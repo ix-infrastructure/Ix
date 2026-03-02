@@ -1,0 +1,6 @@
+target/
+.bsp/
+.idea/
+*.class
+*.jar
+.DS_Store

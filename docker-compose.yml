@@ -1,0 +1,7 @@
+services:
+  arangodb:
+    image: arangodb:3.12
+    ports:
+      - "8529:8529"
+    environment:
+      ARANGO_NO_AUTH: "1"
