@@ -3,6 +3,7 @@ package ix.memory.db
 import cats.effect.{IO, Resource}
 import cats.syntax.traverse._
 import com.arangodb.{ArangoDB, ArangoDatabase}
+import com.arangodb.model.{AqlQueryOptions, StreamTransactionOptions}
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.circe.Json
 import io.circe.parser.{parse => parseJson}
@@ -24,18 +25,58 @@ class ArangoClient private (db: ArangoDatabase) {
     m
   }
 
-  def query(aql: String, bindVars: Map[String, AnyRef] = Map.empty): IO[List[Json]] =
+  private def queryOptions(txId: Option[String]): AqlQueryOptions =
+    txId.fold(new AqlQueryOptions())(id => new AqlQueryOptions().streamTransactionId(id))
+
+  def query(
+    aql: String,
+    bindVars: Map[String, AnyRef] = Map.empty,
+    txId: Option[String] = None
+  ): IO[List[Json]] =
     IO.blocking {
-      val cursor = db.query(aql, classOf[AnyRef], asJava(bindVars))
+      val cursor = db.query(aql, classOf[AnyRef], asJava(bindVars), queryOptions(txId))
       cursor.asListRemaining().asScala.toList
     }.flatMap(_.traverse(toJson))
 
-  def queryOne(aql: String, bindVars: Map[String, AnyRef] = Map.empty): IO[Option[Json]] =
-    query(aql, bindVars).map(_.headOption)
+  def queryOne(
+    aql: String,
+    bindVars: Map[String, AnyRef] = Map.empty,
+    txId: Option[String] = None
+  ): IO[Option[Json]] =
+    query(aql, bindVars, txId).map(_.headOption)
 
-  def execute(aql: String, bindVars: Map[String, AnyRef] = Map.empty): IO[Unit] =
+  def execute(
+    aql: String,
+    bindVars: Map[String, AnyRef] = Map.empty,
+    txId: Option[String] = None
+  ): IO[Unit] =
     IO.blocking {
-      db.query(aql, classOf[Void], asJava(bindVars))
+      db.query(aql, classOf[Void], asJava(bindVars), queryOptions(txId))
+      ()
+    }
+
+  // ── Stream Transaction lifecycle ──────────────────────────────────
+
+  def beginTransaction(
+    readCollections: Seq[String],
+    writeCollections: Seq[String]
+  ): IO[String] =
+    IO.blocking {
+      val opts = new StreamTransactionOptions()
+        .readCollections(readCollections: _*)
+        .writeCollections(writeCollections: _*)
+      db.beginStreamTransaction(opts).getId
+    }
+
+  def commitTransaction(txId: String): IO[Unit] =
+    IO.blocking {
+      db.commitStreamTransaction(txId)
+      ()
+    }
+
+  def abortTransaction(txId: String): IO[Unit] =
+    IO.blocking {
+      db.abortStreamTransaction(txId)
       ()
     }
 

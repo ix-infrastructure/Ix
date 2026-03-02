@@ -14,63 +14,89 @@ import ix.memory.model._
 
 class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
 
-  override def commitPatch(patch: GraphPatch): IO[CommitResult] =
-    for {
-      // Step 1: Check idempotency — has this patch_id already been applied?
-      idempotent <- checkIdempotency(patch.patchId, patch.tenant)
-      result     <- idempotent match {
-        case Some(storedRev) =>
-          IO.pure(CommitResult(storedRev, CommitStatus.Idempotent))
-        case None =>
-          doCommit(patch)
-      }
-    } yield result
+  // I1 fix: single ObjectMapper instance shared across all calls
+  private val mapper = new com.fasterxml.jackson.databind.ObjectMapper()
 
-  private def checkIdempotency(patchId: PatchId, tenant: TenantId): IO[Option[Rev]] =
+  // ── Collections involved in a commit transaction ──────────────────
+
+  private val ReadCollections  = Seq("revisions", "idempotency_keys")
+  private val WriteCollections = Seq("nodes", "edges", "claims", "patches", "revisions", "idempotency_keys")
+
+  // ── Public entry point ────────────────────────────────────────────
+
+  override def commitPatch(patch: GraphPatch): IO[CommitResult] =
+    client.beginTransaction(ReadCollections, WriteCollections).flatMap { txId =>
+      val commit = for {
+        // Step 1: Check idempotency inside the transaction
+        idempotent <- checkIdempotency(patch.patchId, patch.tenant, txId)
+        result     <- idempotent match {
+          case Some(storedRev) =>
+            // Already applied — commit the (read-only) transaction and return
+            client.commitTransaction(txId) *>
+              IO.pure(CommitResult(storedRev, CommitStatus.Idempotent))
+          case None =>
+            doCommit(patch, txId)
+        }
+      } yield result
+
+      commit.handleErrorWith { err =>
+        client.abortTransaction(txId) *> IO.raiseError(err)
+      }
+    }
+
+  // ── Private helpers ───────────────────────────────────────────────
+
+  private def checkIdempotency(patchId: PatchId, tenant: TenantId, txId: String): IO[Option[Rev]] =
     client.queryOne(
       """FOR ik IN idempotency_keys
         |  FILTER ik.key == @key
         |  RETURN ik.rev""".stripMargin,
-      Map("key" -> idempotencyKey(patchId, tenant).asInstanceOf[AnyRef])
+      Map("key" -> idempotencyKey(patchId, tenant).asInstanceOf[AnyRef]),
+      txId = Some(txId)
     ).map(_.flatMap(_.as[Long].toOption).map(Rev(_)))
 
   private def idempotencyKey(patchId: PatchId, tenant: TenantId): String =
     s"${tenant.value}:${patchId.value}"
 
-  private def doCommit(patch: GraphPatch): IO[CommitResult] =
+  private def doCommit(patch: GraphPatch, txId: String): IO[CommitResult] =
     for {
-      // Step 2: Load latest_rev for tenant
-      latestRev <- loadLatestRev(patch.tenant)
+      // Step 2: Load latest_rev for tenant (inside transaction)
+      latestRev <- loadLatestRev(patch.tenant, txId)
 
       // Step 3: Check baseRev (if > 0, must match latest)
       result <- {
         if (patch.baseRev.value > 0L && patch.baseRev.value != latestRev) {
-          IO.pure(CommitResult(Rev(latestRev), CommitStatus.BaseRevMismatch))
+          // Mismatch — commit the read-only transaction cleanly, then return
+          client.commitTransaction(txId) *>
+            IO.pure(CommitResult(Rev(latestRev), CommitStatus.BaseRevMismatch))
         } else {
           val newRev = latestRev + 1L
           for {
             // Step 5: Execute each op
-            _ <- patch.ops.traverse_(op => executeOp(op, patch, newRev))
+            _ <- patch.ops.traverse_(op => executeOp(op, patch, newRev, txId))
             // Step 6: Store patch
-            _ <- storePatch(patch, newRev)
+            _ <- storePatch(patch, newRev, txId)
             // Step 7: Store idempotency key
-            _ <- storeIdempotencyKey(patch.patchId, patch.tenant, newRev)
+            _ <- storeIdempotencyKey(patch.patchId, patch.tenant, newRev, txId)
             // Step 8: Update tenant revision
-            _ <- updateTenantRevision(patch.tenant, newRev)
+            _ <- updateTenantRevision(patch.tenant, newRev, txId)
+            // Step 9: Commit the transaction
+            _ <- client.commitTransaction(txId)
           } yield CommitResult(Rev(newRev), CommitStatus.Ok)
         }
       }
     } yield result
 
-  private def loadLatestRev(tenant: TenantId): IO[Long] =
+  private def loadLatestRev(tenant: TenantId, txId: String): IO[Long] =
     client.queryOne(
       """FOR r IN revisions
         |  FILTER r._key == @key
         |  RETURN r.rev""".stripMargin,
-      Map("key" -> tenant.value.toString.asInstanceOf[AnyRef])
+      Map("key" -> tenant.value.toString.asInstanceOf[AnyRef]),
+      txId = Some(txId)
     ).map(_.flatMap(_.as[Long].toOption).getOrElse(0L))
 
-  private def executeOp(op: PatchOp, patch: GraphPatch, newRev: Long): IO[Unit] = op match {
+  private def executeOp(op: PatchOp, patch: GraphPatch, newRev: Long, txId: String): IO[Unit] = op match {
     case PatchOp.UpsertNode(id, kind, name, attrs) =>
       val now = Instant.now().toString
       val provenanceJson = buildProvenance(patch)
@@ -109,7 +135,8 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
           "created_rev" -> Long.box(newRev).asInstanceOf[AnyRef],
           "provenance"  -> parseToJavaMap(provenanceJson.noSpaces).asInstanceOf[AnyRef],
           "now"         -> now.asInstanceOf[AnyRef]
-        )
+        ),
+        txId = Some(txId)
       )
 
     case PatchOp.UpsertEdge(id, src, dst, predicate, attrs) =>
@@ -159,7 +186,8 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
           "created_rev" -> Long.box(newRev).asInstanceOf[AnyRef],
           "provenance"  -> parseToJavaMap(provenanceJson.noSpaces).asInstanceOf[AnyRef],
           "now"         -> now.asInstanceOf[AnyRef]
-        )
+        ),
+        txId = Some(txId)
       )
 
     case PatchOp.DeleteNode(id) =>
@@ -170,7 +198,8 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
         Map(
           "key"         -> id.value.toString.asInstanceOf[AnyRef],
           "deleted_rev" -> Long.box(newRev).asInstanceOf[AnyRef]
-        )
+        ),
+        txId = Some(txId)
       )
 
     case PatchOp.DeleteEdge(id) =>
@@ -181,7 +210,8 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
         Map(
           "key"         -> id.value.toString.asInstanceOf[AnyRef],
           "deleted_rev" -> Long.box(newRev).asInstanceOf[AnyRef]
-        )
+        ),
+        txId = Some(txId)
       )
 
     case PatchOp.AssertClaim(entityId, field, value, confidence) =>
@@ -210,7 +240,8 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
           "tenant"      -> patch.tenant.value.toString.asInstanceOf[AnyRef],
           "created_rev" -> Long.box(newRev).asInstanceOf[AnyRef],
           "provenance"  -> parseToJavaMap(provenanceJson.noSpaces).asInstanceOf[AnyRef]
-        )
+        ),
+        txId = Some(txId)
       )
 
     case PatchOp.RetractClaim(claimId) =>
@@ -221,11 +252,12 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
         Map(
           "key"         -> claimId.value.toString.asInstanceOf[AnyRef],
           "deleted_rev" -> Long.box(newRev).asInstanceOf[AnyRef]
-        )
+        ),
+        txId = Some(txId)
       )
   }
 
-  private def storePatch(patch: GraphPatch, newRev: Long): IO[Unit] = {
+  private def storePatch(patch: GraphPatch, newRev: Long, txId: String): IO[Unit] = {
     val patchJson = patch.asJson.noSpaces
     client.execute(
       """INSERT {
@@ -241,11 +273,12 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
         "tenant"   -> patch.tenant.value.toString.asInstanceOf[AnyRef],
         "rev"      -> Long.box(newRev).asInstanceOf[AnyRef],
         "data"     -> parseToJavaMap(patchJson).asInstanceOf[AnyRef]
-      )
+      ),
+      txId = Some(txId)
     )
   }
 
-  private def storeIdempotencyKey(patchId: PatchId, tenant: TenantId, newRev: Long): IO[Unit] =
+  private def storeIdempotencyKey(patchId: PatchId, tenant: TenantId, newRev: Long, txId: String): IO[Unit] =
     client.execute(
       """INSERT {
         |  key: @key,
@@ -255,10 +288,11 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
       Map(
         "key" -> idempotencyKey(patchId, tenant).asInstanceOf[AnyRef],
         "rev" -> Long.box(newRev).asInstanceOf[AnyRef]
-      )
+      ),
+      txId = Some(txId)
     )
 
-  private def updateTenantRevision(tenant: TenantId, newRev: Long): IO[Unit] =
+  private def updateTenantRevision(tenant: TenantId, newRev: Long, txId: String): IO[Unit] =
     client.execute(
       """UPSERT { _key: @key }
         |  INSERT { _key: @key, rev: @rev }
@@ -267,7 +301,8 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
       Map(
         "key" -> tenant.value.toString.asInstanceOf[AnyRef],
         "rev" -> Long.box(newRev).asInstanceOf[AnyRef]
-      )
+      ),
+      txId = Some(txId)
     )
 
   private def buildProvenance(patch: GraphPatch): Json =
@@ -279,39 +314,18 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
       "observed_at" -> Json.fromString(patch.timestamp.toString)
     )
 
-  private def sourceTypeToString(st: SourceType): String = st match {
-    case SourceType.Code     => "code"
-    case SourceType.Config   => "config"
-    case SourceType.Doc      => "doc"
-    case SourceType.Test     => "test"
-    case SourceType.Schema   => "schema"
-    case SourceType.Commit   => "commit"
-    case SourceType.Comment  => "comment"
-    case SourceType.Inferred => "inferred"
-    case SourceType.Human    => "human"
-  }
+  // I3 fix: reuse Circe encoders instead of duplicating string conversion logic
+  private def sourceTypeToString(st: SourceType): String =
+    st.asJson.asString.getOrElse(st.toString)
 
-  private def nodeKindToString(nk: NodeKind): String = nk match {
-    case NodeKind.Module      => "module"
-    case NodeKind.File        => "file"
-    case NodeKind.Class       => "class"
-    case NodeKind.Function    => "function"
-    case NodeKind.Variable    => "variable"
-    case NodeKind.Config      => "config"
-    case NodeKind.ConfigEntry => "config_entry"
-    case NodeKind.Service     => "service"
-    case NodeKind.Endpoint    => "endpoint"
-  }
+  private def nodeKindToString(nk: NodeKind): String =
+    nk.asJson.asString.getOrElse(nk.toString)
 
   /** Convert a JSON string into a java.util.Map for use as an ArangoDB bind variable. */
-  private def parseToJavaMap(jsonStr: String): java.util.Map[String, AnyRef] = {
-    val mapper = new com.fasterxml.jackson.databind.ObjectMapper()
+  private def parseToJavaMap(jsonStr: String): java.util.Map[String, AnyRef] =
     mapper.readValue(jsonStr, classOf[java.util.Map[String, AnyRef]])
-  }
 
   /** Convert a circe Json value to a Java object suitable for ArangoDB bind variables. */
-  private def jsonToJava(json: Json): AnyRef = {
-    val mapper = new com.fasterxml.jackson.databind.ObjectMapper()
+  private def jsonToJava(json: Json): AnyRef =
     mapper.readValue(json.noSpaces, classOf[AnyRef])
-  }
 }
