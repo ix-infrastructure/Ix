@@ -3,6 +3,8 @@ package ix.memory.ingestion
 import java.time.Instant
 import java.util.UUID
 
+import io.circe.Json
+
 import ix.memory.model._
 
 object GraphPatchBuilder {
@@ -40,13 +42,37 @@ object GraphPatchBuilder {
       )
     }
 
+    // Generate claims so the confidence/conflict engine has data to operate on.
+    val relationshipClaims = parseResult.relationships.map { r =>
+      PatchOp.AssertClaim(
+        entityId   = nodeIdFor(r.srcName),
+        field      = s"${r.predicate.toLowerCase}:${r.dstName}",
+        value      = Json.fromString(r.dstName),
+        confidence = None // will be computed at query time
+      )
+    }
+
+    val attributeClaims = parseResult.entities.flatMap { e =>
+      e.attrs.flatMap { case (key, value) =>
+        Vector(PatchOp.AssertClaim(
+          entityId   = nodeIdFor(e.name),
+          field      = key,
+          value      = Json.fromString(value.noSpaces),
+          confidence = None
+        ))
+      }
+    }
+
+    val claimOps = relationshipClaims ++ attributeClaims
+    val allOps   = nodeOps ++ edgeOps ++ claimOps
+
     GraphPatch(
       patchId   = PatchId(UUID.randomUUID()),
       actor     = "ix/ingestion",
       timestamp = Instant.now(),
       source    = PatchSource(filePath, sourceHash, "tree-sitter-python/1.0", SourceType.Code),
       baseRev   = Rev(0L),
-      ops       = nodeOps ++ edgeOps,
+      ops       = allOps,
       replaces  = Vector.empty,
       intent    = Some(s"Parsed $filePath")
     )
