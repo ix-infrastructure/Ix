@@ -9,6 +9,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { IxClient } from "../client/api.js";
+import { SessionState } from "./session.js";
 
 // ---------------------------------------------------------------------------
 // Server instructions — sent to the LLM at connection time
@@ -36,6 +37,7 @@ BEHAVIORAL CHECKS:
 // Client – uses IX_ENDPOINT env var or defaults to localhost:8090
 // ---------------------------------------------------------------------------
 const client = new IxClient(process.env.IX_ENDPOINT ?? "http://localhost:8090");
+const session = new SessionState();
 
 // ---------------------------------------------------------------------------
 // Server
@@ -59,6 +61,11 @@ server.tool(
   async ({ question, asOfRev, depth }) => {
     try {
       const ctx = await client.query(question, { asOfRev, depth });
+      // Track session
+      session.track({ type: "query", summary: question, timestamp: new Date().toISOString() });
+      if (ctx.nodes) {
+        session.trackEntities(ctx.nodes.map((n: any) => n.id));
+      }
       return {
         content: [{ type: "text" as const, text: JSON.stringify(ctx, null, 2) }],
       };
@@ -84,6 +91,8 @@ server.tool(
   async ({ path, recursive }) => {
     try {
       const result = await client.ingest(path, recursive);
+      // Track session
+      session.track({ type: "ingest", summary: path, timestamp: new Date().toISOString() });
       return {
         content: [
           { type: "text" as const, text: JSON.stringify(result, null, 2) },
@@ -114,6 +123,8 @@ server.tool(
   async ({ title, rationale, intentId }) => {
     try {
       const result = await client.decide(title, rationale, { intentId });
+      // Track session
+      session.track({ type: "decision", id: result.nodeId, summary: title, timestamp: new Date().toISOString() });
       return {
         content: [
           { type: "text" as const, text: JSON.stringify(result, null, 2) },
@@ -167,6 +178,9 @@ server.tool(
   async ({ id }) => {
     try {
       const entity = await client.entity(id);
+      // Track session
+      session.track({ type: "entity", id, summary: `Looked up entity ${id}`, timestamp: new Date().toISOString() });
+      session.trackEntities([id]);
       return {
         content: [
           { type: "text" as const, text: JSON.stringify(entity, null, 2) },
@@ -248,6 +262,8 @@ server.tool(
   async () => {
     try {
       const conflicts = await client.conflicts();
+      // Track session
+      session.track({ type: "conflict", summary: "Checked conflicts", timestamp: new Date().toISOString() });
       return {
         content: [
           { type: "text" as const, text: JSON.stringify(conflicts, null, 2) },
@@ -389,6 +405,8 @@ server.tool(
           };
         }
         const result = await client.createTruth(statement, parentIntent);
+        // Track session
+        session.track({ type: "truth", summary: statement, timestamp: new Date().toISOString() });
         return {
           content: [
             { type: "text" as const, text: JSON.stringify(result, null, 2) },
@@ -449,20 +467,26 @@ server.tool(
 server.resource(
   "ix-session-context",
   "ix://session/context",
-  { description: "Session context nudge — review this at the start of each session" },
+  { description: "Session working set — entities queried, decisions made, files ingested in this session" },
   async (uri) => {
-    let text: string;
-    try {
-      const ctx = await client.query("session context overview", {});
-      text = JSON.stringify(ctx, null, 2);
-    } catch {
-      text = [
-        "Ix Memory session context is unavailable (server may not be running).",
-        "Start the Ix Memory Layer server and try again.",
-      ].join("\n");
+    const summary = session.getSummary();
+    let contextData: any = { session: summary };
+
+    // If there are queried entities, include a fresh context query
+    if (summary.queriedEntities.length > 0) {
+      try {
+        const ctx = await client.query(
+          `entities: ${summary.queriedEntities.slice(0, 5).join(", ")}`,
+          {},
+        );
+        contextData.latestContext = ctx;
+      } catch {
+        // Session data is still useful even without fresh query
+      }
     }
+
     return {
-      contents: [{ uri: uri.href, mimeType: "application/json", text }],
+      contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(contextData, null, 2) }],
     };
   },
 );
