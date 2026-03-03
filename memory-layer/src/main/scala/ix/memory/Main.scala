@@ -42,7 +42,7 @@ object Main extends IOApp.Simple {
       conflictService  = new ConflictService(client, queryApi, writeApi)
 
       // 4. HTTP routes
-      routes = Routes.all(contextService, ingestionService, queryApi, conflictService, client)
+      routes = Routes.all(contextService, ingestionService, queryApi, writeApi, conflictService, client)
 
       // 5. Server
       server <- EmberServerBuilder

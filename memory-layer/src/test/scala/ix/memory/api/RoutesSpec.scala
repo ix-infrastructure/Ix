@@ -63,7 +63,7 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
       new ConflictDetectorImpl()
     )
     val ingestionService = new IngestionService(new ParserRouter(), writeApi, queryApi)
-    Routes.all(contextService, ingestionService, queryApi, conflictService, client).orNotFound
+    Routes.all(contextService, ingestionService, queryApi, writeApi, conflictService, client).orNotFound
   }
 
   // ── Test 1: Health check ─────────────────────────────────────────────
@@ -343,6 +343,164 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
         body.hcursor.downField("entityId").as[String] shouldBe Right(nodeId.value.toString)
         val chain = body.hcursor.downField("chain").focus.flatMap(_.asArray).getOrElse(Vector.empty)
         chain.size should be >= 1
+      }
+    }
+  }
+
+  // ── Test 12: POST /v1/decide creates a decision node ─────────────────
+
+  it should "create a decision node via POST /v1/decide" in {
+    clientResource.use { client =>
+      val writeApi = new ArangoGraphWriteApi(client)
+      val queryApi = new ArangoGraphQueryApi(client)
+      val app      = buildRoutes(client, writeApi, queryApi)
+
+      for {
+        _    <- client.ensureSchema()
+        body  = Json.obj(
+          "title"     -> "Use exponential backoff".asJson,
+          "rationale" -> "Better for transient failures".asJson
+        )
+        req   = Request[IO](Method.POST, uri"/v1/decide").withEntity(body)
+        resp <- app.run(req)
+        json <- resp.as[Json]
+      } yield {
+        resp.status shouldBe Status.Ok
+        json.hcursor.get[String]("status").toOption shouldBe Some("Ok")
+        json.hcursor.get[String]("nodeId").toOption should not be empty
+      }
+    }
+  }
+
+  // ── Test 13: POST /v1/search finds nodes by term ─────────────────────
+
+  it should "search nodes by term via POST /v1/search" in {
+    clientResource.use { client =>
+      val writeApi = new ArangoGraphWriteApi(client)
+      val queryApi = new ArangoGraphQueryApi(client)
+      val app      = buildRoutes(client, writeApi, queryApi)
+      val nodeId   = NodeId(UUID.randomUUID())
+      val patch    = makePatch(
+        ops = Vector(
+          PatchOp.UpsertNode(nodeId, NodeKind.Service, "billing_search_test", Map.empty[String, Json])
+        )
+      )
+
+      for {
+        _    <- client.ensureSchema()
+        _    <- writeApi.commitPatch(patch)
+        body  = Json.obj("term" -> "billing_search_test".asJson)
+        req   = Request[IO](Method.POST, uri"/v1/search").withEntity(body)
+        resp <- app.run(req)
+        json <- resp.as[Json]
+      } yield {
+        resp.status shouldBe Status.Ok
+        json.asArray should not be empty
+      }
+    }
+  }
+
+  // ── Test 14: GET /v1/truth returns intent list ────────────────────────
+
+  it should "return intent list via GET /v1/truth" in {
+    clientResource.use { client =>
+      val writeApi = new ArangoGraphWriteApi(client)
+      val queryApi = new ArangoGraphQueryApi(client)
+      val app      = buildRoutes(client, writeApi, queryApi)
+
+      for {
+        _    <- client.ensureSchema()
+        req   = Request[IO](Method.GET, uri"/v1/truth")
+        resp <- app.run(req)
+      } yield {
+        resp.status shouldBe Status.Ok
+      }
+    }
+  }
+
+  // ── Test 15: POST /v1/truth creates an intent node ─────────────────
+
+  it should "create an intent via POST /v1/truth" in {
+    clientResource.use { client =>
+      val writeApi = new ArangoGraphWriteApi(client)
+      val queryApi = new ArangoGraphQueryApi(client)
+      val app      = buildRoutes(client, writeApi, queryApi)
+
+      for {
+        _    <- client.ensureSchema()
+        body  = Json.obj("statement" -> "Ship retry system by Friday".asJson)
+        req   = Request[IO](Method.POST, uri"/v1/truth").withEntity(body)
+        resp <- app.run(req)
+        json <- resp.as[Json]
+      } yield {
+        resp.status shouldBe Status.Ok
+        json.hcursor.get[String]("status").toOption shouldBe Some("Ok")
+      }
+    }
+  }
+
+  // ── Test 16: GET /v1/patches lists recent patches ─────────────────────
+
+  it should "list recent patches via GET /v1/patches" in {
+    clientResource.use { client =>
+      val writeApi = new ArangoGraphWriteApi(client)
+      val queryApi = new ArangoGraphQueryApi(client)
+      val app      = buildRoutes(client, writeApi, queryApi)
+
+      for {
+        _    <- client.ensureSchema()
+        req   = Request[IO](Method.GET, uri"/v1/patches")
+        resp <- app.run(req)
+      } yield {
+        resp.status shouldBe Status.Ok
+      }
+    }
+  }
+
+  // ── Test 17: GET /v1/patches/:id returns a specific patch ──────────────
+
+  it should "return a specific patch by ID via GET /v1/patches/:id" in {
+    clientResource.use { client =>
+      val writeApi = new ArangoGraphWriteApi(client)
+      val queryApi = new ArangoGraphQueryApi(client)
+      val app      = buildRoutes(client, writeApi, queryApi)
+      val nodeId   = NodeId(UUID.randomUUID())
+      val patchId  = PatchId(UUID.randomUUID())
+      val patch    = makePatch(
+        patchId = patchId,
+        ops = Vector(
+          PatchOp.UpsertNode(nodeId, NodeKind.Function, "patch_test_func", Map.empty[String, Json])
+        )
+      )
+
+      for {
+        _    <- client.ensureSchema()
+        _    <- writeApi.commitPatch(patch)
+        req   = Request[IO](Method.GET, Uri.unsafeFromString(s"/v1/patches/${patchId.value}"))
+        resp <- app.run(req)
+        body <- resp.as[Json]
+      } yield {
+        resp.status shouldBe Status.Ok
+        body.hcursor.get[String]("patch_id").toOption shouldBe Some(patchId.value.toString)
+      }
+    }
+  }
+
+  // ── Test 18: GET /v1/patches/:id returns 404 for missing patch ─────────
+
+  it should "return 404 for non-existent patch ID" in {
+    clientResource.use { client =>
+      val writeApi = new ArangoGraphWriteApi(client)
+      val queryApi = new ArangoGraphQueryApi(client)
+      val app      = buildRoutes(client, writeApi, queryApi)
+      val fakeId   = UUID.randomUUID()
+
+      for {
+        _    <- client.ensureSchema()
+        req   = Request[IO](Method.GET, Uri.unsafeFromString(s"/v1/patches/$fakeId"))
+        resp <- app.run(req)
+      } yield {
+        resp.status shouldBe Status.NotFound
       }
     }
   }
