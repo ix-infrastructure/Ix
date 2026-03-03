@@ -218,10 +218,10 @@ class ContextServiceSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
       ClaimStatus.Active, prov, Rev(1L), None)
 
     val scored1 = ScoredClaim(claim1, ConfidenceBreakdown(
-      Factor(0.5, "low"), Factor(1.0, "ok"), Factor(1.0, "ok"), Factor(1.0, "ok"), Factor(1.0, "ok")
+      Factor(0.5, "low"), Factor(1.0, "ok"), Factor(1.0, "ok"), Factor(1.0, "ok"), Factor(1.0, "ok"), Factor(1.0, "ok")
     ))
     val scored2 = ScoredClaim(claim2, ConfidenceBreakdown(
-      Factor(0.9, "high"), Factor(1.0, "ok"), Factor(1.0, "ok"), Factor(1.0, "ok"), Factor(1.0, "ok")
+      Factor(0.9, "high"), Factor(1.0, "ok"), Factor(1.0, "ok"), Factor(1.0, "ok"), Factor(1.0, "ok"), Factor(1.0, "ok")
     ))
 
     val ranked = ContextRanker.rank(Vector(scored1, scored2))

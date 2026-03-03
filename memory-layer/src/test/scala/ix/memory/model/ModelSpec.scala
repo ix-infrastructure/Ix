@@ -194,16 +194,17 @@ class ModelSpec extends AnyFlatSpec with Matchers {
 
   // ── ConfidenceBreakdown.score ───────────────────────────────────────
 
-  "ConfidenceBreakdown" should "compute score correctly: 0.90 * 1.1 * 1.0 * 1.1 * 0.85 = ~0.926" in {
+  "ConfidenceBreakdown" should "compute score correctly: 0.90 * 1.1 * 1.0 * 1.1 * 0.85 * 1.0 = ~0.926" in {
     val breakdown = ConfidenceBreakdown(
       baseAuthority   = Factor(0.90, "code source"),
       verification    = Factor(1.1, "test-verified"),
       recency         = Factor(1.0, "recent commit"),
       corroboration   = Factor(1.1, "multiple extractors agree"),
-      conflictPenalty = Factor(0.85, "minor conflict")
+      conflictPenalty = Factor(0.85, "minor conflict"),
+      intentAlignment = Factor(1.0, "no connection to intent")
     )
 
-    // 0.90 * 1.1 * 1.0 * 1.1 * 0.85 = 0.92565
+    // 0.90 * 1.1 * 1.0 * 1.1 * 0.85 * 1.0 = 0.92565
     breakdown.score shouldBe 0.926 +- 0.001
   }
 
@@ -213,7 +214,8 @@ class ModelSpec extends AnyFlatSpec with Matchers {
       verification    = Factor(1.5, "highly verified"),
       recency         = Factor(1.0, "fresh"),
       corroboration   = Factor(1.5, "strong agreement"),
-      conflictPenalty = Factor(1.0, "no conflict")
+      conflictPenalty = Factor(1.0, "no conflict"),
+      intentAlignment = Factor(1.0, "no connection to intent")
     )
 
     breakdown.score shouldBe 1.0
@@ -225,7 +227,8 @@ class ModelSpec extends AnyFlatSpec with Matchers {
       verification    = Factor(1.0, "none"),
       recency         = Factor(1.0, "none"),
       corroboration   = Factor(1.0, "none"),
-      conflictPenalty = Factor(1.0, "none")
+      conflictPenalty = Factor(1.0, "none"),
+      intentAlignment = Factor(1.0, "none")
     )
 
     breakdown.score shouldBe 0.0
@@ -237,7 +240,8 @@ class ModelSpec extends AnyFlatSpec with Matchers {
       verification    = Factor(1.1, "test-verified"),
       recency         = Factor(1.0, "recent commit"),
       corroboration   = Factor(1.1, "multiple extractors agree"),
-      conflictPenalty = Factor(0.85, "minor conflict")
+      conflictPenalty = Factor(0.85, "minor conflict"),
+      intentAlignment = Factor(1.0, "no connection to intent")
     )
 
     val json    = breakdown.asJson

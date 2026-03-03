@@ -15,7 +15,8 @@ final case class ConfidenceBreakdown(
   verification:    Factor,
   recency:         Factor,
   corroboration:   Factor,
-  conflictPenalty: Factor
+  conflictPenalty: Factor,
+  intentAlignment: Factor
 ) {
 
   /** Confidence score = product of all factor values, clamped to [0, 1]. */
@@ -24,7 +25,8 @@ final case class ConfidenceBreakdown(
       verification.value *
       recency.value *
       corroboration.value *
-      conflictPenalty.value
+      conflictPenalty.value *
+      intentAlignment.value
     math.max(0.0, math.min(1.0, raw))
   }
 }

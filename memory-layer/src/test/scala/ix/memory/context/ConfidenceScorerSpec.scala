@@ -23,7 +23,9 @@ class ConfidenceScorerSpec extends AnyFlatSpec with Matchers {
     latestRev = Rev(5L),
     sourceChanged = false,
     corroboratingCount = 1,
-    conflictState = ConflictState.NoConflict
+    conflictState = ConflictState.NoConflict,
+    intentAlignment = IntentAlignment.NoConnection,
+    observedAt = Instant.now()
   )
 
   "ConfidenceScorer" should "score code-sourced claims higher than doc-sourced" in {

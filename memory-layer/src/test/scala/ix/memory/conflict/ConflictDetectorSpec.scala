@@ -26,7 +26,8 @@ class ConflictDetectorSpec extends AnyFlatSpec with Matchers {
       verification = Factor(1.0, "test"),
       recency = Factor(1.0, "test"),
       corroboration = Factor(1.0, "test"),
-      conflictPenalty = Factor(1.0, "test")
+      conflictPenalty = Factor(1.0, "test"),
+      intentAlignment = Factor(1.0, "test")
     )
     ScoredClaim(claim, breakdown)
   }
