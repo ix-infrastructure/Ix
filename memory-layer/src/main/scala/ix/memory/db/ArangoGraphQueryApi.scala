@@ -4,12 +4,15 @@ import java.time.Instant
 import java.util.UUID
 
 import cats.effect.IO
-import cats.syntax.traverse._
 import io.circe.Json
+
+import org.slf4j.LoggerFactory
 
 import ix.memory.model._
 
 class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
+
+  private val log = LoggerFactory.getLogger(classOf[ArangoGraphQueryApi])
 
   // ── Public API ──────────────────────────────────────────────────────
 
@@ -74,10 +77,8 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
       case None    => ""
     }
 
-    val deletedFilter = asOfRev match {
-      case Some(_) => " AND e.created_rev <= @rev AND (e.deleted_rev == null OR @rev < e.deleted_rev)"
-      case None    => " AND e.deleted_rev == null"
-    }
+    // I4: always use MVCC filter with resolved rev (never bare deleted_rev == null)
+    val deletedFilter = " AND e.created_rev <= @rev AND (e.deleted_rev == null OR @rev < e.deleted_rev)"
 
     def buildEdgeQuery(srcOrDst: String): String =
       s"""FOR e IN edges
@@ -87,27 +88,25 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
          |    $predicateFilter
          |  RETURN e""".stripMargin
 
-    def buildBindVars(rev: Option[Rev]): Map[String, AnyRef] = {
+    def buildBindVars(rev: Rev): Map[String, AnyRef] = {
       val base = Map(
         "tenant" -> tenant.value.toString.asInstanceOf[AnyRef],
-        "nodeId" -> nodeId.value.toString.asInstanceOf[AnyRef]
+        "nodeId" -> nodeId.value.toString.asInstanceOf[AnyRef],
+        "rev"    -> Long.box(rev.value).asInstanceOf[AnyRef]
       )
-      val withRev = rev match {
-        case Some(r) => base + ("rev" -> Long.box(r.value).asInstanceOf[AnyRef])
-        case None    => base
-      }
       predicates.filter(_.nonEmpty) match {
         case Some(ps) =>
           val javaList = new java.util.ArrayList[String]()
           ps.foreach(javaList.add)
-          withRev + ("predicates" -> javaList.asInstanceOf[AnyRef])
-        case None => withRev
+          base + ("predicates" -> javaList.asInstanceOf[AnyRef])
+        case None => base
       }
     }
 
     for {
-      rev <- asOfRev.fold(IO.none[Rev])(r => IO.pure(Some(r)))
-      bindVars = buildBindVars(rev)
+      // I4: resolve revision once at the start so edges and nodes see the same snapshot
+      resolvedRev <- asOfRev.fold(getLatestRev(tenant))(IO.pure)
+      bindVars = buildBindVars(resolvedRev)
 
       outEdges <- direction match {
         case Direction.Out | Direction.Both =>
@@ -132,10 +131,21 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
         else Vector(e.src, e.dst)
       }.distinct
 
-      // Fetch the neighbor nodes
-      nodes <- neighborIds.traverse { nid =>
-        getNode(tenant, nid, asOfRev)
-      }.map(_.flatten)
+      // I1: batch-fetch all neighbor nodes in a single AQL query instead of N+1
+      nodes <- if (neighborIds.isEmpty) IO.pure(Vector.empty[GraphNode])
+               else {
+                 val idList = new java.util.ArrayList[String]()
+                 neighborIds.foreach(nid => idList.add(nid.value.toString))
+                 val aql = """FOR n IN nodes
+                             |  FILTER n.id IN @ids AND n.tenant == @tenant
+                             |  AND n.created_rev <= @rev AND (n.deleted_rev == null OR @rev < n.deleted_rev)
+                             |  RETURN n""".stripMargin
+                 client.query(aql, Map(
+                   "ids"    -> idList.asInstanceOf[AnyRef],
+                   "tenant" -> tenant.value.toString.asInstanceOf[AnyRef],
+                   "rev"    -> Long.box(resolvedRev.value).asInstanceOf[AnyRef]
+                 )).map(_.flatMap(parseNode).toVector)
+               }
 
     } yield ExpandResult(nodes, allEdges)
   }
@@ -165,7 +175,7 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
 
   private def parseNode(json: Json): Option[GraphNode] = {
     val c = json.hcursor
-    for {
+    val result = for {
       id         <- c.get[String]("id").toOption
                       .flatMap(s => scala.util.Try(UUID.fromString(s)).toOption)
                       .map(NodeId(_))
@@ -183,11 +193,13 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
       updatedAt  <- c.get[String]("updated_at").toOption
                       .flatMap(s => scala.util.Try(Instant.parse(s)).toOption)
     } yield GraphNode(id, kind, tenantStr, attrs, provenance, createdRev, deletedRev, createdAt, updatedAt)
+    if (result.isEmpty) log.warn("Failed to parse node from JSON: {}", json.noSpaces.take(200))
+    result
   }
 
   private def parseEdge(json: Json): Option[GraphEdge] = {
     val c = json.hcursor
-    for {
+    val result = for {
       id         <- c.get[String]("id").toOption
                       .flatMap(s => scala.util.Try(UUID.fromString(s)).toOption)
                       .map(EdgeId(_))
@@ -206,11 +218,13 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
       createdRev <- c.get[Long]("created_rev").toOption.map(Rev(_))
       deletedRev  = c.get[Long]("deleted_rev").toOption.map(Rev(_))
     } yield GraphEdge(id, src, dst, predicate, tenantStr, attrs, provenance, createdRev, deletedRev)
+    if (result.isEmpty) log.warn("Failed to parse edge from JSON: {}", json.noSpaces.take(200))
+    result
   }
 
   private def parseClaim(json: Json): Option[Claim] = {
     val c = json.hcursor
-    for {
+    val result = for {
       key        <- c.get[String]("_key").toOption
                       .flatMap(s => scala.util.Try(UUID.fromString(s)).toOption)
                       .map(ClaimId(_))
@@ -229,6 +243,8 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
       createdRev <- c.get[Long]("created_rev").toOption.map(Rev(_))
       deletedRev  = c.get[Long]("deleted_rev").toOption.map(Rev(_))
     } yield Claim(key, entityId, field, status, provenance, createdRev, deletedRev)
+    if (result.isEmpty) log.warn("Failed to parse claim from JSON: {}", json.noSpaces.take(200))
+    result
   }
 
   private def parseProvenance(jsonOpt: Option[Json]): Option[Provenance] = {

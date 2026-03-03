@@ -26,7 +26,7 @@ object ArangoSchema {
       new PersistentIndexOptions()
     )
     nodes.ensurePersistentIndex(
-      java.util.Arrays.asList("tenant", "attrs.name"),
+      java.util.Arrays.asList("tenant", "name"),
       new PersistentIndexOptions().sparse(true)
     )
 
