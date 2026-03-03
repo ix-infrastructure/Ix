@@ -8,8 +8,8 @@ import ix.memory.model._
 
 class ClaimCollector(queryApi: GraphQueryApi) {
 
-  def collect(tenant: TenantId, nodeIds: Vector[NodeId]): IO[Vector[Claim]] =
+  def collect(nodeIds: Vector[NodeId]): IO[Vector[Claim]] =
     nodeIds
-      .parTraverse(id => queryApi.getClaims(tenant, id))
+      .parTraverse(id => queryApi.getClaims(id))
       .map(_.flatten.distinctBy(_.id))
 }

@@ -73,7 +73,6 @@ object PatchSource {
 
 final case class GraphPatch(
   patchId:   PatchId,
-  tenant:    TenantId,
   actor:     String,
   timestamp: Instant,
   source:    PatchSource,

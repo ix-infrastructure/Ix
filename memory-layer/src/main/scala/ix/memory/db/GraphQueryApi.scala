@@ -5,15 +5,15 @@ import io.circe.Json
 import ix.memory.model._
 
 trait GraphQueryApi {
-  def getNode(tenant: TenantId, id: NodeId, asOfRev: Option[Rev] = None): IO[Option[GraphNode]]
-  def findNodesByKind(tenant: TenantId, kind: NodeKind, limit: Int = 100): IO[Vector[GraphNode]]
-  def searchNodes(tenant: TenantId, text: String, limit: Int = 20): IO[Vector[GraphNode]]
-  def expand(tenant: TenantId, nodeId: NodeId, direction: Direction,
+  def getNode(id: NodeId, asOfRev: Option[Rev] = None): IO[Option[GraphNode]]
+  def findNodesByKind(kind: NodeKind, limit: Int = 100): IO[Vector[GraphNode]]
+  def searchNodes(text: String, limit: Int = 20): IO[Vector[GraphNode]]
+  def expand(nodeId: NodeId, direction: Direction,
              predicates: Option[Set[String]] = None, hops: Int = 1,
              asOfRev: Option[Rev] = None): IO[ExpandResult]
-  def getClaims(tenant: TenantId, entityId: NodeId): IO[Vector[Claim]]
-  def getLatestRev(tenant: TenantId): IO[Rev]
-  def getPatchesForEntity(tenant: TenantId, entityId: NodeId): IO[List[Json]]
+  def getClaims(entityId: NodeId): IO[Vector[Claim]]
+  def getLatestRev: IO[Rev]
+  def getPatchesForEntity(entityId: NodeId): IO[List[Json]]
 }
 
 sealed trait Direction

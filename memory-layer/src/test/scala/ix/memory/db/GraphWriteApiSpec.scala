@@ -19,14 +19,12 @@ class GraphWriteApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
   )
 
   private def makePatch(
-    tenant: TenantId,
     baseRev: Rev = Rev(0L),
     ops: Vector[PatchOp] = Vector.empty,
     patchId: PatchId = PatchId(UUID.randomUUID())
   ): GraphPatch =
     GraphPatch(
       patchId   = patchId,
-      tenant    = tenant,
       actor     = "test-actor",
       timestamp = Instant.parse("2025-06-01T12:00:00Z"),
       source    = PatchSource(
@@ -48,10 +46,8 @@ class GraphWriteApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
       for {
         _      <- client.ensureSchema()
         api     = new ArangoGraphWriteApi(client)
-        tenant  = TenantId(UUID.randomUUID())
         nodeId  = NodeId(UUID.randomUUID())
         patch   = makePatch(
-          tenant = tenant,
           ops = Vector(
             PatchOp.UpsertNode(
               id   = nodeId,
@@ -76,11 +72,9 @@ class GraphWriteApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
       for {
         _       <- client.ensureSchema()
         api      = new ArangoGraphWriteApi(client)
-        tenant   = TenantId(UUID.randomUUID())
         nodeId   = NodeId(UUID.randomUUID())
         patchId  = PatchId(UUID.randomUUID())
         patch    = makePatch(
-          tenant  = tenant,
           patchId = patchId,
           ops = Vector(
             PatchOp.UpsertNode(
@@ -108,11 +102,9 @@ class GraphWriteApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
       for {
         _       <- client.ensureSchema()
         api      = new ArangoGraphWriteApi(client)
-        tenant   = TenantId(UUID.randomUUID())
         nodeId1  = NodeId(UUID.randomUUID())
         // First patch to establish rev 1
         patch1   = makePatch(
-          tenant = tenant,
           ops = Vector(
             PatchOp.UpsertNode(
               id   = nodeId1,
@@ -126,7 +118,6 @@ class GraphWriteApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
         // Second patch with wrong baseRev
         nodeId2  = NodeId(UUID.randomUUID())
         patch2   = makePatch(
-          tenant  = tenant,
           baseRev = Rev(999L),
           ops = Vector(
             PatchOp.UpsertNode(
@@ -151,10 +142,8 @@ class GraphWriteApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
       for {
         _      <- client.ensureSchema()
         api     = new ArangoGraphWriteApi(client)
-        tenant  = TenantId(UUID.randomUUID())
         nodeId  = NodeId(UUID.randomUUID())
         patch   = makePatch(
-          tenant = tenant,
           ops = Vector(
             PatchOp.UpsertNode(
               id    = nodeId,
@@ -174,7 +163,6 @@ class GraphWriteApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
         val doc = result.get
         doc.hcursor.get[String]("kind") shouldBe Right("file")
         doc.hcursor.get[String]("name") shouldBe Right("Main.scala")
-        doc.hcursor.get[String]("tenant") shouldBe Right(tenant.value.toString)
         // attrs should contain the path attribute
         doc.hcursor.downField("attrs").downField("path").as[String] shouldBe Right("/src/Main.scala")
         // deleted_rev should be null (not soft-deleted)
@@ -190,11 +178,9 @@ class GraphWriteApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
       for {
         _      <- client.ensureSchema()
         api     = new ArangoGraphWriteApi(client)
-        tenant  = TenantId(UUID.randomUUID())
         nodeId  = NodeId(UUID.randomUUID())
         // First patch: create the node
         patch1  = makePatch(
-          tenant = tenant,
           ops = Vector(
             PatchOp.UpsertNode(
               id   = nodeId,
@@ -207,7 +193,6 @@ class GraphWriteApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
         res1   <- api.commitPatch(patch1)
         // Second patch: soft delete the node
         patch2  = makePatch(
-          tenant  = tenant,
           baseRev = res1.newRev,
           ops     = Vector(PatchOp.DeleteNode(nodeId))
         )

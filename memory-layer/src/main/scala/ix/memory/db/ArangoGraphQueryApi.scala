@@ -16,56 +16,49 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
 
   // ── Public API ──────────────────────────────────────────────────────
 
-  override def getNode(tenant: TenantId, id: NodeId, asOfRev: Option[Rev] = None): IO[Option[GraphNode]] =
+  override def getNode(id: NodeId, asOfRev: Option[Rev] = None): IO[Option[GraphNode]] =
     for {
-      rev    <- asOfRev.fold(getLatestRev(tenant))(IO.pure)
+      rev    <- asOfRev.fold(getLatestRev)(IO.pure)
       result <- client.queryOne(
         """FOR n IN nodes
           |  FILTER n._key == @id
-          |    AND n.tenant == @tenant
           |    AND n.created_rev <= @rev
           |    AND (n.deleted_rev == null OR @rev < n.deleted_rev)
           |  RETURN n""".stripMargin,
         Map(
           "id"     -> id.value.toString.asInstanceOf[AnyRef],
-          "tenant" -> tenant.value.toString.asInstanceOf[AnyRef],
           "rev"    -> Long.box(rev.value).asInstanceOf[AnyRef]
         )
       )
     } yield result.flatMap(parseNode)
 
-  override def findNodesByKind(tenant: TenantId, kind: NodeKind, limit: Int = 100): IO[Vector[GraphNode]] =
+  override def findNodesByKind(kind: NodeKind, limit: Int = 100): IO[Vector[GraphNode]] =
     client.query(
       """FOR n IN nodes
-        |  FILTER n.tenant == @tenant
-        |    AND n.kind == @kind
+        |  FILTER n.kind == @kind
         |    AND n.deleted_rev == null
         |  LIMIT @limit
         |  RETURN n""".stripMargin,
       Map(
-        "tenant" -> tenant.value.toString.asInstanceOf[AnyRef],
         "kind"   -> nodeKindToString(kind).asInstanceOf[AnyRef],
         "limit"  -> Int.box(limit).asInstanceOf[AnyRef]
       )
     ).map(_.flatMap(parseNode).toVector)
 
-  override def searchNodes(tenant: TenantId, text: String, limit: Int = 20): IO[Vector[GraphNode]] =
+  override def searchNodes(text: String, limit: Int = 20): IO[Vector[GraphNode]] =
     client.query(
       """FOR n IN nodes
-        |  FILTER n.tenant == @tenant
-        |    AND CONTAINS(LOWER(n.name), LOWER(@text))
+        |  FILTER CONTAINS(LOWER(n.name), LOWER(@text))
         |    AND n.deleted_rev == null
         |  LIMIT @limit
         |  RETURN n""".stripMargin,
       Map(
-        "tenant" -> tenant.value.toString.asInstanceOf[AnyRef],
         "text"   -> text.asInstanceOf[AnyRef],
         "limit"  -> Int.box(limit).asInstanceOf[AnyRef]
       )
     ).map(_.flatMap(parseNode).toVector)
 
   override def expand(
-    tenant: TenantId,
     nodeId: NodeId,
     direction: Direction,
     predicates: Option[Set[String]] = None,
@@ -82,15 +75,13 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
 
     def buildEdgeQuery(srcOrDst: String): String =
       s"""FOR e IN edges
-         |  FILTER e.tenant == @tenant
-         |    AND e.$srcOrDst == @nodeId
+         |  FILTER e.$srcOrDst == @nodeId
          |    $deletedFilter
          |    $predicateFilter
          |  RETURN e""".stripMargin
 
     def buildBindVars(rev: Rev): Map[String, AnyRef] = {
       val base = Map(
-        "tenant" -> tenant.value.toString.asInstanceOf[AnyRef],
         "nodeId" -> nodeId.value.toString.asInstanceOf[AnyRef],
         "rev"    -> Long.box(rev.value).asInstanceOf[AnyRef]
       )
@@ -105,7 +96,7 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
 
     for {
       // I4: resolve revision once at the start so edges and nodes see the same snapshot
-      resolvedRev <- asOfRev.fold(getLatestRev(tenant))(IO.pure)
+      resolvedRev <- asOfRev.fold(getLatestRev)(IO.pure)
       bindVars = buildBindVars(resolvedRev)
 
       outEdges <- direction match {
@@ -137,12 +128,11 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
                  val idList = new java.util.ArrayList[String]()
                  neighborIds.foreach(nid => idList.add(nid.value.toString))
                  val aql = """FOR n IN nodes
-                             |  FILTER n.id IN @ids AND n.tenant == @tenant
+                             |  FILTER n.id IN @ids
                              |  AND n.created_rev <= @rev AND (n.deleted_rev == null OR @rev < n.deleted_rev)
                              |  RETURN n""".stripMargin
                  client.query(aql, Map(
                    "ids"    -> idList.asInstanceOf[AnyRef],
-                   "tenant" -> tenant.value.toString.asInstanceOf[AnyRef],
                    "rev"    -> Long.box(resolvedRev.value).asInstanceOf[AnyRef]
                  )).map(_.flatMap(parseNode).toVector)
                }
@@ -150,32 +140,29 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
     } yield ExpandResult(nodes, allEdges)
   }
 
-  override def getClaims(tenant: TenantId, entityId: NodeId): IO[Vector[Claim]] =
+  override def getClaims(entityId: NodeId): IO[Vector[Claim]] =
     client.query(
       """FOR c IN claims
-        |  FILTER c.tenant == @tenant
-        |    AND c.entity_id == @entityId
+        |  FILTER c.entity_id == @entityId
         |    AND c.deleted_rev == null
         |  RETURN c""".stripMargin,
       Map(
-        "tenant"   -> tenant.value.toString.asInstanceOf[AnyRef],
         "entityId" -> entityId.value.toString.asInstanceOf[AnyRef]
       )
     ).map(_.flatMap(parseClaim).toVector)
 
-  override def getLatestRev(tenant: TenantId): IO[Rev] =
+  override def getLatestRev: IO[Rev] =
     client.queryOne(
       """FOR r IN revisions
         |  FILTER r._key == @key
         |  RETURN r.rev""".stripMargin,
-      Map("key" -> tenant.value.toString.asInstanceOf[AnyRef])
+      Map("key" -> "current".asInstanceOf[AnyRef])
     ).map(_.flatMap(_.as[Long].toOption).map(Rev(_)).getOrElse(Rev(0L)))
 
-  override def getPatchesForEntity(tenant: TenantId, entityId: NodeId): IO[List[Json]] = {
+  override def getPatchesForEntity(entityId: NodeId): IO[List[Json]] = {
     val nodeIdStr = entityId.value.toString
     client.query(
       """FOR p IN patches
-        |  FILTER p.tenant == @tenant
         |  FILTER LENGTH(
         |    FOR op IN (IS_ARRAY(p.data.ops) ? p.data.ops : [])
         |      FILTER op.id == @nodeId OR op.entityId == @nodeId
@@ -184,7 +171,6 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
         |  SORT p.rev ASC
         |  RETURN p""".stripMargin,
       Map(
-        "tenant" -> tenant.value.toString.asInstanceOf[AnyRef],
         "nodeId" -> nodeIdStr.asInstanceOf[AnyRef]
       )
     )
@@ -200,9 +186,6 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
                       .map(NodeId(_))
       kindStr    <- c.get[String]("kind").toOption
       kind       <- NodeKind.decoder.decodeJson(Json.fromString(kindStr)).toOption
-      tenantStr  <- c.get[String]("tenant").toOption
-                      .flatMap(s => scala.util.Try(UUID.fromString(s)).toOption)
-                      .map(TenantId(_))
       attrs      <- c.get[Json]("attrs").toOption
       provenance <- parseProvenance(c.downField("provenance").focus)
       createdRev <- c.get[Long]("created_rev").toOption.map(Rev(_))
@@ -211,7 +194,7 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
                       .flatMap(s => scala.util.Try(Instant.parse(s)).toOption)
       updatedAt  <- c.get[String]("updated_at").toOption
                       .flatMap(s => scala.util.Try(Instant.parse(s)).toOption)
-    } yield GraphNode(id, kind, tenantStr, attrs, provenance, createdRev, deletedRev, createdAt, updatedAt)
+    } yield GraphNode(id, kind, attrs, provenance, createdRev, deletedRev, createdAt, updatedAt)
     if (result.isEmpty) log.warn("Failed to parse node from JSON: {}", json.noSpaces.take(200))
     result
   }
@@ -229,14 +212,11 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
                       .flatMap(s => scala.util.Try(UUID.fromString(s)).toOption)
                       .map(NodeId(_))
       predicate  <- c.get[String]("predicate").toOption.map(EdgePredicate(_))
-      tenantStr  <- c.get[String]("tenant").toOption
-                      .flatMap(s => scala.util.Try(UUID.fromString(s)).toOption)
-                      .map(TenantId(_))
       attrs      <- c.get[Json]("attrs").toOption
       provenance <- parseProvenance(c.downField("provenance").focus)
       createdRev <- c.get[Long]("created_rev").toOption.map(Rev(_))
       deletedRev  = c.get[Long]("deleted_rev").toOption.map(Rev(_))
-    } yield GraphEdge(id, src, dst, predicate, tenantStr, attrs, provenance, createdRev, deletedRev)
+    } yield GraphEdge(id, src, dst, predicate, attrs, provenance, createdRev, deletedRev)
     if (result.isEmpty) log.warn("Failed to parse edge from JSON: {}", json.noSpaces.take(200))
     result
   }

@@ -49,7 +49,6 @@ object NodeKind {
 final case class GraphNode(
   id:         NodeId,
   kind:       NodeKind,
-  tenant:     TenantId,
   attrs:      Json,
   provenance: Provenance,
   createdRev: Rev,

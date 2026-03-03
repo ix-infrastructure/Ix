@@ -15,17 +15,16 @@ object GraphPatchBuilder {
    * idempotent upserts.
    */
   def build(
-    tenant:     TenantId,
     filePath:   String,
     sourceHash: Option[String],
     parseResult: ParseResult
   ): GraphPatch = {
 
     def nodeIdFor(name: String): NodeId =
-      NodeId(UUID.nameUUIDFromBytes(s"${tenant.value}:$filePath:$name".getBytes("UTF-8")))
+      NodeId(UUID.nameUUIDFromBytes(s"$filePath:$name".getBytes("UTF-8")))
 
     def edgeIdFor(src: String, dst: String, predicate: String): EdgeId =
-      EdgeId(UUID.nameUUIDFromBytes(s"${tenant.value}:$src:$dst:$predicate".getBytes("UTF-8")))
+      EdgeId(UUID.nameUUIDFromBytes(s"$src:$dst:$predicate".getBytes("UTF-8")))
 
     val nodeOps = parseResult.entities.map { e =>
       PatchOp.UpsertNode(nodeIdFor(e.name), e.kind, e.name, e.attrs)
@@ -43,7 +42,6 @@ object GraphPatchBuilder {
 
     GraphPatch(
       patchId   = PatchId(UUID.randomUUID()),
-      tenant    = tenant,
       actor     = "ix/ingestion",
       timestamp = Instant.now(),
       source    = PatchSource(filePath, sourceHash, "tree-sitter-python/1.0", SourceType.Code),

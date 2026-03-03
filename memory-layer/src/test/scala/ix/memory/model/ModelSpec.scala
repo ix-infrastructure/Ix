@@ -38,11 +38,6 @@ class ModelSpec extends AnyFlatSpec with Matchers {
     decode[ConflictId](id.asJson.noSpaces) shouldBe Right(id)
   }
 
-  it should "round-trip TenantId through JSON" in {
-    val id = TenantId(UUID.randomUUID())
-    decode[TenantId](id.asJson.noSpaces) shouldBe Right(id)
-  }
-
   it should "round-trip Rev through JSON" in {
     val rev = Rev(42L)
     decode[Rev](rev.asJson.noSpaces) shouldBe Right(rev)
@@ -127,7 +122,6 @@ class ModelSpec extends AnyFlatSpec with Matchers {
   // ── GraphPatch serialization ────────────────────────────────────────
 
   "GraphPatch" should "serialize with all fields" in {
-    val tenantId = TenantId(UUID.randomUUID())
     val patchId  = PatchId(UUID.randomUUID())
     val nodeId   = NodeId(UUID.randomUUID())
     val edgeId   = EdgeId(UUID.randomUUID())
@@ -162,7 +156,6 @@ class ModelSpec extends AnyFlatSpec with Matchers {
 
     val patch = GraphPatch(
       patchId   = patchId,
-      tenant    = tenantId,
       actor     = "extractor:tree-sitter",
       timestamp = Instant.parse("2025-06-01T12:00:00Z"),
       source    = PatchSource(
@@ -184,7 +177,6 @@ class ModelSpec extends AnyFlatSpec with Matchers {
     // Verify all top-level fields are present
     val cursor = json.hcursor
     cursor.downField("patchId").succeeded shouldBe true
-    cursor.downField("tenant").succeeded shouldBe true
     cursor.downField("actor").succeeded shouldBe true
     cursor.downField("timestamp").succeeded shouldBe true
     cursor.downField("source").succeeded shouldBe true

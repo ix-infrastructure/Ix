@@ -37,7 +37,6 @@ class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
   }
 
   private def makePatch(
-    tenant: TenantId,
     baseRev: Rev = Rev(0L),
     ops: Vector[PatchOp] = Vector.empty,
     patchId: PatchId = PatchId(UUID.randomUUID()),
@@ -45,7 +44,6 @@ class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
   ): GraphPatch =
     GraphPatch(
       patchId   = patchId,
-      tenant    = tenant,
       actor     = "test-actor",
       timestamp = Instant.parse("2025-06-01T12:00:00Z"),
       source    = source,
@@ -64,14 +62,13 @@ class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
       val parserRouter   = new ParserRouter()
       val ingestion      = new IngestionService(parserRouter, writeApi)
       val contextService = buildContextService(queryApi)
-      val tenant         = TenantId(UUID.randomUUID())
 
       for {
         _      <- client.ensureSchema()
         // Ingest the sample billing_service.py fixture
-        commit <- ingestion.ingestFile(tenant, fixtureFilePath)
+        commit <- ingestion.ingestFile(fixtureFilePath)
         // Query about billing retry
-        result <- contextService.query(tenant, "How does billing retry?")
+        result <- contextService.query("How does billing retry?")
       } yield {
         // CommitResult should be Ok
         commit.status shouldBe CommitStatus.Ok
@@ -110,23 +107,21 @@ class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
       val parserRouter   = new ParserRouter()
       val ingestion      = new IngestionService(parserRouter, writeApi)
       val contextService = buildContextService(queryApi)
-      val tenant         = TenantId(UUID.randomUUID())
 
       for {
         _         <- client.ensureSchema()
         // Step 1: Ingest billing_service.py (creates nodes for BillingService etc.)
-        commit1   <- ingestion.ingestFile(tenant, fixtureFilePath)
+        commit1   <- ingestion.ingestFile(fixtureFilePath)
 
         // Compute the deterministic node ID for BillingService
         // (same algorithm as GraphPatchBuilder)
         billingNodeId = NodeId(UUID.nameUUIDFromBytes(
-          s"${tenant.value}:${fixtureFilePath.toString}:BillingService".getBytes("UTF-8")
+          s"${fixtureFilePath.toString}:BillingService".getBytes("UTF-8")
         ))
 
         // Step 2: Assert a claim from code source (higher authority)
         // The statement (field) says "uses exponential backoff for retries"
         codePatch = makePatch(
-          tenant = tenant,
           baseRev = commit1.newRev,
           source = PatchSource("code://billing_service.py", Some("abc"), "tree-sitter", SourceType.Code),
           ops = Vector(
@@ -138,7 +133,6 @@ class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
         // Step 3: Assert a contradictory claim from a README (lower authority)
         // The statement (field) says "does not retry on failure" -- contradicts code
         readmePatch = makePatch(
-          tenant = tenant,
           baseRev = commit2.newRev,
           source = PatchSource("doc://README.md", Some("def"), "markdown-parser", SourceType.Doc),
           ops = Vector(
@@ -148,7 +142,7 @@ class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
         commit3 <- writeApi.commitPatch(readmePatch)
 
         // Step 4: Query about the topic
-        result <- contextService.query(tenant, "BillingService retry")
+        result <- contextService.query("BillingService retry")
       } yield {
         // Both commits should succeed
         commit2.status shouldBe CommitStatus.Ok
@@ -188,19 +182,17 @@ class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
       val writeApi       = new ArangoGraphWriteApi(client)
       val queryApi       = new ArangoGraphQueryApi(client)
       val contextService = buildContextService(queryApi)
-      val tenant         = TenantId(UUID.randomUUID())
 
       // Use deterministic IDs for manual patches
-      val coreNodeId    = NodeId(UUID.nameUUIDFromBytes(s"${tenant.value}:tt:billing_core".getBytes("UTF-8")))
-      val newNodeId     = NodeId(UUID.nameUUIDFromBytes(s"${tenant.value}:tt:payment_processor".getBytes("UTF-8")))
-      val edgeId        = EdgeId(UUID.nameUUIDFromBytes(s"${tenant.value}:tt:billing_core:payment_processor:CALLS".getBytes("UTF-8")))
+      val coreNodeId    = NodeId(UUID.nameUUIDFromBytes(s"tt:billing_core".getBytes("UTF-8")))
+      val newNodeId     = NodeId(UUID.nameUUIDFromBytes(s"tt:payment_processor".getBytes("UTF-8")))
+      val edgeId        = EdgeId(UUID.nameUUIDFromBytes(s"tt:billing_core:payment_processor:CALLS".getBytes("UTF-8")))
 
       for {
         _ <- client.ensureSchema()
 
         // Step 1: Commit patch at rev N with billing_core node
         patch1 = makePatch(
-          tenant = tenant,
           ops = Vector(
             PatchOp.UpsertNode(coreNodeId, NodeKind.Function, "billing_core", Map.empty[String, Json]),
             PatchOp.AssertClaim(coreNodeId, "billing_core_info", Json.fromString("handles billing"), Some(0.9))
@@ -211,7 +203,6 @@ class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
 
         // Step 2: Commit another patch at rev N+1 with a new node + edge
         patch2 = makePatch(
-          tenant = tenant,
           baseRev = revN,
           ops = Vector(
             PatchOp.UpsertNode(newNodeId, NodeKind.Function, "payment_processor", Map.empty[String, Json]),
@@ -230,10 +221,10 @@ class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
         // Step 4: Query at revN -- should only see billing_core node
         // The node payment_processor was created at revN+1 so it should NOT appear
         // in the expansion (expand filters by created_rev <= asOfRev)
-        resultAtRevN <- contextService.query(tenant, "billing_core", asOfRev = Some(revN))
+        resultAtRevN <- contextService.query("billing_core", asOfRev = Some(revN))
 
         // Step 5: Query at latest -- should see both nodes
-        resultLatest <- contextService.query(tenant, "billing_core")
+        resultLatest <- contextService.query("billing_core")
       } yield {
         // At revN: only billing_core should be found, payment_processor should NOT
         // appear in the expanded nodes
@@ -264,25 +255,24 @@ class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
       val queryApi     = new ArangoGraphQueryApi(client)
       val parserRouter = new ParserRouter()
       val ingestion    = new IngestionService(parserRouter, writeApi)
-      val tenant       = TenantId(UUID.randomUUID())
 
       for {
         _ <- client.ensureSchema()
 
         // Step 1: First ingestion
-        commit1 <- ingestion.ingestFile(tenant, fixtureFilePath)
+        commit1 <- ingestion.ingestFile(fixtureFilePath)
 
         // Count nodes after first ingestion
-        nodesBefore <- queryApi.findNodesByKind(tenant, NodeKind.Class)
-        funcsBefore <- queryApi.findNodesByKind(tenant, NodeKind.Function)
+        nodesBefore <- queryApi.findNodesByKind(NodeKind.Class)
+        funcsBefore <- queryApi.findNodesByKind(NodeKind.Function)
         totalBefore  = nodesBefore.size + funcsBefore.size
 
         // Step 2: Re-ingest the same file with the same content
-        commit2 <- ingestion.ingestFile(tenant, fixtureFilePath)
+        commit2 <- ingestion.ingestFile(fixtureFilePath)
 
         // Count nodes after second ingestion
-        nodesAfter <- queryApi.findNodesByKind(tenant, NodeKind.Class)
-        funcsAfter <- queryApi.findNodesByKind(tenant, NodeKind.Function)
+        nodesAfter <- queryApi.findNodesByKind(NodeKind.Class)
+        funcsAfter <- queryApi.findNodesByKind(NodeKind.Function)
         totalAfter  = nodesAfter.size + funcsAfter.size
       } yield {
         // First ingestion should succeed

@@ -8,12 +8,12 @@ import ix.memory.model._
 
 class GraphExpander(queryApi: GraphQueryApi) {
 
-  def expand(tenant: TenantId, seeds: Vector[NodeId], hops: Int = 1,
+  def expand(seeds: Vector[NodeId], hops: Int = 1,
              predicates: Option[Set[String]] = None,
              asOfRev: Option[Rev] = None): IO[ExpandResult] =
     seeds
       .parTraverse { nodeId =>
-        queryApi.expand(tenant, nodeId, Direction.Both, predicates, hops, asOfRev)
+        queryApi.expand(nodeId, Direction.Both, predicates, hops, asOfRev)
       }
       .map { results =>
         val allNodes = results.flatMap(_.nodes).distinctBy(_.id)

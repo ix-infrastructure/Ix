@@ -8,9 +8,9 @@ import ix.memory.model._
 
 class GraphSeeder(queryApi: GraphQueryApi) {
 
-  def seed(tenant: TenantId, terms: Vector[String],
+  def seed(terms: Vector[String],
            asOfRev: Option[Rev] = None): IO[Vector[GraphNode]] =
     terms
-      .parTraverse(term => queryApi.searchNodes(tenant, term))
+      .parTraverse(term => queryApi.searchNodes(term))
       .map(_.flatten.distinctBy(_.id))
 }

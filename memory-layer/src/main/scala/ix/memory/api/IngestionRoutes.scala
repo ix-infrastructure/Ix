@@ -1,7 +1,6 @@
 package ix.memory.api
 
 import java.nio.file.Paths
-import java.util.UUID
 
 import cats.effect.IO
 import io.circe.{Decoder, Encoder}
@@ -11,9 +10,8 @@ import org.http4s.circe.CirceEntityCodec._
 import org.http4s.dsl.io._
 
 import ix.memory.ingestion.IngestionService
-import ix.memory.model.TenantId
 
-case class IngestRequest(path: String, tenant: String, language: Option[String], recursive: Option[Boolean])
+case class IngestRequest(path: String, language: Option[String], recursive: Option[Boolean])
 
 object IngestRequest {
   implicit val decoder: Decoder[IngestRequest] = deriveDecoder[IngestRequest]
@@ -33,12 +31,11 @@ class IngestionRoutes(ingestionService: IngestionService) {
     case req @ POST -> Root / "v1" / "ingest" =>
       (for {
         body     <- req.as[IngestRequest]
-        tenantId <- IO.fromTry(scala.util.Try(UUID.fromString(body.tenant))).map(TenantId(_))
         _        <- IO.raiseWhen(body.path.contains(".."))(
           new IllegalArgumentException("Path traversal not allowed")
         )
         path      = Paths.get(body.path)
-        result   <- ingestionService.ingestPath(tenantId, path, body.language, body.recursive.getOrElse(false))
+        result   <- ingestionService.ingestPath(path, body.language, body.recursive.getOrElse(false))
         resp     <- Ok(IngestResponse(
           filesProcessed  = result.filesProcessed,
           patchesApplied  = result.patchesApplied,

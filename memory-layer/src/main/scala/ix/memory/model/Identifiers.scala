@@ -4,12 +4,6 @@ import java.util.UUID
 
 import io.circe.{Decoder, Encoder}
 
-final case class TenantId(value: UUID) extends AnyVal
-object TenantId {
-  implicit val encoder: Encoder[TenantId] = Encoder[UUID].contramap(_.value)
-  implicit val decoder: Decoder[TenantId] = Decoder[UUID].map(TenantId(_))
-}
-
 final case class NodeId(value: UUID) extends AnyVal
 object NodeId {
   implicit val encoder: Encoder[NodeId] = Encoder[UUID].contramap(_.value)

@@ -35,44 +35,36 @@ class EntityRoutes(queryApi: GraphQueryApi) {
 
   val routes: HttpRoutes[IO] = HttpRoutes.of[IO] {
 
-    // GET /v1/entity/:id?tenant=<uuid>
-    case req @ GET -> Root / "v1" / "entity" / UUIDVar(id) =>
+    // GET /v1/entity/:id
+    case GET -> Root / "v1" / "entity" / UUIDVar(id) =>
+      val nodeId = NodeId(id)
       (for {
-        tenantStr <- IO.fromOption(req.params.get("tenant"))(
-          new IllegalArgumentException("Missing required query parameter: tenant")
-        )
-        tenantId  <- IO.fromTry(scala.util.Try(UUID.fromString(tenantStr))).map(TenantId(_))
-        nodeId     = NodeId(id)
-        nodeOpt   <- queryApi.getNode(tenantId, nodeId)
+        nodeOpt   <- queryApi.getNode(nodeId)
         node      <- IO.fromOption(nodeOpt)(
           new NoSuchElementException(s"Entity not found: $id")
         )
-        claims    <- queryApi.getClaims(tenantId, nodeId)
-        expanded  <- queryApi.expand(tenantId, nodeId, Direction.Both)
+        claims    <- queryApi.getClaims(nodeId)
+        expanded  <- queryApi.expand(nodeId, Direction.Both)
         resp      <- Ok(EntityResponse(node, claims, expanded.edges))
       } yield resp).handleErrorWith(ErrorHandler.handle(_))
 
-    // POST /v1/provenance/:id?tenant=<uuid>
-    case req @ POST -> Root / "v1" / "provenance" / UUIDVar(id) =>
+    // POST /v1/provenance/:id
+    case POST -> Root / "v1" / "provenance" / UUIDVar(id) =>
+      val nodeId = NodeId(id)
       (for {
-        tenantStr <- IO.fromOption(req.params.get("tenant"))(
-          new IllegalArgumentException("Missing required query parameter: tenant")
-        )
-        tenantId  <- IO.fromTry(scala.util.Try(UUID.fromString(tenantStr))).map(TenantId(_))
-        nodeId     = NodeId(id)
         // Verify entity exists
-        nodeOpt   <- queryApi.getNode(tenantId, nodeId)
+        nodeOpt   <- queryApi.getNode(nodeId)
         _         <- IO.fromOption(nodeOpt)(
           new NoSuchElementException(s"Entity not found: $id")
         )
         // Query patches that touched this entity
-        chain     <- queryProvenanceChain(tenantId, nodeId)
+        chain     <- queryProvenanceChain(nodeId)
         resp      <- Ok(ProvenanceResponse(nodeId, chain))
       } yield resp).handleErrorWith(ErrorHandler.handle(_))
   }
 
-  private def queryProvenanceChain(tenant: TenantId, nodeId: NodeId): IO[Vector[ProvenanceEntry]] =
-    queryApi.getPatchesForEntity(tenant, nodeId).map { jsons =>
+  private def queryProvenanceChain(nodeId: NodeId): IO[Vector[ProvenanceEntry]] =
+    queryApi.getPatchesForEntity(nodeId).map { jsons =>
       jsons.flatMap { json =>
         val c = json.hcursor
         val dataC = c.downField("data")

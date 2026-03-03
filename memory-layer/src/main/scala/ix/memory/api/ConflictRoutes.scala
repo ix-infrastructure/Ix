@@ -10,7 +10,7 @@ import org.http4s.circe.CirceEntityCodec._
 import org.http4s.dsl.io._
 
 import ix.memory.conflict.ConflictService
-import ix.memory.model.{ClaimId, ConflictId, ConflictStatus, TenantId}
+import ix.memory.model.{ClaimId, ConflictId, ConflictStatus}
 
 case class ResolveRequest(winnerClaimId: String)
 
@@ -23,29 +23,21 @@ class ConflictRoutes(conflictService: ConflictService) {
 
   val routes: HttpRoutes[IO] = HttpRoutes.of[IO] {
 
-    // GET /v1/conflicts?tenant=<uuid>&status=<optional>
+    // GET /v1/conflicts?status=<optional>
     case req @ GET -> Root / "v1" / "conflicts" =>
+      val status = req.params.get("status").flatMap(parseStatus)
       (for {
-        tenantStr <- IO.fromOption(req.params.get("tenant"))(
-          new IllegalArgumentException("Missing required query parameter: tenant")
-        )
-        tenantId  <- IO.fromTry(scala.util.Try(UUID.fromString(tenantStr))).map(TenantId(_))
-        status     = req.params.get("status").flatMap(parseStatus)
-        conflicts <- conflictService.listConflicts(tenantId, status)
+        conflicts <- conflictService.listConflicts(status)
         resp      <- Ok(conflicts)
       } yield resp).handleErrorWith(ErrorHandler.handle(_))
 
-    // POST /v1/conflicts/:id/resolve?tenant=<uuid>
+    // POST /v1/conflicts/:id/resolve
     case req @ POST -> Root / "v1" / "conflicts" / UUIDVar(id) / "resolve" =>
       (for {
-        tenantStr    <- IO.fromOption(req.params.get("tenant"))(
-          new IllegalArgumentException("Missing required query parameter: tenant")
-        )
-        tenantId     <- IO.fromTry(scala.util.Try(UUID.fromString(tenantStr))).map(TenantId(_))
         body         <- req.as[ResolveRequest]
         winnerClaimId <- IO.fromTry(scala.util.Try(UUID.fromString(body.winnerClaimId))).map(ClaimId(_))
         conflictId    = ConflictId(id)
-        _            <- conflictService.resolve(tenantId, conflictId, winnerClaimId)
+        _            <- conflictService.resolve(conflictId, winnerClaimId)
         resp         <- Ok(io.circe.Json.obj("status" -> io.circe.Json.fromString("resolved")))
       } yield resp).handleErrorWith(ErrorHandler.handle(_))
   }

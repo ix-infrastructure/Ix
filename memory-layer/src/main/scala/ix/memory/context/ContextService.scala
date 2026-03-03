@@ -14,24 +14,24 @@ class ContextService(
   conflictDetector: ConflictDetector
 ) {
 
-  def query(tenant: TenantId, question: String,
+  def query(question: String,
             asOfRev: Option[Rev] = None): IO[StructuredContext] =
     for {
       // 1. Extract entity keywords from the natural language query
       terms <- IO.pure(EntityExtractor.extract(question))
 
       // 2. Seed: search the graph for nodes matching extracted terms
-      seeds <- seeder.seed(tenant, terms, asOfRev)
+      seeds <- seeder.seed(terms, asOfRev)
 
       // 3. Expand: traverse the graph 1 hop from each seed
-      expanded <- expander.expand(tenant, seeds.map(_.id), hops = 1, asOfRev = asOfRev)
+      expanded <- expander.expand(seeds.map(_.id), hops = 1, asOfRev = asOfRev)
 
       // 4. Collect claims for all discovered nodes
       allNodeIds = (seeds.map(_.id) ++ expanded.nodes.map(_.id)).distinct
-      claims <- claimCollector.collect(tenant, allNodeIds)
+      claims <- claimCollector.collect(allNodeIds)
 
       // 5. Score each claim
-      rev <- asOfRev.fold(queryApi.getLatestRev(tenant))(IO.pure)
+      rev <- asOfRev.fold(queryApi.getLatestRev)(IO.pure)
       scored = claims.map { c =>
         confidenceScorer.score(c, ScoringContext(
           latestRev          = rev,

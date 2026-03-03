@@ -12,7 +12,7 @@ import org.http4s.dsl.io._
 import ix.memory.db.GraphQueryApi
 import ix.memory.model._
 
-case class DiffRequest(tenant: String, fromRev: Long, toRev: Long, entityId: Option[String])
+case class DiffRequest(fromRev: Long, toRev: Long, entityId: Option[String])
 
 object DiffRequest {
   implicit val decoder: Decoder[DiffRequest] = deriveDecoder[DiffRequest]
@@ -42,7 +42,6 @@ class DiffRoutes(queryApi: GraphQueryApi) {
     case req @ POST -> Root / "v1" / "diff" =>
       (for {
         body     <- req.as[DiffRequest]
-        tenantId <- IO.fromTry(scala.util.Try(UUID.fromString(body.tenant))).map(TenantId(_))
         _        <- IO.raiseWhen(body.fromRev >= body.toRev)(
           new IllegalArgumentException("fromRev must be less than toRev")
         )
@@ -51,7 +50,7 @@ class DiffRoutes(queryApi: GraphQueryApi) {
             // Diff a single entity
             for {
               eid    <- IO.fromTry(scala.util.Try(UUID.fromString(eidStr))).map(NodeId(_))
-              result <- diffEntity(tenantId, eid, Rev(body.fromRev), Rev(body.toRev))
+              result <- diffEntity(eid, Rev(body.fromRev), Rev(body.toRev))
             } yield result.toVector
           case None =>
             IO.raiseError(new UnsupportedOperationException(
@@ -63,11 +62,11 @@ class DiffRoutes(queryApi: GraphQueryApi) {
   }
 
   private def diffEntity(
-    tenant: TenantId, nodeId: NodeId, fromRev: Rev, toRev: Rev
+    nodeId: NodeId, fromRev: Rev, toRev: Rev
   ): IO[Option[DiffEntry]] =
     for {
-      atFrom <- queryApi.getNode(tenant, nodeId, asOfRev = Some(fromRev))
-      atTo   <- queryApi.getNode(tenant, nodeId, asOfRev = Some(toRev))
+      atFrom <- queryApi.getNode(nodeId, asOfRev = Some(fromRev))
+      atTo   <- queryApi.getNode(nodeId, asOfRev = Some(toRev))
     } yield {
       (atFrom, atTo) match {
         case (None, None)       => None

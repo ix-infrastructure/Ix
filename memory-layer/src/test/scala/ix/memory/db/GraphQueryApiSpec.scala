@@ -19,14 +19,12 @@ class GraphQueryApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
   )
 
   private def makePatch(
-    tenant: TenantId,
     baseRev: Rev = Rev(0L),
     ops: Vector[PatchOp] = Vector.empty,
     patchId: PatchId = PatchId(UUID.randomUUID())
   ): GraphPatch =
     GraphPatch(
       patchId   = patchId,
-      tenant    = tenant,
       actor     = "test-actor",
       timestamp = Instant.parse("2025-06-01T12:00:00Z"),
       source    = PatchSource(
@@ -49,10 +47,8 @@ class GraphQueryApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
         _        <- client.ensureSchema()
         writeApi  = new ArangoGraphWriteApi(client)
         queryApi  = new ArangoGraphQueryApi(client)
-        tenant    = TenantId(UUID.randomUUID())
         nodeId    = NodeId(UUID.randomUUID())
         patch     = makePatch(
-          tenant = tenant,
           ops = Vector(
             PatchOp.UpsertNode(
               id   = nodeId,
@@ -63,13 +59,12 @@ class GraphQueryApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
           )
         )
         _        <- writeApi.commitPatch(patch)
-        result   <- queryApi.getNode(tenant, nodeId)
+        result   <- queryApi.getNode(nodeId)
       } yield {
         result shouldBe defined
         val node = result.get
         node.id shouldBe nodeId
         node.kind shouldBe NodeKind.Function
-        node.tenant shouldBe tenant
         node.attrs.hcursor.get[String]("lang") shouldBe Right("scala")
         node.provenance.extractor shouldBe "test-extractor"
         node.provenance.sourceType shouldBe SourceType.Code
@@ -86,11 +81,9 @@ class GraphQueryApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
         _        <- client.ensureSchema()
         writeApi  = new ArangoGraphWriteApi(client)
         queryApi  = new ArangoGraphQueryApi(client)
-        tenant    = TenantId(UUID.randomUUID())
         nodeId    = NodeId(UUID.randomUUID())
         // Commit patch1: create the node
         patch1    = makePatch(
-          tenant = tenant,
           ops = Vector(
             PatchOp.UpsertNode(
               id   = nodeId,
@@ -104,16 +97,15 @@ class GraphQueryApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
         rev1      = res1.newRev
         // Commit patch2: delete the node
         patch2    = makePatch(
-          tenant  = tenant,
           baseRev = rev1,
           ops     = Vector(PatchOp.DeleteNode(nodeId))
         )
         res2     <- writeApi.commitPatch(patch2)
         rev2      = res2.newRev
         // Query as of rev1 → should see the node
-        atRev1   <- queryApi.getNode(tenant, nodeId, asOfRev = Some(rev1))
+        atRev1   <- queryApi.getNode(nodeId, asOfRev = Some(rev1))
         // Query as of rev2 → should not see the node (deleted)
-        atRev2   <- queryApi.getNode(tenant, nodeId, asOfRev = Some(rev2))
+        atRev2   <- queryApi.getNode(nodeId, asOfRev = Some(rev2))
       } yield {
         atRev1 shouldBe defined
         atRev1.get.id shouldBe nodeId
@@ -130,12 +122,10 @@ class GraphQueryApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
         _        <- client.ensureSchema()
         writeApi  = new ArangoGraphWriteApi(client)
         queryApi  = new ArangoGraphQueryApi(client)
-        tenant    = TenantId(UUID.randomUUID())
         funcId1   = NodeId(UUID.randomUUID())
         funcId2   = NodeId(UUID.randomUUID())
         classId   = NodeId(UUID.randomUUID())
         patch     = makePatch(
-          tenant = tenant,
           ops = Vector(
             PatchOp.UpsertNode(funcId1, NodeKind.Function, "func1", Map.empty[String, Json]),
             PatchOp.UpsertNode(funcId2, NodeKind.Function, "func2", Map.empty[String, Json]),
@@ -143,8 +133,8 @@ class GraphQueryApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
           )
         )
         _        <- writeApi.commitPatch(patch)
-        funcs    <- queryApi.findNodesByKind(tenant, NodeKind.Function)
-        classes  <- queryApi.findNodesByKind(tenant, NodeKind.Class)
+        funcs    <- queryApi.findNodesByKind(NodeKind.Function)
+        classes  <- queryApi.findNodesByKind(NodeKind.Class)
       } yield {
         funcs.length shouldBe 2
         funcs.map(_.kind).toSet shouldBe Set(NodeKind.Function)
@@ -162,12 +152,10 @@ class GraphQueryApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
         _        <- client.ensureSchema()
         writeApi  = new ArangoGraphWriteApi(client)
         queryApi  = new ArangoGraphQueryApi(client)
-        tenant    = TenantId(UUID.randomUUID())
         nodeA     = NodeId(UUID.randomUUID())
         nodeB     = NodeId(UUID.randomUUID())
         edgeId    = EdgeId(UUID.randomUUID())
         patch     = makePatch(
-          tenant = tenant,
           ops = Vector(
             PatchOp.UpsertNode(nodeA, NodeKind.Function, "funcA", Map.empty[String, Json]),
             PatchOp.UpsertNode(nodeB, NodeKind.Function, "funcB", Map.empty[String, Json]),
@@ -175,9 +163,9 @@ class GraphQueryApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
           )
         )
         _        <- writeApi.commitPatch(patch)
-        outRes   <- queryApi.expand(tenant, nodeA, Direction.Out)
-        inRes    <- queryApi.expand(tenant, nodeB, Direction.In)
-        bothRes  <- queryApi.expand(tenant, nodeA, Direction.Both)
+        outRes   <- queryApi.expand(nodeA, Direction.Out)
+        inRes    <- queryApi.expand(nodeB, Direction.In)
+        bothRes  <- queryApi.expand(nodeA, Direction.Both)
       } yield {
         // Out from nodeA should find nodeB via "calls" edge
         outRes.edges.length shouldBe 1
@@ -207,18 +195,16 @@ class GraphQueryApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
         _        <- client.ensureSchema()
         writeApi  = new ArangoGraphWriteApi(client)
         queryApi  = new ArangoGraphQueryApi(client)
-        tenant    = TenantId(UUID.randomUUID())
         node1     = NodeId(UUID.randomUUID())
         node2     = NodeId(UUID.randomUUID())
         patch     = makePatch(
-          tenant = tenant,
           ops = Vector(
             PatchOp.UpsertNode(node1, NodeKind.Service, "billing_service", Map.empty[String, Json]),
             PatchOp.UpsertNode(node2, NodeKind.Service, "payment_gateway", Map.empty[String, Json])
           )
         )
         _        <- writeApi.commitPatch(patch)
-        results  <- queryApi.searchNodes(tenant, "billing")
+        results  <- queryApi.searchNodes("billing")
       } yield {
         results.length shouldBe 1
         results.head.id shouldBe node1
@@ -234,17 +220,15 @@ class GraphQueryApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
         _        <- client.ensureSchema()
         writeApi  = new ArangoGraphWriteApi(client)
         queryApi  = new ArangoGraphQueryApi(client)
-        tenant    = TenantId(UUID.randomUUID())
         nodeId    = NodeId(UUID.randomUUID())
         patch     = makePatch(
-          tenant = tenant,
           ops = Vector(
             PatchOp.UpsertNode(nodeId, NodeKind.Function, "myFunc", Map.empty[String, Json]),
             PatchOp.AssertClaim(nodeId, "returns", Json.fromString("Int"), Some(0.9))
           )
         )
         _        <- writeApi.commitPatch(patch)
-        claims   <- queryApi.getClaims(tenant, nodeId)
+        claims   <- queryApi.getClaims(nodeId)
       } yield {
         claims.length shouldBe 1
         val claim = claims.head
@@ -264,18 +248,16 @@ class GraphQueryApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
         _        <- client.ensureSchema()
         writeApi  = new ArangoGraphWriteApi(client)
         queryApi  = new ArangoGraphQueryApi(client)
-        tenant    = TenantId(UUID.randomUUID())
         nodeId    = NodeId(UUID.randomUUID())
         // Before any commits, rev should be 0
-        rev0     <- queryApi.getLatestRev(tenant)
+        rev0     <- queryApi.getLatestRev
         patch     = makePatch(
-          tenant = tenant,
           ops = Vector(
             PatchOp.UpsertNode(nodeId, NodeKind.Module, "mod1", Map.empty[String, Json])
           )
         )
         res      <- writeApi.commitPatch(patch)
-        rev1     <- queryApi.getLatestRev(tenant)
+        rev1     <- queryApi.getLatestRev
       } yield {
         rev0 shouldBe Rev(0L)
         rev1 shouldBe res.newRev

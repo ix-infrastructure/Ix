@@ -28,14 +28,12 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
   )
 
   private def makePatch(
-    tenant: TenantId,
     baseRev: Rev = Rev(0L),
     ops: Vector[PatchOp] = Vector.empty,
     patchId: PatchId = PatchId(UUID.randomUUID())
   ): GraphPatch =
     GraphPatch(
       patchId   = patchId,
-      tenant    = tenant,
       actor     = "test-actor",
       timestamp = Instant.parse("2025-06-01T12:00:00Z"),
       source    = PatchSource(
@@ -94,10 +92,8 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
       val writeApi = new ArangoGraphWriteApi(client)
       val queryApi = new ArangoGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
-      val tenant   = TenantId(UUID.randomUUID())
       val nodeId   = NodeId(UUID.randomUUID())
       val patch    = makePatch(
-        tenant = tenant,
         ops = Vector(
           PatchOp.UpsertNode(nodeId, NodeKind.Function, "test_func", Map("lang" -> Json.fromString("scala"))),
           PatchOp.AssertClaim(nodeId, "returns", Json.fromString("Int"), Some(0.9))
@@ -107,7 +103,7 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
       for {
         _    <- client.ensureSchema()
         _    <- writeApi.commitPatch(patch)
-        req   = Request[IO](Method.GET, Uri.unsafeFromString(s"/v1/entity/${nodeId.value}?tenant=${tenant.value}"))
+        req   = Request[IO](Method.GET, Uri.unsafeFromString(s"/v1/entity/${nodeId.value}"))
         resp <- app.run(req)
         body <- resp.as[Json]
       } yield {
@@ -125,26 +121,6 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
       val writeApi = new ArangoGraphWriteApi(client)
       val queryApi = new ArangoGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
-      val tenant   = TenantId(UUID.randomUUID())
-      val fakeId   = UUID.randomUUID()
-
-      for {
-        _    <- client.ensureSchema()
-        req   = Request[IO](Method.GET, Uri.unsafeFromString(s"/v1/entity/$fakeId?tenant=${tenant.value}"))
-        resp <- app.run(req)
-      } yield {
-        resp.status shouldBe Status.NotFound
-      }
-    }
-  }
-
-  // ── Test 4: GET /v1/entity/:id returns 400 for missing tenant ────────
-
-  it should "return 400 for missing tenant query param" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
-      val app      = buildRoutes(client, writeApi, queryApi)
       val fakeId   = UUID.randomUUID()
 
       for {
@@ -152,23 +128,22 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
         req   = Request[IO](Method.GET, Uri.unsafeFromString(s"/v1/entity/$fakeId"))
         resp <- app.run(req)
       } yield {
-        resp.status shouldBe Status.BadRequest
+        resp.status shouldBe Status.NotFound
       }
     }
   }
 
-  // ── Test 5: GET /v1/conflicts returns empty list ─────────────────────
+  // ── Test 4: GET /v1/conflicts returns empty list ─────────────────────
 
-  it should "return empty conflicts list for new tenant" in {
+  it should "return empty conflicts list" in {
     clientResource.use { client =>
       val writeApi = new ArangoGraphWriteApi(client)
       val queryApi = new ArangoGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
-      val tenant   = TenantId(UUID.randomUUID())
 
       for {
         _    <- client.ensureSchema()
-        req   = Request[IO](Method.GET, Uri.unsafeFromString(s"/v1/conflicts?tenant=${tenant.value}"))
+        req   = Request[IO](Method.GET, Uri.unsafeFromString(s"/v1/conflicts"))
         resp <- app.run(req)
         body <- resp.as[Json]
       } yield {
@@ -178,17 +153,15 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
     }
   }
 
-  // ── Test 6: POST /v1/diff returns diff between revisions ─────────────
+  // ── Test 5: POST /v1/diff returns diff between revisions ─────────────
 
   it should "diff between revisions and detect added entity" in {
     clientResource.use { client =>
       val writeApi = new ArangoGraphWriteApi(client)
       val queryApi = new ArangoGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
-      val tenant   = TenantId(UUID.randomUUID())
       val nodeId   = NodeId(UUID.randomUUID())
       val patch    = makePatch(
-        tenant = tenant,
         ops = Vector(
           PatchOp.UpsertNode(nodeId, NodeKind.Function, "diff_func", Map.empty[String, Json])
         )
@@ -198,7 +171,6 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
         _      <- client.ensureSchema()
         result <- writeApi.commitPatch(patch)
         diffReq = Json.obj(
-          "tenant"   -> tenant.value.toString.asJson,
           "fromRev"  -> 0L.asJson,
           "toRev"    -> result.newRev.value.asJson,
           "entityId" -> nodeId.value.toString.asJson
@@ -215,19 +187,17 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
     }
   }
 
-  // ── Test 7: POST /v1/diff returns 400 for invalid rev order ──────────
+  // ── Test 6: POST /v1/diff returns 400 for invalid rev order ──────────
 
   it should "return 400 for invalid rev order in diff" in {
     clientResource.use { client =>
       val writeApi = new ArangoGraphWriteApi(client)
       val queryApi = new ArangoGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
-      val tenant   = TenantId(UUID.randomUUID())
 
       for {
         _    <- client.ensureSchema()
         diffReq = Json.obj(
-          "tenant"  -> tenant.value.toString.asJson,
           "fromRev" -> 5L.asJson,
           "toRev"   -> 2L.asJson
         )
@@ -239,17 +209,15 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
     }
   }
 
-  // ── Test 8: POST /v1/context returns structured context ──────────────
+  // ── Test 7: POST /v1/context returns structured context ──────────────
 
   it should "return structured context for a query" in {
     clientResource.use { client =>
       val writeApi = new ArangoGraphWriteApi(client)
       val queryApi = new ArangoGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
-      val tenant   = TenantId(UUID.randomUUID())
       val nodeId   = NodeId(UUID.randomUUID())
       val patch    = makePatch(
-        tenant = tenant,
         ops = Vector(
           PatchOp.UpsertNode(nodeId, NodeKind.Function, "billing_calc", Map.empty[String, Json]),
           PatchOp.AssertClaim(nodeId, "calculates billing", Json.fromString("true"), Some(0.9))
@@ -260,8 +228,7 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
         _    <- client.ensureSchema()
         _    <- writeApi.commitPatch(patch)
         ctxReq = Json.obj(
-          "query"  -> "billing".asJson,
-          "tenant" -> tenant.value.toString.asJson
+          "query"  -> "billing".asJson
         )
         req   = Request[IO](Method.POST, uri"/v1/context").withEntity(ctxReq)
         resp <- app.run(req)
@@ -273,14 +240,13 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
     }
   }
 
-  // ── Test 9: POST /v1/ingest ingests a Python file ─────────────────────
+  // ── Test 8: POST /v1/ingest ingests a Python file ─────────────────────
 
   it should "ingest a Python file and return counts" in {
     clientResource.use { client =>
       val writeApi = new ArangoGraphWriteApi(client)
       val queryApi = new ArangoGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
-      val tenant   = TenantId(UUID.randomUUID())
 
       for {
         _       <- client.ensureSchema()
@@ -294,8 +260,7 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
           f
         }
         ingestReq = Json.obj(
-          "path"   -> tmpFile.toAbsolutePath.toString.asJson,
-          "tenant" -> tenant.value.toString.asJson
+          "path"   -> tmpFile.toAbsolutePath.toString.asJson
         )
         req     = Request[IO](Method.POST, uri"/v1/ingest").withEntity(ingestReq)
         resp   <- app.run(req)
@@ -310,20 +275,18 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
     }
   }
 
-  // ── Test 10: POST /v1/ingest rejects path traversal ────────────────
+  // ── Test 9: POST /v1/ingest rejects path traversal ────────────────
 
   it should "return 400 for path traversal attempt" in {
     clientResource.use { client =>
       val writeApi = new ArangoGraphWriteApi(client)
       val queryApi = new ArangoGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
-      val tenant   = TenantId(UUID.randomUUID())
 
       for {
         _    <- client.ensureSchema()
         ingestReq = Json.obj(
-          "path"   -> "/tmp/../etc/passwd".asJson,
-          "tenant" -> tenant.value.toString.asJson
+          "path"   -> "/tmp/../etc/passwd".asJson
         )
         req   = Request[IO](Method.POST, uri"/v1/ingest").withEntity(ingestReq)
         resp <- app.run(req)
@@ -333,19 +296,17 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
     }
   }
 
-  // ── Test 11: POST /v1/diff returns 422 without entityId ─────────────
+  // ── Test 10: POST /v1/diff returns 422 without entityId ─────────────
 
   it should "return 422 for diff without entityId" in {
     clientResource.use { client =>
       val writeApi = new ArangoGraphWriteApi(client)
       val queryApi = new ArangoGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
-      val tenant   = TenantId(UUID.randomUUID())
 
       for {
         _    <- client.ensureSchema()
         diffReq = Json.obj(
-          "tenant"  -> tenant.value.toString.asJson,
           "fromRev" -> 0L.asJson,
           "toRev"   -> 1L.asJson
         )
@@ -357,17 +318,15 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
     }
   }
 
-  // ── Test 12: POST /v1/provenance/:id returns provenance chain ─────────
+  // ── Test 11: POST /v1/provenance/:id returns provenance chain ─────────
 
   it should "return provenance chain for entity" in {
     clientResource.use { client =>
       val writeApi = new ArangoGraphWriteApi(client)
       val queryApi = new ArangoGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
-      val tenant   = TenantId(UUID.randomUUID())
       val nodeId   = NodeId(UUID.randomUUID())
       val patch    = makePatch(
-        tenant = tenant,
         ops = Vector(
           PatchOp.UpsertNode(nodeId, NodeKind.Function, "prov_func", Map.empty[String, Json])
         )
@@ -376,7 +335,7 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
       for {
         _    <- client.ensureSchema()
         _    <- writeApi.commitPatch(patch)
-        req   = Request[IO](Method.POST, Uri.unsafeFromString(s"/v1/provenance/${nodeId.value}?tenant=${tenant.value}"))
+        req   = Request[IO](Method.POST, Uri.unsafeFromString(s"/v1/provenance/${nodeId.value}"))
         resp <- app.run(req)
         body <- resp.as[Json]
       } yield {

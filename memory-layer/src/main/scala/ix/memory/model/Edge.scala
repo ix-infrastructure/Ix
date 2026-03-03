@@ -14,7 +14,6 @@ final case class GraphEdge(
   src:        NodeId,
   dst:        NodeId,
   predicate:  EdgePredicate,
-  tenant:     TenantId,
   attrs:      Json,
   provenance: Provenance,
   createdRev: Rev,

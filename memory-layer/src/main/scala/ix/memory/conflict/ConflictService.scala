@@ -8,16 +8,16 @@ import ix.memory.context.ConflictDetector
 
 class ConflictService(client: ArangoClient, queryApi: GraphQueryApi, writeApi: GraphWriteApi) {
 
-  def detectAndStore(tenant: TenantId, claims: Vector[ScoredClaim],
+  def detectAndStore(claims: Vector[ScoredClaim],
                      detector: ConflictDetector): IO[Vector[ConflictReport]] = {
     val reports = detector.detect(claims)
     // Store conflict sets in DB for each report
     reports.traverse { report =>
-      storeConflictSet(tenant, report).map(_ => report)
+      storeConflictSet(report).map(_ => report)
     }
   }
 
-  private def storeConflictSet(tenant: TenantId, report: ConflictReport): IO[Unit] = {
+  private def storeConflictSet(report: ConflictReport): IO[Unit] = {
     client.execute(
       """INSERT {
         |  _key: @key,
@@ -26,7 +26,6 @@ class ConflictService(client: ArangoClient, queryApi: GraphQueryApi, writeApi: G
         |  status: "open",
         |  candidate_claims: @candidates,
         |  winner_claim_id: null,
-        |  tenant: @tenant,
         |  created_rev: 0
         |} INTO conflict_sets OPTIONS { overwriteMode: "ignore" }""".stripMargin,
       Map(
@@ -35,14 +34,13 @@ class ConflictService(client: ArangoClient, queryApi: GraphQueryApi, writeApi: G
         "reason" -> report.reason.asInstanceOf[AnyRef],
         "candidates" -> java.util.Arrays.asList(
           report.claimA.value.toString, report.claimB.value.toString
-        ).asInstanceOf[AnyRef],
-        "tenant" -> tenant.value.toString.asInstanceOf[AnyRef]
+        ).asInstanceOf[AnyRef]
       )
     )
   }
 
-  def listConflicts(tenant: TenantId, status: Option[ConflictStatus] = None): IO[Vector[ConflictSet]] = {
-    val statusFilter = status.map(_ => " AND cs.status == @status").getOrElse("")
+  def listConflicts(status: Option[ConflictStatus] = None): IO[Vector[ConflictSet]] = {
+    val statusFilter = status.map(_ => " FILTER cs.status == @status").getOrElse("")
     val statusVar: Map[String, AnyRef] = status.map { s =>
       val str = s match {
         case ConflictStatus.Open => "open"
@@ -54,20 +52,19 @@ class ConflictService(client: ArangoClient, queryApi: GraphQueryApi, writeApi: G
 
     client.query(
       s"""FOR cs IN conflict_sets
-         |  FILTER cs.tenant == @tenant$statusFilter
+         |  $statusFilter
          |  RETURN cs""".stripMargin,
-      Map("tenant" -> tenant.value.toString.asInstanceOf[AnyRef]) ++ statusVar
+      statusVar
     ).map(_.flatMap(parseConflictSet).toVector)
   }
 
-  def resolve(tenant: TenantId, conflictId: ConflictId, winnerClaimId: ClaimId): IO[Unit] = {
+  def resolve(conflictId: ConflictId, winnerClaimId: ClaimId): IO[Unit] = {
     client.execute(
       """FOR cs IN conflict_sets
-        |  FILTER cs._key == @key AND cs.tenant == @tenant
+        |  FILTER cs._key == @key
         |  UPDATE cs WITH { status: "resolved", winner_claim_id: @winner } IN conflict_sets""".stripMargin,
       Map(
         "key" -> conflictId.value.toString.asInstanceOf[AnyRef],
-        "tenant" -> tenant.value.toString.asInstanceOf[AnyRef],
         "winner" -> winnerClaimId.value.toString.asInstanceOf[AnyRef]
       )
     )

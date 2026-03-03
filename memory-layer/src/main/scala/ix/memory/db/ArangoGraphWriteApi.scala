@@ -28,7 +28,7 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
     client.beginTransaction(ReadCollections, WriteCollections).flatMap { txId =>
       val commit = for {
         // Step 1: Check idempotency inside the transaction
-        idempotent <- checkIdempotency(patch.patchId, patch.tenant, txId)
+        idempotent <- checkIdempotency(patch.patchId, txId)
         result     <- idempotent match {
           case Some(storedRev) =>
             // Already applied — commit the (read-only) transaction and return
@@ -46,22 +46,22 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
 
   // ── Private helpers ───────────────────────────────────────────────
 
-  private def checkIdempotency(patchId: PatchId, tenant: TenantId, txId: String): IO[Option[Rev]] =
+  private def checkIdempotency(patchId: PatchId, txId: String): IO[Option[Rev]] =
     client.queryOne(
       """FOR ik IN idempotency_keys
         |  FILTER ik.key == @key
         |  RETURN ik.rev""".stripMargin,
-      Map("key" -> idempotencyKey(patchId, tenant).asInstanceOf[AnyRef]),
+      Map("key" -> idempotencyKey(patchId).asInstanceOf[AnyRef]),
       txId = Some(txId)
     ).map(_.flatMap(_.as[Long].toOption).map(Rev(_)))
 
-  private def idempotencyKey(patchId: PatchId, tenant: TenantId): String =
-    s"${tenant.value}:${patchId.value}"
+  private def idempotencyKey(patchId: PatchId): String =
+    patchId.value.toString
 
   private def doCommit(patch: GraphPatch, txId: String): IO[CommitResult] =
     for {
-      // Step 2: Load latest_rev for tenant (inside transaction)
-      latestRev <- loadLatestRev(patch.tenant, txId)
+      // Step 2: Load latest_rev (inside transaction)
+      latestRev <- loadLatestRev(txId)
 
       // Step 3: Check baseRev (if > 0, must match latest)
       result <- {
@@ -77,9 +77,9 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
             // Step 6: Store patch
             _ <- storePatch(patch, newRev, txId)
             // Step 7: Store idempotency key
-            _ <- storeIdempotencyKey(patch.patchId, patch.tenant, newRev, txId)
-            // Step 8: Update tenant revision
-            _ <- updateTenantRevision(patch.tenant, newRev, txId)
+            _ <- storeIdempotencyKey(patch.patchId, newRev, txId)
+            // Step 8: Update revision
+            _ <- updateRevision(newRev, txId)
             // Step 9: Commit the transaction
             _ <- client.commitTransaction(txId)
           } yield CommitResult(Rev(newRev), CommitStatus.Ok)
@@ -87,12 +87,12 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
       }
     } yield result
 
-  private def loadLatestRev(tenant: TenantId, txId: String): IO[Long] =
+  private def loadLatestRev(txId: String): IO[Long] =
     client.queryOne(
       """FOR r IN revisions
         |  FILTER r._key == @key
         |  RETURN r.rev""".stripMargin,
-      Map("key" -> tenant.value.toString.asInstanceOf[AnyRef]),
+      Map("key" -> "current".asInstanceOf[AnyRef]),
       txId = Some(txId)
     ).map(_.flatMap(_.as[Long].toOption).getOrElse(0L))
 
@@ -108,7 +108,6 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
           |    id: @id,
           |    kind: @kind,
           |    name: @name,
-          |    tenant: @tenant,
           |    attrs: @attrs,
           |    created_rev: @created_rev,
           |    deleted_rev: null,
@@ -130,7 +129,6 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
           "id"          -> id.value.toString.asInstanceOf[AnyRef],
           "kind"        -> nodeKindToString(kind).asInstanceOf[AnyRef],
           "name"        -> name.asInstanceOf[AnyRef],
-          "tenant"      -> patch.tenant.value.toString.asInstanceOf[AnyRef],
           "attrs"       -> parseToJavaMap(attrsJson).asInstanceOf[AnyRef],
           "created_rev" -> Long.box(newRev).asInstanceOf[AnyRef],
           "provenance"  -> parseToJavaMap(provenanceJson.noSpaces).asInstanceOf[AnyRef],
@@ -153,7 +151,6 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
           |    src: @src,
           |    dst: @dst,
           |    predicate: @predicate,
-          |    tenant: @tenant,
           |    attrs: @attrs,
           |    created_rev: @created_rev,
           |    deleted_rev: null,
@@ -181,7 +178,6 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
           "src"         -> src.value.toString.asInstanceOf[AnyRef],
           "dst"         -> dst.value.toString.asInstanceOf[AnyRef],
           "predicate"   -> predicate.value.asInstanceOf[AnyRef],
-          "tenant"      -> patch.tenant.value.toString.asInstanceOf[AnyRef],
           "attrs"       -> parseToJavaMap(attrsJson).asInstanceOf[AnyRef],
           "created_rev" -> Long.box(newRev).asInstanceOf[AnyRef],
           "provenance"  -> parseToJavaMap(provenanceJson.noSpaces).asInstanceOf[AnyRef],
@@ -225,7 +221,6 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
           |  value: @value,
           |  confidence: @confidence,
           |  status: @status,
-          |  tenant: @tenant,
           |  created_rev: @created_rev,
           |  deleted_rev: null,
           |  provenance: @provenance
@@ -237,7 +232,6 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
           "value"       -> jsonToJava(value).asInstanceOf[AnyRef],
           "confidence"  -> confidence.map(Double.box).orNull.asInstanceOf[AnyRef],
           "status"      -> "active".asInstanceOf[AnyRef],
-          "tenant"      -> patch.tenant.value.toString.asInstanceOf[AnyRef],
           "created_rev" -> Long.box(newRev).asInstanceOf[AnyRef],
           "provenance"  -> parseToJavaMap(provenanceJson.noSpaces).asInstanceOf[AnyRef]
         ),
@@ -263,14 +257,12 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
       """INSERT {
         |  _key: @key,
         |  patch_id: @patch_id,
-        |  tenant: @tenant,
         |  rev: @rev,
         |  data: @data
         |} INTO patches""".stripMargin,
       Map(
-        "key"      -> s"${patch.tenant.value}:${patch.patchId.value}".asInstanceOf[AnyRef],
+        "key"      -> patch.patchId.value.toString.asInstanceOf[AnyRef],
         "patch_id" -> patch.patchId.value.toString.asInstanceOf[AnyRef],
-        "tenant"   -> patch.tenant.value.toString.asInstanceOf[AnyRef],
         "rev"      -> Long.box(newRev).asInstanceOf[AnyRef],
         "data"     -> parseToJavaMap(patchJson).asInstanceOf[AnyRef]
       ),
@@ -278,7 +270,7 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
     )
   }
 
-  private def storeIdempotencyKey(patchId: PatchId, tenant: TenantId, newRev: Long, txId: String): IO[Unit] =
+  private def storeIdempotencyKey(patchId: PatchId, newRev: Long, txId: String): IO[Unit] =
     client.execute(
       """INSERT {
         |  key: @key,
@@ -286,20 +278,20 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
         |  created_at: DATE_NOW() / 1000
         |} INTO idempotency_keys""".stripMargin,
       Map(
-        "key" -> idempotencyKey(patchId, tenant).asInstanceOf[AnyRef],
+        "key" -> idempotencyKey(patchId).asInstanceOf[AnyRef],
         "rev" -> Long.box(newRev).asInstanceOf[AnyRef]
       ),
       txId = Some(txId)
     )
 
-  private def updateTenantRevision(tenant: TenantId, newRev: Long, txId: String): IO[Unit] =
+  private def updateRevision(newRev: Long, txId: String): IO[Unit] =
     client.execute(
       """UPSERT { _key: @key }
         |  INSERT { _key: @key, rev: @rev }
         |  UPDATE { rev: @rev }
         |  IN revisions""".stripMargin,
       Map(
-        "key" -> tenant.value.toString.asInstanceOf[AnyRef],
+        "key" -> "current".asInstanceOf[AnyRef],
         "rev" -> Long.box(newRev).asInstanceOf[AnyRef]
       ),
       txId = Some(txId)
