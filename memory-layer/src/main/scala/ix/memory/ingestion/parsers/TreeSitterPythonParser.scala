@@ -1,6 +1,6 @@
 package ix.memory.ingestion.parsers
 
-import ix.memory.ingestion.{ParseResult, ParsedEntity, ParsedRelationship}
+import ix.memory.ingestion.{Parser, ParseResult, ParsedEntity, ParsedRelationship}
 import ix.memory.model.NodeKind
 import io.circe.Json
 
@@ -14,7 +14,7 @@ import scala.util.matching.Regex
  * The regex fallback is sufficient for Phase 1 since the goal is the pipeline
  * structure, not production-grade parsing.
  */
-class TreeSitterPythonParser {
+class TreeSitterPythonParser extends Parser {
 
   /**
    * Parse a Python source file and extract entities and relationships.

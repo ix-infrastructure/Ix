@@ -1,16 +1,18 @@
 package ix.memory.ingestion
 
-import ix.memory.ingestion.parsers.TreeSitterPythonParser
+import ix.memory.ingestion.parsers.{TreeSitterPythonParser, TypeScriptParser}
 
 /**
  * Routes file paths to the appropriate language parser.
- * Currently supports Python (.py) files only.
+ * Supports Python (.py), TypeScript (.ts), and TSX (.tsx) files.
  */
 class ParserRouter {
   private val pythonParser = new TreeSitterPythonParser()
+  private val tsParser     = new TypeScriptParser()
 
-  def parserFor(filePath: String): Option[TreeSitterPythonParser] = {
+  def parserFor(filePath: String): Option[Parser] = {
     if (filePath.endsWith(".py")) Some(pythonParser)
+    else if (filePath.endsWith(".ts") || filePath.endsWith(".tsx")) Some(tsParser)
     else None
   }
 }

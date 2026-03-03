@@ -33,7 +33,10 @@ class IngestionService(parserRouter: ParserRouter, writeApi: GraphWriteApi, quer
           .mkString
       )
       // Check for existing patch from same source+extractor
-      existing <- queryApi.getPatchesBySource(filePath.toString, "tree-sitter-python/1.0")
+      extractor = if (filePath.toString.endsWith(".py")) "tree-sitter-python/1.0"
+                  else if (filePath.toString.endsWith(".ts") || filePath.toString.endsWith(".tsx")) "typescript-parser/1.0"
+                  else "unknown-parser/1.0"
+      existing <- queryApi.getPatchesBySource(filePath.toString, extractor)
       prevPatch = existing.headOption
       prevHash  = prevPatch.flatMap(_.hcursor.downField("data").downField("source").get[String]("sourceHash").toOption)
       // If hash unchanged, skip (idempotent)
@@ -88,8 +91,9 @@ class IngestionService(parserRouter: ParserRouter, writeApi: GraphWriteApi, quer
     import scala.jdk.CollectionConverters._
 
     val extensions = language match {
-      case Some("python") => Set(".py")
-      case _              => Set(".py") // default: all supported extensions
+      case Some("python")     => Set(".py")
+      case Some("typescript") => Set(".ts", ".tsx")
+      case _                  => Set(".py", ".ts", ".tsx") // all supported
     }
 
     if (Files.isRegularFile(path)) {

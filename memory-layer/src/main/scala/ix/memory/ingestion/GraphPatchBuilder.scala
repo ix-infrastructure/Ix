@@ -28,6 +28,10 @@ object GraphPatchBuilder {
     def edgeIdFor(src: String, dst: String, predicate: String): EdgeId =
       EdgeId(UUID.nameUUIDFromBytes(s"$src:$dst:$predicate".getBytes("UTF-8")))
 
+    val extractor = if (filePath.endsWith(".py")) "tree-sitter-python/1.0"
+                    else if (filePath.endsWith(".ts") || filePath.endsWith(".tsx")) "typescript-parser/1.0"
+                    else "unknown-parser/1.0"
+
     val nodeOps = parseResult.entities.map { e =>
       PatchOp.UpsertNode(nodeIdFor(e.name), e.kind, e.name, e.attrs)
     }
@@ -70,7 +74,7 @@ object GraphPatchBuilder {
       patchId   = PatchId(UUID.randomUUID()),
       actor     = "ix/ingestion",
       timestamp = Instant.now(),
-      source    = PatchSource(filePath, sourceHash, "tree-sitter-python/1.0", SourceType.Code),
+      source    = PatchSource(filePath, sourceHash, extractor, SourceType.Code),
       baseRev   = Rev(0L),
       ops       = allOps,
       replaces  = Vector.empty,
