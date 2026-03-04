@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "ix-memory": {
+      "command": "ix",
+      "args": ["mcp", "start"],
+      "env": {
+        "IX_ENDPOINT": "{{IX_ENDPOINT}}",
+        "IX_PROJECT": "{{IX_PROJECT}}"
+      }
+    }
+  }
+}

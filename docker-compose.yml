@@ -5,3 +5,35 @@ services:
       - "8529:8529"
     environment:
       ARANGO_NO_AUTH: "1"
+    volumes:
+      - arangodb-data:/var/lib/arangodb3
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8529/_api/version"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
+
+  memory-layer:
+    build: ./memory-layer
+    ports:
+      - "8090:8090"
+    environment:
+      ARANGO_HOST: arangodb
+      ARANGO_PORT: "8529"
+      ARANGO_DATABASE: ix_memory
+      ARANGO_USER: root
+      ARANGO_PASSWORD: ""
+      PORT: "8090"
+    depends_on:
+      arangodb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8090/v1/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 5
+
+volumes:
+  arangodb-data:

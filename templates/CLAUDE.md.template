@@ -1,0 +1,15 @@
+# Ix Memory System
+
+This project uses Ix Memory for persistent, time-aware context.
+
+## Project
+- Name: {{PROJECT_NAME}}
+
+## MANDATORY RULES
+1. BEFORE answering any question about this codebase → call ix_query
+2. AFTER making any design/architecture decision → call ix_decide
+3. When noticing contradictory information → call ix_conflicts
+4. NEVER guess about codebase facts when Ix has structured data
+5. After modifying code → call ix_ingest on changed files
+6. At start of each session → review ix://session/context for prior work
+7. When the user states a goal → call ix_truth to record it
