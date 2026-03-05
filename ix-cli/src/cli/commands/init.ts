@@ -6,7 +6,11 @@ import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 
-export const CLAUDE_MD = `# Ix Memory System
+export const IX_MARKER_START = "<!-- IX-MEMORY START -->";
+export const IX_MARKER_END = "<!-- IX-MEMORY END -->";
+
+export const IX_CLAUDE_MD_BLOCK = `${IX_MARKER_START}
+# Ix Memory System
 
 This project uses Ix Memory — persistent, time-aware context for LLM assistants.
 
@@ -38,7 +42,7 @@ Ix returns confidence scores with query results. When data has low confidence:
 - Mention the uncertainty to the user (e.g., "Ix has low confidence on this — it may be outdated").
 - Suggest re-ingesting the relevant files to improve confidence.
 - Never present low-confidence data as established fact.
-`;
+${IX_MARKER_END}`;
 
 export function registerInitCommand(program: Command): void {
   program
@@ -68,19 +72,26 @@ export function registerInitCommand(program: Command): void {
       );
       console.log("  [ok] Created ~/.ix/config.yaml");
 
-      // 3. Create CLAUDE.md in project root (don't overwrite without --force)
-      if (existsSync("CLAUDE.md") && !opts.force) {
+      // 3. Add IX block to CLAUDE.md (using markers for clean add/remove)
+      if (existsSync("CLAUDE.md")) {
         const existing = await readFile("CLAUDE.md", "utf-8");
-        if (existing.includes("ix_query") || existing.includes("Ix Memory")) {
-          console.log("  [ok] CLAUDE.md already contains Ix rules (use --force to overwrite)");
+        if (existing.includes(IX_MARKER_START)) {
+          if (opts.force) {
+            // Replace existing IX block
+            const re = new RegExp(`${IX_MARKER_START}[\\s\\S]*?${IX_MARKER_END}`, "g");
+            await writeFile("CLAUDE.md", existing.replace(re, IX_CLAUDE_MD_BLOCK));
+            console.log("  [ok] Updated Ix rules in CLAUDE.md");
+          } else {
+            console.log("  [ok] CLAUDE.md already contains Ix rules (use --force to replace)");
+          }
         } else {
-          // Append Ix rules to existing CLAUDE.md
-          await writeFile("CLAUDE.md", existing + "\n\n" + CLAUDE_MD);
-          console.log("  [ok] Appended Ix rules to existing CLAUDE.md");
+          // Append IX block to existing CLAUDE.md
+          await writeFile("CLAUDE.md", existing.trimEnd() + "\n\n" + IX_CLAUDE_MD_BLOCK + "\n");
+          console.log("  [ok] Appended Ix rules to CLAUDE.md");
         }
       } else {
-        await writeFile("CLAUDE.md", CLAUDE_MD);
-        console.log("  [ok] Created CLAUDE.md");
+        await writeFile("CLAUDE.md", IX_CLAUDE_MD_BLOCK + "\n");
+        console.log("  [ok] Created CLAUDE.md with Ix rules");
       }
 
       console.log("\nIx Memory initialized.");

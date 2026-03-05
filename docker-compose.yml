@@ -18,6 +18,8 @@ services:
     build: ./memory-layer
     ports:
       - "8090:8090"
+    volumes:
+      - ${HOME}:${HOME}:ro
     environment:
       ARANGO_HOST: arangodb
       ARANGO_PORT: "8529"

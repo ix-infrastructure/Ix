@@ -15,7 +15,7 @@ let CLAUDE_MD: string;
 
 beforeAll(async () => {
   const mod = await import("../commands/init.js");
-  CLAUDE_MD = mod.CLAUDE_MD;
+  CLAUDE_MD = mod.IX_CLAUDE_MD_BLOCK;
 });
 
 describe("CLAUDE_MD template", () => {

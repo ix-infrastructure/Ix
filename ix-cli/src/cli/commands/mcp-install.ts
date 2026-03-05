@@ -6,6 +6,7 @@ import type { Command } from "commander";
 
 interface McpConfig {
   mcpServers: Record<string, {
+    type?: string;
     command: string;
     args: string[];
     env?: Record<string, string>;
@@ -16,6 +17,7 @@ interface McpConfig {
 const serverPath = join(new URL(".", import.meta.url).pathname, "../../mcp/server.ts");
 
 const ixMcpEntry = {
+  type: "stdio",
   command: "npx",
   args: ["tsx", serverPath],
   env: {
@@ -71,13 +73,14 @@ async function installCursor(): Promise<void> {
 }
 
 async function installClaudeCode(): Promise<void> {
-  const configPath = join(process.cwd(), ".claude", "settings.json");
+  // Claude Code reads MCP config from .mcp.json in the project root
+  const configPath = join(process.cwd(), ".mcp.json");
   const config = await loadOrCreateConfig(configPath);
   config.mcpServers["ix-memory"] = ixMcpEntry;
-  await mkdir(join(configPath, ".."), { recursive: true });
   await writeFile(configPath, JSON.stringify(config, null, 2) + "\n");
   console.log(`  [ok] Installed Ix MCP server in Claude Code config`);
   console.log(`       ${configPath}`);
+  console.log("  Restart Claude Code to activate.");
 }
 
 async function loadOrCreateConfig(path: string): Promise<McpConfig> {

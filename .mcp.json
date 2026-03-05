@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "ix-memory": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "tsx",
+        "/Users/rileythompson/startprojes/startup/IX-Memory/ix-cli/src/mcp/server.ts"
+      ],
+      "env": {
+        "IX_ENDPOINT": "http://localhost:8090"
+      }
+    }
+  }
+}
