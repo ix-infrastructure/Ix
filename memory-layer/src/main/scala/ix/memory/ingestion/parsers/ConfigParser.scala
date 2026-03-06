@@ -5,45 +5,63 @@ import ix.memory.model.NodeKind
 import io.circe.Json
 
 /**
- * Config file parser for YAML, JSON, and TOML files.
- * Extracts a Config node for the file and ConfigEntry nodes for top-level keys.
- * Uses simple regex heuristics — not a full YAML/TOML parser.
+ * Parser for configuration files (JSON, YAML, TOML).
+ *
+ * Flattens nested structures into dot-path entries so that each leaf value
+ * becomes a ConfigEntry node with a meaningful value (never "{" or "[").
  */
 class ConfigParser extends Parser {
 
-  def parse(fileName: String, source: String): ParseResult = {
-    val format = detectFormat(fileName)
-    val entries = format match {
-      case "json" => parseJson(source)
-      case "yaml" => parseYaml(source)
-      case "toml" => parseToml(source)
-      case _      => Vector.empty
-    }
+  private val JsonExtensions = Set(".json")
+  private val YamlExtensions = Set(".yaml", ".yml")
+  private val TomlExtensions = Set(".toml")
 
-    // File-level Config node
+  def canParse(fileName: String): Boolean = {
+    val lower = fileName.toLowerCase
+    (JsonExtensions ++ YamlExtensions ++ TomlExtensions).exists(ext => lower.endsWith(ext))
+  }
+
+  def parse(fileName: String, source: String): ParseResult = {
+    val lower = fileName.toLowerCase
+
+    val entries: Vector[(String, String, Int)] =
+      if (JsonExtensions.exists(ext => lower.endsWith(ext))) parseJson(source)
+      else if (YamlExtensions.exists(ext => lower.endsWith(ext))) parseYaml(source)
+      else if (TomlExtensions.exists(ext => lower.endsWith(ext))) parseToml(source)
+      else Vector.empty
+
+    buildResult(fileName, source, entries)
+  }
+
+  // ---------------------------------------------------------------------------
+  // Result builder
+  // ---------------------------------------------------------------------------
+
+  private def buildResult(
+    fileName: String,
+    source:   String,
+    entries:  Vector[(String, String, Int)]
+  ): ParseResult = {
+    val lines = source.split("\n", -1)
+
     val configEntity = ParsedEntity(
       name      = fileName,
       kind      = NodeKind.Config,
-      attrs     = Map("format" -> Json.fromString(format)),
+      attrs     = Map("format" -> Json.fromString(detectFormat(fileName))),
       lineStart = 1,
-      lineEnd   = source.split("\n", -1).length
+      lineEnd   = lines.length
     )
 
-    // ConfigEntry nodes for each top-level key
     val entryEntities = entries.map { case (key, value, line) =>
       ParsedEntity(
         name      = key,
         kind      = NodeKind.ConfigEntry,
-        attrs     = Map(
-          "value"  -> Json.fromString(value),
-          "format" -> Json.fromString(format)
-        ),
+        attrs     = Map("value" -> Json.fromString(value)),
         lineStart = line,
         lineEnd   = line
       )
     }
 
-    // Relationships: Config DEFINES each ConfigEntry
     val relationships = entries.map { case (key, _, _) =>
       ParsedRelationship(fileName, key, "DEFINES")
     }
@@ -55,79 +73,118 @@ class ConfigParser extends Parser {
   }
 
   private def detectFormat(fileName: String): String = {
-    if (fileName.endsWith(".json")) "json"
-    else if (fileName.endsWith(".yaml") || fileName.endsWith(".yml")) "yaml"
-    else if (fileName.endsWith(".toml")) "toml"
+    val lower = fileName.toLowerCase
+    if (JsonExtensions.exists(ext => lower.endsWith(ext))) "json"
+    else if (YamlExtensions.exists(ext => lower.endsWith(ext))) "yaml"
+    else if (TomlExtensions.exists(ext => lower.endsWith(ext))) "toml"
     else "unknown"
   }
 
-  /** Parse JSON: extract top-level keys from objects. Simple regex approach. */
+  // ---------------------------------------------------------------------------
+  // JSON parsing — Circe-based with flattening
+  // ---------------------------------------------------------------------------
+
   private def parseJson(source: String): Vector[(String, String, Int)] = {
-    val lines = source.split("\n", -1)
-    var results = Vector.empty[(String, String, Int)]
-    // Match top-level JSON object keys: "key": value
-    // Only match lines at indent level 2 (1 level into the root object)
-    val KeyPattern = """^\s{0,4}"(\w[\w.-]*)"\s*:\s*(.+?),?\s*$""".r
-    for ((line, idx) <- lines.zipWithIndex) {
-      KeyPattern.findFirstMatchIn(line).foreach { m =>
-        val key = m.group(1)
-        val value = m.group(2).trim.stripPrefix("\"").stripSuffix("\"").stripSuffix(",")
-        results = results :+ (key, value, idx + 1)
-      }
+    io.circe.parser.parse(source) match {
+      case Right(json) => flattenJson("", json, 1)
+      case Left(_)     => regexParseJson(source)
     }
-    results
   }
 
-  /** Parse YAML: extract top-level keys (no indentation). */
+  private def flattenJson(prefix: String, json: io.circe.Json, line: Int): Vector[(String, String, Int)] = {
+    json.fold(
+      jsonNull    = Vector.empty,
+      jsonBoolean = b => Vector((prefix, b.toString, line)),
+      jsonNumber  = n => Vector((prefix, n.toString, line)),
+      jsonString  = s => Vector((prefix, s, line)),
+      jsonArray   = arr => arr.zipWithIndex.flatMap { case (v, i) =>
+        val key = if (prefix.isEmpty) s"[$i]" else s"$prefix[$i]"
+        flattenJson(key, v, line)
+      }.toVector,
+      jsonObject  = obj => obj.toVector.flatMap { case (k, v) =>
+        val key = if (prefix.isEmpty) k else s"$prefix.$k"
+        v.fold(
+          jsonNull    = Vector((key, "null", line)),
+          jsonBoolean = b => Vector((key, b.toString, line)),
+          jsonNumber  = n => Vector((key, n.toString, line)),
+          jsonString  = s => Vector((key, s, line)),
+          jsonArray   = _ => flattenJson(key, v, line),
+          jsonObject  = _ => flattenJson(key, v, line)
+        )
+      }
+    )
+  }
+
+  /** Regex fallback for malformed JSON */
+  private def regexParseJson(source: String): Vector[(String, String, Int)] = {
+    val KvPattern = """"([^"]+)"\s*:\s*"([^"]*)"""".r
+    val lines = source.split("\n", -1)
+    lines.zipWithIndex.flatMap { case (line, idx) =>
+      KvPattern.findAllMatchIn(line).map { m =>
+        (m.group(1), m.group(2), idx + 1)
+      }
+    }.toVector
+  }
+
+  // ---------------------------------------------------------------------------
+  // YAML parsing — indentation-aware
+  // ---------------------------------------------------------------------------
+
   private def parseYaml(source: String): Vector[(String, String, Int)] = {
     val lines = source.split("\n", -1)
-    var results = Vector.empty[(String, String, Int)]
-    // Top-level YAML keys start at column 0 (no indentation)
-    val KeyPattern = """^([a-zA-Z_][\w.-]*)\s*:\s*(.*)$""".r
-    for ((line, idx) <- lines.zipWithIndex) {
-      // Skip comments and empty lines
-      if (!line.trim.startsWith("#") && line.trim.nonEmpty) {
-        KeyPattern.findFirstMatchIn(line).foreach { m =>
-          val key = m.group(1)
-          val value = m.group(2).trim
-          // Skip keys that start a nested block (value is empty or just a comment)
-          val cleanValue = if (value.isEmpty || value.startsWith("#")) "(block)" else value
-          results = results :+ (key, cleanValue, idx + 1)
+    val result = Vector.newBuilder[(String, String, Int)]
+    val stack = scala.collection.mutable.Stack.empty[(Int, String)] // (indent, prefix)
+
+    val KvWithValue = """^([a-zA-Z_][\w.-]*)\s*:\s*(.+)$""".r
+    val KvNoValue   = """^([a-zA-Z_][\w.-]*)\s*:\s*$""".r
+
+    lines.zipWithIndex.foreach { case (line, idx) =>
+      val trimmed = line.trim
+      if (!trimmed.startsWith("#") && trimmed.nonEmpty) {
+        val indent = line.takeWhile(_ == ' ').length
+        trimmed match {
+          case KvWithValue(key, value) =>
+            while (stack.nonEmpty && stack.top._1 >= indent) stack.pop()
+            val fullKey = if (stack.nonEmpty) s"${stack.top._2}.$key" else key
+            result += ((fullKey, value.trim, idx + 1))
+          case KvNoValue(key) =>
+            while (stack.nonEmpty && stack.top._1 >= indent) stack.pop()
+            val fullKey = if (stack.nonEmpty) s"${stack.top._2}.$key" else key
+            stack.push((indent, fullKey))
+          case _ =>
+            // skip list items, comments, etc.
         }
       }
     }
-    results
+    result.result()
   }
 
-  /** Parse TOML: extract top-level key-value pairs and section keys. */
+  // ---------------------------------------------------------------------------
+  // TOML parsing — section-aware
+  // ---------------------------------------------------------------------------
+
   private def parseToml(source: String): Vector[(String, String, Int)] = {
     val lines = source.split("\n", -1)
-    var results = Vector.empty[(String, String, Int)]
-    var inSection = false // Track if we're inside a [section]
-    val SectionPattern = """^\[.*\]""".r
-    val KeyPattern = """^([a-zA-Z_][\w.-]*)\s*=\s*(.+)$""".r
-    for ((line, idx) <- lines.zipWithIndex) {
-      if (!line.trim.startsWith("#") && line.trim.nonEmpty) {
-        SectionPattern.findFirstMatchIn(line).foreach { _ =>
-          inSection = true
-        }
-        if (!inSection) {
-          KeyPattern.findFirstMatchIn(line).foreach { m =>
-            val key = m.group(1)
-            val value = m.group(2).trim.stripPrefix("\"").stripSuffix("\"")
-            results = results :+ (key, value, idx + 1)
-          }
-        }
-        // Also capture section-level keys as section.key
-        if (inSection) {
-          KeyPattern.findFirstMatchIn(line).foreach { m =>
-            val key = m.group(1)
-            val value = m.group(2).trim.stripPrefix("\"").stripSuffix("\"")
-            results = results :+ (key, value, idx + 1)
-          }
+    val result = Vector.newBuilder[(String, String, Int)]
+    var currentSection = ""
+
+    val SectionPattern = """^\[([^\]]+)\]""".r
+    val KvPattern      = """^([a-zA-Z_][\w.-]*)\s*=\s*(.+)$""".r
+
+    lines.zipWithIndex.foreach { case (line, idx) =>
+      val trimmed = line.trim
+      if (!trimmed.startsWith("#") && trimmed.nonEmpty) {
+        trimmed match {
+          case SectionPattern(section) =>
+            currentSection = section
+          case KvPattern(key, value) =>
+            val fullKey = if (currentSection.isEmpty) key else s"$currentSection.$key"
+            val cleanValue = value.trim.stripPrefix("\"").stripSuffix("\"")
+            result += ((fullKey, cleanValue, idx + 1))
+          case _ =>
         }
       }
     }
-    results
+    result.result()
   }
 }

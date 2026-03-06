@@ -7,60 +7,26 @@ import io.circe.Json
 import scala.util.matching.Regex
 
 /**
- * TypeScript/TSX source parser that extracts structural entities and relationships.
- *
- * Uses regex-based extraction for .ts/.tsx files, following the same pattern as
- * TreeSitterPythonParser. Uses brace counting for block boundaries instead of
- * indentation.
+ * TypeScript/JavaScript source parser that extracts structural entities
+ * and relationships using regex-based extraction.
  */
 class TypeScriptParser extends Parser {
 
+  /**
+   * Parse a TypeScript source file and extract entities and relationships.
+   *
+   * @param fileName the file name (e.g. "api.ts")
+   * @param source   the full source code as a string
+   * @return ParseResult with entities and relationships
+   */
   def parse(fileName: String, source: String): ParseResult = {
-    regexParse(fileName, source)
-  }
-
-  // ---------------------------------------------------------------------------
-  // Regex patterns
-  // ---------------------------------------------------------------------------
-
-  private val ClassPattern: Regex      = """(?:export\s+)?(?:abstract\s+)?class\s+(\w+)""".r
-  private val FuncPattern: Regex       = """(?:export\s+)?(?:async\s+)?function\s+(\w+)""".r
-  private val ArrowFuncPattern: Regex  = """(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[a-zA-Z_]\w*)\s*(?::\s*[^=]+)?\s*=>""".r
-  private val ConstFuncPattern: Regex  = """(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?function""".r
-  private val InterfacePattern: Regex  = """(?:export\s+)?interface\s+(\w+)""".r
-  private val TypeAliasPattern: Regex  = """(?:export\s+)?type\s+(\w+)\s*(?:<[^>]+>)?\s*=""".r
-  private val ImportPattern: Regex     = """import\s+.*?from\s+['"]([^'"]+)['"]""".r
-  private val SideEffectImportPattern: Regex = """^import\s+['"]([^'"]+)['"]""".r
-  private val MethodPattern: Regex     = """^\s+(?:async\s+)?(?:private\s+|public\s+|protected\s+|static\s+|readonly\s+)*(\w+)\s*(?:<[^>]+>)?\s*\(""".r
-  private val CallPattern: Regex       = """(?:(?:this|self|await)\.)?\b(\w+)\s*\(""".r
-
-  // ---------------------------------------------------------------------------
-  // Builtins to filter from CALLS
-  // ---------------------------------------------------------------------------
-
-  private val TsBuiltins: Set[String] = Set(
-    "console", "parseInt", "parseFloat", "String", "Number", "Boolean",
-    "Array", "Object", "Promise", "JSON", "Math", "Date", "Error",
-    "RegExp", "Map", "Set", "WeakMap", "WeakSet", "Symbol",
-    "require", "setTimeout", "setInterval", "clearTimeout", "clearInterval",
-    "fetch", "Response", "Request", "URL", "Buffer", "process"
-  )
-
-  // ---------------------------------------------------------------------------
-  // Regex-based parser
-  // ---------------------------------------------------------------------------
-
-  private def regexParse(fileName: String, source: String): ParseResult = {
     val lines = source.split("\n", -1)
 
-    // -- File entity --
+    // -- File entity (no raw content stored) --
     val fileEntity = ParsedEntity(
       name      = fileName,
       kind      = NodeKind.File,
-      attrs     = Map(
-        "language" -> Json.fromString("typescript"),
-        "content"  -> Json.fromString(source)
-      ),
+      attrs     = Map("language" -> Json.fromString("typescript")),
       lineStart = 1,
       lineEnd   = lines.length
     )
@@ -68,7 +34,7 @@ class TypeScriptParser extends Parser {
     var entities = Vector(fileEntity)
     var relationships = Vector.empty[ParsedRelationship]
 
-    // Track class ranges for containment checks
+    // Track class ranges for containment
     var classRanges = Vector.empty[(String, Int, Int)]
 
     for ((line, idx) <- lines.zipWithIndex) {
@@ -94,29 +60,33 @@ class TypeScriptParser extends Parser {
           relationships = relationships :+ ParsedRelationship(fileName, className, "DEFINES")
           classRanges = classRanges :+ (className, lineNum, classEnd)
 
-          // Extract methods inside this class
+          // Extract methods from this class
           val methods = extractMethods(lines, idx, classEnd, className)
           entities = entities ++ methods._1
           relationships = relationships ++ methods._2
         }
 
-        // Check for function definition (but not if it's a method inside a class)
-        if (!isInsideClass(lineNum, classRanges)) {
+        // Check for top-level function (not inside a class)
+        if (!insideClass(lineNum, classRanges)) {
           FuncPattern.findFirstMatchIn(line).foreach { m =>
             val funcName = m.group(1)
             val funcEnd = findBraceBlockEnd(lines, idx)
+            val summary = line.trim.take(120)
             entities = entities :+ ParsedEntity(
               name      = funcName,
               kind      = NodeKind.Function,
-              attrs     = Map("language" -> Json.fromString("typescript")),
+              attrs     = Map(
+                "language" -> Json.fromString("typescript"),
+                "summary"  -> Json.fromString(summary)
+              ),
               lineStart = lineNum,
               lineEnd   = funcEnd
             )
             relationships = relationships :+ ParsedRelationship(fileName, funcName, "DEFINES")
 
             // Extract calls within this function
-            val callRels = extractCalls(lines, idx, funcEnd, funcName)
-            relationships = relationships ++ callRels
+            val calls = extractCalls(lines, idx, funcEnd, funcName)
+            relationships = relationships ++ calls
           }
 
           // Check for arrow function / const function
@@ -128,10 +98,14 @@ class TypeScriptParser extends Parser {
             // Avoid duplicates if already captured by FuncPattern
             if (!entities.exists(e => e.name == funcName && e.kind == NodeKind.Function)) {
               val funcEnd = findBraceBlockEnd(lines, idx)
+              val summary = line.trim.take(120)
               entities = entities :+ ParsedEntity(
                 name      = funcName,
                 kind      = NodeKind.Function,
-                attrs     = Map("language" -> Json.fromString("typescript")),
+                attrs     = Map(
+                  "language" -> Json.fromString("typescript"),
+                  "summary"  -> Json.fromString(summary)
+                ),
                 lineStart = lineNum,
                 lineEnd   = funcEnd
               )
@@ -140,45 +114,6 @@ class TypeScriptParser extends Parser {
               val callRels = extractCalls(lines, idx, funcEnd, funcName)
               relationships = relationships ++ callRels
             }
-          }
-        }
-
-        // Check for interface definition
-        InterfacePattern.findFirstMatchIn(line).foreach { m =>
-          val ifaceName = m.group(1)
-          // Don't match if this is already matched as a class pattern
-          if (!entities.exists(e => e.name == ifaceName && e.kind == NodeKind.Class && !e.attrs.contains("ts_kind"))) {
-            val ifaceEnd = findBraceBlockEnd(lines, idx)
-            entities = entities :+ ParsedEntity(
-              name      = ifaceName,
-              kind      = NodeKind.Class,
-              attrs     = Map(
-                "language" -> Json.fromString("typescript"),
-                "ts_kind"  -> Json.fromString("interface")
-              ),
-              lineStart = lineNum,
-              lineEnd   = ifaceEnd
-            )
-            relationships = relationships :+ ParsedRelationship(fileName, ifaceName, "DEFINES")
-          }
-        }
-
-        // Check for type alias
-        TypeAliasPattern.findFirstMatchIn(line).foreach { m =>
-          val typeName = m.group(1)
-          // Avoid matching 'import type' lines
-          if (!trimmed.startsWith("import")) {
-            entities = entities :+ ParsedEntity(
-              name      = typeName,
-              kind      = NodeKind.Class,
-              attrs     = Map(
-                "language" -> Json.fromString("typescript"),
-                "ts_kind"  -> Json.fromString("type_alias")
-              ),
-              lineStart = lineNum,
-              lineEnd   = lineNum
-            )
-            relationships = relationships :+ ParsedRelationship(fileName, typeName, "DEFINES")
           }
         }
 
@@ -199,7 +134,6 @@ class TypeScriptParser extends Parser {
 
         SideEffectImportPattern.findFirstMatchIn(line).foreach { m =>
           val moduleName = m.group(1)
-          // Only add if not already captured by the regular ImportPattern
           if (!relationships.exists(r => r.dstName == moduleName && r.predicate == "IMPORTS")) {
             if (!entities.exists(e => e.name == moduleName && e.kind == NodeKind.Module)) {
               entities = entities :+ ParsedEntity(
@@ -214,16 +148,122 @@ class TypeScriptParser extends Parser {
           }
         }
 
-      } // end else (non-comment line)
+        // Check for interface definition
+        InterfacePattern.findFirstMatchIn(line).foreach { m =>
+          val ifaceName = m.group(1)
+          if (!entities.exists(e => e.name == ifaceName && e.kind == NodeKind.Class)) {
+            val ifaceEnd = findBraceBlockEnd(lines, idx)
+            entities = entities :+ ParsedEntity(
+              name      = ifaceName,
+              kind      = NodeKind.Class, // model interfaces as Class kind
+              attrs     = Map(
+                "language"  -> Json.fromString("typescript"),
+                "ts_kind"   -> Json.fromString("interface")
+              ),
+              lineStart = lineNum,
+              lineEnd   = ifaceEnd
+            )
+            relationships = relationships :+ ParsedRelationship(fileName, ifaceName, "DEFINES")
+          }
+        }
+
+        // Check for type alias
+        TypeAliasPattern.findFirstMatchIn(line).foreach { m =>
+          val typeName = m.group(1)
+          if (!trimmed.startsWith("import")) {
+            entities = entities :+ ParsedEntity(
+              name      = typeName,
+              kind      = NodeKind.Class,
+              attrs     = Map(
+                "language" -> Json.fromString("typescript"),
+                "ts_kind"  -> Json.fromString("type_alias")
+              ),
+              lineStart = lineNum,
+              lineEnd   = lineNum
+            )
+            relationships = relationships :+ ParsedRelationship(fileName, typeName, "DEFINES")
+          }
+        }
+
+      } // end else (non-comment)
     }
 
     ParseResult(entities, relationships)
   }
 
   // ---------------------------------------------------------------------------
-  // Block boundary detection using brace counting
+  // Patterns
   // ---------------------------------------------------------------------------
 
+  private val ClassPattern: Regex      = """(?:export\s+)?(?:abstract\s+)?class\s+(\w+)""".r
+  private val FuncPattern: Regex       = """(?:export\s+)?(?:async\s+)?function\s+(\w+)""".r
+  private val ArrowFuncPattern: Regex  = """(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[a-zA-Z_]\w*)\s*(?::\s*[^=]+)?\s*=>""".r
+  private val ConstFuncPattern: Regex  = """(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?function""".r
+  private val MethodPattern: Regex     = """^\s+(?:async\s+)?(?:private\s+|public\s+|protected\s+|static\s+|readonly\s+)*(\w+)\s*(?:<[^>]+>)?\s*\(""".r
+  private val ImportPattern: Regex     = """import\s+.*?from\s+['"]([^'"]+)['"]""".r
+  private val SideEffectImportPattern: Regex = """^import\s+['"]([^'"]+)['"]""".r
+  private val InterfacePattern: Regex  = """(?:export\s+)?interface\s+(\w+)""".r
+  private val TypeAliasPattern: Regex  = """(?:export\s+)?type\s+(\w+)\s*(?:<[^>]+>)?\s*=""".r
+  private val CallPattern: Regex       = """(?:(?:this|self|await)\.)?\b(\w+)\s*\(""".r
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+
+  private def insideClass(lineNum: Int, classRanges: Vector[(String, Int, Int)]): Boolean =
+    classRanges.exists { case (_, start, end) => lineNum > start && lineNum <= end }
+
+  /**
+   * Extract methods from a class body.
+   */
+  private def extractMethods(
+    lines: Array[String],
+    classStartIdx: Int,
+    classEndLine: Int,
+    className: String
+  ): (Vector[ParsedEntity], Vector[ParsedRelationship]) = {
+    var entities = Vector.empty[ParsedEntity]
+    var relationships = Vector.empty[ParsedRelationship]
+
+    var i = classStartIdx + 1
+    while (i < lines.length && (i + 1) <= classEndLine) {
+      val line = lines(i)
+      val lineNum = i + 1
+
+      if (!line.trim.startsWith("//") && !line.trim.startsWith("*")) {
+        MethodPattern.findFirstMatchIn(line).foreach { m =>
+          val methodName = m.group(1)
+          // Skip keywords that look like methods
+          if (!TypeScriptKeywords.contains(methodName)) {
+            val methodEnd = findBraceBlockEnd(lines, i)
+            val summary = line.trim.take(120)
+            entities = entities :+ ParsedEntity(
+              name      = methodName,
+              kind      = NodeKind.Function,
+              attrs     = Map(
+                "language" -> Json.fromString("typescript"),
+                "summary"  -> Json.fromString(summary)
+              ),
+              lineStart = lineNum,
+              lineEnd   = methodEnd
+            )
+            relationships = relationships :+ ParsedRelationship(className, methodName, "DEFINES")
+
+            // Extract calls within this method
+            val calls = extractCalls(lines, i, methodEnd, methodName)
+            relationships = relationships ++ calls
+          }
+        }
+      }
+      i += 1
+    }
+
+    (entities, relationships)
+  }
+
+  /**
+   * Find end of a brace-delimited block starting near `startIdx`.
+   */
   private def findBraceBlockEnd(lines: Array[String], startIdx: Int): Int = {
     var braceCount = 0
     var foundOpen = false
@@ -231,7 +271,7 @@ class TypeScriptParser extends Parser {
     while (i < lines.length) {
       for (ch <- lines(i)) {
         if (ch == '{') { braceCount += 1; foundOpen = true }
-        else if (ch == '}') { braceCount -= 1 }
+        if (ch == '}') braceCount -= 1
       }
       if (foundOpen && braceCount <= 0) return i + 1
       i += 1
@@ -239,63 +279,9 @@ class TypeScriptParser extends Parser {
     lines.length
   }
 
-  // ---------------------------------------------------------------------------
-  // Helper: check if a line is inside a class range
-  // ---------------------------------------------------------------------------
-
-  private def isInsideClass(lineNum: Int, classRanges: Vector[(String, Int, Int)]): Boolean = {
-    classRanges.exists { case (_, start, end) =>
-      lineNum > start && lineNum <= end
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Extract methods inside a class block
-  // ---------------------------------------------------------------------------
-
-  private def extractMethods(
-    lines: Array[String],
-    classStartIdx: Int,
-    classEndLine: Int,
-    className: String
-  ): (Vector[ParsedEntity], Vector[ParsedRelationship]) = {
-    var methodEntities = Vector.empty[ParsedEntity]
-    var methodRels = Vector.empty[ParsedRelationship]
-
-    var i = classStartIdx + 1
-    while (i < lines.length && (i + 1) <= classEndLine) {
-      val line = lines(i)
-      MethodPattern.findFirstMatchIn(line).foreach { m =>
-        val methodName = m.group(1)
-        // Skip constructor and common keywords that look like methods
-        if (methodName != "constructor" && methodName != "if" && methodName != "for" &&
-            methodName != "while" && methodName != "switch" && methodName != "return" &&
-            methodName != "new" && methodName != "throw" && methodName != "catch") {
-          val methodEnd = findBraceBlockEnd(lines, i)
-          methodEntities = methodEntities :+ ParsedEntity(
-            name      = methodName,
-            kind      = NodeKind.Function,
-            attrs     = Map("language" -> Json.fromString("typescript")),
-            lineStart = i + 1,
-            lineEnd   = methodEnd
-          )
-          methodRels = methodRels :+ ParsedRelationship(className, methodName, "DEFINES")
-
-          // Extract calls within this method
-          val callRels = extractCalls(lines, i, methodEnd, methodName)
-          methodRels = methodRels ++ callRels
-        }
-      }
-      i += 1
-    }
-
-    (methodEntities, methodRels)
-  }
-
-  // ---------------------------------------------------------------------------
-  // Extract CALLS relationships from a function/method body
-  // ---------------------------------------------------------------------------
-
+  /**
+   * Extract CALLS relationships from a function/method body.
+   */
   private def extractCalls(
     lines: Array[String],
     funcStartIdx: Int,
@@ -310,10 +296,8 @@ class TypeScriptParser extends Parser {
       val line = lines(i)
       CallPattern.findAllMatchIn(line).foreach { m =>
         val callee = m.group(1)
-        if (callee != callerName && !TsBuiltins.contains(callee) && !seen.contains(callee) &&
-            callee != "if" && callee != "for" && callee != "while" && callee != "switch" &&
-            callee != "return" && callee != "new" && callee != "throw" && callee != "catch" &&
-            callee != "constructor") {
+        if (callee != callerName && !TypeScriptBuiltins.contains(callee) &&
+            !TypeScriptKeywords.contains(callee) && !seen.contains(callee)) {
           seen += callee
           calls = calls :+ ParsedRelationship(callerName, callee, "CALLS")
         }
@@ -322,4 +306,24 @@ class TypeScriptParser extends Parser {
     }
     calls
   }
+
+  private val TypeScriptKeywords: Set[String] = Set(
+    "if", "else", "for", "while", "do", "switch", "case", "break",
+    "continue", "return", "throw", "try", "catch", "finally",
+    "new", "delete", "typeof", "instanceof", "void", "in", "of",
+    "class", "extends", "implements", "interface", "enum", "type",
+    "const", "let", "var", "function", "async", "await",
+    "import", "export", "default", "from", "as",
+    "this", "super", "constructor", "static", "private", "public", "protected"
+  )
+
+  private val TypeScriptBuiltins: Set[String] = Set(
+    "console", "log", "error", "warn", "parseInt", "parseFloat",
+    "String", "Number", "Boolean", "Array", "Object", "Promise",
+    "JSON", "Math", "Date", "RegExp", "Error", "Map", "Set",
+    "WeakMap", "WeakSet", "Symbol",
+    "setTimeout", "setInterval", "clearTimeout", "clearInterval",
+    "require", "module", "exports",
+    "fetch", "Response", "Request", "URL", "Buffer", "process"
+  )
 }

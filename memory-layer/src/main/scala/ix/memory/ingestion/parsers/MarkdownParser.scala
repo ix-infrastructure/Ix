@@ -7,18 +7,20 @@ import io.circe.Json
 import scala.util.matching.Regex
 
 /**
- * Markdown parser that extracts document structure from .md files.
- * Each header becomes a Doc node. Sections are connected by DEFINES relationships
- * based on heading hierarchy (## is defined by #, ### is defined by ##).
+ * Markdown parser that extracts structural entities from `.md` files.
+ *
+ * Each heading becomes a Doc entity with attrs for `level`, `title`, and `content`.
+ * Content captures all non-header lines in the section, up to 2000 characters.
+ * A top-level File entity is also emitted, with CONTAINS edges to each section.
  */
 class MarkdownParser extends Parser {
 
-  private val HeaderPattern: Regex = """^(#{1,6})\s+(.+)$""".r
+  private val HeadingPattern: Regex = """^(#{1,6})\s+(.+)$""".r
 
   def parse(fileName: String, source: String): ParseResult = {
     val lines = source.split("\n", -1)
 
-    // File-level Doc node
+    // -- File entity --
     val fileEntity = ParsedEntity(
       name      = fileName,
       kind      = NodeKind.File,
@@ -27,71 +29,50 @@ class MarkdownParser extends Parser {
       lineEnd   = lines.length
     )
 
+    // Collect headings with their line indices
+    val headings: Vector[(Int, Int, String)] = lines.zipWithIndex.flatMap { case (line, idx) =>
+      HeadingPattern.findFirstMatchIn(line.trim).map { m =>
+        val level = m.group(1).length
+        val title = m.group(2).trim
+        (idx, level, title)
+      }
+    }.toVector
+
     var entities = Vector(fileEntity)
     var relationships = Vector.empty[ParsedRelationship]
 
-    // Track heading hierarchy for parent-child relationships
-    // Stack of (level, name) — most recent heading at each level
-    var headingStack = Vector.empty[(Int, String)]
+    for (i <- headings.indices) {
+      val (startIdx, level, title) = headings(i)
+      val endIdx = if (i + 1 < headings.length) headings(i + 1)._1 else lines.length
 
-    for ((line, idx) <- lines.zipWithIndex) {
-      val lineNum = idx + 1
+      val content = extractContent(lines, startIdx, endIdx)
 
-      HeaderPattern.findFirstMatchIn(line).foreach { m =>
-        val level = m.group(1).length  // 1 for #, 2 for ##, etc.
-        val title = m.group(2).trim
-
-        // Find the end of this section (next heading of same or higher level)
-        val sectionEnd = findSectionEnd(lines, idx, level)
-
-        // Extract a content summary (first non-empty, non-header line after the heading)
-        val contentSummary = extractSummary(lines, idx + 1, sectionEnd)
-
-        val attrs = Map(
+      val entity = ParsedEntity(
+        name      = title,
+        kind      = NodeKind.Doc,
+        attrs     = Map(
           "level"   -> Json.fromInt(level),
-          "content" -> Json.fromString(contentSummary)
-        )
+          "title"   -> Json.fromString(title),
+          "content" -> Json.fromString(content)
+        ),
+        lineStart = startIdx + 1,
+        lineEnd   = endIdx
+      )
 
-        entities = entities :+ ParsedEntity(
-          name      = title,
-          kind      = NodeKind.Doc,
-          attrs     = attrs,
-          lineStart = lineNum,
-          lineEnd   = sectionEnd
-        )
-
-        // Determine parent: find nearest heading with lower level number
-        headingStack = headingStack.filter(_._1 < level)
-        val parent = headingStack.lastOption.map(_._2).getOrElse(fileName)
-
-        relationships = relationships :+ ParsedRelationship(parent, title, "DEFINES")
-
-        headingStack = headingStack :+ (level, title)
-      }
+      entities = entities :+ entity
+      relationships = relationships :+ ParsedRelationship(fileName, title, "CONTAINS")
     }
 
     ParseResult(entities, relationships)
   }
 
-  /** Find the end line of a section: the next heading line (any level). Returns 1-based line number. */
-  private def findSectionEnd(lines: Array[String], startIdx: Int, level: Int): Int = {
-    var i = startIdx + 1
-    while (i < lines.length) {
-      if (HeaderPattern.findFirstMatchIn(lines(i)).isDefined) {
-        return i + 1  // Convert 0-indexed to 1-based line number
-      }
-      i += 1
+  /**
+   * Extract content from all non-header lines in the section, up to 2000 characters.
+   */
+  private def extractContent(lines: Array[String], startIdx: Int, endIdx: Int): String = {
+    val contentLines = lines.slice(startIdx + 1, endIdx).filterNot { line =>
+      HeadingPattern.findFirstMatchIn(line.trim).isDefined
     }
-    lines.length  // Section extends to end of file
-  }
-
-  /** Extract a summary from the first paragraph after a heading (up to 200 chars). */
-  private def extractSummary(lines: Array[String], startIdx: Int, endIdx: Int): String = {
-    val contentLines = lines.slice(startIdx, endIdx)
-      .map(_.trim)
-      .filter(l => l.nonEmpty && !l.startsWith("#"))
-      .take(3) // Take first 3 content lines for summary
-    val summary = contentLines.mkString(" ").take(200)
-    summary
+    contentLines.mkString("\n").trim.take(2000)
   }
 }

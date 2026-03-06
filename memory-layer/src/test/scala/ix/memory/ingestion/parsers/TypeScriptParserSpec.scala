@@ -2,19 +2,95 @@ package ix.memory.ingestion.parsers
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+
 import ix.memory.model.NodeKind
 
 class TypeScriptParserSpec extends AnyFlatSpec with Matchers {
-
   val parser = new TypeScriptParser()
 
-  // Test 1: Extract file entity
-  "TypeScriptParser" should "create a File entity for the source file" in {
+  val sampleCode: String = scala.io.Source.fromResource("fixtures/api.ts").mkString
+
+  // --- Tests using fixture file ---
+
+  "TypeScriptParser" should "extract classes and functions from TypeScript source" in {
+    val result = parser.parse("api.ts", sampleCode)
+    val names = result.entities.map(_.name)
+    names should contain("ApiClient")
+    names should contain("createClient")
+    names should contain("fetchAllUsers")
+  }
+
+  it should "extract methods from classes" in {
+    val result = parser.parse("api.ts", sampleCode)
+    val names = result.entities.map(_.name)
+    names should contain("getUser")
+    names should contain("updateUser")
+    names should contain("parseResponse")
+  }
+
+  it should "set language attr to typescript" in {
+    val result = parser.parse("api.ts", sampleCode)
+    val file = result.entities.find(_.kind == NodeKind.File).get
+    file.attrs("language").asString shouldBe Some("typescript")
+  }
+
+  it should "extract import relationships" in {
+    val result = parser.parse("api.ts", sampleCode)
+    val imports = result.relationships.filter(_.predicate == "IMPORTS")
+    imports.size should be >= 2
+  }
+
+  it should "extract class-to-method DEFINES edges" in {
+    val result = parser.parse("api.ts", sampleCode)
+    val defines = result.relationships.filter(_.predicate == "DEFINES")
+    val classDefines = defines.filter(_.srcName == "ApiClient")
+    classDefines.size should be >= 3
+  }
+
+  it should "extract function call relationships" in {
+    val result = parser.parse("api.ts", sampleCode)
+    val calls = result.relationships.filter(_.predicate == "CALLS")
+    calls.size should be >= 1
+  }
+
+  it should "extract interface definitions" in {
+    val result = parser.parse("api.ts", sampleCode)
+    val names = result.entities.map(_.name)
+    names should contain("UserResponse")
+  }
+
+  it should "store method/function signature as summary attr" in {
+    val result = parser.parse("api.ts", sampleCode)
+    val funcs = result.entities.filter(_.kind == NodeKind.Function)
+    funcs should not be empty
+    funcs.foreach { f =>
+      f.attrs.get("summary") shouldBe defined
+      f.attrs("summary").asString.get should not be empty
+    }
+  }
+
+  it should "not store raw source content on File entity" in {
+    val result = parser.parse("api.ts", sampleCode)
+    val file = result.entities.find(_.kind == NodeKind.File).get
+    file.attrs.get("content") shouldBe None
+  }
+
+  it should "truncate summary to 120 chars" in {
+    val longSignature = "export async function veryLongFunctionNameThatExceedsTheLimit(paramA: string, paramB: number, paramC: boolean, paramD: SomeType, paramE: AnotherType): Promise<Result> {"
+    val longSource = longSignature + "\n  return null;\n}\n"
+    val result = parser.parse("long.ts", longSource)
+    val func = result.entities.find(_.kind == NodeKind.Function).get
+    val summary = func.attrs("summary").asString.get
+    summary.length should be <= 120
+  }
+
+  // --- Tests using inline source ---
+
+  it should "create a File entity for the source file" in {
     val result = parser.parse("app.ts", "const x = 1;")
     result.entities.exists(e => e.name == "app.ts" && e.kind == NodeKind.File) shouldBe true
   }
 
-  // Test 2: Extract class
   it should "extract class definitions" in {
     val source = """
       |export class UserService {
@@ -27,11 +103,9 @@ class TypeScriptParserSpec extends AnyFlatSpec with Matchers {
     """.stripMargin
     val result = parser.parse("service.ts", source)
     result.entities.exists(e => e.name == "UserService" && e.kind == NodeKind.Class) shouldBe true
-    // File DEFINES UserService
     result.relationships.exists(r => r.srcName == "service.ts" && r.dstName == "UserService" && r.predicate == "DEFINES") shouldBe true
   }
 
-  // Test 3: Extract functions
   it should "extract function definitions" in {
     val source = """
       |export function calculateTotal(items: Item[]): number {
@@ -47,7 +121,6 @@ class TypeScriptParserSpec extends AnyFlatSpec with Matchers {
     result.entities.exists(e => e.name == "fetchData" && e.kind == NodeKind.Function) shouldBe true
   }
 
-  // Test 4: Extract arrow functions
   it should "extract arrow function declarations" in {
     val source = """
       |export const handler = async (req: Request): Promise<Response> => {
@@ -58,8 +131,7 @@ class TypeScriptParserSpec extends AnyFlatSpec with Matchers {
     result.entities.exists(e => e.name == "handler" && e.kind == NodeKind.Function) shouldBe true
   }
 
-  // Test 5: Extract interfaces
-  it should "extract interface definitions" in {
+  it should "extract interface definitions with ts_kind attr" in {
     val source = """
       |export interface UserProps {
       |  name: string;
@@ -69,11 +141,10 @@ class TypeScriptParserSpec extends AnyFlatSpec with Matchers {
     val result = parser.parse("types.ts", source)
     val iface = result.entities.find(e => e.name == "UserProps")
     iface shouldBe defined
-    iface.get.kind shouldBe NodeKind.Class // using Class for interfaces
+    iface.get.kind shouldBe NodeKind.Class
     iface.get.attrs.get("ts_kind").map(_.noSpaces) shouldBe Some("\"interface\"")
   }
 
-  // Test 6: Extract type aliases
   it should "extract type alias definitions" in {
     val source = """
       |export type UserId = string;
@@ -84,8 +155,7 @@ class TypeScriptParserSpec extends AnyFlatSpec with Matchers {
     result.entities.exists(e => e.name == "Config") shouldBe true
   }
 
-  // Test 7: Extract imports
-  it should "extract import relationships" in {
+  it should "extract import relationships from various import styles" in {
     val source = """
       |import { Router } from 'express';
       |import * as path from 'node:path';
@@ -96,7 +166,6 @@ class TypeScriptParserSpec extends AnyFlatSpec with Matchers {
     result.relationships.exists(r => r.dstName == "node:path" && r.predicate == "IMPORTS") shouldBe true
   }
 
-  // Test 8: Extract method-in-class
   it should "detect methods inside classes" in {
     val source = """
       |class Api {
@@ -110,13 +179,11 @@ class TypeScriptParserSpec extends AnyFlatSpec with Matchers {
       |}
     """.stripMargin
     val result = parser.parse("api.ts", source)
-    // Api DEFINES fetch
     result.relationships.exists(r => r.srcName == "Api" && r.dstName == "fetch" && r.predicate == "DEFINES") shouldBe true
     result.relationships.exists(r => r.srcName == "Api" && r.dstName == "parse" && r.predicate == "DEFINES") shouldBe true
   }
 
-  // Test 9: Extract function calls
-  it should "extract function call relationships" in {
+  it should "extract function call relationships from function bodies" in {
     val source = """
       |function main() {
       |  const data = loadConfig();
@@ -128,7 +195,6 @@ class TypeScriptParserSpec extends AnyFlatSpec with Matchers {
     result.relationships.exists(r => r.srcName == "main" && r.dstName == "processData" && r.predicate == "CALLS") shouldBe true
   }
 
-  // Test 10: Filter builtins from calls
   it should "filter TypeScript builtins from CALLS" in {
     val source = """
       |function test() {
@@ -143,7 +209,6 @@ class TypeScriptParserSpec extends AnyFlatSpec with Matchers {
     result.relationships.exists(r => r.predicate == "CALLS" && r.dstName == "myFunction") shouldBe true
   }
 
-  // Test 11: Handles .tsx files
   it should "parse .tsx files with JSX" in {
     val source = """
       |import React from 'react';
@@ -160,13 +225,5 @@ class TypeScriptParserSpec extends AnyFlatSpec with Matchers {
     result.entities.exists(e => e.name == "Greeting" && e.kind == NodeKind.Function) shouldBe true
     result.entities.exists(e => e.name == "Props") shouldBe true
     result.relationships.exists(r => r.dstName == "react" && r.predicate == "IMPORTS") shouldBe true
-  }
-
-  // Test 12: Language attrs set to "typescript"
-  it should "set language attr to typescript" in {
-    val result = parser.parse("app.ts", "const x = 1;")
-    val fileEntity = result.entities.find(_.name == "app.ts")
-    fileEntity shouldBe defined
-    fileEntity.get.attrs.get("language").map(_.noSpaces) shouldBe Some("\"typescript\"")
   }
 }

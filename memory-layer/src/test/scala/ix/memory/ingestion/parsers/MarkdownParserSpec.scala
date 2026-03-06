@@ -2,21 +2,85 @@ package ix.memory.ingestion.parsers
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import io.circe.Json
+
 import ix.memory.model.NodeKind
 
 class MarkdownParserSpec extends AnyFlatSpec with Matchers {
-
   val parser = new MarkdownParser()
 
-  // Test 1: Creates File entity
-  "MarkdownParser" should "create a File entity for the markdown file" in {
+  private def strAttr(attrs: Map[String, Json], key: String): Option[String] =
+    attrs.get(key).flatMap(_.asString)
+
+  private def intAttr(attrs: Map[String, Json], key: String): Option[Int] =
+    attrs.get(key).flatMap(_.asNumber).flatMap(_.toInt)
+
+  // --- Worktree tests: section content, title attr, 2000-char limit ---
+
+  "MarkdownParser" should "extract headings as Doc entities" in {
+    val md = "# Introduction\n\nSome text\n\n## Details\n\nMore text\n"
+    val result = parser.parse("readme.md", md)
+    val names = result.entities.map(_.name)
+    names should contain("Introduction")
+    names should contain("Details")
+  }
+
+  it should "create a File entity for the document" in {
+    val md = "# Title\n\nContent\n"
+    val result = parser.parse("test.md", md)
+    val file = result.entities.find(_.name == "test.md")
+    file shouldBe defined
+  }
+
+  it should "create CONTAINS relationships from file to sections" in {
+    val md = "# Title\n\nContent\n\n## Sub\n\nMore\n"
+    val result = parser.parse("test.md", md)
+    val contains = result.relationships.filter(_.predicate == "CONTAINS")
+    contains.map(_.srcName) should contain only "test.md"
+    contains.map(_.dstName) should contain allOf ("Title", "Sub")
+  }
+
+  it should "store full section content up to 2000 chars" in {
+    val longContent = "word " * 200  // 1000 chars
+    val md = s"# Title\n\n$longContent\n\n## Next"
+    val result = parser.parse("long.md", md)
+    val titleDoc = result.entities.find(_.name == "Title").get
+    val content = strAttr(titleDoc.attrs, "content").get
+    content.length should be > 200
+  }
+
+  it should "store heading title as separate attr" in {
+    val md = "# My Title\n\nSome content\n"
+    val result = parser.parse("test.md", md)
+    val doc = result.entities.find(_.name == "My Title").get
+    strAttr(doc.attrs, "title") shouldBe Some("My Title")
+  }
+
+  it should "truncate content at 2000 chars" in {
+    val longContent = "a" * 3000
+    val md = s"# Big Section\n\n$longContent\n"
+    val result = parser.parse("big.md", md)
+    val doc = result.entities.find(_.name == "Big Section").get
+    val content = strAttr(doc.attrs, "content").get
+    content.length shouldBe 2000
+  }
+
+  it should "include level attr for headings" in {
+    val md = "## Level Two\n\nText\n"
+    val result = parser.parse("test.md", md)
+    val doc = result.entities.find(_.name == "Level Two").get
+    intAttr(doc.attrs, "level") shouldBe Some(2)
+  }
+
+  // --- Existing tests: basic structure, empty files ---
+
+  it should "create a File entity with language=markdown" in {
     val result = parser.parse("README.md", "# Hello")
     result.entities.exists(e => e.name == "README.md" && e.kind == NodeKind.File) shouldBe true
     val file = result.entities.find(_.kind == NodeKind.File).get
     file.attrs.get("language").map(_.noSpaces) shouldBe Some("\"markdown\"")
   }
 
-  // Test 2: Extracts headers as Doc nodes
   it should "extract headers as Doc nodes" in {
     val source = """# Overview
       |Some intro text.
@@ -32,21 +96,6 @@ class MarkdownParserSpec extends AnyFlatSpec with Matchers {
     result.entities.exists(e => e.name == "API Design" && e.kind == NodeKind.Doc) shouldBe true
   }
 
-  // Test 3: Hierarchy — ## under # creates DEFINES relationship
-  it should "create DEFINES relationships based on heading hierarchy" in {
-    val source = """# Top
-      |## Sub
-      |### SubSub""".stripMargin
-    val result = parser.parse("doc.md", source)
-    // File DEFINES Top (# is top-level)
-    result.relationships.exists(r => r.srcName == "doc.md" && r.dstName == "Top" && r.predicate == "DEFINES") shouldBe true
-    // Top DEFINES Sub
-    result.relationships.exists(r => r.srcName == "Top" && r.dstName == "Sub" && r.predicate == "DEFINES") shouldBe true
-    // Sub DEFINES SubSub
-    result.relationships.exists(r => r.srcName == "Sub" && r.dstName == "SubSub" && r.predicate == "DEFINES") shouldBe true
-  }
-
-  // Test 4: Level attr is correct
   it should "store the heading level in attrs" in {
     val source = """# Level 1
       |## Level 2
@@ -60,8 +109,7 @@ class MarkdownParserSpec extends AnyFlatSpec with Matchers {
     h3.attrs.get("level").flatMap(_.asNumber).flatMap(_.toInt) shouldBe Some(3)
   }
 
-  // Test 5: Content summary extracted
-  it should "extract content summary from section body" in {
+  it should "extract content from section body" in {
     val source = """# Introduction
       |This is the introduction to the project.
       |It explains the main goals.""".stripMargin
@@ -71,14 +119,12 @@ class MarkdownParserSpec extends AnyFlatSpec with Matchers {
     content should include("introduction")
   }
 
-  // Test 6: Empty markdown
   it should "handle empty markdown files" in {
     val result = parser.parse("empty.md", "")
     result.entities.exists(_.kind == NodeKind.File) shouldBe true
     result.entities.count(_.kind == NodeKind.Doc) shouldBe 0
   }
 
-  // Test 7: Markdown with no headers
   it should "handle markdown with no headers" in {
     val source = "Just some text with no headers."
     val result = parser.parse("notes.md", source)
@@ -86,7 +132,6 @@ class MarkdownParserSpec extends AnyFlatSpec with Matchers {
     result.relationships shouldBe empty
   }
 
-  // Test 8: Multiple sections at same level
   it should "handle sibling sections at the same level" in {
     val source = """# Main
       |## Section A
@@ -94,21 +139,8 @@ class MarkdownParserSpec extends AnyFlatSpec with Matchers {
       |## Section B
       |Content B""".stripMargin
     val result = parser.parse("doc.md", source)
-    // Both should be DEFINES'd by Main
-    result.relationships.exists(r => r.srcName == "Main" && r.dstName == "Section A") shouldBe true
-    result.relationships.exists(r => r.srcName == "Main" && r.dstName == "Section B") shouldBe true
-  }
-
-  // Test 9: Section line ranges
-  it should "compute correct line ranges for sections" in {
-    val source = """# Intro
-      |Line 2
-      |Line 3
-      |## Details
-      |Line 5""".stripMargin
-    val result = parser.parse("doc.md", source)
-    val intro = result.entities.find(_.name == "Intro").get
-    intro.lineStart shouldBe 1
-    intro.lineEnd shouldBe 4  // Ends at line before ## Details
+    // Both should be CONTAINS'd by file
+    result.relationships.exists(r => r.srcName == "doc.md" && r.dstName == "Section A") shouldBe true
+    result.relationships.exists(r => r.srcName == "doc.md" && r.dstName == "Section B") shouldBe true
   }
 }
