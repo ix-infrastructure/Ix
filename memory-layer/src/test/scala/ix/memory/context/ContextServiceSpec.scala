@@ -224,9 +224,9 @@ class ContextServiceSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers wi
   it should "rank claims in descending confidence order" in {
     val prov = Provenance("test://uri", None, "test", SourceType.Code, Instant.now())
     val claim1 = Claim(ClaimId(UUID.randomUUID()), NodeId(UUID.randomUUID()), "field1",
-      ClaimStatus.Active, prov, Rev(1L), None)
+      Json.Null, None, ClaimStatus.Active, prov, Rev(1L), None)
     val claim2 = Claim(ClaimId(UUID.randomUUID()), NodeId(UUID.randomUUID()), "field2",
-      ClaimStatus.Active, prov, Rev(1L), None)
+      Json.Null, None, ClaimStatus.Active, prov, Rev(1L), None)
 
     val scored1 = ScoredClaim(claim1, ConfidenceBreakdown(
       Factor(0.5, "low"), Factor(1.0, "ok"), Factor(1.0, "ok"), Factor(1.0, "ok"), Factor(1.0, "ok"), Factor(1.0, "ok")

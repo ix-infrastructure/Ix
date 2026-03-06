@@ -6,6 +6,7 @@ import java.util.UUID
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import io.circe.Json
 import ix.memory.model._
 
 class CorroborationCounterSpec extends AnyFlatSpec with Matchers {
@@ -15,6 +16,8 @@ class CorroborationCounterSpec extends AnyFlatSpec with Matchers {
       id         = ClaimId(UUID.randomUUID()),
       entityId   = entityId,
       statement  = statement,
+      value      = Json.Null,
+      confidence = None,
       status     = ClaimStatus.Active,
       provenance = Provenance(sourceUri, None, "test", SourceType.Code, Instant.now()),
       createdRev = Rev(1L),

@@ -8,6 +8,7 @@ import cats.effect.testing.scalatest.AsyncIOSpec
 import org.scalatest.flatspec.AsyncFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import io.circe.Json
 import ix.memory.model._
 
 class LlmJudgeSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
@@ -15,7 +16,7 @@ class LlmJudgeSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
   private def makeScoredClaim(statement: String, entityId: NodeId, score: Double = 0.8): ScoredClaim = {
     val claim = Claim(
       ClaimId(UUID.randomUUID()), entityId, statement,
-      ClaimStatus.Active,
+      Json.Null, None, ClaimStatus.Active,
       Provenance("test://src", None, "test", SourceType.Code, Instant.now()),
       Rev(1L), None
     )

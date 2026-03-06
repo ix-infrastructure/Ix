@@ -4,6 +4,7 @@ import java.time.Instant
 import java.util.UUID
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import io.circe.Json
 import ix.memory.model._
 import ix.memory.context.ConflictDetectorImpl
 
@@ -16,6 +17,8 @@ class ConflictDetectorSpec extends AnyFlatSpec with Matchers {
       id = ClaimId(UUID.randomUUID()),
       entityId = entityId,
       statement = statement,
+      value = Json.Null,
+      confidence = None,
       status = ClaimStatus.Active,
       provenance = Provenance("test.py", Some("abc"), "test", sourceType, Instant.now()),
       createdRev = Rev(1L),

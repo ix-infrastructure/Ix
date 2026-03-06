@@ -4,6 +4,7 @@ import java.time.Instant
 import java.util.UUID
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import io.circe.Json
 import ix.memory.model._
 
 class ConfidenceScorerSpec extends AnyFlatSpec with Matchers {
@@ -13,6 +14,8 @@ class ConfidenceScorerSpec extends AnyFlatSpec with Matchers {
     id = ClaimId(UUID.randomUUID()),
     entityId = NodeId(UUID.randomUUID()),
     statement = "test statement",
+    value = Json.Null,
+    confidence = None,
     status = ClaimStatus.Active,
     provenance = Provenance("test.py", Some("abc123"), "tree-sitter", sourceType, Instant.now()),
     createdRev = Rev(rev),

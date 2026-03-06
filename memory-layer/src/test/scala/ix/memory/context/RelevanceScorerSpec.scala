@@ -19,7 +19,7 @@ class RelevanceScorerSpec extends AnyFlatSpec with Matchers {
   private def makeClaim(entityId: NodeId): ScoredClaim = {
     val claim = Claim(
       ClaimId(UUID.randomUUID()), entityId, "test_field",
-      ClaimStatus.Active, prov, Rev(1L), None
+      io.circe.Json.Null, None, ClaimStatus.Active, prov, Rev(1L), None
     )
     ScoredClaim(claim, defaultBreakdown, relevance = 1.0, finalScore = defaultBreakdown.score)
   }

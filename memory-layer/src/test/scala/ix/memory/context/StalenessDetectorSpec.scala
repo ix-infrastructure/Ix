@@ -10,6 +10,7 @@ import cats.effect.testing.scalatest.AsyncIOSpec
 import org.scalatest.flatspec.AsyncFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import io.circe.Json
 import ix.memory.model._
 
 class StalenessDetectorSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
@@ -25,6 +26,8 @@ class StalenessDetectorSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers
       id         = ClaimId(UUID.randomUUID()),
       entityId   = NodeId(UUID.randomUUID()),
       statement  = "test claim",
+      value      = Json.Null,
+      confidence = None,
       status     = ClaimStatus.Active,
       provenance = Provenance(sourceUri, sourceHash, "test", SourceType.Code, Instant.now()),
       createdRev = Rev(1L),
