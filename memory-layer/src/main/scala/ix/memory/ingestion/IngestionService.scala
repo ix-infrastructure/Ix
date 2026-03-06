@@ -1,11 +1,13 @@
 package ix.memory.ingestion
 
 import java.nio.file.{Files, Path}
+import java.time.Instant
+import java.util.UUID
 
 import cats.effect.IO
 import cats.syntax.all._
 import ix.memory.db.{CommitResult, GraphQueryApi, GraphWriteApi}
-import ix.memory.model.{NodeKind, PatchId, Rev}
+import ix.memory.model._
 import io.circe.Json
 
 /**
@@ -20,6 +22,8 @@ class IngestionService(parserRouter: ParserRouter, writeApi: GraphWriteApi, quer
   def ingestFile(filePath: Path): IO[CommitResult] = {
     for {
       bytes <- IO.blocking(Files.readAllBytes(filePath))
+      _     <- if (bytes.isEmpty) IO.raiseError(new RuntimeException(s"Skipping empty file: $filePath"))
+               else IO.unit
       // Hash raw bytes so revisions are stable across encodings
       hash = Some(sha256Bytes(bytes))
       // Decode text with UTF-8, fallback to ISO-8859-1 to avoid hard failures
@@ -53,6 +57,8 @@ class IngestionService(parserRouter: ParserRouter, writeApi: GraphWriteApi, quer
       patch   = GraphPatchBuilder.build(filePath.toString, hash, result).copy(replaces = replaces)
       _      <- IO.fromEither(PatchValidator.validate(patch).left.map(msg => new IllegalStateException(msg)))
       commit <- writeApi.commitPatch(patch)
+      // Resolve cross-file import edges after main patch is committed
+      _      <- resolveImportEdges(filePath, result, hash).attempt.void
     } yield commit
   }
 
@@ -151,6 +157,54 @@ class IngestionService(parserRouter: ParserRouter, writeApi: GraphWriteApi, quer
     } else {
       List.empty
     }
+  }
+
+  private def resolveImportEdges(
+    filePath:   Path,
+    parseResult: ParseResult,
+    sourceHash: Option[String]
+  ): IO[Unit] = {
+    val importRels = parseResult.relationships.filter(_.predicate == "IMPORTS")
+    importRels.traverse_ { rel =>
+      val targetName = rel.dstName
+      // Try to resolve relative imports (./config, ../utils)
+      val resolvedPath = resolveRelativePath(filePath, targetName)
+      resolvedPath match {
+        case Some(resolved) =>
+          queryApi.searchNodes(resolved.getFileName.toString, limit = 1).flatMap {
+            case nodes if nodes.nonEmpty =>
+              val srcId = NodeId(UUID.nameUUIDFromBytes(s"${filePath}:${filePath.getFileName}".getBytes("UTF-8")))
+              val dstId = nodes.head.id
+              val edgeId = EdgeId(UUID.nameUUIDFromBytes(s"${srcId.value}:${dstId.value}:IMPORTS".getBytes("UTF-8")))
+              val patch = GraphPatch(
+                patchId   = PatchId(UUID.randomUUID()),
+                actor     = "ix/cross-file",
+                timestamp = Instant.now(),
+                source    = PatchSource(filePath.toString, sourceHash, "cross-file-resolver/1.0", SourceType.Code),
+                baseRev   = Rev(0L),
+                ops       = Vector(PatchOp.UpsertEdge(edgeId, srcId, dstId, EdgePredicate("IMPORTS"), Map.empty)),
+                replaces  = Vector.empty,
+                intent    = Some(s"Cross-file import: ${filePath.getFileName} -> ${resolved.getFileName}")
+              )
+              writeApi.commitPatch(patch).void
+            case _ => IO.unit
+          }
+        case None => IO.unit
+      }
+    }
+  }
+
+  private def resolveRelativePath(from: Path, importTarget: String): Option[Path] = {
+    if (importTarget.startsWith("./") || importTarget.startsWith("../")) {
+      val base = from.getParent
+      if (base == null) return None
+      val extensions = List("", ".ts", ".tsx", ".scala", ".py", ".js")
+      extensions.collectFirst {
+        case ext =>
+          val candidate = base.resolve(importTarget + ext).normalize()
+          if (Files.exists(candidate)) candidate else null
+      }.flatMap(Option(_))
+    } else None
   }
 
   private def sha256Bytes(bytes: Array[Byte]): String = {

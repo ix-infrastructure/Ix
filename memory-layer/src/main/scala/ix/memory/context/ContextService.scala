@@ -66,8 +66,8 @@ class ContextService(
         ))
       }
 
-      // 7. Relevance score: weight claims by hop distance from seeds
-      relevant = RelevanceScorer.score(scored, seeds.map(_.id).toSet, expanded.edges)
+      // 7. Relevance score: weight claims by hop distance from seeds, boost exact matches
+      relevant = RelevanceScorer.scoreWithTerms(scored, seeds.map(_.id).toSet, expanded.edges, terms)
 
       // 8. Rank claims by finalScore (relevance x confidence) descending
       ranked = ContextRanker.rank(relevant)
@@ -96,7 +96,14 @@ class ContextService(
 
       // Lightweight summaries for LLM navigation (lets the model drill down with ix_entity/ix_expand)
       nodeSummaries: Vector[NodeSummary] = allNodes.map { n =>
-        val display = n.attrs.hcursor.get[String]("name").getOrElse(n.id.value.toString)
+        val display = n.attrs.hcursor.get[String]("name").toOption
+          .orElse(n.attrs.hcursor.get[String]("title").toOption)
+          .orElse(n.attrs.hcursor.get[String]("heading").toOption)
+          .getOrElse {
+            val uri = n.provenance.sourceUri
+            val basename = uri.split("/").lastOption.getOrElse(uri)
+            if (basename.nonEmpty) basename else n.id.value.toString.take(8)
+          }
         NodeSummary(n.id, n.kind, display, rev)
       }
       edgeSummaries: Vector[EdgeSummary] = edgesTrimmed.map(e => EdgeSummary(e.id, e.src, e.dst, e.predicate, rev))

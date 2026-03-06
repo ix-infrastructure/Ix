@@ -53,9 +53,16 @@ class DiffRoutes(queryApi: GraphQueryApi) {
               result <- diffEntity(eid, Rev(body.fromRev), Rev(body.toRev))
             } yield result.toVector
           case None =>
-            IO.raiseError(new UnsupportedOperationException(
-              "Diff without entityId is not yet supported. Please provide an entityId."
-            ))
+            queryApi.getChangedEntities(Rev(body.fromRev), Rev(body.toRev)).map { nodes =>
+              nodes.map { n =>
+                DiffEntry(
+                  entityId   = n.id,
+                  changeType = if (n.deletedRev.isDefined) "removed" else "added_or_modified",
+                  atFromRev  = None,
+                  atToRev    = Some(n)
+                )
+              }
+            }
         }
         resp <- Ok(DiffResponse(body.fromRev, body.toRev, changes))
       } yield resp).handleErrorWith(ErrorHandler.handle(_))

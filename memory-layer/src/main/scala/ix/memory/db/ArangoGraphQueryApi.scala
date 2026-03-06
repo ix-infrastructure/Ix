@@ -71,7 +71,18 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
         |    RETURN DISTINCT c.entity_id
         |)
         |
-        |LET all_ids = UNION_DISTINCT(name_matches, provenance_matches, claim_matches)
+        |LET decision_matches = (
+        |  FOR n IN nodes
+        |    FILTER n.kind == "decision"
+        |      AND n.deleted_rev == null
+        |      AND (
+        |        CONTAINS(LOWER(TO_STRING(n.attrs.title)), LOWER(@text))
+        |        OR CONTAINS(LOWER(TO_STRING(n.attrs.rationale)), LOWER(@text))
+        |      )
+        |    RETURN DISTINCT n.logical_id
+        |)
+        |
+        |LET all_ids = UNION_DISTINCT(name_matches, provenance_matches, claim_matches, decision_matches)
         |
         |FOR id IN all_ids
         |  FOR n IN nodes
@@ -213,6 +224,19 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
         "extractor" -> extractor.asInstanceOf[AnyRef]
       )
     ).map(_.toVector)
+
+  override def getChangedEntities(fromRev: Rev, toRev: Rev): IO[Vector[GraphNode]] =
+    client.query(
+      """FOR n IN nodes
+        |  FILTER n.created_rev > @fromRev AND n.created_rev <= @toRev
+        |  COLLECT logicalId = n.logical_id INTO group
+        |  LET latest = LAST(group[*].n)
+        |  RETURN latest""".stripMargin,
+      Map(
+        "fromRev" -> Long.box(fromRev.value).asInstanceOf[AnyRef],
+        "toRev"   -> Long.box(toRev.value).asInstanceOf[AnyRef]
+      )
+    ).map(_.flatMap(parseNode).toVector)
 
   // ── JSON Parsers (snake_case → camelCase) ───────────────────────────
 

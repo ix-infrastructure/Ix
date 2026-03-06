@@ -162,6 +162,26 @@ export function formatIntents(intents: any[], format: string): void {
   }
 }
 
+export function formatDiff(result: any, format: string): void {
+  if (format === "json") {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  console.log(chalk.cyan.bold(`Diff: rev ${result.fromRev} → ${result.toRev}`));
+  if (!result.changes?.length) {
+    console.log(chalk.dim("  No changes in this range."));
+    return;
+  }
+  for (const change of result.changes) {
+    const icon = change.changeType === "removed" ? chalk.red("- ")
+      : change.changeType === "added" ? chalk.green("+ ")
+      : chalk.yellow("~ ");
+    const name = change.atToRev?.attrs?.name || change.entityId?.substring(0, 8);
+    const kind = change.atToRev?.kind || "unknown";
+    console.log(`  ${icon}${chalk.bold(name)} (${kind}) [${change.changeType}]`);
+  }
+}
+
 export function formatConflicts(conflicts: any[], format: string): void {
   if (format === "json") {
     console.log(JSON.stringify(conflicts, null, 2));

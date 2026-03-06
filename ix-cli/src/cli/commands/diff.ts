@@ -1,6 +1,8 @@
 import type { Command } from "commander";
+import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
+import { formatDiff } from "../format.js";
 
 export function registerDiffCommand(program: Command): void {
   program
@@ -14,7 +16,7 @@ export function registerDiffCommand(program: Command): void {
       if (opts.format === "json") {
         console.log(JSON.stringify(result, null, 2));
       } else {
-        console.log(JSON.stringify(result, null, 2));
+        formatDiff(result, "text");
       }
     });
 }
