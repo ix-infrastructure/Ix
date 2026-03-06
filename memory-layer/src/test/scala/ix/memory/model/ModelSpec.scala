@@ -248,4 +248,34 @@ class ModelSpec extends AnyFlatSpec with Matchers {
     val decoded = decode[ConfidenceBreakdown](json.noSpaces)
     decoded shouldBe Right(breakdown)
   }
+
+  it should "produce compact confidence when all multipliers are trivial" in {
+    val trivial = ConfidenceBreakdown(
+      baseAuthority = Factor(0.9, "Code, tree-sitter-python/1.0"),
+      verification = Factor(1.0, "no verification data available"),
+      recency = Factor(1.0, "Source unchanged since observation"),
+      corroboration = Factor(1.0, "0 corroborating sources"),
+      conflictPenalty = Factor(1.0, "no conflicts"),
+      intentAlignment = Factor(1.0, "No connection to intent")
+    )
+    val compact = trivial.toCompact
+    compact.score shouldBe trivial.score
+    compact.authority shouldBe Some(0.9)
+    compact.nonTrivialFactors shouldBe empty
+  }
+
+  it should "include non-trivial factors in compact confidence" in {
+    val interesting = ConfidenceBreakdown(
+      baseAuthority = Factor(0.9, "Code, tree-sitter-python/1.0"),
+      verification = Factor(1.0, "no verification data available"),
+      recency = Factor(0.7, "1-6 months since observation"),
+      corroboration = Factor(1.1, "3 corroborating sources"),
+      conflictPenalty = Factor(1.0, "no conflicts"),
+      intentAlignment = Factor(1.0, "No connection to intent")
+    )
+    val compact = interesting.toCompact
+    compact.score shouldBe interesting.score
+    compact.nonTrivialFactors should have size 2
+    compact.nonTrivialFactors.map(_._1) should contain allOf ("recency", "corroboration")
+  }
 }
