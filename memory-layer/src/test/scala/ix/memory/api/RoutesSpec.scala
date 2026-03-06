@@ -305,9 +305,9 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
     }
   }
 
-  // ── Test 10: POST /v1/diff returns 422 without entityId ─────────────
+  // ── Test 10: POST /v1/diff returns global diff without entityId ──────
 
-  it should "return 422 for diff without entityId" in {
+  it should "return 200 for global diff without entityId" in {
     clientResource.use { client =>
       val writeApi = new ArangoGraphWriteApi(client)
       val queryApi = new ArangoGraphQueryApi(client)
@@ -323,7 +323,7 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
         req   = Request[IO](Method.POST, uri"/v1/diff").withEntity(diffReq)
         resp <- app.run(req)
       } yield {
-        resp.status shouldBe Status.UnprocessableEntity
+        resp.status shouldBe Status.Ok
       }
     }
   }
