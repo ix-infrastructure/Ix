@@ -4,6 +4,7 @@ import {
   formatIntents,
   formatConflicts,
   formatDecisions,
+  formatTextResults,
   confidenceColor,
 } from "../format.js";
 
@@ -299,6 +300,34 @@ describe("formatDecisions", () => {
     expect(output).toContain("Use ArangoDB");
     expect(output).toContain("Supports MVCC");
     expect(output).toContain("abc-1234");
+    spy.mockRestore();
+  });
+});
+
+describe("formatTextResults", () => {
+  it("should output JSON when format is json", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const results = [{ path: "src/foo.ts", line: 42, snippet: "const foo = bar;" }];
+    formatTextResults(results, "json");
+    expect(spy).toHaveBeenCalledWith(JSON.stringify(results, null, 2));
+    spy.mockRestore();
+  });
+
+  it("should show 'No text matches found.' for empty results", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    formatTextResults([], "text");
+    expect(spy).toHaveBeenCalledWith("No text matches found.");
+    spy.mockRestore();
+  });
+
+  it("should display path:line and snippet in text mode", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const results = [{ path: "src/foo.ts", line: 42, snippet: "const foo = bar;" }];
+    formatTextResults(results, "text");
+    const output = spy.mock.calls.map(c => c[0]).join("\n");
+    expect(output).toContain("src/foo.ts");
+    expect(output).toContain(":42");
+    expect(output).toContain("const foo = bar;");
     spy.mockRestore();
   });
 });
