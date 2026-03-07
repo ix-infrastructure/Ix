@@ -77,4 +77,49 @@ class RelevanceScorerSpec extends AnyFlatSpec with Matchers {
     result(1).relevance shouldBe 0.7
     result(2).relevance shouldBe 0.4
   }
+
+  it should "boost symbol node claims with kindBoost 1.3x" in {
+    val seedId = NodeId(UUID.randomUUID())
+    val kindMap = Map(seedId -> NodeKind.Function)
+    val claims = Vector(makeClaim(seedId))
+    val result = RelevanceScorer.scoreWithTerms(claims, Set(seedId), Vector.empty, Vector.empty, kindMap)
+    // hopRelevance=1.0 * kindBoost=1.3 → clamped to 1.0
+    result.head.relevance shouldBe 1.0
+  }
+
+  it should "penalize File node claims with kindBoost 0.6x" in {
+    val seedId = NodeId(UUID.randomUUID())
+    val kindMap = Map(seedId -> NodeKind.File)
+    val claims = Vector(makeClaim(seedId))
+    val result = RelevanceScorer.scoreWithTerms(claims, Set(seedId), Vector.empty, Vector.empty, kindMap)
+    // hopRelevance=1.0 * kindBoost=0.6 = 0.6
+    result.head.relevance shouldBe 0.6
+    result.head.finalScore shouldBe (0.6 * defaultBreakdown.score +- 0.001)
+  }
+
+  it should "rank Method claims above File claims for same seed" in {
+    val methodId = NodeId(UUID.randomUUID())
+    val fileId = NodeId(UUID.randomUUID())
+    val kindMap = Map(methodId -> NodeKind.Method, fileId -> NodeKind.File)
+    val claims = Vector(makeClaim(fileId), makeClaim(methodId))
+    val result = RelevanceScorer.scoreWithTerms(
+      claims, Set(methodId, fileId), Vector.empty, Vector.empty, kindMap
+    ).sortBy(-_.finalScore)
+    result.head.claim.entityId shouldBe methodId
+  }
+
+  it should "apply neutral 1.0x kindBoost for Config nodes" in {
+    val seedId = NodeId(UUID.randomUUID())
+    val kindMap = Map(seedId -> NodeKind.Config)
+    val claims = Vector(makeClaim(seedId))
+    val result = RelevanceScorer.scoreWithTerms(claims, Set(seedId), Vector.empty, Vector.empty, kindMap)
+    result.head.relevance shouldBe 1.0
+  }
+
+  it should "use default kindBoost 1.0 when nodeKindMap is empty" in {
+    val seedId = NodeId(UUID.randomUUID())
+    val claims = Vector(makeClaim(seedId))
+    val result = RelevanceScorer.scoreWithTerms(claims, Set(seedId), Vector.empty, Vector.empty, Map.empty)
+    result.head.relevance shouldBe 1.0
+  }
 }
