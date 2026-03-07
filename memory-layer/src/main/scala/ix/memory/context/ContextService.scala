@@ -66,8 +66,9 @@ class ContextService(
         ))
       }
 
-      // 7. Relevance score: weight claims by hop distance from seeds, boost exact matches
-      relevant = RelevanceScorer.scoreWithTerms(scored, seeds.map(_.id).toSet, expanded.edges, terms)
+      // 7. Relevance score: weight claims by hop distance from seeds, boost exact matches, prefer symbols
+      nodeKindMap: Map[NodeId, NodeKind] = (seeds ++ expanded.nodes).map(n => n.id -> n.kind).toMap
+      relevant = RelevanceScorer.scoreWithTerms(scored, seeds.map(_.id).toSet, expanded.edges, terms, nodeKindMap)
 
       // 8. Rank claims by finalScore (relevance x confidence) descending
       ranked = ContextRanker.rank(relevant)
