@@ -72,7 +72,7 @@ class ScalaParser extends Parser {
                 val endLine = findBraceBlockEnd(lines, idx).getOrElse(lineNum)
                 entities = entities :+ ParsedEntity(
                   name      = name,
-                  kind      = NodeKind.Class,
+                  kind      = NodeKind.Trait,
                   attrs     = Map("scala_kind" -> Json.fromString("trait"), "language" -> Json.fromString("scala")),
                   lineStart = lineNum,
                   lineEnd   = endLine
@@ -89,7 +89,7 @@ class ScalaParser extends Parser {
                     val endLine = findBraceBlockEnd(lines, idx).getOrElse(lineNum)
                     entities = entities :+ ParsedEntity(
                       name      = name,
-                      kind      = NodeKind.Class,
+                      kind      = NodeKind.Object,
                       attrs     = Map("scala_kind" -> Json.fromString("object"), "language" -> Json.fromString("scala")),
                       lineStart = lineNum,
                       lineEnd   = endLine
@@ -126,31 +126,33 @@ class ScalaParser extends Parser {
             val funcName = m.group(1)
             val endLine = findBraceBlockEnd(lines, idx).getOrElse(lineNum)
 
-            // Build summary from the first line of the signature, truncated to 120 chars
-            val sigLine = trimmed.take(120)
-            val summary = sigLine
-
-            entities = entities :+ ParsedEntity(
-              name      = funcName,
-              kind      = NodeKind.Function,
-              attrs     = Map(
-                "language" -> Json.fromString("scala"),
-                "summary"  -> Json.fromString(summary)
-              ),
-              lineStart = lineNum,
-              lineEnd   = endLine
-            )
+            val signature = extractSignature(trimmed)
+            val visibility = extractVisibility(trimmed)
 
             // Determine enclosing type
             val enclosing = typeRanges.find { case (_, start, end) =>
               lineNum > start && lineNum <= end
             }
-            enclosing match {
-              case Some((typeName, _, _)) =>
-                relationships = relationships :+ ParsedRelationship(typeName, funcName, "DEFINES")
-              case None =>
-                relationships = relationships :+ ParsedRelationship(fileName, funcName, "DEFINES")
+
+            val (kind, edgePredicate, edgeSrc) = enclosing match {
+              case Some((typeName, _, _)) => (NodeKind.Method, "CONTAINS", typeName)
+              case None                   => (NodeKind.Function, "DEFINES", fileName)
             }
+
+            entities = entities :+ ParsedEntity(
+              name      = funcName,
+              kind      = kind,
+              attrs     = Map(
+                "language"   -> Json.fromString("scala"),
+                "summary"    -> Json.fromString(signature),
+                "signature"  -> Json.fromString(signature),
+                "visibility" -> Json.fromString(visibility)
+              ),
+              lineStart = lineNum,
+              lineEnd   = endLine
+            )
+
+            relationships = relationships :+ ParsedRelationship(edgeSrc, funcName, edgePredicate)
           }
         }
 
@@ -216,5 +218,22 @@ class ScalaParser extends Parser {
     }
 
     if (foundOpen) Some(lines.length) else None
+  }
+
+  /** Extract a clean signature from a trimmed line, stripping trailing body markers. */
+  private def extractSignature(trimmedLine: String): String = {
+    val cleaned = trimmedLine
+      .replaceAll("""\s*=\s*\{?\s*$""", "")
+      .replaceAll("""\s*\{\s*$""", "")
+      .trim
+    cleaned.take(120)
+  }
+
+  /** Detect visibility from a trimmed line (after stripping `override`). */
+  private def extractVisibility(trimmedLine: String): String = {
+    val withoutOverride = trimmedLine.replaceFirst("""^\s*override\s+""", "").trim
+    if (withoutOverride.startsWith("private"))        "private"
+    else if (withoutOverride.startsWith("protected")) "protected"
+    else                                               "public"
   }
 }
