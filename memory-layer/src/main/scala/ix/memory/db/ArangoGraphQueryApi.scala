@@ -45,6 +45,30 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
       )
     ).map(_.flatMap(parseNode).toVector)
 
+  override def listDecisions(limit: Int = 50, topic: Option[String] = None): IO[Vector[GraphNode]] = {
+    val topicFilter = topic match {
+      case Some(_) =>
+        """AND (
+          |  CONTAINS(LOWER(TO_STRING(n.attrs.title)), LOWER(@topic))
+          |  OR CONTAINS(LOWER(TO_STRING(n.attrs.rationale)), LOWER(@topic))
+          |)""".stripMargin
+      case None => ""
+    }
+    val aql =
+      s"""FOR n IN nodes
+         |  FILTER n.kind == "decision"
+         |    AND n.deleted_rev == null
+         |    $topicFilter
+         |  SORT n.created_at DESC
+         |  LIMIT @limit
+         |  RETURN n""".stripMargin
+    val binds = scala.collection.mutable.Map[String, AnyRef](
+      "limit" -> Int.box(limit).asInstanceOf[AnyRef]
+    )
+    topic.foreach(t => binds += ("topic" -> t.asInstanceOf[AnyRef]))
+    client.query(aql, binds.toMap).map(_.flatMap(parseNode).toVector)
+  }
+
   override def searchNodes(text: String, limit: Int = 20): IO[Vector[GraphNode]] =
     client.query(
       """LET name_matches = (
