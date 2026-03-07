@@ -1,8 +1,6 @@
 package ix.memory.ingestion
 
 import java.nio.file.{Files, Path}
-import java.time.Instant
-import java.util.UUID
 
 import cats.effect.IO
 import cats.syntax.all._
@@ -27,6 +25,7 @@ class BulkIngestionService(
 ) {
 
   private val parallelism = Runtime.getRuntime.availableProcessors.max(2)
+  private val mapper = new com.fasterxml.jackson.databind.ObjectMapper()
 
   /**
    * Ingest files under a path using parallel parsing and bulk writes.
@@ -83,6 +82,7 @@ class BulkIngestionService(
                           case None    => genericTextParse(filePath.getFileName.toString, source)
                         }
                         patch = GraphPatchBuilder.build(filePath.toString, Some(hash), parseResult)
+                        _ <- IO.fromEither(PatchValidator.validate(patch).left.map(msg => new IllegalStateException(msg)))
                         provenance = buildProvenanceMap(patch)
                       } yield Some(FileBatch(filePath.toString, Some(hash), patch, provenance))
                   }
@@ -100,7 +100,6 @@ class BulkIngestionService(
     IO.pure(Map.empty[String, String])
 
   private def buildProvenanceMap(patch: GraphPatch): java.util.Map[String, AnyRef] = {
-    val mapper = new com.fasterxml.jackson.databind.ObjectMapper()
     val json = Json.obj(
       "source_uri"  -> Json.fromString(patch.source.uri),
       "source_hash" -> patch.source.sourceHash.fold(Json.Null)(Json.fromString),
