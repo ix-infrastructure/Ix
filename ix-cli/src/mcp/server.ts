@@ -148,10 +148,13 @@ server.tool(
   {
     term: z.string().describe("Search term"),
     limit: z.optional(z.number()).describe("Max results to return"),
+    kind: z.optional(z.string()).describe("Filter by node kind (e.g. method, class, decision)"),
+    language: z.optional(z.string()).describe("Filter by language/file extension (e.g. scala, ts)"),
+    asOfRev: z.optional(z.number()).describe("Search as of a specific revision"),
   },
-  async ({ term, limit }) => {
+  async ({ term, limit, kind, language, asOfRev }) => {
     try {
-      const nodes = await client.search(term, { limit });
+      const nodes = await client.search(term, { limit, kind, language, asOfRev });
       return {
         content: [
           { type: "text" as const, text: JSON.stringify(nodes, null, 2) },
@@ -168,6 +171,33 @@ server.tool(
   },
 );
 
+// --- ix_decisions -------------------------------------------------------------
+server.tool(
+  "ix_decisions",
+  "List recorded design decisions. Use this to review past architectural choices and their rationale.",
+  {
+    limit: z.optional(z.number()).describe("Max results (default 50)"),
+    topic: z.optional(z.string()).describe("Filter decisions by topic keyword"),
+  },
+  async ({ limit, topic }) => {
+    try {
+      const nodes = await client.listDecisions({ limit, topic });
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(nodes, null, 2) },
+        ],
+      };
+    } catch (err) {
+      return {
+        isError: true,
+        content: [
+          { type: "text" as const, text: `ix_decisions failed: ${String(err)}` },
+        ],
+      };
+    }
+  },
+);
+
 // --- ix_entity ---------------------------------------------------------------
 server.tool(
   "ix_entity",
@@ -177,10 +207,11 @@ server.tool(
   },
   async ({ id }) => {
     try {
-      const entity = await client.entity(id);
+      const resolvedId = await client.resolvePrefix(id);
+      const entity = await client.entity(resolvedId);
       // Track session
-      session.track({ type: "entity", id, summary: `Looked up entity ${id}`, timestamp: new Date().toISOString() });
-      session.trackEntities([id]);
+      session.track({ type: "entity", id: resolvedId, summary: `Looked up entity ${resolvedId}`, timestamp: new Date().toISOString() });
+      session.trackEntities([resolvedId]);
       return {
         content: [
           { type: "text" as const, text: JSON.stringify(entity, null, 2) },
@@ -326,8 +357,9 @@ server.tool(
   },
   async ({ nodeId, hops: _hops, direction: _direction }) => {
     try {
+      const resolvedId = await client.resolvePrefix(nodeId);
       // The entity endpoint already returns edges; use it as the expansion source.
-      const entity = await client.entity(nodeId);
+      const entity = await client.entity(resolvedId);
       return {
         content: [
           { type: "text" as const, text: JSON.stringify(entity, null, 2) },
@@ -353,7 +385,8 @@ server.tool(
   },
   async ({ entityId }) => {
     try {
-      const history = await client.provenance(entityId);
+      const resolvedId = await client.resolvePrefix(entityId);
+      const history = await client.provenance(resolvedId);
       return {
         content: [
           { type: "text" as const, text: JSON.stringify(history, null, 2) },
