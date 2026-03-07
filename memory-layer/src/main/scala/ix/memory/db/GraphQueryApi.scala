@@ -31,3 +31,9 @@ object Direction {
 }
 
 final case class ExpandResult(nodes: Vector[GraphNode], edges: Vector[GraphEdge])
+
+object ExpandResult {
+  import io.circe.Encoder
+  import io.circe.generic.semiauto.deriveEncoder
+  implicit val encoder: Encoder[ExpandResult] = deriveEncoder[ExpandResult]
+}

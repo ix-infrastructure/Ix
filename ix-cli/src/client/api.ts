@@ -69,6 +69,18 @@ export class IxClient {
     return this.get(`/v1/entity/${id}`);
   }
 
+  async expand(
+    id: string,
+    opts?: { direction?: string; predicates?: string[]; hops?: number }
+  ): Promise<{ nodes: any[]; edges: any[] }> {
+    return this.post("/v1/expand", {
+      nodeId: id,
+      direction: opts?.direction ?? "both",
+      predicates: opts?.predicates,
+      hops: opts?.hops ?? 1,
+    });
+  }
+
   async listTruth(): Promise<GraphNode[]> {
     return this.get("/v1/truth");
   }

@@ -268,6 +268,23 @@ export function formatLocateResults(results: LocateResult[], format: string): vo
   }
 }
 
+export function formatEdgeResults(nodes: any[], relation: string, symbol: string, format: string): void {
+  if (format === "json") {
+    console.log(JSON.stringify(nodes, null, 2));
+    return;
+  }
+  if (nodes.length === 0) {
+    console.log(`No ${relation} found for "${symbol}".`);
+    return;
+  }
+  console.log(`${chalk.bold(relation)} of ${chalk.cyan(symbol)}:`);
+  for (const n of nodes) {
+    const shortId = n.id?.slice(0, 8) ?? "";
+    const name = n.attrs?.name ?? n.name ?? n.id;
+    console.log(`  ${chalk.cyan(n.kind)}  ${chalk.dim(shortId)}  ${name}`);
+  }
+}
+
 export function formatConflicts(conflicts: any[], format: string): void {
   if (format === "json") {
     console.log(JSON.stringify(conflicts, null, 2));
