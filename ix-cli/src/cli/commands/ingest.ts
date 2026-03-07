@@ -25,6 +25,7 @@ export function registerIngestCommand(program: Command): void {
           if (sr.unchanged > 0) console.log(`  ${chalk.dim("skipped unchanged:")} ${sr.unchanged}`);
           if (sr.emptyFile > 0) console.log(`  ${chalk.dim("skipped empty:")}     ${sr.emptyFile}`);
           if (sr.parseError > 0) console.log(`  ${chalk.red("parse errors:")}      ${sr.parseError}`);
+          if (sr.tooLarge > 0) console.log(`  ${chalk.dim("skipped too large:")} ${sr.tooLarge}`);
         } else if (result.filesSkipped) {
           console.log(`  ${chalk.dim("skipped:")}  ${result.filesSkipped} unchanged files`);
         }

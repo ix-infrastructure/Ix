@@ -18,7 +18,7 @@ object IngestRequest {
   implicit val encoder: Encoder[IngestRequest] = deriveEncoder[IngestRequest]
 }
 
-case class SkipReasonsResponse(unchanged: Int, emptyFile: Int, parseError: Int)
+case class SkipReasonsResponse(unchanged: Int, emptyFile: Int, parseError: Int, tooLarge: Int)
 
 object SkipReasonsResponse {
   implicit val encoder: Encoder[SkipReasonsResponse] = deriveEncoder[SkipReasonsResponse]
@@ -53,7 +53,8 @@ class IngestionRoutes(ingestionService: IngestionService, bulkIngestionService: 
           skipReasons     = SkipReasonsResponse(
             result.skipReasons.unchanged,
             result.skipReasons.emptyFile,
-            result.skipReasons.parseError
+            result.skipReasons.parseError,
+            result.skipReasons.tooLarge
           )
         ))
       } yield resp).handleErrorWith(ErrorHandler.handle(_))

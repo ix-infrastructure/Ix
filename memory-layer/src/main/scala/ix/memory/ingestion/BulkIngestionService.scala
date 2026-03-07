@@ -29,6 +29,7 @@ class BulkIngestionService(
 ) {
 
   private val parallelism = Runtime.getRuntime.availableProcessors.max(2)
+  private val MaxFileBytes: Long = 1024 * 1024  // 1 MB
   private val mapper = new com.fasterxml.jackson.databind.ObjectMapper()
 
   /**
@@ -49,7 +50,8 @@ class BulkIngestionService(
       unchangedCount = batches.count { case Right(Skipped("unchanged")) => true; case _ => false }
       emptyCount     = batches.count { case Right(Skipped("emptyFile")) => true; case _ => false }
       errorCount     = batches.count { case Left(_) => true; case _ => false }
-      skippedCount   = unchangedCount + emptyCount + errorCount
+      tooLargeCount  = batches.count { case Right(Skipped("tooLarge")) => true; case _ => false }
+      skippedCount   = unchangedCount + emptyCount + errorCount + tooLargeCount
       latestRev  <- queryApi.getLatestRev
       result     <- if (validBatches.isEmpty) IO.pure(CommitResult(latestRev, CommitStatus.Ok))
                     else bulkWriteApi.commitBatch(validBatches.toVector, latestRev.value)
@@ -59,7 +61,7 @@ class BulkIngestionService(
       filesSkipped    = skippedCount,
       entitiesCreated = validBatches.flatMap(_.patch.ops.collect { case _: PatchOp.UpsertNode => 1 }).size,
       latestRev       = result.newRev,
-      skipReasons     = SkipReasons(unchanged = unchangedCount, emptyFile = emptyCount, parseError = errorCount)
+      skipReasons     = SkipReasons(unchanged = unchangedCount, emptyFile = emptyCount, parseError = errorCount, tooLarge = tooLargeCount)
     )
   }
 
@@ -68,30 +70,34 @@ class BulkIngestionService(
    */
   private def parseFile(filePath: Path, hashMap: Map[String, String]): IO[ParseOutcome] = {
     for {
-      bytes <- IO.blocking(Files.readAllBytes(filePath))
-      result <- if (bytes.isEmpty) IO.pure(Skipped("emptyFile"): ParseOutcome)
-                else {
-                  val hash = sha256Bytes(bytes)
-                  hashMap.get(filePath.toString) match {
-                    case Some(existingHash) if existingHash == hash =>
-                      IO.pure(Skipped("unchanged"): ParseOutcome)
-                    case _ =>
-                      for {
-                        source <- IO.blocking {
-                          try new String(bytes, java.nio.charset.StandardCharsets.UTF_8)
-                          catch { case _: Throwable => new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1) }
-                        }
-                        parserOpt = parserRouter.parserFor(filePath.toString)
-                        parseResult = parserOpt match {
-                          case Some(p) => p.parse(filePath.getFileName.toString, source)
-                          case None    => genericTextParse(filePath.getFileName.toString, source)
-                        }
-                        patch = GraphPatchBuilder.build(filePath.toString, Some(hash), parseResult)
-                        _ <- IO.fromEither(PatchValidator.validate(patch).left.map(msg => new IllegalStateException(msg)))
-                        provenance = buildProvenanceMap(patch)
-                      } yield Parsed(FileBatch(filePath.toString, Some(hash), patch, provenance)): ParseOutcome
+      fileSize <- IO.blocking(Files.size(filePath))
+      result   <- if (fileSize > MaxFileBytes) IO.pure(Skipped("tooLarge"): ParseOutcome)
+                  else if (fileSize == 0L) IO.pure(Skipped("emptyFile"): ParseOutcome)
+                  else {
+                    for {
+                      bytes <- IO.blocking(Files.readAllBytes(filePath))
+                      hash   = sha256Bytes(bytes)
+                      outcome <- hashMap.get(filePath.toString) match {
+                        case Some(existingHash) if existingHash == hash =>
+                          IO.pure(Skipped("unchanged"): ParseOutcome)
+                        case _ =>
+                          for {
+                            source <- IO.blocking {
+                              try new String(bytes, java.nio.charset.StandardCharsets.UTF_8)
+                              catch { case _: Throwable => new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1) }
+                            }
+                            parserOpt = parserRouter.parserFor(filePath.toString)
+                            parseResult = parserOpt match {
+                              case Some(p) => p.parse(filePath.getFileName.toString, source)
+                              case None    => genericTextParse(filePath.getFileName.toString, source)
+                            }
+                            patch = GraphPatchBuilder.build(filePath.toString, Some(hash), parseResult)
+                            _ <- IO.fromEither(PatchValidator.validate(patch).left.map(msg => new IllegalStateException(msg)))
+                            provenance = buildProvenanceMap(patch)
+                          } yield Parsed(FileBatch(filePath.toString, Some(hash), patch, provenance)): ParseOutcome
+                      }
+                    } yield outcome
                   }
-                }
     } yield result
   }
 

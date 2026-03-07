@@ -188,7 +188,8 @@ class IngestionService(parserRouter: ParserRouter, writeApi: GraphWriteApi, quer
 case class SkipReasons(
   unchanged:    Int = 0,
   emptyFile:    Int = 0,
-  parseError:   Int = 0
+  parseError:   Int = 0,
+  tooLarge:     Int = 0
 )
 
 case class IngestionResult(
