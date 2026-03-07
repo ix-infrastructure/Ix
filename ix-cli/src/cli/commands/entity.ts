@@ -9,7 +9,8 @@ export function registerEntityCommand(program: Command): void {
     .option("--format <fmt>", "Output format (text|json)", "text")
     .action(async (id: string, opts: { format: string }) => {
       const client = new IxClient(getEndpoint());
-      const result = await client.entity(id);
+      const resolvedId = await client.resolvePrefix(id);
+      const result = await client.entity(resolvedId);
       if (opts.format === "json") {
         console.log(JSON.stringify(result, null, 2));
       } else {
