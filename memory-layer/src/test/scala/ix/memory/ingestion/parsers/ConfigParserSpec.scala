@@ -68,10 +68,10 @@ class ConfigParserSpec extends AnyFlatSpec with Matchers {
     configs.head.name shouldBe "settings.json"
   }
 
-  it should "create DEFINES relationships from Config to ConfigEntry" in {
+  it should "create CONTAINS relationships from Config to ConfigEntry" in {
     val json = """{"a": "1", "b": "2"}"""
     val result = parser.parse("app.json", json)
-    val defines = result.relationships.filter(_.predicate == "DEFINES")
+    val defines = result.relationships.filter(_.predicate == "CONTAINS")
     defines should have size 2
     defines.foreach(_.srcName shouldBe "app.json")
   }

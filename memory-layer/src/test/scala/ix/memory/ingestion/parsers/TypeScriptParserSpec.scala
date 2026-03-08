@@ -104,7 +104,7 @@ class TypeScriptParserSpec extends AnyFlatSpec with Matchers {
     """.stripMargin
     val result = parser.parse("service.ts", source)
     result.entities.exists(e => e.name == "UserService" && e.kind == NodeKind.Class) shouldBe true
-    result.relationships.exists(r => r.srcName == "service.ts" && r.dstName == "UserService" && r.predicate == "DEFINES") shouldBe true
+    result.relationships.exists(r => r.srcName == "service.ts" && r.dstName == "UserService" && r.predicate == "CONTAINS") shouldBe true
   }
 
   it should "extract function definitions" in {

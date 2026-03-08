@@ -90,9 +90,9 @@ class ScalaParserSpec extends AnyFlatSpec with Matchers {
     imports.map(_.name) should contain allOf ("cats.effect.IO", "ix.memory.model")
   }
 
-  it should "create DEFINES relationships from file to types" in {
+  it should "create CONTAINS relationships from file to types" in {
     val result = parser.parse("ConfidenceScorer.scala", sampleCode)
-    val defines = result.relationships.filter(_.predicate == "DEFINES")
+    val defines = result.relationships.filter(_.predicate == "CONTAINS")
     defines.map(r => (r.srcName, r.dstName)) should contain allOf (
       ("ConfidenceScorer.scala", "ConfidenceScorer"),
       ("ConfidenceScorer.scala", "ConfidenceScorerImpl")

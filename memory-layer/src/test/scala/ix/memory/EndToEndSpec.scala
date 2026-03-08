@@ -93,7 +93,7 @@ class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with Tes
         // Verify nodes are present from the ingestion
         result.nodes.size should be >= 1
 
-        // Verify edges are present (DEFINES, IMPORTS, CALLS relationships)
+        // Verify edges are present (CONTAINS, IMPORTS, CALLS relationships)
         result.edges should not be empty
       }
     }

@@ -25,10 +25,10 @@ class TreeSitterPythonParserSpec extends AnyFlatSpec with Matchers {
     imports.size should be >= 2
   }
 
-  it should "extract class-to-method DEFINES edges" in {
+  it should "extract class-to-method CONTAINS edges" in {
     val source = scala.io.Source.fromResource("fixtures/billing_service.py").mkString
     val result = parser.parse("billing_service.py", source)
-    val defines = result.relationships.filter(_.predicate == "DEFINES")
+    val defines = result.relationships.filter(_.predicate == "CONTAINS")
     defines.size should be >= 3
   }
 
