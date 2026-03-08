@@ -58,7 +58,6 @@ class TypeScriptParser extends Parser {
             lineEnd   = classEnd
           )
           relationships = relationships :+ ParsedRelationship(fileName, className, "CONTAINS")
-          relationships = relationships :+ ParsedRelationship(fileName, className, "CONTAINS")
           classRanges = classRanges :+ (className, lineNum, classEnd)
 
           // Extract methods from this class
