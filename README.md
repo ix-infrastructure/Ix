@@ -1,197 +1,174 @@
 # Ix Memory
 
-Persistent, time-aware memory for LLM coding assistants. Ix builds a versioned knowledge graph from your codebase and gives LLMs structured context with confidence scores — so they answer from facts, not training data.
+Ix Memory is a local, versioned knowledge graph for codebases.
 
-## What It Does
+It has two runtime parts:
+- `memory-layer` (Scala HTTP API)
+- `ix-cli` (TypeScript CLI; canonical interface)
 
-- **Ingests** source files (Python, TypeScript, YAML, JSON, TOML, Markdown) into a knowledge graph
-- **Queries** return structured context: nodes, edges, claims, conflicts, and decisions — each with 6-factor confidence scores
-- **Tracks decisions** with rationale linked to project intents, so future sessions know *why* things were built
-- **Detects conflicts** when the graph contains contradictory claims
-- **Versions everything** — every change is a patch with provenance, so you can diff and time-travel
+MCP is still present for compatibility, but the primary interface is `ix` CLI commands.
+
+## What It Supports Today
+
+- File ingestion: `.py`, `.ts`, `.tsx`, `.scala`, `.sc`, `.json`, `.yaml`, `.yml`, `.toml`, `.md`
+- Graph navigation: search, explain, callers/callees, imports/imported-by, contains, depends
+- Decision and intent tracking: `ix decide`, `ix decisions`, `ix truth ...`
+- Provenance + history: `ix patches`, `ix history`, `ix diff`, `ix conflicts`
+- GitHub ingestion: `ix ingest --github owner/repo` (issues/PRs/commits/comments)
 
 ## Prerequisites
 
-| Tool | Version | Check |
-|------|---------|-------|
-| Java | 17+ | `java -version` |
-| sbt | 1.x | `sbt --version` |
-| Docker | 20+ | `docker --version` |
-| Node.js | 18+ | `node --version` |
-| npm | 9+ | `npm --version` |
+| Tool | Version |
+|---|---|
+| Java | 17+ |
+| sbt | 1.x |
+| Docker | 20+ |
+| Node.js | 18+ |
+| npm | 9+ |
 
-## Quickstart
+## Install And Start
 
-### 1. Start the backend
+### Recommended (one command)
 
-```bash
-# Production mode (Docker handles everything)
-./stack.sh
-
-# Or dev mode (ArangoDB in Docker, Memory Layer via sbt for hot reload)
-./dev.sh
-cd memory-layer && sbt run   # in another terminal
-```
-
-The backend is ready when you see:
-```
-Ix Memory backend is ready at http://localhost:8090
-```
-
-### 2. Install CLI dependencies
+From repo root:
 
 ```bash
-cd ix-cli && npm install
+./setup.sh
 ```
 
-### 3. Initialize Ix in your project
+What this does:
+- Starts backend services (`arangodb` + `memory-layer`) via `scripts/backend.sh`
+- Builds CLI (`ix-cli`) via `scripts/build-cli.sh`
+- Installs a global `ix` command at `~/.local/bin/ix`
+- Ensures `~/.local/bin` is on your PATH in `~/.bashrc` / `~/.zshrc`
+
+Optional flags:
+
+```bash
+./setup.sh --skip-backend
+./setup.sh --skip-global-ix
+```
+
+### Verify
+
+```bash
+./scripts/backend.sh check
+ix status
+```
+
+## Running The CLI
+
+`setup.sh` installs `ix` globally for your user at `~/.local/bin/ix`.
+
+```bash
+ix status
+```
+
+If `ix` is not found in your current shell, reload your shell or run:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+## Connect A Project
+
+### Fast path
+
+```bash
+./scripts/connect.sh /path/to/your/project
+```
+
+This configures project files and ingests code.
+
+### Manual path
 
 ```bash
 cd /path/to/your/project
-npx tsx /path/to/ix-cli/src/cli/main.ts init
+node /path/to/IX-Memory/ix-cli/dist/cli/main.js init
+node /path/to/IX-Memory/ix-cli/dist/cli/main.js ingest ./src --recursive
 ```
 
-This checks the backend is running, creates `~/.ix/config.yaml`, and adds Ix rules to your `CLAUDE.md`.
+## Core Usage
 
-### 4. Ingest your codebase
+All commands support `--format json`.
 
 ```bash
+ix status
 ix ingest ./src --recursive
+ix search IngestionService --kind class --format json
+ix explain IngestionService --format json
+ix callers parseFile --format json
+ix callees parseFile --format json
+ix imports IngestionService --format json
+ix imported-by IngestionService --format json
+ix contains IngestionService --format json
+ix depends IngestionService --depth 2 --format json
+ix read src/main/scala/ix/memory/Main.scala:1-80
+ix text "commitPatch" --language ts --limit 20 --format json
 ```
 
-### 5. Explore
+## GitHub Ingestion
 
 ```bash
-ix search "UserService" --kind class
-ix explain UserService
-ix callers UserService
+ix ingest --github owner/repo --since 2026-01-01 --limit 50 --format json
 ```
 
-## CLI Commands
+Auth resolution order in code:
+1. `--token <pat>`
+2. `GITHUB_TOKEN`
+3. `gh auth token`
 
-All commands accept `--format json` for machine-readable output.
+## Useful Scripts
 
-### Core
+| Script | Purpose |
+|---|---|
+| `./setup.sh` | Start backend + build CLI + install global `ix` |
+| `./scripts/backend.sh up` | Start backend |
+| `./scripts/backend.sh down` | Stop backend |
+| `./scripts/backend.sh logs` | Tail logs |
+| `./scripts/backend.sh clean` | Remove volumes/data |
+| `./scripts/build-cli.sh` | Build CLI |
+| `./scripts/connect.sh <dir>` | Connect project + ingest |
+| `./scripts/disconnect.sh <dir>` | Remove project config |
+| `./scripts/ingest.sh [path]` | Ingest helper |
 
-| Command | Usage | Description |
-|---------|-------|-------------|
-| `ix status` | `ix status` | Check backend health |
-| `ix ingest` | `ix ingest <path> [--recursive]` | Ingest source files |
-| `ix ingest --github` | `ix ingest --github owner/repo` | Ingest GitHub issues, PRs, commits |
-| `ix search` | `ix search <term> [--limit N]` | Search nodes by term |
-| `ix explain` | `ix explain <symbol>` | Understand an entity |
-| `ix callers` | `ix callers <symbol>` | What calls a function |
-| `ix callees` | `ix callees <symbol>` | What a function calls |
-| `ix contains` | `ix contains <symbol>` | Members of a class/module |
-| `ix imports` | `ix imports <symbol>` | What an entity imports |
-| `ix depends` | `ix depends <symbol>` | Dependency impact analysis |
-| `ix text` | `ix text <term>` | Fast lexical search (ripgrep) |
-| `ix read` | `ix read <target>` | Read source code |
-| `ix locate` | `ix locate <symbol>` | Find a symbol (graph + text) |
-| `ix query` | `ix query <question> --unsafe` | [DEPRECATED] Broad graph query |
+## Testing
 
-### Decisions & Intents
-
-| Command | Usage | Description |
-|---------|-------|-------------|
-| `ix decide` | `ix decide <title> --rationale <text> [--intent-id <id>]` | Record a design decision |
-| `ix truth list` | `ix truth list` | List all project intents |
-| `ix truth add` | `ix truth add <statement> [--parent <id>]` | Add a project intent/goal |
-
-### Inspection
-
-| Command | Usage | Description |
-|---------|-------|-------------|
-| `ix entity` | `ix entity <id>` | Get entity details (node, claims, edges) |
-| `ix history` | `ix history <entityId>` | Show provenance chain for an entity |
-| `ix patches` | `ix patches` | List recent patches |
-| `ix diff` | `ix diff <fromRev> <toRev> --entity <id>` | Show changes between revisions |
-| `ix conflicts` | `ix conflicts` | List detected conflicts |
-
-### Setup
-
-| Command | Usage | Description |
-|---------|-------|-------------|
-| `ix init` | `ix init [--force]` | Initialize Ix in the current project |
-| `ix mcp-install` | `ix mcp-install [--cursor\|--claude-code]` | Install MCP server config |
-| `ix mcp-start` | `ix mcp-start` | Start the MCP server (stdio) |
-
-## MCP Integration (Compatibility Only)
-
-> **Note:** The CLI is now the canonical agent interface. MCP is retained for backward compatibility but is no longer the recommended integration path. Use `ix` CLI commands with `--format json` instead.
-
-MCP server installation is still available if needed:
+CLI:
 
 ```bash
-ix mcp-install --claude-code    # Claude Code
-ix mcp-install --cursor         # Cursor
-ix mcp-install                  # Claude Desktop
+cd ix-cli
+npm test
 ```
+
+Backend:
+
+```bash
+# Requires ArangoDB running on localhost:8529
+sbt memoryLayer/test
+```
+
+## Known Gaps / Notes
+
+- Many Scala tests require a live ArangoDB instance; if it is down, DB/API/E2E specs fail.
+- `TreeSitterPythonParser` still contains a TODO for full AST traversal fallback behavior.
+- `ix query` remains available but is explicitly deprecated in help text and templates.
+- `connect.sh` still sets MCP config for IDE compatibility; CLI is still the canonical interface.
+
+## Next Steps (Recommended)
+
+1. Stabilize backend tests by making DB-dependent specs self-start ArangoDB (or isolate with test profile).
+2. Resolve `ConflictDetectorSpec` expectation drift (`"Contradictory"` vs `"Potential inconsistency"`).
+3. Add a CI pipeline that runs `npm test` and `sbt memoryLayer/test` with Arango service container.
+4. Add parser diagnostics reporting in CLI output when fallback/unresolved references are returned.
 
 ## Architecture
 
 ```
-                    ┌──────────────────┐     ┌───────────┐
-┌─────────────┐    │  Memory Layer    │────>│ ArangoDB  │
-│  ix CLI     │───>│  (Scala/http4s)  │     │  (Graph)  │
-│  (canonical)│    └──────────────────┘     └───────────┘
-└─────────────┘              ▲
-                    ┌────────┘
-                    │
-              ┌─────┴───────┐
-              │  MCP Server │  (compatibility only)
-              └─────────────┘
+ix-cli  --->  memory-layer (http4s)  --->  ArangoDB
+   \
+    \--> mcp server (compatibility mode)
 ```
-
-- **Memory Layer** — Scala 2.13, Cats Effect 3, http4s 0.23, Circe. Handles ingestion, parsing, graph operations, context assembly with 6-factor confidence scoring.
-- **CLI + MCP** — TypeScript, Commander, MCP SDK. Thin client that talks to the Memory Layer REST API.
-- **ArangoDB** — Multi-model database used as the graph store. All nodes, edges, claims, and patches stored here.
-
-## Supported File Types
-
-| Extension | Parser | What It Extracts |
-|-----------|--------|------------------|
-| `.py` | Tree-sitter | Modules, classes, functions, imports, calls |
-| `.ts`, `.tsx` | Regex | Classes, functions, interfaces, imports, calls |
-| `.json`, `.yaml`, `.yml`, `.toml` | Config | Config entries, nested keys, values |
-| `.md` | Markdown | Document sections by heading hierarchy |
-
-## Confidence Scoring
-
-Every claim returned by `ix query` includes a 6-factor confidence breakdown:
-
-| Factor | What It Measures |
-|--------|-----------------|
-| **Base Authority** | Source type weight (code > config > docs > inferred) |
-| **Verification** | Whether the claim has been independently verified |
-| **Recency** | How recently the source was observed |
-| **Corroboration** | How many independent sources confirm the claim |
-| **Conflict Penalty** | Reduction if the claim is part of a detected conflict |
-| **Intent Alignment** | Whether the claim connects to a stated project goal |
-
-Final score = `base × verification × recency × corroboration × conflict_penalty × intent_alignment`
-
-## Scripts
-
-| Script | Description |
-|--------|-------------|
-| `./stack.sh` | Build JAR + start full stack via Docker Compose |
-| `./stack.sh down` | Stop the stack |
-| `./stack.sh clean` | Stop + remove data volumes |
-| `./stack.sh logs` | Tail container logs |
-| `./dev.sh` | Start only ArangoDB (for dev — run `sbt run` separately) |
-| `./dev.sh down` | Stop ArangoDB |
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `IX_ENDPOINT` | `http://localhost:8090` | Memory Layer URL (used by CLI and MCP) |
-| `ARANGO_HOST` | `localhost` | ArangoDB host |
-| `ARANGO_PORT` | `8529` | ArangoDB port |
-| `ARANGO_DATABASE` | `ix_memory` | ArangoDB database name |
-| `ARANGO_USER` | `root` | ArangoDB user |
-| `ARANGO_PASSWORD` | (empty) | ArangoDB password |
 
 ## License
 
