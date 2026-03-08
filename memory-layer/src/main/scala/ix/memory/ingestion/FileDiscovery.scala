@@ -68,20 +68,29 @@ object FileDiscovery {
       pb.directory(dir.toFile)
       pb.redirectErrorStream(true)
       val proc = pb.start()
-      val output = new String(proc.getInputStream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)
-      val exitCode = proc.waitFor()
-      if (exitCode != 0) return None
+      val reader = new java.io.BufferedReader(
+        new java.io.InputStreamReader(proc.getInputStream, java.nio.charset.StandardCharsets.UTF_8)
+      )
+      val result = scala.collection.mutable.ListBuffer.empty[Path]
 
-      val files = output.split("\n").toList
-        .filter(_.nonEmpty)
-        .map(rel => dir.resolve(rel).normalize())
-        .filter(p => Files.isRegularFile(p))
-        .filter { p =>
-          val isUnder = if (recursive) true else p.getParent == dir
-          isUnder && matchesFilter(p, extensions)
+      try {
+        var line = reader.readLine()
+        while (line != null) {
+          if (line.nonEmpty) {
+            val p = dir.resolve(line).normalize()
+            val isUnder = if (recursive) true else p.getParent == dir
+            if (isUnder && Files.isRegularFile(p) && matchesFilter(p, extensions)) {
+              result += p
+            }
+          }
+          line = reader.readLine()
         }
+      } finally {
+        reader.close()
+      }
 
-      Some(files)
+      val exitCode = proc.waitFor()
+      if (exitCode != 0) None else Some(result.toList)
     } catch {
       case _: Throwable => None
     }
