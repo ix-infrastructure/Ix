@@ -19,14 +19,16 @@ beforeAll(async () => {
 });
 
 describe("CLAUDE_MD template", () => {
-  it("contains all 7 mandatory rules", () => {
-    expect(CLAUDE_MD).toContain("ix_query");
+  it("contains all 7 mandatory rules and command routing", () => {
     expect(CLAUDE_MD).toContain("ix_decide");
     expect(CLAUDE_MD).toContain("ix_conflicts");
     expect(CLAUDE_MD).toContain("NEVER guess");
     expect(CLAUDE_MD).toContain("ix_ingest");
     expect(CLAUDE_MD).toContain("ix://session/context");
     expect(CLAUDE_MD).toContain("ix_truth");
+    expect(CLAUDE_MD).toContain("ix_search");
+    expect(CLAUDE_MD).toContain("ix_entity");
+    expect(CLAUDE_MD).toContain("ix_expand");
   });
 
   it("contains a Workflow section", () => {

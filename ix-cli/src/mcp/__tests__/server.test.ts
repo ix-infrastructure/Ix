@@ -35,17 +35,19 @@ describe("MCP server INSTRUCTIONS", () => {
     expect(INSTRUCTIONS).toContain("ix_truth");
   });
 
-  it("is under 30 lines to stay concise", () => {
+  it("is under 40 lines to stay concise", () => {
     const lines = INSTRUCTIONS.split("\n");
-    expect(lines.length).toBeLessThan(30);
+    expect(lines.length).toBeLessThan(40);
   });
 
   it("contains behavioral checks section", () => {
     expect(INSTRUCTIONS).toContain("BEHAVIORAL CHECKS");
   });
 
-  it("contains a stop-and-query nudge", () => {
-    expect(INSTRUCTIONS).toContain("STOP and call it");
+  it("contains routing guidance for codebase questions", () => {
+    expect(INSTRUCTIONS).toContain("ix_search");
+    expect(INSTRUCTIONS).toContain("ix_entity");
+    expect(INSTRUCTIONS).toContain("ix_expand");
   });
 
   it("describes what Ix returns", () => {

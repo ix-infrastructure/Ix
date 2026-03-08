@@ -6,10 +6,23 @@ This project uses Ix Memory for persistent, time-aware context.
 - Name: {{PROJECT_NAME}}
 
 ## MANDATORY RULES
-1. BEFORE answering any question about this codebase → call ix_query
+1. BEFORE answering codebase questions → use targeted Ix tools (see routing below), NOT ix_query
 2. AFTER making any design/architecture decision → call ix_decide
 3. When noticing contradictory information → call ix_conflicts
 4. NEVER guess about codebase facts when Ix has structured data
 5. After modifying code → call ix_ingest on changed files
 6. At start of each session → review ix://session/context for prior work
 7. When the user states a goal → call ix_truth to record it
+
+## Preferred Ix Command Routing
+- ix_search — find entities by name/kind/language
+- ix_entity — get full entity details by ID
+- ix_expand — traverse edges (CALLS, IMPORTS, CONTAINS)
+- ix_text — fast lexical search (ripgrep)
+- ix_decisions — list past design decisions
+- ix_history — entity provenance chain
+- ix_diff — changes between revisions
+
+## Avoid ix_query
+ix_query is deprecated — broad NLP-style queries produce oversized, low-signal responses.
+Decompose questions into targeted ix_search + ix_entity + ix_expand calls.

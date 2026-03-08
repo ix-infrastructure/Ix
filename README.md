@@ -59,10 +59,12 @@ This checks the backend is running, creates `~/.ix/config.yaml`, and adds Ix rul
 ix ingest ./src --recursive
 ```
 
-### 5. Query
+### 5. Explore
 
 ```bash
-ix query "What does the UserService class do?"
+ix search "UserService" --kind class
+ix explain UserService
+ix callers UserService
 ```
 
 ## CLI Commands
@@ -74,9 +76,18 @@ All commands accept `--format json` for machine-readable output.
 | Command | Usage | Description |
 |---------|-------|-------------|
 | `ix status` | `ix status` | Check backend health |
-| `ix query` | `ix query <question>` | Query the knowledge graph |
 | `ix ingest` | `ix ingest <path> [--recursive]` | Ingest source files |
 | `ix search` | `ix search <term> [--limit N]` | Search nodes by term |
+| `ix explain` | `ix explain <symbol>` | Understand an entity |
+| `ix callers` | `ix callers <symbol>` | What calls a function |
+| `ix callees` | `ix callees <symbol>` | What a function calls |
+| `ix contains` | `ix contains <symbol>` | Members of a class/module |
+| `ix imports` | `ix imports <symbol>` | What an entity imports |
+| `ix depends` | `ix depends <symbol>` | Dependency impact analysis |
+| `ix text` | `ix text <term>` | Fast lexical search (ripgrep) |
+| `ix read` | `ix read <target>` | Read source code |
+| `ix locate` | `ix locate <symbol>` | Find a symbol (graph + text) |
+| `ix query` | `ix query <question> --unsafe` | [DEPRECATED] Broad graph query |
 
 ### Decisions & Intents
 
@@ -130,7 +141,7 @@ ix mcp-install
 
 | Tool | Description |
 |------|-------------|
-| `ix_query` | Query the knowledge graph (ALWAYS call before answering codebase questions) |
+| `ix_query` | [DEPRECATED] Broad graph query — use ix_search + ix_entity + ix_expand instead |
 | `ix_ingest` | Ingest files into the graph (call IMMEDIATELY after file changes) |
 | `ix_decide` | Record a design decision with rationale |
 | `ix_search` | Search nodes by term |

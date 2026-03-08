@@ -16,7 +16,7 @@ export const IX_CLAUDE_MD_BLOCK = `${IX_MARKER_START}
 This project uses Ix Memory — persistent, time-aware context for LLM assistants.
 
 ## MANDATORY RULES
-1. BEFORE answering any question about the codebase → call \`ix_query\` first. Do NOT answer from training data alone.
+1. BEFORE answering codebase questions → use targeted Ix tools (see Command Routing below). Do NOT answer from training data alone.
 2. AFTER every design or architecture decision → call \`ix_decide\` with both the conclusion AND the reasoning.
 3. When you notice contradictory information → call \`ix_conflicts\` and present conflicts to the user before continuing.
 4. NEVER guess about codebase facts — if Ix has structured data, use it. Say "according to Ix" when citing results.
@@ -24,15 +24,43 @@ This project uses Ix Memory — persistent, time-aware context for LLM assistant
 6. At start of each session → review \`ix://session/context\` to load prior work and decisions.
 7. When the user states a goal → call \`ix_truth\` to record the intent so all decisions can trace back to it.
 
+## Preferred Ix Command Routing
+
+Use bounded, composable primitives — never broad NLP-style queries.
+
+- \`ix_search\` — find entities by name, kind, or language (\`--kind class --limit 10\`)
+- \`ix_entity\` — get full entity details (node, claims, edges) by ID
+- \`ix_expand\` — traverse edges: CALLS, IMPORTS, CONTAINS (use direction + predicates)
+- \`ix_text\` — fast lexical search via ripgrep (\`--language python --path src/\`)
+- \`ix_decisions\` — list past design decisions (\`--topic "ingestion"\`)
+- \`ix_history\` — entity provenance chain
+- \`ix_diff\` — what changed between revisions
+- \`ix_conflicts\` — detect contradictions
+- \`ix_truth\` — manage project intents/goals
+
+### Decompose broad questions into targeted calls:
+- "How does X work?" → \`ix_search "X"\` → \`ix_entity <id>\` → \`ix_expand <id>\`
+- "What depends on Y?" → \`ix_search "Y"\` → \`ix_expand <id> direction=in predicates=["CALLS"]\`
+- "List all imports" → \`ix_search "" --kind file\` → \`ix_expand <id> predicates=["IMPORTS"]\`
+
+### Best practices:
+- Always use \`--kind\` and \`--limit\` to constrain search results
+- Use \`--path\` to restrict text searches to specific directories
+- Use exact entity IDs from previous results, not broad queries
+
+## Avoid ix_query
+
+\`ix_query\` is **deprecated**. It produces broad, oversized, low-signal responses. Do NOT use it for repo-wide inventory, NLP-style QA, or exploratory graph sweeps. Decompose into the targeted commands above.
+
 ## Workflow
-A typical session follows this flow:
 1. **Start** — Read \`ix://session/context\` and \`ix://project/intent\` to understand prior state.
-2. **Query** — Before any task, call \`ix_query\` to get relevant context from the knowledge graph.
+2. **Explore** — Use \`ix_search\` + \`ix_entity\` + \`ix_expand\` to understand relevant code.
 3. **Work** — Implement changes, making decisions as needed.
 4. **Ingest** — After each file change, call \`ix_ingest\` immediately to keep the graph current.
 5. **Decide** — Record any design decisions with \`ix_decide\` so future sessions can understand why.
 
 ## What NOT to Do
+- Do NOT use \`ix_query\` for broad exploration — decompose into targeted commands instead.
 - Do NOT answer architecture questions from training data alone — always check Ix first.
 - Do NOT skip \`ix_ingest\` after modifying files — stale memory leads to wrong answers next session.
 - Do NOT record a decision without rationale — "we chose X" is useless without "because Y".
@@ -43,13 +71,6 @@ Ix returns confidence scores with query results. When data has low confidence:
 - Mention the uncertainty to the user (e.g., "Ix has low confidence on this — it may be outdated").
 - Suggest re-ingesting the relevant files to improve confidence.
 - Never present low-confidence data as established fact.
-
-## Command Routing
-- \`ix text\` — exact lexical / snippet / filename lookup (fast, uses ripgrep)
-- \`ix search\` — graph entity search by name, kind, or attribute
-- \`ix query\` — semantic questions about the codebase (assembles context with confidence)
-- \`ix decisions\` — list and inspect recorded design decisions
-- \`ix history\` / \`ix diff\` — temporal questions about entity changes
 ${IX_MARKER_END}`;
 
 export function registerInitCommand(program: Command): void {

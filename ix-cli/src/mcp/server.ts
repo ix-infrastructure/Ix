@@ -18,7 +18,7 @@ export const INSTRUCTIONS = `You have access to Ix Memory — a persistent, time
 Ix returns structured context: nodes, edges, claims, conflicts, and decisions — each with confidence scores.
 
 MANDATORY RULES:
-1. ALWAYS call ix_query before answering questions about the codebase — if you are about to answer and have not called ix_query yet, STOP and call it first
+1. BEFORE answering codebase questions, use targeted Ix tools (NOT ix_query — it is deprecated)
 2. AFTER any design decision, call ix_decide to record it with full reasoning
 3. When you notice conflicting information, call ix_conflicts and present results to the user
 4. NEVER answer from training data alone when Ix has structured data available
@@ -26,8 +26,25 @@ MANDATORY RULES:
 6. At start of each session, review ix://session/context for prior work and decisions
 7. When the user states a goal, call ix_truth to record the intent so decisions trace back to it
 
+PREFERRED IX COMMAND ROUTING:
+- Find an entity by name → ix_search (with --kind, --limit for precision)
+- Understand a symbol → ix_entity (by ID) or ix_expand (neighborhood)
+- What calls a function → ix_expand with direction=in, predicates=["CALLS"]
+- What a function calls → ix_expand with direction=out, predicates=["CALLS"]
+- Members of a class → ix_expand with direction=out, predicates=["CONTAINS"]
+- What imports something → ix_expand with direction=in, predicates=["IMPORTS"]
+- Exact text/snippet search → ix_text (fast ripgrep-based)
+- Past decisions → ix_decisions
+- Entity change history → ix_history
+- What changed between revisions → ix_diff
+
+AVOID ix_query:
+- ix_query is DEPRECATED — it produces broad, oversized, low-signal responses
+- Instead, decompose questions into targeted tool calls above
+- Example: "how does ingestion work?" → ix_search "IngestionService" → ix_entity <id> → ix_expand <id>
+
 BEHAVIORAL CHECKS:
-- About to answer a codebase question? → Did you call ix_query? If not, STOP and call it.
+- About to answer a codebase question? → Use ix_search + ix_entity + ix_expand, NOT ix_query
 - Just made a design choice? → Call ix_decide before moving on.
 - Just edited a file? → Call ix_ingest now, not later.
 - See something contradictory? → Call ix_conflicts before proceeding.
@@ -49,16 +66,38 @@ const server = new McpServer(
 
 // ============================= TOOLS =======================================
 
-// --- ix_query ---------------------------------------------------------------
+// --- ix_query [DEPRECATED] ---------------------------------------------------
 server.tool(
   "ix_query",
-  "ALWAYS call this tool BEFORE answering any question about the codebase, architecture, or technical decisions. Ix Memory contains structured, versioned knowledge with confidence scores. Never rely on your training data alone when Ix has data available. Results include confidence scores — mention uncertainty to the user when confidence is low.",
+  "[DEPRECATED] Broad NLP-style graph query — produces oversized, low-signal responses. Use targeted tools instead: ix_search (find entities), ix_entity (get details), ix_expand (traverse edges), ix_text (lexical search), ix_decisions (past decisions). Decompose questions into specific tool calls rather than issuing a single broad query.",
   {
     question: z.string().describe("The question to ask the knowledge graph"),
     asOfRev: z.optional(z.number()).describe("Optional revision snapshot"),
     depth: z.optional(z.string()).describe("Query depth: shallow | deep"),
   },
   async ({ question, asOfRev, depth }) => {
+    const deprecationWarning = [
+      "⚠ ix_query is DEPRECATED — broad NLP-style queries produce oversized, low-signal responses.",
+      "",
+      "Prefer these targeted alternatives:",
+      "  ix_search — find entities by name/kind",
+      "  ix_entity — get full entity details by ID",
+      "  ix_expand — traverse edges (CALLS, IMPORTS, CONTAINS)",
+      "  ix_text — fast lexical search (ripgrep)",
+      "  ix_decisions — list design decisions",
+      "  ix_history — entity change history",
+      "  ix_diff — changes between revisions",
+      "",
+      "Decompose broad questions into specific tool calls.",
+      "Example: 'how does ingestion work?' →",
+      "  1. ix_search 'IngestionService'",
+      "  2. ix_entity <id>",
+      "  3. ix_expand <id> direction=out predicates=[CONTAINS]",
+      "",
+      "--- query results follow (not recommended) ---",
+      "",
+    ].join("\n");
+
     try {
       const ctx = await client.query(question, { asOfRev, depth });
       // Track session
@@ -67,7 +106,7 @@ server.tool(
         session.trackEntities(ctx.nodes.map((n: any) => n.id));
       }
       return {
-        content: [{ type: "text" as const, text: JSON.stringify(ctx, null, 2) }],
+        content: [{ type: "text" as const, text: deprecationWarning + JSON.stringify(ctx, null, 2) }],
       };
     } catch (err) {
       return {
@@ -462,7 +501,7 @@ server.tool(
 // --- ix_text -----------------------------------------------------------------
 server.tool(
   "ix_text",
-  "Fast lexical/text search across the codebase. Use for exact string matches, symbol lookups, and filename searches. For semantic questions use ix_query instead.",
+  "Fast lexical/text search across the codebase. Use for exact string matches, symbol lookups, and filename searches. Combine with ix_search and ix_entity for comprehensive results.",
   {
     term: z.string().describe("Text/pattern to search for"),
     limit: z.optional(z.number()).describe("Max results (default 20)"),
