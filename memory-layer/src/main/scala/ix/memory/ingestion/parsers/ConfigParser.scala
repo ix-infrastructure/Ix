@@ -63,7 +63,7 @@ class ConfigParser extends Parser {
     }
 
     val relationships = entries.map { case (key, _, _) =>
-      ParsedRelationship(fileName, key, "DEFINES")
+      ParsedRelationship(fileName, key, "CONTAINS")
     }
 
     ParseResult(

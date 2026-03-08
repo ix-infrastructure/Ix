@@ -103,8 +103,8 @@ class TreeSitterPythonParser extends Parser {
           lineStart = lineNum,
           lineEnd   = classEnd
         )
-        // File DEFINES class
-        relationships = relationships :+ ParsedRelationship(fileName, className, "DEFINES")
+        // File CONTAINS class
+        relationships = relationships :+ ParsedRelationship(fileName, className, "CONTAINS")
         classRanges = classRanges :+ (className, lineNum, classEnd)
       }
 
@@ -130,7 +130,7 @@ class TreeSitterPythonParser extends Parser {
             relationships = relationships :+ ParsedRelationship(className, funcName, "CONTAINS")
           case None =>
             // Top-level function — file defines it
-            relationships = relationships :+ ParsedRelationship(fileName, funcName, "DEFINES")
+            relationships = relationships :+ ParsedRelationship(fileName, funcName, "CONTAINS")
         }
 
         // Extract function calls within the function body

@@ -57,7 +57,7 @@ class TypeScriptParser extends Parser {
             lineStart = lineNum,
             lineEnd   = classEnd
           )
-          relationships = relationships :+ ParsedRelationship(fileName, className, "DEFINES")
+          relationships = relationships :+ ParsedRelationship(fileName, className, "CONTAINS")
           relationships = relationships :+ ParsedRelationship(fileName, className, "CONTAINS")
           classRanges = classRanges :+ (className, lineNum, classEnd)
 
@@ -85,7 +85,7 @@ class TypeScriptParser extends Parser {
               lineStart = lineNum,
               lineEnd   = funcEnd
             )
-            relationships = relationships :+ ParsedRelationship(fileName, funcName, "DEFINES")
+            relationships = relationships :+ ParsedRelationship(fileName, funcName, "CONTAINS")
 
             // Extract calls within this function
             val calls = extractCalls(lines, idx, funcEnd, funcName)
@@ -114,7 +114,7 @@ class TypeScriptParser extends Parser {
                 lineStart = lineNum,
                 lineEnd   = funcEnd
               )
-              relationships = relationships :+ ParsedRelationship(fileName, funcName, "DEFINES")
+              relationships = relationships :+ ParsedRelationship(fileName, funcName, "CONTAINS")
 
               val callRels = extractCalls(lines, idx, funcEnd, funcName)
               relationships = relationships ++ callRels
@@ -168,7 +168,7 @@ class TypeScriptParser extends Parser {
               lineStart = lineNum,
               lineEnd   = ifaceEnd
             )
-            relationships = relationships :+ ParsedRelationship(fileName, ifaceName, "DEFINES")
+            relationships = relationships :+ ParsedRelationship(fileName, ifaceName, "CONTAINS")
           }
         }
 
@@ -186,7 +186,7 @@ class TypeScriptParser extends Parser {
               lineStart = lineNum,
               lineEnd   = lineNum
             )
-            relationships = relationships :+ ParsedRelationship(fileName, typeName, "DEFINES")
+            relationships = relationships :+ ParsedRelationship(fileName, typeName, "CONTAINS")
           }
         }
 

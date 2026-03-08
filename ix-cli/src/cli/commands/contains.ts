@@ -15,7 +15,7 @@ export function registerContainsCommand(program: Command): void {
       const target = await resolveEntity(client, symbol, ["class", "object", "trait", "interface", "module", "file"], opts);
       if (!target) return;
       printResolved(target);
-      const result = await client.expand(target.id, { direction: "out", predicates: ["CONTAINS", "DEFINES"] });
+      const result = await client.expand(target.id, { direction: "out", predicates: ["CONTAINS"] });
       formatEdgeResults(result.nodes, "contains", target.name, opts.format, target);
     });
 }

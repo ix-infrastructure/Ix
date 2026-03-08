@@ -79,7 +79,7 @@ class ScalaParser extends Parser {
               lineStart = lineNum,
               lineEnd   = endLine
             )
-            relationships = relationships :+ ParsedRelationship(fileName, name, "DEFINES")
+            relationships = relationships :+ ParsedRelationship(fileName, name, "CONTAINS")
             typeRanges = typeRanges :+ (name, lineNum, endLine)
             true
 
@@ -97,7 +97,7 @@ class ScalaParser extends Parser {
                   lineStart = lineNum,
                   lineEnd   = endLine
                 )
-                relationships = relationships :+ ParsedRelationship(fileName, name, "DEFINES")
+                relationships = relationships :+ ParsedRelationship(fileName, name, "CONTAINS")
                 typeRanges = typeRanges :+ (name, lineNum, endLine)
                 true
 
@@ -115,7 +115,7 @@ class ScalaParser extends Parser {
                       lineStart = lineNum,
                       lineEnd   = endLine
                     )
-                    relationships = relationships :+ ParsedRelationship(fileName, name, "DEFINES")
+                    relationships = relationships :+ ParsedRelationship(fileName, name, "CONTAINS")
                     typeRanges = typeRanges :+ (name, lineNum, endLine)
                     true
 
@@ -133,7 +133,7 @@ class ScalaParser extends Parser {
                           lineStart = lineNum,
                           lineEnd   = endLine
                         )
-                        relationships = relationships :+ ParsedRelationship(fileName, name, "DEFINES")
+                        relationships = relationships :+ ParsedRelationship(fileName, name, "CONTAINS")
                         typeRanges = typeRanges :+ (name, lineNum, endLine)
                         true
                       case None => false
@@ -158,7 +158,7 @@ class ScalaParser extends Parser {
 
             val (kind, edgePredicate, edgeSrc) = enclosing match {
               case Some((typeName, _, _)) => (NodeKind.Method, "CONTAINS", typeName)
-              case None                   => (NodeKind.Function, "DEFINES", fileName)
+              case None                   => (NodeKind.Function, "CONTAINS", fileName)
             }
 
             entities = entities :+ ParsedEntity(

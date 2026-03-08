@@ -24,7 +24,7 @@ export function registerExplainCommand(program: Command): void {
 
       const edges = (details.edges ?? []) as any[];
       const containsEdge = edges.find((e: any) =>
-        (e.predicate === "CONTAINS" || e.predicate === "DEFINES") && e.dst === target.id
+        e.predicate === "CONTAINS" && e.dst === target.id
       );
       let container: any = undefined;
       if (containsEdge) {
@@ -36,7 +36,7 @@ export function registerExplainCommand(program: Command): void {
 
       const callEdges = edges.filter((e: any) => e.predicate === "CALLS");
       const containedEdges = edges.filter((e: any) =>
-        (e.predicate === "CONTAINS" || e.predicate === "DEFINES") && e.src === target.id
+        e.predicate === "CONTAINS" && e.src === target.id
       );
 
       const node = details.node as any;
