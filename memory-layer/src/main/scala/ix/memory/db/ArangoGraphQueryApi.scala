@@ -342,6 +342,73 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
     }
   }
 
+  override def expandByName(
+    name: String,
+    direction: Direction,
+    predicates: Option[Set[String]] = None,
+    kinds: Option[Set[NodeKind]] = None
+  ): IO[ExpandResult] = {
+    val kindFilter = kinds.filter(_.nonEmpty) match {
+      case Some(_) => " AND n.kind IN @kinds"
+      case None    => ""
+    }
+    val predicateFilter = predicates.filter(_.nonEmpty) match {
+      case Some(_) => " AND e.predicate IN @predicates"
+      case None    => ""
+    }
+    val directionFilter = direction match {
+      case Direction.Out  => "FILTER e.src IN target_ids"
+      case Direction.In   => "FILTER e.dst IN target_ids"
+      case Direction.Both => "FILTER e.src IN target_ids OR e.dst IN target_ids"
+    }
+
+    val aql =
+      s"""LET target_ids = (
+         |  FOR n IN nodes
+         |    FILTER n.name == @name AND n.deleted_rev == null
+         |      $kindFilter
+         |    RETURN DISTINCT n.logical_id
+         |)
+         |FOR e IN edges
+         |  FILTER e.deleted_rev == null
+         |  $directionFilter
+         |  $predicateFilter
+         |  LET other_id = (e.src IN target_ids ? e.dst : e.src)
+         |  LET other = FIRST(
+         |    FOR n IN nodes
+         |      FILTER n.logical_id == other_id AND n.deleted_rev == null
+         |      SORT n.created_rev DESC
+         |      LIMIT 1
+         |      RETURN n
+         |  )
+         |  FILTER other != null
+         |  RETURN { edge: e, node: other }""".stripMargin
+
+    val binds = scala.collection.mutable.Map[String, AnyRef](
+      "name" -> name.asInstanceOf[AnyRef]
+    )
+    kinds.filter(_.nonEmpty).foreach { ks =>
+      val kindList = new java.util.ArrayList[String]()
+      ks.foreach(k => kindList.add(nodeKindToString(k)))
+      binds += ("kinds" -> kindList.asInstanceOf[AnyRef])
+    }
+    predicates.filter(_.nonEmpty).foreach { ps =>
+      val predList = new java.util.ArrayList[String]()
+      ps.foreach(predList.add)
+      binds += ("predicates" -> predList.asInstanceOf[AnyRef])
+    }
+
+    client.query(aql, binds.toMap).map { results =>
+      val edges = results.flatMap { json =>
+        json.hcursor.downField("edge").focus.flatMap(parseEdge)
+      }.toVector
+      val nodes = results.flatMap { json =>
+        json.hcursor.downField("node").focus.flatMap(parseNode)
+      }.toVector
+      ExpandResult(nodes, edges)
+    }
+  }
+
   // ── JSON Parsers (snake_case → camelCase) ───────────────────────────
 
   private def parseNode(json: Json): Option[GraphNode] = {

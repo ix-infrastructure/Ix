@@ -21,6 +21,12 @@ trait GraphQueryApi {
   def getChangedEntities(fromRev: Rev, toRev: Rev): IO[Vector[(GraphNode, Option[GraphNode])]]
   def resolvePrefix(prefix: String): IO[Vector[NodeId]]
   def getSourceHashes(sourceUris: Seq[String]): IO[Map[String, String]]
+  def expandByName(
+    name: String,
+    direction: Direction,
+    predicates: Option[Set[String]] = None,
+    kinds: Option[Set[NodeKind]] = None
+  ): IO[ExpandResult]
 }
 
 sealed trait Direction

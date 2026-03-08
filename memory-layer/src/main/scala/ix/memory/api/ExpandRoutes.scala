@@ -25,6 +25,17 @@ object ExpandRequest {
   implicit val decoder: Decoder[ExpandRequest] = deriveDecoder[ExpandRequest]
 }
 
+case class ExpandByNameRequest(
+  name: String,
+  direction: Option[String] = None,
+  predicates: Option[List[String]] = None,
+  kinds: Option[List[String]] = None
+)
+
+object ExpandByNameRequest {
+  implicit val decoder: Decoder[ExpandByNameRequest] = deriveDecoder[ExpandByNameRequest]
+}
+
 class ExpandRoutes(queryApi: GraphQueryApi) {
 
   val routes: HttpRoutes[IO] = HttpRoutes.of[IO] {
@@ -41,6 +52,22 @@ class ExpandRoutes(queryApi: GraphQueryApi) {
         }
         preds = body.predicates.map(_.toSet)
         result <- queryApi.expand(nodeId, dir, preds, body.hops.getOrElse(1), body.asOfRev.map(Rev(_)))
+        resp <- Ok(result.asJson)
+      } yield resp).handleErrorWith(ErrorHandler.handle(_))
+
+    case req @ POST -> Root / "v1" / "expand-by-name" =>
+      (for {
+        body <- req.as[ExpandByNameRequest]
+        dir = body.direction match {
+          case Some("in")  => Direction.In
+          case Some("out") => Direction.Out
+          case _           => Direction.Both
+        }
+        preds = body.predicates.map(_.toSet)
+        kinds = body.kinds.map(_.flatMap(k =>
+          NodeKind.decoder.decodeJson(io.circe.Json.fromString(k)).toOption
+        ).toSet)
+        result <- queryApi.expandByName(body.name, dir, preds, kinds)
         resp <- Ok(result.asJson)
       } yield resp).handleErrorWith(ErrorHandler.handle(_))
   }
