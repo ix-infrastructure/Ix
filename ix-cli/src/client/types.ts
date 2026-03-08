@@ -150,3 +150,31 @@ export interface IngestResult {
 export interface HealthResponse {
   status: string;
 }
+
+export interface PatchSource {
+  uri: string;
+  sourceHash?: string;
+  extractor: string;
+  sourceType: string;
+}
+
+export interface PatchOp {
+  type: string;
+  [key: string]: unknown;
+}
+
+export interface GraphPatchPayload {
+  patchId: string;
+  actor: string;
+  timestamp: string;
+  source: PatchSource;
+  baseRev: number;
+  ops: PatchOp[];
+  replaces: string[];
+  intent?: string;
+}
+
+export interface PatchCommitResult {
+  status: string;
+  rev: number;
+}

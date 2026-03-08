@@ -5,6 +5,8 @@ import type {
   GraphNode,
   HealthResponse,
   PatchSummary,
+  GraphPatchPayload,
+  PatchCommitResult,
 } from "./types.js";
 
 export class IxClient {
@@ -139,6 +141,10 @@ export class IxClient {
 
   async provenance(entityId: string): Promise<unknown> {
     return this.post(`/v1/provenance/${entityId}`, {});
+  }
+
+  async commitPatch(patch: GraphPatchPayload): Promise<PatchCommitResult> {
+    return this.post("/v1/patch", patch);
   }
 
   async stats(): Promise<any> {
