@@ -15,6 +15,7 @@ export function registerTextCommand(program: Command): void {
     .option("--language <lang>", "Filter by language (python, typescript, scala, etc.)")
     .option("--format <fmt>", "Output format (text|json)", "text")
     .option("--root <dir>", "Workspace root directory")
+    .addHelpText("after", "\nExamples:\n  ix text verify_token --language python\n  ix text \"class.*Service\" --limit 10 --format json\n  ix text TODO --path src/")
     .action(async (term: string, opts: { limit: string; path: string; format: string; language?: string; root?: string }) => {
       const limit = parseInt(opts.limit, 10);
       const searchPath = opts.path !== "." ? opts.path : resolveWorkspaceRoot(opts.root);

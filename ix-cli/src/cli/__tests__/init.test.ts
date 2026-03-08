@@ -19,24 +19,24 @@ beforeAll(async () => {
 });
 
 describe("CLAUDE_MD template", () => {
-  it("contains all 7 mandatory rules and command routing", () => {
-    expect(CLAUDE_MD).toContain("ix_decide");
-    expect(CLAUDE_MD).toContain("ix_conflicts");
+  it("contains mandatory rules and CLI command routing", () => {
+    expect(CLAUDE_MD).toContain("ix decide");
+    expect(CLAUDE_MD).toContain("ix conflicts");
     expect(CLAUDE_MD).toContain("NEVER guess");
-    expect(CLAUDE_MD).toContain("ix_ingest");
-    expect(CLAUDE_MD).toContain("ix://session/context");
-    expect(CLAUDE_MD).toContain("ix_truth");
-    expect(CLAUDE_MD).toContain("ix_search");
-    expect(CLAUDE_MD).toContain("ix_entity");
-    expect(CLAUDE_MD).toContain("ix_expand");
+    expect(CLAUDE_MD).toContain("ix ingest");
+    expect(CLAUDE_MD).toContain("ix truth");
+    expect(CLAUDE_MD).toContain("ix search");
+    expect(CLAUDE_MD).toContain("ix explain");
+    expect(CLAUDE_MD).toContain("ix callers");
   });
 
-  it("contains a Workflow section", () => {
-    expect(CLAUDE_MD).toContain("## Workflow");
+  it("routes through CLI exclusively, not MCP", () => {
+    expect(CLAUDE_MD).toContain("ix` CLI exclusively");
+    expect(CLAUDE_MD).toContain("Do NOT use MCP");
   });
 
-  it("contains a What NOT to Do section", () => {
-    expect(CLAUDE_MD).toContain("## What NOT to Do");
+  it("contains a Do NOT Use section", () => {
+    expect(CLAUDE_MD).toContain("## Do NOT Use");
   });
 
   it("contains a Confidence Scores section", () => {
@@ -48,8 +48,8 @@ describe("CLAUDE_MD template", () => {
     expect(lines.length).toBeLessThan(80);
   });
 
-  it("has numbered rules 1-7 in the MANDATORY RULES section", () => {
-    for (let i = 1; i <= 7; i++) {
+  it("has numbered rules 1-6 in the MANDATORY RULES section", () => {
+    for (let i = 1; i <= 6; i++) {
       expect(CLAUDE_MD).toContain(`${i}.`);
     }
   });

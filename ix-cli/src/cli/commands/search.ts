@@ -12,6 +12,7 @@ export function registerSearchCommand(program: Command): void {
     .option("--language <lang>", "Filter by language/file extension (e.g. scala, ts)")
     .option("--as-of <rev>", "Search as of a specific revision")
     .option("--format <fmt>", "Output format (text|json)", "text")
+    .addHelpText("after", "\nExamples:\n  ix search IngestionService --kind class\n  ix search auth --language python --limit 10\n  ix search \"\" --kind file --limit 50 --format json")
     .action(async (term: string, opts: {
       limit: string; kind?: string; language?: string; asOf?: string; format: string
     }) => {

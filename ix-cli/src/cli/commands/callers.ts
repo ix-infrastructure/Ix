@@ -14,9 +14,12 @@ export function registerCallersCommand(program: Command): void {
     .command("callers <symbol>")
     .description("Show methods/functions that call the given symbol (cross-file)")
     .option("--kind <kind>", "Filter target entity by kind")
+    .option("--limit <n>", "Max results to show", "50")
     .option("--format <fmt>", "Output format (text|json)", "text")
-    .action(async (symbol: string, opts: { kind?: string; format: string }) => {
+    .addHelpText("after", "\nExamples:\n  ix callers verify_token\n  ix callers processPayment --format json\n  ix callers parse --kind method --limit 20")
+    .action(async (symbol: string, opts: { kind?: string; limit: string; format: string }) => {
       const client = new IxClient(getEndpoint());
+      const limit = parseInt(opts.limit, 10);
       const target = await resolveEntity(client, symbol, ["method", "function"], opts);
       if (!target) return;
       printResolved(target);
@@ -74,7 +77,7 @@ export function registerCallersCommand(program: Command): void {
         // Both graph and text empty
         formatEdgeResults([], "callers", target.name, opts.format, target, "graph");
       } else {
-        formatEdgeResults(result.nodes, "callers", target.name, opts.format, target, "graph");
+        formatEdgeResults(result.nodes.slice(0, limit), "callers", target.name, opts.format, target, "graph");
       }
     });
 
@@ -82,9 +85,12 @@ export function registerCallersCommand(program: Command): void {
     .command("callees <symbol>")
     .description("Show methods/functions called by the given symbol (cross-file)")
     .option("--kind <kind>", "Filter target entity by kind")
+    .option("--limit <n>", "Max results to show", "50")
     .option("--format <fmt>", "Output format (text|json)", "text")
-    .action(async (symbol: string, opts: { kind?: string; format: string }) => {
+    .addHelpText("after", "\nExamples:\n  ix callees processPayment\n  ix callees parse --format json")
+    .action(async (symbol: string, opts: { kind?: string; limit: string; format: string }) => {
       const client = new IxClient(getEndpoint());
+      const calleeLimit = parseInt(opts.limit, 10);
       const target = await resolveEntity(client, symbol, ["method", "function"], opts);
       if (!target) return;
       printResolved(target);
@@ -94,6 +100,6 @@ export function registerCallersCommand(program: Command): void {
         predicates: ["CALLS"],
         kinds: ["function", "method"],
       });
-      formatEdgeResults(result.nodes, "callees", target.name, opts.format, target, "graph");
+      formatEdgeResults(result.nodes.slice(0, calleeLimit), "callees", target.name, opts.format, target, "graph");
     });
 }

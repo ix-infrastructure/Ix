@@ -10,6 +10,7 @@ export function registerExplainCommand(program: Command): void {
     .description("Explain an entity — shows structure, container, and history")
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--format <fmt>", "Output format (text|json)", "text")
+    .addHelpText("after", "\nExamples:\n  ix explain IngestionService\n  ix explain verify_token --kind function --format json")
     .action(async (symbol: string, opts: { kind?: string; format: string }) => {
       const client = new IxClient(getEndpoint());
       const target = await resolveEntity(client, symbol, ["class", "function", "method", "trait", "object", "interface", "module", "file"], opts);

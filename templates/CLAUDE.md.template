@@ -5,24 +5,31 @@ This project uses Ix Memory for persistent, time-aware context.
 ## Project
 - Name: {{PROJECT_NAME}}
 
+## Interface
+Use the `ix` CLI exclusively. Do NOT use MCP tools — the CLI is the canonical agent interface.
+All commands support `--format json` for machine-readable output.
+
 ## MANDATORY RULES
-1. BEFORE answering codebase questions → use targeted Ix tools (see routing below), NOT ix_query
-2. AFTER making any design/architecture decision → call ix_decide
-3. When noticing contradictory information → call ix_conflicts
+1. BEFORE answering codebase questions → use targeted `ix` CLI commands (see routing below)
+2. AFTER making any design/architecture decision → run `ix decide`
+3. When noticing contradictory information → run `ix conflicts`
 4. NEVER guess about codebase facts when Ix has structured data
-5. After modifying code → call ix_ingest on changed files
-6. At start of each session → review ix://session/context for prior work
-7. When the user states a goal → call ix_truth to record it
+5. After modifying code → run `ix ingest` on changed files
+6. When the user states a goal → run `ix truth add`
 
-## Preferred Ix Command Routing
-- ix_search — find entities by name/kind/language
-- ix_entity — get full entity details by ID
-- ix_expand — traverse edges (CALLS, IMPORTS, CONTAINS)
-- ix_text — fast lexical search (ripgrep)
-- ix_decisions — list past design decisions
-- ix_history — entity provenance chain
-- ix_diff — changes between revisions
+## Ix CLI Command Routing
+- `ix search` — find entities by name/kind/language
+- `ix explain` — understand a symbol (structure, container, calls)
+- `ix read` — read source code by path or symbol
+- `ix entity` — full entity details by ID
+- `ix text` — fast lexical search (ripgrep)
+- `ix callers` / `ix callees` — call graph navigation
+- `ix contains` — members of a class/module
+- `ix imports` / `ix imported-by` — import graph
+- `ix depends` — dependency impact analysis
+- `ix decisions` — list past design decisions
+- `ix history` / `ix diff` — temporal queries
 
-## Avoid ix_query
-ix_query is deprecated — broad NLP-style queries produce oversized, low-signal responses.
-Decompose questions into targeted ix_search + ix_entity + ix_expand calls.
+## Do NOT Use
+- `ix query` — deprecated, oversized low-signal responses
+- MCP tools — deprecated, use CLI instead

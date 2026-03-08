@@ -15,62 +15,62 @@ export const IX_CLAUDE_MD_BLOCK = `${IX_MARKER_START}
 
 This project uses Ix Memory — persistent, time-aware context for LLM assistants.
 
+## Interface
+
+Use the \`ix\` CLI exclusively. Do NOT use MCP tools — the CLI is the canonical agent interface.
+All commands support \`--format json\` for machine-readable output.
+
 ## MANDATORY RULES
-1. BEFORE answering codebase questions → use targeted Ix tools (see Command Routing below). Do NOT answer from training data alone.
-2. AFTER every design or architecture decision → call \`ix_decide\` with both the conclusion AND the reasoning.
-3. When you notice contradictory information → call \`ix_conflicts\` and present conflicts to the user before continuing.
-4. NEVER guess about codebase facts — if Ix has structured data, use it. Say "according to Ix" when citing results.
-5. IMMEDIATELY after modifying code → call \`ix_ingest\` on changed files. Do not batch this to the end of the session.
-6. At start of each session → review \`ix://session/context\` to load prior work and decisions.
-7. When the user states a goal → call \`ix_truth\` to record the intent so all decisions can trace back to it.
+1. BEFORE answering codebase questions → use targeted \`ix\` CLI commands (see routing below). Do NOT answer from training data alone.
+2. AFTER every design or architecture decision → run \`ix decide <title> --rationale <text>\`.
+3. When you notice contradictory information → run \`ix conflicts\` and present results to the user.
+4. NEVER guess about codebase facts — if Ix has structured data, use it.
+5. IMMEDIATELY after modifying code → run \`ix ingest <path>\` on changed files.
+6. When the user states a goal → run \`ix truth add "<statement>"\`.
 
-## Preferred Ix Command Routing
+## Ix CLI Command Routing
 
-Use bounded, composable primitives — never broad NLP-style queries.
+Use bounded, composable CLI commands — never broad queries.
 
-- \`ix_search\` — find entities by name, kind, or language (\`--kind class --limit 10\`)
-- \`ix_entity\` — get full entity details (node, claims, edges) by ID
-- \`ix_expand\` — traverse edges: CALLS, IMPORTS, CONTAINS (use direction + predicates)
-- \`ix_text\` — fast lexical search via ripgrep (\`--language python --path src/\`)
-- \`ix_decisions\` — list past design decisions (\`--topic "ingestion"\`)
-- \`ix_history\` — entity provenance chain
-- \`ix_diff\` — what changed between revisions
-- \`ix_conflicts\` — detect contradictions
-- \`ix_truth\` — manage project intents/goals
+### Finding & Understanding Code
+- \`ix search <term>\` — find entities by name (\`--kind class --limit 10\`)
+- \`ix explain <symbol>\` — structure, container, history, calls
+- \`ix read <target>\` — read source (\`file.py:10-50\` or symbol name)
+- \`ix entity <id>\` — full entity details by ID
+- \`ix text <term>\` — fast text search (\`--language python --limit 20\`)
+- \`ix locate <symbol>\` — find symbol via graph + text
 
-### Decompose broad questions into targeted calls:
-- "How does X work?" → \`ix_search "X"\` → \`ix_entity <id>\` → \`ix_expand <id>\`
-- "What depends on Y?" → \`ix_search "Y"\` → \`ix_expand <id> direction=in predicates=["CALLS"]\`
-- "List all imports" → \`ix_search "" --kind file\` → \`ix_expand <id> predicates=["IMPORTS"]\`
+### Navigating Relationships
+- \`ix callers <symbol>\` — what calls a function (cross-file)
+- \`ix callees <symbol>\` — what a function calls
+- \`ix contains <symbol>\` — members of a class/module
+- \`ix imports <symbol>\` — what an entity imports
+- \`ix imported-by <symbol>\` — what imports an entity
+- \`ix depends <symbol>\` — dependency impact analysis
 
-### Best practices:
-- Always use \`--kind\` and \`--limit\` to constrain search results
-- Use \`--path\` to restrict text searches to specific directories
-- Use exact entity IDs from previous results, not broad queries
+### History & Decisions
+- \`ix decisions\` — list design decisions (\`--topic ingestion\`)
+- \`ix history <entityId>\` — entity provenance chain
+- \`ix diff <from> <to>\` — changes between revisions
+- \`ix conflicts\` — detect contradictions
 
-## Avoid ix_query
+### Best practices
+- Use \`--kind\` and \`--limit\` to constrain results
+- Use \`--format json\` when chaining command results
+- Use \`--path\` or \`--language\` to restrict text searches
+- Use exact entity IDs from previous JSON results
+- Decompose large questions into multiple targeted calls
 
-\`ix_query\` is **deprecated**. It produces broad, oversized, low-signal responses. Do NOT use it for repo-wide inventory, NLP-style QA, or exploratory graph sweeps. Decompose into the targeted commands above.
-
-## Workflow
-1. **Start** — Read \`ix://session/context\` and \`ix://project/intent\` to understand prior state.
-2. **Explore** — Use \`ix_search\` + \`ix_entity\` + \`ix_expand\` to understand relevant code.
-3. **Work** — Implement changes, making decisions as needed.
-4. **Ingest** — After each file change, call \`ix_ingest\` immediately to keep the graph current.
-5. **Decide** — Record any design decisions with \`ix_decide\` so future sessions can understand why.
-
-## What NOT to Do
-- Do NOT use \`ix_query\` for broad exploration — decompose into targeted commands instead.
-- Do NOT answer architecture questions from training data alone — always check Ix first.
-- Do NOT skip \`ix_ingest\` after modifying files — stale memory leads to wrong answers next session.
-- Do NOT record a decision without rationale — "we chose X" is useless without "because Y".
-- Do NOT ignore conflicts — if \`ix_conflicts\` returns results, surface them to the user before proceeding.
+## Do NOT Use
+- \`ix query\` — deprecated, oversized low-signal responses
+- MCP tools — deprecated, use CLI instead
+- Broad repo-wide inventory queries
 
 ## Confidence Scores
-Ix returns confidence scores with query results. When data has low confidence:
-- Mention the uncertainty to the user (e.g., "Ix has low confidence on this — it may be outdated").
-- Suggest re-ingesting the relevant files to improve confidence.
-- Never present low-confidence data as established fact.
+Ix returns confidence scores with results. When data has low confidence:
+- Mention the uncertainty to the user
+- Suggest re-ingesting the relevant files
+- Never present low-confidence data as established fact
 ${IX_MARKER_END}`;
 
 export function registerInitCommand(program: Command): void {

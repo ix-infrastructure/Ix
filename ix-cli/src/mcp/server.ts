@@ -1,8 +1,9 @@
 /**
- * Ix Memory MCP Server
+ * Ix Memory MCP Server (Compatibility Only)
  *
- * Exposes 14 tools and 2 resources over the Model Context Protocol,
- * providing persistent, time-aware memory to LLM coding assistants.
+ * The CLI (`ix` commands) is now the canonical agent interface.
+ * This MCP server is retained for backward compatibility but is
+ * no longer the recommended integration path.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -17,30 +18,21 @@ import { SessionState } from "./session.js";
 export const INSTRUCTIONS = `You have access to Ix Memory — a persistent, time-aware knowledge graph for this codebase.
 Ix returns structured context: nodes, edges, claims, conflicts, and decisions — each with confidence scores.
 
+NOTE: The ix CLI is now the canonical agent interface. Prefer running CLI commands
+(ix search, ix explain, ix callers, etc.) over these MCP tools when possible.
+These MCP tools are retained for backward compatibility.
+
 MANDATORY RULES:
 1. BEFORE answering codebase questions, use targeted Ix tools (NOT ix_query — it is deprecated)
 2. AFTER any design decision, call ix_decide to record it with full reasoning
 3. When you notice conflicting information, call ix_conflicts and present results to the user
 4. NEVER answer from training data alone when Ix has structured data available
 5. After modifying code, call ix_ingest IMMEDIATELY on changed files — not at end of session
-6. At start of each session, review ix://session/context for prior work and decisions
-7. When the user states a goal, call ix_truth to record the intent so decisions trace back to it
-
-PREFERRED IX COMMAND ROUTING:
-- Find an entity by name → ix_search (with --kind, --limit for precision)
-- Understand a symbol → ix_entity (by ID) or ix_expand (neighborhood)
-- What calls a function → ix_expand with direction=in, predicates=["CALLS"]
-- What a function calls → ix_expand with direction=out, predicates=["CALLS"]
-- Members of a class → ix_expand with direction=out, predicates=["CONTAINS"]
-- What imports something → ix_expand with direction=in, predicates=["IMPORTS"]
-- Exact text/snippet search → ix_text (fast ripgrep-based)
-- Past decisions → ix_decisions
-- Entity change history → ix_history
-- What changed between revisions → ix_diff
+6. When the user states a goal, call ix_truth to record the intent so decisions trace back to it
 
 AVOID ix_query:
 - ix_query is DEPRECATED — it produces broad, oversized, low-signal responses
-- Instead, decompose questions into targeted tool calls above
+- Instead, decompose questions into targeted tool calls
 - Example: "how does ingestion work?" → ix_search "IngestionService" → ix_entity <id> → ix_expand <id>
 
 BEHAVIORAL CHECKS:

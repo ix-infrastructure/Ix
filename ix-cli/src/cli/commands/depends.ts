@@ -10,9 +10,12 @@ export function registerDependsCommand(program: Command): void {
     .description("Show what depends on the given entity (reverse CALLS + IMPORTS)")
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--depth <n>", "Traversal depth (default 1)", "1")
+    .option("--limit <n>", "Max results to show", "50")
     .option("--format <fmt>", "Output format (text|json)", "text")
-    .action(async (symbol: string, opts: { kind?: string; depth: string; format: string }) => {
+    .addHelpText("after", "\nExamples:\n  ix depends verify_token\n  ix depends AuthProvider --depth 2 --format json\n  ix depends parser.py --kind file --limit 20")
+    .action(async (symbol: string, opts: { kind?: string; depth: string; limit: string; format: string }) => {
       const client = new IxClient(getEndpoint());
+      const limit = parseInt(opts.limit, 10);
       const target = await resolveEntity(
         client, symbol,
         ["method", "function", "class", "object", "trait", "interface", "module", "file"],
@@ -44,7 +47,7 @@ export function registerDependsCommand(program: Command): void {
         }
       }
 
-      const allDependents = [...callers, ...importers];
+      const allDependents = [...callers, ...importers].slice(0, limit);
 
       if (opts.format === "json") {
         console.log(JSON.stringify({

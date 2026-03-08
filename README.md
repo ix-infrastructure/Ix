@@ -115,66 +115,31 @@ All commands accept `--format json` for machine-readable output.
 | `ix mcp-install` | `ix mcp-install [--cursor\|--claude-code]` | Install MCP server config |
 | `ix mcp-start` | `ix mcp-start` | Start the MCP server (stdio) |
 
-## MCP Integration
+## MCP Integration (Compatibility Only)
 
-Ix exposes 13 tools and 2 resources over the [Model Context Protocol](https://modelcontextprotocol.io/), so LLMs can query, ingest, and record decisions automatically.
+> **Note:** The CLI is now the canonical agent interface. MCP is retained for backward compatibility but is no longer the recommended integration path. Use `ix` CLI commands with `--format json` instead.
 
-### Claude Code
-
-```bash
-ix mcp-install --claude-code
-```
-
-### Cursor
+MCP server installation is still available if needed:
 
 ```bash
-ix mcp-install --cursor
+ix mcp-install --claude-code    # Claude Code
+ix mcp-install --cursor         # Cursor
+ix mcp-install                  # Claude Desktop
 ```
-
-### Claude Desktop
-
-```bash
-ix mcp-install
-```
-
-### MCP Tools
-
-| Tool | Description |
-|------|-------------|
-| `ix_query` | [DEPRECATED] Broad graph query — use ix_search + ix_entity + ix_expand instead |
-| `ix_ingest` | Ingest files into the graph (call IMMEDIATELY after file changes) |
-| `ix_decide` | Record a design decision with rationale |
-| `ix_search` | Search nodes by term |
-| `ix_entity` | Get full entity details |
-| `ix_expand` | Expand a node's neighborhood |
-| `ix_history` | Get provenance chain |
-| `ix_truth` | Manage project intents |
-| `ix_diff` | Diff between revisions |
-| `ix_conflicts` | List conflicts |
-| `ix_resolve` | Resolve a conflict |
-| `ix_assert` | Assert a claim about an entity |
-| `ix_patches` | List or get patches |
-
-### MCP Resources
-
-| URI | Description |
-|-----|-------------|
-| `ix://session/context` | Current session working set (entities queried, decisions made) |
-| `ix://project/intent` | Project intent tree |
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────────────┐     ┌───────────┐
-│  ix CLI     │────>│  Memory Layer    │────>│ ArangoDB  │
-│  (TypeScript)│     │  (Scala/http4s)  │     │  (Graph)  │
-└─────────────┘     └──────────────────┘     └───────────┘
-       │
-┌──────┴──────┐
-│  MCP Server │  (stdio transport, same TypeScript codebase)
-│  13 tools   │
-│  2 resources│
-└─────────────┘
+                    ┌──────────────────┐     ┌───────────┐
+┌─────────────┐    │  Memory Layer    │────>│ ArangoDB  │
+│  ix CLI     │───>│  (Scala/http4s)  │     │  (Graph)  │
+│  (canonical)│    └──────────────────┘     └───────────┘
+└─────────────┘              ▲
+                    ┌────────┘
+                    │
+              ┌─────┴───────┐
+              │  MCP Server │  (compatibility only)
+              └─────────────┘
 ```
 
 - **Memory Layer** — Scala 2.13, Cats Effect 3, http4s 0.23, Circe. Handles ingestion, parsing, graph operations, context assembly with 6-factor confidence scoring.

@@ -25,13 +25,12 @@ beforeAll(async () => {
 });
 
 describe("MCP server INSTRUCTIONS", () => {
-  it("contains all 7 mandatory rules", () => {
+  it("contains mandatory rules and key tool references", () => {
     expect(INSTRUCTIONS).toContain("ix_query");
     expect(INSTRUCTIONS).toContain("ix_decide");
     expect(INSTRUCTIONS).toContain("ix_conflicts");
     expect(INSTRUCTIONS).toContain("NEVER answer from training data alone");
     expect(INSTRUCTIONS).toContain("ix_ingest");
-    expect(INSTRUCTIONS).toContain("ix://session/context");
     expect(INSTRUCTIONS).toContain("ix_truth");
   });
 
@@ -44,10 +43,8 @@ describe("MCP server INSTRUCTIONS", () => {
     expect(INSTRUCTIONS).toContain("BEHAVIORAL CHECKS");
   });
 
-  it("contains routing guidance for codebase questions", () => {
-    expect(INSTRUCTIONS).toContain("ix_search");
-    expect(INSTRUCTIONS).toContain("ix_entity");
-    expect(INSTRUCTIONS).toContain("ix_expand");
+  it("notes CLI is canonical interface", () => {
+    expect(INSTRUCTIONS).toContain("ix CLI is now the canonical agent interface");
   });
 
   it("describes what Ix returns", () => {
