@@ -74,6 +74,8 @@ ix decide <title> --rationale <text> --affects <entities> --format json  # Recor
 - "List all functions in auth.py" → `ix inventory --kind function --path auth.py`
 - "List all classes" → `ix inventory --kind class`
 - "What are the most critical methods?" → `ix rank --by callers --kind method --top 10`
+- "What changed between rev 5 and 10?" → `ix diff 5 10 --summary`
+- "Show me all changes" → `ix diff 5 10 --full --format json`
 
 ### Low-level structural primitives
 
@@ -115,7 +117,9 @@ ix ingest --github owner/repo --since 2026-01-01 --format json
 ```
 ix decisions --format json
 ix history <id> --format json
-ix diff <from> <to> --format json
+ix diff <from> <to> --summary --format json   # Fast revision summary
+ix diff <from> <to> --format json              # Full diff (default limit 100)
+ix diff <from> <to> --full --format json       # All changes, no limit
 ```
 
 ### Planning & decisions

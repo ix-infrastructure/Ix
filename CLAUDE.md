@@ -64,7 +64,7 @@ Underlying structural commands — useful for debugging or fine-grained inspecti
 |---|---|---|
 | Design decisions | `ix decisions` | `ix decisions --topic ingestion --limit 10` |
 | Entity history | `ix history` | `ix history <entityId>` |
-| Changes between revisions | `ix diff` | `ix diff 1 5 --format json` |
+| Changes between revisions | `ix diff` | `ix diff 1 5 --summary --format json` |
 | Detect contradictions | `ix conflicts` | `ix conflicts --format json` |
 | Record a decision | `ix decide` | `ix decide "Use CONTAINS" --rationale "Normalize edges"` |
 | Record a goal | `ix truth add` | `ix truth add "Support 100k file repos"` |
@@ -109,6 +109,8 @@ ix inventory --kind function --format json
 ### Best Practices
 - Always use `--kind` with `ix search` to get bounded results
 - Use `ix inventory` instead of `ix search ""` for listing entities by kind
+- Use `ix diff --summary` for broad revision comparisons (server-side, fast)
+- Use `--full` only when you need every individual change
 - Always use `--limit` to cap result sets
 - Use `--format json` when chaining results between commands
 - Use `--path` or `--language` to restrict text searches
