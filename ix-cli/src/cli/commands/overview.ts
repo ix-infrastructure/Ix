@@ -29,6 +29,8 @@ interface OverviewResult {
   container: { kind: string; name: string } | null;
   signature: string | null;
   diagnostics: string[];
+  decisions: { id: string; title: string; rationale?: string }[];
+  tasks: { id: string; title: string; status: string }[];
 }
 
 export function registerOverviewCommand(program: Command): void {
@@ -71,11 +73,12 @@ async function overviewContainer(
   const diagnostics: string[] = [];
 
   // Fetch entity details, members, imports, and inbound dependents in parallel
-  const [details, membersResult, importsResult, inboundResult] = await Promise.all([
+  const [details, membersResult, importsResult, inboundResult, decisionsResult] = await Promise.all([
     client.entity(target.id),
     client.expand(target.id, { direction: "out", predicates: ["CONTAINS"] }),
     client.expand(target.id, { direction: "out", predicates: ["IMPORTS"] }),
     client.expand(target.id, { direction: "in", predicates: ["CALLS", "IMPORTS"] }),
+    client.expand(target.id, { direction: "in", predicates: ["DECISION_AFFECTS"] }),
   ]);
 
   const node = details.node as any;
@@ -84,6 +87,12 @@ async function overviewContainer(
   const members = membersResult.nodes;
   const imports = importsResult.nodes;
   const inbound = inboundResult.nodes;
+
+  const decisions = decisionsResult.nodes.map((n: any) => ({
+    id: n.id,
+    title: n.name || n.attrs?.name || "(unnamed)",
+    rationale: n.attrs?.rationale ?? undefined,
+  }));
 
   // Get top 5 members by name and their inbound CALLS count
   const sortedMembers = [...members]
@@ -135,6 +144,8 @@ async function overviewContainer(
     container: null,
     signature: null,
     diagnostics,
+    decisions,
+    tasks: [],
   };
 
   if (format === "json") {
@@ -154,6 +165,13 @@ async function overviewContainer(
         console.log(`  ${kindStr} ${nameStr} ${km.callerCount} callers`);
       }
     }
+
+    if (decisions.length > 0) {
+      console.log(`\nDecisions:`);
+      for (const d of decisions) {
+        console.log(`  ${chalk.yellow(d.title)}`);
+      }
+    }
   }
 }
 
@@ -165,10 +183,11 @@ async function overviewCallable(
   const diagnostics: string[] = [];
 
   // Fetch entity details, callers, and callees in parallel
-  const [details, callersResult, calleesResult] = await Promise.all([
+  const [details, callersResult, calleesResult, decisionsResult] = await Promise.all([
     client.entity(target.id),
     client.expand(target.id, { direction: "in", predicates: ["CALLS"] }),
     client.expand(target.id, { direction: "out", predicates: ["CALLS"] }),
+    client.expand(target.id, { direction: "in", predicates: ["DECISION_AFFECTS"] }),
   ]);
 
   const node = details.node as any;
@@ -198,6 +217,12 @@ async function overviewCallable(
   const callers = callersResult.nodes;
   const callees = calleesResult.nodes;
 
+  const decisions = decisionsResult.nodes.map((n: any) => ({
+    id: n.id,
+    title: n.name || n.attrs?.name || "(unnamed)",
+    rationale: n.attrs?.rationale ?? undefined,
+  }));
+
   const result: OverviewResult = {
     resolvedTarget: { id: target.id, kind: target.kind, name: target.name },
     resolutionMode: target.resolutionMode,
@@ -211,6 +236,8 @@ async function overviewCallable(
     container,
     signature,
     diagnostics,
+    decisions,
+    tasks: [],
   };
 
   if (format === "json") {
@@ -222,5 +249,12 @@ async function overviewCallable(
     if (signature) console.log(`  signature:  ${chalk.dim(signature)}`);
     console.log(`  callers:    ${callers.length}`);
     console.log(`  callees:    ${callees.length}`);
+
+    if (decisions.length > 0) {
+      console.log(`\nDecisions:`);
+      for (const d of decisions) {
+        console.log(`  ${chalk.yellow(d.title)}`);
+      }
+    }
   }
 }
