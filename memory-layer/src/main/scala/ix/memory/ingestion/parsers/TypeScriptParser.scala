@@ -52,10 +52,11 @@ class TypeScriptParser extends Parser {
           val classEnd = findBraceBlockEnd(lines, idx)
           val bodyText = lines.slice(idx, classEnd).mkString("\n")
           val fp = Fingerprint.compute(trimmed.replaceAll("""\s*\{\s*$""", "").take(120), bodyText)
+          val exported = trimmed.startsWith("export ") || trimmed.startsWith("export{")
           entities = entities :+ ParsedEntity(
             name      = className,
             kind      = NodeKind.Class,
-            attrs     = Map("language" -> Json.fromString("typescript")),
+            attrs     = Map("language" -> Json.fromString("typescript"), "exported" -> Json.fromBoolean(exported)),
             lineStart = lineNum,
             lineEnd   = classEnd,
             contentFingerprint = Some(fp)
@@ -77,6 +78,7 @@ class TypeScriptParser extends Parser {
             val summary = line.trim.take(120)
             val bodyText = lines.slice(idx, funcEnd).mkString("\n")
             val fp = Fingerprint.compute(summary, bodyText)
+            val exported = trimmed.startsWith("export ") || trimmed.startsWith("export{")
             entities = entities :+ ParsedEntity(
               name      = funcName,
               kind      = NodeKind.Function,
@@ -84,7 +86,8 @@ class TypeScriptParser extends Parser {
                 "language"   -> Json.fromString("typescript"),
                 "summary"    -> Json.fromString(summary),
                 "signature"  -> Json.fromString(summary),
-                "visibility" -> Json.fromString("public")
+                "visibility" -> Json.fromString("public"),
+                "exported"   -> Json.fromBoolean(exported)
               ),
               lineStart = lineNum,
               lineEnd   = funcEnd,
@@ -109,6 +112,7 @@ class TypeScriptParser extends Parser {
               val summary = line.trim.take(120)
               val bodyText = lines.slice(idx, funcEnd).mkString("\n")
               val fp = Fingerprint.compute(summary, bodyText)
+              val exported = trimmed.startsWith("export ") || trimmed.startsWith("export{")
               entities = entities :+ ParsedEntity(
                 name      = funcName,
                 kind      = NodeKind.Function,
@@ -116,7 +120,8 @@ class TypeScriptParser extends Parser {
                   "language"   -> Json.fromString("typescript"),
                   "summary"    -> Json.fromString(summary),
                   "signature"  -> Json.fromString(summary),
-                  "visibility" -> Json.fromString("public")
+                  "visibility" -> Json.fromString("public"),
+                  "exported"   -> Json.fromBoolean(exported)
                 ),
                 lineStart = lineNum,
                 lineEnd   = funcEnd,
@@ -145,6 +150,17 @@ class TypeScriptParser extends Parser {
           relationships = relationships :+ ParsedRelationship(fileName, moduleName, "IMPORTS")
         }
 
+        // Extract named import bindings: import { foo, bar } from "mod"
+        NamedImportPattern.findFirstMatchIn(line).foreach { m =>
+          val names = m.group(1).split(",").map(_.trim).filter(_.nonEmpty)
+          for (rawName <- names) {
+            val symbolName = if (rawName.contains(" as ")) rawName.split("\\s+as\\s+").last.trim else rawName
+            if (symbolName.nonEmpty && !relationships.exists(r => r.srcName == fileName && r.dstName == symbolName && r.predicate == "IMPORTS")) {
+              relationships = relationships :+ ParsedRelationship(fileName, symbolName, "IMPORTS")
+            }
+          }
+        }
+
         SideEffectImportPattern.findFirstMatchIn(line).foreach { m =>
           val moduleName = m.group(1)
           if (!relationships.exists(r => r.dstName == moduleName && r.predicate == "IMPORTS")) {
@@ -168,12 +184,14 @@ class TypeScriptParser extends Parser {
             val ifaceEnd = findBraceBlockEnd(lines, idx)
             val bodyText = lines.slice(idx, ifaceEnd).mkString("\n")
             val fp = Fingerprint.compute(trimmed.replaceAll("""\s*\{\s*$""", "").take(120), bodyText)
+            val exported = trimmed.startsWith("export ") || trimmed.startsWith("export{")
             entities = entities :+ ParsedEntity(
               name      = ifaceName,
               kind      = NodeKind.Interface,
               attrs     = Map(
                 "language"  -> Json.fromString("typescript"),
-                "ts_kind"   -> Json.fromString("interface")
+                "ts_kind"   -> Json.fromString("interface"),
+                "exported"  -> Json.fromBoolean(exported)
               ),
               lineStart = lineNum,
               lineEnd   = ifaceEnd,
@@ -187,13 +205,15 @@ class TypeScriptParser extends Parser {
         TypeAliasPattern.findFirstMatchIn(line).foreach { m =>
           val typeName = m.group(1)
           if (!trimmed.startsWith("import")) {
+            val exported = trimmed.startsWith("export ") || trimmed.startsWith("export{")
             val fp = Fingerprint.compute(trimmed.take(120), trimmed)
             entities = entities :+ ParsedEntity(
               name      = typeName,
               kind      = NodeKind.Class,
               attrs     = Map(
                 "language" -> Json.fromString("typescript"),
-                "ts_kind"  -> Json.fromString("type_alias")
+                "ts_kind"  -> Json.fromString("type_alias"),
+                "exported" -> Json.fromBoolean(exported)
               ),
               lineStart = lineNum,
               lineEnd   = lineNum,
@@ -204,6 +224,27 @@ class TypeScriptParser extends Parser {
         }
 
       } // end else (non-comment)
+    }
+
+    // Extract file-level calls from code outside named functions/methods/classes
+    val coveredRanges: Vector[(Int, Int)] = entities
+      .filter(e => e.kind == NodeKind.Function || e.kind == NodeKind.Method || e.kind == NodeKind.Class)
+      .map(e => (e.lineStart, e.lineEnd))
+
+    val fileCallsSeen = scala.collection.mutable.Set.empty[String]
+    for ((line, idx) <- lines.zipWithIndex) {
+      val lineNum = idx + 1
+      val inNamedBody = coveredRanges.exists { case (s, e) => lineNum >= s && lineNum <= e }
+      if (!inNamedBody && !line.trim.startsWith("//") && !line.trim.startsWith("*")) {
+        CallPattern.findAllMatchIn(line).foreach { m =>
+          val callee = m.group(1)
+          if (!TypeScriptBuiltins.contains(callee) && !TypeScriptKeywords.contains(callee)
+              && !fileCallsSeen.contains(callee) && callee != fileName) {
+            fileCallsSeen += callee
+            relationships = relationships :+ ParsedRelationship(fileName, callee, "CALLS")
+          }
+        }
+      }
     }
 
     ParseResult(entities, relationships)
@@ -219,6 +260,7 @@ class TypeScriptParser extends Parser {
   private val ConstFuncPattern: Regex  = """(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?function""".r
   private val MethodPattern: Regex     = """^\s+(?:async\s+)?(?:private\s+|public\s+|protected\s+|static\s+|readonly\s+)*(\w+)\s*(?:<[^>]+>)?\s*\(""".r
   private val ImportPattern: Regex     = """import\s+.*?from\s+['"]([^'"]+)['"]""".r
+  private val NamedImportPattern: Regex = """import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]""".r
   private val SideEffectImportPattern: Regex = """^import\s+['"]([^'"]+)['"]""".r
   private val InterfacePattern: Regex  = """(?:export\s+)?interface\s+(\w+)""".r
   private val TypeAliasPattern: Regex  = """(?:export\s+)?type\s+(\w+)\s*(?:<[^>]+>)?\s*=""".r

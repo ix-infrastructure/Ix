@@ -22,6 +22,15 @@ class ScalaParser extends Parser {
   private val DefPattern: Regex        = """^\s*(?:override\s+)?(?:private(?:\[\w+\])?\s+|protected(?:\[\w+\])?\s+)?(?:final\s+)?def\s+(\w+)""".r
   private val ImportPattern: Regex     = """^\s*import\s+(.+)$""".r
   private val CallPattern: Regex      = """(?:(?:this|super)\.)?\b(\w+)\s*(?:\[.*?\])?\s*\(""".r
+  private val ExtendsPattern: Regex      = """extends\s+(\w+)""".r
+  private val TypeRefPattern: Regex      = """\b([A-Z]\w+)""".r
+  private val QualifiedRefPattern: Regex = """\b([A-Z]\w+)\.(\w+)""".r
+
+  private val ScalaBuiltinTypes: Set[String] = Set(
+    "String", "Int", "Long", "Double", "Float", "Boolean", "Unit", "Any", "AnyRef", "AnyVal",
+    "Nothing", "Null", "Option", "List", "Map", "Set", "Vector", "Seq", "Array", "Future",
+    "IO", "Either", "Try", "Some", "None", "Right", "Left", "Success", "Failure"
+  )
 
   private val ScalaBuiltins: Set[String] = Set(
     "println", "print", "require", "assert", "assume",
@@ -82,8 +91,13 @@ class ScalaParser extends Parser {
               lineEnd   = endLine,
               contentFingerprint = Some(fp)
             )
-            relationships = relationships :+ ParsedRelationship(fileName, name, "CONTAINS")
+            val enclosingType = typeRanges.find { case (_, start, end) => lineNum > start && lineNum <= end }
+            val containsSrc = enclosingType.map(_._1).getOrElse(fileName)
+            relationships = relationships :+ ParsedRelationship(containsSrc, name, "CONTAINS")
             typeRanges = typeRanges :+ (name, lineNum, endLine)
+            ExtendsPattern.findFirstMatchIn(line).foreach { em =>
+              relationships = relationships :+ ParsedRelationship(name, em.group(1), "EXTENDS")
+            }
             true
 
           case None =>
@@ -103,8 +117,13 @@ class ScalaParser extends Parser {
                   lineEnd   = endLine,
                   contentFingerprint = Some(fp)
                 )
-                relationships = relationships :+ ParsedRelationship(fileName, name, "CONTAINS")
+                val enclosingType = typeRanges.find { case (_, start, end) => lineNum > start && lineNum <= end }
+                val containsSrc = enclosingType.map(_._1).getOrElse(fileName)
+                relationships = relationships :+ ParsedRelationship(containsSrc, name, "CONTAINS")
                 typeRanges = typeRanges :+ (name, lineNum, endLine)
+                ExtendsPattern.findFirstMatchIn(line).foreach { em =>
+                  relationships = relationships :+ ParsedRelationship(name, em.group(1), "EXTENDS")
+                }
                 true
 
               case None =>
@@ -124,8 +143,13 @@ class ScalaParser extends Parser {
                       lineEnd   = endLine,
                       contentFingerprint = Some(fp)
                     )
-                    relationships = relationships :+ ParsedRelationship(fileName, name, "CONTAINS")
+                    val enclosingType = typeRanges.find { case (_, start, end) => lineNum > start && lineNum <= end }
+                    val containsSrc = enclosingType.map(_._1).getOrElse(fileName)
+                    relationships = relationships :+ ParsedRelationship(containsSrc, name, "CONTAINS")
                     typeRanges = typeRanges :+ (name, lineNum, endLine)
+                    ExtendsPattern.findFirstMatchIn(line).foreach { em =>
+                      relationships = relationships :+ ParsedRelationship(name, em.group(1), "EXTENDS")
+                    }
                     true
 
                   case None =>
@@ -145,8 +169,13 @@ class ScalaParser extends Parser {
                           lineEnd   = endLine,
                           contentFingerprint = Some(fp)
                         )
-                        relationships = relationships :+ ParsedRelationship(fileName, name, "CONTAINS")
+                        val enclosingType = typeRanges.find { case (_, start, end) => lineNum > start && lineNum <= end }
+                        val containsSrc = enclosingType.map(_._1).getOrElse(fileName)
+                        relationships = relationships :+ ParsedRelationship(containsSrc, name, "CONTAINS")
                         typeRanges = typeRanges :+ (name, lineNum, endLine)
+                        ExtendsPattern.findFirstMatchIn(line).foreach { em =>
+                          relationships = relationships :+ ParsedRelationship(name, em.group(1), "EXTENDS")
+                        }
                         true
                       case None => false
                     }
@@ -192,9 +221,18 @@ class ScalaParser extends Parser {
 
             relationships = relationships :+ ParsedRelationship(edgeSrc, funcName, edgePredicate)
 
-            // Extract CALLS from method/function body
+            // Extract CALLS and REFERENCES from method/function body
             val callsInFunc = extractCalls(lines, idx, endLine, funcName)
             relationships = relationships ++ callsInFunc
+
+            // Extract REFERENCES from method signature type annotations
+            val enclosingTypeName = enclosing.map(_._1).getOrElse("")
+            val sigRefs = TypeRefPattern.findAllMatchIn(signature).map(_.group(1)).toSet
+            for (ref <- sigRefs) {
+              if (!ScalaBuiltinTypes.contains(ref) && ref != funcName && ref != enclosingTypeName && ref != fileName) {
+                relationships = relationships :+ ParsedRelationship(funcName, ref, "REFERENCES")
+              }
+            }
           }
         }
 
@@ -262,10 +300,11 @@ class ScalaParser extends Parser {
     if (foundOpen) Some(lines.length) else None
   }
 
-  /** Extract CALLS relationships from a method/function body. */
+  /** Extract CALLS and qualified REFERENCES relationships from a method/function body. */
   private def extractCalls(lines: Array[String], startIdx: Int, endIdx: Int, callerName: String): Vector[ParsedRelationship] = {
     var calls = Vector.empty[ParsedRelationship]
     val seen = scala.collection.mutable.Set.empty[String]
+    val refSeen = scala.collection.mutable.Set.empty[String]
     for (i <- (startIdx + 1) until endIdx.min(lines.length)) {
       val line = lines(i).trim
       if (!line.startsWith("//") && !line.startsWith("*")) {
@@ -275,6 +314,15 @@ class ScalaParser extends Parser {
           if (callee != callerName && !ScalaBuiltins.contains(callee) && !seen.contains(callee) && callee.head.isLower) {
             seen += callee
             calls = calls :+ ParsedRelationship(callerName, callee, "CALLS")
+          }
+        }
+        // Extract qualified REFERENCES (e.g., NodeKind.File, SourceType.Code)
+        QualifiedRefPattern.findAllMatchIn(line).foreach { m =>
+          val qualifier = m.group(1)
+          if (!ScalaBuiltinTypes.contains(qualifier) && !ScalaBuiltins.contains(qualifier) &&
+              !refSeen.contains(qualifier) && qualifier != callerName) {
+            refSeen += qualifier
+            calls = calls :+ ParsedRelationship(callerName, qualifier, "REFERENCES")
           }
         }
       }

@@ -4,6 +4,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import ix.memory.model.NodeKind
+import io.circe.Json
 
 class TypeScriptParserSpec extends AnyFlatSpec with Matchers {
   val parser = new TypeScriptParser()
@@ -481,6 +482,85 @@ class TypeScriptParserSpec extends AnyFlatSpec with Matchers {
     calls.map(_.dstName) should not contain "find"
     calls.map(_.dstName) should not contain "reduce"
     calls.map(_.dstName) should not contain "join"
+  }
+
+  // --- File-level CALLS tests ---
+
+  it should "extract calls from anonymous callback bodies" in {
+    val source = """
+      |import { Command } from "commander";
+      |program.command("test").action(async (opts) => {
+      |  const result = await resolveEntity(client, name);
+      |  printResolved(result);
+      |});
+    """.stripMargin
+    val result = parser.parse("test.ts", source)
+    val calls = result.relationships.filter(r => r.predicate == "CALLS" && r.srcName == "test.ts")
+    calls.map(_.dstName) should contain allOf ("resolveEntity", "printResolved")
+  }
+
+  // --- Named import bindings tests ---
+
+  it should "extract named import bindings" in {
+    val source = """import { pickBest, resolveEntity } from "./resolve.js";"""
+    val result = parser.parse("api.ts", source)
+    val imports = result.relationships.filter(_.predicate == "IMPORTS")
+    imports.map(_.dstName) should contain allOf ("pickBest", "resolveEntity", "./resolve.js")
+  }
+
+  it should "handle import aliases" in {
+    val source = """import { Foo as Bar } from "./mod.js";"""
+    val result = parser.parse("test.ts", source)
+    val imports = result.relationships.filter(_.predicate == "IMPORTS")
+    imports.map(_.dstName) should contain ("Bar")
+    imports.map(_.dstName) should not contain ("Foo")
+  }
+
+  // --- Export tracking tests ---
+
+  it should "track exported entities" in {
+    val source = """export function verify() { return true; }"""
+    val result = parser.parse("auth.ts", source)
+    val func = result.entities.find(_.name == "verify").get
+    func.attrs("exported") shouldBe Json.fromBoolean(true)
+  }
+
+  it should "mark non-exported entities" in {
+    val source = """function helper() { return 1; }"""
+    val result = parser.parse("util.ts", source)
+    val func = result.entities.find(_.name == "helper").get
+    func.attrs("exported") shouldBe Json.fromBoolean(false)
+  }
+
+  it should "not emit file-level CALLS for locally defined functions" in {
+    val source = """
+      |export function registerCommand(program: any): void {
+      |  program.action(async () => {
+      |    const result = await doWork();
+      |  });
+      |}
+    """.stripMargin
+    val result = parser.parse("cmd.ts", source)
+    val fileCalls = result.relationships.filter(r =>
+      r.predicate == "CALLS" && r.srcName == "cmd.ts")
+    fileCalls.map(_.dstName) should not contain ("registerCommand")
+  }
+
+  it should "not emit file-level CALLS for code inside class bodies" in {
+    val source = """
+      |class Service {
+      |  async handle() {
+      |    return processData();
+      |  }
+      |}
+      |initApp();
+    """.stripMargin
+    val result = parser.parse("app.ts", source)
+    val fileCalls = result.relationships.filter(r =>
+      r.predicate == "CALLS" && r.srcName == "app.ts")
+    fileCalls.map(_.dstName) should contain ("initApp")
+    fileCalls.map(_.dstName) should not contain ("processData")
+    fileCalls.map(_.dstName) should not contain ("handle")
   }
 
   it should "compute method spans bounded within their class" in {

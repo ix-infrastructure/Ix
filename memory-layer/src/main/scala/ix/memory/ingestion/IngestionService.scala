@@ -59,6 +59,8 @@ class IngestionService(parserRouter: ParserRouter, writeApi: GraphWriteApi, quer
       commit <- writeApi.commitPatch(patch)
       // Resolve cross-file import edges after main patch is committed
       _      <- resolveImportEdges(filePath, result, hash).attempt.void
+      // Resolve named import symbols to their actual source entities
+      _      <- resolveNamedImports(filePath, result, hash).attempt.void
     } yield commit
   }
 
@@ -144,14 +146,80 @@ class IngestionService(parserRouter: ParserRouter, writeApi: GraphWriteApi, quer
     }
   }
 
+  private def resolveNamedImports(
+    filePath:    Path,
+    parseResult: ParseResult,
+    sourceHash:  Option[String]
+  ): IO[Unit] = {
+    val namedImports = parseResult.relationships.filter { rel =>
+      rel.predicate == "IMPORTS" && !rel.dstName.contains("/") && !rel.dstName.contains(".")
+    }
+    namedImports.traverse_ { rel =>
+      queryApi.searchNodes(rel.dstName, limit = 5, nameOnly = true).flatMap { nodes =>
+        val external = nodes.filter { n =>
+          n.name == rel.dstName &&
+          n.provenance.sourceUri != filePath.toString
+        }
+        external.headOption match {
+          case Some(target) =>
+            val srcId = NodeId(UUID.nameUUIDFromBytes(
+              s"${filePath}:${filePath.getFileName}".getBytes("UTF-8")))
+            val edgeId = EdgeId(UUID.nameUUIDFromBytes(
+              s"${srcId.value}:${target.id.value}:IMPORTS".getBytes("UTF-8")))
+            val patch = GraphPatch(
+              patchId   = PatchId(UUID.randomUUID()),
+              actor     = "ix/cross-file",
+              timestamp = Instant.now(),
+              source    = PatchSource(filePath.toString, sourceHash,
+                            "cross-file-resolver/1.0", SourceType.Code),
+              baseRev   = Rev(0L),
+              ops       = Vector(PatchOp.UpsertEdge(
+                edgeId, srcId, target.id, EdgePredicate("IMPORTS"), Map.empty)),
+              replaces  = Vector.empty,
+              intent    = Some(s"Named import: ${filePath.getFileName} -> ${rel.dstName}")
+            )
+            writeApi.commitPatch(patch).void
+          case None => IO.unit
+        }
+      }
+    }
+  }
+
   private def resolveRelativePath(from: Path, importTarget: String): Option[Path] = {
     if (importTarget.startsWith("./") || importTarget.startsWith("../")) {
       val base = from.getParent
       if (base == null) return None
-      val extensions = List("", ".ts", ".tsx", ".scala", ".py", ".js")
-      extensions.collectFirst {
+
+      // 1. Try the import target as-is and with source extensions appended
+      val directExtensions = List("", ".ts", ".tsx", ".scala", ".py", ".js")
+      val directMatch = directExtensions.collectFirst {
         case ext =>
           val candidate = base.resolve(importTarget + ext).normalize()
+          if (Files.exists(candidate)) candidate else null
+      }.flatMap(Option(_))
+      if (directMatch.isDefined) return directMatch
+
+      // 2. Strip compiled extensions (.js/.mjs/.cjs) and try source extensions
+      val strippable = List(".js", ".mjs", ".cjs")
+      val stripped = strippable.collectFirst {
+        case ext if importTarget.endsWith(ext) =>
+          importTarget.stripSuffix(ext)
+      }
+      val strippedMatch = stripped.flatMap { baseName =>
+        val sourceExtensions = List(".ts", ".tsx")
+        sourceExtensions.collectFirst {
+          case ext =>
+            val candidate = base.resolve(baseName + ext).normalize()
+            if (Files.exists(candidate)) candidate else null
+        }.flatMap(Option(_))
+      }
+      if (strippedMatch.isDefined) return strippedMatch
+
+      // 3. Try directory index files (e.g., ./utils -> ./utils/index.ts)
+      val indexExtensions = List("index.ts", "index.tsx", "index.js")
+      indexExtensions.collectFirst {
+        case idx =>
+          val candidate = base.resolve(importTarget).resolve(idx).normalize()
           if (Files.exists(candidate)) candidate else null
       }.flatMap(Option(_))
     } else None
