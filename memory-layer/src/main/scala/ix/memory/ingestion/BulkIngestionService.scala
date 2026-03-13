@@ -10,7 +10,7 @@ import io.circe.syntax._
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import org.typelevel.log4cats.Logger
 
-import ix.memory.db.{BulkWriteApi, CommitResult, CommitStatus, FileBatch, GraphQueryApi}
+import ix.memory.db.{BulkWriteApiBase, CommitResult, CommitStatus, FileBatch, GraphQueryApi}
 import ix.memory.model._
 
 private[ingestion] sealed trait ParseOutcome
@@ -26,7 +26,7 @@ private[ingestion] case class Skipped(reason: String)    extends ParseOutcome
  */
 class BulkIngestionService(
   parserRouter: ParserRouter,
-  bulkWriteApi: BulkWriteApi,
+  bulkWriteApi: BulkWriteApiBase,
   queryApi: GraphQueryApi
 ) {
 

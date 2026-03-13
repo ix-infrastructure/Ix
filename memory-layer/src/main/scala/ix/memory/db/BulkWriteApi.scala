@@ -16,7 +16,7 @@ import ix.memory.model._
  * High-performance batch writer that uses ArangoDB Document API
  * instead of individual AQL queries.
  */
-class BulkWriteApi(client: ArangoClient) {
+class BulkWriteApi(client: ArangoClient) extends BulkWriteApiBase {
 
   private def withRetry[A](action: IO[A], maxAttempts: Int = 3, delay: FiniteDuration = 500.millis): IO[A] = {
     action.handleErrorWith { err =>
