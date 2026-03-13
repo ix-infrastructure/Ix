@@ -38,6 +38,10 @@ import { registerWorkflowsHelpCommand } from "./commands/workflows.js";
 import { registerWorkflowCommand } from "./commands/workflow.js";
 import { registerTasksCommand } from "./commands/tasks.js";
 import { registerGoalsCommand } from "./commands/goals.js";
+import { registerUpgradeCommand } from "./commands/upgrade.js";
+import { registerServerCommand } from "./commands/server.js";
+import { registerResetCommand } from "./commands/reset.js";
+import { printVersionInfo } from "./version-info.js";
 
 const HELP_HEADER = `
 Workflow Commands (start here):
@@ -81,6 +85,15 @@ Diagnostics / State / History:
   truth                 Manage project intents
   text <term>           Fast lexical/text search (ripgrep)
 
+Server Management:
+  server start          Start the Ix backend server
+  server stop           Stop the Ix backend server
+  server status         Show server status
+
+Upgrade & Maintenance:
+  upgrade               Upgrade Ix to the latest version
+  reset                 Reset the Ix knowledge graph
+
 Use "ix help workflows" for the recommended development loop.
 Use "ix <command> --help" for details on any command.
 `;
@@ -89,8 +102,13 @@ const program = new Command();
 program
   .name("ix")
   .description("Ix Memory — Persistent Memory for LLM Systems")
-  .version("0.1.0")
   .addHelpText("before", HELP_HEADER);
+
+program.option("-V, --version", "Show version information");
+program.on("option:version", async () => {
+  await printVersionInfo();
+  process.exit(0);
+});
 
 registerQueryCommand(program);
 registerIngestCommand(program);
@@ -131,5 +149,8 @@ registerWorkflowCommand(program);
 registerWorkflowsHelpCommand(program);
 registerTasksCommand(program);
 registerGoalsCommand(program);
+registerUpgradeCommand(program);
+registerServerCommand(program);
+registerResetCommand(program);
 
 program.parse();
