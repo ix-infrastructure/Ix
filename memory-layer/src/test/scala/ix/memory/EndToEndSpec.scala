@@ -17,11 +17,6 @@ import ix.memory.model._
 
 class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestDbHelper {
 
-  val clientResource = ArangoClient.resource(
-    host = "localhost", port = 8529,
-    database = "ix_memory_test", user = "root", password = ""
-  )
-
   private def buildContextService(queryApi: GraphQueryApi): ContextService = {
     val seeder    = new GraphSeeder(queryApi)
     val expander  = new GraphExpander(queryApi)
@@ -56,16 +51,15 @@ class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with Tes
   // ── Test 1: Ingest Python code and answer queries with provenance ────
 
   "EndToEnd" should "ingest Python code and answer queries with provenance" in {
-    clientResource.use { client =>
-      val writeApi       = new ArangoGraphWriteApi(client)
-      val queryApi       = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi       = new ArcadeGraphWriteApi(client)
+      val queryApi       = new ArcadeGraphQueryApi(client)
       val parserRouter   = new ParserRouter()
       val ingestion      = new IngestionService(parserRouter, writeApi, queryApi)
       val contextService = buildContextService(queryApi)
 
       for {
         _      <- client.ensureSchema()
-        _      <- cleanDatabase(client)
         // Ingest the sample billing_service.py fixture
         commit <- ingestion.ingestFile(fixtureFilePath)
         // Query about billing retry
@@ -102,16 +96,15 @@ class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with Tes
   // ── Test 2: Detect conflicts between contradictory sources ───────────
 
   it should "detect conflicts between contradictory sources" in {
-    clientResource.use { client =>
-      val writeApi       = new ArangoGraphWriteApi(client)
-      val queryApi       = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi       = new ArcadeGraphWriteApi(client)
+      val queryApi       = new ArcadeGraphQueryApi(client)
       val parserRouter   = new ParserRouter()
       val ingestion      = new IngestionService(parserRouter, writeApi, queryApi)
       val contextService = buildContextService(queryApi)
 
       for {
         _         <- client.ensureSchema()
-        _         <- cleanDatabase(client)
         // Step 1: Ingest billing_service.py (creates nodes for BillingService etc.)
         commit1   <- ingestion.ingestFile(fixtureFilePath)
 
@@ -180,9 +173,9 @@ class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with Tes
   // ── Test 3: Support time-travel queries ──────────────────────────────
 
   it should "support time-travel queries across revisions" in {
-    clientResource.use { client =>
-      val writeApi       = new ArangoGraphWriteApi(client)
-      val queryApi       = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi       = new ArcadeGraphWriteApi(client)
+      val queryApi       = new ArcadeGraphQueryApi(client)
       val contextService = buildContextService(queryApi)
 
       // Use deterministic IDs for manual patches
@@ -192,7 +185,6 @@ class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with Tes
 
       for {
         _ <- client.ensureSchema()
-        _ <- cleanDatabase(client)
 
         // Step 1: Commit patch at rev N with billing_core node
         patch1 = makePatch(
@@ -253,15 +245,14 @@ class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with Tes
   // ── Test 4: Idempotent re-ingestion ──────────────────────────────────
 
   it should "be idempotent when re-ingesting the same file" in {
-    clientResource.use { client =>
-      val writeApi     = new ArangoGraphWriteApi(client)
-      val queryApi     = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi     = new ArcadeGraphWriteApi(client)
+      val queryApi     = new ArcadeGraphQueryApi(client)
       val parserRouter = new ParserRouter()
       val ingestion    = new IngestionService(parserRouter, writeApi, queryApi)
 
       for {
         _ <- client.ensureSchema()
-        _ <- cleanDatabase(client)
 
         // Step 1: First ingestion
         commit1 <- ingestion.ingestFile(fixtureFilePath)

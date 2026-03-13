@@ -7,8 +7,18 @@ import org.http4s.HttpRoutes
 import org.http4s.circe.CirceEntityCodec._
 import org.http4s.dsl.io._
 
+import io.circe.{Decoder, Encoder}
+import io.circe.generic.semiauto.{deriveDecoder, deriveEncoder}
+
 import ix.memory.conflict.ArcadeConflictService
 import ix.memory.model.{ClaimId, ConflictId, ConflictStatus}
+
+case class ResolveRequest(winnerClaimId: String)
+
+object ResolveRequest {
+  implicit val decoder: Decoder[ResolveRequest] = deriveDecoder[ResolveRequest]
+  implicit val encoder: Encoder[ResolveRequest] = deriveEncoder[ResolveRequest]
+}
 
 class ArcadeConflictRoutes(conflictService: ArcadeConflictService) {
 

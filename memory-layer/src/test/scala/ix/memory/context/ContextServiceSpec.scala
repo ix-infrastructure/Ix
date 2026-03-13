@@ -15,11 +15,6 @@ import ix.memory.model._
 
 class ContextServiceSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestDbHelper {
 
-  val clientResource = ArangoClient.resource(
-    host = "localhost", port = 8529,
-    database = "ix_memory_test", user = "root", password = ""
-  )
-
   private def makePatch(
     baseRev: Rev = Rev(0L),
     ops: Vector[PatchOp] = Vector.empty,
@@ -53,9 +48,9 @@ class ContextServiceSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers wi
   // ── Test 1: Full pipeline returns structured context ───────────────
 
   "ContextService" should "return structured context for a query" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
 
       val billingId = NodeId(UUID.nameUUIDFromBytes(s"test:billing_service".getBytes))
       val retryId   = NodeId(UUID.nameUUIDFromBytes(s"test:retry_handler".getBytes))
@@ -74,7 +69,6 @@ class ContextServiceSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers wi
 
       for {
         _      <- client.ensureSchema()
-        _      <- cleanDatabase(client)
         _      <- writeApi.commitPatch(patch)
         result <- contextService.query("How does billing retry?")
       } yield {
@@ -91,13 +85,12 @@ class ContextServiceSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers wi
   // ── Test 2: Empty context for unknown query ────────────────────────
 
   it should "return empty context for unknown query" in {
-    clientResource.use { client =>
-      val queryApi       = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val queryApi       = new ArcadeGraphQueryApi(client)
       val contextService = buildContextService(queryApi)
 
       for {
         _      <- client.ensureSchema()
-        _      <- cleanDatabase(client)
         result <- contextService.query("something totally unknown xyz123")
       } yield {
         result.nodes shouldBe empty
@@ -119,9 +112,9 @@ class ContextServiceSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers wi
   // ── Test 4: Claims are scored and ranked ───────────────────────────
 
   it should "score and rank claims by confidence" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
 
       val nodeId = NodeId(UUID.randomUUID())
 
@@ -137,7 +130,6 @@ class ContextServiceSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers wi
 
       for {
         _      <- client.ensureSchema()
-        _      <- cleanDatabase(client)
         _      <- writeApi.commitPatch(patch)
         result <- contextService.query("What does billing do?")
       } yield {
@@ -160,9 +152,9 @@ class ContextServiceSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers wi
   // ── Test 5: GraphExpander returns connected nodes ──────────────────
 
   it should "expand seeds to find connected nodes" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
 
       val billingId = NodeId(UUID.randomUUID())
       val retryId   = NodeId(UUID.randomUUID())
@@ -180,7 +172,6 @@ class ContextServiceSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers wi
 
       for {
         _      <- client.ensureSchema()
-        _      <- cleanDatabase(client)
         _      <- writeApi.commitPatch(patch)
         result <- contextService.query("How does billing work?")
       } yield {
@@ -194,9 +185,9 @@ class ContextServiceSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers wi
   // ── Test 6: No conflicts when only one claim per entity ────────────
 
   it should "return empty conflicts when no contradictions exist" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
 
       val nodeId = NodeId(UUID.randomUUID())
       val contextService = buildContextService(queryApi)
@@ -210,7 +201,6 @@ class ContextServiceSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers wi
 
       for {
         _      <- client.ensureSchema()
-        _      <- cleanDatabase(client)
         _      <- writeApi.commitPatch(patch)
         result <- contextService.query("billing info")
       } yield {

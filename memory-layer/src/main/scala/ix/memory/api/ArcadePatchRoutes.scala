@@ -8,7 +8,11 @@ import org.http4s.HttpRoutes
 import org.http4s.circe.CirceEntityCodec._
 import org.http4s.dsl.io._
 
+import org.http4s.dsl.impl.OptionalQueryParamDecoderMatcher
+
 import ix.memory.db.ArcadeClient
+
+object LimitParam extends OptionalQueryParamDecoderMatcher[Int]("limit")
 
 class ArcadePatchRoutes(client: ArcadeClient) {
 

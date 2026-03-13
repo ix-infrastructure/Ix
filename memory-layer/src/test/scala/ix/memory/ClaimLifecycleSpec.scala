@@ -14,11 +14,6 @@ import ix.memory.model._
 
 class ClaimLifecycleSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestDbHelper {
 
-  val clientResource = ArangoClient.resource(
-    host = "localhost", port = 8529,
-    database = "ix_memory_test", user = "root", password = ""
-  )
-
   private val testEntityId = NodeId(UUID.nameUUIDFromBytes("test:entity1".getBytes("UTF-8")))
 
   private def makePatch(
@@ -41,13 +36,12 @@ class ClaimLifecycleSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers wi
   // ── Test 1: Claim Retirement ─────────────────────────────────────────
 
   "ClaimLifecycle" should "retire old claims when a new value is asserted for the same field" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
 
       for {
         _ <- client.ensureSchema()
-        _ <- cleanDatabase(client)
 
         // Step 1: Create node + assert initial content claim
         patch1 = makePatch(
@@ -96,13 +90,12 @@ class ClaimLifecycleSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers wi
   // ── Test 2: Search Coverage ──────────────────────────────────────────
 
   it should "find entities by name, provenance, claim field, and claim value" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
 
       for {
         _ <- client.ensureSchema()
-        _ <- cleanDatabase(client)
 
         // Ingest a doc node with claims
         patch = makePatch(
@@ -148,13 +141,12 @@ class ClaimLifecycleSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers wi
   // ── Test 3: Identical Claim Dedup ────────────────────────────────────
 
   it should "not create duplicate active claims when the same claim is asserted twice" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
 
       for {
         _ <- client.ensureSchema()
-        _ <- cleanDatabase(client)
 
         // Step 1: Assert a claim
         patch1 = makePatch(
@@ -194,13 +186,12 @@ class ClaimLifecycleSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers wi
   // ── Test 4: Absent Claims Retirement ─────────────────────────────────
 
   it should "retire claims from the same extractor that are no longer emitted" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
 
       for {
         _ <- client.ensureSchema()
-        _ <- cleanDatabase(client)
 
         // Step 1: Assert two claims from the same extractor
         patch1 = makePatch(

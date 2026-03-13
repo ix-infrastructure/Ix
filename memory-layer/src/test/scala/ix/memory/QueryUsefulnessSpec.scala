@@ -15,14 +15,9 @@ import ix.memory.model._
  * Integration tests verifying that parser-emitted edges (especially REFERENCES)
  * are persisted and queryable via the expand API.
  *
- * Requires a running ArangoDB instance on localhost:8529.
+ * Uses embedded ArcadeDB (no external dependencies).
  */
 class QueryUsefulnessSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestDbHelper {
-
-  val clientResource = ArangoClient.resource(
-    host = "localhost", port = 8529,
-    database = "ix_memory_test", user = "root", password = ""
-  )
 
   private def fixturePath(name: String): Path = {
     val url = getClass.getClassLoader.getResource(s"fixtures/$name")
@@ -32,14 +27,14 @@ class QueryUsefulnessSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers w
   // ── Scala REFERENCES: object references become query-useful ──
 
   "QueryUsefulness" should "persist REFERENCES edges from Scala parser and return them via expand" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val router   = new ParserRouter()
       val service  = new IngestionService(router, writeApi, queryApi)
 
       for {
-        _ <- cleanDatabase(client)
+        _ <- client.ensureSchema()
         _ <- service.ingestFile(fixturePath("node_kind.scala"))
         _ <- service.ingestFile(fixturePath("node_kind_user.scala"))
 
@@ -63,14 +58,14 @@ class QueryUsefulnessSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers w
   }
 
   it should "return REFERENCES edges alongside CALLS in combined dependency queries" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val router   = new ParserRouter()
       val service  = new IngestionService(router, writeApi, queryApi)
 
       for {
-        _ <- cleanDatabase(client)
+        _ <- client.ensureSchema()
         _ <- service.ingestFile(fixturePath("node_kind.scala"))
         _ <- service.ingestFile(fixturePath("node_kind_user.scala"))
 
@@ -93,14 +88,14 @@ class QueryUsefulnessSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers w
   // ── Scala nested CONTAINS: object membership is queryable ──
 
   it should "persist nested CONTAINS edges for case objects inside companion" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val router   = new ParserRouter()
       val service  = new IngestionService(router, writeApi, queryApi)
 
       for {
-        _ <- cleanDatabase(client)
+        _ <- client.ensureSchema()
         _ <- service.ingestFile(fixturePath("node_kind.scala"))
 
         results <- queryApi.searchNodes("NodeKind", limit = 10, nameOnly = true)
@@ -123,14 +118,14 @@ class QueryUsefulnessSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers w
   // ── TypeScript: file-level CALLS correctness ──
 
   it should "not create false file-level CALLS for exported function definitions" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val router   = new ParserRouter()
       val service  = new IngestionService(router, writeApi, queryApi)
 
       for {
-        _ <- cleanDatabase(client)
+        _ <- client.ensureSchema()
         _ <- service.ingestFile(fixturePath("command_module.ts"))
 
         fileResults <- queryApi.searchNodes("command_module.ts", limit = 5, nameOnly = true)
@@ -153,14 +148,14 @@ class QueryUsefulnessSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers w
   // ── TypeScript: cross-file caller attribution ──
 
   it should "create cross-file CALLS edges for imported function invocations" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val router   = new ParserRouter()
       val service  = new IngestionService(router, writeApi, queryApi)
 
       for {
-        _ <- cleanDatabase(client)
+        _ <- client.ensureSchema()
         _ <- service.ingestFile(fixturePath("command_module.ts"))
         _ <- service.ingestFile(fixturePath("command_registration.ts"))
 

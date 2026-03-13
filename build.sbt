@@ -26,11 +26,11 @@ lazy val memoryLayer = (project in file("memory-layer"))
       "io.circe"       %% "circe-generic"       % "0.14.10",
       "io.circe"       %% "circe-parser"        % "0.14.10",
 
-      // ArangoDB (to be removed after ArcadeDB migration)
-      "com.arangodb"   %  "arangodb-java-driver" % "7.12.0",
-
       // ArcadeDB (embedded graph database)
       "com.arcadedb"   %  "arcadedb-engine"      % "26.1.1",
+
+      // Jackson (used for JSON-to-Java-Map conversion in bulk ingestion)
+      "com.fasterxml.jackson.core" % "jackson-databind" % "2.17.2",
 
       // Tree-sitter
       "ch.usi.si.seart" % "java-tree-sitter"    % "1.12.0",
@@ -44,7 +44,7 @@ lazy val memoryLayer = (project in file("memory-layer"))
       "org.typelevel"  %% "cats-effect-testing-scalatest" % "1.5.0" % Test
     ),
 
-    // Run tests sequentially to avoid ArangoDB write-write conflicts on shared DB
+    // Run tests sequentially to avoid embedded ArcadeDB lock conflicts
     Test / parallelExecution := false,
 
     // Assembly settings

@@ -8,14 +8,9 @@ import org.scalatest.flatspec.AsyncFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import ix.memory.TestDbHelper
-import ix.memory.db.{ArangoClient, ArangoGraphQueryApi, BulkWriteApi}
+import ix.memory.db.{ArcadeClient, ArcadeGraphQueryApi, ArcadeBulkWriteApi}
 
 class LargeRepoIngestionSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestDbHelper {
-
-  val clientResource = ArangoClient.resource(
-    host = "localhost", port = 8529,
-    database = "ix_memory_test", user = "root", password = ""
-  )
 
   private def createSyntheticRepo(fileCount: Int): IO[Path] = IO.blocking {
     val tmpDir = Files.createTempDirectory("ix-large-repo-test")
@@ -38,15 +33,14 @@ class LargeRepoIngestionSpec extends AsyncFlatSpec with AsyncIOSpec with Matcher
   }
 
   "BulkIngestionService" should "handle 500 files without OOM" in {
-    clientResource.use { client =>
-      val queryApi = new ArangoGraphQueryApi(client)
-      val writeApi = new BulkWriteApi(client)
+    tempDbResource.use { client =>
+      val queryApi = new ArcadeGraphQueryApi(client)
+      val writeApi = new ArcadeBulkWriteApi(client)
       val router   = new ParserRouter()
       val service  = new BulkIngestionService(router, writeApi, queryApi)
 
       for {
         _      <- client.ensureSchema()
-        _      <- cleanDatabase(client)
         tmpDir <- createSyntheticRepo(500)
         result <- service.ingestPath(tmpDir, Some("python"), recursive = true)
         _      <- cleanupDir(tmpDir)
@@ -60,15 +54,14 @@ class LargeRepoIngestionSpec extends AsyncFlatSpec with AsyncIOSpec with Matcher
   }
 
   it should "produce correct skip reasons on re-ingest" in {
-    clientResource.use { client =>
-      val queryApi = new ArangoGraphQueryApi(client)
-      val writeApi = new BulkWriteApi(client)
+    tempDbResource.use { client =>
+      val queryApi = new ArcadeGraphQueryApi(client)
+      val writeApi = new ArcadeBulkWriteApi(client)
       val router   = new ParserRouter()
       val service  = new BulkIngestionService(router, writeApi, queryApi)
 
       for {
         _      <- client.ensureSchema()
-        _      <- cleanDatabase(client)
         tmpDir <- createSyntheticRepo(10)
         r1     <- service.ingestPath(tmpDir, Some("python"), recursive = true)
         r2     <- service.ingestPath(tmpDir, Some("python"), recursive = true)
@@ -82,15 +75,14 @@ class LargeRepoIngestionSpec extends AsyncFlatSpec with AsyncIOSpec with Matcher
   }
 
   it should "survive chunked writes on medium batch" in {
-    clientResource.use { client =>
-      val queryApi = new ArangoGraphQueryApi(client)
-      val writeApi = new BulkWriteApi(client)
+    tempDbResource.use { client =>
+      val queryApi = new ArcadeGraphQueryApi(client)
+      val writeApi = new ArcadeBulkWriteApi(client)
       val router   = new ParserRouter()
       val service  = new BulkIngestionService(router, writeApi, queryApi)
 
       for {
         _      <- client.ensureSchema()
-        _      <- cleanDatabase(client)
         tmpDir <- createSyntheticRepo(250)
         result <- service.ingestPath(tmpDir, Some("python"), recursive = true)
         rev    <- queryApi.getLatestRev

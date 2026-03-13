@@ -15,18 +15,13 @@ import org.scalatest.flatspec.AsyncFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import ix.memory.TestDbHelper
-import ix.memory.conflict.ConflictService
+import ix.memory.conflict.ArcadeConflictService
 import ix.memory.context._
 import ix.memory.db._
 import ix.memory.ingestion.{BulkIngestionService, IngestionService, ParserRouter}
 import ix.memory.model._
 
 class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestDbHelper {
-
-  val clientResource = ArangoClient.resource(
-    host = "localhost", port = 8529,
-    database = "ix_memory_test", user = "root", password = ""
-  )
 
   private def makePatch(
     baseRev: Rev = Rev(0L),
@@ -50,11 +45,11 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
     )
 
   private def buildRoutes(
-    client: ArangoClient,
-    writeApi: ArangoGraphWriteApi,
-    queryApi: ArangoGraphQueryApi
+    client: ArcadeClient,
+    writeApi: ArcadeGraphWriteApi,
+    queryApi: ArcadeGraphQueryApi
   ): HttpApp[IO] = {
-    val conflictService = new ConflictService(client, queryApi, writeApi)
+    val conflictService = new ArcadeConflictService(client, queryApi, writeApi)
     val contextService = new ContextService(
       queryApi,
       new GraphSeeder(queryApi),
@@ -64,21 +59,22 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
       new ConflictDetectorImpl()
     )
     val ingestionService = new IngestionService(new ParserRouter(), writeApi, queryApi)
-    val bulkWriteApi = new BulkWriteApi(client)
+    val bulkWriteApi = new ArcadeBulkWriteApi(client)
     val bulkIngestionService = new BulkIngestionService(new ParserRouter(), bulkWriteApi, queryApi)
-    Routes.all(contextService, ingestionService, bulkIngestionService, queryApi, writeApi, conflictService, client).orNotFound
+    Routes.arcade(contextService, ingestionService, bulkIngestionService, queryApi, writeApi, conflictService, client).orNotFound
   }
 
   // ── Test 1: Health check ─────────────────────────────────────────────
 
   "Routes" should "return 200 OK for health check" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val app = buildRoutes(client, writeApi, queryApi)
       val req = Request[IO](Method.GET, uri"/v1/health")
 
       for {
+        _    <- client.ensureSchema()
         resp <- app.run(req)
         body <- resp.as[Json]
       } yield {
@@ -91,9 +87,9 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
   // ── Test 2: GET /v1/entity/:id returns entity with claims ────────────
 
   it should "return entity with claims and edges" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
       val nodeId   = NodeId(UUID.randomUUID())
       val patch    = makePatch(
@@ -105,7 +101,6 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
 
       for {
         _    <- client.ensureSchema()
-        _    <- cleanDatabase(client)
         _    <- writeApi.commitPatch(patch)
         req   = Request[IO](Method.GET, Uri.unsafeFromString(s"/v1/entity/${nodeId.value}"))
         resp <- app.run(req)
@@ -121,15 +116,14 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
   // ── Test 3: GET /v1/entity/:id returns 404 for missing entity ────────
 
   it should "return 404 for missing entity" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
       val fakeId   = UUID.randomUUID()
 
       for {
         _    <- client.ensureSchema()
-        _    <- cleanDatabase(client)
         req   = Request[IO](Method.GET, Uri.unsafeFromString(s"/v1/entity/$fakeId"))
         resp <- app.run(req)
       } yield {
@@ -141,14 +135,13 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
   // ── Test 4: GET /v1/conflicts returns empty list ─────────────────────
 
   it should "return empty conflicts list" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
 
       for {
         _    <- client.ensureSchema()
-        _    <- cleanDatabase(client)
         req   = Request[IO](Method.GET, Uri.unsafeFromString(s"/v1/conflicts"))
         resp <- app.run(req)
         body <- resp.as[Json]
@@ -162,9 +155,9 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
   // ── Test 5: POST /v1/diff returns diff between revisions ─────────────
 
   it should "diff between revisions and detect added entity" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
       val nodeId   = NodeId(UUID.randomUUID())
       val patch    = makePatch(
@@ -175,7 +168,6 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
 
       for {
         _      <- client.ensureSchema()
-        _      <- cleanDatabase(client)
         result <- writeApi.commitPatch(patch)
         diffReq = Json.obj(
           "fromRev"  -> 0L.asJson,
@@ -197,14 +189,13 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
   // ── Test 6: POST /v1/diff returns 400 for invalid rev order ──────────
 
   it should "return 400 for invalid rev order in diff" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
 
       for {
         _    <- client.ensureSchema()
-        _    <- cleanDatabase(client)
         diffReq = Json.obj(
           "fromRev" -> 5L.asJson,
           "toRev"   -> 2L.asJson
@@ -220,9 +211,9 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
   // ── Test 7: POST /v1/context returns structured context ──────────────
 
   it should "return structured context for a query" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
       val nodeId   = NodeId(UUID.randomUUID())
       val patch    = makePatch(
@@ -234,7 +225,6 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
 
       for {
         _    <- client.ensureSchema()
-        _    <- cleanDatabase(client)
         _    <- writeApi.commitPatch(patch)
         ctxReq = Json.obj(
           "query"  -> "billing".asJson
@@ -252,14 +242,13 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
   // ── Test 8: POST /v1/ingest ingests a Python file ─────────────────────
 
   it should "ingest a Python file and return counts" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
 
       for {
         _       <- client.ensureSchema()
-        _       <- cleanDatabase(client)
         tmpFile <- IO.blocking {
           val f = java.nio.file.Files.createTempFile("ix-test-", ".py")
           java.nio.file.Files.writeString(f,
@@ -288,14 +277,13 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
   // ── Test 9: POST /v1/ingest rejects path traversal ────────────────
 
   it should "return 400 for path traversal attempt" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
 
       for {
         _    <- client.ensureSchema()
-        _    <- cleanDatabase(client)
         ingestReq = Json.obj(
           "path"   -> "/tmp/../etc/passwd".asJson
         )
@@ -310,14 +298,13 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
   // ── Test 10: POST /v1/diff returns global diff without entityId ──────
 
   it should "return 200 for global diff without entityId" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
 
       for {
         _    <- client.ensureSchema()
-        _    <- cleanDatabase(client)
         diffReq = Json.obj(
           "fromRev" -> 0L.asJson,
           "toRev"   -> 1L.asJson
@@ -333,9 +320,9 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
   // ── Test 11: POST /v1/provenance/:id returns provenance chain ─────────
 
   it should "return provenance chain for entity" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
       val nodeId   = NodeId(UUID.randomUUID())
       val patch    = makePatch(
@@ -346,7 +333,6 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
 
       for {
         _    <- client.ensureSchema()
-        _    <- cleanDatabase(client)
         _    <- writeApi.commitPatch(patch)
         req   = Request[IO](Method.POST, Uri.unsafeFromString(s"/v1/provenance/${nodeId.value}"))
         resp <- app.run(req)
@@ -363,14 +349,13 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
   // ── Test 12: POST /v1/decide creates a decision node ─────────────────
 
   it should "create a decision node via POST /v1/decide" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
 
       for {
         _    <- client.ensureSchema()
-        _    <- cleanDatabase(client)
         body  = Json.obj(
           "title"     -> "Use exponential backoff".asJson,
           "rationale" -> "Better for transient failures".asJson
@@ -389,9 +374,9 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
   // ── Test 13: POST /v1/search finds nodes by term ─────────────────────
 
   it should "search nodes by term via POST /v1/search" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
       val nodeId   = NodeId(UUID.randomUUID())
       val patch    = makePatch(
@@ -402,7 +387,6 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
 
       for {
         _    <- client.ensureSchema()
-        _    <- cleanDatabase(client)
         _    <- writeApi.commitPatch(patch)
         body  = Json.obj("term" -> "billing_search_test".asJson)
         req   = Request[IO](Method.POST, uri"/v1/search").withEntity(body)
@@ -418,14 +402,13 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
   // ── Test 14: GET /v1/truth returns intent list ────────────────────────
 
   it should "return intent list via GET /v1/truth" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
 
       for {
         _    <- client.ensureSchema()
-        _    <- cleanDatabase(client)
         req   = Request[IO](Method.GET, uri"/v1/truth")
         resp <- app.run(req)
       } yield {
@@ -437,14 +420,13 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
   // ── Test 15: POST /v1/truth creates an intent node ─────────────────
 
   it should "create an intent via POST /v1/truth" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
 
       for {
         _    <- client.ensureSchema()
-        _    <- cleanDatabase(client)
         body  = Json.obj("statement" -> "Ship retry system by Friday".asJson)
         req   = Request[IO](Method.POST, uri"/v1/truth").withEntity(body)
         resp <- app.run(req)
@@ -459,14 +441,13 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
   // ── Test 16: GET /v1/patches lists recent patches ─────────────────────
 
   it should "list recent patches via GET /v1/patches" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
 
       for {
         _    <- client.ensureSchema()
-        _    <- cleanDatabase(client)
         req   = Request[IO](Method.GET, uri"/v1/patches")
         resp <- app.run(req)
       } yield {
@@ -478,9 +459,9 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
   // ── Test 17: GET /v1/patches/:id returns a specific patch ──────────────
 
   it should "return a specific patch by ID via GET /v1/patches/:id" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
       val nodeId   = NodeId(UUID.randomUUID())
       val patchId  = PatchId(UUID.randomUUID())
@@ -493,7 +474,6 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
 
       for {
         _    <- client.ensureSchema()
-        _    <- cleanDatabase(client)
         _    <- writeApi.commitPatch(patch)
         req   = Request[IO](Method.GET, Uri.unsafeFromString(s"/v1/patches/${patchId.value}"))
         resp <- app.run(req)
@@ -508,15 +488,14 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
   // ── Test 18: GET /v1/patches/:id returns 404 for missing patch ─────────
 
   it should "return 404 for non-existent patch ID" in {
-    clientResource.use { client =>
-      val writeApi = new ArangoGraphWriteApi(client)
-      val queryApi = new ArangoGraphQueryApi(client)
+    tempDbResource.use { client =>
+      val writeApi = new ArcadeGraphWriteApi(client)
+      val queryApi = new ArcadeGraphQueryApi(client)
       val app      = buildRoutes(client, writeApi, queryApi)
       val fakeId   = UUID.randomUUID()
 
       for {
         _    <- client.ensureSchema()
-        _    <- cleanDatabase(client)
         req   = Request[IO](Method.GET, Uri.unsafeFromString(s"/v1/patches/$fakeId"))
         resp <- app.run(req)
       } yield {
