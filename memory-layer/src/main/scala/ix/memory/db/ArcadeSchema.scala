@@ -17,7 +17,10 @@ object ArcadeSchema {
       schema.getOrCreateVertexType("ix_revisions")
       val idempotencyKeys = schema.getOrCreateVertexType("ix_idempotency_keys")
       schema.getOrCreateVertexType("ix_conflict_sets")
-      schema.getOrCreateVertexType("ix_meta")
+      val meta = schema.getOrCreateVertexType("ix_meta")
+      ensureProperty(meta, "schemaVersion", Type.INTEGER)
+      ensureProperty(meta, "appVersion", Type.STRING)
+      ensureProperty(meta, "migratedAt", Type.STRING)
 
       // ix_edges stored as vertex type (we query by src/dst fields, not native traversal)
       val edges = schema.getOrCreateVertexType("ix_edges")

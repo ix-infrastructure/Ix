@@ -9,6 +9,7 @@ import ix.memory.api.Routes
 import ix.memory.conflict.ArcadeConflictService
 import ix.memory.context._
 import ix.memory.db._
+import ix.memory.db.migrations.MigrationRunner
 import ix.memory.ingestion._
 
 object Main extends IOApp.Simple {
@@ -24,6 +25,9 @@ object Main extends IOApp.Simple {
         sys.env.getOrElse("IX_DATA_DIR", defaultDataDir)
       )
       _ <- Resource.eval(client.ensureSchema())
+      _ <- Resource.eval(IO.blocking {
+        MigrationRunner.run(client.raw, "0.1.0")
+      })
 
       // 2. Core APIs
       writeApi     = new ArcadeGraphWriteApi(client)

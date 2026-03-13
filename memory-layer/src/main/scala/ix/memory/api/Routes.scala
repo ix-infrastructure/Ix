@@ -11,6 +11,7 @@ import org.http4s.dsl.io._
 import ix.memory.conflict.ArcadeConflictService
 import ix.memory.context.ContextService
 import ix.memory.db.{ArcadeClient, GraphQueryApi, GraphWriteApi}
+import ix.memory.db.migrations.MigrationRunner
 import ix.memory.ingestion.{BulkIngestionService, IngestionService}
 
 object Routes {
@@ -28,6 +29,15 @@ object Routes {
     val health = HttpRoutes.of[IO] {
       case GET -> Root / "v1" / "health" =>
         Ok(Json.obj("status" -> "ok".asJson))
+      case GET -> Root / "v1" / "version" =>
+        val schemaVersion = IO.blocking(MigrationRunner.currentSchemaVersion(client.raw))
+        schemaVersion.flatMap { sv =>
+          Ok(Json.obj(
+            "version"       -> "0.1.0".asJson,
+            "schemaVersion" -> sv.asJson,
+            "platform"      -> "jvm".asJson
+          ))
+        }
     }
 
     val contextRoutes   = new ContextRoutes(contextService).routes
