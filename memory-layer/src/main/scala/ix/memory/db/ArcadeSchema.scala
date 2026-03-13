@@ -19,8 +19,8 @@ object ArcadeSchema {
       schema.getOrCreateVertexType("ix_conflict_sets")
       schema.getOrCreateVertexType("ix_meta")
 
-      // Edge type
-      val edges = schema.getOrCreateEdgeType("ix_edges")
+      // ix_edges stored as vertex type (we query by src/dst fields, not native traversal)
+      val edges = schema.getOrCreateVertexType("ix_edges")
 
       // Properties & Indexes — ix_nodes
       ensureProperty(nodes, "kind", Type.STRING)
@@ -33,9 +33,11 @@ object ArcadeSchema {
       createIndex(schema, unique = false, "ix_nodes", "source_uri")
 
       // Properties & Indexes — ix_edges
+      ensureProperty(edges, "edge_id", Type.STRING)
       ensureProperty(edges, "src", Type.STRING)
       ensureProperty(edges, "dst", Type.STRING)
       ensureProperty(edges, "predicate", Type.STRING)
+      createIndex(schema, unique = false, "ix_edges", "edge_id")
       createIndex(schema, unique = false, "ix_edges", "src")
       createIndex(schema, unique = false, "ix_edges", "dst")
       createIndex(schema, unique = false, "ix_edges", "predicate")
