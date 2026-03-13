@@ -17,6 +17,111 @@ The primary interface is `ix` CLI commands.
 - Provenance + history: `ix patches`, `ix history`, `ix diff`, `ix conflicts`
 - GitHub ingestion: `ix ingest --github owner/repo` (issues/PRs/commits/comments)
 
+## Install
+
+macOS, Linux, WSL:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/IX-Memory/main/install.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/ix-infrastructure/IX-Memory/main/install.ps1 | iex
+```
+
+Windows CMD:
+
+```cmd
+curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/IX-Memory/main/install.cmd -o install.cmd && install.cmd && del install.cmd
+```
+
+Homebrew:
+
+```bash
+brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/IX-Memory
+brew install ix
+```
+
+## Getting Started
+
+```bash
+cd your-project
+ix init                          # register workspace, set up MCP
+ix ingest ./src --recursive      # parse codebase into knowledge graph
+ix overview YourMainClass        # explore what Ix knows
+```
+
+## Upgrade
+
+```bash
+ix upgrade                       # upgrade to latest stable version
+ix upgrade --check               # see what's available without installing
+ix upgrade --version 1.6.0       # install a specific version
+ix upgrade --channel beta        # switch to beta channel
+```
+
+## Rollback
+
+If an upgrade caused issues, revert to the previous version:
+
+```bash
+ix upgrade --rollback
+```
+
+This restores both the binary and database to their state before the last upgrade.
+
+## Reset
+
+Start fresh with an empty database:
+
+```bash
+ix reset                         # wipe database (with confirmation)
+ix reset --force                 # wipe without confirmation
+ix upgrade --reset               # upgrade and wipe database
+```
+
+After a reset, re-ingest your codebase:
+
+```bash
+ix ingest ./src --recursive
+```
+
+## Version Info
+
+```bash
+ix --version
+```
+
+```
+ix 1.5.0 (stable)
+  server: 1.5.0
+  schema: 5
+  platform: darwin-arm64
+```
+
+## Server Management
+
+The server starts automatically when you run any `ix` command. For manual control:
+
+```bash
+ix server status                 # check if server is running
+ix server start                  # start manually
+ix server stop                   # stop the server
+```
+
+The server auto-shuts down after 30 minutes of inactivity.
+
+## Diagnostics
+
+```bash
+ix status                        # backend health + graph freshness
+ix stats                         # graph node/edge counts
+```
+
+---
+
 ## Prerequisites
 
 | Tool | Version |
