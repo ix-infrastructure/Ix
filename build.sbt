@@ -26,8 +26,11 @@ lazy val memoryLayer = (project in file("memory-layer"))
       "io.circe"       %% "circe-generic"       % "0.14.10",
       "io.circe"       %% "circe-parser"        % "0.14.10",
 
-      // ArangoDB
+      // ArangoDB (to be removed after ArcadeDB migration)
       "com.arangodb"   %  "arangodb-java-driver" % "7.12.0",
+
+      // ArcadeDB (embedded graph database)
+      "com.arcadedb"   %  "arcadedb-engine"      % "26.1.1",
 
       // Tree-sitter
       "ch.usi.si.seart" % "java-tree-sitter"    % "1.12.0",
