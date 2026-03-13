@@ -1,30 +1,35 @@
 class Ix < Formula
   desc "Persistent memory for LLM systems — CLI for the Ix knowledge graph"
   homepage "https://github.com/ix-infrastructure/IX-Memory"
-  url "https://github.com/ix-infrastructure/IX-Memory/archive/refs/tags/v0.1.0.tar.gz"
-  # sha256 "UPDATE_WITH_ACTUAL_SHA256_AFTER_RELEASE"
+  version "0.1.0"
   license "MIT"
-  head "https://github.com/ix-infrastructure/IX-Memory.git", branch: "main"
+
+  if OS.mac?
+    if Hardware::CPU.arm?
+      url "https://github.com/ix-infrastructure/IX-Memory/releases/download/v0.1.0/ix-darwin-arm64.tar.gz"
+      sha256 "PLACEHOLDER_SHA256_DARWIN_ARM64" # TODO: update after release
+    else
+      url "https://github.com/ix-infrastructure/IX-Memory/releases/download/v0.1.0/ix-darwin-x64.tar.gz"
+      sha256 "PLACEHOLDER_SHA256_DARWIN_X64" # TODO: update after release
+    end
+  elsif OS.linux?
+    if Hardware::CPU.arm?
+      url "https://github.com/ix-infrastructure/IX-Memory/releases/download/v0.1.0/ix-linux-arm64.tar.gz"
+      sha256 "PLACEHOLDER_SHA256_LINUX_ARM64" # TODO: update after release
+    else
+      url "https://github.com/ix-infrastructure/IX-Memory/releases/download/v0.1.0/ix-linux-x64.tar.gz"
+      sha256 "PLACEHOLDER_SHA256_LINUX_X64" # TODO: update after release
+    end
+  end
 
   depends_on "node@22"
 
   def install
-    cd "ix-cli" do
-      system "npm", "install", "--production", "--silent"
-      system "npm", "run", "build"
-
-      # Install the compiled CLI and its dependencies
-      libexec.install "dist", "node_modules", "package.json"
-
-      # Create a wrapper script that invokes node with the correct path
-      (bin/"ix").write <<~EOS
-        #!/bin/bash
-        exec "#{Formula["node@22"].opt_bin}/node" "#{libexec}/dist/cli/main.js" "$@"
-      EOS
-    end
+    libexec.install Dir["*"]
+    bin.install_symlink libexec/"ix"
   end
 
   test do
-    assert_match "Usage:", shell_output("#{bin}/ix --help")
+    system "#{bin}/ix", "--version"
   end
 end
