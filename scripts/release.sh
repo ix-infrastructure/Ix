@@ -2,95 +2,94 @@
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IX-Memory — Release Script
+# IX-Memory — Release Script (CI-driven)
 #
-# Creates a GitHub release with a tarball suitable for Homebrew installation.
+# Bumps versions, tags, and pushes. CI handles building platform archives,
+# creating the GitHub Release, and updating the Homebrew formula.
 #
 # Usage:
-#   ./scripts/release.sh 0.1.0          # Create release v0.1.0
-#   ./scripts/release.sh 0.2.0 --draft  # Create draft release
+#   ./scripts/release.sh 0.1.0          # Release v0.1.0
+#   ./scripts/release.sh 0.2.0 --draft  # Release v0.2.0 (CI creates draft)
 #
 # Prerequisites:
 #   - gh CLI installed and authenticated
 #   - Clean working tree on main branch
-#   - CLI builds successfully
 # ─────────────────────────────────────────────────────────────────────────────
 
 IX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${1:?Usage: ./scripts/release.sh <version> [--draft]}"
-DRAFT_FLAG=""
+DRAFT=""
 
 if [[ "${2:-}" == "--draft" ]]; then
-  DRAFT_FLAG="--draft"
+  DRAFT="true"
 fi
 
 TAG="v${VERSION}"
 
-# ── Preflight ────────────────────────────────────────────────────────────────
+# ── Preflight checks ────────────────────────────────────────────────────────
 
 if ! command -v gh &> /dev/null; then
   echo "Error: gh CLI is required. Install: https://cli.github.com/"
   exit 1
 fi
 
-# Verify CLI builds
-echo "Verifying CLI build..."
-cd "$IX_DIR/ix-cli"
-npm install --silent
-npm run build
-echo "[ok] CLI builds successfully"
+if ! git diff --quiet HEAD 2>/dev/null || ! git diff --cached --quiet HEAD 2>/dev/null; then
+  echo "Error: working tree is not clean. Commit or stash changes first."
+  exit 1
+fi
 
-# Update version in package.json
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [[ "$CURRENT_BRANCH" != "main" ]]; then
+  echo "Warning: you are on branch '$CURRENT_BRANCH', not 'main'."
+  read -rp "Continue anyway? [y/N] " confirm
+  if [[ "$confirm" != [yY] ]]; then
+    echo "Aborted."
+    exit 1
+  fi
+fi
+
+# ── Bump versions ───────────────────────────────────────────────────────────
+
+echo "Bumping version to ${VERSION}..."
+
+# build.sbt
+sed -i '' "s|ThisBuild / version := \".*\"|ThisBuild / version := \"${VERSION}\"|" "$IX_DIR/build.sbt"
+echo "  [ok] build.sbt"
+
+# ix-cli/package.json
 cd "$IX_DIR/ix-cli"
 npm version "$VERSION" --no-git-tag-version --allow-same-version 2>/dev/null || true
 cd "$IX_DIR"
+echo "  [ok] ix-cli/package.json"
 
-# ── Create release ───────────────────────────────────────────────────────────
-
-echo ""
-echo "Creating release $TAG..."
-
-# Create and push tag
-git tag -a "$TAG" -m "Release $TAG"
-git push origin "$TAG"
-
-# Create GitHub release
-gh release create "$TAG" \
-  --title "IX-Memory $TAG" \
-  --notes "## IX-Memory $TAG
-
-### Install via Homebrew
-\`\`\`bash
-brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/IX-Memory
-brew install ix
-\`\`\`
-
-### Install manually
-\`\`\`bash
-git clone https://github.com/ix-infrastructure/IX-Memory
-cd IX-Memory && ./scripts/build-cli.sh
-\`\`\`
-" $DRAFT_FLAG
-
-# ── Update Homebrew formula ─────────────────────────────────────────────────
+# ── Commit, tag, push ──────────────────────────────────────────────────────
 
 echo ""
-echo "Fetching release tarball SHA..."
-TARBALL_URL="https://github.com/ix-infrastructure/IX-Memory/archive/refs/tags/${TAG}.tar.gz"
-SHA256=$(curl -sL "$TARBALL_URL" | shasum -a 256 | cut -d' ' -f1)
+echo "Committing version bump..."
+git add build.sbt ix-cli/package.json
+git commit -m "release: bump version to ${VERSION}"
 
-echo "Updating Homebrew formula..."
-sed -i '' "s|url \".*\"|url \"${TARBALL_URL}\"|" "$IX_DIR/homebrew/ix.rb"
-sed -i '' "s|# sha256 .*|sha256 \"${SHA256}\"|" "$IX_DIR/homebrew/ix.rb"
+echo "Creating annotated tag ${TAG}..."
+git tag -a "$TAG" -m "Release ${TAG}"
+
+echo "Pushing commit and tag to origin..."
+git push origin main --follow-tags
+
+# ── Done ────────────────────────────────────────────────────────────────────
 
 echo ""
-echo "[ok] Release $TAG created"
-echo "     Tarball: $TARBALL_URL"
-echo "     SHA256:  $SHA256"
+echo "[ok] Version ${VERSION} tagged and pushed."
 echo ""
-echo "Formula updated at: homebrew/ix.rb"
+echo "CI will now automatically:"
+echo "  1. Build platform-specific archives (macOS aarch64/x86_64, Linux x86_64)"
+echo "  2. Create the GitHub Release${DRAFT:+ (as draft)}"
+echo "  3. Upload release artifacts"
+echo "  4. Update the Homebrew formula with the correct SHA256"
 echo ""
-echo "To publish the tap, push the updated formula:"
-echo "  git add homebrew/ix.rb"
-echo "  git commit -m \"brew: update formula for $TAG\""
-echo "  git push origin main"
+if [[ -n "$DRAFT" ]]; then
+  echo "Note: --draft was specified. The CI-created release will be a draft."
+  echo "You will need to manually publish it when ready."
+  echo ""
+fi
+echo "Monitor the release workflow:"
+echo "  gh run list --workflow=release.yml"
