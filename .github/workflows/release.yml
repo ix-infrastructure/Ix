@@ -1,0 +1,187 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - platform: linux-amd64
+            os: ubuntu-latest
+          - platform: linux-arm64
+            os: ubuntu-latest
+          - platform: darwin-amd64
+            os: macos-13
+          - platform: darwin-arm64
+            os: macos-14
+
+    runs-on: ${{ matrix.os }}
+    name: Build (${{ matrix.platform }})
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ix-cli/package-lock.json
+
+      - name: Set up sbt
+        uses: sbt/setup-sbt@v1
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build fat JAR
+        if: matrix.platform != 'linux-arm64'
+        run: sbt "memoryLayer/assembly"
+
+      - name: Build fat JAR (ARM64 cross-build)
+        if: matrix.platform == 'linux-arm64'
+        uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: aarch64
+          distro: ubuntu22.04
+          install: |
+            apt-get update -q
+            apt-get install -yq curl gnupg
+            curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor -o /usr/share/keyrings/adoptium.gpg
+            echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(. /etc/os-release && echo $VERSION_CODENAME) main" \
+              > /etc/apt/sources.list.d/adoptium.list
+            apt-get update -q
+            apt-get install -yq temurin-21-jdk
+            curl -fsSL https://www.scala-sbt.org/sbt-rpm.repo > /etc/yum.repos.d/sbt-rpm.repo 2>/dev/null || true
+            echo "deb https://repo.scala-sbt.org/scalasbt/debian all main" > /etc/apt/sources.list.d/sbt.list
+            curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x2EE0EA64E40A89B84B2DF73499E82A75642AC823" | gpg --dearmor -o /usr/share/keyrings/scalasbt-archive-keyring.gpg
+            echo "deb [signed-by=/usr/share/keyrings/scalasbt-archive-keyring.gpg] https://repo.scala-sbt.org/scalasbt/debian all main" \
+              > /etc/apt/sources.list.d/sbt.list
+            apt-get update -q
+            apt-get install -yq sbt
+          run: sbt "memoryLayer/assembly"
+
+      - name: Build CLI
+        run: |
+          cd ix-cli
+          npm ci
+          npm run build
+
+      - name: Package distribution
+        run: |
+          # package.sh builds JAR and CLI too, but we already did that.
+          # We replicate the packaging logic directly to avoid redundant builds.
+          VERSION="${{ steps.version.outputs.version }}"
+          PLATFORM="${{ matrix.platform }}"
+          DIST_NAME="ix-${VERSION}-${PLATFORM}"
+          DIST_DIR="dist/${DIST_NAME}"
+
+          mkdir -p "${DIST_DIR}/server"
+          mkdir -p "${DIST_DIR}/cli"
+
+          cp memory-layer/target/scala-2.13/ix-memory-layer.jar "${DIST_DIR}/server/"
+          cp -r ix-cli/dist "${DIST_DIR}/cli/"
+          cp ix-cli/package.json "${DIST_DIR}/cli/"
+
+          cat > "${DIST_DIR}/ix" <<'WRAPPER'
+          #!/bin/sh
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          exec node "${SCRIPT_DIR}/cli/dist/cli/main.js" "$@"
+          WRAPPER
+          chmod +x "${DIST_DIR}/ix"
+
+          cd dist
+          tar czf "${DIST_NAME}.tar.gz" "${DIST_NAME}"
+          shasum -a 256 "${DIST_NAME}.tar.gz" > "${DIST_NAME}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ix-${{ steps.version.outputs.version }}-${{ matrix.platform }}
+          path: |
+            dist/ix-${{ steps.version.outputs.version }}-${{ matrix.platform }}.tar.gz
+            dist/ix-${{ steps.version.outputs.version }}-${{ matrix.platform }}.tar.gz.sha256
+          retention-days: 5
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    name: Create Release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate manifest
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cd artifacts
+
+          echo '{' > manifest.json
+          echo '  "version": "'"${VERSION}"'",' >> manifest.json
+          echo '  "platforms": {' >> manifest.json
+
+          FIRST=true
+          for archive in ix-${VERSION}-*.tar.gz; do
+            [ -f "$archive" ] || continue
+            PLATFORM="${archive#ix-${VERSION}-}"
+            PLATFORM="${PLATFORM%.tar.gz}"
+            SHA256=$(shasum -a 256 "$archive" | cut -d' ' -f1)
+
+            if [ "$FIRST" = true ]; then
+              FIRST=false
+            else
+              echo ',' >> manifest.json
+            fi
+
+            printf '    "%s": {\n' "$PLATFORM" >> manifest.json
+            printf '      "archive": "%s",\n' "$archive" >> manifest.json
+            printf '      "sha256": "%s"\n' "$SHA256" >> manifest.json
+            printf '    }' >> manifest.json
+          done
+
+          echo '' >> manifest.json
+          echo '  }' >> manifest.json
+          echo '}' >> manifest.json
+
+          echo "Generated manifest.json:"
+          cat manifest.json
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${GITHUB_REF_NAME}"
+
+          gh release create "$TAG" \
+            --title "IX-Memory v${VERSION}" \
+            --generate-notes \
+            artifacts/ix-${VERSION}-*.tar.gz \
+            artifacts/ix-${VERSION}-*.tar.gz.sha256 \
+            artifacts/manifest.json
