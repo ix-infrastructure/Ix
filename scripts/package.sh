@@ -2,6 +2,8 @@
 set -eu
 
 VERSION="${1:-dev}"
+NODE_VERSION="22.14.0"
+JDK_VERSION="21"
 
 # Detect OS
 case "$(uname -s)" in
@@ -16,6 +18,12 @@ case "$(uname -m)" in
   aarch64) ARCH="arm64" ;;
   arm64)   ARCH="arm64" ;;
   *)       ARCH="$(uname -m)" ;;
+esac
+
+# Map arch for different download sources
+case "$ARCH" in
+  amd64) NODE_ARCH="x64"; ADOPTIUM_ARCH="x64" ;;
+  arm64) NODE_ARCH="arm64"; ADOPTIUM_ARCH="aarch64" ;;
 esac
 
 PLATFORM="${OS}-${ARCH}"
@@ -47,11 +55,34 @@ cp "${ROOT_DIR}/memory-layer/target/scala-2.13/ix-memory-layer.jar" "${DIST_DIR}
 cp -r "${ROOT_DIR}/ix-cli/dist" "${DIST_DIR}/cli/"
 cp "${ROOT_DIR}/ix-cli/package.json" "${DIST_DIR}/cli/"
 
+# Download Node.js
+echo "==> Downloading Node.js ${NODE_VERSION} for ${PLATFORM}..."
+NODE_ARCHIVE="node-v${NODE_VERSION}-${OS}-${NODE_ARCH}.tar.gz"
+NODE_URL="https://nodejs.org/dist/v${NODE_VERSION}/${NODE_ARCHIVE}"
+curl -fSL --progress-bar -o "${DIST_DIR}/${NODE_ARCHIVE}" "$NODE_URL"
+mkdir -p "${DIST_DIR}/runtime/node"
+tar -xzf "${DIST_DIR}/${NODE_ARCHIVE}" --strip-components=1 -C "${DIST_DIR}/runtime/node"
+rm "${DIST_DIR}/${NODE_ARCHIVE}"
+
+# Download Adoptium JRE
+echo "==> Downloading Adoptium JRE ${JDK_VERSION} for ${PLATFORM}..."
+JRE_URL="https://api.adoptium.net/v3/binary/latest/${JDK_VERSION}/ga/${OS}/${ADOPTIUM_ARCH}/jre/hotspot/normal/eclipse?project=jdk"
+curl -fSL --progress-bar -o "${DIST_DIR}/jre.tar.gz" -L "$JRE_URL"
+mkdir -p "${DIST_DIR}/runtime/jre"
+tar -xzf "${DIST_DIR}/jre.tar.gz" --strip-components=1 -C "${DIST_DIR}/runtime/jre"
+rm "${DIST_DIR}/jre.tar.gz"
+# On macOS, the JRE extracts with Contents/Home structure
+if [ -d "${DIST_DIR}/runtime/jre/Contents/Home" ]; then
+  mv "${DIST_DIR}/runtime/jre/Contents/Home"/* "${DIST_DIR}/runtime/jre/"
+  rm -rf "${DIST_DIR}/runtime/jre/Contents"
+fi
+
 # Create wrapper script
 cat > "${DIST_DIR}/ix" <<'WRAPPER'
 #!/bin/sh
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-exec node "${SCRIPT_DIR}/cli/dist/cli/main.js" "$@"
+export PATH="${SCRIPT_DIR}/runtime/node/bin:${SCRIPT_DIR}/runtime/jre/bin:${PATH}"
+exec "${SCRIPT_DIR}/runtime/node/bin/node" "${SCRIPT_DIR}/cli/dist/cli/main.js" "$@"
 WRAPPER
 chmod +x "${DIST_DIR}/ix"
 
