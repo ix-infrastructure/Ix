@@ -26,6 +26,12 @@ case "$ARCH" in
   arm64) NODE_ARCH="arm64"; ADOPTIUM_ARCH="aarch64" ;;
 esac
 
+# Adoptium uses "mac" not "darwin"
+case "$OS" in
+  darwin) ADOPTIUM_OS="mac" ;;
+  *)      ADOPTIUM_OS="$OS" ;;
+esac
+
 PLATFORM="${OS}-${ARCH}"
 DIST_NAME="ix-${VERSION}-${PLATFORM}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -54,6 +60,10 @@ mkdir -p "${DIST_DIR}/cli"
 cp "${ROOT_DIR}/memory-layer/target/scala-2.13/ix-memory-layer.jar" "${DIST_DIR}/server/"
 cp -r "${ROOT_DIR}/ix-cli/dist" "${DIST_DIR}/cli/"
 cp "${ROOT_DIR}/ix-cli/package.json" "${DIST_DIR}/cli/"
+# Install production-only dependencies (much smaller than full node_modules)
+cd "${DIST_DIR}/cli"
+npm install --omit=dev --ignore-scripts --no-audit --no-fund 2>/dev/null
+cd "${ROOT_DIR}"
 
 # Download Node.js
 echo "==> Downloading Node.js ${NODE_VERSION} for ${PLATFORM}..."
@@ -66,7 +76,7 @@ rm "${DIST_DIR}/${NODE_ARCHIVE}"
 
 # Download Adoptium JRE
 echo "==> Downloading Adoptium JRE ${JDK_VERSION} for ${PLATFORM}..."
-JRE_URL="https://api.adoptium.net/v3/binary/latest/${JDK_VERSION}/ga/${OS}/${ADOPTIUM_ARCH}/jre/hotspot/normal/eclipse?project=jdk"
+JRE_URL="https://api.adoptium.net/v3/binary/latest/${JDK_VERSION}/ga/${ADOPTIUM_OS}/${ADOPTIUM_ARCH}/jre/hotspot/normal/eclipse?project=jdk"
 curl -fSL --progress-bar -o "${DIST_DIR}/jre.tar.gz" -L "$JRE_URL"
 mkdir -p "${DIST_DIR}/runtime/jre"
 tar -xzf "${DIST_DIR}/jre.tar.gz" --strip-components=1 -C "${DIST_DIR}/runtime/jre"

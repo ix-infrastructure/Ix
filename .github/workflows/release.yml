@@ -100,12 +100,21 @@ jobs:
             arm64) NODE_ARCH="arm64"; ADOPTIUM_ARCH="aarch64" ;;
           esac
 
+          # Adoptium uses "mac" not "darwin"
+          case "$OS" in
+            darwin) ADOPTIUM_OS="mac" ;;
+            *)      ADOPTIUM_OS="$OS" ;;
+          esac
+
           mkdir -p "${DIST_DIR}/server" "${DIST_DIR}/cli" "${DIST_DIR}/runtime/node" "${DIST_DIR}/runtime/jre"
 
           # Copy build artifacts
           cp memory-layer/target/scala-2.13/ix-memory-layer.jar "${DIST_DIR}/server/"
           cp -r ix-cli/dist "${DIST_DIR}/cli/"
           cp ix-cli/package.json "${DIST_DIR}/cli/"
+          cd "${DIST_DIR}/cli"
+          npm install --omit=dev --ignore-scripts --no-audit --no-fund
+          cd -
 
           # Download and extract Node.js
           echo "Downloading Node.js ${NODE_VERSION}..."
@@ -115,7 +124,7 @@ jobs:
 
           # Download and extract Adoptium JRE
           echo "Downloading Adoptium JRE 21..."
-          curl -fSL -o /tmp/jre.tar.gz -L "https://api.adoptium.net/v3/binary/latest/21/ga/${OS}/${ADOPTIUM_ARCH}/jre/hotspot/normal/eclipse?project=jdk"
+          curl -fSL -o /tmp/jre.tar.gz -L "https://api.adoptium.net/v3/binary/latest/21/ga/${ADOPTIUM_OS}/${ADOPTIUM_ARCH}/jre/hotspot/normal/eclipse?project=jdk"
           tar -xzf /tmp/jre.tar.gz --strip-components=1 -C "${DIST_DIR}/runtime/jre"
           # Handle macOS Contents/Home structure
           if [ -d "${DIST_DIR}/runtime/jre/Contents/Home" ]; then
@@ -125,11 +134,11 @@ jobs:
 
           # Create wrapper script using bundled runtimes
           cat > "${DIST_DIR}/ix" <<'WRAPPER'
-          #!/bin/sh
-          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-          export PATH="${SCRIPT_DIR}/runtime/node/bin:${SCRIPT_DIR}/runtime/jre/bin:${PATH}"
-          exec "${SCRIPT_DIR}/runtime/node/bin/node" "${SCRIPT_DIR}/cli/dist/cli/main.js" "$@"
-          WRAPPER
+#!/bin/sh
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+export PATH="${SCRIPT_DIR}/runtime/node/bin:${SCRIPT_DIR}/runtime/jre/bin:${PATH}"
+exec "${SCRIPT_DIR}/runtime/node/bin/node" "${SCRIPT_DIR}/cli/dist/cli/main.js" "$@"
+WRAPPER
           chmod +x "${DIST_DIR}/ix"
 
           # Create archive
