@@ -84,30 +84,62 @@ jobs:
 
       - name: Package distribution
         run: |
-          # package.sh builds JAR and CLI too, but we already did that.
-          # We replicate the packaging logic directly to avoid redundant builds.
           VERSION="${{ steps.version.outputs.version }}"
           PLATFORM="${{ matrix.platform }}"
           DIST_NAME="ix-${VERSION}-${PLATFORM}"
           DIST_DIR="dist/${DIST_NAME}"
+          NODE_VERSION="22.14.0"
 
-          mkdir -p "${DIST_DIR}/server"
-          mkdir -p "${DIST_DIR}/cli"
+          # Parse OS and ARCH from platform
+          OS="${PLATFORM%%-*}"
+          ARCH="${PLATFORM##*-}"
 
+          # Map arch for download URLs
+          case "$ARCH" in
+            amd64) NODE_ARCH="x64"; ADOPTIUM_ARCH="x64" ;;
+            arm64) NODE_ARCH="arm64"; ADOPTIUM_ARCH="aarch64" ;;
+          esac
+
+          mkdir -p "${DIST_DIR}/server" "${DIST_DIR}/cli" "${DIST_DIR}/runtime/node" "${DIST_DIR}/runtime/jre"
+
+          # Copy build artifacts
           cp memory-layer/target/scala-2.13/ix-memory-layer.jar "${DIST_DIR}/server/"
           cp -r ix-cli/dist "${DIST_DIR}/cli/"
           cp ix-cli/package.json "${DIST_DIR}/cli/"
 
+          # Download and extract Node.js
+          echo "Downloading Node.js ${NODE_VERSION}..."
+          NODE_ARCHIVE="node-v${NODE_VERSION}-${OS}-${NODE_ARCH}.tar.gz"
+          curl -fSL -o "/tmp/${NODE_ARCHIVE}" "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_ARCHIVE}"
+          tar -xzf "/tmp/${NODE_ARCHIVE}" --strip-components=1 -C "${DIST_DIR}/runtime/node"
+
+          # Download and extract Adoptium JRE
+          echo "Downloading Adoptium JRE 21..."
+          curl -fSL -o /tmp/jre.tar.gz -L "https://api.adoptium.net/v3/binary/latest/21/ga/${OS}/${ADOPTIUM_ARCH}/jre/hotspot/normal/eclipse?project=jdk"
+          tar -xzf /tmp/jre.tar.gz --strip-components=1 -C "${DIST_DIR}/runtime/jre"
+          # Handle macOS Contents/Home structure
+          if [ -d "${DIST_DIR}/runtime/jre/Contents/Home" ]; then
+            cp -r "${DIST_DIR}/runtime/jre/Contents/Home"/* "${DIST_DIR}/runtime/jre/"
+            rm -rf "${DIST_DIR}/runtime/jre/Contents"
+          fi
+
+          # Create wrapper script using bundled runtimes
           cat > "${DIST_DIR}/ix" <<'WRAPPER'
           #!/bin/sh
           SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-          exec node "${SCRIPT_DIR}/cli/dist/cli/main.js" "$@"
+          export PATH="${SCRIPT_DIR}/runtime/node/bin:${SCRIPT_DIR}/runtime/jre/bin:${PATH}"
+          exec "${SCRIPT_DIR}/runtime/node/bin/node" "${SCRIPT_DIR}/cli/dist/cli/main.js" "$@"
           WRAPPER
           chmod +x "${DIST_DIR}/ix"
 
+          # Create archive
           cd dist
           tar czf "${DIST_NAME}.tar.gz" "${DIST_NAME}"
-          shasum -a 256 "${DIST_NAME}.tar.gz" > "${DIST_NAME}.tar.gz.sha256"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${DIST_NAME}.tar.gz" > "${DIST_NAME}.tar.gz.sha256"
+          else
+            shasum -a 256 "${DIST_NAME}.tar.gz" > "${DIST_NAME}.tar.gz.sha256"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

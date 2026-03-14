@@ -22,8 +22,6 @@ class Ix < Formula
     end
   end
 
-  depends_on "node@22"
-
   def install
     libexec.install Dir["*"]
     bin.install_symlink libexec/"ix"
