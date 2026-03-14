@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, openSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { getDataDir, getStateDir, getEndpoint } from "./config.js";
 
@@ -13,6 +14,36 @@ export function getServerLogPath(): string {
 
 export function getServerJarPath(): string {
   return join(getDataDir(), "server", "ix-memory-layer.jar");
+}
+
+export function getBundledJavaPath(): string {
+  // The install layout is:
+  // ~/.local/share/ix/
+  //   ix-VERSION-PLATFORM/
+  //     runtime/jre/bin/java
+  //     server/ix-memory-layer.jar
+  //     cli/...
+  //     ix (wrapper)
+  //
+  // But after install, files are at:
+  //   ~/.local/share/ix/server/ix-memory-layer.jar
+  //   ~/.local/share/ix/runtime/jre/bin/java
+  //
+  // Also check relative to the CLI's location (for dev/local installs)
+
+  const dataDir = getDataDir();
+
+  // Check bundled JRE in data dir
+  const bundledJre = join(dataDir, "runtime", "jre", "bin", "java");
+  if (existsSync(bundledJre)) return bundledJre;
+
+  // Check relative to CLI location (for when running from extracted archive)
+  const cliDir = dirname(fileURLToPath(import.meta.url));
+  const relativeJre = join(cliDir, "..", "..", "..", "runtime", "jre", "bin", "java");
+  if (existsSync(relativeJre)) return relativeJre;
+
+  // Fallback to system java
+  return "java";
 }
 
 export function readPid(): number | null {
@@ -85,7 +116,8 @@ export async function startServer(): Promise<{ pid: number }> {
   const dataDir = join(getDataDir(), "data", "graph");
   if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
 
-  const child = spawn("java", [
+  const javaPath = getBundledJavaPath();
+  const child = spawn(javaPath, [
     "-jar", jarPath,
   ], {
     detached: true,
