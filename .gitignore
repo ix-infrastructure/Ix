@@ -9,3 +9,5 @@ ix-cli/node_modules/*
 ix-cli/dist/
 .vscode/
 docs/superpowers/
+docs/plans/
+.claude/
