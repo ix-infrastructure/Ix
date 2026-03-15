@@ -106,7 +106,7 @@ export function registerWatchCommand(program: Command): void {
         try {
           const result = await client.ingest(filePath, false);
           lastHash.set(filePath, hash);
-          if (result.patchesApplied > 0) {
+          if ((result?.patchesApplied ?? 0) > 0) {
             console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(rel)} → rev ${result.latestRev}`);
           } else {
             console.log(`${chalk.dim("[watch]")} unchanged: ${rel}`);

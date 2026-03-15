@@ -116,14 +116,14 @@ export class IxClient {
   }
 
   async listGoals(): Promise<GraphNode[]> {
-    return this.get("/v1/goal");
+    return this.get("/v1/truth");
   }
 
   async createGoal(
     statement: string,
     parentGoal?: string
   ): Promise<{ status: string; nodeId: string; rev: number }> {
-    return this.post("/v1/goal", { statement, parentGoal });
+    return this.post("/v1/truth", { statement, parentIntent: parentGoal });
   }
 
   async listTruth(): Promise<GraphNode[]> {

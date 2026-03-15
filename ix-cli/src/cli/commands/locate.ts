@@ -239,7 +239,11 @@ async function runRipgrep(symbol: string, root: string, limit: number): Promise<
       } catch { /* skip */ }
     }
   } catch (err: any) {
-    if (err.code !== 1 && err.status !== 1 && err.code !== "ENOENT") throw err;
+    if (err.code === "ENOENT") {
+      stderr(chalk.yellow("⚠ ripgrep (rg) is not installed — text fallback skipped. Install it: https://github.com/BurntSushi/ripgrep#installation"));
+    } else if (err.code !== 1 && err.status !== 1) {
+      throw err;
+    }
   }
   return hits.slice(0, 10);
 }

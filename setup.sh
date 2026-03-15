@@ -101,6 +101,37 @@ echo "║       IX-Memory — Setup                  ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
+# ── Step 0: System dependencies ──────────────────────────────────────────────
+
+echo "── [0] Checking dependencies ──────────────────────"
+
+MISSING_DEPS=()
+for dep in docker node jq rg; do
+  if ! command -v "$dep" >/dev/null 2>&1; then
+    MISSING_DEPS+=("$dep")
+  fi
+done
+
+if [ "${#MISSING_DEPS[@]}" -gt 0 ]; then
+  echo "  Missing required tools: ${MISSING_DEPS[*]}"
+  echo ""
+  echo "  Install hints:"
+  for dep in "${MISSING_DEPS[@]}"; do
+    case "$dep" in
+      docker) echo "    docker:  https://docs.docker.com/get-docker/" ;;
+      node)   echo "    node:    https://nodejs.org (v18+ required)" ;;
+      jq)     echo "    jq:      sudo apt install jq  /  brew install jq" ;;
+      rg)     echo "    rg:      sudo apt install ripgrep  /  brew install ripgrep" ;;
+    esac
+  done
+  echo ""
+  echo "  Re-run setup.sh after installing missing tools."
+  exit 1
+fi
+echo "  [ok] docker, node, jq, rg"
+
+echo ""
+
 # ── Step 1: Backend ──────────────────────────────────────────────────────────
 
 echo "── [1] Backend ────────────────────────────────────"

@@ -182,6 +182,7 @@ export function registerPlanCommand(program: Command): void {
   const plan = program
     .command("plan")
     .description("Manage plans and plan tasks")
+    .option("--format <fmt>", "Output format (text|json)", "text")
     .addHelpText(
       "after",
       `\nSubcommands:
@@ -194,13 +195,34 @@ Options --goal and --plan accept IDs, UUID prefixes, or exact names.
 Duplicate names within each type are rejected.
 
 Examples:
+  ix plan                                          List all plans
+  ix plan --format json                            List all plans as JSON
   ix plan create "Fix auth" --goal <goal-id-or-name>
   ix plan task "Step 1" --plan <plan-id-or-name>
   ix plan create "Fix auth" --goal "Support GitHub"
   ix plan task "Step 1" --plan "Fix auth"
   ix plan show <plan-id> --format json
   ix plan next <plan-id> --with-workflow`
-    );
+    )
+    .action(async (opts: { format: string }) => {
+      const client = new IxClient(getEndpoint());
+      const plans = await client.listByKind("plan", { limit: 50 });
+      if (opts.format === "json") {
+        console.log(JSON.stringify(plans.map((p: any) => ({
+          id: p.id,
+          name: p.name,
+          status: p.attrs?.status ?? "active",
+        })), null, 2));
+      } else {
+        if (plans.length === 0) {
+          console.log("No plans found. Create one with: ix plan create <title> --goal <goal>");
+          return;
+        }
+        for (const p of plans) {
+          console.log(`  ${chalk.bold((p.name ?? "(unnamed)").padEnd(40))}  ${chalk.dim(p.id.slice(0, 8))}`);
+        }
+      }
+    });
 
   plan
     .command("create <title>")

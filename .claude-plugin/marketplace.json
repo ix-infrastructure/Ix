@@ -1,0 +1,13 @@
+{
+  "name": "ix-memory",
+  "owner": {
+    "name": "ix-infrastructure"
+  },
+  "plugins": [
+    {
+      "name": "ix-memory",
+      "source": "./ix-plugin",
+      "description": "Keeps the Ix graph current as Claude edits files, and front-runs Grep/Glob with graph-aware ix searches for token-efficient codebase understanding."
+    }
+  ]
+}

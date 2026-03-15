@@ -70,6 +70,7 @@ Examples:
       for (const n of nodes) {
         const name = n.name || n.attrs?.name || "(unnamed)";
         const path = String(
+          (n as any).provenance?.source_uri ??
           n.provenance?.sourceUri ??
           n.attrs?.path ??
           ""

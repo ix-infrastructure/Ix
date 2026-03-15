@@ -723,7 +723,6 @@ function printAttrs(indent: string, attrs: Record<string, unknown> | undefined):
 }
 
 function diffAttrs(indent: string, before: Record<string, unknown>, after: Record<string, unknown>): void {
-  //symbol test
   const allKeys = new Set([...Object.keys(before), ...Object.keys(after)]);
   for (const key of allKeys) {
     const bVal = before[key];
@@ -741,6 +740,3 @@ function diffAttrs(indent: string, before: Record<string, unknown>, after: Recor
     }
   }
 }
-// Let's see if this works
-// how about this
-// new comment

@@ -20,18 +20,34 @@ Both hooks bail silently if `ix` is not in PATH or the Ix backend is unreachable
 
 ## Installation
 
-```bash
-# From the IX-Memory repo root
-claude plugin install ./ix-plugin
+**1. Add the IX-Memory marketplace (one-time):**
 
-# Or for a single project only
-claude plugin install ./ix-plugin --scope project
 ```
+/plugin marketplace add ix-infrastructure/IX-Memory
+```
+
+**2. Install the plugin:**
+
+```
+/plugin install ix-memory
+```
+
+**3. Restart Claude Code.** Verify the hooks loaded with `/hooks`.
 
 ## Requirements
 
 - `ix` CLI in PATH and Ix backend running (`ix status` should return ok)
 - `jq` in PATH (used to parse hook JSON input)
+- `ripgrep` (`rg`) in PATH — required by `ix text` for file-level text search
+
+Install missing deps:
+```bash
+# Ubuntu/Debian
+sudo apt install jq ripgrep
+
+# macOS
+brew install jq ripgrep
+```
 
 ## Structure
 
@@ -69,6 +85,5 @@ When Claude edits a file:
 
 ## Uninstall
 
-```bash
-claude plugin uninstall ix-memory
-```
+Remove the `hooks` block from `~/.claude/settings.json` (or `.claude/settings.json` for
+project-scoped installs), then restart Claude Code.
