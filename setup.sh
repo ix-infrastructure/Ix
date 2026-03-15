@@ -46,6 +46,48 @@ ensure_local_bin_on_path() {
   done
 }
 
+install_claude_hooks() {
+  local settings="$HOME/.claude/settings.json"
+  local intercept="$IX_DIR/ix-plugin/hooks/ix-intercept.sh"
+  local ingest="$IX_DIR/ix-plugin/hooks/ix-ingest.sh"
+
+  chmod +x "$intercept" "$ingest"
+
+  mkdir -p "$HOME/.claude"
+  [ -f "$settings" ] || echo "{}" > "$settings"
+
+  # Merge hooks into existing settings without clobbering other keys.
+  # If the ix hooks are already present (matched by command path), skip.
+  local already
+  already=$(jq --arg cmd "$intercept" \
+    '[.hooks?.PreToolUse[]?.hooks[]?.command? // empty] | map(select(. == $cmd)) | length' \
+    "$settings" 2>/dev/null || echo "0")
+
+  if [ "$already" -gt 0 ]; then
+    echo "  [ok] Claude Code hooks already configured — skipping"
+    return
+  fi
+
+  local tmp
+  tmp=$(mktemp)
+  jq --arg intercept "$intercept" --arg ingest "$ingest" '
+    .hooks |= (. // {}) |
+    .hooks.PreToolUse |= (. // []) |
+    .hooks.PreToolUse += [{
+      "matcher": "Grep|Glob",
+      "hooks": [{ "type": "command", "command": $intercept, "timeout": 10 }]
+    }] |
+    .hooks.PostToolUse |= (. // []) |
+    .hooks.PostToolUse += [{
+      "matcher": "Write|Edit|MultiEdit",
+      "hooks": [{ "type": "command", "command": $ingest, "timeout": 30 }]
+    }]
+  ' "$settings" > "$tmp" && mv "$tmp" "$settings"
+
+  echo "  [ok] Claude Code hooks installed → ~/.claude/settings.json"
+  echo "       Restart Claude Code to activate."
+}
+
 install_global_ix() {
   local local_bin="$HOME/.local/bin"
   local ix_shim="$local_bin/ix"
@@ -162,6 +204,16 @@ else
   echo "  [ok] Installed: ~/.local/bin/ix"
 fi
 
+# ── Step 4: Claude Code Plugin ───────────────────────────────────────────────
+
+echo ""
+echo "── [4] Claude Code plugin ─────────────────────────"
+if command -v claude >/dev/null 2>&1; then
+  install_claude_hooks
+else
+  echo "  (skipped — claude CLI not found)"
+fi
+
 # ── Done ─────────────────────────────────────────────────────────────────────
 
 echo ""
@@ -174,6 +226,8 @@ echo "  ArangoDB: http://localhost:8529"
 echo ""
 echo "  CLI:      ix status"
 echo "            (open a new shell, or run: export PATH=\"\$HOME/.local/bin:\$PATH\")"
+echo ""
+echo "  Plugin:   restart Claude Code to activate the Ix hooks"
 echo ""
 echo "  Next: connect a project to IX:"
 echo "    ./scripts/connect.sh ~/my-project"
