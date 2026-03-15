@@ -11,18 +11,15 @@ import org.http4s.dsl.io._
 import ix.memory.conflict.ConflictService
 import ix.memory.context.ContextService
 import ix.memory.db.{ArangoClient, GraphQueryApi, GraphWriteApi}
-import ix.memory.ingestion.{BulkIngestionService, IngestionService}
 
 object Routes {
 
   def all(
-    contextService:       ContextService,
-    ingestionService:     IngestionService,
-    bulkIngestionService: BulkIngestionService,
-    queryApi:             GraphQueryApi,
-    writeApi:         GraphWriteApi,
-    conflictService:  ConflictService,
-    client:           ArangoClient
+    contextService:  ContextService,
+    queryApi:        GraphQueryApi,
+    writeApi:        GraphWriteApi,
+    conflictService: ConflictService,
+    client:          ArangoClient
   ): HttpRoutes[IO] = {
 
     val health = HttpRoutes.of[IO] {
@@ -30,14 +27,13 @@ object Routes {
         Ok(Json.obj("status" -> "ok".asJson))
     }
 
-    val contextRoutes   = new ContextRoutes(contextService).routes
-    val ingestionRoutes = new IngestionRoutes(ingestionService, bulkIngestionService).routes
-    val entityRoutes    = new EntityRoutes(queryApi).routes
-    val diffRoutes      = new DiffRoutes(queryApi).routes
-    val conflictRoutes  = new ConflictRoutes(conflictService).routes
-    val decideRoutes    = new DecideRoutes(writeApi).routes
-    val searchRoutes    = new SearchRoutes(queryApi).routes
-    val truthRoutes     = new TruthRoutes(writeApi, queryApi).routes
+    val contextRoutes       = new ContextRoutes(contextService).routes
+    val entityRoutes        = new EntityRoutes(queryApi).routes
+    val diffRoutes          = new DiffRoutes(queryApi).routes
+    val conflictRoutes      = new ConflictRoutes(conflictService).routes
+    val decideRoutes        = new DecideRoutes(writeApi).routes
+    val searchRoutes        = new SearchRoutes(queryApi).routes
+    val truthRoutes         = new TruthRoutes(writeApi, queryApi).routes
     val patchRoutes         = new PatchRoutes(client).routes
     val decisionListRoutes  = new DecisionRoutes(queryApi).routes
     val expandRoutes        = new ExpandRoutes(queryApi).routes
@@ -45,7 +41,7 @@ object Routes {
     val patchCommitRoutes   = new PatchCommitRoutes(writeApi).routes
     val listRoutes          = new ListRoutes(queryApi).routes
 
-    health <+> contextRoutes <+> ingestionRoutes <+> entityRoutes <+>
+    health <+> contextRoutes <+> entityRoutes <+>
       diffRoutes <+> conflictRoutes <+> decideRoutes <+> searchRoutes <+>
       truthRoutes <+> patchRoutes <+> decisionListRoutes <+> expandRoutes <+>
       statsRoutes <+> patchCommitRoutes <+> listRoutes

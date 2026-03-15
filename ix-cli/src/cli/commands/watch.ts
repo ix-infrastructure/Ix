@@ -5,14 +5,15 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
+import { parseFile } from "../../parser/index.js";
+import { buildPatch } from "../../parser/patch-builder.js";
+import { languageFromPath } from "../../parser/languages.js";
 
 const SUPPORTED_EXTENSIONS = new Set([
   ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
   ".scala", ".sc", ".java",
-  ".py", ".rb", ".go", ".rs",
-  ".md", ".mdx",
-  ".json", ".yaml", ".yml", ".toml",
-  ".sql", ".graphql", ".gql",
+  ".py", ".rb", ".go", ".rs", ".kt", ".kts", ".cs", ".php", ".swift",
+  ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp",
 ]);
 
 const SUPPORTED_NAMES = new Set([
@@ -104,13 +105,15 @@ export function registerWatchCommand(program: Command): void {
         }
 
         try {
-          const result = await client.ingest(filePath, false);
-          lastHash.set(filePath, hash);
-          if (result.patchesApplied > 0) {
-            console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(rel)} → rev ${result.latestRev}`);
-          } else {
-            console.log(`${chalk.dim("[watch]")} unchanged: ${rel}`);
+          const parsed = parseFile(filePath, content);
+          if (!parsed) {
+            console.log(`${chalk.dim("[watch]")} skipped (unsupported): ${rel}`);
+            return;
           }
+          const patch = buildPatch(parsed, hash);
+          const result = await client.commitPatch(patch);
+          lastHash.set(filePath, hash);
+          console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(rel)} → rev ${result.rev}`);
         } catch (err: any) {
           console.error(`${chalk.red("[watch]")} error ingesting ${rel}: ${err.message}`);
         }
@@ -219,12 +222,14 @@ async function pollMode(
       const rel = path.relative(root, f);
       console.log(`${chalk.dim("[watch]")} changed: ${rel}`);
       try {
-        const result = await client.ingest(f, false);
-        if (result.patchesApplied > 0) {
-          console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(rel)} → rev ${result.latestRev}`);
-        } else {
-          console.log(`${chalk.dim("[watch]")} unchanged: ${rel}`);
-        }
+        const content = readFileContent(f);
+        if (!content) continue;
+        const parsed = parseFile(f, content);
+        if (!parsed) continue;
+        const hash = hashContent(content);
+        const patch = buildPatch(parsed, hash);
+        const result = await client.commitPatch(patch);
+        console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(rel)} → rev ${result.rev}`);
       } catch (err: any) {
         console.error(`${chalk.red("[watch]")} error: ${err.message}`);
       }

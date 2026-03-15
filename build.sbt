@@ -29,9 +29,6 @@ lazy val memoryLayer = (project in file("memory-layer"))
       // ArangoDB
       "com.arangodb"   %  "arangodb-java-driver" % "7.12.0",
 
-      // Tree-sitter
-      "ch.usi.si.seart" % "java-tree-sitter"    % "1.12.0",
-
       // Logging
       "org.typelevel"  %% "log4cats-slf4j"      % "2.7.0",
       "ch.qos.logback" %  "logback-classic"     % "1.5.6",
