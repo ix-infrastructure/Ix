@@ -33,8 +33,8 @@ describe("api.ts has separate goal and truth methods", () => {
     expect(apiContent).toContain("async createGoal(");
   });
 
-  it("listGoals calls /v1/goal endpoint", () => {
-    expect(apiContent).toContain('"/v1/goal"');
+  it("listGoals calls /v1/truth endpoint (goals are stored as truth)", () => {
+    expect(apiContent).toContain('"/v1/truth"');
   });
 
   it("still has listTruth method", () => {
