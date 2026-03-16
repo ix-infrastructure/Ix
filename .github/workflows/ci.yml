@@ -38,11 +38,11 @@ jobs:
         env:
           ARANGO_NO_AUTH: "1"
         options: >-
-          --health-cmd "wget -qO- http://localhost:8529/_api/version || exit 1"
+          --health-cmd "arangosh --server.authentication false --server.endpoint tcp://127.0.0.1:8529 --javascript.execute-string 'db._version()'"
           --health-interval 10s
-          --health-timeout 5s
+          --health-timeout 10s
           --health-retries 10
-          --health-start-period 20s
+          --health-start-period 30s
 
     steps:
       - uses: actions/checkout@v4
