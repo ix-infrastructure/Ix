@@ -54,7 +54,7 @@ function Get-LatestVersion {
         $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$GithubOrg/$GithubRepo/releases/latest" -ErrorAction Stop
         return $release.tag_name -replace '^v', ''
     } catch {
-        return "0.2.0"
+        return "0.1.0"
     }
 }
 

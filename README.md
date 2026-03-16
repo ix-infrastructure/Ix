@@ -169,7 +169,7 @@ Both jobs run in parallel. PRs must pass both before merging.
 
 ### Release (`release.yml`) — runs when you push a version tag
 
-Triggered by: `git tag v0.3.0 && git push origin v0.3.0`
+Triggered by: `git tag v0.2.0 && git push origin v0.2.0`
 
 | Step | What it does |
 |------|-------------|
@@ -184,44 +184,45 @@ After the release completes, all install methods (`curl`, `brew`, PowerShell) au
 
 ## Releasing a New Version
 
-Everything is automated. To cut a release:
+Versioning is fully automated via [release-please](https://github.com/googleapis/release-please). You don't pick version numbers or create tags manually.
 
-```bash
-# 1. Make sure you're on main with a clean tree
-git checkout main
-git pull origin main
+### How it works
 
-# 2. Tag the version
-git tag v0.3.0
+1. **You merge PRs to main** using conventional commit messages (`feat:`, `fix:`, `chore:`, etc.)
+2. **release-please opens a "Release PR"** automatically — it reads your commits, determines the version bump, and writes a changelog
+3. **You merge the Release PR** when you're ready to ship
+4. **The tag is created automatically** → triggers the release pipeline → everything is built and published
 
-# 3. Push the tag — this triggers the release pipeline
-git push origin v0.3.0
+That's it. You just write good commit messages and merge PRs.
+
+### What commit prefixes do
+
+| Prefix | Version bump | Example |
+|--------|-------------|---------|
+| `fix:` | Patch (0.1.0 → 0.1.1) | `fix: parser fails on decorators` |
+| `feat:` | Minor (0.1.0 → 0.2.0) | `feat: add ix docker command` |
+| `feat!:` or `BREAKING CHANGE:` | Major (0.2.0 → 1.0.0) | `feat!: redesign CLI flags` |
+| `chore:`, `docs:`, `refactor:` | No release | `docs: update README` |
+
+### Example flow
+
+```
+1. You merge "feat: add ix docker command" to main
+2. release-please auto-opens PR: "chore(main): release 0.2.0"
+   - Contains CHANGELOG.md updates
+   - Bumps version in package.json
+3. You review and merge that PR
+4. Tag v0.2.0 is created → release.yml runs → Docker image pushed,
+   tarballs built, GitHub Release created, Homebrew updated
 ```
 
-That's it. GitHub Actions will:
-- Build and test everything
-- Push the Docker image to GitHub Container Registry
-- Create CLI tarballs for all platforms
-- Publish a GitHub Release with download links
-- Update the Homebrew formula automatically
+### Manual release (if needed)
 
-### Version numbering
-
-Use [semver](https://semver.org/):
-- **Patch** (`0.2.1`): bug fixes, no API changes
-- **Minor** (`0.3.0`): new features, backwards compatible
-- **Major** (`1.0.0`): breaking changes
-
-### If something goes wrong
+You can also tag manually to bypass release-please:
 
 ```bash
-# Delete a tag (local + remote) to re-do a release
-git tag -d v0.3.0
-git push origin :refs/tags/v0.3.0
-
-# Then fix the issue and re-tag
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 ## Developer Setup (from source)

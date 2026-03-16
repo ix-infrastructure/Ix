@@ -59,7 +59,7 @@ resolve_version() {
   fi
 
   # Fallback
-  echo "0.2.0"
+  echo "0.1.0"
 }
 
 # ── Detect platform ─────────────────────────────────────────────────────────
