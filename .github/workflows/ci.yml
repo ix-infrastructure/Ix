@@ -29,6 +29,21 @@ jobs:
   backend:
     name: Backend (Scala)
     runs-on: ubuntu-latest
+
+    services:
+      arangodb:
+        image: arangodb:3.12
+        ports:
+          - 8529:8529
+        env:
+          ARANGO_NO_AUTH: "1"
+        options: >-
+          --health-cmd "curl -sf http://localhost:8529/_api/version || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          --health-start-period 10s
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
