@@ -42,10 +42,10 @@ class SearchAqlSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "include filePath in edge ID generation for cross-file uniqueness" in {
-    // Read the GraphPatchBuilder source to verify edge IDs include filePath
+    // Read the ingestion patch builder source to verify edge IDs include filePath
     val gpbSource = scala.io.Source.fromFile(
-      "memory-layer/src/main/scala/ix/memory/ingestion/GraphPatchBuilder.scala"
+      "core-ingestion/src/patch-builder.ts"
     ).mkString
-    gpbSource should include ("$filePath:$src:$dst:$predicate")
+    gpbSource should include ("`${filePath}:${src}:${dst}:${predicate}`")
   }
 }

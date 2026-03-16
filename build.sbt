@@ -29,11 +29,6 @@ lazy val memoryLayer = (project in file("memory-layer"))
       // ArangoDB
       "com.arangodb"   %  "arangodb-java-driver" % "7.12.0",
 
-      // Tree-sitter (bonede/tree-sitter-ng — ARM64 macOS compatible)
-      "io.github.bonede" % "tree-sitter"            % "0.26.6",
-      "io.github.bonede" % "tree-sitter-scala"      % "0.24.0",
-      "io.github.bonede" % "tree-sitter-typescript" % "0.23.2",
-
       // Logging
       "org.typelevel"  %% "log4cats-slf4j"      % "2.7.0",
       "ch.qos.logback" %  "logback-classic"     % "1.5.6",

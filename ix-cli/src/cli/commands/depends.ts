@@ -12,8 +12,8 @@ export interface DependencyNode {
   name: string;
   kind: string;
   resolved: boolean;
-  relation: "called_by" | "imported_by" | "referenced_by";
-  sourceEdge: "CALLS" | "IMPORTS" | "REFERENCES";
+  relation: "called_by" | "imported_by" | "referenced_by" | "extended_by" | "implemented_by";
+  sourceEdge: "CALLS" | "IMPORTS" | "REFERENCES" | "EXTENDS" | "IMPLEMENTS";
   path?: string;
   children: DependencyNode[];
   cycle?: boolean;
@@ -46,15 +46,17 @@ export async function buildDependencyTree(
 
     maxDepthReached = Math.max(maxDepthReached, depth);
 
-    const [callResult, importResult, refResult] = await Promise.all([
+    const [callResult, importResult, refResult, extendsResult, implementsResult] = await Promise.all([
       client.expand(nodeId, { direction: "in", predicates: ["CALLS"], hops: 1 }),
       client.expand(nodeId, { direction: "in", predicates: ["IMPORTS"], hops: 1 }),
       client.expand(nodeId, { direction: "in", predicates: ["REFERENCES"], hops: 1 }),
+      client.expand(nodeId, { direction: "in", predicates: ["EXTENDS"], hops: 1 }),
+      client.expand(nodeId, { direction: "in", predicates: ["IMPLEMENTS"], hops: 1 }),
     ]);
 
     const children: DependencyNode[] = [];
 
-    const processNodes = async (nodes: any[], relation: "called_by" | "imported_by" | "referenced_by", sourceEdge: "CALLS" | "IMPORTS" | "REFERENCES") => {
+    const processNodes = async (nodes: any[], relation: "called_by" | "imported_by" | "referenced_by" | "extended_by" | "implemented_by", sourceEdge: "CALLS" | "IMPORTS" | "REFERENCES" | "EXTENDS" | "IMPLEMENTS") => {
       for (const n of nodes) {
         if (nodesVisited >= maxNodes) { truncated = true; break; }
         const name = n.name || n.attrs?.name || "";
@@ -87,6 +89,8 @@ export async function buildDependencyTree(
     await processNodes(callResult.nodes, "called_by", "CALLS");
     await processNodes(importResult.nodes, "imported_by", "IMPORTS");
     await processNodes(refResult.nodes, "referenced_by", "REFERENCES");
+    await processNodes(extendsResult.nodes, "extended_by", "EXTENDS");
+    await processNodes(implementsResult.nodes, "implemented_by", "IMPLEMENTS");
 
     return children;
   }
