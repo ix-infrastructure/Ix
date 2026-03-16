@@ -7,7 +7,7 @@
 # - Diff works on the correct entity and shows content change
 #
 # Assumptions:
-# - Run from repo root (IX-Memory)
+# - Run from repo root (Ix)
 # - docker + docker compose available
 # - sbt available
 # - node + npm available

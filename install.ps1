@@ -1,14 +1,14 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# IX-Memory — Windows Installer (PowerShell)
+# Ix — Windows Installer (PowerShell)
 #
-# Installs everything needed to run IX-Memory:
+# Installs everything needed to run Ix:
 #   1. Docker Desktop (checks / prompts)
 #   2. Backend (ArangoDB + Memory Layer via Docker)
 #   3. ix CLI
 #   4. Claude Code hooks (if Claude Code is installed)
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/ix-infrastructure/IX-Memory/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/ix-infrastructure/Ix/main/install.ps1 | iex
 #
 # Options (env vars):
 #   $env:IX_VERSION = "0.2.0"     Override version
@@ -21,7 +21,7 @@ $ErrorActionPreference = "Stop"
 # ── Config ───────────────────────────────────────────────────────────────────
 
 $GithubOrg = "ix-infrastructure"
-$GithubRepo = "IX-Memory"
+$GithubRepo = "Ix"
 $GithubRaw = "https://raw.githubusercontent.com/$GithubOrg/$GithubRepo/main"
 $IxHome = if ($env:IX_HOME) { $env:IX_HOME } else { "$env:USERPROFILE\.ix" }
 $IxBin = "$IxHome\bin"
@@ -64,7 +64,7 @@ function Get-LatestVersion {
 
 Write-Host ""
 Write-Host "+" + ("=" * 42) + "+" -ForegroundColor Cyan
-Write-Host "|       IX-Memory - Install                |" -ForegroundColor Cyan
+Write-Host "|       Ix - Install                |" -ForegroundColor Cyan
 Write-Host "+" + ("=" * 42) + "+" -ForegroundColor Cyan
 Write-Host ""
 
@@ -223,7 +223,7 @@ if ($env:IX_SKIP_HOOKS -eq "1") {
 
 Write-Host ""
 Write-Host "+" + ("=" * 42) + "+" -ForegroundColor Green
-Write-Host "|       IX-Memory is ready!                |" -ForegroundColor Green
+Write-Host "|       Ix is ready!                |" -ForegroundColor Green
 Write-Host "+" + ("=" * 42) + "+" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Backend:  http://localhost:8090"

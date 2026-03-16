@@ -10,13 +10,13 @@ const LOCAL_COMPOSE = join(COMPOSE_DIR, "docker-compose.yml");
 const HEALTH_URL = "http://localhost:8090/v1/health";
 const ARANGO_URL = "http://localhost:8529/_api/version";
 const GITHUB_RAW =
-  "https://raw.githubusercontent.com/ix-infrastructure/IX-Memory/main";
+  "https://raw.githubusercontent.com/ix-infrastructure/Ix/main";
 
 function findComposeFile(): string | null {
   // Check standalone install location first
   if (existsSync(LOCAL_COMPOSE)) return LOCAL_COMPOSE;
 
-  // Check if we're in the IX-Memory repo
+  // Check if we're in the Ix repo
   const repoCompose = join(process.cwd(), "docker-compose.yml");
   if (existsSync(repoCompose)) return repoCompose;
 
@@ -127,7 +127,7 @@ export function registerDockerCommand(program: Command): void {
       if (!composeFile) {
         console.error("[error] No docker-compose.yml found.");
         console.error(
-          "  Run 'ix docker start' first, or run from the IX-Memory repo."
+          "  Run 'ix docker start' first, or run from the Ix repo."
         );
         process.exit(1);
       }

@@ -1,8 +1,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# IX-Memory — Windows Uninstaller (PowerShell)
+# Ix — Windows Uninstaller (PowerShell)
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/ix-infrastructure/IX-Memory/main/uninstall.ps1 | iex
+#   irm https://raw.githubusercontent.com/ix-infrastructure/Ix/main/uninstall.ps1 | iex
 # ─────────────────────────────────────────────────────────────────────────────
 
 $ErrorActionPreference = "Stop"
@@ -15,7 +15,7 @@ function Write-Ok($msg) { Write-Host "  [ok] $msg" -ForegroundColor Green }
 
 Write-Host ""
 Write-Host "+" + ("=" * 42) + "+" -ForegroundColor Cyan
-Write-Host "|       IX-Memory - Uninstall              |" -ForegroundColor Cyan
+Write-Host "|       Ix - Uninstall              |" -ForegroundColor Cyan
 Write-Host "+" + ("=" * 42) + "+" -ForegroundColor Cyan
 Write-Host ""
 
@@ -67,6 +67,6 @@ if (Test-Path $IxHome) {
 }
 
 Write-Host ""
-Write-Host "  Done. IX-Memory has been uninstalled."
+Write-Host "  Done. Ix has been uninstalled."
 Write-Host "  Open a new terminal for PATH changes to take effect."
 Write-Host ""

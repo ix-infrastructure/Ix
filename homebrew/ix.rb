@@ -1,10 +1,10 @@
 class Ix < Formula
   desc "Persistent memory for LLM systems — CLI for the Ix knowledge graph"
-  homepage "https://github.com/ix-infrastructure/IX-Memory"
-  url "https://github.com/ix-infrastructure/IX-Memory/archive/refs/tags/v0.1.0.tar.gz"
+  homepage "https://github.com/ix-infrastructure/Ix"
+  url "https://github.com/ix-infrastructure/Ix/archive/refs/tags/v0.1.0.tar.gz"
   # sha256 "UPDATE_WITH_ACTUAL_SHA256_AFTER_RELEASE"
   license "MIT"
-  head "https://github.com/ix-infrastructure/IX-Memory.git", branch: "main"
+  head "https://github.com/ix-infrastructure/Ix.git", branch: "main"
 
   depends_on "node@22"
 

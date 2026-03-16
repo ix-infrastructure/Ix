@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# IX-Memory — Uninstaller
+# Ix — Uninstaller
 #
-# Removes everything installed by the IX-Memory installer:
+# Removes everything installed by the Ix installer:
 #   1. Claude Code hooks
 #   2. ix CLI
 #   3. Backend Docker containers + volumes (optional)
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/IX-Memory/main/uninstall.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/Ix/main/uninstall.sh | bash
 #
 # Options (env vars):
 #   IX_KEEP_DATA=1    Keep ArangoDB data volume (default: remove everything)
@@ -27,7 +27,7 @@ warn() { printf "  \033[33m[!!]\033[0m %s\n" "$*"; }
 
 echo ""
 echo "╔══════════════════════════════════════════╗"
-echo "║       IX-Memory — Uninstall              ║"
+echo "║       Ix — Uninstall              ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
@@ -118,7 +118,7 @@ if [ -d "$plugin_parent" ]; then
 fi
 
 echo ""
-echo "  Done. IX-Memory has been uninstalled."
+echo "  Done. Ix has been uninstalled."
 echo ""
 echo "  Note: The ~/.local/bin PATH entry in your shell rc was left in place."
 echo "  Restart Claude Code to deactivate hooks."

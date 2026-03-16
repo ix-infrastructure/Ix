@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IX-Memory — Build CLI
+# Ix — Build CLI
 #
 # Installs dependencies and compiles the TypeScript CLI + MCP server.
 #

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IX-Memory — Shutdown
+# Ix — Shutdown
 #
 # Stops the IX backend (Docker containers + MCP server processes).
 # Optionally disconnects projects too.
@@ -40,7 +40,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       echo "Usage: ./shutdown.sh [OPTIONS]"
       echo ""
-      echo "Stops the IX-Memory backend."
+      echo "Stops the Ix backend."
       echo ""
       echo "Options:"
       echo "  --clean                      Stop + remove data volumes (fresh start)"
@@ -60,7 +60,7 @@ done
 
 echo ""
 echo "╔══════════════════════════════════════════╗"
-echo "║       IX-Memory — Shutdown               ║"
+echo "║       Ix — Shutdown               ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# IX-Memory — Standalone Installer
+# Ix — Standalone Installer
 #
-# Installs everything needed to run IX-Memory without cloning the repo:
+# Installs everything needed to run Ix without cloning the repo:
 #   1. Docker (checks / prompts)
 #   2. Backend (ArangoDB + Memory Layer via Docker)
 #   3. ix CLI
 #   4. Claude Code hooks (if Claude Code is installed)
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/IX-Memory/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/Ix/main/install.sh | bash
 #
 # Options (env vars):
 #   IX_VERSION=0.2.0          Override version (default: latest)
@@ -22,7 +22,7 @@ set -euo pipefail
 # ── Config ───────────────────────────────────────────────────────────────────
 
 GITHUB_ORG="ix-infrastructure"
-GITHUB_REPO="IX-Memory"
+GITHUB_REPO="Ix"
 GITHUB_RAW="https://raw.githubusercontent.com/${GITHUB_ORG}/${GITHUB_REPO}/main"
 IX_HOME="${IX_HOME:-$HOME/.ix}"
 IX_BIN="$HOME/.local/bin"
@@ -97,7 +97,7 @@ ensure_path() {
   for rc in "${rc_files[@]}"; do
     [ -f "$rc" ] || touch "$rc"
     if ! grep -Fq '.local/bin' "$rc" 2>/dev/null; then
-      printf '\n# Added by IX-Memory installer\n%s\n' "$path_line" >> "$rc"
+      printf '\n# Added by Ix installer\n%s\n' "$path_line" >> "$rc"
     fi
   done
 }
@@ -108,7 +108,7 @@ ensure_path() {
 
 echo ""
 echo "╔══════════════════════════════════════════╗"
-echo "║       IX-Memory — Install                ║"
+echo "║       Ix — Install                ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
@@ -304,7 +304,7 @@ fi
 
 echo ""
 echo "╔══════════════════════════════════════════╗"
-echo "║       IX-Memory is ready!                ║"
+echo "║       Ix is ready!                ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 echo "  Backend:  http://localhost:8090"

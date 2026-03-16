@@ -1,9 +1,9 @@
-# Homebrew Tap for IX-Memory
+# Homebrew Tap for Ix
 
 ## Install
 
 ```bash
-brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/IX-Memory
+brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/Ix
 brew install ix
 ```
 
@@ -23,7 +23,7 @@ brew untap ix-infrastructure/ix
 ## How it works
 
 The formula:
-1. Downloads the IX-Memory source tarball from GitHub releases
+1. Downloads the Ix source tarball from GitHub releases
 2. Runs `npm install --production` and `npm run build` in `ix-cli/`
 3. Installs compiled JS + node_modules to `$(brew --prefix)/lib/ix/`
 4. Creates a wrapper script at `$(brew --prefix)/bin/ix`
@@ -40,4 +40,4 @@ This creates a GitHub release, computes the tarball SHA256, and updates the form
 
 ## Tap structure
 
-Homebrew looks for formulas in `homebrew/ix.rb` when the tap URL points to the IX-Memory repo directly. For a dedicated tap repo, copy `ix.rb` to `Formula/ix.rb` in a `homebrew-ix` repo.
+Homebrew looks for formulas in `homebrew/ix.rb` when the tap URL points to the Ix repo directly. For a dedicated tap repo, copy `ix.rb` to `Formula/ix.rb` in a `homebrew-ix` repo.

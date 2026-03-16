@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IX-Memory — Initialize Project
+# Ix — Initialize Project
 #
 # Initializes IX in a target project directory:
 #   - Verifies backend is running
