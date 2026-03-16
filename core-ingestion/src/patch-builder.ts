@@ -85,20 +85,25 @@ export function buildPatch(
     return name;
   }
 
-  // UpsertNode for each entity
+  // UpsertNode for each entity (deduplicated by id — last occurrence wins)
+  const seenNodeIds = new Set<string>();
   for (const e of entities) {
     const qk = entityQKey.get(e)!;
-    ops.push({
-      type: 'UpsertNode',
-      id: nodeId(filePath, qk),
-      kind: e.kind,
-      name: e.name,
-      attrs: {
-        line_start: e.lineStart,
-        line_end: e.lineEnd,
-        language: e.language,
-      },
-    });
+    const id = nodeId(filePath, qk);
+    if (!seenNodeIds.has(id)) {
+      seenNodeIds.add(id);
+      ops.push({
+        type: 'UpsertNode',
+        id,
+        kind: e.kind,
+        name: e.name,
+        attrs: {
+          line_start: e.lineStart,
+          line_end: e.lineEnd,
+          language: e.language,
+        },
+      });
+    }
   }
 
   // UpsertEdge for each relationship
@@ -202,15 +207,20 @@ export function buildPatchWithResolution(
     return name;
   }
 
+  const seenNodeIds2 = new Set<string>();
   for (const e of entities) {
     const qk = entityQKey.get(e)!;
-    ops.push({
-      type: 'UpsertNode',
-      id: nodeId(filePath, qk),
-      kind: e.kind,
-      name: e.name,
-      attrs: { line_start: e.lineStart, line_end: e.lineEnd, language: e.language },
-    });
+    const id = nodeId(filePath, qk);
+    if (!seenNodeIds2.has(id)) {
+      seenNodeIds2.add(id);
+      ops.push({
+        type: 'UpsertNode',
+        id,
+        kind: e.kind,
+        name: e.name,
+        attrs: { line_start: e.lineStart, line_end: e.lineEnd, language: e.language },
+      });
+    }
   }
 
   for (const r of relationships) {

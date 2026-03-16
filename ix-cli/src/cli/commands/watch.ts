@@ -5,10 +5,8 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
-import { parseFile } from "../../parser/index.js";
-import { buildPatch } from "../../parser/patch-builder.js";
-import { languageFromPath } from "../../parser/languages.js";
-
+import { loadWatchIngestionModules } from "./ingestion-loader.js";
+import { readFileContent } from "./watch-utils.js";
 const SUPPORTED_EXTENSIONS = new Set([
   ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
   ".scala", ".sc", ".java",
@@ -33,16 +31,6 @@ const DEBOUNCE_MS = 300;
 /** Compute SHA-256 hash of file content for dedup. */
 function hashContent(content: string): string {
   return crypto.createHash("sha256").update(content).digest("hex");
-}
-
-/** Read file content safely, returning null if inaccessible. */
-export function readFileContent(filePath: string): string | null {
-  try {
-    if (!fs.existsSync(filePath)) return null;
-    return fs.readFileSync(filePath, "utf-8");
-  } catch {
-    return null;
-  }
 }
 
 export function registerWatchCommand(program: Command): void {
@@ -91,6 +79,7 @@ export function registerWatchCommand(program: Command): void {
       }
 
       async function ingestFile(filePath: string): Promise<void> {
+        const [{ parseFile }, { buildPatch }] = await loadWatchIngestionModules();
         const rel = path.relative(root, filePath);
 
         // Re-read content at actual ingest time (not at event time)
@@ -171,6 +160,7 @@ async function pollMode(
   root: string,
   client: IxClient
 ): Promise<void> {
+  const [{ parseFile }, { buildPatch }] = await loadWatchIngestionModules();
   const mtimes = new Map<string, number>();
 
   function collectFiles(dir: string): string[] {

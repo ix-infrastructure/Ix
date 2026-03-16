@@ -8,26 +8,14 @@
     "ix": "dist/cli/main.js"
   },
   "scripts": {
-    "build": "tsc",
-    "test": "vitest run",
-    "dev": "tsx src/cli/main.ts"
+    "build": "node scripts/build-core-ingestion.mjs && node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
+    "test": "node scripts/build-core-ingestion.mjs && vitest run --exclude test/parser.test.ts && node test/parser.smoke.mjs",
+    "dev": "node scripts/build-core-ingestion.mjs && tsx src/cli/main.ts"
   },
   "dependencies": {
     "commander": "^12.0.0",
     "chalk": "^5.3.0",
-    "yaml": "^2.4.0",
-    "tree-sitter": "^0.21.0",
-    "tree-sitter-javascript": "^0.21.0",
-    "tree-sitter-typescript": "^0.21.0",
-    "tree-sitter-python": "^0.21.0",
-    "tree-sitter-java": "^0.21.0",
-    "tree-sitter-c": "^0.21.0",
-    "tree-sitter-cpp": "^0.22.0",
-    "tree-sitter-c-sharp": "^0.21.0",
-    "tree-sitter-go": "^0.21.0",
-    "tree-sitter-rust": "^0.21.0",
-    "tree-sitter-ruby": "^0.23.1",
-    "tree-sitter-php": "^0.23.12"
+    "yaml": "^2.4.0"
   },
   "devDependencies": {
     "typescript": "^5.4.0",
