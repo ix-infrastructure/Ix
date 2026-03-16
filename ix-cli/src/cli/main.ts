@@ -38,6 +38,7 @@ import { registerWorkflowsHelpCommand } from "./commands/workflows.js";
 import { registerWorkflowCommand } from "./commands/workflow.js";
 import { registerTasksCommand } from "./commands/tasks.js";
 import { registerGoalsCommand } from "./commands/goals.js";
+import { registerDockerCommand } from "./commands/docker.js";
 
 const HELP_HEADER = `
 Workflow Commands (start here):
@@ -70,6 +71,13 @@ Core Graph / Code Commands:
   depends <symbol>      Show reverse dependencies
   entity <id>           Get entity details with claims and edges
   explain <symbol>      Explain an entity with history
+
+Infrastructure:
+  docker start          Start the IX backend (ArangoDB + Memory Layer)
+  docker stop           Stop the backend (--remove-data to wipe volumes)
+  docker status         Show container and health status
+  docker logs           Tail backend logs
+  docker restart        Restart backend containers
 
 Diagnostics / State / History:
   ingest [path]         Ingest source files or GitHub data
@@ -131,5 +139,6 @@ registerWorkflowCommand(program);
 registerWorkflowsHelpCommand(program);
 registerTasksCommand(program);
 registerGoalsCommand(program);
+registerDockerCommand(program);
 
 program.parse();

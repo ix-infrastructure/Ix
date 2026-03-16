@@ -123,7 +123,7 @@ wait_for_health() {
 }
 
 is_healthy() {
-  curl -sf "$HEALTH_URL" > /dev/null 2>&1
+  curl -sf "$HEALTH_URL" > /dev/null 2>&1 && curl -sf "$ARANGO_URL" > /dev/null 2>&1
 }
 
 containers_running() {

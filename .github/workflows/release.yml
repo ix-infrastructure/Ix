@@ -1,0 +1,173 @@
+name: Release
+
+# Trigger: push a tag like v0.2.0
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/ix-memory-layer
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Build Memory Layer JAR ──────────────────────────────────────────
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: "sbt"
+
+      - name: Build JAR
+        run: sbt "memoryLayer/assembly"
+
+      # ── Build + Push Docker Image ───────────────────────────────────────
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./memory-layer
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+
+      # ── Build CLI ───────────────────────────────────────────────────────
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: ix-cli/package-lock.json
+
+      - name: Build CLI
+        working-directory: ix-cli
+        run: |
+          npm ci --silent
+          npm run build
+          npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
+
+      # ── Package CLI tarballs ────────────────────────────────────────────
+      - name: Package CLI (linux-amd64)
+        run: |
+          STAGING="ix-${{ steps.version.outputs.version }}-linux-amd64"
+          mkdir -p "$STAGING/cli"
+          cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          # Create wrapper script
+          cat > "$STAGING/ix" <<'WRAPPER'
+          #!/bin/sh
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          exec node "$SCRIPT_DIR/cli/dist/cli/main.js" "$@"
+          WRAPPER
+          chmod +x "$STAGING/ix"
+          tar -czf "$STAGING.tar.gz" "$STAGING"
+          shasum -a 256 "$STAGING.tar.gz" > "$STAGING.tar.gz.sha256"
+
+      - name: Package CLI (darwin-amd64)
+        run: |
+          STAGING="ix-${{ steps.version.outputs.version }}-darwin-amd64"
+          mkdir -p "$STAGING/cli"
+          cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          cat > "$STAGING/ix" <<'WRAPPER'
+          #!/bin/sh
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          exec node "$SCRIPT_DIR/cli/dist/cli/main.js" "$@"
+          WRAPPER
+          chmod +x "$STAGING/ix"
+          tar -czf "$STAGING.tar.gz" "$STAGING"
+          shasum -a 256 "$STAGING.tar.gz" > "$STAGING.tar.gz.sha256"
+
+      - name: Package CLI (darwin-arm64)
+        run: |
+          STAGING="ix-${{ steps.version.outputs.version }}-darwin-arm64"
+          mkdir -p "$STAGING/cli"
+          cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          cat > "$STAGING/ix" <<'WRAPPER'
+          #!/bin/sh
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          exec node "$SCRIPT_DIR/cli/dist/cli/main.js" "$@"
+          WRAPPER
+          chmod +x "$STAGING/ix"
+          tar -czf "$STAGING.tar.gz" "$STAGING"
+          shasum -a 256 "$STAGING.tar.gz" > "$STAGING.tar.gz.sha256"
+
+      - name: Package CLI (windows-amd64)
+        run: |
+          STAGING="ix-${{ steps.version.outputs.version }}-windows-amd64"
+          mkdir -p "$STAGING/cli"
+          cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          cat > "$STAGING/ix.cmd" <<'WRAPPER'
+          @echo off
+          node "%~dp0cli\dist\cli\main.js" %*
+          WRAPPER
+          zip -r "$STAGING.zip" "$STAGING"
+          shasum -a 256 "$STAGING.zip" > "$STAGING.zip.sha256"
+
+      # ── Create GitHub Release ───────────────────────────────────────────
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            ### Quick install (no repo needed)
+            ```bash
+            # macOS / Linux
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
+
+            # Windows (PowerShell)
+            irm https://raw.githubusercontent.com/${{ github.repository }}/main/install.ps1 | iex
+
+            # Homebrew
+            brew tap ${{ github.repository_owner }}/ix https://github.com/${{ github.repository }}
+            brew install ix
+            ix docker start
+            ```
+
+            ### Docker image
+            ```bash
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ```
+          files: |
+            ix-${{ steps.version.outputs.version }}-linux-amd64.tar.gz
+            ix-${{ steps.version.outputs.version }}-linux-amd64.tar.gz.sha256
+            ix-${{ steps.version.outputs.version }}-darwin-amd64.tar.gz
+            ix-${{ steps.version.outputs.version }}-darwin-amd64.tar.gz.sha256
+            ix-${{ steps.version.outputs.version }}-darwin-arm64.tar.gz
+            ix-${{ steps.version.outputs.version }}-darwin-arm64.tar.gz.sha256
+            ix-${{ steps.version.outputs.version }}-windows-amd64.zip
+            ix-${{ steps.version.outputs.version }}-windows-amd64.zip.sha256
+
+      # ── Update Homebrew formula ─────────────────────────────────────────
+      - name: Update Homebrew formula
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/v${VERSION}.tar.gz"
+          SHA256=$(curl -sL "$TARBALL_URL" | shasum -a 256 | cut -d' ' -f1)
+          sed -i "s|url \".*\"|url \"${TARBALL_URL}\"|" homebrew/ix.rb
+          sed -i "s|# sha256 .*|sha256 \"${SHA256}\"|; s|sha256 \".*\"|sha256 \"${SHA256}\"|" homebrew/ix.rb
+          echo "formula_sha=${SHA256}" >> "$GITHUB_OUTPUT"
+          echo "Updated homebrew/ix.rb with SHA256: ${SHA256}"

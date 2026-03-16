@@ -1,0 +1,43 @@
+# docker-compose.standalone.yml — Remote install (no repo checkout needed)
+#
+# Used by: curl -fsSL .../install.sh | bash
+# Location when installed: ~/.ix/backend/docker-compose.yml
+#
+# Uses published Docker images — no local build step required.
+
+services:
+  arangodb:
+    image: arangodb:3.12
+    ports:
+      - "8529:8529"
+    environment:
+      ARANGO_NO_AUTH: "1"
+    volumes:
+      - arangodb-data:/var/lib/arangodb3
+    restart: unless-stopped
+
+  memory-layer:
+    image: ghcr.io/ix-infrastructure/ix-memory-layer:latest
+    ports:
+      - "8090:8090"
+    volumes:
+      - ${HOME}:${HOME}:ro
+    environment:
+      ARANGO_HOST: arangodb
+      ARANGO_PORT: "8529"
+      ARANGO_DATABASE: ix_memory
+      ARANGO_USER: root
+      ARANGO_PASSWORD: ""
+      PORT: "8090"
+    depends_on:
+      - arangodb
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8090/v1/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  arangodb-data:
