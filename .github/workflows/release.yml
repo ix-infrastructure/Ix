@@ -1,6 +1,17 @@
 name: Release
 
-# Trigger: push a tag like v0.2.0
+# ─────────────────────────────────────────────────────────────────────────────
+# Triggered by pushing a version tag:    git tag v0.3.0 && git push origin v0.3.0
+#
+# What it does (in order):
+#   1. Builds the Scala Memory Layer JAR (sbt assembly)
+#   2. Builds + pushes Docker image to ghcr.io
+#   3. Builds the TypeScript CLI
+#   4. Packages CLI tarballs for linux, macOS (amd64+arm64), Windows
+#   5. Creates a GitHub Release with all assets + install instructions
+#   6. Updates the Homebrew formula with the new SHA and commits it
+# ─────────────────────────────────────────────────────────────────────────────
+
 on:
   push:
     tags:
@@ -21,8 +32,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Need full history + write access for the Homebrew formula commit
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── Build Memory Layer JAR ──────────────────────────────────────────
+      # ── 1. Build Memory Layer JAR ───────────────────────────────────────
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -33,7 +48,7 @@ jobs:
       - name: Build JAR
         run: sbt "memoryLayer/assembly"
 
-      # ── Build + Push Docker Image ───────────────────────────────────────
+      # ── 2. Build + Push Docker Image ────────────────────────────────────
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -54,7 +69,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
 
-      # ── Build CLI ───────────────────────────────────────────────────────
+      # ── 3. Build CLI ────────────────────────────────────────────────────
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -69,13 +84,12 @@ jobs:
           npm run build
           npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
 
-      # ── Package CLI tarballs ────────────────────────────────────────────
+      # ── 4. Package CLI tarballs ─────────────────────────────────────────
       - name: Package CLI (linux-amd64)
         run: |
           STAGING="ix-${{ steps.version.outputs.version }}-linux-amd64"
           mkdir -p "$STAGING/cli"
           cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
-          # Create wrapper script
           cat > "$STAGING/ix" <<'WRAPPER'
           #!/bin/sh
           SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -125,7 +139,7 @@ jobs:
           zip -r "$STAGING.zip" "$STAGING"
           shasum -a 256 "$STAGING.zip" > "$STAGING.zip.sha256"
 
-      # ── Create GitHub Release ───────────────────────────────────────────
+      # ── 5. Create GitHub Release ────────────────────────────────────────
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -161,13 +175,19 @@ jobs:
             ix-${{ steps.version.outputs.version }}-windows-amd64.zip
             ix-${{ steps.version.outputs.version }}-windows-amd64.zip.sha256
 
-      # ── Update Homebrew formula ─────────────────────────────────────────
+      # ── 6. Update Homebrew formula and commit to main ───────────────────
       - name: Update Homebrew formula
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/v${VERSION}.tar.gz"
           SHA256=$(curl -sL "$TARBALL_URL" | shasum -a 256 | cut -d' ' -f1)
+
           sed -i "s|url \".*\"|url \"${TARBALL_URL}\"|" homebrew/ix.rb
           sed -i "s|# sha256 .*|sha256 \"${SHA256}\"|; s|sha256 \".*\"|sha256 \"${SHA256}\"|" homebrew/ix.rb
-          echo "formula_sha=${SHA256}" >> "$GITHUB_OUTPUT"
-          echo "Updated homebrew/ix.rb with SHA256: ${SHA256}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout main
+          git add homebrew/ix.rb
+          git commit -m "brew: update formula for v${VERSION}" || echo "No formula changes"
+          git push origin main

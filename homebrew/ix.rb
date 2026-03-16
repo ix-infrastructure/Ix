@@ -24,6 +24,17 @@ class Ix < Formula
     end
   end
 
+  def caveats
+    <<~EOS
+      The ix CLI is installed. To start the backend:
+
+        ix docker start
+
+      This requires Docker Desktop to be running.
+      The backend runs as two containers: ArangoDB + Memory Layer.
+    EOS
+  end
+
   test do
     assert_match "Usage:", shell_output("#{bin}/ix --help")
   end
