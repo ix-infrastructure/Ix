@@ -21,6 +21,25 @@ GITHUB_RAW="https://raw.githubusercontent.com/ix-infrastructure/Ix/main/ix-plugi
 INSTALL_DIR="${IX_PLUGIN_DIR:-$HOME/.local/share/ix/plugin/hooks}"
 SETTINGS="$HOME/.claude/settings.json"
 
+# Auth for private repo access
+AUTH_HEADER=""
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+  AUTH_HEADER="Authorization: token ${GITHUB_TOKEN}"
+elif command -v gh >/dev/null 2>&1; then
+  GH_TOKEN=$(gh auth token 2>/dev/null || true)
+  if [ -n "$GH_TOKEN" ]; then
+    AUTH_HEADER="Authorization: token ${GH_TOKEN}"
+  fi
+fi
+
+gcurl() {
+  if [ -n "$AUTH_HEADER" ]; then
+    curl -fsSL -H "$AUTH_HEADER" "$@"
+  else
+    curl -fsSL "$@"
+  fi
+}
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 info()  { echo "  [ok] $*"; }
@@ -70,8 +89,8 @@ if [ -n "$_repo_hooks" ]; then
   info "Copied hooks from local repo → $INSTALL_DIR"
 else
   # Remote install — download from GitHub
-  curl -fsSL "$GITHUB_RAW/ix-intercept.sh" -o "$INSTALL_DIR/ix-intercept.sh"
-  curl -fsSL "$GITHUB_RAW/ix-ingest.sh"    -o "$INSTALL_DIR/ix-ingest.sh"
+  gcurl "$GITHUB_RAW/ix-intercept.sh" -o "$INSTALL_DIR/ix-intercept.sh"
+  gcurl "$GITHUB_RAW/ix-ingest.sh"    -o "$INSTALL_DIR/ix-ingest.sh"
   info "Downloaded hooks → $INSTALL_DIR"
 fi
 
