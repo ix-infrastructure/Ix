@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IX-Memory — Connect a Project
+# Ix — Connect a Project
 #
-# Connects a project to IX-Memory:
+# Connects a project to Ix:
 #   1. Creates .mcp.json in the project (so Claude Code sees IX tools)
 #   2. Adds IX rules to CLAUDE.md (so Claude follows the IX workflow)
 #   3. Ingests the project's source code into the knowledge graph
@@ -35,7 +35,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       echo "Usage: ./scripts/connect.sh <PROJECT_DIR> [OPTIONS]"
       echo ""
-      echo "Connects a project to IX-Memory so Claude can use the knowledge graph."
+      echo "Connects a project to Ix so Claude can use the knowledge graph."
       echo ""
       echo "Arguments:"
       echo "  PROJECT_DIR          Path to the project to connect (required)"
@@ -97,7 +97,7 @@ fi
 
 echo ""
 echo "╔══════════════════════════════════════════╗"
-echo "║       IX-Memory — Connect Project        ║"
+echo "║       Ix — Connect Project        ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 echo "  Project: $PROJECT_DIR"

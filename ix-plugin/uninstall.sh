@@ -2,7 +2,7 @@
 # ix-plugin/uninstall.sh — Remove the Ix Memory Claude Code plugin
 #
 # Usage (curl):
-#   curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/IX-Memory/main/ix-plugin/uninstall.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/Ix/main/ix-plugin/uninstall.sh | bash
 #
 # Usage (local):
 #   bash ix-plugin/uninstall.sh

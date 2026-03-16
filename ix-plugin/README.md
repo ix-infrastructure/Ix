@@ -20,10 +20,10 @@ Both hooks bail silently if `ix` is not in PATH or the Ix backend is unreachable
 
 ## Installation
 
-**1. Add the IX-Memory marketplace (one-time):**
+**1. Add the Ix marketplace (one-time):**
 
 ```
-/plugin marketplace add ix-infrastructure/IX-Memory
+/plugin marketplace add ix-infrastructure/Ix
 ```
 
 **2. Install the plugin:**

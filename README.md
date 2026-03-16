@@ -1,170 +1,147 @@
 # Ix Memory
 
-Ix Memory is a local, versioned knowledge graph for codebases.
+Persistent, versioned knowledge graph for codebases. Gives LLM assistants structured memory across conversations.
 
-It has two runtime parts:
-- `memory-layer` (Scala HTTP API)
-- `ix-cli` (TypeScript CLI; canonical interface)
+## Install
 
-The primary interface is `ix` CLI commands.
+Pick one method. All install the same thing: the `ix` CLI + a local Docker backend.
 
-## What It Supports Today
-
-- File ingestion: `.py`, `.ts`, `.tsx`, `.scala`, `.sc`, `.json`, `.yaml`, `.yml`, `.toml`, `.md`
-- Graph navigation: search, explain, callers/callees, imports/imported-by, contains, depends
-- High-level workflow: impact analysis, hotspot ranking, one-shot overviews, scoped inventory
-- Decision and intent tracking: `ix decide`, `ix decisions`, `ix truth ...`
-- Provenance + history: `ix patches`, `ix history`, `ix diff`, `ix conflicts`
-- GitHub ingestion: `ix ingest --github owner/repo` (issues/PRs/commits/comments)
-
-## Prerequisites
-
-| Tool | Version |
-|---|---|
-| Java | 17+ |
-| sbt | 1.x |
-| Docker | 20+ |
-| Node.js | 18+ |
-| npm | 9+ |
-
-## Install And Start
-
-From repo root:
+### curl (macOS / Linux)
 
 ```bash
-./setup.sh
+curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/Ix/main/install.sh | bash
 ```
 
-What this does:
-- Starts backend services (`arangodb` + `memory-layer`) via `scripts/backend.sh`
-- Builds CLI (`ix-cli`) via `scripts/build-cli.sh`
-- Installs a global `ix` command at `~/.local/bin/ix`
-- Ensures `~/.local/bin` is on your PATH in `~/.bashrc` / `~/.zshrc`
+### PowerShell (Windows)
 
-Optional flags:
-
-```bash
-./setup.sh --skip-backend
-./setup.sh --skip-global-ix
+```powershell
+irm https://raw.githubusercontent.com/ix-infrastructure/Ix/main/install.ps1 | iex
 ```
 
-### Verify
+### Homebrew (macOS / Linux)
 
 ```bash
-./scripts/backend.sh check
-ix status
+brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/Ix
+brew install ix
+ix docker start
 ```
 
-If `ix` is not found in your current shell, reload your shell or run:
+### Prerequisites
+
+- **Docker Desktop** — the backend runs as two containers (ArangoDB + Memory Layer). The installer will prompt you if Docker is missing.
+
+## Quick Start
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
+# 1. Start the backend
+ix docker start
 
-## Connect A Project
-
-### Fast path
-
-```bash
-./scripts/connect.sh /path/to/your/project
-```
-
-### Manual path
-
-```bash
-cd /path/to/your/project
+# 2. Connect a project
+cd ~/my-project
 ix init
 ix ingest ./src --recursive
+
+# 3. Use it
+ix overview MyService
+ix impact MyService
+ix search parseFile --kind function
+ix callers parseFile
 ```
 
-## Core Usage
+## Managing the Backend
+
+```bash
+ix docker start               # Start ArangoDB + Memory Layer
+ix docker stop                # Stop containers (keeps data)
+ix docker stop --remove-data  # Stop and wipe all data
+ix docker status              # Health check
+ix docker logs                # Tail container logs
+ix docker restart             # Restart containers
+```
+
+## Commands
 
 All commands support `--format json`.
 
+### Workflow Commands (start here)
+
 ```bash
-# Start with high-level workflow commands
 ix overview UserService                          # one-shot summary
 ix impact UserService                            # what depends on it
 ix rank --by dependents --kind class --top 10    # most important classes
 ix inventory --kind function --path "src/"       # list functions
+ix briefing                                      # session resume
+```
 
-# Low-level primitives for fine-grained inspection
-ix search IngestionService --kind class --format json
-ix explain IngestionService --format json
-ix callers parseFile --format json
-ix callees parseFile --format json
-ix imports IngestionService --format json
-ix imported-by IngestionService --format json
-ix contains IngestionService --format json
-ix depends IngestionService --depth 2 --format json
+### Code Navigation
+
+```bash
+ix search IngestionService --kind class
+ix explain IngestionService
+ix callers parseFile
+ix callees parseFile
+ix imports IngestionService
+ix imported-by IngestionService
+ix contains IngestionService
+ix depends IngestionService --depth 2
 ix read src/main/scala/ix/memory/Main.scala:1-80
-ix text "commitPatch" --language ts --limit 20 --format json
+ix text "commitPatch" --language ts --limit 20
 ```
 
-## GitHub Ingestion
+### Planning and Tracking
 
 ```bash
-ix ingest --github owner/repo --since 2026-01-01 --limit 50 --format json
+ix goal create "Support 100k file repos"
+ix plan create "Scale ingestion" --goal <id>
+ix plan task "Batch writes" --plan <id>
+ix task update <id> --status done
+ix decide "Use CONTAINS edge" --rationale "Normalize hierarchy"
+ix bug create "Parser fails on decorators" --severity high
 ```
 
-Auth resolution order:
-1. `--token <pat>`
-2. `GITHUB_TOKEN`
-3. `gh auth token`
-
-## Planning & Tasks
-
-| Command | Usage | Description |
-|---------|-------|-------------|
-| `ix goal create` | `ix goal create <statement>` | Create a project goal |
-| `ix goal list` | `ix goal list` | List all goals |
-| `ix plan create` | `ix plan create <title> --goal <id>` | Create a plan linked to a goal |
-| `ix plan task` | `ix plan task <title> --plan <id>` | Add a task to a plan |
-| `ix plan status` | `ix plan status <plan-id>` | Show plan progress and next task |
-| `ix plan next` | `ix plan next <plan-id>` | Get the next actionable task |
-| `ix task update` | `ix task update <id> --status done` | Update task status |
-
-## Useful Scripts
-
-| Script | Purpose |
-|---|---|
-| `./setup.sh` | Start backend + build CLI + install global `ix` |
-| `./scripts/backend.sh up` | Start backend |
-| `./scripts/backend.sh down` | Stop backend |
-| `./scripts/backend.sh logs` | Tail logs |
-| `./scripts/backend.sh clean` | Remove volumes/data |
-| `./scripts/build-cli.sh` | Build CLI |
-| `./scripts/connect.sh <dir>` | Connect project + ingest |
-| `./scripts/disconnect.sh <dir>` | Remove project config |
-| `./scripts/ingest.sh [path]` | Ingest helper |
-
-## Testing
-
-CLI:
+### GitHub Ingestion
 
 ```bash
-cd ix-cli
-npm test
+ix ingest --github owner/repo --since 2026-01-01 --limit 50
 ```
 
-Backend:
+Auth resolution: `--token <pat>` → `GITHUB_TOKEN` env → `gh auth token`
+
+## Claude Code Plugin
+
+Automatically installed if `claude` is in your PATH. To install separately:
 
 ```bash
-# Requires ArangoDB running on localhost:8529
-sbt memoryLayer/test
+curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/Ix/main/ix-plugin/install.sh | bash
 ```
 
-## Known Notes
+What the hooks do:
+- **On search** (Grep/Glob): injects graph-aware results before the native tool runs
+- **On edit** (Write/Edit): auto-ingests changed files to keep the graph current
 
-- Many Scala tests require a live ArangoDB instance; if it is down, DB/API/E2E specs fail.
-- `TreeSitterPythonParser` still contains a TODO for full AST traversal fallback behavior.
-- `ix query` remains available but is deprecated in help text and templates.
-- `connect.sh` sets up project config; CLI remains canonical.
+## Supported File Types
+
+`.py`, `.ts`, `.tsx`, `.scala`, `.sc`, `.json`, `.yaml`, `.yml`, `.toml`, `.md`
+
+## Uninstall
+
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/Ix/main/uninstall.sh | bash
+
+# Windows
+irm https://raw.githubusercontent.com/ix-infrastructure/Ix/main/uninstall.ps1 | iex
+
+# Homebrew
+brew uninstall ix && brew untap ix-infrastructure/ix
+ix docker stop --remove-data
+```
 
 ## Architecture
 
-```text
-ix-cli  --->  memory-layer (http4s)  --->  ArangoDB
+```
+ix CLI (TypeScript)  →  Memory Layer (Scala/http4s)  →  ArangoDB
+     local                   Docker :8090                Docker :8529
 ```
 
 ## License

@@ -1,10 +1,10 @@
 class Ix < Formula
   desc "Persistent memory for LLM systems — CLI for the Ix knowledge graph"
-  homepage "https://github.com/ix-infrastructure/IX-Memory"
-  url "https://github.com/ix-infrastructure/IX-Memory/archive/refs/tags/v0.1.0.tar.gz"
+  homepage "https://github.com/ix-infrastructure/Ix"
+  url "https://github.com/ix-infrastructure/Ix/archive/refs/tags/v0.1.0.tar.gz"
   # sha256 "UPDATE_WITH_ACTUAL_SHA256_AFTER_RELEASE"
   license "MIT"
-  head "https://github.com/ix-infrastructure/IX-Memory.git", branch: "main"
+  head "https://github.com/ix-infrastructure/Ix.git", branch: "main"
 
   depends_on "node@22"
 
@@ -22,6 +22,17 @@ class Ix < Formula
         exec "#{Formula["node@22"].opt_bin}/node" "#{libexec}/dist/cli/main.js" "$@"
       EOS
     end
+  end
+
+  def caveats
+    <<~EOS
+      The ix CLI is installed. To start the backend:
+
+        ix docker start
+
+      This requires Docker Desktop to be running.
+      The backend runs as two containers: ArangoDB + Memory Layer.
+    EOS
   end
 
   test do

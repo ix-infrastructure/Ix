@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IX-Memory — Install MCP Server
+# Ix — Install MCP Server
 #
 # Registers the IX MCP server with your IDE so the LLM gets access to
 # the 13 IX tools and 2 resources.

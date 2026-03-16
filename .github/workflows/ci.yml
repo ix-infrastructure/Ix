@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  cli:
+    name: CLI (TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: ix-cli/package-lock.json
+      - name: Install & Build
+        working-directory: ix-cli
+        run: |
+          npm ci --silent
+          npm run build
+      - name: Test
+        working-directory: ix-cli
+        run: npm test
+
+  backend:
+    name: Backend (Scala)
+    runs-on: ubuntu-latest
+
+    services:
+      arangodb:
+        image: arangodb:3.12
+        ports:
+          - 8529:8529
+        env:
+          ARANGO_NO_AUTH: "1"
+        options: >-
+          --health-cmd "arangosh --server.authentication false --server.endpoint tcp://127.0.0.1:8529 --javascript.execute-string 'db._version()'"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 10
+          --health-start-period 30s
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: "sbt"
+      - uses: sbt/setup-sbt@v1
+      - name: Compile
+        run: sbt compile
+      - name: Test
+        run: sbt test
+      - name: Assembly
+        run: sbt "memoryLayer/assembly"

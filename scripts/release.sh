@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IX-Memory — Release Script
+# Ix — Release Script
 #
 # Creates a GitHub release with a tarball suitable for Homebrew installation.
 #
@@ -56,19 +56,19 @@ git push origin "$TAG"
 
 # Create GitHub release
 gh release create "$TAG" \
-  --title "IX-Memory $TAG" \
-  --notes "## IX-Memory $TAG
+  --title "Ix $TAG" \
+  --notes "## Ix $TAG
 
 ### Install via Homebrew
 \`\`\`bash
-brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/IX-Memory
+brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/Ix
 brew install ix
 \`\`\`
 
 ### Install manually
 \`\`\`bash
-git clone https://github.com/ix-infrastructure/IX-Memory
-cd IX-Memory && ./scripts/build-cli.sh
+git clone https://github.com/ix-infrastructure/Ix
+cd Ix && ./scripts/build-cli.sh
 \`\`\`
 " $DRAFT_FLAG
 
@@ -76,7 +76,7 @@ cd IX-Memory && ./scripts/build-cli.sh
 
 echo ""
 echo "Fetching release tarball SHA..."
-TARBALL_URL="https://github.com/ix-infrastructure/IX-Memory/archive/refs/tags/${TAG}.tar.gz"
+TARBALL_URL="https://github.com/ix-infrastructure/Ix/archive/refs/tags/${TAG}.tar.gz"
 SHA256=$(curl -sL "$TARBALL_URL" | shasum -a 256 | cut -d' ' -f1)
 
 echo "Updating Homebrew formula..."

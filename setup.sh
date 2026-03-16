@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IX-Memory — Setup
+# Ix — Setup
 #
 # Starts the IX backend (ArangoDB + Memory Layer) and builds the CLI.
-# This runs from the IX-Memory repo — it does NOT touch your projects.
+# This runs from the Ix repo — it does NOT touch your projects.
 #
 # To connect a project, run: ./scripts/connect.sh ~/my-project
 #
@@ -40,7 +40,7 @@ ensure_local_bin_on_path() {
     fi
     if ! grep -Fq "$path_line" "$rc"; then
       echo "" >> "$rc"
-      echo "# Added by IX-Memory setup" >> "$rc"
+      echo "# Added by Ix setup" >> "$rc"
       echo "$path_line" >> "$rc"
     fi
   done
@@ -75,7 +75,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       echo "Usage: ./setup.sh [OPTIONS]"
       echo ""
-      echo "Starts the IX-Memory backend, builds the CLI, and installs an 'ix' command."
+      echo "Starts the Ix backend, builds the CLI, and installs an 'ix' command."
       echo ""
       echo "Options:"
       echo "  --skip-backend   Skip backend startup (if already running)"
@@ -103,7 +103,7 @@ done
 
 echo ""
 echo "╔══════════════════════════════════════════╗"
-echo "║       IX-Memory — Setup                  ║"
+echo "║       Ix — Setup                  ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 

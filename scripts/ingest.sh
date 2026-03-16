@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IX-Memory — Ingest Codebase
+# Ix — Ingest Codebase
 #
 # Ingests source files into the IX knowledge graph. Parses code into entities
 # (classes, functions, imports, config keys) and builds the versioned graph.

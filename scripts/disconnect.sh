@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IX-Memory — Disconnect a Project
+# Ix — Disconnect a Project
 #
-# Removes IX-Memory from a project:
+# Removes Ix from a project:
 #   1. Removes .mcp.json (so Claude Code no longer sees IX tools)
 #   2. Removes IX rules from CLAUDE.md (preserves other content)
 #
@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       echo "Usage: ./scripts/disconnect.sh <PROJECT_DIR>"
       echo ""
-      echo "Removes IX-Memory config from a project."
+      echo "Removes Ix config from a project."
       echo ""
       echo "What this does:"
       echo "  1. Removes .mcp.json (MCP server config)"
@@ -59,7 +59,7 @@ fi
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 
 echo ""
-echo "Disconnecting IX-Memory from: $PROJECT_DIR"
+echo "Disconnecting Ix from: $PROJECT_DIR"
 echo ""
 
 # ── Remove .mcp.json ────────────────────────────────────────────────────────

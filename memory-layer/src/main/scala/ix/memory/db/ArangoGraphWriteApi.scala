@@ -133,13 +133,20 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
                   OPTIONS { waitForSync: true }
               """
               val newKey = s"${logicalId}_${newRev}"
-              val insertAql = """
+              val upsertAql = """
+                UPSERT { _key: @key }
                 INSERT {
                   _key: @key, logical_id: @logicalId, id: @id, kind: @kind, name: @name,
                   attrs: @attrs, provenance: @provenance,
                   created_rev: @rev, deleted_rev: null,
                   created_at: @now, updated_at: @now
-                } INTO nodes OPTIONS { waitForSync: true }
+                }
+                UPDATE {
+                  logical_id: @logicalId, id: @id, kind: @kind, name: @name,
+                  attrs: @attrs, provenance: @provenance,
+                  deleted_rev: null, updated_at: @now
+                }
+                IN nodes OPTIONS { waitForSync: true }
               """
               for {
                 _ <- client.execute(tombstoneAql, Map(
@@ -147,7 +154,7 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
                   "rev" -> Long.box(newRev).asInstanceOf[AnyRef],
                   "now" -> now.asInstanceOf[AnyRef]
                 ), txId = Some(txId))
-                _ <- client.execute(insertAql, Map(
+                _ <- client.execute(upsertAql, Map(
                   "key"        -> newKey.asInstanceOf[AnyRef],
                   "logicalId"  -> logicalId.asInstanceOf[AnyRef],
                   "id"         -> logicalId.asInstanceOf[AnyRef],
@@ -164,15 +171,22 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
           case None =>
             // New node — create first row with versioned key
             val newKey = s"${logicalId}_${newRev}"
-            val insertAql = """
+            val upsertAql = """
+              UPSERT { _key: @key }
               INSERT {
                 _key: @key, logical_id: @logicalId, id: @id, kind: @kind, name: @name,
                 attrs: @attrs, provenance: @provenance,
                 created_rev: @rev, deleted_rev: null,
                 created_at: @now, updated_at: @now
-              } INTO nodes OPTIONS { waitForSync: true }
+              }
+              UPDATE {
+                logical_id: @logicalId, id: @id, kind: @kind, name: @name,
+                attrs: @attrs, provenance: @provenance,
+                deleted_rev: null, updated_at: @now
+              }
+              IN nodes OPTIONS { waitForSync: true }
             """
-            client.execute(insertAql, Map(
+            client.execute(upsertAql, Map(
               "key"        -> newKey.asInstanceOf[AnyRef],
               "logicalId"  -> logicalId.asInstanceOf[AnyRef],
               "id"         -> logicalId.asInstanceOf[AnyRef],

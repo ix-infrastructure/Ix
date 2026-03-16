@@ -25,7 +25,7 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
 
   val clientResource = ArangoClient.resource(
     host = "localhost", port = 8529,
-    database = "ix_memory_test", user = "root", password = ""
+    database = "ix_test_routes", user = "root", password = ""
   )
 
   private def makePatch(
