@@ -21,7 +21,7 @@ class QueryUsefulnessSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers w
 
   val clientResource = ArangoClient.resource(
     host = "localhost", port = 8529,
-    database = "ix_memory_test", user = "root", password = ""
+    database = "ix_test_query_usefulness", user = "root", password = ""
   )
 
   private def fixturePath(name: String): Path = {
@@ -39,6 +39,7 @@ class QueryUsefulnessSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers w
       val service  = new IngestionService(router, writeApi, queryApi)
 
       for {
+        _ <- client.ensureSchema()
         _ <- cleanDatabase(client)
         _ <- service.ingestFile(fixturePath("node_kind.scala"))
         _ <- service.ingestFile(fixturePath("node_kind_user.scala"))
@@ -70,6 +71,7 @@ class QueryUsefulnessSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers w
       val service  = new IngestionService(router, writeApi, queryApi)
 
       for {
+        _ <- client.ensureSchema()
         _ <- cleanDatabase(client)
         _ <- service.ingestFile(fixturePath("node_kind.scala"))
         _ <- service.ingestFile(fixturePath("node_kind_user.scala"))
@@ -100,6 +102,7 @@ class QueryUsefulnessSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers w
       val service  = new IngestionService(router, writeApi, queryApi)
 
       for {
+        _ <- client.ensureSchema()
         _ <- cleanDatabase(client)
         _ <- service.ingestFile(fixturePath("node_kind.scala"))
 
@@ -130,6 +133,7 @@ class QueryUsefulnessSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers w
       val service  = new IngestionService(router, writeApi, queryApi)
 
       for {
+        _ <- client.ensureSchema()
         _ <- cleanDatabase(client)
         _ <- service.ingestFile(fixturePath("command_module.ts"))
 
@@ -160,6 +164,7 @@ class QueryUsefulnessSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers w
       val service  = new IngestionService(router, writeApi, queryApi)
 
       for {
+        _ <- client.ensureSchema()
         _ <- cleanDatabase(client)
         _ <- service.ingestFile(fixturePath("command_module.ts"))
         _ <- service.ingestFile(fixturePath("command_registration.ts"))

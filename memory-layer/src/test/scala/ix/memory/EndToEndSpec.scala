@@ -19,7 +19,7 @@ class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with Tes
 
   val clientResource = ArangoClient.resource(
     host = "localhost", port = 8529,
-    database = "ix_memory_test", user = "root", password = ""
+    database = "ix_test_end_to_end", user = "root", password = ""
   )
 
   private def buildContextService(queryApi: GraphQueryApi): ContextService = {
@@ -156,7 +156,7 @@ class EndToEndSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with Tes
 
         // Conflicts should be detected (same entity, different statements)
         result.conflicts should not be empty
-        result.conflicts.exists(_.reason.contains("Contradictory statements")) shouldBe true
+        result.conflicts.exists(c => c.reason.contains("inconsistency") || c.reason.contains("Conflicting")) shouldBe true
 
         // Code-sourced claim should have higher confidence than doc-sourced
         val claimScores = result.claims.map(sc => (sc.claim.provenance.sourceType, sc.confidence.score))

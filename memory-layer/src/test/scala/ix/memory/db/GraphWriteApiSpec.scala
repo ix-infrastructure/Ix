@@ -16,7 +16,7 @@ class GraphWriteApiSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers wit
 
   val clientResource = ArangoClient.resource(
     host = "localhost", port = 8529,
-    database = "ix_memory_test", user = "root", password = ""
+    database = "ix_test_graph_write", user = "root", password = ""
   )
 
   private def makePatch(

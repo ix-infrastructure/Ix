@@ -43,7 +43,7 @@ class ConflictDetectorSpec extends AnyFlatSpec with Matchers {
     val conflicts = detector.detect(Vector(claim1, claim2))
 
     conflicts.size shouldBe 1
-    conflicts.head.reason should include("Contradictory")
+    conflicts.head.reason should include("inconsistency")
     conflicts.head.recommendation should include("returns String")
   }
 

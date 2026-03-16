@@ -14,7 +14,7 @@ class LargeRepoIngestionSpec extends AsyncFlatSpec with AsyncIOSpec with Matcher
 
   val clientResource = ArangoClient.resource(
     host = "localhost", port = 8529,
-    database = "ix_memory_test", user = "root", password = ""
+    database = "ix_test_large_repo", user = "root", password = ""
   )
 
   private def createSyntheticRepo(fileCount: Int): IO[Path] = IO.blocking {

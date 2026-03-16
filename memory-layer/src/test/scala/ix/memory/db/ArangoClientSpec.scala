@@ -11,7 +11,7 @@ class ArangoClientSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers {
   // Requires ArangoDB running on localhost:8529
   val clientResource = ArangoClient.resource(
     host = "localhost", port = 8529,
-    database = "ix_memory_test", user = "root", password = ""
+    database = "ix_test_arango_client", user = "root", password = ""
   )
 
   "ArangoClient" should "connect and ensure schema" in {

@@ -17,7 +17,7 @@ class ContextServiceSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers wi
 
   val clientResource = ArangoClient.resource(
     host = "localhost", port = 8529,
-    database = "ix_memory_test", user = "root", password = ""
+    database = "ix_test_context_service", user = "root", password = ""
   )
 
   private def makePatch(

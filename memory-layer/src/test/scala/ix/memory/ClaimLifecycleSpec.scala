@@ -16,7 +16,7 @@ class ClaimLifecycleSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers wi
 
   val clientResource = ArangoClient.resource(
     host = "localhost", port = 8529,
-    database = "ix_memory_test", user = "root", password = ""
+    database = "ix_test_claim_lifecycle", user = "root", password = ""
   )
 
   private val testEntityId = NodeId(UUID.nameUUIDFromBytes("test:entity1".getBytes("UTF-8")))

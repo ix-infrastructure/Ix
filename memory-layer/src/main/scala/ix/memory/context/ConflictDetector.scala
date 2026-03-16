@@ -62,6 +62,8 @@ class ConflictDetectorImpl(llmJudge: Option[LlmJudge] = None) extends ConflictDe
             val candidates = activeClaims.filter(sc => sc.relevance >= 0.25)
             val pairs = candidates.combinations(2).toVector
             pairs.flatMap {
+              case Vector(a, b) if a.claim.statement == b.claim.statement =>
+                None // Same statement — not a conflict
               case Vector(a, b) =>
                 if (shareFieldPrefix(a.claim.statement, b.claim.statement)) {
                   Some(makeConflict(a, b, "Potential inconsistency (same field prefix)"))
