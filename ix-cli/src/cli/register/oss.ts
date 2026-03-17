@@ -27,6 +27,7 @@ import { registerDockerCommand } from "../commands/docker.js";
 import { registerWorkflowsHelpCommand } from "../commands/workflows.js";
 import { registerMapCommand } from "../commands/map.js";
 import { registerResetCommand } from "../commands/reset.js";
+import { registerConfigCommand } from "../commands/config.js";
 
 const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "briefing", desc: "Session-resume briefing" },
@@ -49,6 +50,8 @@ const PRO_COMMANDS: { name: string; desc: string }[] = [
 const ADVANCED_COMMANDS = [
   "contains", "callers", "callees", "imports", "imported-by",
   "depends", "entity", "text", "conflicts", "query",
+  // init is deprecated; ingest is now an implementation detail
+  "init", "ingest",
 ];
 
 export function registerOssCommands(program: Command): void {
@@ -80,6 +83,7 @@ export function registerOssCommands(program: Command): void {
   registerWorkflowsHelpCommand(program);
   registerMapCommand(program);
   registerResetCommand(program);
+  registerConfigCommand(program);
 
   // Hide advanced commands from default help
   const advancedSet = new Set(ADVANCED_COMMANDS);

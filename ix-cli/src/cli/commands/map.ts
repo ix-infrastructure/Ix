@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
+import { bootstrap } from "../bootstrap.js";
 
 interface MapRegion {
   id: string;
@@ -32,8 +33,8 @@ interface MapResult {
 
 export function registerMapCommand(program: Command): void {
   program
-    .command("map")
-    .description("Infer multi-scale architectural hierarchy from code structure")
+    .command("map [path]")
+    .description("Map the architectural hierarchy of a codebase")
     .option("--format <fmt>", "Output format (text|json)", "text")
     .option("--level <n>", "Show only regions at this level (1=finest, higher=coarser)")
     .option("--min-confidence <n>", "Only show regions above this confidence threshold (0-1)", "0")
@@ -50,12 +51,22 @@ Levels:
   3 = system       (top-level architectural regions)
 
 Examples:
-  ix map
+  ix map .
   ix map --format json
   ix map --level 2
   ix map --min-confidence 0.5`
     )
-    .action(async (opts: { format: string; level?: string; minConfidence: string }) => {
+    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string }) => {
+      const cwd = pathArg ? require("node:path").resolve(pathArg) : process.cwd();
+
+      try {
+        await bootstrap(cwd);
+      } catch (err: any) {
+        console.error(chalk.red("Error:"), err.message);
+        process.exitCode = 1;
+        return;
+      }
+
       const client = new IxClient(getEndpoint());
 
       if (opts.format !== "json") {

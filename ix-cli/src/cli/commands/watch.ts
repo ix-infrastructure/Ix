@@ -5,6 +5,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
+import { bootstrap } from "../bootstrap.js";
 import { loadWatchIngestionModules } from "./ingestion-loader.js";
 import { readFileContent } from "./watch-utils.js";
 const SUPPORTED_EXTENSIONS = new Set([
@@ -40,6 +41,13 @@ export function registerWatchCommand(program: Command): void {
     .option("--path <path>", "Restrict watching to a subdirectory")
     .option("--root <dir>", "Workspace root directory")
     .action(async (opts: { path?: string; root?: string }) => {
+      try {
+        await bootstrap();
+      } catch (err: any) {
+        console.error(chalk.red("Error:"), err.message);
+        process.exit(1);
+      }
+
       const root = resolveWorkspaceRoot(opts.root);
       const watchPath = opts.path
         ? path.resolve(root, opts.path)
@@ -51,14 +59,6 @@ export function registerWatchCommand(program: Command): void {
       }
 
       const client = new IxClient(getEndpoint());
-
-      // Verify backend is reachable
-      try {
-        await client.health();
-      } catch {
-        console.error(`Ix backend not reachable at ${getEndpoint()}`);
-        process.exit(1);
-      }
 
       const relative = path.relative(root, watchPath) || ".";
       console.log(chalk.cyan(`[watch] Watching ${relative}`));

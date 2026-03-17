@@ -1,27 +1,30 @@
 const OSS_HELP = `ix — Code Memory CLI
 
-Core:
-  init                  Initialize Ix in a project directory
+Start:
+  map [path]            Map the architectural hierarchy of a codebase
+  watch                 Watch files and auto-ingest on change
+  config                Show or update configuration
+
+Understand:
   search <term>         Search the knowledge graph by term
   locate <symbol>       Resolve symbol to definition with context
   explain <symbol>      Explain an entity with history
   impact <target>       Blast-radius / dependency analysis
   overview <target>     One-shot structural summary
-  watch                 Watch files and auto-ingest on change
-
-Utilities:
   read <target>         Read file content or symbol source code
+
+Explore:
   inventory             List entities by kind
   rank                  Hotspot discovery by metric
   history <entityId>    Show entity provenance chain
   diff <from> <to>      Show diff between revisions
 
 System:
-  ingest [path]         Ingest source files or GitHub data
   status                Show backend health
   stats                 Show graph statistics
   doctor                Check system health
   docker <action>       Manage the IX backend containers
+  reset                 Wipe all graph data for a clean re-ingest
 `;
 
 const FOOTER = `Use "ix help advanced" for low-level graph commands.
