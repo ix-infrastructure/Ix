@@ -26,11 +26,10 @@ export function registerCallersCommand(program: Command): void {
       const target = await resolveFileOrEntity(client, symbol, resolveOpts);
       if (!target) return;
       if (opts.format !== "json") printResolved(target);
-      // Use expandByName for cross-file resolution
-      const result = await client.expandByName(target.name, {
+      // Use expand by entity ID to avoid aggregating results across all same-named entities
+      const result = await client.expand(target.id, {
         direction: "in",
         predicates: ["CALLS", "REFERENCES"],
-        kinds: ["function", "method"],
       });
 
       if (result.nodes.length === 0) {
@@ -116,11 +115,10 @@ export function registerCallersCommand(program: Command): void {
       const target = await resolveFileOrEntity(client, symbol, resolveOpts);
       if (!target) return;
       if (opts.format !== "json") printResolved(target);
-      // Use expandByName for cross-file resolution
-      const result = await client.expandByName(target.name, {
+      // Use expand by entity ID to avoid aggregating results across all same-named entities
+      const result = await client.expand(target.id, {
         direction: "out",
         predicates: ["CALLS"],
-        kinds: ["function", "method"],
       });
       formatEdgeResults(result.nodes.slice(0, calleeLimit), "callees", target.name, opts.format, target, "graph");
     });

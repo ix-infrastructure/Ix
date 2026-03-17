@@ -187,8 +187,8 @@ export const PYTHON_QUERIES = `
     (identifier) @heritage.extends)) @heritage
 
 ; Type references — captures types used in type annotations / hints
-(typed_parameter type: (identifier) @reference.type)
-(typed_default_parameter type: (identifier) @reference.type)
+(typed_parameter type: (type (identifier) @reference.type))
+(typed_default_parameter type: (type (identifier) @reference.type))
 `;
 // Java queries - works with tree-sitter-java
 export const JAVA_QUERIES = `
