@@ -12,7 +12,9 @@
     "./types": "./dist/types.js"
   },
   "scripts": {
-    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json"
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
+    "test": "vitest run --pool threads",
+    "test:watch": "vitest --pool threads"
   },
   "dependencies": {
     "tree-sitter": "^0.21.0",
@@ -31,6 +33,8 @@
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "typescript": "^5.4.0"
+    "fast-check": "^4.6.0",
+    "typescript": "^5.4.0",
+    "vitest": "^4.1.0"
   }
 }

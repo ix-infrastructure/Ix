@@ -191,8 +191,8 @@ export const PYTHON_QUERIES = `
     (identifier) @heritage.extends)) @heritage
 
 ; Type references — captures types used in type annotations / hints
-(typed_parameter type: (identifier) @reference.type)
-(typed_default_parameter type: (identifier) @reference.type)
+(typed_parameter type: (type (identifier) @reference.type))
+(typed_default_parameter type: (type (identifier) @reference.type))
 `;
 
 // Java queries - works with tree-sitter-java
@@ -778,6 +778,16 @@ export const SCALA_QUERIES = `
 ; ── Type aliases ──────────────────────────────────────────────────────────────
 (type_definition
   name: (type_identifier) @name) @definition.type
+
+; ── Val/var definitions (class-level members only, not method-local vars) ──────
+; Restricting to template_body ensures we only capture class/object-level
+; declarations (e.g. companion object implicits) and not local val bindings
+; inside method bodies, which would add noise entities to the graph.
+(template_body
+  (val_definition (identifier) @name) @definition.const)
+
+(template_body
+  (var_definition (identifier) @name) @definition.const)
 
 ; ── Imports: capture full declaration for dotted-path reconstruction ─────────
 ; Handles: import ix.memory.model._  (wildcard)
