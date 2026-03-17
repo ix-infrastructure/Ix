@@ -174,6 +174,10 @@ export class IxClient {
     return this.post("/v1/patch", patch);
   }
 
+  async map(): Promise<any> {
+    return this.post("/v1/map", {});
+  }
+
   async stats(): Promise<any> {
     return this.get("/v1/stats");
   }

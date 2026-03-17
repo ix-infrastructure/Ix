@@ -9,6 +9,7 @@ import ix.memory.api.Routes
 import ix.memory.conflict.ConflictService
 import ix.memory.context._
 import ix.memory.db._
+import ix.memory.map.MapService
 
 object Main extends IOApp.Simple {
 
@@ -37,9 +38,10 @@ object Main extends IOApp.Simple {
       contextService   = new ContextService(queryApi, seeder, expander,
                            claimCollector, confidenceScorer, conflictDetector)
       conflictService  = new ConflictService(client, queryApi, writeApi)
+      mapService       = new MapService(client, queryApi, writeApi)
 
       // 4. HTTP routes
-      routes = Routes.all(contextService, queryApi, writeApi, conflictService, client)
+      routes = Routes.all(contextService, queryApi, writeApi, conflictService, client, mapService)
 
       // 5. Server
       server <- EmberServerBuilder

@@ -11,6 +11,7 @@ import org.http4s.dsl.io._
 import ix.memory.conflict.ConflictService
 import ix.memory.context.ContextService
 import ix.memory.db.{ArangoClient, GraphQueryApi, GraphWriteApi}
+import ix.memory.map.MapService
 
 object Routes {
 
@@ -19,7 +20,8 @@ object Routes {
     queryApi:        GraphQueryApi,
     writeApi:        GraphWriteApi,
     conflictService: ConflictService,
-    client:          ArangoClient
+    client:          ArangoClient,
+    mapService:      MapService
   ): HttpRoutes[IO] = {
 
     val health = HttpRoutes.of[IO] {
@@ -41,10 +43,12 @@ object Routes {
     val statsRoutes         = new StatsRoutes(client).routes
     val patchCommitRoutes   = new PatchCommitRoutes(writeApi).routes
     val listRoutes          = new ListRoutes(queryApi).routes
+    val mapRoutes           = new MapRoutes(mapService).routes
 
     health <+> contextRoutes <+> entityRoutes <+>
       diffRoutes <+> conflictRoutes <+> decideRoutes <+> searchRoutes <+>
       truthRoutes <+> patchRoutes <+> decisionListRoutes <+> expandRoutes <+>
-      statsRoutes <+> patchCommitRoutes <+> listRoutes <+> goalRoutes
+      statsRoutes <+> patchCommitRoutes <+> listRoutes <+> goalRoutes <+>
+      mapRoutes
   }
 }
