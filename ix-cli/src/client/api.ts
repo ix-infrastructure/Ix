@@ -178,6 +178,10 @@ export class IxClient {
     return this.post("/v1/map", {});
   }
 
+  async reset(): Promise<{ ok: boolean; message: string }> {
+    return this.post("/v1/reset", {});
+  }
+
   async stats(): Promise<any> {
     return this.get("/v1/stats");
   }

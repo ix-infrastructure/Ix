@@ -44,11 +44,12 @@ object Routes {
     val patchCommitRoutes   = new PatchCommitRoutes(writeApi).routes
     val listRoutes          = new ListRoutes(queryApi).routes
     val mapRoutes           = new MapRoutes(mapService).routes
+    val resetRoutes         = new ResetRoutes(client).routes
 
     health <+> contextRoutes <+> entityRoutes <+>
       diffRoutes <+> conflictRoutes <+> decideRoutes <+> searchRoutes <+>
       truthRoutes <+> patchRoutes <+> decisionListRoutes <+> expandRoutes <+>
       statsRoutes <+> patchCommitRoutes <+> listRoutes <+> goalRoutes <+>
-      mapRoutes
+      mapRoutes <+> resetRoutes
   }
 }

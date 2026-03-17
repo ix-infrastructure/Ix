@@ -26,6 +26,7 @@ import { registerWatchCommand } from "../commands/watch.js";
 import { registerDockerCommand } from "../commands/docker.js";
 import { registerWorkflowsHelpCommand } from "../commands/workflows.js";
 import { registerMapCommand } from "../commands/map.js";
+import { registerResetCommand } from "../commands/reset.js";
 
 const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "briefing", desc: "Session-resume briefing" },
@@ -78,6 +79,7 @@ export function registerOssCommands(program: Command): void {
   registerDockerCommand(program);
   registerWorkflowsHelpCommand(program);
   registerMapCommand(program);
+  registerResetCommand(program);
 
   // Hide advanced commands from default help
   const advancedSet = new Set(ADVANCED_COMMANDS);

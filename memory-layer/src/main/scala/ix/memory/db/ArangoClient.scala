@@ -106,6 +106,14 @@ class ArangoClient private (db: ArangoDatabase) {
     }
 
   def ensureSchema(): IO[Unit] = ArangoSchema.ensure(db)
+
+  /** Truncate all graph collections (nodes + edges). Destructive — dev use only. */
+  def truncateGraph(): IO[Unit] =
+    IO.blocking {
+      db.collection("nodes").truncate()
+      db.collection("edges").truncate()
+      ()
+    }
 }
 
 object ArangoClient {
