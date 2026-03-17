@@ -4,6 +4,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { bootstrap } from "../bootstrap.js";
+import { ingestFiles } from "./ingest.js";
 
 interface MapRegion {
   id: string;
@@ -67,6 +68,12 @@ Examples:
         process.exitCode = 1;
         return;
       }
+
+      // Ingest the path before mapping so the graph is up to date
+      if (opts.format !== "json") {
+        process.stderr.write(chalk.dim("Ingesting...\n"));
+      }
+      await ingestFiles(cwd, { recursive: true, format: "text" });
 
       const client = new IxClient(getEndpoint());
 

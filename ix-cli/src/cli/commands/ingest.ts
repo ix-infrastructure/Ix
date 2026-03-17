@@ -90,7 +90,7 @@ export function registerIngestCommand(program: Command): void {
 // File ingestion — parse locally, send via /v1/patch
 // ---------------------------------------------------------------------------
 
-async function ingestFiles(
+export async function ingestFiles(
   path: string,
   opts: { recursive?: boolean; force?: boolean; format: string; root?: string }
 ): Promise<void> {
