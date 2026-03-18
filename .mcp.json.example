@@ -5,7 +5,7 @@
       "command": "npx",
       "args": [
         "tsx",
-        "/Users/tkocher/Development/Ix/IX-Memory/ix-cli/src/mcp/server.ts"
+        "/path/to/IX-Memory/ix-cli/src/mcp/server.ts"
       ],
       "env": {
         "IX_ENDPOINT": "http://localhost:8090"
