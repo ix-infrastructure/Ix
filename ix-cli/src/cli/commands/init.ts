@@ -37,7 +37,7 @@ Use bounded, composable CLI commands — never broad queries.
 - \`ix read <target>\` — read source (\`file.py:10-50\` or symbol name)
 - \`ix entity <id>\` — full entity details by ID
 - \`ix text <term>\` — fast text search (\`--language python --limit 20\`)
-- \`ix locate <symbol>\` — find symbol via graph + text
+- \`ix locate <symbol>\` — find where something lives and how it connects
 
 ### Navigating Relationships
 - \`ix callers <symbol>\` — what calls a function (cross-file)

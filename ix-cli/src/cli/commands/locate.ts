@@ -257,7 +257,7 @@ function outputLocate(output: LocateOutput, symbol: string, format: string): voi
   if (output.stale) stderr(chalk.yellow("⚠ Some results may be stale. Run ix ingest to update.\n"));
 
   if (!output.resolvedTarget) {
-    stderr(`No graph entity found for "${symbol}".`);
+    stderr(`No entity found for "${symbol}".`);
     if (output.textMatches.length > 0) {
       console.log(chalk.dim("\nText matches:"));
       for (const tm of output.textMatches) {

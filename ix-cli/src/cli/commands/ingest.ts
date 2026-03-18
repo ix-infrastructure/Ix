@@ -59,7 +59,7 @@ function sha256(content: Buffer): string {
 export function registerIngestCommand(program: Command): void {
   program
     .command('ingest [path]')
-    .description('Ingest source files or GitHub data into the knowledge graph')
+    .description('Bring code into the system map')
     .option('--path <dir>', 'Path to ingest (alternative to positional argument)')
     .option('--recursive', 'Recursively ingest directory')
     .option('--github <owner/repo>', 'Ingest issues, PRs, and commits from a GitHub repository')

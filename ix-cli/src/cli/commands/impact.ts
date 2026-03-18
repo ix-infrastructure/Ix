@@ -9,7 +9,7 @@ const CONTAINER_KINDS = new Set(["class", "module", "file", "object", "trait", "
 export function registerImpactCommand(program: Command): void {
   program
     .command("impact <target>")
-    .description("Aggregated impact analysis — who depends on this symbol and its members")
+    .description("Whats affected")
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")
     .option("--depth <n>", "Expansion depth for callers/importers (default 1, max 3)", "1")

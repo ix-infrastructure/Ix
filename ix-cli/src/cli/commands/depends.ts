@@ -197,7 +197,7 @@ export function registerDependsCommand(program: Command): void {
       printResolved(target);
 
       if (tree.length === 0) {
-        console.log(`  No downstream dependents found at current graph state.`);
+        console.log(`  No downstream dependents found.`);
         return;
       }
 

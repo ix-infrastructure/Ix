@@ -1,30 +1,36 @@
-const OSS_HELP = `ix — Code Memory CLI
+const HEADER = [
+  "Ix",
+  "Understand any system, instantly.",
+  "Your virtual cartographer.",
+].join("\n");
+
+const OSS_HELP = `${HEADER}
 
 Core:
-  init                  Initialize Ix in a project directory
-  search <term>         Search the knowledge graph by term
-  locate <symbol>       Resolve symbol to definition with context
-  explain <symbol>      Explain an entity with history
-  impact <target>       Blast-radius / dependency analysis
-  overview <target>     One-shot structural summary
-  watch                 Watch files and auto-ingest on change
+  init                  Start mapping this project
+  search <term>         Find anything
+  locate <symbol>       Jump to definition
+  explain <symbol>      What it does
+  impact <target>       Whats affected
+  overview <target>     Where it fits
+  watch                 Stay in sync
 
 Utilities:
-  read <target>         Read file content or symbol source code
-  inventory             List entities by kind
-  rank                  Hotspot discovery by metric
-  history <entityId>    Show entity provenance chain
-  diff <from> <to>      Show diff between revisions
+  read <target>         View source
+  inventory             Explore structure
+  rank                  What matters most
+  history <entityId>    What changed
+  diff <from> <to>      Compare changes
 
 System:
-  ingest [path]         Ingest source files or GitHub data
-  status                Show backend health
-  stats                 Show graph statistics
-  doctor                Check system health
-  docker <action>       Manage the IX backend containers
+  ingest [path]         Add code
+  status                System status
+  stats                 System stats
+  doctor                Diagnose issues
+  docker <action>       Manage services
 `;
 
-const FOOTER = `Use "ix help advanced" for low-level graph commands.
+const FOOTER = `Advanced: ix help advanced
 Use "ix <command> --help" for details on any command.
 `;
 

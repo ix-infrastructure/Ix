@@ -80,7 +80,7 @@ export function registerCallersCommand(program: Command): void {
                 }],
               }, null, 2));
             } else {
-              stderr(chalk.dim("No graph-backed CALLS/REFERENCES edges found. Showing text-based candidate usages."));
+              stderr(chalk.dim("No structural relationships found. Showing text-based candidate usages."));
               stderr(chalk.dim("Tip: if files were ingested before CALLS extraction, run: ix ingest --force --recursive .\n"));
               for (const r of textResults) {
                 const snippet = r.attrs?.snippet ?? "";

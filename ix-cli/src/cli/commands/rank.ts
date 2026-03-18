@@ -109,7 +109,7 @@ async function scoreAllCandidates(
 export function registerRankCommand(program: Command): void {
   program
     .command("rank")
-    .description("Rank entities by graph-derived importance (dependents, callers, importers, members)")
+    .description("Identify the most critical parts of the system by importance")
     .requiredOption("--by <metric>", `Metric to rank by (${VALID_METRICS.join(", ")})`)
     .requiredOption("--kind <kind>", "Entity kind to rank (e.g. class, method, module)")
     .option("--top <n>", "Number of results to return", "10")

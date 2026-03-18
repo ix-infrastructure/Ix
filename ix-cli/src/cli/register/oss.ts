@@ -1,5 +1,4 @@
 import type { Command } from "commander";
-import { registerQueryCommand } from "../commands/query.js";
 import { registerIngestCommand } from "../commands/ingest.js";
 import { registerSearchCommand } from "../commands/search.js";
 import { registerStatusCommand } from "../commands/status.js";
@@ -46,11 +45,10 @@ const PRO_COMMANDS: { name: string; desc: string }[] = [
 /** Commands hidden from default help but still callable. */
 const ADVANCED_COMMANDS = [
   "contains", "callers", "callees", "imports", "imported-by",
-  "depends", "entity", "text", "conflicts", "query",
+  "depends", "entity", "text", "conflicts",
 ];
 
 export function registerOssCommands(program: Command): void {
-  registerQueryCommand(program);
   registerIngestCommand(program);
   registerSearchCommand(program);
   registerStatusCommand(program);

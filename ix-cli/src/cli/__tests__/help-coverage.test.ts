@@ -30,7 +30,8 @@ describe("help coverage", () => {
   });
 
   it("OSS help uses new branding", () => {
-    expect(ossHelp).toContain("ix — Code Memory CLI");
+    expect(ossHelp).toContain("Ix");
+    expect(ossHelp).toContain("Understand any system, instantly.");
     expect(ossHelp).not.toContain("Persistent Memory for LLM Systems");
   });
 
