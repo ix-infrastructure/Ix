@@ -123,7 +123,9 @@ function renderTree(children: DependencyNode[], prefix: string, isLast: boolean[
       indent += isLast[j] ? "   " : "│  ";
     }
 
-    const kindStr = chalk.cyan((child.kind ?? "").padEnd(10));
+    const kindStr = child.cycle
+      ? chalk.dim((child.kind ?? "").padEnd(10))
+      : chalk.cyan((child.kind ?? "").padEnd(10));
     const nameStr = child.cycle
       ? chalk.dim(child.name) + chalk.yellow(" ↺")
       : child.resolved ? chalk.bold(child.name) : chalk.dim(child.name);
