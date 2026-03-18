@@ -124,10 +124,11 @@ function renderTree(children: DependencyNode[], prefix: string, isLast: boolean[
     }
 
     const kindStr = chalk.cyan((child.kind ?? "").padEnd(10));
-    const nameStr = child.resolved ? chalk.bold(child.name) : chalk.dim(child.name);
-    const cycleMark = child.cycle ? chalk.yellow(" (cycle)") : "";
+    const nameStr = child.cycle
+      ? chalk.dim(child.name) + chalk.yellow(" ↺")
+      : child.resolved ? chalk.bold(child.name) : chalk.dim(child.name);
 
-    lines.push(`${indent}${connector}${kindStr} ${nameStr}${cycleMark}`);
+    lines.push(`${indent}${connector}${kindStr} ${nameStr}`);
 
     if (child.children.length > 0) {
       lines.push(...renderTree(child.children, prefix, [...isLast, last]));
