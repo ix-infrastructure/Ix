@@ -293,7 +293,9 @@ export const GO_QUERIES = `
 ; Type references — captures types used in field/param/return-type positions
 (field_declaration type: (type_identifier) @reference.type)
 (parameter_declaration type: (type_identifier) @reference.type)
-(result type: (type_identifier) @reference.type)
+; Return types: in tree-sitter-go, return type is a direct type_identifier child of function/method
+(function_declaration result: (type_identifier) @reference.type)
+(method_declaration result: (type_identifier) @reference.type)
 `;
 // C++ queries - works with tree-sitter-cpp
 export const CPP_QUERIES = `

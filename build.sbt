@@ -33,6 +33,7 @@ lazy val memoryLayer = (project in file("memory-layer"))
       "io.github.bonede" % "tree-sitter"            % "0.26.6",
       "io.github.bonede" % "tree-sitter-scala"      % "0.24.0",
       "io.github.bonede" % "tree-sitter-typescript" % "0.23.2",
+      "io.github.bonede" % "tree-sitter-go"         % "0.23.3",
 
       // Logging
       "org.typelevel"  %% "log4cats-slf4j"      % "2.7.0",

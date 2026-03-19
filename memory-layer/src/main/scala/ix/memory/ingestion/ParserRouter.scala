@@ -1,6 +1,6 @@
 package ix.memory.ingestion
 
-import ix.memory.ingestion.parsers.{ConfigParser, MarkdownParser, ScalaParser, TreeSitterPythonParser, TypeScriptParser}
+import ix.memory.ingestion.parsers.{ConfigParser, MarkdownParser, ScalaParser, TreeSitterGoParser, TreeSitterPythonParser, TypeScriptParser}
 
 /**
  * Routes file paths to the appropriate language parser.
@@ -13,11 +13,13 @@ class ParserRouter {
   private val configParser   = new ConfigParser()
   private val markdownParser = new MarkdownParser()
   private val scalaParser    = new ScalaParser()
+  private val goParser       = new TreeSitterGoParser()
 
   def parserFor(filePath: String): Option[Parser] = {
     if (filePath.endsWith(".py")) Some(pythonParser)
     else if (filePath.endsWith(".ts") || filePath.endsWith(".tsx")) Some(tsParser)
     else if (filePath.endsWith(".scala") || filePath.endsWith(".sc")) Some(scalaParser)
+    else if (filePath.endsWith(".go")) Some(goParser)
     else if (filePath.endsWith(".json") || filePath.endsWith(".yaml") || filePath.endsWith(".yml") || filePath.endsWith(".toml")) Some(configParser)
     else if (filePath.endsWith(".md")) Some(markdownParser)
     else None

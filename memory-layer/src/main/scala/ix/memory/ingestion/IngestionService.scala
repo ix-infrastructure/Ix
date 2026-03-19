@@ -41,6 +41,7 @@ class IngestionService(parserRouter: ParserRouter, writeApi: GraphWriteApi, quer
       extractor = if (fp.endsWith(".py")) "tree-sitter-python/1.0"
                   else if (fp.endsWith(".ts") || fp.endsWith(".tsx")) "typescript-parser/1.0"
                   else if (fp.endsWith(".scala") || fp.endsWith(".sc")) "scala-parser/1.0"
+                  else if (fp.endsWith(".go")) "tree-sitter-go/1.0"
                   else if (fp.endsWith(".json") || fp.endsWith(".yaml") || fp.endsWith(".yml") || fp.endsWith(".toml") || fp.endsWith(".ini") || fp.endsWith(".conf") || fp.endsWith(".properties") || fp.endsWith(".env")) "config-parser/1.0"
                   else if (fp.endsWith(".md") || fp.endsWith(".mdx") || fp.endsWith(".rst") || fp.endsWith(".txt")) "markdown-parser/1.0"
                   else "text-parser/1.0"
