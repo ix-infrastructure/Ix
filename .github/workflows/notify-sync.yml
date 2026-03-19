@@ -4,6 +4,12 @@ on:
   push:
   issues:
     types: [opened, closed, reopened, edited, labeled, unlabeled, assigned, unassigned]
+  pull_request:
+    types: [opened, closed, reopened]
+  create:
+  delete:
+  release:
+    types: [published]
 
 jobs:
   notify:
