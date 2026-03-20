@@ -74,6 +74,7 @@ export function registerMapCommand(program: Command): void {
     .option("--level <n>", "Show only regions at this level (1=finest, higher=coarser)")
     .option("--min-confidence <n>", "Only show regions above this confidence threshold (0-1)", "0")
     .option("--full", "Force full local map, bypassing automatic safety limits (advanced/testing)")
+    .option("--verbose", "Show raw confidence scores, crosscut scores, boundary ratios, and signals")
     .addHelpText(
       "after",
       `
@@ -99,7 +100,7 @@ Examples:
   ix map . --full
   ix --debug map . --full`
     )
-    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; full?: boolean }) => {
+    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; full?: boolean; verbose?: boolean }) => {
       const cwd = pathArg ? resolve(pathArg) : process.cwd();
 
       try {
@@ -119,15 +120,12 @@ Examples:
       }
 
       // Ingest the path before mapping so the graph is up to date
-      if (opts.format !== "json") {
-        process.stderr.write(chalk.dim("Ingesting...\n"));
-      }
-      await ingestFiles(cwd, { recursive: true, format: "text" });
+      await ingestFiles(cwd, { recursive: true, format: opts.format === "json" ? "json" : "text", printSummary: false });
 
       const client = new IxClient(getEndpoint());
 
       if (opts.format !== "json") {
-        process.stderr.write(chalk.dim("Computing architectural map...\n"));
+        process.stderr.write(chalk.dim("  Computing map...\n"));
       }
 
       let result: MapResult;
@@ -159,16 +157,12 @@ Examples:
 
       // Text output
       console.log(
-        `\n${chalk.bold("Architectural Map")}  ` +
-        chalk.dim(`rev ${result.map_rev} · ${result.file_count} files · `) +
-        chalk.dim(`${result.region_count} regions · ${result.levels} levels`)
+        `\n${chalk.bold("Architectural Map")} — ` +
+        `${result.file_count} files · ${result.region_count} regions`
       );
 
       if (result.outcome === "fast_local_completed") {
-        console.log(
-          chalk.yellow("  Large system detected") +
-          chalk.dim(" — using Fast Map")
-        );
+        console.log(chalk.yellow("  Large system detected") + chalk.dim(" — using Fast Map"));
         console.log(chalk.dim("  Reduced coupling model with full region hierarchy output."));
       }
 
@@ -177,46 +171,101 @@ Examples:
         return;
       }
 
-      // Group by level, finest last for display (coarsest first = system overview at top)
-      const byLevel = new Map<number, MapRegion[]>();
+      // Build id→region lookup for parent label resolution
+      const regionById = new Map(result.regions.map(r => [r.id, r]));
+
+      const KIND_ORDER   = ["system", "subsystem", "module"];
+      const KIND_HEADERS: Record<string, string> = {
+        system:    "Systems",
+        subsystem: "Subsystems",
+        module:    "Modules",
+      };
+      const CROSSCUT_THRESHOLD = 0.10;
+      const RULE = chalk.dim("─".repeat(58));
+
+      // Group by label_kind
+      const byKind = new Map<string, MapRegion[]>();
       for (const r of regions) {
-        if (!byLevel.has(r.level)) byLevel.set(r.level, []);
-        byLevel.get(r.level)!.push(r);
+        if (!byKind.has(r.label_kind)) byKind.set(r.label_kind, []);
+        byKind.get(r.label_kind)!.push(r);
       }
 
-      const sortedLevels = [...byLevel.keys()].sort((a, b) => b - a);  // coarsest first
+      for (const kind of KIND_ORDER) {
+        const kindRegions = byKind.get(kind);
+        if (!kindRegions) continue;
 
-      for (const lvl of sortedLevels) {
-        const lvlRegions = byLevel.get(lvl)!.sort((a, b) => b.confidence - a.confidence);
-        const kindLabel = lvlRegions[0]?.label_kind ?? "region";
-        console.log(`\n${chalk.bold(kindLabel.toUpperCase())} (level ${lvl})`);
+        // Sort: systems/subsystems by file_count desc; modules: problematic first, then parent+size
+        if (kind !== "module") {
+          kindRegions.sort((a, b) => b.file_count - a.file_count);
+        } else {
+          const isProblematic = (r: MapRegion) =>
+            r.crosscut_score > CROSSCUT_THRESHOLD || r.confidence < 0.50;
+          kindRegions.sort((a, b) => {
+            const ap = isProblematic(a) ? 1 : 0;
+            const bp = isProblematic(b) ? 1 : 0;
+            if (bp !== ap) return bp - ap;
+            const aParent = a.parent_id ? (regionById.get(a.parent_id)?.label ?? "") : "";
+            const bParent = b.parent_id ? (regionById.get(b.parent_id)?.label ?? "") : "";
+            if (aParent !== bParent) return aParent.localeCompare(bParent);
+            return b.file_count - a.file_count;
+          });
+        }
 
-        for (const r of lvlRegions) {
-          const confBar = confidenceBar(r.confidence);
-          const signals = r.dominant_signals.slice(0, 2).join("+");
-          const name    = chalk.bold(r.label.padEnd(20));
-          const files   = chalk.dim(`${r.file_count}f`).padEnd(6);
-          const brVal   = Math.min(r.boundary_ratio, 9999);
-          const br      = brVal > 0
-            ? chalk.dim(`br=${brVal.toFixed(1)}`)
-            : chalk.dim("br=0.0");
+        const colHeader = kind === "module"
+          ? chalk.dim(`  ${"Name".padEnd(22)}  ${"Files".padStart(8)}   ${"Clarity".padEnd(13)}  System`)
+          : chalk.dim(`  ${"Name".padEnd(22)}  ${"Files".padStart(8)}   Clarity`);
 
-          console.log(
-            `  ${name} ${files} ${confBar} ${br}  ${chalk.dim(signals)}`
-          );
+        console.log(`\n${chalk.bold(KIND_HEADERS[kind] ?? kind)}`);
+        console.log(colHeader);
+        console.log(RULE);
+
+        if (opts.verbose) {
+          for (const r of kindRegions) {
+            const bar         = confidenceBar(r.confidence);
+            const name        = chalk.bold(r.label.padEnd(22));
+            const files       = chalk.dim(`${r.file_count} files`.padStart(8));
+            const confPct     = chalk.cyan(`${Math.round(r.confidence * 100)}%`.padStart(4));
+            const xcut        = chalk.dim(`xcut=${r.crosscut_score.toFixed(2)}`);
+            const br          = chalk.dim(`br=${Math.min(r.boundary_ratio, 999.9).toFixed(1)}`);
+            const signals     = chalk.dim(r.dominant_signals.slice(0, 3).join("+") || "—");
+            const parentLabel = r.parent_id ? regionById.get(r.parent_id)?.label : null;
+            const parentStr   = (kind === "module" && parentLabel) ? chalk.dim(` (${parentLabel})`) : "";
+            const crossStr    = r.crosscut_score > CROSSCUT_THRESHOLD ? chalk.yellow("  ⚠ cross-cutting") : "";
+            console.log(`  ${bar}  ${name}  ${files}   ${confPct}   ${xcut}   ${br}   ${signals}${parentStr}${crossStr}`);
+          }
+        } else {
+          for (const r of kindRegions) {
+            const label       = confidenceLabel(r.confidence);
+            const labelColor  = r.confidence >= 0.75 ? chalk.green : r.confidence >= 0.50 ? chalk.yellow : chalk.red;
+            const name        = chalk.bold(r.label.padEnd(22));
+            const files       = chalk.dim(`${r.file_count} files`.padStart(8));
+            const parentLabel = r.parent_id ? regionById.get(r.parent_id)?.label : null;
+            const parentStr   = (kind === "module" && parentLabel) ? chalk.dim(`  (${parentLabel})`) : "";
+            const crossStr    = r.crosscut_score > CROSSCUT_THRESHOLD ? chalk.yellow("  ⚠ cross-cutting") : "";
+            console.log(`  ${name}  ${files}   ${labelColor(label.padEnd(13))}${parentStr}${crossStr}`);
+          }
         }
       }
 
-      console.log(
-        chalk.dim(`\nRegion nodes persisted to graph. Use 'ix entity <id>' to inspect a region.`)
-      );
+      console.log(chalk.dim(`\nLegend: cross-cutting = spans multiple subsystems.`));
+      if (!opts.verbose) {
+        console.log(chalk.dim(`Run 'ix map --verbose' for confidence scores and raw metrics.`));
+      }
+      console.log();
     });
 }
 
-/** Render a confidence score as a compact bar: ████░░ */
+/** Render a confidence score as a compact bar: ████░░ (used in --verbose mode) */
 function confidenceBar(conf: number): string {
   const filled = Math.round(conf * 6);
   const bar    = "█".repeat(filled) + "░".repeat(6 - filled);
   const color  = conf >= 0.7 ? chalk.green : conf >= 0.4 ? chalk.yellow : chalk.red;
   return color(bar);
+}
+
+/** Map a confidence score to a human-readable label. */
+function confidenceLabel(conf: number): string {
+  if (conf >= 0.75) return "Well-defined";
+  if (conf >= 0.50) return "Moderate";
+  return "Fuzzy";
 }

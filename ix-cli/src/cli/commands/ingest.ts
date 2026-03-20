@@ -53,6 +53,26 @@ function sha256(content: Buffer): string {
 }
 
 // ---------------------------------------------------------------------------
+// Progress bar
+// ---------------------------------------------------------------------------
+
+const PROG_BAR_WIDTH  = 25;
+const PROG_LINE_WIDTH = 72;
+
+function renderProgressLine(phase: string, current: number, total: number): string {
+  if (total === 0) {
+    return `  ${phase}...`.padEnd(PROG_LINE_WIDTH);
+  }
+  const pct    = Math.min(current / total, 1);
+  const filled = Math.round(pct * PROG_BAR_WIDTH);
+  const bar    = chalk.cyan('█'.repeat(filled)) + chalk.dim('░'.repeat(PROG_BAR_WIDTH - filled));
+  const pctStr = `${Math.round(pct * 100)}%`.padStart(4);
+  const w      = total.toString().length;
+  const count  = `${current.toString().padStart(w)} / ${total}`;
+  return `  ${phase.padEnd(8)}  ${bar}  ${pctStr}  ${count}`.padEnd(PROG_LINE_WIDTH);
+}
+
+// ---------------------------------------------------------------------------
 // Command registration
 // ---------------------------------------------------------------------------
 
@@ -93,7 +113,7 @@ export function registerIngestCommand(program: Command): void {
 
 export async function ingestFiles(
   path: string,
-  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean }
+  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean }
 ): Promise<void> {
   const debug = opts.debug || process.env.IX_DEBUG === '1';
   const trueStart = performance.now();
@@ -108,12 +128,12 @@ export async function ingestFiles(
   const client = new IxClient(getEndpoint());
   const start = performance.now();
 
-  const spinner = ['\u28CB', '\u28D9', '\u28F9', '\u28F8', '\u28FC', '\u28F4', '\u28E6', '\u28E7', '\u28C7', '\u28CF'];
-  let spinIdx = 0;
+  let progressPhase   = 'Scanning';
+  let progressCurrent = 0;
+  let progressTotal   = 0;
   const interval = opts.format === 'text' ? setInterval(() => {
-    const elapsed = ((performance.now() - start) / 1000).toFixed(0);
-    process.stderr.write(`\r${spinner[spinIdx++ % spinner.length]} Ingesting... ${elapsed}s`);
-  }, 200) : null;
+    process.stderr.write('\r' + renderProgressLine(progressPhase, progressCurrent, progressTotal));
+  }, 80) : null;
 
   let filesDiscovered = 0;
   let filesChanged = 0;
@@ -143,6 +163,10 @@ export async function ingestFiles(
     const discovered = performance.now();
     timings.discoverMs = Math.round(discovered - start);
 
+    progressPhase   = 'Parsing';
+    progressTotal   = filePaths.length;
+    progressCurrent = 0;
+
     // Phase: hash lookup (skipped on first ingest when no baseline exists)
     let knownHashes: Map<string, string>;
     let baselineSkipped = false;
@@ -167,6 +191,7 @@ export async function ingestFiles(
     const parsedFiles: ParsedFile[] = [];
 
     for (const filePath of filePaths) {
+      progressCurrent++;
       try {
         const fileSize = fs.statSync(filePath).size;
         if (fileSize === 0) { filesSkipped++; continue; }
@@ -227,10 +252,14 @@ export async function ingestFiles(
     }
 
     if (patches.length > 0) {
+      progressPhase   = 'Saving';
+      progressTotal   = patches.length;
+      progressCurrent = 0;
       try {
         const result = await client.commitPatchBulk(patches);
         latestRev = result.rev;
         patchesApplied = patches.length;
+        progressCurrent = patches.length;
       } catch (err) {
         // Fallback: try per-file commits if bulk endpoint fails
         if (debug) process.stderr.write(`\n  [bulk commit failed, falling back to per-file] ${err}\n`);
@@ -239,6 +268,7 @@ export async function ingestFiles(
             const result = await client.commitPatch(patch);
             if (result.rev > latestRev) latestRev = result.rev;
             patchesApplied++;
+            progressCurrent++;
           } catch (commitErr) {
             parseErrors++;
             process.stderr.write(`\n  [commit error] ${patch.source?.uri}: ${commitErr}\n`);
@@ -252,7 +282,10 @@ export async function ingestFiles(
   } finally {
     if (interval) {
       clearInterval(interval);
-      process.stderr.write('\r' + ' '.repeat(40) + '\r');
+      if (progressTotal > 0) {
+        process.stderr.write('\r' + renderProgressLine(progressPhase, progressTotal, progressTotal));
+      }
+      process.stderr.write('\r' + ' '.repeat(PROG_LINE_WIDTH) + '\r');
     }
   }
 
@@ -271,7 +304,7 @@ export async function ingestFiles(
       timings,
       resolveStats,
     }, null, 2));
-  } else {
+  } else if (opts.printSummary !== false) {
     console.log(chalk.bold('\nIngest summary'));
     console.log(`  processed:   ${patchesApplied} files (${elapsed}s)`);
     console.log(`  discovered:  ${filesDiscovered} files`);
