@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { execSync, spawn } from "child_process";
+import { createInterface } from "readline";
 import { existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
@@ -21,6 +22,55 @@ function findComposeFile(): string | null {
   if (existsSync(repoCompose)) return repoCompose;
 
   return null;
+}
+
+/**
+ * Find all Ix-managed ArangoDB Docker volumes across repos.
+ *
+ * Matches volumes created by Docker Compose where:
+ *   - The compose project name starts with "ix" (label: com.docker.compose.project)
+ *   - The compose volume name contains "arango" (label: com.docker.compose.volume)
+ *
+ * This avoids matching unrelated ArangoDB volumes (e.g. enterprise projects).
+ */
+function findIxArangoVolumes(): string[] {
+  try {
+    const output = execSync(
+      'docker volume ls --format "{{.Name}}|{{.Labels}}"',
+      { encoding: "utf-8", timeout: 10000 }
+    ).trim();
+    if (!output) return [];
+
+    return output.split("\n").filter((line) => {
+      const [name, labels] = line.split("|", 2);
+      if (!name || !labels) return false;
+
+      // Parse labels: "key1=val1,key2=val2,..."
+      const labelMap = new Map<string, string>();
+      for (const pair of labels.split(",")) {
+        const eq = pair.indexOf("=");
+        if (eq > 0) labelMap.set(pair.slice(0, eq), pair.slice(eq + 1));
+      }
+
+      const project = labelMap.get("com.docker.compose.project") ?? "";
+      const volume = labelMap.get("com.docker.compose.volume") ?? "";
+
+      // Match: Ix project (starts with "ix") + ArangoDB volume (contains "arango")
+      return project.startsWith("ix") && volume.includes("arango");
+    }).map((line) => line.split("|", 1)[0]);
+  } catch {
+    return [];
+  }
+}
+
+function askConfirmation(prompt: string): Promise<boolean> {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  return new Promise((resolve) => {
+    rl.question(prompt, (answer) => {
+      rl.close();
+      resolve(answer.toLowerCase() === "y");
+    });
+  });
 }
 
 function isHealthy(): boolean {
@@ -121,8 +171,10 @@ export function registerDockerCommand(program: Command): void {
     .command("stop")
     .alias("down")
     .description("Stop the IX backend containers")
-    .option("--remove-data", "Also remove the ArangoDB data volume")
-    .action((opts) => {
+    .option("--remove-data", "Also remove the current project's ArangoDB data volume")
+    .option("--remove-all-data", "Remove all local Ix ArangoDB data volumes across repos")
+    .option("--yes", "Skip confirmation prompt (for use with --remove-all-data)")
+    .action(async (opts) => {
       const composeFile = findComposeFile();
       if (!composeFile) {
         console.error("[error] No docker-compose.yml found.");
@@ -132,22 +184,74 @@ export function registerDockerCommand(program: Command): void {
         process.exit(1);
       }
 
-      const flags = opts.removeData ? "down -v" : "down";
+      // --remove-all-data is a superset of --remove-data
+      const removeLocal = opts.removeData || opts.removeAllData;
+      const flags = removeLocal ? "down -v" : "down";
+
       try {
         execSync(`docker compose -f "${composeFile}" ${flags}`, {
           stdio: "inherit",
         });
-        if (opts.removeData) {
-          console.log("[ok] Backend stopped and data volumes removed.");
-        } else {
-          console.log("[ok] Backend stopped. Data volume preserved.");
-          console.log(
-            "  Use 'ix docker stop --remove-data' to also delete data."
-          );
-        }
       } catch {
         console.error("[error] Failed to stop containers.");
         process.exit(1);
+      }
+
+      if (opts.removeAllData) {
+        // Global cleanup: find and remove all Ix ArangoDB volumes
+        const volumes = findIxArangoVolumes();
+        if (volumes.length === 0) {
+          console.log("[ok] Backend stopped. No additional Ix data volumes found.");
+          return;
+        }
+
+        // Confirm unless --yes
+        if (!opts.yes) {
+          console.log("");
+          console.log("This will remove all local Ix ArangoDB data volumes across repos:");
+          for (const v of volumes) console.log(`  ${v}`);
+          console.log("");
+          const confirmed = await askConfirmation("Continue? [y/N] ");
+          if (!confirmed) {
+            console.log("Aborted.");
+            return;
+          }
+        }
+
+        const removed: string[] = [];
+        const failed: string[] = [];
+        for (const v of volumes) {
+          try {
+            execSync(`docker volume rm "${v}"`, { stdio: "ignore", timeout: 10000 });
+            removed.push(v);
+          } catch {
+            failed.push(v);
+          }
+        }
+
+        if (failed.length > 0) {
+          console.error("");
+          console.error("[error] Failed to remove one or more Ix data volumes.");
+          for (const v of failed) console.error(`  ${v}`);
+          console.error("");
+          console.error("  Volumes may be in use. Stop all Ix containers first.");
+          process.exitCode = 1;
+        }
+
+        if (removed.length > 0) {
+          console.log("");
+          console.log("[ok] Backend stopped and all local Ix data volumes removed.");
+          console.log("");
+          console.log("Removed:");
+          for (const v of removed) console.log(`  ${v}`);
+        }
+      } else if (opts.removeData) {
+        console.log("[ok] Backend stopped and data volume removed.");
+      } else {
+        console.log("[ok] Backend stopped. Data volume preserved.");
+        console.log(
+          "  Use 'ix docker stop --remove-data' to also delete data."
+        );
       }
     });
 

@@ -27,11 +27,18 @@ class MapGraphBuilder(client: ArangoClient) {
   private val Gamma   = 0.9
   private val Epsilon = 0.3
 
-  def build(): IO[WeightedFileGraph] =
+  def discoverFiles(): IO[Vector[FileVertex]] = fetchFiles()
+
+  def buildGraph(files: Vector[FileVertex]): IO[WeightedFileGraph] =
     for {
-      files    <- fetchFiles()
       rawPairs <- fetchCouplingByUri()
       graph     = computeGraph(files, rawPairs)
+    } yield graph
+
+  def build(): IO[WeightedFileGraph] =
+    for {
+      files <- discoverFiles()
+      graph <- buildGraph(files)
     } yield graph
 
   // ── ArangoDB queries ───────────────────────────────────────────────

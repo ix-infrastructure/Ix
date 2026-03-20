@@ -5,6 +5,7 @@ import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { bootstrap } from "../bootstrap.js";
 import { ingestFiles } from "./ingest.js";
+import { parseBackendError, renderStructuredError } from "../errors.js";
 
 interface MapRegion {
   id: string;
@@ -24,6 +25,35 @@ interface MapRegion {
   children?: MapRegion[];
 }
 
+interface MapPreflight {
+  cost: {
+    file_count: number;
+    directory_count: number;
+    directory_quadratic: number;
+    symbol_estimate: number;
+    edge_estimate: number;
+  };
+  capacity: {
+    cpu_cores: number;
+    heap_max_bytes: number;
+    heap_free_bytes: number;
+    container_memory: number | null;
+    disk_free_bytes: number | null;
+  };
+  risk: string;
+  mode: string;
+  warnings: string[];
+  duration_ms: number;
+}
+
+interface MapPersistence {
+  region_nodes: number;
+  file_edges: number;
+  region_edges: number;
+  delete_ops: number;
+  total_ops: number;
+}
+
 interface MapResult {
   file_count: number;
   region_count: number;
@@ -31,6 +61,9 @@ interface MapResult {
   map_rev: number;
   regions: MapRegion[];
   hierarchy: MapRegion[];
+  outcome?: string;
+  preflight?: MapPreflight;
+  persistence?: MapPersistence;
 }
 
 export function registerMapCommand(program: Command): void {
@@ -85,7 +118,13 @@ Examples:
       try {
         result = await client.map() as MapResult;
       } catch (err: any) {
-        console.error(chalk.red("Error:"), err.message);
+        const msg: string = err.message ?? "";
+        const structured = parseBackendError(msg);
+        if (structured) {
+          renderStructuredError(structured);
+        } else {
+          console.error(chalk.red("Error:"), msg);
+        }
         process.exitCode = 1;
         return;
       }
@@ -108,6 +147,14 @@ Examples:
         chalk.dim(`rev ${result.map_rev} · ${result.file_count} files · `) +
         chalk.dim(`${result.region_count} regions · ${result.levels} levels`)
       );
+
+      if (result.outcome === "fast_local_completed") {
+        console.log(
+          chalk.yellow("  Large system detected") +
+          chalk.dim(" — using Fast Map")
+        );
+        console.log(chalk.dim("  Reduced coupling model with full region hierarchy output."));
+      }
 
       if (regions.length === 0) {
         console.log(chalk.dim("\n  No regions found matching filters."));

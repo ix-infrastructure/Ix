@@ -53,9 +53,84 @@ final case class Region(
   mapRev:          Long
 )
 
+// ── Preflight types ──────────────────────────────────────────────────
+
+sealed trait RiskTier { def label: String }
+object RiskTier {
+  case object Low     extends RiskTier { val label = "Low" }
+  case object Medium  extends RiskTier { val label = "Medium" }
+  case object High    extends RiskTier { val label = "High" }
+  case object Extreme extends RiskTier { val label = "Extreme" }
+}
+
+sealed trait MapExecutionMode { def label: String }
+object MapExecutionMode {
+  case object FullLocal extends MapExecutionMode { val label = "FullLocal" }
+  case object FastLocal extends MapExecutionMode { val label = "FastLocal" }
+}
+
+final case class LocalCapacity(
+  cpuCores:        Int,
+  heapMaxBytes:    Long,
+  heapFreeBytes:   Long,
+  containerMemory: Option[Long],
+  diskFreeBytes:   Option[Long]
+)
+
+final case class CostEstimate(
+  fileCount:          Int,
+  directoryCount:     Int,
+  directoryQuadratic: Long,
+  symbolEstimate:     Long,
+  edgeEstimate:       Long
+)
+
+final case class MapPreflightResult(
+  cost:       CostEstimate,
+  capacity:   LocalCapacity,
+  risk:       RiskTier,
+  mode:       MapExecutionMode,
+  warnings:   Vector[String],
+  durationMs: Long
+)
+
+// ── Outcome and guardrail types ──────────────────────────────────────
+
+sealed trait MapOutcome { def label: String }
+object MapOutcome {
+  case object FullLocalCompleted    extends MapOutcome { val label = "full_local_completed" }
+  case object FastLocalCompleted    extends MapOutcome { val label = "fast_local_completed" }
+  case object LocalMapTooLarge     extends MapOutcome { val label = "local_map_too_large" }
+  case object LocalMapNotRecommended extends MapOutcome { val label = "local_map_not_recommended" }
+}
+
+final case class PersistenceEstimate(
+  regionNodes:  Int,
+  fileEdges:    Int,
+  regionEdges:  Int,
+  deleteOps:    Int,
+  totalOps:     Int
+)
+
+/**
+ * Structured exception for map capacity failures.
+ *
+ * Carries the outcome category, a user-facing message, and a next-step
+ * suggestion so the error handler can produce clean structured JSON
+ * without relying on ad-hoc exception parsing.
+ */
+class MapCapacityException(
+  val outcome: MapOutcome,
+  val userMessage: String,
+  val next: String
+) extends RuntimeException(userMessage)
+
 /** The full multi-level architecture map returned by MapService. */
 final case class ArchitectureMap(
-  regions:   Vector[Region],
-  fileCount: Int,
-  mapRev:    Long
+  regions:              Vector[Region],
+  fileCount:            Int,
+  mapRev:               Long,
+  preflight:            Option[MapPreflightResult] = None,
+  outcome:              MapOutcome = MapOutcome.FullLocalCompleted,
+  persistenceEstimate:  Option[PersistenceEstimate] = None
 )

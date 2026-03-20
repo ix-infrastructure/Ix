@@ -6,6 +6,7 @@ import java.util.UUID
 import cats.effect.IO
 import io.circe.Json
 import io.circe.syntax._
+import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 import ix.memory.db.{ArangoClient, GraphQueryApi, GraphWriteApi}
 import ix.memory.model._
@@ -38,7 +39,13 @@ class MapService(
     "extensions", "ext", "mixin", "mixins", "core", "framework"
   )
 
-  private val builder = new MapGraphBuilder(client)
+  private val logger      = Slf4jLogger.getLoggerFromName[IO]("ix.map.service")
+  private val builder     = new MapGraphBuilder(client)
+  private val fastBuilder = new MapGraphBuilderFast(client)
+  private val preflight   = new MapPreflight
+
+  // Persistence guardrail: max total patch ops before we refuse to commit
+  private val MaxSafePatchOps = 10000
 
   // Label kinds by level
   private def labelKind(level: Int, maxLevel: Int): String =
@@ -49,15 +56,54 @@ class MapService(
 
   def buildMap(): IO[ArchitectureMap] =
     for {
-      rev           <- queryApi.getLatestRev
-      rawGraph      <- builder.build()
-      _             <- IO.pure(())  // no-op; structured for easy step annotation
+      rev   <- queryApi.getLatestRev
+      files <- builder.discoverFiles()
+      pf    <- preflight.evaluate(files)
+      result <- pf.mode match {
+        case MapExecutionMode.FullLocal => buildFullLocal(files, pf, rev)
+        case MapExecutionMode.FastLocal => buildFastLocal(files, pf, rev)
+      }
+    } yield result
+
+  private def buildFullLocal(
+    files: Vector[FileVertex],
+    pf:    MapPreflightResult,
+    rev:   Rev
+  ): IO[ArchitectureMap] =
+    for {
+      rawGraph      <- builder.buildGraph(files)
       crosscutScores = detectCrosscut(rawGraph)
       graph          = applyPenalty(rawGraph, crosscutScores)
       levels         = LouvainClustering.cluster(graph, maxLevels = 3, minCommunitySize = 3)
       regions        = buildRegions(graph, levels, crosscutScores, rev)
-      _             <- persistMap(regions, rev)
-    } yield ArchitectureMap(regions, rawGraph.vertices.size, rev.value)
+      pe            <- guardAndPersist(regions, rev)
+      _             <- logOutcome(MapOutcome.FullLocalCompleted, pf, pe)
+    } yield ArchitectureMap(
+      regions, rawGraph.vertices.size, rev.value,
+      preflight = Some(pf),
+      outcome = MapOutcome.FullLocalCompleted,
+      persistenceEstimate = Some(pe)
+    )
+
+  private def buildFastLocal(
+    files: Vector[FileVertex],
+    pf:    MapPreflightResult,
+    rev:   Rev
+  ): IO[ArchitectureMap] =
+    for {
+      rawGraph      <- fastBuilder.buildGraph(files)
+      crosscutScores = detectCrosscut(rawGraph)
+      graph          = applyPenalty(rawGraph, crosscutScores)
+      levels         = LouvainClustering.cluster(graph, maxLevels = 3, minCommunitySize = 3)
+      regions        = buildRegions(graph, levels, crosscutScores, rev)
+      pe            <- guardAndPersist(regions, rev)
+      _             <- logOutcome(MapOutcome.FastLocalCompleted, pf, pe)
+    } yield ArchitectureMap(
+      regions, rawGraph.vertices.size, rev.value,
+      preflight = Some(pf),
+      outcome = MapOutcome.FastLocalCompleted,
+      persistenceEstimate = Some(pe)
+    )
 
   // ── Cross-cutting detection ─────────────────────────────────────────
 
@@ -359,16 +405,50 @@ class MapService(
     ((0.4 * brScore + 0.3 * cohScore + 0.3 * sizeBonus) - crossPenalty).max(0.0).min(1.0)
   }
 
-  // ── Persistence ─────────────────────────────────────────────────────
+  // ── Persistence guardrail + logging ─────────────────────────────────
 
-  private def persistMap(regions: Vector[Region], rev: Rev): IO[Unit] = {
-    if (regions.isEmpty) return IO.unit
+  private def guardAndPersist(regions: Vector[Region], rev: Rev): IO[PersistenceEstimate] = {
+    if (regions.isEmpty) return IO.pure(PersistenceEstimate(0, 0, 0, 0, 0))
 
     for {
       oldRegions <- queryApi.findNodesByKind(NodeKind.Region, limit = 5000)
+      pe          = estimatePersistence(regions, oldRegions.size)
+      _          <- logger.debug(
+        s"Persistence estimate: ${pe.totalOps} ops " +
+        s"(${pe.regionNodes} regions, ${pe.fileEdges} file edges, " +
+        s"${pe.regionEdges} region edges, ${pe.deleteOps} deletes)"
+      )
+      _          <- if (pe.totalOps > MaxSafePatchOps)
+                      IO.raiseError(new MapCapacityException(
+                        outcome     = MapOutcome.LocalMapTooLarge,
+                        userMessage = "Local map output is too large to persist safely.",
+                        next        = "For full system mapping at this scale, use Ix Cloud."
+                      ))
+                    else IO.unit
       _          <- submitMapPatch(oldRegions, regions, rev)
-    } yield ()
+    } yield pe
   }
+
+  private def estimatePersistence(regions: Vector[Region], oldRegionCount: Int): PersistenceEstimate = {
+    val regionNodes = regions.size
+    val fileEdges   = regions.filter(_.level == 1).map(_.memberFiles.size).sum
+    val regionEdges = regions.count(_.parentId.isDefined)
+    val deleteOps   = oldRegionCount
+    val totalOps    = deleteOps + regionNodes + fileEdges + regionEdges
+    PersistenceEstimate(regionNodes, fileEdges, regionEdges, deleteOps, totalOps)
+  }
+
+  private def logOutcome(
+    outcome: MapOutcome,
+    pf:      MapPreflightResult,
+    pe:      PersistenceEstimate
+  ): IO[Unit] =
+    logger.info(
+      s"Map completed: outcome=${outcome.label} " +
+      s"mode=${pf.mode.label} risk=${pf.risk.label} " +
+      s"files=${pf.cost.fileCount} regions=${pe.regionNodes} " +
+      s"patchOps=${pe.totalOps} preflightMs=${pf.durationMs}"
+    )
 
   private def submitMapPatch(oldRegions: Vector[GraphNode], regions: Vector[Region], rev: Rev): IO[Unit] = {
     val deleteOps: Vector[PatchOp] = oldRegions.map(n => PatchOp.DeleteNode(n.id))

@@ -7,7 +7,7 @@ import org.http4s.HttpRoutes
 import org.http4s.circe.CirceEntityCodec._
 import org.http4s.dsl.io._
 
-import ix.memory.map.{ArchitectureMap, MapService, Region}
+import ix.memory.map.{ArchitectureMap, MapPreflightResult, MapService, PersistenceEstimate, Region}
 import ix.memory.model.NodeId
 
 class MapRoutes(mapService: MapService) {
@@ -25,7 +25,7 @@ class MapRoutes(mapService: MapService) {
   private def encodeMap(m: ArchitectureMap): Json = {
     val regionsByLevel = m.regions.groupBy(_.level).toVector.sortBy(_._1)
 
-    Json.obj(
+    val base = Json.obj(
       "file_count"   -> m.fileCount.asJson,
       "region_count" -> m.regions.size.asJson,
       "levels"       -> regionsByLevel.size.asJson,
@@ -33,7 +33,50 @@ class MapRoutes(mapService: MapService) {
       "regions"      -> m.regions.sortBy(r => (r.level, r.label)).map(encodeRegion).asJson,
       "hierarchy"    -> buildHierarchyTree(m).asJson
     )
+
+    val withOutcome = base.deepMerge(Json.obj("outcome" -> m.outcome.label.asJson))
+
+    val withPreflight = m.preflight match {
+      case Some(pf) => withOutcome.deepMerge(Json.obj("preflight" -> encodePreflight(pf)))
+      case None     => withOutcome
+    }
+
+    m.persistenceEstimate match {
+      case Some(pe) => withPreflight.deepMerge(Json.obj("persistence" -> encodePersistence(pe)))
+      case None     => withPreflight
+    }
   }
+
+  private def encodePreflight(pf: MapPreflightResult): Json =
+    Json.obj(
+      "cost" -> Json.obj(
+        "file_count"           -> pf.cost.fileCount.asJson,
+        "directory_count"      -> pf.cost.directoryCount.asJson,
+        "directory_quadratic"  -> pf.cost.directoryQuadratic.asJson,
+        "symbol_estimate"      -> pf.cost.symbolEstimate.asJson,
+        "edge_estimate"        -> pf.cost.edgeEstimate.asJson
+      ),
+      "capacity" -> Json.obj(
+        "cpu_cores"        -> pf.capacity.cpuCores.asJson,
+        "heap_max_bytes"   -> pf.capacity.heapMaxBytes.asJson,
+        "heap_free_bytes"  -> pf.capacity.heapFreeBytes.asJson,
+        "container_memory" -> pf.capacity.containerMemory.asJson,
+        "disk_free_bytes"  -> pf.capacity.diskFreeBytes.asJson
+      ),
+      "risk"        -> pf.risk.label.asJson,
+      "mode"        -> pf.mode.label.asJson,
+      "warnings"    -> pf.warnings.asJson,
+      "duration_ms" -> pf.durationMs.asJson
+    )
+
+  private def encodePersistence(pe: PersistenceEstimate): Json =
+    Json.obj(
+      "region_nodes"  -> pe.regionNodes.asJson,
+      "file_edges"    -> pe.fileEdges.asJson,
+      "region_edges"  -> pe.regionEdges.asJson,
+      "delete_ops"    -> pe.deleteOps.asJson,
+      "total_ops"     -> pe.totalOps.asJson
+    )
 
   private def encodeRegion(r: Region): Json =
     Json.obj(

@@ -7,12 +7,17 @@ import org.http4s.{Response, Status}
 import org.http4s.circe._
 import org.http4s.dsl.io._
 
+import ix.memory.map.MapCapacityException
+
 /**
  * Maps domain exceptions to appropriate HTTP responses with JSON error bodies.
  */
 object ErrorHandler {
 
   def handle(err: Throwable): IO[Response[IO]] = err match {
+    case e: MapCapacityException =>
+      UnprocessableEntity(mapCapacityJson(e))
+
     case e: IllegalArgumentException =>
       BadRequest(errorJson("bad_request", e.getMessage))
 
@@ -33,5 +38,12 @@ object ErrorHandler {
     Json.obj(
       "error" -> code.asJson,
       "message" -> message.asJson
+    )
+
+  private def mapCapacityJson(e: MapCapacityException): Json =
+    Json.obj(
+      "error"   -> e.outcome.label.asJson,
+      "message" -> e.userMessage.asJson,
+      "next"    -> e.next.asJson
     )
 }
