@@ -22,5 +22,11 @@ class SourceHashRoutes(queryApi: GraphQueryApi) {
         hashes <- queryApi.getSourceHashes(body.uris)
         resp   <- Ok(Json.fromFields(hashes.map { case (k, v) => k -> v.asJson }))
       } yield resp).handleErrorWith(ErrorHandler.handle(_))
+
+    case GET -> Root / "v1" / "source-hashes" / "exists" =>
+      (for {
+        exists <- queryApi.hasIngestBaseline()
+        resp   <- Ok(Json.obj("exists" -> exists.asJson))
+      } yield resp).handleErrorWith(ErrorHandler.handle(_))
   }
 }

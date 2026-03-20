@@ -143,8 +143,22 @@ export async function ingestFiles(
     const discovered = performance.now();
     timings.discoverMs = Math.round(discovered - start);
 
-    // Phase: hash lookup
-    const knownHashes = opts.force ? new Map<string, string>() : await loadExistingHashes(client, filePaths, debug);
+    // Phase: hash lookup (skipped on first ingest when no baseline exists)
+    let knownHashes: Map<string, string>;
+    let baselineSkipped = false;
+    if (opts.force) {
+      knownHashes = new Map();
+    } else {
+      const hasBaseline = await checkIngestBaseline(client, debug);
+      if (hasBaseline) {
+        if (debug) process.stderr.write('\n  Existing ingest baseline found — performing source hash comparison\n');
+        knownHashes = await loadExistingHashes(client, filePaths, debug);
+      } else {
+        if (debug) process.stderr.write('\n  No existing ingest baseline found — skipping source hash lookup\n');
+        knownHashes = new Map();
+        baselineSkipped = true;
+      }
+    }
     const hashed = performance.now();
     timings.hashMs = Math.round(hashed - discovered);
 
@@ -301,6 +315,15 @@ export async function ingestFiles(
 // ---------------------------------------------------------------------------
 // Load existing hashes from the server for change detection
 // ---------------------------------------------------------------------------
+
+async function checkIngestBaseline(client: IxClient, debug = false): Promise<boolean> {
+  try {
+    return await client.hasIngestBaseline();
+  } catch (err) {
+    if (debug) process.stderr.write(`\n  [baseline check failed, falling back to full hash lookup] ${err}\n`);
+    return true; // Safe fallback: assume baseline exists, do the full lookup
+  }
+}
 
 async function loadExistingHashes(client: IxClient, filePaths: string[], debug = false): Promise<Map<string, string>> {
   try {

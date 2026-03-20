@@ -174,6 +174,11 @@ export class IxClient {
     return this.post("/v1/patch", patch);
   }
 
+  async hasIngestBaseline(): Promise<boolean> {
+    const result = await this.get<{ exists: boolean }>('/v1/source-hashes/exists');
+    return result.exists;
+  }
+
   async getSourceHashes(filePaths: string[]): Promise<Map<string, string>> {
     const result = await this.post<Record<string, string>>('/v1/source-hashes', { uris: filePaths });
     return new Map(Object.entries(result));

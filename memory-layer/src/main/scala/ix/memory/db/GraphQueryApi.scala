@@ -24,6 +24,7 @@ trait GraphQueryApi {
   def getDiffSummary(fromRev: Rev, toRev: Rev): IO[Map[String, Int]]
   def resolvePrefix(prefix: String): IO[Vector[NodeId]]
   def getSourceHashes(sourceUris: Seq[String]): IO[Map[String, String]]
+  def hasIngestBaseline(): IO[Boolean]
   def expandByName(
     name: String,
     direction: Direction,
