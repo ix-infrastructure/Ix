@@ -49,7 +49,7 @@ Underlying structural commands — useful for debugging or fine-grained inspecti
 | Read source code | `ix read` | `ix read src/auth.py:10-50` or `ix read verify_token` |
 | Full entity details | `ix entity` | `ix entity <id> --format json` |
 | Fast text search | `ix text` | `ix text "verify_token" --language python --limit 20` |
-| Find symbol (graph+text) | `ix locate` | `ix locate AuthProvider --limit 10` |
+| Find symbol (graph+text) | `ix locate` | `ix locate AuthProvider --kind class` |
 
 #### Navigating Relationships
 | Goal | Command | Example |
@@ -78,7 +78,7 @@ Underlying structural commands — useful for debugging or fine-grained inspecti
 ### Ingestion & Health
 | Goal | Command | Example |
 |---|---|---|
-| Ingest files | `ix ingest` | `ix ingest ./src --recursive` |
+| Ingest files | `ix ingest` | `ix ingest ./src` |
 | Ingest GitHub data | `ix ingest` | `ix ingest --github owner/repo --limit 50` |
 | Backend health | `ix status` | `ix status` |
 | Graph statistics | `ix stats` | `ix stats --format json` |

@@ -39,7 +39,7 @@ ix docker start
 # 2. Connect a project
 cd ~/my-project
 ix init
-ix ingest ./src --recursive
+ix ingest ./src
 
 # 3. Use it
 ix overview MyService
@@ -70,7 +70,6 @@ ix overview UserService                          # one-shot summary
 ix impact UserService                            # what depends on it
 ix rank --by dependents --kind class --top 10    # most important classes
 ix inventory --kind function --path "src/"       # list functions
-ix briefing                                      # session resume
 ```
 
 ### Code Navigation
@@ -88,7 +87,9 @@ ix read src/main/scala/ix/memory/Main.scala:1-80
 ix text "commitPatch" --language ts --limit 20
 ```
 
-### Planning and Tracking
+### Planning and Tracking (Pro)
+
+These commands require [Ix Pro](https://github.com/ix-infrastructure/Ix).
 
 ```bash
 ix goal create "Support 100k file repos"
@@ -97,6 +98,7 @@ ix plan task "Batch writes" --plan <id>
 ix task update <id> --status done
 ix decide "Use CONTAINS edge" --rationale "Normalize hierarchy"
 ix bug create "Parser fails on decorators" --severity high
+ix briefing                                      # session resume
 ```
 
 ### GitHub Ingestion
@@ -121,7 +123,9 @@ What the hooks do:
 
 ## Supported File Types
 
-`.py`, `.ts`, `.tsx`, `.scala`, `.sc`, `.json`, `.yaml`, `.yml`, `.toml`, `.md`
+**Code** — `.py`, `.ts`, `.tsx`, `.js`, `.jsx`, `.scala`, `.sc`, `.go`, `.java`, `.c`, `.cpp`, `.cs`, `.rb`, `.rs`, `.php`, `.kt`, `.swift`
+
+**Config & Docs** — `.json`, `.yaml`, `.yml`, `.toml`, `.md`
 
 ## Uninstall
 
