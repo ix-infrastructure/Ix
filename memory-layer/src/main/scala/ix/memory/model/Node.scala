@@ -26,6 +26,8 @@ object NodeKind {
   case object Plan        extends NodeKind
   case object Task        extends NodeKind
   case object Bug         extends NodeKind
+  case object Goal        extends NodeKind
+  case object Region      extends NodeKind
 
   private val nameMap: Map[String, NodeKind] = Map(
     "module"       -> Module,
@@ -46,7 +48,9 @@ object NodeKind {
     "method"       -> Method,
     "plan"         -> Plan,
     "task"         -> Task,
-    "bug"          -> Bug
+    "bug"          -> Bug,
+    "goal"         -> Goal,
+    "region"       -> Region
   )
 
   implicit val encoder: Encoder[NodeKind] = Encoder[String].contramap {
@@ -69,6 +73,8 @@ object NodeKind {
     case Plan        => "plan"
     case Task        => "task"
     case Bug         => "bug"
+    case Goal        => "goal"
+    case Region      => "region"
   }
 
   implicit val decoder: Decoder[NodeKind] = Decoder[String].emap { s =>

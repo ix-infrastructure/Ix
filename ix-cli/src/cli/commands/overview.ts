@@ -1,51 +1,47 @@
+import * as nodePath from "node:path";
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveFileOrEntity, printResolved } from "../resolve.js";
+import { getSystemPath, hasMapData } from "../hierarchy.js";
+import { humanizeLabel } from "../impact/risk-semantics.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "trait", "object", "interface"]);
-const CALLABLE_KINDS = new Set(["method", "function"]);
+const STRUCTURAL_CONTAINER_KINDS = new Set(["class", "object", "trait", "interface"]);
+const REGION_KINDS = new Set(["system", "subsystem", "module", "region"]);
+const FILE_KINDS = new Set(["file"]);
 
-interface KeyMember {
-  name: string;
-  kind: string;
-  callerCount: number;
-}
+const KEY_ITEMS_LIMIT = 5;
 
 interface OverviewResult {
   resolvedTarget: { id: string; kind: string; name: string };
   resolutionMode: string;
-  resultSource: string;
   path: string | null;
-  summary: {
-    members?: number;
-    imports?: number;
-    inboundDependents?: number;
-    callers?: number;
-    callees?: number;
-  };
-  keyMembers: KeyMember[] | null;
-  container: { kind: string; name: string } | null;
-  signature: string | null;
+  systemPath: Array<{ name: string; kind: string }> | null;
+  hasMapData: boolean;
+  // Container targets
+  childrenByKind: Record<string, number> | null;
+  keyItems: Array<{ name: string; kind: string }> | null;
+  // Leaf targets
+  containedIn: { kind: string; name: string } | null;
+  siblingsByKind: Record<string, number> | null;
+  keySiblings: Array<{ name: string; kind: string }> | null;
   diagnostics: string[];
-  decisions: { id: string; title: string; rationale?: string }[];
-  tasks: { id: string; title: string; status: string }[];
-  bugs: { id: string; title: string; status: string; severity: string }[];
 }
 
 export function registerOverviewCommand(program: Command): void {
   program
     .command("overview <target>")
-    .description("Structural summary: members, relationships, decisions, and bugs for an entity")
+    .description("Structural summary — what a target contains or what surrounds it")
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Prefer symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")
     .option("--format <fmt>", "Output format (text|json)", "text")
     .addHelpText(
       "after",
-      `\nUse overview for structural summaries. Use 'ix read' for raw source code.
-Use 'ix locate' to resolve a symbol and trace its relationships.
+      `\nUse overview for structural summaries. Use 'ix locate' for position.
+Use 'ix explain' for role. Use 'ix impact' for risk.
 
 Examples:
   ix overview IngestionService
@@ -64,14 +60,76 @@ Examples:
       if (opts.format !== "json") printResolved(target);
 
       const isContainer = CONTAINER_KINDS.has(target.kind);
+      const isRegion = REGION_KINDS.has(target.kind);
 
-      if (isContainer) {
+      if (isContainer || isRegion) {
         await overviewContainer(client, target, opts.format);
       } else {
-        await overviewCallable(client, target, opts.format);
+        await overviewLeaf(client, target, opts.format);
       }
     });
 }
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function toRepoRelative(filePath: string): string {
+  if (!nodePath.isAbsolute(filePath)) return filePath;
+  try {
+    const cwd = process.cwd();
+    const rel = nodePath.relative(cwd, filePath);
+    if (!rel.startsWith("..") && !nodePath.isAbsolute(rel)) return rel;
+  } catch {}
+  return filePath;
+}
+
+function humanizeBreadcrumb(nodes: Array<{ name: string; kind: string }>): string {
+  return nodes.map((n) => {
+    if (REGION_KINDS.has(n.kind)) return humanizeLabel(n.name).replace(/ layer$/, "");
+    return n.name;
+  }).join(" → ");
+}
+
+/** Label for the "Key ..." section based on target kind. */
+function keyItemsLabel(kind: string): string {
+  if (FILE_KINDS.has(kind)) return "Key definitions";
+  if (REGION_KINDS.has(kind)) return "Key files";
+  return "Key members";
+}
+
+/** Humanize a kind for the Contains/Nearby section (e.g. "method" → "Methods"). */
+function kindLabel(kind: string): string {
+  const labels: Record<string, string> = {
+    method: "Methods",
+    function: "Functions",
+    field: "Fields",
+    class: "Classes",
+    interface: "Interfaces",
+    trait: "Traits",
+    object: "Objects",
+    file: "Files",
+    enum: "Enums",
+    type: "Types",
+    type_alias: "Type aliases",
+    module: "Modules",
+    region: "Regions",
+    subsystem: "Subsystems",
+    constructor: "Constructors",
+    def: "Methods",
+    fun: "Functions",
+    val: "Fields",
+    var: "Fields",
+  };
+  const label = labels[kind.toLowerCase()];
+  if (label) return label;
+  return kind.charAt(0).toUpperCase() + kind.slice(1) + "s";
+}
+
+/** Sibling label: "Sibling methods", "Sibling functions", etc. */
+function siblingKindLabel(kind: string): string {
+  return `Sibling ${kindLabel(kind).toLowerCase()}`;
+}
+
+// ── Container / Region overview ─────────────────────────────────────────────
 
 async function overviewContainer(
   client: IxClient,
@@ -79,264 +137,245 @@ async function overviewContainer(
   format: string
 ): Promise<void> {
   const diagnostics: string[] = [];
+  const isRegion = REGION_KINDS.has(target.kind);
 
-  // Fetch entity details, members, imports, and inbound dependents in parallel
-  const [details, membersResult, importsResult, inboundResult, decisionsResult, tasksResult, bugsResult] = await Promise.all([
+  const childPredicate = isRegion ? "IN_REGION" : "CONTAINS";
+
+  const [details, childrenResult, systemPath] = await Promise.all([
     client.entity(target.id),
-    client.expand(target.id, { direction: "out", predicates: ["CONTAINS"] }),
-    client.expand(target.id, { direction: "out", predicates: ["IMPORTS"] }),
-    client.expand(target.id, { direction: "in", predicates: ["CALLS", "IMPORTS", "REFERENCES"] }),
-    client.expand(target.id, { direction: "in", predicates: ["DECISION_AFFECTS"] }),
-    client.expand(target.id, { direction: "in", predicates: ["TASK_AFFECTS"] }),
-    client.expand(target.id, { direction: "in", predicates: ["BUG_AFFECTS"] }),
+    client.expand(target.id, { direction: "out", predicates: [childPredicate] }),
+    getSystemPath(client, target.id),
   ]);
 
   const node = details.node as any;
-  const path = node.provenance?.source_uri ?? node.provenance?.sourceUri ?? null;
+  const rawPath = node.provenance?.source_uri ?? node.provenance?.sourceUri ?? null;
+  const displayPath = rawPath ? toRepoRelative(rawPath) : null;
 
-  const members = membersResult.nodes;
-  const imports = importsResult.nodes;
-  const inbound = inboundResult.nodes;
+  const children = childrenResult.nodes;
 
-  const decisions = decisionsResult.nodes.map((n: any) => ({
-    id: n.id,
-    title: n.name || n.attrs?.name || "(unnamed)",
-    rationale: n.attrs?.rationale ?? undefined,
-  }));
+  const childrenByKind: Record<string, number> = {};
+  const childList: Array<{ name: string; kind: string }> = [];
+  for (const m of children) {
+    const member = m as any;
+    const kind = member.kind || "unknown";
+    const name = member.name || member.attrs?.name || "(unnamed)";
+    childrenByKind[kind] = (childrenByKind[kind] || 0) + 1;
+    childList.push({ name, kind });
+  }
 
-  const tasks = tasksResult.nodes.map((n: any) => ({
-    id: n.id,
-    title: n.name || n.attrs?.name || "(unnamed)",
-    status: String(n.attrs?.status ?? "pending"),
-  }));
+  const keyItems = childList.slice(0, KEY_ITEMS_LIMIT);
 
-  const bugs = bugsResult.nodes.map((n: any) => ({
-    id: n.id,
-    title: n.name || n.attrs?.name || "(unnamed)",
-    status: String(n.attrs?.status ?? "open"),
-    severity: String(n.attrs?.severity ?? "medium"),
-  }));
+  const hasMap = hasMapData(systemPath);
+  if (!hasMap) {
+    diagnostics.push("No system map. Run `ix map` to see hierarchy.");
+  }
 
-  // Get top 5 members by name and their inbound CALLS count
-  const sortedMembers = [...members]
-    .filter((m: any) => m.name || m.attrs?.name)
-    .sort((a: any, b: any) => {
-      const nameA = a.name || a.attrs?.name || "";
-      const nameB = b.name || b.attrs?.name || "";
-      return nameA.localeCompare(nameB);
-    })
-    .slice(0, 5);
-
-  let keyMembers: KeyMember[] = [];
-  if (sortedMembers.length > 0) {
-    const callerCounts = await Promise.all(
-      sortedMembers.map(async (m: any) => {
-        try {
-          const callersResult = await client.expand(m.id, {
-            direction: "in",
-            predicates: ["CALLS", "REFERENCES"],
-          });
-          return callersResult.nodes.length;
-        } catch {
-          return 0;
-        }
-      })
-    );
-
-    keyMembers = sortedMembers.map((m: any, i: number) => ({
-      name: m.name || m.attrs?.name || "(unnamed)",
-      kind: m.kind || "unknown",
-      callerCount: callerCounts[i],
-    }));
-
-    // Sort by callerCount descending for display
-    keyMembers.sort((a, b) => b.callerCount - a.callerCount);
+  // Append container symbol to system path for non-file, non-region containers
+  let systemPathMapped = systemPath.map((n) => ({ name: n.name, kind: n.kind }));
+  if (!FILE_KINDS.has(target.kind) && !isRegion) {
+    const lastInPath = systemPathMapped[systemPathMapped.length - 1];
+    if (!lastInPath || lastInPath.name !== target.name) {
+      systemPathMapped = [...systemPathMapped, { name: target.name, kind: target.kind }];
+    }
   }
 
   const result: OverviewResult = {
     resolvedTarget: { id: target.id, kind: target.kind, name: target.name },
     resolutionMode: target.resolutionMode,
-    resultSource: "graph",
-    path,
-    summary: {
-      members: members.length,
-      imports: imports.length,
-      inboundDependents: inbound.length,
-    },
-    keyMembers: keyMembers.length > 0 ? keyMembers : null,
-    container: null,
-    signature: null,
+    path: displayPath,
+    systemPath: systemPathMapped,
+    hasMapData: hasMap,
+    childrenByKind: Object.keys(childrenByKind).length > 0 ? childrenByKind : null,
+    keyItems: keyItems.length > 0 ? keyItems : null,
+    containedIn: null,
+    siblingsByKind: null,
+    keySiblings: null,
     diagnostics,
-    decisions,
-    tasks,
-    bugs,
   };
 
   if (format === "json") {
     console.log(JSON.stringify(result, null, 2));
-  } else {
-    console.log(`Overview: ${chalk.bold(target.name)} (${chalk.cyan(target.kind)})`);
-    if (path) console.log(`  path:     ${chalk.dim(path)}`);
-    console.log(`  members:  ${members.length}`);
-    console.log(`  imports:  ${imports.length}`);
-    console.log(`  inbound:  ${inbound.length} dependents`);
+    return;
+  }
 
-    if (keyMembers.length > 0) {
-      console.log(`\nKey members:`);
-      for (const km of keyMembers) {
-        const kindStr = chalk.cyan(km.kind.padEnd(10));
-        const nameStr = km.name.padEnd(20);
-        console.log(`  ${kindStr} ${nameStr} ${km.callerCount} callers`);
-      }
-    }
+  renderOverviewHeader(target, displayPath, null, systemPathMapped, hasMap);
 
-    if (decisions.length > 0) {
-      console.log(`\nDecisions:`);
-      for (const d of decisions) {
-        console.log(`  ${chalk.yellow(d.title)}`);
-      }
-    }
-
-    if (tasks.length > 0) {
-      console.log(`\nTasks:`);
-      for (const t of tasks) {
-        const icon = t.status === "done" ? "✓" : "○";
-        console.log(`  ${icon} [${t.status}] ${t.title}`);
-      }
-    }
-
-    if (bugs.length > 0) {
-      console.log(`\nBugs:`);
-      for (const b of bugs) {
-        const icon = b.status === "closed" || b.status === "resolved" ? "✓" : "○";
-        console.log(`  ${icon} [${b.status}] ${chalk.red(b.severity)} ${b.title}`);
-      }
+  if (Object.keys(childrenByKind).length > 0) {
+    console.log(chalk.bold("\nContains"));
+    const sorted = Object.entries(childrenByKind).sort((a, b) => b[1] - a[1]);
+    for (const [kind, count] of sorted) {
+      console.log(`  ${chalk.dim((kindLabel(kind) + ":").padEnd(22))}${count}`);
     }
   }
+
+  if (keyItems.length > 0) {
+    console.log(chalk.bold(`\n${keyItemsLabel(target.kind)}`));
+    for (const item of keyItems) {
+      console.log(`  ${item.name}`);
+    }
+  }
+
+  renderDiagnostics(diagnostics);
 }
 
-async function overviewCallable(
+// ── Leaf (function/method/field) overview ────────────────────────────────────
+
+async function overviewLeaf(
   client: IxClient,
   target: { id: string; kind: string; name: string; resolutionMode: string },
   format: string
 ): Promise<void> {
   const diagnostics: string[] = [];
 
-  // Fetch entity details, callers, and callees in parallel
-  const [details, callersResult, calleesResult, decisionsResult, tasksResult, bugsResult] = await Promise.all([
+  // Fetch entity details, system path, and parent container in parallel
+  const [details, systemPath, parentResult] = await Promise.all([
     client.entity(target.id),
-    client.expand(target.id, { direction: "in", predicates: ["CALLS", "REFERENCES"] }),
-    client.expand(target.id, { direction: "out", predicates: ["CALLS", "REFERENCES"] }),
-    client.expand(target.id, { direction: "in", predicates: ["DECISION_AFFECTS"] }),
-    client.expand(target.id, { direction: "in", predicates: ["TASK_AFFECTS"] }),
-    client.expand(target.id, { direction: "in", predicates: ["BUG_AFFECTS"] }),
+    getSystemPath(client, target.id),
+    client.expand(target.id, { direction: "in", predicates: ["CONTAINS"] }),
   ]);
 
   const node = details.node as any;
-  const path = node.provenance?.source_uri ?? node.provenance?.sourceUri ?? null;
-  const signature = node.attrs?.signature || null;
+  const rawPath = node.provenance?.source_uri ?? node.provenance?.sourceUri ?? null;
+  const displayPath = rawPath ? toRepoRelative(rawPath) : null;
 
-  // Find container via CONTAINS edge (parent class/file)
-  const edges = (details.edges ?? []) as any[];
-  const containsEdge = edges.find(
-    (e: any) => e.predicate === "CONTAINS" && e.dst === target.id
-  );
+  const hasMap = hasMapData(systemPath);
+  if (!hasMap) {
+    diagnostics.push("No system map. Run `ix map` to see hierarchy.");
+  }
 
-  let container: { kind: string; name: string } | null = null;
-  if (containsEdge) {
+  // Append target to system path if not already there
+  let systemPathMapped = systemPath.map((n) => ({ name: n.name, kind: n.kind }));
+  const lastInPath = systemPathMapped[systemPathMapped.length - 1];
+  if (!lastInPath || lastInPath.name !== target.name) {
+    systemPathMapped = [...systemPathMapped, { name: target.name, kind: target.kind }];
+  }
+
+  // Find nearest meaningful container
+  // Prefer class/object/trait/interface, fall back to file
+  let containedIn: { kind: string; name: string } | null = null;
+  let containerId: string | null = null;
+
+  const parents = parentResult.nodes as any[];
+  const structuralParent = parents.find((p) => STRUCTURAL_CONTAINER_KINDS.has(p.kind));
+  const fileParent = parents.find((p) => FILE_KINDS.has(p.kind));
+  const bestParent = structuralParent ?? fileParent ?? parents[0];
+
+  if (bestParent) {
+    containedIn = {
+      kind: bestParent.kind || "unknown",
+      name: bestParent.name || bestParent.attrs?.name || "(unknown)",
+    };
+    containerId = bestParent.id;
+  }
+
+  // Fetch siblings from the container
+  let siblingsByKind: Record<string, number> | null = null;
+  let keySiblings: Array<{ name: string; kind: string }> | null = null;
+
+  if (containerId) {
     try {
-      const containerDetails = await client.entity(containsEdge.src);
-      const cNode = containerDetails.node as any;
-      container = {
-        kind: cNode.kind || "unknown",
-        name: cNode.name || cNode.attrs?.name || "(unknown)",
-      };
+      const siblingsResult = await client.expand(containerId, {
+        direction: "out",
+        predicates: ["CONTAINS"],
+      });
+
+      const siblings = (siblingsResult.nodes as any[]).filter(
+        (n) => n.id !== target.id
+      );
+
+      if (siblings.length > 0) {
+        // Group siblings by kind
+        const byKind: Record<string, number> = {};
+        const siblingList: Array<{ name: string; kind: string }> = [];
+        for (const s of siblings) {
+          const kind = s.kind || "unknown";
+          const name = s.name || s.attrs?.name || "(unnamed)";
+          byKind[kind] = (byKind[kind] || 0) + 1;
+          siblingList.push({ name, kind });
+        }
+        siblingsByKind = byKind;
+
+        // Key siblings: prefer same kind, then others, exclude target
+        const sameKind = siblingList.filter((s) => s.kind === target.kind);
+        const otherKind = siblingList.filter((s) => s.kind !== target.kind);
+        const ordered = [...sameKind, ...otherKind];
+        if (ordered.length > 0) {
+          keySiblings = ordered.slice(0, KEY_ITEMS_LIMIT);
+        }
+      }
     } catch {
-      diagnostics.push("Could not resolve container entity");
+      diagnostics.push("Could not fetch sibling structure.");
     }
   }
-
-  const callers = callersResult.nodes;
-  const callees = calleesResult.nodes;
-
-  if (callers.length === 0 && callees.length === 0) {
-    diagnostics.push("No CALLS/REFERENCES edges found. If files were ingested before extraction was added, run: ix ingest --force --recursive .");
-  }
-
-  const decisions = decisionsResult.nodes.map((n: any) => ({
-    id: n.id,
-    title: n.name || n.attrs?.name || "(unnamed)",
-    rationale: n.attrs?.rationale ?? undefined,
-  }));
-
-  const tasks = tasksResult.nodes.map((n: any) => ({
-    id: n.id,
-    title: n.name || n.attrs?.name || "(unnamed)",
-    status: String(n.attrs?.status ?? "pending"),
-  }));
-
-  const bugs = bugsResult.nodes.map((n: any) => ({
-    id: n.id,
-    title: n.name || n.attrs?.name || "(unnamed)",
-    status: String(n.attrs?.status ?? "open"),
-    severity: String(n.attrs?.severity ?? "medium"),
-  }));
 
   const result: OverviewResult = {
     resolvedTarget: { id: target.id, kind: target.kind, name: target.name },
     resolutionMode: target.resolutionMode,
-    resultSource: "graph",
-    path,
-    summary: {
-      callers: callers.length,
-      callees: callees.length,
-    },
-    keyMembers: null,
-    container,
-    signature,
+    path: displayPath,
+    systemPath: systemPathMapped,
+    hasMapData: hasMap,
+    childrenByKind: null,
+    keyItems: null,
+    containedIn,
+    siblingsByKind,
+    keySiblings,
     diagnostics,
-    decisions,
-    tasks,
-    bugs,
   };
 
   if (format === "json") {
     console.log(JSON.stringify(result, null, 2));
-  } else {
-    console.log(`Overview: ${chalk.bold(target.name)} (${chalk.cyan(target.kind)})`);
-    if (path) console.log(`  path:       ${chalk.dim(path)}`);
-    if (container) console.log(`  container:  ${chalk.cyan(container.kind)} ${container.name}`);
-    if (signature) console.log(`  signature:  ${chalk.dim(signature)}`);
-    console.log(`  callers:    ${callers.length}`);
-    console.log(`  callees:    ${callees.length}`);
+    return;
+  }
 
-    if (decisions.length > 0) {
-      console.log(`\nDecisions:`);
-      for (const d of decisions) {
-        console.log(`  ${chalk.yellow(d.title)}`);
-      }
-    }
+  renderOverviewHeader(target, displayPath, containedIn, systemPathMapped, hasMap);
 
-    if (tasks.length > 0) {
-      console.log(`\nTasks:`);
-      for (const t of tasks) {
-        const icon = t.status === "done" ? "✓" : "○";
-        console.log(`  ${icon} [${t.status}] ${t.title}`);
-      }
+  // Nearby structure
+  if (siblingsByKind && Object.keys(siblingsByKind).length > 0) {
+    console.log(chalk.bold("\nNearby structure"));
+    const sorted = Object.entries(siblingsByKind).sort((a, b) => b[1] - a[1]);
+    for (const [kind, count] of sorted) {
+      console.log(`  ${chalk.dim((siblingKindLabel(kind) + ":").padEnd(24))}${count}`);
     }
+  }
 
-    if (bugs.length > 0) {
-      console.log(`\nBugs:`);
-      for (const b of bugs) {
-        const icon = b.status === "closed" || b.status === "resolved" ? "✓" : "○";
-        console.log(`  ${icon} [${b.status}] ${chalk.red(b.severity)} ${b.title}`);
-      }
+  // Key siblings
+  if (keySiblings && keySiblings.length > 0) {
+    console.log(chalk.bold("\nKey siblings"));
+    for (const s of keySiblings) {
+      console.log(`  ${s.name}`);
     }
+  }
 
-    if (diagnostics.length > 0) {
-      for (const d of diagnostics) {
-        console.log(chalk.dim(`\n  ${d}`));
-      }
-    }
+  renderDiagnostics(diagnostics);
+}
+
+// ── Shared rendering ────────────────────────────────────────────────────────
+
+function renderOverviewHeader(
+  target: { kind: string; name: string },
+  displayPath: string | null,
+  containedIn: { kind: string; name: string } | null,
+  systemPath: Array<{ name: string; kind: string }>,
+  hasMap: boolean,
+): void {
+  console.log(chalk.bold("\nOverview"));
+  console.log(`  ${chalk.dim("Kind:".padEnd(16))}${target.kind}`);
+  if (displayPath) {
+    console.log(`  ${chalk.dim("File:".padEnd(16))}${displayPath}`);
+  }
+  if (containedIn) {
+    const containerLabel = STRUCTURAL_CONTAINER_KINDS.has(containedIn.kind)
+      ? `${containedIn.kind} ${containedIn.name}`
+      : containedIn.name;
+    console.log(`  ${chalk.dim("Contained in:".padEnd(16))}${containerLabel}`);
+  }
+  if (systemPath.length > 1 && hasMap) {
+    console.log(`  ${chalk.dim("System path:".padEnd(16))}${humanizeBreadcrumb(systemPath)}`);
+  }
+}
+
+function renderDiagnostics(diagnostics: string[]): void {
+  for (const d of diagnostics) {
+    console.log(chalk.dim(`\n  ${d}`));
   }
 }

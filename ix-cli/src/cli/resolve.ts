@@ -2,6 +2,7 @@ import * as path from "node:path";
 import chalk from "chalk";
 import type { IxClient } from "../client/api.js";
 import { stderr } from "./stderr.js";
+import { applyRoleFilter } from "./role-filter.js";
 
 export type ResolutionMode = "exact" | "preferred-kind" | "scored" | "ambiguous" | "heuristic";
 
@@ -20,9 +21,9 @@ export interface AmbiguousResult {
 }
 
 export type ResolveResult =
-  | { resolved: true; entity: ResolvedEntity }
-  | { resolved: false; ambiguous: true; result: AmbiguousResult }
-  | { resolved: false; ambiguous: false };
+  | { resolved: true; entity: ResolvedEntity; hiddenTestCount?: number }
+  | { resolved: false; ambiguous: true; result: AmbiguousResult; hiddenTestCount?: number }
+  | { resolved: false; ambiguous: false; hiddenTestCount?: number };
 
 // ── Structural kind sets ──────────────────────────────────────────────────
 
@@ -100,7 +101,7 @@ export async function resolveEntity(
   client: IxClient,
   symbol: string,
   preferredKinds: string[],
-  opts?: { kind?: string; path?: string; pick?: number }
+  opts?: { kind?: string; path?: string; pick?: number; includeTests?: boolean; testsOnly?: boolean }
 ): Promise<ResolvedEntity | null> {
   const result = await resolveEntityFull(client, symbol, preferredKinds, opts);
   if (result.resolved) return result.entity;
@@ -121,7 +122,7 @@ export async function resolveEntityFull(
   client: IxClient,
   symbol: string,
   preferredKinds: string[],
-  opts?: { kind?: string; path?: string; pick?: number }
+  opts?: { kind?: string; path?: string; pick?: number; includeTests?: boolean; testsOnly?: boolean }
 ): Promise<ResolveResult> {
   const kindFilter = opts?.kind;
   const nodes = await client.search(symbol, { limit: 20, kind: kindFilter, nameOnly: true });
@@ -131,9 +132,12 @@ export async function resolveEntityFull(
     return { resolved: false, ambiguous: false };
   }
 
+  // Apply role filter before scoring
+  const { filtered: filteredNodes, hiddenTestCount } = applyRoleFilter(nodes, opts ?? {});
+
   // ── Phase 1: Exact-name candidates ──────────────────────────────────
   const symbolLower = symbol.toLowerCase();
-  const exactName = nodes.filter((n: any) => {
+  const exactName = filteredNodes.filter((n: any) => {
     const name = (n.name || n.attrs?.name || "").toLowerCase();
     return name === symbolLower;
   });
@@ -143,24 +147,22 @@ export async function resolveEntityFull(
     const winner = pickBest(exactName, symbol, preferredKinds, opts);
     if (winner) {
       const picked = applyPick(winner, opts);
-      if (picked) return picked;
-      if (!winner.resolved) return winner; // ambiguous but no --pick
-      return winner;
+      if (picked) return { ...picked, hiddenTestCount } as ResolveResult;
+      return { ...winner, hiddenTestCount } as ResolveResult;
     }
   }
 
   // ── Phase 2: Fall back to all candidates ────────────────────────────
-  const winner = pickBest(nodes, symbol, preferredKinds, opts);
+  const winner = pickBest(filteredNodes, symbol, preferredKinds, opts);
   if (winner) {
     const picked = applyPick(winner, opts);
-    if (picked) return picked;
-    if (!winner.resolved) return winner;
-    return winner;
+    if (picked) return { ...picked, hiddenTestCount } as ResolveResult;
+    return { ...winner, hiddenTestCount } as ResolveResult;
   }
 
   // Nothing resolved at all
   stderr(`No entity found matching "${symbol}".`);
-  return { resolved: false, ambiguous: false };
+  return { resolved: false, ambiguous: false, hiddenTestCount };
 }
 
 /**
@@ -335,7 +337,7 @@ function buildAmbiguous(nodes: any[], scores?: number[]): AmbiguousResult {
   };
 }
 
-function printAmbiguous(symbol: string, result: AmbiguousResult, opts?: { kind?: string; path?: string }): void {
+export function printAmbiguous(symbol: string, result: AmbiguousResult, opts?: { kind?: string; path?: string }): void {
   stderr(`Ambiguous symbol "${symbol}":`);
   for (let i = 0; i < result.candidates.length; i++) {
     const c = result.candidates[i];
@@ -397,7 +399,7 @@ export function looksFileLike(target: string): boolean {
 export async function resolveFileOrEntity(
   client: IxClient,
   target: string,
-  opts?: { kind?: string; path?: string; pick?: number }
+  opts?: { kind?: string; path?: string; pick?: number; includeTests?: boolean; testsOnly?: boolean }
 ): Promise<ResolvedEntity | null> {
   // 1. Raw UUID
   if (isRawId(target)) {

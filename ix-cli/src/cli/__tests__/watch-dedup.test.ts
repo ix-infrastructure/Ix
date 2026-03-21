@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { readFileContent } from "../commands/watch.js";
+import { readFileContent } from "../commands/watch-utils.js";
 
 const watchTsPath = path.resolve(__dirname, "../commands/watch.ts");
 const watchContent = fs.readFileSync(watchTsPath, "utf-8");

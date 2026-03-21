@@ -39,7 +39,15 @@ class DecideRoutes(writeApi: GraphWriteApi) {
               "rationale" -> Json.fromString(body.rationale),
               "intent_id" -> body.intentId.fold(Json.Null)(Json.fromString)
             ))
-          ),
+          ) ++ body.intentId.map { truthId =>
+            PatchOp.UpsertEdge(
+              EdgeId(UUID.randomUUID()),
+              nodeId,
+              NodeId(UUID.fromString(truthId)),
+              EdgePredicate("DECISION_CONSTRAINED_BY_TRUTH"),
+              Map.empty
+            )
+          }.toVector,
           replaces  = Vector.empty,
           intent    = Some(s"Decision: ${body.title}")
         )

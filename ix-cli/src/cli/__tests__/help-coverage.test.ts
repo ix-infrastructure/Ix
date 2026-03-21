@@ -1,40 +1,51 @@
 import { describe, it, expect } from "vitest";
-import * as fs from "node:fs";
-import * as path from "node:path";
+import { buildHelpText } from "../help-text.js";
 
 /**
- * Verify that HELP_HEADER in main.ts mentions all core commands.
+ * Verify that buildHelpText output mentions all core commands.
  * This prevents regression where new commands become invisible.
  */
 
-const mainTsPath = path.resolve(__dirname, "../main.ts");
-const mainTsContent = fs.readFileSync(mainTsPath, "utf-8");
-
-// Extract the HELP_HEADER string from main.ts
-const headerMatch = mainTsContent.match(/const HELP_HEADER = `([\s\S]*?)`;/);
-const HELP_HEADER = headerMatch?.[1] ?? "";
+const ossHelp = buildHelpText();
 
 const REQUIRED_COMMANDS = [
-  "read", "search", "locate", "contains", "callers", "callees",
-  "imports", "entity", "status", "stats", "doctor", "history", "diff",
-  "briefing", "overview", "impact", "rank", "inventory",
-  "plan", "task", "tasks", "workflow", "bug", "bugs", "decide", "goal", "goals",
-  "ingest", "truth", "text", "explain",
+  "init", "search", "locate", "explain", "impact", "overview", "watch",
+  "read", "inventory", "rank", "history", "diff",
+  "ingest", "status", "stats", "doctor", "docker",
 ];
 
 describe("help coverage", () => {
-  it("HELP_HEADER is non-empty", () => {
-    expect(HELP_HEADER.length).toBeGreaterThan(100);
+  it("OSS help is non-empty", () => {
+    expect(ossHelp.length).toBeGreaterThan(100);
   });
 
-  it("HELP_HEADER mentions all core commands", () => {
+  it("OSS help mentions all core commands", () => {
     const missing: string[] = [];
     for (const cmd of REQUIRED_COMMANDS) {
-      // Match command name at start of a line (with leading whitespace)
-      if (!HELP_HEADER.includes(cmd)) {
+      if (!ossHelp.includes(cmd)) {
         missing.push(cmd);
       }
     }
     expect(missing).toEqual([]);
+  });
+
+  it("OSS help uses new branding", () => {
+    expect(ossHelp).toContain("ix — Code Memory CLI");
+    expect(ossHelp).not.toContain("Persistent Memory for LLM Systems");
+  });
+
+  it("OSS help does not show a Pro section", () => {
+    expect(ossHelp).not.toContain("Pro:");
+  });
+
+  it("Pro help includes Pro section when commands provided", () => {
+    const proHelp = buildHelpText([
+      { name: "plan", desc: "Manage plans" },
+      { name: "goal", desc: "Manage goals" },
+    ]);
+    expect(proHelp).toContain("Pro:");
+    expect(proHelp).toContain("plan");
+    expect(proHelp).toContain("Manage plans");
+    expect(proHelp).toContain("goal");
   });
 });

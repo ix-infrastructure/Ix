@@ -5,14 +5,14 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
-
+import { bootstrap } from "../bootstrap.js";
+import { loadWatchIngestionModules } from "./ingestion-loader.js";
+import { readFileContent } from "./watch-utils.js";
 const SUPPORTED_EXTENSIONS = new Set([
   ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
   ".scala", ".sc", ".java",
-  ".py", ".rb", ".go", ".rs",
-  ".md", ".mdx",
-  ".json", ".yaml", ".yml", ".toml",
-  ".sql", ".graphql", ".gql",
+  ".py", ".rb", ".go", ".rs", ".kt", ".kts", ".cs", ".php", ".swift",
+  ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp",
 ]);
 
 const SUPPORTED_NAMES = new Set([
@@ -34,16 +34,6 @@ function hashContent(content: string): string {
   return crypto.createHash("sha256").update(content).digest("hex");
 }
 
-/** Read file content safely, returning null if inaccessible. */
-export function readFileContent(filePath: string): string | null {
-  try {
-    if (!fs.existsSync(filePath)) return null;
-    return fs.readFileSync(filePath, "utf-8");
-  } catch {
-    return null;
-  }
-}
-
 export function registerWatchCommand(program: Command): void {
   program
     .command("watch")
@@ -51,6 +41,13 @@ export function registerWatchCommand(program: Command): void {
     .option("--path <path>", "Restrict watching to a subdirectory")
     .option("--root <dir>", "Workspace root directory")
     .action(async (opts: { path?: string; root?: string }) => {
+      try {
+        await bootstrap();
+      } catch (err: any) {
+        console.error(chalk.red("Error:"), err.message);
+        process.exit(1);
+      }
+
       const root = resolveWorkspaceRoot(opts.root);
       const watchPath = opts.path
         ? path.resolve(root, opts.path)
@@ -62,14 +59,6 @@ export function registerWatchCommand(program: Command): void {
       }
 
       const client = new IxClient(getEndpoint());
-
-      // Verify backend is reachable
-      try {
-        await client.health();
-      } catch {
-        console.error(`Ix backend not reachable at ${getEndpoint()}`);
-        process.exit(1);
-      }
 
       const relative = path.relative(root, watchPath) || ".";
       console.log(chalk.cyan(`[watch] Watching ${relative}`));
@@ -90,6 +79,7 @@ export function registerWatchCommand(program: Command): void {
       }
 
       async function ingestFile(filePath: string): Promise<void> {
+        const [{ parseFile }, { buildPatch }] = await loadWatchIngestionModules();
         const rel = path.relative(root, filePath);
 
         // Re-read content at actual ingest time (not at event time)
@@ -104,13 +94,15 @@ export function registerWatchCommand(program: Command): void {
         }
 
         try {
-          const result = await client.ingest(filePath, false);
-          lastHash.set(filePath, hash);
-          if ((result?.patchesApplied ?? 0) > 0) {
-            console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(rel)} → rev ${result.latestRev}`);
-          } else {
-            console.log(`${chalk.dim("[watch]")} unchanged: ${rel}`);
+          const parsed = parseFile(filePath, content);
+          if (!parsed) {
+            console.log(`${chalk.dim("[watch]")} skipped (unsupported): ${rel}`);
+            return;
           }
+          const patch = buildPatch(parsed, hash);
+          const result = await client.commitPatch(patch);
+          lastHash.set(filePath, hash);
+          console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(rel)} → rev ${result.rev}`);
         } catch (err: any) {
           console.error(`${chalk.red("[watch]")} error ingesting ${rel}: ${err.message}`);
         }
@@ -168,6 +160,7 @@ async function pollMode(
   root: string,
   client: IxClient
 ): Promise<void> {
+  const [{ parseFile }, { buildPatch }] = await loadWatchIngestionModules();
   const mtimes = new Map<string, number>();
 
   function collectFiles(dir: string): string[] {
@@ -219,12 +212,14 @@ async function pollMode(
       const rel = path.relative(root, f);
       console.log(`${chalk.dim("[watch]")} changed: ${rel}`);
       try {
-        const result = await client.ingest(f, false);
-        if (result.patchesApplied > 0) {
-          console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(rel)} → rev ${result.latestRev}`);
-        } else {
-          console.log(`${chalk.dim("[watch]")} unchanged: ${rel}`);
-        }
+        const content = readFileContent(f);
+        if (!content) continue;
+        const parsed = parseFile(f, content);
+        if (!parsed) continue;
+        const hash = hashContent(content);
+        const patch = buildPatch(parsed, hash);
+        const result = await client.commitPatch(patch);
+        console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(rel)} → rev ${result.rev}`);
       } catch (err: any) {
         console.error(`${chalk.red("[watch]")} error: ${err.message}`);
       }

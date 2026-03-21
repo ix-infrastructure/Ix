@@ -12,13 +12,15 @@ const workflowsContent = fs.readFileSync(workflowsTsPath, "utf-8");
 
 describe("help topic routing", () => {
   it("help command accepts an optional [topic] argument", () => {
-    // The help command should be registered as "help [topic]" not "help"
-    // so it can handle arbitrary topic names like task, plan, bug, goal
     expect(workflowsContent).toContain('command("help [topic]")');
   });
 
+  it("no-topic path uses program.helpInformation() (dynamic, bypasses Commander)", () => {
+    expect(workflowsContent).toContain("program.helpInformation()");
+    expect(workflowsContent).not.toContain('import { HELP_TEXT }');
+  });
+
   it("help action looks up commands on the program", () => {
-    // The action should delegate to program.commands for arbitrary topics
     expect(workflowsContent).toContain("program.commands.find");
     expect(workflowsContent).toContain("outputHelp");
   });
@@ -26,6 +28,11 @@ describe("help topic routing", () => {
   it("help action handles the workflows topic directly", () => {
     expect(workflowsContent).toContain('topic === "workflows"');
     expect(workflowsContent).toContain("WORKFLOWS_TEXT");
+  });
+
+  it("help action handles the advanced topic directly", () => {
+    expect(workflowsContent).toContain('topic === "advanced"');
+    expect(workflowsContent).toContain("ADVANCED_TEXT");
   });
 
   it("help action handles unknown topics with an error", () => {

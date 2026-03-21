@@ -174,6 +174,28 @@ export class IxClient {
     return this.post("/v1/patch", patch);
   }
 
+  async hasIngestBaseline(): Promise<boolean> {
+    const result = await this.get<{ exists: boolean }>('/v1/source-hashes/exists');
+    return result.exists;
+  }
+
+  async getSourceHashes(filePaths: string[]): Promise<Map<string, string>> {
+    const result = await this.post<Record<string, string>>('/v1/source-hashes', { uris: filePaths });
+    return new Map(Object.entries(result));
+  }
+
+  async commitPatchBulk(patches: GraphPatchPayload[]): Promise<PatchCommitResult> {
+    return this.post<PatchCommitResult>('/v1/patches/bulk', { patches });
+  }
+
+  async map(opts?: { full?: boolean }): Promise<any> {
+    return this.post("/v1/map", { full: opts?.full });
+  }
+
+  async reset(): Promise<{ ok: boolean; message: string }> {
+    return this.post("/v1/reset", {});
+  }
+
   async stats(): Promise<any> {
     return this.get("/v1/stats");
   }

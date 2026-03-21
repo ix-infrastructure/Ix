@@ -43,19 +43,40 @@ Task Listing:
   ix tasks --plan <id>                    Tasks in a specific plan
 `;
 
+const ADVANCED_TEXT = `
+Advanced (low-level graph commands):
+  contains <symbol>     Show members of a class/module/file
+  callers <symbol>      Show callers of a function/method
+  callees <symbol>      Show callees of a function/method
+  imports <symbol>      Show what an entity imports
+  imported-by <symbol>  Show what imports an entity
+  depends <symbol>      Show reverse dependencies
+  entity <id>           Get entity details with claims and edges
+  text <term>           Fast lexical/text search (ripgrep)
+  conflicts             Detect contradictory information
+  query <nql>           Raw NQL graph query (deprecated)
+
+Use "ix <command> --help" for details on any command.
+`;
+
 export function registerWorkflowsHelpCommand(program: Command): void {
   const help = program
     .command("help [topic]")
     .description("Additional help topics")
     .action((topic: string | undefined) => {
       if (!topic) {
-        // ix help — show full program help
-        program.outputHelp();
+        // ix help — call our overridden helpInformation() directly
+        console.log(program.helpInformation());
         return;
       }
 
       if (topic === "workflows" || topic === "workflow") {
         console.log(WORKFLOWS_TEXT);
+        return;
+      }
+
+      if (topic === "advanced") {
+        console.log(ADVANCED_TEXT);
         return;
       }
 

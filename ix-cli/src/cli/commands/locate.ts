@@ -1,115 +1,95 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import * as path from "node:path";
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
-import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
-import { resolveFileOrEntity, printResolved } from "../resolve.js";
+import { getEndpoint } from "../config.js";
+import {
+  resolveFileOrEntity, resolveEntityFull, printResolved, printAmbiguous,
+  looksFileLike, isRawId, type ResolvedEntity,
+} from "../resolve.js";
 import { isFileStale } from "../stale.js";
 import { stderr } from "../stderr.js";
-
-const execFileAsync = promisify(execFile);
+import { getSystemPath, hasMapData } from "../hierarchy.js";
+import { humanizeLabel } from "../impact/risk-semantics.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "trait", "object", "interface"]);
+const FILE_KINDS = new Set(["file"]);
 
-interface RelatedItem {
-  name: string;
-  kind: string;
-  id?: string;
-  relationship: "contains" | "contained-by" | "depends-on" | "imported-by" | "calls" | "called-by" | "referenced-by";
-}
-
-interface TextMatch {
-  path: string;
-  line: number;
-}
+// Region kinds whose names should be humanized in system path
+const REGION_KINDS = new Set(["system", "subsystem", "module", "region"]);
 
 interface LocateOutput {
   resolvedTarget: { id: string; kind: string; name: string; path?: string } | null;
   resolutionMode: string;
-  structuralContext: {
-    container?: { kind: string; name: string; id?: string };
-    members?: Array<{ name: string; kind: string; id?: string }>;
-    signature?: string;
-  };
-  relationships: RelatedItem[];
-  textMatches: TextMatch[];
-  resultSource: "graph" | "text" | "graph+text";
+  lineRange?: { start: number; end: number };
+  container?: { kind: string; name: string; id?: string };
+  systemPath: Array<{ name: string; kind: string }> | null;
+  hasMapData?: boolean;
   stale?: boolean;
-  warning?: string;
   diagnostics: string[];
 }
 
 export function registerLocateCommand(program: Command): void {
   program
     .command("locate <symbol>")
-    .description("Resolve a symbol to its definition, show structural and relationship context")
-    .option("--limit <n>", "Max text hits to check", "10")
+    .description("Resolve a symbol to its position in the codebase and system hierarchy")
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Prefer results from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")
     .option("--format <fmt>", "Output format (text|json)", "text")
-    .option("--root <dir>", "Workspace root directory")
     .addHelpText("after", `\nExamples:
   ix locate IngestionService
   ix locate verify_token --kind function
   ix locate ArangoClient --format json
   ix locate scoreCandidate --pick 2`)
-    .action(async (symbol: string, opts: { limit: string; kind?: string; path?: string; pick?: string; format: string; root?: string }) => {
+    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: string; format: string }) => {
       const client = new IxClient(getEndpoint());
-      const limit = parseInt(opts.limit, 10);
-      const root = resolveWorkspaceRoot(opts.root);
       const diagnostics: string[] = [];
+      const isJson = opts.format === "json";
 
-      // --- Step 1: Resolve the target entity ---
-      // Prefer structural container kinds — locate wants real definitions, not incidental helpers
       const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick ? parseInt(opts.pick, 10) : undefined };
-      const target = await resolveFileOrEntity(client, symbol, resolveOpts);
+
+      // Resolution with ambiguity detection
+      const { target, ambiguous } = await resolveWithAmbiguity(client, symbol, resolveOpts, isJson);
 
       if (!target) {
-        // Fall back to text-only search
-        const textMatches = await runRipgrep(symbol, root, limit);
+        if (ambiguous) {
+          // Ambiguity already printed — stop cleanly
+          return;
+        }
         const output: LocateOutput = {
           resolvedTarget: null,
           resolutionMode: "none",
-          structuralContext: {},
-          relationships: [],
-          textMatches,
-          resultSource: "text",
-          diagnostics: ["No graph entity found; showing text matches only."],
+          systemPath: null,
+          diagnostics: ["No graph entity found."],
         };
         outputLocate(output, symbol, opts.format);
         return;
       }
 
-      if (opts.format !== "json") printResolved(target);
+      if (!isJson) printResolved(target);
 
-      // --- Step 2: Fetch structural context and relationships in parallel ---
       const isContainer = CONTAINER_KINDS.has(target.kind);
+      const isFile = FILE_KINDS.has(target.kind);
 
-      const [
-        details,
-        containsResult,       // members (for containers) or container (for callables)
-        callersResult,
-        calleesResult,
-        importsResult,
-        importedByResult,
-        referencedByResult,
-      ] = await Promise.all([
-        client.entity(target.id),
+      // Parallel fetch: system path, parent container (for non-containers), entity details
+      const [systemPath, containsResult, details] = await Promise.all([
+        getSystemPath(client, target.id),
         isContainer
-          ? client.expand(target.id, { direction: "out", predicates: ["CONTAINS"] })
+          ? Promise.resolve({ nodes: [] })
           : client.expand(target.id, { direction: "in", predicates: ["CONTAINS"] }),
-        client.expand(target.id, { direction: "in", predicates: ["CALLS"] }),
-        client.expand(target.id, { direction: "out", predicates: ["CALLS"] }),
-        client.expand(target.id, { direction: "out", predicates: ["IMPORTS"] }),
-        client.expand(target.id, { direction: "in", predicates: ["IMPORTS"] }),
-        client.expand(target.id, { direction: "in", predicates: ["REFERENCES"] }),
+        client.entity(target.id),
       ]);
 
       const node = details.node as any;
       const nodePath = node.provenance?.source_uri ?? node.provenance?.sourceUri ?? undefined;
-      const signature = node.attrs?.signature ?? undefined;
+
+      // Extract line range from attrs
+      const lineStart = node.attrs?.line_start ?? node.attrs?.lineStart;
+      const lineEnd = node.attrs?.line_end ?? node.attrs?.lineEnd;
+      const lineRange = lineStart != null && lineEnd != null
+        ? { start: Number(lineStart), end: Number(lineEnd) }
+        : undefined;
 
       // Check staleness
       let stale = false;
@@ -117,136 +97,120 @@ export function registerLocateCommand(program: Command): void {
         try { stale = await isFileStale(client, nodePath); } catch {}
       }
 
-      // Build structural context
-      const structuralContext: LocateOutput["structuralContext"] = {};
-      if (signature) structuralContext.signature = signature;
+      // Container context (parent for callables)
+      let container: LocateOutput["container"];
+      if (!isContainer && containsResult.nodes.length > 0) {
+        const c = containsResult.nodes[0] as any;
+        container = {
+          kind: c.kind || "unknown",
+          name: c.name || c.attrs?.name || "(unknown)",
+          id: c.id,
+        };
+      }
 
-      if (isContainer) {
-        // Members
-        const members = containsResult.nodes.slice(0, 10).map((n: any) => ({
-          name: n.name || n.attrs?.name || "(unnamed)",
-          kind: n.kind || "unknown",
-          id: n.id,
-        }));
-        if (members.length > 0) structuralContext.members = members;
-      } else {
-        // Container (parent class/file)
-        if (containsResult.nodes.length > 0) {
-          const c = containsResult.nodes[0] as any;
-          structuralContext.container = {
-            kind: c.kind || "unknown",
-            name: c.name || c.attrs?.name || "(unknown)",
-            id: c.id,
-          };
+      // Diagnostic for missing map data
+      const hasMap = hasMapData(systemPath);
+      if (!hasMap) {
+        diagnostics.push("No system map. Run `ix map` to see hierarchy.");
+      }
+
+      // Build system path: append resolved symbol for non-file targets
+      let systemPathMapped = systemPath.map((n) => ({ name: n.name, kind: n.kind }));
+      if (!isFile) {
+        const lastInPath = systemPathMapped[systemPathMapped.length - 1];
+        if (!lastInPath || lastInPath.name !== target.name) {
+          systemPathMapped = [...systemPathMapped, { name: target.name, kind: target.kind }];
         }
       }
 
-      // Build relationships
-      const relationships: RelatedItem[] = [];
-
-      for (const n of callersResult.nodes) {
-        relationships.push(nodeToRelated(n, "called-by"));
-      }
-      for (const n of calleesResult.nodes) {
-        relationships.push(nodeToRelated(n, "calls"));
-      }
-      for (const n of importsResult.nodes) {
-        relationships.push(nodeToRelated(n, "depends-on"));
-      }
-      for (const n of importedByResult.nodes) {
-        relationships.push(nodeToRelated(n, "imported-by"));
-      }
-      for (const n of referencedByResult.nodes) {
-        relationships.push(nodeToRelated(n, "referenced-by"));
-      }
-
-      // If container, show contained members as relationships too
-      if (isContainer) {
-        for (const n of containsResult.nodes.slice(0, 10)) {
-          relationships.push(nodeToRelated(n, "contains"));
-        }
-      } else if (structuralContext.container) {
-        relationships.push({
-          name: structuralContext.container.name,
-          kind: structuralContext.container.kind,
-          id: structuralContext.container.id,
-          relationship: "contained-by",
-        });
-      }
-
-      // --- Step 3: Text matches (secondary) ---
-      const textMatches = await runRipgrep(symbol, root, limit);
-
-      // Filter out text matches from the same file as the resolved entity
-      const filteredTextMatches = textMatches.filter(tm => tm.path !== nodePath);
-
-      const resultSource: LocateOutput["resultSource"] =
-        filteredTextMatches.length > 0 ? "graph+text" : "graph";
+      // Make path repo-relative
+      const displayPath = nodePath ? toRepoRelative(nodePath) : undefined;
 
       const output: LocateOutput = {
         resolvedTarget: {
           id: target.id,
           kind: target.kind,
           name: target.name,
-          path: nodePath,
+          path: displayPath,
         },
         resolutionMode: target.resolutionMode,
-        structuralContext,
-        relationships,
-        textMatches: filteredTextMatches,
-        resultSource,
+        lineRange,
+        container,
+        systemPath: systemPathMapped,
+        hasMapData: hasMap,
         diagnostics,
       };
       if (stale) {
         output.stale = true;
-        output.warning = "Results may be stale; files have changed since last ingest.";
       }
 
       outputLocate(output, symbol, opts.format);
     });
 }
 
-function nodeToRelated(n: any, rel: RelatedItem["relationship"]): RelatedItem {
-  return {
-    name: n.name || n.attrs?.name || "(unnamed)",
-    kind: n.kind || "unknown",
-    id: n.id,
-    relationship: rel,
-  };
+// ── Ambiguity-aware resolution ──────────────────────────────────────────────
+
+async function resolveWithAmbiguity(
+  client: IxClient,
+  symbol: string,
+  opts: { kind?: string; path?: string; pick?: number },
+  isJson: boolean,
+): Promise<{ target: ResolvedEntity | null; ambiguous: boolean }> {
+  // For raw IDs and file-like targets, delegate to resolveFileOrEntity (no ambiguity)
+  if (isRawId(symbol) || looksFileLike(symbol)) {
+    const target = await resolveFileOrEntity(client, symbol, opts);
+    return { target, ambiguous: false };
+  }
+
+  // Symbol resolution — use full result to detect ambiguity
+  const allKinds = ["file", "class", "object", "trait", "interface", "module", "function", "method"];
+  const result = await resolveEntityFull(client, symbol, allKinds, opts);
+
+  if (result.resolved) {
+    return { target: result.entity, ambiguous: false };
+  }
+
+  if (result.ambiguous) {
+    if (isJson) {
+      console.log(JSON.stringify({
+        resolvedTarget: null,
+        resolutionMode: "ambiguous",
+        candidates: result.result.candidates,
+        systemPath: null,
+        diagnostics: result.result.diagnostics ?? [],
+      }, null, 2));
+    } else {
+      printAmbiguous(symbol, result.result, opts);
+    }
+    return { target: null, ambiguous: true };
+  }
+
+  return { target: null, ambiguous: false };
 }
 
-async function runRipgrep(symbol: string, root: string, limit: number): Promise<TextMatch[]> {
-  const hits: TextMatch[] = [];
+// ── Repo-relative path ──────────────────────────────────────────────────────
+
+function toRepoRelative(filePath: string): string {
+  if (!path.isAbsolute(filePath)) return filePath;
   try {
-    const rgArgs = [
-      "--json", "--max-count", String(limit),
-      "--no-heading", "--word-regexp",
-      symbol, root,
-    ];
-    const { stdout } = await execFileAsync("rg", rgArgs, { maxBuffer: 10 * 1024 * 1024 });
-    const seenPaths = new Set<string>();
-    for (const line of stdout.split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        const parsed = JSON.parse(line);
-        if (parsed.type === "match") {
-          const p = parsed.data.path?.text ?? "";
-          if (!seenPaths.has(p)) {
-            seenPaths.add(p);
-            hits.push({ path: p, line: parsed.data.line_number ?? 0 });
-          }
-        }
-      } catch { /* skip */ }
-    }
-  } catch (err: any) {
-    if (err.code === "ENOENT") {
-      stderr(chalk.yellow("⚠ ripgrep (rg) is not installed — text fallback skipped. Install it: https://github.com/BurntSushi/ripgrep#installation"));
-    } else if (err.code !== 1 && err.status !== 1) {
-      throw err;
-    }
-  }
-  return hits.slice(0, 10);
+    const cwd = process.cwd();
+    const rel = path.relative(cwd, filePath);
+    // Only use relative if it doesn't escape the repo (no leading ../)
+    if (!rel.startsWith("..") && !path.isAbsolute(rel)) return rel;
+  } catch {}
+  return filePath;
 }
+
+// ── Humanized system path breadcrumb ────────────────────────────────────────
+
+function humanizeBreadcrumb(nodes: Array<{ name: string; kind: string }>): string {
+  return nodes.map((n) => {
+    if (REGION_KINDS.has(n.kind)) return humanizeLabel(n.name).replace(/ layer$/, "");
+    return n.name;
+  }).join(" → ");
+}
+
+// ── Output ──────────────────────────────────────────────────────────────────
 
 function outputLocate(output: LocateOutput, symbol: string, format: string): void {
   if (format === "json") {
@@ -258,77 +222,35 @@ function outputLocate(output: LocateOutput, symbol: string, format: string): voi
 
   if (!output.resolvedTarget) {
     stderr(`No graph entity found for "${symbol}".`);
-    if (output.textMatches.length > 0) {
-      console.log(chalk.dim("\nText matches:"));
-      for (const tm of output.textMatches) {
-        console.log(`  ${chalk.dim(tm.path)}${chalk.cyan(`:${tm.line}`)}`);
-      }
-    } else {
-      console.log("No matches found.");
-    }
+    console.log("No matches found.");
     return;
   }
 
   const t = output.resolvedTarget;
-  if (t.path) console.log(chalk.dim(`  ${t.path}`));
 
-  // Structural context
-  const ctx = output.structuralContext;
-  if (ctx.signature) console.log(`  ${chalk.green(ctx.signature)}`);
-  if (ctx.container) console.log(`  ${chalk.dim("in")} ${chalk.cyan(ctx.container.kind)} ${ctx.container.name}`);
-  if (ctx.members && ctx.members.length > 0) {
-    console.log(chalk.dim("\nMembers:"));
-    for (const m of ctx.members) {
-      console.log(`  ${chalk.cyan(m.kind.padEnd(10))} ${m.name}`);
+  // Location section
+  const hasLocation = t.path || output.lineRange || output.container;
+  if (hasLocation) {
+    console.log(chalk.bold("\nLocation"));
+    if (t.path) {
+      console.log(`  ${chalk.dim("File:".padEnd(16))}${t.path}`);
+    }
+    if (output.lineRange) {
+      console.log(`  ${chalk.dim("Lines:".padEnd(16))}${output.lineRange.start}-${output.lineRange.end}`);
+    }
+    if (output.container) {
+      console.log(`  ${chalk.dim("Contained in:".padEnd(16))}${output.container.name}`);
     }
   }
 
-  // Relationships grouped by type
-  const relGroups = new Map<string, RelatedItem[]>();
-  for (const r of output.relationships) {
-    const group = relGroups.get(r.relationship) || [];
-    group.push(r);
-    relGroups.set(r.relationship, group);
+  // System path section
+  if (output.systemPath && output.systemPath.length > 1 && output.hasMapData) {
+    console.log(chalk.bold("\nSystem path"));
+    console.log(`  ${humanizeBreadcrumb(output.systemPath)}`);
   }
 
-  const relOrder: RelatedItem["relationship"][] = [
-    "contained-by", "contains", "called-by", "calls", "imported-by", "depends-on",
-  ];
-
-  const LABELS: Record<string, string> = {
-    "contained-by": "Contained by",
-    "contains": "Contains",
-    "called-by": "Called by",
-    "calls": "Calls",
-    "imported-by": "Imported by",
-    "depends-on": "Depends on",
-  };
-
-  let hasRelationships = false;
-  for (const rel of relOrder) {
-    const items = relGroups.get(rel);
-    if (!items || items.length === 0) continue;
-    if (!hasRelationships) {
-      console.log(chalk.dim("\nRelationships:"));
-      hasRelationships = true;
-    }
-    console.log(`  ${chalk.bold(LABELS[rel])} (${items.length}):`);
-    for (const item of items.slice(0, 5)) {
-      console.log(`    ${chalk.cyan(item.kind.padEnd(10))} ${item.name}`);
-    }
-    if (items.length > 5) {
-      console.log(chalk.dim(`    ... and ${items.length - 5} more`));
-    }
-  }
-
-  // Text matches (secondary)
-  if (output.textMatches.length > 0) {
-    console.log(chalk.dim("\nText matches (other files):"));
-    for (const tm of output.textMatches.slice(0, 5)) {
-      console.log(`  ${chalk.dim(tm.path)}${chalk.cyan(`:${tm.line}`)}`);
-    }
-    if (output.textMatches.length > 5) {
-      console.log(chalk.dim(`  ... and ${output.textMatches.length - 5} more`));
-    }
+  // Diagnostics
+  for (const d of output.diagnostics) {
+    stderr(chalk.dim(`  ${d}`));
   }
 }

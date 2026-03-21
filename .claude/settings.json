@@ -4,11 +4,63 @@
       "command": "npx",
       "args": [
         "tsx",
-        "/Users/rileythompson/startprojes/startup/IX-Memory/ix-cli/src/mcp/server.ts"
+        "/home/ianhock/ix/IX-Memory/ix-cli/src/mcp/server.ts"
       ],
       "env": {
         "IX_ENDPOINT": "http://localhost:8090"
       }
     }
+  },
+  "permissions": {
+    "allow": ["Bash(*)", "Read(*)", "Edit(*)", "Write(*)"]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/session-start.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/post-edit-ingest.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/pre-tool-ix-check.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/stop-decision-reminder.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }

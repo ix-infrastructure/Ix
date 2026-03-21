@@ -1,0 +1,40 @@
+{
+  "name": "@ix/core-ingestion",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./languages": "./dist/languages.js",
+    "./patch-builder": "./dist/patch-builder.js",
+    "./types": "./dist/types.js"
+  },
+  "scripts": {
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
+    "test": "vitest run --pool threads",
+    "test:watch": "vitest --pool threads"
+  },
+  "dependencies": {
+    "tree-sitter": "^0.21.0",
+    "tree-sitter-c": "^0.21.0",
+    "tree-sitter-c-sharp": "^0.21.0",
+    "tree-sitter-cpp": "^0.22.0",
+    "tree-sitter-go": "^0.21.0",
+    "tree-sitter-java": "^0.21.0",
+    "tree-sitter-javascript": "^0.21.0",
+    "tree-sitter-php": "^0.23.12",
+    "tree-sitter-python": "^0.21.0",
+    "tree-sitter-ruby": "^0.23.1",
+    "tree-sitter-rust": "^0.21.0",
+    "tree-sitter-scala": "^0.24.0",
+    "tree-sitter-typescript": "^0.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "fast-check": "^4.6.0",
+    "typescript": "^5.4.0",
+    "vitest": "^4.1.0"
+  }
+}

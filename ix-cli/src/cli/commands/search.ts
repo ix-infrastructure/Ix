@@ -1,8 +1,11 @@
 import type { Command } from "commander";
+import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { formatNodes } from "../format.js";
 import { scoreCandidate } from "../resolve.js";
+import { applyRoleFilter, roleHint } from "../role-filter.js";
+import { stderr } from "../stderr.js";
 
 /** Structural kinds that should rank higher than incidental matches. */
 const STRUCTURAL_KINDS = new Set([
@@ -87,6 +90,8 @@ export function registerSearchCommand(program: Command): void {
     .option("--path <path>", "Boost results from files matching this path substring")
     .option("--as-of <rev>", "Search as of a specific revision")
     .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--include-tests", "Include test and fixture entities in results")
+    .option("--tests-only", "Show only test and fixture entities")
     .addHelpText("after", `\nRanking priority:
   1. Exact name + exact kind match
   2. Exact name + structural kind (class, function, etc.)
@@ -103,7 +108,7 @@ Examples:
   ix search expand --path memory-layer
   ix search "" --kind file --limit 50 --format json`)
     .action(async (term: string, opts: {
-      limit: string; kind?: string; language?: string; path?: string; asOf?: string; format: string
+      limit: string; kind?: string; language?: string; path?: string; asOf?: string; format: string; includeTests?: boolean; testsOnly?: boolean
     }) => {
       const client = new IxClient(getEndpoint());
       const limit = parseInt(opts.limit, 10);
@@ -125,7 +130,13 @@ Examples:
 
       scored.sort(searchSort);
 
-      const trimmed = scored.slice(0, limit);
+      const { filtered: roleFiltered, hiddenTestCount } = applyRoleFilter(
+        scored.map(s => s.node),
+        { includeTests: opts.includeTests, testsOnly: opts.testsOnly },
+      );
+      // Re-wrap with scores for trimming
+      const roleFilteredScored = scored.filter(s => roleFiltered.includes(s.node));
+      const trimmed = roleFilteredScored.slice(0, limit);
       const ranked = trimmed.map(s => s.node);
 
       if (opts.format === "json") {
@@ -134,6 +145,12 @@ Examples:
           diagnostics.push({
             code: "unfiltered_search",
             message: "Results may be broad. Use --kind to filter and boost structural matches.",
+          });
+        }
+        if (hiddenTestCount > 0) {
+          diagnostics.push({
+            code: "test_candidates_hidden",
+            message: roleHint(hiddenTestCount)!,
           });
         }
         console.log(JSON.stringify({
@@ -155,6 +172,8 @@ Examples:
         }, null, 2));
       } else {
         formatNodes(ranked, opts.format);
+        const hint = roleHint(hiddenTestCount);
+        if (hint) stderr(chalk.dim(hint));
       }
     });
 }

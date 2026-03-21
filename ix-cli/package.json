@@ -4,13 +4,18 @@
   "type": "module",
   "description": "Ix Memory — Persistent Memory for LLM Systems",
   "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./client/*": "./dist/client/*",
+    "./cli/*": "./dist/cli/*"
+  },
   "bin": {
     "ix": "dist/cli/main.js"
   },
   "scripts": {
-    "build": "tsc",
-    "test": "vitest run",
-    "dev": "tsx src/cli/main.ts"
+    "build": "node scripts/build-core-ingestion.mjs && node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
+    "test": "node scripts/build-core-ingestion.mjs && vitest run --exclude test/parser.test.ts && node test/parser.smoke.mjs",
+    "dev": "node scripts/build-core-ingestion.mjs && tsx src/cli/main.ts"
   },
   "dependencies": {
     "commander": "^12.0.0",

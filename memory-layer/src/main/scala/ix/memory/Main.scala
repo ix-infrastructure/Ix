@@ -10,6 +10,7 @@ import ix.memory.conflict.ConflictService
 import ix.memory.context._
 import ix.memory.db._
 import ix.memory.ingestion._
+import ix.memory.map.MapService
 
 object Main extends IOApp.Simple {
 
@@ -28,11 +29,11 @@ object Main extends IOApp.Simple {
       // 2. Core APIs
       writeApi     = new ArangoGraphWriteApi(client)
       queryApi     = new ArangoGraphQueryApi(client)
-      bulkWriteApi = new BulkWriteApi(client)
 
       // 3. Services
       parserRouter         = new ParserRouter()
       ingestionService     = new IngestionService(parserRouter, writeApi, queryApi)
+      bulkWriteApi         = new BulkWriteApi(client)
       bulkIngestionService = new BulkIngestionService(parserRouter, bulkWriteApi, queryApi)
       seeder           = new GraphSeeder(queryApi)
       expander         = new GraphExpander(queryApi)
@@ -42,9 +43,10 @@ object Main extends IOApp.Simple {
       contextService   = new ContextService(queryApi, seeder, expander,
                            claimCollector, confidenceScorer, conflictDetector)
       conflictService  = new ConflictService(client, queryApi, writeApi)
+      mapService       = new MapService(client, queryApi, writeApi)
 
       // 4. HTTP routes
-      routes = Routes.all(contextService, ingestionService, bulkIngestionService, queryApi, writeApi, conflictService, client)
+      routes = Routes.all(contextService, ingestionService, bulkIngestionService, queryApi, writeApi, conflictService, client, mapService, bulkWriteApi)
 
       // 5. Server
       server <- EmberServerBuilder

@@ -6,5 +6,8 @@ target/
 .DS_Store
 .worktrees/
 ix-cli/node_modules/*
+core-ingestion/node_modules/*
+core-ingestion/dist/
 ix-cli/dist/
 .vscode/
+.mcp.json

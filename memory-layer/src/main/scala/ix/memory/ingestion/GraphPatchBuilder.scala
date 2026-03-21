@@ -31,6 +31,7 @@ object GraphPatchBuilder {
     val extractor = if (filePath.endsWith(".py")) "tree-sitter-python/1.0"
                     else if (filePath.endsWith(".ts") || filePath.endsWith(".tsx")) "typescript-parser/1.0"
                     else if (filePath.endsWith(".scala") || filePath.endsWith(".sc")) "scala-parser/1.0"
+                    else if (filePath.endsWith(".go")) "tree-sitter-go/1.0"
                     else if (filePath.endsWith(".json") || filePath.endsWith(".yaml") || filePath.endsWith(".yml") || filePath.endsWith(".toml")) "config-parser/1.0"
                     else if (filePath.endsWith(".md")) "markdown-parser/1.0"
                     else "unknown-parser/1.0"
@@ -80,7 +81,7 @@ object GraphPatchBuilder {
     val claimOps = relationshipClaims ++ attributeClaims
     val allOps   = nodeOps ++ edgeOps ++ claimOps
 
-    val sourceType = if (filePath.endsWith(".py") || filePath.endsWith(".ts") || filePath.endsWith(".tsx") || filePath.endsWith(".scala") || filePath.endsWith(".sc")) SourceType.Code
+    val sourceType = if (filePath.endsWith(".py") || filePath.endsWith(".ts") || filePath.endsWith(".tsx") || filePath.endsWith(".scala") || filePath.endsWith(".sc") || filePath.endsWith(".go")) SourceType.Code
                      else if (filePath.endsWith(".json") || filePath.endsWith(".yaml") || filePath.endsWith(".yml") || filePath.endsWith(".toml")) SourceType.Config
                      else if (filePath.endsWith(".md")) SourceType.Doc
                      else SourceType.Code

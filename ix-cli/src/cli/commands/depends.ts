@@ -12,15 +12,24 @@ export interface DependencyNode {
   name: string;
   kind: string;
   resolved: boolean;
-  relation: "called_by" | "imported_by" | "referenced_by";
-  sourceEdge: "CALLS" | "IMPORTS" | "REFERENCES";
+  relation: "called_by" | "imported_by" | "referenced_by" | "extended_by" | "implemented_by";
+  sourceEdge: "CALLS" | "IMPORTS" | "REFERENCES" | "EXTENDS" | "IMPLEMENTS";
   path?: string;
   children: DependencyNode[];
   cycle?: boolean;
 }
 
-const MAX_NODES = 200;
-const DEFAULT_MAX_DEPTH = 20;
+const MAX_NODES = Infinity;
+const DEFAULT_MAX_DEPTH = Infinity;
+
+const PREDICATE_META: Record<string, { relation: DependencyNode["relation"]; sourceEdge: DependencyNode["sourceEdge"] }> = {
+  CALLS:      { relation: "called_by",      sourceEdge: "CALLS" },
+  IMPORTS:    { relation: "imported_by",    sourceEdge: "IMPORTS" },
+  REFERENCES: { relation: "referenced_by", sourceEdge: "REFERENCES" },
+  EXTENDS:    { relation: "extended_by",   sourceEdge: "EXTENDS" },
+  IMPLEMENTS: { relation: "implemented_by", sourceEdge: "IMPLEMENTS" },
+};
+const ALL_DEPENDENCY_PREDICATES = Object.keys(PREDICATE_META);
 
 // ── Tree building ───────────────────────────────────────────────────
 
@@ -31,10 +40,11 @@ const DEFAULT_MAX_DEPTH = 20;
 export async function buildDependencyTree(
   client: IxClient,
   rootId: string,
-  opts?: { maxDepth?: number; maxNodes?: number },
+  opts?: { maxDepth?: number; maxNodes?: number; predicates?: string[] },
 ): Promise<{ tree: DependencyNode[]; truncated: boolean; nodesVisited: number; maxDepthReached: number }> {
   const maxDepth = opts?.maxDepth ?? DEFAULT_MAX_DEPTH;
   const maxNodes = opts?.maxNodes ?? MAX_NODES;
+  const activePredicates = (opts?.predicates ?? ALL_DEPENDENCY_PREDICATES).filter((p) => p in PREDICATE_META);
   const visited = new Set<string>([rootId]);
   let nodesVisited = 0;
   let truncated = false;
@@ -46,22 +56,27 @@ export async function buildDependencyTree(
 
     maxDepthReached = Math.max(maxDepthReached, depth);
 
-    const [callResult, importResult, refResult] = await Promise.all([
-      client.expand(nodeId, { direction: "in", predicates: ["CALLS"], hops: 1 }),
-      client.expand(nodeId, { direction: "in", predicates: ["IMPORTS"], hops: 1 }),
-      client.expand(nodeId, { direction: "in", predicates: ["REFERENCES"], hops: 1 }),
-    ]);
+    const expandResults = await Promise.all(
+      activePredicates.map((p) => client.expand(nodeId, { direction: "in", predicates: [p], hops: 1 })),
+    );
 
     const children: DependencyNode[] = [];
+    // Track IDs added at this level to suppress same-level duplicates from
+    // multiple edge types (e.g. a node that both EXTENDS and REFERENCES the
+    // root would otherwise appear twice, the second time as a spurious cycle).
+    const levelSeen = new Set<string>();
 
-    const processNodes = async (nodes: any[], relation: "called_by" | "imported_by" | "referenced_by", sourceEdge: "CALLS" | "IMPORTS" | "REFERENCES") => {
+    const processNodes = async (nodes: any[], relation: "called_by" | "imported_by" | "referenced_by" | "extended_by" | "implemented_by", sourceEdge: "CALLS" | "IMPORTS" | "REFERENCES" | "EXTENDS" | "IMPLEMENTS") => {
       for (const n of nodes) {
         if (nodesVisited >= maxNodes) { truncated = true; break; }
+        // Skip if already emitted at this level via a different edge type.
+        if (levelSeen.has(n.id)) continue;
         const name = n.name || n.attrs?.name || "";
         const resolved = !!name && !isRawId(name);
         const isCycle = visited.has(n.id);
 
         nodesVisited++;
+        levelSeen.add(n.id);
         visited.add(n.id);
 
         const child: DependencyNode = {
@@ -84,9 +99,10 @@ export async function buildDependencyTree(
       }
     };
 
-    await processNodes(callResult.nodes, "called_by", "CALLS");
-    await processNodes(importResult.nodes, "imported_by", "IMPORTS");
-    await processNodes(refResult.nodes, "referenced_by", "REFERENCES");
+    for (let i = 0; i < activePredicates.length; i++) {
+      const meta = PREDICATE_META[activePredicates[i]];
+      await processNodes(expandResults[i].nodes, meta.relation, meta.sourceEdge);
+    }
 
     return children;
   }
@@ -111,11 +127,14 @@ function renderTree(children: DependencyNode[], prefix: string, isLast: boolean[
       indent += isLast[j] ? "   " : "│  ";
     }
 
-    const kindStr = chalk.cyan((child.kind ?? "").padEnd(10));
-    const nameStr = child.resolved ? chalk.bold(child.name) : chalk.dim(child.name);
-    const cycleMark = child.cycle ? chalk.yellow(" (cycle)") : "";
+    const kindStr = child.cycle
+      ? chalk.dim((child.kind ?? "").padEnd(10))
+      : chalk.cyan((child.kind ?? "").padEnd(10));
+    const nameStr = child.cycle
+      ? chalk.dim(child.name) + chalk.yellow(" ↺")
+      : child.resolved ? chalk.bold(child.name) : chalk.dim(child.name);
 
-    lines.push(`${indent}${connector}${kindStr} ${nameStr}${cycleMark}`);
+    lines.push(`${indent}${connector}${kindStr} ${nameStr}`);
 
     if (child.children.length > 0) {
       lines.push(...renderTree(child.children, prefix, [...isLast, last]));
@@ -130,18 +149,22 @@ function renderTree(children: DependencyNode[], prefix: string, isLast: boolean[
 export function registerDependsCommand(program: Command): void {
   program
     .command("depends <symbol>")
-    .description("Show downstream dependents of the given entity (full tree by default)")
+    .description("Show upstream dependents of the given entity (full tree by default)")
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Prefer symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")
-    .option("--depth <n>", "Limit traversal depth (default: full tree)")
+    .option("--depth <n>", "Cap traversal depth")
+    .option("--cap <n>", "Cap number of nodes visited")
     .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--include-tests", "Include test and fixture entities in results")
+    .option("--tests-only", "Show only test and fixture entities")
     .addHelpText("after", `\nExamples:
   ix depends verify_token
   ix depends pickBest --format json
   ix depends AuthProvider --depth 2
-  ix depends parser.py --kind file`)
-    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: string; depth?: string; format: string }) => {
+  ix depends parser.py --kind file
+  ix depends NodeKind --pick 1 --cap 500`)
+    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: string; depth?: string; cap?: string; format: string; includeTests?: boolean; testsOnly?: boolean }) => {
       const client = new IxClient(getEndpoint());
 
       // Validate --pick
@@ -153,14 +176,21 @@ export function registerDependsCommand(program: Command): void {
         }
       }
 
-      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick ? parseInt(opts.pick, 10) : undefined };
+      const resolveOpts = {
+        kind: opts.kind,
+        path: opts.path,
+        pick: opts.pick ? parseInt(opts.pick, 10) : undefined,
+        includeTests: opts.includeTests,
+        testsOnly: opts.testsOnly,
+      };
       const target = await resolveFileOrEntity(client, symbol, resolveOpts);
       if (!target) return;
 
       const maxDepth = opts.depth ? parseInt(opts.depth, 10) : DEFAULT_MAX_DEPTH;
+      const maxNodes = opts.cap ? parseInt(opts.cap, 10) : MAX_NODES;
 
       const { tree, truncated, nodesVisited, maxDepthReached } = await buildDependencyTree(
-        client, target.id, { maxDepth },
+        client, target.id, { maxDepth, maxNodes },
       );
 
       // ── JSON output ──────────────────────────────────────────────
@@ -179,11 +209,11 @@ export function registerDependsCommand(program: Command): void {
           },
         };
         if (tree.length === 0) {
-          output.diagnostics = [{ code: "no_edges", message: `No downstream dependents found for resolved entity.` }];
+          output.diagnostics = [{ code: "no_edges", message: `No upstream dependents found for resolved entity.` }];
         }
         if (truncated) {
           output.diagnostics = output.diagnostics ?? [];
-          output.diagnostics.push({ code: "truncated", message: `Traversal truncated (depth: ${maxDepth}, node cap: ${MAX_NODES}).` });
+          output.diagnostics.push({ code: "truncated", message: `Traversal truncated (depth: ${maxDepth}, node cap: ${maxNodes}).` });
         }
         console.log(JSON.stringify(output, null, 2));
         return;
@@ -193,12 +223,11 @@ export function registerDependsCommand(program: Command): void {
       printResolved(target);
 
       if (tree.length === 0) {
-        console.log(`  No downstream dependents found at current graph state.`);
+        console.log(`  No upstream dependents found at current graph state.`);
         return;
       }
 
-      console.log(chalk.bold(`\n  Downstream dependents of ${target.kind} ${target.name}:\n`));
-
+      console.log(chalk.bold(`Dependents`));
       const rootLine = `  ${chalk.cyan((target.kind ?? "").padEnd(10))} ${chalk.bold(target.name)}`;
       console.log(rootLine);
 
@@ -211,6 +240,7 @@ export function registerDependsCommand(program: Command): void {
         console.log(chalk.yellow(`\n  (tree truncated — ${nodesVisited} nodes visited, depth ${maxDepthReached})`));
       }
 
-      console.log(chalk.dim(`\n  ${nodesVisited} downstream dependents, depth ${maxDepthReached}`));
+      console.log(chalk.dim(`\n  ${nodesVisited} upstream dependents, depth ${maxDepthReached}`));
+
     });
 }

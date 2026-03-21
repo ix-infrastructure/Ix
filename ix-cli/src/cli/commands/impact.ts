@@ -3,13 +3,15 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveFileOrEntity, printResolved } from "../resolve.js";
+import { bucketByHierarchy, getSystemPath, formatSystemPath, hasMapData, type SystemPath } from "../hierarchy.js";
+import { inferRiskSemantics, humanizeLabel, type ImpactFacts, type RiskSemantics } from "../impact/risk-semantics.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "object", "trait", "interface"]);
 
 export function registerImpactCommand(program: Command): void {
   program
     .command("impact <target>")
-    .description("Aggregated impact analysis — who depends on this symbol and its members")
+    .description("System risk analysis — what behavior is at risk if this changes")
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")
     .option("--depth <n>", "Expansion depth for callers/importers (default 1, max 3)", "1")
@@ -44,6 +46,151 @@ export function registerImpactCommand(program: Command): void {
     );
 }
 
+// ── Risk level coloring ──────────────────────────────────────────────────────
+
+function riskColor(level: string): typeof chalk {
+  if (level === "critical") return chalk.red.bold;
+  if (level === "high") return chalk.red;
+  if (level === "medium") return chalk.yellow;
+  return chalk.dim;
+}
+
+// ── Shared text rendering ────────────────────────────────────────────────────
+
+function renderRiskHeader(
+  target: { kind: string; name: string },
+  risk: RiskSemantics,
+  systemPath: SystemPath,
+): void {
+  console.log(chalk.bold(`Target: ${target.kind} ${target.name}\n`));
+
+  if (systemPath.length > 1 && hasMapData(systemPath)) {
+    console.log(`  System path: ${chalk.dim(formatSystemPath(systemPath))}`);
+  }
+
+  // Risk summary — the lead section
+  const color = riskColor(risk.riskLevel);
+  console.log(chalk.bold("\nRisk summary"));
+  console.log(`  ${color(risk.riskSummary)}`);
+
+  // At-risk behavior
+  if (risk.behaviorAtRisk.length > 0) {
+    console.log(chalk.bold("\nAt-risk behavior"));
+    for (const b of risk.behaviorAtRisk) {
+      console.log(`  ${chalk.white("•")} ${b}`);
+    }
+  }
+}
+
+function renderPropagationBuckets(
+  propagationBuckets: Array<{ region: { name: string; kind: string }; members: Array<{ name: string; kind: string }> }>,
+  flowPropagation?: { flowName: string; count: number },
+): void {
+  if (propagationBuckets.length === 0 && !flowPropagation) return;
+  console.log(chalk.bold("\nPropagation"));
+
+  // Flow propagation line first
+  if (flowPropagation) {
+    const flowLabel = capitalize(flowPropagation.flowName) + " flow";
+    console.log(`  ${chalk.cyan(flowLabel.padEnd(30))} ${flowPropagation.count} downstream dependents`);
+  }
+
+  const sorted = [...propagationBuckets].sort((a, b) => b.members.length - a.members.length);
+  for (const bucket of sorted) {
+    const regionLabel = humanizeLabel(bucket.region.name);
+    console.log(`  ${chalk.cyan(regionLabel.padEnd(30))} ${bucket.members.length} dependents`);
+  }
+}
+
+function renderMostAffected(
+  risk: RiskSemantics,
+  topMembers: Array<{ name: string; kind: string; callerCount: number }>,
+  callerNames?: string[],
+  calleeNames?: string[],
+): void {
+  const items: string[] = [];
+
+  if (topMembers.length > 0) {
+    const names = topMembers.slice(0, 3).map((m) => m.name);
+    const suffix = topMembers.length > 3 ? ` and ${topMembers.length - 3} more` : "";
+    items.push(`${names.join(", ")}${suffix} in the ${risk.category === "boundary" ? "client boundary" : "container"}`);
+  }
+
+  if (risk.mostAffectedHint) {
+    // For flow hints with ";", split into separate items
+    const hintParts = risk.mostAffectedHint.split("; ");
+    for (const part of hintParts) {
+      if (items.length < 3) items.push(part);
+    }
+  }
+
+  if (callerNames && callerNames.length > 0 && items.length < 3) {
+    const shown = callerNames.slice(0, 2).join(", ");
+    const more = callerNames.length > 2 ? ` and ${callerNames.length - 2} more` : "";
+    items.push(`Callers: ${shown}${more}`);
+  }
+
+  if (items.length > 0) {
+    console.log(chalk.bold("\nMost affected"));
+    for (const item of items.slice(0, 3)) {
+      console.log(`  ${chalk.white("•")} ${item}`);
+    }
+  }
+}
+
+function renderNextStep(risk: RiskSemantics): void {
+  if (risk.nextStep) {
+    console.log(chalk.bold("\nNext"));
+    console.log(`  ${chalk.dim(risk.nextStep)}`);
+  }
+}
+
+function renderSupportingContext(
+  counts: Record<string, number>,
+): void {
+  const entries = Object.entries(counts).filter(([, v]) => v > 0);
+  if (entries.length === 0) return;
+  console.log(chalk.bold("\nSupporting context"));
+  for (const [label, value] of entries) {
+    console.log(`  ${chalk.dim(label.padEnd(24))} ${value}`);
+  }
+}
+
+function renderDecisionsTasksBugs(
+  decisions: Array<{ name: string }>,
+  tasks: Array<{ name: string; status: string }>,
+  bugs: Array<{ name: string; status: string; severity: string }>,
+): void {
+  if (decisions.length > 0) {
+    console.log(chalk.bold("\nDecisions:"));
+    for (const d of decisions) {
+      console.log(`  ${chalk.yellow(d.name)}`);
+    }
+  }
+
+  if (tasks.length > 0) {
+    console.log(chalk.bold("\nTasks:"));
+    for (const t of tasks) {
+      const icon = t.status === "done" ? "✓" : "○";
+      console.log(`  ${icon} [${t.status}] ${t.name}`);
+    }
+  }
+
+  if (bugs.length > 0) {
+    console.log(chalk.bold("\nBugs:"));
+    for (const b of bugs) {
+      const icon = b.status === "closed" || b.status === "resolved" ? "✓" : "○";
+      console.log(`  ${icon} [${b.status}] ${chalk.red(b.severity)} ${b.name}`);
+    }
+  }
+}
+
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// ── Container impact ─────────────────────────────────────────────────────────
+
 async function containerImpact(
   client: IxClient,
   target: { id: string; kind: string; name: string; resolutionMode: string },
@@ -53,15 +200,16 @@ async function containerImpact(
 ): Promise<void> {
   const diagnostics: string[] = [];
 
-  // 1. Get contained members, importers, dependents, and developer-cycle context in parallel
-  const [containsResult, importersResult, dependentsResult, decisionsResult, tasksResult, bugsResult] = await Promise.all([
+  const [containsResult, importersResult, dependentsResult, systemPath, decisionsResult, tasksResult, bugsResult] = await Promise.all([
     client.expand(target.id, { direction: "out", predicates: ["CONTAINS"] }),
     client.expand(target.id, { direction: "in", predicates: ["IMPORTS"], hops: depth }),
     client.expand(target.id, { direction: "in", predicates: ["CALLS", "REFERENCES"], hops: depth }),
+    getSystemPath(client, target.id),
     client.expand(target.id, { direction: "in", predicates: ["DECISION_AFFECTS"] }),
     client.expand(target.id, { direction: "in", predicates: ["TASK_AFFECTS"] }),
     client.expand(target.id, { direction: "in", predicates: ["BUG_AFFECTS"] }),
   ]);
+
   const members = containsResult.nodes;
   const directImporters = importersResult.nodes;
   const directDependents = dependentsResult.nodes;
@@ -76,7 +224,7 @@ async function containerImpact(
     id: n.id, name: n.name || n.attrs?.name || "(unnamed)", status: String(n.attrs?.status ?? "open"), severity: String(n.attrs?.severity ?? "medium"),
   }));
 
-  // 4. For each member (up to 20), get inbound callers
+  // For each member (up to 20), get inbound callers
   const membersToCheck = members.slice(0, 20);
   const memberCallerCounts: { name: string; kind: string; id: string; callerCount: number }[] = [];
   let totalMemberCallers = 0;
@@ -110,9 +258,40 @@ async function containerImpact(
     totalMemberCallers += r.callerCount;
   }
 
-  // 5. Rank by caller count, top N
   memberCallerCounts.sort((a, b) => b.callerCount - a.callerCount);
   const topMembers = memberCallerCounts.filter((m) => m.callerCount > 0).slice(0, limit);
+
+  // Bucket all dependents by hierarchy
+  const allDependentIds = [
+    ...directImporters.map((n: any) => n.id),
+    ...directDependents.map((n: any) => n.id),
+  ];
+  const uniqueDependentIds = [...new Set(allDependentIds)];
+  const propagationBuckets = uniqueDependentIds.length > 0
+    ? await bucketByHierarchy(client, uniqueDependentIds)
+    : [];
+
+  const systemPathMapped = systemPath.map((n) => ({ name: n.name, kind: n.kind }));
+
+  // Infer risk semantics
+  const riskFacts: ImpactFacts = {
+    name: target.name,
+    kind: target.kind,
+    container: undefined,
+    systemPath: systemPathMapped,
+    members: members.length,
+    callers: 0,
+    callees: 0,
+    directImporters: directImporters.length,
+    directDependents: directDependents.length,
+    memberLevelCallers: totalMemberCallers,
+    propagationBuckets: propagationBuckets.map((b) => ({
+      region: b.region.name,
+      regionKind: b.region.kind,
+      count: b.members.length,
+    })),
+  };
+  const risk = inferRiskSemantics(riskFacts);
 
   if (isJson) {
     console.log(
@@ -122,6 +301,13 @@ async function containerImpact(
           resolutionMode: target.resolutionMode,
           resultSource: "graph",
           depth,
+          systemPath: systemPathMapped,
+          riskSummary: risk.riskSummary,
+          riskLevel: risk.riskLevel,
+          riskCategory: risk.category,
+          atRiskBehavior: risk.behaviorAtRisk,
+          nextStep: risk.nextStep ?? null,
+          flowPropagation: risk.flowPropagation ?? null,
           summary: {
             members: members.length,
             callers: 0,
@@ -133,6 +319,12 @@ async function containerImpact(
           callerList: [],
           calleeList: [],
           topImpactedMembers: topMembers,
+          propagationBuckets: propagationBuckets.map((b) => ({
+            region: b.region.name,
+            regionKind: b.region.kind,
+            count: b.members.length,
+            members: b.members.slice(0, 5).map((m) => ({ name: m.name, kind: m.kind })),
+          })),
           decisions,
           tasks,
           bugs,
@@ -143,47 +335,28 @@ async function containerImpact(
       )
     );
   } else {
-    const depthNote = depth > 1 ? chalk.dim(` (depth ${depth})`) : "";
-    console.log(chalk.bold(`Target: ${target.kind} ${target.name}\n`));
-    console.log(chalk.bold("Impact summary:") + depthNote);
-    console.log(`  members:              ${members.length}`);
-    console.log(`  importers:            ${directImporters.length}`);
-    console.log(`  dependents:           ${directDependents.length}`);
-    console.log(`  member-level callers: ${totalMemberCallers}`);
+    // 1. Risk summary + At-risk behavior
+    renderRiskHeader(target, risk, systemPath);
 
-    if (topMembers.length > 0) {
-      console.log(chalk.bold("\nTop impacted members:"));
-      for (const m of topMembers) {
-        const kindStr = chalk.cyan(m.kind.padEnd(10));
-        const nameStr = chalk.white(m.name.padEnd(20));
-        console.log(`  ${kindStr} ${nameStr} ${m.callerCount} callers`);
-      }
-    } else {
-      console.log(chalk.dim("\nNo member-level callers found."));
-    }
+    // 2. Propagation
+    renderPropagationBuckets(propagationBuckets, risk.flowPropagation);
 
-    if (decisions.length > 0) {
-      console.log(chalk.bold("\nDecisions:"));
-      for (const d of decisions) {
-        console.log(`  ${chalk.yellow(d.name)}`);
-      }
-    }
+    // 3. Most affected
+    renderMostAffected(risk, topMembers);
 
-    if (tasks.length > 0) {
-      console.log(chalk.bold("\nTasks:"));
-      for (const t of tasks) {
-        const icon = t.status === "done" ? "✓" : "○";
-        console.log(`  ${icon} [${t.status}] ${t.name}`);
-      }
-    }
+    // 4. Supporting context
+    renderSupportingContext({
+      "Members:": members.length,
+      "Importers:": directImporters.length,
+      "Direct dependents:": directDependents.length,
+      "Member-level callers:": totalMemberCallers,
+    });
 
-    if (bugs.length > 0) {
-      console.log(chalk.bold("\nBugs:"));
-      for (const b of bugs) {
-        const icon = b.status === "closed" || b.status === "resolved" ? "✓" : "○";
-        console.log(`  ${icon} [${b.status}] ${chalk.red(b.severity)} ${b.name}`);
-      }
-    }
+    // 5. Next step
+    renderNextStep(risk);
+
+    // 6. Decisions / Tasks / Bugs
+    renderDecisionsTasksBugs(decisions, tasks, bugs);
 
     if (diagnostics.length > 0) {
       console.log(chalk.dim(`\nDiagnostics: ${diagnostics.join("; ")}`));
@@ -191,16 +364,18 @@ async function containerImpact(
   }
 }
 
+// ── Leaf impact ──────────────────────────────────────────────────────────────
+
 async function leafImpact(
   client: IxClient,
   target: { id: string; kind: string; name: string; resolutionMode: string },
   depth: number,
   isJson: boolean
 ): Promise<void> {
-  // Fetch callers, callees, and developer-cycle context in parallel
-  const [callersResult, calleesResult, decisionsResult, tasksResult, bugsResult] = await Promise.all([
+  const [callersResult, calleesResult, systemPath, decisionsResult, tasksResult, bugsResult] = await Promise.all([
     client.expand(target.id, { direction: "in", predicates: ["CALLS", "REFERENCES"], hops: depth }),
     client.expand(target.id, { direction: "out", predicates: ["CALLS", "REFERENCES"] }),
+    getSystemPath(client, target.id),
     client.expand(target.id, { direction: "in", predicates: ["DECISION_AFFECTS"] }),
     client.expand(target.id, { direction: "in", predicates: ["TASK_AFFECTS"] }),
     client.expand(target.id, { direction: "in", predicates: ["BUG_AFFECTS"] }),
@@ -216,6 +391,39 @@ async function leafImpact(
     id: n.id, name: n.name || n.attrs?.name || "(unnamed)", status: String(n.attrs?.status ?? "open"), severity: String(n.attrs?.severity ?? "medium"),
   }));
 
+  // Bucket callers by hierarchy
+  const callerIds = callersResult.nodes.map((n: any) => n.id);
+  const propagationBuckets = callerIds.length > 0
+    ? await bucketByHierarchy(client, callerIds)
+    : [];
+
+  const systemPathMapped = systemPath.map((n) => ({ name: n.name, kind: n.kind }));
+
+  // Extract caller/callee names for rendering
+  const callerNames = callersResult.nodes.map((n: any) => n.name || n.attrs?.name || "(unnamed)");
+  const calleeNames = calleesResult.nodes.map((n: any) => n.name || n.attrs?.name || "(unnamed)");
+
+  // Infer risk semantics
+  const riskFacts: ImpactFacts = {
+    name: target.name,
+    kind: target.kind,
+    container: undefined,
+    systemPath: systemPathMapped,
+    members: 0,
+    callers: callersResult.nodes.length,
+    callees: calleesResult.nodes.length,
+    directImporters: 0,
+    directDependents: 0,
+    memberLevelCallers: 0,
+    propagationBuckets: propagationBuckets.map((b) => ({
+      region: b.region.name,
+      regionKind: b.region.kind,
+      count: b.members.length,
+    })),
+    topCallerNames: callerNames.slice(0, 3),
+  };
+  const risk = inferRiskSemantics(riskFacts);
+
   if (isJson) {
     console.log(
       JSON.stringify(
@@ -224,6 +432,13 @@ async function leafImpact(
           resolutionMode: target.resolutionMode,
           resultSource: "graph",
           depth,
+          systemPath: systemPathMapped,
+          riskSummary: risk.riskSummary,
+          riskLevel: risk.riskLevel,
+          riskCategory: risk.category,
+          atRiskBehavior: risk.behaviorAtRisk,
+          nextStep: risk.nextStep ?? null,
+          flowPropagation: risk.flowPropagation ?? null,
           summary: {
             members: 0,
             callers: callersResult.nodes.length,
@@ -243,6 +458,12 @@ async function leafImpact(
             name: n.name || n.attrs?.name || "(unnamed)",
           })),
           topImpactedMembers: [],
+          propagationBuckets: propagationBuckets.map((b) => ({
+            region: b.region.name,
+            regionKind: b.region.kind,
+            count: b.members.length,
+            members: b.members.slice(0, 5).map((m) => ({ name: m.name, kind: m.kind })),
+          })),
           decisions,
           tasks,
           bugs,
@@ -253,53 +474,35 @@ async function leafImpact(
       )
     );
   } else {
-    const depthNote = depth > 1 ? chalk.dim(` (depth ${depth})`) : "";
-    console.log(chalk.bold(`Target: ${target.kind} ${target.name}\n`));
-    console.log(chalk.bold("Impact summary:") + depthNote);
-    console.log(`  callers: ${callersResult.nodes.length}`);
-    console.log(`  callees: ${calleesResult.nodes.length}`);
+    // 1. Risk summary + At-risk behavior
+    renderRiskHeader(target, risk, systemPath);
 
-    if (callersResult.nodes.length > 0) {
-      console.log(chalk.bold("\nCallers:"));
-      for (const n of callersResult.nodes) {
-        const node = n as any;
-        const kindStr = chalk.cyan((node.kind || "").padEnd(10));
-        const name = node.name || node.attrs?.name || "(unnamed)";
-        console.log(`  ${kindStr} ${name}`);
-      }
-    }
+    // 2. Propagation
+    renderPropagationBuckets(propagationBuckets, risk.flowPropagation);
 
+    // 3. Most affected
+    renderMostAffected(risk, [], callerNames, calleeNames);
+
+    // 4. Supporting context
+    renderSupportingContext({
+      "Direct callers:": callersResult.nodes.length,
+      "Direct callees:": calleesResult.nodes.length,
+    });
+
+    // 5. Next step
+    renderNextStep(risk);
+
+    // 6. Callees (as supporting detail)
     if (calleesResult.nodes.length > 0) {
-      console.log(chalk.bold("\nCallees:"));
+      console.log(chalk.bold("\nCalls:"));
       for (const n of calleesResult.nodes) {
         const node = n as any;
-        const kindStr = chalk.cyan((node.kind || "").padEnd(10));
         const name = node.name || node.attrs?.name || "(unnamed)";
-        console.log(`  ${kindStr} ${name}`);
+        console.log(`  ${chalk.dim((node.kind || "").padEnd(10))} ${name}`);
       }
     }
 
-    if (decisions.length > 0) {
-      console.log(chalk.bold("\nDecisions:"));
-      for (const d of decisions) {
-        console.log(`  ${chalk.yellow(d.name)}`);
-      }
-    }
-
-    if (tasks.length > 0) {
-      console.log(chalk.bold("\nTasks:"));
-      for (const t of tasks) {
-        const icon = t.status === "done" ? "✓" : "○";
-        console.log(`  ${icon} [${t.status}] ${t.name}`);
-      }
-    }
-
-    if (bugs.length > 0) {
-      console.log(chalk.bold("\nBugs:"));
-      for (const b of bugs) {
-        const icon = b.status === "closed" || b.status === "resolved" ? "✓" : "○";
-        console.log(`  ${icon} [${b.status}] ${chalk.red(b.severity)} ${b.name}`);
-      }
-    }
+    // 7. Decisions / Tasks / Bugs
+    renderDecisionsTasksBugs(decisions, tasks, bugs);
   }
 }

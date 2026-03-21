@@ -112,7 +112,7 @@ echo ""
 echo "── [0] Checking dependencies ──────────────────────"
 
 MISSING_DEPS=()
-for dep in docker node jq rg; do
+for dep in docker node; do
   if ! command -v "$dep" >/dev/null 2>&1; then
     MISSING_DEPS+=("$dep")
   fi
@@ -126,15 +126,25 @@ if [ "${#MISSING_DEPS[@]}" -gt 0 ]; then
     case "$dep" in
       docker) echo "    docker:  https://docs.docker.com/get-docker/" ;;
       node)   echo "    node:    https://nodejs.org (v18+ required)" ;;
-      jq)     echo "    jq:      sudo apt install jq  /  brew install jq" ;;
-      rg)     echo "    rg:      sudo apt install ripgrep  /  brew install ripgrep" ;;
     esac
   done
   echo ""
   echo "  Re-run setup.sh after installing missing tools."
   exit 1
 fi
-echo "  [ok] docker, node, jq, rg"
+echo "  [ok] docker, node"
+
+# Warn about optional tools (needed for hooks + ix text)
+MISSING_OPT=()
+for dep in jq rg; do
+  if ! command -v "$dep" >/dev/null 2>&1; then
+    MISSING_OPT+=("$dep")
+  fi
+done
+if [ "${#MISSING_OPT[@]}" -gt 0 ]; then
+  echo "  [warn] Optional tools not found: ${MISSING_OPT[*]}"
+  echo "         jq is required for Claude Code hooks; rg for 'ix text' search."
+fi
 
 echo ""
 
@@ -196,6 +206,7 @@ echo ""
 echo "  Next: connect a project to IX:"
 echo "    ./scripts/connect.sh ~/my-project"
 echo ""
-echo "  Or with a specific IDE:"
-echo "    ./scripts/connect.sh ~/my-project --cursor"
+echo "  To also install MCP (optional, for Cursor/Claude Desktop):"
+echo "    ./scripts/connect.sh ~/my-project --mcp cursor"
+echo "    ./scripts/connect.sh ~/my-project --mcp claude-desktop"
 echo ""

@@ -448,6 +448,15 @@ class ArangoGraphQueryApi(client: ArangoClient) extends GraphQueryApi {
     }
   }
 
+  override def hasIngestBaseline(): IO[Boolean] =
+    client.query(
+      """FOR p IN patches
+        |  FILTER p.data.source.sourceHash != null
+        |  LIMIT 1
+        |  RETURN 1""".stripMargin,
+      Map.empty
+    ).map(_.nonEmpty)
+
   override def expandByName(
     name: String,
     direction: Direction,

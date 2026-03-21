@@ -21,6 +21,17 @@ set -euo pipefail
 IX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$IX_DIR"
 
+# On Windows/MINGW, Docker (a Windows binary) receives paths via MINGW's
+# auto-conversion, which turns /c/Users/foo into C:\Users\foo — the drive
+# letter colon then breaks Docker's source:target:options mount syntax.
+# Prefixing with an extra / (//c/Users/foo) suppresses MINGW conversion so
+# the path reaches Docker Desktop as-is, which it maps correctly.
+if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
+  export DOCKER_HOME="/${HOME}"
+else
+  export DOCKER_HOME="${HOME}"
+fi
+
 JAR_PATH="memory-layer/target/scala-2.13/ix-memory-layer.jar"
 HEALTH_URL="http://localhost:8090/v1/health"
 ARANGO_URL="http://localhost:8529/_api/version"
