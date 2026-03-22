@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/ix-infrastructure/Ix/compare/v0.3.1...v0.3.2) (2026-03-22)
+
+
+### Bug Fixes
+
+* install core-ingestion deps before CLI build in release and build script ([a21e5c4](https://github.com/ix-infrastructure/Ix/commit/a21e5c479071c466e708c93d21fce2f96c37bd01))
+
 ## [0.3.1](https://github.com/ix-infrastructure/Ix/compare/v0.3.0...v0.3.1) (2026-03-22)
 
 
