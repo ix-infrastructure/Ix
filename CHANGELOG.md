@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.0](https://github.com/ix-infrastructure/Ix/compare/v0.3.4...v0.4.0) (2026-03-22)
+
+
+### Features
+
+* add ix upgrade command and update notifications ([e7082be](https://github.com/ix-infrastructure/Ix/commit/e7082be1f87d4f0148e7505d2dc933b55357fc46))
+* add ix upgrade command and update notifications ([0b4816c](https://github.com/ix-infrastructure/Ix/commit/0b4816c5dda35a31c8e8341240790bbe2c5e8f6b))
+* auto-merge release-please PRs ([b5e60d3](https://github.com/ix-infrastructure/Ix/commit/b5e60d36cf9b9bf001af9efd673b1ce88ee929df))
+* auto-merge release-please PRs ([e48715d](https://github.com/ix-infrastructure/Ix/commit/e48715de820429315cd41d6fd43ab0c3794b9404))
+
 ## [0.3.4](https://github.com/ix-infrastructure/Ix/compare/v0.3.3...v0.3.4) (2026-03-22)
 
 
