@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.1](https://github.com/ix-infrastructure/Ix/compare/v0.3.0...v0.3.1) (2026-03-22)
+
+
+### Bug Fixes
+
+* consolidate release pipeline into release-please workflow ([fd2eefb](https://github.com/ix-infrastructure/Ix/commit/fd2eefbea8f871491b4f13dada4fce117e021b3f))
+* consolidate release pipeline into release-please workflow ([2ae3998](https://github.com/ix-infrastructure/Ix/commit/2ae3998b0d1550f78d3ef3c4bf99c1e78c2ae359))
+* consolidate release pipeline into release-please workflow ([cf5776d](https://github.com/ix-infrastructure/Ix/commit/cf5776d3940d3f77b7d1f0e7824c659992f54b24))
+* sync package-lock.json version to 0.3.0 ([77fd91f](https://github.com/ix-infrastructure/Ix/commit/77fd91f1734e5457560f82c5d6556831501ae495))
+* update ingest references to ix map in README and install.sh ([6299de3](https://github.com/ix-infrastructure/Ix/commit/6299de3774677c9e1da8a61b6282005247cdd3bf))
+* update ingest references to ix map in README and install.sh ([34c2f94](https://github.com/ix-infrastructure/Ix/commit/34c2f9478b753c6990f3509c717b0d367513e466))
+
 ## [0.3.0](https://github.com/ix-infrastructure/Ix/compare/v0.2.0...v0.3.0) (2026-03-21)
 
 
