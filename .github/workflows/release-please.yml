@@ -35,6 +35,20 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+      # Auto-merge the release PR when CI passes.
+      # Requires: repo Settings → General → "Allow auto-merge" enabled,
+      # and github-actions[bot] added as bypass actor in branch ruleset.
+      # This ONLY merges PRs created by release-please — not human PRs.
+      - name: Auto-merge release PR
+        if: steps.rp.outputs.pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=$(echo '${{ steps.rp.outputs.pr }}' | jq -r '.number')
+          if [ "$PR_NUMBER" != "null" ] && [ -n "$PR_NUMBER" ]; then
+            gh pr merge "$PR_NUMBER" --squash --auto --repo ${{ github.repository }}
+          fi
+
   build-and-release:
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
