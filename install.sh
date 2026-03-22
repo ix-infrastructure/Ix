@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# ─────────────────────────────────────────────────────────────────────────────
 # Ix — Standalone Installer
 #
 # Installs everything needed to run Ix without cloning the repo:
@@ -15,32 +14,63 @@
 #   IX_VERSION=0.2.0          Override version (default: latest)
 #   IX_SKIP_BACKEND=1         Skip Docker backend setup
 #   IX_SKIP_HOOKS=1           Skip Claude Code hook installation
-# ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
 
-# ── Config ───────────────────────────────────────────────────────────────────
+# -- Config --
 
 GITHUB_ORG="ix-infrastructure"
 GITHUB_REPO="Ix"
 GITHUB_RAW="https://raw.githubusercontent.com/${GITHUB_ORG}/${GITHUB_REPO}/main"
 
 IX_HOME="${IX_HOME:-$HOME/.ix}"
-IX_BIN="$HOME/.local/bin"
 IX_DATA="$IX_HOME/data"
 COMPOSE_DIR="$IX_HOME/backend"
 
 HEALTH_URL="http://localhost:8090/v1/health"
 ARANGO_URL="http://localhost:8529/_api/version"
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# Pick a bin dir that's already in PATH and writable
+pick_bin_dir() {
+  # Prefer /usr/local/bin (already in PATH everywhere)
+  if [ -w "/usr/local/bin" ] || [ -w "/usr/local" ]; then
+    echo "/usr/local/bin"
+    return
+  fi
+  # Fallback to ~/.local/bin
+  mkdir -p "$HOME/.local/bin"
+  echo "$HOME/.local/bin"
+}
+
+IX_BIN="$(pick_bin_dir)"
+
+# -- Helpers --
 
 info()  { printf "  \033[32m[ok]\033[0m %s\n" "$*"; }
 warn()  { printf "  \033[33m[!!]\033[0m %s\n" "$*" >&2; }
 err()   { printf "  \033[31m[error]\033[0m %s\n" "$*" >&2; exit 1; }
-step()  { printf "\n── %s ──\n" "$*"; }
+step()  { printf "\n-- %s --\n" "$*"; }
 
-# ── Resolve version ─────────────────────────────────────────────────────────
+ensure_path() {
+  # Only needed if using ~/.local/bin
+  if [ "$IX_BIN" = "/usr/local/bin" ]; then return; fi
+
+  local path_line='export PATH="$HOME/.local/bin:$PATH"'
+  local rc_files=()
+
+  [ -f "$HOME/.zshrc" ]  && rc_files+=("$HOME/.zshrc")
+  [ -f "$HOME/.bashrc" ] && rc_files+=("$HOME/.bashrc")
+  [ "${#rc_files[@]}" -eq 0 ] && rc_files=("$HOME/.zshrc")
+
+  for rc in "${rc_files[@]}"; do
+    [ -f "$rc" ] || touch "$rc"
+    if ! grep -Fq '.local/bin' "$rc" 2>/dev/null; then
+      printf '\n# Added by Ix installer\n%s\n' "$path_line" >> "$rc"
+    fi
+  done
+}
+
+# -- Resolve version --
 
 resolve_version() {
   if [ -n "${IX_VERSION:-}" ]; then
@@ -48,7 +78,6 @@ resolve_version() {
     return
   fi
 
-  # Try GitHub API for latest release
   if command -v curl >/dev/null 2>&1; then
     local latest
     latest=$(curl -fsSL "https://api.github.com/repos/${GITHUB_ORG}/${GITHUB_REPO}/releases/latest" 2>/dev/null \
@@ -59,11 +88,10 @@ resolve_version() {
     fi
   fi
 
-  # Fallback
   echo "0.1.0"
 }
 
-# ── Detect platform ─────────────────────────────────────────────────────────
+# -- Detect platform --
 
 detect_platform() {
   local os arch
@@ -85,27 +113,9 @@ detect_platform() {
   echo "${os}-${arch}"
 }
 
-# ── PATH helper ──────────────────────────────────────────────────────────────
-
-ensure_path() {
-  local path_line='export PATH="$HOME/.local/bin:$PATH"'
-  local rc_files=()
-
-  [ -f "$HOME/.zshrc" ]  && rc_files+=("$HOME/.zshrc")
-  [ -f "$HOME/.bashrc" ] && rc_files+=("$HOME/.bashrc")
-  [ "${#rc_files[@]}" -eq 0 ] && rc_files=("$HOME/.zshrc")
-
-  for rc in "${rc_files[@]}"; do
-    [ -f "$rc" ] || touch "$rc"
-    if ! grep -Fq '.local/bin' "$rc" 2>/dev/null; then
-      printf '\n# Added by Ix installer\n%s\n' "$path_line" >> "$rc"
-    fi
-  done
-}
-
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 #  MAIN
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 echo ""
 echo "╔══════════════════════════════════════════╗"
@@ -118,7 +128,7 @@ PLATFORM=$(detect_platform)
 echo "  Version:  $VERSION"
 echo "  Platform: $PLATFORM"
 
-# ── Step 1: Check / Install Docker ───────────────────────────────────────────
+# -- Step 1: Check / Install Docker --
 
 step "1. Docker"
 
@@ -151,7 +161,6 @@ else
     err "Install Docker and re-run this installer."
   fi
 
-  # Check Docker is running
   if ! docker info >/dev/null 2>&1; then
     echo ""
     echo "  Docker is installed but not running."
@@ -178,21 +187,18 @@ else
   info "Docker is running"
 fi
 
-# ── Step 2: Start Backend ────────────────────────────────────────────────────
+# -- Step 2: Start Backend --
 
 step "2. Backend (ArangoDB + Memory Layer)"
 
 if [ "${IX_SKIP_BACKEND:-}" = "1" ]; then
   echo "  (skipped via IX_SKIP_BACKEND=1)"
 else
-  # Check if already running and healthy
   if curl -sf "$HEALTH_URL" >/dev/null 2>&1 && curl -sf "$ARANGO_URL" >/dev/null 2>&1; then
     info "Backend is already running and healthy"
   else
-    # Kill any stale process on 8090 that isn't Docker
     stale_pid=$(lsof -ti :8090 2>/dev/null || true)
     if [ -n "$stale_pid" ]; then
-      # Check if it's a Docker process — if not, kill it
       stale_cmd=$(ps -p "$stale_pid" -o comm= 2>/dev/null || true)
       if [ "$stale_cmd" != "com.docker.ba" ] && [ "$stale_cmd" != "docker" ]; then
         warn "Killing stale process on port 8090 (PID $stale_pid: $stale_cmd)"
@@ -203,15 +209,12 @@ else
 
     mkdir -p "$COMPOSE_DIR"
 
-    # Download docker-compose.yml
     curl -fsSL "${GITHUB_RAW}/docker-compose.standalone.yml" -o "$COMPOSE_DIR/docker-compose.yml"
-    info "Downloaded docker-compose.yml → $COMPOSE_DIR"
+    info "Downloaded docker-compose.yml"
 
-    # Start services
     echo "  Starting backend services (this may take a minute on first run)..."
     docker compose -f "$COMPOSE_DIR/docker-compose.yml" up -d --pull always 2>&1 | sed 's/^/  /'
 
-    # Wait for health
     echo "  Waiting for services to become healthy..."
     for i in $(seq 1 30); do
       if curl -sf "$HEALTH_URL" >/dev/null 2>&1 && curl -sf "$ARANGO_URL" >/dev/null 2>&1; then
@@ -233,13 +236,20 @@ else
   echo "  ArangoDB:     http://localhost:8529"
 fi
 
-# ── Step 3: Install ix CLI ───────────────────────────────────────────────────
+# -- Step 3: Install ix CLI --
 
 step "3. ix CLI"
 
 TARBALL_NAME="ix-${VERSION}-${PLATFORM}.tar.gz"
 TARBALL_URL="https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/releases/download/v${VERSION}/${TARBALL_NAME}"
 INSTALL_DIR="$IX_HOME/cli"
+
+# Remove any stale ix from other locations
+for old_ix in "$HOME/.local/bin/ix" "/usr/local/bin/ix"; do
+  if [ "$old_ix" != "$IX_BIN/ix" ] && [ -f "$old_ix" ]; then
+    rm -f "$old_ix" 2>/dev/null || true
+  fi
+done
 
 # Check if already installed at correct version
 if [ -x "$IX_BIN/ix" ]; then
@@ -253,7 +263,7 @@ if [ -x "$IX_BIN/ix" ]; then
 fi
 
 if [ ! -x "$IX_BIN/ix" ] || [ "$("$IX_BIN/ix" --version 2>/dev/null || echo "")" != "$VERSION" ]; then
-  mkdir -p "$INSTALL_DIR" "$IX_BIN"
+  mkdir -p "$INSTALL_DIR"
 
   echo "  Downloading ix CLI v${VERSION} for ${PLATFORM}..."
   if ! curl -fsSL "$TARBALL_URL" -o "/tmp/${TARBALL_NAME}" 2>/dev/null; then
@@ -273,9 +283,9 @@ if [ ! -x "$IX_BIN/ix" ] || [ "$("$IX_BIN/ix" --version 2>/dev/null || echo "")"
   # Extract
   tar -xzf "/tmp/${TARBALL_NAME}" -C "$INSTALL_DIR" --strip-components=1
   rm -f "/tmp/${TARBALL_NAME}"
-  info "Extracted CLI → $INSTALL_DIR"
+  info "Extracted CLI"
 
-  # Create shim
+  # Create wrapper in bin dir
   cat > "$IX_BIN/ix" <<SHIM
 #!/usr/bin/env bash
 exec "$INSTALL_DIR/ix" "\$@"
@@ -284,14 +294,10 @@ SHIM
 
   ensure_path
 
-  # Make ix available in the current shell immediately
-  export PATH="$IX_BIN:$PATH"
-  hash -r 2>/dev/null || true
-
-  info "Installed: ~/.local/bin/ix"
+  info "Installed: $IX_BIN/ix"
 fi
 
-# ── Step 4: Claude Code Hooks ────────────────────────────────────────────────
+# -- Step 4: Claude Code Hooks --
 
 step "4. Claude Code Plugin"
 
@@ -305,7 +311,7 @@ else
   curl -fsSL "${GITHUB_RAW}/ix-plugin/install.sh" | bash
 fi
 
-# ── Done ─────────────────────────────────────────────────────────────────────
+# -- Done --
 
 echo ""
 echo "╔══════════════════════════════════════════╗"
@@ -320,8 +326,14 @@ echo ""
 if command -v ix >/dev/null 2>&1; then
   CLI_VERSION=$(ix --version 2>/dev/null || echo "unknown")
   info "ix CLI v${CLI_VERSION} is working"
+elif [ -x "$IX_BIN/ix" ]; then
+  CLI_VERSION=$("$IX_BIN/ix" --version 2>/dev/null || echo "unknown")
+  info "ix CLI v${CLI_VERSION} installed at $IX_BIN/ix"
+  if [ "$IX_BIN" != "/usr/local/bin" ]; then
+    echo "  Open a new terminal for 'ix' to be in your PATH"
+  fi
 else
-  warn "ix is not in PATH yet — open a new terminal to use it"
+  warn "ix not found"
 fi
 
 echo ""

@@ -68,12 +68,13 @@ fi
 echo ""
 echo "── Removing ix CLI ──"
 
-if [ -f "$IX_BIN/ix" ]; then
-  rm -f "$IX_BIN/ix"
-  info "Removed $IX_BIN/ix"
-else
-  echo "  (ix binary not found — skipping)"
-fi
+# Remove ix from all known locations
+for ix_path in "/usr/local/bin/ix" "$HOME/.local/bin/ix"; do
+  if [ -f "$ix_path" ]; then
+    rm -f "$ix_path" 2>/dev/null || true
+    info "Removed $ix_path"
+  fi
+done
 
 if [ -d "$IX_HOME/cli" ]; then
   rm -rf "$IX_HOME/cli"
