@@ -26,6 +26,7 @@ System:
   doctor                Check system health
   docker <action>       Manage the IX backend containers
   reset                 Wipe all graph data for a clean re-ingest
+  upgrade               Upgrade ix CLI and backend to the latest version
 `;
 
 const FOOTER = `Use "ix help advanced" for low-level graph commands.
