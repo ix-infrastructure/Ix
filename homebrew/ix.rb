@@ -3,7 +3,7 @@ class Ix < Formula
   homepage "https://github.com/ix-infrastructure/Ix"
   url "https://github.com/ix-infrastructure/Ix/archive/refs/tags/v0.3.4.tar.gz"
   sha256 "32bfaa786849230d3ee72198b0a89ce7706dfd011c9919d69fc9929265c10fa7"
-  license "MIT"
+  license "Apache-2.0"
   head "https://github.com/ix-infrastructure/Ix.git", branch: "main"
 
   depends_on "node@22"

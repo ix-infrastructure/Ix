@@ -1,7 +1,7 @@
 import { Command } from "commander";
-import { execSync, spawn } from "child_process";
+import { execFileSync, execSync, spawn } from "child_process";
 import { createInterface } from "readline";
-import { existsSync } from "fs";
+import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
@@ -14,29 +14,17 @@ const GITHUB_RAW =
   "https://raw.githubusercontent.com/ix-infrastructure/Ix/main";
 
 function findComposeFile(): string | null {
-  // Check standalone install location first
   if (existsSync(LOCAL_COMPOSE)) return LOCAL_COMPOSE;
-
-  // Check if we're in the Ix repo
   const repoCompose = join(process.cwd(), "docker-compose.yml");
   if (existsSync(repoCompose)) return repoCompose;
-
   return null;
 }
 
-/**
- * Find all Ix-managed ArangoDB Docker volumes across repos.
- *
- * Matches volumes created by Docker Compose where:
- *   - The compose project name starts with "ix" (label: com.docker.compose.project)
- *   - The compose volume name contains "arango" (label: com.docker.compose.volume)
- *
- * This avoids matching unrelated ArangoDB volumes (e.g. enterprise projects).
- */
 function findIxArangoVolumes(): string[] {
   try {
-    const output = execSync(
-      'docker volume ls --format "{{.Name}}|{{.Labels}}"',
+    const output = execFileSync(
+      "docker",
+      ["volume", "ls", "--format", "{{.Name}}|{{.Labels}}"],
       { encoding: "utf-8", timeout: 10000 }
     ).trim();
     if (!output) return [];
@@ -45,7 +33,6 @@ function findIxArangoVolumes(): string[] {
       const [name, labels] = line.split("|", 2);
       if (!name || !labels) return false;
 
-      // Parse labels: "key1=val1,key2=val2,..."
       const labelMap = new Map<string, string>();
       for (const pair of labels.split(",")) {
         const eq = pair.indexOf("=");
@@ -55,7 +42,6 @@ function findIxArangoVolumes(): string[] {
       const project = labelMap.get("com.docker.compose.project") ?? "";
       const volume = labelMap.get("com.docker.compose.volume") ?? "";
 
-      // Match: Ix project (starts with "ix") + ArangoDB volume (contains "arango")
       return project.startsWith("ix") && volume.includes("arango");
     }).map((line) => line.split("|", 1)[0]);
   } catch {
@@ -75,8 +61,8 @@ function askConfirmation(prompt: string): Promise<boolean> {
 
 function isHealthy(): boolean {
   try {
-    execSync(`curl -sf ${HEALTH_URL}`, { stdio: "ignore", timeout: 5000 });
-    execSync(`curl -sf ${ARANGO_URL}`, { stdio: "ignore", timeout: 5000 });
+    execFileSync("curl", ["-sf", HEALTH_URL], { stdio: "ignore", timeout: 5000 });
+    execFileSync("curl", ["-sf", ARANGO_URL], { stdio: "ignore", timeout: 5000 });
     return true;
   } catch {
     return false;
@@ -85,7 +71,7 @@ function isHealthy(): boolean {
 
 function dockerAvailable(): boolean {
   try {
-    execSync("docker info", { stdio: "ignore", timeout: 10000 });
+    execFileSync("docker", ["info"], { stdio: "ignore", timeout: 10000 });
     return true;
   } catch {
     return false;
@@ -117,28 +103,26 @@ export function registerDockerCommand(program: Command): void {
 
       let composeFile = findComposeFile();
 
-      // If no compose file found, download the standalone one
       if (!composeFile) {
         console.log("Downloading docker-compose.yml...");
         try {
-          execSync(`mkdir -p "${COMPOSE_DIR}"`);
-          execSync(
-            `curl -fsSL "${GITHUB_RAW}/docker-compose.standalone.yml" -o "${LOCAL_COMPOSE}"`,
+          mkdirSync(COMPOSE_DIR, { recursive: true });
+          execFileSync(
+            "curl",
+            ["-fsSL", `${GITHUB_RAW}/docker-compose.standalone.yml`, "-o", LOCAL_COMPOSE],
             { stdio: "inherit" }
           );
           composeFile = LOCAL_COMPOSE;
           console.log(`[ok] Saved to ${COMPOSE_DIR}`);
         } catch {
-          console.error(
-            "[error] Failed to download docker-compose.yml"
-          );
+          console.error("[error] Failed to download docker-compose.yml");
           process.exit(1);
         }
       }
 
       console.log("Starting backend services...");
       try {
-        execSync(`docker compose -f "${composeFile}" up -d`, {
+        execFileSync("docker", ["compose", "-f", composeFile, "up", "-d"], {
           stdio: "inherit",
         });
       } catch {
@@ -146,7 +130,6 @@ export function registerDockerCommand(program: Command): void {
         process.exit(1);
       }
 
-      // Wait for health
       console.log("Waiting for services to become healthy...");
       for (let i = 0; i < 30; i++) {
         if (isHealthy()) {
@@ -161,9 +144,7 @@ export function registerDockerCommand(program: Command): void {
       }
 
       console.log("");
-      console.error(
-        "[!!] Health check timed out. Check: ix docker logs"
-      );
+      console.error("[!!] Health check timed out. Check: ix docker logs");
       process.exit(1);
     });
 
@@ -178,34 +159,28 @@ export function registerDockerCommand(program: Command): void {
       const composeFile = findComposeFile();
       if (!composeFile) {
         console.error("[error] No docker-compose.yml found.");
-        console.error(
-          "  Run 'ix docker start' first, or run from the Ix repo."
-        );
+        console.error("  Run 'ix docker start' first, or run from the Ix repo.");
         process.exit(1);
       }
 
-      // --remove-all-data is a superset of --remove-data
       const removeLocal = opts.removeData || opts.removeAllData;
-      const flags = removeLocal ? "down -v" : "down";
+      const args = ["compose", "-f", composeFile, "down"];
+      if (removeLocal) args.push("-v");
 
       try {
-        execSync(`docker compose -f "${composeFile}" ${flags}`, {
-          stdio: "inherit",
-        });
+        execFileSync("docker", args, { stdio: "inherit" });
       } catch {
         console.error("[error] Failed to stop containers.");
         process.exit(1);
       }
 
       if (opts.removeAllData) {
-        // Global cleanup: find and remove all Ix ArangoDB volumes
         const volumes = findIxArangoVolumes();
         if (volumes.length === 0) {
           console.log("[ok] Backend stopped. No additional Ix data volumes found.");
           return;
         }
 
-        // Confirm unless --yes
         if (!opts.yes) {
           console.log("");
           console.log("This will remove all local Ix ArangoDB data volumes across repos:");
@@ -222,7 +197,7 @@ export function registerDockerCommand(program: Command): void {
         const failed: string[] = [];
         for (const v of volumes) {
           try {
-            execSync(`docker volume rm "${v}"`, { stdio: "ignore", timeout: 10000 });
+            execFileSync("docker", ["volume", "rm", v], { stdio: "ignore", timeout: 10000 });
             removed.push(v);
           } catch {
             failed.push(v);
@@ -249,9 +224,7 @@ export function registerDockerCommand(program: Command): void {
         console.log("[ok] Backend stopped and data volume removed.");
       } else {
         console.log("[ok] Backend stopped. Data volume preserved.");
-        console.log(
-          "  Use 'ix docker stop --remove-data' to also delete data."
-        );
+        console.log("  Use 'ix docker stop --remove-data' to also delete data.");
       }
     });
 
@@ -262,7 +235,7 @@ export function registerDockerCommand(program: Command): void {
       const composeFile = findComposeFile();
       if (composeFile) {
         try {
-          execSync(`docker compose -f "${composeFile}" ps`, {
+          execFileSync("docker", ["compose", "-f", composeFile, "ps"], {
             stdio: "inherit",
           });
         } catch {
@@ -277,19 +250,13 @@ export function registerDockerCommand(program: Command): void {
       } else {
         console.log("[!!] Backend is not healthy");
         try {
-          execSync(`curl -sf ${HEALTH_URL}`, {
-            stdio: "ignore",
-            timeout: 3000,
-          });
+          execFileSync("curl", ["-sf", HEALTH_URL], { stdio: "ignore", timeout: 3000 });
           console.log("  Memory Layer: responding");
         } catch {
           console.log("  Memory Layer: not responding");
         }
         try {
-          execSync(`curl -sf ${ARANGO_URL}`, {
-            stdio: "ignore",
-            timeout: 3000,
-          });
+          execFileSync("curl", ["-sf", ARANGO_URL], { stdio: "ignore", timeout: 3000 });
           console.log("  ArangoDB: responding");
         } catch {
           console.log("  ArangoDB: not responding");
@@ -308,12 +275,9 @@ export function registerDockerCommand(program: Command): void {
         process.exit(1);
       }
 
-      const followFlag = opts.follow ? "-f" : "";
-      const child = spawn(
-        "docker",
-        ["compose", "-f", composeFile, "logs", followFlag].filter(Boolean),
-        { stdio: "inherit" }
-      );
+      const args = ["compose", "-f", composeFile, "logs"];
+      if (opts.follow) args.push("-f");
+      const child = spawn("docker", args, { stdio: "inherit" });
       child.on("exit", (code) => process.exit(code || 0));
     });
 
@@ -328,7 +292,7 @@ export function registerDockerCommand(program: Command): void {
       }
 
       try {
-        execSync(`docker compose -f "${composeFile}" restart`, {
+        execFileSync("docker", ["compose", "-f", composeFile, "restart"], {
           stdio: "inherit",
         });
         console.log("[ok] Backend restarted.");

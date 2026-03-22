@@ -265,8 +265,12 @@ fi
 if [ ! -x "$IX_BIN/ix" ] || [ "$("$IX_BIN/ix" --version 2>/dev/null || echo "")" != "$VERSION" ]; then
   mkdir -p "$INSTALL_DIR"
 
+  TMP_DIR=$(mktemp -d)
+  TMP_FILE="$TMP_DIR/${TARBALL_NAME}"
+
   echo "  Downloading ix CLI v${VERSION} for ${PLATFORM}..."
-  if ! curl -fsSL "$TARBALL_URL" -o "/tmp/${TARBALL_NAME}" 2>/dev/null; then
+  if ! curl -fsSL "$TARBALL_URL" -o "$TMP_FILE" 2>/dev/null; then
+    rm -rf "$TMP_DIR"
     echo ""
     warn "Could not download pre-built CLI from:"
     warn "  $TARBALL_URL"
@@ -281,8 +285,8 @@ if [ ! -x "$IX_BIN/ix" ] || [ "$("$IX_BIN/ix" --version 2>/dev/null || echo "")"
   fi
 
   # Extract
-  tar -xzf "/tmp/${TARBALL_NAME}" -C "$INSTALL_DIR" --strip-components=1
-  rm -f "/tmp/${TARBALL_NAME}"
+  tar -xzf "$TMP_FILE" -C "$INSTALL_DIR" --strip-components=1
+  rm -rf "$TMP_DIR"
   info "Extracted CLI"
 
   # Create wrapper in bin dir

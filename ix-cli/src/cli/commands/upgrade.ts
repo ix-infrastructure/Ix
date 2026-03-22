@@ -1,8 +1,8 @@
 import { Command } from "commander";
-import { execSync } from "child_process";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { execFileSync } from "child_process";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, mkdtempSync } from "fs";
 import { join } from "path";
-import { homedir } from "os";
+import { homedir, tmpdir } from "os";
 import chalk from "chalk";
 
 const GITHUB_ORG = "ix-infrastructure";
@@ -84,7 +84,6 @@ export async function checkForUpdate(): Promise<void> {
   const current = getCurrentVersion();
   const cache = readCache();
 
-  // Only check once per hour
   if (cache && Date.now() - cache.checkedAt < 3600_000) {
     if (isNewer(cache.latest, current)) {
       printUpdateNotice(current, cache.latest);
@@ -92,7 +91,6 @@ export async function checkForUpdate(): Promise<void> {
     return;
   }
 
-  // Fetch in background — don't block the command
   fetchLatestVersion().then((latest) => {
     if (!latest) return;
     writeCache(latest);
@@ -138,17 +136,21 @@ export function registerUpgradeCommand(program: Command): void {
 
       if (opts.check) return;
 
-      // Download and install the new CLI
       const platform = detectPlatform();
       const tarball = `ix-${latest}-${platform}.tar.gz`;
       const url = `https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/releases/download/v${latest}/${tarball}`;
       const installDir = join(IX_HOME, "cli");
 
+      // Use secure temp directory
+      const tmpDir = mkdtempSync(join(tmpdir(), "ix-upgrade-"));
+      const tmpFile = join(tmpDir, tarball);
+
       console.log(`Downloading ix ${latest} for ${platform}...`);
 
       try {
-        execSync(
-          `curl -fsSL "${url}" -o "/tmp/${tarball}"`,
+        execFileSync(
+          "curl",
+          ["-fsSL", url, "-o", tmpFile],
           { stdio: "inherit", timeout: 60000 }
         );
       } catch {
@@ -157,51 +159,52 @@ export function registerUpgradeCommand(program: Command): void {
         console.error(
           `  curl -fsSL https://raw.githubusercontent.com/${GITHUB_ORG}/${GITHUB_REPO}/main/install.sh | bash`
         );
+        rmSync(tmpDir, { recursive: true, force: true });
         process.exit(1);
       }
 
-      // Extract over the existing install
       console.log("Installing...");
       try {
-        execSync(`rm -rf "${installDir}"`, { stdio: "ignore" });
-        execSync(`mkdir -p "${installDir}"`, { stdio: "ignore" });
-        execSync(
-          `tar -xzf "/tmp/${tarball}" -C "${installDir}" --strip-components=1`,
+        rmSync(installDir, { recursive: true, force: true });
+        mkdirSync(installDir, { recursive: true });
+        execFileSync(
+          "tar",
+          ["-xzf", tmpFile, "-C", installDir, "--strip-components=1"],
           { stdio: "ignore" }
         );
-        execSync(`rm -f "/tmp/${tarball}"`, { stdio: "ignore" });
+        rmSync(tmpDir, { recursive: true, force: true });
       } catch {
         console.error("[error] Failed to extract CLI update.");
+        rmSync(tmpDir, { recursive: true, force: true });
         process.exit(1);
       }
 
       console.log(`[ok] Upgraded ix: ${current} → ${latest}`);
 
-      // Update the Docker image too
       console.log("Pulling latest backend image...");
       try {
-        execSync(
-          "docker pull ghcr.io/ix-infrastructure/ix-memory-layer:latest",
+        execFileSync(
+          "docker",
+          ["pull", "ghcr.io/ix-infrastructure/ix-memory-layer:latest"],
           { stdio: "inherit", timeout: 120000 }
         );
         console.log("[ok] Backend image updated");
       } catch {
-        console.error(
-          "[!!] Could not pull latest backend image. Run: ix docker restart"
-        );
+        console.error("[!!] Could not pull latest backend image. Run: ix docker restart");
       }
 
       // Restart backend if running
       try {
-        execSync("curl -sf http://localhost:8090/v1/health", {
+        execFileSync("curl", ["-sf", "http://localhost:8090/v1/health"], {
           stdio: "ignore",
           timeout: 3000,
         });
         console.log("Restarting backend...");
         const composeFile = join(IX_HOME, "backend", "docker-compose.yml");
         if (existsSync(composeFile)) {
-          execSync(
-            `docker compose -f "${composeFile}" up -d --pull always`,
+          execFileSync(
+            "docker",
+            ["compose", "-f", composeFile, "up", "-d", "--pull", "always"],
             { stdio: "inherit" }
           );
           console.log("[ok] Backend restarted with latest image");
