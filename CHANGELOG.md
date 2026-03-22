@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.4](https://github.com/ix-infrastructure/Ix/compare/v0.3.3...v0.3.4) (2026-03-22)
+
+
+### Bug Fixes
+
+* install ix to /usr/local/bin so it works immediately ([6440219](https://github.com/ix-infrastructure/Ix/commit/64402190ef7c55eaa82df0872accb8f85ce127ca))
+* install ix to /usr/local/bin so it works immediately ([bf93002](https://github.com/ix-infrastructure/Ix/commit/bf93002b6bf6b23f53757abc72187adf498436e9))
+* make ix CLI available immediately after install ([b78ce92](https://github.com/ix-infrastructure/Ix/commit/b78ce925432b639d8a7da02bc4bf3970615193cc))
+* make ix CLI available immediately after install ([b741dda](https://github.com/ix-infrastructure/Ix/commit/b741ddaf1fcdfc83fed774abc1a2c619a7d4dcbb))
+
 ## [0.3.3](https://github.com/ix-infrastructure/Ix/compare/v0.3.2...v0.3.3) (2026-03-22)
 
 
