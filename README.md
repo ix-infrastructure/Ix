@@ -8,8 +8,8 @@ Pick one method. All install the same thing: the `ix` CLI + a local Docker backe
 
 ### curl (macOS / Linux)
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/Ix/main/install.sh | bash
+```sh
+curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/Ix/main/install.sh | sh
 ```
 
 ### PowerShell (Windows)
