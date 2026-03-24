@@ -199,6 +199,11 @@ if ($existingVersion -eq $Version) {
         [Environment]::SetEnvironmentVariable("PATH", "$IxBin;$userPath", "User")
         Write-Ok "Added $IxBin to user PATH"
     }
+
+    # Make ix available in the current session immediately
+    if ($env:Path -notlike "*$IxBin*") {
+        $env:Path = "$IxBin;$env:Path"
+    }
 }
 
 # ── Step 4: Claude Code hooks ────────────────────────────────────────────────
@@ -228,14 +233,26 @@ Write-Host "+" + ("=" * 42) + "+" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Backend:  http://localhost:8090"
 Write-Host "  ArangoDB: http://localhost:8529"
-Write-Host "  CLI:      ix docker status"
 Write-Host ""
-Write-Host "  Open a new terminal to use 'ix' commands."
+
+# Verify CLI works
+$ixCmd = Get-Command ix -ErrorAction SilentlyContinue
+if ($ixCmd) {
+    try {
+        $cliVersion = & ix --version 2>&1
+        Write-Ok "ix CLI v$cliVersion is working"
+    } catch {
+        Write-Warn "ix installed but could not verify — open a new terminal to use it"
+    }
+} else {
+    Write-Warn "ix is not in PATH yet — open a new terminal to use it"
+}
+
 Write-Host ""
 Write-Host "  Connect a project:"
 Write-Host "    cd ~\my-project"
 Write-Host "    ix init"
-Write-Host "    ix ingest .\src --recursive"
+Write-Host "    ix map .\src"
 Write-Host ""
 Write-Host "  To uninstall:"
 Write-Host "    irm $GithubRaw/uninstall.ps1 | iex"

@@ -1,5 +1,118 @@
 # Changelog
 
+## [0.4.0](https://github.com/ix-infrastructure/Ix/compare/v0.3.4...v0.4.0) (2026-03-22)
+
+
+### Features
+
+* add ix upgrade command and update notifications ([e7082be](https://github.com/ix-infrastructure/Ix/commit/e7082be1f87d4f0148e7505d2dc933b55357fc46))
+* add ix upgrade command and update notifications ([0b4816c](https://github.com/ix-infrastructure/Ix/commit/0b4816c5dda35a31c8e8341240790bbe2c5e8f6b))
+* auto-merge release-please PRs ([b5e60d3](https://github.com/ix-infrastructure/Ix/commit/b5e60d36cf9b9bf001af9efd673b1ce88ee929df))
+* auto-merge release-please PRs ([e48715d](https://github.com/ix-infrastructure/Ix/commit/e48715de820429315cd41d6fd43ab0c3794b9404))
+
+## [0.3.4](https://github.com/ix-infrastructure/Ix/compare/v0.3.3...v0.3.4) (2026-03-22)
+
+
+### Bug Fixes
+
+* install ix to /usr/local/bin so it works immediately ([6440219](https://github.com/ix-infrastructure/Ix/commit/64402190ef7c55eaa82df0872accb8f85ce127ca))
+* install ix to /usr/local/bin so it works immediately ([bf93002](https://github.com/ix-infrastructure/Ix/commit/bf93002b6bf6b23f53757abc72187adf498436e9))
+* make ix CLI available immediately after install ([b78ce92](https://github.com/ix-infrastructure/Ix/commit/b78ce925432b639d8a7da02bc4bf3970615193cc))
+* make ix CLI available immediately after install ([b741dda](https://github.com/ix-infrastructure/Ix/commit/b741ddaf1fcdfc83fed774abc1a2c619a7d4dcbb))
+
+## [0.3.3](https://github.com/ix-infrastructure/Ix/compare/v0.3.2...v0.3.3) (2026-03-22)
+
+
+### Bug Fixes
+
+* remove private repo auth from install scripts ([1ad91ca](https://github.com/ix-infrastructure/Ix/commit/1ad91cabc94e8d6727807992cb0b3c7f1ef01f58))
+* use PR instead of direct push for Homebrew formula updates ([b863954](https://github.com/ix-infrastructure/Ix/commit/b86395481ec60c3db79e8df3bdbc7b45573de363))
+* use PR instead of direct push for Homebrew formula updates ([07f45a9](https://github.com/ix-infrastructure/Ix/commit/07f45a9b21bcb2fe5616f0f3b698a70bb32b50ff))
+
+## [0.3.2](https://github.com/ix-infrastructure/Ix/compare/v0.3.1...v0.3.2) (2026-03-22)
+
+
+### Bug Fixes
+
+* install core-ingestion deps before CLI build in release and build script ([a21e5c4](https://github.com/ix-infrastructure/Ix/commit/a21e5c479071c466e708c93d21fce2f96c37bd01))
+
+## [0.3.1](https://github.com/ix-infrastructure/Ix/compare/v0.3.0...v0.3.1) (2026-03-22)
+
+
+### Bug Fixes
+
+* consolidate release pipeline into release-please workflow ([fd2eefb](https://github.com/ix-infrastructure/Ix/commit/fd2eefbea8f871491b4f13dada4fce117e021b3f))
+* consolidate release pipeline into release-please workflow ([2ae3998](https://github.com/ix-infrastructure/Ix/commit/2ae3998b0d1550f78d3ef3c4bf99c1e78c2ae359))
+* consolidate release pipeline into release-please workflow ([cf5776d](https://github.com/ix-infrastructure/Ix/commit/cf5776d3940d3f77b7d1f0e7824c659992f54b24))
+* sync package-lock.json version to 0.3.0 ([77fd91f](https://github.com/ix-infrastructure/Ix/commit/77fd91f1734e5457560f82c5d6556831501ae495))
+* update ingest references to ix map in README and install.sh ([6299de3](https://github.com/ix-infrastructure/Ix/commit/6299de3774677c9e1da8a61b6282005247cdd3bf))
+* update ingest references to ix map in README and install.sh ([34c2f94](https://github.com/ix-infrastructure/Ix/commit/34c2f9478b753c6990f3509c717b0d367513e466))
+
+## [0.3.0](https://github.com/ix-infrastructure/Ix/compare/v0.2.0...v0.3.0) (2026-03-21)
+
+
+### Features
+
+* add Go parser and fix Go query error that blocked all .go ingestion ([387f4ab](https://github.com/ix-infrastructure/Ix/commit/387f4abf654581018eef0c324a8e97280e16c30d))
+* add ix map --full override and module load timing ([4c280a3](https://github.com/ix-infrastructure/Ix/commit/4c280a387e97c30d655c03f449598c8ef8c7b969))
+* add ix trace command ([e7f9aae](https://github.com/ix-infrastructure/Ix/commit/e7f9aae0c6c99799f3b6a46f4b2ae76d80ff258d))
+* add map preflight/fast-map system, docker volume cleanup, and Apache 2.0 license ([57349ef](https://github.com/ix-infrastructure/Ix/commit/57349ef391edcd2b321ee6cabb1d86cecb769990))
+* add path-qualified name syntax to ix decide --affects ([bae1201](https://github.com/ix-infrastructure/Ix/commit/bae12014d5d4f278deb42a5f263e2d5ffb353031))
+* add PR and issue templates for contributor governance ([5267d31](https://github.com/ix-infrastructure/Ix/commit/5267d319bd894039b3deb6dbff74ea238ecb5ea2))
+* add role classification to ingestion and CLI filtering ([77de518](https://github.com/ix-infrastructure/Ix/commit/77de518a76cd643665e6ae97b66fcb373cf2ccad))
+* deterministic explanation pipeline for ix explain ([eacdd6b](https://github.com/ix-infrastructure/Ix/commit/eacdd6b0e139573b7c180828d30a8baaf8c312f0))
+* extract Pro commands into @ix/pro, add dynamic CLI help ([76ab10d](https://github.com/ix-infrastructure/Ix/commit/76ab10d89c5ddb4acb635554d13e76a8d672df9c))
+* final polish for ix overview — breadcrumb completion and formatting ([34b4c6e](https://github.com/ix-infrastructure/Ix/commit/34b4c6e97958787340b871f6c5fc46c1b8a113b1))
+* finalize trace/depends — --both removed, both is default; --cap added; kind in cyan; no truncation note ([ad844e7](https://github.com/ix-infrastructure/Ix/commit/ad844e76dda6a8d22fc5c18fc883ee2d09a9554d))
+* generalize edge resolver to handle REFERENCES and EXTENDS alongside CALLS ([84161e6](https://github.com/ix-infrastructure/Ix/commit/84161e6682059e25b287ba64b7555f42041ac2d5))
+* ix map — multi-scale architectural hierarchy from code structure ([143a20d](https://github.com/ix-infrastructure/Ix/commit/143a20d1084498dfa93f21934fe42e3087f0e0af))
+* ix map auto-ingests path before mapping ([b20ce21](https://github.com/ix-infrastructure/Ix/commit/b20ce218ba15956e918b132ce442408dcbe08622))
+* ix reset — wipe graph for clean re-ingest ([2330d07](https://github.com/ix-infrastructure/Ix/commit/2330d0701c3500dd93ac9ab2bc634c1638a46a94))
+* lazy bootstrap in ix map; ix config command; clean up UX surface ([3fa9b60](https://github.com/ix-infrastructure/Ix/commit/3fa9b6020c008085f367847e846db850b39383eb))
+* make ix overview adaptive for containers vs leaf nodes ([653c770](https://github.com/ix-infrastructure/Ix/commit/653c770a7c11501643a833ff005c8ccc3ea38da2))
+* modified the output of ix map cli to be more intuitive and added a loading bar. ([2df025c](https://github.com/ix-infrastructure/Ix/commit/2df025cf7180cbf9d9accbc6db9e5d74dd66eba6))
+* polish ix impact semantics and refactor ix locate to pure position command ([feee1ee](https://github.com/ix-infrastructure/Ix/commit/feee1ee8abd61af5df024f7ee54fddd4beb3c6f7))
+* polish ix locate with relative paths, humanized labels, and clean ambiguity ([2f1545f](https://github.com/ix-infrastructure/Ix/commit/2f1545febbcb3c9e6c5aa44004001397fda5be03))
+* refactor ix overview into pure structural summary ([8837792](https://github.com/ix-infrastructure/Ix/commit/88377925e01dbb1f5cfb913430c42acb8bd2a363))
+* show node kind in trace from-to route output ([ad5ca09](https://github.com/ix-infrastructure/Ix/commit/ad5ca098c2d81aa8208269e8b000585f111cf258))
+* speed up ingestion with change detection fix and bulk commits ([b057167](https://github.com/ix-infrastructure/Ix/commit/b05716746a3e917ada794762b81b9bdd178a5a2a))
+* update explain pipeline, render, and facts with package-lock changes ([6befba7](https://github.com/ix-infrastructure/Ix/commit/6befba7d10df38fded0384056af84c542e3ebf49))
+
+
+### Bug Fixes
+
+* add auth support to installer for private repo access ([1da4628](https://github.com/ix-infrastructure/Ix/commit/1da46281161fa500f5b6861370c6e887a6cd2464))
+* add auth support to plugin installer for private repo ([d2bf8c5](https://github.com/ix-infrastructure/Ix/commit/d2bf8c51b32d4fca6cc60f047763c94990ab4e96))
+* add language guard to tier-3 edge resolver to prevent cross-language false CALLS edges ([469cb58](https://github.com/ix-infrastructure/Ix/commit/469cb586c6ffede376b87688afc9383b7713d8dd))
+* add missing hierarchy/semantics modules; add trace+depends to oss registration and help ([d9a360f](https://github.com/ix-infrastructure/Ix/commit/d9a360f28d0f1e5392aa10e06f32f281b4152e0d))
+* bug fix for ingestion load bar ([847d731](https://github.com/ix-infrastructure/Ix/commit/847d7316373dca3760ae95d9cb3848492f9f19d4))
+* bump extractor to 1.12 so role attrs are written on re-ingest ([dc6d855](https://github.com/ix-infrastructure/Ix/commit/dc6d8553de2eacbe7cfe34fab11e321373204275))
+* docker healthcheck ordering and make MCP opt-in ([6a05692](https://github.com/ix-infrastructure/Ix/commit/6a05692415d4d3b30e373e5f030bf376602d43d6))
+* exclude component prefix from release-please tags ([1e5dc27](https://github.com/ix-infrastructure/Ix/commit/1e5dc27fc428c3f69869b7db4539f9652ebd9a2a))
+* flip IN_REGION edges top-down and atomic map patch ([abe1d90](https://github.com/ix-infrastructure/Ix/commit/abe1d909d9804c67d99e5c1e383d3e40ff0d7d07))
+* hide depends from help, make jq/rg optional in setup, fix docker-compose HOME fallback ([c5df4c9](https://github.com/ix-infrastructure/Ix/commit/c5df4c97f8d397ccfa1182c43e42de3678cc6c8a))
+* ix ingest recursive by default; ix reset auto-ingests after wipe ([9565350](https://github.com/ix-infrastructure/Ix/commit/9565350d72287b67a9b219d7b5f64100c730ec09))
+* ix reset --ingest is opt-in; fix stdin hang after confirmation ([7a55636](https://github.com/ix-infrastructure/Ix/commit/7a5563660ec53200c30e181aa0adc1ddcdf9516f))
+* ix reset must truncate idempotency_keys and all state collections ([85344e1](https://github.com/ix-infrastructure/Ix/commit/85344e1d6f67db7e96176cb35d13227fdb283e99))
+* pass auth token to plugin installer subprocess ([58958db](https://github.com/ix-infrastructure/Ix/commit/58958dbb054c2d1d75e223de73704cea0682915e))
+* register depends command so it can be hidden in joey/trace ([6cf978d](https://github.com/ix-infrastructure/Ix/commit/6cf978d0324f8935c505b76b056cd02f0d98947b))
+* remove depth/cap from trace header; normalize paths in patch-builder ([034c5f8](https://github.com/ix-infrastructure/Ix/commit/034c5f84ef0fd1b1de0b8bfac69fb4d552a869b3))
+* replace require() with ES module imports in map.ts and bootstrap.ts ([253ada1](https://github.com/ix-infrastructure/Ix/commit/253ada1894aa7c0e694d5fbced709f7758141e7c))
+* resolve CI failures in CLI build and backend test compilation ([b6f8e2b](https://github.com/ix-infrastructure/Ix/commit/b6f8e2b3644d51b9ee67df3b3307251bad033d52))
+* resolve CI failures in CLI build and backend tests ([2576242](https://github.com/ix-infrastructure/Ix/commit/2576242a8f02b868e741c6169e18ca2e56fe3e8b))
+* restore ingestion routes and fix hardcoded docker volume path ([706d402](https://github.com/ix-infrastructure/Ix/commit/706d402e6d1b782205f45addfb135fdcdde48a86))
+* support Windows/MINGW Docker path mounting ([166d720](https://github.com/ix-infrastructure/Ix/commit/166d72061cc15bec6e68faded1a878c7d1e63549))
+* update SearchAqlSpec to match normalizePath in edge ID generation ([a80618a](https://github.com/ix-infrastructure/Ix/commit/a80618a718db631f6a7e89cd291bbe04cec4af0e))
+* update stale test assertions in explain-pipeline and depends-semantics ([6f85081](https://github.com/ix-infrastructure/Ix/commit/6f85081c1cedad7d414e6734868d02a44e163e98))
+* use entity ID for callers/callees graph expansion instead of name ([4a86e67](https://github.com/ix-infrastructure/Ix/commit/4a86e6727eb248b363733215a8c1a2d5e149e5c7))
+* use gh CLI for release asset downloads from private repos ([bf32868](https://github.com/ix-infrastructure/Ix/commit/bf328682a3218baf246cc3f17428e0044bc1a404))
+
+
+### Performance Improvements
+
+* eliminate O(n²) bottlenecks in first-ingest pipeline ([f1396a6](https://github.com/ix-infrastructure/Ix/commit/f1396a6d4e47ee409e8eb37fff5ee4055040977a))
+* skip source-hash lookup on first ingest ([f3020df](https://github.com/ix-infrastructure/Ix/commit/f3020dff8458302707a4e019b58be838ff1c0552))
+
 ## [0.2.0](https://github.com/ix-infrastructure/Ix/compare/ix-v0.1.0...ix-v0.2.0) (2026-03-16)
 
 

@@ -3,7 +3,8 @@ name: Release Please
 # Runs on every push to main. Reads conventional commit messages (feat:, fix:,
 # etc.) and either:
 #   a) Opens/updates a "Release vX.Y.Z" PR with changelog, OR
-#   b) If that PR was just merged, creates the tag → triggers release.yml
+#   b) If that PR was just merged, creates the tag + release, then builds and
+#      uploads CLI tarballs + Docker image as release assets.
 #
 # You never need to manually create tags or version numbers.
 
@@ -14,12 +15,200 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/ix-memory-layer
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      version: ${{ steps.rp.outputs.major }}.${{ steps.rp.outputs.minor }}.${{ steps.rp.outputs.patch }}
     steps:
       - uses: googleapis/release-please-action@v4
+        id: rp
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # Auto-merge the release PR when CI passes.
+      # Requires: repo Settings → General → "Allow auto-merge" enabled,
+      # and github-actions[bot] added as bypass actor in branch ruleset.
+      # This ONLY merges PRs created by release-please — not human PRs.
+      - name: Auto-merge release PR
+        if: steps.rp.outputs.pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=$(echo '${{ steps.rp.outputs.pr }}' | jq -r '.number')
+          if [ "$PR_NUMBER" != "null" ] && [ -n "$PR_NUMBER" ]; then
+            gh pr merge "$PR_NUMBER" --squash --auto --repo ${{ github.repository }}
+          fi
+
+  build-and-release:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 1. Build Memory Layer JAR ───────────────────────────────────────
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: "sbt"
+
+      - name: Set up sbt
+        uses: sbt/setup-sbt@v1
+
+      - name: Build JAR
+        run: sbt "memoryLayer/assembly"
+
+      # ── 2. Build + Push Docker Image ────────────────────────────────────
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./memory-layer
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.release-please.outputs.version }}
+
+      # ── 3. Build CLI ────────────────────────────────────────────────────
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: |
+            ix-cli/package-lock.json
+            core-ingestion/package-lock.json
+
+      - name: Install core-ingestion deps
+        working-directory: core-ingestion
+        run: npm ci --silent
+
+      - name: Build CLI
+        working-directory: ix-cli
+        run: |
+          npm ci --silent
+          npm run build
+          npm version "${{ needs.release-please.outputs.version }}" --no-git-tag-version --allow-same-version
+
+      # ── 4. Package CLI tarballs ─────────────────────────────────────────
+      - name: Package CLI (linux-amd64)
+        run: |
+          VERSION="${{ needs.release-please.outputs.version }}"
+          STAGING="ix-${VERSION}-linux-amd64"
+          mkdir -p "$STAGING/cli"
+          cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          cat > "$STAGING/ix" <<'WRAPPER'
+          #!/bin/sh
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          exec node "$SCRIPT_DIR/cli/dist/cli/main.js" "$@"
+          WRAPPER
+          chmod +x "$STAGING/ix"
+          tar -czf "$STAGING.tar.gz" "$STAGING"
+          shasum -a 256 "$STAGING.tar.gz" > "$STAGING.tar.gz.sha256"
+
+      - name: Package CLI (darwin-amd64)
+        run: |
+          VERSION="${{ needs.release-please.outputs.version }}"
+          STAGING="ix-${VERSION}-darwin-amd64"
+          mkdir -p "$STAGING/cli"
+          cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          cat > "$STAGING/ix" <<'WRAPPER'
+          #!/bin/sh
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          exec node "$SCRIPT_DIR/cli/dist/cli/main.js" "$@"
+          WRAPPER
+          chmod +x "$STAGING/ix"
+          tar -czf "$STAGING.tar.gz" "$STAGING"
+          shasum -a 256 "$STAGING.tar.gz" > "$STAGING.tar.gz.sha256"
+
+      - name: Package CLI (darwin-arm64)
+        run: |
+          VERSION="${{ needs.release-please.outputs.version }}"
+          STAGING="ix-${VERSION}-darwin-arm64"
+          mkdir -p "$STAGING/cli"
+          cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          cat > "$STAGING/ix" <<'WRAPPER'
+          #!/bin/sh
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          exec node "$SCRIPT_DIR/cli/dist/cli/main.js" "$@"
+          WRAPPER
+          chmod +x "$STAGING/ix"
+          tar -czf "$STAGING.tar.gz" "$STAGING"
+          shasum -a 256 "$STAGING.tar.gz" > "$STAGING.tar.gz.sha256"
+
+      - name: Package CLI (windows-amd64)
+        run: |
+          VERSION="${{ needs.release-please.outputs.version }}"
+          STAGING="ix-${VERSION}-windows-amd64"
+          mkdir -p "$STAGING/cli"
+          cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          cat > "$STAGING/ix.cmd" <<'WRAPPER'
+          @echo off
+          node "%~dp0cli\dist\cli\main.js" %*
+          WRAPPER
+          zip -r "$STAGING.zip" "$STAGING"
+          shasum -a 256 "$STAGING.zip" > "$STAGING.zip.sha256"
+
+      # ── 5. Upload assets to the release created by release-please ──────
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.release-please.outputs.version }}"
+          TAG="${{ needs.release-please.outputs.tag_name }}"
+          gh release upload "$TAG" \
+            "ix-${VERSION}-linux-amd64.tar.gz" \
+            "ix-${VERSION}-linux-amd64.tar.gz.sha256" \
+            "ix-${VERSION}-darwin-amd64.tar.gz" \
+            "ix-${VERSION}-darwin-amd64.tar.gz.sha256" \
+            "ix-${VERSION}-darwin-arm64.tar.gz" \
+            "ix-${VERSION}-darwin-arm64.tar.gz.sha256" \
+            "ix-${VERSION}-windows-amd64.zip" \
+            "ix-${VERSION}-windows-amd64.zip.sha256" \
+            --clobber
+
+      # ── 6. Update Homebrew formula via PR ──────────────────────────────
+      - name: Update Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.release-please.outputs.version }}"
+          TAG="${{ needs.release-please.outputs.tag_name }}"
+          TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz"
+          SHA256=$(curl -sL "$TARBALL_URL" | shasum -a 256 | cut -d' ' -f1)
+
+          sed -i "s|url \".*\"|url \"${TARBALL_URL}\"|" homebrew/ix.rb
+          sed -i "s|# sha256 .*|sha256 \"${SHA256}\"|; s|sha256 \".*\"|sha256 \"${SHA256}\"|" homebrew/ix.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH="chore/brew-update-${TAG}"
+          git checkout -b "$BRANCH"
+          git add homebrew/ix.rb
+          git commit -m "brew: update formula for ${TAG}" || exit 0
+          git push origin "$BRANCH"
+          gh pr create --title "brew: update formula for ${TAG}" --body "Auto-generated: updates Homebrew formula SHA for ${TAG}" --base main

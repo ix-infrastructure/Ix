@@ -1,16 +1,22 @@
 class Ix < Formula
   desc "Persistent memory for LLM systems — CLI for the Ix knowledge graph"
   homepage "https://github.com/ix-infrastructure/Ix"
-  url "https://github.com/ix-infrastructure/Ix/archive/refs/tags/v0.2.0.tar.gz"
-  sha256 "0019dfc4b32d63c1392aa264aed2253c1e0c2fb09216f8e2cc269bbfb8bb49b5"
-  license "MIT"
+  url "https://github.com/ix-infrastructure/Ix/archive/refs/tags/v0.3.4.tar.gz"
+  sha256 "32bfaa786849230d3ee72198b0a89ce7706dfd011c9919d69fc9929265c10fa7"
+  license "Apache-2.0"
   head "https://github.com/ix-infrastructure/Ix.git", branch: "main"
 
   depends_on "node@22"
 
   def install
+    # core-ingestion must be built first — the CLI build depends on it
+    cd "core-ingestion" do
+      system "npm", "install", "--silent"
+      system "npm", "run", "build"
+    end
+
     cd "ix-cli" do
-      system "npm", "install", "--production", "--silent"
+      system "npm", "install", "--silent"
       system "npm", "run", "build"
 
       # Install the compiled CLI and its dependencies

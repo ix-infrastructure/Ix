@@ -178,8 +178,10 @@ jobs:
             ix-${{ steps.version.outputs.version }}-windows-amd64.zip
             ix-${{ steps.version.outputs.version }}-windows-amd64.zip.sha256
 
-      # ── 6. Update Homebrew formula and commit to main ───────────────────
+      # ── 6. Update Homebrew formula via PR ──────────────────────────────
       - name: Update Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/v${VERSION}.tar.gz"
@@ -190,7 +192,10 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout main
+
+          BRANCH="chore/brew-update-v${VERSION}"
+          git checkout -b "$BRANCH"
           git add homebrew/ix.rb
-          git commit -m "brew: update formula for v${VERSION}" || echo "No formula changes"
-          git push origin main
+          git commit -m "brew: update formula for v${VERSION}" || exit 0
+          git push origin "$BRANCH"
+          gh pr create --title "brew: update formula for v${VERSION}" --body "Auto-generated: updates Homebrew formula SHA for v${VERSION}" --base main
