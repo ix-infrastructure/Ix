@@ -11,32 +11,10 @@ import java.nio.file.{Files, Path}
 object FileDiscovery {
 
   private val defaultExtensions = Set(
-    // code
-    ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
-    ".java", ".scala", ".sc", ".go", ".rs", ".c", ".h", ".cc", ".cpp", ".hpp",
-    ".kt", ".kts", ".swift", ".rb", ".php", ".cs", ".ex", ".exs",
-    ".lua", ".zig", ".nim", ".jl", ".r", ".R", ".pl", ".pm",
-    ".sh", ".bash", ".zsh", ".fish",
-
-    // config / data
-    ".json", ".yaml", ".yml", ".toml", ".ini", ".conf", ".env", ".properties",
-    ".xml", ".plist", ".gradle",
-
-    // docs
-    ".md", ".mdx", ".rst", ".txt",
-
-    // build
-    ".sbt", ".gradle", ".cmake"
-  )
-
-  /** Files matched by name regardless of extension. */
-  private val specialFiles = Set(
-    "Dockerfile", "Makefile", "Rakefile", "Gemfile", "Procfile",
-    "README", "LICENSE", "NOTICE", "CHANGELOG",
-    "Cargo.toml", "go.mod", "go.sum",
-    "package.json", "tsconfig.json", "pyproject.toml", "setup.py", "setup.cfg",
-    "build.sbt", "build.gradle", "pom.xml", "CMakeLists.txt",
-    ".gitignore", ".dockerignore", ".editorconfig"
+    ".py", ".ts", ".tsx",
+    ".scala", ".sc",
+    ".json", ".yaml", ".yml", ".toml",
+    ".md"
   )
 
   def extensionsFor(language: Option[String]): Set[String] = language match {
@@ -55,7 +33,7 @@ object FileDiscovery {
 
   def matchesFilter(file: Path, extensions: Set[String]): Boolean = {
     val name = file.getFileName.toString
-    specialFiles.contains(name) || extensions.exists(name.endsWith)
+    extensions.exists(name.endsWith)
   }
 
   /**

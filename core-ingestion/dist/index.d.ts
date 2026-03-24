@@ -9,6 +9,22 @@ export interface ParsedEntity {
     /** Direct enclosing class/interface/trait, if any (undefined for file-level entities). */
     container?: string;
 }
+/** A semantic code span extracted from the AST. The primary LLM retrieval unit. */
+export interface ParsedChunk {
+    /** Semantic name of the chunk (function/class/trait name), or null for file_body. */
+    name: string | null;
+    /** Chunk kind: "function" | "method" | "class" | "interface" | "trait" | "module_block" | "file_body" */
+    chunkKind: string;
+    lineStart: number;
+    lineEnd: number;
+    startByte: number;
+    endByte: number;
+    /** SHA-256 of the chunk source text for change detection and stable identity. */
+    contentHash: string;
+    language: string;
+    /** Name of the directly enclosing class/trait/interface, if any. */
+    container?: string;
+}
 export interface ParsedRelationship {
     srcName: string;
     dstName: string;
@@ -18,6 +34,7 @@ export interface FileParseResult {
     filePath: string;
     language: SupportedLanguages;
     entities: ParsedEntity[];
+    chunks: ParsedChunk[];
     relationships: ParsedRelationship[];
     fileRole: RoleClassification;
 }

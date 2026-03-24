@@ -1,0 +1,7 @@
+interface:
+  display_name: "IX Session Memory"
+  short_description: "Keep ix state synced across multi-step work"
+  default_prompt: "Use $ix-session-memory to resume context, scope impact, and track this task in goals/plans/decisions."
+
+policy:
+  allow_implicit_invocation: true

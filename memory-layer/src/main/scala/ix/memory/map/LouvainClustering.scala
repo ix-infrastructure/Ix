@@ -48,15 +48,42 @@ object LouvainClustering {
   def cluster(
     graph:              WeightedFileGraph,
     maxLevels:          Int    = 4,
-    resolution:         Double = 1.0,
+    resolution:         Double = -1.0,
     minCommunitySize:   Int    = 2,
     seed:               Long   = 42L
   ): Vector[LevelPartition] = {
     if (graph.vertices.isEmpty || graph.totalWeight == 0.0) return Vector.empty
 
+    val effectiveResolution =
+      if (resolution > 0.0) resolution else adaptiveResolution(graph.vertices.size)
+
+    val numSeeds = if (graph.vertices.size < 30) 1L else 3L
+    val runs = (0L until numSeeds).map { offset =>
+      val levels = clusterOnce(
+        graph            = graph,
+        maxLevels        = maxLevels,
+        resolution       = effectiveResolution,
+        minCommunitySize = minCommunitySize,
+        seed             = seed + offset
+      )
+      val score = levels.headOption
+        .map(level => modularity(graph, level.assignment, effectiveResolution))
+        .getOrElse(Double.NegativeInfinity)
+      levels -> score
+    }
+
+    runs.maxBy(_._2)._1
+  }
+
+  private def clusterOnce(
+    graph:            WeightedFileGraph,
+    maxLevels:        Int,
+    resolution:       Double,
+    minCommunitySize: Int,
+    seed:             Long
+  ): Vector[LevelPartition] = {
     val rng = new Random(seed)
 
-    // nodeExpansion: for the current working graph, maps each node → original file IDs it represents
     var nodeExpansion: Map[NodeId, Set[NodeId]] =
       graph.vertices.map(v => v.id -> Set(v.id)).toMap
 
@@ -66,19 +93,14 @@ object LouvainClustering {
     var level = 0
     while (level < maxLevels && currentGraph.vertices.size > 1) {
       val rawAssignment = louvainPass(currentGraph, resolution, rng)
-
-      // Project raw assignment (current node ids) → original file id communities
-      val projected = projectPartition(rawAssignment, nodeExpansion)
-
-      val meaningful = projected.communities.count(_.size >= minCommunitySize)
+      val projected     = projectPartition(rawAssignment, nodeExpansion)
+      val meaningful    = projected.communities.count(_.size >= minCommunitySize)
 
       if (meaningful <= 1 && levels.nonEmpty) {
-        // No further useful partitioning — stop
         level = maxLevels
       } else {
         levels += projected
 
-        // Coarsen: collapse each community into a supernode
         val (coarsenedGraph, newExpansion) =
           coarsen(currentGraph, rawAssignment, nodeExpansion)
 
@@ -93,6 +115,11 @@ object LouvainClustering {
     levels.toVector
   }
 
+  private def adaptiveResolution(fileCount: Int): Double =
+    if (fileCount < 50) 1.2
+    else if (fileCount <= 500) 1.0
+    else 0.8
+
   // ── Single Louvain pass ────────────────────────────────────────────
 
   /**
@@ -104,7 +131,7 @@ object LouvainClustering {
     resolution: Double,
     rng:        Random
   ): Map[NodeId, Int] = {
-    val nodes = graph.vertices.map(_.id)
+    val nodes = graph.vertices.map(_.id).toArray
     val adj   = graph.adjMatrix
     val m     = graph.totalWeight.max(1e-12)
 
@@ -113,32 +140,34 @@ object LouvainClustering {
     val sumTot  = scala.collection.mutable.Map(
       nodes.zipWithIndex.map { case (n, i) => i -> graph.degrees.getOrElse(n, 0.0) }: _*
     ).withDefaultValue(0.0)
-    val sumIn   = scala.collection.mutable.Map[Int, Double]().withDefaultValue(0.0)
     // communities: commId → members (mutable set)
     val members = scala.collection.mutable.Map(
       nodes.zipWithIndex.map { case (n, i) => i -> scala.collection.mutable.Set(n) }: _*
     )
 
-    var improved = true
-    var passes   = 0
+    var continue = true
+    val wToComm = scala.collection.mutable.HashMap.empty[Int, Double]
 
-    while (improved && passes < 30) {
-      improved = false
-      passes  += 1
+    while (continue) {
+      shuffleInPlace(nodes, rng)
+      var improved = false
+      var passGain = 0.0
 
-      for (node <- rng.shuffle(nodes)) {
+      var idx = 0
+      while (idx < nodes.length) {
+        val node = nodes(idx)
         val ci = commOf(node)
         val ki = graph.degrees.getOrElse(node, 0.0)
 
         // Compute weight from this node to each neighboring community
-        val wToComm = scala.collection.mutable.Map[Int, Double]().withDefaultValue(0.0)
+        wToComm.clear()
         for ((neighbor, w) <- adj.getOrElse(node, Map.empty)) {
-          wToComm(commOf(neighbor)) += w
+          val community = commOf(neighbor)
+          wToComm.update(community, wToComm.getOrElse(community, 0.0) + w)
         }
 
         // Remove node from current community
         val kiInCi = wToComm.getOrElse(ci, 0.0)
-        sumIn(ci)  -= 2.0 * kiInCi
         sumTot(ci) -= ki
         members(ci) -= node
         // Temporarily isolate: treat as its own community (gains = 0 baseline)
@@ -159,11 +188,16 @@ object LouvainClustering {
         commOf(node) = bestComm
         members.getOrElseUpdate(bestComm, scala.collection.mutable.Set()) += node
         val kiInBest = wToComm.getOrElse(bestComm, 0.0)
-        sumIn(bestComm)  += 2.0 * kiInBest
         sumTot(bestComm) += ki
 
-        if (bestComm != ci) improved = true
+        if (bestComm != ci) {
+          improved = true
+          passGain += bestGain
+        }
+        idx += 1
       }
+
+      continue = improved && passGain >= 1e-6
     }
 
     // Re-index communities from 0 to N-1 (dense)
@@ -174,6 +208,38 @@ object LouvainClustering {
     }.toMap
 
     finalAssign
+  }
+
+  private def shuffleInPlace(nodes: Array[NodeId], rng: Random): Unit = {
+    var i = nodes.length - 1
+    while (i > 0) {
+      val j = rng.nextInt(i + 1)
+      val tmp = nodes(i)
+      nodes(i) = nodes(j)
+      nodes(j) = tmp
+      i -= 1
+    }
+  }
+
+  private def modularity(
+    graph:      WeightedFileGraph,
+    assignment: Map[NodeId, Int],
+    resolution: Double
+  ): Double = {
+    val communities = assignment.groupBy(_._2).map { case (idx, entries) => idx -> entries.keySet }
+    val m = graph.totalWeight.max(1e-12)
+
+    communities.values.foldLeft(0.0) { (acc, members) =>
+      val totalDegree = members.iterator.map(node => graph.degrees.getOrElse(node, 0.0)).sum
+      var internalWeight = 0.0
+      for {
+        src <- members
+        (dst, weight) <- graph.adjMatrix.getOrElse(src, Map.empty)
+        if members.contains(dst) && src.value.compareTo(dst.value) < 0
+      } internalWeight += weight
+
+      acc + (internalWeight / m) - resolution * math.pow(totalDegree / (2.0 * m), 2.0)
+    }
   }
 
   // ── Projection ─────────────────────────────────────────────────────
@@ -262,7 +328,8 @@ object LouvainClustering {
       superVertices,
       newAdjFinal,
       newDegrees.toMap,
-      newTotalWeight
+      newTotalWeight,
+      Map.empty
     )
 
     (coarsened, newExpansion)

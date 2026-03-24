@@ -12,7 +12,14 @@ object PatchOp {
   final case class UpsertEdge(id: EdgeId, src: NodeId, dst: NodeId, predicate: EdgePredicate, attrs: Map[String, Json]) extends PatchOp
   final case class DeleteNode(id: NodeId)   extends PatchOp
   final case class DeleteEdge(id: EdgeId)   extends PatchOp
-  final case class AssertClaim(entityId: NodeId, field: String, value: Json, confidence: Option[Double]) extends PatchOp
+  final case class AssertClaim(
+    entityId:         NodeId,
+    field:            String,
+    value:            Json,
+    confidence:       Option[Double],
+    /** Inference pass identifier. Absent for observed facts; required for inferred claims. */
+    inferenceVersion: Option[String] = None
+  ) extends PatchOp
   final case class RetractClaim(claimId: ClaimId) extends PatchOp
 
   implicit val encoder: Encoder[PatchOp] = Encoder.instance {
@@ -22,8 +29,8 @@ object PatchOp {
       Json.obj("type" -> "UpsertEdge".asJson, "id" -> id.asJson, "src" -> src.asJson, "dst" -> dst.asJson, "predicate" -> predicate.asJson, "attrs" -> attrs.asJson)
     case DeleteNode(id)        => Json.obj("type" -> "DeleteNode".asJson, "id" -> id.asJson)
     case DeleteEdge(id)        => Json.obj("type" -> "DeleteEdge".asJson, "id" -> id.asJson)
-    case AssertClaim(entityId, field, value, confidence) =>
-      Json.obj("type" -> "AssertClaim".asJson, "entityId" -> entityId.asJson, "field" -> field.asJson, "value" -> value.asJson, "confidence" -> confidence.asJson)
+    case AssertClaim(entityId, field, value, confidence, inferenceVersion) =>
+      Json.obj("type" -> "AssertClaim".asJson, "entityId" -> entityId.asJson, "field" -> field.asJson, "value" -> value.asJson, "confidence" -> confidence.asJson, "inferenceVersion" -> inferenceVersion.asJson)
     case RetractClaim(claimId) => Json.obj("type" -> "RetractClaim".asJson, "claimId" -> claimId.asJson)
   }
 
@@ -48,11 +55,12 @@ object PatchOp {
       case "DeleteEdge"   => c.downField("id").as[EdgeId].map(DeleteEdge)
       case "AssertClaim" =>
         for {
-          entityId   <- c.downField("entityId").as[NodeId]
-          field      <- c.downField("field").as[String]
-          value      <- c.downField("value").as[Json]
-          confidence <- c.downField("confidence").as[Option[Double]]
-        } yield AssertClaim(entityId, field, value, confidence)
+          entityId         <- c.downField("entityId").as[NodeId]
+          field            <- c.downField("field").as[String]
+          value            <- c.downField("value").as[Json]
+          confidence       <- c.downField("confidence").as[Option[Double]]
+          inferenceVersion <- c.downField("inferenceVersion").as[Option[String]]
+        } yield AssertClaim(entityId, field, value, confidence, inferenceVersion)
       case "RetractClaim" => c.downField("claimId").as[ClaimId].map(RetractClaim)
       case other          => Left(DecodingFailure(s"Unknown PatchOp type: $other", c.history))
     }

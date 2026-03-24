@@ -89,6 +89,8 @@ ix bug show <id> --format json                # Bug details
 - "What are the most critical methods?" → `ix rank --by callers --kind method --top 10`
 - "What changed between rev 5 and 10?" → `ix diff 5 10 --summary`
 - "Show me all changes" → `ix diff 5 10 --full --format json`
+- "Are there architectural problems?" → `ix smells --format json`
+- "Which subsystems are unhealthy?" → `ix subsystems --format json`
 
 ### Low-level structural primitives
 
@@ -119,9 +121,24 @@ ix imported-by <symbol> --format json
 ix depends <symbol> --format json
 ```
 
-### Ingesting data
+### Architecture analysis
 ```
-ix ingest ./src --recursive --format json
+ix smells --format json                              # Detect orphan files, god modules, weak components
+ix smells --list --format json                       # List previously stored smell claims
+ix smells --god-module-chunks 15 --god-module-fan 10 # Custom thresholds
+ix subsystems --format json                          # Score subsystems by health (0–1)
+ix subsystems --list --format json                   # List stored scores
+ix subsystems --level 2 --format json                # Filter to subsystem level
+```
+
+**When to use which:**
+- "Are there any architectural problems?" → `ix smells`
+- "Which subsystems are unhealthy?" → `ix subsystems --format json`
+- "Show me god modules" → `ix smells --format json | jq '.candidates[] | select(.smell == "has_smell.god_module")'`
+
+### Updating the graph
+```
+ix map --format json
 ix ingest --github owner/repo --format json --limit 50
 ix ingest --github owner/repo --since 2026-01-01 --format json
 ```
@@ -135,26 +152,71 @@ ix diff <from> <to> --format json              # Full diff (default limit 100)
 ix diff <from> <to> --full --format json       # All changes, no limit
 ```
 
-### Planning & decisions
+### Planning & decisions (Pro)
 ```
+# Goals
 ix goal create "GitHub ingestion pipeline" --format json
-ix goal list --format json
-ix plan create "GitHub Ingestion" --goal <goal-id> --format json
+ix goal show <id-or-name> --format json
+ix goal list --status active --format json
+ix goals --format json                               # shorthand list
+
+# Plans
+ix plan create "GitHub Ingestion" --goal <goal-id> --responds-to <bugId> --format json
+ix plan status <plan-id> --format json               # task list + critical path + open bug count
+ix plan next <plan-id> --with-workflow --format json # next actionable task + workflow
+ix plan next <plan-id> --run-workflow --stage discover --format json  # execute one stage
+ix plans --format json                               # shorthand list
+
+# Tasks
 ix plan task "API fetch layer" --plan <plan-id> --depends-on <task-id> --format json
-ix plan task "title" --plan <id> --workflow "cmd1,cmd2" --format json  # Task with flat workflow
-ix plan task "title" --plan <id> --workflow-staged '{"discover":["cmd1"],"implement":["cmd2"],"validate":["cmd3"]}' --format json  # Staged workflow
-ix plan task "title" --plan <id> --resolves <bugId> --format json  # Task resolving a bug
-ix plan status <plan-id> --format json          # Includes openBugCount in summary
-ix plan next <plan-id> --format json            # Explains reason if no actionable task
-ix plan next <plan-id> --with-workflow --format json  # Next task with staged workflow display
-ix tasks --format json                                 # List all tasks across plans
-ix tasks --status pending --format json                # Filter tasks by status
-ix tasks --plan <plan-id> --format json                # Tasks in a specific plan
-ix task show <task-id> --with-workflow --format json   # Task details with workflow
+ix plan task "title" --plan <id> --workflow-staged '{"discover":["ix overview X"],"implement":["ix map"],"validate":["ix smells"]}' --format json
+ix plan task "title" --plan <id> --resolves <bugId> --format json
+ix tasks --format json                               # list all tasks across plans
+ix tasks --status pending --plan <plan-id> --format json
+ix task show <task-id> --with-workflow --format json
 ix task update <task-id> --status done --format json
+ix task update <task-id> --run-workflow implement --format json  # run a workflow stage
+
+# Decisions
 ix decide "Use client-side patch" --rationale "..." --affects IngestionService --format json
-ix decide "Use JWT" --rationale "..." --responds-to <bugId> --format json  # Decision responding to a bug
+ix decide "Use JWT" --rationale "..." --responds-to <bugId> --format json
+
+# Bugs
+ix bug create "title" --severity high --affects Entity --format json
+ix bug update <id> --status resolved --format json
+ix bug show <id> --format json
+ix bugs --status open --format json
+
+# Misc
+ix patches --limit 20 --format json                 # recent graph patches
+ix truth add "Support 100k file repos"
+ix truth list --format json
 ```
+
+### Workflows (Pro)
+Staged command sequences attached to tasks, plans, or decisions. Stages: `discover → implement → validate`. All commands must start with `ix ` — no arbitrary shell.
+```
+ix workflow attach task <id> --file workflow.json    # attach from JSON file
+ix workflow show task <id> --format json             # view attached workflow
+ix workflow validate task <id> --format json         # check structure
+ix workflow run task <id> --stage implement --format json  # execute one stage
+```
+
+**Workflow JSON format:**
+```json
+{
+  "discover":   ["ix overview AuthService", "ix impact AuthService"],
+  "implement":  ["ix map"],
+  "validate":   ["ix smells --format json"]
+}
+```
+
+**When to use which:**
+- "What work is planned?" → `ix plans --format json` then `ix plan status <id>`
+- "What should I do next?" → `ix plan next <id> --with-workflow`
+- "Execute the next task's discovery phase" → `ix plan next <id> --run-workflow --stage discover`
+- "Mark a task done" → `ix task update <id> --status done`
+- "Link a decision to a bug" → `ix decide "title" --rationale "..." --responds-to <bugId>`
 
 ## Semantic boundaries
 

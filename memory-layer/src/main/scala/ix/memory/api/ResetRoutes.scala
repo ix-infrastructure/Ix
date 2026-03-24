@@ -19,5 +19,12 @@ class ResetRoutes(client: ArangoClient) {
         _ <- client.truncateGraph()
         r <- Ok(Json.obj("ok" -> true.asJson, "message" -> "Graph reset. All nodes and edges deleted.".asJson))
       } yield r).handleErrorWith(ErrorHandler.handle(_))
+
+    /** POST /v1/reset/code — Delete only code-derived nodes/edges; preserve planning artifacts. */
+    case POST -> Root / "v1" / "reset" / "code" =>
+      (for {
+        _ <- client.truncateCodeGraph()
+        r <- Ok(Json.obj("ok" -> true.asJson, "message" -> "Code graph reset. Planning artifacts (goals, plans, tasks, bugs, decisions) preserved.".asJson))
+      } yield r).handleErrorWith(ErrorHandler.handle(_))
   }
 }

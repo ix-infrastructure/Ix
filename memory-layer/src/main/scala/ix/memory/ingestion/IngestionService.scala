@@ -8,8 +8,6 @@ import cats.effect.IO
 import cats.syntax.all._
 import ix.memory.db.{CommitResult, GraphQueryApi, GraphWriteApi}
 import ix.memory.model._
-import io.circe.Json
-
 /**
  * Orchestrates file ingestion: reads source files, parses them,
  * builds graph patches, and commits them through the write API.
@@ -35,7 +33,7 @@ class IngestionService(parserRouter: ParserRouter, writeApi: GraphWriteApi, quer
       parserOpt = parserRouter.parserFor(filePath.toString)
       result = parserOpt match {
         case Some(p) => p.parse(filePath.getFileName.toString, source)
-        case None    => genericTextParse(filePath.getFileName.toString, source)
+        case None    => GenericTextFallback.parse(filePath.getFileName.toString, source)
       }
       val fp = filePath.toString
       extractor = if (fp.endsWith(".py")) "tree-sitter-python/1.0"
@@ -103,7 +101,7 @@ class IngestionService(parserRouter: ParserRouter, writeApi: GraphWriteApi, quer
   ): IO[List[Path]] = IO.blocking {
     val extensions = FileDiscovery.extensionsFor(language)
     if (Files.isRegularFile(path)) {
-      if (FileDiscovery.matchesFilter(path, extensions)) List(path) else List.empty
+      if (language.isEmpty || FileDiscovery.matchesFilter(path, extensions)) List(path) else List.empty
     } else if (Files.isDirectory(path)) {
       FileDiscovery.tryGitLsFiles(path, recursive, extensions)
         .getOrElse(FileDiscovery.walkFiles(path, recursive, extensions))
@@ -230,28 +228,6 @@ class IngestionService(parserRouter: ParserRouter, writeApi: GraphWriteApi, quer
     val md = java.security.MessageDigest.getInstance("SHA-256")
     md.digest(bytes).map("%02x".format(_)).mkString
   }
-
-  /**
-    * Generic fallback parse: ensures every text file produces at least a File entity with content.
-    * This avoids needing a bespoke parser for every dev/text extension.
-    */
-  private def genericTextParse(fileName: String, source: String): ParseResult = {
-    val lines = if (source.isEmpty) 1 else source.count(_ == '\n') + 1
-    ParseResult(
-      entities = Vector(
-        ParsedEntity(
-          name = fileName,
-          kind = NodeKind.File,
-          attrs = Map(
-            "content" -> Json.fromString(source)
-          ),
-          lineStart = 1,
-          lineEnd = lines
-        )
-      ),
-      relationships = Vector.empty
-    )
-  }
 }
 
 case class IngestionProgress(
@@ -266,7 +242,9 @@ case class SkipReasons(
   emptyFile:    Int = 0,
   parseError:   Int = 0,
   tooLarge:     Int = 0
-)
+) {
+  def total: Int = unchanged + emptyFile + parseError + tooLarge
+}
 
 case class IngestionResult(
   filesProcessed:  Int,

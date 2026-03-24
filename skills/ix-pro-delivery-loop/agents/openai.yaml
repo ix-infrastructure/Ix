@@ -1,0 +1,7 @@
+interface:
+  display_name: "IX Pro Delivery Loop"
+  short_description: "Operate goals/plans/tasks/bugs/workflows together"
+  default_prompt: "Use $ix-pro-delivery-loop to drive this work through plan/task/bug/workflow lifecycle with linked entities."
+
+policy:
+  allow_implicit_invocation: true

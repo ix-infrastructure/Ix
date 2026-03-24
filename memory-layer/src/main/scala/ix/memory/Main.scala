@@ -11,6 +11,8 @@ import ix.memory.context._
 import ix.memory.db._
 import ix.memory.ingestion._
 import ix.memory.map.MapService
+import ix.memory.smell.SmellService
+import ix.memory.subsystem.SubsystemScoringService
 
 object Main extends IOApp.Simple {
 
@@ -44,9 +46,11 @@ object Main extends IOApp.Simple {
                            claimCollector, confidenceScorer, conflictDetector)
       conflictService  = new ConflictService(client, queryApi, writeApi)
       mapService       = new MapService(client, queryApi, writeApi)
+      smellService     = new SmellService(client, writeApi)
+      subsystemService = new SubsystemScoringService(client, writeApi, mapService)
 
       // 4. HTTP routes
-      routes = Routes.all(contextService, ingestionService, bulkIngestionService, queryApi, writeApi, conflictService, client, mapService, bulkWriteApi)
+      routes = Routes.all(contextService, ingestionService, bulkIngestionService, queryApi, writeApi, conflictService, client, mapService, bulkWriteApi, smellService, subsystemService)
 
       // 5. Server
       server <- EmberServerBuilder

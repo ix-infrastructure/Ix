@@ -1,4 +1,5 @@
 import * as nodePath from 'node:path';
+import * as crypto from 'node:crypto';
 // @ts-ignore — tree-sitter has no bundled types
 import Parser from 'tree-sitter';
 // @ts-ignore
@@ -45,6 +46,23 @@ export interface ParsedEntity {
   container?: string;
 }
 
+/** A semantic code span extracted from the AST. The primary LLM retrieval unit. */
+export interface ParsedChunk {
+  /** Semantic name of the chunk (function/class/trait name), or null for file_body. */
+  name: string | null;
+  /** Chunk kind: "function" | "method" | "class" | "interface" | "trait" | "module_block" | "file_body" */
+  chunkKind: string;
+  lineStart: number;
+  lineEnd: number;
+  startByte: number;
+  endByte: number;
+  /** SHA-256 of the chunk source text for change detection and stable identity. */
+  contentHash: string;
+  language: string;
+  /** Name of the directly enclosing class/trait/interface, if any. */
+  container?: string;
+}
+
 export interface ParsedRelationship {
   srcName: string;
   dstName: string;
@@ -55,6 +73,7 @@ export interface FileParseResult {
   filePath: string;
   language: SupportedLanguages;
   entities: ParsedEntity[];
+  chunks: ParsedChunk[];
   relationships: ParsedRelationship[];
   fileRole: RoleClassification;
 }
@@ -160,17 +179,18 @@ export function isGrammarSupported(filePath: string): boolean {
 // ---------------------------------------------------------------------------
 
 let _parser: Parser | null = null;
+const _queryCache = new Map<SupportedLanguages | 'tsx', { grammar: any; query: any }>();
 
 function getParser(): Parser {
   if (!_parser) _parser = new Parser();
   return _parser;
 }
 
-// Per-process cache for compiled tree-sitter queries, keyed by language.
-// Avoids recompiling the same query string for every file of the same language.
-const _queryCache = new Map<SupportedLanguages | 'tsx', { grammar: any; query: any }>();
-
-function getCachedQuery(language: SupportedLanguages | 'tsx', grammar: any, querySource: string): any {
+function getCachedQuery(
+  language: SupportedLanguages | 'tsx',
+  grammar: any,
+  querySource: string,
+): any {
   const cached = _queryCache.get(language);
   if (cached && cached.grammar === grammar) return cached.query;
   const query = new Parser.Query(grammar, querySource);
@@ -203,14 +223,26 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
     const matches = query.matches(tree.rootNode);
 
     const fileName = nodePath.basename(filePath);
-    // Count newlines instead of allocating a full string array
-    let lineCount = 1;
-    for (let i = 0; i < source.length; i++) { if (source.charCodeAt(i) === 10) lineCount++; }
+    let sourceLineCount = 1;
+    for (let i = 0; i < source.length; i++) {
+      if (source.charCodeAt(i) === 10) sourceLineCount++;
+    }
 
     const entities: ParsedEntity[] = [
-      { name: fileName, kind: 'file', lineStart: 1, lineEnd: lineCount, language },
+      { name: fileName, kind: 'file', lineStart: 1, lineEnd: sourceLineCount, language },
     ];
+    const chunks: ParsedChunk[] = [];
     const relationships: ParsedRelationship[] = [];
+    const pendingChunks: Array<{
+      name: string;
+      chunkKind: string;
+      lineStart: number;
+      lineEnd: number;
+      startByte: number;
+      endByte: number;
+      language: SupportedLanguages;
+      container?: string;
+    }> = [];
 
     // Track class ranges for containment: [name, startLine, endLine]
     const classRanges: Array<{ name: string; start: number; end: number }> = [];
@@ -236,6 +268,8 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         const defNode = defCapture.node;
         const lineStart = defNode.startPosition.row + 1;
         const lineEnd = defNode.endPosition.row + 1;
+        const startByte = defNode.startIndex;
+        const endByte = defNode.endIndex;
 
         // Containment: file CONTAINS or class CONTAINS
         const enclosing = findEnclosing(classRanges, lineStart, name);
@@ -245,6 +279,17 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
           kind,
           lineStart,
           lineEnd,
+          language,
+          container: enclosing ?? undefined,
+        });
+
+        pendingChunks.push({
+          name,
+          chunkKind: kind,
+          lineStart,
+          lineEnd,
+          startByte,
+          endByte,
           language,
           container: enclosing ?? undefined,
         });
@@ -404,7 +449,31 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
       }
     }
 
-    return { filePath, language, entities, relationships, fileRole: classifyFileRole(filePath, source) };
+    for (const pendingChunk of pendingChunks) {
+      const chunkText = source.slice(pendingChunk.startByte, pendingChunk.endByte);
+      const contentHash = crypto.createHash('sha256').update(chunkText).digest('hex').slice(0, 16);
+      chunks.push({
+        ...pendingChunk,
+        contentHash,
+      });
+    }
+
+    // Fallback: if no semantic chunks found, emit one file_body chunk covering the whole file
+    if (chunks.length === 0) {
+      const contentHash = crypto.createHash('sha256').update(source).digest('hex').slice(0, 16);
+      chunks.push({
+        name: null,
+        chunkKind: 'file_body',
+        lineStart: 1,
+        lineEnd: sourceLineCount,
+        startByte: 0,
+        endByte: source.length,
+        contentHash,
+        language,
+      });
+    }
+
+    return { filePath, language, entities, chunks, relationships, fileRole: classifyFileRole(filePath, source) };
   } catch {
     return null;
   }
@@ -485,37 +554,7 @@ function bestQKey(
  *   - Unambiguous class method: dstQualifiedKey === 'ClassName.method'
  *   - Ambiguous (two entities share the same plain name): edge not emitted
  */
-/** Stats collected during resolution (exposed for debug instrumentation). */
-export interface ResolveStats {
-  importLookups: number;
-  transitiveLookups: number;
-  globalFallbacks: number;
-  globalCandidateTotal: number;
-  resolvedImport: number;
-  resolvedTransitive: number;
-  resolvedGlobal: number;
-  resolvedQualifier: number;
-  skippedSameFile: number;
-  skippedAmbiguous: number;
-}
-
-export function resolveEdges(results: FileParseResult[]): ResolvedEdge[];
-export function resolveEdges(results: FileParseResult[], statsOut: ResolveStats): ResolvedEdge[];
-export function resolveEdges(results: FileParseResult[], statsOut?: ResolveStats): ResolvedEdge[] {
-  const stats: ResolveStats = statsOut ?? {
-    importLookups: 0, transitiveLookups: 0, globalFallbacks: 0,
-    globalCandidateTotal: 0, resolvedImport: 0, resolvedTransitive: 0,
-    resolvedGlobal: 0, resolvedQualifier: 0, skippedSameFile: 0, skippedAmbiguous: 0,
-  };
-
-  // ── Index structures (built once) ──────────────────────────────────
-
-  // Direct file lookup: filePath → FileParseResult  (replaces results.find())
-  const resultByPath = new Map<string, FileParseResult>();
-  for (const r of results) {
-    resultByPath.set(r.filePath, r);
-  }
-
+export function resolveEdges(results: FileParseResult[]): ResolvedEdge[] {
   // fileQKeys: filePath → (plainName → qualifiedKeys[])
   // Mirrors the entityQKey computation in buildPatch so nodeIds match exactly.
   const fileQKeys = new Map<string, Map<string, string[]>>();
@@ -537,20 +576,16 @@ export function resolveEdges(results: FileParseResult[], statsOut?: ResolveStats
     fileHasSymbol.set(fp, new Set(qkMap.keys()));
   }
 
-  // Precompute language per file (avoids calling languageFromPath in hot loops)
-  const fileLanguage = new Map<string, SupportedLanguages | null>();
-  for (const r of results) {
-    fileLanguage.set(r.filePath, r.language);
-  }
+  // resultsByPath: O(1) lookup replacing results.find() in transitive import loop
+  const resultsByPath = new Map<string, FileParseResult>(results.map(r => [r.filePath, r]));
 
-  // Inverted symbol index: symbolName → Array<{filePath, language}>
-  // Replaces the O(N) global fallback scan with O(candidates) lookup.
-  const symbolToFiles = new Map<string, Array<string>>();
+  // symbolToFiles: plainName → filePath[]  — replaces O(F) full-scan in tier-3 and qualifier fallback
+  const symbolToFiles = new Map<string, string[]>();
   for (const [fp, symbols] of fileHasSymbol) {
     for (const sym of symbols) {
-      let arr = symbolToFiles.get(sym);
-      if (!arr) { arr = []; symbolToFiles.set(sym, arr); }
-      arr.push(fp);
+      const list = symbolToFiles.get(sym) ?? [];
+      list.push(fp);
+      symbolToFiles.set(sym, list);
     }
   }
 
@@ -596,8 +631,6 @@ export function resolveEdges(results: FileParseResult[], statsOut?: ResolveStats
     }
   }
 
-  // ── Helpers ────────────────────────────────────────────────────────
-
   /** Resolve a module name to matching file paths in the batch. */
   function modNameToFiles(modName: string, excludeFp: string): string[] {
     const fps: string[] = [];
@@ -630,14 +663,11 @@ export function resolveEdges(results: FileParseResult[], statsOut?: ResolveStats
     return fps;
   }
 
-  // ── Main resolution loop ───────────────────────────────────────────
-
   const resolved: ResolvedEdge[] = [];
 
   for (const result of results) {
     const srcFilePath = result.filePath;
     const srcSymbols = fileHasSymbol.get(srcFilePath)!;
-    const srcLanguage = result.language;
 
     // Build the set of file paths this file explicitly imports.
     const importedFilePaths = new Set<string>();
@@ -652,7 +682,7 @@ export function resolveEdges(results: FileParseResult[], statsOut?: ResolveStats
     // Handles re-exports: baz.ts → index.ts (re-exports from bar.ts) → bar.ts
     const transitiveFilePaths = new Set<string>();
     for (const fp of importedFilePaths) {
-      const fpResult = resultByPath.get(fp);  // O(1) instead of results.find()
+      const fpResult = resultsByPath.get(fp);
       if (!fpResult) continue;
       for (const rel of fpResult.relationships) {
         if (rel.predicate !== 'IMPORTS') continue;
@@ -686,7 +716,6 @@ export function resolveEdges(results: FileParseResult[], statsOut?: ResolveStats
         const dstQualifiedKey = bestQKey(fileQKeys, fp, entityName);
         if (dstQualifiedKey === null) continue;
         resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: 'IMPORTS', confidence: 0.9 });
-        stats.resolvedImport++;
         continue;
       }
 
@@ -714,23 +743,18 @@ export function resolveEdges(results: FileParseResult[], statsOut?: ResolveStats
               if (dstQualifiedKey !== null) {
                 // dstName must match rel.dstName so buildPatchWithResolution can look it up
                 resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9 });
-                stats.resolvedQualifier++;
               }
             }
             continue;
           }
-          // Global qualifier fallback — use inverted index instead of scanning all files
-          const qualCandidates = symbolToFiles.get(qualifierPart) ?? [];
-          const qualGlobalMatches = qualCandidates.filter(fp => fp !== srcFilePath);
-          stats.globalFallbacks++;
-          stats.globalCandidateTotal += qualGlobalMatches.length;
+          // Global qualifier fallback — use symbolToFiles index instead of full scan
+          const qualGlobalMatches = (symbolToFiles.get(qualifierPart) ?? []).filter(fp => fp !== srcFilePath);
           if (qualGlobalMatches.length === 1) {
             const qfp = qualGlobalMatches[0];
             if (fileHasSymbol.get(qfp)?.has(memberPart)) {
               const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart);
               if (dstQualifiedKey !== null) {
                 resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.7 });
-                stats.resolvedQualifier++;
               }
             }
           }
@@ -739,10 +763,9 @@ export function resolveEdges(results: FileParseResult[], statsOut?: ResolveStats
       }
 
       // Tier 1: same-file — already correct in buildPatch, skip here
-      if (srcSymbols.has(dstName)) { stats.skippedSameFile++; continue; }
+      if (srcSymbols.has(dstName)) continue;
 
       // Tier 2: import-scoped (confidence 0.9)
-      stats.importLookups++;
       const importMatches: string[] = [];
       for (const fp of importedFilePaths) {
         if (fileHasSymbol.get(fp)?.has(dstName)) importMatches.push(fp);
@@ -753,13 +776,11 @@ export function resolveEdges(results: FileParseResult[], statsOut?: ResolveStats
         const dstQualifiedKey = bestQKey(fileQKeys, fp, dstName);
         if (dstQualifiedKey === null) continue; // ambiguous — do not emit bad nodeId
         resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9 });
-        stats.resolvedImport++;
         continue;
       }
-      if (importMatches.length > 1) { stats.skippedAmbiguous++; continue; } // ambiguous file — do not emit
+      if (importMatches.length > 1) continue; // ambiguous file — do not emit
 
       // Tier 2.5: transitive import-scoped (confidence 0.8) — one re-export hop away
-      stats.transitiveLookups++;
       const transitiveMatches: string[] = [];
       for (const fp of transitiveFilePaths) {
         if (fileHasSymbol.get(fp)?.has(dstName)) transitiveMatches.push(fp);
@@ -770,24 +791,21 @@ export function resolveEdges(results: FileParseResult[], statsOut?: ResolveStats
         const dstQualifiedKey = bestQKey(fileQKeys, fp, dstName);
         if (dstQualifiedKey === null) continue;
         resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.8 });
-        stats.resolvedTransitive++;
         continue;
       }
-      if (transitiveMatches.length > 1) { stats.skippedAmbiguous++; continue; } // ambiguous — do not emit
+      if (transitiveMatches.length > 1) continue; // ambiguous — do not emit
 
-      // Tier 3: global fallback (confidence 0.5) — uses inverted symbol index
-      // instead of scanning all files.
-      stats.globalFallbacks++;
-      const candidates = symbolToFiles.get(dstName) ?? [];
-      const globalMatches = candidates.filter(fp => fp !== srcFilePath && fileLanguage.get(fp) === srcLanguage);
-      stats.globalCandidateTotal += globalMatches.length;
+      // Tier 3: global fallback (confidence 0.5) — exactly one other file defines it
+      // Only match files in the same language as the caller to avoid cross-language false positives.
+      const srcLanguage = result.language;
+      const globalMatches = (symbolToFiles.get(dstName) ?? [])
+        .filter(fp => fp !== srcFilePath && languageFromPath(fp) === srcLanguage);
 
       if (globalMatches.length === 1) {
         const fp = globalMatches[0];
         const dstQualifiedKey = bestQKey(fileQKeys, fp, dstName);
         if (dstQualifiedKey === null) continue; // ambiguous — do not emit bad nodeId
         resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.5 });
-        stats.resolvedGlobal++;
       }
       // 0 or >1 global matches — leave as dangling edge, do not emit
     }

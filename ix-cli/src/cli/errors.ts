@@ -48,3 +48,47 @@ export function renderStructuredError(err: StructuredError): void {
   }
   console.error("");
 }
+
+export class CliUsageError extends Error {
+  constructor(
+    message: string,
+    public readonly hint?: string,
+  ) {
+    super(message);
+    this.name = "CliUsageError";
+  }
+}
+
+export class CliResolutionError extends Error {
+  constructor(
+    message: string,
+    public readonly hint?: string,
+    public readonly detail?: string,
+  ) {
+    super(message);
+    this.name = "CliResolutionError";
+  }
+}
+
+export function renderCliError(err: unknown, debug = false): void {
+  if (err instanceof CliUsageError || err instanceof CliResolutionError) {
+    process.stderr.write(chalk.red(`Error: ${err.message}\n`));
+    if (err.hint) {
+      process.stderr.write(chalk.dim(`${err.hint}\n`));
+    }
+    if (debug && err instanceof CliResolutionError && err.detail) {
+      process.stderr.write(chalk.dim(`Detail: ${err.detail}\n`));
+    }
+    process.exit(1);
+  }
+
+  const e = err as any;
+  const msg = e?.message ?? String(err);
+  process.stderr.write(chalk.red(`Error: ${msg}\n`));
+
+  if (debug && e?.stack) {
+    process.stderr.write(chalk.dim(`${e.stack}\n`));
+  }
+
+  process.exit(1);
+}

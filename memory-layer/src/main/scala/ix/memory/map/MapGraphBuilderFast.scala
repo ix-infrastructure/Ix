@@ -145,7 +145,7 @@ class MapGraphBuilderFast(client: ArangoClient) {
     val degrees     = adj.map { case (k, m) => k -> m.values.sum }
     val totalWeight = degrees.values.sum / 2.0
 
-    WeightedFileGraph(files, adj, degrees.toMap, totalWeight)
+    WeightedFileGraph(files, adj, degrees.toMap, totalWeight, Map.empty)
   }
 
   private def pathProximity(a: String, b: String): Double = {

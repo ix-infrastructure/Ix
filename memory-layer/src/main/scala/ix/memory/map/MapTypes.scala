@@ -21,12 +21,13 @@ final case class WeightedFileGraph(
   vertices:    Vector[FileVertex],
   adjMatrix:   Map[NodeId, Map[NodeId, Double]],
   degrees:     Map[NodeId, Double],
-  totalWeight: Double
+  totalWeight: Double,
+  predicatePairs: Map[(NodeId, NodeId), Map[String, Int]]
 )
 
 object WeightedFileGraph {
   val empty: WeightedFileGraph =
-    WeightedFileGraph(Vector.empty, Map.empty, Map.empty, 0.0)
+    WeightedFileGraph(Vector.empty, Map.empty, Map.empty, 0.0, Map.empty)
 }
 
 /**
@@ -133,4 +134,25 @@ final case class ArchitectureMap(
   preflight:            Option[MapPreflightResult] = None,
   outcome:              MapOutcome = MapOutcome.FullLocalCompleted,
   persistenceEstimate:  Option[PersistenceEstimate] = None
+)
+
+final case class RegionMatch(
+  region: Region,
+  matchQuality: Int,
+  normalizedLabel: String
+)
+
+final case class ScopedHealthSummary(
+  wellDefined: Int,
+  moderate: Int,
+  fuzzy: Int,
+  crossCutting: Int
+)
+
+final case class ScopedSubsystemView(
+  target: Region,
+  parent: Option[Region],
+  children: Vector[Region],
+  subtree: Vector[Region],
+  summary: ScopedHealthSummary
 )

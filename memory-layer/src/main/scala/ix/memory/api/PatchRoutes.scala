@@ -4,16 +4,24 @@ import java.util.UUID
 
 import cats.effect.IO
 import io.circe.syntax._
+import io.circe.{Decoder, Encoder}
+import io.circe.generic.semiauto._
 import org.http4s.HttpRoutes
 import org.http4s.circe.CirceEntityCodec._
 import org.http4s.dsl.io._
 import org.http4s.dsl.impl.OptionalQueryParamDecoderMatcher
 
-import ix.memory.db.ArangoClient
+import ix.memory.db.{ArangoClient, GraphQueryApi}
 
 object LimitParam extends OptionalQueryParamDecoderMatcher[Int]("limit")
 
-class PatchRoutes(client: ArangoClient) {
+case class SourceHashesRequest(uris: List[String])
+object SourceHashesRequest {
+  implicit val decoder: Decoder[SourceHashesRequest] = deriveDecoder
+  implicit val encoder: Encoder[SourceHashesRequest] = deriveEncoder
+}
+
+class PatchRoutes(client: ArangoClient, queryApi: GraphQueryApi) {
 
   val routes: HttpRoutes[IO] = HttpRoutes.of[IO] {
     case GET -> Root / "v1" / "patches" :? LimitParam(limit) =>
@@ -45,6 +53,13 @@ class PatchRoutes(client: ArangoClient) {
           new NoSuchElementException(s"Patch not found: $patchIdStr")
         )
         resp    <- Ok(patch)
+      } yield resp).handleErrorWith(ErrorHandler.handle(_))
+
+    case req @ POST -> Root / "v1" / "source-hashes" =>
+      (for {
+        body    <- req.as[SourceHashesRequest]
+        hashes  <- queryApi.getSourceHashes(body.uris)
+        resp    <- Ok(hashes.asJson)
       } yield resp).handleErrorWith(ErrorHandler.handle(_))
   }
 }

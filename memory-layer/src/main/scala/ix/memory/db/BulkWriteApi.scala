@@ -1,5 +1,6 @@
 package ix.memory.db
 
+import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.util.UUID
 
@@ -17,6 +18,8 @@ import ix.memory.model._
  * instead of individual AQL queries.
  */
 class BulkWriteApi(client: ArangoClient) {
+  private val CurrentRevisionKey = "current"
+  private val SourceGraphRevisionKey = "source-graph"
 
   private def withRetry[A](action: IO[A], maxAttempts: Int = 3, delay: FiniteDuration = 500.millis): IO[A] = {
     action.handleErrorWith { err =>
@@ -115,12 +118,13 @@ class BulkWriteApi(client: ArangoClient) {
 
   private def updateRevision(newRev: Long): IO[Unit] =
     client.execute(
-      """UPSERT { _key: @key }
-        |  INSERT { _key: @key, rev: @rev }
+      """FOR key IN @keys
+        |  UPSERT { _key: key }
+        |  INSERT { _key: key, rev: @rev }
         |  UPDATE { rev: @rev }
         |  IN revisions""".stripMargin,
       Map(
-        "key" -> "current".asInstanceOf[AnyRef],
+        "keys" -> Array(CurrentRevisionKey, SourceGraphRevisionKey).asInstanceOf[AnyRef],
         "rev" -> Long.box(newRev).asInstanceOf[AnyRef]
       )
     )
@@ -146,6 +150,9 @@ case class FileBatch(
 
   private def nodeKindToString(nk: NodeKind): String =
     nk.asJson.asString.getOrElse(nk.toString)
+
+  lazy val estimatedPayloadBytes: Int =
+    (patch.asJson.noSpaces.getBytes(StandardCharsets.UTF_8).length * 4) + 1024
 
   def nodeDocuments(rev: Long): Vector[java.util.Map[String, AnyRef]] = {
     val now = Instant.now().toString
@@ -191,7 +198,7 @@ case class FileBatch(
   }
 
   def claimDocuments(rev: Long): Vector[java.util.Map[String, AnyRef]] =
-    patch.ops.collect { case PatchOp.AssertClaim(entityId, field, value, confidence) =>
+    patch.ops.collect { case PatchOp.AssertClaim(entityId, field, value, confidence, inferenceVersion) =>
       val doc = new java.util.HashMap[String, AnyRef]()
       doc.put("_key", UUID.randomUUID().toString)
       doc.put("entity_id", entityId.value.toString)
@@ -202,6 +209,7 @@ case class FileBatch(
       doc.put("created_rev", Long.box(rev))
       doc.put("deleted_rev", null)
       doc.put("provenance", provenance)
+      doc.put("inference_version", inferenceVersion.orNull)
       doc: java.util.Map[String, AnyRef]
     }
 

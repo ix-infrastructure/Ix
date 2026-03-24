@@ -20,6 +20,8 @@ import ix.memory.db._
 import ix.memory.ingestion._
 import ix.memory.map.MapService
 import ix.memory.model._
+import ix.memory.smell.SmellService
+import ix.memory.subsystem.SubsystemScoringService
 
 class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestDbHelper {
 
@@ -68,8 +70,22 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
     val bulkWriteApi         = new BulkWriteApi(client)
     val bulkIngestionService = new BulkIngestionService(parserRouter, bulkWriteApi, queryApi)
     val mapService           = new MapService(client, queryApi, writeApi)
+    val smellService         = new SmellService(client, writeApi)
+    val subsystemService     = new SubsystemScoringService(client, writeApi, mapService)
 
-    Routes.all(contextService, ingestionService, bulkIngestionService, queryApi, writeApi, conflictService, client, mapService, bulkWriteApi).orNotFound
+    Routes.all(
+      contextService,
+      ingestionService,
+      bulkIngestionService,
+      queryApi,
+      writeApi,
+      conflictService,
+      client,
+      mapService,
+      bulkWriteApi,
+      smellService,
+      subsystemService
+    ).orNotFound
   }
 
   "Routes" should "return 200 OK for health check" in {

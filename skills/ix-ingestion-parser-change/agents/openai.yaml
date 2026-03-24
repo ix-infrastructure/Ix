@@ -1,0 +1,7 @@
+interface:
+  display_name: "IX Ingestion Parser Change"
+  short_description: "Guard parser routing and patch generation"
+  default_prompt: "Use $ix-ingestion-parser-change to make this ingestion/parser update without breaking graph patch behavior."
+
+policy:
+  allow_implicit_invocation: true

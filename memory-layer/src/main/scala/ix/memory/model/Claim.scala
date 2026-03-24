@@ -27,15 +27,18 @@ object ClaimStatus {
 }
 
 final case class Claim(
-  id:         ClaimId,
-  entityId:   NodeId,
-  statement:  String,
-  value:      Json,
-  confidence: Option[Double],
-  status:     ClaimStatus,
-  provenance: Provenance,
-  createdRev: Rev,
-  deletedRev: Option[Rev]
+  id:               ClaimId,
+  entityId:         NodeId,
+  statement:        String,
+  value:            Json,
+  confidence:       Option[Double],
+  status:           ClaimStatus,
+  provenance:       Provenance,
+  createdRev:       Rev,
+  deletedRev:       Option[Rev],
+  /** Identifies the inference pass that produced this claim (e.g. "smell_v1", "subsystem_v1").
+   *  Absent for observed facts extracted from source code. Missing legacy claims are treated as "legacy". */
+  inferenceVersion: Option[String] = None
 )
 
 object Claim {

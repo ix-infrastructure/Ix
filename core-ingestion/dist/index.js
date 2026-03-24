@@ -1,4 +1,5 @@
 import * as nodePath from 'node:path';
+import * as crypto from 'node:crypto';
 // @ts-ignore — tree-sitter has no bundled types
 import Parser from 'tree-sitter';
 // @ts-ignore
@@ -124,14 +125,12 @@ export function isGrammarSupported(filePath) {
 // Parser instance (reused across calls)
 // ---------------------------------------------------------------------------
 let _parser = null;
+const _queryCache = new Map();
 function getParser() {
     if (!_parser)
         _parser = new Parser();
     return _parser;
 }
-// Per-process cache for compiled tree-sitter queries, keyed by language.
-// Avoids recompiling the same query string for every file of the same language.
-const _queryCache = new Map();
 function getCachedQuery(language, grammar, querySource) {
     const cached = _queryCache.get(language);
     if (cached && cached.grammar === grammar)
@@ -163,16 +162,17 @@ export function parseFile(filePath, source) {
         const query = getCachedQuery(cacheKey, grammar, queries);
         const matches = query.matches(tree.rootNode);
         const fileName = nodePath.basename(filePath);
-        // Count newlines instead of allocating a full string array
-        let lineCount = 1;
+        let sourceLineCount = 1;
         for (let i = 0; i < source.length; i++) {
             if (source.charCodeAt(i) === 10)
-                lineCount++;
+                sourceLineCount++;
         }
         const entities = [
-            { name: fileName, kind: 'file', lineStart: 1, lineEnd: lineCount, language },
+            { name: fileName, kind: 'file', lineStart: 1, lineEnd: sourceLineCount, language },
         ];
+        const chunks = [];
         const relationships = [];
+        const pendingChunks = [];
         // Track class ranges for containment: [name, startLine, endLine]
         const classRanges = [];
         // Track seen calls per enclosing scope to avoid duplicate CALLS edges
@@ -193,6 +193,8 @@ export function parseFile(filePath, source) {
                 const defNode = defCapture.node;
                 const lineStart = defNode.startPosition.row + 1;
                 const lineEnd = defNode.endPosition.row + 1;
+                const startByte = defNode.startIndex;
+                const endByte = defNode.endIndex;
                 // Containment: file CONTAINS or class CONTAINS
                 const enclosing = findEnclosing(classRanges, lineStart, name);
                 entities.push({
@@ -200,6 +202,16 @@ export function parseFile(filePath, source) {
                     kind,
                     lineStart,
                     lineEnd,
+                    language,
+                    container: enclosing ?? undefined,
+                });
+                pendingChunks.push({
+                    name,
+                    chunkKind: kind,
+                    lineStart,
+                    lineEnd,
+                    startByte,
+                    endByte,
                     language,
                     container: enclosing ?? undefined,
                 });
@@ -345,7 +357,29 @@ export function parseFile(filePath, source) {
                 continue;
             }
         }
-        return { filePath, language, entities, relationships, fileRole: classifyFileRole(filePath, source) };
+        for (const pendingChunk of pendingChunks) {
+            const chunkText = source.slice(pendingChunk.startByte, pendingChunk.endByte);
+            const contentHash = crypto.createHash('sha256').update(chunkText).digest('hex').slice(0, 16);
+            chunks.push({
+                ...pendingChunk,
+                contentHash,
+            });
+        }
+        // Fallback: if no semantic chunks found, emit one file_body chunk covering the whole file
+        if (chunks.length === 0) {
+            const contentHash = crypto.createHash('sha256').update(source).digest('hex').slice(0, 16);
+            chunks.push({
+                name: null,
+                chunkKind: 'file_body',
+                lineStart: 1,
+                lineEnd: sourceLineCount,
+                startByte: 0,
+                endByte: source.length,
+                contentHash,
+                language,
+            });
+        }
+        return { filePath, language, entities, chunks, relationships, fileRole: classifyFileRole(filePath, source) };
     }
     catch {
         return null;
@@ -367,18 +401,33 @@ function bestQKey(fileQKeys, filePath, plainName) {
     const qks = [...new Set(fileQKeys.get(filePath)?.get(plainName) ?? [])];
     return qks.length === 1 ? qks[0] : null;
 }
-export function resolveEdges(results, statsOut) {
-    const stats = statsOut ?? {
-        importLookups: 0, transitiveLookups: 0, globalFallbacks: 0,
-        globalCandidateTotal: 0, resolvedImport: 0, resolvedTransitive: 0,
-        resolvedGlobal: 0, resolvedQualifier: 0, skippedSameFile: 0, skippedAmbiguous: 0,
-    };
-    // ── Index structures (built once) ──────────────────────────────────
-    // Direct file lookup: filePath → FileParseResult  (replaces results.find())
-    const resultByPath = new Map();
-    for (const r of results) {
-        resultByPath.set(r.filePath, r);
-    }
+/**
+ * Resolves CALLS and EXTENDS relationships to their cross-file targets by
+ * building a symbol table and import map over the full batch of parsed files.
+ *
+ * Tiers (in priority order):
+ *   0.9 — import-scoped: dst is in a file the src explicitly imports
+ *   0.8 — transitive import-scoped: one re-export hop away
+ *   0.5 — global fallback: dst exists in exactly one other file (unambiguous)
+ *
+ * Same-file edges are already handled correctly by buildPatch and are not
+ * emitted here.
+ *
+ * Import resolution handles:
+ *   - Stem-based:      './payments'     → 'payments.ts'
+ *   - Path-aliased:    '@/lib/payments' → 'payments.ts'  (last segment)
+ *   - Directory index: './services'     → 'services/index.ts'
+ *   - Bare aliases:    '@components'    → 'components.ts' (strip leading non-word chars)
+ *   - Dotted paths:    'ix.memory.model.Edge' → stem 'Edge' → 'Edge.scala'
+ *                      (handles Scala/Java package imports where tree-sitter
+ *                       emits each identifier separately)
+ *
+ * Qualified-key resolution:
+ *   - Module-level function/class: dstQualifiedKey === dstName
+ *   - Unambiguous class method: dstQualifiedKey === 'ClassName.method'
+ *   - Ambiguous (two entities share the same plain name): edge not emitted
+ */
+export function resolveEdges(results) {
     // fileQKeys: filePath → (plainName → qualifiedKeys[])
     // Mirrors the entityQKey computation in buildPatch so nodeIds match exactly.
     const fileQKeys = new Map();
@@ -399,22 +448,15 @@ export function resolveEdges(results, statsOut) {
     for (const [fp, qkMap] of fileQKeys) {
         fileHasSymbol.set(fp, new Set(qkMap.keys()));
     }
-    // Precompute language per file (avoids calling languageFromPath in hot loops)
-    const fileLanguage = new Map();
-    for (const r of results) {
-        fileLanguage.set(r.filePath, r.language);
-    }
-    // Inverted symbol index: symbolName → Array<{filePath, language}>
-    // Replaces the O(N) global fallback scan with O(candidates) lookup.
+    // resultsByPath: O(1) lookup replacing results.find() in transitive import loop
+    const resultsByPath = new Map(results.map(r => [r.filePath, r]));
+    // symbolToFiles: plainName → filePath[]  — replaces O(F) full-scan in tier-3 and qualifier fallback
     const symbolToFiles = new Map();
     for (const [fp, symbols] of fileHasSymbol) {
         for (const sym of symbols) {
-            let arr = symbolToFiles.get(sym);
-            if (!arr) {
-                arr = [];
-                symbolToFiles.set(sym, arr);
-            }
-            arr.push(fp);
+            const list = symbolToFiles.get(sym) ?? [];
+            list.push(fp);
+            symbolToFiles.set(sym, list);
         }
     }
     // stemToFiles: basename-without-extension → filePath[]
@@ -458,7 +500,6 @@ export function resolveEdges(results, statsOut) {
             packageToFiles.set(pkg, list);
         }
     }
-    // ── Helpers ────────────────────────────────────────────────────────
     /** Resolve a module name to matching file paths in the batch. */
     function modNameToFiles(modName, excludeFp) {
         const fps = [];
@@ -496,12 +537,10 @@ export function resolveEdges(results, statsOut) {
         }
         return fps;
     }
-    // ── Main resolution loop ───────────────────────────────────────────
     const resolved = [];
     for (const result of results) {
         const srcFilePath = result.filePath;
         const srcSymbols = fileHasSymbol.get(srcFilePath);
-        const srcLanguage = result.language;
         // Build the set of file paths this file explicitly imports.
         const importedFilePaths = new Set();
         for (const rel of result.relationships) {
@@ -515,7 +554,7 @@ export function resolveEdges(results, statsOut) {
         // Handles re-exports: baz.ts → index.ts (re-exports from bar.ts) → bar.ts
         const transitiveFilePaths = new Set();
         for (const fp of importedFilePaths) {
-            const fpResult = resultByPath.get(fp); // O(1) instead of results.find()
+            const fpResult = resultsByPath.get(fp);
             if (!fpResult)
                 continue;
             for (const rel of fpResult.relationships) {
@@ -556,7 +595,6 @@ export function resolveEdges(results, statsOut) {
                 if (dstQualifiedKey === null)
                     continue;
                 resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: 'IMPORTS', confidence: 0.9 });
-                stats.resolvedImport++;
                 continue;
             }
             const dstName = rel.dstName;
@@ -583,23 +621,18 @@ export function resolveEdges(results, statsOut) {
                             if (dstQualifiedKey !== null) {
                                 // dstName must match rel.dstName so buildPatchWithResolution can look it up
                                 resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9 });
-                                stats.resolvedQualifier++;
                             }
                         }
                         continue;
                     }
-                    // Global qualifier fallback — use inverted index instead of scanning all files
-                    const qualCandidates = symbolToFiles.get(qualifierPart) ?? [];
-                    const qualGlobalMatches = qualCandidates.filter(fp => fp !== srcFilePath);
-                    stats.globalFallbacks++;
-                    stats.globalCandidateTotal += qualGlobalMatches.length;
+                    // Global qualifier fallback — use symbolToFiles index instead of full scan
+                    const qualGlobalMatches = (symbolToFiles.get(qualifierPart) ?? []).filter(fp => fp !== srcFilePath);
                     if (qualGlobalMatches.length === 1) {
                         const qfp = qualGlobalMatches[0];
                         if (fileHasSymbol.get(qfp)?.has(memberPart)) {
                             const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart);
                             if (dstQualifiedKey !== null) {
                                 resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.7 });
-                                stats.resolvedQualifier++;
                             }
                         }
                     }
@@ -607,12 +640,9 @@ export function resolveEdges(results, statsOut) {
                 }
             }
             // Tier 1: same-file — already correct in buildPatch, skip here
-            if (srcSymbols.has(dstName)) {
-                stats.skippedSameFile++;
+            if (srcSymbols.has(dstName))
                 continue;
-            }
             // Tier 2: import-scoped (confidence 0.9)
-            stats.importLookups++;
             const importMatches = [];
             for (const fp of importedFilePaths) {
                 if (fileHasSymbol.get(fp)?.has(dstName))
@@ -624,15 +654,11 @@ export function resolveEdges(results, statsOut) {
                 if (dstQualifiedKey === null)
                     continue; // ambiguous — do not emit bad nodeId
                 resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9 });
-                stats.resolvedImport++;
                 continue;
             }
-            if (importMatches.length > 1) {
-                stats.skippedAmbiguous++;
-                continue;
-            } // ambiguous file — do not emit
+            if (importMatches.length > 1)
+                continue; // ambiguous file — do not emit
             // Tier 2.5: transitive import-scoped (confidence 0.8) — one re-export hop away
-            stats.transitiveLookups++;
             const transitiveMatches = [];
             for (const fp of transitiveFilePaths) {
                 if (fileHasSymbol.get(fp)?.has(dstName))
@@ -644,26 +670,21 @@ export function resolveEdges(results, statsOut) {
                 if (dstQualifiedKey === null)
                     continue;
                 resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.8 });
-                stats.resolvedTransitive++;
                 continue;
             }
-            if (transitiveMatches.length > 1) {
-                stats.skippedAmbiguous++;
-                continue;
-            } // ambiguous — do not emit
-            // Tier 3: global fallback (confidence 0.5) — uses inverted symbol index
-            // instead of scanning all files.
-            stats.globalFallbacks++;
-            const candidates = symbolToFiles.get(dstName) ?? [];
-            const globalMatches = candidates.filter(fp => fp !== srcFilePath && fileLanguage.get(fp) === srcLanguage);
-            stats.globalCandidateTotal += globalMatches.length;
+            if (transitiveMatches.length > 1)
+                continue; // ambiguous — do not emit
+            // Tier 3: global fallback (confidence 0.5) — exactly one other file defines it
+            // Only match files in the same language as the caller to avoid cross-language false positives.
+            const srcLanguage = result.language;
+            const globalMatches = (symbolToFiles.get(dstName) ?? [])
+                .filter(fp => fp !== srcFilePath && languageFromPath(fp) === srcLanguage);
             if (globalMatches.length === 1) {
                 const fp = globalMatches[0];
                 const dstQualifiedKey = bestQKey(fileQKeys, fp, dstName);
                 if (dstQualifiedKey === null)
                     continue; // ambiguous — do not emit bad nodeId
                 resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.5 });
-                stats.resolvedGlobal++;
             }
             // 0 or >1 global matches — leave as dangling edge, do not emit
         }

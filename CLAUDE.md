@@ -14,7 +14,7 @@ Use JSON when chaining command results.
 2. AFTER every design or architecture decision → run `ix decide <title> --rationale <text>`.
 3. When you notice contradictory information → run `ix conflicts` and present results to the user.
 4. NEVER guess about codebase facts — if Ix has structured data, use it.
-5. IMMEDIATELY after modifying code → run `ix ingest <path>` on changed files.
+5. IMMEDIATELY after modifying code → run `ix map` to re-ingest and update the graph.
 6. When the user states a goal → run `ix truth add "<statement>"`.
 
 ## Ix CLI Command Routing
@@ -49,7 +49,7 @@ Underlying structural commands — useful for debugging or fine-grained inspecti
 | Read source code | `ix read` | `ix read src/auth.py:10-50` or `ix read verify_token` |
 | Full entity details | `ix entity` | `ix entity <id> --format json` |
 | Fast text search | `ix text` | `ix text "verify_token" --language python --limit 20` |
-| Find symbol (graph+text) | `ix locate` | `ix locate AuthProvider --limit 10` |
+| Find symbol (graph+text) | `ix locate` | `ix locate AuthProvider --kind class` |
 
 #### Navigating Relationships
 | Goal | Command | Example |
@@ -72,13 +72,58 @@ Underlying structural commands — useful for debugging or fine-grained inspecti
 | Record a goal | `ix truth add` | `ix truth add "Support 100k file repos"` |
 | List goals | `ix truth list` | `ix truth list --format json` |
 | Bug tracking | `ix bug create` | `ix bug create "title" --severity high --affects Entity` |
-| Bug listing | `ix bugs` | `ix bugs --format json` |
+| Update bug status | `ix bug update` | `ix bug update <id> --status resolved` |
+| Bug listing | `ix bugs` | `ix bugs --status open --format json` |
 | Bug details | `ix bug show` | `ix bug show <id> --format json` |
+| List recent patches | `ix patches` | `ix patches --limit 20 --format json` |
+
+### Planning (Pro)
+| Goal | Command | Example |
+|---|---|---|
+| Create a goal | `ix goal create` | `ix goal create "Support GitHub" --format json` |
+| List goals | `ix goals` | `ix goals --status active --format json` |
+| Create a plan | `ix plan create` | `ix plan create "Fix auth" --goal <id> --responds-to <bugId> --format json` |
+| Add a task | `ix plan task` | `ix plan task "Step 1" --plan <id> --depends-on <taskId> --resolves <bugId> --workflow-staged '{"discover":["ix overview X"],"implement":["ix map"],"validate":["ix smells"]}' --format json` |
+| Plan status | `ix plan status` | `ix plan status <id> --format json` |
+| Next actionable task | `ix plan next` | `ix plan next <id> --with-workflow --format json` |
+| Run next task workflow | `ix plan next` | `ix plan next <id> --run-workflow --stage discover --format json` |
+| List all plans | `ix plans` | `ix plans --format json` |
+| List tasks | `ix tasks` | `ix tasks --status pending --plan <id> --format json` |
+| Task details | `ix task show` | `ix task show <id> --with-workflow --format json` |
+| Update task | `ix task update` | `ix task update <id> --status done --format json` |
+| Run task workflow stage | `ix task update` | `ix task update <id> --run-workflow discover --format json` |
+
+### Workflows (Pro)
+Workflows are staged command sequences (discover → implement → validate) attached to tasks, plans, or decisions. All commands must start with `ix ` — no shell operators.
+
+| Goal | Command | Example |
+|---|---|---|
+| Attach workflow | `ix workflow attach` | `ix workflow attach task <id> --file workflow.json` |
+| Show workflow | `ix workflow show` | `ix workflow show task <id> --format json` |
+| Validate workflow | `ix workflow validate` | `ix workflow validate task <id>` |
+| Run workflow | `ix workflow run` | `ix workflow run task <id> --stage implement --format json` |
+
+**Workflow JSON format:**
+```json
+{
+  "discover":   ["ix overview AuthService", "ix impact AuthService"],
+  "implement":  ["ix map"],
+  "validate":   ["ix smells --format json", "ix subsystems --format json"]
+}
+```
+
+### Architecture Analysis
+| Goal | Command | Example |
+|---|---|---|
+| Detect code smells | `ix smells` | `ix smells --format json` |
+| Score subsystems | `ix subsystems` | `ix subsystems --level 2 --format json` |
+| List smell claims | `ix smells --list` | `ix smells --list --format json` |
+| List subsystem scores | `ix subsystems --list` | `ix subsystems --list --format json` |
 
 ### Ingestion & Health
 | Goal | Command | Example |
 |---|---|---|
-| Ingest files | `ix ingest` | `ix ingest ./src --recursive` |
+| Update graph + map | `ix map` | `ix map` |
 | Ingest GitHub data | `ix ingest` | `ix ingest --github owner/repo --limit 50` |
 | Backend health | `ix status` | `ix status` |
 | Graph statistics | `ix stats` | `ix stats --format json` |
@@ -137,6 +182,6 @@ Use the right entity type for the right purpose:
 ## Confidence Scores
 Ix returns confidence scores with results. When data has low confidence:
 - Mention the uncertainty to the user
-- Suggest re-ingesting the relevant files
+- Suggest re-running `ix map` to refresh the graph
 - Never present low-confidence data as established fact
 <!-- IX-MEMORY END -->

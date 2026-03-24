@@ -119,6 +119,37 @@ class ArangoClient private (db: ArangoDatabase) {
       db.collection("conflict_sets").truncate()
       ()
     }
+
+  /**
+   * Delete only code-derived nodes and edges, preserving planning artifacts
+   * (goals/intents, plans, tasks, decisions, bugs and their linking edges).
+   */
+  def truncateCodeGraph(): IO[Unit] = {
+    val codeKinds = Array(
+      "file", "function", "class", "method", "interface",
+      "module", "chunk", "region"
+    )
+    val codePredicates = Array(
+      "CALLS", "IMPORTS", "EXTENDS", "IMPLEMENTS",
+      "CONTAINS", "DEFINES", "CONTAINS_CHUNK", "REFERENCES", "NEXT", "IN_REGION"
+    )
+    for {
+      _ <- execute(
+             "FOR n IN nodes FILTER n.kind IN @kinds REMOVE n IN nodes",
+             Map("kinds" -> codeKinds.asInstanceOf[AnyRef])
+           )
+      _ <- execute(
+             "FOR e IN edges FILTER e.predicate IN @predicates REMOVE e IN edges",
+             Map("predicates" -> codePredicates.asInstanceOf[AnyRef])
+           )
+      // Also remove code-ingest patches so getSourceHashes returns empty after reset,
+      // preventing the ingest client from treating all files as unchanged.
+      _ <- execute(
+             "FOR p IN patches FILTER STARTS_WITH(p.data.source.extractor, 'tree-sitter') REMOVE p IN patches",
+             Map.empty
+           )
+    } yield ()
+  }
 }
 
 object ArangoClient {

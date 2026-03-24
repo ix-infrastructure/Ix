@@ -34,6 +34,7 @@ function fileResult(
       { name: filePath.split(/[\\/]/).pop() ?? filePath, kind: 'file', lineStart: 1, lineEnd: 1, language },
       ...entities,
     ],
+    chunks: [],
     relationships,
     fileRole: defaultFileRole,
   };

@@ -1,6 +1,7 @@
 import * as nodePath from 'node:path';
 import * as fs from 'node:fs';
 import * as crypto from 'node:crypto';
+import * as os from 'node:os';
 import type { Command } from 'commander';
 import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
@@ -21,6 +22,15 @@ import {
 // File discovery
 // ---------------------------------------------------------------------------
 
+// Inline extension set — mirrors core-ingestion/dist/languages.js EXT_MAP.
+// Kept here so file discovery does NOT require loading tree-sitter grammars.
+const SUPPORTED_EXTENSIONS = new Set([
+  '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
+  '.py', '.java', '.c', '.h', '.cpp', '.cc', '.cxx', '.hpp',
+  '.cs', '.go', '.rb', '.rs', '.php', '.kt', '.kts', '.swift',
+  '.scala', '.sc',
+]);
+
 const IGNORE_DIRS = new Set([
   'node_modules', '.git', 'dist', 'build', 'target', '.next',
   '.cache', '__pycache__', '.ix', '.claude', '.gitnexus',
@@ -31,7 +41,6 @@ const MAX_FILE_BYTES = 1024 * 1024; // 1 MB
 function* walkFiles(
   dir: string,
   recursive: boolean,
-  supportsFile: (fileName: string) => boolean
 ): Generator<string> {
   let entries: fs.Dirent[];
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
@@ -41,15 +50,51 @@ function* walkFiles(
     if (IGNORE_DIRS.has(entry.name)) continue;
     const full = nodePath.join(dir, entry.name);
     if (entry.isDirectory()) {
-      if (recursive) yield* walkFiles(full, true, supportsFile);
+      if (recursive) yield* walkFiles(full, true);
     } else if (entry.isFile()) {
-      if (supportsFile(entry.name)) yield full;
+      if (SUPPORTED_EXTENSIONS.has(nodePath.extname(entry.name))) yield full;
     }
   }
 }
 
 function sha256(content: Buffer): string {
   return crypto.createHash('sha256').update(content).digest('hex');
+}
+
+// ---------------------------------------------------------------------------
+// Mtime cache — skip readFileSync+sha256 for unchanged files
+// ---------------------------------------------------------------------------
+
+interface MtimeCache {
+  root: string;
+  files: Record<string, number>; // absolute path → mtime (ms)
+}
+
+function mtimeCachePath(projectRoot: string): string {
+  const key = crypto.createHash('sha256').update(projectRoot).digest('hex').slice(0, 12);
+  return nodePath.join(os.homedir(), '.ix', `ingest_mtimes_${key}.json`);
+}
+
+function loadMtimeCache(projectRoot: string): Map<string, number> {
+  try {
+    const raw = fs.readFileSync(mtimeCachePath(projectRoot), 'utf-8');
+    const data = JSON.parse(raw) as MtimeCache;
+    if (data.root !== projectRoot) return new Map();
+    return new Map(Object.entries(data.files));
+  } catch {
+    return new Map();
+  }
+}
+
+function saveMtimeCache(projectRoot: string, mtimes: Map<string, number>): void {
+  try {
+    const dir = nodePath.join(os.homedir(), '.ix');
+    fs.mkdirSync(dir, { recursive: true });
+    const data: MtimeCache = { root: projectRoot, files: Object.fromEntries(mtimes) };
+    fs.writeFileSync(mtimeCachePath(projectRoot), JSON.stringify(data));
+  } catch {
+    // Non-critical: ignore write errors
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -118,9 +163,6 @@ export async function ingestFiles(
   const debug = opts.debug || process.env.IX_DEBUG === '1';
   const trueStart = performance.now();
 
-  const [{ parseFile, resolveEdges, isGrammarSupported }, { buildPatchWithResolution }] = await loadIngestionModules();
-  const moduleLoadMs = Math.round(performance.now() - trueStart);
-
   const resolvedPath = nodePath.isAbsolute(path)
     ? path
     : nodePath.resolve(resolveWorkspaceRoot(opts.root), path);
@@ -131,8 +173,17 @@ export async function ingestFiles(
   let progressPhase   = 'Scanning';
   let progressCurrent = 0;
   let progressTotal   = 0;
+  let progressStart   = performance.now();
+
   const interval = opts.format === 'text' ? setInterval(() => {
-    process.stderr.write('\r' + renderProgressLine(progressPhase, progressCurrent, progressTotal));
+    const elapsed   = performance.now() - progressStart;
+    const tau       = progressPhase === 'Saving' ? 3000 : 2000;
+    let display     = progressCurrent;
+    if (progressTotal > 0 && progressCurrent < progressTotal) {
+      const simulated = Math.floor((1 - Math.exp(-elapsed / tau)) * 0.88 * progressTotal);
+      display = Math.max(display, simulated);
+    }
+    process.stderr.write('\r' + renderProgressLine(progressPhase, display, progressTotal));
   }, 80) : null;
 
   let filesDiscovered = 0;
@@ -145,7 +196,7 @@ export async function ingestFiles(
   let entitiesParsed = 0;
 
   // Phase timing marks
-  const timings = { moduleLoadMs, discoverMs: 0, hashMs: 0, parseMs: 0, resolveMs: 0, commitMs: 0 };
+  const timings = { moduleLoadMs: 0, discoverMs: 0, hashMs: 0, parseMs: 0, resolveMs: 0, commitMs: 0 };
   const resolveStats = {
     importLookups: 0, transitiveLookups: 0, globalFallbacks: 0,
     globalCandidateTotal: 0, resolvedImport: 0, resolvedTransitive: 0,
@@ -156,8 +207,8 @@ export async function ingestFiles(
     // Phase: discover files
     const stat = fs.statSync(resolvedPath);
     const filePaths: string[] = stat.isFile()
-      ? [resolvedPath]
-      : Array.from(walkFiles(resolvedPath, opts.recursive ?? true, isGrammarSupported));
+      ? (SUPPORTED_EXTENSIONS.has(nodePath.extname(resolvedPath)) ? [resolvedPath] : [])
+      : Array.from(walkFiles(resolvedPath, opts.recursive ?? true));
 
     filesDiscovered = filePaths.length;
     const discovered = performance.now();
@@ -166,120 +217,222 @@ export async function ingestFiles(
     progressPhase   = 'Parsing';
     progressTotal   = filePaths.length;
     progressCurrent = 0;
+    progressStart   = performance.now();
 
-    // Phase: hash lookup (skipped on first ingest when no baseline exists)
-    let knownHashes: Map<string, string>;
-    let baselineSkipped = false;
-    if (opts.force) {
-      knownHashes = new Map();
-    } else {
-      const hasBaseline = await checkIngestBaseline(client, debug);
-      if (hasBaseline) {
-        if (debug) process.stderr.write('\n  Existing ingest baseline found — performing source hash comparison\n');
-        knownHashes = await loadExistingHashes(client, filePaths, debug);
-      } else {
-        if (debug) process.stderr.write('\n  No existing ingest baseline found — skipping source hash lookup\n');
-        knownHashes = new Map();
-        baselineSkipped = true;
+    // Phase: mtime pre-filter — skip readFileSync+sha256 for files whose mtime
+    // is unchanged since the last successful ingest (common "ix map" re-run case).
+    const projectRoot = fs.statSync(resolvedPath).isDirectory() ? resolvedPath : nodePath.dirname(resolvedPath);
+    const mtimeCache  = opts.force ? new Map<string, number>() : loadMtimeCache(projectRoot);
+    const currentMtimes = new Map<string, number>();
+
+    // DB-reset guard: if the mtime cache has entries but the server returns no hashes
+    // for a small sample, the DB was wiped (e.g. `ix reset` run from a different dir
+    // so the cache wasn't cleared). Invalidate the cache so files are re-ingested.
+    if (!opts.force && mtimeCache.size > 0) {
+      const samplePaths = [...mtimeCache.keys()].slice(0, 5);
+      const sampleHashes = await loadExistingHashes(client, samplePaths, debug);
+      if (sampleHashes.size === 0) {
+        mtimeCache.clear();
+        if (debug) process.stderr.write(`\n  DB reset detected — invalidating mtime cache\n`);
       }
+    }
+
+    // Stat all files and partition into mtime-clean (skip) and mtime-changed (need hash check).
+    const mtimeChangedPaths: string[] = [];
+    for (const filePath of filePaths) {
+      try {
+        const st = fs.statSync(filePath);
+        if (st.size === 0) { filesSkipped++; continue; }
+        if (st.size > MAX_FILE_BYTES) { tooLarge++; continue; }
+        const mtime = st.mtimeMs;
+        currentMtimes.set(filePath, mtime);
+        if (!opts.force && mtimeCache.get(filePath) === mtime) {
+          filesSkipped++;   // mtime clean — assume unchanged
+        } else {
+          mtimeChangedPaths.push(filePath);
+        }
+      } catch (err) {
+        parseErrors++;
+        process.stderr.write(`\n  [stat error] ${filePath}: ${err}\n`);
+      }
+    }
+
+    // Phase: hash lookup — only needed when mtime-changed files exist.
+    let knownHashes: Map<string, string>;
+    if (opts.force || mtimeChangedPaths.length > 0) {
+      knownHashes = await loadExistingHashes(client, opts.force ? filePaths : mtimeChangedPaths, debug);
+      if (debug) process.stderr.write(`\n  Source hash lookup: ${knownHashes.size} known hashes (${mtimeChangedPaths.length} mtime-changed)\n`);
+    } else {
+      // All files are mtime-clean — skip server round-trip entirely.
+      knownHashes = new Map();
+      if (debug) process.stderr.write(`\n  All ${filePaths.length} files mtime-clean — skipping hash lookup\n`);
     }
     const hashed = performance.now();
     timings.hashMs = Math.round(hashed - discovered);
 
-    // Phase: parse all files
+    // Phase: parse + commit — streaming to bound peak memory.
+    //
+    // Files are parsed in PARSE_STREAM_CHUNK-sized batches. After each batch,
+    // resolveEdges runs on that batch and patches are committed before the next
+    // batch is parsed. This keeps heap usage at O(chunk) instead of O(total).
+    //
+    // YIELD_EVERY yields the Node.js event loop so the progress bar timer can
+    // fire even during the synchronous tree-sitter parse calls.
+    //
+    // Two paths:
+    //   A) Has baseline or mtime-changed files → pre-scan first, skip module load
+    //      entirely if nothing changed (common "ix map" re-run case).
+    //   B) No baseline / force → load modules, parse + stream-commit all files.
+
     type ParsedFile = { filePath: string; parsed: any; hash: string; previousHash: string | undefined };
-    const parsedFiles: ParsedFile[] = [];
+    let resolveEdgesFn: Function | null = null;
+    let buildPatchFn: Function | null = null;
 
-    for (const filePath of filePaths) {
-      progressCurrent++;
-      if (interval) process.stderr.write('\r' + renderProgressLine(progressPhase, progressCurrent, progressTotal));
-      try {
-        const fileSize = fs.statSync(filePath).size;
-        if (fileSize === 0) { filesSkipped++; continue; }
-        if (fileSize > MAX_FILE_BYTES) { tooLarge++; continue; }
+    const PARSE_STREAM_CHUNK = 1000;  // resolve + commit after this many parsed files
+    const COMMIT_CHUNK_SIZE   = 200;  // files per HTTP batch to server
+    const YIELD_EVERY         = 100;  // yield event loop every N files during parse
 
-        const bytes = fs.readFileSync(filePath);
-        const hash = sha256(bytes);
+    const emptyEdges: any[] = [];
 
-        if (!opts.force && knownHashes.get(filePath) === hash) {
-          filesSkipped++;
-          continue;
-        }
+    /** Resolve edges within a batch, build patches, and commit in sub-chunks. */
+    const flushBatch = async (batch: ParsedFile[]): Promise<void> => {
+      if (batch.length === 0) return;
+      filesChanged += batch.length;
 
-        const source = bytes.toString('utf-8');
-        const parsed = parseFile(filePath, source);
-
-        if (!parsed) {
-          filesSkipped++;
-          continue;
-        }
-
-        entitiesParsed += parsed.entities.length;
-        const previousHash = knownHashes.get(filePath);
-        parsedFiles.push({ filePath, parsed, hash, previousHash: previousHash !== hash ? previousHash : undefined });
-      } catch (err) {
-        parseErrors++;
-        process.stderr.write(`\n  [parse error] ${filePath}: ${err}\n`);
+      const resolvedEdges = resolveEdgesFn!(batch.map(f => f.parsed), resolveStats);
+      const batchEdgesByFile = new Map<string, any[]>();
+      for (const edge of resolvedEdges) {
+        let arr = batchEdgesByFile.get(edge.srcFilePath);
+        if (!arr) { arr = []; batchEdgesByFile.set(edge.srcFilePath, arr); }
+        arr.push(edge);
       }
-    }
 
-    filesChanged = parsedFiles.length;
-    const parsed = performance.now();
-    timings.parseMs = Math.round(parsed - hashed);
-
-    // Phase: cross-file CALLS + EXTENDS resolution over the full batch
-    const resolvedEdges = (resolveEdges as Function)(parsedFiles.map(f => f.parsed), resolveStats);
-    const resolved = performance.now();
-    timings.resolveMs = Math.round(resolved - parsed);
-
-    // Pre-group resolved edges by source file for O(1) lookup in patch building
-    const edgesByFile = new Map<string, typeof resolvedEdges>();
-    for (const edge of resolvedEdges) {
-      let arr = edgesByFile.get(edge.srcFilePath);
-      if (!arr) { arr = []; edgesByFile.set(edge.srcFilePath, arr); }
-      arr.push(edge);
-    }
-    const emptyEdges: typeof resolvedEdges = [];
-
-    // Phase: build patches and bulk commit
-    const patches: GraphPatchPayload[] = [];
-    for (const { parsed: p, hash, previousHash } of parsedFiles) {
-      try {
-        patches.push(buildPatchWithResolution(p, hash, edgesByFile.get(p.filePath) ?? emptyEdges, previousHash));
-      } catch (err) {
-        parseErrors++;
-        process.stderr.write(`\n  [patch build error] ${p.filePath}: ${err}\n`);
-      }
-    }
-
-    if (patches.length > 0) {
-      progressPhase   = 'Saving';
-      progressTotal   = patches.length;
-      progressCurrent = 0;
-      try {
-        const result = await client.commitPatchBulk(patches);
-        latestRev = result.rev;
-        patchesApplied = patches.length;
-        progressCurrent = patches.length;
-      } catch (err) {
-        // Fallback: try per-file commits if bulk endpoint fails
-        if (debug) process.stderr.write(`\n  [bulk commit failed, falling back to per-file] ${err}\n`);
-        for (const patch of patches) {
+      for (let i = 0; i < batch.length; i += COMMIT_CHUNK_SIZE) {
+        const end = Math.min(i + COMMIT_CHUNK_SIZE, batch.length);
+        const patchChunk: GraphPatchPayload[] = [];
+        for (let j = i; j < end; j++) {
+          const { parsed: p, hash, previousHash } = batch[j];
           try {
-            const result = await client.commitPatch(patch);
-            if (result.rev > latestRev) latestRev = result.rev;
-            patchesApplied++;
-            progressCurrent++;
-          } catch (commitErr) {
+            patchChunk.push(buildPatchFn!(p, hash, batchEdgesByFile.get(p.filePath) ?? emptyEdges, previousHash));
+          } catch (err) {
             parseErrors++;
-            process.stderr.write(`\n  [commit error] ${patch.source?.uri}: ${commitErr}\n`);
+            process.stderr.write(`\n  [patch build error] ${p.filePath}: ${err}\n`);
+          }
+        }
+        if (patchChunk.length === 0) continue;
+        try {
+          const result = await client.commitPatchBulk(patchChunk);
+          if (result.rev > latestRev) latestRev = result.rev;
+          patchesApplied += patchChunk.length;
+        } catch (err) {
+          if (debug) process.stderr.write(`\n  [bulk chunk failed, falling back to per-file] ${err}\n`);
+          for (const patch of patchChunk) {
+            try {
+              const result = await client.commitPatch(patch);
+              if (result.rev > latestRev) latestRev = result.rev;
+              patchesApplied++;
+            } catch (commitErr) {
+              parseErrors++;
+              process.stderr.write(`\n  [commit error] ${patch.source?.uri}: ${commitErr}\n`);
+            }
           }
         }
       }
+    };
+
+    if ((knownHashes.size > 0 || mtimeChangedPaths.length === 0) && !opts.force) {
+      // Path A: has baseline or all mtime-clean → pre-scan to detect changes before loading modules.
+      // If nothing changed, module load is skipped entirely.
+      const changedPaths: Array<{ filePath: string; bytes: Buffer; hash: string; previousHash: string | undefined }> = [];
+      for (const filePath of mtimeChangedPaths) {
+        try {
+          const bytes = fs.readFileSync(filePath);
+          const hash = sha256(bytes);
+          if (knownHashes.get(filePath) === hash) { filesSkipped++; continue; }
+          const previousHash = knownHashes.get(filePath);
+          changedPaths.push({ filePath, bytes, hash, previousHash: previousHash !== hash ? previousHash : undefined });
+        } catch (err) {
+          parseErrors++;
+          process.stderr.write(`\n  [read error] ${filePath}: ${err}\n`);
+        }
+      }
+
+      if (changedPaths.length > 0) {
+        const moduleStart = performance.now();
+        const [ingestion, patchBuilder] = await loadIngestionModules();
+        timings.moduleLoadMs = Math.round(performance.now() - moduleStart);
+        resolveEdgesFn = ingestion.resolveEdges as Function;
+        buildPatchFn = patchBuilder.buildPatchWithResolution as Function;
+
+        let batch: ParsedFile[] = [];
+        for (let i = 0; i < changedPaths.length; i++) {
+          const { filePath, bytes, hash, previousHash } = changedPaths[i];
+          try {
+            const parsed = (ingestion.parseFile as Function)(filePath, bytes.toString('utf-8'));
+            if (!parsed) { filesSkipped++; progressCurrent++; continue; }
+            entitiesParsed += parsed.entities.length;
+            batch.push({ filePath, parsed, hash, previousHash });
+            progressCurrent++;
+          } catch (err) {
+            parseErrors++;
+            progressCurrent++;
+            process.stderr.write(`\n  [parse error] ${filePath}: ${err}\n`);
+          }
+          if ((i + 1) % YIELD_EVERY === 0) await new Promise<void>(resolve => setImmediate(resolve));
+          if (batch.length >= PARSE_STREAM_CHUNK) { await flushBatch(batch); batch = []; }
+        }
+        await flushBatch(batch);
+      }
+    } else {
+      // Path B: no baseline (first ingest) or --force → load modules, then stream parse + commit.
+      const moduleStart = performance.now();
+      const [ingestion, patchBuilder] = await loadIngestionModules();
+      timings.moduleLoadMs = Math.round(performance.now() - moduleStart);
+      resolveEdgesFn = ingestion.resolveEdges as Function;
+      buildPatchFn = patchBuilder.buildPatchWithResolution as Function;
+
+      let batch: ParsedFile[] = [];
+      for (let i = 0; i < filePaths.length; i++) {
+        const filePath = filePaths[i];
+        try {
+          const fileSize = fs.statSync(filePath).size;
+          if (fileSize === 0) { filesSkipped++; progressCurrent++; continue; }
+          if (fileSize > MAX_FILE_BYTES) { tooLarge++; progressCurrent++; continue; }
+          const bytes = fs.readFileSync(filePath);
+          const hash = sha256(bytes);
+          if (!opts.force && knownHashes.get(filePath) === hash) { filesSkipped++; progressCurrent++; continue; }
+          const previousHash = knownHashes.get(filePath);
+          const parsed = (ingestion.parseFile as Function)(filePath, bytes.toString('utf-8'));
+          if (!parsed) { filesSkipped++; progressCurrent++; continue; }
+          entitiesParsed += parsed.entities.length;
+          batch.push({ filePath, parsed, hash, previousHash: previousHash !== hash ? previousHash : undefined });
+          progressCurrent++;
+        } catch (err) {
+          parseErrors++;
+          progressCurrent++;
+          process.stderr.write(`\n  [parse error] ${filePath}: ${err}\n`);
+        }
+        if ((i + 1) % YIELD_EVERY === 0) await new Promise<void>(resolve => setImmediate(resolve));
+        if (batch.length >= PARSE_STREAM_CHUNK) { await flushBatch(batch); batch = []; }
+      }
+      await flushBatch(batch);
     }
 
+    const parsed = performance.now();
+    timings.parseMs = Math.round(parsed - hashed);
+    timings.resolveMs = 0;   // now interleaved with parse
+    timings.commitMs  = 0;   // now interleaved with parse
+
+    // Clear the parse bar
+    if (interval) process.stderr.write('\r' + ' '.repeat(PROG_LINE_WIDTH) + '\r');
+
     const committed = performance.now();
-    timings.commitMs = Math.round(committed - resolved);
+
+    // Persist mtime cache so next run can skip unchanged files quickly.
+    // Only save when no parse errors (avoid poisoning cache on partial failures).
+    if (!opts.force && parseErrors === 0 && currentMtimes.size > 0) {
+      saveMtimeCache(projectRoot, currentMtimes);
+    }
   } finally {
     if (interval) {
       clearInterval(interval);
@@ -287,6 +440,8 @@ export async function ingestFiles(
         process.stderr.write('\r' + renderProgressLine(progressPhase, progressTotal, progressTotal));
       }
       process.stderr.write('\r' + ' '.repeat(PROG_LINE_WIDTH) + '\r');
+      const elapsedSec = ((performance.now() - start) / 1000).toFixed(1);
+      process.stderr.write(chalk.dim(`  Ingested in ${elapsedSec}s\n`));
     }
   }
 
@@ -349,15 +504,6 @@ export async function ingestFiles(
 // ---------------------------------------------------------------------------
 // Load existing hashes from the server for change detection
 // ---------------------------------------------------------------------------
-
-async function checkIngestBaseline(client: IxClient, debug = false): Promise<boolean> {
-  try {
-    return await client.hasIngestBaseline();
-  } catch (err) {
-    if (debug) process.stderr.write(`\n  [baseline check failed, falling back to full hash lookup] ${err}\n`);
-    return true; // Safe fallback: assume baseline exists, do the full lookup
-  }
-}
 
 async function loadExistingHashes(client: IxClient, filePaths: string[], debug = false): Promise<Map<string, string>> {
   try {

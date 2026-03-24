@@ -10,7 +10,7 @@ import io.circe.syntax._
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import org.typelevel.log4cats.Logger
 
-import ix.memory.db.{BulkWriteApi, CommitResult, CommitStatus, FileBatch, GraphQueryApi}
+import ix.memory.db.{BulkWriteApi, FileBatch, GraphQueryApi}
 import ix.memory.model._
 
 private[ingestion] sealed trait ParseOutcome
@@ -32,6 +32,9 @@ class BulkIngestionService(
 
   private val parallelism = Runtime.getRuntime.availableProcessors.max(2)
   private val MaxFileBytes: Long = 1024 * 1024  // 1 MB
+  private val ParseBatchSize = 100
+  private val MaxCommitFiles = 100
+  private val MaxCommitPayloadBytes = 1024 * 1024
   private val mapper = new com.fasterxml.jackson.databind.ObjectMapper()
   private val logger: Logger[IO] = Slf4jLogger.getLoggerFromName[IO]("ix.ingestion")
 
@@ -46,55 +49,69 @@ class BulkIngestionService(
     force: Boolean = false
   ): IO[IngestionResult] = {
     for {
-      files      <- discoverFiles(path, language, recursive)
-      _          <- onProgress(IngestionProgress(files.size, 0, 0, 0))
-      hashMap    <- if (force) IO.pure(Map.empty[String, String]) else loadExistingHashes(files)
-      outcomes   <- files.parTraverseN(parallelism) { f =>
-        parseFile(f, hashMap).handleErrorWith { err =>
-          logger.warn(s"Parse error: ${f.toString} — ${err.getMessage}") *>
-            IO.pure(Skipped("parseError"): ParseOutcome)
-        }
+      files <- discoverFiles(path, language, recursive)
+      _     <- onProgress(IngestionProgress(files.size, 0, 0, 0))
+      latestRev <- queryApi.getLatestRev
+      state <- files.grouped(ParseBatchSize).toVector.foldLeft(IO.pure(BulkIngestionState.empty(latestRev.value))) {
+        case (stateIO, batch) =>
+          stateIO.flatMap(processBatch(batch, force, files.size, onProgress, _))
       }
-      validBatches   = outcomes.collect { case Parsed(b) => b }
-      unchangedCount = outcomes.count { case Skipped("unchanged") => true; case _ => false }
-      emptyCount     = outcomes.count { case Skipped("emptyFile") => true; case _ => false }
-      errorCount     = outcomes.count { case Skipped("parseError") => true; case _ => false }
-      tooLargeCount  = outcomes.count { case Skipped("tooLarge") => true; case _ => false }
-      skippedCount   = unchangedCount + emptyCount + errorCount + tooLargeCount
-      totalChunks    = if (validBatches.isEmpty) 0 else (validBatches.size + 99) / 100
-      _          <- onProgress(IngestionProgress(files.size, outcomes.size, 0, totalChunks))
-      latestRev  <- queryApi.getLatestRev
-      result     <- if (validBatches.isEmpty) IO.pure(CommitResult(latestRev, CommitStatus.Ok))
-                    else commitChunkedWithProgress(validBatches.toVector, latestRev.value, onProgress, files.size, outcomes.size)
     } yield IngestionResult(
       filesProcessed  = files.size,
-      patchesApplied  = validBatches.size,
-      filesSkipped    = skippedCount,
-      entitiesCreated = validBatches.flatMap(_.patch.ops.collect { case _: PatchOp.UpsertNode => 1 }).size,
-      latestRev       = result.newRev,
-      skipReasons     = SkipReasons(unchanged = unchangedCount, emptyFile = emptyCount, parseError = errorCount, tooLarge = tooLargeCount)
+      patchesApplied  = state.patchesApplied,
+      filesSkipped    = state.skipped.total,
+      entitiesCreated = state.entitiesCreated,
+      latestRev       = Rev(state.currentRev),
+      skipReasons     = state.skipped
     )
   }
 
-  private def commitChunkedWithProgress(
-    batches: Vector[FileBatch],
-    baseRev: Long,
-    onProgress: IngestionProgress => IO[Unit],
+  private def processBatch(
+    files: List[Path],
+    force: Boolean,
     discovered: Int,
-    parsed: Int
-  ): IO[CommitResult] = {
-    val chunkSize = 100
-    val chunks = batches.grouped(chunkSize).toVector
-    val totalChunks = chunks.size
-
-    chunks.zipWithIndex.foldLeft(IO.pure(baseRev)) { case (revIO, (chunk, idx)) =>
-      revIO.flatMap { currentRev =>
-        bulkWriteApi.commitBatch(chunk, currentRev).flatMap { result =>
-          onProgress(IngestionProgress(discovered, parsed, idx + 1, totalChunks)) *>
-            IO.pure(result.newRev.value)
+    onProgress: IngestionProgress => IO[Unit],
+    state: BulkIngestionState
+  ): IO[BulkIngestionState] = {
+    for {
+      hashMap <- if (force) IO.pure(Map.empty[String, String]) else loadExistingHashes(files)
+      outcomes <- files.parTraverseN(parallelism) { f =>
+        parseFile(f, hashMap).handleErrorWith { err =>
+          logger.warn(s"Parse error: ${f.toString} - ${err.getMessage}") *>
+            IO.pure(Skipped("parseError"): ParseOutcome)
         }
       }
-    }.map(finalRev => CommitResult(Rev(finalRev), CommitStatus.Ok))
+      validBatches = outcomes.collect { case Parsed(batch) => batch }.toVector
+      batchSkipped = SkipReasons(
+        unchanged = outcomes.count { case Skipped("unchanged") => true; case _ => false },
+        emptyFile = outcomes.count { case Skipped("emptyFile") => true; case _ => false },
+        parseError = outcomes.count { case Skipped("parseError") => true; case _ => false },
+        tooLarge = outcomes.count { case Skipped("tooLarge") => true; case _ => false }
+      )
+      parsedFiles = state.filesParsed + outcomes.size
+      commitChunks = chunkForCommit(validBatches)
+      totalChunks = state.totalChunksPlanned + commitChunks.size
+      _ <- onProgress(IngestionProgress(discovered, parsedFiles, state.chunksWritten, totalChunks))
+      committed <- commitChunks.foldLeft(IO.pure((state.currentRev, state.chunksWritten))) {
+        case (revIO, chunk) =>
+          revIO.flatMap { case (currentRev, chunksWritten) =>
+            bulkWriteApi.commitBatch(chunk, currentRev).flatMap { result =>
+              val updatedChunks = chunksWritten + 1
+              onProgress(IngestionProgress(discovered, parsedFiles, updatedChunks, totalChunks)) *>
+                IO.pure((result.newRev.value, updatedChunks))
+            }
+          }
+      }
+      entitiesCreated = validBatches.flatMap(_.patch.ops.collect { case _: PatchOp.UpsertNode => 1 }).size
+    } yield state.copy(
+      currentRev = committed._1,
+      filesParsed = parsedFiles,
+      patchesApplied = state.patchesApplied + validBatches.size,
+      chunksWritten = committed._2,
+      totalChunksPlanned = totalChunks,
+      entitiesCreated = state.entitiesCreated + entitiesCreated,
+      skipped = combineSkipReasons(state.skipped, batchSkipped)
+    )
   }
 
   /**
@@ -121,7 +138,7 @@ class BulkIngestionService(
                             parserOpt = parserRouter.parserFor(filePath.toString)
                             parseResult = parserOpt match {
                               case Some(p) => p.parse(filePath.getFileName.toString, source)
-                              case None    => genericTextParse(filePath.getFileName.toString, source)
+                              case None    => GenericTextFallback.parse(filePath.getFileName.toString, source)
                             }
                             patch = GraphPatchBuilder.build(filePath.toString, Some(hash), parseResult)
                             _ <- IO.fromEither(PatchValidator.validate(patch).left.map(msg => new IllegalStateException(msg)))
@@ -133,7 +150,7 @@ class BulkIngestionService(
     } yield result
   }
 
-  private def loadExistingHashes(files: List[Path]): IO[Map[String, String]] = {
+  private def loadExistingHashes(files: Seq[Path]): IO[Map[String, String]] = {
     val paths = files.map(_.toString)
     queryApi.getSourceHashes(paths)
   }
@@ -156,7 +173,7 @@ class BulkIngestionService(
   ): IO[List[Path]] = IO.blocking {
     val extensions = FileDiscovery.extensionsFor(language)
     if (Files.isRegularFile(path)) {
-      if (FileDiscovery.matchesFilter(path, extensions)) List(path) else List.empty
+      if (language.isEmpty || FileDiscovery.matchesFilter(path, extensions)) List(path) else List.empty
     } else if (Files.isDirectory(path)) {
       // Try git ls-files first (respects .gitignore), fall back to manual walk
       FileDiscovery.tryGitLsFiles(path, recursive, extensions)
@@ -164,20 +181,65 @@ class BulkIngestionService(
     } else List.empty
   }
 
+  private def chunkForCommit(batches: Vector[FileBatch]): Vector[Vector[FileBatch]] = {
+    val chunks = Vector.newBuilder[Vector[FileBatch]]
+    var current = Vector.empty[FileBatch]
+    var currentBytes = 0
+
+    batches.foreach { batch =>
+      val batchBytes = batch.estimatedPayloadBytes
+      val exceedsPayload = current.nonEmpty && currentBytes + batchBytes > MaxCommitPayloadBytes
+      val exceedsCount = current.size >= MaxCommitFiles
+      if (exceedsPayload || exceedsCount) {
+        chunks += current
+        current = Vector.empty
+        currentBytes = 0
+      }
+      current = current :+ batch
+      currentBytes += batchBytes
+    }
+
+    if (current.nonEmpty) {
+      chunks += current
+    }
+
+    chunks.result()
+  }
+
+  private def combineSkipReasons(left: SkipReasons, right: SkipReasons): SkipReasons =
+    SkipReasons(
+      unchanged = left.unchanged + right.unchanged,
+      emptyFile = left.emptyFile + right.emptyFile,
+      parseError = left.parseError + right.parseError,
+      tooLarge = left.tooLarge + right.tooLarge
+    )
+
   private def sha256Bytes(bytes: Array[Byte]): String = {
     val md = java.security.MessageDigest.getInstance("SHA-256")
     md.digest(bytes).map("%02x".format(_)).mkString
   }
 
-  private def genericTextParse(fileName: String, source: String): ParseResult = {
-    val lines = if (source.isEmpty) 1 else source.count(_ == '\n') + 1
-    ParseResult(
-      entities = Vector(ParsedEntity(
-        name = fileName, kind = NodeKind.File,
-        attrs = Map("content" -> Json.fromString(source)),
-        lineStart = 1, lineEnd = lines
-      )),
-      relationships = Vector.empty
+}
+
+private[ingestion] final case class BulkIngestionState(
+  currentRev: Long,
+  filesParsed: Int,
+  patchesApplied: Int,
+  chunksWritten: Int,
+  totalChunksPlanned: Int,
+  entitiesCreated: Int,
+  skipped: SkipReasons
+)
+
+private[ingestion] object BulkIngestionState {
+  def empty(baseRev: Long): BulkIngestionState =
+    BulkIngestionState(
+      currentRev = baseRev,
+      filesParsed = 0,
+      patchesApplied = 0,
+      chunksWritten = 0,
+      totalChunksPlanned = 0,
+      entitiesCreated = 0,
+      skipped = SkipReasons()
     )
-  }
 }

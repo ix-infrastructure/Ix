@@ -30,6 +30,11 @@ function edgeId(filePath: string, src: string, dst: string, predicate: string): 
   return deterministicId(`${normalizePath(filePath)}:${src}:${dst}:${predicate}`);
 }
 
+/** Deterministic ID for a chunk — keyed on file + kind + name + start line to survive minor edits. */
+function chunkId(filePath: string, chunkKind: string, name: string | null, startLine: number): string {
+  return deterministicId(`${normalizePath(filePath)}:chunk:${chunkKind}:${name ?? 'file_body'}:${startLine}`);
+}
+
 // ---------------------------------------------------------------------------
 // Source type from file extension
 // ---------------------------------------------------------------------------
@@ -42,11 +47,11 @@ function sourceType(filePath: string): string {
 }
 
 export function extractorName(): string {
-  return `tree-sitter/1.12`;
+  return `tree-sitter/1.13`;
 }
 
 /** Previous extractor versions — their patches are superseded when re-ingesting. */
-export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
+export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
 
 /** Compute a patchId for a (filePath, sourceHash, extractorVersion) triple. */
 function computePatchId(filePath: string, sourceHash: string, extractor: string): string {
@@ -67,7 +72,7 @@ export function buildPatch(
   sourceHash: string,
   previousSourceHash?: string
 ): GraphPatchPayload {
-  const { filePath, entities, relationships } = result;
+  const { filePath, entities, chunks, relationships } = result;
   const ops: PatchOp[] = [];
 
   // Build a qualified-key map so that same-named entities in different
@@ -123,6 +128,73 @@ export function buildPatch(
           language: e.language,
           ...roleAttrs,
         },
+      });
+    }
+  }
+
+  // UpsertNode + edges for each chunk
+  const fileNodeId = nodeId(filePath, entities.find(e => e.kind === 'file')?.name ?? filePath);
+  for (const chunk of chunks) {
+    const cid = chunkId(filePath, chunk.chunkKind, chunk.name, chunk.lineStart);
+    const chunkName = chunk.name ?? `file_body:${chunk.lineStart}`;
+    ops.push({
+      type: 'UpsertNode',
+      id: cid,
+      kind: 'chunk',
+      name: chunkName,
+      attrs: {
+        file_uri: filePath,
+        language: chunk.language,
+        chunk_kind: chunk.chunkKind,
+        start_line: chunk.lineStart,
+        end_line: chunk.lineEnd,
+        start_byte: chunk.startByte,
+        end_byte: chunk.endByte,
+        content_hash: chunk.contentHash,
+        parser_version: extractorName(),
+      },
+    });
+    // File -[CONTAINS]-> Chunk
+    ops.push({
+      type: 'UpsertEdge',
+      id: edgeId(filePath, 'file', chunkName, 'CONTAINS_CHUNK'),
+      src: fileNodeId,
+      dst: cid,
+      predicate: 'CONTAINS_CHUNK',
+      attrs: {},
+    });
+    // Chunk -[DEFINES]-> Symbol (only for named chunks)
+    if (chunk.name !== null) {
+      const symbolKey = chunk.container ? `${chunk.container}.${chunk.name}` : chunk.name;
+      const symbolNid = nodeId(filePath, symbolKey);
+      ops.push({
+        type: 'UpsertEdge',
+        id: edgeId(filePath, chunkName, symbolKey, 'DEFINES'),
+        src: cid,
+        dst: symbolNid,
+        predicate: 'DEFINES',
+        attrs: {},
+      });
+    }
+  }
+
+  // NEXT edges for source-order chunk adjacency
+  for (let i = 0; i + 1 < chunks.length; i++) {
+    const a = chunks[i];
+    const b = chunks[i + 1];
+    // Only link top-level chunks (no container) to avoid intra-class ordering noise
+    if (a.container == null && b.container == null) {
+      const aid = chunkId(filePath, a.chunkKind, a.name, a.lineStart);
+      const bid = chunkId(filePath, b.chunkKind, b.name, b.lineStart);
+      const aName = a.name ?? `file_body:${a.lineStart}`;
+      const bName = b.name ?? `file_body:${b.lineStart}`;
+      ops.push({
+        type: 'UpsertEdge',
+        id: edgeId(filePath, aName, bName, 'NEXT'),
+        src: aid,
+        dst: bid,
+        predicate: 'NEXT',
+        attrs: {},
       });
     }
   }
@@ -208,7 +280,7 @@ export function buildPatchWithResolution(
     });
   }
 
-  const { filePath, entities, relationships } = result;
+  const { filePath, entities, chunks, relationships } = result;
   const ops: PatchOp[] = [];
 
   const entityQKey = new Map<ParsedEntity, string>();
@@ -248,6 +320,69 @@ export function buildPatchWithResolution(
         kind: e.kind,
         name: e.name,
         attrs: { line_start: e.lineStart, line_end: e.lineEnd, language: e.language, ...roleAttrs },
+      });
+    }
+  }
+
+  // UpsertNode + edges for each chunk (same logic as buildPatch)
+  const fileNodeId2 = nodeId(filePath, entities.find(e => e.kind === 'file')?.name ?? filePath);
+  for (const chunk of chunks) {
+    const cid = chunkId(filePath, chunk.chunkKind, chunk.name, chunk.lineStart);
+    const chunkName = chunk.name ?? `file_body:${chunk.lineStart}`;
+    ops.push({
+      type: 'UpsertNode',
+      id: cid,
+      kind: 'chunk',
+      name: chunkName,
+      attrs: {
+        file_uri: filePath,
+        language: chunk.language,
+        chunk_kind: chunk.chunkKind,
+        start_line: chunk.lineStart,
+        end_line: chunk.lineEnd,
+        start_byte: chunk.startByte,
+        end_byte: chunk.endByte,
+        content_hash: chunk.contentHash,
+        parser_version: extractorName(),
+      },
+    });
+    ops.push({
+      type: 'UpsertEdge',
+      id: edgeId(filePath, 'file', chunkName, 'CONTAINS_CHUNK'),
+      src: fileNodeId2,
+      dst: cid,
+      predicate: 'CONTAINS_CHUNK',
+      attrs: {},
+    });
+    if (chunk.name !== null) {
+      const symbolKey = chunk.container ? `${chunk.container}.${chunk.name}` : chunk.name;
+      const symbolNid = nodeId(filePath, symbolKey);
+      ops.push({
+        type: 'UpsertEdge',
+        id: edgeId(filePath, chunkName, symbolKey, 'DEFINES'),
+        src: cid,
+        dst: symbolNid,
+        predicate: 'DEFINES',
+        attrs: {},
+      });
+    }
+  }
+
+  for (let i = 0; i + 1 < chunks.length; i++) {
+    const a = chunks[i];
+    const b = chunks[i + 1];
+    if (a.container == null && b.container == null) {
+      const aid = chunkId(filePath, a.chunkKind, a.name, a.lineStart);
+      const bid = chunkId(filePath, b.chunkKind, b.name, b.lineStart);
+      const aName = a.name ?? `file_body:${a.lineStart}`;
+      const bName = b.name ?? `file_body:${b.lineStart}`;
+      ops.push({
+        type: 'UpsertEdge',
+        id: edgeId(filePath, aName, bName, 'NEXT'),
+        src: aid,
+        dst: bid,
+        predicate: 'NEXT',
+        attrs: {},
       });
     }
   }

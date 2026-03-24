@@ -1,0 +1,7 @@
+interface:
+  display_name: "IX Pro Command Extension"
+  short_description: "Extend pro CLI safely across loader and commands"
+  default_prompt: "Use $ix-pro-command-extension to add or refactor a pro CLI command without breaking registration or patch semantics."
+
+policy:
+  allow_implicit_invocation: true

@@ -3,6 +3,8 @@ package ix.memory.db
 import java.time.Instant
 import java.util.UUID
 
+import scala.collection.mutable
+
 import cats.effect.IO
 import cats.syntax.traverse._
 import cats.syntax.foldable._
@@ -16,6 +18,22 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
 
   // I1 fix: single ObjectMapper instance shared across all calls
   private val mapper = new com.fasterxml.jackson.databind.ObjectMapper()
+  private val CurrentRevisionKey = "current"
+  private val SourceGraphRevisionKey = "source-graph"
+  private val SourceGraphIgnoredKinds: Set[NodeKind] = Set(
+    NodeKind.Module,
+    NodeKind.Config,
+    NodeKind.ConfigEntry,
+    NodeKind.Doc,
+    NodeKind.Decision,
+    NodeKind.Intent,
+    NodeKind.Bug,
+    NodeKind.Plan,
+    NodeKind.Task,
+    NodeKind.Goal,
+    NodeKind.Region
+  )
+  private val SourceGraphPredicates = Set("CALLS", "IMPORTS", "EXTENDS", "IMPLEMENTS")
 
   // ── Collections involved in a commit transaction ──────────────────
 
@@ -58,7 +76,11 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
   private def idempotencyKey(patchId: PatchId): String =
     patchId.value.toString
 
-  private def doCommit(patch: GraphPatch, txId: String): IO[CommitResult] =
+  private def doCommit(patch: GraphPatch, txId: String): IO[CommitResult] = {
+    val entityIdsForClaims = patch.ops.collect {
+      case PatchOp.AssertClaim(eid, _, _, _, _) => eid.value.toString
+    }.toSet
+
     for {
       // Step 2: Load latest_rev (inside transaction)
       latestRev <- loadLatestRev(txId)
@@ -71,23 +93,28 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
             IO.pure(CommitResult(Rev(latestRev), CommitStatus.BaseRevMismatch))
         } else {
           val newRev = latestRev + 1L
+          val advanceSourceGraphRev = shouldAdvanceSourceGraphRev(patch)
           for {
+            // Step 4b: Pre-load active claims for all entities in this patch (one query)
+            //           Eliminates per-claim hasIdenticalActiveClaim DB round-trips
+            claimCache <- loadActiveClaimsCache(entityIdsForClaims, txId)
             // Step 5: Execute each op
-            _ <- patch.ops.traverse_(op => executeOp(op, patch, newRev, txId))
-            // Step 5b: Retire absent claims (claims from same extractor/entity no longer emitted)
-            _ <- retireAbsentClaims(patch, newRev, txId)
+            _ <- patch.ops.traverse_(op => executeOp(op, patch, newRev, txId, claimCache))
+            // Step 5b: Retire absent claims — single batch query instead of one per entity
+            _ <- retireAbsentClaimsBatch(patch, newRev, txId)
             // Step 6: Store patch
             _ <- storePatch(patch, newRev, txId)
             // Step 7: Store idempotency key
             _ <- storeIdempotencyKey(patch.patchId, newRev, txId)
             // Step 8: Update revision
-            _ <- updateRevision(newRev, txId)
+            _ <- updateRevision(newRev, txId, advanceSourceGraphRev)
             // Step 9: Commit the transaction
             _ <- client.commitTransaction(txId)
           } yield CommitResult(Rev(newRev), CommitStatus.Ok)
         }
       }
     } yield result
+  }
 
   private def loadLatestRev(txId: String): IO[Long] =
     client.queryOne(
@@ -98,7 +125,7 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
       txId = Some(txId)
     ).map(_.flatMap(_.as[Long].toOption).getOrElse(0L))
 
-  private def executeOp(op: PatchOp, patch: GraphPatch, newRev: Long, txId: String): IO[Unit] = op match {
+  private def executeOp(op: PatchOp, patch: GraphPatch, newRev: Long, txId: String, claimCache: mutable.Set[(String, String, String)]): IO[Unit] = op match {
     case PatchOp.UpsertNode(id, kind, name, attrs) =>
       val logicalId = id.value.toString
       val now = Instant.now().toString
@@ -273,41 +300,48 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
         txId = Some(txId)
       )
 
-    case PatchOp.AssertClaim(entityId, field, value, confidence) =>
+    case PatchOp.AssertClaim(entityId, field, value, confidence, inferenceVersion) =>
       val provenanceJson = buildProvenance(patch)
+      val eid      = entityId.value.toString
+      val valueStr = value.noSpaces
       for {
         // Step 1: Retire active claims for same (entity_id, field) with different value
-        _ <- retireClaims(entityId.value.toString, field, value, newRev, txId)
-        // Step 2: Check if identical active claim already exists
-        hasDuplicate <- hasIdenticalActiveClaim(entityId.value.toString, field, value, txId)
-        // Step 3: Only insert if no duplicate
-        _ <- if (hasDuplicate) IO.unit
+        _ <- retireClaims(eid, field, value, newRev, txId)
+        // Mirror retirement in the cache: remove entries for (eid, field) with different value
+        _ = claimCache.filterInPlace { case (e, f, v) => !(e == eid && f == field && v != valueStr) }
+        // Step 2: Check in-memory cache — avoids a DB round-trip per claim
+        _ <- if (claimCache.contains((eid, field, valueStr))) IO.unit
              else {
                val claimKey = UUID.randomUUID().toString
-               client.execute(
-                 """INSERT {
-                   |  _key: @key,
-                   |  entity_id: @entity_id,
-                   |  field: @field,
-                   |  value: @value,
-                   |  confidence: @confidence,
-                   |  status: @status,
-                   |  created_rev: @created_rev,
-                   |  deleted_rev: null,
-                   |  provenance: @provenance
-                   |} INTO claims""".stripMargin,
-                 Map(
-                   "key"         -> claimKey.asInstanceOf[AnyRef],
-                   "entity_id"   -> entityId.value.toString.asInstanceOf[AnyRef],
-                   "field"       -> field.asInstanceOf[AnyRef],
-                   "value"       -> jsonToJava(value).asInstanceOf[AnyRef],
-                   "confidence"  -> confidence.map(Double.box).orNull.asInstanceOf[AnyRef],
-                   "status"      -> "active".asInstanceOf[AnyRef],
-                   "created_rev" -> Long.box(newRev).asInstanceOf[AnyRef],
-                   "provenance"  -> parseToJavaMap(provenanceJson.noSpaces).asInstanceOf[AnyRef]
-                 ),
-                 txId = Some(txId)
-               )
+               for {
+                 _ <- client.execute(
+                   """INSERT {
+                     |  _key: @key,
+                     |  entity_id: @entity_id,
+                     |  field: @field,
+                     |  value: @value,
+                     |  confidence: @confidence,
+                     |  status: @status,
+                     |  created_rev: @created_rev,
+                     |  deleted_rev: null,
+                     |  provenance: @provenance,
+                     |  inference_version: @inference_version
+                     |} INTO claims""".stripMargin,
+                   Map(
+                     "key"               -> claimKey.asInstanceOf[AnyRef],
+                     "entity_id"         -> eid.asInstanceOf[AnyRef],
+                     "field"             -> field.asInstanceOf[AnyRef],
+                     "value"             -> jsonToJava(value).asInstanceOf[AnyRef],
+                     "confidence"        -> confidence.map(Double.box).orNull.asInstanceOf[AnyRef],
+                     "status"            -> "active".asInstanceOf[AnyRef],
+                     "created_rev"       -> Long.box(newRev).asInstanceOf[AnyRef],
+                     "provenance"        -> parseToJavaMap(provenanceJson.noSpaces).asInstanceOf[AnyRef],
+                     "inference_version" -> inferenceVersion.orNull.asInstanceOf[AnyRef]
+                   ),
+                   txId = Some(txId)
+                 )
+                 _ = claimCache.add((eid, field, valueStr))
+               } yield ()
              }
       } yield ()
 
@@ -327,12 +361,10 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
   private def storePatch(patch: GraphPatch, newRev: Long, txId: String): IO[Unit] = {
     val patchJson = patch.asJson.noSpaces
     client.execute(
-      """INSERT {
-        |  _key: @key,
-        |  patch_id: @patch_id,
-        |  rev: @rev,
-        |  data: @data
-        |} INTO patches""".stripMargin,
+      """UPSERT { _key: @key }
+        |  INSERT { _key: @key, patch_id: @patch_id, rev: @rev, data: @data }
+        |  UPDATE {}
+        |  IN patches""".stripMargin,
       Map(
         "key"      -> patch.patchId.value.toString.asInstanceOf[AnyRef],
         "patch_id" -> patch.patchId.value.toString.asInstanceOf[AnyRef],
@@ -357,14 +389,32 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
       txId = Some(txId)
     )
 
-  private def updateRevision(newRev: Long, txId: String): IO[Unit] =
+  private def shouldAdvanceSourceGraphRev(patch: GraphPatch): Boolean =
+    patch.ops.exists {
+      case PatchOp.UpsertNode(_, kind, _, _) =>
+        !SourceGraphIgnoredKinds.contains(kind)
+      case PatchOp.UpsertEdge(_, _, _, predicate, _) =>
+        SourceGraphPredicates.contains(predicate.value)
+      case PatchOp.DeleteNode(_) | PatchOp.DeleteEdge(_) =>
+        patch.source.sourceType == SourceType.Code || patch.source.sourceType == SourceType.Test
+      case _ =>
+        false
+    }
+
+  private def updateRevision(newRev: Long, txId: String, advanceSourceGraphRev: Boolean): IO[Unit] =
     client.execute(
-      """UPSERT { _key: @key }
-        |  INSERT { _key: @key, rev: @rev }
+      """FOR key IN @keys
+        |  UPSERT { _key: key }
+        |  INSERT { _key: key, rev: @rev }
         |  UPDATE { rev: @rev }
         |  IN revisions""".stripMargin,
       Map(
-        "key" -> "current".asInstanceOf[AnyRef],
+        "keys" -> {
+          val keys =
+            if (advanceSourceGraphRev) Array(CurrentRevisionKey, SourceGraphRevisionKey)
+            else Array(CurrentRevisionKey)
+          keys.asInstanceOf[AnyRef]
+        },
         "rev" -> Long.box(newRev).asInstanceOf[AnyRef]
       ),
       txId = Some(txId)
@@ -388,32 +438,44 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
       txId = Some(txId)
     )
 
-  /** Check if an identical active claim already exists (same entity, field, value). */
-  private def hasIdenticalActiveClaim(entityId: String, field: String, value: Json, txId: String): IO[Boolean] =
-    client.queryOne(
-      """FOR c IN claims
-        |  FILTER c.entity_id == @entity_id
-        |    AND c.field == @field
-        |    AND c.value == @value
-        |    AND c.deleted_rev == null
-        |  LIMIT 1
-        |  RETURN 1""".stripMargin,
-      Map(
-        "entity_id" -> entityId.asInstanceOf[AnyRef],
-        "field"     -> field.asInstanceOf[AnyRef],
-        "value"     -> jsonToJava(value).asInstanceOf[AnyRef]
-      ),
-      txId = Some(txId)
-    ).map(_.isDefined)
+  /**
+   * Pre-load all active claims for the given entity IDs in one DB query.
+   * Returns a mutable set of (entityId, field, valueNoSpaces) triples used
+   * as an in-memory duplicate-check cache throughout a single patch commit.
+   */
+  private def loadActiveClaimsCache(entityIds: Set[String], txId: String): IO[mutable.Set[(String, String, String)]] =
+    if (entityIds.isEmpty) IO.pure(mutable.Set.empty)
+    else {
+      val eids = new java.util.ArrayList[String]()
+      entityIds.foreach(eids.add)
+      client.query(
+        """FOR c IN claims
+          |  FILTER c.entity_id IN @entityIds AND c.deleted_rev == null
+          |  RETURN { entity_id: c.entity_id, field: c.field, value: c.value }""".stripMargin,
+        Map("entityIds" -> eids.asInstanceOf[AnyRef]),
+        txId = Some(txId)
+      ).map { results =>
+        val cache = mutable.Set.empty[(String, String, String)]
+        results.foreach { json =>
+          val parsed = for {
+            eid   <- json.hcursor.get[String]("entity_id").toOption
+            field <- json.hcursor.get[String]("field").toOption
+            value <- json.hcursor.downField("value").focus
+          } yield (eid, field, value.noSpaces)
+          parsed.foreach(cache.add)
+        }
+        cache
+      }
+    }
 
   /**
    * After all ops execute, retire claims from the same extractor/entity that are
-   * no longer emitted (the "absent claims" policy). This handles the case where
-   * a re-parsed file no longer contains a previously asserted claim.
+   * no longer emitted (the "absent claims" policy). Uses a single batch AQL query
+   * across all entities instead of one query per entity.
    */
-  private def retireAbsentClaims(patch: GraphPatch, newRev: Long, txId: String): IO[Unit] = {
+  private def retireAbsentClaimsBatch(patch: GraphPatch, newRev: Long, txId: String): IO[Unit] = {
     val assertedClaims = patch.ops.collect {
-      case PatchOp.AssertClaim(entityId, field, _, _) => (entityId.value.toString, field)
+      case PatchOp.AssertClaim(entityId, field, _, _, _) => (entityId.value.toString, field)
     }
 
     if (assertedClaims.isEmpty) IO.unit
@@ -422,27 +484,34 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
         .groupBy(_._1)
         .map { case (eid, pairs) => eid -> pairs.map(_._2).toSet }
 
-      val extractor = patch.source.extractor
-
-      fieldsByEntity.toVector.traverse_ { case (entityId, fields) =>
-        val fieldList = new java.util.ArrayList[String]()
-        fields.foreach(fieldList.add)
-        client.execute(
-          """FOR c IN claims
-            |  FILTER c.entity_id == @entity_id
-            |    AND c.field NOT IN @fields
-            |    AND c.deleted_rev == null
-            |    AND c.provenance.extractor == @extractor
-            |  UPDATE c WITH { status: "retracted", deleted_rev: @deleted_rev } IN claims""".stripMargin,
-          Map(
-            "entity_id"   -> entityId.asInstanceOf[AnyRef],
-            "fields"      -> fieldList.asInstanceOf[AnyRef],
-            "extractor"   -> extractor.asInstanceOf[AnyRef],
-            "deleted_rev" -> Long.box(newRev).asInstanceOf[AnyRef]
-          ),
-          txId = Some(txId)
-        )
+      // Build Java list of {entity_id, fields} for AQL — one query instead of N
+      val entityFieldMap = new java.util.ArrayList[java.util.Map[String, AnyRef]]()
+      fieldsByEntity.foreach { case (eid, fields) =>
+        val m  = new java.util.HashMap[String, AnyRef]()
+        val fl = new java.util.ArrayList[String]()
+        fields.foreach(fl.add)
+        m.put("entity_id", eid)
+        m.put("fields", fl)
+        entityFieldMap.add(m)
       }
+
+      client.execute(
+        """LET fieldMap = MERGE(
+          |  FOR ef IN @entityFieldMap RETURN { [ef.entity_id]: ef.fields }
+          |)
+          |FOR c IN claims
+          |  FILTER c.entity_id IN ATTRIBUTES(fieldMap)
+          |    AND c.field NOT IN fieldMap[c.entity_id]
+          |    AND c.deleted_rev == null
+          |    AND c.provenance.extractor == @extractor
+          |  UPDATE c WITH { status: "retracted", deleted_rev: @deleted_rev } IN claims""".stripMargin,
+        Map(
+          "entityFieldMap" -> entityFieldMap.asInstanceOf[AnyRef],
+          "extractor"      -> patch.source.extractor.asInstanceOf[AnyRef],
+          "deleted_rev"    -> Long.box(newRev).asInstanceOf[AnyRef]
+        ),
+        txId = Some(txId)
+      )
     }
   }
 
