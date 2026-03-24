@@ -1,149 +1,155 @@
-# Ix Memory
+# Ix
 
-Persistent, versioned knowledge graph for codebases. Gives LLM assistants structured memory across conversations.
+Understand any system instantly.
+Your virtual cartographer.
+
+---
+
+Software systems are too complex to understand manually.
+
+Millions of lines of code.
+Hundreds of services.
+Thousands of dependencies.
+
+You shouldn't have to guess how your system works.
+
+Ix maps it.
+
+---
+
+## The Problem
+
+Understanding a system today means:
+
+- reading code
+- searching logs
+- asking teammates
+- guessing how things connect
+
+It doesn't scale.
+
+---
+
+## The Shift
+
+What if you could open a map instead?
+
+Ix creates a living map of your system.
+
+A map you can explore.
+A map you can trace.
+A map that evolves as your system evolves.
+
+---
+
+## What Ix Does
+
+Ix turns your system into something you can:
+
+- **Explore** — navigate architecture like a map
+- **Trace** — follow how data and logic flow
+- **Understand** — instantly see how components connect
+- **Analyze impact** — know what changes affect before you make them
+- **Remember** — build persistent system memory over time
+
+---
+
+## Demo
+
+```bash
+ix map .
+ix explain auth-service
+ix trace user_login_flow
+ix impact database.schema
+```
+
+Stop digging through files.
+
+Open the map instead.
+
+---
 
 ## Install
 
-Pick one method. All install the same thing: the `ix` CLI + a local Docker backend.
+```bash
+curl -fsSL https://get.ix.dev | bash
+```
 
-### curl (macOS / Linux)
+or
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/Ix/main/install.sh | bash
+npm install -g ix
 ```
 
-### PowerShell (Windows)
-
-```powershell
-irm https://raw.githubusercontent.com/ix-infrastructure/Ix/main/install.ps1 | iex
-```
-
-### Homebrew (macOS / Linux)
-
-```bash
-brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/Ix
-brew install ix
-ix docker start
-```
-
-### Prerequisites
-
-- **Docker Desktop** — the backend runs as two containers (ArangoDB + Memory Layer). The installer will prompt you if Docker is missing.
+---
 
 ## Quick Start
 
-```bash
-# 1. Start the backend
-ix docker start
-
-# 2. Connect a project
-cd ~/my-project
-ix init
-ix map ./src
-
-# 3. Use it
-ix overview MyService
-ix impact MyService
-ix search parseFile --kind function
-ix callers parseFile
-```
-
-## Managing the Backend
+Map your system:
 
 ```bash
-ix docker start               # Start ArangoDB + Memory Layer
-ix docker stop                # Stop containers (keeps data)
-ix docker stop --remove-data  # Stop and wipe all data
-ix docker status              # Health check
-ix docker logs                # Tail container logs
-ix docker restart             # Restart containers
+ix map .
 ```
 
-## Commands
-
-All commands support `--format json`.
-
-### Workflow Commands (start here)
+Explore it:
 
 ```bash
-ix overview UserService                          # one-shot summary
-ix impact UserService                            # what depends on it
-ix rank --by dependents --kind class --top 10    # most important classes
-ix inventory --kind function --path "src/"       # list functions
-ix briefing                                      # session resume
+ix ask "how does authentication work?"
 ```
 
-### Code Navigation
+---
 
-```bash
-ix search IngestionService --kind class
-ix explain IngestionService
-ix callers parseFile
-ix callees parseFile
-ix imports IngestionService
-ix imported-by IngestionService
-ix contains IngestionService
-ix depends IngestionService --depth 2
-ix read src/main/scala/ix/memory/Main.scala:1-80
-ix text "commitPatch" --language ts --limit 20
-```
+## Why It Matters
 
-### Planning and Tracking
+Systems change. Knowledge fades.
 
-```bash
-ix goal create "Support 100k file repos"
-ix plan create "Scale ingestion" --goal <id>
-ix plan task "Batch writes" --plan <id>
-ix task update <id> --status done
-ix decide "Use CONTAINS edge" --rationale "Normalize hierarchy"
-ix bug create "Parser fails on decorators" --severity high
-```
+Ix doesn't just map your system — it remembers it.
 
-### GitHub Ingestion
+Every trace, every flow, every decision becomes part of a persistent system memory.
 
-```bash
-ix map --github owner/repo --since 2026-01-01 --limit 50
-```
+So understanding doesn't reset every time.
 
-Auth resolution: `--token <pat>` → `GITHUB_TOKEN` env → `gh auth token`
+It compounds.
 
-## Claude Code Plugin
+---
 
-Automatically installed if `claude` is in your PATH. To install separately:
+## Core Capabilities
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/Ix/main/ix-plugin/install.sh | bash
-```
+**A living system map**
+Your architecture, always up to date.
 
-What the hooks do:
-- **On search** (Grep/Glob): injects graph-aware results before the native tool runs
-- **On edit** (Write/Edit): auto-ingests changed files to keep the graph current
+**Trace flows instantly**
+Follow how anything moves through your system.
 
-## Supported File Types
+**Understand impact**
+See what changes affect before you make them.
 
-`.py`, `.ts`, `.tsx`, `.scala`, `.sc`, `.json`, `.yaml`, `.yml`, `.toml`, `.md`
+**Persistent system memory**
+Knowledge doesn't disappear — it builds over time.
 
-## Uninstall
+**AI-assisted reasoning**
+Ask questions and explore your system naturally.
 
-```bash
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/Ix/main/uninstall.sh | bash
+---
 
-# Windows
-irm https://raw.githubusercontent.com/ix-infrastructure/Ix/main/uninstall.ps1 | iex
+## CLI
 
-# Homebrew
-brew uninstall ix && brew untap ix-infrastructure/ix
-ix docker stop --remove-data
-```
+Ix is designed around navigation:
 
-## Architecture
+`map` → `explore` → `trace` → `impact` → `understand`
 
-```
-ix CLI (TypeScript)  →  Memory Layer (Scala/http4s)  →  ArangoDB
-     local                   Docker :8090                Docker :8529
-```
+Commands:
 
-## License
+- `ix map`
+- `ix trace`
+- `ix impact`
+- `ix explain`
+- `ix ask`
 
-This project is licensed under the [Apache License 2.0](LICENSE).
+---
+
+## Philosophy
+
+Every complex system should have a map.
+
+Ix gives you yours.
