@@ -71,8 +71,14 @@ Open the map instead.
 
 ## Install
 
+**macOS / Linux**
 ```bash
 curl -fsSL https://get.ix.dev | bash
+```
+
+**Windows (PowerShell)**
+```powershell
+irm https://raw.githubusercontent.com/ix-infrastructure/Ix/main/install.ps1 | iex
 ```
 
 or

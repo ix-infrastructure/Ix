@@ -75,7 +75,10 @@ function isNewer(latest: string, current: string): boolean {
 }
 
 function detectPlatform(): string {
-  const os = process.platform === "darwin" ? "darwin" : "linux";
+  let os: string;
+  if (process.platform === "darwin") os = "darwin";
+  else if (process.platform === "win32") os = "windows";
+  else os = "linux";
   const arch = process.arch === "arm64" ? "arm64" : "amd64";
   return `${os}-${arch}`;
 }
@@ -141,21 +144,26 @@ export function registerUpgradeCommand(program: Command): void {
       if (opts.check) return;
 
       const platform = detectPlatform();
-      const tarball = `ix-${latest}-${platform}.tar.gz`;
-      const url = `https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/releases/download/v${latest}/${tarball}`;
+      const isWindows = platform.startsWith("windows");
+      const archiveName = isWindows
+        ? `ix-${latest}-${platform}.zip`
+        : `ix-${latest}-${platform}.tar.gz`;
+      const url = `https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/releases/download/v${latest}/${archiveName}`;
       const installDir = join(IX_HOME, "cli");
 
       // Use secure temp directory
-      const tmpDir = mkdtempSync(join(tmpdir(), "ix-upgrade-"));
-      const tmpFile = join(tmpDir, tarball);
+      // Keep Windows paths for curl/Node (which use Windows curl/fs),
+      // convert to Unix paths only for bash tools (unzip)
+      const tmpDirRaw = mkdtempSync(join(tmpdir(), "ix-upgrade-"));
+      const tmpFile = join(tmpDirRaw, archiveName);
 
       console.log(`Downloading ix ${latest} for ${platform}...`);
 
       try {
         execFileSync(
           "curl",
-          ["-fsSL", url, "-o", tmpFile],
-          { stdio: "inherit", timeout: 60000 }
+          ["-fsSL", "--progress-bar", url, "-o", tmpFile],
+          { stdio: ["ignore", "inherit", "inherit"], timeout: 300000 }
         );
       } catch {
         console.error(`[error] Failed to download ${url}`);
@@ -163,7 +171,7 @@ export function registerUpgradeCommand(program: Command): void {
         console.error(
           `  curl -fsSL https://raw.githubusercontent.com/${GITHUB_ORG}/${GITHUB_REPO}/main/install.sh | bash`
         );
-        rmSync(tmpDir, { recursive: true, force: true });
+        rmSync(tmpDirRaw, { recursive: true, force: true });
         process.exit(1);
       }
 
@@ -171,16 +179,39 @@ export function registerUpgradeCommand(program: Command): void {
       try {
         rmSync(installDir, { recursive: true, force: true });
         mkdirSync(installDir, { recursive: true });
-        execFileSync(
-          "tar",
-          ["-xzf", tmpFile, "-C", installDir, "--strip-components=1"],
-          { stdio: "ignore" }
-        );
-        rmSync(tmpDir, { recursive: true, force: true });
+        if (isWindows) {
+          let unixTmpFile = tmpFile;
+          let unixInstallDir = installDir;
+          try {
+            unixTmpFile = execFileSync("cygpath", ["-u", tmpFile], { encoding: "utf-8" }).trim();
+            unixInstallDir = execFileSync("cygpath", ["-u", installDir], { encoding: "utf-8" }).trim();
+          } catch { /* use as-is */ }
+          execFileSync("unzip", ["-q", unixTmpFile, "-d", unixInstallDir], { stdio: "ignore" });
+        } else {
+          execFileSync(
+            "tar",
+            ["-xzf", tmpFile, "-C", installDir, "--strip-components=1"],
+            { stdio: "ignore" }
+          );
+        }
+        rmSync(tmpDirRaw, { recursive: true, force: true });
       } catch {
         console.error("[error] Failed to extract CLI update.");
-        rmSync(tmpDir, { recursive: true, force: true });
+        rmSync(tmpDirRaw, { recursive: true, force: true });
         process.exit(1);
+      }
+
+      // On Windows, update the shim to point to the new versioned directory
+      if (isWindows) {
+        const shimPath = join(homedir(), ".local", "bin", "ix");
+        const jsPathWin = join(installDir, `ix-${latest}-${platform}`, "cli", "dist", "cli", "main.js");
+        let jsPath = jsPathWin;
+        try {
+          jsPath = execFileSync("cygpath", ["-u", jsPathWin], { encoding: "utf-8" }).trim();
+        } catch { /* use windows path */ }
+        if (existsSync(shimPath)) {
+          writeFileSync(shimPath, `#!/usr/bin/env bash\nexec node "${jsPath}" "$@"\n`);
+        }
       }
 
       console.log(`[ok] Upgraded ix: ${current} → ${latest}`);

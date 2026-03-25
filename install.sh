@@ -101,6 +101,7 @@ detect_platform() {
   case "$os" in
     darwin) os="darwin" ;;
     linux)  os="linux" ;;
+    mingw*|msys*|cygwin*) os="windows" ;;
     *)      err "Unsupported OS: $os" ;;
   esac
 
@@ -156,6 +157,10 @@ else
         echo "  Quick install:"
         echo "    curl -fsSL https://get.docker.com | sh"
         ;;
+      MINGW*|MSYS*|CYGWIN*)
+        echo "  Install Docker Desktop for Windows:"
+        echo "    https://docs.docker.com/desktop/install/windows-install/"
+        ;;
     esac
     echo ""
     err "Install Docker and re-run this installer."
@@ -197,13 +202,15 @@ else
   if curl -sf "$HEALTH_URL" >/dev/null 2>&1 && curl -sf "$ARANGO_URL" >/dev/null 2>&1; then
     info "Backend is already running and healthy"
   else
-    stale_pid=$(lsof -ti :8090 2>/dev/null || true)
-    if [ -n "$stale_pid" ]; then
-      stale_cmd=$(ps -p "$stale_pid" -o comm= 2>/dev/null || true)
-      if [ "$stale_cmd" != "com.docker.ba" ] && [ "$stale_cmd" != "docker" ]; then
-        warn "Killing stale process on port 8090 (PID $stale_pid: $stale_cmd)"
-        kill "$stale_pid" 2>/dev/null || true
-        sleep 1
+    if command -v lsof >/dev/null 2>&1; then
+      stale_pid=$(lsof -ti :8090 2>/dev/null || true)
+      if [ -n "$stale_pid" ]; then
+        stale_cmd=$(ps -p "$stale_pid" -o comm= 2>/dev/null || true)
+        if [ "$stale_cmd" != "com.docker.ba" ] && [ "$stale_cmd" != "docker" ]; then
+          warn "Killing stale process on port 8090 (PID $stale_pid: $stale_cmd)"
+          kill "$stale_pid" 2>/dev/null || true
+          sleep 1
+        fi
       fi
     fi
 
@@ -240,7 +247,11 @@ fi
 
 step "3. ix CLI"
 
-TARBALL_NAME="ix-${VERSION}-${PLATFORM}.tar.gz"
+if [ "$PLATFORM" = "windows-amd64" ]; then
+  TARBALL_NAME="ix-${VERSION}-${PLATFORM}.zip"
+else
+  TARBALL_NAME="ix-${VERSION}-${PLATFORM}.tar.gz"
+fi
 TARBALL_URL="https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/releases/download/v${VERSION}/${TARBALL_NAME}"
 INSTALL_DIR="$IX_HOME/cli"
 
@@ -252,8 +263,21 @@ for old_ix in "$HOME/.local/bin/ix" "/usr/local/bin/ix"; do
 done
 
 # Check if already installed at correct version
+# On Windows, avoid invoking the shim (calls cmd.exe, hangs in bash subshell)
+check_installed_version() {
+  if [ "$PLATFORM" = "windows-amd64" ]; then
+    if [ -d "$INSTALL_DIR/ix-${VERSION}-windows-amd64" ]; then
+      echo "$VERSION"
+    else
+      echo "unknown"
+    fi
+  else
+    "$IX_BIN/ix" --version 2>/dev/null || echo "unknown"
+  fi
+}
+
 if [ -x "$IX_BIN/ix" ]; then
-  existing_version=$("$IX_BIN/ix" --version 2>/dev/null || echo "unknown")
+  existing_version=$(check_installed_version)
   if [ "$existing_version" = "$VERSION" ]; then
     info "ix CLI v${VERSION} is already installed"
   else
@@ -262,7 +286,7 @@ if [ -x "$IX_BIN/ix" ]; then
   fi
 fi
 
-if [ ! -x "$IX_BIN/ix" ] || [ "$("$IX_BIN/ix" --version 2>/dev/null || echo "")" != "$VERSION" ]; then
+if [ ! -x "$IX_BIN/ix" ] || [ "$(check_installed_version)" != "$VERSION" ]; then
   mkdir -p "$INSTALL_DIR"
 
   TMP_DIR=$(mktemp -d)
@@ -285,15 +309,27 @@ if [ ! -x "$IX_BIN/ix" ] || [ "$("$IX_BIN/ix" --version 2>/dev/null || echo "")"
   fi
 
   # Extract
-  tar -xzf "$TMP_FILE" -C "$INSTALL_DIR" --strip-components=1
+  if [ "$PLATFORM" = "windows-amd64" ]; then
+    unzip -q "$TMP_FILE" -d "$INSTALL_DIR"
+  else
+    tar -xzf "$TMP_FILE" -C "$INSTALL_DIR" --strip-components=1
+  fi
   rm -rf "$TMP_DIR"
   info "Extracted CLI"
 
   # Create wrapper in bin dir
-  cat > "$IX_BIN/ix" <<SHIM
+  if [ "$PLATFORM" = "windows-amd64" ]; then
+    IX_JS="$INSTALL_DIR/ix-${VERSION}-windows-amd64/cli/dist/cli/main.js"
+    cat > "$IX_BIN/ix" <<SHIM
+#!/usr/bin/env bash
+exec node "$IX_JS" "\$@"
+SHIM
+  else
+    cat > "$IX_BIN/ix" <<SHIM
 #!/usr/bin/env bash
 exec "$INSTALL_DIR/ix" "\$@"
 SHIM
+  fi
   chmod +x "$IX_BIN/ix"
 
   ensure_path
@@ -327,7 +363,12 @@ echo "  ArangoDB: http://localhost:8529"
 echo ""
 
 # Verify CLI works
-if command -v ix >/dev/null 2>&1; then
+if [ "$PLATFORM" = "windows-amd64" ]; then
+  if [ -x "$IX_BIN/ix" ]; then
+    info "ix CLI v${VERSION} installed at $IX_BIN/ix"
+    echo "  Run 'ix --version' in a new terminal to verify"
+  fi
+elif command -v ix >/dev/null 2>&1; then
   CLI_VERSION=$(ix --version 2>/dev/null || echo "unknown")
   info "ix CLI v${CLI_VERSION} is working"
 elif [ -x "$IX_BIN/ix" ]; then
