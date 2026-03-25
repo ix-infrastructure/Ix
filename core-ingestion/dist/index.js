@@ -619,11 +619,13 @@ function bestQKey(fileQKeys, filePath, plainName) {
  *   - Ambiguous (two entities share the same plain name): edge not emitted
  */
 export function resolveEdges(results, stats) {
-    if (!stats) stats = {
-        importLookups: 0, transitiveLookups: 0, globalFallbacks: 0,
-        globalCandidateTotal: 0, resolvedImport: 0, resolvedTransitive: 0,
-        resolvedGlobal: 0, resolvedQualifier: 0, skippedSameFile: 0, skippedAmbiguous: 0,
-    };
+    // Provide a default no-op stats bag when caller passes none (backward compat).
+    if (!stats)
+        stats = {
+            importLookups: 0, transitiveLookups: 0, globalFallbacks: 0,
+            globalCandidateTotal: 0, resolvedImport: 0, resolvedTransitive: 0,
+            resolvedGlobal: 0, resolvedQualifier: 0, skippedSameFile: 0, skippedAmbiguous: 0,
+        };
     // fileQKeys: filePath → (plainName → qualifiedKeys[])
     // Mirrors the entityQKey computation in buildPatch so nodeIds match exactly.
     const fileQKeys = new Map();
@@ -655,7 +657,7 @@ export function resolveEdges(results, stats) {
             symbolToFiles.set(sym, list);
         }
     }
-    // fileLanguage: filePath → language (fast language lookup)
+    // fileLanguage: filePath → SupportedLanguages (fast language lookup without re-calling languageFromPath)
     const fileLanguage = new Map();
     for (const r of results) {
         fileLanguage.set(r.filePath, r.language);

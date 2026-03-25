@@ -39,6 +39,7 @@ function fileResult(
     ],
     relationships,
     fileRole: defaultFileRole,
+    chunks: [],
   };
 }
 

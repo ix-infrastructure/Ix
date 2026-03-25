@@ -775,6 +775,10 @@ export const RUBY_QUERIES = `
 (class
   name: (constant) @name) @definition.class
 
+; Scoped class name: class Module::ClassName
+(class
+  name: (scope_resolution) @name) @definition.class
+
 ; ── Instance methods ─────────────────────────────────────────────────────────
 (method
   name: (identifier) @name) @definition.method
@@ -808,6 +812,25 @@ export const RUBY_QUERIES = `
   name: (constant) @heritage.class
   superclass: (superclass
     (constant) @heritage.extends)) @heritage
+
+; Scoped superclass: class Foo < Module::Class
+; Captures full "Module::Class" text to avoid ambiguity with bare "Class" names
+(class
+  name: (constant) @heritage.class
+  superclass: (superclass
+    (scope_resolution) @heritage.extends)) @heritage
+
+; Scoped class name, bare superclass: class Module::Foo < Bar
+(class
+  name: (scope_resolution) @heritage.class
+  superclass: (superclass
+    (constant) @heritage.extends)) @heritage
+
+; Scoped class name, scoped superclass: class Module::Foo < Module::Bar
+(class
+  name: (scope_resolution) @heritage.class
+  superclass: (superclass
+    (scope_resolution) @heritage.extends)) @heritage
 `;
 // Kotlin queries - works with tree-sitter-kotlin (fwcd/tree-sitter-kotlin)
 // Based on official tags.scm; functions use simple_identifier, classes use type_identifier
