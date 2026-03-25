@@ -188,7 +188,7 @@ if ($existingVersion -eq $Version) {
     # Create batch wrapper
     @"
 @echo off
-"%~dp0..\cli\ix.cmd" %*
+"%~dp0..\cli\ix-$Version-windows-amd64\ix.cmd" %*
 "@ | Out-File -FilePath "$IxBin\ix.cmd" -Encoding ascii
 
     Write-Ok "Installed: $IxBin\ix.cmd"

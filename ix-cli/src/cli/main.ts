@@ -6,10 +6,12 @@ import { buildHelpText } from "./help-text.js";
 import { checkForUpdate } from "./commands/upgrade.js";
 
 import { readFileSync } from "fs";
-import { join } from "path";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 
 let cliVersion = "0.0.0";
 try {
+  const __dirname = dirname(fileURLToPath(import.meta.url));
   const pkg = JSON.parse(readFileSync(join(__dirname, "../../package.json"), "utf-8"));
   cliVersion = pkg.version || "0.0.0";
 } catch {}
