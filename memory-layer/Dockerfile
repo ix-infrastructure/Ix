@@ -3,6 +3,7 @@
 FROM eclipse-temurin:17-jdk-jammy AS builder
 
 ARG SBT_VERSION=1.10.7
+ARG SBT_SHA256=32c15233c636c233ee25a2c31879049db7021cfef70807c187515c39b96b0fe6
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
@@ -11,8 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tar \
   && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL "https://github.com/sbt/sbt/releases/download/v${SBT_VERSION}/sbt-${SBT_VERSION}.tgz" \
-  | tar -xz -C /opt \
+RUN curl -fsSL "https://github.com/sbt/sbt/releases/download/v${SBT_VERSION}/sbt-${SBT_VERSION}.tgz" -o /tmp/sbt.tgz \
+  && echo "${SBT_SHA256}  /tmp/sbt.tgz" | sha256sum -c - \
+  && tar -xzf /tmp/sbt.tgz -C /opt \
+  && rm /tmp/sbt.tgz \
   && ln -s /opt/sbt/bin/sbt /usr/local/bin/sbt
 
 WORKDIR /src
