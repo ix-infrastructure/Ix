@@ -16,8 +16,6 @@ class BulkPatchCommitRoutes(bulkWriteApi: BulkWriteApi, queryApi: GraphQueryApi)
   private case class BulkPatchRequest(patches: List[GraphPatch])
   private implicit val reqDecoder: Decoder[BulkPatchRequest] = deriveDecoder
 
-  private val mapper = new com.fasterxml.jackson.databind.ObjectMapper()
-
   val routes: HttpRoutes[IO] = HttpRoutes.of[IO] {
     case req @ POST -> Root / "v1" / "patches" / "bulk" =>
       (for {
@@ -43,13 +41,12 @@ class BulkPatchCommitRoutes(bulkWriteApi: BulkWriteApi, queryApi: GraphQueryApi)
   }
 
   private def buildProvenanceMap(patch: GraphPatch): java.util.Map[String, AnyRef] = {
-    val json = Json.obj(
-      "source_uri"  -> Json.fromString(patch.source.uri),
-      "source_hash" -> patch.source.sourceHash.fold(Json.Null)(Json.fromString),
-      "extractor"   -> Json.fromString(patch.source.extractor),
-      "source_type" -> Json.fromString(patch.source.sourceType.asJson.asString.getOrElse("code")),
-      "observed_at" -> Json.fromString(patch.timestamp.toString)
-    )
-    mapper.readValue(json.noSpaces, classOf[java.util.Map[String, AnyRef]])
+    val result = new java.util.HashMap[String, AnyRef](5)
+    result.put("source_uri", patch.source.uri)
+    result.put("source_hash", patch.source.sourceHash.orNull)
+    result.put("extractor", patch.source.extractor)
+    result.put("source_type", patch.source.sourceType.asJson.asString.getOrElse("code"))
+    result.put("observed_at", patch.timestamp.toString)
+    result
   }
 }

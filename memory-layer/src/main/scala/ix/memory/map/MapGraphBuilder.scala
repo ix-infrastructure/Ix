@@ -1,6 +1,7 @@
 package ix.memory.map
 
 import cats.effect.IO
+import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 import ix.memory.db.ArangoClient
 import ix.memory.model.{NodeId, Rev}
@@ -21,6 +22,7 @@ import ix.memory.model.{NodeId, Rev}
  *   ε = 0.2  path proximity      (weak structural prior)
  */
 class MapGraphBuilder(client: ArangoClient) {
+  private val logger = Slf4jLogger.getLoggerFromName[IO]("ix.map.build")
 
   private val Alpha   = 1.0
   private val Beta    = 0.5
@@ -32,7 +34,8 @@ class MapGraphBuilder(client: ArangoClient) {
   private val SourceGraphRevisionKey = "source-graph"
   private val IgnoredNodeKinds = Vector(
     "module", "config", "config_entry", "doc", "decision", "intent",
-    "bug", "plan", "task", "goal", "region"
+    "bug", "plan", "task", "goal", "region",
+    "chunk"  // chunks are code-text segments, never CALLS/IMPORTS/EXTENDS/IMPLEMENTS endpoints
   )
   private val CouplingPredicates = Vector("CALLS", "IMPORTS", "EXTENDS", "IMPLEMENTS")
 
@@ -40,8 +43,14 @@ class MapGraphBuilder(client: ArangoClient) {
 
   def buildGraph(files: Vector[FileVertex]): IO[WeightedFileGraph] =
     for {
+      t0       <- IO(System.currentTimeMillis())
       rawPairs <- fetchCouplingByUri()
+      t1       <- IO(System.currentTimeMillis())
       graph     = computeGraph(files, rawPairs)
+      t2       <- IO(System.currentTimeMillis())
+      _        <- logger.info(
+                    s"map graph files=${files.size} raw_pairs=${rawPairs.size} fetch=${t1-t0}ms compute=${t2-t1}ms total=${t2-t0}ms"
+                  )
     } yield graph
 
   def build(): IO[WeightedFileGraph] =
@@ -226,9 +235,7 @@ class MapGraphBuilder(client: ArangoClient) {
       scala.collection.mutable.Map[(NodeId, NodeId), Map[String, Int]]()
     var edgeCount = 0
 
-    for (((srcId, dstId), predicateCounts) <- pairAcc.toVector.sortBy { case ((a, b), _) =>
-           (a.value.toString, b.value.toString)
-         }) {
+    for (((srcId, dstId), predicateCounts) <- pairAcc.iterator) {
       val sv = byId(srcId)
       val dv = byId(dstId)
       val srcSegments = pathSegmentsById(srcId)

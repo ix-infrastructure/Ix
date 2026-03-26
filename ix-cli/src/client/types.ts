@@ -136,6 +136,7 @@ export interface SkipReasons {
   emptyFile: number;
   parseError: number;
   tooLarge: number;
+  minifiedLikely?: number;
 }
 
 export interface IngestResult {

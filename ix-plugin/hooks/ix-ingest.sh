@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ix-ingest.sh — PostToolUse hook for Write, Edit, MultiEdit
+# ix-ingest.sh — PostToolUse hook for Write, Edit, MultiEdit, NotebookEdit
 #
 # Fires after Claude modifies a file. Automatically ingests the changed file
 # into the Ix graph so the next query reflects the current code state.

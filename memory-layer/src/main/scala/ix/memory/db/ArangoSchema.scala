@@ -33,6 +33,13 @@ object ArangoSchema {
       java.util.Arrays.asList("logical_id"),
       new PersistentIndexOptions()
     )
+    // Compound index for tombstone query: FILTER logical_id IN @ids AND deleted_rev == null
+    // Without this, the single-field logical_id index returns all historical versions of each
+    // node and applies deleted_rev as a post-filter — gets slower as the collection grows.
+    nodes.ensurePersistentIndex(
+      java.util.Arrays.asList("logical_id", "deleted_rev"),
+      new PersistentIndexOptions()
+    )
 
     // Indexes — edges
     val edges = db.collection("edges")
@@ -59,6 +66,12 @@ object ArangoSchema {
     val claims = db.collection("claims")
     claims.ensurePersistentIndex(
       java.util.Arrays.asList("entity_id"),
+      new PersistentIndexOptions()
+    )
+    // Compound index for retire query: FILTER entity_id IN @ids AND deleted_rev == null
+    // Mirrors the nodes compound index — avoids post-filtering all historical claim versions.
+    claims.ensurePersistentIndex(
+      java.util.Arrays.asList("entity_id", "deleted_rev"),
       new PersistentIndexOptions()
     )
     claims.ensurePersistentIndex(

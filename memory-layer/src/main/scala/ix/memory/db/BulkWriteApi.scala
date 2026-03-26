@@ -8,6 +8,8 @@ import cats.effect.IO
 import cats.syntax.traverse._
 import io.circe.Json
 import io.circe.syntax._
+import org.typelevel.log4cats.Logger
+import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 import scala.concurrent.duration._
 
@@ -18,8 +20,18 @@ import ix.memory.model._
  * instead of individual AQL queries.
  */
 class BulkWriteApi(client: ArangoClient) {
+  private type BulkDoc = java.util.Map[String, AnyRef]
   private val CurrentRevisionKey = "current"
   private val SourceGraphRevisionKey = "source-graph"
+  private val DefaultChunkSize = 100
+  private val DefaultChunkPayloadBytes = 4 * 1024 * 1024
+  private val MaxNodeDocs  = 10000
+  private val MaxEdgeDocs  = 20000
+  private val MaxClaimDocs = 10000
+  private val MaxPatchDocs = 250
+  private val SlowChunkMs = 2000L
+  private val debugBulkWrites = sys.env.get("IX_DEBUG").exists(v => v.nonEmpty && v != "0" && !v.equalsIgnoreCase("false"))
+  private val logger: Logger[IO] = Slf4jLogger.getLoggerFromName[IO]("ix.bulk-write")
 
   private def withRetry[A](action: IO[A], maxAttempts: Int = 3, delay: FiniteDuration = 500.millis): IO[A] = {
     action.handleErrorWith { err =>
@@ -28,30 +40,82 @@ class BulkWriteApi(client: ArangoClient) {
     }
   }
 
+  private def chunkDocs[T](docs: Seq[T], maxDocs: Int): Seq[Seq[T]] =
+    docs.grouped(maxDocs).toVector
+
+  private def insertCollectionChunked(
+    collection: String,
+    docs: Seq[BulkDoc],
+    maxDocs: Int
+  )(insert: Seq[BulkDoc] => IO[Int]): IO[Long] =
+    if (docs.isEmpty) IO.pure(0L)
+    else {
+      val batches = chunkDocs(docs, maxDocs)
+      batches.foldLeft(IO.pure(0L)) { case (accIO, batch) =>
+        for {
+          acc <- accIO
+          ms  <- timedUnit(withRetry(insert(batch)))
+          _   <- if (debugBulkWrites)
+                   logger.info(s"[bulk-write] collection=$collection docs=${batch.size} insertMs=$ms")
+                 else IO.unit
+        } yield acc + ms
+      }
+    }
+
   def commitBatch(
     fileBatches: Vector[FileBatch],
-    baseRev: Long
+    baseRev: Long,
+    skipTombstone: Boolean = false
   ): IO[CommitResult] = {
     val newRev = baseRev + 1L
 
-    val allNodes   = fileBatches.flatMap(_.nodeDocuments(newRev))
-    val allEdges   = fileBatches.flatMap(_.edgeDocuments(newRev))
-    val allClaims  = fileBatches.flatMap(_.claimDocuments(newRev))
-    val allPatches = fileBatches.map(_.patchDocument(newRev))
-
-    // Collect all logical_ids being upserted for tombstoning
-    val logicalIds = allNodes.flatMap { doc =>
-      Option(doc.get("logical_id")).map(_.toString)
-    }
-
     for {
-      _ <- tombstoneExistingNodes(logicalIds, newRev)
-      _ <- retireOldClaims(fileBatches, newRev)
-      _ <- withRetry(client.bulkInsert("nodes", allNodes))
-      _ <- withRetry(client.bulkInsertEdges("edges", allEdges))
-      _ <- withRetry(client.bulkInsert("claims", allClaims))
-      _ <- withRetry(client.bulkInsert("patches", allPatches))
-      _ <- updateRevision(newRev)
+      // Build all document maps in a single IO.blocking pass — one traversal instead of four.
+      docsAndBuildMs <- timed {
+        IO.blocking {
+        val nodesBuf   = Vector.newBuilder[java.util.Map[String, AnyRef]]
+        val edgesBuf   = Vector.newBuilder[java.util.Map[String, AnyRef]]
+        val claimsBuf  = Vector.newBuilder[java.util.Map[String, AnyRef]]
+        val patchesBuf = Vector.newBuilder[java.util.Map[String, AnyRef]]
+        fileBatches.foreach { fb =>
+          nodesBuf   ++= fb.nodeDocuments(newRev)
+          edgesBuf   ++= fb.edgeDocuments(newRev)
+          claimsBuf  ++= fb.claimDocuments(newRev)
+          patchesBuf  += fb.patchDocument(newRev)
+        }
+        (nodesBuf.result(), edgesBuf.result(), claimsBuf.result(), patchesBuf.result())
+        }
+      }
+      (docs, buildDocsMs) = docsAndBuildMs
+      (allNodes, allEdges, allClaims, allPatches) = docs
+      logicalIds = allNodes.flatMap(doc => Option(doc.get("logical_id")).map(_.toString))
+      chunkSummary = s"files=${fileBatches.size} nodes=${allNodes.size} edges=${allEdges.size} claims=${allClaims.size} patches=${allPatches.size}"
+      // Skip tombstone/retire on first ingest — DB is empty, no existing docs to update.
+      tombstoneAndRetireMs <-
+        if (skipTombstone || baseRev == 0) IO.pure((0L, 0L))
+        else timedUnit(tombstoneExistingNodes(logicalIds, newRev))
+               .both(timedUnit(retireOldClaims(fileBatches, newRev)))
+      (tombstoneMs: Long, retireClaimsMs: Long) = tombstoneAndRetireMs
+      insertNodesMs  <- insertCollectionChunked("nodes", allNodes, MaxNodeDocs)(docs => client.bulkInsert("nodes", docs))
+      insertEdgesMs  <- insertCollectionChunked("edges", allEdges, MaxEdgeDocs)(docs => client.bulkInsertEdges("edges", docs))
+      insertClaimsMs <- insertCollectionChunked("claims", allClaims, MaxClaimDocs)(docs => client.bulkInsert("claims", docs))
+      insertPatchesMs <- insertCollectionChunked("patches", allPatches, MaxPatchDocs)(docs => client.bulkInsert("patches", docs))
+      updateRevMs    <- timedUnit(updateRevision(newRev))
+      totalMs = buildDocsMs + tombstoneMs + retireClaimsMs + insertNodesMs + insertEdgesMs + insertClaimsMs + insertPatchesMs + updateRevMs
+      _ <- logChunkTiming(
+        s"rev=$newRev $chunkSummary",
+        totalMs,
+        List(
+          "buildDocs" -> buildDocsMs,
+          "tombstoneNodes" -> tombstoneMs,
+          "retireClaims" -> retireClaimsMs,
+          "insertNodes" -> insertNodesMs,
+          "insertEdges" -> insertEdgesMs,
+          "insertClaims" -> insertClaimsMs,
+          "insertPatches" -> insertPatchesMs,
+          "updateRevision" -> updateRevMs,
+        )
+      )
     } yield CommitResult(Rev(newRev), CommitStatus.Ok)
   }
 
@@ -74,10 +138,7 @@ class BulkWriteApi(client: ArangoClient) {
     }
   }
 
-  private def retireOldClaims(fileBatches: Vector[FileBatch], newRev: Long): IO[Unit] = {
-    val entityIds = fileBatches.flatMap(_.patch.ops.collect {
-      case PatchOp.UpsertNode(id, _, _, _) => id.value.toString
-    }).distinct
+  private def retireOldClaimsByEntityIds(entityIds: Seq[String], newRev: Long): IO[Unit] =
     if (entityIds.isEmpty) IO.unit
     else {
       val idList = new java.util.ArrayList[String](entityIds.size)
@@ -93,41 +154,124 @@ class BulkWriteApi(client: ArangoClient) {
         )
       )
     }
-  }
+
+  private def retireOldClaims(fileBatches: Vector[FileBatch], newRev: Long): IO[Unit] =
+    retireOldClaimsByEntityIds(
+      fileBatches.flatMap(_.patch.ops.collect {
+        case PatchOp.UpsertNode(id, _, _, _) => id.value.toString
+      }).distinct,
+      newRev
+    )
 
   /**
    * Commit file batches in chunks. Each chunk gets its own revision.
    * If a chunk fails, prior chunks are preserved (partial progress).
+   *
+   * When multiple chunks exist and baseRev > 0 (incremental update), tombstone+retire
+   * runs once upfront for all files in parallel rather than once per chunk sequentially.
+   * This reduces 2*N AQL UPDATE scans to 2 — e.g. 160 → 2 for Kubernetes.
    */
   def commitBatchChunked(
     fileBatches: Vector[FileBatch],
     baseRev: Long,
-    chunkSize: Int = 100
+    chunkSize: Int = DefaultChunkSize,
+    maxPayloadBytes: Int = DefaultChunkPayloadBytes
   ): IO[CommitResult] = {
     if (fileBatches.isEmpty)
       return IO.pure(CommitResult(Rev(baseRev), CommitStatus.Ok))
 
-    val chunks = fileBatches.grouped(chunkSize).toVector
+    val chunks = chunkForCommit(fileBatches, chunkSize, maxPayloadBytes)
+    val multiChunk = chunks.size > 1 && baseRev > 0
 
-    chunks.foldLeft(IO.pure(baseRev)) { case (revIO, chunk) =>
-      revIO.flatMap { currentRev =>
-        commitBatch(chunk, currentRev).map(_.newRev.value)
+    // Pre-tombstone: collect all entity IDs upfront and retire/tombstone in one parallel pass.
+    // Uses baseRev+1 as the tombstone rev, which is the same rev chunk 1 will use for its inserts.
+    val preTombstoneIO: IO[Unit] =
+      if (!multiChunk) IO.unit
+      else {
+        val allIds = fileBatches.flatMap(_.patch.ops.collect {
+          case PatchOp.UpsertNode(id, _, _, _) => id.value.toString
+        }).distinct
+        val preTombRev = baseRev + 1L
+        timedUnit(tombstoneExistingNodes(allIds.toVector, preTombRev))
+          .both(timedUnit(retireOldClaimsByEntityIds(allIds, preTombRev)))
+          .flatMap { case (tombMs, retireMs) =>
+            if (debugBulkWrites)
+              logger.info(s"[bulk-write] pre-tombstone files=${fileBatches.size} tombstoneMs=$tombMs retireMs=$retireMs")
+            else IO.unit
+          }
       }
-    }.map(finalRev => CommitResult(Rev(finalRev), CommitStatus.Ok))
+
+    for {
+      _ <- preTombstoneIO
+      finalRev <- chunks.foldLeft(IO.pure(baseRev)) { case (revIO, chunk) =>
+        revIO.flatMap { currentRev =>
+          commitBatch(chunk, currentRev, skipTombstone = multiChunk).map(_.newRev.value)
+        }
+      }
+    } yield CommitResult(Rev(finalRev), CommitStatus.Ok)
   }
 
-  private def updateRevision(newRev: Long): IO[Unit] =
-    client.execute(
-      """FOR key IN @keys
-        |  UPSERT { _key: key }
-        |  INSERT { _key: key, rev: @rev }
-        |  UPDATE { rev: @rev }
-        |  IN revisions""".stripMargin,
-      Map(
-        "keys" -> Array(CurrentRevisionKey, SourceGraphRevisionKey).asInstanceOf[AnyRef],
-        "rev" -> Long.box(newRev).asInstanceOf[AnyRef]
-      )
-    )
+  private def updateRevision(newRev: Long): IO[Unit] = {
+    // Use Document API (replace mode) instead of AQL UPSERT.
+    // AQL UPSERT produces write-write conflicts when multiple concurrent HTTP
+    // requests all try to update the same "current" revision key simultaneously.
+    // The Document API replace is atomic at the document level — no conflict possible.
+    val doc1 = new java.util.HashMap[String, AnyRef]()
+    doc1.put("_key", CurrentRevisionKey)
+    doc1.put("rev", Long.box(newRev))
+    val doc2 = new java.util.HashMap[String, AnyRef]()
+    doc2.put("_key", SourceGraphRevisionKey)
+    doc2.put("rev", Long.box(newRev))
+    client.bulkInsert("revisions", Seq(doc1, doc2)).void
+  }
+
+  private def chunkForCommit(
+    fileBatches: Vector[FileBatch],
+    maxFiles: Int,
+    maxPayloadBytes: Int
+  ): Vector[Vector[FileBatch]] = {
+    val chunks = Vector.newBuilder[Vector[FileBatch]]
+    var current = Vector.empty[FileBatch]
+    var currentBytes = 0
+
+    fileBatches.foreach { batch =>
+      val batchBytes = batch.estimatedPayloadBytes
+      val exceedsPayload = current.nonEmpty && currentBytes + batchBytes > maxPayloadBytes
+      val exceedsCount = current.size >= maxFiles
+      if (exceedsPayload || exceedsCount) {
+        chunks += current
+        current = Vector.empty
+        currentBytes = 0
+      }
+      current = current :+ batch
+      currentBytes += batchBytes
+    }
+
+    if (current.nonEmpty) {
+      chunks += current
+    }
+
+    chunks.result()
+  }
+
+  private def timed[A](ioa: IO[A]): IO[(A, Long)] =
+    for {
+      start <- IO.monotonic
+      result <- ioa
+      end <- IO.monotonic
+    } yield (result, (end - start).toMillis)
+
+  private def timedUnit[A](ioa: IO[A]): IO[Long] =
+    timed(ioa).map(_._2)
+
+  private def logChunkTiming(summary: String, totalMs: Long, stages: List[(String, Long)]): IO[Unit] = {
+    val shouldLog = debugBulkWrites || totalMs >= SlowChunkMs
+    if (!shouldLog) IO.unit
+    else {
+      val stageSummary = stages.map { case (name, ms) => s"$name=${ms}ms" }.mkString(" ")
+      logger.info(s"$summary total=${totalMs}ms $stageSummary")
+    }
+  }
 }
 
 /**
@@ -140,32 +284,47 @@ case class FileBatch(
   patch: GraphPatch,
   provenance: java.util.Map[String, AnyRef]
 ) {
-  private val mapper = new com.fasterxml.jackson.databind.ObjectMapper()
+  // Direct Circe-to-Java conversion — no string serialization round-trip.
+  private def jsonToJava(json: Json): AnyRef = json.fold(
+    jsonNull    = null.asInstanceOf[AnyRef],
+    jsonBoolean = b => java.lang.Boolean.valueOf(b),
+    jsonNumber  = n => java.lang.Double.valueOf(n.toDouble),
+    jsonString  = s => s,
+    jsonArray   = arr => {
+      val list = new java.util.ArrayList[AnyRef](arr.size)
+      arr.foreach(j => list.add(jsonToJava(j)))
+      list
+    },
+    jsonObject  = obj => {
+      val map = new java.util.LinkedHashMap[String, AnyRef](obj.size)
+      obj.toMap.foreach { case (k, v) => map.put(k, jsonToJava(v)) }
+      map
+    }
+  )
 
-  private def parseToJavaMap(jsonStr: String): java.util.Map[String, AnyRef] =
-    mapper.readValue(jsonStr, classOf[java.util.Map[String, AnyRef]])
-
-  private def jsonToJava(json: Json): AnyRef =
-    mapper.readValue(json.noSpaces, classOf[AnyRef])
+  private def attrsToJavaMap(attrs: Map[String, Json]): java.util.Map[String, AnyRef] = {
+    val result = new java.util.HashMap[String, AnyRef](attrs.size)
+    attrs.foreach { case (k, v) => result.put(k, jsonToJava(v)) }
+    result
+  }
 
   private def nodeKindToString(nk: NodeKind): String =
     nk.asJson.asString.getOrElse(nk.toString)
 
   lazy val estimatedPayloadBytes: Int =
-    (patch.asJson.noSpaces.getBytes(StandardCharsets.UTF_8).length * 4) + 1024
+    patch.asJson.noSpaces.getBytes(StandardCharsets.UTF_8).length + 1024
 
   def nodeDocuments(rev: Long): Vector[java.util.Map[String, AnyRef]] = {
     val now = Instant.now().toString
     patch.ops.collect { case PatchOp.UpsertNode(id, kind, name, attrs) =>
       val logicalId = id.value.toString
-      val attrsJson = Json.obj(attrs.toSeq.map { case (k, v) => k -> v }: _*).noSpaces
       val doc = new java.util.HashMap[String, AnyRef]()
       doc.put("_key", s"${logicalId}_${rev}")
       doc.put("logical_id", logicalId)
       doc.put("id", logicalId)
       doc.put("kind", nodeKindToString(kind))
       doc.put("name", name)
-      doc.put("attrs", parseToJavaMap(attrsJson))
+      doc.put("attrs", attrsToJavaMap(attrs))
       doc.put("provenance", provenance)
       doc.put("created_rev", Long.box(rev))
       doc.put("deleted_rev", null)
@@ -178,7 +337,6 @@ case class FileBatch(
   def edgeDocuments(rev: Long): Vector[java.util.Map[String, AnyRef]] = {
     val now = Instant.now().toString
     patch.ops.collect { case PatchOp.UpsertEdge(id, src, dst, predicate, attrs) =>
-      val attrsJson = Json.obj(attrs.toSeq.map { case (k, v) => k -> v }: _*).noSpaces
       val doc = new java.util.HashMap[String, AnyRef]()
       doc.put("_key", id.value.toString)
       doc.put("_from", s"nodes/${src.value}")
@@ -187,7 +345,7 @@ case class FileBatch(
       doc.put("src", src.value.toString)
       doc.put("dst", dst.value.toString)
       doc.put("predicate", predicate.value)
-      doc.put("attrs", parseToJavaMap(attrsJson))
+      doc.put("attrs", attrsToJavaMap(attrs))
       doc.put("created_rev", Long.box(rev))
       doc.put("deleted_rev", null)
       doc.put("provenance", provenance)
@@ -214,12 +372,11 @@ case class FileBatch(
     }
 
   def patchDocument(rev: Long): java.util.Map[String, AnyRef] = {
-    val patchJson = patch.asJson.noSpaces
     val doc = new java.util.HashMap[String, AnyRef]()
     doc.put("_key", patch.patchId.value.toString)
     doc.put("patch_id", patch.patchId.value.toString)
     doc.put("rev", Long.box(rev))
-    doc.put("data", mapper.readValue(patchJson, classOf[java.util.Map[String, AnyRef]]))
+    doc.put("data", jsonToJava(patch.asJson))
     doc: java.util.Map[String, AnyRef]
   }
 }

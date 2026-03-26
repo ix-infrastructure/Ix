@@ -91,6 +91,7 @@ export function registerMapCommand(program: Command): void {
     .option("--list", "Render the ranked list view instead of the default graph/tree view")
     .option("--full", "Force full local map, bypassing automatic safety limits (advanced/testing)")
     .option("--verbose", "Show raw confidence scores, crosscut scores, boundary ratios, and signals")
+    .option("--silent", "Suppress all output except a one-line summary (useful for LLM hooks)")
     .addHelpText(
       "after",
       `
@@ -107,10 +108,14 @@ Advanced:
   --full    Override automatic local safety limits and force the full local map
             path. Bypasses automatic downgrade to fast mode and the persistence
             safety guardrail. Intended for testing and performance diagnosis.
+  --silent  Skip the full map rendering. Prints one summary line to stderr and
+            exits. Ideal for LLM hooks and automated workflows where the full
+            output would waste context tokens.
 
 Examples:
   ix map .
   ix map --format json
+  ix map --silent
   ix map --level 2
   ix map --min-confidence 0.5
   ix map --max-items 10
@@ -121,7 +126,7 @@ Examples:
   ix map . --full
   ix --debug map . --full`
     )
-    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; verbose?: boolean }) => {
+    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; verbose?: boolean; silent?: boolean }) => {
       const cwd = pathArg ? resolve(pathArg) : process.cwd();
 
       try {
@@ -132,8 +137,10 @@ Examples:
         return;
       }
 
+      const silent = opts.silent === true || opts.format === "silent";
+
       // Print warning when --full override is active
-      if (opts.full && opts.format !== "json") {
+      if (opts.full && opts.format !== "json" && !silent) {
         console.log(chalk.yellow("\nWarning"));
         console.log(chalk.yellow("  Full local map override enabled.\n"));
         console.log("  Ix will ignore automatic local safety limits and attempt full local mapping.");
@@ -142,14 +149,14 @@ Examples:
 
       // Ingest the path before mapping so the graph is up to date
       const ingestStart = performance.now();
-      await ingestFiles(cwd, { recursive: true, format: opts.format === "json" ? "json" : "text", printSummary: false });
+      await ingestFiles(cwd, { recursive: true, format: (opts.format === "json" || silent) ? "json" : "text", printSummary: false, mapMode: true });
       const ingestMs = Math.round(performance.now() - ingestStart);
 
       const client = new IxClient(getEndpoint());
 
       const mapBarWidth = 25;
       const mapStart    = performance.now();
-      const mapInterval = opts.format !== "json" ? setInterval(() => {
+      const mapInterval = (opts.format !== "json" && !silent) ? setInterval(() => {
         const elapsed  = performance.now() - mapStart;
         const pct      = 1 - Math.exp(-elapsed / 4000);
         const filled   = Math.round(pct * mapBarWidth);
@@ -169,6 +176,17 @@ Examples:
       }
       if (mapInterval) { clearInterval(mapInterval); process.stderr.write('\r' + ' '.repeat(60) + '\r'); }
       const mapMs = Math.round(performance.now() - mapStart);
+
+      if (silent) {
+        const systems    = result.regions.filter(r => r.level === 3).length;
+        const subsystems = result.regions.filter(r => r.level === 2).length;
+        const modules    = result.regions.filter(r => r.level === 1).length;
+        process.stderr.write(
+          `map: ${result.file_count} files · ${systems}s/${subsystems}ss/${modules}m regions · ${mapMs}ms\n`
+        );
+        return;
+      }
+
       if (opts.format !== "json") {
         process.stderr.write(chalk.dim(`  ingest ${ingestMs}ms · map ${mapMs}ms\n`));
       }

@@ -4,8 +4,10 @@ import java.time.Instant
 import java.util.UUID
 
 import cats.effect.IO
+import com.fasterxml.jackson.databind.ObjectMapper
 import io.circe.Json
 import io.circe.syntax._
+import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 import ix.memory.db.{ArangoClient, GraphQueryApi, GraphWriteApi}
 import ix.memory.model._
@@ -26,6 +28,8 @@ class MapService(
   queryApi: GraphQueryApi,
   writeApi: GraphWriteApi
 ) {
+  private val mapper = new ObjectMapper()
+  private val logger = Slf4jLogger.getLoggerFromName[IO]("ix.map")
   private val CrosscutThreshold = 0.10
 
   // Cross-cut penalty multiplier (reduces edge weights involving crosscut files)
@@ -46,7 +50,8 @@ class MapService(
     "PATH"       -> 0.2
   )
 
-  private val builder = new MapGraphBuilder(client)
+  private val fullBuilder = new MapGraphBuilder(client)
+  private val preflight = new MapPreflight()
   private final class RetainedRegion(val level: Int, val communityIndex: Int, val region: Region)
 
   // Label kinds by level
@@ -56,20 +61,20 @@ class MapService(
     else if (level == 1)        "module"
     else                         "subsystem"
 
-  def buildMap(forceRecompute: Boolean = false): IO[ArchitectureMap] =
-    getOrBuildMap(forceRecompute)
+  def buildMap(forceRecompute: Boolean = false, forceFull: Boolean = false): IO[ArchitectureMap] =
+    getOrBuildMap(forceRecompute, forceFull)
 
-  def getOrBuildMap(forceRecompute: Boolean = false): IO[ArchitectureMap] =
+  def getOrBuildMap(forceRecompute: Boolean = false, forceFull: Boolean = false): IO[ArchitectureMap] =
     for {
-      inputRev <- builder.currentInputRev()
+      inputRev <- fullBuilder.currentInputRev()
       cached   <- loadCachedMap(inputRev)
       archMap  <- if (cached.nonEmpty && !forceRecompute) IO.pure(cached.get)
-                  else computeAndPersistMap(inputRev, cached)
+                  else computeAndPersistMap(inputRev, cached, forceFull)
     } yield archMap
 
   def loadPersistedMapForCurrentGraph(): IO[Option[ArchitectureMap]] =
     for {
-      inputRev <- builder.currentInputRev()
+      inputRev <- fullBuilder.currentInputRev()
       cached   <- loadCachedMap(inputRev)
     } yield cached
 
@@ -263,14 +268,15 @@ class MapService(
     val withChildren = withParents.map { r =>
       r.copy(childRegionIds = childrenByParent.getOrElse(r.id, Set.empty))
     }
+    val dedupedHierarchy = collapseDuplicateHierarchyLevels(withChildren)
 
     // Disambiguate duplicate labels within each level.
     // For each group of same-label regions, find a path segment unique to each.
-    val labelGroups = withChildren.groupBy(r => (r.level, r.label))
+    val labelGroups = dedupedHierarchy.groupBy(r => (r.level, r.label))
     val needsDisambig = labelGroups.filter(_._2.size > 1)
 
-    if (needsDisambig.isEmpty) withChildren
-    else withChildren.map { r =>
+    if (needsDisambig.isEmpty) dedupedHierarchy
+    else dedupedHierarchy.map { r =>
       needsDisambig.get((r.level, r.label)) match {
         case Some(group) =>
           val myPaths    = r.memberFiles.flatMap(id => fileVertexById.get(id).map(_.path)).toSet
@@ -297,6 +303,14 @@ class MapService(
         case None => r
       }
     }
+  }
+
+  private[map] def collapseDuplicateHierarchyLevels(regions: Vector[Region]): Vector[Region] = {
+    val keepById = regions.groupBy(_.id).view.mapValues { duplicates =>
+      duplicates.maxBy(region => (region.level, region.confidence, region.label.length))
+    }.toMap
+
+    regions.filter(region => keepById.get(region.id).contains(region))
   }
 
   private val LabelNoiseTokens = Set(
@@ -600,15 +614,36 @@ class MapService(
 
   // ── Persistence ─────────────────────────────────────────────────────
 
-  private def computeAndPersistMap(inputRev: Rev, cached: Option[ArchitectureMap]): IO[ArchitectureMap] =
+  private def computeAndPersistMap(
+    inputRev: Rev,
+    cached: Option[ArchitectureMap],
+    forceFull: Boolean
+  ): IO[ArchitectureMap] =
     for {
-      rawGraph      <- builder.build()
-      crosscutScores = detectCrosscut(rawGraph)
-      graph          = applyPenalty(rawGraph, crosscutScores)
-      levels         = LouvainClustering.cluster(graph, maxLevels = 3, minCommunitySize = 3)
-      regions        = buildRegions(graph, levels, crosscutScores, inputRev)
-      fresh          = ArchitectureMap(regions, rawGraph.vertices.size, inputRev.value)
-      _             <- persistMap(fresh, cached)
+      files          <- fullBuilder.discoverFiles()
+      preflightEval  <- preflight.evaluate(files)
+      t0             <- IO(System.currentTimeMillis())
+      rawGraph       <- fullBuilder.buildGraph(files)
+      t1             <- IO(System.currentTimeMillis())
+      crosscutScores <- IO.blocking(detectCrosscut(rawGraph))
+      graph          <- IO.blocking(applyPenalty(rawGraph, crosscutScores))
+      t2             <- IO(System.currentTimeMillis())
+      levels         <- IO.blocking(LouvainClustering.cluster(graph, maxLevels = 3, minCommunitySize = 3))
+      t3             <- IO(System.currentTimeMillis())
+      regions        <- IO.blocking(buildRegions(graph, levels, crosscutScores, inputRev))
+      fresh           = ArchitectureMap(
+                          regions = regions,
+                          fileCount = rawGraph.vertices.size,
+                          mapRev = inputRev.value,
+                          preflight = Some(preflightEval),
+                          outcome = MapOutcome.FullLocalCompleted
+                        )
+      t4             <- IO(System.currentTimeMillis())
+      _              <- persistMap(fresh, cached)
+      t5             <- IO(System.currentTimeMillis())
+      _              <- logger.info(
+                          s"map mode=${fresh.outcome.label} files=${files.size} build=${t1-t0}ms crosscut=${t2-t1}ms cluster=${t3-t2}ms regions=${t4-t3}ms persist=${t5-t4}ms total=${t5-t0}ms"
+                        )
     } yield fresh
 
   private def loadCachedMap(inputRev: Rev): IO[Option[ArchitectureMap]] =
@@ -629,7 +664,7 @@ class MapService(
       )
       decoded = rows.flatMap(decodePersistedRegion(_, inputRev)).toVector
       regions  = rehydrateRelationships(decoded)
-      fileCount <- if (regions.isEmpty) IO.pure(0) else builder.liveFileCount()
+      fileCount <- if (regions.isEmpty) IO.pure(0) else fullBuilder.liveFileCount()
     } yield {
       if (regions.isEmpty) None
       else Some(ArchitectureMap(regions, fileCount, inputRev.value))
@@ -700,9 +735,8 @@ class MapService(
     if (cached.exists(existing => sameRegions(existing.regions, fresh.regions))) IO.unit
     else {
       for {
-        oldRegions <- queryApi.findNodesByKind(NodeKind.Region, limit = 5000)
-        oldEdgeIds <- loadActiveRegionEdgeIds(oldRegions.map(_.id))
-        _          <- submitMapPatch(oldRegions, oldEdgeIds, fresh.regions, Rev(fresh.mapRev))
+        oldLogicalIds <- loadOldRegionIds()
+        _             <- submitMapPatch(oldLogicalIds, fresh.regions, Rev(fresh.mapRev))
       } yield ()
     }
   }
@@ -710,103 +744,189 @@ class MapService(
   private def sameRegions(left: Vector[Region], right: Vector[Region]): Boolean =
     left.sortBy(_.id.value.toString) == right.sortBy(_.id.value.toString)
 
-  private def loadActiveRegionEdgeIds(regionIds: Vector[NodeId]): IO[Vector[EdgeId]] =
-    if (regionIds.isEmpty) IO.pure(Vector.empty)
-    else {
-      val ids = regionIds.map(_.value.toString).toArray
-      client.query(
-        """FOR e IN edges
-          |  FILTER e.deleted_rev == null
-          |    AND e.predicate == "IN_REGION"
-          |    AND (e.src IN @regionIds OR e.dst IN @regionIds)
-          |  RETURN e._key""".stripMargin,
-        Map("regionIds" -> ids.asInstanceOf[AnyRef])
-      ).map(_.flatMap(_.as[String].toOption).flatMap(id => scala.util.Try(UUID.fromString(id)).toOption.map(EdgeId(_))).toVector)
-    }
+  /** Fetch only the logical_ids of current live region nodes — cheaper than full GraphNode. */
+  private def loadOldRegionIds(): IO[Vector[String]] =
+    client.query(
+      """FOR n IN nodes
+        |  FILTER n.kind == "region"
+        |    AND n.deleted_rev == null
+        |  LIMIT 5000
+        |  RETURN n.logical_id""".stripMargin,
+      Map.empty
+    ).map(_.flatMap(_.as[String].toOption).toVector)
 
+  /**
+   * Persist map regions using direct bulk operations instead of the per-op transaction path.
+   *
+   * This replaces the old commitPatch approach (which made N+1 DB round-trips inside
+   * a transaction, causing timeouts on large repos) with five bulk operations:
+   *   1. Batch AQL tombstone for old region nodes
+   *   2. Batch AQL tombstone for old region edges
+   *   3. bulkInsert for new region nodes
+   *   4. bulkInsertEdges for IN_REGION edges
+   *   5. Revision update
+   */
   private def submitMapPatch(
-    oldRegions: Vector[GraphNode],
-    oldEdgeIds: Vector[EdgeId],
-    regions: Vector[Region],
-    rev: Rev
+    oldRegionIds: Vector[String],
+    regions:      Vector[Region],
+    rev:          Rev
   ): IO[Unit] = {
-    val deleteOps: Vector[PatchOp] = oldRegions.map(n => PatchOp.DeleteNode(n.id))
-    val deleteEdgeOps: Vector[PatchOp] = oldEdgeIds.map(PatchOp.DeleteEdge)
+    if (oldRegionIds.isEmpty && regions.isEmpty) return IO.unit
 
-    val nodeOps: Vector[PatchOp] = regions.map { r =>
-      PatchOp.UpsertNode(
-        id   = r.id,
-        kind = NodeKind.Region,
-        name = r.label,
-        attrs = Map(
-          "label"              -> r.label.asJson,
-          "map_generated"      -> Json.True,
-          "level"              -> r.level.asJson,
-          "label_kind"         -> r.labelKind.asJson,
-          "file_count"         -> r.memberFiles.size.asJson,
-          "member_files"       -> r.memberFiles.map(_.value.toString).asJson,
-          "parent_id"          -> r.parentId.map(_.value.toString).asJson,
-          "child_region_ids"   -> r.childRegionIds.toVector.map(_.value.toString).sorted.asJson,
-          "cohesion"           -> r.cohesion.asJson,
-          "external_coupling"  -> r.externalCoupling.asJson,
-          "boundary_ratio"     -> r.boundaryRatio.asJson,
-          "confidence"         -> r.confidence.asJson,
-          "crosscut_score"     -> r.crosscutScore.asJson,
-          "dominant_signals"   -> r.dominantSignals.asJson,
-          "interface_node_count" -> r.interfaceNodeCount.asJson,
-          "map_rev"            -> r.mapRev.asJson
-        )
-      )
+    val now = Instant.now().toString
+    val provMap = {
+      val m = new java.util.HashMap[String, AnyRef]()
+      m.put("source_uri",  "ix:map")
+      m.put("source_hash", null)
+      m.put("extractor",   "map-service")
+      m.put("source_type", "inferred")
+      m.put("observed_at", now)
+      m
     }
 
-    // IN_REGION edges: region → file (level-1 regions only, top-down)
-    val fileEdgeOps: Vector[PatchOp] = regions
-      .filter(_.level == 1)
-      .flatMap { r =>
-        r.memberFiles.toVector.map { fileId =>
-          val edgeId = EdgeId(
-            UUID.nameUUIDFromBytes(s"in_region:${r.id.value}:${fileId.value}".getBytes("UTF-8"))
-          )
-          PatchOp.UpsertEdge(
-            id        = edgeId,
-            src       = r.id,
-            dst       = fileId,
-            predicate = EdgePredicate("IN_REGION"),
-            attrs     = Map.empty
-          )
-        }
-      }
+    for {
+      latestRev <- queryApi.getLatestRev
+      newRev     = latestRev.value + 1L
 
-    // IN_REGION edges: parent region → child region (top-down)
-    val regionEdgeOps: Vector[PatchOp] = regions.flatMap { r =>
+      // 1. Tombstone old region nodes
+      _ <- if (oldRegionIds.isEmpty) IO.unit
+           else {
+             val ids = new java.util.ArrayList[String]()
+             oldRegionIds.foreach(ids.add)
+             client.execute(
+               """FOR n IN nodes
+                 |  FILTER n.logical_id IN @ids AND n.deleted_rev == null
+                 |  UPDATE n WITH { deleted_rev: @rev, updated_at: @now } IN nodes""".stripMargin,
+               Map(
+                 "ids" -> ids.asInstanceOf[AnyRef],
+                 "rev" -> Long.box(newRev).asInstanceOf[AnyRef],
+                 "now" -> now.asInstanceOf[AnyRef]
+               )
+             )
+           }
+
+      // 2. Tombstone all active IN_REGION edges in one indexed query.
+      //    Replaces the old loadActiveRegionEdgeIds approach (which did a full
+      //    collection scan with a large src/dst IN clause — the main freeze point).
+      _ <- client.execute(
+             """FOR e IN edges
+               |  FILTER e.predicate == "IN_REGION"
+               |    AND e.deleted_rev == null
+               |  UPDATE e WITH { deleted_rev: @rev, updated_at: @now } IN edges""".stripMargin,
+             Map(
+               "rev" -> Long.box(newRev).asInstanceOf[AnyRef],
+               "now" -> now.asInstanceOf[AnyRef]
+             )
+           )
+
+      // 3. Bulk-insert new region nodes
+      nodeDocs = regions.map(r => buildRegionNodeDoc(r, newRev, now, provMap))
+      _ <- if (nodeDocs.isEmpty) IO.unit
+           else client.bulkInsert("nodes", nodeDocs).void
+
+      // 4. Bulk-insert IN_REGION edges
+      edgeDocs = buildRegionEdgeDocs(regions, newRev, now, provMap)
+      _ <- if (edgeDocs.isEmpty) IO.unit
+           else client.bulkInsertEdges("edges", edgeDocs).void
+
+      // 5. Update current revision
+      _ <- client.execute(
+             """UPSERT { _key: "current" }
+               |  INSERT { _key: "current", rev: @rev }
+               |  UPDATE { rev: @rev }
+               |  IN revisions""".stripMargin,
+             Map("rev" -> Long.box(newRev).asInstanceOf[AnyRef])
+           )
+    } yield ()
+  }
+
+  private def buildRegionNodeDoc(
+    r:        Region,
+    newRev:   Long,
+    now:      String,
+    provMap:  java.util.Map[String, AnyRef]
+  ): java.util.Map[String, AnyRef] = {
+    val logicalId = r.id.value.toString
+    val attrsJson = Json.obj(
+      "label"                -> r.label.asJson,
+      "map_generated"        -> Json.True,
+      "level"                -> r.level.asJson,
+      "label_kind"           -> r.labelKind.asJson,
+      "file_count"           -> r.memberFiles.size.asJson,
+      "member_files"         -> r.memberFiles.map(_.value.toString).asJson,
+      "parent_id"            -> r.parentId.map(_.value.toString).asJson,
+      "child_region_ids"     -> r.childRegionIds.toVector.map(_.value.toString).sorted.asJson,
+      "cohesion"             -> r.cohesion.asJson,
+      "external_coupling"    -> r.externalCoupling.asJson,
+      "boundary_ratio"       -> r.boundaryRatio.asJson,
+      "confidence"           -> r.confidence.asJson,
+      "crosscut_score"       -> r.crosscutScore.asJson,
+      "dominant_signals"     -> r.dominantSignals.asJson,
+      "interface_node_count" -> r.interfaceNodeCount.asJson,
+      "map_rev"              -> r.mapRev.asJson
+    ).noSpaces
+    val doc = new java.util.HashMap[String, AnyRef]()
+    doc.put("_key",        s"${logicalId}_${newRev}")
+    doc.put("logical_id",  logicalId)
+    doc.put("id",          logicalId)
+    doc.put("kind",        "region")
+    doc.put("name",        r.label)
+    doc.put("attrs",       mapper.readValue(attrsJson, classOf[java.util.Map[String, AnyRef]]))
+    doc.put("provenance",  provMap)
+    doc.put("created_rev", Long.box(newRev))
+    doc.put("deleted_rev", null)
+    doc.put("created_at",  now)
+    doc.put("updated_at",  now)
+    doc
+  }
+
+  private def buildRegionEdgeDocs(
+    regions: Vector[Region],
+    newRev:  Long,
+    now:     String,
+    provMap: java.util.Map[String, AnyRef]
+  ): Vector[java.util.Map[String, AnyRef]] = {
+    val fileEdges = regions.filter(_.level == 1).flatMap { r =>
+      r.memberFiles.toVector.map { fileId =>
+        val edgeId = UUID.nameUUIDFromBytes(s"in_region:${r.id.value}:${fileId.value}".getBytes("UTF-8"))
+        buildRegionEdgeDoc(edgeId.toString, s"nodes/${r.id.value}", s"nodes/${fileId.value}",
+          r.id.value.toString, fileId.value.toString, newRev, now, provMap)
+      }
+    }
+    val regionEdges = regions.flatMap { r =>
       r.parentId.map { pid =>
-        val edgeId = EdgeId(
-          UUID.nameUUIDFromBytes(s"in_region:${pid.value}:${r.id.value}".getBytes("UTF-8"))
-        )
-        PatchOp.UpsertEdge(
-          id        = edgeId,
-          src       = pid,
-          dst       = r.id,
-          predicate = EdgePredicate("IN_REGION"),
-          attrs     = Map.empty
-        )
+        val edgeId = UUID.nameUUIDFromBytes(s"in_region:${pid.value}:${r.id.value}".getBytes("UTF-8"))
+        buildRegionEdgeDoc(edgeId.toString, s"nodes/${pid.value}", s"nodes/${r.id.value}",
+          pid.value.toString, r.id.value.toString, newRev, now, provMap)
       }
     }
+    fileEdges ++ regionEdges
+  }
 
-    val allOps = deleteEdgeOps ++ deleteOps ++ nodeOps ++ fileEdgeOps ++ regionEdgeOps
-    if (allOps.isEmpty) return IO.unit
-
-    val patch  = GraphPatch(
-      patchId   = PatchId(UUID.nameUUIDFromBytes(s"map:${rev.value}".getBytes("UTF-8"))),
-      actor     = "map-service",
-      timestamp = Instant.now(),
-      source    = PatchSource("ix:map", None, "map-service", SourceType.Inferred),
-      baseRev   = rev,
-      ops       = allOps,
-      replaces  = Vector.empty,
-      intent    = Some(s"Architectural map computed at rev ${rev.value}")
-    )
-
-    writeApi.commitPatch(patch).void
+  private def buildRegionEdgeDoc(
+    key:     String,
+    from:    String,
+    to:      String,
+    src:     String,
+    dst:     String,
+    newRev:  Long,
+    now:     String,
+    provMap: java.util.Map[String, AnyRef]
+  ): java.util.Map[String, AnyRef] = {
+    val doc = new java.util.HashMap[String, AnyRef]()
+    doc.put("_key",        key)
+    doc.put("_from",       from)
+    doc.put("_to",         to)
+    doc.put("id",          key)
+    doc.put("src",         src)
+    doc.put("dst",         dst)
+    doc.put("predicate",   "IN_REGION")
+    doc.put("attrs",       new java.util.HashMap[String, AnyRef]())
+    doc.put("created_rev", Long.box(newRev))
+    doc.put("deleted_rev", null)
+    doc.put("provenance",  provMap)
+    doc.put("created_at",  now)
+    doc.put("updated_at",  now)
+    doc
   }
 }

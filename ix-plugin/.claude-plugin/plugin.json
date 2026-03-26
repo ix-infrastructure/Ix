@@ -1,7 +1,7 @@
 {
   "name": "ix-memory",
-  "version": "1.0.0",
-  "description": "Ix Memory integration — auto-ingests edited files and front-runs Grep/Glob/Read with graph-aware ix searches for token-efficient codebase understanding.",
+  "version": "2.0.0",
+  "description": "Ix Memory integration — intercepts all searches and file reads with graph-aware ix queries, auto-ingests edits, and refreshes the full architectural map after each session.",
   "author": {
     "name": "Ix Memory"
   },

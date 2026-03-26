@@ -49,19 +49,31 @@ export function registerResetCommand(program: Command): void {
       }
 
       const client = new IxClient(getEndpoint());
+      const label = opts.code ? "Wiping code graph..." : "Wiping graph...";
+      const spinnerFrames = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+      let spinIdx = 0;
+      const interval = setInterval(() => {
+        process.stderr.write(`\r${chalk.cyan(spinnerFrames[spinIdx++ % spinnerFrames.length])} ${chalk.dim(label)}`);
+      }, 80);
       try {
         if (opts.code) {
           await client.resetCode();
+          clearInterval(interval);
+          process.stderr.write("\r\x1b[K");
           // Clear the mtime cache so the next ix map re-ingests all files
           clearMtimeCache(process.cwd());
           console.log(chalk.green("✓") + " Code graph wiped. Planning artifacts preserved.");
           console.log(chalk.dim("  Run `ix map` to rebuild the code graph."));
         } else {
           await client.reset();
+          clearInterval(interval);
+          process.stderr.write("\r\x1b[K");
           clearMtimeCache(process.cwd());
           console.log(chalk.green("✓") + " Graph wiped.");
         }
       } catch (err: any) {
+        clearInterval(interval);
+        process.stderr.write("\r\x1b[K");
         console.error(chalk.red("Error:"), err.message);
         process.exitCode = 1;
         return;

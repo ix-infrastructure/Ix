@@ -189,13 +189,21 @@ export class IxClient {
   }
 
   async map(opts?: { full?: boolean }): Promise<any> {
-    return this.post("/v1/map", opts ?? {});
+    const resp = await fetch(`${this.endpoint}/v1/map`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts ?? {}),
+      signal: AbortSignal.timeout(30 * 60 * 1000), // 30 minute timeout
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`${resp.status}: ${text}`);
+    }
+    return resp.json();
   }
 
-  async commitPatchBulk(patches: GraphPatchPayload[]): Promise<{ rev: number }> {
-    const results = await this.commitPatchBatch(patches);
-    const rev = results.reduce((max, r) => Math.max(max, r.rev ?? 0), 0);
-    return { rev };
+  async commitPatchBulk(patches: GraphPatchPayload[]): Promise<PatchCommitResult> {
+    return this.post<PatchCommitResult>('/v1/patches/bulk', { patches });
   }
 
   async runSmells(opts?: {
@@ -234,11 +242,31 @@ export class IxClient {
   }
 
   async reset(): Promise<{ ok: boolean; message: string }> {
-    return this.post("/v1/reset", {});
+    const resp = await fetch(`${this.endpoint}/v1/reset`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(10 * 60 * 1000), // 10 minutes
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`${resp.status}: ${text}`);
+    }
+    return resp.json() as Promise<{ ok: boolean; message: string }>;
   }
 
   async resetCode(): Promise<{ ok: boolean; message: string }> {
-    return this.post("/v1/reset/code", {});
+    const resp = await fetch(`${this.endpoint}/v1/reset/code`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(10 * 60 * 1000), // 10 minutes
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`${resp.status}: ${text}`);
+    }
+    return resp.json() as Promise<{ ok: boolean; message: string }>;
   }
 
   async stats(): Promise<any> {

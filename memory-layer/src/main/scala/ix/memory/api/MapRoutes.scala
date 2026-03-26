@@ -16,8 +16,8 @@ class MapRoutes(mapService: MapService) {
     case req @ POST -> Root / "v1" / "map" =>
       (for {
         body    <- req.as[Json].handleError(_ => Json.obj())
-        force    = body.hcursor.get[Boolean]("full").toOption.getOrElse(false)
-        archMap <- mapService.buildMap(forceRecompute = force)
+        forceFull = body.hcursor.get[Boolean]("full").toOption.getOrElse(false)
+        archMap <- mapService.buildMap(forceRecompute = forceFull, forceFull = forceFull)
         resp    <- Ok(MapEncoder.encodeMap(archMap))
       } yield resp).handleErrorWith(ErrorHandler.handle(_))
   }

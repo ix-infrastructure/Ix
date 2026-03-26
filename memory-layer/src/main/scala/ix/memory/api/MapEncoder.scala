@@ -3,7 +3,7 @@ package ix.memory.api
 import io.circe.Json
 import io.circe.syntax._
 
-import ix.memory.map.{ArchitectureMap, Region, RegionMatch, ScopedSubsystemView}
+import ix.memory.map.{ArchitectureMap, MapPreflightResult, PersistenceEstimate, Region, RegionMatch, ScopedSubsystemView}
 import ix.memory.model.NodeId
 
 /** Shared JSON encoding for ArchitectureMap, used by MapRoutes and SubsystemRoutes. */
@@ -11,14 +11,26 @@ object MapEncoder {
 
   def encodeMap(m: ArchitectureMap): Json = {
     val regionsByLevel = m.regions.groupBy(_.level).toVector.sortBy(_._1)
-    Json.obj(
+    val base = Json.obj(
       "file_count"   -> m.fileCount.asJson,
       "region_count" -> m.regions.size.asJson,
       "levels"       -> regionsByLevel.size.asJson,
       "map_rev"      -> m.mapRev.asJson,
+      "outcome"      -> m.outcome.label.asJson,
       "regions"      -> m.regions.sortBy(r => (r.level, r.label)).map(encodeRegion).asJson,
       "hierarchy"    -> buildHierarchyTree(m).asJson
     )
+
+    val withPreflight =
+      m.preflight match {
+        case Some(value) => base.deepMerge(Json.obj("preflight" -> encodePreflight(value)))
+        case None        => base
+      }
+
+    m.persistenceEstimate match {
+      case Some(value) => withPreflight.deepMerge(Json.obj("persistence" -> encodePersistence(value)))
+      case None        => withPreflight
+    }
   }
 
   def encodeRegion(r: Region): Json =
@@ -128,4 +140,35 @@ object MapEncoder {
 
     renderNode(view.target, Set.empty)
   }
+
+  private def encodePreflight(preflight: MapPreflightResult): Json =
+    Json.obj(
+      "cost" -> Json.obj(
+        "file_count" -> preflight.cost.fileCount.asJson,
+        "directory_count" -> preflight.cost.directoryCount.asJson,
+        "directory_quadratic" -> preflight.cost.directoryQuadratic.asJson,
+        "symbol_estimate" -> preflight.cost.symbolEstimate.asJson,
+        "edge_estimate" -> preflight.cost.edgeEstimate.asJson
+      ),
+      "capacity" -> Json.obj(
+        "cpu_cores" -> preflight.capacity.cpuCores.asJson,
+        "heap_max_bytes" -> preflight.capacity.heapMaxBytes.asJson,
+        "heap_free_bytes" -> preflight.capacity.heapFreeBytes.asJson,
+        "container_memory" -> preflight.capacity.containerMemory.asJson,
+        "disk_free_bytes" -> preflight.capacity.diskFreeBytes.asJson
+      ),
+      "risk" -> preflight.risk.label.asJson,
+      "mode" -> preflight.mode.label.asJson,
+      "warnings" -> preflight.warnings.asJson,
+      "duration_ms" -> preflight.durationMs.asJson
+    )
+
+  private def encodePersistence(persistence: PersistenceEstimate): Json =
+    Json.obj(
+      "region_nodes" -> persistence.regionNodes.asJson,
+      "file_edges" -> persistence.fileEdges.asJson,
+      "region_edges" -> persistence.regionEdges.asJson,
+      "delete_ops" -> persistence.deleteOps.asJson,
+      "total_ops" -> persistence.totalOps.asJson
+    )
 }

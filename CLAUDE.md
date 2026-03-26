@@ -14,7 +14,7 @@ Use JSON when chaining command results.
 2. AFTER every design or architecture decision → run `ix decide <title> --rationale <text>`.
 3. When you notice contradictory information → run `ix conflicts` and present results to the user.
 4. NEVER guess about codebase facts — if Ix has structured data, use it.
-5. IMMEDIATELY after modifying code → run `ix map` to re-ingest and update the graph.
+5. IMMEDIATELY after modifying code → run `ix map --silent` to re-ingest and update the graph.
 6. When the user states a goal → run `ix truth add "<statement>"`.
 
 ## Ix CLI Command Routing
@@ -107,7 +107,7 @@ Workflows are staged command sequences (discover → implement → validate) att
 ```json
 {
   "discover":   ["ix overview AuthService", "ix impact AuthService"],
-  "implement":  ["ix map"],
+  "implement":  ["ix map --silent"],
   "validate":   ["ix smells --format json", "ix subsystems --format json"]
 }
 ```
@@ -123,7 +123,7 @@ Workflows are staged command sequences (discover → implement → validate) att
 ### Ingestion & Health
 | Goal | Command | Example |
 |---|---|---|
-| Update graph + map | `ix map` | `ix map` |
+| Update graph + map | `ix map --silent` | `ix map --silent` |
 | Ingest GitHub data | `ix ingest` | `ix ingest --github owner/repo --limit 50` |
 | Backend health | `ix status` | `ix status` |
 | Graph statistics | `ix stats` | `ix stats --format json` |
