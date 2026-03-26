@@ -4,8 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-JAR_PATH="memory-layer/target/scala-2.13/ix-memory-layer.jar"
-
 check_docker() {
   if ! command -v docker &> /dev/null; then
     echo "Error: Docker is not installed."
@@ -14,16 +12,6 @@ check_docker() {
   if ! docker info &> /dev/null 2>&1; then
     echo "Error: Docker is not running."
     exit 1
-  fi
-}
-
-build_jar() {
-  local force="${1:-false}"
-  if [ "$force" = "true" ] || [ ! -f "$JAR_PATH" ]; then
-    echo "Building Memory Layer JAR..."
-    sbt "memoryLayer/assembly" 2>&1 | tail -5
-  else
-    echo "JAR already exists, skipping build. Use 'rebuild' to force."
   fi
 }
 
@@ -48,7 +36,6 @@ wait_for_health() {
 case "${1:-up}" in
   up)
     check_docker
-    build_jar
     echo "Starting Ix backend..."
     docker compose up -d --build
     wait_for_health
@@ -66,7 +53,6 @@ case "${1:-up}" in
     ;;
   rebuild)
     check_docker
-    build_jar true
     echo "Rebuilding and starting Ix backend..."
     docker compose up -d --build
     wait_for_health
@@ -77,11 +63,11 @@ case "${1:-up}" in
   *)
     echo "Usage: ./stack.sh [up|down|logs|clean|rebuild|status]"
     echo ""
-    echo "  up       Build JAR (if needed) and start all services (default)"
+    echo "  up       Build containers (if needed) and start all services (default)"
     echo "  down     Stop all services"
     echo "  logs     Tail service logs"
     echo "  clean    Stop all services and remove data volumes"
-    echo "  rebuild  Force rebuild JAR and restart services"
+    echo "  rebuild  Rebuild the memory-layer image and restart services"
     echo "  status   Show service status"
     exit 1
     ;;

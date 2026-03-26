@@ -1,0 +1,8 @@
+.git
+.github
+docs
+**/node_modules
+**/target
+core-ingestion/dist
+ix-cli/dist
+homebrew

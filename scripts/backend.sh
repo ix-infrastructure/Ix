@@ -4,8 +4,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 # IX-Memory — Backend Setup
 #
-# Builds the Memory Layer JAR (if needed) and starts ArangoDB + Memory Layer
-# via Docker Compose.
+# Starts ArangoDB + Memory Layer via Docker Compose.
 #
 # Usage:
 #   ./scripts/backend.sh              # Start backend (default)
@@ -14,7 +13,7 @@ set -euo pipefail
 #   ./scripts/backend.sh status       # Show service status
 #   ./scripts/backend.sh logs         # Tail service logs
 #   ./scripts/backend.sh clean        # Stop + remove data volumes
-#   ./scripts/backend.sh rebuild      # Force rebuild JAR + restart
+#   ./scripts/backend.sh rebuild      # Rebuild image and restart services
 #   ./scripts/backend.sh check        # Just check if backend is healthy
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -32,7 +31,6 @@ else
   export DOCKER_HOME="${HOME}"
 fi
 
-JAR_PATH="memory-layer/target/scala-2.13/ix-memory-layer.jar"
 HEALTH_URL="http://localhost:8090/v1/health"
 ARANGO_URL="http://localhost:8529/_api/version"
 
@@ -98,22 +96,6 @@ ensure_docker() {
   exit 1
 }
 
-build_jar() {
-  local force="${1:-false}"
-  if [ "$force" = "true" ] || [ ! -f "$JAR_PATH" ]; then
-    if ! command -v sbt &> /dev/null; then
-      echo "Error: sbt is not installed."
-      echo "  Install: https://www.scala-sbt.org/download.html"
-      exit 1
-    fi
-    echo "Building Memory Layer JAR..."
-    sbt "memoryLayer/assembly" 2>&1 | tail -5
-    echo "[ok] JAR built: $JAR_PATH"
-  else
-    echo "[ok] JAR already exists (use 'rebuild' to force)"
-  fi
-}
-
 wait_for_health() {
   echo "Waiting for services to become healthy..."
   for i in $(seq 1 30); do
@@ -157,7 +139,6 @@ case "${1:-up}" in
     fi
 
     ensure_docker
-    build_jar
 
     # If containers are running but not healthy, restart them
     if containers_running; then
@@ -192,7 +173,6 @@ case "${1:-up}" in
     ;;
   rebuild)
     ensure_docker
-    build_jar true
     echo "Rebuilding and starting backend..."
     docker compose up -d --build
     wait_for_health
@@ -210,12 +190,12 @@ case "${1:-up}" in
     echo "Usage: ./scripts/backend.sh [COMMAND]"
     echo ""
     echo "Commands:"
-    echo "  up        Build JAR (if needed) and start services (default)"
+    echo "  up        Build containers (if needed) and start services (default)"
     echo "  down      Stop all services"
     echo "  status    Show service status and health"
     echo "  logs      Tail service logs"
     echo "  clean     Stop services and remove data volumes"
-    echo "  rebuild   Force rebuild JAR and restart services"
+    echo "  rebuild   Rebuild the memory-layer image and restart services"
     echo "  check     Check if backend is healthy (exit 0/1)"
     exit 1
     ;;

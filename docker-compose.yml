@@ -18,7 +18,9 @@ services:
     restart: unless-stopped
 
   memory-layer:
-    build: ./memory-layer
+    build:
+      context: .
+      dockerfile: memory-layer/Dockerfile
     networks:
       - backend
     ports:
