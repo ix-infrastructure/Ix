@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/logo.jpg" width="40%" />
+  <img src="./assets/logo.png" width="40%" />
 </p>
 
 <h1 align="center">Understand any system instantly.</h1>
