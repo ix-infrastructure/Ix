@@ -139,6 +139,7 @@ class MapCapacityException(
 /** The full multi-level architecture map returned by MapService. */
 final case class ArchitectureMap(
   regions:              Vector[Region],
+  edges:                Vector[ArchitectureEdge] = Vector.empty,
   fileCount:            Int,
   mapRev:               Long,
   preflight:            Option[MapPreflightResult] = None,

@@ -3,7 +3,7 @@ package ix.memory.api
 import io.circe.Json
 import io.circe.syntax._
 
-import ix.memory.map.{ArchitectureMap, MapPreflightResult, PersistenceEstimate, Region, RegionMatch, ScopedSubsystemView}
+import ix.memory.map.{ArchitectureEdge, ArchitectureMap, MapPreflightResult, PersistenceEstimate, Region, RegionMatch, ScopedSubsystemView}
 import ix.memory.model.NodeId
 
 /** Shared JSON encoding for ArchitectureMap, used by MapRoutes and SubsystemRoutes. */
@@ -18,6 +18,7 @@ object MapEncoder {
       "map_rev"      -> m.mapRev.asJson,
       "outcome"      -> m.outcome.label.asJson,
       "regions"      -> m.regions.sortBy(r => (r.level, r.label)).map(encodeRegion).asJson,
+      "edges"        -> m.edges.sortBy(e => (e.level, e.src.value.toString, e.dst.value.toString)).map(encodeEdge).asJson,
       "hierarchy"    -> buildHierarchyTree(m).asJson
     )
 
@@ -49,6 +50,17 @@ object MapEncoder {
       "crosscut_score"       -> r.crosscutScore.asJson,
       "dominant_signals"     -> r.dominantSignals.asJson,
       "interface_node_count" -> r.interfaceNodeCount.asJson
+    )
+
+  def encodeEdge(edge: ArchitectureEdge): Json =
+    Json.obj(
+      "id" -> edge.id.asJson,
+      "src" -> edge.src.value.toString.asJson,
+      "dst" -> edge.dst.value.toString.asJson,
+      "level" -> edge.level.asJson,
+      "weight" -> edge.weight.asJson,
+      "dominant_signal" -> edge.dominantSignal.asJson,
+      "predicate_counts" -> edge.predicateCounts.asJson
     )
 
   def encodeScopedView(view: ScopedSubsystemView, isCrossCutting: Region => Boolean): Json =
