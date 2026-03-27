@@ -13,9 +13,9 @@ function stripAnsi(s: string): string {
 const ossHelp = buildHelpText();
 
 const REQUIRED_COMMANDS = [
-  "init", "search", "locate", "explain", "impact", "overview", "watch",
-  "read", "inventory", "rank", "history", "diff",
-  "ingest", "status", "stats", "doctor", "docker",
+  "search", "locate", "explain", "impact", "overview", "watch",
+  "read", "inventory", "rank", "history", "diff", "smells", "subsystem",
+  "map", "trace", "status", "stats", "doctor", "docker",
 ];
 
 describe("help coverage", () => {
@@ -34,7 +34,7 @@ describe("help coverage", () => {
   });
 
   it("OSS help uses new branding", () => {
-    expect(stripAnsi(ossHelp)).toContain("ix — Code Memory CLI");
+    expect(stripAnsi(ossHelp)).toContain("ix — System Intelligence CLI");
     expect(stripAnsi(ossHelp)).not.toContain("Persistent Memory for LLM Systems");
   });
 
