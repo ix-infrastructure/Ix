@@ -168,10 +168,10 @@ jobs:
             ### Quick install (no repo needed)
             ```bash
             # macOS / Linux
-            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install/install.sh | bash
 
             # Windows (PowerShell)
-            irm https://raw.githubusercontent.com/${{ github.repository }}/main/install.ps1 | iex
+            irm https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install/install.ps1 | iex
 
             # Homebrew
             brew tap ${{ github.repository_owner }}/ix https://github.com/${{ github.repository }}

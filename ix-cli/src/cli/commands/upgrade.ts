@@ -170,7 +170,7 @@ export function registerUpgradeCommand(program: Command): void {
         console.error(`[error] Failed to download ${url}`);
         console.error("  You can also upgrade manually:");
         console.error(
-          `  curl -fsSL https://raw.githubusercontent.com/${GITHUB_ORG}/${GITHUB_REPO}/main/install.sh | bash`
+          `  curl -fsSL https://raw.githubusercontent.com/${GITHUB_ORG}/${GITHUB_REPO}/main/scripts/install/install.sh | bash`
         );
         rmSync(tmpDirRaw, { recursive: true, force: true });
         process.exit(1);

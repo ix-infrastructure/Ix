@@ -2,7 +2,7 @@
 # Ix — Windows Uninstaller (PowerShell)
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/ix-infrastructure/Ix/main/uninstall.ps1 | iex
+#   irm https://ix-infra.com/uninstall.ps1 | iex
 # ─────────────────────────────────────────────────────────────────────────────
 
 $ErrorActionPreference = "Stop"

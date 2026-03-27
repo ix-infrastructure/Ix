@@ -8,7 +8,7 @@
 #   3. Backend Docker containers + volumes (optional)
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/Ix/main/uninstall.sh | bash
+#   curl -fsSL https://ix-infra.com/uninstall.sh | sh
 #
 # Options (env vars):
 #   IX_KEEP_DATA=1    Keep ArangoDB data volume (default: remove everything)

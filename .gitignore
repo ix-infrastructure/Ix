@@ -5,6 +5,7 @@ target/
 *.jar
 .DS_Store
 .worktrees/
+node_modules/
 ix-cli/node_modules/*
 core-ingestion/node_modules/*
 core-ingestion/dist/

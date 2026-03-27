@@ -8,7 +8,7 @@
 #   4. Claude Code hooks (if Claude Code is installed)
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/ix-infrastructure/Ix/main/install.ps1 | iex
+#   irm https://ix-infra.com/install.ps1 | iex
 #
 # Options (env vars):
 #   $env:IX_VERSION = "0.2.0"     Override version

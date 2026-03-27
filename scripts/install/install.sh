@@ -8,7 +8,7 @@
 #   4. Claude Code hooks (if Claude Code is installed)
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/Ix/main/install.sh | bash
+#   curl -fsSL https://ix-infra.com/install.sh | sh
 #
 # Options (env vars):
 #   IX_VERSION=0.2.0          Override version (default: latest)
@@ -394,5 +394,5 @@ echo "    cd ~/my-project && ix init"
 echo "    ix map ./src"
 echo ""
 echo "  To uninstall:"
-echo "    curl -fsSL ${GITHUB_RAW}/uninstall.sh | bash"
+echo "    curl -fsSL https://ix-infra.com/uninstall.sh | sh"
 echo ""
