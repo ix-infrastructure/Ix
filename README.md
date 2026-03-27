@@ -1,93 +1,97 @@
-# Ix
+<p align="center">
+  <img src="./assets/logo.jpg" width="40%" />
+</p>
 
-Understand any system instantly.
-Your virtual cartographer.
+<h1 align="center">Understand any system instantly.</h1>
+<p align="center"><em>Your virtual cartographer.</em></p>
 
----
+<p align="center">
+  <img src="https://img.shields.io/github/stars/ix-infrastructure/IX-Memory" />
+  <img src="https://img.shields.io/github/license/ix-infrastructure/IX-Memory" />
+  <img src="https://img.shields.io/github/actions/workflow/status/ix-infrastructure/IX-Memory/ci.yml?label=tests" />
+  <img src="https://img.shields.io/badge/platform-windows%20%7C%20macOS%20%7C%20linux-lightgrey" />
+</p>
 
-Software systems are too complex to understand manually.
+<p align="center">
+  <img src="https://img.shields.io/badge/status-alpha-blue" />
+  <img src="https://img.shields.io/badge/focus-system--intelligence-purple" />
+  <img src="https://img.shields.io/badge/AI-persistent--memory-blueviolet" />
+  <img src="https://img.shields.io/badge/LLMs-Claude%20%7C%20Codex-orange" />
+</p>
 
-Millions of lines of code.
-Hundreds of services.
-Thousands of dependencies.
+<p align="center">
+  <a href="https://www.ix-infra.com">Website</a> ·
+  <a href="https://www.ix-infra.com/docs">Docs</a> ·
+  <a href="https://www.ix-compass.com/">Demo</a>
+</p>
 
-You shouldn't have to guess how your system works.
+<p align="center">
+  ⭐ Star this repo if you find it useful
+</p>
 
-Ix maps it.
-
----
-
-## The Problem
-
-Understanding a system today means:
-
-- reading code
-- searching logs
-- asking teammates
-- guessing how things connect
-
-It doesn't scale.
-
----
-
-## The Shift
-
-What if you could open a map instead?
-
-Ix creates a living map of your system.
-
-A map you can explore.
-A map you can trace.
-A map that evolves as your system evolves.
+<br/>
 
 ---
 
-## What Ix Does
+<br/>
 
-Ix turns your system into something you can:
+## Problem
 
-- **Explore** — navigate architecture like a map
-- **Trace** — follow how data and logic flow
-- **Understand** — instantly see how components connect
-- **Analyze impact** — know what changes affect before you make them
-- **Remember** — build persistent system memory over time
+Software systems are too complex to understand.
 
----
+You read code.
+You search logs.
+You still guess.
+
+Ix maps your system instead.
+
+AI can’t reason about systems.
+LLMs can’t remember them either.
+
+Ix fixes both.
 
 ## Demo
 
-```bash
-ix map .
-ix explain auth-service
-ix trace user_login_flow
-ix impact database.schema
-```
+<p align="center">
+  <img src="./assets/demo.gif" width="90%" />
+</p>
 
 Stop digging through files.
-
 Open the map instead.
 
----
+Ix improves how AI systems reason about your codebase.
+
+## Results
+
+**30% fewer tokens** on development tasks  
+**43% increase in daily LLM usage**  
+**Understand systems in minutes, not hours**
+
+Directed context. More signal. Persistent system memory.
 
 ## Install
 
-**macOS / Linux**
 ```bash
-curl -fsSL https://get.ix.dev | bash
+curl -fsSL https://ix-infra.com/install.sh | sh
 ```
 
-**Windows (PowerShell)**
-```powershell
-irm https://raw.githubusercontent.com/ix-infrastructure/Ix/main/install.ps1 | iex
-```
+## Requirements
 
-or
+- macOS, Linux, or Windows
+- Git installed
+- Docker (for full functionality)
 
-```bash
-npm install -g ix
-```
+## Supported Languages
 
----
+Ix currently supports:
+
+- TypeScript / JavaScript
+- Python
+- Go
+- Java
+- more coming
+
+(See docs for full list)
 
 ## Quick Start
 
@@ -97,65 +101,150 @@ Map your system:
 ix map .
 ```
 
-Explore it:
+Understand a component:
 
 ```bash
-ix ask "how does authentication work?"
+ix explain auth-service
 ```
 
----
+Trace a flow:
 
-## Why It Matters
+```bash
+ix trace user_login_flow
+```
 
-Systems change. Knowledge fades.
+Analyze impact:
 
-Ix doesn't just map your system — it remembers it.
+```bash
+ix impact database.schema
+```
 
-Every trace, every flow, every decision becomes part of a persistent system memory.
+Stop guessing. Start navigating.
 
-So understanding doesn't reset every time.
+Map → Explain → Trace → Impact
 
-It compounds.
+## Why Ix
 
----
+Modern systems are not just complex — they are constantly changing.
+
+Every time you switch context, onboard to a new service, or debug a flow, you start from zero.
+
+- knowledge is fragmented across code, logs, and people
+- context is lost between sessions
+- understanding does not persist
+
+AI doesn’t solve this.
+It amplifies it — reasoning is limited to the current prompt, and memory disappears between interactions.
+
+Ix is built to fix this at the system level.
+
+- builds a structured map of your system
+- captures relationships and flows
+- persists understanding over time
+- gives both humans and AI a shared source of truth
+
+Stop re-learning your system.
+Start navigating it.
+
+## Use Cases
+
+Ix is most useful for:
+
+- large codebases
+- unfamiliar systems
+- onboarding new engineers
+- debugging complex flows
+- improving LLM-assisted development
+
+## The Shift
+
+Ix turns your system into a living map.
+
+Not static diagrams.
+Not outdated docs.
+
+A map you can explore.
+A map you can trace.
+A map that evolves with your system.
+
+With Ix you can:
+
+- Understand architecture instantly
+- Trace how anything works
+- See impact before making changes
+- Debug systems faster
+- Build persistent system memory over time
+
+## Built for humans and AI
+
+Developers use Ix to explore and understand systems.
+
+LLMs use Ix as persistent system memory.
+
+Instead of guessing from limited context,
+AI can navigate a real system map — with structure, history, and relationships.
+
+The result:
+
+- better reasoning
+- more consistent answers
+- understanding that compounds over time
+
+## Architecture
+<p align="center">
+  <img src="./assets/arch.png" width="100%"/>
+</p>
+
+**How it works:**
+
+1. **Map** — build a system map from code and signals  
+2. **Structure** — identify boundaries, flows, and relationships  
+3. **Remember** — persist decisions and system knowledge  
+4. **Understand** — explore, trace, and analyze with context  
 
 ## Core Capabilities
 
-**A living system map**
+**A living system map**  
 Your architecture, always up to date.
 
-**Trace flows instantly**
+**Trace flows instantly**  
 Follow how anything moves through your system.
 
-**Understand impact**
+**Understand impact**  
 See what changes affect before you make them.
 
-**Persistent system memory**
-Knowledge doesn't disappear — it builds over time.
+**Persistent system memory**  
+Knowledge builds over time.
 
-**AI-assisted reasoning**
-Ask questions and explore your system naturally.
-
----
-
-## CLI
-
-Ix is designed around navigation:
-
-`map` → `explore` → `trace` → `impact` → `understand`
-
-Commands:
-
-- `ix map`
-- `ix trace`
-- `ix impact`
-- `ix explain`
-- `ix ask`
-
----
+**AI-assisted reasoning**  
+Explore systems with both humans and AI.
 
 ## Philosophy
 
 Every complex system should have a map.
 
 Ix gives you yours.
+
+LLMs process. Ix remembers.
+
+Early stage. Rapidly evolving.
+
+If you're building complex systems — we'd love your feedback.
+
+## Contributing
+
+We welcome contributions.
+
+If you’re building with Ix or want to improve it:
+
+- open an issue
+- submit a PR
+- share feedback
+
+Early stage. Moving fast.
+
+## Status
+
+Ix is in early development (alpha).
+
+APIs and behavior may change.
