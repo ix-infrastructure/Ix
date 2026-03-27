@@ -1,8 +1,10 @@
 services:
   arangodb:
     image: arangodb:3.12
+    networks:
+      - backend
     ports:
-      - "8529:8529"
+      - "127.0.0.1:8529:8529"
     environment:
       ARANGO_NO_AUTH: "1"
     volumes:
@@ -17,10 +19,12 @@ services:
 
   memory-layer:
     build: ./memory-layer
+    networks:
+      - backend
     ports:
-      - "8090:8090"
+      - "127.0.0.1:8090:8090"
     volumes:
-      - ${DOCKER_HOME:-$HOME}:${DOCKER_HOME:-$HOME}:ro
+      - ${IX_HOST_MOUNT_ROOT:-${DOCKER_HOME:-$HOME}}:${IX_HOST_MOUNT_ROOT:-${DOCKER_HOME:-$HOME}}:ro
     environment:
       ARANGO_HOST: arangodb
       ARANGO_PORT: "8529"
@@ -41,3 +45,6 @@ services:
 
 volumes:
   arangodb-data:
+
+networks:
+  backend:
