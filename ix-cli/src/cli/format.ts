@@ -1,6 +1,50 @@
 import chalk from "chalk";
+import { resolve } from "path";
 
 export type ResultSource = "graph" | "text" | "graph+text" | "heuristic";
+
+// ── JSON optimization helpers ──────────────────────────────────────────────
+
+/** Strip the cwd prefix from absolute paths to save tokens in JSON output. */
+export function relativePath(absPath: string | undefined | null): string | undefined {
+  if (!absPath) return undefined;
+  const cwd = process.cwd();
+  if (absPath.startsWith(cwd + "/")) return absPath.slice(cwd.length + 1);
+  // Also handle /Users/.../project/ style without trailing slash match
+  const home = process.env.HOME;
+  if (home && absPath.startsWith(home)) {
+    return "~" + absPath.slice(home.length);
+  }
+  return absPath;
+}
+
+/** Round a number to N decimal places (default 2). */
+export function roundFloat(n: number, decimals: number = 2): number {
+  const factor = Math.pow(10, decimals);
+  return Math.round(n * factor) / factor;
+}
+
+/** Remove keys with null/undefined values from an object (shallow). */
+export function stripNulls<T extends Record<string, unknown>>(obj: T): Partial<T> {
+  const result: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v !== null && v !== undefined) result[k] = v;
+  }
+  return result as Partial<T>;
+}
+
+/** Compact a tree node for JSON output — drops UUIDs, resolved:true, sourceEdge, uses relative paths. */
+export function compactTreeNode(node: any): any {
+  const out: any = { name: node.name, kind: node.kind };
+  if (node.relation) out.rel = node.relation;
+  if (node.path) out.path = relativePath(node.path);
+  if (node.cycle) out.cycle = true;
+  if (node.resolved === false) out.resolved = false;
+  if (node.children?.length > 0) {
+    out.children = node.children.map(compactTreeNode);
+  }
+  return out;
+}
 
 export function confidenceColor(score: number): (text: string) => string {
   if (score >= 0.8) return chalk.green;
@@ -153,7 +197,14 @@ export function formatBugs(nodes: any[], format: string): void {
 
 export function formatPatches(patches: any[], format: string): void {
   if (format === "json") {
-    console.log(JSON.stringify(patches, null, 2));
+    const compact = patches.map(p => ({
+      rev: p.rev,
+      patch_id: p.patch_id?.slice(0, 12),
+      intent: p.intent || undefined,
+      timestamp: p.timestamp,
+      source: relativePath(p.source?.uri) || undefined,
+    }));
+    console.log(JSON.stringify(compact, null, 2));
     return;
   }
   if (patches.length === 0) {
@@ -294,7 +345,11 @@ export interface TextResult {
 
 export function formatTextResults(results: TextResult[], format: string): void {
   if (format === "json") {
-    console.log(JSON.stringify(results, null, 2));
+    const compact = results.map(r => ({
+      ...r,
+      path: relativePath(r.path) ?? r.path,
+    }));
+    console.log(JSON.stringify(compact, null, 2));
     return;
   }
   if (results.length === 0) {
@@ -356,12 +411,14 @@ export function formatEdgeResults(
         name: resolved ? name : undefined,
         kind: n.kind ?? undefined,
         id: resolved ? n.id : undefined,
-        resolved,
-        path: n.provenance?.source_uri ?? n.provenance?.sourceUri ?? n.attrs?.path ?? undefined,
+        path: relativePath(n.provenance?.source_uri ?? n.provenance?.sourceUri ?? n.attrs?.path ?? undefined),
       };
-      if (!resolved && n.id) {
-        ref.rawId = n.id;
-        ref.diagnostic = "unresolved_call_target";
+      if (!resolved) {
+        ref.resolved = false;
+        if (n.id) {
+          ref.rawId = n.id;
+          ref.diagnostic = "unresolved_call_target";
+        }
       }
       return ref;
     });
@@ -371,15 +428,20 @@ export function formatEdgeResults(
       resultSource: source ?? "graph",
     };
     if (resolvedTarget) {
-      output.resolvedTarget = resolvedTarget;
-      output.resolutionMode = resolvedTarget.resolutionMode ?? "exact";
+      output.resolvedTarget = {
+        ...resolvedTarget,
+        path: relativePath((resolvedTarget as any).path),
+      };
+      if (resolvedTarget.resolutionMode && resolvedTarget.resolutionMode !== "exact") {
+        output.resolutionMode = resolvedTarget.resolutionMode;
+      }
     }
     if (nodes.length === 0) {
       output.diagnostics = diagnostics ?? [{ code: "no_edges", message: `No ${relation} edges found for resolved entity.` }];
     } else if (diagnostics && diagnostics.length > 0) {
       output.diagnostics = diagnostics;
     }
-    const unresolvedCount = results.filter((r: any) => !r.resolved).length;
+    const unresolvedCount = results.filter((r: any) => r.resolved === false).length;
     if (unresolvedCount > 0) {
       output.diagnostics = [
         ...(output.diagnostics ?? []),
@@ -474,23 +536,21 @@ export function formatExplain(result: ExplainResult, format: string): void {
   if (format === "json") {
     const output: any = {
       resolvedTarget: { id: result.id, kind: result.kind, name: result.name },
-      resolutionMode: "exact",
-      resultSource: "graph",
-      result: {
+      result: stripNulls({
         kind: result.kind,
         name: result.name,
         id: result.id,
-        file: result.file,
+        file: relativePath(result.file),
         container: result.container,
         introducedRev: result.introducedRev,
         calledBy: result.calledBy,
         calls: result.calls,
         contains: result.contains,
         historyLength: result.historyLength,
-        signature: result.signature,
-        docstring: result.docstring,
+        signature: result.signature ?? null,
+        docstring: result.docstring ?? null,
         callList: result.callList,
-      },
+      }),
     };
     if (result.diagnostics && result.diagnostics.length > 0) {
       output.diagnostics = result.diagnostics;

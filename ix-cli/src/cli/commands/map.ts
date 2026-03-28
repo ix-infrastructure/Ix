@@ -3,6 +3,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
+import { roundFloat } from "../format.js";
 import { bootstrap } from "../bootstrap.js";
 import { ingestFiles } from "./ingest.js";
 
@@ -203,7 +204,22 @@ Examples:
       if (minConf > 0) regions = regions.filter(r => r.confidence >= minConf);
 
       if (opts.format === "json") {
-        console.log(JSON.stringify({ ...result, regions }, null, 2));
+        console.log(JSON.stringify({
+          file_count: result.file_count,
+          region_count: regions.length,
+          levels: result.levels,
+          map_rev: result.map_rev,
+          outcome: result.outcome,
+          regions: regions.map((r: any) => ({
+            label: r.label,
+            level: r.level,
+            files: r.file_count,
+            cohesion: roundFloat(r.cohesion),
+            coupling: roundFloat(r.external_coupling),
+            confidence: roundFloat(r.confidence),
+            signals: r.dominant_signals,
+          })),
+        }, null, 2));
         return;
       }
       renderMapText(result, cwd, opts);

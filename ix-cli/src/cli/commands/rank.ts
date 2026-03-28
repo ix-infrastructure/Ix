@@ -212,10 +212,10 @@ export function registerRankCommand(program: Command): void {
           console.log(JSON.stringify({
             metric,
             kind: opts.kind,
-            scope: opts.path ?? null,
-            results,
-            summary: { evaluated: candidates.length, totalCandidates: candidates.length, returned: results.length },
-            diagnostics,
+            scope: opts.path || undefined,
+            results: results.map(r => ({ name: r.name, kind: r.kind, score: r.score })),
+            summary: { evaluated: candidates.length, returned: results.length },
+            diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
           }, null, 2));
         } else {
           console.log(chalk.bold(`Top ${results.length} ${pluralize(opts.kind)} by ${metric}:`));

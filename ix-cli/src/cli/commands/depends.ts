@@ -4,6 +4,7 @@ import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveFileOrEntity, printResolved, isRawId } from "../resolve.js";
 import { stderr } from "../stderr.js";
+import { compactTreeNode, relativePath } from "../format.js";
 
 // ── Tree types ──────────────────────────────────────────────────────
 
@@ -196,11 +197,13 @@ export function registerDependsCommand(program: Command): void {
       // ── JSON output ──────────────────────────────────────────────
       if (opts.format === "json") {
         const output: any = {
-          resolvedTarget: target,
-          resolutionMode: target.resolutionMode,
-          resultSource: "graph",
+          resolvedTarget: {
+            name: target.name,
+            kind: target.kind,
+            path: relativePath(target.path),
+          },
           semantics: "downstream_dependents",
-          tree,
+          tree: tree.map(compactTreeNode),
           traversal: {
             nodesVisited,
             maxDepthReached,

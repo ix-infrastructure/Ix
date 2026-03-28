@@ -3,6 +3,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveFileOrEntity, printResolved } from "../resolve.js";
+import { relativePath } from "../format.js";
 import { stderr } from "../stderr.js";
 
 export function registerHistoryCommand(program: Command): void {
@@ -29,7 +30,16 @@ export function registerHistoryCommand(program: Command): void {
       const result = await client.provenance(resolved.id);
 
       if (opts.format === "json") {
-        console.log(JSON.stringify({ resolvedTarget: resolved, provenance: result }, null, 2));
+        const patches = Array.isArray(result) ? result : (result as any)?.patches ?? [];
+        console.log(JSON.stringify({
+          resolvedTarget: { kind: resolved.kind, name: resolved.name, path: relativePath(resolved.path) },
+          patches: patches.map((p: any) => ({
+            rev: p.rev ?? p.data?.rev,
+            timestamp: p.data?.timestamp ?? p.timestamp,
+            intent: (p.data?.intent ?? p.intent) || undefined,
+            source: relativePath(p.data?.source?.uri) ?? undefined,
+          })),
+        }, null, 2));
       } else {
         const patches = Array.isArray(result) ? result : (result as any)?.patches ?? [];
         if (patches.length === 0) {

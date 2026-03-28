@@ -4,7 +4,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
-import { formatEdgeResults } from "../format.js";
+import { formatEdgeResults, relativePath } from "../format.js";
 import { resolveFileOrEntity, printResolved } from "../resolve.js";
 import { stderr } from "../stderr.js";
 
@@ -52,7 +52,7 @@ export function registerCallersCommand(program: Command): void {
                   kind: "text-match",
                   name: `${data.path?.text ?? ""}:${data.line_number ?? 0}`,
                   resolved: false,
-                  path: data.path?.text ?? "",
+                  path: relativePath(data.path?.text) ?? "",
                   line: data.line_number ?? 0,
                   attrs: { snippet: data.lines?.text?.trim() ?? "" },
                 });

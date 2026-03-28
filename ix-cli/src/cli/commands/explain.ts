@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
-import { formatExplain, type ExplainResult, type EntityRef, type Diagnostic } from "../format.js";
+import { formatExplain, relativePath, type ExplainResult, type EntityRef, type Diagnostic } from "../format.js";
 import { resolveFileOrEntity, isRawId } from "../resolve.js";
 import { isFileStale } from "../stale.js";
 import { collectFacts } from "../explain/facts.js";
@@ -39,16 +39,14 @@ export function registerExplainCommand(program: Command): void {
       const rendered = renderExplanation(facts, role, importance);
 
       if (opts.format === "json") {
-        const output = {
-          resolvedTarget: { id: target.id, kind: target.kind, name: target.name },
-          resolutionMode: target.resolutionMode,
-          resultSource: "graph",
+        const output: any = {
+          resolvedTarget: { kind: target.kind, name: target.name },
           facts,
           role,
           importance,
           rendered,
-          diagnostics: facts.diagnostics.length > 0 ? facts.diagnostics : undefined,
         };
+        if (facts.diagnostics.length > 0) output.diagnostics = facts.diagnostics;
         console.log(JSON.stringify(output, null, 2));
       } else {
         if (facts.stale) {
@@ -148,7 +146,7 @@ async function rawExplain(
             kind: calleeNode.kind,
             id: e.dst,
             resolved: true,
-            path: calleeNode.provenance?.source_uri ?? calleeNode.provenance?.sourceUri,
+            path: relativePath(calleeNode.provenance?.source_uri ?? calleeNode.provenance?.sourceUri),
             suggestedCommand: `ix explain "${name}"`,
           };
         } catch {
@@ -182,7 +180,7 @@ async function rawExplain(
     kind: node.kind,
     name: node.name || node.attrs?.name || target.name,
     id: target.id,
-    file: sourceUri,
+    file: relativePath(sourceUri),
     container: container ? { kind: container.kind, name: container.name || container.attrs?.name || "(unknown)" } : undefined,
     introducedRev: node.createdRev ?? node.created_rev,
     calledBy: callEdges.filter((e: any) => e.dst === target.id).length,
@@ -202,9 +200,7 @@ async function rawExplain(
 
   if (format === "json") {
     const output: any = {
-      resolvedTarget: { id: target.id, kind: target.kind, name: target.name },
-      resolutionMode: target.resolutionMode,
-      resultSource: "graph",
+      resolvedTarget: { kind: target.kind, name: target.name },
       result,
     };
     if (stale) {

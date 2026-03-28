@@ -1,5 +1,6 @@
 import type { IxClient } from "../../client/api.js";
 import type { EntityRef, Diagnostic } from "../format.js";
+import { relativePath } from "../format.js";
 import { isRawId } from "../resolve.js";
 import { isFileStale } from "../stale.js";
 import { buildDependencyTree } from "../commands/depends.js";
@@ -80,7 +81,7 @@ export async function collectFacts(
   const edges = (details.edges ?? []) as any[];
 
   // Extract path
-  const path = node.provenance?.source_uri ?? node.provenance?.sourceUri ?? undefined;
+  const path = relativePath(node.provenance?.source_uri ?? node.provenance?.sourceUri) ?? undefined;
 
   // Extract container from CONTAINS edge (where this entity is the dst)
   const containsEdge = edges.find(
@@ -151,7 +152,7 @@ export async function collectFacts(
             kind: calleeNode.kind,
             id: e.dst,
             resolved: true,
-            path: calleeNode.provenance?.source_uri ?? calleeNode.provenance?.sourceUri,
+            path: relativePath(calleeNode.provenance?.source_uri ?? calleeNode.provenance?.sourceUri),
             suggestedCommand: `ix explain "${name}"`,
           };
         } catch {

@@ -8,6 +8,7 @@ import {
 } from "../resolve.js";
 import { isFileStale } from "../stale.js";
 import { stderr } from "../stderr.js";
+import { relativePath } from "../format.js";
 import { getSystemPath, hasMapData } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
 import { renderSection, renderKeyValue, renderNote, renderWarning, renderBreadcrumb } from "../ui.js";
@@ -133,12 +134,12 @@ export function registerLocateCommand(program: Command): void {
           name: target.name,
           path: displayPath,
         },
-        resolutionMode: target.resolutionMode,
+        resolutionMode: target.resolutionMode === "exact" ? undefined as any : target.resolutionMode,
         lineRange,
         container,
         systemPath: systemPathMapped,
         hasMapData: hasMap,
-        diagnostics,
+        diagnostics: diagnostics.length > 0 ? diagnostics : [] as string[],
       };
       if (stale) {
         output.stale = true;
@@ -191,14 +192,7 @@ async function resolveWithAmbiguity(
 // ── Repo-relative path ──────────────────────────────────────────────────────
 
 function toRepoRelative(filePath: string): string {
-  if (!path.isAbsolute(filePath)) return filePath;
-  try {
-    const cwd = process.cwd();
-    const rel = path.relative(cwd, filePath);
-    // Only use relative if it doesn't escape the repo (no leading ../)
-    if (!rel.startsWith("..") && !path.isAbsolute(rel)) return rel;
-  } catch {}
-  return filePath;
+  return relativePath(filePath) ?? filePath;
 }
 
 // ── Humanized system path breadcrumb ────────────────────────────────────────

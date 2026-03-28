@@ -5,6 +5,7 @@ import { getEndpoint } from "../config.js";
 import { resolveFileOrEntity, printResolved } from "../resolve.js";
 import { getSystemPath, hasMapData } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
+import { relativePath } from "../format.js";
 import { renderSection, renderKeyValue, renderNote, renderBreadcrumb } from "../ui.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "trait", "object", "interface"]);
@@ -73,13 +74,7 @@ Examples:
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function toRepoRelative(filePath: string): string {
-  if (!nodePath.isAbsolute(filePath)) return filePath;
-  try {
-    const cwd = process.cwd();
-    const rel = nodePath.relative(cwd, filePath);
-    if (!rel.startsWith("..") && !nodePath.isAbsolute(rel)) return rel;
-  } catch {}
-  return filePath;
+  return relativePath(filePath) ?? filePath;
 }
 
 function humanizeBreadcrumb(nodes: Array<{ name: string; kind: string }>): string {

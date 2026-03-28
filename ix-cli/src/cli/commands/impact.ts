@@ -6,6 +6,7 @@ import { getEndpoint } from "../config.js";
 import { resolveFileOrEntity, printResolved } from "../resolve.js";
 import { bucketByHierarchy, getSystemPath, formatSystemPath, hasMapData, type SystemPath } from "../hierarchy.js";
 import { inferRiskSemantics, humanizeLabel, type ImpactFacts, type RiskSemantics } from "../impact/risk-semantics.js";
+import { stripNulls } from "../format.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "object", "trait", "interface"]);
 
@@ -298,40 +299,34 @@ async function containerImpact(
   if (isJson) {
     console.log(
       JSON.stringify(
-        {
-          resolvedTarget: { id: target.id, kind: target.kind, name: target.name },
-          resolutionMode: target.resolutionMode,
-          resultSource: "graph",
+        stripNulls({
+          resolvedTarget: { kind: target.kind, name: target.name },
           depth,
-          systemPath: systemPathMapped,
+          systemPath: systemPathMapped.length > 0 ? systemPathMapped : undefined,
           riskSummary: risk.riskSummary,
           riskLevel: risk.riskLevel,
           riskCategory: risk.category,
           atRiskBehavior: risk.behaviorAtRisk,
-          nextStep: risk.nextStep ?? null,
-          flowPropagation: risk.flowPropagation ?? null,
+          nextStep: risk.nextStep || undefined,
+          flowPropagation: risk.flowPropagation || undefined,
           summary: {
             members: members.length,
-            callers: 0,
-            callees: 0,
             directImporters: directImporters.length,
             directDependents: directDependents.length,
             memberLevelCallers: totalMemberCallers,
           },
-          callerList: [],
-          calleeList: [],
-          topImpactedMembers: topMembers,
-          propagationBuckets: propagationBuckets.map((b) => ({
+          topImpactedMembers: topMembers.length > 0 ? topMembers : undefined,
+          propagationBuckets: propagationBuckets.length > 0 ? propagationBuckets.map((b) => ({
             region: b.region.name,
             regionKind: b.region.kind,
             count: b.members.length,
             members: b.members.slice(0, 5).map((m) => ({ name: m.name, kind: m.kind })),
-          })),
-          decisions,
-          tasks,
-          bugs,
-          diagnostics,
-        },
+          })) : undefined,
+          decisions: decisions.length > 0 ? decisions : undefined,
+          tasks: tasks.length > 0 ? tasks : undefined,
+          bugs: bugs.length > 0 ? bugs : undefined,
+          diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
+        }),
         null,
         2
       )
@@ -429,48 +424,38 @@ async function leafImpact(
   if (isJson) {
     console.log(
       JSON.stringify(
-        {
-          resolvedTarget: { id: target.id, kind: target.kind, name: target.name },
-          resolutionMode: target.resolutionMode,
-          resultSource: "graph",
+        stripNulls({
+          resolvedTarget: { kind: target.kind, name: target.name },
           depth,
-          systemPath: systemPathMapped,
+          systemPath: systemPathMapped.length > 0 ? systemPathMapped : undefined,
           riskSummary: risk.riskSummary,
           riskLevel: risk.riskLevel,
           riskCategory: risk.category,
           atRiskBehavior: risk.behaviorAtRisk,
-          nextStep: risk.nextStep ?? null,
-          flowPropagation: risk.flowPropagation ?? null,
+          nextStep: risk.nextStep || undefined,
+          flowPropagation: risk.flowPropagation || undefined,
           summary: {
-            members: 0,
             callers: callersResult.nodes.length,
             callees: calleesResult.nodes.length,
-            directImporters: 0,
-            directDependents: 0,
-            memberLevelCallers: 0,
           },
-          callerList: callersResult.nodes.map((n: any) => ({
-            id: n.id,
+          callerList: callersResult.nodes.length > 0 ? callersResult.nodes.map((n: any) => ({
             kind: n.kind,
             name: n.name || n.attrs?.name || "(unnamed)",
-          })),
-          calleeList: calleesResult.nodes.map((n: any) => ({
-            id: n.id,
+          })) : undefined,
+          calleeList: calleesResult.nodes.length > 0 ? calleesResult.nodes.map((n: any) => ({
             kind: n.kind,
             name: n.name || n.attrs?.name || "(unnamed)",
-          })),
-          topImpactedMembers: [],
-          propagationBuckets: propagationBuckets.map((b) => ({
+          })) : undefined,
+          propagationBuckets: propagationBuckets.length > 0 ? propagationBuckets.map((b) => ({
             region: b.region.name,
             regionKind: b.region.kind,
             count: b.members.length,
             members: b.members.slice(0, 5).map((m) => ({ name: m.name, kind: m.kind })),
-          })),
-          decisions,
-          tasks,
-          bugs,
-          diagnostics: [],
-        },
+          })) : undefined,
+          decisions: decisions.length > 0 ? decisions : undefined,
+          tasks: tasks.length > 0 ? tasks : undefined,
+          bugs: bugs.length > 0 ? bugs : undefined,
+        }),
         null,
         2
       )

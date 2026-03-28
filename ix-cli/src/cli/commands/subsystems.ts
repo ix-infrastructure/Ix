@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
+import { roundFloat } from "../format.js";
 import { renderMapText, type MapResult } from "./map.js";
 import {
   renderSubsystemExplanationJson,
@@ -114,7 +115,15 @@ Examples:
           : scores;
 
         if (opts.format === "json") {
-          console.log(JSON.stringify({ scores: filtered }, null, 2));
+          const compact = filtered.map(s => ({
+            name: s.name,
+            level: s.level,
+            health: roundFloat(s.health_score),
+            files: s.file_count,
+            chunks_per_file: roundFloat(s.chunk_density),
+            smell_files: s.smell_files,
+          }));
+          console.log(JSON.stringify({ scores: compact }, null, 2));
           return;
         }
         printScores(filtered);
@@ -171,7 +180,7 @@ Examples:
       }
 
       if (opts.format === "json") {
-        console.log(JSON.stringify(result, null, 2));
+        console.log(JSON.stringify(compactMapResult(result), null, 2));
         return;
       }
 
@@ -381,4 +390,79 @@ function confidenceLabel(confidence: number): string {
   if (confidence >= 0.75) return "Well-defined";
   if (confidence >= 0.50) return "Moderate";
   return "Fuzzy";
+}
+
+/** Compact a MapResult or ScopedSubsystemResult for JSON output — drops UUIDs,
+ *  rounds floats, removes internal-only fields to save tokens. */
+function compactMapResult(result: any): any {
+  // ScopedSubsystemResult
+  if (isScopedSubsystemResult(result)) {
+    return compactScopedResult(result);
+  }
+  // Full MapResult — drop raw edges (505KB+ of UUID pairs) and
+  // hierarchy (redundant with regions); keep only compacted regions.
+  const regions = result.regions ?? [];
+  const out: any = {
+    file_count: result.file_count,
+    region_count: result.region_count,
+    levels: result.levels,
+    map_rev: result.map_rev,
+    outcome: result.outcome,
+    regions: regions.map(compactRegion),
+  };
+  // Include hierarchy only as a compact tree if present
+  if (result.hierarchy) {
+    out.hierarchy = compactHierarchyNode(result.hierarchy);
+  }
+  return out;
+}
+
+function compactRegion(r: any): any {
+  const out: any = {
+    label: r.label,
+    level: r.level,
+    files: r.file_count,
+    children: r.child_region_count,
+    cohesion: roundFloat(r.cohesion),
+    coupling: roundFloat(r.external_coupling),
+    boundary: roundFloat(r.boundary_ratio),
+    confidence: roundFloat(r.confidence),
+    signals: r.dominant_signals,
+    interfaces: r.interface_node_count,
+  };
+  if (r.crosscut_score > 0.01) out.crosscut = roundFloat(r.crosscut_score);
+  return out;
+}
+
+function compactScopedResult(result: any): any {
+  const target = result.target;
+  return {
+    target: {
+      label: target.label,
+      kind: target.label_kind,
+      level: target.level,
+      files: target.file_count,
+      confidence: roundFloat(target.confidence),
+      signals: target.dominant_signals,
+      cross_cutting: target.is_cross_cutting || undefined,
+    },
+    parent: result.parent ? { label: result.parent.label, kind: result.parent.label_kind } : undefined,
+    summary: result.summary,
+    hierarchy: compactHierarchyNode(result.hierarchy),
+    children: (result.children ?? []).map(compactRegion),
+  };
+}
+
+function compactHierarchyNode(node: any): any {
+  if (!node) return undefined;
+  const out: any = {
+    label: node.label,
+    kind: node.label_kind,
+    files: node.file_count,
+    confidence: roundFloat(node.confidence),
+  };
+  if (node.children?.length > 0) {
+    out.children = node.children.map(compactHierarchyNode);
+  }
+  return out;
 }

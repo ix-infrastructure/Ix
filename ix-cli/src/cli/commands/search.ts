@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
-import { formatNodes } from "../format.js";
+import { formatNodes, relativePath } from "../format.js";
 import { scoreCandidate } from "../resolve.js";
 import { applyRoleFilter, roleHint } from "../role-filter.js";
 import { stderr } from "../stderr.js";
@@ -158,7 +158,7 @@ Examples:
             id: s.node.id,
             name: s.node.name || (s.node.attrs as any)?.name || "(unnamed)",
             kind: s.node.kind,
-            path: s.node.provenance?.sourceUri ?? undefined,
+            path: relativePath(s.node.provenance?.sourceUri) ?? undefined,
             rank: i + 1,
             tier: s.rank.tier,
             score: s.rank.score,

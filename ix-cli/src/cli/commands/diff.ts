@@ -8,7 +8,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveFileOrEntity, resolveEntityFull, printResolved, looksFileLike, type ResolvedEntity } from "../resolve.js";
-import { formatDiff } from "../format.js";
+import { formatDiff, relativePath, stripNulls } from "../format.js";
 import { stderr } from "../stderr.js";
 
 const execFileAsync = promisify(execFile);
@@ -35,6 +35,54 @@ export function computeLineDiff(before: string, after: string): string[] {
   }
 
   return result;
+}
+
+// ── JSON compaction ────────────────────────────────────────────────
+
+/** Compact a node snapshot from a diff change — drop timestamps, null deletedRev, member_files UUIDs. */
+function compactNodeSnapshot(node: any): any {
+  if (!node) return node;
+  const out: any = { name: node.name, kind: node.kind };
+  if (node.provenance) {
+    const p = node.provenance;
+    const uri = relativePath(p.source_uri ?? p.sourceUri);
+    if (uri) out.path = uri;
+    if (p.source_hash ?? p.sourceHash) out.hash = (p.source_hash ?? p.sourceHash).slice(0, 12);
+  }
+  if (node.attrs) {
+    const a = { ...node.attrs };
+    // Drop member_files UUID arrays (bulky, not useful in diff output)
+    delete a.member_files;
+    delete a.memberFiles;
+    // Keep only non-empty attrs
+    if (Object.keys(a).length > 0) out.attrs = a;
+  }
+  return out;
+}
+
+/** Compact a diff result — strip bloat from change snapshots. */
+function compactDiffResult(result: any): any {
+  const out: any = {
+    fromRev: result.fromRev,
+    toRev: result.toRev,
+    total: result.total ?? result.totalChanges,
+  };
+  if (result.truncated) out.truncated = true;
+  if (result.changes) {
+    out.changes = result.changes.map((c: any) => {
+      const change: any = { changeType: c.changeType };
+      if (c.atFromRev) change.from = compactNodeSnapshot(c.atFromRev);
+      if (c.atToRev) change.to = compactNodeSnapshot(c.atToRev);
+      // Preserve source content fields added by --content fallback
+      if (c.sourceContentBefore !== undefined) change.sourceContentBefore = c.sourceContentBefore;
+      if (c.sourceContentAfter !== undefined) change.sourceContentAfter = c.sourceContentAfter;
+      if (c.sourceDiff !== undefined) change.sourceDiff = c.sourceDiff;
+      if (c.sourceContent !== undefined) change.sourceContent = c.sourceContent;
+      return change;
+    });
+  }
+  if (result.summary) out.summary = result.summary;
+  return out;
 }
 
 // ── File content loading ────────────────────────────────────────────
@@ -417,7 +465,7 @@ export function registerDiffCommand(program: Command): void {
         const result: any = await client.diff(from, to, { summary: true, entityId });
 
         if (opts.format === "json") {
-          console.log(JSON.stringify(result, null, 2));
+          console.log(JSON.stringify(compactDiffResult(result), null, 2));
         } else {
           const s = result.summary || {};
           console.log(chalk.cyan.bold(`\nDiff: rev ${result.fromRev} → ${result.toRev}`));
@@ -470,7 +518,7 @@ export function registerDiffCommand(program: Command): void {
 
             if (opts.format === "json") {
               const jsonResult: any = {
-                ...result,
+                ...compactDiffResult(result),
                 textualDiff: diffLines,
                 hasTextualChanges: diffLines.length > 0,
                 diffMode,
@@ -531,7 +579,7 @@ export function registerDiffCommand(program: Command): void {
               c.sourceContent = afterSource ?? beforeSource;
             }
           }
-          console.log(JSON.stringify(result, null, 2));
+          console.log(JSON.stringify(compactDiffResult(result), null, 2));
         } else {
           await formatDiffContent(result);
         }
@@ -553,7 +601,7 @@ export function registerDiffCommand(program: Command): void {
 
             if (opts.format === "json") {
               console.log(JSON.stringify({
-                ...result,
+                ...compactDiffResult(result),
                 textualChanges: {
                   detected: true,
                   lineChanges: changeCount,
@@ -571,7 +619,7 @@ export function registerDiffCommand(program: Command): void {
       }
 
       if (opts.format === "json") {
-        console.log(JSON.stringify(result, null, 2));
+        console.log(JSON.stringify(compactDiffResult(result), null, 2));
       } else {
         if (result.truncated) {
           console.log(chalk.yellow(`Showing ${result.changes.length} of ${result.totalChanges} changes. Use --full to see all.\n`));

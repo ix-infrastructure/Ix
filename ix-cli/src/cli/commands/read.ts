@@ -7,6 +7,7 @@ import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
 import { resolveEntityFull } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { isFileStale } from "../stale.js";
+import { relativePath } from "../format.js";
 
 /** Common file extensions that signal the target is file-like, not a symbol name. */
 const FILE_EXTENSIONS = new Set([
@@ -58,7 +59,8 @@ function readFileRange(filePath: string, start?: number, end?: number): { conten
 
 function outputResult(result: ReadResult, format: string): void {
   if (format === "json") {
-    console.log(JSON.stringify(result, null, 2));
+    const out = { ...result, path: relativePath(result.path) ?? result.path };
+    console.log(JSON.stringify(out, null, 2));
   } else {
     if (result.stale) stderr(chalk.yellow("⚠ File has changed since last ingest. Run ix map to update.\n"));
     if (result.targetType === "symbol" || result.targetType === "filename-match") {

@@ -69,7 +69,16 @@ Examples:
           return;
         }
         if (opts.format === "json") {
-          console.log(JSON.stringify(result, null, 2));
+          const smells = result.smells ?? [];
+          console.log(JSON.stringify({
+            count: smells.length,
+            inference_version: "smell_v1",
+            smells: smells.map((s: any) => ({
+              smell: s.smell,
+              entity_id: s.entity_id?.slice(0, 12),
+              confidence: s.confidence,
+            })),
+          }, null, 2));
           return;
         }
         const smells = result.smells ?? [];
@@ -104,7 +113,20 @@ Examples:
       }
 
       if (opts.format === "json") {
-        console.log(JSON.stringify(report, null, 2));
+        // Compact: hoist inference_version to top, drop file_id UUIDs
+        const compact = {
+          rev: report.rev,
+          run_at: report.run_at,
+          count: report.count,
+          inference_version: "smell_v1",
+          candidates: report.candidates.map(c => ({
+            file: c.file,
+            smell: c.smell,
+            confidence: c.confidence,
+            signals: c.signals,
+          })),
+        };
+        console.log(JSON.stringify(compact, null, 2));
         return;
       }
 

@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
+import { relativePath } from "../format.js";
 
 export function registerInventoryCommand(program: Command): void {
   program
@@ -41,22 +42,32 @@ Examples:
       const scope = opts.path ?? null;
 
       if (opts.format === "json") {
-        const results = nodes.map((n) => ({
-          id: n.id,
-          name: n.name || n.attrs?.name || "(unnamed)",
-          kind: n.kind,
-          path:
-            (n as any).provenance?.source_uri ??
-            n.provenance?.sourceUri ??
-            n.attrs?.path ??
-            undefined,
+        // Group by file to avoid repeating the same path on every entry
+        const byFile = new Map<string, string[]>();
+        const ungrouped: Array<{ name: string; kind: string; path?: string }> = [];
+        for (const n of nodes) {
+          const name = String(n.name || n.attrs?.name || "(unnamed)");
+          const rawPath = (n as any).provenance?.source_uri ?? n.provenance?.sourceUri ?? n.attrs?.path;
+          const path = relativePath(rawPath);
+          if (path) {
+            const existing = byFile.get(path) ?? [];
+            existing.push(name);
+            byFile.set(path, existing);
+          } else {
+            ungrouped.push({ name, kind: String(n.kind) });
+          }
+        }
+        const grouped = Array.from(byFile.entries()).map(([path, names]) => ({
+          path,
+          items: names,
         }));
-        const output = {
+        const output: any = {
           kind: opts.kind,
-          scope: scope,
-          results,
-          summary: { total: results.length },
+          scope: scope ?? undefined,
+          total: nodes.length,
+          byFile: grouped,
         };
+        if (ungrouped.length > 0) output.ungrouped = ungrouped;
         console.log(JSON.stringify(output, null, 2));
         return;
       }

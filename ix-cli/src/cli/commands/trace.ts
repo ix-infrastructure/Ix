@@ -6,6 +6,7 @@ import { resolveFileOrEntity, isRawId } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { buildDependencyTree } from "./depends.js";
 import { renderSection, renderKeyValue, renderResolvedHeader, colorizeKind } from "../ui.js";
+import { compactTreeNode, relativePath } from "../format.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -292,12 +293,12 @@ export function registerTraceCommand(program: Command): void {
           if (opts.format === "json") {
             const output: Record<string, unknown> = {
               mode: "path",
-              from: { name: fromTarget.name, kind: fromTarget.kind, path: fromTarget.path },
-              to: { name: toTarget.name, kind: toTarget.kind, path: toTarget.path },
+              from: { name: fromTarget.name, kind: fromTarget.kind, path: relativePath(fromTarget.path) },
+              to: { name: toTarget.name, kind: toTarget.kind, path: relativePath(toTarget.path) },
               kind: relKind,
             };
             if (pathNodes.length > 0) {
-              const mapped = pathNodes.map((n) => ({ id: n.id, name: n.name, kind: n.kind }));
+              const mapped = pathNodes.map((n) => ({ name: n.name, kind: n.kind }));
               output.path = mapped;
               output.summary = { path_length: pathNodes.length };
             } else {
@@ -375,16 +376,16 @@ export function registerTraceCommand(program: Command): void {
               JSON.stringify(
                 {
                   mode: "directional",
-                  target: { name: target.name, kind: target.kind, path: target.path },
+                  target: { name: target.name, kind: target.kind, path: relativePath(target.path) },
                   direction: "both",
                   kind: relKind,
                   depth: maxDepth,
                   upstream: {
-                    tree: upResult.tree,
+                    tree: upResult.tree.map(compactTreeNode),
                     summary: { nodes_visited: upResult.nodesVisited, max_depth: upResult.maxDepthReached },
                   },
                   downstream: {
-                    tree: downResult.tree,
+                    tree: downResult.tree.map(compactTreeNode),
                     summary: { nodes_visited: downResult.nodesVisited, max_depth: downResult.maxDepthReached },
                   },
                 },
@@ -438,35 +439,13 @@ export function registerTraceCommand(program: Command): void {
 
         // ── JSON ────────────────────────────────────────────────────
         if (opts.format === "json") {
-          // Build flat nodes + edges lists for JSON output
-          const nodes: Array<{ id: string; name: string; kind: string }> = [
-            { id: target.id, name: target.name, kind: target.kind },
-          ];
-          const edges: Array<{ from: string; to: string; kind: string }> = [];
-
-          function collectJson(parentId: string, children: TraceNode[]): void {
-            for (const child of children) {
-              nodes.push({ id: child.id, name: child.name, kind: child.kind });
-              // downstream = in edges (child → parent), upstream = out edges (parent → child)
-              edges.push({ from: doUpstream ? child.id : parentId, to: doUpstream ? parentId : child.id, kind: relKind });
-              collectJson(child.id, child.children);
-            }
-          }
-          collectJson(target.id, tree);
-
-          function toJsonTree(children: TraceNode[]): unknown[] {
-            return children.map((c) => ({ id: c.id, children: toJsonTree(c.children) }));
-          }
-
           const output: Record<string, unknown> = {
             mode: "directional",
-            target: { name: target.name, kind: target.kind, path: target.path },
+            target: { name: target.name, kind: target.kind, path: relativePath(target.path) },
             direction,
             kind: relKind,
             depth: maxDepth,
-            nodes,
-            edges,
-            tree: { id: target.id, children: toJsonTree(tree) },
+            tree: tree.map(compactTreeNode),
             summary: { nodes_visited: nodesVisited, max_depth: maxDepthReached },
           };
 
