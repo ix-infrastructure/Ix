@@ -11,11 +11,15 @@ const __dirname = dirname(__filename);
 
 const GITHUB_ORG = "ix-infrastructure";
 const GITHUB_REPO = "Ix";
+const COMPASS_DIST_REPO = "ix-compass-dist";
 const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
 const VERSION_CACHE = join(IX_HOME, ".version-check.json");
+const COMPASS_DIR = join(IX_HOME, "cli", "compass");
+const COMPASS_VERSION_FILE = join(COMPASS_DIR, ".version");
 
 interface VersionCache {
   latest: string;
+  compassLatest?: string;
   checkedAt: number;
 }
 
@@ -52,13 +56,12 @@ function readCache(): VersionCache | null {
   }
 }
 
-function writeCache(latest: string): void {
+function writeCache(latest: string, compassLatest?: string): void {
   try {
     mkdirSync(IX_HOME, { recursive: true });
-    writeFileSync(
-      VERSION_CACHE,
-      JSON.stringify({ latest, checkedAt: Date.now() })
-    );
+    const data: VersionCache = { latest, checkedAt: Date.now() };
+    if (compassLatest) data.compassLatest = compassLatest;
+    writeFileSync(VERSION_CACHE, JSON.stringify(data));
   } catch {
     // non-critical
   }
@@ -72,6 +75,28 @@ function isNewer(latest: string, current: string): boolean {
     if ((l[i] || 0) < (c[i] || 0)) return false;
   }
   return false;
+}
+
+function getCompassVersion(): string {
+  try {
+    if (!existsSync(COMPASS_VERSION_FILE)) return "0.0.0";
+    return readFileSync(COMPASS_VERSION_FILE, "utf-8").trim() || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+async function fetchLatestCompassVersion(): Promise<string | null> {
+  try {
+    const resp = await fetch(
+      `https://api.github.com/repos/${GITHUB_ORG}/${COMPASS_DIST_REPO}/releases/latest`
+    );
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as { tag_name?: string };
+    return data.tag_name?.replace(/^v/, "") ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function detectPlatform(): string {
@@ -98,21 +123,34 @@ export async function checkForUpdate(): Promise<void> {
     return;
   }
 
-  fetchLatestVersion().then((latest) => {
-    if (!latest) return;
-    writeCache(latest);
-    if (isNewer(latest, current)) {
-      printUpdateNotice(current, latest);
+  Promise.all([fetchLatestVersion(), fetchLatestCompassVersion()]).then(
+    ([latest, compassLatest]) => {
+      if (!latest) return;
+      writeCache(latest, compassLatest ?? undefined);
+      const compassCurrent = getCompassVersion();
+      const hasCliUpdate = isNewer(latest, current);
+      const hasCompassUpdate =
+        compassLatest && isNewer(compassLatest, compassCurrent);
+      if (hasCliUpdate || hasCompassUpdate) {
+        printUpdateNotice(current, latest, hasCompassUpdate ? true : false);
+      }
     }
-  });
+  );
 }
 
-function printUpdateNotice(current: string, latest: string): void {
-  process.stderr.write('\r' + ' '.repeat(80) + '\r');
+function printUpdateNotice(
+  current: string,
+  latest: string,
+  compassUpdate?: boolean
+): void {
+  process.stderr.write("\r" + " ".repeat(80) + "\r");
   console.error("");
-  console.error(
-    chalk.yellow(`  Update available: ${current} → ${latest}`)
-  );
+  if (isNewer(latest, current)) {
+    console.error(chalk.yellow(`  Update available: ${current} → ${latest}`));
+  }
+  if (compassUpdate) {
+    console.error(chalk.yellow("  Compass update available"));
+  }
   console.error(chalk.dim("  Run: ix upgrade"));
   console.error("");
 }
@@ -248,6 +286,47 @@ export function registerUpgradeCommand(program: Command): void {
       } catch {
         // Backend not running, that's fine
       }
+
+      // ── Compass upgrade ──────────────────────────────────────────────
+      console.log("Checking for compass updates...");
+      const compassCurrent = getCompassVersion();
+      const compassLatest = await fetchLatestCompassVersion();
+
+      if (compassLatest && isNewer(compassLatest, compassCurrent)) {
+        console.log(
+          `Compass update available: ${compassCurrent === "0.0.0" ? "none" : compassCurrent} → ${chalk.green(compassLatest)}`
+        );
+        const compassUrl = `https://github.com/${GITHUB_ORG}/${COMPASS_DIST_REPO}/releases/download/v${compassLatest}/compass-${compassLatest}.tar.gz`;
+        const compassTmp = mkdtempSync(join(tmpdir(), "ix-compass-"));
+        const compassTar = join(compassTmp, `compass-${compassLatest}.tar.gz`);
+
+        try {
+          execFileSync("curl", ["-fsSL", compassUrl, "-o", compassTar], {
+            stdio: ["ignore", "inherit", "inherit"],
+            timeout: 60000,
+          });
+          mkdirSync(COMPASS_DIR, { recursive: true });
+          // Clear old compass files, then extract new ones
+          rmSync(COMPASS_DIR, { recursive: true, force: true });
+          mkdirSync(COMPASS_DIR, { recursive: true });
+          execFileSync(
+            "tar",
+            ["-xzf", compassTar, "-C", COMPASS_DIR, "--strip-components=1"],
+            { stdio: "ignore" }
+          );
+          writeFileSync(COMPASS_VERSION_FILE, compassLatest);
+          console.log(`[ok] Compass upgraded to ${compassLatest}`);
+        } catch {
+          console.error("[!!] Could not download compass update. ix view may use the bundled version.");
+        }
+        rmSync(compassTmp, { recursive: true, force: true });
+      } else if (compassLatest) {
+        console.log(`[ok] Compass is up to date (${compassCurrent})`);
+      } else {
+        console.log("[--] Could not check compass version");
+      }
+
+      if (compassLatest) writeCache(latest, compassLatest);
 
       console.log("");
       console.log(`[ok] ix ${latest} is ready`);
