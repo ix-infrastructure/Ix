@@ -1,7 +1,0 @@
-interface:
-  display_name: "IX API Contract Change"
-  short_description: "Keep Scala routes and IxClient in lockstep"
-  default_prompt: "Use $ix-api-contract-change to implement this endpoint/client change and verify contract alignment."
-
-policy:
-  allow_implicit_invocation: true

@@ -1,7 +1,0 @@
-interface:
-  display_name: "IX Arango Query Change"
-  short_description: "Control AQL/schema/transaction behavior drift"
-  default_prompt: "Use $ix-arango-query-change to update Arango query logic and keep DB semantics and tests aligned."
-
-policy:
-  allow_implicit_invocation: true
