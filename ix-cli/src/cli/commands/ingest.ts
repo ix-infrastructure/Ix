@@ -540,7 +540,7 @@ export async function ingestFiles(
 
     const PARSE_STREAM_CHUNK     = 1000;             // streaming batch size for large repos
     const SMALL_REPO_THRESHOLD   = 5_000;            // parse-all-first below this; streaming above
-    const COMMIT_HTTP_MAX_FILES  = parsePositiveIntEnv('IX_COMMIT_HTTP_MAX_FILES', 200); // files per HTTP request to the backend
+    const COMMIT_HTTP_MAX_FILES  = parsePositiveIntEnv('IX_COMMIT_HTTP_MAX_FILES', 400); // files per HTTP request to the backend
     const COMMIT_CONCURRENCY     = parsePositiveIntEnv('IX_COMMIT_CONCURRENCY', 8); // parallel HTTP save requests
     const COMMIT_CONFLICT_RETRIES = parsePositiveIntEnv('IX_COMMIT_CONFLICT_RETRIES', 6); // retry transient Arango lock conflicts
     const YIELD_EVERY            = 100;              // yield event loop every N files during parse

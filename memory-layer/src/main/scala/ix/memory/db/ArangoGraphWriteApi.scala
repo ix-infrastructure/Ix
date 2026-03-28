@@ -157,7 +157,7 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
                 .getOrElse(logicalId)
               val tombstoneAql = """
                 UPDATE { _key: @key } WITH { deleted_rev: @rev, updated_at: @now } IN nodes
-                  OPTIONS { waitForSync: true }
+                  OPTIONS { waitForSync: false }
               """
               val newKey = s"${logicalId}_${newRev}"
               val upsertAql = """
@@ -173,7 +173,7 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
                   attrs: @attrs, provenance: @provenance,
                   deleted_rev: null, updated_at: @now
                 }
-                IN nodes OPTIONS { waitForSync: true }
+                IN nodes OPTIONS { waitForSync: false }
               """
               for {
                 _ <- client.execute(tombstoneAql, Map(
@@ -211,7 +211,7 @@ class ArangoGraphWriteApi(client: ArangoClient) extends GraphWriteApi {
                 attrs: @attrs, provenance: @provenance,
                 deleted_rev: null, updated_at: @now
               }
-              IN nodes OPTIONS { waitForSync: true }
+              IN nodes OPTIONS { waitForSync: false }
             """
             client.execute(upsertAql, Map(
               "key"        -> newKey.asInstanceOf[AnyRef],

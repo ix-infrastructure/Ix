@@ -5,6 +5,7 @@ import java.time.Instant
 import java.util.UUID
 
 import cats.effect.IO
+import cats.syntax.parallel._
 import cats.syntax.traverse._
 import io.circe.Json
 import io.circe.syntax._
@@ -28,7 +29,7 @@ class BulkWriteApi(client: ArangoClient) {
   private val MaxNodeDocs  = 10000
   private val MaxEdgeDocs  = 20000
   private val MaxClaimDocs = 10000
-  private val MaxPatchDocs = 250
+  private val MaxPatchDocs = 500
   private val SlowChunkMs = 2000L
   private val debugBulkWrites = sys.env.get("IX_DEBUG").exists(v => v.nonEmpty && v != "0" && !v.equalsIgnoreCase("false"))
   private val logger: Logger[IO] = Slf4jLogger.getLoggerFromName[IO]("ix.bulk-write")
@@ -50,18 +51,22 @@ class BulkWriteApi(client: ArangoClient) {
   )(insert: Seq[BulkDoc] => IO[Int]): IO[Long] =
     if (docs.isEmpty) IO.pure(0L)
     else {
-      val batches = chunkDocs(docs, maxDocs)
-      batches.foldLeft(IO.pure(0L)) { case (accIO, batch) =>
+      val batches = chunkDocs(docs, maxDocs).toVector
+      batches.parTraverse { batch =>
         for {
-          acc <- accIO
-          ms  <- timedUnit(withRetry(insert(batch)))
-          _   <- if (debugBulkWrites)
-                   logger.info(s"[bulk-write] collection=$collection docs=${batch.size} insertMs=$ms")
-                 else IO.unit
-        } yield acc + ms
-      }
+          ms <- timedUnit(withRetry(insert(batch)))
+          _  <- if (debugBulkWrites)
+                  logger.info(s"[bulk-write] collection=$collection docs=${batch.size} insertMs=$ms")
+                else IO.unit
+        } yield ms
+      }.map(_.sum)
     }
 
+  /**
+   * Build documents for a single chunk and insert them into ArangoDB.
+   * Document building runs on the compute pool (IO.delay) in parallel
+   * across FileBatches, then inserts run concurrently across collections.
+   */
   def commitBatch(
     fileBatches: Vector[FileBatch],
     baseRev: Long,
@@ -70,20 +75,25 @@ class BulkWriteApi(client: ArangoClient) {
     val newRev = baseRev + 1L
 
     for {
-      // Build all document maps in a single IO.blocking pass — one traversal instead of four.
+      // Build documents in parallel across FileBatches on the compute pool.
+      // Each FileBatch produces its own (nodes, edges, claims, patch) tuple independently.
       docsAndBuildMs <- timed {
-        IO.blocking {
-        val nodesBuf   = Vector.newBuilder[java.util.Map[String, AnyRef]]
-        val edgesBuf   = Vector.newBuilder[java.util.Map[String, AnyRef]]
-        val claimsBuf  = Vector.newBuilder[java.util.Map[String, AnyRef]]
-        val patchesBuf = Vector.newBuilder[java.util.Map[String, AnyRef]]
-        fileBatches.foreach { fb =>
-          nodesBuf   ++= fb.nodeDocuments(newRev)
-          edgesBuf   ++= fb.edgeDocuments(newRev)
-          claimsBuf  ++= fb.claimDocuments(newRev)
-          patchesBuf  += fb.patchDocument(newRev)
-        }
-        (nodesBuf.result(), edgesBuf.result(), claimsBuf.result(), patchesBuf.result())
+        fileBatches.parTraverse { fb =>
+          IO.delay {
+            (fb.nodeDocuments(newRev), fb.edgeDocuments(newRev), fb.claimDocuments(newRev), fb.patchDocument(newRev))
+          }
+        }.map { results =>
+          val nodesBuf   = Vector.newBuilder[java.util.Map[String, AnyRef]]
+          val edgesBuf   = Vector.newBuilder[java.util.Map[String, AnyRef]]
+          val claimsBuf  = Vector.newBuilder[java.util.Map[String, AnyRef]]
+          val patchesBuf = Vector.newBuilder[java.util.Map[String, AnyRef]]
+          results.foreach { case (nodes, edges, claims, patch) =>
+            nodesBuf   ++= nodes
+            edgesBuf   ++= edges
+            claimsBuf  ++= claims
+            patchesBuf  += patch
+          }
+          (nodesBuf.result(), edgesBuf.result(), claimsBuf.result(), patchesBuf.result())
         }
       }
       (docs, buildDocsMs) = docsAndBuildMs
@@ -105,8 +115,7 @@ class BulkWriteApi(client: ArangoClient) {
                        .both(insertCollectionChunked("patches", allPatches, MaxPatchDocs)(docs => client.bulkInsert("patches", docs)))
                        .map { case (((n, e), c), p) => (n, e, c, p) }
       (insertNodesMs, insertEdgesMs, insertClaimsMs, insertPatchesMs) = allInsertMs
-      updateRevMs    <- timedUnit(updateRevision(newRev))
-      totalMs = buildDocsMs + tombstoneMs + retireClaimsMs + insertNodesMs + insertEdgesMs + insertClaimsMs + insertPatchesMs + updateRevMs
+      totalMs = buildDocsMs + tombstoneMs + retireClaimsMs + insertNodesMs + insertEdgesMs + insertClaimsMs + insertPatchesMs
       _ <- logChunkTiming(
         s"rev=$newRev $chunkSummary",
         totalMs,
@@ -118,7 +127,6 @@ class BulkWriteApi(client: ArangoClient) {
           "insertEdges" -> insertEdgesMs,
           "insertClaims" -> insertClaimsMs,
           "insertPatches" -> insertPatchesMs,
-          "updateRevision" -> updateRevMs,
         )
       )
     } yield CommitResult(Rev(newRev), CommitStatus.Ok)
@@ -169,12 +177,15 @@ class BulkWriteApi(client: ArangoClient) {
     )
 
   /**
-   * Commit file batches in chunks. Each chunk gets its own revision.
-   * If a chunk fails, prior chunks are preserved (partial progress).
+   * Commit file batches in chunks with pre-assigned revisions.
+   *
+   * Each chunk gets a unique revision assigned upfront (baseRev+1, baseRev+2, ...),
+   * allowing all chunks to build documents and insert concurrently rather than
+   * waiting for the previous chunk's revision to be committed. The revision counter
+   * is updated once at the end to the final value.
    *
    * When multiple chunks exist and baseRev > 0 (incremental update), tombstone+retire
    * runs once upfront for all files in parallel rather than once per chunk sequentially.
-   * This reduces 2*N AQL UPDATE scans to 2 — e.g. 160 → 2 for Kubernetes.
    */
   def commitBatchChunked(
     fileBatches: Vector[FileBatch],
@@ -187,9 +198,9 @@ class BulkWriteApi(client: ArangoClient) {
 
     val chunks = chunkForCommit(fileBatches, chunkSize, maxPayloadBytes)
     val multiChunk = chunks.size > 1 && baseRev > 0
+    val finalRev = baseRev + chunks.size
 
     // Pre-tombstone: collect all entity IDs upfront and retire/tombstone in one parallel pass.
-    // Uses baseRev+1 as the tombstone rev, which is the same rev chunk 1 will use for its inserts.
     val preTombstoneIO: IO[Unit] =
       if (!multiChunk) IO.unit
       else {
@@ -208,11 +219,13 @@ class BulkWriteApi(client: ArangoClient) {
 
     for {
       _ <- preTombstoneIO
-      finalRev <- chunks.foldLeft(IO.pure(baseRev)) { case (revIO, chunk) =>
-        revIO.flatMap { currentRev =>
-          commitBatch(chunk, currentRev, skipTombstone = multiChunk).map(_.newRev.value)
-        }
+      // Pre-assign revisions and run all chunks concurrently.
+      // Each chunk writes to unique keys (logicalId_rev) so no conflicts.
+      _ <- chunks.zipWithIndex.toVector.parTraverse { case (chunk, idx) =>
+        commitBatch(chunk, baseRev + idx, skipTombstone = multiChunk)
       }
+      // Update revision counter once at the end.
+      _ <- updateRevision(finalRev)
     } yield CommitResult(Rev(finalRev), CommitStatus.Ok)
   }
 
@@ -313,11 +326,18 @@ case class FileBatch(
     result
   }
 
-  private def nodeKindToString(nk: NodeKind): String =
-    nk.asJson.asString.getOrElse(nk.toString)
-
-  lazy val estimatedPayloadBytes: Int =
-    patch.asJson.noSpaces.getBytes(StandardCharsets.UTF_8).length + 1024
+  /** Heuristic payload estimate — avoids full Circe serialization round-trip.
+   *  ~200 bytes per node op, ~180 per edge op, ~150 per claim op, +1KB overhead. */
+  lazy val estimatedPayloadBytes: Int = {
+    var nodes = 0; var edges = 0; var claims = 0
+    patch.ops.foreach {
+      case _: PatchOp.UpsertNode  => nodes += 1
+      case _: PatchOp.UpsertEdge  => edges += 1
+      case _: PatchOp.AssertClaim => claims += 1
+      case _ => ()
+    }
+    nodes * 200 + edges * 180 + claims * 150 + 1024
+  }
 
   def nodeDocuments(rev: Long): Vector[java.util.Map[String, AnyRef]] = {
     val now = Instant.now().toString
@@ -327,7 +347,7 @@ case class FileBatch(
       doc.put("_key", s"${logicalId}_${rev}")
       doc.put("logical_id", logicalId)
       doc.put("id", logicalId)
-      doc.put("kind", nodeKindToString(kind))
+      doc.put("kind", NodeKind.toWireString(kind))
       doc.put("name", name)
       doc.put("attrs", attrsToJavaMap(attrs))
       doc.put("provenance", provenance)

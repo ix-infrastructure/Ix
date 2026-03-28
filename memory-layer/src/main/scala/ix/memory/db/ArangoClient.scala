@@ -238,7 +238,7 @@ object ArangoClient {
           .host(host, port)
           .user(user)
           .password(if (password.isEmpty) null else password)
-          .maxConnections(16)
+          .maxConnections(64)
           .build()
         val existingDbs = arango.getDatabases.asScala.toSet
         if (!existingDbs.contains(database)) {

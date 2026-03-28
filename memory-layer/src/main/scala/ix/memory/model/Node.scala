@@ -86,6 +86,13 @@ object NodeKind {
   implicit val decoder: Decoder[NodeKind] = Decoder[String].emap { s =>
     nameMap.get(s).toRight(s"Unknown NodeKind: $s")
   }
+
+  /** Pre-computed reverse lookup — avoids per-call Circe encoding in hot paths. */
+  private val kindToString: Map[NodeKind, String] = nameMap.map(_.swap)
+
+  /** Fast wire-format string without Circe encoding overhead. */
+  def toWireString(nk: NodeKind): String =
+    kindToString.getOrElse(nk, nk.toString)
 }
 
 final case class GraphNode(
