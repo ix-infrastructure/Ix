@@ -2,6 +2,7 @@ import { mkdirSync, existsSync, writeFileSync } from "node:fs";
 import { join, basename, resolve } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import chalk from "chalk";
 import { IxClient } from "../client/api.js";
 import { getEndpoint, loadConfig, saveConfig, type WorkspaceConfig } from "./config.js";
@@ -50,18 +51,18 @@ export function ensureWorkspaceRegistered(cwd = process.cwd()): { registered: bo
 }
 
 /**
- * Ensure the backend is reachable. Throws with a friendly message if not.
+ * Ensure the backend is reachable. If not, auto-start via ix docker start.
  */
 export async function ensureBackendAvailable(): Promise<void> {
-  const endpoint = getEndpoint();
-  const client = new IxClient(endpoint);
+  const client = new IxClient(getEndpoint());
   try {
     await client.health();
   } catch {
-    throw new Error(
-      `Ix backend not reachable at ${endpoint}\n` +
-      `  Run: ix docker start`
-    );
+    try {
+      execFileSync("ix", ["docker", "start"], { stdio: "inherit", timeout: 120000 });
+    } catch {
+      throw new Error("Failed to start Ix backend. Run: ix docker start");
+    }
   }
 }
 
