@@ -1,0 +1,35 @@
+name: Config Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  trivy-misconfig:
+    name: Trivy config scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run Trivy misconfig scanner
+        uses: aquasecurity/trivy-action@6c175e9c4083a92bbca2f9724c8a5e33bc2d97a5 # v0.35.0
+        with:
+          scan-type: fs
+          scanners: misconfig
+          severity: HIGH,CRITICAL
+          exit-code: 1
+          hide-progress: true
+
+  policy-checks:
+    name: Deployment policy checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run config security checks
+        run: bash scripts/ci/check-config-security.sh

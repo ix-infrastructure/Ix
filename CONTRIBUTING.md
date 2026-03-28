@@ -117,8 +117,9 @@ PRs and pushes to `main` run automated security checks:
 
 - **Dependency review** — flags new dependencies with known vulnerabilities (PRs only)
 - **Trivy scanning** — scans the repo filesystem and Docker image for vulnerabilities and misconfigurations
+- **Config security** — scans Docker Compose and deployment configs for unsafe exposure (e.g., auth disabled with public port bindings, `0.0.0.0` bindings). Local-only configs that bind to `127.0.0.1` are allowed.
 
-Both checks fail on CRITICAL or HIGH severity findings. If a check fails on your PR, inspect the output and either fix the vulnerability or document why it's a false positive.
+All checks fail on CRITICAL or HIGH severity findings. If a check fails on your PR, inspect the output and either fix the vulnerability or document why it's a false positive.
 
 ## OSS vs Pro Boundary
 
