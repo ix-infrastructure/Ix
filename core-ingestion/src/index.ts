@@ -335,7 +335,7 @@ function parseYamlFile(filePath: string, source: string): FileParseResult {
 
     entities.push({
       name: key,
-      kind: 'config_key',
+      kind: 'config_entry',
       lineStart: lineNumber,
       lineEnd: lineNumber,
       language,

@@ -25,17 +25,17 @@ describe('YAML parsing', () => {
     expect(result!.language).toBe(SupportedLanguages.YAML);
     expect(result!.entities).toContainEqual(expect.objectContaining({
       name: 'services',
-      kind: 'config_key',
+      kind: 'config_entry',
       language: SupportedLanguages.YAML,
     }));
     expect(result!.entities).toContainEqual(expect.objectContaining({
       name: 'api',
-      kind: 'config_key',
+      kind: 'config_entry',
       container: 'services',
     }));
     expect(result!.entities).toContainEqual(expect.objectContaining({
       name: 'PORT',
-      kind: 'config_key',
+      kind: 'config_entry',
       container: 'environment',
     }));
     expect(result!.relationships).toContainEqual({
@@ -68,12 +68,12 @@ describe('YAML parsing', () => {
     expect(result).not.toBeNull();
     expect(result!.entities).toContainEqual(expect.objectContaining({
       name: 'name',
-      kind: 'config_key',
+      kind: 'config_entry',
       container: 'jobs',
     }));
     expect(result!.entities).toContainEqual(expect.objectContaining({
       name: 'image',
-      kind: 'config_key',
+      kind: 'config_entry',
       container: 'jobs',
     }));
   });
