@@ -211,9 +211,15 @@ export const PYTHON_QUERIES = `
 (import_from_statement
   module_name: (relative_import) @import.source) @import
 
-; from . import utils / from .models import User — also capture the imported symbol names
+; from . import utils / from .models import User — capture imported symbol names (relative imports)
 (import_from_statement
   module_name: (relative_import)
+  name: (dotted_name (identifier) @import.name)) @import.names
+
+; from module import Class — capture imported symbol names (absolute imports)
+; e.g. from sqlalchemy.sql.schema import Column → import.name = Column
+(import_from_statement
+  module_name: (dotted_name)
   name: (dotted_name (identifier) @import.name)) @import.names
 
 (call
@@ -310,6 +316,17 @@ export const PYTHON_QUERIES = `
               object: (identifier) @_assign_rhs_type
               attribute: (identifier))
             attribute: (identifier))))))) @_assign_scope
+
+; Assignment tracking: x = module.Class (direct attribute reference, no call)
+; Handles variable aliasing like: engineclass = base.Engine
+; Combined with direct-call resolution in index.ts, this lets engineclass(...) → Engine(...)
+(function_definition
+  body: (block
+    (expression_statement
+      (assignment
+        left: (identifier) @_assign_lhs
+        right: (attribute
+          attribute: (identifier) @_assign_rhs_type))))) @_assign_scope
 `;
 
 // Java queries - works with tree-sitter-java

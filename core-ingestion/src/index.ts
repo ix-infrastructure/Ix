@@ -661,6 +661,22 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         const qualifierCapture = match.captures.find((c: any) => c.name === '_qualifier');
         if (builtinsForLanguage(language).has(callee) && !qualifierCapture) continue;
 
+        // For Python: skip calls that are decorator applications.
+        // When a method is decorated (e.g. @util.deprecated(...)), the call sits at the
+        // class-body line before the def, so findEnclosingFunction misses the method and
+        // the caller falls back to the enclosing class — producing false edges like
+        // Table → deprecated.  Decorator application is not an architectural CALLS edge.
+        if (language === SupportedLanguages.Python) {
+          let isDecoratorCall = false;
+          let anc = callName.node.parent;
+          while (anc) {
+            if (anc.type === 'decorator') { isDecoratorCall = true; break; }
+            if (anc.type === 'module' || anc.type === 'function_definition' || anc.type === 'class_definition') break;
+            anc = anc.parent;
+          }
+          if (isDecoratorCall) continue;
+        }
+
         // Find enclosing function/method for the call; fall back to enclosing class
         // (e.g. calls in val/lazy val body at class level) before falling back to file.
         const callLine = callName.node.startPosition.row + 1;
@@ -673,7 +689,18 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         const seen = seenCalls.get(scope)!;
 
         const effectiveCallee = (() => {
-          if (!qualifierCapture) return callee;
+          if (!qualifierCapture) {
+            // Python: if the callee is a local alias for a class, substitute the class name.
+            // e.g. engineclass = base.Engine; engineclass(pool, ...) → Engine(pool, ...)
+            if (language === SupportedLanguages.Python) {
+              const funcName = findEnclosingFunction(entities, callLine);
+              if (funcName) {
+                const typeForAssign = assignTypeMap.get(funcName)?.get(callee);
+                if (typeForAssign) return typeForAssign;
+              }
+            }
+            return callee;
+          }
           let qualifier = qualifierCapture.node.text;
           // Python: 'self'/'cls' always refers to the enclosing class — substitute it
           // so the edge reads 'Query.filter' instead of 'self.filter', enabling
@@ -1500,10 +1527,16 @@ export function resolveEdges(
             confidence: 0.9,
           });
           stats.resolvedImport++;
+          continue;
         } else if (importMatches.length > 1) {
           stats.skippedAmbiguous++;
+          continue;
         }
-        continue;
+        // importMatches.length === 0: if dstName is a PascalCase symbol (class/function name
+        // captured via import.name from "from X import ClassName"), fall through to Tier 2/3
+        // symbol resolution so the edge connects to the actual class node rather than a file.
+        if (!/^[A-Z]/.test(rel.dstName)) continue;
+        // fall through to Tier 1b → Tier 2 → Tier 3 below
       }
 
       const dstName = rel.dstName;
