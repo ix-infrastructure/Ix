@@ -8,24 +8,12 @@ import { inferRiskSemantics, humanizeLabel, type ImpactFacts } from "../impact/r
 
 const REQUIRED_TOP_LEVEL_KEYS = [
   "resolvedTarget",
-  "resolutionMode",
-  "resultSource",
   "systemPath",
   "riskSummary",
   "riskLevel",
   "riskCategory",
   "atRiskBehavior",
-  "nextStep",
-  "flowPropagation",
   "summary",
-  "callerList",
-  "calleeList",
-  "topImpactedMembers",
-  "propagationBuckets",
-  "decisions",
-  "tasks",
-  "bugs",
-  "diagnostics",
 ];
 
 const REQUIRED_SUMMARY_KEYS = [
@@ -40,17 +28,15 @@ const REQUIRED_SUMMARY_KEYS = [
 describe("impact JSON schema normalization", () => {
   it("container impact shape has all required keys", () => {
     // Simulates the container impact JSON output shape
+    // Optimized output: resolutionMode/resultSource dropped, empty arrays omitted
     const containerOutput = {
-      resolvedTarget: { id: "abc", kind: "class", name: "MyClass" },
-      resolutionMode: "exact",
-      resultSource: "graph",
+      resolvedTarget: { kind: "class", name: "MyClass" },
       systemPath: [{ name: "CLI", kind: "subsystem" }, { name: "Commands", kind: "module" }],
       riskSummary: "Medium risk — widely shared dependency affecting the CLI layer.",
       riskLevel: "medium",
       riskCategory: "shared",
       atRiskBehavior: ["Multiple callers across different subsystems"],
-      nextStep: null,
-      flowPropagation: null,
+      nextStep: "Check callers with ix callers MyClass",
       summary: {
         members: 5,
         callers: 0,
@@ -59,14 +45,8 @@ describe("impact JSON schema normalization", () => {
         directDependents: 1,
         memberLevelCallers: 10,
       },
-      callerList: [],
-      calleeList: [],
       topImpactedMembers: [{ name: "foo", kind: "method", id: "m1", callerCount: 3 }],
       propagationBuckets: [{ region: "Commands", regionKind: "module", count: 2, members: [{ name: "fn1", kind: "function" }] }],
-      decisions: [],
-      tasks: [],
-      bugs: [],
-      diagnostics: [],
     };
 
     for (const key of REQUIRED_TOP_LEVEL_KEYS) {
@@ -75,33 +55,25 @@ describe("impact JSON schema normalization", () => {
     for (const key of REQUIRED_SUMMARY_KEYS) {
       expect(containerOutput.summary).toHaveProperty(key);
     }
-    // Container: callerList and calleeList are empty arrays
-    expect(Array.isArray(containerOutput.callerList)).toBe(true);
-    expect(Array.isArray(containerOutput.calleeList)).toBe(true);
-    // decisions/tasks/bugs are always arrays, never undefined
-    expect(Array.isArray(containerOutput.decisions)).toBe(true);
-    expect(Array.isArray(containerOutput.tasks)).toBe(true);
-    expect(Array.isArray(containerOutput.bugs)).toBe(true);
     // Risk fields
     expect(typeof containerOutput.riskSummary).toBe("string");
     expect(typeof containerOutput.riskLevel).toBe("string");
     expect(typeof containerOutput.riskCategory).toBe("string");
     expect(Array.isArray(containerOutput.atRiskBehavior)).toBe(true);
+    // Optional fields are omitted when empty (callerList, calleeList, decisions, tasks, bugs, diagnostics)
+    expect(containerOutput).not.toHaveProperty("callerList");
+    expect(containerOutput).not.toHaveProperty("decisions");
   });
 
   it("leaf impact shape has all required keys", () => {
-    // Simulates the leaf impact JSON output shape
+    // Optimized output: resolutionMode/resultSource dropped, empty arrays omitted
     const leafOutput = {
-      resolvedTarget: { id: "xyz", kind: "function", name: "verify_token" },
-      resolutionMode: "exact",
-      resultSource: "graph",
+      resolvedTarget: { kind: "function", name: "verify_token" },
       systemPath: [{ name: "file.ts", kind: "file" }],
       riskSummary: "Low risk — localized impact with limited propagation.",
       riskLevel: "low",
       riskCategory: "localized",
       atRiskBehavior: ["Limited to immediate callers"],
-      nextStep: null,
-      flowPropagation: null,
       summary: {
         members: 0,
         callers: 3,
@@ -110,14 +82,8 @@ describe("impact JSON schema normalization", () => {
         directDependents: 0,
         memberLevelCallers: 0,
       },
-      callerList: [{ id: "c1", kind: "method", name: "login" }],
-      calleeList: [{ id: "c2", kind: "function", name: "decode_jwt" }],
-      topImpactedMembers: [],
-      propagationBuckets: [],
-      decisions: [],
-      tasks: [],
-      bugs: [],
-      diagnostics: [],
+      callerList: [{ kind: "method", name: "login" }],
+      calleeList: [{ kind: "function", name: "decode_jwt" }],
     };
 
     for (const key of REQUIRED_TOP_LEVEL_KEYS) {
@@ -126,14 +92,14 @@ describe("impact JSON schema normalization", () => {
     for (const key of REQUIRED_SUMMARY_KEYS) {
       expect(leafOutput.summary).toHaveProperty(key);
     }
-    // Leaf: topImpactedMembers is empty
-    expect(Array.isArray(leafOutput.topImpactedMembers)).toBe(true);
-    expect(leafOutput.topImpactedMembers.length).toBe(0);
-    // Leaf: members, directImporters, directDependents, memberLevelCallers are 0
+    // Leaf: zero counts still present in summary
     expect(leafOutput.summary.members).toBe(0);
     expect(leafOutput.summary.directImporters).toBe(0);
     expect(leafOutput.summary.directDependents).toBe(0);
     expect(leafOutput.summary.memberLevelCallers).toBe(0);
+    // Optional fields omitted when empty (topImpactedMembers, propagationBuckets, etc.)
+    expect(leafOutput).not.toHaveProperty("topImpactedMembers");
+    expect(leafOutput).not.toHaveProperty("diagnostics");
   });
 
   it("container and leaf have identical top-level keys", () => {

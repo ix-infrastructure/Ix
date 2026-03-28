@@ -71,8 +71,9 @@ function compactDiffResult(result: any): any {
   if (result.changes) {
     out.changes = result.changes.map((c: any) => {
       const change: any = { changeType: c.changeType };
-      if (c.atFromRev) change.from = compactNodeSnapshot(c.atFromRev);
-      if (c.atToRev) change.to = compactNodeSnapshot(c.atToRev);
+      if (c.entityId) change.entityId = c.entityId;
+      if (c.atFromRev) change.atFromRev = compactNodeSnapshot(c.atFromRev);
+      if (c.atToRev) change.atToRev = compactNodeSnapshot(c.atToRev);
       // Preserve source content fields added by --content fallback
       if (c.sourceContentBefore !== undefined) change.sourceContentBefore = c.sourceContentBefore;
       if (c.sourceContentAfter !== undefined) change.sourceContentAfter = c.sourceContentAfter;

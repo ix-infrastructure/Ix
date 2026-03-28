@@ -290,7 +290,7 @@ DIFF_JSON="${TMPDIR}/diff_3_4.json"
 py_assert 'isinstance(data, dict) and data.get("fromRev")==3 and data.get("toRev")==4' "${DIFF_JSON}"
 py_assert 'isinstance(data.get("changes"), list) and len(data["changes"])>=1' "${DIFF_JSON}"
 py_assert 'any(ch.get("entityId")== "'"${DOC_ID}"'" and ch.get("changeType")=="modified" for ch in data["changes"])' "${DIFF_JSON}"
-py_assert 'any(ch.get("atFromRev",{}).get("attrs",{}).get("content","") == "" and ch.get("atToRev",{}).get("attrs",{}).get("content","") == "zzzxqv123" for ch in data["changes"])' "${DIFF_JSON}"
+py_assert 'any(ch.get("atFromRev",{}).get("attrs",{}).get("content","") == "" and ch.get("atToRev",{}).get("attrs",{}).get("content","") == "zzzxqv123" for ch in data.get("changes",[]))' "${DIFF_JSON}"
 
 # ---------- entity + claim lifecycle check (best-effort) ----------
 # If ix entity includes claims, verify old content claim is retired (deletedRev set) and only one active content claim remains.

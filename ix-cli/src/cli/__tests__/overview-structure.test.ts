@@ -14,7 +14,6 @@ import { humanizeLabel } from "../impact/risk-semantics.js";
 function makeClassOutput() {
   return {
     resolvedTarget: { id: "abc-123", kind: "class", name: "IxClient" },
-    resolutionMode: "exact",
     path: "src/client/api.ts",
     systemPath: [
       { name: "CLI", kind: "system" },
@@ -41,7 +40,6 @@ function makeClassOutput() {
 function makeFileOutput() {
   return {
     resolvedTarget: { id: "file-abc", kind: "file", name: "Node.scala" },
-    resolutionMode: "exact",
     path: "memory-layer/src/main/scala/ix/memory/model/Node.scala",
     systemPath: [
       { name: "API", kind: "system" },
@@ -65,7 +63,6 @@ function makeFileOutput() {
 function makeRegionOutput() {
   return {
     resolvedTarget: { id: "reg-1", kind: "subsystem", name: "Cli / Client" },
-    resolutionMode: "exact",
     path: null,
     systemPath: [
       { name: "CLI", kind: "system" },
@@ -88,7 +85,6 @@ function makeRegionOutput() {
 function makeFunctionInFileOutput() {
   return {
     resolvedTarget: { id: "fn-1", kind: "function", name: "pickBest" },
-    resolutionMode: "exact",
     path: "src/cli/resolve.ts",
     systemPath: [
       { name: "CLI", kind: "system" },
@@ -115,7 +111,6 @@ function makeFunctionInFileOutput() {
 function makeMethodInClassOutput() {
   return {
     resolvedTarget: { id: "m-1", kind: "method", name: "resolve" },
-    resolutionMode: "exact",
     path: "memory-layer/src/main/scala/ix/memory/conflict/ConflictService.scala",
     systemPath: [
       { name: "API", kind: "system" },
