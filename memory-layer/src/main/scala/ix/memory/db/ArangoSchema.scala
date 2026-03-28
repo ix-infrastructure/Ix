@@ -15,6 +15,7 @@ object ArangoSchema {
     ensureCollection(db, "patches")
     ensureCollection(db, "revisions")
     ensureCollection(db, "idempotency_keys")
+    ensureCollection(db, "savings")
 
     // Edge collection
     ensureCollection(db, "edges", edge = true)
