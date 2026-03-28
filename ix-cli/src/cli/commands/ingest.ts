@@ -537,6 +537,7 @@ export async function ingestFiles(
     type ParsedFile = { filePath: string; parsed: any; hash: string; previousHash: string | undefined };
     let resolveEdgesFn: Function | null = null;
     let buildPatchFn: Function | null = null;
+    let globalIndex: any = undefined;
 
     const PARSE_STREAM_CHUNK     = 1000;             // streaming batch size for large repos
     const SMALL_REPO_THRESHOLD   = 5_000;            // parse-all-first below this; streaming above
@@ -676,7 +677,7 @@ export async function ingestFiles(
         setCurrentWork(`resolve+commit batch ending ${nodePath.basename(batch[batch.length - 1].filePath)}`);
 
         const resolveStart = performance.now();
-        const resolvedEdges = resolveEdgesFn!(batch.map(f => f.parsed), resolveStats);
+        const resolvedEdges = resolveEdgesFn!(batch.map(f => f.parsed), resolveStats, globalIndex);
         resolveEdgesMs = Math.round(performance.now() - resolveStart);
         const batchEdgesByFile = new Map<string, any[]>();
         for (const edge of resolvedEdges) {
@@ -743,7 +744,7 @@ export async function ingestFiles(
       try {
         setCurrentWork(`resolve ${allParsed.length} files`);
         const resolveStart = performance.now();
-        const resolvedEdges = resolveEdgesFn!(allParsed.map(f => f.parsed), resolveStats);
+        const resolvedEdges = resolveEdgesFn!(allParsed.map(f => f.parsed), resolveStats, globalIndex);
         resolveEdgesMs = Math.round(performance.now() - resolveStart);
         const edgesByFile = new Map<string, any[]>();
         for (const edge of resolvedEdges) {
@@ -836,8 +837,17 @@ export async function ingestFiles(
         progressTotal   = parseable.length;
         progressCurrent = 0;
 
-        // Pipeline overlap: parse next chunk while committing current chunk
-        let pendingFlush: Promise<void> = Promise.resolve();
+        // Build global resolution index from all repo file paths (not just changed files)
+        // so cross-batch imports resolve correctly even in streaming per-chunk mode.
+        {
+          const sources = new Map<string, string>();
+          for (const fp of filePaths) {
+            if (nodePath.extname(fp) !== '.go') continue;
+            try { sources.set(fp, fs.readFileSync(fp, 'utf-8')); } catch { /* skip unreadable */ }
+          }
+          globalIndex = (ingestion.buildGlobalResolutionIndex as Function)(filePaths, sources);
+        }
+
         for (let i = 0; i < parseable.length; i += PARSE_STREAM_CHUNK) {
           const chunk = parseable.slice(i, i + PARSE_STREAM_CHUNK);
           const parseResults = await Promise.all(
@@ -852,10 +862,8 @@ export async function ingestFiles(
             entitiesParsed += parsed.entities.length;
             batch.push({ filePath: chunk[j].filePath, parsed, hash: chunk[j].hash, previousHash: chunk[j].previousHash });
           }
-          await pendingFlush;
-          pendingFlush = flushBatch(batch);
+          await flushBatch(batch);
         }
-        await pendingFlush;
       }
     } else {
       // Path B: no baseline (first ingest) or --force → load modules, then stream parse + commit.
@@ -865,6 +873,17 @@ export async function ingestFiles(
       resolveEdgesFn = ingestion.resolveEdges as Function;
       buildPatchFn = patchBuilder.buildPatchWithResolution as Function;
 
+      // Build global resolution index from all repo file paths before the parse loop
+      // so cross-batch imports resolve correctly even in streaming per-chunk mode.
+      {
+        const sources = new Map<string, string>();
+        for (const fp of filePaths) {
+          if (nodePath.extname(fp) !== '.go') continue;
+          try { sources.set(fp, fs.readFileSync(fp, 'utf-8')); } catch { /* skip unreadable */ }
+        }
+        globalIndex = ingestion.buildGlobalResolutionIndex(filePaths, sources);
+      }
+
       progressPhase   = 'Parsing';
       progressTotal   = filePaths.length;
       progressCurrent = 0;
@@ -873,7 +892,6 @@ export async function ingestFiles(
       // Each file is dispatched to the parse pool immediately after it is read so workers
       // start processing as soon as the first file in the chunk is ready rather than
       // waiting for all reads in the chunk to complete.
-      let pendingFlush: Promise<void> = Promise.resolve();
       for (let i = 0; i < filePaths.length; i += PARSE_STREAM_CHUNK) {
         const chunk = filePaths.slice(i, i + PARSE_STREAM_CHUNK);
         type FileData = { filePath: string; source: string; hash: string; previousHash: string | undefined } | null;
@@ -917,10 +935,8 @@ export async function ingestFiles(
           entitiesParsed += parsed.entities.length;
           batch.push({ filePath: f.filePath, parsed, hash: f.hash, previousHash: f.previousHash });
         }
-        await pendingFlush;
-        pendingFlush = flushBatch(batch);
+        await flushBatch(batch);
       }
-      await pendingFlush;
     }
 
     const parsed = performance.now();

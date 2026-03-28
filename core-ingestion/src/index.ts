@@ -251,6 +251,10 @@ function normalizeCapturedImport(rawValue: string, language: SupportedLanguages)
     return unwrapped.replace(/^\.\/+/, '');
   }
 
+  if (language === SupportedLanguages.Go) {
+    return unwrapped.replace(/^\.+/, '');
+  }
+
   const rawMod = unwrapped.split('/').filter((s: string) => s !== '*').pop() ?? unwrapped;
   return rawMod.replace(/^\.+/, '');
 }
@@ -712,10 +716,12 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         const typeName = refType.node.text;
         if (!typeName || TYPE_BUILTINS.has(typeName) || typeName.length <= 1) continue;
 
-        // Use the enclosing class as the src so the edge reads "ClassX REFERENCES TypeY".
-        // Fall back to the file name when no enclosing class is found (top-level usage).
+        // Prefer the enclosing function/method so parameter and return-type references
+        // point back to the actual caller. Fall back to class, then file.
         const refLine = refType.node.startPosition.row + 1;
-        const src = findEnclosing(classRanges, refLine, typeName) ?? fileName;
+        const src = findEnclosingFunction(entities, refLine)
+          ?? findEnclosing(classRanges, refLine, typeName)
+          ?? fileName;
 
         if (!seenRefs.has(src)) seenRefs.set(src, new Set());
         const seen = seenRefs.get(src)!;
@@ -808,6 +814,156 @@ function bestQKey(
   return qks.length === 1 ? qks[0] : null;
 }
 
+// ---------------------------------------------------------------------------
+// Global resolution index — pre-scan for cross-batch edge resolution
+// ---------------------------------------------------------------------------
+
+export interface GlobalResolutionIndex {
+  fileHasSymbol:    Map<string, Set<string>>;
+  fileQKeys:        Map<string, Map<string, string[]>>;
+  symbolToFiles:    Map<string, string[]>;
+  stemToFiles:      Map<string, string[]>;
+  dirToIndexFiles:  Map<string, string[]>;
+  packageToFiles:   Map<string, string[]>;
+  goPkgDirToFiles:  Map<string, string[]>;
+  goPkgPathToFiles: Map<string, string[]>;
+}
+
+/**
+ * Build a GlobalResolutionIndex from a list of file paths (and optional source
+ * texts for entity extraction). Covers the entire repository so that each
+ * streaming batch can resolve edges pointing to files outside the batch.
+ */
+export function buildGlobalResolutionIndex(
+  filePaths: string[],
+  sources?: Map<string, string>,
+): GlobalResolutionIndex {
+  const stemToFiles = new Map<string, string[]>();
+  const dirToIndexFiles = new Map<string, string[]>();
+  const packageToFiles = new Map<string, string[]>();
+  const goPkgDirToFiles = new Map<string, string[]>();
+  const goPkgPathToFiles = new Map<string, string[]>();
+
+  for (const fp of filePaths) {
+    const ext = nodePath.extname(fp);
+    const stem = nodePath.basename(fp, ext);
+
+    // stemToFiles
+    const stemList = stemToFiles.get(stem) ?? [];
+    stemList.push(fp);
+    stemToFiles.set(stem, stemList);
+
+    // dirToIndexFiles
+    if (stem === 'index') {
+      const dirName = nodePath.basename(nodePath.dirname(fp));
+      const dirList = dirToIndexFiles.get(dirName) ?? [];
+      dirList.push(fp);
+      dirToIndexFiles.set(dirName, dirList);
+    }
+
+    // packageToFiles (Scala/Java)
+    if (ext === '.scala' || ext === '.java') {
+      const dir = nodePath.dirname(fp);
+      const parts = dir.split(/[/\\]/);
+      const maxDepth = Math.min(8, parts.length);
+      for (let i = parts.length - 1; i >= parts.length - maxDepth; i--) {
+        const pkg = parts.slice(i).join('.');
+        const list = packageToFiles.get(pkg) ?? [];
+        list.push(fp);
+        packageToFiles.set(pkg, list);
+      }
+    }
+
+    // goPkgDirToFiles / goPkgPathToFiles (Go)
+    if (ext === '.go') {
+      const dirName = nodePath.basename(nodePath.dirname(fp));
+      const goDirList = goPkgDirToFiles.get(dirName) ?? [];
+      goDirList.push(fp);
+      goPkgDirToFiles.set(dirName, goDirList);
+
+      const parts = nodePath.dirname(fp).replace(/\\/g, '/').split('/').filter(Boolean);
+      const maxDepth = Math.min(8, parts.length);
+      for (let i = parts.length - 1; i >= parts.length - maxDepth; i--) {
+        const pkgPath = parts.slice(i).join('/');
+        const pkgList = goPkgPathToFiles.get(pkgPath) ?? [];
+        pkgList.push(fp);
+        goPkgPathToFiles.set(pkgPath, pkgList);
+      }
+    }
+  }
+
+  // Entity maps (built from sources if provided, via fast regex scan)
+  const fileQKeys = new Map<string, Map<string, string[]>>();
+  const fileHasSymbol = new Map<string, Set<string>>();
+  const symbolToFiles = new Map<string, string[]>();
+
+  if (sources) {
+    const pkgRe = /^package\s+(\w+)/m;
+    const typeRe = /^type\s+([A-Z]\w*)\s+/gm;
+    const funcRe = /^func\s+([A-Z]\w*)\s*[(\[]/gm;
+    const methodRe = /^func\s+\([^)]+\)\s+([A-Z]\w*)\s*[(\[]/gm;
+
+    for (const [fp, src] of sources) {
+      if (nodePath.extname(fp) !== '.go') continue;
+
+      const qkMap = new Map<string, string[]>();
+
+      // Package name — critical for qualifier-assisted REFERENCES resolution
+      const pkgMatch = pkgRe.exec(src);
+      if (pkgMatch) {
+        const name = pkgMatch[1];
+        qkMap.set(name, [name]);
+      }
+
+      // Exported types (struct/interface/aliases/type defs)
+      typeRe.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = typeRe.exec(src)) !== null) {
+        const name = m[1];
+        if (!qkMap.has(name)) qkMap.set(name, [name]);
+      }
+
+      // Exported top-level functions
+      funcRe.lastIndex = 0;
+      while ((m = funcRe.exec(src)) !== null) {
+        const name = m[1];
+        if (!qkMap.has(name)) qkMap.set(name, [name]);
+      }
+
+      // Exported methods (receiver form)
+      methodRe.lastIndex = 0;
+      while ((m = methodRe.exec(src)) !== null) {
+        const name = m[1];
+        if (!qkMap.has(name)) qkMap.set(name, [name]);
+      }
+
+      if (qkMap.size > 0) {
+        fileQKeys.set(fp, qkMap);
+        fileHasSymbol.set(fp, new Set(qkMap.keys()));
+      }
+    }
+
+    for (const [fp, symbols] of fileHasSymbol) {
+      for (const sym of symbols) {
+        const list = symbolToFiles.get(sym) ?? [];
+        list.push(fp);
+        symbolToFiles.set(sym, list);
+      }
+    }
+  }
+
+  return {
+    fileHasSymbol,
+    fileQKeys,
+    symbolToFiles,
+    stemToFiles,
+    dirToIndexFiles,
+    packageToFiles,
+    goPkgDirToFiles,
+    goPkgPathToFiles,
+  };
+}
+
 /**
  * Resolves CALLS and EXTENDS relationships to their cross-file targets by
  * building a symbol table and import map over the full batch of parsed files.
@@ -834,20 +990,26 @@ function bestQKey(
  *   - Unambiguous class method: dstQualifiedKey === 'ClassName.method'
  *   - Ambiguous (two entities share the same plain name): edge not emitted
  */
-export function resolveEdges(results: FileParseResult[], stats?: {
-  importLookups: number; transitiveLookups: number; globalFallbacks: number;
-  globalCandidateTotal: number; resolvedImport: number; resolvedTransitive: number;
-  resolvedGlobal: number; resolvedQualifier: number; skippedSameFile: number; skippedAmbiguous: number;
-}): ResolvedEdge[] {
+export function resolveEdges(
+  results: FileParseResult[],
+  stats?: {
+    importLookups: number; transitiveLookups: number; globalFallbacks: number;
+    globalCandidateTotal: number; resolvedImport: number; resolvedTransitive: number;
+    resolvedGlobal: number; resolvedQualifier: number; skippedSameFile: number; skippedAmbiguous: number;
+  },
+  globalIndex?: GlobalResolutionIndex,
+): ResolvedEdge[] {
   // Provide a default no-op stats bag when caller passes none (backward compat).
   if (!stats) stats = {
     importLookups: 0, transitiveLookups: 0, globalFallbacks: 0,
     globalCandidateTotal: 0, resolvedImport: 0, resolvedTransitive: 0,
     resolvedGlobal: 0, resolvedQualifier: 0, skippedSameFile: 0, skippedAmbiguous: 0,
   };
-  // fileQKeys: filePath → (plainName → qualifiedKeys[])
+  // fileQKeys: seed from global index (cross-batch files), then batch entries override.
   // Mirrors the entityQKey computation in buildPatch so nodeIds match exactly.
-  const fileQKeys = new Map<string, Map<string, string[]>>();
+  const fileQKeys = globalIndex
+    ? new Map<string, Map<string, string[]>>(globalIndex.fileQKeys)
+    : new Map<string, Map<string, string[]>>();
   for (const r of results) {
     const qkMap = new Map<string, string[]>();
     for (const e of r.entities) {
@@ -857,10 +1019,10 @@ export function resolveEdges(results: FileParseResult[], stats?: {
       list.push(qk);
       qkMap.set(e.name, list);
     }
-    fileQKeys.set(r.filePath, qkMap);
+    fileQKeys.set(r.filePath, qkMap);  // overrides global entry if present
   }
 
-  // fileHasSymbol: filePath → Set<plainName>  (fast membership check)
+  // fileHasSymbol: rebuilt from merged fileQKeys so per-batch overrides take effect.
   const fileHasSymbol = new Map<string, Set<string>>();
   for (const [fp, qkMap] of fileQKeys) {
     fileHasSymbol.set(fp, new Set(qkMap.keys()));
@@ -869,7 +1031,8 @@ export function resolveEdges(results: FileParseResult[], stats?: {
   // resultsByPath: O(1) lookup replacing results.find() in transitive import loop
   const resultsByPath = new Map<string, FileParseResult>(results.map(r => [r.filePath, r]));
 
-  // symbolToFiles: plainName → filePath[]  — replaces O(F) full-scan in tier-3 and qualifier fallback
+  // symbolToFiles: rebuilt from merged fileHasSymbol (not seeded directly — per-batch
+  // overrides can change which files define a symbol).
   const symbolToFiles = new Map<string, string[]>();
   for (const [fp, symbols] of fileHasSymbol) {
     for (const sym of symbols) {
@@ -885,60 +1048,71 @@ export function resolveEdges(results: FileParseResult[], stats?: {
     fileLanguage.set(r.filePath, r.language);
   }
 
-  // stemToFiles: basename-without-extension → filePath[]
-  // Matches the last path segment of an import to files in the batch.
-  const stemToFiles = new Map<string, string[]>();
+  // stemToFiles: seed from global index, then add batch entries.
+  const stemToFiles = globalIndex
+    ? new Map<string, string[]>(globalIndex.stemToFiles)
+    : new Map<string, string[]>();
   for (const r of results) {
     const stem = nodePath.basename(r.filePath, nodePath.extname(r.filePath));
     const list = stemToFiles.get(stem) ?? [];
-    list.push(r.filePath);
+    if (!list.includes(r.filePath)) list.push(r.filePath);
     stemToFiles.set(stem, list);
   }
 
-  // dirToIndexFiles: directory basename → filePath[] for 'index.*' files
-  // Handles directory imports: './services' → 'services/index.ts'
-  const dirToIndexFiles = new Map<string, string[]>();
+  // dirToIndexFiles: seed from global index, then add batch entries.
+  const dirToIndexFiles = globalIndex
+    ? new Map<string, string[]>(globalIndex.dirToIndexFiles)
+    : new Map<string, string[]>();
   for (const r of results) {
     const stem = nodePath.basename(r.filePath, nodePath.extname(r.filePath));
     if (stem === 'index') {
       const dirName = nodePath.basename(nodePath.dirname(r.filePath));
       const list = dirToIndexFiles.get(dirName) ?? [];
-      list.push(r.filePath);
+      if (!list.includes(r.filePath)) list.push(r.filePath);
       dirToIndexFiles.set(dirName, list);
     }
   }
 
-  // packageToFiles: dotted package path → filePath[] (Scala/Java wildcard imports)
+  // packageToFiles: seed from global index, then add batch entries.
   // e.g. "ix.memory.model" → all .scala files under .../ix/memory/model/
-  // Builds all suffix keys so that both "model" and "ix.memory.model" resolve.
-  const packageToFiles = new Map<string, string[]>();
+  const packageToFiles = globalIndex
+    ? new Map<string, string[]>(globalIndex.packageToFiles)
+    : new Map<string, string[]>();
   for (const r of results) {
     const ext = nodePath.extname(r.filePath);
     if (ext !== '.scala' && ext !== '.java') continue;
     const dir = nodePath.dirname(r.filePath);
     const parts = dir.split(/[/\\]/);
-    // Cap at 8 segments to avoid noise from very shallow path components like "src", "main".
     const maxDepth = Math.min(8, parts.length);
     for (let i = parts.length - 1; i >= parts.length - maxDepth; i--) {
       const pkg = parts.slice(i).join('.');
       const list = packageToFiles.get(pkg) ?? [];
-      list.push(r.filePath);
+      if (!list.includes(r.filePath)) list.push(r.filePath);
       packageToFiles.set(pkg, list);
     }
   }
 
-  // goPkgDirToFiles: Go package directory name → filePath[]
-  // In Go, the last segment of an import path IS the package directory name.
-  // e.g. import "go.etcd.io/etcd/server/etcdserver" is stripped to modName "etcdserver"
-  // by the import processor; this index maps that name to all .go files in
-  // any directory named "etcdserver" within the ingested batch.
-  const goPkgDirToFiles = new Map<string, string[]>();
+  // goPkgDirToFiles / goPkgPathToFiles: seed from global index, then add batch entries.
+  const goPkgDirToFiles = globalIndex
+    ? new Map<string, string[]>(globalIndex.goPkgDirToFiles)
+    : new Map<string, string[]>();
+  const goPkgPathToFiles = globalIndex
+    ? new Map<string, string[]>(globalIndex.goPkgPathToFiles)
+    : new Map<string, string[]>();
   for (const r of results) {
     if (nodePath.extname(r.filePath) !== '.go') continue;
     const dirName = nodePath.basename(nodePath.dirname(r.filePath));
     const list = goPkgDirToFiles.get(dirName) ?? [];
-    list.push(r.filePath);
+    if (!list.includes(r.filePath)) list.push(r.filePath);
     goPkgDirToFiles.set(dirName, list);
+    const parts = nodePath.dirname(r.filePath).replace(/\\/g, '/').split('/').filter(Boolean);
+    const maxDepth = Math.min(8, parts.length);
+    for (let i = parts.length - 1; i >= parts.length - maxDepth; i--) {
+      const pkgPath = parts.slice(i).join('/');
+      const pkgList = goPkgPathToFiles.get(pkgPath) ?? [];
+      if (!pkgList.includes(r.filePath)) pkgList.push(r.filePath);
+      goPkgPathToFiles.set(pkgPath, pkgList);
+    }
   }
 
   // ── Helpers ────────────────────────────────────────────────────────
@@ -981,7 +1155,87 @@ export function resolveEdges(results: FileParseResult[], stats?: {
     for (const fp of goPkgDirToFiles.get(modName) ?? []) {
       if (fp !== excludeFp && !fps.includes(fp)) fps.push(fp);
     }
+    const slashParts = modName.replace(/\\/g, '/').split('/').filter(Boolean);
+    const maxSlashDepth = Math.min(8, slashParts.length);
+    for (let i = 0; i < maxSlashDepth; i++) {
+      const suffix = slashParts.slice(slashParts.length - 1 - i).join('/');
+      for (const fp of goPkgPathToFiles.get(suffix) ?? []) {
+        if (fp !== excludeFp && !fps.includes(fp)) fps.push(fp);
+      }
+    }
     return fps;
+  }
+
+  function goImportSuffixes(modName: string): string[] {
+    const parts = modName.replace(/\\/g, '/').split('/').filter(Boolean);
+    const suffixes: string[] = [];
+    const maxDepth = Math.min(8, parts.length);
+    for (let i = 0; i < maxDepth; i++) {
+      suffixes.push(parts.slice(parts.length - 1 - i).join('/'));
+    }
+    return suffixes;
+  }
+
+  function pickGoPackageAnchor(files: string[]): string | null {
+    if (files.length === 0) return null;
+    const nonTestFiles = files.filter(fp => !fp.endsWith('_test.go'));
+    const pool = nonTestFiles.length > 0 ? nonTestFiles : files;
+    const dirName = nodePath.basename(nodePath.dirname(pool[0])).toLowerCase();
+
+    const exactStemMatch = pool.filter(fp => candidateStem(fp) === dirName);
+    if (exactStemMatch.length === 1) return exactStemMatch[0];
+
+    const ranked = [...pool].sort((a, b) => {
+      const aResult = resultsByPath.get(a);
+      const bResult = resultsByPath.get(b);
+      const aImports = aResult?.relationships.filter(rel => rel.predicate === 'IMPORTS').length ?? 0;
+      const bImports = bResult?.relationships.filter(rel => rel.predicate === 'IMPORTS').length ?? 0;
+      if (aImports !== bImports) return bImports - aImports;
+
+      const aEntities = aResult?.entities.length ?? 0;
+      const bEntities = bResult?.entities.length ?? 0;
+      if (aEntities !== bEntities) return bEntities - aEntities;
+
+      return a.localeCompare(b);
+    });
+    return ranked[0] ?? null;
+  }
+
+  function resolveImportTargets(srcFilePath: string, srcLanguage: SupportedLanguages, modName: string): string[] {
+    const importMatches = modNameToFiles(modName, srcFilePath);
+    if (srcLanguage !== SupportedLanguages.Go || importMatches.length <= 1) return importMatches;
+
+    const suffixes = goImportSuffixes(modName);
+    const scored = importMatches.map(fp => {
+      const dirPath = nodePath.dirname(fp).replace(/\\/g, '/');
+      let bestSuffixLen = -1;
+      for (const suffix of suffixes) {
+        if (dirPath === suffix || dirPath.endsWith(`/${suffix}`)) {
+          if (suffix.length > bestSuffixLen) bestSuffixLen = suffix.length;
+        }
+      }
+      return { fp, bestSuffixLen };
+    });
+
+    const bestSuffixLen = Math.max(...scored.map(item => item.bestSuffixLen));
+    const narrowed = bestSuffixLen >= 0
+      ? scored.filter(item => item.bestSuffixLen === bestSuffixLen).map(item => item.fp)
+      : importMatches;
+
+    const dirGroups = new Map<string, string[]>();
+    for (const fp of narrowed) {
+      const key = nodePath.dirname(fp).replace(/\\/g, '/');
+      const list = dirGroups.get(key) ?? [];
+      list.push(fp);
+      dirGroups.set(key, list);
+    }
+
+    if (dirGroups.size === 1) {
+      const anchor = pickGoPackageAnchor([...dirGroups.values()][0]);
+      return anchor ? [anchor] : [];
+    }
+
+    return narrowed;
   }
 
   function tokenizeSymbolParts(value: string): string[] {
@@ -1121,7 +1375,7 @@ export function resolveEdges(results: FileParseResult[], stats?: {
     const importedFilePaths = new Set<string>();
     for (const rel of result.relationships) {
       if (rel.predicate !== 'IMPORTS') continue;
-      for (const fp of modNameToFiles(rel.dstName, srcFilePath)) {
+      for (const fp of resolveImportTargets(srcFilePath, srcLanguage, rel.dstName)) {
         importedFilePaths.add(fp);
       }
     }
@@ -1134,7 +1388,7 @@ export function resolveEdges(results: FileParseResult[], stats?: {
       if (!fpResult) continue;
       for (const rel of fpResult.relationships) {
         if (rel.predicate !== 'IMPORTS') continue;
-        for (const transitiveFp of modNameToFiles(rel.dstName, srcFilePath)) {
+        for (const transitiveFp of resolveImportTargets(fp, fpResult.language, rel.dstName)) {
           if (!importedFilePaths.has(transitiveFp)) transitiveFilePaths.add(transitiveFp);
         }
       }
@@ -1171,7 +1425,7 @@ export function resolveEdges(results: FileParseResult[], stats?: {
           }
         }
 
-        const importMatches = modNameToFiles(rel.dstName, srcFilePath);
+        const importMatches = resolveImportTargets(srcFilePath, result.language, rel.dstName);
         if (importMatches.length === 1) {
           const fp = importMatches[0];
           resolved.push({
