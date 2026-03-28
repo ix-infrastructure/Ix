@@ -1,6 +1,7 @@
 package ix.memory.context
 
 import cats.effect.IO
+import cats.syntax.parallel._
 
 import ix.memory.db.GraphQueryApi
 import ix.memory.model._
@@ -50,11 +51,14 @@ class ContextService(
       allNodeIds = (seeds.map(_.id) ++ expanded.nodes.map(_.id)).distinct
       claims <- claimCollector.collect(allNodeIds)
 
-      // 4.5. Detect stale sources
-      stalenessMap <- StalenessDetector.detect(claims)
+      // 4.5. Detect stale sources + count corroboration in parallel
+      stalenessAndCorroboration <- (
+        StalenessDetector.detect(claims),
+        IO.blocking(CorroborationCounter.count(claims))
+      ).parTupled
+      (stalenessMap, corroborationMap) = stalenessAndCorroboration
 
       // 5. Score each claim for confidence
-      corroborationMap = CorroborationCounter.count(claims)
       scored = claims.map { c =>
         confidenceScorer.score(c, ScoringContext(
           latestRev          = rev,

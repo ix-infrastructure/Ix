@@ -4,6 +4,7 @@ import java.time.Instant
 import java.util.UUID
 
 import cats.effect.IO
+import cats.syntax.parallel._
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.circe.Json
 import io.circe.syntax._
@@ -774,9 +775,12 @@ class MapService(
       )
       decoded = rows.flatMap(decodePersistedRegion(_, inputRev)).toVector
       regions  = rehydrateRelationships(decoded)
-      fileCount <- if (regions.isEmpty) IO.pure(0) else fullBuilder.liveFileCount()
-      rawGraphOpt <- if (regions.isEmpty) IO.pure(None)
-                     else fullBuilder.discoverFiles().flatMap(fullBuilder.buildGraph).map(Some(_))
+      fcAndGraph <- if (regions.isEmpty) IO.pure((0, None))
+                    else (
+                      fullBuilder.liveFileCount(),
+                      fullBuilder.discoverFiles().flatMap(fullBuilder.buildGraph).map(Some(_))
+                    ).parTupled
+      (fileCount, rawGraphOpt) = fcAndGraph
       edges = rawGraphOpt.map(g => computeArchitectureEdges(regions, g)).getOrElse(Vector.empty)
     } yield {
       if (regions.isEmpty) None

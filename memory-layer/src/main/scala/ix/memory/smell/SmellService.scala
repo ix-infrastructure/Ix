@@ -58,10 +58,7 @@ class SmellService(client: ArangoClient, writeApi: GraphWriteApi) {
 
   def run(config: SmellConfig = SmellConfig()): IO[SmellReport] =
     for {
-      orphans    <- detectOrphans(config)
-      godMods    <- detectGodModules(config)
-      weakComps  <- detectWeakComponents(config)
-      candidates  = orphans ++ godMods ++ weakComps
+      candidates <- detectAll(config)
       rev        <- commitSmells(candidates)
     } yield SmellReport(candidates, rev, Instant.now().toString)
 
@@ -82,132 +79,148 @@ class SmellService(client: ArangoClient, writeApi: GraphWriteApi) {
       Map.empty
     ).map(_.toVector)
 
-  // ── Detectors ────────────────────────────────────────────────────────────
+  // ── Unified detector — single edge scan ──────────────────────────────────
 
-  private def detectOrphans(cfg: SmellConfig): IO[Vector[SmellCandidate]] =
+  private def detectAll(cfg: SmellConfig): IO[Vector[SmellCandidate]] =
     client.query(
-      """FOR f IN nodes
+      // One pass over edges: aggregate counts by (id, predicate, direction)
+      // and collect unique neighbors for weak-component detection.
+      // Single-pass: one scan for counts (all predicates as src),
+      // one scan for dst counts + neighbor collection (IMPORTS/CALLS only).
+      """LET src_agg = (
+        |  FOR e IN edges
+        |    FILTER e.predicate IN ["IMPORTS","CALLS","CONTAINS","CONTAINS_CHUNK"]
+        |      AND e.deleted_rev == null
+        |    COLLECT id = e.src, pred = e.predicate WITH COUNT INTO cnt
+        |    RETURN { id, pred, cnt }
+        |)
+        |LET dst_agg = (
+        |  FOR e IN edges
+        |    FILTER e.predicate IN ["IMPORTS","CALLS"]
+        |      AND e.deleted_rev == null
+        |    COLLECT id = e.dst, pred = e.predicate WITH COUNT INTO cnt
+        |    RETURN { id, pred, cnt }
+        |)
+        |LET src_nbrs = (
+        |  FOR e IN edges
+        |    FILTER e.predicate IN ["IMPORTS","CALLS"] AND e.deleted_rev == null
+        |    COLLECT id = e.src INTO dsts = e.dst
+        |    RETURN { id, nbrs: dsts }
+        |)
+        |LET dst_nbrs = (
+        |  FOR e IN edges
+        |    FILTER e.predicate IN ["IMPORTS","CALLS"] AND e.deleted_rev == null
+        |    COLLECT id = e.dst INTO srcs = e.src
+        |    RETURN { id, nbrs: srcs }
+        |)
+        |LET sm = MERGE(FOR r IN src_agg RETURN { [CONCAT(r.id,":",r.pred)]: r.cnt })
+        |LET dm = MERGE(FOR r IN dst_agg RETURN { [CONCAT(r.id,":",r.pred)]: r.cnt })
+        |LET snm = MERGE(FOR r IN src_nbrs RETURN { [r.id]: r.nbrs })
+        |LET dnm = MERGE(FOR r IN dst_nbrs RETURN { [r.id]: r.nbrs })
+        |FOR f IN nodes
         |  FILTER f.kind == "file" AND f.deleted_rev == null
-        |  LET imports_out = LENGTH(
-        |    FOR e IN edges FILTER e.src == f.logical_id AND e.predicate == "IMPORTS" AND e.deleted_rev == null RETURN 1)
-        |  LET imports_in = LENGTH(
-        |    FOR e IN edges FILTER e.dst == f.logical_id AND e.predicate == "IMPORTS" AND e.deleted_rev == null RETURN 1)
-        |  LET calls_out = LENGTH(
-        |    FOR e IN edges FILTER e.src == f.logical_id AND e.predicate == "CALLS" AND e.deleted_rev == null RETURN 1)
-        |  LET calls_in = LENGTH(
-        |    FOR e IN edges FILTER e.dst == f.logical_id AND e.predicate == "CALLS" AND e.deleted_rev == null RETURN 1)
+        |  LET imports_out = TO_NUMBER(sm[CONCAT(f.logical_id,":IMPORTS")])
+        |  LET imports_in  = TO_NUMBER(dm[CONCAT(f.logical_id,":IMPORTS")])
+        |  LET calls_out   = TO_NUMBER(sm[CONCAT(f.logical_id,":CALLS")])
+        |  LET calls_in    = TO_NUMBER(dm[CONCAT(f.logical_id,":CALLS")])
         |  LET connectivity = imports_out + imports_in + calls_out + calls_in
-        |  FILTER connectivity <= @threshold
+        |  LET chunks  = TO_NUMBER(sm[CONCAT(f.logical_id,":CONTAINS_CHUNK")])
+        |  LET symbols = TO_NUMBER(sm[CONCAT(f.logical_id,":CONTAINS")])
+        |  LET fan_in  = imports_in
+        |  LET fan_out = imports_out
+        |  LET all_nbrs = UNIQUE(APPEND(
+        |    TO_ARRAY(snm[f.logical_id]),
+        |    TO_ARRAY(dnm[f.logical_id])
+        |  ))
+        |  LET neighbor_count = LENGTH(all_nbrs)
+        |  LET is_orphan = connectivity <= @orphanThreshold
+        |  LET is_god    = chunks >= @chunkThreshold
+        |                  OR fan_in >= @fanThreshold
+        |                  OR fan_out >= @fanThreshold
+        |  LET is_weak   = neighbor_count > 0 AND neighbor_count <= @maxNeighbors
+        |  FILTER is_orphan OR is_god OR is_weak
         |  RETURN {
         |    logical_id: f.logical_id, name: f.name,
-        |    imports_out, imports_in, calls_out, calls_in, connectivity
+        |    imports_out, imports_in, calls_out, calls_in, connectivity,
+        |    chunks, symbols, fan_in, fan_out,
+        |    neighbor_count,
+        |    is_orphan, is_god, is_weak
         |  }""".stripMargin,
-      Map("threshold" -> Int.box(cfg.orphanMaxConnections).asInstanceOf[AnyRef])
-    ).map(_.flatMap { json =>
-      for {
-        id           <- json.hcursor.get[String]("logical_id").toOption
-        name         <- json.hcursor.get[String]("name").toOption
-        connectivity <- json.hcursor.get[Int]("connectivity").toOption
-        importsOut   <- json.hcursor.get[Int]("imports_out").toOption
-        importsIn    <- json.hcursor.get[Int]("imports_in").toOption
-        callsOut     <- json.hcursor.get[Int]("calls_out").toOption
-        callsIn      <- json.hcursor.get[Int]("calls_in").toOption
-      } yield SmellCandidate(
-        fileId     = id,
-        fileName   = name,
-        smellKind  = SmellKind.OrphanFile,
-        confidence = if (connectivity == 0) 0.85 else 0.6,
-        signals    = Map(
-          "connectivity" -> connectivity.asJson,
-          "imports_out"  -> importsOut.asJson,
-          "imports_in"   -> importsIn.asJson,
-          "calls_out"    -> callsOut.asJson,
-          "calls_in"     -> callsIn.asJson
-        )
-      )
-    }.toVector)
-
-  private def detectGodModules(cfg: SmellConfig): IO[Vector[SmellCandidate]] =
-    client.query(
-      """FOR f IN nodes
-        |  FILTER f.kind == "file" AND f.deleted_rev == null
-        |  LET chunks = LENGTH(
-        |    FOR e IN edges FILTER e.src == f.logical_id AND e.predicate == "CONTAINS_CHUNK" AND e.deleted_rev == null RETURN 1)
-        |  LET symbols = LENGTH(
-        |    FOR e IN edges FILTER e.src == f.logical_id AND e.predicate == "CONTAINS" AND e.deleted_rev == null RETURN 1)
-        |  LET fan_in = LENGTH(
-        |    FOR e IN edges FILTER e.dst == f.logical_id AND e.predicate == "IMPORTS" AND e.deleted_rev == null RETURN 1)
-        |  LET fan_out = LENGTH(
-        |    FOR e IN edges FILTER e.src == f.logical_id AND e.predicate == "IMPORTS" AND e.deleted_rev == null RETURN 1)
-        |  FILTER chunks >= @chunkThreshold OR fan_in >= @fanThreshold OR fan_out >= @fanThreshold
-        |  RETURN { logical_id: f.logical_id, name: f.name, chunks, symbols, fan_in, fan_out }""".stripMargin,
       Map(
-        "chunkThreshold" -> Int.box(cfg.godModuleChunkThreshold).asInstanceOf[AnyRef],
-        "fanThreshold"   -> Int.box(cfg.godModuleFanThreshold).asInstanceOf[AnyRef]
+        "orphanThreshold" -> Int.box(cfg.orphanMaxConnections).asInstanceOf[AnyRef],
+        "chunkThreshold"  -> Int.box(cfg.godModuleChunkThreshold).asInstanceOf[AnyRef],
+        "fanThreshold"    -> Int.box(cfg.godModuleFanThreshold).asInstanceOf[AnyRef],
+        "maxNeighbors"    -> Int.box(cfg.weakComponentMaxNeighbors).asInstanceOf[AnyRef]
       )
     ).map(_.flatMap { json =>
+      val c = json.hcursor
       for {
-        id      <- json.hcursor.get[String]("logical_id").toOption
-        name    <- json.hcursor.get[String]("name").toOption
-        chunks  <- json.hcursor.get[Int]("chunks").toOption
-        symbols <- json.hcursor.get[Int]("symbols").toOption
-        fanIn   <- json.hcursor.get[Int]("fan_in").toOption
-        fanOut  <- json.hcursor.get[Int]("fan_out").toOption
+        id             <- c.get[String]("logical_id").toOption
+        name           <- c.get[String]("name").toOption
+        importsOut     <- c.get[Int]("imports_out").toOption
+        importsIn      <- c.get[Int]("imports_in").toOption
+        callsOut       <- c.get[Int]("calls_out").toOption
+        callsIn        <- c.get[Int]("calls_in").toOption
+        connectivity   <- c.get[Int]("connectivity").toOption
+        chunks         <- c.get[Int]("chunks").toOption
+        symbols        <- c.get[Int]("symbols").toOption
+        fanIn          <- c.get[Int]("fan_in").toOption
+        fanOut         <- c.get[Int]("fan_out").toOption
+        neighborCount  <- c.get[Int]("neighbor_count").toOption
+        isOrphan       <- c.get[Boolean]("is_orphan").toOption
+        isGod          <- c.get[Boolean]("is_god").toOption
+        isWeak         <- c.get[Boolean]("is_weak").toOption
       } yield {
-        val triggeredSignals = Seq(
-          Option.when(chunks  >= cfg.godModuleChunkThreshold)(s"chunks=$chunks"),
-          Option.when(fanIn   >= cfg.godModuleFanThreshold)(s"fan_in=$fanIn"),
-          Option.when(fanOut  >= cfg.godModuleFanThreshold)(s"fan_out=$fanOut")
-        ).flatten
-        SmellCandidate(
-          fileId     = id,
-          fileName   = name,
-          smellKind  = SmellKind.GodModule,
-          confidence = Math.min(0.5 + triggeredSignals.size * 0.15, 0.9),
-          signals    = Map(
-            "chunks"   -> chunks.asJson,
-            "symbols"  -> symbols.asJson,
-            "fan_in"   -> fanIn.asJson,
-            "fan_out"  -> fanOut.asJson,
-            "triggers" -> triggeredSignals.asJson
-          )
-        )
-      }
-    }.toVector)
+        val results = Vector.newBuilder[SmellCandidate]
 
-  private def detectWeakComponents(cfg: SmellConfig): IO[Vector[SmellCandidate]] =
-    client.query(
-      """FOR f IN nodes
-        |  FILTER f.kind == "file" AND f.deleted_rev == null
-        |  LET neighbor_ids = UNIQUE(APPEND(
-        |    (FOR e IN edges
-        |       FILTER e.src == f.logical_id
-        |         AND e.predicate IN ["IMPORTS","CALLS"]
-        |         AND e.deleted_rev == null
-        |       RETURN e.dst),
-        |    (FOR e IN edges
-        |       FILTER e.dst == f.logical_id
-        |         AND e.predicate IN ["IMPORTS","CALLS"]
-        |         AND e.deleted_rev == null
-        |       RETURN e.src)
-        |  ))
-        |  LET neighbor_count = LENGTH(neighbor_ids)
-        |  FILTER neighbor_count > 0 AND neighbor_count <= @maxNeighbors
-        |  RETURN { logical_id: f.logical_id, name: f.name, neighbor_count }""".stripMargin,
-      Map("maxNeighbors" -> Int.box(cfg.weakComponentMaxNeighbors).asInstanceOf[AnyRef])
-    ).map(_.flatMap { json =>
-      for {
-        id             <- json.hcursor.get[String]("logical_id").toOption
-        name           <- json.hcursor.get[String]("name").toOption
-        neighborCount  <- json.hcursor.get[Int]("neighbor_count").toOption
-      } yield SmellCandidate(
-        fileId     = id,
-        fileName   = name,
-        smellKind  = SmellKind.WeakComponent,
-        confidence = 0.55,
-        signals    = Map("neighbor_count" -> neighborCount.asJson)
-      )
-    }.toVector)
+        if (isOrphan)
+          results += SmellCandidate(
+            fileId     = id,
+            fileName   = name,
+            smellKind  = SmellKind.OrphanFile,
+            confidence = if (connectivity == 0) 0.85 else 0.6,
+            signals    = Map(
+              "connectivity" -> connectivity.asJson,
+              "imports_out"  -> importsOut.asJson,
+              "imports_in"   -> importsIn.asJson,
+              "calls_out"    -> callsOut.asJson,
+              "calls_in"     -> callsIn.asJson
+            )
+          )
+
+        if (isGod) {
+          val triggeredSignals = Seq(
+            Option.when(chunks >= cfg.godModuleChunkThreshold)(s"chunks=$chunks"),
+            Option.when(fanIn  >= cfg.godModuleFanThreshold)(s"fan_in=$fanIn"),
+            Option.when(fanOut >= cfg.godModuleFanThreshold)(s"fan_out=$fanOut")
+          ).flatten
+          results += SmellCandidate(
+            fileId     = id,
+            fileName   = name,
+            smellKind  = SmellKind.GodModule,
+            confidence = Math.min(0.5 + triggeredSignals.size * 0.15, 0.9),
+            signals    = Map(
+              "chunks"   -> chunks.asJson,
+              "symbols"  -> symbols.asJson,
+              "fan_in"   -> fanIn.asJson,
+              "fan_out"  -> fanOut.asJson,
+              "triggers" -> triggeredSignals.asJson
+            )
+          )
+        }
+
+        if (isWeak)
+          results += SmellCandidate(
+            fileId     = id,
+            fileName   = name,
+            smellKind  = SmellKind.WeakComponent,
+            confidence = 0.55,
+            signals    = Map("neighbor_count" -> neighborCount.asJson)
+          )
+
+        results.result()
+      }
+    }.flatten.toVector)
 
   // ── Claim persistence ────────────────────────────────────────────────────
 
