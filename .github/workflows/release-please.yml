@@ -113,13 +113,37 @@ jobs:
           npm run build
           npm version "${{ needs.release-please.outputs.version }}" --no-git-tag-version --allow-same-version
 
+      # ── 3b. Build System Compass (optional — needs COMPASS_TOKEN secret) ─
+      - name: Build System Compass
+        if: ${{ secrets.COMPASS_TOKEN != '' }}
+        continue-on-error: true
+        env:
+          COMPASS_TOKEN: ${{ secrets.COMPASS_TOKEN }}
+        run: |
+          git clone https://x-access-token:${COMPASS_TOKEN}@github.com/ix-infrastructure/system-compass.git
+          cd system-compass
+          npm ci --silent
+          npm run build
+
+      # ── 3c. Write version manifest ─────────────────────────────────────
+      - name: Write version manifest
+        run: |
+          COMPASS_VERSION="none"
+          if [ -f system-compass/package.json ]; then
+            COMPASS_VERSION=$(node -p "require('./system-compass/package.json').version")
+          fi
+          echo "{\"ix\":\"${{ needs.release-please.outputs.version }}\",\"compass\":\"${COMPASS_VERSION}\"}" > ix-versions.json
+
       # ── 4. Package CLI tarballs ─────────────────────────────────────────
       - name: Package CLI (linux-amd64)
         run: |
           VERSION="${{ needs.release-please.outputs.version }}"
           STAGING="ix-${VERSION}-linux-amd64"
-          mkdir -p "$STAGING/cli"
+          mkdir -p "$STAGING/cli" "$STAGING/core-ingestion" "$STAGING/compass"
           cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          cp -r core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
+          [ -d system-compass/dist ] && cp -r system-compass/dist/* "$STAGING/compass/" || true
+          cp ix-versions.json "$STAGING/"
           cat > "$STAGING/ix" <<'WRAPPER'
           #!/bin/sh
           SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -133,8 +157,11 @@ jobs:
         run: |
           VERSION="${{ needs.release-please.outputs.version }}"
           STAGING="ix-${VERSION}-darwin-amd64"
-          mkdir -p "$STAGING/cli"
+          mkdir -p "$STAGING/cli" "$STAGING/core-ingestion" "$STAGING/compass"
           cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          cp -r core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
+          [ -d system-compass/dist ] && cp -r system-compass/dist/* "$STAGING/compass/" || true
+          cp ix-versions.json "$STAGING/"
           cat > "$STAGING/ix" <<'WRAPPER'
           #!/bin/sh
           SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -148,8 +175,11 @@ jobs:
         run: |
           VERSION="${{ needs.release-please.outputs.version }}"
           STAGING="ix-${VERSION}-darwin-arm64"
-          mkdir -p "$STAGING/cli"
+          mkdir -p "$STAGING/cli" "$STAGING/core-ingestion" "$STAGING/compass"
           cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          cp -r core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
+          [ -d system-compass/dist ] && cp -r system-compass/dist/* "$STAGING/compass/" || true
+          cp ix-versions.json "$STAGING/"
           cat > "$STAGING/ix" <<'WRAPPER'
           #!/bin/sh
           SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -163,8 +193,11 @@ jobs:
         run: |
           VERSION="${{ needs.release-please.outputs.version }}"
           STAGING="ix-${VERSION}-windows-amd64"
-          mkdir -p "$STAGING/cli"
+          mkdir -p "$STAGING/cli" "$STAGING/core-ingestion" "$STAGING/compass"
           cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          cp -r core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
+          [ -d system-compass/dist ] && cp -r system-compass/dist/* "$STAGING/compass/" || true
+          cp ix-versions.json "$STAGING/"
           cat > "$STAGING/ix.cmd" <<'WRAPPER'
           @echo off
           node "%~dp0cli\dist\cli\main.js" %*
