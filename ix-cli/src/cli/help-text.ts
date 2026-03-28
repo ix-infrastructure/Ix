@@ -30,6 +30,7 @@ const OSS_HELP = [
   `  stats                 Show stats`,
   `  doctor                Diagnose issues`,
   `  docker <action>       Manage backend`,
+  `  view                  Open visualizer`,
   `  reset                 Reset map`,
   `  upgrade               Update ix`,
   ``,

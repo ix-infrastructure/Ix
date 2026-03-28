@@ -98,13 +98,22 @@ jobs:
           npm run build
           npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
 
+      # ── 3b. Build System Compass ────────────────────────────────────────
+      - name: Build System Compass
+        run: |
+          git clone https://x-access-token:${{ secrets.COMPASS_TOKEN }}@github.com/ix-infrastructure/system-compass.git
+          cd system-compass
+          npm ci --silent
+          npm run build
+
       # ── 4. Package CLI tarballs ─────────────────────────────────────────
       - name: Package CLI (linux-amd64)
         run: |
           STAGING="ix-${{ steps.version.outputs.version }}-linux-amd64"
-          mkdir -p "$STAGING/cli" "$STAGING/core-ingestion"
+          mkdir -p "$STAGING/cli" "$STAGING/core-ingestion" "$STAGING/compass"
           cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
           cp -r core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
+          cp -r system-compass/dist/* "$STAGING/compass/"
           cat > "$STAGING/ix" <<'WRAPPER'
           #!/bin/sh
           SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -117,9 +126,10 @@ jobs:
       - name: Package CLI (darwin-amd64)
         run: |
           STAGING="ix-${{ steps.version.outputs.version }}-darwin-amd64"
-          mkdir -p "$STAGING/cli" "$STAGING/core-ingestion"
+          mkdir -p "$STAGING/cli" "$STAGING/core-ingestion" "$STAGING/compass"
           cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
           cp -r core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
+          cp -r system-compass/dist/* "$STAGING/compass/"
           cat > "$STAGING/ix" <<'WRAPPER'
           #!/bin/sh
           SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -132,9 +142,10 @@ jobs:
       - name: Package CLI (darwin-arm64)
         run: |
           STAGING="ix-${{ steps.version.outputs.version }}-darwin-arm64"
-          mkdir -p "$STAGING/cli" "$STAGING/core-ingestion"
+          mkdir -p "$STAGING/cli" "$STAGING/core-ingestion" "$STAGING/compass"
           cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
           cp -r core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
+          cp -r system-compass/dist/* "$STAGING/compass/"
           cat > "$STAGING/ix" <<'WRAPPER'
           #!/bin/sh
           SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -147,9 +158,10 @@ jobs:
       - name: Package CLI (windows-amd64)
         run: |
           STAGING="ix-${{ steps.version.outputs.version }}-windows-amd64"
-          mkdir -p "$STAGING/cli" "$STAGING/core-ingestion"
+          mkdir -p "$STAGING/cli" "$STAGING/core-ingestion" "$STAGING/compass"
           cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
           cp -r core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
+          cp -r system-compass/dist/* "$STAGING/compass/"
           cat > "$STAGING/ix.cmd" <<'WRAPPER'
           @echo off
           node "%~dp0cli\dist\cli\main.js" %*

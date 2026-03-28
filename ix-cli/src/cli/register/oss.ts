@@ -32,6 +32,7 @@ import { registerTraceCommand } from "../commands/trace.js";
 import { registerSmellsCommand } from "../commands/smells.js";
 import { registerSubsystemsCommand } from "../commands/subsystems.js";
 import { registerUpgradeCommand } from "../commands/upgrade.js";
+import { registerViewCommand } from "../commands/view.js";
 
 const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "briefing", desc: "Session-resume briefing" },
@@ -92,6 +93,7 @@ export function registerOssCommands(program: Command): void {
   registerConfigCommand(program);
   registerTraceCommand(program);
   registerUpgradeCommand(program);
+  registerViewCommand(program);
 
   // Hide advanced commands from default help
   const advancedSet = new Set(ADVANCED_COMMANDS);
