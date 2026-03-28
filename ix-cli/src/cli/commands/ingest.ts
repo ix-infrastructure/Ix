@@ -202,6 +202,19 @@ function stripChunkOps(patch: GraphPatchPayload): GraphPatchPayload {
   };
 }
 
+/** Strip chunks and claims from patches — mapMode only needs nodes + edges. */
+function stripMapModeOps(patch: GraphPatchPayload): GraphPatchPayload {
+  return {
+    ...patch,
+    ops: patch.ops.filter(op => {
+      if (op.type === 'AssertClaim' || op.type === 'RetractClaim') return false;
+      if (op.type === 'UpsertNode' && op['kind'] === 'chunk') return false;
+      if (op.type === 'UpsertEdge' && (op['predicate'] === 'CONTAINS_CHUNK' || op['predicate'] === 'NEXT')) return false;
+      return true;
+    }),
+  };
+}
+
 const COMMIT_CONFLICT_RETRY_PATTERNS = [
   'write-write conflict',
   'timeout waiting to lock key',
@@ -614,9 +627,11 @@ export async function ingestFiles(
                 patchesApplied++;
               } catch (commitErr) {
                 parseErrors++;
-                const errMsg = String(commitErr);
-                const truncated = errMsg.length > 200 ? errMsg.slice(0, 200) + '…' : errMsg;
-                process.stderr.write(`\n  [commit error] ${item.patch.source?.uri}: ${truncated}\n`);
+                if (debug) {
+                  const errMsg = String(commitErr);
+                  const truncated = errMsg.length > 200 ? errMsg.slice(0, 200) + '…' : errMsg;
+                  process.stderr.write(`\n  [commit error] ${item.patch.source?.uri}: ${truncated}\n`);
+                }
               }
             }
           } finally {
@@ -676,7 +691,8 @@ export async function ingestFiles(
         for (let j = 0; j < batch.length; j++) {
           const { parsed: p, hash, previousHash } = batch[j];
           try {
-            const patch = buildPatchFn!(p, hash, batchEdgesByFile.get(p.filePath) ?? emptyEdges, previousHash);
+            let patch = buildPatchFn!(p, hash, batchEdgesByFile.get(p.filePath) ?? emptyEdges, previousHash);
+            if (mapMode) patch = stripMapModeOps(patch);
             preparedPatches.push(makePreparedPatch(patch, j + 1, p.filePath));
           } catch (err) {
             parseErrors++;
@@ -741,7 +757,8 @@ export async function ingestFiles(
         for (let j = 0; j < allParsed.length; j++) {
           const { parsed: p, hash, previousHash } = allParsed[j];
           try {
-            const patch = buildPatchFn!(p, hash, edgesByFile.get(p.filePath) ?? emptyEdges, previousHash);
+            let patch = buildPatchFn!(p, hash, edgesByFile.get(p.filePath) ?? emptyEdges, previousHash);
+            if (mapMode) patch = stripMapModeOps(patch);
             preparedPatches.push(makePreparedPatch(patch, j + 1, p.filePath));
           } catch (err) {
             parseErrors++;

@@ -23,8 +23,8 @@ class BulkWriteApi(client: ArangoClient) {
   private type BulkDoc = java.util.Map[String, AnyRef]
   private val CurrentRevisionKey = "current"
   private val SourceGraphRevisionKey = "source-graph"
-  private val DefaultChunkSize = 100
-  private val DefaultChunkPayloadBytes = 4 * 1024 * 1024
+  private val DefaultChunkSize = 500
+  private val DefaultChunkPayloadBytes = 16 * 1024 * 1024
   private val MaxNodeDocs  = 10000
   private val MaxEdgeDocs  = 20000
   private val MaxClaimDocs = 10000
