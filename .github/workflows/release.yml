@@ -102,8 +102,10 @@ jobs:
       - name: Build System Compass
         if: ${{ secrets.COMPASS_TOKEN != '' }}
         continue-on-error: true
+        env:
+          COMPASS_TOKEN: ${{ secrets.COMPASS_TOKEN }}
         run: |
-          git clone https://x-access-token:${{ secrets.COMPASS_TOKEN }}@github.com/ix-infrastructure/system-compass.git
+          git clone https://x-access-token:${COMPASS_TOKEN}@github.com/ix-infrastructure/system-compass.git
           cd system-compass
           npm ci --silent
           npm run build
