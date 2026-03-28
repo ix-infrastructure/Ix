@@ -117,8 +117,13 @@ jobs:
           fi
           git clone https://x-access-token:${COMPASS_TOKEN}@github.com/ix-infrastructure/system-compass.git
           cd system-compass
-          npm ci --silent
+          npm ci --legacy-peer-deps
           npm run build
+          # Verify the build produced output
+          if [ ! -f dist/index.html ]; then
+            echo "::error::Compass build did not produce dist/index.html"
+            exit 1
+          fi
 
       # ── 4. Package CLI tarballs ─────────────────────────────────────────
       - name: Package CLI (linux-amd64)
