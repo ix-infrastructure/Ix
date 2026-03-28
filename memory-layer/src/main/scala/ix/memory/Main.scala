@@ -10,6 +10,7 @@ import ix.memory.conflict.ConflictService
 import ix.memory.context._
 import ix.memory.db._
 import ix.memory.map.MapService
+import ix.memory.savings.{NaiveCostEstimator, SavingsAccumulator, SavingsMiddleware}
 import ix.memory.smell.SmellService
 import ix.memory.subsystem.SubsystemScoringService
 
@@ -44,9 +45,12 @@ object Main extends IOApp.Simple {
       mapService       = new MapService(client, queryApi, writeApi)
       smellService     = new SmellService(client, writeApi)
       subsystemService = new SubsystemScoringService(client, writeApi, mapService)
+      naiveCostEstimator = new NaiveCostEstimator(queryApi)
+      savingsAccumulator <- Resource.eval(SavingsAccumulator.create(client))
 
       // 4. HTTP routes
-      routes = Routes.all(contextService, queryApi, writeApi, conflictService, client, mapService, bulkWriteApi, smellService, subsystemService)
+      rawRoutes = Routes.all(contextService, queryApi, writeApi, conflictService, client, mapService, bulkWriteApi, smellService, subsystemService, savingsAccumulator)
+      routes = SavingsMiddleware(rawRoutes, savingsAccumulator, naiveCostEstimator)
 
       // 5. Server
       server <- EmberServerBuilder

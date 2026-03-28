@@ -12,6 +12,7 @@ import ix.memory.conflict.ConflictService
 import ix.memory.context.ContextService
 import ix.memory.db.{ArangoClient, BulkWriteApi, GraphQueryApi, GraphWriteApi}
 import ix.memory.map.MapService
+import ix.memory.savings.SavingsAccumulator
 import ix.memory.smell.SmellService
 import ix.memory.subsystem.SubsystemScoringService
 
@@ -26,7 +27,8 @@ object Routes {
     mapService:           MapService,
     bulkWriteApi:         BulkWriteApi,
     smellService:         SmellService,
-    subsystemService:     SubsystemScoringService
+    subsystemService:     SubsystemScoringService,
+    savingsAccumulator:   SavingsAccumulator
   ): HttpRoutes[IO] = {
 
     val health = HttpRoutes.of[IO] {
@@ -54,12 +56,13 @@ object Routes {
     val bulkPatchCommitRoutes   = new BulkPatchCommitRoutes(bulkWriteApi, queryApi).routes
     val smellRoutes             = new SmellRoutes(smellService).routes
     val subsystemRoutes         = new SubsystemRoutes(subsystemService, mapService).routes
+    val savingsRoutes           = new SavingsRoutes(savingsAccumulator).routes
 
     health <+> contextRoutes <+> entityRoutes <+>
       diffRoutes <+> conflictRoutes <+> decideRoutes <+> searchRoutes <+>
       truthRoutes <+> patchRoutes <+> decisionListRoutes <+> expandRoutes <+>
       statsRoutes <+> patchCommitRoutes <+> listRoutes <+> goalRoutes <+>
       mapRoutes <+> resetRoutes <+> sourceHashRoutes <+> bulkPatchCommitRoutes <+>
-      smellRoutes <+> subsystemRoutes
+      smellRoutes <+> subsystemRoutes <+> savingsRoutes
   }
 }
