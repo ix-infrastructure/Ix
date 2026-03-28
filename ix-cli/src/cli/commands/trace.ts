@@ -166,7 +166,27 @@ export async function findPath(
 
 // ── Text rendering ───────────────────────────────────────────────────
 
-function renderTraceTree(children: Array<{ name: string; kind?: string; children: any[]; cycle?: boolean }>, isLast: boolean[]): string[] {
+/** Return last 3 path components from a file URI, for compact display. */
+function shortPath(uri: string | undefined): string {
+  if (!uri) return "";
+  const p = uri.replace(/^file:\/\//, "").replace(/\\/g, "/");
+  const parts = p.split("/").filter(Boolean);
+  return parts.slice(-3).join("/");
+}
+
+/** Walk a tree and count how many times each node name appears. */
+function collectAllNames(children: Array<{ name: string; children: any[] }>, out: Map<string, number>): void {
+  for (const c of children) {
+    out.set(c.name, (out.get(c.name) ?? 0) + 1);
+    collectAllNames(c.children, out);
+  }
+}
+
+function renderTraceTree(
+  children: Array<{ name: string; kind?: string; path?: string; children: any[]; cycle?: boolean }>,
+  isLast: boolean[],
+  disambiguate?: Set<string>,
+): string[] {
   const lines: string[] = [];
 
   for (let i = 0; i < children.length; i++) {
@@ -182,14 +202,19 @@ function renderTraceTree(children: Array<{ name: string; kind?: string; children
     const kindStr = child.cycle
       ? chalk.dim((child.kind ?? "").padEnd(10))
       : colorizeKind(child.kind ?? "");
-    const nameStr = child.cycle
+
+    let nameStr = child.cycle
       ? chalk.dim(child.name) + chalk.yellow(" ↺")
       : child.name;
+
+    if (!child.cycle && disambiguate?.has(child.name) && child.path) {
+      nameStr += chalk.dim(` (${shortPath(child.path)})`);
+    }
 
     lines.push(`${indent}${connector}${kindStr} ${nameStr}`);
 
     if (child.children.length > 0) {
-      lines.push(...renderTraceTree(child.children, [...isLast, last]));
+      lines.push(...renderTraceTree(child.children, [...isLast, last], disambiguate));
     }
   }
 
@@ -405,10 +430,13 @@ export function registerTraceCommand(program: Command): void {
           // Upstream section (in edges — who depends on this)
           renderSection("Upstream");
           console.log(`  ${target.name}`);
+          const upNameCounts = new Map<string, number>();
+          collectAllNames(upResult.tree, upNameCounts);
+          const upDisambiguate = new Set([...upNameCounts.entries()].filter(([, n]) => n > 1).map(([k]) => k));
           if (upResult.tree.length === 0) {
             console.log(chalk.dim("  (none)"));
           } else {
-            for (const line of renderTraceTree(upResult.tree, [])) {
+            for (const line of renderTraceTree(upResult.tree, [], upDisambiguate)) {
               console.log(`  ${line}`);
             }
           }
@@ -416,10 +444,13 @@ export function registerTraceCommand(program: Command): void {
           // Downstream section (out edges — what this depends on)
           renderSection("Downstream");
           console.log(`  ${target.name}`);
+          const downNameCounts = new Map<string, number>();
+          collectAllNames(downResult.tree, downNameCounts);
+          const downDisambiguate = new Set([...downNameCounts.entries()].filter(([, n]) => n > 1).map(([k]) => k));
           if (downResult.tree.length === 0) {
             console.log(chalk.dim("  (none)"));
           } else {
-            for (const line of renderTraceTree(downResult.tree, [])) {
+            for (const line of renderTraceTree(downResult.tree, [], downDisambiguate)) {
               console.log(`  ${line}`);
             }
           }
@@ -439,13 +470,41 @@ export function registerTraceCommand(program: Command): void {
 
         // ── JSON ────────────────────────────────────────────────────
         if (opts.format === "json") {
+          // Build flat nodes + edges lists for JSON output.
+          const nodes: Array<{ id: string; name: string; kind: string; path?: string }> = [
+            { id: target.id, name: target.name, kind: target.kind, path: relativePath(target.path) },
+          ];
+          const edges: Array<{ from: string; to: string; kind: string }> = [];
+
+          function collectJson(parentId: string, children: TraceNode[]): void {
+            for (const child of children) {
+              nodes.push({ id: child.id, name: child.name, kind: child.kind, path: relativePath(child.path) });
+              // downstream = in edges (child -> parent), upstream = out edges (parent -> child)
+              edges.push({ from: doUpstream ? child.id : parentId, to: doUpstream ? parentId : child.id, kind: relKind });
+              collectJson(child.id, child.children);
+            }
+          }
+          collectJson(target.id, tree);
+
+          function toJsonTree(children: TraceNode[]): unknown[] {
+            return children.map((c) => ({
+              id: c.id,
+              name: c.name,
+              kind: c.kind,
+              path: relativePath(c.path),
+              children: toJsonTree(c.children),
+            }));
+          }
+
           const output: Record<string, unknown> = {
             mode: "directional",
             target: { name: target.name, kind: target.kind, path: relativePath(target.path) },
             direction,
             kind: relKind,
             depth: maxDepth,
-            tree: tree.map(compactTreeNode),
+            nodes,
+            edges,
+            tree: { id: target.id, name: target.name, kind: target.kind, path: relativePath(target.path), children: toJsonTree(tree) },
             summary: { nodes_visited: nodesVisited, max_depth: maxDepthReached },
           };
 
@@ -478,7 +537,10 @@ export function registerTraceCommand(program: Command): void {
 
         renderSection("Path");
         console.log(`  ${target.name}`);
-        for (const line of renderTraceTree(tree, [])) {
+        const singleNameCounts = new Map<string, number>();
+        collectAllNames(tree, singleNameCounts);
+        const singleDisambiguate = new Set([...singleNameCounts.entries()].filter(([, n]) => n > 1).map(([k]) => k));
+        for (const line of renderTraceTree(tree, [], singleDisambiguate)) {
           console.log(`  ${line}`);
         }
 
