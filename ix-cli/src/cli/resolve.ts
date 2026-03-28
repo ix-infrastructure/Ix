@@ -39,6 +39,10 @@ function looksTypeLikeSymbol(symbol: string): boolean {
   return /^[A-Z][A-Za-z0-9_]*$/.test(symbol);
 }
 
+function normalizeForPathMatch(value: string | undefined): string {
+  return (value ?? "").toLowerCase().replace(/\\/g, "/");
+}
+
 // ── Scoring ───────────────────────────────────────────────────────────────
 
 /**
@@ -58,7 +62,7 @@ export function scoreCandidate(
   const name: string = (node.name || node.attrs?.name || "").toLowerCase();
   const kind: string = (node.kind || "").toLowerCase();
   const symbolLower = symbol.toLowerCase();
-  const sourceUri: string = (node.provenance?.sourceUri ?? node.provenance?.source_uri ?? "").toLowerCase();
+  const sourceUri = normalizeForPathMatch(node.provenance?.sourceUri ?? node.provenance?.source_uri ?? "");
 
   let score = 50; // baseline
 
@@ -97,7 +101,7 @@ export function scoreCandidate(
 
   // ── Path match ──────────────────────────────────────────────────────
   if (opts?.path) {
-    const pathLower = opts.path.toLowerCase();
+    const pathLower = normalizeForPathMatch(opts.path);
     if (sourceUri.includes(pathLower)) {
       // Specificity bonus: a longer/more specific filter string gives a larger
       // score reduction, breaking ties when many entities share the same short
@@ -145,7 +149,7 @@ export async function resolveEntityFull(
 ): Promise<ResolveResult> {
   const kindFilter = opts?.kind;
   const nodes = await client.search(symbol, {
-    limit: opts?.searchLimit ?? (looksTypeLikeSymbol(symbol) ? 50 : 20),
+    limit: opts?.searchLimit ?? (opts?.path ? 200 : looksTypeLikeSymbol(symbol) ? 50 : 20),
     kind: kindFilter,
     nameOnly: true,
   });
@@ -163,8 +167,8 @@ export async function resolveEntityFull(
   // falling back to cross-repo results.
   const filteredNodes = opts?.path
     ? roleFiltered.filter((n: any) => {
-        const uri = (n.provenance?.sourceUri ?? n.provenance?.source_uri ?? "").toLowerCase();
-        return uri.includes(opts.path!.toLowerCase());
+        const uri = normalizeForPathMatch(n.provenance?.sourceUri ?? n.provenance?.source_uri ?? "");
+        return uri.includes(normalizeForPathMatch(opts.path));
       })
     : roleFiltered;
 
@@ -295,9 +299,9 @@ function pickBest(
 
   // If path was provided and best matches path but second doesn't, best wins
   if (opts?.path) {
-    const bestUri = (best.node.provenance?.sourceUri ?? best.node.provenance?.source_uri ?? "").toLowerCase();
-    const secondUri = (second.node.provenance?.sourceUri ?? second.node.provenance?.source_uri ?? "").toLowerCase();
-    const pathLower = opts.path.toLowerCase();
+    const bestUri = normalizeForPathMatch(best.node.provenance?.sourceUri ?? best.node.provenance?.source_uri ?? "");
+    const secondUri = normalizeForPathMatch(second.node.provenance?.sourceUri ?? second.node.provenance?.source_uri ?? "");
+    const pathLower = normalizeForPathMatch(opts.path);
     if (bestUri.includes(pathLower) && !secondUri.includes(pathLower)) {
       return { resolved: true, entity: nodeToResolved(best.node, symbol, "scored") };
     }
@@ -504,7 +508,7 @@ export async function resolveFileOrEntity(
 
   // 2. File-like input → try graph file search
   if (looksFileLike(target)) {
-    const fileEntity = await tryFileGraphMatch(client, target);
+    const fileEntity = await tryFileGraphMatch(client, target, opts);
     if (fileEntity) return fileEntity;
     // Fall through to symbol resolution
   }
@@ -569,24 +573,35 @@ export async function resolveFileOrEntity(
 async function tryFileGraphMatch(
   client: IxClient,
   target: string,
+  opts?: { path?: string },
 ): Promise<ResolvedEntity | null> {
   const basename = path.basename(target);
+  const targetHasPath = target.includes("/") || target.includes("\\");
 
   // Search for file entities matching the basename
-  const nodes = await client.search(basename, { limit: 20, kind: "file", nameOnly: true });
+  const nodes = await client.search(basename, {
+    limit: opts?.path ? 200 : 20,
+    kind: "file",
+    nameOnly: true,
+  });
 
   // Filter to actual matches
-  const targetLower = target.toLowerCase();
+  const targetLower = normalizeForPathMatch(target);
   const basenameLower = basename.toLowerCase();
   const basenameNoExt = basename.replace(/\.[^.]+$/, "").toLowerCase();
+  const normalizedPathHint = normalizeForPathMatch(opts?.path);
 
   const matches: Array<{ node: any; quality: number }> = [];
   for (const n of nodes as any[]) {
     const name = (n.name || "").toLowerCase();
-    const uri = (n.provenance?.sourceUri ?? n.provenance?.source_uri ?? "").toLowerCase();
+    const uri = normalizeForPathMatch(n.provenance?.sourceUri ?? n.provenance?.source_uri ?? "");
 
     // Exact path match (best)
-    if (uri.endsWith(targetLower) || uri === targetLower) {
+    if (targetHasPath && (uri.endsWith(targetLower) || uri === targetLower)) {
+      matches.push({ node: n, quality: 0 });
+    }
+    // Filename match in user-requested path
+    else if (normalizedPathHint && uri.includes(normalizedPathHint) && name === basenameLower) {
       matches.push({ node: n, quality: 0 });
     }
     // Exact filename match
@@ -606,11 +621,11 @@ async function tryFileGraphMatch(
 
   // If multiple matches at same quality, prefer path-matching target
   const best = matches[0];
-  if (matches.length > 1 && matches[0].quality === matches[1].quality && target.includes("/")) {
+  if (matches.length > 1 && matches[0].quality === matches[1].quality && (target.includes("/") || target.includes("\\") || !!normalizedPathHint)) {
     // Disambiguate by path when user provided a path
     const pathMatch = matches.find(m => {
-      const uri = (m.node.provenance?.sourceUri ?? m.node.provenance?.source_uri ?? "").toLowerCase();
-      return uri.endsWith(targetLower);
+      const uri = normalizeForPathMatch(m.node.provenance?.sourceUri ?? m.node.provenance?.source_uri ?? "");
+      return uri.endsWith(targetLower) || (!!normalizedPathHint && uri.includes(normalizedPathHint));
     });
     if (pathMatch) {
       return nodeToResolved(pathMatch.node, pathMatch.node.name, "exact");

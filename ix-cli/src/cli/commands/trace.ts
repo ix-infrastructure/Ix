@@ -266,9 +266,13 @@ export function registerTraceCommand(program: Command): void {
 
         // ── Path mode (--to) ────────────────────────────────────────
         if (opts.to) {
+          const toResolveOpts = {
+            ...resolveOpts,
+            path: undefined,
+          };
           const [fromTarget, toTarget] = await Promise.all([
             resolveFileOrEntity(client, symbol, resolveOpts),
-            resolveFileOrEntity(client, opts.to, resolveOpts),
+            resolveFileOrEntity(client, opts.to, toResolveOpts),
           ]);
           if (!fromTarget || !toTarget) return;
 
