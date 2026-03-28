@@ -5,7 +5,6 @@
 #   1. Docker Desktop (checks / prompts)
 #   2. Backend (ArangoDB + Memory Layer via Docker)
 #   3. ix CLI
-#   4. Claude Code hooks (if Claude Code is installed)
 #
 # Usage:
 #   irm https://ix-infra.com/install.ps1 | iex
@@ -13,7 +12,6 @@
 # Options (env vars):
 #   $env:IX_VERSION = "0.2.0"     Override version
 #   $env:IX_SKIP_BACKEND = "1"    Skip Docker backend
-#   $env:IX_SKIP_HOOKS = "1"      Skip Claude Code hooks
 # ─────────────────────────────────────────────────────────────────────────────
 
 $ErrorActionPreference = "Stop"
@@ -204,24 +202,6 @@ if ($existingVersion -eq $Version) {
     if ($env:Path -notlike "*$IxBin*") {
         $env:Path = "$IxBin;$env:Path"
     }
-}
-
-# ── Step 4: Claude Code hooks ────────────────────────────────────────────────
-
-Write-Host ""
-Write-Host "-- 4. Claude Code Plugin --" -ForegroundColor White
-
-if ($env:IX_SKIP_HOOKS -eq "1") {
-    Write-Host "  (skipped via IX_SKIP_HOOKS=1)"
-} elseif (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
-    Write-Host "  (skipped - claude CLI not found)"
-} else {
-    # Download and run hook installer
-    $hookScript = Invoke-WebRequest -Uri "$GithubRaw/ix-plugin/install.sh" -UseBasicParsing
-    # Note: Claude Code hooks are bash scripts — they work in WSL/Git Bash
-    Write-Warn "Claude Code hooks require bash (WSL or Git Bash)."
-    Write-Host "  Install from WSL or Git Bash:"
-    Write-Host "    curl -fsSL $GithubRaw/ix-plugin/install.sh | bash"
 }
 
 # ── Done ─────────────────────────────────────────────────────────────────────

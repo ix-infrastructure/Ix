@@ -46,12 +46,6 @@ ensure_local_bin_on_path() {
   done
 }
 
-install_claude_hooks() {
-  # Delegate to the standalone installer — keeps curl and repo installs in sync.
-  # Hooks are copied to ~/.local/share/ix/plugin/hooks (not repo-relative).
-  bash "$IX_DIR/ix-plugin/install.sh"
-}
-
 install_global_ix() {
   local local_bin="$HOME/.local/bin"
   local ix_shim="$local_bin/ix"
@@ -98,7 +92,7 @@ while [[ $# -gt 0 ]]; do
       echo "Individual scripts:"
       echo "  ./scripts/backend.sh        Start/stop Docker containers"
       echo "  ./scripts/build-cli.sh      Build the TypeScript CLI"
-      echo "  ./scripts/connect.sh        Connect a project (MCP + CLAUDE.md + ingest)"
+      echo "  ./scripts/connect.sh        Connect a project (CLAUDE.md + ingest)"
       echo "  ./scripts/disconnect.sh     Disconnect a project"
       echo "  ./scripts/ingest.sh         Ingest files into the graph"
       exit 0
@@ -144,16 +138,10 @@ if [ "${#MISSING_DEPS[@]}" -gt 0 ]; then
 fi
 echo "  [ok] docker, node"
 
-# Warn about optional tools (needed for hooks + ix text)
-MISSING_OPT=()
-for dep in jq rg; do
-  if ! command -v "$dep" >/dev/null 2>&1; then
-    MISSING_OPT+=("$dep")
-  fi
-done
-if [ "${#MISSING_OPT[@]}" -gt 0 ]; then
-  echo "  [warn] Optional tools not found: ${MISSING_OPT[*]}"
-  echo "         jq is required for Claude Code hooks; rg for 'ix text' search."
+# Warn about optional tools (needed for ix text)
+if ! command -v rg >/dev/null 2>&1; then
+  echo "  [warn] Optional tool not found: rg"
+  echo "         rg (ripgrep) is required for 'ix text' search."
 fi
 
 echo ""
@@ -188,16 +176,6 @@ else
   echo "  [ok] Installed: ~/.local/bin/ix"
 fi
 
-# ── Step 4: Claude Code Plugin ───────────────────────────────────────────────
-
-echo ""
-echo "── [4] Claude Code plugin ─────────────────────────"
-if command -v claude >/dev/null 2>&1; then
-  install_claude_hooks
-else
-  echo "  (skipped — claude CLI not found)"
-fi
-
 # ── Done ─────────────────────────────────────────────────────────────────────
 
 echo ""
@@ -211,12 +189,6 @@ echo ""
 echo "  CLI:      ix status"
 echo "            (open a new shell, or run: export PATH=\"\$HOME/.local/bin:\$PATH\")"
 echo ""
-echo "  Plugin:   restart Claude Code to activate the Ix hooks"
-echo ""
 echo "  Next: connect a project to IX:"
 echo "    ./scripts/connect.sh ~/my-project"
-echo ""
-echo "  To also install MCP (optional, for Cursor/Claude Desktop):"
-echo "    ./scripts/connect.sh ~/my-project --mcp cursor"
-echo "    ./scripts/connect.sh ~/my-project --mcp claude-desktop"
 echo ""

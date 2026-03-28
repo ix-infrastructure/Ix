@@ -5,7 +5,6 @@
 #   1. Docker (checks / prompts)
 #   2. Backend (ArangoDB + Memory Layer via Docker)
 #   3. ix CLI
-#   4. Claude Code hooks (if Claude Code is installed)
 #
 # Usage:
 #   curl -fsSL https://ix-infra.com/install.sh | sh
@@ -13,7 +12,6 @@
 # Options (env vars):
 #   IX_VERSION=0.2.0          Override version (default: latest)
 #   IX_SKIP_BACKEND=1         Skip Docker backend setup
-#   IX_SKIP_HOOKS=1           Skip Claude Code hook installation
 
 set -euo pipefail
 
@@ -342,20 +340,6 @@ SHIM
   ensure_path
 
   info "Installed: $IX_BIN/ix"
-fi
-
-# -- Step 4: Claude Code Hooks --
-
-step "4. Claude Code Plugin"
-
-if [ "${IX_SKIP_HOOKS:-}" = "1" ]; then
-  echo "  (skipped via IX_SKIP_HOOKS=1)"
-elif ! command -v claude >/dev/null 2>&1; then
-  echo "  (skipped — claude CLI not found)"
-  echo "  Install Claude Code and re-run, or install hooks manually:"
-  echo "    curl -fsSL ${GITHUB_RAW}/ix-plugin/install.sh | bash"
-else
-  curl -fsSL "${GITHUB_RAW}/ix-plugin/install.sh" | bash
 fi
 
 # -- Done --
