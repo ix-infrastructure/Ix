@@ -495,6 +495,15 @@ export const GO_QUERIES = `
 (parameter_declaration type: (pointer_type (type_identifier) @reference.type))
 (function_declaration result: (pointer_type (type_identifier) @reference.type))
 (method_declaration result: (pointer_type (type_identifier) @reference.type))
+; Imported/package-qualified type refs: *scheduler.Scheduler, scheduler.Scheduler
+(field_declaration type: (qualified_type (type_identifier) @reference.type))
+(parameter_declaration type: (qualified_type (type_identifier) @reference.type))
+(function_declaration result: (qualified_type (type_identifier) @reference.type))
+(method_declaration result: (qualified_type (type_identifier) @reference.type))
+(field_declaration type: (pointer_type (qualified_type (type_identifier) @reference.type)))
+(parameter_declaration type: (pointer_type (qualified_type (type_identifier) @reference.type)))
+(function_declaration result: (pointer_type (qualified_type (type_identifier) @reference.type)))
+(method_declaration result: (pointer_type (qualified_type (type_identifier) @reference.type)))
 `;
 
 // C++ queries - works with tree-sitter-cpp

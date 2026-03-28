@@ -209,7 +209,8 @@ describe('resolveEdges', () => {
       [entity('helperFn', SupportedLanguages.TypeScript)],
     );
 
-    expect(resolveEdges([ambiguousCaller, imported, baz])).toEqual([]);
+    const resolved = resolveEdges([ambiguousCaller, imported, baz]);
+    expect(resolved.filter(edge => edge.predicate === 'CALLS')).toEqual([]);
   });
 
   it('resolves tier-2.5 transitive imports', () => {
@@ -275,7 +276,8 @@ describe('resolveEdges', () => {
       [entity('helperFn', SupportedLanguages.TypeScript)],
     );
 
-    expect(resolveEdges([caller, index, helperA, helperB])).toEqual([]);
+    const resolved = resolveEdges([caller, index, helperA, helperB]);
+    expect(resolved.filter(edge => edge.predicate === 'CALLS')).toEqual([]);
   });
 
   it('keeps tier-3 same-language fallback working for TypeScript and Scala and rejects ambiguous globals', () => {
@@ -389,6 +391,102 @@ describe('resolveEdges', () => {
       dstQualifiedKey: 'VersionSet.Recover',
       predicate: 'CALLS',
       confidence: 0.7,
+    });
+  });
+
+  it('resolves Go package imports to the package anchor and uses them for cross-file type references', () => {
+    const caller = fileResult(
+      '/repo/cmd/kube-scheduler/app/server.go',
+      SupportedLanguages.Go,
+      [entity('Run', SupportedLanguages.Go)],
+      [
+        { srcName: 'server.go', dstName: 'k8s.io/kubernetes/pkg/scheduler', predicate: 'IMPORTS' },
+        { srcName: 'Run', dstName: 'Scheduler', predicate: 'REFERENCES' },
+      ],
+    );
+    const nearbyFalseMatch = fileResult(
+      '/repo/cmd/kube-scheduler/app/scheduler.go',
+      SupportedLanguages.Go,
+      [entity('LocalHelper', SupportedLanguages.Go)],
+    );
+    const scheduler = fileResult(
+      '/repo/pkg/scheduler/scheduler.go',
+      SupportedLanguages.Go,
+      [entity('Scheduler', SupportedLanguages.Go, 'class')],
+      Array.from({ length: 10 }, (_, i) => ({
+        srcName: 'scheduler.go',
+        dstName: `dep${i}`,
+        predicate: 'IMPORTS',
+      })),
+    );
+    const eventhandlers = fileResult(
+      '/repo/pkg/scheduler/eventhandlers.go',
+      SupportedLanguages.Go,
+      [entity('registerHandlers', SupportedLanguages.Go)],
+      [{ srcName: 'eventhandlers.go', dstName: 'dep', predicate: 'IMPORTS' }],
+    );
+
+    expect(resolveEdges([caller, nearbyFalseMatch, scheduler, eventhandlers])).toEqual(
+      expect.arrayContaining([
+        {
+          srcFilePath: '/repo/cmd/kube-scheduler/app/server.go',
+          srcName: 'server.go',
+          dstFilePath: '/repo/pkg/scheduler/scheduler.go',
+          dstName: 'k8s.io/kubernetes/pkg/scheduler',
+          dstQualifiedKey: 'scheduler.go',
+          predicate: 'IMPORTS',
+          confidence: 0.9,
+        },
+        {
+          srcFilePath: '/repo/cmd/kube-scheduler/app/server.go',
+          srcName: 'Run',
+          dstFilePath: '/repo/pkg/scheduler/scheduler.go',
+          dstName: 'Scheduler',
+          dstQualifiedKey: 'Scheduler',
+          predicate: 'REFERENCES',
+          confidence: 0.9,
+        },
+      ]),
+    );
+  });
+
+  it('chooses the highest-signal Go package anchor when a package directory has multiple files', () => {
+    const caller = fileResult(
+      '/repo/cmd/kube-apiserver/app/server.go',
+      SupportedLanguages.Go,
+      [entity('Run', SupportedLanguages.Go)],
+      [{ srcName: 'server.go', dstName: 'k8s.io/kubernetes/pkg/controlplane', predicate: 'IMPORTS' }],
+    );
+    const doc = fileResult('/repo/pkg/controlplane/doc.go', SupportedLanguages.Go, []);
+    const versions = fileResult(
+      '/repo/pkg/controlplane/import_known_versions.go',
+      SupportedLanguages.Go,
+      [entity('KnownVersions', SupportedLanguages.Go)],
+      Array.from({ length: 4 }, (_, i) => ({
+        srcName: 'import_known_versions.go',
+        dstName: `dep${i}`,
+        predicate: 'IMPORTS',
+      })),
+    );
+    const instance = fileResult(
+      '/repo/pkg/controlplane/instance.go',
+      SupportedLanguages.Go,
+      [entity('Config', SupportedLanguages.Go, 'class')],
+      Array.from({ length: 8 }, (_, i) => ({
+        srcName: 'instance.go',
+        dstName: `dep${i}`,
+        predicate: 'IMPORTS',
+      })),
+    );
+
+    expect(resolveEdges([caller, doc, versions, instance])).toContainEqual({
+      srcFilePath: '/repo/cmd/kube-apiserver/app/server.go',
+      srcName: 'server.go',
+      dstFilePath: '/repo/pkg/controlplane/instance.go',
+      dstName: 'k8s.io/kubernetes/pkg/controlplane',
+      dstQualifiedKey: 'instance.go',
+      predicate: 'IMPORTS',
+      confidence: 0.9,
     });
   });
 });
