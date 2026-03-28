@@ -35,7 +35,7 @@ bash ix-plugin/install.sh
 ### Via curl
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/IX-Memory/main/ix-plugin/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/Ix/main/ix-plugin/install.sh | bash
 ```
 
 Restart Claude Code after installing. Verify hooks loaded with `/hooks`.
@@ -122,5 +122,5 @@ After Claude finishes each response:
 ```bash
 bash ix-plugin/uninstall.sh
 # or:
-curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/IX-Memory/main/ix-plugin/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/Ix/main/ix-plugin/uninstall.sh | bash
 ```

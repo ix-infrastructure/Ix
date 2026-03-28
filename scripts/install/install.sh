@@ -390,8 +390,7 @@ fi
 
 echo ""
 echo "  Connect a project:"
-echo "    cd ~/my-project && ix init"
-echo "    ix map ./src"
+echo "    cd ~/my-project && ix map ."
 echo ""
 echo "  To uninstall:"
 echo "    curl -fsSL https://ix-infra.com/uninstall.sh | sh"

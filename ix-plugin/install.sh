@@ -2,7 +2,7 @@
 # ix-plugin/install.sh — Standalone Claude Code plugin installer for Ix Memory
 #
 # Usage (curl):
-#   curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/IX-Memory/main/ix-plugin/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/Ix/main/ix-plugin/install.sh | bash
 #
 # Usage (local, from the Ix repo):
 #   bash ix-plugin/install.sh
@@ -17,7 +17,7 @@ set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-GITHUB_RAW="https://raw.githubusercontent.com/ix-infrastructure/IX-Memory/main/ix-plugin/hooks"
+GITHUB_RAW="https://raw.githubusercontent.com/ix-infrastructure/Ix/main/ix-plugin/hooks"
 INSTALL_DIR="${IX_PLUGIN_DIR:-$HOME/.local/share/ix/plugin/hooks}"
 SETTINGS="$HOME/.claude/settings.json"
 
@@ -52,7 +52,7 @@ info "curl, jq"
 
 if ! command -v ix >/dev/null 2>&1; then
   warn "'ix' not found in PATH — hooks will be installed but won't activate until ix is installed."
-  warn "Install ix first: see https://github.com/ix-infrastructure/IX-Memory"
+  warn "Install ix first: see https://github.com/ix-infrastructure/Ix"
 fi
 
 # ── Download / copy hooks ─────────────────────────────────────────────────────
@@ -177,5 +177,5 @@ echo ""
 echo "  To uninstall:"
 echo "    bash ix-plugin/uninstall.sh"
 echo "    # or:"
-echo "    curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/IX-Memory/main/ix-plugin/uninstall.sh | bash"
+echo "    curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/Ix/main/ix-plugin/uninstall.sh | bash"
 echo ""
