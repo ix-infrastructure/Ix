@@ -111,6 +111,15 @@ Run smoke tests for any CLI-facing change. Run backend tests for any Scala chang
 - Follow existing Ix command voice and terminology
 - Match output patterns of existing commands
 
+## Security Checks
+
+PRs and pushes to `main` run automated security checks:
+
+- **Dependency review** — flags new dependencies with known vulnerabilities (PRs only)
+- **Trivy scanning** — scans the repo filesystem and Docker image for vulnerabilities and misconfigurations
+
+Both checks fail on CRITICAL or HIGH severity findings. If a check fails on your PR, inspect the output and either fix the vulnerability or document why it's a false positive.
+
 ## OSS vs Pro Boundary
 
 This repository contains open-source Ix functionality. Some features are available only in Ix Pro.

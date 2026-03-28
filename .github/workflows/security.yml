@@ -1,0 +1,42 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  trivy-repo:
+    name: Trivy (repo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947e795cb3a0a2f3e28 # v0.30.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: 1
+          scanners: vuln,misconfig
+
+  trivy-image:
+    name: Trivy (Docker image)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build Docker image
+        run: docker build -t ix-memory-layer:ci ./memory-layer
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947e795cb3a0a2f3e28 # v0.30.0
+        with:
+          scan-type: image
+          image-ref: ix-memory-layer:ci
+          severity: CRITICAL,HIGH
+          exit-code: 1
+          scanners: vuln
