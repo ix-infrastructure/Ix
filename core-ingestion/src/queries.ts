@@ -438,8 +438,10 @@ export const GO_QUERIES = `
         name: (field_identifier) @name)))) @definition.method
 
 ; Imports
+(import_declaration (import_spec name: (package_identifier) @import.alias path: (interpreted_string_literal) @import.source)) @import
 (import_declaration (import_spec path: (interpreted_string_literal) @import.source)) @import
 (import_declaration (import_spec_list (import_spec path: (interpreted_string_literal) @import.source))) @import
+(import_declaration (import_spec_list (import_spec name: (package_identifier) @import.alias path: (interpreted_string_literal) @import.source))) @import
 
 ; Struct embedding — value: type Foo struct { Bar }
 ; NOTE: no @definition.* capture here — if it were present, defCapture fires first and

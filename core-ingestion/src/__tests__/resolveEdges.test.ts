@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveEdges, type FileParseResult, type ParsedEntity, type ParsedRelationship } from '../index.js';
+import { buildGlobalResolutionIndex, resolveEdges, type FileParseResult, type ParsedEntity, type ParsedRelationship } from '../index.js';
 import { SupportedLanguages } from '../languages.js';
 
 function entity(
@@ -128,6 +128,93 @@ describe('resolveEdges', () => {
       dstName: 'NodeKind.File',
       dstQualifiedKey: 'NodeKind.File',
       predicate: 'REFERENCES',
+      confidence: 0.9,
+    });
+  });
+
+  it('resolves Go alias-qualified package calls through the aliased import path', () => {
+    const caller = fileResult(
+      '/repo/cmd/kube-apiserver/app/server.go',
+      SupportedLanguages.Go,
+      [entity('CreateServerChain', SupportedLanguages.Go)],
+      [
+        { srcName: 'server.go', dstName: 'k8s.io/kubernetes/pkg/controlplane/apiserver', predicate: 'IMPORTS' },
+        { srcName: 'CreateServerChain', dstName: 'controlplaneapiserver.CreateAggregatorServer', predicate: 'CALLS' },
+      ],
+    );
+    caller.importAliases = {
+      controlplaneapiserver: 'k8s.io/kubernetes/pkg/controlplane/apiserver',
+    };
+    const callee = fileResult(
+      '/repo/pkg/controlplane/apiserver/server.go',
+      SupportedLanguages.Go,
+      [entity('CreateAggregatorServer', SupportedLanguages.Go)],
+    );
+
+    expect(resolveEdges([caller, callee])).toContainEqual({
+      srcFilePath: '/repo/cmd/kube-apiserver/app/server.go',
+      srcName: 'CreateServerChain',
+      dstFilePath: '/repo/pkg/controlplane/apiserver/server.go',
+      dstName: 'controlplaneapiserver.CreateAggregatorServer',
+      dstQualifiedKey: 'CreateAggregatorServer',
+      predicate: 'CALLS',
+      confidence: 0.9,
+    });
+  });
+
+  it('resolves Go alias-qualified package calls when using the global index anchor path', () => {
+    const caller = fileResult(
+      '/repo/cmd/kube-apiserver/app/server.go',
+      SupportedLanguages.Go,
+      [entity('CreateServerChain', SupportedLanguages.Go)],
+      [
+        { srcName: 'server.go', dstName: 'k8s.io/kubernetes/pkg/controlplane/apiserver', predicate: 'IMPORTS' },
+        { srcName: 'CreateServerChain', dstName: 'controlplaneapiserver.CreateAggregatorServer', predicate: 'CALLS' },
+      ],
+    );
+    caller.importAliases = {
+      controlplaneapiserver: 'k8s.io/kubernetes/pkg/controlplane/apiserver',
+    };
+
+    const apiserverDoc = fileResult(
+      '/repo/pkg/controlplane/apiserver/apiserver.go',
+      SupportedLanguages.Go,
+      [entity('Config', SupportedLanguages.Go, 'class')],
+    );
+    const aggregator = fileResult(
+      '/repo/pkg/controlplane/apiserver/aggregator.go',
+      SupportedLanguages.Go,
+      [entity('CreateAggregatorServer', SupportedLanguages.Go)],
+    );
+
+    const sources = new Map<string, string>([
+      ['/repo/pkg/controlplane/apiserver/apiserver.go', 'package apiserver\ntype Config struct{}\n'],
+      ['/repo/pkg/controlplane/apiserver/aggregator.go', 'package apiserver\nfunc CreateAggregatorServer() {}\n'],
+    ]);
+    const globalIndex = buildGlobalResolutionIndex(
+      ['/repo/pkg/controlplane/apiserver/apiserver.go', '/repo/pkg/controlplane/apiserver/aggregator.go'],
+      sources,
+    );
+
+    expect(resolveEdges([caller], undefined, globalIndex)).toContainEqual({
+      srcFilePath: '/repo/cmd/kube-apiserver/app/server.go',
+      srcName: 'CreateServerChain',
+      dstFilePath: '/repo/pkg/controlplane/apiserver/aggregator.go',
+      dstName: 'controlplaneapiserver.CreateAggregatorServer',
+      dstQualifiedKey: 'CreateAggregatorServer',
+      predicate: 'CALLS',
+      confidence: 0.9,
+    });
+
+    // Keep the extra parsed files here to mirror production more closely and ensure
+    // the same answer still wins when batch data and global index are both present.
+    expect(resolveEdges([caller, apiserverDoc, aggregator], undefined, globalIndex)).toContainEqual({
+      srcFilePath: '/repo/cmd/kube-apiserver/app/server.go',
+      srcName: 'CreateServerChain',
+      dstFilePath: '/repo/pkg/controlplane/apiserver/aggregator.go',
+      dstName: 'controlplaneapiserver.CreateAggregatorServer',
+      dstQualifiedKey: 'CreateAggregatorServer',
+      predicate: 'CALLS',
       confidence: 0.9,
     });
   });

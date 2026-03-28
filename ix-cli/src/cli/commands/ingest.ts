@@ -134,6 +134,29 @@ function* walkFiles(
   }
 }
 
+function canonicalizeDiscoveredFilePath(filePath: string): string {
+  try {
+    return fs.realpathSync.native(filePath);
+  } catch {
+    return nodePath.resolve(filePath);
+  }
+}
+
+export function dedupeDiscoveredFilePaths(
+  filePaths: string[],
+  canonicalize: (filePath: string) => string = canonicalizeDiscoveredFilePath,
+): string[] {
+  const deduped: string[] = [];
+  const seenCanonical = new Set<string>();
+  for (const filePath of filePaths) {
+    const canonicalPath = canonicalize(filePath);
+    if (seenCanonical.has(canonicalPath)) continue;
+    seenCanonical.add(canonicalPath);
+    deduped.push(canonicalPath);
+  }
+  return deduped;
+}
+
 function tryGitLsFiles(dir: string, recursive: boolean): string[] | null {
   try {
     const result = spawnSync(
@@ -148,6 +171,7 @@ function tryGitLsFiles(dir: string, recursive: boolean): string[] | null {
     if (result.status !== 0) return null;
 
     const files: string[] = [];
+    const seenCanonical = new Set<string>();
     for (const line of result.stdout.split(/\r?\n/)) {
       if (!line) continue;
       const fullPath = nodePath.resolve(dir, line);
@@ -155,7 +179,11 @@ function tryGitLsFiles(dir: string, recursive: boolean): string[] | null {
       if (!SUPPORTED_EXTENSIONS.has(nodePath.extname(fullPath))) continue;
       if (isGeneratedFile(nodePath.basename(fullPath))) continue;
       try {
-        if (fs.statSync(fullPath).isFile()) files.push(fullPath);
+        if (!fs.statSync(fullPath).isFile()) continue;
+        const canonicalPath = canonicalizeDiscoveredFilePath(fullPath);
+        if (seenCanonical.has(canonicalPath)) continue;
+        seenCanonical.add(canonicalPath);
+        files.push(canonicalPath);
       } catch {
         // Ignore racy deletes and permission issues during discovery.
       }
@@ -454,9 +482,11 @@ export async function ingestFiles(
     };
 
     const stat = fs.statSync(resolvedPath);
-    const filePaths: string[] = stat.isFile()
-      ? (SUPPORTED_EXTENSIONS.has(nodePath.extname(resolvedPath)) ? [resolvedPath] : [])
-      : (tryGitLsFiles(resolvedPath, opts.recursive ?? true) ?? Array.from(walkFiles(resolvedPath, opts.recursive ?? true)));
+    const filePaths: string[] = dedupeDiscoveredFilePaths(
+      stat.isFile()
+        ? (SUPPORTED_EXTENSIONS.has(nodePath.extname(resolvedPath)) ? [resolvedPath] : [])
+        : (tryGitLsFiles(resolvedPath, opts.recursive ?? true) ?? Array.from(walkFiles(resolvedPath, opts.recursive ?? true))),
+    );
 
     filesDiscovered = filePaths.length;
     const discovered = performance.now();
@@ -839,11 +869,22 @@ export async function ingestFiles(
 
         // Build global resolution index from all repo file paths (not just changed files)
         // so cross-batch imports resolve correctly even in streaming per-chunk mode.
+        // Reuse bytes already read into changedPaths (on first install = all files, zero extra reads).
+        // Only async-read Go files that were mtime-clean and therefore not in changedPaths.
         {
           const sources = new Map<string, string>();
-          for (const fp of filePaths) {
-            if (nodePath.extname(fp) !== '.go') continue;
-            try { sources.set(fp, fs.readFileSync(fp, 'utf-8')); } catch { /* skip unreadable */ }
+          const changedSet = new Set(changedPaths.map(c => c.filePath));
+          for (const { filePath, bytes } of changedPaths) {
+            if (nodePath.extname(filePath) === '.go') sources.set(filePath, bytes.toString('utf-8'));
+          }
+          const remainingGoFiles = filePaths.filter(fp => nodePath.extname(fp) === '.go' && !changedSet.has(fp));
+          const GO_READ_BATCH = 500;
+          for (let i = 0; i < remainingGoFiles.length; i += GO_READ_BATCH) {
+            const batch = remainingGoFiles.slice(i, i + GO_READ_BATCH);
+            const texts = await Promise.all(batch.map(fp => fs.promises.readFile(fp, 'utf-8').catch(() => null)));
+            for (let j = 0; j < batch.length; j++) {
+              if (texts[j] != null) sources.set(batch[j], texts[j]!);
+            }
           }
           globalIndex = (ingestion.buildGlobalResolutionIndex as Function)(filePaths, sources);
         }

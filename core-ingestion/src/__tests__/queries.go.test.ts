@@ -173,6 +173,33 @@ func Run(sched *scheduler.Scheduler) error {
     });
   });
 
+  it('records explicit Go import aliases so alias-qualified package calls can be resolved later', () => {
+    const result = parseFile(
+      '/repo/server.go',
+      `
+package app
+
+import (
+  controlplaneapiserver "k8s.io/kubernetes/pkg/controlplane/apiserver"
+)
+
+func CreateServerChain() {
+  controlplaneapiserver.CreateAggregatorServer()
+}
+      `,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.importAliases).toEqual({
+      controlplaneapiserver: 'k8s.io/kubernetes/pkg/controlplane/apiserver',
+    });
+    expect(result!.relationships).toContainEqual({
+      srcName: 'CreateServerChain',
+      dstName: 'controlplaneapiserver.CreateAggregatorServer',
+      predicate: 'CALLS',
+    });
+  });
+
   it('emits all qualified CALLS when multiple packages share a function name', () => {
     // Regression: before Bug 3 fix, only the first NewManager call was emitted
     // because seenCalls deduped bare "NewManager" across all packages.
