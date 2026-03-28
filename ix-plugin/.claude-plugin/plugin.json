@@ -1,9 +1,0 @@
-{
-  "name": "ix-memory",
-  "version": "2.0.0",
-  "description": "Ix Memory integration — intercepts all searches and file reads with graph-aware ix queries, auto-ingests edits, and refreshes the full architectural map after each session.",
-  "author": {
-    "name": "Ix Memory"
-  },
-  "hooks": "./hooks/hooks.json"
-}

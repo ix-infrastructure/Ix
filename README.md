@@ -246,6 +246,68 @@ If you’re building with Ix or want to improve it:
 
 Early stage. Moving fast.
 
+## Claude Code Plugin
+
+Ix ships with a Claude Code plugin that makes Claude always use Ix for codebase understanding — automatically injecting context, intercepting searches, and keeping the graph current as Claude edits.
+
+### What It Does
+
+| Trigger | Effect |
+|---------|--------|
+| User sends any prompt | Injects session briefing (goals, bugs, decisions, tasks) into every prompt |
+| Claude runs `Grep` or `Glob` | Front-runs with `ix text` + `ix locate` — graph-aware results before raw output |
+| Claude runs `Read` | Injects entity context and structural overview before Claude sees raw source |
+| Claude runs `Bash` (grep/rg) | Detects grep/rg patterns and front-runs with Ix graph queries |
+| Claude runs `Write`, `Edit`, etc. | Ingests the changed file into the Ix graph silently in the background |
+| Claude finishes responding | Runs `ix map` to refresh the full architectural graph for the next session |
+
+All hooks bail silently if `ix` is not in PATH or the Ix backend is unreachable.
+
+### Why Hooks Instead of MCP
+
+- **No user approval prompt** — hooks fire silently and automatically
+- **Guaranteed execution** — every prompt, search, read, and edit is covered
+- **Token-efficient** — Ix returns structured, bounded results vs. raw file content
+- **Graph always current** — edits ingested immediately; full map refreshes at session end
+
+### Install the Plugin
+
+From the repo:
+
+```bash
+bash ix-plugin/install.sh
+```
+
+Or via curl:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/Ix/main/ix-plugin/install.sh | bash
+```
+
+Restart Claude Code after installing. Verify hooks loaded with `/hooks`.
+
+### Plugin Requirements
+
+- `ix` CLI in PATH and Ix backend running (`ix status` should return ok)
+- `jq` in PATH
+- `ripgrep` (`rg`) in PATH
+
+```bash
+# Ubuntu/Debian
+sudo apt install jq ripgrep
+
+# macOS
+brew install jq ripgrep
+```
+
+### Uninstall the Plugin
+
+```bash
+bash ix-plugin/uninstall.sh
+```
+
+See the [ix-plugin repo](https://github.com/ix-infrastructure/ix-plugin) for full hook details and plugin structure.
+
 ## Status
 
 Ix is in early development (alpha).
