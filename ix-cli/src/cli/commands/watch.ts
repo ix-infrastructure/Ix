@@ -13,6 +13,7 @@ const SUPPORTED_EXTENSIONS = new Set([
   ".scala", ".sc", ".java",
   ".py", ".rb", ".go", ".rs", ".kt", ".kts", ".cs", ".php", ".swift",
   ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp",
+  ".yaml", ".yml",
 ]);
 
 const SUPPORTED_NAMES = new Set([

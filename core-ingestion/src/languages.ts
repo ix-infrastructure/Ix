@@ -13,6 +13,7 @@ export enum SupportedLanguages {
   Kotlin = 'kotlin',
   Swift = 'swift',
   Scala = 'scala',
+  YAML = 'yaml',
 }
 
 const EXT_MAP: Record<string, SupportedLanguages> = {
@@ -40,6 +41,8 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.swift':SupportedLanguages.Swift,
   '.scala':SupportedLanguages.Scala,
   '.sc':   SupportedLanguages.Scala,
+  '.yaml': SupportedLanguages.YAML,
+  '.yml':  SupportedLanguages.YAML,
 };
 
 export function languageFromPath(filePath: string): SupportedLanguages | null {

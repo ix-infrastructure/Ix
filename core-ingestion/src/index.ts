@@ -213,6 +213,7 @@ function builtinsForLanguage(lang: SupportedLanguages): Set<string> {
 export function isGrammarSupported(filePath: string): boolean {
   const language = languageFromPath(filePath);
   if (!language) return false;
+  if (language === SupportedLanguages.YAML) return true;
   if (filePath.endsWith('.tsx')) return true; // TSX uses TypeScript.tsx, always available
   return GRAMMAR_MAP[language] !== undefined;
 }
@@ -282,6 +283,111 @@ function detectLanguageForSource(filePath: string, source: string): SupportedLan
   return language;
 }
 
+function countSourceLines(source: string): number {
+  let lineCount = 1;
+  for (let i = 0; i < source.length; i++) {
+    if (source.charCodeAt(i) === 10) lineCount++;
+  }
+  return lineCount;
+}
+
+function computeLineStarts(source: string): number[] {
+  const lineStarts = [0];
+  for (let i = 0; i < source.length; i++) {
+    if (source.charCodeAt(i) === 10) lineStarts.push(i + 1);
+  }
+  return lineStarts;
+}
+
+function parseYamlFile(filePath: string, source: string): FileParseResult {
+  const language = SupportedLanguages.YAML;
+  const fileName = nodePath.basename(filePath);
+  const sourceLineCount = countSourceLines(source);
+  const fileRole = classifyFileRole(filePath);
+  const entities: ParsedEntity[] = [
+    { name: fileName, kind: 'file', lineStart: 1, lineEnd: sourceLineCount, language },
+  ];
+  const chunks: ParsedChunk[] = [];
+  const relationships: ParsedRelationship[] = [];
+  const lineStarts = computeLineStarts(source);
+  const lines = source.split(/\r?\n/);
+  const stack: Array<{ indent: number; key: string }> = [];
+  const keyLinePattern = /^(\s*)(?:-\s+)?([A-Za-z0-9_.-]+)\s*:(?:\s*.*)?$/;
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    const match = keyLinePattern.exec(line);
+    if (!match) continue;
+
+    const indent = match[1].replace(/\t/g, '  ').length;
+    const listPrefixWidth = line.trimStart().startsWith('- ') ? 2 : 0;
+    const effectiveIndent = indent + listPrefixWidth;
+    const key = match[2];
+    while (stack.length > 0 && effectiveIndent <= stack[stack.length - 1].indent) {
+      stack.pop();
+    }
+
+    const parent = stack[stack.length - 1];
+    const lineNumber = index + 1;
+    const lineStartOffset = lineStarts[index] ?? 0;
+    const startByte = lineStartOffset + match[1].length + listPrefixWidth;
+    const endByte = Math.max(startByte + key.length, lineStartOffset + line.length);
+
+    entities.push({
+      name: key,
+      kind: 'config_key',
+      lineStart: lineNumber,
+      lineEnd: lineNumber,
+      language,
+      container: parent?.key,
+    });
+
+    chunks.push({
+      name: key,
+      chunkKind: 'config_key',
+      lineStart: lineNumber,
+      lineEnd: lineNumber,
+      startByte,
+      endByte,
+      contentHash: crypto.createHash('sha256').update(line).digest('hex'),
+      language,
+      container: parent?.key,
+    });
+
+    relationships.push({
+      srcName: parent?.key ?? fileName,
+      dstName: key,
+      predicate: 'CONTAINS',
+    });
+
+    if (listPrefixWidth === 0) {
+      stack.push({ indent: effectiveIndent, key });
+    }
+  }
+
+  if (chunks.length === 0) {
+    chunks.push({
+      name: null,
+      chunkKind: 'file_body',
+      lineStart: 1,
+      lineEnd: Math.max(sourceLineCount, 1),
+      startByte: 0,
+      endByte: source.length,
+      contentHash: crypto.createHash('sha256').update(source).digest('hex'),
+      language,
+    });
+  }
+
+  return {
+    filePath,
+    language,
+    entities,
+    chunks,
+    relationships,
+    fileRole,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Rust: cfg macro unwrapping
 // ---------------------------------------------------------------------------
@@ -341,6 +447,7 @@ function unwrapRustCfgMacros(source: string): string {
 export function parseFile(filePath: string, source: string): FileParseResult | null {
   const language = detectLanguageForSource(filePath, source);
   if (!language) return null;
+  if (language === SupportedLanguages.YAML) return parseYamlFile(filePath, source);
 
   // TypeScript TSX uses a separate grammar
   const isTsx = filePath.endsWith('.tsx');
@@ -399,10 +506,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
     }
 
     const fileName = nodePath.basename(filePath);
-    let sourceLineCount = 1;
-    for (let i = 0; i < source.length; i++) {
-      if (source.charCodeAt(i) === 10) sourceLineCount++;
-    }
+    const sourceLineCount = countSourceLines(source);
 
     const entities: ParsedEntity[] = [
       { name: fileName, kind: 'file', lineStart: 1, lineEnd: sourceLineCount, language },

@@ -32,6 +32,7 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.py', '.java', '.c', '.h', '.cpp', '.cc', '.cxx', '.hpp',
   '.cs', '.go', '.rb', '.rs', '.php', '.kt', '.kts', '.swift',
   '.scala', '.sc',
+  '.yaml', '.yml',
 ]);
 
 // ---------------------------------------------------------------------------

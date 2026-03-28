@@ -1179,5 +1179,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.Kotlin]: KOTLIN_QUERIES,
   [SupportedLanguages.Swift]: SWIFT_QUERIES,
   [SupportedLanguages.Scala]: SCALA_QUERIES,
+  [SupportedLanguages.YAML]: '',
 };
  
