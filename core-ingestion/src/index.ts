@@ -1670,10 +1670,12 @@ export function resolveEdges(
     return ranked[0] ?? null;
   }
 
-  function resolveImportTargets(srcFilePath: string, srcLanguage: SupportedLanguages, modName: unknown): string[] {
-    const importMatches = modNameToFiles(modName, srcFilePath);
-    if (srcLanguage !== SupportedLanguages.Go || importMatches.length <= 1) return importMatches;
-
+  function narrowGoImportCandidates(
+    srcFilePath: string,
+    modName: unknown,
+    importMatches: string[],
+    pickFromSingleDir: (files: string[]) => string[],
+  ): string[] {
     const suffixes = goImportSuffixes(modName);
     const scored = importMatches.map(fp => {
       const dirPath = nodePath.dirname(fp).replace(/\\/g, '/');
@@ -1699,45 +1701,23 @@ export function resolveEdges(
       dirGroups.set(key, list);
     }
 
-    if (dirGroups.size === 1) {
-      const anchor = pickGoPackageAnchor([...dirGroups.values()][0]);
-      return anchor ? [anchor] : [];
-    }
-
+    if (dirGroups.size === 1) return pickFromSingleDir([...dirGroups.values()][0]);
     return narrowed;
+  }
+
+  function resolveImportTargets(srcFilePath: string, srcLanguage: SupportedLanguages, modName: unknown): string[] {
+    const importMatches = modNameToFiles(modName, srcFilePath);
+    if (srcLanguage !== SupportedLanguages.Go || importMatches.length <= 1) return importMatches;
+    return narrowGoImportCandidates(srcFilePath, modName, importMatches, files => {
+      const anchor = pickGoPackageAnchor(files);
+      return anchor ? [anchor] : [];
+    });
   }
 
   function resolveImportQualifierTargets(srcFilePath: string, srcLanguage: SupportedLanguages, modName: unknown): string[] {
     const importMatches = modNameToFiles(modName, srcFilePath);
     if (srcLanguage !== SupportedLanguages.Go || importMatches.length <= 1) return importMatches;
-
-    const suffixes = goImportSuffixes(modName);
-    const scored = importMatches.map(fp => {
-      const dirPath = nodePath.dirname(fp).replace(/\\/g, '/');
-      let bestSuffixLen = -1;
-      for (const suffix of suffixes) {
-        if (dirPath === suffix || dirPath.endsWith(`/${suffix}`)) {
-          if (suffix.length > bestSuffixLen) bestSuffixLen = suffix.length;
-        }
-      }
-      return { fp, bestSuffixLen };
-    });
-
-    const bestSuffixLen = Math.max(...scored.map(item => item.bestSuffixLen));
-    const narrowed = bestSuffixLen >= 0
-      ? scored.filter(item => item.bestSuffixLen === bestSuffixLen).map(item => item.fp)
-      : importMatches;
-
-    const dirGroups = new Map<string, string[]>();
-    for (const fp of narrowed) {
-      const key = nodePath.dirname(fp).replace(/\\/g, '/');
-      const list = dirGroups.get(key) ?? [];
-      list.push(fp);
-      dirGroups.set(key, list);
-    }
-
-    if (dirGroups.size === 1) return [...dirGroups.values()][0];
-    return narrowed;
+    return narrowGoImportCandidates(srcFilePath, modName, importMatches, files => files);
   }
 
   function tokenizeSymbolParts(value: string): string[] {
@@ -1948,7 +1928,7 @@ export function resolveEdges(
         // importMatches.length === 0: if dstName is a PascalCase symbol (class/function name
         // captured via import.name from "from X import ClassName"), fall through to Tier 2/3
         // symbol resolution so the edge connects to the actual class node rather than a file.
-        if (!/^[A-Z]/.test(rel.dstName)) continue;
+        if (srcLanguage !== SupportedLanguages.Python || !/^[A-Z]/.test(rel.dstName)) continue;
         // fall through to Tier 1b → Tier 2 → Tier 3 below
       }
 
