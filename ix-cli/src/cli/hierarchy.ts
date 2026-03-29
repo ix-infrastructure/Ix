@@ -7,7 +7,7 @@ const REGION_KINDS = new Set(["system", "subsystem", "module", "region"]);
 /** Traverse IN_REGION edges upward to build the system-hierarchy path for a node. */
 export async function getSystemPath(client: IxClient, nodeId: string): Promise<SystemPath> {
   try {
-    const result = await client.expand(nodeId, { direction: "out", predicates: ["IN_REGION"], hops: 5 });
+    const result = await client.expand(nodeId, { direction: "in", predicates: ["IN_REGION"], hops: 5 });
     const nodes = result.nodes as Array<{ id: string; name?: string; attrs?: { name?: string }; kind?: string }>;
     if (nodes.length === 0) return [];
     // Sort by region kind: system > subsystem > module > region > file
@@ -55,7 +55,7 @@ export async function bucketByHierarchy(
         const memberName = node.name || node.attrs?.name || "(unnamed)";
         const memberKind = node.kind || "unknown";
 
-        const regionResult = await client.expand(nodeId, { direction: "out", predicates: ["IN_REGION"], hops: 1 });
+        const regionResult = await client.expand(nodeId, { direction: "in", predicates: ["IN_REGION"], hops: 1 });
         const regionNodes = regionResult.nodes as Array<{ id: string; name?: string; attrs?: { name?: string }; kind?: string }>;
 
         // Pick the most specific region (lowest in hierarchy)

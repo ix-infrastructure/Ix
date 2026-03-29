@@ -1181,5 +1181,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.Scala]: SCALA_QUERIES,
   [SupportedLanguages.YAML]: '',
   [SupportedLanguages.Dockerfile]: '',
+  [SupportedLanguages.SQL]: '',
 };
  

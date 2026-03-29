@@ -28,6 +28,18 @@ COMPOSE_DIR="$IX_HOME/backend"
 HEALTH_URL="http://localhost:8090/v1/health"
 ARANGO_URL="http://localhost:8529/_api/version"
 
+if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
+  export IX_HOST_MOUNT_ROOT="$(cygpath -m "$HOME")"
+  export IX_CONTAINER_MOUNT_ROOT="${HOME}"
+  dc() {
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker compose "$@"
+  }
+else
+  export IX_HOST_MOUNT_ROOT="${HOME}"
+  export IX_CONTAINER_MOUNT_ROOT="${HOME}"
+  dc() { docker compose "$@"; }
+fi
+
 # Pick a bin dir that's already in PATH and writable
 pick_bin_dir() {
   # Prefer /usr/local/bin (already in PATH everywhere)
@@ -218,7 +230,7 @@ else
     info "Downloaded docker-compose.yml"
 
     printf "  Starting backend services (this may take a minute on first run)..."
-    docker compose -f "$COMPOSE_DIR/docker-compose.yml" up -d --pull always >/dev/null 2>&1 &
+    dc -f "$COMPOSE_DIR/docker-compose.yml" up -d --pull always >/dev/null 2>&1 &
     DOCKER_PID=$!
     while kill -0 "$DOCKER_PID" 2>/dev/null; do
       printf "."

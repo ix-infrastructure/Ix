@@ -18,6 +18,19 @@ set -euo pipefail
 IX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$IX_DIR"
 
+if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
+  export IX_HOST_MOUNT_ROOT="$(cygpath -m "$HOME")"
+  export IX_CONTAINER_MOUNT_ROOT="${HOME}"
+  dc() {
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+      docker compose -f "$(cygpath -m "$IX_DIR/docker-compose.yml")" "$@"
+  }
+else
+  export IX_HOST_MOUNT_ROOT="${HOME}"
+  export IX_CONTAINER_MOUNT_ROOT="${HOME}"
+  dc() { docker compose -f "$IX_DIR/docker-compose.yml" "$@"; }
+fi
+
 CLEAN=false
 DISCONNECT_PROJECTS=()
 
@@ -108,10 +121,10 @@ elif ! docker info &> /dev/null 2>&1; then
   echo "  [ok] Docker not running, nothing to stop"
 else
   if [ "$CLEAN" = true ]; then
-    docker compose -f "$IX_DIR/docker-compose.yml" down -v 2>&1 | sed 's/^/  /'
+    dc down -v 2>&1 | sed 's/^/  /'
     echo "  [ok] Containers stopped and data volumes removed"
   else
-    docker compose -f "$IX_DIR/docker-compose.yml" down 2>&1 | sed 's/^/  /'
+    dc down 2>&1 | sed 's/^/  /'
     echo "  [ok] Containers stopped (data preserved)"
   fi
 fi

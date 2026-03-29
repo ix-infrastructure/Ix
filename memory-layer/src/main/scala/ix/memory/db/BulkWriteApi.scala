@@ -103,8 +103,13 @@ class BulkWriteApi(client: ArangoClient) {
       // Skip tombstone/retire on first ingest — DB is empty, no existing docs to update.
       tombstoneAndRetireMs <-
         if (skipTombstone || baseRev == 0) IO.pure((0L, 0L))
-        else timedUnit(tombstoneExistingNodes(logicalIds, newRev))
-               .both(timedUnit(retireOldClaims(fileBatches, newRev)))
+        else {
+          val sourceUris = fileBatches.map(_.filePath)
+          timedUnit(tombstoneExistingNodes(logicalIds, newRev))
+            .both(timedUnit(tombstoneExistingEdges(sourceUris, newRev)))
+            .both(timedUnit(retireOldClaims(fileBatches, newRev)))
+            .map { case ((nodesMs, edgesMs), claimsMs) => (nodesMs + edgesMs, claimsMs) }
+        }
       (tombstoneMs: Long, retireClaimsMs: Long) = tombstoneAndRetireMs
       // Run all four collection inserts concurrently — they write to independent collections
       // with no referential-integrity enforcement between them. Wall time drops from the
@@ -146,6 +151,31 @@ class BulkWriteApi(client: ArangoClient) {
           "ids" -> idList.asInstanceOf[AnyRef],
           "rev" -> Long.box(newRev).asInstanceOf[AnyRef],
           "now" -> Instant.now().toString.asInstanceOf[AnyRef]
+        )
+      )
+    }
+  }
+
+  // Tombstone all active edges whose provenance.source_uri matches a re-ingested file.
+  // Without this, edges removed from the parse output (e.g. a decorator CALLS edge that
+  // was fixed) persist in the graph indefinitely, since UpsertEdge only updates edges
+  // that still exist in the new parse — it never deletes edges that were dropped.
+  // The subsequent bulkInsertEdges (overwriteMode=replace) will un-tombstone any edges
+  // that still exist in the new parse, so only genuinely removed edges remain tombstoned.
+  private def tombstoneExistingEdges(sourceUris: Vector[String], newRev: Long): IO[Unit] = {
+    if (sourceUris.isEmpty) IO.unit
+    else {
+      val uriList = new java.util.ArrayList[String](sourceUris.size)
+      sourceUris.distinct.foreach(uriList.add)
+      client.execute(
+        """FOR e IN edges
+          |  FILTER e.provenance.source_uri IN @uris
+          |    AND e.deleted_rev == null
+          |  UPDATE e WITH { deleted_rev: @rev, updated_at: @now } IN edges""".stripMargin,
+        Map(
+          "uris" -> uriList.asInstanceOf[AnyRef],
+          "rev"  -> Long.box(newRev).asInstanceOf[AnyRef],
+          "now"  -> Instant.now().toString.asInstanceOf[AnyRef]
         )
       )
     }
@@ -207,12 +237,14 @@ class BulkWriteApi(client: ArangoClient) {
         val allIds = fileBatches.flatMap(_.patch.ops.collect {
           case PatchOp.UpsertNode(id, _, _, _) => id.value.toString
         }).distinct
+        val sourceUris = fileBatches.map(_.filePath)
         val preTombRev = baseRev + 1L
         timedUnit(tombstoneExistingNodes(allIds.toVector, preTombRev))
+          .both(timedUnit(tombstoneExistingEdges(sourceUris, preTombRev)))
           .both(timedUnit(retireOldClaimsByEntityIds(allIds, preTombRev)))
-          .flatMap { case (tombMs, retireMs) =>
+          .flatMap { case ((tombMs, edgeTombMs), retireMs) =>
             if (debugBulkWrites)
-              logger.info(s"[bulk-write] pre-tombstone files=${fileBatches.size} tombstoneMs=$tombMs retireMs=$retireMs")
+              logger.info(s"[bulk-write] pre-tombstone files=${fileBatches.size} tombstoneMs=$tombMs edgeTombMs=$edgeTombMs retireMs=$retireMs")
             else IO.unit
           }
       }

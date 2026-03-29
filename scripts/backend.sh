@@ -21,15 +21,24 @@ set -euo pipefail
 IX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$IX_DIR"
 
-# On Windows/MINGW, Docker (a Windows binary) receives paths via MINGW's
-# auto-conversion, which turns /c/Users/foo into C:\Users\foo — the drive
-# letter colon then breaks Docker's source:target:options mount syntax.
-# Prefixing with an extra / (//c/Users/foo) suppresses MINGW conversion so
-# the path reaches Docker Desktop as-is, which it maps correctly.
+# On Windows/MINGW, Docker Compose (a Windows binary) can mix POSIX and Windows
+# home paths if we rely on nested interpolation defaults in the compose file.
+# Export both sides of the bind mount explicitly instead:
+#   IX_HOST_MOUNT_ROOT      → host bind source  (cygpath -m: C:/Users/...)
+#   IX_CONTAINER_MOUNT_ROOT → container target  ($HOME: /c/Users/... or /Users/...)
+# The dc() helper passes -f with a Windows-format path so docker compose can
+# locate its file regardless of how it resolves the CWD from a MINGW shell.
 if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
-  export DOCKER_HOME="/${HOME}"
+  export IX_HOST_MOUNT_ROOT="$(cygpath -m "$HOME")"
+  export IX_CONTAINER_MOUNT_ROOT="${HOME}"
+  dc() {
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+      docker compose -f "$(cygpath -m "$IX_DIR/docker-compose.yml")" "$@"
+  }
 else
-  export DOCKER_HOME="${HOME}"
+  export IX_HOST_MOUNT_ROOT="${HOME}"
+  export IX_CONTAINER_MOUNT_ROOT="${HOME}"
+  dc() { docker compose "$@"; }
 fi
 
 JAR_PATH="memory-layer/target/scala-2.13/ix-memory-layer.jar"
@@ -140,7 +149,7 @@ is_healthy() {
 containers_running() {
   # Check if both containers are running via docker compose
   local running
-  running=$(docker compose ps --status running --format json 2>/dev/null | wc -l)
+  running=$(dc ps --status running --format json 2>/dev/null | wc -l)
   [ "$running" -ge 2 ]
 }
 
@@ -162,20 +171,20 @@ case "${1:-up}" in
     # If containers are running but not healthy, restart them
     if containers_running; then
       echo "Containers are running but not healthy — restarting..."
-      docker compose restart
+      dc restart
     else
       echo "Starting backend services..."
-      docker compose up -d --build
+      dc up -d --build
     fi
 
     wait_for_health
     ;;
   down)
-    docker compose down
+    dc down
     echo "[ok] Backend stopped."
     ;;
   status)
-    docker compose ps
+    dc ps
     echo ""
     if is_healthy; then
       echo "[ok] Backend is healthy"
@@ -184,17 +193,17 @@ case "${1:-up}" in
     fi
     ;;
   logs)
-    docker compose logs -f
+    dc logs -f
     ;;
   clean)
-    docker compose down -v
+    dc down -v
     echo "[ok] Backend stopped and data volumes removed."
     ;;
   rebuild)
     ensure_docker
     build_jar true
     echo "Rebuilding and starting backend..."
-    docker compose up -d --build
+    dc up -d --build
     wait_for_health
     ;;
   check)

@@ -213,7 +213,7 @@ function builtinsForLanguage(lang: SupportedLanguages): Set<string> {
 export function isGrammarSupported(filePath: string): boolean {
   const language = languageFromPath(filePath);
   if (!language) return false;
-  if (language === SupportedLanguages.YAML || language === SupportedLanguages.Dockerfile) return true;
+  if (language === SupportedLanguages.YAML || language === SupportedLanguages.Dockerfile || language === SupportedLanguages.SQL) return true;
   if (filePath.endsWith('.tsx')) return true; // TSX uses TypeScript.tsx, always available
   return GRAMMAR_MAP[language] !== undefined;
 }
@@ -546,6 +546,156 @@ function parseDockerfileFile(filePath: string, source: string): FileParseResult 
 }
 
 // ---------------------------------------------------------------------------
+// SQL
+// ---------------------------------------------------------------------------
+
+/** Strip -- line comments and /* block comments *\/ from SQL source. */
+function stripSqlComments(source: string): string {
+  // Block comments first, then line comments
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, match => match.replace(/[^\n]/g, ' '))
+    .replace(/--[^\n]*/g, match => ' '.repeat(match.length));
+}
+
+/** Extract unquoted table/view names following FROM, JOIN variants, INTO, UPDATE, REFERENCES. */
+function extractSqlTableRefs(sql: string): string[] {
+  const refs = new Set<string>();
+  // FROM tbl, JOIN tbl, INTO tbl, UPDATE tbl, REFERENCES tbl
+  const refPattern =
+    /\b(?:FROM|JOIN|INNER\s+JOIN|LEFT\s+JOIN|RIGHT\s+JOIN|FULL\s+JOIN|CROSS\s+JOIN|INTO|UPDATE|REFERENCES)\s+([A-Za-z0-9_.`"[\]]+)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = refPattern.exec(sql)) !== null) {
+    refs.add(m[1].replace(/[`"[\]]/g, ''));
+  }
+  return [...refs];
+}
+
+function parseSqlFile(filePath: string, source: string): FileParseResult {
+  const language = SupportedLanguages.SQL;
+  const fileName = nodePath.basename(filePath);
+  const sourceLineCount = countSourceLines(source);
+  const fileRole = classifyFileRole(filePath);
+  const entities: ParsedEntity[] = [
+    { name: fileName, kind: 'file', lineStart: 1, lineEnd: sourceLineCount, language },
+  ];
+  const chunks: ParsedChunk[] = [];
+  const relationships: ParsedRelationship[] = [];
+  const lineStarts = computeLineStarts(source);
+  const lines = source.split(/\r?\n/);
+  const stripped = stripSqlComments(source);
+  const strippedLines = stripped.split(/\r?\n/);
+
+  // Matches: CREATE [OR REPLACE] [TEMP[ORARY]] [UNIQUE] <TYPE> [IF NOT EXISTS] <name>
+  const createRe =
+    /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP(?:ORARY)?\s+)?(?:UNIQUE\s+)?(TABLE|VIEW|FUNCTION|PROCEDURE|PROC|TRIGGER|INDEX)\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_.`"[\]]+)/i;
+
+  // For INDEX ... ON tableName
+  const indexOnRe = /\bON\s+([A-Za-z0-9_.`"[\]]+)/i;
+
+  let statementLines: number[] = [];  // line indices (0-based) belonging to current statement
+  let currentCreate: { kind: string; name: string; lineStart: number } | null = null;
+
+  const flushStatement = (endLineIdx: number) => {
+    if (!currentCreate) return;
+    const lineEnd = endLineIdx + 1;
+    const startByte = lineStarts[currentCreate.lineStart - 1] ?? 0;
+    const endByte =
+      lineEnd < lines.length ? (lineStarts[lineEnd] ?? source.length) - 1 : source.length;
+    const statementText = strippedLines
+      .slice(currentCreate.lineStart - 1, lineEnd)
+      .join('\n');
+    const rawContent = lines.slice(currentCreate.lineStart - 1, lineEnd).join('\n');
+
+    const objType = currentCreate.kind.toUpperCase();
+    const entityKind =
+      objType === 'TABLE' ? 'table'
+      : objType === 'VIEW' ? 'view'
+      : objType === 'INDEX' ? 'config_entry'
+      : 'function'; // FUNCTION, PROCEDURE, PROC, TRIGGER
+    const chunkKind =
+      objType === 'TABLE' ? 'create_table'
+      : objType === 'VIEW' ? 'create_view'
+      : objType === 'INDEX' ? 'create_index'
+      : objType === 'TRIGGER' ? 'create_trigger'
+      : 'create_function';
+
+    entities.push({
+      name: currentCreate.name,
+      kind: entityKind,
+      lineStart: currentCreate.lineStart,
+      lineEnd,
+      language,
+    });
+    chunks.push({
+      name: currentCreate.name,
+      chunkKind,
+      lineStart: currentCreate.lineStart,
+      lineEnd,
+      startByte,
+      endByte,
+      contentHash: crypto.createHash('sha256').update(rawContent).digest('hex'),
+      language,
+    });
+    relationships.push({ srcName: fileName, dstName: currentCreate.name, predicate: 'CONTAINS' });
+
+    if (objType === 'INDEX') {
+      // REFERENCES the table the index is ON
+      const onMatch = indexOnRe.exec(statementText);
+      if (onMatch) {
+        relationships.push({
+          srcName: currentCreate.name,
+          dstName: onMatch[1].replace(/[`"[\]]/g, ''),
+          predicate: 'REFERENCES',
+        });
+      }
+    } else if (objType !== 'TABLE') {
+      // Views, functions, procedures, triggers: extract table refs from body
+      for (const ref of extractSqlTableRefs(statementText)) {
+        if (ref !== currentCreate.name) {
+          relationships.push({ srcName: currentCreate.name, dstName: ref, predicate: 'REFERENCES' });
+        }
+      }
+    }
+
+    currentCreate = null;
+  };
+
+  for (let i = 0; i < strippedLines.length; i++) {
+    const line = strippedLines[i];
+
+    if (!currentCreate) {
+      const m = createRe.exec(line);
+      if (m) {
+        currentCreate = {
+          kind: m[1],
+          name: m[2].replace(/[`"[\]]/g, ''),
+          lineStart: i + 1,
+        };
+      }
+    }
+
+    if (currentCreate && /;/.test(line)) {
+      flushStatement(i);
+    }
+  }
+
+  if (chunks.length === 0) {
+    chunks.push({
+      name: null,
+      chunkKind: 'file_body',
+      lineStart: 1,
+      lineEnd: Math.max(sourceLineCount, 1),
+      startByte: 0,
+      endByte: source.length,
+      contentHash: crypto.createHash('sha256').update(source).digest('hex'),
+      language,
+    });
+  }
+
+  return { filePath, language, entities, chunks, relationships, fileRole };
+}
+
+// ---------------------------------------------------------------------------
 // Rust: cfg macro unwrapping
 // ---------------------------------------------------------------------------
 
@@ -606,6 +756,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
   if (!language) return null;
   if (language === SupportedLanguages.YAML) return parseYamlFile(filePath, source);
   if (language === SupportedLanguages.Dockerfile) return parseDockerfileFile(filePath, source);
+  if (language === SupportedLanguages.SQL) return parseSqlFile(filePath, source);
 
   // TypeScript TSX uses a separate grammar
   const isTsx = filePath.endsWith('.tsx');
