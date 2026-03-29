@@ -19,6 +19,7 @@ import ix.memory.context._
 import ix.memory.db._
 import ix.memory.map.MapService
 import ix.memory.model._
+import ix.memory.savings.SavingsAccumulator
 import ix.memory.smell.SmellService
 import ix.memory.subsystem.SubsystemScoringService
 
@@ -68,6 +69,7 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
     val mapService           = new MapService(client, queryApi, writeApi)
     val smellService         = new SmellService(client, writeApi)
     val subsystemService     = new SubsystemScoringService(client, writeApi, mapService)
+    val savingsAccumulator   = SavingsAccumulator.create(client).unsafeRunSync()(ioRuntime)
 
     Routes.all(
       contextService,
@@ -78,7 +80,8 @@ class RoutesSpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with TestD
       mapService,
       bulkWriteApi,
       smellService,
-      subsystemService
+      subsystemService,
+      savingsAccumulator
     ).orNotFound
   }
 

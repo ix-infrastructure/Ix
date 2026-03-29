@@ -289,6 +289,20 @@ export class IxClient {
     return resp.json() as Promise<{ ok: boolean; message: string }>;
   }
 
+  async savings(detail?: boolean): Promise<any> {
+    const qs = detail ? "?detail=true" : "";
+    return this.get(`/v1/savings${qs}`);
+  }
+
+  async savingsReset(): Promise<any> {
+    const resp = await fetch(`${this.endpoint}/v1/savings`, { method: "DELETE" });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`${resp.status}: ${text}`);
+    }
+    return resp.json();
+  }
+
   async stats(): Promise<any> {
     return this.get("/v1/stats");
   }

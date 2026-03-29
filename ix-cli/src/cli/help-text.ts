@@ -32,6 +32,7 @@ const OSS_HELP = [
   `  docker <action>       Manage backend`,
   `  view                  Open visualizer`,
   `  reset                 Reset map`,
+  `  savings               Show token savings`,
   `  upgrade               Update ix`,
   ``,
 ].join("\n");
