@@ -904,6 +904,7 @@ export async function ingestFiles(
             }
           }
           globalIndex = (ingestion.buildGlobalResolutionIndex as Function)(filePaths, sources);
+          sources.clear();
         }
 
         let pendingFlush: Promise<void> = Promise.resolve();
@@ -949,6 +950,7 @@ export async function ingestFiles(
           }
         }
         globalIndex = ingestion.buildGlobalResolutionIndex(filePaths, sources);
+        sources.clear();
       }
 
       progressPhase   = 'Parsing';

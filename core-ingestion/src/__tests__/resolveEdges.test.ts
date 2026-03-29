@@ -576,4 +576,53 @@ describe('resolveEdges', () => {
       confidence: 0.9,
     });
   });
+
+  it('Python: from X import ClassName resolves IMPORTS edge to the class node via Tier 2', () => {
+    // `from models import Column` produces two IMPORTS edges: one for the module
+    // (resolves to models.py as a file) and one for the symbol (dstName='Column',
+    // no file match). The PascalCase fallthrough should bind Column to the class node.
+    const consumer = fileResult(
+      '/repo/consumer.py',
+      SupportedLanguages.Python,
+      [entity('use_column', SupportedLanguages.Python)],
+      [
+        { srcName: 'consumer.py', dstName: 'models', predicate: 'IMPORTS' },
+        { srcName: 'consumer.py', dstName: 'Column', predicate: 'IMPORTS' },
+      ],
+    );
+    const models = fileResult(
+      '/repo/models.py',
+      SupportedLanguages.Python,
+      [entity('Column', SupportedLanguages.Python, 'class')],
+    );
+
+    expect(resolveEdges([consumer, models])).toContainEqual({
+      srcFilePath: '/repo/consumer.py',
+      srcName: 'consumer.py',
+      dstFilePath: '/repo/models.py',
+      dstName: 'Column',
+      dstQualifiedKey: 'Column',
+      predicate: 'IMPORTS',
+      confidence: 0.9,
+    });
+  });
+
+  it('Go: IMPORTS edge with PascalCase name and zero importMatches does not fall through to symbol resolution', () => {
+    // An unresolvable external package (no matching file) with a PascalCase name
+    // should not leak into Tier 2/3 and bind to an in-repo Go symbol of the same name.
+    const consumer = fileResult(
+      '/repo/main.go',
+      SupportedLanguages.Go,
+      [entity('main', SupportedLanguages.Go, 'function')],
+      [{ srcName: 'main.go', dstName: 'HttpClient', predicate: 'IMPORTS' }],
+    );
+    const lib = fileResult(
+      '/repo/lib/http.go',
+      SupportedLanguages.Go,
+      [entity('HttpClient', SupportedLanguages.Go, 'class')],
+    );
+
+    const resolved = resolveEdges([consumer, lib]);
+    expect(resolved.filter(e => e.predicate === 'IMPORTS' && e.dstName === 'HttpClient')).toEqual([]);
+  });
 });
