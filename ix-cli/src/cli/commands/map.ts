@@ -150,7 +150,19 @@ Examples:
 
       // Ingest the path before mapping so the graph is up to date
       const ingestStart = performance.now();
-      await ingestFiles(cwd, { recursive: true, format: (opts.format === "json" || silent) ? "json" : "text", printSummary: false, mapMode: true });
+      try {
+        await ingestFiles(cwd, {
+          recursive: true,
+          format: (opts.format === "json" || silent) ? "json" : "text",
+          printSummary: false,
+          suppressOutput: true,
+          mapMode: true,
+        });
+      } catch (err: any) {
+        console.error(chalk.red("Error:"), err.message ?? err);
+        process.exitCode = 1;
+        return;
+      }
       const ingestMs = Math.round(performance.now() - ingestStart);
 
       const client = new IxClient(getEndpoint());

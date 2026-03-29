@@ -33,7 +33,15 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.cs', '.go', '.rb', '.rs', '.php', '.kt', '.kts', '.swift',
   '.scala', '.sc',
   '.yaml', '.yml',
+  '.dockerfile',
 ]);
+
+export function isSupportedSourceFile(filePath: string): boolean {
+  const fileName = nodePath.basename(filePath).toLowerCase();
+  return fileName === 'dockerfile'
+    || fileName.endsWith('.dockerfile')
+    || SUPPORTED_EXTENSIONS.has(nodePath.extname(filePath).toLowerCase());
+}
 
 // ---------------------------------------------------------------------------
 // Language filter helpers
@@ -130,7 +138,7 @@ function* walkFiles(
     if (entry.isDirectory()) {
       if (recursive) yield* walkFiles(full, true);
     } else if (entry.isFile()) {
-      if (SUPPORTED_EXTENSIONS.has(nodePath.extname(entry.name)) && !isGeneratedFile(entry.name)) yield full;
+      if (isSupportedSourceFile(entry.name) && !isGeneratedFile(entry.name)) yield full;
     }
   }
 }
@@ -177,7 +185,7 @@ function tryGitLsFiles(dir: string, recursive: boolean): string[] | null {
       if (!line) continue;
       const fullPath = nodePath.resolve(dir, line);
       if (!recursive && nodePath.dirname(fullPath) !== dir) continue;
-      if (!SUPPORTED_EXTENSIONS.has(nodePath.extname(fullPath))) continue;
+      if (!isSupportedSourceFile(fullPath)) continue;
       if (isGeneratedFile(nodePath.basename(fullPath))) continue;
       try {
         if (!fs.statSync(fullPath).isFile()) continue;
@@ -372,7 +380,7 @@ export function registerIngestCommand(program: Command): void {
 
 export async function ingestFiles(
   path: string,
-  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; lang?: string; mapMode?: boolean }
+  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean }
 ): Promise<void> {
   const debug = opts.debug || process.env.IX_DEBUG === '1';
   const mapMode = opts.mapMode === true;
@@ -394,8 +402,13 @@ export async function ingestFiles(
     nodePath.dirname(fileURLToPath(import.meta.url)),
     '../../../../core-ingestion/dist/parse-worker.js',
   );
-  const pool = new ParsePool(workerPath, Math.max(1, os.cpus().length - 1));
-  pool.init();
+  let pool: ParsePool | null = null;
+  const ensureParsePool = (): ParsePool => {
+    if (pool) return pool;
+    pool = new ParsePool(workerPath, Math.max(1, os.cpus().length - 1));
+    pool.init();
+    return pool;
+  };
 
   let progressPhase   = 'Scanning';
   let progressCurrent = 0;
@@ -482,10 +495,13 @@ export async function ingestFiles(
       return lang !== null && langFilter.has(lang);
     };
 
+    if (!fs.existsSync(resolvedPath)) {
+      throw new Error(`Path not found: ${resolvedPath}`);
+    }
     const stat = fs.statSync(resolvedPath);
     const filePaths: string[] = dedupeDiscoveredFilePaths(
       stat.isFile()
-        ? (SUPPORTED_EXTENSIONS.has(nodePath.extname(resolvedPath)) ? [resolvedPath] : [])
+        ? (isSupportedSourceFile(resolvedPath) ? [resolvedPath] : [])
         : (tryGitLsFiles(resolvedPath, opts.recursive ?? true) ?? Array.from(walkFiles(resolvedPath, opts.recursive ?? true))),
     );
 
@@ -894,7 +910,7 @@ export async function ingestFiles(
           const chunk = parseable.slice(i, i + PARSE_STREAM_CHUNK);
           const parseResults = await Promise.all(
             chunk.map(f =>
-              pool.parse(f.filePath, f.source).then(r => { progressCurrent++; return r; }),
+              ensureParsePool().parse(f.filePath, f.source).then(r => { progressCurrent++; return r; }),
             ),
           );
           const batch: ParsedFile[] = [];
@@ -917,11 +933,17 @@ export async function ingestFiles(
 
       // Build global resolution index from all repo file paths before the parse loop
       // so cross-batch imports resolve correctly even in streaming per-chunk mode.
+      // Use async batched reads (same as Path A) to avoid blocking the event loop.
       {
         const sources = new Map<string, string>();
-        for (const fp of filePaths) {
-          if (nodePath.extname(fp) !== '.go') continue;
-          try { sources.set(fp, fs.readFileSync(fp, 'utf-8')); } catch { /* skip unreadable */ }
+        const goFiles = filePaths.filter(fp => nodePath.extname(fp) === '.go');
+        const GO_READ_BATCH = 500;
+        for (let i = 0; i < goFiles.length; i += GO_READ_BATCH) {
+          const batch = goFiles.slice(i, i + GO_READ_BATCH);
+          const texts = await Promise.all(batch.map(fp => fs.promises.readFile(fp, 'utf-8').catch(() => null)));
+          for (let j = 0; j < batch.length; j++) {
+            if (texts[j] != null) sources.set(batch[j], texts[j]!);
+          }
         }
         globalIndex = ingestion.buildGlobalResolutionIndex(filePaths, sources);
       }
@@ -959,7 +981,7 @@ export async function ingestFiles(
             }
             const fd: NonNullable<FileData> = { filePath, source: sourceText, hash, previousHash: previousHash !== hash ? previousHash : undefined };
             fileData.push(fd);
-            parsePromises.push(pool.parse(fd.filePath, fd.source).then(r => { progressCurrent++; return r; }));
+            parsePromises.push(ensureParsePool().parse(fd.filePath, fd.source).then(r => { progressCurrent++; return r; }));
           } catch (err) {
             parseErrors++;
             fileData.push(null);
@@ -994,7 +1016,9 @@ export async function ingestFiles(
       saveMtimeCache(projectRoot, currentMtimes);
     }
   } finally {
-    await pool.destroy();
+    if (pool) {
+      await pool.destroy();
+    }
     if (interval) {
       clearInterval(interval);
       if (progressTotal > 0) {
@@ -1007,6 +1031,10 @@ export async function ingestFiles(
   }
 
   const elapsed = ((performance.now() - start) / 1000).toFixed(2);
+
+  if (opts.suppressOutput === true) {
+    return;
+  }
 
   if (opts.format === 'json') {
     console.log(JSON.stringify({
