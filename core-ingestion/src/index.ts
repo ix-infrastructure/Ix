@@ -213,7 +213,7 @@ function builtinsForLanguage(lang: SupportedLanguages): Set<string> {
 export function isGrammarSupported(filePath: string): boolean {
   const language = languageFromPath(filePath);
   if (!language) return false;
-  if (language === SupportedLanguages.YAML) return true;
+  if (language === SupportedLanguages.YAML || language === SupportedLanguages.Dockerfile) return true;
   if (filePath.endsWith('.tsx')) return true; // TSX uses TypeScript.tsx, always available
   return GRAMMAR_MAP[language] !== undefined;
 }
@@ -388,6 +388,163 @@ function parseYamlFile(filePath: string, source: string): FileParseResult {
   };
 }
 
+function parseDockerfileFile(filePath: string, source: string): FileParseResult {
+  const language = SupportedLanguages.Dockerfile;
+  const fileName = nodePath.basename(filePath);
+  const sourceLineCount = countSourceLines(source);
+  const fileRole = classifyFileRole(filePath);
+  const entities: ParsedEntity[] = [
+    { name: fileName, kind: 'file', lineStart: 1, lineEnd: sourceLineCount, language },
+  ];
+  const chunks: ParsedChunk[] = [];
+  const relationships: ParsedRelationship[] = [];
+  const lines = source.split(/\r?\n/);
+  const lineStarts = computeLineStarts(source);
+  const stageNames: string[] = [];
+  let pending = '';
+  let logicalStartLine = 1;
+
+  const pushChunk = (
+    name: string | null,
+    chunkKind: string,
+    lineStart: number,
+    lineEnd: number,
+    startByte: number,
+    endByte: number,
+    content: string,
+    container?: string,
+  ) => {
+    chunks.push({
+      name,
+      chunkKind,
+      lineStart,
+      lineEnd,
+      startByte,
+      endByte,
+      contentHash: crypto.createHash('sha256').update(content).digest('hex'),
+      language,
+      container,
+    });
+  };
+
+  const addInstruction = (instructionLine: string, lineStart: number, lineEnd: number) => {
+    const trimmed = instructionLine.trim();
+    if (!trimmed || trimmed.startsWith('#')) return;
+
+    const instructionMatch = /^([A-Z]+)\b(?:\s+([\s\S]*))?$/i.exec(trimmed);
+    if (!instructionMatch) return;
+
+    const keyword = instructionMatch[1].toUpperCase();
+    const argument = (instructionMatch[2] ?? '').trim();
+    const startByte = lineStarts[lineStart - 1] ?? 0;
+    const endByte = lineEnd < lines.length
+      ? (lineStarts[lineEnd] ?? source.length) - 1
+      : source.length;
+
+    if (keyword === 'FROM') {
+      const fromMatch = /^([^\s]+)(?:\s+AS\s+([A-Za-z0-9._-]+))?/i.exec(argument);
+      const baseImage = fromMatch?.[1] ?? argument;
+      const stageName = fromMatch?.[2] ?? `stage-${stageNames.length}`;
+      stageNames.push(stageName);
+
+      entities.push({
+        name: stageName,
+        kind: 'config',
+        lineStart,
+        lineEnd,
+        language,
+      });
+      relationships.push({
+        srcName: fileName,
+        dstName: stageName,
+        predicate: 'CONTAINS',
+      });
+      pushChunk(stageName, 'build_stage', lineStart, lineEnd, startByte, endByte, instructionLine);
+
+      if (baseImage) {
+        entities.push({
+          name: baseImage,
+          kind: 'module',
+          lineStart,
+          lineEnd,
+          language,
+          container: stageName,
+        });
+        relationships.push({
+          srcName: stageName,
+          dstName: baseImage,
+          predicate: 'IMPORTS',
+        });
+      }
+      return;
+    }
+
+    const scope = stageNames[stageNames.length - 1];
+    const entityName =
+      keyword === 'COPY' || keyword === 'ADD'
+        ? `${keyword.toLowerCase()}:${argument.split(/\s+/).find(token => token.length > 0) ?? keyword.toLowerCase()}`
+        : keyword.toLowerCase();
+
+    entities.push({
+      name: entityName,
+      kind: 'config_entry',
+      lineStart,
+      lineEnd,
+      language,
+      container: scope,
+    });
+    relationships.push({
+      srcName: scope ?? fileName,
+      dstName: entityName,
+      predicate: 'CONTAINS',
+    });
+    pushChunk(entityName, 'docker_instruction', lineStart, lineEnd, startByte, endByte, instructionLine, scope);
+
+    if (keyword === 'COPY') {
+      const fromFlag = /--from=([^\s]+)/i.exec(argument)?.[1];
+      if (fromFlag) {
+        relationships.push({
+          srcName: scope ?? fileName,
+          dstName: fromFlag,
+          predicate: 'IMPORTS',
+        });
+      }
+    }
+  };
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    const trimmedEnd = line.replace(/\s+$/, '');
+    const lineContent = pending ? `${pending}\n${line}` : line;
+    if (!pending) logicalStartLine = index + 1;
+
+    if (trimmedEnd.endsWith('\\')) {
+      pending = lineContent.slice(0, lineContent.lastIndexOf('\\')).trimEnd();
+      continue;
+    }
+
+    addInstruction(lineContent, logicalStartLine, index + 1);
+    pending = '';
+  }
+
+  if (pending) {
+    addInstruction(pending, logicalStartLine, lines.length);
+  }
+
+  if (chunks.length === 0) {
+    pushChunk(null, 'file_body', 1, Math.max(sourceLineCount, 1), 0, source.length, source);
+  }
+
+  return {
+    filePath,
+    language,
+    entities,
+    chunks,
+    relationships,
+    fileRole,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Rust: cfg macro unwrapping
 // ---------------------------------------------------------------------------
@@ -448,6 +605,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
   const language = detectLanguageForSource(filePath, source);
   if (!language) return null;
   if (language === SupportedLanguages.YAML) return parseYamlFile(filePath, source);
+  if (language === SupportedLanguages.Dockerfile) return parseDockerfileFile(filePath, source);
 
   // TypeScript TSX uses a separate grammar
   const isTsx = filePath.endsWith('.tsx');

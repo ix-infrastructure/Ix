@@ -40,7 +40,11 @@ function chunkId(filePath: string, chunkKind: string, name: string | null, start
 // ---------------------------------------------------------------------------
 
 function sourceType(filePath: string): string {
-  const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
+  const normalized = filePath.replace(/\\/g, '/');
+  const fileName = normalized.slice(normalized.lastIndexOf('/') + 1).toLowerCase();
+  if (fileName === 'dockerfile' || fileName.endsWith('.dockerfile')) return 'config';
+  const dotIndex = fileName.lastIndexOf('.');
+  const ext = dotIndex === -1 ? '' : fileName.slice(dotIndex);
   if (['.json', '.yaml', '.yml', '.toml', '.ini', '.conf', '.env'].includes(ext)) return 'config';
   if (['.md', '.mdx', '.rst', '.txt'].includes(ext)) return 'doc';
   return 'code';

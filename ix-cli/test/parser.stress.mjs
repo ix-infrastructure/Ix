@@ -64,6 +64,7 @@ const extExpectations = [
   ['.php', 'php'],
   ['.kt', 'kotlin'], ['.kts', 'kotlin'],
   ['.swift', 'swift'],
+  ['.dockerfile', 'dockerfile'],
 ];
 
 for (const [ext, expected] of extExpectations) {
@@ -73,6 +74,7 @@ for (const [ext, expected] of extExpectations) {
 
 assert(languageFromPath('file.txt') === null, 'languageFromPath(.txt) === null');
 assert(languageFromPath('Makefile') === null, 'languageFromPath(no-ext) === null');
+assert(languageFromPath('Dockerfile') === 'dockerfile', 'languageFromPath(Dockerfile) === dockerfile');
 
 // ---------------------------------------------------------------------------
 // § 2  Core entity + relationship extraction (TypeScript)

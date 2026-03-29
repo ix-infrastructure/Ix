@@ -116,8 +116,9 @@ class MapGraphBuilder(client: ArangoClient) {
         |  FILTER n.kind == "file"
         |    AND n.deleted_rev == null
         |    AND n.provenance.source_uri != null
-        |  LET ext = LOWER(LAST(SPLIT(n.provenance.source_uri, ".")))
-        |  FILTER ext IN @extensions
+        |  LET base = LOWER(n.name)
+        |  LET ext = CONTAINS(base, ".") ? LOWER(LAST(SPLIT(base, "."))) : null
+        |  FILTER ext IN @extensions OR base == "dockerfile" OR LIKE(base, "%.dockerfile")
         |  COLLECT WITH COUNT INTO cnt
         |  RETURN cnt""".stripMargin,
       Map("extensions" -> SourceExtensions.toArray.asInstanceOf[AnyRef])
@@ -140,8 +141,9 @@ class MapGraphBuilder(client: ArangoClient) {
         |  FILTER n.kind == "file"
         |    AND n.deleted_rev == null
         |    AND n.provenance.source_uri != null
-        |  LET ext = LOWER(LAST(SPLIT(n.provenance.source_uri, ".")))
-        |  FILTER ext IN @extensions
+        |  LET base = LOWER(n.name)
+        |  LET ext = CONTAINS(base, ".") ? LOWER(LAST(SPLIT(base, "."))) : null
+        |  FILTER ext IN @extensions OR base == "dockerfile" OR LIKE(base, "%.dockerfile")
         |  RETURN {id: n.logical_id, path: n.provenance.source_uri}""".stripMargin,
       Map("extensions" -> SourceExtensions.toArray.asInstanceOf[AnyRef])
     ).map { rows =>
