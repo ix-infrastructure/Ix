@@ -465,6 +465,54 @@ SHIM
   info "Installed: $IX_BIN/ix"
 fi
 
+# -- Referral --
+
+prompt_referral() {
+  # Must read from /dev/tty — stdin may be a pipe (curl | sh)
+  [ -t 0 ] || exec < /dev/tty 2>/dev/null || return
+
+  echo ""
+  echo "  Quick question — how did you hear about Ix?"
+  echo ""
+  echo "    1) LinkedIn"
+  echo "    2) Reddit"
+  echo "    3) Word of mouth"
+  echo "    4) X / Twitter"
+  echo "    5) Hacker News"
+  echo "    6) Other"
+  echo ""
+  printf "  Enter a number (or press Enter to skip): "
+
+  local choice
+  read -r choice < /dev/tty || return
+
+  case "$choice" in
+    1) source="linkedin" ;;
+    2) source="reddit" ;;
+    3) source="word-of-mouth" ;;
+    4) source="x" ;;
+    5) source="hackernews" ;;
+    6) source="other" ;;
+    *) return ;;
+  esac
+
+  printf "  Email for updates (optional, press Enter to skip): "
+  local email
+  read -r email < /dev/tty || true
+
+  local payload="{\"source\":\"${source}\",\"version\":\"${VERSION}\",\"platform\":\"${PLATFORM}\"}"
+  if [ -n "$email" ]; then
+    payload="{\"source\":\"${source}\",\"email\":\"${email}\",\"version\":\"${VERSION}\",\"platform\":\"${PLATFORM}\"}"
+  fi
+
+  curl -fsSL -X POST "https://ix-infra.com/api/referral" \
+    -H "Content-Type: application/json" \
+    -d "$payload" \
+    >/dev/null 2>&1 || true
+}
+
+prompt_referral
+
 # -- Done --
 
 echo ""

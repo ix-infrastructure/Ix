@@ -290,6 +290,49 @@ if ($existingVersion -eq $Version) {
     }
 }
 
+# ── Referral ─────────────────────────────────────────────────────────────────
+
+function Invoke-ReferralPrompt {
+    Write-Host ""
+    Write-Host "  Quick question — how did you hear about Ix?"
+    Write-Host ""
+    Write-Host "    1) LinkedIn"
+    Write-Host "    2) Reddit"
+    Write-Host "    3) Word of mouth"
+    Write-Host "    4) X / Twitter"
+    Write-Host "    5) Hacker News"
+    Write-Host "    6) Other"
+    Write-Host ""
+    $choice = Read-Host "  Enter a number (or press Enter to skip)"
+
+    $source = switch ($choice) {
+        "1" { "linkedin" }
+        "2" { "reddit" }
+        "3" { "word-of-mouth" }
+        "4" { "x" }
+        "5" { "hackernews" }
+        "6" { "other" }
+        default { $null }
+    }
+
+    if (-not $source) { return }
+
+    $email = Read-Host "  Email for updates (optional, press Enter to skip)"
+
+    $body = @{ source = $source; version = $Version; platform = "windows-amd64" }
+    if ($email) { $body.email = $email }
+
+    try {
+        Invoke-RestMethod -Uri "https://ix-infra.com/api/referral" `
+            -Method POST `
+            -ContentType "application/json" `
+            -Body ($body | ConvertTo-Json) `
+            -ErrorAction SilentlyContinue | Out-Null
+    } catch {}
+}
+
+Invoke-ReferralPrompt
+
 # ── Done ─────────────────────────────────────────────────────────────────────
 
 Write-Host ""
