@@ -109,14 +109,26 @@ export function registerLocateCommand(program: Command): void {
         };
       }
 
+      // Sub-file entities (table, view, function, etc.) have no IN_REGION edges of their
+      // own — those belong to the containing file. Walk up via CONTAINS to inherit the
+      // parent file's system path so hasMapData returns true after `ix map`.
+      let effectiveSystemPath = systemPath;
+      if (!hasMapData(systemPath) && !isContainer && containsResult.nodes.length > 0) {
+        const parentFile = containsResult.nodes[0] as any;
+        if (parentFile?.id) {
+          const parentPath = await getSystemPath(client, parentFile.id);
+          if (hasMapData(parentPath)) effectiveSystemPath = parentPath;
+        }
+      }
+
       // Diagnostic for missing map data
-      const hasMap = hasMapData(systemPath);
+      const hasMap = hasMapData(effectiveSystemPath);
       if (!hasMap) {
         diagnostics.push("No system map. Run `ix map` to see hierarchy.");
       }
 
       // Build system path: append resolved symbol for non-file targets
-      let systemPathMapped = systemPath.map((n) => ({ name: n.name, kind: n.kind }));
+      let systemPathMapped = effectiveSystemPath.map((n) => ({ name: n.name, kind: n.kind }));
       if (!isFile) {
         const lastInPath = systemPathMapped[systemPathMapped.length - 1];
         if (!lastInPath || lastInPath.name !== target.name) {

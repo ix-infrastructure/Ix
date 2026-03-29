@@ -118,7 +118,7 @@ export function registerCallersCommand(program: Command): void {
       // Use expand by entity ID to avoid aggregating results across all same-named entities
       const result = await client.expand(target.id, {
         direction: "out",
-        predicates: ["CALLS"],
+        predicates: ["CALLS", "REFERENCES"],
       });
       formatEdgeResults(result.nodes.slice(0, calleeLimit), "callees", target.name, opts.format, target, "graph");
     });
