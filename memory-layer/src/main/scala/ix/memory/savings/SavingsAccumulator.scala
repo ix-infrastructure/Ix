@@ -19,11 +19,13 @@ class SavingsAccumulator(client: ArangoClient, session: Ref[IO, SavingsData]) {
     } yield ()
   }
 
-  /** Get current savings data. */
+  /** Get current savings data. Lifetime is floored to session values since
+    * some AQL writes may fail silently under concurrent load. */
   def getSavings(detail: Boolean): IO[SavingsResponse] =
     for {
       sess     <- session.get
-      lifetime <- loadLifetime
+      dbLife   <- loadLifetime
+      lifetime  = dbLife.atLeast(sess)
     } yield SavingsResponse(
       session  = if (detail) sess else sess.withoutBreakdown,
       lifetime = if (detail) lifetime else lifetime.withoutBreakdown
@@ -133,6 +135,22 @@ case class SavingsData(
   }
 
   def withoutBreakdown: SavingsData = copy(byCommandType = Map.empty)
+
+  /** Ensure this data is at least as large as `other` in all metrics. */
+  def atLeast(other: SavingsData): SavingsData = copy(
+    totalSaved   = math.max(totalSaved, other.totalSaved),
+    totalNaive   = math.max(totalNaive, other.totalNaive),
+    totalActual  = math.max(totalActual, other.totalActual),
+    commandCount = math.max(commandCount, other.commandCount),
+    byCommandType = {
+      val allKeys = byCommandType.keySet ++ other.byCommandType.keySet
+      allKeys.map { k =>
+        val a = byCommandType.getOrElse(k, CommandSavings(0, 0))
+        val b = other.byCommandType.getOrElse(k, CommandSavings(0, 0))
+        k -> CommandSavings(math.max(a.count, b.count), math.max(a.saved, b.saved))
+      }.toMap
+    }
+  )
 }
 
 object SavingsData {
