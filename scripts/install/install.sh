@@ -2,9 +2,10 @@
 # Ix — Standalone Installer
 #
 # Installs everything needed to run Ix without cloning the repo:
-#   1. Docker (checks / prompts)
-#   2. Backend (ArangoDB + Memory Layer via Docker)
-#   3. ix CLI
+#   1. Node.js (checks / installs / upgrades)
+#   2. Docker (checks / prompts)
+#   3. Backend (ArangoDB + Memory Layer via Docker)
+#   4. ix CLI
 #
 # Usage:
 #   curl -fsSL https://ix-infra.com/install.sh | sh
@@ -27,6 +28,8 @@ COMPOSE_DIR="$IX_HOME/backend"
 
 HEALTH_URL="http://localhost:8090/v1/health"
 ARANGO_URL="http://localhost:8529/_api/version"
+
+NODE_MIN_MAJOR=18
 
 # Pick a bin dir that's already in PATH and writable
 pick_bin_dir() {
@@ -127,9 +130,116 @@ PLATFORM=$(detect_platform)
 echo "  Version:  $VERSION"
 echo "  Platform: $PLATFORM"
 
-# -- Step 1: Check / Install Docker --
+# -- Step 1: Check / Install Node.js --
 
-step "1. Docker"
+step "1. Node.js (runtime)"
+
+node_version_major() {
+  node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1
+}
+
+install_or_upgrade_node() {
+  local action="$1"  # "Installing" or "Upgrading"
+  case "$(uname -s)" in
+    Darwin)
+      if command -v brew >/dev/null 2>&1; then
+        echo "  ${action} Node.js via Homebrew..."
+        if [ "$action" = "Upgrading" ]; then
+          brew upgrade node 2>/dev/null || brew install node
+        else
+          brew install node
+        fi
+      else
+        echo "  ${action} Node.js via official installer..."
+        local node_pkg arch node_ver
+        node_pkg=$(mktemp /tmp/node-XXXXXX.pkg)
+        arch="$(uname -m)"
+        # Resolve latest LTS version dynamically
+        node_ver=$(curl -fsSL "https://nodejs.org/dist/index.json" \
+          | sed -n 's/.*"version":"v\([^"]*\)".*"lts":[^f].*/\1/p' \
+          | head -1)
+        if [ -z "$node_ver" ]; then node_ver="22.14.0"; fi
+        if [ "$arch" = "arm64" ]; then
+          curl -fsSL "https://nodejs.org/dist/v${node_ver}/node-v${node_ver}-darwin-arm64.pkg" -o "$node_pkg"
+        else
+          curl -fsSL "https://nodejs.org/dist/v${node_ver}/node-v${node_ver}-darwin-x64.pkg" -o "$node_pkg"
+        fi
+        sudo installer -pkg "$node_pkg" -target /
+        rm -f "$node_pkg"
+      fi
+      ;;
+    Linux)
+      if command -v apt-get >/dev/null 2>&1; then
+        echo "  ${action} Node.js via NodeSource (apt)..."
+        curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+        sudo apt-get install -y nodejs
+      elif command -v dnf >/dev/null 2>&1; then
+        echo "  ${action} Node.js via NodeSource (dnf)..."
+        curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash -
+        sudo dnf install -y nodejs
+      elif command -v yum >/dev/null 2>&1; then
+        echo "  ${action} Node.js via NodeSource (yum)..."
+        curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash -
+        sudo yum install -y nodejs
+      elif command -v apk >/dev/null 2>&1; then
+        echo "  ${action} Node.js via apk..."
+        sudo apk add --update nodejs npm
+      else
+        err "Could not detect a supported package manager (apt, dnf, yum, apk). Install Node.js ${NODE_MIN_MAJOR}+ manually: https://nodejs.org/"
+      fi
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      echo ""
+      echo "  Node.js ${NODE_MIN_MAJOR}+ is required."
+      echo "  Download from: https://nodejs.org/"
+      echo ""
+      err "Install Node.js and re-run this installer."
+      ;;
+    *)
+      err "Unsupported OS. Install Node.js ${NODE_MIN_MAJOR}+ manually: https://nodejs.org/"
+      ;;
+  esac
+}
+
+if command -v node >/dev/null 2>&1; then
+  CURRENT_NODE=$(node_version_major)
+  if [ "$CURRENT_NODE" -ge "$NODE_MIN_MAJOR" ]; then
+    info "Node.js $(node -v) is installed (>= ${NODE_MIN_MAJOR} required)"
+  else
+    warn "Node.js $(node -v) is too old (>= ${NODE_MIN_MAJOR} required)"
+    install_or_upgrade_node "Upgrading"
+    # Re-check after upgrade
+    if ! command -v node >/dev/null 2>&1; then
+      err "Node.js upgrade failed. Install Node.js ${NODE_MIN_MAJOR}+ manually: https://nodejs.org/"
+    fi
+    CURRENT_NODE=$(node_version_major)
+    if [ "$CURRENT_NODE" -lt "$NODE_MIN_MAJOR" ]; then
+      err "Node.js upgrade resulted in $(node -v), still below ${NODE_MIN_MAJOR}. Install manually: https://nodejs.org/"
+    fi
+    info "Node.js upgraded to $(node -v)"
+  fi
+else
+  install_or_upgrade_node "Installing"
+  # Rehash PATH — brew/apt may have just added node
+  hash -r 2>/dev/null || true
+  if ! command -v node >/dev/null 2>&1; then
+    # Try common install locations
+    for p in /usr/local/bin/node /opt/homebrew/bin/node; do
+      if [ -x "$p" ]; then
+        export PATH="$(dirname "$p"):$PATH"
+        break
+      fi
+    done
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    err "Node.js installation failed. Install Node.js ${NODE_MIN_MAJOR}+ manually: https://nodejs.org/"
+  fi
+  info "Node.js $(node -v) installed"
+fi
+
+# -- Step 2: Check / Install Docker --
+
+step "2. Docker"
 
 if [ "${IX_SKIP_BACKEND:-}" = "1" ]; then
   echo "  (skipped via IX_SKIP_BACKEND=1)"
@@ -190,9 +300,9 @@ else
   info "Docker is running"
 fi
 
-# -- Step 2: Start Backend --
+# -- Step 3: Start Backend --
 
-step "2. Backend (ArangoDB + Memory Layer)"
+step "3. Backend (ArangoDB + Memory Layer)"
 
 if [ "${IX_SKIP_BACKEND:-}" = "1" ]; then
   echo "  (skipped via IX_SKIP_BACKEND=1)"
@@ -248,9 +358,9 @@ else
   echo "  ArangoDB:     http://localhost:8529"
 fi
 
-# -- Step 3: Install ix CLI --
+# -- Step 4: Install ix CLI --
 
-step "3. ix CLI"
+step "4. ix CLI"
 
 if [ "$PLATFORM" = "windows-amd64" ]; then
   TARBALL_NAME="ix-${VERSION}-${PLATFORM}.zip"

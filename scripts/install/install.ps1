@@ -2,9 +2,10 @@
 # Ix — Windows Installer (PowerShell)
 #
 # Installs everything needed to run Ix:
-#   1. Docker Desktop (checks / prompts)
-#   2. Backend (ArangoDB + Memory Layer via Docker)
-#   3. ix CLI
+#   1. Node.js (checks / installs / upgrades)
+#   2. Docker Desktop (checks / prompts)
+#   3. Backend (ArangoDB + Memory Layer via Docker)
+#   4. ix CLI
 #
 # Usage:
 #   irm https://ix-infra.com/install.ps1 | iex
@@ -26,6 +27,7 @@ $IxBin = "$IxHome\bin"
 $ComposeDir = "$IxHome\backend"
 $HealthUrl = "http://localhost:8090/v1/health"
 $ArangoUrl = "http://localhost:8529/_api/version"
+$NodeMinMajor = 18
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -70,10 +72,94 @@ $Version = Get-LatestVersion
 Write-Host "  Version:  $Version"
 Write-Host "  Platform: windows-amd64"
 
-# ── Step 1: Docker ───────────────────────────────────────────────────────────
+# ── Step 1: Node.js ──────────────────────────────────────────────────────────
 
 Write-Host ""
-Write-Host "-- 1. Docker --" -ForegroundColor White
+Write-Host "-- 1. Node.js (runtime) --" -ForegroundColor White
+
+function Get-NodeMajorVersion {
+    try {
+        $ver = & node -v 2>&1
+        return [int]($ver -replace '^v','').Split('.')[0]
+    } catch {
+        return 0
+    }
+}
+
+function Install-NodeJS($action) {
+    $wingetAvailable = Get-Command winget -ErrorAction SilentlyContinue
+    $chocoAvailable = Get-Command choco -ErrorAction SilentlyContinue
+
+    if ($wingetAvailable) {
+        Write-Host "  $action Node.js via winget..."
+        if ($action -eq "Upgrading") {
+            winget upgrade OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements --silent
+        } else {
+            winget install OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements --silent
+        }
+    } elseif ($chocoAvailable) {
+        Write-Host "  $action Node.js via Chocolatey..."
+        if ($action -eq "Upgrading") {
+            choco upgrade nodejs-lts -y
+        } else {
+            choco install nodejs-lts -y
+        }
+    } else {
+        Write-Host "  $action Node.js via official installer..."
+        $nodeInstaller = "$env:TEMP\node-install.msi"
+        Write-Host "  Downloading Node.js LTS installer..."
+        # Resolve latest LTS version
+        try {
+            $nodeIndex = Invoke-RestMethod -Uri "https://nodejs.org/dist/index.json" -ErrorAction Stop
+            $ltsEntry = $nodeIndex | Where-Object { $_.lts -ne $false } | Select-Object -First 1
+            $nodeVer = $ltsEntry.version -replace '^v', ''
+        } catch {
+            $nodeVer = "22.14.0"
+        }
+        Invoke-WebRequest -Uri "https://nodejs.org/dist/v$nodeVer/node-v$nodeVer-x64.msi" `
+            -OutFile $nodeInstaller -UseBasicParsing
+        Write-Host "  Running installer (this may take a moment)..."
+        Start-Process msiexec.exe -ArgumentList "/i", $nodeInstaller, "/qn", "/norestart" -Wait -NoNewWindow
+        Remove-Item $nodeInstaller -Force -ErrorAction SilentlyContinue
+    }
+
+    # Refresh PATH for current session
+    $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+    $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+    $env:Path = "$machinePath;$userPath"
+}
+
+$nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+if ($nodeCmd) {
+    $currentMajor = Get-NodeMajorVersion
+    if ($currentMajor -ge $NodeMinMajor) {
+        $nodeVer = & node -v 2>&1
+        Write-Ok "Node.js $nodeVer is installed (>= $NodeMinMajor required)"
+    } else {
+        $nodeVer = & node -v 2>&1
+        Write-Warn "Node.js $nodeVer is too old (>= $NodeMinMajor required)"
+        Install-NodeJS "Upgrading"
+        $currentMajor = Get-NodeMajorVersion
+        if ($currentMajor -lt $NodeMinMajor) {
+            Write-Err "Node.js upgrade failed. Install Node.js $NodeMinMajor+ manually: https://nodejs.org/"
+        }
+        $nodeVer = & node -v 2>&1
+        Write-Ok "Node.js upgraded to $nodeVer"
+    }
+} else {
+    Install-NodeJS "Installing"
+    $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $nodeCmd) {
+        Write-Err "Node.js installation failed. Install Node.js $NodeMinMajor+ manually: https://nodejs.org/"
+    }
+    $nodeVer = & node -v 2>&1
+    Write-Ok "Node.js $nodeVer installed"
+}
+
+# ── Step 2: Docker ───────────────────────────────────────────────────────────
+
+Write-Host ""
+Write-Host "-- 2. Docker --" -ForegroundColor White
 
 if ($env:IX_SKIP_BACKEND -eq "1") {
     Write-Host "  (skipped via IX_SKIP_BACKEND=1)"
@@ -104,10 +190,10 @@ if ($env:IX_SKIP_BACKEND -eq "1") {
     }
 }
 
-# ── Step 2: Backend ──────────────────────────────────────────────────────────
+# ── Step 3: Backend ──────────────────────────────────────────────────────────
 
 Write-Host ""
-Write-Host "-- 2. Backend (ArangoDB + Memory Layer) --" -ForegroundColor White
+Write-Host "-- 3. Backend (ArangoDB + Memory Layer) --" -ForegroundColor White
 
 if ($env:IX_SKIP_BACKEND -eq "1") {
     Write-Host "  (skipped via IX_SKIP_BACKEND=1)"
@@ -145,10 +231,10 @@ if ($env:IX_SKIP_BACKEND -eq "1") {
     Write-Host "  ArangoDB:     http://localhost:8529"
 }
 
-# ── Step 3: ix CLI ───────────────────────────────────────────────────────────
+# ── Step 4: ix CLI ───────────────────────────────────────────────────────────
 
 Write-Host ""
-Write-Host "-- 3. ix CLI --" -ForegroundColor White
+Write-Host "-- 4. ix CLI --" -ForegroundColor White
 
 $TarballName = "ix-$Version-windows-amd64.zip"
 $TarballUrl = "https://github.com/$GithubOrg/$GithubRepo/releases/download/v$Version/$TarballName"
