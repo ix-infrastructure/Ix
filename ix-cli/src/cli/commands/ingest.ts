@@ -906,6 +906,7 @@ export async function ingestFiles(
           globalIndex = (ingestion.buildGlobalResolutionIndex as Function)(filePaths, sources);
         }
 
+        let pendingFlush: Promise<void> = Promise.resolve();
         for (let i = 0; i < parseable.length; i += PARSE_STREAM_CHUNK) {
           const chunk = parseable.slice(i, i + PARSE_STREAM_CHUNK);
           const parseResults = await Promise.all(
@@ -920,8 +921,10 @@ export async function ingestFiles(
             entitiesParsed += parsed.entities.length;
             batch.push({ filePath: chunk[j].filePath, parsed, hash: chunk[j].hash, previousHash: chunk[j].previousHash });
           }
-          await flushBatch(batch);
+          await pendingFlush;
+          pendingFlush = flushBatch(batch);
         }
+        await pendingFlush;
       }
     } else {
       // Path B: no baseline (first ingest) or --force → load modules, then stream parse + commit.
@@ -956,6 +959,7 @@ export async function ingestFiles(
       // Each file is dispatched to the parse pool immediately after it is read so workers
       // start processing as soon as the first file in the chunk is ready rather than
       // waiting for all reads in the chunk to complete.
+      let pendingFlushB: Promise<void> = Promise.resolve();
       for (let i = 0; i < filePaths.length; i += PARSE_STREAM_CHUNK) {
         const chunk = filePaths.slice(i, i + PARSE_STREAM_CHUNK);
         type FileData = { filePath: string; source: string; hash: string; previousHash: string | undefined } | null;
@@ -999,8 +1003,10 @@ export async function ingestFiles(
           entitiesParsed += parsed.entities.length;
           batch.push({ filePath: f.filePath, parsed, hash: f.hash, previousHash: f.previousHash });
         }
-        await flushBatch(batch);
+        await pendingFlushB;
+        pendingFlushB = flushBatch(batch);
       }
+      await pendingFlushB;
     }
 
     const parsed = performance.now();
