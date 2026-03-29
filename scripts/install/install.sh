@@ -145,21 +145,21 @@ install_or_upgrade_node() {
       if command -v brew >/dev/null 2>&1; then
         echo "  ${action} Node.js via Homebrew..."
         if [ "$action" = "Upgrading" ]; then
-          brew upgrade node 2>/dev/null || brew install node
+          brew upgrade node < /dev/null 2>/dev/null || brew install node < /dev/null
         else
-          brew install node 2>/dev/null || true
+          brew install node < /dev/null 2>/dev/null || true
         fi
         # Handle "installed but not linked" — common when a previous version left stale symlinks
         if ! command -v node >/dev/null 2>&1; then
           echo "  Linking Node.js..."
-          if ! brew link --overwrite node 2>/dev/null; then
+          if ! brew link --overwrite node < /dev/null 2>/dev/null; then
             # Fix ownership on dirs Homebrew needs to symlink into
             for dir in /usr/local/include/node /usr/local/lib/node_modules /usr/local/share/doc/node; do
               if [ -d "$dir" ] && [ ! -w "$dir" ]; then
-                sudo chown -R "$(whoami)" "$dir" 2>/dev/null || true
+                sudo chown -R "$(whoami)" "$dir" < /dev/null 2>/dev/null || true
               fi
             done
-            brew link --overwrite node 2>/dev/null || true
+            brew link --overwrite node < /dev/null 2>/dev/null || true
           fi
         fi
       else
@@ -177,26 +177,26 @@ install_or_upgrade_node() {
         else
           curl -fsSL "https://nodejs.org/dist/v${node_ver}/node-v${node_ver}-darwin-x64.pkg" -o "$node_pkg"
         fi
-        sudo installer -pkg "$node_pkg" -target /
+        sudo installer -pkg "$node_pkg" -target / < /dev/null
         rm -f "$node_pkg"
       fi
       ;;
     Linux)
       if command -v apt-get >/dev/null 2>&1; then
         echo "  ${action} Node.js via NodeSource (apt)..."
-        curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-        sudo apt-get install -y nodejs
+        curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - < /dev/null
+        sudo apt-get install -y nodejs < /dev/null
       elif command -v dnf >/dev/null 2>&1; then
         echo "  ${action} Node.js via NodeSource (dnf)..."
-        curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash -
-        sudo dnf install -y nodejs
+        curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash - < /dev/null
+        sudo dnf install -y nodejs < /dev/null
       elif command -v yum >/dev/null 2>&1; then
         echo "  ${action} Node.js via NodeSource (yum)..."
-        curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash -
-        sudo yum install -y nodejs
+        curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash - < /dev/null
+        sudo yum install -y nodejs < /dev/null
       elif command -v apk >/dev/null 2>&1; then
         echo "  ${action} Node.js via apk..."
-        sudo apk add --update nodejs npm
+        sudo apk add --update nodejs npm < /dev/null
       else
         err "Could not detect a supported package manager (apt, dnf, yum, apk). Install Node.js ${NODE_MIN_MAJOR}+ manually: https://nodejs.org/"
       fi
@@ -287,7 +287,7 @@ else
     err "Install Docker and re-run this installer."
   fi
 
-  if ! docker info >/dev/null 2>&1; then
+  if ! docker info < /dev/null >/dev/null 2>&1; then
     echo ""
     echo "  Docker is installed but not running."
     case "$(uname -s)" in
@@ -297,7 +297,7 @@ else
           open -a Docker
           echo "  Waiting for Docker to start (this can take 30-60 seconds)..."
           for i in $(seq 1 30); do
-            if docker info >/dev/null 2>&1; then break; fi
+            if docker info < /dev/null >/dev/null 2>&1; then break; fi
             printf "."
             sleep 2
           done
@@ -306,7 +306,7 @@ else
         ;;
     esac
 
-    if ! docker info >/dev/null 2>&1; then
+    if ! docker info < /dev/null >/dev/null 2>&1; then
       err "Docker is not running. Start Docker and re-run this installer."
     fi
   fi
@@ -341,7 +341,7 @@ else
     info "Downloaded docker-compose.yml"
 
     printf "  Starting backend services (this may take a minute on first run)..."
-    docker compose -f "$COMPOSE_DIR/docker-compose.yml" up -d --pull always >/dev/null 2>&1 &
+    docker compose -f "$COMPOSE_DIR/docker-compose.yml" up -d --pull always < /dev/null >/dev/null 2>&1 &
     DOCKER_PID=$!
     while kill -0 "$DOCKER_PID" 2>/dev/null; do
       printf "."
