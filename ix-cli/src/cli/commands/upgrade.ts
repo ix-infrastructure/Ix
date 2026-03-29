@@ -120,6 +120,7 @@ export async function checkForUpdate(): Promise<void> {
     const hasCliUpdate = isNewer(cache.latest, current);
     const compassCurrent = getCompassVersion();
     const hasCompassUpdate =
+      compassCurrent !== "0.0.0" &&
       cache.compassLatest && isNewer(cache.compassLatest, compassCurrent);
     if (hasCliUpdate || hasCompassUpdate) {
       printUpdateNotice(current, cache.latest, !!hasCompassUpdate);
@@ -134,6 +135,7 @@ export async function checkForUpdate(): Promise<void> {
       const compassCurrent = getCompassVersion();
       const hasCliUpdate = isNewer(latest, current);
       const hasCompassUpdate =
+        compassCurrent !== "0.0.0" &&
         compassLatest && isNewer(compassLatest, compassCurrent);
       if (hasCliUpdate || hasCompassUpdate) {
         printUpdateNotice(current, latest, hasCompassUpdate ? true : false);
@@ -317,9 +319,18 @@ export function registerUpgradeCommand(program: Command): void {
           // Clear old compass files, then extract new ones
           rmSync(COMPASS_DIR, { recursive: true, force: true });
           mkdirSync(COMPASS_DIR, { recursive: true });
+          // On Windows/MINGW, convert paths for tar
+          let tarFile = compassTar;
+          let tarDest = COMPASS_DIR;
+          if (process.platform === "win32") {
+            try {
+              tarFile = execFileSync("cygpath", ["-u", compassTar], { encoding: "utf-8" }).trim();
+              tarDest = execFileSync("cygpath", ["-u", COMPASS_DIR], { encoding: "utf-8" }).trim();
+            } catch { /* use as-is */ }
+          }
           execFileSync(
             "tar",
-            ["-xzf", compassTar, "-C", COMPASS_DIR, "--strip-components=1"],
+            ["-xzf", tarFile, "-C", tarDest, "--strip-components=1"],
             { stdio: "ignore" }
           );
           writeFileSync(COMPASS_VERSION_FILE, compassLatest);
