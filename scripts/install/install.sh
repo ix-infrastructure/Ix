@@ -147,7 +147,20 @@ install_or_upgrade_node() {
         if [ "$action" = "Upgrading" ]; then
           brew upgrade node 2>/dev/null || brew install node
         else
-          brew install node
+          brew install node 2>/dev/null || true
+        fi
+        # Handle "installed but not linked" — common when a previous version left stale symlinks
+        if ! command -v node >/dev/null 2>&1; then
+          echo "  Linking Node.js..."
+          if ! brew link --overwrite node 2>/dev/null; then
+            # Fix ownership on dirs Homebrew needs to symlink into
+            for dir in /usr/local/include/node /usr/local/lib/node_modules /usr/local/share/doc/node; do
+              if [ -d "$dir" ] && [ ! -w "$dir" ]; then
+                sudo chown -R "$(whoami)" "$dir" 2>/dev/null || true
+              fi
+            done
+            brew link --overwrite node 2>/dev/null || true
+          fi
         fi
       else
         echo "  ${action} Node.js via official installer..."
