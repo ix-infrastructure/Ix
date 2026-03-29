@@ -142,6 +142,22 @@ jobs:
           tar -czf "$STAGING.tar.gz" "$STAGING"
           shasum -a 256 "$STAGING.tar.gz" > "$STAGING.tar.gz.sha256"
 
+      - name: Package CLI (linux-arm64)
+        run: |
+          STAGING="ix-${{ steps.version.outputs.version }}-linux-arm64"
+          mkdir -p "$STAGING/cli" "$STAGING/core-ingestion" "$STAGING/compass"
+          cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          cp -r core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
+          [ -d system-compass/dist ] && cp -r system-compass/dist/* "$STAGING/compass/" || true
+          cat > "$STAGING/ix" <<'WRAPPER'
+          #!/bin/sh
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          exec node "$SCRIPT_DIR/cli/dist/cli/main.js" "$@"
+          WRAPPER
+          chmod +x "$STAGING/ix"
+          tar -czf "$STAGING.tar.gz" "$STAGING"
+          shasum -a 256 "$STAGING.tar.gz" > "$STAGING.tar.gz.sha256"
+
       - name: Package CLI (darwin-amd64)
         run: |
           STAGING="ix-${{ steps.version.outputs.version }}-darwin-amd64"
@@ -218,6 +234,8 @@ jobs:
           files: |
             ix-${{ steps.version.outputs.version }}-linux-amd64.tar.gz
             ix-${{ steps.version.outputs.version }}-linux-amd64.tar.gz.sha256
+            ix-${{ steps.version.outputs.version }}-linux-arm64.tar.gz
+            ix-${{ steps.version.outputs.version }}-linux-arm64.tar.gz.sha256
             ix-${{ steps.version.outputs.version }}-darwin-amd64.tar.gz
             ix-${{ steps.version.outputs.version }}-darwin-amd64.tar.gz.sha256
             ix-${{ steps.version.outputs.version }}-darwin-arm64.tar.gz
