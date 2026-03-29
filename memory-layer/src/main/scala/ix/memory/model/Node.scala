@@ -30,6 +30,8 @@ object NodeKind {
   case object Region      extends NodeKind
   case object Chunk       extends NodeKind
   case object Macro       extends NodeKind
+  case object Table       extends NodeKind
+  case object View        extends NodeKind
 
   private val nameMap: Map[String, NodeKind] = Map(
     "module"       -> Module,
@@ -54,7 +56,9 @@ object NodeKind {
     "goal"         -> Goal,
     "region"       -> Region,
     "chunk"        -> Chunk,
-    "macro"        -> Macro
+    "macro"        -> Macro,
+    "table"        -> Table,
+    "view"         -> View
   )
 
   implicit val encoder: Encoder[NodeKind] = Encoder[String].contramap {
@@ -81,6 +85,8 @@ object NodeKind {
     case Region      => "region"
     case Chunk       => "chunk"
     case Macro       => "macro"
+    case Table       => "table"
+    case View        => "view"
   }
 
   implicit val decoder: Decoder[NodeKind] = Decoder[String].emap { s =>

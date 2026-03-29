@@ -34,6 +34,7 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.scala', '.sc',
   '.yaml', '.yml',
   '.dockerfile',
+  '.sql',
 ]);
 
 export function isSupportedSourceFile(filePath: string): boolean {
