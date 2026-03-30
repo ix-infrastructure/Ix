@@ -73,10 +73,14 @@ Ix improves how AI systems reason about your codebase.
 Directed context. More signal. Persistent system memory.
 
 ## Install
-
+### Linux/MacOS
 ```bash
 curl -fsSL https://ix-infra.com/install.sh | sh
 ```
+### Windows
+```bash
+irm https://ix-infra.com/install.ps1 | iex
+``` 
 ### Claude Plugin
 ``` bash
 /plugin marketplace add ix-infrastructure/ix-claude-plugin
