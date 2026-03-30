@@ -90,6 +90,10 @@ irm https://ix-infra.com/install.ps1 | iex
 ### Codex Plugin
 [Codex Plugin Repo](https://github.com/ix-infrastructure/ix-codex-plugin)
 
+### OpenClaw Plugin
+``` bash
+openclaw plugins install ix-infrastructure/ix-openclaw-plugin
+```
 ## Requirements
 
 - macOS, Linux, or Windows
