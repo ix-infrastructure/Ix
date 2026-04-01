@@ -270,14 +270,24 @@ class MapService(
       r.copy(childRegionIds = childrenByParent.getOrElse(r.id, Set.empty))
     }
     val dedupedHierarchy = collapseDuplicateHierarchyLevels(withChildren)
+    val withSingletonFallbacks = appendSingletonRegionsForUncoveredFiles(
+      dedupedHierarchy,
+      graph,
+      fileVertexById,
+      crosscutScores,
+      signalAdjacency,
+      rev,
+      commonPfxLen,
+      globalDirTokenCounts
+    )
 
     // Disambiguate duplicate labels within each level.
     // For each group of same-label regions, find a path segment unique to each.
-    val labelGroups = dedupedHierarchy.groupBy(r => (r.level, r.label))
+    val labelGroups = withSingletonFallbacks.groupBy(r => (r.level, r.label))
     val needsDisambig = labelGroups.filter(_._2.size > 1)
 
-    if (needsDisambig.isEmpty) dedupedHierarchy
-    else dedupedHierarchy.map { r =>
+    if (needsDisambig.isEmpty) withSingletonFallbacks
+    else withSingletonFallbacks.map { r =>
       needsDisambig.get((r.level, r.label)) match {
         case Some(group) =>
           val myPaths    = r.memberFiles.flatMap(id => fileVertexById.get(id).map(_.path)).toSet
@@ -304,6 +314,38 @@ class MapService(
         case None => r
       }
     }
+  }
+
+  private[map] def appendSingletonRegionsForUncoveredFiles(
+    regions: Vector[Region],
+    graph: WeightedFileGraph,
+    fileVertexById: Map[NodeId, FileVertex],
+    crosscutScores: Map[NodeId, Double],
+    signalAdjacency: Map[NodeId, Vector[(NodeId, Map[String, Int])]],
+    rev: Rev,
+    commonPfxLen: Int = 0,
+    globalDirTokenCounts: Map[String, Int] = Map.empty
+  ): Vector[Region] = {
+    val coveredFileIds = regions.iterator.flatMap(_.memberFiles.iterator).toSet
+    val uncoveredFileIds = graph.vertices.iterator.map(_.id).filterNot(coveredFileIds.contains).toVector
+    if (uncoveredFileIds.isEmpty) return regions
+
+    val singletonRegions = uncoveredFileIds.map { fileId =>
+      buildOneRegion(
+        memberFiles = Set(fileId),
+        level = 1,
+        kind = "module",
+        graph = graph,
+        fileVertexById = fileVertexById,
+        crosscutScores = crosscutScores,
+        signalAdjacency = signalAdjacency,
+        rev = rev,
+        commonPfxLen = commonPfxLen,
+        globalDirTokenCounts = globalDirTokenCounts
+      )
+    }
+
+    regions ++ singletonRegions
   }
 
   private[map] def collapseDuplicateHierarchyLevels(regions: Vector[Region]): Vector[Region] = {

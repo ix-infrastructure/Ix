@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveEdges, type FileParseResult, type ParsedEntity, type ParsedRelationship } from '../index.js';
+import { buildGlobalResolutionIndex, resolveEdges, type FileParseResult, type ParsedEntity, type ParsedRelationship } from '../index.js';
 import { SupportedLanguages } from '../languages.js';
 
 function entity(
@@ -132,6 +132,93 @@ describe('resolveEdges', () => {
     });
   });
 
+  it('resolves Go alias-qualified package calls through the aliased import path', () => {
+    const caller = fileResult(
+      '/repo/cmd/kube-apiserver/app/server.go',
+      SupportedLanguages.Go,
+      [entity('CreateServerChain', SupportedLanguages.Go)],
+      [
+        { srcName: 'server.go', dstName: 'k8s.io/kubernetes/pkg/controlplane/apiserver', predicate: 'IMPORTS' },
+        { srcName: 'CreateServerChain', dstName: 'controlplaneapiserver.CreateAggregatorServer', predicate: 'CALLS' },
+      ],
+    );
+    caller.importAliases = {
+      controlplaneapiserver: 'k8s.io/kubernetes/pkg/controlplane/apiserver',
+    };
+    const callee = fileResult(
+      '/repo/pkg/controlplane/apiserver/server.go',
+      SupportedLanguages.Go,
+      [entity('CreateAggregatorServer', SupportedLanguages.Go)],
+    );
+
+    expect(resolveEdges([caller, callee])).toContainEqual({
+      srcFilePath: '/repo/cmd/kube-apiserver/app/server.go',
+      srcName: 'CreateServerChain',
+      dstFilePath: '/repo/pkg/controlplane/apiserver/server.go',
+      dstName: 'controlplaneapiserver.CreateAggregatorServer',
+      dstQualifiedKey: 'CreateAggregatorServer',
+      predicate: 'CALLS',
+      confidence: 0.9,
+    });
+  });
+
+  it('resolves Go alias-qualified package calls when using the global index anchor path', () => {
+    const caller = fileResult(
+      '/repo/cmd/kube-apiserver/app/server.go',
+      SupportedLanguages.Go,
+      [entity('CreateServerChain', SupportedLanguages.Go)],
+      [
+        { srcName: 'server.go', dstName: 'k8s.io/kubernetes/pkg/controlplane/apiserver', predicate: 'IMPORTS' },
+        { srcName: 'CreateServerChain', dstName: 'controlplaneapiserver.CreateAggregatorServer', predicate: 'CALLS' },
+      ],
+    );
+    caller.importAliases = {
+      controlplaneapiserver: 'k8s.io/kubernetes/pkg/controlplane/apiserver',
+    };
+
+    const apiserverDoc = fileResult(
+      '/repo/pkg/controlplane/apiserver/apiserver.go',
+      SupportedLanguages.Go,
+      [entity('Config', SupportedLanguages.Go, 'class')],
+    );
+    const aggregator = fileResult(
+      '/repo/pkg/controlplane/apiserver/aggregator.go',
+      SupportedLanguages.Go,
+      [entity('CreateAggregatorServer', SupportedLanguages.Go)],
+    );
+
+    const sources = new Map<string, string>([
+      ['/repo/pkg/controlplane/apiserver/apiserver.go', 'package apiserver\ntype Config struct{}\n'],
+      ['/repo/pkg/controlplane/apiserver/aggregator.go', 'package apiserver\nfunc CreateAggregatorServer() {}\n'],
+    ]);
+    const globalIndex = buildGlobalResolutionIndex(
+      ['/repo/pkg/controlplane/apiserver/apiserver.go', '/repo/pkg/controlplane/apiserver/aggregator.go'],
+      sources,
+    );
+
+    expect(resolveEdges([caller], undefined, globalIndex)).toContainEqual({
+      srcFilePath: '/repo/cmd/kube-apiserver/app/server.go',
+      srcName: 'CreateServerChain',
+      dstFilePath: '/repo/pkg/controlplane/apiserver/aggregator.go',
+      dstName: 'controlplaneapiserver.CreateAggregatorServer',
+      dstQualifiedKey: 'CreateAggregatorServer',
+      predicate: 'CALLS',
+      confidence: 0.9,
+    });
+
+    // Keep the extra parsed files here to mirror production more closely and ensure
+    // the same answer still wins when batch data and global index are both present.
+    expect(resolveEdges([caller, apiserverDoc, aggregator], undefined, globalIndex)).toContainEqual({
+      srcFilePath: '/repo/cmd/kube-apiserver/app/server.go',
+      srcName: 'CreateServerChain',
+      dstFilePath: '/repo/pkg/controlplane/apiserver/aggregator.go',
+      dstName: 'controlplaneapiserver.CreateAggregatorServer',
+      dstQualifiedKey: 'CreateAggregatorServer',
+      predicate: 'CALLS',
+      confidence: 0.9,
+    });
+  });
+
   it('does not resolve qualifier-assisted edges when the member is missing or the qualifier is ambiguous', () => {
     const caller = fileResult(
       '/repo/consumer.scala',
@@ -209,7 +296,8 @@ describe('resolveEdges', () => {
       [entity('helperFn', SupportedLanguages.TypeScript)],
     );
 
-    expect(resolveEdges([ambiguousCaller, imported, baz])).toEqual([]);
+    const resolved = resolveEdges([ambiguousCaller, imported, baz]);
+    expect(resolved.filter(edge => edge.predicate === 'CALLS')).toEqual([]);
   });
 
   it('resolves tier-2.5 transitive imports', () => {
@@ -275,7 +363,8 @@ describe('resolveEdges', () => {
       [entity('helperFn', SupportedLanguages.TypeScript)],
     );
 
-    expect(resolveEdges([caller, index, helperA, helperB])).toEqual([]);
+    const resolved = resolveEdges([caller, index, helperA, helperB]);
+    expect(resolved.filter(edge => edge.predicate === 'CALLS')).toEqual([]);
   });
 
   it('keeps tier-3 same-language fallback working for TypeScript and Scala and rejects ambiguous globals', () => {
@@ -390,5 +479,150 @@ describe('resolveEdges', () => {
       predicate: 'CALLS',
       confidence: 0.7,
     });
+  });
+
+  it('resolves Go package imports to the package anchor and uses them for cross-file type references', () => {
+    const caller = fileResult(
+      '/repo/cmd/kube-scheduler/app/server.go',
+      SupportedLanguages.Go,
+      [entity('Run', SupportedLanguages.Go)],
+      [
+        { srcName: 'server.go', dstName: 'k8s.io/kubernetes/pkg/scheduler', predicate: 'IMPORTS' },
+        { srcName: 'Run', dstName: 'Scheduler', predicate: 'REFERENCES' },
+      ],
+    );
+    const nearbyFalseMatch = fileResult(
+      '/repo/cmd/kube-scheduler/app/scheduler.go',
+      SupportedLanguages.Go,
+      [entity('LocalHelper', SupportedLanguages.Go)],
+    );
+    const scheduler = fileResult(
+      '/repo/pkg/scheduler/scheduler.go',
+      SupportedLanguages.Go,
+      [entity('Scheduler', SupportedLanguages.Go, 'class')],
+      Array.from({ length: 10 }, (_, i) => ({
+        srcName: 'scheduler.go',
+        dstName: `dep${i}`,
+        predicate: 'IMPORTS',
+      })),
+    );
+    const eventhandlers = fileResult(
+      '/repo/pkg/scheduler/eventhandlers.go',
+      SupportedLanguages.Go,
+      [entity('registerHandlers', SupportedLanguages.Go)],
+      [{ srcName: 'eventhandlers.go', dstName: 'dep', predicate: 'IMPORTS' }],
+    );
+
+    expect(resolveEdges([caller, nearbyFalseMatch, scheduler, eventhandlers])).toEqual(
+      expect.arrayContaining([
+        {
+          srcFilePath: '/repo/cmd/kube-scheduler/app/server.go',
+          srcName: 'server.go',
+          dstFilePath: '/repo/pkg/scheduler/scheduler.go',
+          dstName: 'k8s.io/kubernetes/pkg/scheduler',
+          dstQualifiedKey: 'scheduler.go',
+          predicate: 'IMPORTS',
+          confidence: 0.9,
+        },
+        {
+          srcFilePath: '/repo/cmd/kube-scheduler/app/server.go',
+          srcName: 'Run',
+          dstFilePath: '/repo/pkg/scheduler/scheduler.go',
+          dstName: 'Scheduler',
+          dstQualifiedKey: 'Scheduler',
+          predicate: 'REFERENCES',
+          confidence: 0.9,
+        },
+      ]),
+    );
+  });
+
+  it('chooses the highest-signal Go package anchor when a package directory has multiple files', () => {
+    const caller = fileResult(
+      '/repo/cmd/kube-apiserver/app/server.go',
+      SupportedLanguages.Go,
+      [entity('Run', SupportedLanguages.Go)],
+      [{ srcName: 'server.go', dstName: 'k8s.io/kubernetes/pkg/controlplane', predicate: 'IMPORTS' }],
+    );
+    const doc = fileResult('/repo/pkg/controlplane/doc.go', SupportedLanguages.Go, []);
+    const versions = fileResult(
+      '/repo/pkg/controlplane/import_known_versions.go',
+      SupportedLanguages.Go,
+      [entity('KnownVersions', SupportedLanguages.Go)],
+      Array.from({ length: 4 }, (_, i) => ({
+        srcName: 'import_known_versions.go',
+        dstName: `dep${i}`,
+        predicate: 'IMPORTS',
+      })),
+    );
+    const instance = fileResult(
+      '/repo/pkg/controlplane/instance.go',
+      SupportedLanguages.Go,
+      [entity('Config', SupportedLanguages.Go, 'class')],
+      Array.from({ length: 8 }, (_, i) => ({
+        srcName: 'instance.go',
+        dstName: `dep${i}`,
+        predicate: 'IMPORTS',
+      })),
+    );
+
+    expect(resolveEdges([caller, doc, versions, instance])).toContainEqual({
+      srcFilePath: '/repo/cmd/kube-apiserver/app/server.go',
+      srcName: 'server.go',
+      dstFilePath: '/repo/pkg/controlplane/instance.go',
+      dstName: 'k8s.io/kubernetes/pkg/controlplane',
+      dstQualifiedKey: 'instance.go',
+      predicate: 'IMPORTS',
+      confidence: 0.9,
+    });
+  });
+
+  it('Python: from X import ClassName resolves IMPORTS edge to the class node via Tier 2', () => {
+    // `from models import Column` produces two IMPORTS edges: one for the module
+    // (resolves to models.py as a file) and one for the symbol (dstName='Column',
+    // no file match). The PascalCase fallthrough should bind Column to the class node.
+    const consumer = fileResult(
+      '/repo/consumer.py',
+      SupportedLanguages.Python,
+      [entity('use_column', SupportedLanguages.Python)],
+      [
+        { srcName: 'consumer.py', dstName: 'models', predicate: 'IMPORTS' },
+        { srcName: 'consumer.py', dstName: 'Column', predicate: 'IMPORTS' },
+      ],
+    );
+    const models = fileResult(
+      '/repo/models.py',
+      SupportedLanguages.Python,
+      [entity('Column', SupportedLanguages.Python, 'class')],
+    );
+
+    expect(resolveEdges([consumer, models])).toContainEqual({
+      srcFilePath: '/repo/consumer.py',
+      srcName: 'consumer.py',
+      dstFilePath: '/repo/models.py',
+      dstName: 'Column',
+      dstQualifiedKey: 'Column',
+      predicate: 'IMPORTS',
+      confidence: 0.9,
+    });
+  });
+
+  it('Go: IMPORTS edge with PascalCase name and zero importMatches does not fall through to symbol resolution', () => {
+    // An unresolvable external package (no matching file) with a PascalCase name
+    // should not leak into Tier 2/3 and bind to an in-repo Go symbol of the same name.
+    const consumer = fileResult(
+      '/repo/main.go',
+      SupportedLanguages.Go,
+      [entity('main', SupportedLanguages.Go, 'function')],
+      [{ srcName: 'main.go', dstName: 'HttpClient', predicate: 'IMPORTS' }],
+    );
+    const lib = fileResult(
+      '/repo/lib/http.go',
+      SupportedLanguages.Go,
+      [entity('HttpClient', SupportedLanguages.Go, 'class')],
+    );
+
+    const resolved = resolveEdges([consumer, lib]);
+    expect(resolved.filter(e => e.predicate === 'IMPORTS' && e.dstName === 'HttpClient')).toEqual([]);
   });
 });

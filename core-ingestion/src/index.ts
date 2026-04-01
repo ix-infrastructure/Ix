@@ -82,6 +82,7 @@ export interface FileParseResult {
   entities: ParsedEntity[];
   chunks: ParsedChunk[];
   relationships: ParsedRelationship[];
+  importAliases?: Record<string, string>;
   fileRole: RoleClassification;
 }
 
@@ -212,6 +213,7 @@ function builtinsForLanguage(lang: SupportedLanguages): Set<string> {
 export function isGrammarSupported(filePath: string): boolean {
   const language = languageFromPath(filePath);
   if (!language) return false;
+  if (language === SupportedLanguages.YAML || language === SupportedLanguages.Dockerfile) return true;
   if (filePath.endsWith('.tsx')) return true; // TSX uses TypeScript.tsx, always available
   return GRAMMAR_MAP[language] !== undefined;
 }
@@ -251,6 +253,10 @@ function normalizeCapturedImport(rawValue: string, language: SupportedLanguages)
     return unwrapped.replace(/^\.\/+/, '');
   }
 
+  if (language === SupportedLanguages.Go) {
+    return unwrapped.replace(/^\.+/, '');
+  }
+
   const rawMod = unwrapped.split('/').filter((s: string) => s !== '*').pop() ?? unwrapped;
   return rawMod.replace(/^\.+/, '');
 }
@@ -275,6 +281,268 @@ function detectLanguageForSource(filePath: string, source: string): SupportedLan
     return SupportedLanguages.CPlusPlus;
   }
   return language;
+}
+
+function countSourceLines(source: string): number {
+  let lineCount = 1;
+  for (let i = 0; i < source.length; i++) {
+    if (source.charCodeAt(i) === 10) lineCount++;
+  }
+  return lineCount;
+}
+
+function computeLineStarts(source: string): number[] {
+  const lineStarts = [0];
+  for (let i = 0; i < source.length; i++) {
+    if (source.charCodeAt(i) === 10) lineStarts.push(i + 1);
+  }
+  return lineStarts;
+}
+
+function parseYamlFile(filePath: string, source: string): FileParseResult {
+  const language = SupportedLanguages.YAML;
+  const fileName = nodePath.basename(filePath);
+  const sourceLineCount = countSourceLines(source);
+  const fileRole = classifyFileRole(filePath);
+  const entities: ParsedEntity[] = [
+    { name: fileName, kind: 'file', lineStart: 1, lineEnd: sourceLineCount, language },
+  ];
+  const chunks: ParsedChunk[] = [];
+  const relationships: ParsedRelationship[] = [];
+  const lineStarts = computeLineStarts(source);
+  const lines = source.split(/\r?\n/);
+  const stack: Array<{ indent: number; key: string }> = [];
+  const keyLinePattern = /^(\s*)(?:-\s+)?([A-Za-z0-9_.-]+)\s*:(?:\s*.*)?$/;
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    const match = keyLinePattern.exec(line);
+    if (!match) continue;
+
+    const indent = match[1].replace(/\t/g, '  ').length;
+    const listPrefixWidth = line.trimStart().startsWith('- ') ? 2 : 0;
+    const effectiveIndent = indent + listPrefixWidth;
+    const key = match[2];
+    while (stack.length > 0 && effectiveIndent <= stack[stack.length - 1].indent) {
+      stack.pop();
+    }
+
+    const parent = stack[stack.length - 1];
+    const lineNumber = index + 1;
+    const lineStartOffset = lineStarts[index] ?? 0;
+    const startByte = lineStartOffset + match[1].length + listPrefixWidth;
+    const endByte = Math.max(startByte + key.length, lineStartOffset + line.length);
+
+    entities.push({
+      name: key,
+      kind: 'config_entry',
+      lineStart: lineNumber,
+      lineEnd: lineNumber,
+      language,
+      container: parent?.key,
+    });
+
+    chunks.push({
+      name: key,
+      chunkKind: 'config_key',
+      lineStart: lineNumber,
+      lineEnd: lineNumber,
+      startByte,
+      endByte,
+      contentHash: crypto.createHash('sha256').update(line).digest('hex'),
+      language,
+      container: parent?.key,
+    });
+
+    relationships.push({
+      srcName: parent?.key ?? fileName,
+      dstName: key,
+      predicate: 'CONTAINS',
+    });
+
+    if (listPrefixWidth === 0) {
+      stack.push({ indent: effectiveIndent, key });
+    }
+  }
+
+  if (chunks.length === 0) {
+    chunks.push({
+      name: null,
+      chunkKind: 'file_body',
+      lineStart: 1,
+      lineEnd: Math.max(sourceLineCount, 1),
+      startByte: 0,
+      endByte: source.length,
+      contentHash: crypto.createHash('sha256').update(source).digest('hex'),
+      language,
+    });
+  }
+
+  return {
+    filePath,
+    language,
+    entities,
+    chunks,
+    relationships,
+    fileRole,
+  };
+}
+
+function parseDockerfileFile(filePath: string, source: string): FileParseResult {
+  const language = SupportedLanguages.Dockerfile;
+  const fileName = nodePath.basename(filePath);
+  const sourceLineCount = countSourceLines(source);
+  const fileRole = classifyFileRole(filePath);
+  const entities: ParsedEntity[] = [
+    { name: fileName, kind: 'file', lineStart: 1, lineEnd: sourceLineCount, language },
+  ];
+  const chunks: ParsedChunk[] = [];
+  const relationships: ParsedRelationship[] = [];
+  const lines = source.split(/\r?\n/);
+  const lineStarts = computeLineStarts(source);
+  const stageNames: string[] = [];
+  let pending = '';
+  let logicalStartLine = 1;
+
+  const pushChunk = (
+    name: string | null,
+    chunkKind: string,
+    lineStart: number,
+    lineEnd: number,
+    startByte: number,
+    endByte: number,
+    content: string,
+    container?: string,
+  ) => {
+    chunks.push({
+      name,
+      chunkKind,
+      lineStart,
+      lineEnd,
+      startByte,
+      endByte,
+      contentHash: crypto.createHash('sha256').update(content).digest('hex'),
+      language,
+      container,
+    });
+  };
+
+  const addInstruction = (instructionLine: string, lineStart: number, lineEnd: number) => {
+    const trimmed = instructionLine.trim();
+    if (!trimmed || trimmed.startsWith('#')) return;
+
+    const instructionMatch = /^([A-Z]+)\b(?:\s+([\s\S]*))?$/i.exec(trimmed);
+    if (!instructionMatch) return;
+
+    const keyword = instructionMatch[1].toUpperCase();
+    const argument = (instructionMatch[2] ?? '').trim();
+    const startByte = lineStarts[lineStart - 1] ?? 0;
+    const endByte = lineEnd < lines.length
+      ? (lineStarts[lineEnd] ?? source.length) - 1
+      : source.length;
+
+    if (keyword === 'FROM') {
+      const fromMatch = /^([^\s]+)(?:\s+AS\s+([A-Za-z0-9._-]+))?/i.exec(argument);
+      const baseImage = fromMatch?.[1] ?? argument;
+      const stageName = fromMatch?.[2] ?? `stage-${stageNames.length}`;
+      stageNames.push(stageName);
+
+      entities.push({
+        name: stageName,
+        kind: 'config',
+        lineStart,
+        lineEnd,
+        language,
+      });
+      relationships.push({
+        srcName: fileName,
+        dstName: stageName,
+        predicate: 'CONTAINS',
+      });
+      pushChunk(stageName, 'build_stage', lineStart, lineEnd, startByte, endByte, instructionLine);
+
+      if (baseImage) {
+        entities.push({
+          name: baseImage,
+          kind: 'module',
+          lineStart,
+          lineEnd,
+          language,
+          container: stageName,
+        });
+        relationships.push({
+          srcName: stageName,
+          dstName: baseImage,
+          predicate: 'IMPORTS',
+        });
+      }
+      return;
+    }
+
+    const scope = stageNames[stageNames.length - 1];
+    const entityName =
+      keyword === 'COPY' || keyword === 'ADD'
+        ? `${keyword.toLowerCase()}:${argument.split(/\s+/).find(token => token.length > 0) ?? keyword.toLowerCase()}`
+        : keyword.toLowerCase();
+
+    entities.push({
+      name: entityName,
+      kind: 'config_entry',
+      lineStart,
+      lineEnd,
+      language,
+      container: scope,
+    });
+    relationships.push({
+      srcName: scope ?? fileName,
+      dstName: entityName,
+      predicate: 'CONTAINS',
+    });
+    pushChunk(entityName, 'docker_instruction', lineStart, lineEnd, startByte, endByte, instructionLine, scope);
+
+    if (keyword === 'COPY') {
+      const fromFlag = /--from=([^\s]+)/i.exec(argument)?.[1];
+      if (fromFlag) {
+        relationships.push({
+          srcName: scope ?? fileName,
+          dstName: fromFlag,
+          predicate: 'IMPORTS',
+        });
+      }
+    }
+  };
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    const trimmedEnd = line.replace(/\s+$/, '');
+    const lineContent = pending ? `${pending}\n${line}` : line;
+    if (!pending) logicalStartLine = index + 1;
+
+    if (trimmedEnd.endsWith('\\')) {
+      pending = lineContent.slice(0, lineContent.lastIndexOf('\\')).trimEnd();
+      continue;
+    }
+
+    addInstruction(lineContent, logicalStartLine, index + 1);
+    pending = '';
+  }
+
+  if (pending) {
+    addInstruction(pending, logicalStartLine, lines.length);
+  }
+
+  if (chunks.length === 0) {
+    pushChunk(null, 'file_body', 1, Math.max(sourceLineCount, 1), 0, source.length, source);
+  }
+
+  return {
+    filePath,
+    language,
+    entities,
+    chunks,
+    relationships,
+    fileRole,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -336,6 +604,8 @@ function unwrapRustCfgMacros(source: string): string {
 export function parseFile(filePath: string, source: string): FileParseResult | null {
   const language = detectLanguageForSource(filePath, source);
   if (!language) return null;
+  if (language === SupportedLanguages.YAML) return parseYamlFile(filePath, source);
+  if (language === SupportedLanguages.Dockerfile) return parseDockerfileFile(filePath, source);
 
   // TypeScript TSX uses a separate grammar
   const isTsx = filePath.endsWith('.tsx');
@@ -394,10 +664,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
     }
 
     const fileName = nodePath.basename(filePath);
-    let sourceLineCount = 1;
-    for (let i = 0; i < source.length; i++) {
-      if (source.charCodeAt(i) === 10) sourceLineCount++;
-    }
+    const sourceLineCount = countSourceLines(source);
 
     const entities: ParsedEntity[] = [
       { name: fileName, kind: 'file', lineStart: 1, lineEnd: sourceLineCount, language },
@@ -427,6 +694,8 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
     const assignTypeMap = new Map<string, Map<string, string>>();
     // C/C++: map enclosing scope → (variable/member name → declared type)
     const declaredTypeMap = new Map<string, Map<string, string>>();
+    // Import aliases keyed by the in-file alias name (Go explicit aliases, etc.).
+    const importAliases: Record<string, string> = {};
 
     // --- First pass: collect definitions ---
     for (const match of pass1Matches) {
@@ -615,6 +884,10 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
       const importSource = match.captures.find((c: any) => c.name === 'import.source');
       if (importSource) {
         const modName = normalizeCapturedImport(importSource.node.text, language);
+        const importAlias = match.captures.find((c: any) => c.name === 'import.alias')?.node.text;
+        if (importAlias && modName && importAlias !== '.' && importAlias !== '_') {
+          importAliases[importAlias] = modName;
+        }
         if (modName.length > 0 && modName !== '*') {
           if (!modName) continue;                        // skip bare '.' relative imports
           entities.push({ name: modName, kind: 'module', lineStart: importSource.node.startPosition.row + 1, lineEnd: importSource.node.startPosition.row + 1, language });
@@ -650,6 +923,22 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         const qualifierCapture = match.captures.find((c: any) => c.name === '_qualifier');
         if (builtinsForLanguage(language).has(callee) && !qualifierCapture) continue;
 
+        // For Python: skip calls that are decorator applications.
+        // When a method is decorated (e.g. @util.deprecated(...)), the call sits at the
+        // class-body line before the def, so findEnclosingFunction misses the method and
+        // the caller falls back to the enclosing class — producing false edges like
+        // Table → deprecated.  Decorator application is not an architectural CALLS edge.
+        if (language === SupportedLanguages.Python) {
+          let isDecoratorCall = false;
+          let anc = callName.node.parent;
+          while (anc) {
+            if (anc.type === 'decorator') { isDecoratorCall = true; break; }
+            if (anc.type === 'module' || anc.type === 'function_definition' || anc.type === 'class_definition') break;
+            anc = anc.parent;
+          }
+          if (isDecoratorCall) continue;
+        }
+
         // Find enclosing function/method for the call; fall back to enclosing class
         // (e.g. calls in val/lazy val body at class level) before falling back to file.
         const callLine = callName.node.startPosition.row + 1;
@@ -662,7 +951,18 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         const seen = seenCalls.get(scope)!;
 
         const effectiveCallee = (() => {
-          if (!qualifierCapture) return callee;
+          if (!qualifierCapture) {
+            // Python: if the callee is a local alias for a class, substitute the class name.
+            // e.g. engineclass = base.Engine; engineclass(pool, ...) → Engine(pool, ...)
+            if (language === SupportedLanguages.Python) {
+              const funcName = findEnclosingFunction(entities, callLine);
+              if (funcName) {
+                const typeForAssign = assignTypeMap.get(funcName)?.get(callee);
+                if (typeForAssign) return typeForAssign;
+              }
+            }
+            return callee;
+          }
           let qualifier = qualifierCapture.node.text;
           // Python: 'self'/'cls' always refers to the enclosing class — substitute it
           // so the edge reads 'Query.filter' instead of 'self.filter', enabling
@@ -712,10 +1012,12 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         const typeName = refType.node.text;
         if (!typeName || TYPE_BUILTINS.has(typeName) || typeName.length <= 1) continue;
 
-        // Use the enclosing class as the src so the edge reads "ClassX REFERENCES TypeY".
-        // Fall back to the file name when no enclosing class is found (top-level usage).
+        // Prefer the enclosing function/method so parameter and return-type references
+        // point back to the actual caller. Fall back to class, then file.
         const refLine = refType.node.startPosition.row + 1;
-        const src = findEnclosing(classRanges, refLine, typeName) ?? fileName;
+        const src = findEnclosingFunction(entities, refLine)
+          ?? findEnclosing(classRanges, refLine, typeName)
+          ?? fileName;
 
         if (!seenRefs.has(src)) seenRefs.set(src, new Set());
         const seen = seenRefs.get(src)!;
@@ -751,7 +1053,15 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
       });
     }
 
-    return { filePath, language, entities, chunks, relationships, fileRole: classifyFileRole(filePath, source) };
+    return {
+      filePath,
+      language,
+      entities,
+      chunks,
+      relationships,
+      importAliases: Object.keys(importAliases).length > 0 ? importAliases : undefined,
+      fileRole: classifyFileRole(filePath, source),
+    };
   } catch {
     return null;
   }
@@ -808,6 +1118,156 @@ function bestQKey(
   return qks.length === 1 ? qks[0] : null;
 }
 
+// ---------------------------------------------------------------------------
+// Global resolution index — pre-scan for cross-batch edge resolution
+// ---------------------------------------------------------------------------
+
+export interface GlobalResolutionIndex {
+  fileHasSymbol:    Map<string, Set<string>>;
+  fileQKeys:        Map<string, Map<string, string[]>>;
+  symbolToFiles:    Map<string, string[]>;
+  stemToFiles:      Map<string, string[]>;
+  dirToIndexFiles:  Map<string, string[]>;
+  packageToFiles:   Map<string, string[]>;
+  goPkgDirToFiles:  Map<string, string[]>;
+  goPkgPathToFiles: Map<string, string[]>;
+}
+
+/**
+ * Build a GlobalResolutionIndex from a list of file paths (and optional source
+ * texts for entity extraction). Covers the entire repository so that each
+ * streaming batch can resolve edges pointing to files outside the batch.
+ */
+export function buildGlobalResolutionIndex(
+  filePaths: string[],
+  sources?: Map<string, string>,
+): GlobalResolutionIndex {
+  const stemToFiles = new Map<string, string[]>();
+  const dirToIndexFiles = new Map<string, string[]>();
+  const packageToFiles = new Map<string, string[]>();
+  const goPkgDirToFiles = new Map<string, string[]>();
+  const goPkgPathToFiles = new Map<string, string[]>();
+
+  for (const fp of filePaths) {
+    const ext = nodePath.extname(fp);
+    const stem = nodePath.basename(fp, ext);
+
+    // stemToFiles
+    const stemList = stemToFiles.get(stem) ?? [];
+    stemList.push(fp);
+    stemToFiles.set(stem, stemList);
+
+    // dirToIndexFiles
+    if (stem === 'index') {
+      const dirName = nodePath.basename(nodePath.dirname(fp));
+      const dirList = dirToIndexFiles.get(dirName) ?? [];
+      dirList.push(fp);
+      dirToIndexFiles.set(dirName, dirList);
+    }
+
+    // packageToFiles (Scala/Java)
+    if (ext === '.scala' || ext === '.java') {
+      const dir = nodePath.dirname(fp);
+      const parts = dir.split(/[/\\]/);
+      const maxDepth = Math.min(8, parts.length);
+      for (let i = parts.length - 1; i >= parts.length - maxDepth; i--) {
+        const pkg = parts.slice(i).join('.');
+        const list = packageToFiles.get(pkg) ?? [];
+        list.push(fp);
+        packageToFiles.set(pkg, list);
+      }
+    }
+
+    // goPkgDirToFiles / goPkgPathToFiles (Go)
+    if (ext === '.go') {
+      const dirName = nodePath.basename(nodePath.dirname(fp));
+      const goDirList = goPkgDirToFiles.get(dirName) ?? [];
+      goDirList.push(fp);
+      goPkgDirToFiles.set(dirName, goDirList);
+
+      const parts = nodePath.dirname(fp).replace(/\\/g, '/').split('/').filter(Boolean);
+      const maxDepth = Math.min(8, parts.length);
+      for (let i = parts.length - 1; i >= parts.length - maxDepth; i--) {
+        const pkgPath = parts.slice(i).join('/');
+        const pkgList = goPkgPathToFiles.get(pkgPath) ?? [];
+        pkgList.push(fp);
+        goPkgPathToFiles.set(pkgPath, pkgList);
+      }
+    }
+  }
+
+  // Entity maps (built from sources if provided, via fast regex scan)
+  const fileQKeys = new Map<string, Map<string, string[]>>();
+  const fileHasSymbol = new Map<string, Set<string>>();
+  const symbolToFiles = new Map<string, string[]>();
+
+  if (sources) {
+    const pkgRe = /^package\s+(\w+)/m;
+    const typeRe = /^type\s+([A-Z]\w*)\s+/gm;
+    const funcRe = /^func\s+([A-Z]\w*)\s*[(\[]/gm;
+    const methodRe = /^func\s+\([^)]+\)\s+([A-Z]\w*)\s*[(\[]/gm;
+
+    for (const [fp, src] of sources) {
+      if (nodePath.extname(fp) !== '.go') continue;
+
+      const qkMap = new Map<string, string[]>();
+
+      // Package name — critical for qualifier-assisted REFERENCES resolution
+      const pkgMatch = pkgRe.exec(src);
+      if (pkgMatch) {
+        const name = pkgMatch[1];
+        qkMap.set(name, [name]);
+      }
+
+      // Exported types (struct/interface/aliases/type defs)
+      typeRe.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = typeRe.exec(src)) !== null) {
+        const name = m[1];
+        if (!qkMap.has(name)) qkMap.set(name, [name]);
+      }
+
+      // Exported top-level functions
+      funcRe.lastIndex = 0;
+      while ((m = funcRe.exec(src)) !== null) {
+        const name = m[1];
+        if (!qkMap.has(name)) qkMap.set(name, [name]);
+      }
+
+      // Exported methods (receiver form)
+      methodRe.lastIndex = 0;
+      while ((m = methodRe.exec(src)) !== null) {
+        const name = m[1];
+        if (!qkMap.has(name)) qkMap.set(name, [name]);
+      }
+
+      if (qkMap.size > 0) {
+        fileQKeys.set(fp, qkMap);
+        fileHasSymbol.set(fp, new Set(qkMap.keys()));
+      }
+    }
+
+    for (const [fp, symbols] of fileHasSymbol) {
+      for (const sym of symbols) {
+        const list = symbolToFiles.get(sym) ?? [];
+        list.push(fp);
+        symbolToFiles.set(sym, list);
+      }
+    }
+  }
+
+  return {
+    fileHasSymbol,
+    fileQKeys,
+    symbolToFiles,
+    stemToFiles,
+    dirToIndexFiles,
+    packageToFiles,
+    goPkgDirToFiles,
+    goPkgPathToFiles,
+  };
+}
+
 /**
  * Resolves CALLS and EXTENDS relationships to their cross-file targets by
  * building a symbol table and import map over the full batch of parsed files.
@@ -834,20 +1294,26 @@ function bestQKey(
  *   - Unambiguous class method: dstQualifiedKey === 'ClassName.method'
  *   - Ambiguous (two entities share the same plain name): edge not emitted
  */
-export function resolveEdges(results: FileParseResult[], stats?: {
-  importLookups: number; transitiveLookups: number; globalFallbacks: number;
-  globalCandidateTotal: number; resolvedImport: number; resolvedTransitive: number;
-  resolvedGlobal: number; resolvedQualifier: number; skippedSameFile: number; skippedAmbiguous: number;
-}): ResolvedEdge[] {
+export function resolveEdges(
+  results: FileParseResult[],
+  stats?: {
+    importLookups: number; transitiveLookups: number; globalFallbacks: number;
+    globalCandidateTotal: number; resolvedImport: number; resolvedTransitive: number;
+    resolvedGlobal: number; resolvedQualifier: number; skippedSameFile: number; skippedAmbiguous: number;
+  },
+  globalIndex?: GlobalResolutionIndex,
+): ResolvedEdge[] {
   // Provide a default no-op stats bag when caller passes none (backward compat).
   if (!stats) stats = {
     importLookups: 0, transitiveLookups: 0, globalFallbacks: 0,
     globalCandidateTotal: 0, resolvedImport: 0, resolvedTransitive: 0,
     resolvedGlobal: 0, resolvedQualifier: 0, skippedSameFile: 0, skippedAmbiguous: 0,
   };
-  // fileQKeys: filePath → (plainName → qualifiedKeys[])
+  // fileQKeys: seed from global index (cross-batch files), then batch entries override.
   // Mirrors the entityQKey computation in buildPatch so nodeIds match exactly.
-  const fileQKeys = new Map<string, Map<string, string[]>>();
+  const fileQKeys = globalIndex
+    ? new Map<string, Map<string, string[]>>(globalIndex.fileQKeys)
+    : new Map<string, Map<string, string[]>>();
   for (const r of results) {
     const qkMap = new Map<string, string[]>();
     for (const e of r.entities) {
@@ -857,10 +1323,10 @@ export function resolveEdges(results: FileParseResult[], stats?: {
       list.push(qk);
       qkMap.set(e.name, list);
     }
-    fileQKeys.set(r.filePath, qkMap);
+    fileQKeys.set(r.filePath, qkMap);  // overrides global entry if present
   }
 
-  // fileHasSymbol: filePath → Set<plainName>  (fast membership check)
+  // fileHasSymbol: rebuilt from merged fileQKeys so per-batch overrides take effect.
   const fileHasSymbol = new Map<string, Set<string>>();
   for (const [fp, qkMap] of fileQKeys) {
     fileHasSymbol.set(fp, new Set(qkMap.keys()));
@@ -869,7 +1335,8 @@ export function resolveEdges(results: FileParseResult[], stats?: {
   // resultsByPath: O(1) lookup replacing results.find() in transitive import loop
   const resultsByPath = new Map<string, FileParseResult>(results.map(r => [r.filePath, r]));
 
-  // symbolToFiles: plainName → filePath[]  — replaces O(F) full-scan in tier-3 and qualifier fallback
+  // symbolToFiles: rebuilt from merged fileHasSymbol (not seeded directly — per-batch
+  // overrides can change which files define a symbol).
   const symbolToFiles = new Map<string, string[]>();
   for (const [fp, symbols] of fileHasSymbol) {
     for (const sym of symbols) {
@@ -885,83 +1352,102 @@ export function resolveEdges(results: FileParseResult[], stats?: {
     fileLanguage.set(r.filePath, r.language);
   }
 
-  // stemToFiles: basename-without-extension → filePath[]
-  // Matches the last path segment of an import to files in the batch.
-  const stemToFiles = new Map<string, string[]>();
+  // stemToFiles: seed from global index, then add batch entries.
+  const stemToFiles = globalIndex
+    ? new Map<string, string[]>(globalIndex.stemToFiles)
+    : new Map<string, string[]>();
   for (const r of results) {
     const stem = nodePath.basename(r.filePath, nodePath.extname(r.filePath));
     const list = stemToFiles.get(stem) ?? [];
-    list.push(r.filePath);
+    if (!list.includes(r.filePath)) list.push(r.filePath);
     stemToFiles.set(stem, list);
   }
 
-  // dirToIndexFiles: directory basename → filePath[] for 'index.*' files
-  // Handles directory imports: './services' → 'services/index.ts'
-  const dirToIndexFiles = new Map<string, string[]>();
+  // dirToIndexFiles: seed from global index, then add batch entries.
+  const dirToIndexFiles = globalIndex
+    ? new Map<string, string[]>(globalIndex.dirToIndexFiles)
+    : new Map<string, string[]>();
   for (const r of results) {
     const stem = nodePath.basename(r.filePath, nodePath.extname(r.filePath));
     if (stem === 'index') {
       const dirName = nodePath.basename(nodePath.dirname(r.filePath));
       const list = dirToIndexFiles.get(dirName) ?? [];
-      list.push(r.filePath);
+      if (!list.includes(r.filePath)) list.push(r.filePath);
       dirToIndexFiles.set(dirName, list);
     }
   }
 
-  // packageToFiles: dotted package path → filePath[] (Scala/Java wildcard imports)
+  // packageToFiles: seed from global index, then add batch entries.
   // e.g. "ix.memory.model" → all .scala files under .../ix/memory/model/
-  // Builds all suffix keys so that both "model" and "ix.memory.model" resolve.
-  const packageToFiles = new Map<string, string[]>();
+  const packageToFiles = globalIndex
+    ? new Map<string, string[]>(globalIndex.packageToFiles)
+    : new Map<string, string[]>();
   for (const r of results) {
     const ext = nodePath.extname(r.filePath);
     if (ext !== '.scala' && ext !== '.java') continue;
     const dir = nodePath.dirname(r.filePath);
     const parts = dir.split(/[/\\]/);
-    // Cap at 8 segments to avoid noise from very shallow path components like "src", "main".
     const maxDepth = Math.min(8, parts.length);
     for (let i = parts.length - 1; i >= parts.length - maxDepth; i--) {
       const pkg = parts.slice(i).join('.');
       const list = packageToFiles.get(pkg) ?? [];
-      list.push(r.filePath);
+      if (!list.includes(r.filePath)) list.push(r.filePath);
       packageToFiles.set(pkg, list);
     }
   }
 
-  // goPkgDirToFiles: Go package directory name → filePath[]
-  // In Go, the last segment of an import path IS the package directory name.
-  // e.g. import "go.etcd.io/etcd/server/etcdserver" is stripped to modName "etcdserver"
-  // by the import processor; this index maps that name to all .go files in
-  // any directory named "etcdserver" within the ingested batch.
-  const goPkgDirToFiles = new Map<string, string[]>();
+  // goPkgDirToFiles / goPkgPathToFiles: seed from global index, then add batch entries.
+  const goPkgDirToFiles = globalIndex
+    ? new Map<string, string[]>(globalIndex.goPkgDirToFiles)
+    : new Map<string, string[]>();
+  const goPkgPathToFiles = globalIndex
+    ? new Map<string, string[]>(globalIndex.goPkgPathToFiles)
+    : new Map<string, string[]>();
   for (const r of results) {
     if (nodePath.extname(r.filePath) !== '.go') continue;
     const dirName = nodePath.basename(nodePath.dirname(r.filePath));
     const list = goPkgDirToFiles.get(dirName) ?? [];
-    list.push(r.filePath);
+    if (!list.includes(r.filePath)) list.push(r.filePath);
     goPkgDirToFiles.set(dirName, list);
+    const parts = nodePath.dirname(r.filePath).replace(/\\/g, '/').split('/').filter(Boolean);
+    const maxDepth = Math.min(8, parts.length);
+    for (let i = parts.length - 1; i >= parts.length - maxDepth; i--) {
+      const pkgPath = parts.slice(i).join('/');
+      const pkgList = goPkgPathToFiles.get(pkgPath) ?? [];
+      if (!pkgList.includes(r.filePath)) pkgList.push(r.filePath);
+      goPkgPathToFiles.set(pkgPath, pkgList);
+    }
   }
 
   // ── Helpers ────────────────────────────────────────────────────────
 
+  function normalizeImportTarget(modName: unknown): string {
+    if (typeof modName === 'string') return modName;
+    if (modName == null) return '';
+    return String(modName);
+  }
+
   /** Resolve a module name to matching file paths in the batch. */
-  function modNameToFiles(modName: string, excludeFp: string): string[] {
+  function modNameToFiles(modName: unknown, excludeFp: string): string[] {
+    const normalizedModName = normalizeImportTarget(modName);
+    if (!normalizedModName) return [];
     const fps: string[] = [];
     // Strip leading non-word chars for bare aliases: '@components' → 'components'
-    const candidates = [modName];
-    const stripped = modName.replace(/^[^a-zA-Z0-9_]+/, '');
-    if (stripped && stripped !== modName) candidates.push(stripped);
+    const candidates = [normalizedModName];
+    const stripped = normalizedModName.replace(/^[^a-zA-Z0-9_]+/, '');
+    if (stripped && stripped !== normalizedModName) candidates.push(stripped);
     // Strip file extensions so "explain.js" resolves to the "explain" stem
     // (TS/JS ESM imports use .js extensions that map to .ts source files)
-    const noExt = modName.replace(/\.(js|ts|mjs|cjs|jsx|tsx|py|scala|java|c|cc|cpp|cxx|h|hh|hpp|hxx)$/, '');
-    if (noExt !== modName && noExt && !candidates.includes(noExt)) candidates.push(noExt);
-    const pathBasename = nodePath.posix.basename(modName);
+    const noExt = normalizedModName.replace(/\.(js|ts|mjs|cjs|jsx|tsx|py|scala|java|c|cc|cpp|cxx|h|hh|hpp|hxx)$/, '');
+    if (noExt !== normalizedModName && noExt && !candidates.includes(noExt)) candidates.push(noExt);
+    const pathBasename = nodePath.posix.basename(normalizedModName);
     if (pathBasename && !candidates.includes(pathBasename)) candidates.push(pathBasename);
     const pathBasenameNoExt = nodePath.posix.basename(noExt);
     if (pathBasenameNoExt && !candidates.includes(pathBasenameNoExt)) candidates.push(pathBasenameNoExt);
     // For dotted paths (Scala/Java: 'ix.memory.model.Edge'), also try last segment
-    const lastDot = modName.lastIndexOf('.');
+    const lastDot = normalizedModName.lastIndexOf('.');
     if (lastDot !== -1) {
-      const lastSegment = modName.slice(lastDot + 1);
+      const lastSegment = normalizedModName.slice(lastDot + 1);
       if (lastSegment && !candidates.includes(lastSegment)) candidates.push(lastSegment);
     }
     for (const cand of candidates) {
@@ -973,15 +1459,114 @@ export function resolveEdges(results: FileParseResult[], stats?: {
       }
     }
     // Package-path wildcard resolution (Scala/Java): "ix.memory.model" → all files in that dir
-    for (const fp of packageToFiles.get(modName) ?? []) {
+    for (const fp of packageToFiles.get(normalizedModName) ?? []) {
       if (fp !== excludeFp && !fps.includes(fp)) fps.push(fp);
     }
     // Go package directory resolution: "etcdserver" → all .go files in .../etcdserver/
     // The last segment of a Go import path is the package directory name, not a file stem.
-    for (const fp of goPkgDirToFiles.get(modName) ?? []) {
+    for (const fp of goPkgDirToFiles.get(normalizedModName) ?? []) {
       if (fp !== excludeFp && !fps.includes(fp)) fps.push(fp);
     }
+    const slashParts = normalizedModName.replace(/\\/g, '/').split('/').filter(Boolean);
+    const maxSlashDepth = Math.min(8, slashParts.length);
+    for (let i = 0; i < maxSlashDepth; i++) {
+      const suffix = slashParts.slice(slashParts.length - 1 - i).join('/');
+      for (const fp of goPkgPathToFiles.get(suffix) ?? []) {
+        if (fp !== excludeFp && !fps.includes(fp)) fps.push(fp);
+      }
+    }
     return fps;
+  }
+
+  function goImportSuffixes(modName: unknown): string[] {
+    const normalizedModName = normalizeImportTarget(modName);
+    if (!normalizedModName) return [];
+    const parts = normalizedModName.replace(/\\/g, '/').split('/').filter(Boolean);
+    const suffixes: string[] = [];
+    const maxDepth = Math.min(8, parts.length);
+    for (let i = 0; i < maxDepth; i++) {
+      suffixes.push(parts.slice(parts.length - 1 - i).join('/'));
+    }
+    return suffixes;
+  }
+
+  function pickGoPackageAnchor(files: string[]): string | null {
+    if (files.length === 0) return null;
+    const nonTestFiles = files.filter(fp => !fp.endsWith('_test.go'));
+    const pool = nonTestFiles.length > 0 ? nonTestFiles : files;
+    const dirName = nodePath.basename(nodePath.dirname(pool[0])).toLowerCase();
+
+    const exactStemMatch = pool.filter(fp => candidateStem(fp) === dirName);
+    if (exactStemMatch.length === 1) return exactStemMatch[0];
+
+    const ranked = [...pool].sort((a, b) => {
+      const aResult = resultsByPath.get(a);
+      const bResult = resultsByPath.get(b);
+      const aImports = aResult?.relationships.filter(rel => rel.predicate === 'IMPORTS').length ?? 0;
+      const bImports = bResult?.relationships.filter(rel => rel.predicate === 'IMPORTS').length ?? 0;
+      if (aImports !== bImports) return bImports - aImports;
+
+      // Fall back to global index entity count for cross-batch files (not in resultsByPath).
+      // fileQKeys is seeded from buildGlobalResolutionIndex which pre-scans exported
+      // types/functions via regex, so substantive files like instance.go score higher
+      // than package-doc stubs like doc.go (which only has the package name).
+      const aEntities = aResult?.entities.length ?? fileQKeys.get(a)?.size ?? 0;
+      const bEntities = bResult?.entities.length ?? fileQKeys.get(b)?.size ?? 0;
+      if (aEntities !== bEntities) return bEntities - aEntities;
+
+      return a.localeCompare(b);
+    });
+    return ranked[0] ?? null;
+  }
+
+  function narrowGoImportCandidates(
+    srcFilePath: string,
+    modName: unknown,
+    importMatches: string[],
+    pickFromSingleDir: (files: string[]) => string[],
+  ): string[] {
+    const suffixes = goImportSuffixes(modName);
+    const scored = importMatches.map(fp => {
+      const dirPath = nodePath.dirname(fp).replace(/\\/g, '/');
+      let bestSuffixLen = -1;
+      for (const suffix of suffixes) {
+        if (dirPath === suffix || dirPath.endsWith(`/${suffix}`)) {
+          if (suffix.length > bestSuffixLen) bestSuffixLen = suffix.length;
+        }
+      }
+      return { fp, bestSuffixLen };
+    });
+
+    const bestSuffixLen = Math.max(...scored.map(item => item.bestSuffixLen));
+    const narrowed = bestSuffixLen >= 0
+      ? scored.filter(item => item.bestSuffixLen === bestSuffixLen).map(item => item.fp)
+      : importMatches;
+
+    const dirGroups = new Map<string, string[]>();
+    for (const fp of narrowed) {
+      const key = nodePath.dirname(fp).replace(/\\/g, '/');
+      const list = dirGroups.get(key) ?? [];
+      list.push(fp);
+      dirGroups.set(key, list);
+    }
+
+    if (dirGroups.size === 1) return pickFromSingleDir([...dirGroups.values()][0]);
+    return narrowed;
+  }
+
+  function resolveImportTargets(srcFilePath: string, srcLanguage: SupportedLanguages, modName: unknown): string[] {
+    const importMatches = modNameToFiles(modName, srcFilePath);
+    if (srcLanguage !== SupportedLanguages.Go || importMatches.length <= 1) return importMatches;
+    return narrowGoImportCandidates(srcFilePath, modName, importMatches, files => {
+      const anchor = pickGoPackageAnchor(files);
+      return anchor ? [anchor] : [];
+    });
+  }
+
+  function resolveImportQualifierTargets(srcFilePath: string, srcLanguage: SupportedLanguages, modName: unknown): string[] {
+    const importMatches = modNameToFiles(modName, srcFilePath);
+    if (srcLanguage !== SupportedLanguages.Go || importMatches.length <= 1) return importMatches;
+    return narrowGoImportCandidates(srcFilePath, modName, importMatches, files => files);
   }
 
   function tokenizeSymbolParts(value: string): string[] {
@@ -1121,7 +1706,7 @@ export function resolveEdges(results: FileParseResult[], stats?: {
     const importedFilePaths = new Set<string>();
     for (const rel of result.relationships) {
       if (rel.predicate !== 'IMPORTS') continue;
-      for (const fp of modNameToFiles(rel.dstName, srcFilePath)) {
+      for (const fp of resolveImportTargets(srcFilePath, srcLanguage, rel.dstName)) {
         importedFilePaths.add(fp);
       }
     }
@@ -1134,7 +1719,7 @@ export function resolveEdges(results: FileParseResult[], stats?: {
       if (!fpResult) continue;
       for (const rel of fpResult.relationships) {
         if (rel.predicate !== 'IMPORTS') continue;
-        for (const transitiveFp of modNameToFiles(rel.dstName, srcFilePath)) {
+        for (const transitiveFp of resolveImportTargets(fp, fpResult.language, rel.dstName)) {
           if (!importedFilePaths.has(transitiveFp)) transitiveFilePaths.add(transitiveFp);
         }
       }
@@ -1171,7 +1756,7 @@ export function resolveEdges(results: FileParseResult[], stats?: {
           }
         }
 
-        const importMatches = modNameToFiles(rel.dstName, srcFilePath);
+        const importMatches = resolveImportTargets(srcFilePath, result.language, rel.dstName);
         if (importMatches.length === 1) {
           const fp = importMatches[0];
           resolved.push({
@@ -1184,10 +1769,16 @@ export function resolveEdges(results: FileParseResult[], stats?: {
             confidence: 0.9,
           });
           stats.resolvedImport++;
+          continue;
         } else if (importMatches.length > 1) {
           stats.skippedAmbiguous++;
+          continue;
         }
-        continue;
+        // importMatches.length === 0: if dstName is a PascalCase symbol (class/function name
+        // captured via import.name from "from X import ClassName"), fall through to Tier 2/3
+        // symbol resolution so the edge connects to the actual class node rather than a file.
+        if (srcLanguage !== SupportedLanguages.Python || !/^[A-Z]/.test(rel.dstName)) continue;
+        // fall through to Tier 1b → Tier 2 → Tier 3 below
       }
 
       const dstName = rel.dstName;
@@ -1202,17 +1793,30 @@ export function resolveEdges(results: FileParseResult[], stats?: {
         const qualifierPart = dstName.slice(0, qualDot);
         const memberPart = dstName.slice(qualDot + 1);
         if (memberPart && qualifierPart) {
+          const aliasedImportMatches =
+            srcLanguage === SupportedLanguages.Go
+              ? resolveImportQualifierTargets(srcFilePath, srcLanguage, result.importAliases?.[qualifierPart] ?? '')
+              : [];
           // Try import-scoped qualifier first
+          const qualifierSearchPool = aliasedImportMatches.length > 0
+            ? aliasedImportMatches
+            : [...importedFilePaths];
           const qualImportMatches: string[] = [];
-          for (const fp of importedFilePaths) {
+          for (const fp of qualifierSearchPool) {
             if (fileDefinesQualifiedMember(fp, qualifierPart, memberPart) || fileHasSymbol.get(fp)?.has(qualifierPart)) {
               qualImportMatches.push(fp);
             }
           }
+          if (qualImportMatches.length === 0 && aliasedImportMatches.length > 0) {
+            for (const fp of aliasedImportMatches) {
+              if (fileHasSymbol.get(fp)?.has(memberPart)) qualImportMatches.push(fp);
+            }
+          }
           if (qualImportMatches.length === 1) {
             const qfp = qualImportMatches[0];
+            const preferredQKey = aliasedImportMatches.length > 0 ? undefined : `${qualifierPart}.${memberPart}`;
             if (fileHasSymbol.get(qfp)?.has(memberPart)) {
-              const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart, `${qualifierPart}.${memberPart}`);
+              const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart, preferredQKey);
               if (dstQualifiedKey !== null) {
                 // dstName must match rel.dstName so buildPatchWithResolution can look it up
                 resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9 });

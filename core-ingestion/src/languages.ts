@@ -13,6 +13,8 @@ export enum SupportedLanguages {
   Kotlin = 'kotlin',
   Swift = 'swift',
   Scala = 'scala',
+  YAML = 'yaml',
+  Dockerfile = 'dockerfile',
 }
 
 const EXT_MAP: Record<string, SupportedLanguages> = {
@@ -40,9 +42,20 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.swift':SupportedLanguages.Swift,
   '.scala':SupportedLanguages.Scala,
   '.sc':   SupportedLanguages.Scala,
+  '.yaml': SupportedLanguages.YAML,
+  '.yml':  SupportedLanguages.YAML,
+  '.dockerfile': SupportedLanguages.Dockerfile,
 };
 
 export function languageFromPath(filePath: string): SupportedLanguages | null {
-  const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
+  const normalized = filePath.replace(/\\/g, '/');
+  const fileName = normalized.slice(normalized.lastIndexOf('/') + 1);
+  const lowerFileName = fileName.toLowerCase();
+  if (lowerFileName === 'dockerfile' || lowerFileName.endsWith('.dockerfile')) {
+    return SupportedLanguages.Dockerfile;
+  }
+  const dotIndex = lowerFileName.lastIndexOf('.');
+  if (dotIndex === -1) return null;
+  const ext = lowerFileName.slice(dotIndex);
   return EXT_MAP[ext] ?? null;
 }

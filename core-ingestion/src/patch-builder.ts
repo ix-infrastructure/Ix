@@ -40,18 +40,22 @@ function chunkId(filePath: string, chunkKind: string, name: string | null, start
 // ---------------------------------------------------------------------------
 
 function sourceType(filePath: string): string {
-  const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
+  const normalized = filePath.replace(/\\/g, '/');
+  const fileName = normalized.slice(normalized.lastIndexOf('/') + 1).toLowerCase();
+  if (fileName === 'dockerfile' || fileName.endsWith('.dockerfile')) return 'config';
+  const dotIndex = fileName.lastIndexOf('.');
+  const ext = dotIndex === -1 ? '' : fileName.slice(dotIndex);
   if (['.json', '.yaml', '.yml', '.toml', '.ini', '.conf', '.env'].includes(ext)) return 'config';
   if (['.md', '.mdx', '.rst', '.txt'].includes(ext)) return 'doc';
   return 'code';
 }
 
 export function extractorName(): string {
-  return `tree-sitter/1.19`;
+  return `tree-sitter/1.20`;
 }
 
 /** Previous extractor versions — their patches are superseded when re-ingesting. */
-export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
+export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
 
 /** Compute a patchId for a (filePath, sourceHash, extractorVersion) triple. */
 function computePatchId(filePath: string, sourceHash: string, extractor: string): string {

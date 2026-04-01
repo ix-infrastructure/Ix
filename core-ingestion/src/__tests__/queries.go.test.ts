@@ -146,6 +146,60 @@ func run(s *Service) {
     });
   });
 
+  it('preserves full Go import paths and captures qualified type references in function signatures', () => {
+    const result = parseFile(
+      '/repo/server.go',
+      `
+package app
+
+import scheduler "k8s.io/kubernetes/pkg/scheduler"
+
+func Run(sched *scheduler.Scheduler) error {
+  return nil
+}
+      `,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.relationships).toContainEqual({
+      srcName: 'server.go',
+      dstName: 'k8s.io/kubernetes/pkg/scheduler',
+      predicate: 'IMPORTS',
+    });
+    expect(result!.relationships).toContainEqual({
+      srcName: 'Run',
+      dstName: 'Scheduler',
+      predicate: 'REFERENCES',
+    });
+  });
+
+  it('records explicit Go import aliases so alias-qualified package calls can be resolved later', () => {
+    const result = parseFile(
+      '/repo/server.go',
+      `
+package app
+
+import (
+  controlplaneapiserver "k8s.io/kubernetes/pkg/controlplane/apiserver"
+)
+
+func CreateServerChain() {
+  controlplaneapiserver.CreateAggregatorServer()
+}
+      `,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.importAliases).toEqual({
+      controlplaneapiserver: 'k8s.io/kubernetes/pkg/controlplane/apiserver',
+    });
+    expect(result!.relationships).toContainEqual({
+      srcName: 'CreateServerChain',
+      dstName: 'controlplaneapiserver.CreateAggregatorServer',
+      predicate: 'CALLS',
+    });
+  });
+
   it('emits all qualified CALLS when multiple packages share a function name', () => {
     // Regression: before Bug 3 fix, only the first NewManager call was emitted
     // because seenCalls deduped bare "NewManager" across all packages.

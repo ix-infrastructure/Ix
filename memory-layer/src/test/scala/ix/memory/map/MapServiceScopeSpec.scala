@@ -72,6 +72,34 @@ class MapServiceScopeSpec extends AnyFlatSpec with Matchers {
     collapsed.find(_.label == "Edges / Resolver").flatMap(_.parentId) shouldBe Some(sharedId)
   }
 
+  "appendSingletonRegionsForUncoveredFiles" should "create module regions for files left out by clustering" in {
+    val fileA = fileVertex("C:/repo/src/core/service.ts")
+    val fileB = fileVertex("C:/repo/infra/Dockerfile")
+    val graph = WeightedFileGraph(
+      vertices = Vector(fileA, fileB),
+      adjMatrix = Map(fileA.id -> Map.empty, fileB.id -> Map.empty),
+      degrees = Map(fileA.id -> 0.0, fileB.id -> 0.0),
+      totalWeight = 0.0,
+      predicatePairs = Map.empty
+    )
+    val existing = regionWithMembers("Core", "module", 1, NodeId(UUID.randomUUID()), Set(fileA.id))
+
+    val completed = service.appendSingletonRegionsForUncoveredFiles(
+      regions = Vector(existing),
+      graph = graph,
+      fileVertexById = graph.vertices.map(v => v.id -> v).toMap,
+      crosscutScores = Map.empty,
+      signalAdjacency = Map.empty,
+      rev = ix.memory.model.Rev(42L)
+    )
+
+    completed.map(_.memberFiles) should contain (Set(fileB.id))
+    completed.find(_.memberFiles == Set(fileB.id)).map(_.labelKind) shouldBe Some("module")
+  }
+
+  private def fileVertex(path: String): FileVertex =
+    FileVertex(NodeId(UUID.randomUUID()), path)
+
   private def region(
     label: String,
     labelKind: String,

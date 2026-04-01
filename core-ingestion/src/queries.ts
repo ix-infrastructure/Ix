@@ -211,9 +211,15 @@ export const PYTHON_QUERIES = `
 (import_from_statement
   module_name: (relative_import) @import.source) @import
 
-; from . import utils / from .models import User — also capture the imported symbol names
+; from . import utils / from .models import User — capture imported symbol names (relative imports)
 (import_from_statement
   module_name: (relative_import)
+  name: (dotted_name (identifier) @import.name)) @import.names
+
+; from module import Class — capture imported symbol names (absolute imports)
+; e.g. from sqlalchemy.sql.schema import Column → import.name = Column
+(import_from_statement
+  module_name: (dotted_name)
   name: (dotted_name (identifier) @import.name)) @import.names
 
 (call
@@ -310,6 +316,17 @@ export const PYTHON_QUERIES = `
               object: (identifier) @_assign_rhs_type
               attribute: (identifier))
             attribute: (identifier))))))) @_assign_scope
+
+; Assignment tracking: x = module.Class (direct attribute reference, no call)
+; Handles variable aliasing like: engineclass = base.Engine
+; Combined with direct-call resolution in index.ts, this lets engineclass(...) → Engine(...)
+(function_definition
+  body: (block
+    (expression_statement
+      (assignment
+        left: (identifier) @_assign_lhs
+        right: (attribute
+          attribute: (identifier) @_assign_rhs_type))))) @_assign_scope
 `;
 
 // Java queries - works with tree-sitter-java
@@ -438,8 +455,10 @@ export const GO_QUERIES = `
         name: (field_identifier) @name)))) @definition.method
 
 ; Imports
+(import_declaration (import_spec name: (package_identifier) @import.alias path: (interpreted_string_literal) @import.source)) @import
 (import_declaration (import_spec path: (interpreted_string_literal) @import.source)) @import
 (import_declaration (import_spec_list (import_spec path: (interpreted_string_literal) @import.source))) @import
+(import_declaration (import_spec_list (import_spec name: (package_identifier) @import.alias path: (interpreted_string_literal) @import.source))) @import
 
 ; Struct embedding — value: type Foo struct { Bar }
 ; NOTE: no @definition.* capture here — if it were present, defCapture fires first and
@@ -495,6 +514,15 @@ export const GO_QUERIES = `
 (parameter_declaration type: (pointer_type (type_identifier) @reference.type))
 (function_declaration result: (pointer_type (type_identifier) @reference.type))
 (method_declaration result: (pointer_type (type_identifier) @reference.type))
+; Imported/package-qualified type refs: *scheduler.Scheduler, scheduler.Scheduler
+(field_declaration type: (qualified_type (type_identifier) @reference.type))
+(parameter_declaration type: (qualified_type (type_identifier) @reference.type))
+(function_declaration result: (qualified_type (type_identifier) @reference.type))
+(method_declaration result: (qualified_type (type_identifier) @reference.type))
+(field_declaration type: (pointer_type (qualified_type (type_identifier) @reference.type)))
+(parameter_declaration type: (pointer_type (qualified_type (type_identifier) @reference.type)))
+(function_declaration result: (pointer_type (qualified_type (type_identifier) @reference.type)))
+(method_declaration result: (pointer_type (qualified_type (type_identifier) @reference.type)))
 `;
 
 // C++ queries - works with tree-sitter-cpp
@@ -1151,5 +1179,7 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.Kotlin]: KOTLIN_QUERIES,
   [SupportedLanguages.Swift]: SWIFT_QUERIES,
   [SupportedLanguages.Scala]: SCALA_QUERIES,
+  [SupportedLanguages.YAML]: '',
+  [SupportedLanguages.Dockerfile]: '',
 };
  
