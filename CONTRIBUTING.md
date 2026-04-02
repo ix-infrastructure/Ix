@@ -5,7 +5,6 @@
 ### Prerequisites
 
 - Node.js 20+
-- Java 17+ and sbt
 - Docker and Docker Compose
 
 ### Local Setup
@@ -13,10 +12,9 @@
 ```bash
 git clone https://github.com/ix-infrastructure/Ix.git
 cd Ix
-./scripts/dev/setup.sh
+./scripts/backend.sh up    # Start ArangoDB + Memory Layer (Docker)
+cd ix-cli && npm ci && npm run build
 ```
-
-This installs dependencies, builds the CLI and backend, and starts Docker services.
 
 ### Building from Source
 
@@ -30,10 +28,6 @@ npm run build
 cd ../ix-cli
 npm ci
 npm run build
-
-# memory-layer (Scala backend)
-cd ..
-sbt memoryLayer/compile
 ```
 
 ### Verify Your Setup
@@ -41,12 +35,6 @@ sbt memoryLayer/compile
 ```bash
 # CLI tests
 cd ix-cli && npm test
-
-# Backend tests (requires ArangoDB on localhost:8529)
-cd .. && sbt memoryLayer/test
-
-# Smoke test (full stack)
-./scripts/dev/ix-smoke-test.sh
 ```
 
 ## Development Workflow
@@ -55,7 +43,7 @@ cd .. && sbt memoryLayer/test
 2. Make your changes
 3. Run tests locally
 4. Open a PR using the pull request template
-5. Ensure CI passes — both CLI and backend jobs must be green before merge
+5. Ensure CI passes before merge
 
 ## Branch Naming
 
@@ -90,11 +78,7 @@ Breaking changes: use `feat!:` or `fix!:` prefix.
 | What changed | Run |
 |---|---|
 | CLI code | `cd ix-cli && npm test` |
-| Backend code | `sbt memoryLayer/test` |
-| CLI behavior | `./scripts/dev/ix-smoke-test.sh` |
 | Any change | Full test suite before opening PR |
-
-Run smoke tests for any CLI-facing change. Run backend tests for any Scala change.
 
 ## CLI Standards
 
@@ -120,6 +104,10 @@ PRs and pushes to `main` run automated security checks:
 - **Config security** — scans Docker Compose and deployment configs for unsafe exposure (e.g., auth disabled with public port bindings, `0.0.0.0` bindings). Local-only configs that bind to `127.0.0.1` are allowed.
 
 All checks fail on CRITICAL or HIGH severity findings. If a check fails on your PR, inspect the output and either fix the vulnerability or document why it's a false positive.
+
+## Backend Development
+
+The Scala backend (memory-layer) lives in a [separate private repo](https://github.com/ix-infrastructure/ix-memory-layer). For backend changes, clone that repo directly.
 
 ## OSS vs Pro Boundary
 

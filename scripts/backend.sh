@@ -4,8 +4,8 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 # IX-Memory — Backend Setup
 #
-# Builds the Memory Layer JAR (if needed) and starts ArangoDB + Memory Layer
-# via Docker Compose.
+# Starts ArangoDB + Memory Layer via Docker Compose using the published
+# Docker image from ghcr.io.
 #
 # Usage:
 #   ./scripts/backend.sh              # Start backend (default)
@@ -14,7 +14,7 @@ set -euo pipefail
 #   ./scripts/backend.sh status       # Show service status
 #   ./scripts/backend.sh logs         # Tail service logs
 #   ./scripts/backend.sh clean        # Stop + remove data volumes
-#   ./scripts/backend.sh rebuild      # Force rebuild JAR + restart
+#   ./scripts/backend.sh restart      # Restart services
 #   ./scripts/backend.sh check        # Just check if backend is healthy
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -33,15 +33,15 @@ if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
   export IX_CONTAINER_MOUNT_ROOT="${HOME}"
   dc() {
     MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
-      docker compose -f "$(cygpath -m "$IX_DIR/docker-compose.yml")" "$@"
+      docker compose -f "$(cygpath -m "$IX_DIR/$COMPOSE_FILE")" "$@"
   }
 else
   export IX_HOST_MOUNT_ROOT="${HOME}"
   export IX_CONTAINER_MOUNT_ROOT="${HOME}"
-  dc() { docker compose "$@"; }
+  dc() { docker compose -f "$COMPOSE_FILE" "$@"; }
 fi
 
-JAR_PATH="memory-layer/target/scala-2.13/ix-memory-layer.jar"
+COMPOSE_FILE="docker-compose.standalone.yml"
 HEALTH_URL="http://localhost:8090/v1/health"
 ARANGO_URL="http://localhost:8529/_api/version"
 
@@ -63,7 +63,6 @@ ensure_docker() {
   echo "Docker is not running. Attempting to start..."
 
   if [ "$(uname)" = "Darwin" ]; then
-    # macOS: try Docker Desktop
     if [ -d "/Applications/Docker.app" ]; then
       open -a Docker
       echo "  Launched Docker Desktop, waiting for it to start..."
@@ -76,7 +75,6 @@ ensure_docker() {
       exit 1
     fi
   elif [ "$(uname)" = "Linux" ]; then
-    # Linux: try systemctl
     if command -v systemctl &> /dev/null; then
       echo "  Running: sudo systemctl start docker"
       sudo systemctl start docker
@@ -91,7 +89,6 @@ ensure_docker() {
     exit 1
   fi
 
-  # Wait for Docker to be ready
   for i in $(seq 1 30); do
     if docker info &> /dev/null 2>&1; then
       echo "[ok] Docker is now running"
@@ -105,22 +102,6 @@ ensure_docker() {
   echo "Error: Docker did not start within 60 seconds."
   echo "  Start Docker manually and try again."
   exit 1
-}
-
-build_jar() {
-  local force="${1:-false}"
-  if [ "$force" = "true" ] || [ ! -f "$JAR_PATH" ]; then
-    if ! command -v sbt &> /dev/null; then
-      echo "Error: sbt is not installed."
-      echo "  Install: https://www.scala-sbt.org/download.html"
-      exit 1
-    fi
-    echo "Building Memory Layer JAR..."
-    sbt "memoryLayer/assembly" 2>&1 | tail -5
-    echo "[ok] JAR built: $JAR_PATH"
-  else
-    echo "[ok] JAR already exists (use 'rebuild' to force)"
-  fi
 }
 
 wait_for_health() {
@@ -157,7 +138,6 @@ containers_running() {
 
 case "${1:-up}" in
   up)
-    # If backend is already healthy, skip everything
     if is_healthy; then
       echo "[ok] Backend is already running and healthy"
       echo "  Memory Layer: http://localhost:8090"
@@ -166,7 +146,6 @@ case "${1:-up}" in
     fi
 
     ensure_docker
-    build_jar
 
     # If containers are running but not healthy, restart them
     if containers_running; then
@@ -174,7 +153,7 @@ case "${1:-up}" in
       dc restart
     else
       echo "Starting backend services..."
-      dc up -d --build
+      dc up -d --pull always
     fi
 
     wait_for_health
@@ -199,12 +178,9 @@ case "${1:-up}" in
     dc down -v
     echo "[ok] Backend stopped and data volumes removed."
     ;;
-  rebuild)
-    ensure_docker
-    build_jar true
-    echo "Rebuilding and starting backend..."
-    dc up -d --build
-    wait_for_health
+  restart)
+    dc restart
+    echo "[ok] Backend restarted."
     ;;
   check)
     if is_healthy; then
@@ -219,12 +195,12 @@ case "${1:-up}" in
     echo "Usage: ./scripts/backend.sh [COMMAND]"
     echo ""
     echo "Commands:"
-    echo "  up        Build JAR (if needed) and start services (default)"
+    echo "  up        Start services using published Docker image (default)"
     echo "  down      Stop all services"
     echo "  status    Show service status and health"
     echo "  logs      Tail service logs"
     echo "  clean     Stop services and remove data volumes"
-    echo "  rebuild   Force rebuild JAR and restart services"
+    echo "  restart   Restart services"
     echo "  check     Check if backend is healthy (exit 0/1)"
     exit 1
     ;;
