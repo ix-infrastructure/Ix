@@ -4,7 +4,6 @@ import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveFileOrEntity, isRawId } from "../resolve.js";
 import { stderr } from "../stderr.js";
-import { buildDependencyTree } from "./depends.js";
 import { renderSection, renderKeyValue, renderResolvedHeader, colorizeKind } from "../ui.js";
 import { compactTreeNode, relativePath } from "../format.js";
 
@@ -33,7 +32,7 @@ const MAX_NODES = Infinity;
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-const ALL_PREDICATES = ["CALLS", "IMPORTS", "REFERENCES", "EXTENDS", "IMPLEMENTS"];
+const ALL_PREDICATES = ["CALLS", "IMPORTS", "REFERENCES", "EXTENDS", "IMPLEMENTS", "CONTAINS"];
 
 /** Map --kind flag to API predicates. If no kind specified, use all predicates (same as depends). */
 function kindToPredicates(kind?: string): string[] {
@@ -386,13 +385,8 @@ export function registerTraceCommand(program: Command): void {
         // ── Both: run up + down in parallel ────────────────────────
         if (doBoth) {
           const [upResult, downResult] = await Promise.all([
-            buildDependencyTree(client, target.id, { maxDepth, maxNodes, predicates }),
-            buildTraceTree(client, target.id, {
-              direction: "out",
-              predicates,
-              maxDepth,
-              maxNodes,
-            }),
+            buildTraceTree(client, target.id, { direction: "in", predicates, maxDepth, maxNodes }),
+            buildTraceTree(client, target.id, { direction: "out", predicates, maxDepth, maxNodes }),
           ]);
 
           // ── JSON ──────────────────────────────────────────────
@@ -465,7 +459,7 @@ export function registerTraceCommand(program: Command): void {
 
         // ── Single direction ────────────────────────────────────────
         const { tree, truncated, nodesVisited, maxDepthReached } = doUpstream
-          ? await buildDependencyTree(client, target.id, { maxDepth, maxNodes, predicates })
+          ? await buildTraceTree(client, target.id, { direction: "in", predicates, maxDepth, maxNodes })
           : await buildTraceTree(client, target.id, { direction: "out", predicates, maxDepth, maxNodes });
 
         // ── JSON ────────────────────────────────────────────────────
