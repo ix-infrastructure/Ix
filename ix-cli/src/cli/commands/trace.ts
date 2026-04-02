@@ -3,8 +3,8 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveFileOrEntity, isRawId } from "../resolve.js";
+import type { ResolvedEntity } from "../resolve.js";
 import { stderr } from "../stderr.js";
-import { buildDependencyTree } from "./depends.js";
 import { renderSection, renderKeyValue, renderResolvedHeader, colorizeKind } from "../ui.js";
 import { compactTreeNode, relativePath } from "../format.js";
 
@@ -33,7 +33,7 @@ const MAX_NODES = Infinity;
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-const ALL_PREDICATES = ["CALLS", "IMPORTS", "REFERENCES", "EXTENDS", "IMPLEMENTS"];
+const ALL_PREDICATES = ["CALLS", "IMPORTS", "REFERENCES", "EXTENDS", "IMPLEMENTS", "CONTAINS"];
 
 /** Map --kind flag to API predicates. If no kind specified, use all predicates (same as depends). */
 function kindToPredicates(kind?: string): string[] {
@@ -45,6 +45,101 @@ function kindToPredicates(kind?: string): string[] {
     case "contains": return ["CONTAINS"];
     default:         return ALL_PREDICATES;
   }
+}
+
+function isExactSymbolMatch(node: any, symbol: string): boolean {
+  const name = node?.name || node?.attrs?.name || "";
+  return name === symbol || String(name).toLowerCase() === symbol.toLowerCase();
+}
+
+async function traceEdgeScore(
+  client: IxClient,
+  nodeId: string,
+  direction: "upstream" | "downstream" | "both",
+  predicates: string[],
+): Promise<number> {
+  if (direction === "both") {
+    const [upstream, downstream] = await Promise.all([
+      client.expand(nodeId, { direction: "in", predicates, hops: 1 }),
+      client.expand(nodeId, { direction: "out", predicates, hops: 1 }),
+    ]);
+    return upstream.nodes.length + downstream.nodes.length;
+  }
+
+  const result = await client.expand(nodeId, {
+    direction: direction === "upstream" ? "in" : "out",
+    predicates,
+    hops: 1,
+  });
+  return result.nodes.length;
+}
+
+export async function pickTraceTarget(
+  client: IxClient,
+  symbol: string,
+  target: ResolvedEntity,
+  opts: {
+    direction: "upstream" | "downstream" | "both";
+    predicates: string[];
+    pick?: number;
+    path?: string;
+  },
+): Promise<ResolvedEntity> {
+  if (target.kind !== "config_entry") return target;
+  if (opts.path) return target;
+
+  const candidates = (await client.search(symbol, {
+    limit: 50,
+    kind: "config_entry",
+    nameOnly: true,
+  }))
+    .filter((node: any) => isExactSymbolMatch(node, symbol))
+    .filter((node: any, index: number, all: any[]) =>
+      all.findIndex((other: any) => other.id === node.id) === index,
+    );
+
+  if (candidates.length <= 1) return target;
+
+  const scored = await Promise.all(
+    candidates.map(async (node: any, index: number) => ({
+      node,
+      index,
+      score: await traceEdgeScore(client, node.id, opts.direction, opts.predicates),
+    })),
+  );
+
+  scored.sort((a, b) => {
+    if (a.score !== b.score) return b.score - a.score;
+    if (a.node.id === target.id) return -1;
+    if (b.node.id === target.id) return 1;
+    return a.index - b.index;
+  });
+
+  if (opts.pick !== undefined) {
+    const picked = scored[opts.pick - 1];
+    if (!picked) return target;
+    return {
+      id: picked.node.id,
+      kind: picked.node.kind,
+      name: picked.node.name || picked.node.attrs?.name || symbol,
+      path: picked.node.provenance?.sourceUri ?? picked.node.provenance?.source_uri ?? picked.node.path,
+      resolutionMode: "scored",
+    };
+  }
+
+  const current = scored.find((entry) => entry.node.id === target.id);
+  const best = scored[0];
+  if (!best) return target;
+  if ((current?.score ?? -1) >= best.score) return target;
+  if (best.score <= 0) return target;
+
+  return {
+    id: best.node.id,
+    kind: best.node.kind,
+    name: best.node.name || best.node.attrs?.name || symbol,
+    path: best.node.provenance?.sourceUri ?? best.node.provenance?.source_uri ?? best.node.path,
+    resolutionMode: "scored",
+  };
 }
 
 // ── Tree traversal ───────────────────────────────────────────────────
@@ -368,8 +463,9 @@ export function registerTraceCommand(program: Command): void {
         }
 
         // ── Directional mode ────────────────────────────────────────
-        const target = await resolveFileOrEntity(client, symbol, resolveOpts);
-        if (!target) return;
+        const resolvedTarget = await resolveFileOrEntity(client, symbol, resolveOpts);
+        if (!resolvedTarget) return;
+        let target: ResolvedEntity = resolvedTarget;
 
         const predicates = kindToPredicates(opts.kind);
         const relKind = opts.kind ?? "mixed";
@@ -379,6 +475,12 @@ export function registerTraceCommand(program: Command): void {
         const doDownstream = opts.downstream === true;
         const doBoth = !doUpstream && !doDownstream;
         const direction = doBoth ? "both" : doUpstream ? "upstream" : "downstream";
+        target = await pickTraceTarget(client, symbol, target, {
+          direction,
+          predicates,
+          pick: opts.pick ? parseInt(opts.pick, 10) : undefined,
+          path: opts.path,
+        });
 
         // upstream   = "in" (who depends on this — same as depends)
         // downstream = "out" (what this depends on — inverse of depends)
@@ -386,13 +488,8 @@ export function registerTraceCommand(program: Command): void {
         // ── Both: run up + down in parallel ────────────────────────
         if (doBoth) {
           const [upResult, downResult] = await Promise.all([
-            buildDependencyTree(client, target.id, { maxDepth, maxNodes, predicates }),
-            buildTraceTree(client, target.id, {
-              direction: "out",
-              predicates,
-              maxDepth,
-              maxNodes,
-            }),
+            buildTraceTree(client, target.id, { direction: "in", predicates, maxDepth, maxNodes }),
+            buildTraceTree(client, target.id, { direction: "out", predicates, maxDepth, maxNodes }),
           ]);
 
           // ── JSON ──────────────────────────────────────────────
@@ -465,7 +562,7 @@ export function registerTraceCommand(program: Command): void {
 
         // ── Single direction ────────────────────────────────────────
         const { tree, truncated, nodesVisited, maxDepthReached } = doUpstream
-          ? await buildDependencyTree(client, target.id, { maxDepth, maxNodes, predicates })
+          ? await buildTraceTree(client, target.id, { direction: "in", predicates, maxDepth, maxNodes })
           : await buildTraceTree(client, target.id, { direction: "out", predicates, maxDepth, maxNodes });
 
         // ── JSON ────────────────────────────────────────────────────

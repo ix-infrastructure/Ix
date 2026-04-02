@@ -159,6 +159,7 @@ Examples:
             name: s.node.name || (s.node.attrs as any)?.name || "(unnamed)",
             kind: s.node.kind,
             path: relativePath(s.node.provenance?.sourceUri) ?? undefined,
+            language: (s.node.attrs as any)?.language ?? undefined,
             rank: i + 1,
             tier: s.rank.tier,
             score: s.rank.score,

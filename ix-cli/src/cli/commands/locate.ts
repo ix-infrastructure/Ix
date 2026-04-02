@@ -9,7 +9,7 @@ import {
 import { isFileStale } from "../stale.js";
 import { stderr } from "../stderr.js";
 import { relativePath } from "../format.js";
-import { getSystemPath, hasMapData } from "../hierarchy.js";
+import { getEffectiveSystemPath, hasMapData } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
 import { renderSection, renderKeyValue, renderNote, renderWarning, renderBreadcrumb } from "../ui.js";
 
@@ -73,9 +73,9 @@ export function registerLocateCommand(program: Command): void {
       const isContainer = CONTAINER_KINDS.has(target.kind);
       const isFile = FILE_KINDS.has(target.kind);
 
-      // Parallel fetch: system path, parent container (for non-containers), entity details
+      // Parallel fetch: effective system path, parent container (for non-containers), entity details
       const [systemPath, containsResult, details] = await Promise.all([
-        getSystemPath(client, target.id),
+        getEffectiveSystemPath(client, target.id),
         isContainer
           ? Promise.resolve({ nodes: [] })
           : client.expand(target.id, { direction: "in", predicates: ["CONTAINS"] }),
@@ -112,23 +112,14 @@ export function registerLocateCommand(program: Command): void {
       // Sub-file entities (table, view, function, etc.) have no IN_REGION edges of their
       // own — those belong to the containing file. Walk up via CONTAINS to inherit the
       // parent file's system path so hasMapData returns true after `ix map`.
-      let effectiveSystemPath = systemPath;
-      if (!hasMapData(systemPath) && !isContainer && containsResult.nodes.length > 0) {
-        const parentFile = containsResult.nodes[0] as any;
-        if (parentFile?.id) {
-          const parentPath = await getSystemPath(client, parentFile.id);
-          if (hasMapData(parentPath)) effectiveSystemPath = parentPath;
-        }
-      }
-
       // Diagnostic for missing map data
-      const hasMap = hasMapData(effectiveSystemPath);
+      const hasMap = hasMapData(systemPath);
       if (!hasMap) {
         diagnostics.push("No system map. Run `ix map` to see hierarchy.");
       }
 
       // Build system path: append resolved symbol for non-file targets
-      let systemPathMapped = effectiveSystemPath.map((n) => ({ name: n.name, kind: n.kind }));
+      let systemPathMapped = systemPath.map((n) => ({ name: n.name, kind: n.kind }));
       if (!isFile) {
         const lastInPath = systemPathMapped[systemPathMapped.length - 1];
         if (!lastInPath || lastInPath.name !== target.name) {

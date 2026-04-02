@@ -213,7 +213,7 @@ function builtinsForLanguage(lang: SupportedLanguages): Set<string> {
 export function isGrammarSupported(filePath: string): boolean {
   const language = languageFromPath(filePath);
   if (!language) return false;
-  if (language === SupportedLanguages.YAML || language === SupportedLanguages.Dockerfile || language === SupportedLanguages.SQL) return true;
+  if (language === SupportedLanguages.YAML || language === SupportedLanguages.Dockerfile || language === SupportedLanguages.SQL || language === SupportedLanguages.JSON) return true;
   if (filePath.endsWith('.tsx')) return true; // TSX uses TypeScript.tsx, always available
   return GRAMMAR_MAP[language] !== undefined;
 }
@@ -570,6 +570,89 @@ function extractSqlTableRefs(sql: string): string[] {
   return [...refs];
 }
 
+function parseJsonFile(filePath: string, source: string): FileParseResult {
+  const language = SupportedLanguages.JSON;
+  const fileName = nodePath.basename(filePath);
+  const sourceLineCount = countSourceLines(source);
+  const fileRole = classifyFileRole(filePath);
+  const entities: ParsedEntity[] = [
+    { name: fileName, kind: 'file', lineStart: 1, lineEnd: sourceLineCount, language },
+  ];
+  const chunks: ParsedChunk[] = [];
+  const relationships: ParsedRelationship[] = [];
+
+  // Walk the parsed JSON value, emitting one entity+chunk per object key.
+  // `path` is the fully qualified key ancestry for the current object.
+  const walk = (
+    value: unknown,
+    path: string,
+    lineHint: number,
+  ): void => {
+    if (value === null || typeof value !== 'object') return;
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        walk(item, path, lineHint);
+      }
+      return;
+    }
+
+    for (const key of Object.keys(value as Record<string, unknown>)) {
+      const fullPath = path ? `${path}.${key}` : key;
+      entities.push({
+        name: key,
+        kind: 'config_entry',
+        lineStart: lineHint,
+        lineEnd: lineHint,
+        language,
+        container: path || undefined,
+      });
+      chunks.push({
+        name: key,
+        chunkKind: 'config_key',
+        lineStart: lineHint,
+        lineEnd: lineHint,
+        startByte: 0,
+        endByte: 0,
+        contentHash: crypto
+          .createHash('sha256')
+          .update(`${fullPath}=${JSON.stringify((value as Record<string, unknown>)[key])}`)
+          .digest('hex'),
+        language,
+        container: path || undefined,
+      });
+      relationships.push({
+        srcName: path || fileName,
+        dstName: key,
+        predicate: 'CONTAINS',
+      });
+      walk((value as Record<string, unknown>)[key], fullPath, lineHint);
+    }
+  };
+
+  try {
+    const parsed: unknown = JSON.parse(source);
+    walk(parsed, '', 1);
+  } catch {
+    // Unparseable JSON: fall through to file_body chunk below
+  }
+
+  if (chunks.length === 0) {
+    chunks.push({
+      name: null,
+      chunkKind: 'file_body',
+      lineStart: 1,
+      lineEnd: Math.max(sourceLineCount, 1),
+      startByte: 0,
+      endByte: source.length,
+      contentHash: crypto.createHash('sha256').update(source).digest('hex'),
+      language,
+    });
+  }
+
+  return { filePath, language, entities, chunks, relationships, fileRole };
+}
+
 function parseSqlFile(filePath: string, source: string): FileParseResult {
   const language = SupportedLanguages.SQL;
   const fileName = nodePath.basename(filePath);
@@ -757,6 +840,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
   if (language === SupportedLanguages.YAML) return parseYamlFile(filePath, source);
   if (language === SupportedLanguages.Dockerfile) return parseDockerfileFile(filePath, source);
   if (language === SupportedLanguages.SQL) return parseSqlFile(filePath, source);
+  if (language === SupportedLanguages.JSON) return parseJsonFile(filePath, source);
 
   // TypeScript TSX uses a separate grammar
   const isTsx = filePath.endsWith('.tsx');

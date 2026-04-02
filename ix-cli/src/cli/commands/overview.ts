@@ -3,7 +3,7 @@ import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveFileOrEntity, printResolved } from "../resolve.js";
-import { getSystemPath, hasMapData } from "../hierarchy.js";
+import { getEffectiveSystemPath, getSystemPath, hasMapData } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
 import { relativePath } from "../format.js";
 import { renderSection, renderKeyValue, renderNote, renderBreadcrumb } from "../ui.js";
@@ -226,7 +226,7 @@ async function overviewLeaf(
   // Fetch entity details, system path, and parent container in parallel
   const [details, systemPath, parentResult] = await Promise.all([
     client.entity(target.id),
-    getSystemPath(client, target.id),
+    getEffectiveSystemPath(client, target.id),
     client.expand(target.id, { direction: "in", predicates: ["CONTAINS"] }),
   ]);
 

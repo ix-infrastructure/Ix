@@ -3,6 +3,7 @@ import type { IxClient } from "../client/api.js";
 export type SystemPath = Array<{ name: string; kind: string; id?: string }>;
 
 const REGION_KINDS = new Set(["system", "subsystem", "module", "region"]);
+const FILE_KINDS = new Set(["file"]);
 
 /** Traverse IN_REGION edges upward to build the system-hierarchy path for a node. */
 export async function getSystemPath(client: IxClient, nodeId: string): Promise<SystemPath> {
@@ -35,6 +36,62 @@ export function formatSystemPath(path: SystemPath): string {
 /** Returns true if the path contains at least one region/system node (i.e. map data exists). */
 export function hasMapData(path: SystemPath): boolean {
   return path.some((n) => REGION_KINDS.has(n.kind));
+}
+
+/**
+ * Return the best system path available for a node.
+ * Some nested entities do not carry IN_REGION edges directly and must inherit
+ * map context from a containing ancestor, typically the enclosing file.
+ */
+export async function getEffectiveSystemPath(
+  client: IxClient,
+  nodeId: string,
+  opts?: { maxContainsHops?: number }
+): Promise<SystemPath> {
+  const directPath = await getSystemPath(client, nodeId);
+  if (hasMapData(directPath)) return directPath;
+
+  const maxContainsHops = opts?.maxContainsHops ?? 8;
+  const visited = new Set<string>([nodeId]);
+  let frontier: Array<{ id: string; kind?: string }> = [{ id: nodeId }];
+
+  for (let depth = 0; depth < maxContainsHops; depth += 1) {
+    const nextLevel: Array<{ id: string; kind?: string }> = [];
+
+    for (const current of frontier) {
+      try {
+        const result = await client.expand(current.id, {
+          direction: "in",
+          predicates: ["CONTAINS"],
+          hops: 1,
+        });
+
+        const parents = (result.nodes as Array<{ id: string; kind?: string }>).filter(
+          (node) => node?.id && !visited.has(node.id)
+        );
+
+        const prioritized = [...parents].sort((a, b) => {
+          const aRank = FILE_KINDS.has(a.kind ?? "") ? 0 : 1;
+          const bRank = FILE_KINDS.has(b.kind ?? "") ? 0 : 1;
+          return aRank - bRank;
+        });
+
+        for (const parent of prioritized) {
+          visited.add(parent.id);
+          const parentPath = await getSystemPath(client, parent.id);
+          if (hasMapData(parentPath)) return parentPath;
+          nextLevel.push(parent);
+        }
+      } catch {
+        // Ignore lookup failures and keep climbing through any remaining nodes.
+      }
+    }
+
+    if (nextLevel.length === 0) break;
+    frontier = nextLevel;
+  }
+
+  return directPath;
 }
 
 /** Group a set of node IDs by their containing region (IN_REGION). */

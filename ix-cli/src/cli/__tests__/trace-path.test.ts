@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { findPath } from '../commands/trace.js';
+import { findPath, pickTraceTarget } from '../commands/trace.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -127,5 +127,81 @@ describe('no path between disconnected files', () => {
     const path = await findPath(client as any, 'parse-pool-ts', 'api-ts', ['IMPORTS'], 6);
 
     expect(path).toBeNull();
+  });
+});
+
+describe('trace target selection', () => {
+  it('prefers the exact-name config entry that has traversable downstream edges', async () => {
+    const client = {
+      async search() {
+        return [
+          { id: 'orphan-name', kind: 'config_entry', name: 'name', provenance: { source_uri: '/repo/countries-unescaped.json' } },
+          { id: 'nested-name', kind: 'config_entry', name: 'name', provenance: { source_uri: '/repo/countries.json' } },
+        ];
+      },
+      async expand(id: string, opts?: { direction?: string }) {
+        if (id === 'orphan-name' && opts?.direction === 'out') {
+          return { nodes: [], edges: [] };
+        }
+        if (id === 'nested-name' && opts?.direction === 'out') {
+          return {
+            nodes: [
+              { id: 'common', kind: 'config_entry', name: 'common' },
+              { id: 'official', kind: 'config_entry', name: 'official' },
+            ],
+            edges: [],
+          };
+        }
+        return { nodes: [], edges: [] };
+      },
+    };
+
+    const target = await pickTraceTarget(
+      client as any,
+      'name',
+      { id: 'orphan-name', kind: 'config_entry', name: 'name', path: '/repo/countries-unescaped.json', resolutionMode: 'exact' },
+      { direction: 'downstream', predicates: ['CONTAINS'] },
+    );
+
+    expect(target.id).toBe('nested-name');
+    expect(target.path).toBe('/repo/countries.json');
+  });
+
+  it('uses trace-ranked candidates when --pick is provided for duplicate config keys', async () => {
+    const client = {
+      async search() {
+        return [
+          { id: 'orphan-name', kind: 'config_entry', name: 'name', provenance: { source_uri: '/repo/countries-unescaped.json' } },
+          { id: 'nested-name', kind: 'config_entry', name: 'name', provenance: { source_uri: '/repo/countries.json' } },
+          { id: 'deep-name', kind: 'config_entry', name: 'name', provenance: { source_uri: '/repo/alt.json' } },
+        ];
+      },
+      async expand(id: string, opts?: { direction?: string }) {
+        if (opts?.direction !== 'out') return { nodes: [], edges: [] };
+        if (id === 'nested-name') {
+          return { nodes: [{ id: 'common', kind: 'config_entry', name: 'common' }], edges: [] };
+        }
+        if (id === 'deep-name') {
+          return {
+            nodes: [
+              { id: 'common', kind: 'config_entry', name: 'common' },
+              { id: 'official', kind: 'config_entry', name: 'official' },
+              { id: 'native', kind: 'config_entry', name: 'native' },
+            ],
+            edges: [],
+          };
+        }
+        return { nodes: [], edges: [] };
+      },
+    };
+
+    const target = await pickTraceTarget(
+      client as any,
+      'name',
+      { id: 'orphan-name', kind: 'config_entry', name: 'name', path: '/repo/countries-unescaped.json', resolutionMode: 'exact' },
+      { direction: 'downstream', predicates: ['CONTAINS'], pick: 2 },
+    );
+
+    expect(target.id).toBe('nested-name');
   });
 });

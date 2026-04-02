@@ -16,6 +16,7 @@ export enum SupportedLanguages {
   YAML = 'yaml',
   Dockerfile = 'dockerfile',
   SQL = 'sql',
+  JSON = 'json',
 }
 
 const EXT_MAP: Record<string, SupportedLanguages> = {
@@ -47,6 +48,7 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.yml':  SupportedLanguages.YAML,
   '.dockerfile': SupportedLanguages.Dockerfile,
   '.sql':  SupportedLanguages.SQL,
+  '.json': SupportedLanguages.JSON,
 };
 
 export function languageFromPath(filePath: string): SupportedLanguages | null {

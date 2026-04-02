@@ -130,10 +130,11 @@ class MapGraphBuilder(client: ArangoClient) {
    * Returns file nodes using provenance.source_uri as the path key.
    * Files without source_uri are skipped (unusual but defensive).
    */
-  // Source-code extensions to include in the architectural map.
-  // Docs (.md), scripts (.sh), config (.yml/.json/.toml) etc. are excluded.
+  // Source-like artifacts to include in the architectural map.
+  // JSON and common config formats are included so data-heavy repos can still
+  // receive file-level singleton regions even when they have little coupling.
   private val SourceExtensions =
-    Set("scala","java","kt","ts","tsx","js","jsx","py","go","rs","cs","cpp","c","h","hpp","rb")
+    Set("scala","java","kt","ts","tsx","js","jsx","py","go","rs","cs","cpp","c","h","hpp","rb","json","yaml","yml","toml")
 
   private def fetchFiles(): IO[Vector[FileVertex]] =
     client.query(

@@ -1047,18 +1047,31 @@ class MapService(
     doc
   }
 
-  private def buildRegionEdgeDocs(
+  private[map] def buildRegionEdgeDocs(
     regions: Vector[Region],
     newRev:  Long,
     now:     String,
     provMap: java.util.Map[String, AnyRef]
   ): Vector[java.util.Map[String, AnyRef]] = {
-    val fileEdges = regions.filter(_.level == 1).flatMap { r =>
-      r.memberFiles.toVector.map { fileId =>
-        val edgeId = UUID.nameUUIDFromBytes(s"in_region:${r.id.value}:${fileId.value}".getBytes("UTF-8"))
-        buildRegionEdgeDoc(edgeId.toString, s"nodes/${r.id.value}", s"nodes/${fileId.value}",
-          r.id.value.toString, fileId.value.toString, newRev, now, provMap)
-      }
+    val fileRegionById = regions
+      .flatMap(region => region.memberFiles.toVector.map(_ -> region))
+      .groupBy(_._1)
+      .view
+      .mapValues(_.map(_._2).minBy(region => (region.level, region.labelKind)))
+      .toMap
+
+    val fileEdges = fileRegionById.toVector.map { case (fileId, region) =>
+      val edgeId = UUID.nameUUIDFromBytes(s"in_region:${region.id.value}:${fileId.value}".getBytes("UTF-8"))
+      buildRegionEdgeDoc(
+        edgeId.toString,
+        s"nodes/${region.id.value}",
+        s"nodes/${fileId.value}",
+        region.id.value.toString,
+        fileId.value.toString,
+        newRev,
+        now,
+        provMap
+      )
     }
     val regionEdges = regions.flatMap { r =>
       r.parentId.map { pid =>
