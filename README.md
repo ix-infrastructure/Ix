@@ -94,6 +94,11 @@ irm https://ix-infra.com/install.ps1 | iex
 ``` bash
 openclaw plugins install ix-infrastructure/ix-openclaw-plugin
 ```
+### Gemini Extension 
+``` bash
+gemini extensions install https://github.com/ix-infrastructure/ix-gemini-plugin
+```
+
 ## Requirements
 
 - macOS, Linux, or Windows
