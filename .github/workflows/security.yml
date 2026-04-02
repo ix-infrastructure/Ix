@@ -25,26 +25,4 @@ jobs:
           exit-code: 1
           scanners: vuln,misconfig
 
-  trivy-image:
-    name: Trivy (Docker image)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
-        with:
-          java-version: "17"
-          distribution: "temurin"
-          cache: "sbt"
-      - uses: sbt/setup-sbt@dd1ef7d7798fab5ce802a6adab3b782817b8c2d0 # v1.1.20
-      - name: Build JAR
-        run: sbt "memoryLayer/assembly"
-      - name: Build Docker image
-        run: docker build -t ix-memory-layer:ci ./memory-layer
-      - name: Trivy image scan
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
-        with:
-          scan-type: image
-          image-ref: ix-memory-layer:ci
-          severity: CRITICAL,HIGH
-          exit-code: 1
-          scanners: vuln
+  # Docker image scanning is handled in the private ix-memory-layer repo

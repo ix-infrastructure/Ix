@@ -19,7 +19,7 @@ function parseFixture(relativePath) {
 }
 
 const pythonResult = parseFixture(
-  '../memory-layer/src/test/resources/fixtures/sample_project/billing_service.py'
+  'test/fixtures/sample_project/billing_service.py'
 );
 assert(pythonResult, 'Expected Python fixture to parse');
 assert(
@@ -36,7 +36,7 @@ assert(
 );
 
 const typeScriptResult = parseFixture(
-  '../memory-layer/src/test/resources/fixtures/api.ts'
+  'test/fixtures/api.ts'
 );
 assert(typeScriptResult, 'Expected TypeScript fixture to parse');
 assert(

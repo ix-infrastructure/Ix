@@ -28,6 +28,10 @@ class Ix < Formula
         exec "#{Formula["node@22"].opt_bin}/node" "#{libexec}/dist/cli/main.js" "$@"
       EOS
     end
+
+    # Install Docker Compose file for the backend (ix docker start)
+    (var/"ix/backend").mkpath
+    (var/"ix/backend/docker-compose.yml").write (buildpath/"docker-compose.standalone.yml").read
   end
 
   def caveats
