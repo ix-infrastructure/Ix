@@ -16,7 +16,7 @@
   <img src="https://img.shields.io/badge/status-alpha-blue" />
   <img src="https://img.shields.io/badge/focus-system--intelligence-purple" />
   <img src="https://img.shields.io/badge/AI-persistent--memory-blueviolet" />
-  <img src="https://img.shields.io/badge/LLMs-Claude%20%7C%20Codex%20%7C%20OpenClaw-orange" />
+  <img src="https://img.shields.io/badge/LLMs-Claude%20%7C%20Codex%20%7C%20OpenClaw%20%7C%20Gemini-orange" />
 </p>
 
 <p align="center">
