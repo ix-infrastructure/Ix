@@ -15,6 +15,10 @@ class Ix < Formula
       system "npm", "run", "build"
     end
 
+    # Install core-ingestion runtime (parser + tree-sitter grammars)
+    # The CLI loads these at runtime via a relative path from dist/cli/commands/
+    (prefix/"core-ingestion").install Dir["core-ingestion/dist", "core-ingestion/node_modules", "core-ingestion/package.json"]
+
     cd "ix-cli" do
       system "npm", "install", "--silent"
       system "npm", "run", "build"
