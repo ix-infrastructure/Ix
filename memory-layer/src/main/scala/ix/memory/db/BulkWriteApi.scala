@@ -27,7 +27,7 @@ class BulkWriteApi(client: ArangoClient) {
   private val DefaultChunkSize = 500
   private val DefaultChunkPayloadBytes = 16 * 1024 * 1024
   private val MaxNodeDocs  = 10000
-  private val MaxEdgeDocs  = 20000
+  private val MaxEdgeDocs  = 50000
   private val MaxClaimDocs = 10000
   private val MaxPatchDocs = 500
   private val SlowChunkMs = 2000L

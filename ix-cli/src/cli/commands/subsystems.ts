@@ -214,7 +214,13 @@ function printScores(scores: SubsystemScore[]): void {
     byLevel.get(s.level)!.push(s);
   }
 
-  const levelLabels: Record<number, string> = { 1: "Modules", 2: "Subsystems", 3: "Systems" };
+  const maxLevel = scores.length > 0 ? Math.max(...scores.map(s => s.level)) : 3;
+  const levelLabels: Record<number, string> = {};
+  for (let l = 1; l <= maxLevel; l++) {
+    if (l === maxLevel) levelLabels[l] = "Systems";
+    else if (l === maxLevel - 1) levelLabels[l] = "Subsystems";
+    else levelLabels[l] = "Modules";
+  }
   const sorted = [...byLevel.entries()].sort((a, b) => b[0] - a[0]);
 
   for (const [level, group] of sorted) {

@@ -33,8 +33,8 @@ class MapService(
   private val logger = Slf4jLogger.getLoggerFromName[IO]("ix.map")
   private val CrosscutThreshold = 0.10
 
-  // Cross-cut penalty multiplier (reduces edge weights involving crosscut files)
-  private val CrosscutLambda    = 0.5
+  // Cross-cut penalty base multiplier (reduces edge weights involving crosscut files)
+  private val CrosscutLambdaBase = 0.5
   // High-degree threshold: files in the top N% by degree are crosscut candidates
   private val CrosscutDegreeTop = 0.10
   // Path tokens that suggest cross-cutting utilities
@@ -55,12 +55,13 @@ class MapService(
   private val preflight = new MapPreflight()
   private final class RetainedRegion(val level: Int, val communityIndex: Int, val region: Region)
 
-  // Label kinds by level
+  // Label kinds by level — supports arbitrary depth.
+  // Top level = "system", bottom level = "module", everything in between = "subsystem".
   private def labelKind(level: Int, maxLevel: Int): String =
-    if (maxLevel <= 1)   "system"
+    if (maxLevel <= 1) "system"
     else if (level == maxLevel) "system"
-    else if (level == 1)        "module"
-    else                         "subsystem"
+    else if (level == 1) "module"
+    else "subsystem"
 
   def buildMap(forceRecompute: Boolean = false, forceFull: Boolean = false): IO[ArchitectureMap] =
     getOrBuildMap(forceRecompute, forceFull)
@@ -184,15 +185,22 @@ class MapService(
     }
   }
 
+  private def adaptiveCrosscutLambda(fileCount: Int): Double =
+    if      (fileCount <= 500)  CrosscutLambdaBase        // 0.5
+    else if (fileCount <= 2000) CrosscutLambdaBase * 0.6  // 0.3
+    else if (fileCount <= 5000) CrosscutLambdaBase * 0.4  // 0.2
+    else                        CrosscutLambdaBase * 0.3  // 0.15
+
   private def applyPenalty(
     graph:  WeightedFileGraph,
     scores: Map[NodeId, Double]
   ): WeightedFileGraph = {
+    val lambda = adaptiveCrosscutLambda(graph.vertices.size)
     val newAdj = graph.adjMatrix.map { case (src, neighbors) =>
       val sCross = scores.getOrElse(src, 0.0)
       val adjusted = neighbors.map { case (dst, w) =>
         val dCross  = scores.getOrElse(dst, 0.0)
-        val penalty = (sCross + dCross) / 2.0 * CrosscutLambda
+        val penalty = (sCross + dCross) / 2.0 * lambda
         dst -> w * (1.0 - penalty)
       }
       src -> adjusted
@@ -779,7 +787,7 @@ class MapService(
       crosscutScores <- IO.blocking(detectCrosscut(rawGraph))
       graph          <- IO.blocking(applyPenalty(rawGraph, crosscutScores))
       t2             <- IO(System.currentTimeMillis())
-      levels         <- IO.blocking(LouvainClustering.cluster(graph, maxLevels = 3, minCommunitySize = 3))
+      levels         <- IO.blocking(LouvainClustering.cluster(graph, maxLevels = 5, minCommunitySize = 3))
       t3             <- IO(System.currentTimeMillis())
       regions        <- IO.blocking(buildRegions(graph, levels, crosscutScores, inputRev))
       edges          <- IO.blocking(computeArchitectureEdges(regions, rawGraph))

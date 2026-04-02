@@ -85,11 +85,13 @@ class ArangoClient private (db: ArangoDatabase) {
       documents.size - result.getErrors.size
     }
 
-  /** Bulk insert edge documents. Same as bulkInsert but for edge collections. */
+  /** Bulk insert edge documents. Uses 'update' overwrite mode by default —
+    * edge documents are keyed by a deterministic ID so update-merge is safe
+    * and faster than full replace (avoids read-delete-write per document). */
   def bulkInsertEdges(
     collection: String,
     documents: Seq[java.util.Map[String, AnyRef]],
-    overwriteMode: String = "replace"
+    overwriteMode: String = "update"
   ): IO[Int] = bulkInsert(collection, documents, overwriteMode)
 
   // ── Stream Transaction lifecycle ──────────────────────────────────
@@ -119,9 +121,19 @@ class ArangoClient private (db: ArangoDatabase) {
 
   def ensureSchema(): IO[Unit] = ArangoSchema.ensure(db)
 
+  /** Abort all active stream transactions so truncation can acquire locks. */
+  private def abortAllTransactions(): IO[Unit] =
+    IO.blocking {
+      val txns = db.getStreamTransactions().asScala.toList
+      txns.filter(_.getState.toString == "running").foreach { tx =>
+        try db.abortStreamTransaction(tx.getId)
+        catch { case _: Exception => () }
+      }
+    }
+
   /** Truncate all graph state. Destructive — dev use only. */
   def truncateGraph(): IO[Unit] =
-    IO.blocking {
+    abortAllTransactions() *> IO.blocking {
       db.collection("nodes").truncate()
       db.collection("edges").truncate()
       db.collection("patches").truncate()
@@ -141,7 +153,7 @@ class ArangoClient private (db: ArangoDatabase) {
    * then execute enough bounded delete passes to cover that cardinality, with
    * a final recount only if needed. Edges are removed before nodes.
    */
-  def truncateCodeGraph(): IO[Unit] = {
+  def truncateCodeGraph(): IO[Unit] = abortAllTransactions() *> {
     val batchSize = 5000
     val codeKinds = Array(
       "file", "function", "class", "method", "interface",

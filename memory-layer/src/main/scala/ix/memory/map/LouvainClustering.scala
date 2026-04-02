@@ -44,35 +44,71 @@ object LouvainClustering {
    *
    * Returns a vector of LevelPartitions, finest first (index 0 = most granular).
    * Each partition covers ALL original file nodes.
+   *
+   * Adaptive re-clustering: when the coarsest level exceeds
+   * MaxTopLevelCommunities, the algorithm halves the resolution and
+   * retries up to MaxAdaptiveRetries times to produce coarser groupings.
+   *
+   * Singleton absorption: after each Louvain pass, singleton communities
+   * (size 1) that have edges to other communities are merged into the
+   * community they have the strongest total edge weight to.
    */
+  private val MaxTopLevelCommunities = 60
+  private val MaxAdaptiveRetries     = 3
+  /** When consecutive levels jump by more than this ratio, insert intermediate levels. */
+  private val MaxLevelJumpRatio      = 15
+  private val MaxGapFillAttempts     = 3
+
   def cluster(
     graph:              WeightedFileGraph,
-    maxLevels:          Int    = 4,
+    maxLevels:          Int    = 5,
     resolution:         Double = -1.0,
     minCommunitySize:   Int    = 2,
     seed:               Long   = 42L
   ): Vector[LevelPartition] = {
     if (graph.vertices.isEmpty || graph.totalWeight == 0.0) return Vector.empty
 
-    val effectiveResolution =
+    val baseResolution =
       if (resolution > 0.0) resolution else adaptiveResolution(graph.vertices.size)
 
-    val numSeeds = if (graph.vertices.size < 30) 1L else 3L
-    val runs = (0L until numSeeds).map { offset =>
-      val levels = clusterOnce(
-        graph            = graph,
-        maxLevels        = maxLevels,
-        resolution       = effectiveResolution,
-        minCommunitySize = minCommunitySize,
-        seed             = seed + offset
+    var effectiveResolution = baseResolution
+    var bestLevels: Vector[LevelPartition] = Vector.empty
+    var retries = 0
+
+    while (retries <= MaxAdaptiveRetries) {
+      val numSeeds = if (graph.vertices.size < 30) 1L else 3L
+      val runs = (0L until numSeeds).map { offset =>
+        val levels = clusterOnce(
+          graph            = graph,
+          maxLevels        = maxLevels,
+          resolution       = effectiveResolution,
+          minCommunitySize = minCommunitySize,
+          seed             = seed + offset
+        )
+        val score = levels.headOption
+          .map(level => modularity(graph, level.assignment, effectiveResolution))
+          .getOrElse(Double.NegativeInfinity)
+        levels -> score
+      }
+
+      bestLevels = fillHierarchyGaps(
+        runs.maxBy(_._2)._1,
+        graph, minCommunitySize, seed
       )
-      val score = levels.headOption
-        .map(level => modularity(graph, level.assignment, effectiveResolution))
-        .getOrElse(Double.NegativeInfinity)
-      levels -> score
+
+      val coarsestCount = bestLevels.lastOption
+        .map(_.communities.count(_.size >= minCommunitySize))
+        .getOrElse(0)
+
+      if (coarsestCount > MaxTopLevelCommunities && retries < MaxAdaptiveRetries) {
+        effectiveResolution *= 0.5
+        retries += 1
+      } else {
+        retries = MaxAdaptiveRetries + 1  // exit loop
+      }
     }
 
-    runs.maxBy(_._2)._1
+    bestLevels
   }
 
   private def clusterOnce(
@@ -92,7 +128,7 @@ object LouvainClustering {
 
     var level = 0
     while (level < maxLevels && currentGraph.vertices.size > 1) {
-      val rawAssignment = louvainPass(currentGraph, resolution, rng)
+      val rawAssignment = absorbSingletons(louvainPass(currentGraph, resolution, rng), currentGraph)
       val projected     = projectPartition(rawAssignment, nodeExpansion)
       val meaningful    = projected.communities.count(_.size >= minCommunitySize)
 
@@ -115,10 +151,151 @@ object LouvainClustering {
     levels.toVector
   }
 
-  private def adaptiveResolution(fileCount: Int): Double =
-    if (fileCount < 50) 1.2
-    else if (fileCount <= 500) 1.0
-    else 0.8
+  /**
+   * When consecutive levels jump from N communities to M (ratio N/M > MaxLevelJumpRatio),
+   * insert intermediate levels by sub-clustering the finer level's communities at
+   * progressively lower resolutions to bridge the gap.
+   *
+   * Example: if level 1 has 847 communities and level 2 has 7, this inserts
+   * intermediate levels (e.g., ~60-80 communities) between them.
+   */
+  private def fillHierarchyGaps(
+    levels:           Vector[LevelPartition],
+    graph:            WeightedFileGraph,
+    minCommunitySize: Int,
+    seed:             Long
+  ): Vector[LevelPartition] = {
+    if (levels.size < 2) return levels
+
+    val result = scala.collection.mutable.ArrayBuffer[LevelPartition]()
+    result += levels.head
+
+    for (i <- 1 until levels.size) {
+      val finer   = levels(i - 1)
+      val coarser = levels(i)
+      val finerCount   = finer.communities.count(_.size >= minCommunitySize)
+      val coarserCount = coarser.communities.count(_.size >= minCommunitySize)
+
+      val ratio = if (coarserCount > 0) finerCount.toDouble / coarserCount else 0.0
+      if (finerCount > 0 && coarserCount > 0 && ratio > MaxLevelJumpRatio) {
+        // Build a weighted graph of the finer-level communities
+        val interLevels = bridgeLevels(finer, coarser, graph, minCommunitySize, seed)
+        result ++= interLevels
+      }
+
+      result += coarser
+    }
+
+    result.toVector
+  }
+
+  /**
+   * Create intermediate partitions between a fine level and a coarse level.
+   * Builds a community graph from the fine level and runs Louvain at varying
+   * resolutions to produce partitions with intermediate community counts.
+   */
+  private def bridgeLevels(
+    finer:            LevelPartition,
+    coarser:          LevelPartition,
+    graph:            WeightedFileGraph,
+    minCommunitySize: Int,
+    seed:             Long
+  ): Vector[LevelPartition] = {
+    val finerCount   = finer.communities.count(_.size >= minCommunitySize)
+    val coarserCount = coarser.communities.count(_.size >= minCommunitySize)
+
+    // Build a supernode graph where each node = one fine-level community
+    val commToId: Map[Int, NodeId] = finer.communities.indices.map { ci =>
+      val key = "map:bridge:" + ci
+      ci -> NodeId(java.util.UUID.nameUUIDFromBytes(key.getBytes("UTF-8")))
+    }.toMap
+
+    val superVertices = commToId.map { case (ci, nid) =>
+      FileVertex(nid, s"comm_$ci")
+    }.toVector
+
+    // Aggregate inter-community edge weights
+    val edgeWeights = scala.collection.mutable.Map[(NodeId, NodeId), Double]()
+    for ((src, neighbors) <- graph.adjMatrix) {
+      val ci = finer.assignment.getOrElse(src, -1)
+      if (ci >= 0) {
+        val si = commToId(ci)
+        for ((dst, w) <- neighbors) {
+          val cj = finer.assignment.getOrElse(dst, -1)
+          if (cj >= 0 && ci != cj) {
+            val sj  = commToId(cj)
+            val key = if (si.value.compareTo(sj.value) < 0) (si, sj) else (sj, si)
+            edgeWeights(key) = edgeWeights.getOrElse(key, 0.0) + w / 2.0
+          }
+        }
+      }
+    }
+
+    val newAdj = scala.collection.mutable.Map[NodeId, scala.collection.mutable.Map[NodeId, Double]]()
+    for (((si, sj), w) <- edgeWeights) {
+      newAdj.getOrElseUpdate(si, scala.collection.mutable.Map())(sj) = w
+      newAdj.getOrElseUpdate(sj, scala.collection.mutable.Map())(si) = w
+    }
+    val adjFinal    = newAdj.map { case (k, m) => k -> m.toMap }.toMap
+    val degrees     = adjFinal.map { case (k, m) => k -> m.values.sum }
+    val totalWeight = edgeWeights.values.sum
+
+    val bridgeGraph = WeightedFileGraph(superVertices, adjFinal, degrees.toMap, totalWeight, Map.empty)
+
+    // Try different resolutions to find intermediate community counts.
+    // Higher resolution → more communities (finer); lower → fewer (coarser).
+    val rng = new Random(seed + 999)
+    val targetMin = coarserCount * 2
+    val targetMax = finerCount / 2
+    val inserted  = scala.collection.mutable.ArrayBuffer[LevelPartition]()
+
+    // Sweep resolutions: start very high (fine) and decrease toward coarse.
+    // This explores intermediate granularities between the two existing levels.
+    val resolutions = Vector(4.0, 2.0, 1.0, 0.5, 0.25, 0.1)
+    for (res <- resolutions) {
+      val assignment = absorbSingletons(louvainPass(bridgeGraph, res, rng), bridgeGraph)
+      val projected = projectBridgePartition(assignment, commToId, finer)
+      val count = projected.communities.count(_.size >= minCommunitySize)
+
+      if (count > coarserCount && count < finerCount) {
+        val isDuplicate = inserted.exists { existing =>
+          val ec = existing.communities.count(_.size >= minCommunitySize)
+          ec > 0 && (count.toDouble / ec > 0.7 && count.toDouble / ec < 1.4)
+        }
+        if (!isDuplicate) inserted += projected
+      }
+    }
+
+    // Sort by community count descending (finest first) to maintain level ordering
+    inserted.sortBy(p => -p.communities.count(_.size >= minCommunitySize)).toVector
+  }
+
+  /** Project a bridge-graph partition back to original file IDs. */
+  private def projectBridgePartition(
+    bridgeAssignment: Map[NodeId, Int],
+    commToId:         Map[Int, NodeId],
+    finer:            LevelPartition
+  ): LevelPartition = {
+    val idToComm = commToId.map(_.swap)
+    // For each bridge community, collect all original file IDs from the fine-level communities it contains
+    val bridgeComms = scala.collection.mutable.Map[Int, scala.collection.mutable.Set[NodeId]]()
+    for ((nid, bridgeIdx) <- bridgeAssignment) {
+      idToComm.get(nid).foreach { fineCommIdx =>
+        val files = finer.communities(fineCommIdx)
+        bridgeComms.getOrElseUpdate(bridgeIdx, scala.collection.mutable.Set()) ++= files
+      }
+    }
+    val commVec = bridgeComms.toVector.sortBy(_._1).map(_._2.toSet)
+    val reverseAssign = (for ((members, idx) <- commVec.zipWithIndex; f <- members) yield f -> idx).toMap
+    LevelPartition(commVec, reverseAssign)
+  }
+
+  private[map] def adaptiveResolution(fileCount: Int): Double =
+    if      (fileCount < 50)    1.2
+    else if (fileCount <= 500)  1.0
+    else if (fileCount <= 2000) 0.8
+    else if (fileCount <= 5000) 0.6
+    else                        0.4
 
   // ── Single Louvain pass ────────────────────────────────────────────
 
@@ -240,6 +417,50 @@ object LouvainClustering {
 
       acc + (internalWeight / m) - resolution * math.pow(totalDegree / (2.0 * m), 2.0)
     }
+  }
+
+  // ── Singleton absorption ───────────────────────────────────────────
+
+  /**
+   * After a Louvain pass, merge singleton communities into the neighbor
+   * community they have the strongest total edge weight to.  Nodes with
+   * zero edges to any other community stay as singletons (truly isolated).
+   */
+  private def absorbSingletons(
+    assignment: Map[NodeId, Int],
+    graph:      WeightedFileGraph
+  ): Map[NodeId, Int] = {
+    // Identify singleton communities
+    val commMembers = assignment.groupBy(_._2).map { case (c, m) => c -> m.keySet }
+    val singletonComms = commMembers.filter(_._2.size == 1).keySet
+
+    if (singletonComms.isEmpty) return assignment
+
+    val result = scala.collection.mutable.Map(assignment.toSeq: _*)
+
+    for (comm <- singletonComms) {
+      val node = commMembers(comm).head
+      val neighbors = graph.adjMatrix.getOrElse(node, Map.empty)
+      if (neighbors.nonEmpty) {
+        // Sum edge weight to each neighboring community (excluding our own singleton)
+        val weightByComm = scala.collection.mutable.Map.empty[Int, Double]
+        for ((neighbor, w) <- neighbors) {
+          val nc = result(neighbor)
+          if (nc != comm) {
+            weightByComm(nc) = weightByComm.getOrElse(nc, 0.0) + w
+          }
+        }
+        // Merge into the community with the strongest total weight
+        if (weightByComm.nonEmpty) {
+          result(node) = weightByComm.maxBy(_._2)._1
+        }
+      }
+    }
+
+    // Re-index to keep dense community indices
+    val usedComms = result.values.toVector.distinct.sorted
+    val reindex = usedComms.zipWithIndex.toMap
+    result.map { case (n, c) => n -> reindex(c) }.toMap
   }
 
   // ── Projection ─────────────────────────────────────────────────────

@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { Command } from 'commander';
 import { ParsePool } from './parse-pool.js';
+// import { ResolveWorker } from './resolve-pool.js';
 import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
 import type { GraphPatchPayload } from '../../client/types.js';
@@ -410,6 +411,7 @@ export async function ingestFiles(
     return pool;
   };
 
+
   let progressPhase   = 'Scanning';
   let progressCurrent = 0;
   let progressTotal   = 0;
@@ -448,6 +450,7 @@ export async function ingestFiles(
   // Phase timing marks
   const timings = {
     moduleLoadMs: 0, discoverMs: 0, hashMs: 0, parseMs: 0,
+    goIndexMs: 0,        // time to build Go global resolution index
     parseOnlyMs: 0,      // sum of just parseFile() call durations
     resolveMs: 0, buildPatchMs: 0, commitMs: 0,
     stripChunkOpsMs: 0,  // sum of stripChunkOps() durations (mapMode only)
@@ -586,9 +589,12 @@ export async function ingestFiles(
     let buildPatchFn: Function | null = null;
     let globalIndex: any = undefined;
 
-    const PARSE_STREAM_CHUNK     = 1000;             // streaming batch size for large repos
-    const SMALL_REPO_THRESHOLD   = 5_000;            // parse-all-first below this; streaming above
-    const COMMIT_HTTP_MAX_FILES  = parsePositiveIntEnv('IX_COMMIT_HTTP_MAX_FILES', 400); // files per HTTP request to the backend
+    // Larger chunks for big repos: fewer resolve+commit cycles, better edge resolution per batch.
+    // Smaller chunks pipeline better: resolve(N) overlaps with commit(N-1) + parse(N+1).
+    // With 2000-file chunks, resolve takes 68s and dominates. With 500, resolve ~17s
+    // and overlaps well with commit (~5s) + parse (~5s).
+    const PARSE_STREAM_CHUNK     = filePaths.length > 10_000 ? 500 : 500;
+    const COMMIT_HTTP_MAX_FILES  = parsePositiveIntEnv('IX_COMMIT_HTTP_MAX_FILES', 1000); // files per HTTP request to the backend
     const COMMIT_CONCURRENCY     = parsePositiveIntEnv('IX_COMMIT_CONCURRENCY', 8); // parallel HTTP save requests
     const COMMIT_CONFLICT_RETRIES = parsePositiveIntEnv('IX_COMMIT_CONFLICT_RETRIES', 6); // retry transient Arango lock conflicts
     const YIELD_EVERY            = 100;              // yield event loop every N files during parse
@@ -895,9 +901,9 @@ export async function ingestFiles(
             if (nodePath.extname(filePath) === '.go') sources.set(filePath, bytes.toString('utf-8'));
           }
           const remainingGoFiles = filePaths.filter(fp => nodePath.extname(fp) === '.go' && !changedSet.has(fp));
-          const GO_READ_BATCH = 500;
-          for (let i = 0; i < remainingGoFiles.length; i += GO_READ_BATCH) {
-            const batch = remainingGoFiles.slice(i, i + GO_READ_BATCH);
+          const GO_READ_CONCURRENCY = 2000;
+          for (let i = 0; i < remainingGoFiles.length; i += GO_READ_CONCURRENCY) {
+            const batch = remainingGoFiles.slice(i, i + GO_READ_CONCURRENCY);
             const texts = await Promise.all(batch.map(fp => fs.promises.readFile(fp, 'utf-8').catch(() => null)));
             for (let j = 0; j < batch.length; j++) {
               if (texts[j] != null) sources.set(batch[j], texts[j]!);
@@ -937,13 +943,14 @@ export async function ingestFiles(
 
       // Build global resolution index from all repo file paths before the parse loop
       // so cross-batch imports resolve correctly even in streaming per-chunk mode.
-      // Use async batched reads (same as Path A) to avoid blocking the event loop.
+      // Read all Go files in parallel to maximize I/O throughput.
       {
+        const goIndexStart = performance.now();
         const sources = new Map<string, string>();
         const goFiles = filePaths.filter(fp => nodePath.extname(fp) === '.go');
-        const GO_READ_BATCH = 500;
-        for (let i = 0; i < goFiles.length; i += GO_READ_BATCH) {
-          const batch = goFiles.slice(i, i + GO_READ_BATCH);
+        const GO_READ_CONCURRENCY = 2000;
+        for (let i = 0; i < goFiles.length; i += GO_READ_CONCURRENCY) {
+          const batch = goFiles.slice(i, i + GO_READ_CONCURRENCY);
           const texts = await Promise.all(batch.map(fp => fs.promises.readFile(fp, 'utf-8').catch(() => null)));
           for (let j = 0; j < batch.length; j++) {
             if (texts[j] != null) sources.set(batch[j], texts[j]!);
@@ -951,51 +958,52 @@ export async function ingestFiles(
         }
         globalIndex = ingestion.buildGlobalResolutionIndex(filePaths, sources);
         sources.clear();
+        timings.goIndexMs = Math.round(performance.now() - goIndexStart);
       }
 
       progressPhase   = 'Parsing';
       progressTotal   = filePaths.length;
       progressCurrent = 0;
 
-      // Pipeline overlap: parse next chunk in worker pool while committing current chunk.
-      // Each file is dispatched to the parse pool immediately after it is read so workers
-      // start processing as soon as the first file in the chunk is ready rather than
-      // waiting for all reads in the chunk to complete.
+      // Pipeline overlap: read files asynchronously and dispatch to parse pool
+      // immediately so workers start processing while more files are still being read.
+      // Commit previous chunk's results while parsing the next chunk.
       let pendingFlushB: Promise<void> = Promise.resolve();
       for (let i = 0; i < filePaths.length; i += PARSE_STREAM_CHUNK) {
         const chunk = filePaths.slice(i, i + PARSE_STREAM_CHUNK);
         type FileData = { filePath: string; source: string; hash: string; previousHash: string | undefined } | null;
-        const fileData: FileData[] = [];
-        const parsePromises: Promise<unknown>[] = [];
-        for (const filePath of chunk) {
+        const fileData: FileData[] = new Array(chunk.length).fill(null);
+        const parsePromises: Promise<unknown>[] = new Array(chunk.length).fill(Promise.resolve(null));
+
+        // Read files asynchronously and dispatch to parse pool as each file completes.
+        // This keeps workers busy while I/O is still in flight for other files.
+        const readAndDispatch = chunk.map(async (filePath, idx) => {
           try {
-            const fileSize = fs.statSync(filePath).size;
-            if (fileSize === 0) { filesSkipped++; fileData.push(null); parsePromises.push(Promise.resolve(null)); continue; }
-            if (fileSize > MAX_FILE_BYTES) { tooLarge++; fileData.push(null); parsePromises.push(Promise.resolve(null)); continue; }
-            const bytes = fs.readFileSync(filePath);
+            const st = await fs.promises.stat(filePath);
+            if (st.size === 0) { filesSkipped++; return; }
+            if (st.size > MAX_FILE_BYTES) { tooLarge++; return; }
+            const bytes = await fs.promises.readFile(filePath);
             const hash = sha256(bytes);
-            if (!opts.force && knownHashes.get(filePath) === hash) { filesSkipped++; fileData.push(null); parsePromises.push(Promise.resolve(null)); continue; }
+            if (!opts.force && knownHashes.get(filePath) === hash) { filesSkipped++; return; }
             const previousHash = knownHashes.get(filePath);
             const sourceText = bytes.toString('utf-8');
             if (isLikelyMinifiedSource(sourceText)) {
               minifiedLikely++;
               filesSkipped++;
               if (debug) process.stderr.write(`\n  [skip minified-likely] ${filePath}\n`);
-              fileData.push(null);
-              parsePromises.push(Promise.resolve(null));
-              continue;
+              return;
             }
             const fd: NonNullable<FileData> = { filePath, source: sourceText, hash, previousHash: previousHash !== hash ? previousHash : undefined };
-            fileData.push(fd);
-            parsePromises.push(ensureParsePool().parse(fd.filePath, fd.source).then(r => { progressCurrent++; return r; }));
+            fileData[idx] = fd;
+            parsePromises[idx] = ensureParsePool().parse(fd.filePath, fd.source).then(r => { progressCurrent++; return r; });
           } catch (err) {
             parseErrors++;
-            fileData.push(null);
-            parsePromises.push(Promise.resolve(null));
             process.stderr.write(`\n  [read error] ${filePath}: ${err}\n`);
           }
-        }
+        });
+        await Promise.all(readAndDispatch);
         const parseResults = await Promise.all(parsePromises);
+
         const batch: ParsedFile[] = [];
         for (let j = 0; j < fileData.length; j++) {
           const f = fileData[j];
@@ -1087,6 +1095,7 @@ export async function ingestFiles(
       console.log(chalk.dim(`    modules:     ${timings.moduleLoadMs}ms`));
       console.log(chalk.dim(`    discover:    ${timings.discoverMs}ms`));
       console.log(chalk.dim(`    hash:        ${timings.hashMs}ms`));
+      console.log(chalk.dim(`    go index:    ${timings.goIndexMs}ms`));
       console.log(chalk.dim(`    parse total: ${timings.parseMs}ms`));
       console.log(chalk.dim(`    parse only:  ${Math.round(timings.parseOnlyMs)}ms`));
       console.log(chalk.dim(`    resolve:     ${timings.resolveMs}ms`));

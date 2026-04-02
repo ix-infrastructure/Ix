@@ -191,9 +191,9 @@ Examples:
       const mapMs = Math.round(performance.now() - mapStart);
 
       if (silent) {
-        const systems    = result.regions.filter(r => r.level === 3).length;
-        const subsystems = result.regions.filter(r => r.level === 2).length;
-        const modules    = result.regions.filter(r => r.level === 1).length;
+        const systems    = result.regions.filter(r => r.label_kind === "system").length;
+        const subsystems = result.regions.filter(r => r.label_kind === "subsystem").length;
+        const modules    = result.regions.filter(r => r.label_kind === "module").length;
         process.stderr.write(
           `map: ${result.file_count} files · ${systems}s/${subsystems}ss/${modules}m regions · ${mapMs}ms\n`
         );
@@ -271,9 +271,9 @@ export function renderMapText(result: MapResult, cwd: string, opts: MapTextRende
 
   const regionById = new Map(result.regions.map(r => [r.id, r]));
   const CROSSCUT_THRESHOLD = 0.10;
-  const systemsCount = regions.filter(r => r.level === 3).length;
-  const subsystemsCount = regions.filter(r => r.level === 2).length;
-  const modulesCount = regions.filter(r => r.level === 1).length;
+  const systemsCount = regions.filter(r => r.label_kind === "system").length;
+  const subsystemsCount = regions.filter(r => r.label_kind === "subsystem").length;
+  const modulesCount = regions.filter(r => r.label_kind === "module").length;
   const wellDefined = regions.filter(r => r.confidence >= 0.75).length;
   const moderate = regions.filter(r => r.confidence >= 0.50 && r.confidence < 0.75).length;
   const fuzzy = regions.filter(r => r.confidence < 0.50).length;
@@ -329,7 +329,7 @@ function confidenceLabel(conf: number): string {
 
 function pickTopSystemName(regions: MapRegion[], cwd: string): string {
   const systems = regions
-    .filter(r => r.level === 3 || r.label_kind === "system")
+    .filter(r => r.label_kind === "system")
     .slice()
     .sort((a, b) => b.file_count - a.file_count || b.confidence - a.confidence);
 
@@ -392,7 +392,7 @@ function renderMapTree(
   }
 
   const roots = sortRegions(
-    regions.filter(region => region.level === 3 || region.parent_id === null || !regionById.has(region.parent_id)),
+    regions.filter(region => region.label_kind === "system" || region.parent_id === null || !regionById.has(region.parent_id)),
     sortMode,
   );
   const shownRoots = allItems ? roots : roots.slice(0, maxItems);
@@ -457,11 +457,11 @@ function renderRankedList(
   verbose: boolean,
   sortMode: MapSortMode,
 ): void {
-  const subsystems = sortRegions(regions.filter(r => r.level === 2), sortMode);
+  const subsystems = sortRegions(regions.filter(r => r.label_kind === "subsystem"), sortMode);
   const shownSubsystems = allItems ? subsystems : subsystems.slice(0, maxItems);
   const shownSubsystemIds = new Set(shownSubsystems.map(region => region.id));
   const candidateModules = sortRegions(
-    regions.filter(r => r.level === 1 && (
+    regions.filter(r => r.label_kind === "module" && (
       shownSubsystemIds.size === 0 ||
       (r.parent_id !== null && shownSubsystemIds.has(r.parent_id))
     )),
@@ -578,7 +578,7 @@ function formatRegionLine(region: MapRegion, verbose: boolean, depth = 0): strin
   const clarityColor = region.confidence >= 0.75 ? chalk.green : region.confidence >= 0.50 ? chalk.yellow : chalk.red;
   const confPct = Math.round(region.confidence * 100);
   const crosscut = region.crosscut_score > 0.10 ? chalk.yellow(" shared") : "";
-  const levelTag = region.level === 3 ? "system" : region.level === 2 ? "subsystem" : "module";
+  const levelTag = region.label_kind || (region.level === 3 ? "system" : region.level === 2 ? "subsystem" : "module");
   const badge = chalk.bgBlackBright.white(` ${levelTag.toUpperCase()} `);
   const signals = region.dominant_signals.slice(0, 2).join(" · ");
 

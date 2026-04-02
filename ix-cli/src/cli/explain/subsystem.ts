@@ -250,7 +250,7 @@ function renderWhyItMatters(
     );
   }
 
-  if (score && score.health_score >= 0.8 && region.level === 3) {
+  if (score && score.health_score >= 0.8 && region.label_kind === "system") {
     return (
       `${region.label} is a stable, well-defined system boundary. Changes within it are usually ` +
       `well-contained. Run \`ix impact ${JSON.stringify(region.label)}\` to review cross-system dependencies.`
