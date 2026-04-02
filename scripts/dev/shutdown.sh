@@ -18,17 +18,19 @@ set -euo pipefail
 IX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$IX_DIR"
 
+COMPOSE_FILE="docker-compose.standalone.yml"
+
 if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
   export IX_HOST_MOUNT_ROOT="$(cygpath -m "$HOME")"
   export IX_CONTAINER_MOUNT_ROOT="${HOME}"
   dc() {
     MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
-      docker compose -f "$(cygpath -m "$IX_DIR/docker-compose.yml")" "$@"
+      docker compose -f "$(cygpath -m "$IX_DIR/$COMPOSE_FILE")" "$@"
   }
 else
   export IX_HOST_MOUNT_ROOT="${HOME}"
   export IX_CONTAINER_MOUNT_ROOT="${HOME}"
-  dc() { docker compose -f "$IX_DIR/docker-compose.yml" "$@"; }
+  dc() { docker compose -f "$IX_DIR/$COMPOSE_FILE" "$@"; }
 fi
 
 CLEAN=false
