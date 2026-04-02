@@ -35,6 +35,7 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.yaml', '.yml',
   '.dockerfile',
   '.sql',
+  '.json',
 ]);
 
 export function isSupportedSourceFile(filePath: string): boolean {
