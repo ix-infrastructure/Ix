@@ -88,6 +88,12 @@ describe('TOML parsing', () => {
     );
 
     expect(result).not.toBeNull();
+    // Intermediate node
+    expect(result!.entities).toContainEqual(expect.objectContaining({
+      name: 'server',
+      kind: 'config_entry',
+      container: undefined,
+    }));
     expect(result!.entities).toContainEqual(expect.objectContaining({
       name: 'tls',
       kind: 'config_entry',
@@ -99,6 +105,11 @@ describe('TOML parsing', () => {
       container: 'server.tls',
     }));
     expect(result!.relationships).toContainEqual({
+      srcName: 'config.toml',
+      dstName: 'server',
+      predicate: 'CONTAINS',
+    });
+    expect(result!.relationships).toContainEqual({
       srcName: 'server',
       dstName: 'tls',
       predicate: 'CONTAINS',
@@ -108,6 +119,68 @@ describe('TOML parsing', () => {
       dstName: 'cert',
       predicate: 'CONTAINS',
     });
+  });
+
+  it('emits intermediate nodes for dotted table paths', () => {
+    const result = parseFile(
+      '/repo/Cargo.toml',
+      [
+        '[profile.release]',
+        'lto = true',
+      ].join('\n'),
+    );
+
+    expect(result).not.toBeNull();
+    // Intermediate node
+    expect(result!.entities).toContainEqual(expect.objectContaining({
+      name: 'profile',
+      kind: 'config_entry',
+      container: undefined,
+    }));
+    // Leaf node
+    expect(result!.entities).toContainEqual(expect.objectContaining({
+      name: 'release',
+      kind: 'config_entry',
+      container: 'profile',
+    }));
+    // Key within leaf
+    expect(result!.entities).toContainEqual(expect.objectContaining({
+      name: 'lto',
+      kind: 'config_entry',
+      container: 'profile.release',
+    }));
+    // Chain of CONTAINS relationships
+    expect(result!.relationships).toContainEqual({
+      srcName: 'Cargo.toml',
+      dstName: 'profile',
+      predicate: 'CONTAINS',
+    });
+    expect(result!.relationships).toContainEqual({
+      srcName: 'profile',
+      dstName: 'release',
+      predicate: 'CONTAINS',
+    });
+    expect(result!.relationships).toContainEqual({
+      srcName: 'profile.release',
+      dstName: 'lto',
+      predicate: 'CONTAINS',
+    });
+  });
+
+  it('does not duplicate intermediate nodes across sibling table headers', () => {
+    const result = parseFile(
+      '/repo/Cargo.toml',
+      [
+        '[profile.release]',
+        'lto = true',
+        '[profile.dev]',
+        'opt-level = 0',
+      ].join('\n'),
+    );
+
+    expect(result).not.toBeNull();
+    const profileNodes = result!.entities.filter(e => e.name === 'profile');
+    expect(profileNodes).toHaveLength(1);
   });
 
   it('parses [[array-of-tables]] headers', () => {

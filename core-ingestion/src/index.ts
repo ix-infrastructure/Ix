@@ -407,6 +407,7 @@ function parseTomlFile(filePath: string, source: string): FileParseResult {
   const keyPattern = /^\s*([A-Za-z0-9_"'-][A-Za-z0-9_"' .-]*?)\s*=/;
 
   let currentTable: string | null = null;
+  const seenTablePaths = new Set<string>();
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -418,11 +419,36 @@ function parseTomlFile(filePath: string, source: string): FileParseResult {
       const tablePath = tableMatch[1].trim();
       currentTable = tablePath;
       const parts = tablePath.split('.');
-      const key = parts[parts.length - 1];
-      const parent = parts.length > 1 ? parts.slice(0, -1).join('.') : null;
       const lineNumber = i + 1;
       const startByte = lineStarts[i] ?? 0;
 
+      // Emit intermediate nodes for each prefix segment (e.g. [a.b.c] → emit a, a.b)
+      for (let p = 1; p < parts.length; p++) {
+        const prefixPath = parts.slice(0, p).join('.');
+        if (!seenTablePaths.has(prefixPath)) {
+          seenTablePaths.add(prefixPath);
+          const prefixKey = parts[p - 1];
+          const prefixParent = p > 1 ? parts.slice(0, p - 1).join('.') : null;
+          entities.push({
+            name: prefixKey,
+            kind: 'config_entry',
+            lineStart: lineNumber,
+            lineEnd: lineNumber,
+            language,
+            container: prefixParent ?? undefined,
+          });
+          relationships.push({
+            srcName: prefixParent ?? fileName,
+            dstName: prefixKey,
+            predicate: 'CONTAINS',
+          });
+        }
+      }
+
+      const key = parts[parts.length - 1];
+      const parent = parts.length > 1 ? parts.slice(0, -1).join('.') : null;
+
+      seenTablePaths.add(tablePath);
       entities.push({
         name: key,
         kind: 'config_entry',
