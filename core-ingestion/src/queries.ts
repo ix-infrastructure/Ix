@@ -1183,5 +1183,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.Dockerfile]: '',
   [SupportedLanguages.SQL]: '',
   [SupportedLanguages.JSON]: '',
+  [SupportedLanguages.TOML]: '',
 };
  

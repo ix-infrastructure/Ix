@@ -388,6 +388,117 @@ function parseYamlFile(filePath: string, source: string): FileParseResult {
   };
 }
 
+function parseTomlFile(filePath: string, source: string): FileParseResult {
+  const language = SupportedLanguages.TOML;
+  const fileName = nodePath.basename(filePath);
+  const sourceLineCount = countSourceLines(source);
+  const fileRole = classifyFileRole(filePath);
+  const entities: ParsedEntity[] = [
+    { name: fileName, kind: 'file', lineStart: 1, lineEnd: sourceLineCount, language },
+  ];
+  const chunks: ParsedChunk[] = [];
+  const relationships: ParsedRelationship[] = [];
+  const lineStarts = computeLineStarts(source);
+  const lines = source.split(/\r?\n/);
+
+  // [table] or [[array-of-tables]] headers set the current section context.
+  const tableHeaderPattern = /^\s*\[{1,2}([^\[\]]+)\]{1,2}\s*(?:#.*)?$/;
+  // key = value lines (bare keys, quoted keys, dotted keys).
+  const keyPattern = /^\s*([A-Za-z0-9_"'-][A-Za-z0-9_"' .-]*?)\s*=/;
+
+  let currentTable: string | null = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trimStart();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const tableMatch = tableHeaderPattern.exec(line);
+    if (tableMatch) {
+      const tablePath = tableMatch[1].trim();
+      currentTable = tablePath;
+      const parts = tablePath.split('.');
+      const key = parts[parts.length - 1];
+      const parent = parts.length > 1 ? parts.slice(0, -1).join('.') : null;
+      const lineNumber = i + 1;
+      const startByte = lineStarts[i] ?? 0;
+
+      entities.push({
+        name: key,
+        kind: 'config_entry',
+        lineStart: lineNumber,
+        lineEnd: lineNumber,
+        language,
+        container: parent ?? undefined,
+      });
+      chunks.push({
+        name: key,
+        chunkKind: 'config_key',
+        lineStart: lineNumber,
+        lineEnd: lineNumber,
+        startByte,
+        endByte: startByte + line.length,
+        contentHash: crypto.createHash('sha256').update(line).digest('hex'),
+        language,
+        container: parent ?? undefined,
+      });
+      relationships.push({
+        srcName: parent ?? fileName,
+        dstName: key,
+        predicate: 'CONTAINS',
+      });
+      continue;
+    }
+
+    const keyMatch = keyPattern.exec(line);
+    if (keyMatch) {
+      const key = keyMatch[1].trim().replace(/^["']|["']$/g, '');
+      const lineNumber = i + 1;
+      const startByte = lineStarts[i] ?? 0;
+
+      entities.push({
+        name: key,
+        kind: 'config_entry',
+        lineStart: lineNumber,
+        lineEnd: lineNumber,
+        language,
+        container: currentTable ?? undefined,
+      });
+      chunks.push({
+        name: key,
+        chunkKind: 'config_key',
+        lineStart: lineNumber,
+        lineEnd: lineNumber,
+        startByte,
+        endByte: startByte + line.length,
+        contentHash: crypto.createHash('sha256').update(line).digest('hex'),
+        language,
+        container: currentTable ?? undefined,
+      });
+      relationships.push({
+        srcName: currentTable ?? fileName,
+        dstName: key,
+        predicate: 'CONTAINS',
+      });
+    }
+  }
+
+  if (chunks.length === 0) {
+    chunks.push({
+      name: null,
+      chunkKind: 'file_body',
+      lineStart: 1,
+      lineEnd: Math.max(sourceLineCount, 1),
+      startByte: 0,
+      endByte: source.length,
+      contentHash: crypto.createHash('sha256').update(source).digest('hex'),
+      language,
+    });
+  }
+
+  return { filePath, language, entities, chunks, relationships, fileRole };
+}
+
 function parseDockerfileFile(filePath: string, source: string): FileParseResult {
   const language = SupportedLanguages.Dockerfile;
   const fileName = nodePath.basename(filePath);
@@ -841,6 +952,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
   if (language === SupportedLanguages.Dockerfile) return parseDockerfileFile(filePath, source);
   if (language === SupportedLanguages.SQL) return parseSqlFile(filePath, source);
   if (language === SupportedLanguages.JSON) return parseJsonFile(filePath, source);
+  if (language === SupportedLanguages.TOML) return parseTomlFile(filePath, source);
 
   // TypeScript TSX uses a separate grammar
   const isTsx = filePath.endsWith('.tsx');
