@@ -4,16 +4,23 @@ import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import { parse, stringify } from "yaml";
 
+export interface InstanceConfig {
+  endpoint: string;
+}
+
 export interface WorkspaceConfig {
   workspace_id: string;
   workspace_name: string;
   root_path: string;
   default: boolean;
+  instance?: string;
 }
 
 export interface IxConfig {
   endpoint: string;
   format: string;
+  active?: string;
+  instances?: Record<string, InstanceConfig>;
   workspaces?: WorkspaceConfig[];
 }
 
@@ -39,8 +46,50 @@ export function saveConfig(config: IxConfig): void {
   writeFileSync(configPath, stringify(config));
 }
 
+/**
+ * Resolve the backend endpoint. Priority:
+ * 1. IX_ENDPOINT env var
+ * 2. --instance flag (set via setInstanceOverride from Pro/Cloud)
+ * 3. Workspace-bound instance (current directory)
+ * 4. Active instance in config
+ * 5. config.endpoint (default: localhost:8090)
+ */
+let _instanceOverride: string | undefined;
+
+export function setInstanceOverride(name: string | undefined): void {
+  _instanceOverride = name;
+}
+
 export function getEndpoint(): string {
-  return process.env.IX_ENDPOINT || loadConfig().endpoint;
+  if (process.env.IX_ENDPOINT) return process.env.IX_ENDPOINT;
+
+  const config = loadConfig();
+  const instances = config.instances ?? {};
+
+  // --instance flag (set by Pro/Cloud plugin)
+  if (_instanceOverride) {
+    const inst = instances[_instanceOverride];
+    if (!inst) {
+      console.error(`Unknown instance: ${_instanceOverride}`);
+      console.error(`Available: ${Object.keys(instances).join(", ") || "(none)"}`);
+      process.exit(1);
+    }
+    return inst.endpoint;
+  }
+
+  // Workspace-bound instance
+  const cwd = process.cwd();
+  const ws = findWorkspaceForCwd(cwd);
+  if (ws?.instance && instances[ws.instance]) {
+    return instances[ws.instance].endpoint;
+  }
+
+  // Active instance
+  if (config.active && instances[config.active]) {
+    return instances[config.active].endpoint;
+  }
+
+  return config.endpoint;
 }
 
 export function loadWorkspaces(): WorkspaceConfig[] {

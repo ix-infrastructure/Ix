@@ -4,6 +4,7 @@ import { registerOssCommands, registerProStubs } from "./register/oss.js";
 import { tryLoadProCommands } from "./register/pro-loader.js";
 import { buildHelpText } from "./help-text.js";
 import { checkForUpdate } from "./commands/upgrade.js";
+import { setInstanceOverride } from "./config.js";
 
 import { readFileSync } from "fs";
 import { join, dirname } from "path";
@@ -19,7 +20,12 @@ try {
 const program = new Command();
 program
   .name("ix")
-  .version(cliVersion);
+  .version(cliVersion)
+  .option("--instance <name>", "Use a named cloud instance")
+  .hook("preAction", () => {
+    const opts = program.opts();
+    if (opts.instance) setInstanceOverride(opts.instance);
+  });
 
 // Start with OSS-only help; updated after Pro probe.
 program.helpInformation = () => buildHelpText();
