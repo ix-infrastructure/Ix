@@ -80,17 +80,17 @@ TARBALL_URL="https://github.com/ix-infrastructure/Ix/archive/refs/tags/${TAG}.ta
 SHA256=$(curl -sL "$TARBALL_URL" | shasum -a 256 | cut -d' ' -f1)
 
 echo "Updating Homebrew formula..."
-sed -i '' "s|url \".*\"|url \"${TARBALL_URL}\"|" "$IX_DIR/homebrew/ix.rb"
-sed -i '' "s|# sha256 .*|sha256 \"${SHA256}\"|" "$IX_DIR/homebrew/ix.rb"
+sed -i '' "s|url \".*\"|url \"${TARBALL_URL}\"|" "$IX_DIR/Formula/ix.rb"
+sed -i '' "s|# sha256 .*|sha256 \"${SHA256}\"|" "$IX_DIR/Formula/ix.rb"
 
 echo ""
 echo "[ok] Release $TAG created"
 echo "     Tarball: $TARBALL_URL"
 echo "     SHA256:  $SHA256"
 echo ""
-echo "Formula updated at: homebrew/ix.rb"
+echo "Formula updated at: Formula/ix.rb"
 echo ""
 echo "To publish the tap, push the updated formula:"
-echo "  git add homebrew/ix.rb"
+echo "  git add Formula/ix.rb"
 echo "  git commit -m \"brew: update formula for $TAG\""
 echo "  git push origin main"
