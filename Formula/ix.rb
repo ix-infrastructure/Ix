@@ -21,6 +21,8 @@ class Ix < Formula
 
     cd "ix-cli" do
       system "npm", "install", "--silent"
+      # Sync package.json version with the formula version
+      system "npm", "version", version.to_s, "--no-git-tag-version", "--allow-same-version"
       # Run tsc directly — npm run build would redundantly rebuild core-ingestion
       # via build-core-ingestion.mjs, which triggers native module compilation
       system "npx", "tsc"
