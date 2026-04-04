@@ -213,7 +213,7 @@ function builtinsForLanguage(lang: SupportedLanguages): Set<string> {
 export function isGrammarSupported(filePath: string): boolean {
   const language = languageFromPath(filePath);
   if (!language) return false;
-  if (language === SupportedLanguages.YAML || language === SupportedLanguages.Dockerfile || language === SupportedLanguages.SQL || language === SupportedLanguages.JSON || language === SupportedLanguages.TOML) return true;
+  if (language === SupportedLanguages.YAML || language === SupportedLanguages.Dockerfile || language === SupportedLanguages.SQL || language === SupportedLanguages.JSON || language === SupportedLanguages.TOML || language === SupportedLanguages.Markdown) return true;
   if (filePath.endsWith('.tsx')) return true; // TSX uses TypeScript.tsx, always available
   return GRAMMAR_MAP[language] !== undefined;
 }
@@ -507,6 +507,126 @@ function parseTomlFile(filePath: string, source: string): FileParseResult {
         predicate: 'CONTAINS',
       });
     }
+  }
+
+  if (chunks.length === 0) {
+    chunks.push({
+      name: null,
+      chunkKind: 'file_body',
+      lineStart: 1,
+      lineEnd: Math.max(sourceLineCount, 1),
+      startByte: 0,
+      endByte: source.length,
+      contentHash: crypto.createHash('sha256').update(source).digest('hex'),
+      language,
+    });
+  }
+
+  return { filePath, language, entities, chunks, relationships, fileRole };
+}
+
+function parseMarkdownFile(filePath: string, source: string): FileParseResult {
+  const language = SupportedLanguages.Markdown;
+  const fileName = nodePath.basename(filePath);
+  const sourceLineCount = countSourceLines(source);
+  const fileRole = classifyFileRole(filePath);
+  const entities: ParsedEntity[] = [
+    { name: fileName, kind: 'file', lineStart: 1, lineEnd: sourceLineCount, language },
+  ];
+  const chunks: ParsedChunk[] = [];
+  const relationships: ParsedRelationship[] = [];
+  const lineStarts = computeLineStarts(source);
+  const lines = source.split(/\r?\n/);
+
+  let startLine = 0;
+
+  // Parse YAML frontmatter delimited by --- ... ---
+  if (lines[0]?.trim() === '---') {
+    let fmEnd = -1;
+    for (let j = 1; j < lines.length; j++) {
+      if (lines[j].trim() === '---' || lines[j].trim() === '...') {
+        fmEnd = j;
+        break;
+      }
+    }
+    if (fmEnd > 0) {
+      startLine = fmEnd + 1;
+      const endByte = (lineStarts[fmEnd] ?? 0) + lines[fmEnd].length;
+      const fmContent = lines.slice(0, fmEnd + 1).join('\n');
+      entities.push({ name: 'frontmatter', kind: 'frontmatter', lineStart: 1, lineEnd: fmEnd + 1, language });
+      chunks.push({
+        name: 'frontmatter',
+        chunkKind: 'frontmatter',
+        lineStart: 1,
+        lineEnd: fmEnd + 1,
+        startByte: 0,
+        endByte,
+        contentHash: crypto.createHash('sha256').update(fmContent).digest('hex'),
+        language,
+      });
+      relationships.push({ srcName: fileName, dstName: 'frontmatter', predicate: 'CONTAINS' });
+    }
+  }
+
+  // headingStack[level] = heading name currently active at that depth (1–6)
+  const headingStack: (string | null)[] = [null, null, null, null, null, null, null];
+  const headingPattern = /^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/;
+  const headingLines: { level: number; name: string; lineNum: number; container: string | null }[] = [];
+
+  let inFence = false;
+  for (let i = startLine; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Toggle fenced code block on opening/closing fence (``` or ~~~)
+    if (/^(`{3,}|~{3,})/.test(line.trimStart())) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+
+    const headingMatch = headingPattern.exec(line);
+    if (!headingMatch) continue;
+
+    const level = headingMatch[1].length;
+    const name = headingMatch[2].trim();
+    const lineNum = i + 1;
+
+    // Find nearest ancestor at a shallower level
+    let container: string | null = null;
+    for (let l = level - 1; l >= 1; l--) {
+      if (headingStack[l] !== null) {
+        container = headingStack[l];
+        break;
+      }
+    }
+
+    // Reset all deeper levels when a heading resets scope
+    for (let l = level; l <= 6; l++) headingStack[l] = null;
+    headingStack[level] = name;
+
+    entities.push({ name, kind: 'heading', lineStart: lineNum, lineEnd: lineNum, language, container: container ?? undefined });
+    relationships.push({ srcName: container ?? fileName, dstName: name, predicate: 'CONTAINS' });
+    headingLines.push({ level, name, lineNum, container });
+  }
+
+  // Build one section chunk per heading spanning to the line before the next heading
+  for (let h = 0; h < headingLines.length; h++) {
+    const { name, lineNum, container } = headingLines[h];
+    const nextLineNum = h + 1 < headingLines.length ? headingLines[h + 1].lineNum - 1 : sourceLineCount;
+    const startByte = lineStarts[lineNum - 1] ?? 0;
+    const endByte = nextLineNum < lines.length ? (lineStarts[nextLineNum] ?? source.length) : source.length;
+    const sectionContent = lines.slice(lineNum - 1, nextLineNum).join('\n');
+    chunks.push({
+      name,
+      chunkKind: 'section',
+      lineStart: lineNum,
+      lineEnd: nextLineNum,
+      startByte,
+      endByte,
+      contentHash: crypto.createHash('sha256').update(sectionContent).digest('hex'),
+      language,
+      container: container ?? undefined,
+    });
   }
 
   if (chunks.length === 0) {
@@ -979,6 +1099,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
   if (language === SupportedLanguages.SQL) return parseSqlFile(filePath, source);
   if (language === SupportedLanguages.JSON) return parseJsonFile(filePath, source);
   if (language === SupportedLanguages.TOML) return parseTomlFile(filePath, source);
+  if (language === SupportedLanguages.Markdown) return parseMarkdownFile(filePath, source);
 
   // TypeScript TSX uses a separate grammar
   const isTsx = filePath.endsWith('.tsx');
