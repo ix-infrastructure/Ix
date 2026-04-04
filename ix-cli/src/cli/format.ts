@@ -520,6 +520,7 @@ export interface ExplainResult {
   name: string;
   id: string;
   file?: string;
+  chunkKind?: string;
   container?: { kind: string; name: string };
   introducedRev: number;
   calledBy: number;
@@ -541,6 +542,7 @@ export function formatExplain(result: ExplainResult, format: string): void {
         name: result.name,
         id: result.id,
         file: relativePath(result.file),
+        chunkKind: result.chunkKind ?? null,
         container: result.container,
         introducedRev: result.introducedRev,
         calledBy: result.calledBy,
@@ -572,6 +574,9 @@ export function formatExplain(result: ExplainResult, format: string): void {
   }
   if (result.file) {
     console.log(`  ${chalk.dim("file")} ${result.file}`);
+  }
+  if (result.chunkKind) {
+    console.log(`  ${chalk.dim("chunk kind")} ${result.chunkKind}`);
   }
   console.log(`  ${chalk.dim("introduced rev")} ${result.introducedRev}`);
   if (result.calledBy > 0) console.log(`  ${chalk.dim("called by")} ${result.calledBy} methods`);

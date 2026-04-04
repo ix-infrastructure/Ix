@@ -121,6 +121,7 @@ async function rawExplain(
   // Extract snippet fields from attrs
   const signature = node.attrs?.signature || node.attrs?.summary;
   const docstring = node.attrs?.docstring || node.attrs?.description;
+  const chunkKind = node.attrs?.chunk_kind || node.attrs?.chunkKind || (node.kind === "section" ? "section" : undefined);
 
   // Get actual callee details from outgoing CALLS edges
   const calleeEdges = callEdges.filter((e: any) => e.src === target.id);
@@ -181,6 +182,7 @@ async function rawExplain(
     name: node.name || node.attrs?.name || target.name,
     id: target.id,
     file: relativePath(sourceUri),
+    chunkKind,
     container: container ? { kind: container.kind, name: container.name || container.attrs?.name || "(unknown)" } : undefined,
     introducedRev: node.createdRev ?? node.created_rev,
     calledBy: callEdges.filter((e: any) => e.dst === target.id).length,

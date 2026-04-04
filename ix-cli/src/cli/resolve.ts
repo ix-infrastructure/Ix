@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import chalk from "chalk";
 import type { IxClient } from "../client/api.js";
+import { getActiveWorkspaceRoot } from "./config.js";
 import { stderr } from "./stderr.js";
 import { applyRoleFilter } from "./role-filter.js";
 
@@ -147,9 +148,10 @@ export async function resolveEntityFull(
   preferredKinds: string[],
   opts?: { kind?: string; path?: string; pick?: number; includeTests?: boolean; testsOnly?: boolean; searchLimit?: number }
 ): Promise<ResolveResult> {
+  const effectivePath = opts?.path ?? getActiveWorkspaceRoot();
   const kindFilter = opts?.kind;
   const nodes = await client.search(symbol, {
-    limit: opts?.searchLimit ?? (opts?.path ? 200 : looksTypeLikeSymbol(symbol) ? 50 : 20),
+    limit: opts?.searchLimit ?? (effectivePath ? 200 : looksTypeLikeSymbol(symbol) ? 50 : 20),
     kind: kindFilter,
     nameOnly: true,
   });
@@ -165,15 +167,15 @@ export async function resolveEntityFull(
   // Hard path filter: when --path is provided, exclude candidates whose sourceUri does not
   // contain the filter string. If no candidates survive, return "not found" rather than
   // falling back to cross-repo results.
-  const filteredNodes = opts?.path
+  const filteredNodes = effectivePath
     ? roleFiltered.filter((n: any) => {
         const uri = normalizeForPathMatch(n.provenance?.sourceUri ?? n.provenance?.source_uri ?? "");
-        return uri.includes(normalizeForPathMatch(opts.path));
+        return uri.includes(normalizeForPathMatch(effectivePath));
       })
     : roleFiltered;
 
-  if (opts?.path && filteredNodes.length === 0) {
-    stderr(`No entity named "${symbol}" found in paths matching "${opts.path}".`);
+  if (effectivePath && filteredNodes.length === 0) {
+    stderr(`No entity named "${symbol}" found in paths matching "${effectivePath}".`);
     return { resolved: false, ambiguous: false, hiddenTestCount };
   }
 
@@ -195,7 +197,7 @@ export async function resolveEntityFull(
 
   // Score exact-name candidates
   if (exactName.length > 0) {
-    const winner = pickBest(exactName, symbol, preferredKinds, opts);
+    const winner = pickBest(exactName, symbol, preferredKinds, { ...opts, path: effectivePath });
     if (winner) {
       const picked = applyPick(winner, opts);
       if (picked) return { ...picked, hiddenTestCount } as ResolveResult;
@@ -204,7 +206,7 @@ export async function resolveEntityFull(
   }
 
   // ── Phase 2: Fall back to all candidates ────────────────────────────
-  const winner = pickBest(filteredNodes, symbol, preferredKinds, opts);
+  const winner = pickBest(filteredNodes, symbol, preferredKinds, { ...opts, path: effectivePath });
   if (winner) {
     const picked = applyPick(winner, opts);
     if (picked) return { ...picked, hiddenTestCount } as ResolveResult;
@@ -577,10 +579,11 @@ async function tryFileGraphMatch(
 ): Promise<ResolvedEntity | null> {
   const basename = path.basename(target);
   const targetHasPath = target.includes("/") || target.includes("\\");
+  const effectivePath = opts?.path ?? getActiveWorkspaceRoot();
 
   // Search for file entities matching the basename
   const nodes = await client.search(basename, {
-    limit: opts?.path ? 200 : 20,
+    limit: effectivePath ? 200 : 20,
     kind: "file",
     nameOnly: true,
   });
@@ -589,7 +592,7 @@ async function tryFileGraphMatch(
   const targetLower = normalizeForPathMatch(target);
   const basenameLower = basename.toLowerCase();
   const basenameNoExt = basename.replace(/\.[^.]+$/, "").toLowerCase();
-  const normalizedPathHint = normalizeForPathMatch(opts?.path);
+  const normalizedPathHint = normalizeForPathMatch(effectivePath);
 
   const matches: Array<{ node: any; quality: number }> = [];
   for (const n of nodes as any[]) {

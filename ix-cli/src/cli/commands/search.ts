@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { getActiveWorkspaceRoot, getEndpoint } from "../config.js";
 import { formatNodes, relativePath } from "../format.js";
 import { scoreCandidate } from "../resolve.js";
 import { applyRoleFilter, roleHint } from "../role-filter.js";
@@ -80,6 +80,10 @@ function searchSort(
   return aName.localeCompare(bName);
 }
 
+function normalizePath(value: string | undefined): string {
+  return (value ?? "").toLowerCase().replace(/\\/g, "/");
+}
+
 export function registerSearchCommand(program: Command): void {
   program
     .command("search <term>")
@@ -112,20 +116,27 @@ Examples:
     }) => {
       const client = new IxClient(getEndpoint());
       const limit = parseInt(opts.limit, 10);
+      const effectivePathFilter = opts.path ?? getActiveWorkspaceRoot();
 
       // Fetch more results than requested so we can re-rank and trim
       const fetchLimit = Math.min(limit * 3, 60);
-      const nodes = await client.search(term, {
+      const rawNodes = await client.search(term, {
         limit: fetchLimit,
         kind: opts.kind,
         language: opts.language,
         asOfRev: opts.asOf ? parseInt(opts.asOf, 10) : undefined,
       });
+      const nodes = effectivePathFilter
+        ? rawNodes.filter((node: any) => {
+            const sourceUri = normalizePath(node.provenance?.sourceUri ?? node.provenance?.source_uri ?? "");
+            return sourceUri.includes(normalizePath(effectivePathFilter));
+          })
+        : rawNodes;
 
       // Re-rank client-side using shared scoring + backend weight
       const scored = nodes.map(n => ({
         node: n,
-        rank: rankScore(n, term, opts.kind, opts.path),
+        rank: rankScore(n, term, opts.kind, effectivePathFilter),
       }));
 
       scored.sort(searchSort);
@@ -167,7 +178,7 @@ Examples:
           })),
           summary: {
             count: ranked.length,
-            totalCandidates: nodes.length,
+            totalCandidates: rawNodes.length,
           },
           diagnostics,
         }, null, 2));

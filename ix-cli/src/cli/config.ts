@@ -60,6 +60,20 @@ export function getDefaultWorkspace(): WorkspaceConfig | undefined {
   return loadWorkspaces().find(w => w.default);
 }
 
+export function getActiveWorkspaceRoot(): string | undefined {
+  const cwd = process.cwd();
+  const nearest = findWorkspaceForCwd(cwd);
+  if (nearest) return nearest.root_path;
+
+  const cfg = loadConfig();
+  if (cfg.workspace) {
+    const named = loadWorkspaces().find(w => w.workspace_name === cfg.workspace);
+    if (named) return named.root_path;
+  }
+
+  return getDefaultWorkspace()?.root_path;
+}
+
 export function resolveWorkspaceRoot(explicitRoot?: string): string {
   // 1. Explicit --root
   if (explicitRoot) return explicitRoot;
