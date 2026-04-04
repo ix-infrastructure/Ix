@@ -508,6 +508,23 @@ export async function resolveFileOrEntity(
     }
   }
 
+  // 1.5 Short ID prefix (8–31 hex chars, e.g. "aacc3359" from CLI output)
+  if (/^[0-9a-f]{8,31}$/i.test(target)) {
+    try {
+      const fullId = await client.resolvePrefix(target);
+      const details = await client.entity(fullId);
+      const n = details.node as any;
+      return {
+        id: fullId,
+        kind: n.kind || "unknown",
+        name: n.name || target,
+        resolutionMode: "exact",
+      };
+    } catch {
+      // Not a valid entity prefix — fall through to normal resolution
+    }
+  }
+
   // 2. File-like input → try graph file search
   if (looksFileLike(target)) {
     const fileEntity = await tryFileGraphMatch(client, target, opts);
@@ -599,8 +616,10 @@ async function tryFileGraphMatch(
     const name = (n.name || "").toLowerCase();
     const uri = normalizeForPathMatch(n.provenance?.sourceUri ?? n.provenance?.source_uri ?? "");
 
-    // Exact path match (best)
-    if (targetHasPath && (uri.endsWith(targetLower) || uri === targetLower)) {
+    // Exact path match (best): covers both absolute URIs matching absolute target,
+    // and relative URIs that are a suffix of an absolute target path.
+    if (targetHasPath && (uri.endsWith(targetLower) || uri === targetLower
+        || (uri.includes("/") && targetLower.endsWith(uri)))) {
       matches.push({ node: n, quality: 0 });
     }
     // Filename match in user-requested path
@@ -619,8 +638,13 @@ async function tryFileGraphMatch(
 
   if (matches.length === 0) return null;
 
-  // Sort by quality then pick best
-  matches.sort((a, b) => a.quality - b.quality);
+  // Sort by quality then by URI length descending (longer = more specific path wins)
+  matches.sort((a, b) => {
+    if (a.quality !== b.quality) return a.quality - b.quality;
+    const uriA = normalizeForPathMatch(a.node.provenance?.sourceUri ?? a.node.provenance?.source_uri ?? "");
+    const uriB = normalizeForPathMatch(b.node.provenance?.sourceUri ?? b.node.provenance?.source_uri ?? "");
+    return uriB.length - uriA.length;
+  });
 
   // If multiple matches at same quality, prefer path-matching target
   const best = matches[0];
@@ -628,7 +652,9 @@ async function tryFileGraphMatch(
     // Disambiguate by path when user provided a path
     const pathMatch = matches.find(m => {
       const uri = normalizeForPathMatch(m.node.provenance?.sourceUri ?? m.node.provenance?.source_uri ?? "");
-      return uri.endsWith(targetLower) || (!!normalizedPathHint && uri.includes(normalizedPathHint));
+      return uri.endsWith(targetLower) || uri === targetLower
+        || (uri.includes("/") && targetLower.endsWith(uri))
+        || (!!normalizedPathHint && uri.includes(normalizedPathHint));
     });
     if (pathMatch) {
       return nodeToResolved(pathMatch.node, pathMatch.node.name, "exact");

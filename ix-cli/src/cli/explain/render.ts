@@ -272,6 +272,8 @@ export function renderExplanation(
   // ── Context ───────────────────────────────────────────────────────────
   const contextLines: string[] = [];
 
+  contextLines.push(`Kind: ${facts.kind}`);
+
   if (facts.path) {
     contextLines.push(`Defined in: ${facts.path}`);
   }
