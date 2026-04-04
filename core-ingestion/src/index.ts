@@ -595,26 +595,47 @@ function parseMarkdownFile(filePath: string, source: string): FileParseResult {
   const htmlHeadingPattern = /^<h([1-6])\b[^>]*>(.*?)<\/h\1>\s*$/i;
   const headingLines: { level: number; name: string; lineNum: number; container: string | null }[] = [];
 
-  let inFence = false;
+  // Bug 3 fix: track opening fence char+length so only matching delimiter closes the block
+  let fenceState: { char: string; len: number } | null = null;
   for (let i = startLine; i < lines.length; i++) {
     const line = lines[i];
 
-    // Toggle fenced code block on opening/closing fence (``` or ~~~)
-    if (/^(`{3,}|~{3,})/.test(line.trimStart())) {
-      inFence = !inFence;
+    // Toggle fenced code block — only close with same character and >= opening length
+    const fenceMatch = /^(`{3,}|~{3,})/.exec(line.trimStart());
+    if (fenceMatch) {
+      const matchChar = fenceMatch[1][0];
+      const matchLen = fenceMatch[1].length;
+      if (fenceState === null) {
+        fenceState = { char: matchChar, len: matchLen };
+      } else if (matchChar === fenceState.char && matchLen >= fenceState.len) {
+        fenceState = null;
+      }
       continue;
     }
-    if (inFence) continue;
+    if (fenceState !== null) continue;
 
     const headingMatch = headingPattern.exec(line);
     const htmlHeadingMatch = headingMatch ? null : htmlHeadingPattern.exec(line.trim());
-    if (!headingMatch && !htmlHeadingMatch) continue;
 
-    const level = headingMatch ? headingMatch[1].length : Number(htmlHeadingMatch![1]);
-    const rawName = headingMatch ? headingMatch[2] : htmlHeadingMatch![2];
+    // Bug 2 fix: detect setext-style headings (text line followed by === or --- underline)
+    let setextLevel: number | null = null;
+    if (!headingMatch && !htmlHeadingMatch && line.trim() !== '') {
+      const nextLine = lines[i + 1];
+      if (nextLine !== undefined) {
+        if (/^=+\s*$/.test(nextLine)) setextLevel = 1;
+        else if (/^-+\s*$/.test(nextLine)) setextLevel = 2;
+      }
+    }
+
+    if (!headingMatch && !htmlHeadingMatch && setextLevel === null) continue;
+
+    const level = headingMatch ? headingMatch[1].length : (htmlHeadingMatch ? Number(htmlHeadingMatch![1]) : setextLevel!);
+    const rawName = headingMatch ? headingMatch[2] : (htmlHeadingMatch ? htmlHeadingMatch![2] : line.trim());
     const name = cleanHeadingName(rawName);
     if (!name) continue;
     const lineNum = i + 1;
+
+    if (setextLevel !== null) i++; // skip the underline line
 
     // Find nearest ancestor at a shallower level
     let container: string | null = null;
@@ -661,15 +682,19 @@ function parseMarkdownFile(filePath: string, source: string): FileParseResult {
     });
   }
 
-  if (chunks.length === 0) {
+  // Bug 1 fix: emit file_body when no section chunks exist, regardless of frontmatter chunk
+  if (headingLines.length === 0) {
+    const bodyLineStart = startLine + 1;
+    const bodyStartByte = lineStarts[startLine] ?? 0;
+    const bodyContent = source.slice(bodyStartByte);
     chunks.push({
       name: null,
       chunkKind: 'file_body',
-      lineStart: 1,
+      lineStart: bodyLineStart,
       lineEnd: Math.max(sourceLineCount, 1),
-      startByte: 0,
+      startByte: bodyStartByte,
       endByte: source.length,
-      contentHash: crypto.createHash('sha256').update(source).digest('hex'),
+      contentHash: crypto.createHash('sha256').update(bodyContent).digest('hex'),
       language,
     });
   }

@@ -230,6 +230,93 @@ describe('Markdown parsing', () => {
     expect(result!.entities).toContainEqual(expect.objectContaining({ name: '<Suspense>', kind: 'heading' }));
   });
 
+  // Bug 1: frontmatter + no headings
+  it('produces file_body chunk for body content when file has frontmatter but no headings', () => {
+    const result = parseFile(
+      '/repo/post.md',
+      ['---', 'title: Hello', '---', '', 'Some body content.'].join('\n'),
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.chunks).toContainEqual(expect.objectContaining({ chunkKind: 'frontmatter' }));
+    expect(result!.chunks).toContainEqual(expect.objectContaining({ chunkKind: 'file_body' }));
+  });
+
+  // Bug 2: setext headings
+  it('parses setext h1 headings (=== underline)', () => {
+    const result = parseFile(
+      '/repo/README.md',
+      ['My Project', '==========', '', 'Some text.'].join('\n'),
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(expect.objectContaining({
+      name: 'My Project',
+      kind: 'heading',
+    }));
+  });
+
+  it('parses setext h2 headings (--- underline)', () => {
+    const result = parseFile(
+      '/repo/README.md',
+      ['Overview', '--------', '', 'Details.'].join('\n'),
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(expect.objectContaining({
+      name: 'Overview',
+      kind: 'heading',
+    }));
+  });
+
+  it('nests setext heading under a preceding ATX heading', () => {
+    const result = parseFile(
+      '/repo/README.md',
+      ['# Guide', '', 'Installation', '------------'].join('\n'),
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(expect.objectContaining({
+      name: 'Installation',
+      kind: 'heading',
+      container: 'Guide',
+    }));
+  });
+
+  it('does not parse setext underline inside a fenced code block', () => {
+    const result = parseFile(
+      '/repo/README.md',
+      ['# Real', '```', 'not a heading', '=============', '```'].join('\n'),
+    );
+
+    const headings = result!.entities.filter(e => e.kind === 'heading');
+    expect(headings).toHaveLength(1);
+    expect(headings[0].name).toBe('Real');
+  });
+
+  // Bug 3: fenced code block delimiter matching
+  it('does not close a backtick fence with a tilde line', () => {
+    const result = parseFile(
+      '/repo/README.md',
+      ['# Real', '```', '~~~', '# Not A Heading', '~~~', '```'].join('\n'),
+    );
+
+    const headings = result!.entities.filter(e => e.kind === 'heading');
+    expect(headings).toHaveLength(1);
+    expect(headings[0].name).toBe('Real');
+  });
+
+  it('does not close a tilde fence with a backtick line', () => {
+    const result = parseFile(
+      '/repo/README.md',
+      ['# Real', '~~~', '```', '# Not A Heading', '```', '~~~'].join('\n'),
+    );
+
+    const headings = result!.entities.filter(e => e.kind === 'heading');
+    expect(headings).toHaveLength(1);
+    expect(headings[0].name).toBe('Real');
+  });
+
   it('parses single-line HTML headings commonly used in docs', () => {
     const result = parseFile(
       '/repo/docs.md',
