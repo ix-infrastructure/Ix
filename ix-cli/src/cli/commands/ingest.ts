@@ -38,6 +38,7 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.sql',
   '.json',
   '.toml',
+  '.md', '.markdown',
 ]);
 
 export function isSupportedSourceFile(filePath: string): boolean {
