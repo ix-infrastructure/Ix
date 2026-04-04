@@ -571,6 +571,7 @@ function parseMarkdownFile(filePath: string, source: string): FileParseResult {
   // headingStack[level] = heading name currently active at that depth (1–6)
   const headingStack: (string | null)[] = [null, null, null, null, null, null, null];
   const headingPattern = /^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/;
+  const htmlHeadingPattern = /^<h([1-6])\b[^>]*>(.*?)<\/h\1>\s*$/i;
   const headingLines: { level: number; name: string; lineNum: number; container: string | null }[] = [];
 
   let inFence = false;
@@ -585,10 +586,13 @@ function parseMarkdownFile(filePath: string, source: string): FileParseResult {
     if (inFence) continue;
 
     const headingMatch = headingPattern.exec(line);
-    if (!headingMatch) continue;
+    const htmlHeadingMatch = headingMatch ? null : htmlHeadingPattern.exec(line.trim());
+    if (!headingMatch && !htmlHeadingMatch) continue;
 
-    const level = headingMatch[1].length;
-    const name = headingMatch[2].trim();
+    const level = headingMatch ? headingMatch[1].length : Number(htmlHeadingMatch![1]);
+    const rawName = headingMatch ? headingMatch[2] : htmlHeadingMatch![2];
+    const name = rawName.replace(/<[^>]+>/g, '').trim();
+    if (!name) continue;
     const lineNum = i + 1;
 
     // Find nearest ancestor at a shallower level

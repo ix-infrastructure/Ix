@@ -169,4 +169,33 @@ describe('Markdown parsing', () => {
       kind: 'heading',
     }));
   });
+
+  it('parses single-line HTML headings commonly used in docs', () => {
+    const result = parseFile(
+      '/repo/docs.md',
+      ['<h1 align="center">Fastify</h1>', '', '## Routes'].join('\n'),
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(expect.objectContaining({
+      name: 'Fastify',
+      kind: 'heading',
+      container: undefined,
+    }));
+    expect(result!.entities).toContainEqual(expect.objectContaining({
+      name: 'Routes',
+      kind: 'heading',
+      container: 'Fastify',
+    }));
+    expect(result!.relationships).toContainEqual({
+      srcName: 'docs.md',
+      dstName: 'Fastify',
+      predicate: 'CONTAINS',
+    });
+    expect(result!.relationships).toContainEqual({
+      srcName: 'Fastify',
+      dstName: 'Routes',
+      predicate: 'CONTAINS',
+    });
+  });
 });
