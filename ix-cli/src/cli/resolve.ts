@@ -638,12 +638,12 @@ async function tryFileGraphMatch(
 
   if (matches.length === 0) return null;
 
-  // Sort by quality then by URI length descending (longer = more specific path wins)
+  // Sort by quality then by URI length ascending (shorter = closer to root = more prominent)
   matches.sort((a, b) => {
     if (a.quality !== b.quality) return a.quality - b.quality;
     const uriA = normalizeForPathMatch(a.node.provenance?.sourceUri ?? a.node.provenance?.source_uri ?? "");
     const uriB = normalizeForPathMatch(b.node.provenance?.sourceUri ?? b.node.provenance?.source_uri ?? "");
-    return uriB.length - uriA.length;
+    return uriA.length - uriB.length;
   });
 
   // If multiple matches at same quality, prefer path-matching target

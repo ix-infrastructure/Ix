@@ -105,6 +105,30 @@ describe('Markdown parsing', () => {
     }));
   });
 
+  it('parent section spans full subtree including nested headings', () => {
+    // H1 section should extend to EOF (no sibling H1), spanning all 4 lines.
+    // H2 section should extend to EOF as well (no next H2 or H1 after it).
+    const source = ['# Title', 'intro text', '## Install', 'install steps'].join('\n');
+    const result = parseFile('/repo/README.md', source);
+
+    expect(result).not.toBeNull();
+    const titleSection = result!.chunks.find(c => c.name === 'Title' && c.chunkKind === 'section');
+    const installSection = result!.chunks.find(c => c.name === 'Install' && c.chunkKind === 'section');
+
+    expect(titleSection).toBeDefined();
+    expect(installSection).toBeDefined();
+
+    // Title (H1) section must span to end of file — it has no sibling H1 after it
+    expect(titleSection!.lineEnd).toBe(4);
+    // Install (H2) section spans to end of file
+    expect(installSection!.lineEnd).toBe(4);
+
+    // Title section must start before Install section
+    expect(titleSection!.lineStart).toBeLessThan(installSection!.lineStart);
+    // Title section must end no earlier than Install section
+    expect(titleSection!.lineEnd).toBeGreaterThanOrEqual(installSection!.lineEnd);
+  });
+
   it('parses YAML frontmatter', () => {
     const result = parseFile(
       '/repo/post.md',

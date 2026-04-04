@@ -613,10 +613,17 @@ function parseMarkdownFile(filePath: string, source: string): FileParseResult {
     headingLines.push({ level, name, lineNum, container });
   }
 
-  // Build one section chunk per heading spanning to the line before the next heading
+  // Build one section chunk per heading spanning to the line before the next heading at the same or
+  // shallower level. This ensures parent sections contain their nested sub-sections' content.
   for (let h = 0; h < headingLines.length; h++) {
-    const { name, lineNum, container } = headingLines[h];
-    const nextLineNum = h + 1 < headingLines.length ? headingLines[h + 1].lineNum - 1 : sourceLineCount;
+    const { level: currentLevel, name, lineNum, container } = headingLines[h];
+    let nextLineNum = sourceLineCount;
+    for (let k = h + 1; k < headingLines.length; k++) {
+      if (headingLines[k].level <= currentLevel) {
+        nextLineNum = headingLines[k].lineNum - 1;
+        break;
+      }
+    }
     const startByte = lineStarts[lineNum - 1] ?? 0;
     const endByte = nextLineNum < lines.length ? (lineStarts[nextLineNum] ?? source.length) : source.length;
     const sectionContent = lines.slice(lineNum - 1, nextLineNum).join('\n');
