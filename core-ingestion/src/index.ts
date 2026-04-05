@@ -404,7 +404,8 @@ function parseTomlFile(filePath: string, source: string): FileParseResult {
   // [table] or [[array-of-tables]] headers set the current section context.
   const tableHeaderPattern = /^\s*\[{1,2}([^\[\]]+)\]{1,2}\s*(?:#.*)?$/;
   // key = value lines (bare keys, quoted keys, dotted keys).
-  const keyPattern = /^\s*([A-Za-z0-9_"'-][A-Za-z0-9_"' .-]*?)\s*=/;
+  // Quoted keys handled separately to avoid ReDoS from spaces overlapping with \s*.
+  const keyPattern = /^\s*("[^"]*"|'[^']*'|[A-Za-z0-9_-][A-Za-z0-9_.-]*)\s*=/;
 
   let currentTable: string | null = null;
   const seenTablePaths = new Set<string>();
