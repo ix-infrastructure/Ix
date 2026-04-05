@@ -603,7 +603,14 @@ else
     # Pull images first so we catch rate limits / auth errors clearly
     echo "  Pulling Docker images (this may take a few minutes on first run)..."
     PULL_LOG=$(mktemp /tmp/ix-pull-XXXXXX.log)
-    if ! dc -f "$COMPOSE_DIR/docker-compose.yml" pull < /dev/null >"$PULL_LOG" 2>&1; then
+    dc -f "$COMPOSE_DIR/docker-compose.yml" pull < /dev/null >"$PULL_LOG" 2>&1 &
+    PULL_PID=$!
+    while kill -0 "$PULL_PID" 2>/dev/null; do
+      printf "."
+      sleep 2
+    done
+    echo ""
+    if ! wait "$PULL_PID"; then
       echo ""
       if grep -qi "toomanyrequests\|rate limit\|429\|unauthorized\|denied" "$PULL_LOG" 2>/dev/null; then
         echo "  ┌─────────────────────────────────────────────────────────────┐"
