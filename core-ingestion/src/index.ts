@@ -604,9 +604,10 @@ function parseMarkdownFile(filePath: string, source: string): FileParseResult {
 
   // headingStack[level] = heading name currently active at that depth (1–6)
   const headingStack: (string | null)[] = [null, null, null, null, null, null, null];
-  // (.*\S) captures up to the last non-whitespace — avoids \s*$ overlap (ReDoS).
-  // Closing ## markers are stripped below after capture.
-  const headingPattern = /^(#{1,6})\s+(.*\S)/;
+  // \S[^\r\n]* requires content to start with non-whitespace, eliminating the
+  // \s+/(.*\S) overlap that caused polynomial backtracking. Trailing whitespace
+  // and closing ## markers are stripped in code below.
+  const headingPattern = /^(#{1,6})[ \t]+(\S[^\r\n]*)$/;
   // Greedy .* with specific closing tag as anchor avoids (.*?)\s*$ overlap (ReDoS).
   const htmlHeadingPattern = /^<h([1-6])\b[^>]*>(.*)<\/h\1>/i;
   const headingLines: { level: number; name: string; lineNum: number; container: string | null }[] = [];
@@ -647,7 +648,14 @@ function parseMarkdownFile(filePath: string, source: string): FileParseResult {
 
     const level = headingMatch ? headingMatch[1].length : (htmlHeadingMatch ? Number(htmlHeadingMatch![1]) : setextLevel!);
     // Strip optional ATX closing markers (e.g. "Title ##") that (.*\S) now includes.
-    const rawName = headingMatch ? headingMatch[2].replace(/\s+#+$/, '') : (htmlHeadingMatch ? htmlHeadingMatch![2] : line.trim());
+    // Use string walk instead of regex to avoid ReDoS on +#+$ backtracking.
+    let atxRaw = headingMatch ? headingMatch[2].trimEnd() : null;
+    if (atxRaw !== null && atxRaw[atxRaw.length - 1] === '#') {
+      let i = atxRaw.length - 1;
+      while (i >= 0 && atxRaw[i] === '#') i--;
+      if (i >= 0 && (atxRaw[i] === ' ' || atxRaw[i] === '\t')) atxRaw = atxRaw.slice(0, i);
+    }
+    const rawName = atxRaw !== null ? atxRaw : (htmlHeadingMatch ? htmlHeadingMatch![2] : line.trim());
     const name = cleanHeadingName(rawName);
     if (!name) continue;
     const lineNum = i + 1;
