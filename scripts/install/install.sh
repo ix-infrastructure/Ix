@@ -368,14 +368,31 @@ install_docker() {
     Darwin)
       if command -v brew >/dev/null 2>&1; then
         echo "  Installing Docker Desktop via Homebrew (this can take a few minutes)..."
+        # Clean stale symlinks that block brew cask linking
+        for f in /usr/local/bin/docker /usr/local/bin/docker-compose \
+                 /usr/local/bin/docker-credential-desktop \
+                 /usr/local/bin/docker-credential-ecr-login \
+                 /usr/local/bin/docker-credential-osxkeychain \
+                 /usr/local/bin/com.docker.cli \
+                 /usr/local/bin/kubectl.docker /usr/local/bin/hub-tool \
+                 /usr/local/bin/docker-index; do
+          if [ -L "$f" ] && [ ! -e "$f" ]; then
+            sudo rm -f "$f" 2>/dev/null || true
+          fi
+        done
         brew install --cask docker < /dev/null > /dev/null 2>&1 &
         BREW_PID=$!
+        BAR="##################################################"
+        EMPTY=".................................................."
+        spinner_i=0
         while kill -0 "$BREW_PID" 2>/dev/null; do
-          printf "."
-          sleep 2
+          filled=$((spinner_i % 50))
+          printf "\r  [%.${filled}s%.$(( 50 - filled ))s]" "$BAR" "$EMPTY"
+          sleep 1
+          spinner_i=$((spinner_i + 1))
         done
+        printf "\r  [##################################################] Done!\n"
         wait "$BREW_PID" || true
-        echo ""
       else
         echo "  Downloading Docker Desktop for macOS..."
         dmg=$(mktemp /tmp/docker-XXXXXX.dmg)
