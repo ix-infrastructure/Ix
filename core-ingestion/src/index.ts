@@ -528,7 +528,15 @@ function parseTomlFile(filePath: string, source: string): FileParseResult {
 
 function cleanHeadingName(raw: string): string {
   // 1. Strip VitePress anchor ID suffix {#...}
-  let s = raw.replace(/\s*\{#[^}]+\}\s*$/, '');
+  // Use string methods to avoid ReDoS from overlapping \s* / [^}]+ quantifiers.
+  let s = raw;
+  const anchorStart = raw.lastIndexOf('{#');
+  if (anchorStart !== -1) {
+    const closeIdx = raw.indexOf('}', anchorStart + 2);
+    if (closeIdx !== -1 && raw.slice(closeIdx + 1).trim() === '') {
+      s = raw.slice(0, anchorStart).trimEnd();
+    }
+  }
   // 2. Unescape backslash-escaped angle brackets before HTML stripping
   s = s.replace(/\\</g, '\x01LT\x01').replace(/\\>/g, '\x01GT\x01');
   // 3. Protect inline code spans from HTML stripping
