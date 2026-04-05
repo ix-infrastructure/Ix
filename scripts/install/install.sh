@@ -169,6 +169,76 @@ PLATFORM=$(detect_platform)
 echo "  Version:  $VERSION"
 echo "  Platform: $PLATFORM"
 
+# -- Step 0: System prerequisites --
+
+step "0. System prerequisites (git, Homebrew)"
+
+# Homebrew — macOS package manager (used to install Node, Docker, git)
+case "$(uname -s)" in
+  Darwin)
+    if ! command -v brew >/dev/null 2>&1; then
+      echo "  Installing Homebrew (macOS package manager)..."
+      /bin/bash -c "$(_fetch https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" < /dev/null
+      # Add brew to PATH for this session (Apple Silicon vs Intel)
+      if [ -x "/opt/homebrew/bin/brew" ]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+      elif [ -x "/usr/local/bin/brew" ]; then
+        eval "$(/usr/local/bin/brew shellenv)"
+      fi
+      if command -v brew >/dev/null 2>&1; then
+        info "Homebrew installed"
+      else
+        warn "Homebrew installed but not in PATH yet — open a new terminal after install"
+      fi
+    else
+      info "Homebrew is available"
+    fi
+    ;;
+esac
+
+# git — required by ix CLI
+if ! command -v git >/dev/null 2>&1; then
+  echo "  Installing git..."
+  case "$(uname -s)" in
+    Darwin)
+      if command -v xcode-select >/dev/null 2>&1; then
+        echo "  Installing Xcode Command Line Tools (includes git)..."
+        echo "  A dialog may appear — click Install and wait."
+        xcode-select --install 2>/dev/null || true
+        printf "  Waiting for git..."
+        i=0
+        while [ "$i" -lt 120 ]; do
+          if command -v git >/dev/null 2>&1; then break; fi
+          printf "."
+          sleep 2
+          i=$((i + 1))
+        done
+        echo ""
+      fi
+      if ! command -v git >/dev/null 2>&1 && command -v brew >/dev/null 2>&1; then
+        brew install git < /dev/null
+      fi
+      ;;
+    Linux)
+      if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update -qq < /dev/null && sudo apt-get install -y git < /dev/null
+      elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y git < /dev/null
+      elif command -v yum >/dev/null 2>&1; then
+        sudo yum install -y git < /dev/null
+      elif command -v apk >/dev/null 2>&1; then
+        sudo apk add git < /dev/null
+      fi
+      ;;
+  esac
+  if ! command -v git >/dev/null 2>&1; then
+    err "git is required. Install it manually: https://git-scm.com/downloads"
+  fi
+  info "git installed"
+else
+  info "git is available"
+fi
+
 # -- Step 1: Check / Install Node.js --
 
 step "1. Node.js (runtime)"
@@ -289,72 +359,165 @@ else
   info "Node.js $(node -v) installed"
 fi
 
-# -- Step 2: Check / Install Docker --
+# -- Step 2: Check / Install Docker + Docker Compose --
 
-step "2. Docker"
+step "2. Docker + Docker Compose"
+
+install_docker() {
+  case "$(uname -s)" in
+    Darwin)
+      if command -v brew >/dev/null 2>&1; then
+        echo "  Installing Docker Desktop via Homebrew..."
+        brew install --cask docker < /dev/null
+      else
+        echo "  Downloading Docker Desktop for macOS..."
+        dmg=$(mktemp /tmp/docker-XXXXXX.dmg)
+        arch_suffix="arm64"
+        if [ "$(uname -m)" = "x86_64" ]; then arch_suffix="amd64"; fi
+        _download "https://desktop.docker.com/mac/main/${arch_suffix}/Docker.dmg" "$dmg"
+        echo "  Mounting installer..."
+        hdiutil attach "$dmg" -quiet -nobrowse -mountpoint /Volumes/Docker < /dev/null
+        echo "  Installing (may require your password)..."
+        sudo cp -R /Volumes/Docker/Docker.app /Applications/ < /dev/null
+        hdiutil detach /Volumes/Docker -quiet
+        rm -f "$dmg"
+      fi
+      ;;
+    Linux)
+      echo "  Installing Docker Engine via get.docker.com..."
+      _fetch https://get.docker.com | sh < /dev/null
+      if ! id -nG "$USER" 2>/dev/null | grep -qw docker; then
+        echo "  Adding $USER to the docker group..."
+        sudo usermod -aG docker "$USER" < /dev/null 2>/dev/null || true
+      fi
+      if command -v systemctl >/dev/null 2>&1; then
+        sudo systemctl start docker < /dev/null 2>/dev/null || true
+        sudo systemctl enable docker < /dev/null 2>/dev/null || true
+      fi
+      if ! docker compose version >/dev/null 2>&1; then
+        echo "  Installing Docker Compose plugin..."
+        compose_arch="x86_64"
+        if [ "$(uname -m)" = "aarch64" ]; then compose_arch="aarch64"; fi
+        compose_url="https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${compose_arch}"
+        sudo mkdir -p /usr/local/lib/docker/cli-plugins
+        sudo _download "$compose_url" /usr/local/lib/docker/cli-plugins/docker-compose
+        sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+      fi
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      echo ""
+      echo "  Docker Desktop is required on Windows."
+      echo "  Download and install from:"
+      echo "    https://docs.docker.com/desktop/install/windows-install/"
+      echo ""
+      echo "  After installing, restart your terminal and re-run this installer."
+      echo ""
+      echo "  To install the CLI only (no backend):"
+      echo "    IX_SKIP_BACKEND=1 sh install.sh"
+      err "Automatic Docker install is not supported on Windows."
+      ;;
+    *)
+      err "Unsupported OS. Install Docker manually: https://docs.docker.com/engine/install/"
+      ;;
+  esac
+}
+
+wait_for_docker_daemon() {
+  max_wait="$1"
+  printf "  Waiting for Docker daemon..."
+  i=0
+  while [ "$i" -lt "$max_wait" ]; do
+    if docker info < /dev/null >/dev/null 2>&1; then
+      echo ""
+      return 0
+    fi
+    printf "."
+    sleep 2
+    i=$((i + 1))
+  done
+  echo ""
+  return 1
+}
+
+start_docker_daemon() {
+  case "$(uname -s)" in
+    Darwin)
+      if [ -d "/Applications/Docker.app" ]; then
+        echo "  Starting Docker Desktop..."
+        open -a Docker
+        if ! wait_for_docker_daemon 15; then
+          echo ""
+          echo "  ┌─────────────────────────────────────────────────────────────┐"
+          echo "  │  Docker Desktop needs you to complete setup in its window.  │"
+          echo "  │                                                             │"
+          echo "  │  1. Accept the Docker Desktop license agreement             │"
+          echo "  │  2. Skip or complete sign-in (sign-in is optional)          │"
+          echo "  │  3. Wait for the engine to finish starting                  │"
+          echo "  │     (whale icon in menu bar stops animating)                │"
+          echo "  │                                                             │"
+          echo "  │  This installer will continue automatically once ready.     │"
+          echo "  └─────────────────────────────────────────────────────────────┘"
+          echo ""
+          if ! wait_for_docker_daemon 150; then
+            return 1
+          fi
+        fi
+      fi
+      ;;
+    Linux)
+      if command -v systemctl >/dev/null 2>&1; then
+        echo "  Starting Docker daemon..."
+        sudo systemctl start docker < /dev/null 2>/dev/null || true
+        sleep 2
+      fi
+      if ! docker info < /dev/null >/dev/null 2>&1; then
+        if sudo docker info < /dev/null >/dev/null 2>&1; then
+          echo "  Docker requires sudo (group not yet active). Using sudo for this session."
+          dc() { sudo docker compose "$@"; }
+        fi
+      fi
+      ;;
+  esac
+}
 
 if [ "${IX_SKIP_BACKEND:-}" = "1" ]; then
   echo "  (skipped via IX_SKIP_BACKEND=1)"
 else
-  if command -v docker >/dev/null 2>&1; then
-    info "Docker is installed"
+  if ! command -v docker >/dev/null 2>&1; then
+    install_docker
+    hash -r 2>/dev/null || true
+    if ! command -v docker >/dev/null 2>&1; then
+      for p in /usr/local/bin /opt/homebrew/bin; do
+        if [ -x "$p/docker" ]; then
+          export PATH="$p:$PATH"
+          break
+        fi
+      done
+    fi
+    if ! command -v docker >/dev/null 2>&1; then
+      err "Docker installation failed. Install manually: https://docs.docker.com/engine/install/"
+    fi
+    info "Docker installed"
   else
-    echo ""
-    echo "  Docker is required to run the Ix backend (ArangoDB + Memory Layer)."
-    echo ""
-    case "$(uname -s)" in
-      Darwin)
-        echo "  Install Docker Desktop for macOS:"
-        echo "    https://docs.docker.com/desktop/install/mac-install/"
-        echo ""
-        echo "  Or via Homebrew:"
-        echo "    brew install --cask docker"
-        ;;
-      Linux)
-        echo "  Install Docker Engine:"
-        echo "    https://docs.docker.com/engine/install/"
-        echo ""
-        echo "  Quick install:"
-        echo "    curl -fsSL https://get.docker.com | sh"
-        ;;
-      MINGW*|MSYS*|CYGWIN*)
-        echo "  Install Docker Desktop for Windows:"
-        echo "    https://docs.docker.com/desktop/install/windows-install/"
-        ;;
-    esac
-    echo ""
-    echo "  To install the CLI only (no backend):"
-    echo "    IX_SKIP_BACKEND=1 sh install.sh"
-    echo ""
-    err "Install Docker and re-run, or set IX_SKIP_BACKEND=1 to skip."
+    info "Docker is installed"
   fi
 
   if ! docker info < /dev/null >/dev/null 2>&1; then
-    echo ""
-    echo "  Docker is installed but not running."
-    case "$(uname -s)" in
-      Darwin)
-        echo "  Trying to start Docker Desktop..."
-        if [ -d "/Applications/Docker.app" ]; then
-          open -a Docker
-          echo "  Waiting for Docker to start (this can take 30-60 seconds)..."
-          i=0
-          while [ "$i" -lt 30 ]; do
-            if docker info < /dev/null >/dev/null 2>&1; then break; fi
-            printf "."
-            sleep 2
-            i=$((i + 1))
-          done
-          echo ""
-        fi
-        ;;
-    esac
-
-    if ! docker info < /dev/null >/dev/null 2>&1; then
-      err "Docker is not running. Start Docker and re-run this installer."
+    start_docker_daemon
+    if ! docker info < /dev/null >/dev/null 2>&1 && ! sudo docker info < /dev/null >/dev/null 2>&1; then
+      echo ""
+      echo "  Could not start Docker automatically."
+      echo "  To install the CLI only (no backend):"
+      echo "    IX_SKIP_BACKEND=1 sh install.sh"
+      err "Docker daemon is not running. Start it and re-run."
     fi
   fi
-  info "Docker is running"
+  info "Docker daemon is running"
+
+  if ! docker compose version >/dev/null 2>&1; then
+    err "Docker Compose v2 is required. Update Docker or install the compose plugin."
+  fi
+  info "Docker Compose $(docker compose version --short 2>/dev/null || echo 'v2') is available"
 fi
 
 # -- Step 3: Start Backend --
@@ -384,19 +547,50 @@ else
     _download "${GITHUB_RAW}/docker-compose.standalone.yml" "$COMPOSE_DIR/docker-compose.yml"
     info "Downloaded docker-compose.yml"
 
-    printf "  Starting backend services (this may take a minute on first run)..."
-    dc -f "$COMPOSE_DIR/docker-compose.yml" up -d --pull always < /dev/null >/dev/null 2>&1 &
-    DOCKER_PID=$!
-    while kill -0 "$DOCKER_PID" 2>/dev/null; do
-      printf "."
-      sleep 1
-    done
-    wait "$DOCKER_PID" || true
-    echo ""
+    # Pull images first so we catch rate limits / auth errors clearly
+    echo "  Pulling Docker images (this may take a few minutes on first run)..."
+    PULL_LOG=$(mktemp /tmp/ix-pull-XXXXXX.log)
+    if ! dc -f "$COMPOSE_DIR/docker-compose.yml" pull < /dev/null >"$PULL_LOG" 2>&1; then
+      echo ""
+      if grep -qi "toomanyrequests\|rate limit\|429\|unauthorized\|denied" "$PULL_LOG" 2>/dev/null; then
+        echo "  ┌─────────────────────────────────────────────────────────────┐"
+        echo "  │  Docker image pull was rate-limited or denied.              │"
+        echo "  │                                                             │"
+        echo "  │  Docker Hub limits unauthenticated pulls to 100 per 6hrs.  │"
+        echo "  │  Sign in to Docker Hub (free account) to raise the limit:  │"
+        echo "  │                                                             │"
+        echo "  │    docker login                                             │"
+        echo "  │                                                             │"
+        echo "  │  Then re-run this installer.                                │"
+        echo "  └─────────────────────────────────────────────────────────────┘"
+      else
+        echo "  Image pull failed. Error output:"
+        head -20 "$PULL_LOG"
+        echo ""
+        echo "  If Docker just started, it may need a moment — try again."
+      fi
+      rm -f "$PULL_LOG"
+      err "Failed to pull Docker images."
+    fi
+    rm -f "$PULL_LOG"
+    info "Docker images pulled"
+
+    # Start services
+    printf "  Starting backend services..."
+    START_LOG=$(mktemp /tmp/ix-start-XXXXXX.log)
+    if ! dc -f "$COMPOSE_DIR/docker-compose.yml" up -d < /dev/null >"$START_LOG" 2>&1; then
+      echo ""
+      echo "  Failed to start backend. Error output:"
+      head -20 "$START_LOG"
+      rm -f "$START_LOG"
+      err "docker compose up failed."
+    fi
+    rm -f "$START_LOG"
+    echo " started"
 
     printf "  Waiting for services to become healthy..."
     i=0
-    while [ "$i" -lt 30 ]; do
+    while [ "$i" -lt 45 ]; do
       if _fetch "$HEALTH_URL" >/dev/null 2>&1 && _fetch "$ARANGO_URL" >/dev/null 2>&1; then
         break
       fi
