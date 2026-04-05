@@ -246,6 +246,34 @@ else
   info "git is available"
 fi
 
+# ripgrep — used by "ix text" for fast codebase search
+if ! command -v rg >/dev/null 2>&1; then
+  echo "  Installing ripgrep..."
+  case "$(uname -s)" in
+    Darwin)
+      if command -v brew >/dev/null 2>&1; then
+        brew install ripgrep < /dev/null 2>/dev/null
+      fi
+      ;;
+    Linux)
+      if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get install -y ripgrep < /dev/null 2>/dev/null
+      elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y ripgrep < /dev/null 2>/dev/null
+      elif command -v apk >/dev/null 2>&1; then
+        sudo apk add ripgrep < /dev/null 2>/dev/null
+      fi
+      ;;
+  esac
+  if command -v rg >/dev/null 2>&1; then
+    info "ripgrep installed"
+  else
+    warn "ripgrep not installed — 'ix text' will not be available"
+  fi
+else
+  info "ripgrep is available"
+fi
+
 # -- Step 1: Check / Install Node.js --
 
 step "1. Node.js (runtime)"

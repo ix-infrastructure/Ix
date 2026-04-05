@@ -79,11 +79,14 @@ ix-memory-layer==latest
 # Platforms: linux-amd64, linux-arm64, darwin-amd64, darwin-arm64, windows-amd64
 
 # ============================================================================
-#  OPTIONAL
+#  ALSO INSTALLED (used by ix commands)
 # ============================================================================
 
-# ripgrep — used by "ix text" for fast text search
-# ripgrep>=13
+# ripgrep — used by "ix text" for fast codebase text search
+#   macOS:   brew install ripgrep
+#   Linux:   apt/dnf/apk install ripgrep
+#   Falls back to a warning if install fails (non-fatal)
+ripgrep>=13
 
 # ============================================================================
 #  NETWORK ENDPOINTS ACCESSED
