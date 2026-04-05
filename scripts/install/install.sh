@@ -367,8 +367,13 @@ install_docker() {
   case "$(uname -s)" in
     Darwin)
       if command -v brew >/dev/null 2>&1; then
-        echo "  Installing Docker Desktop via Homebrew (this can take a few minutes)..."
-        # Clean stale symlinks that block brew cask linking
+        echo "  Installing Docker Desktop via Homebrew..."
+        echo "  (this downloads ~700MB — may take a few minutes)"
+        echo ""
+        # Remove any stale Docker symlinks from a previous install
+        # that would cause brew to fail with "already a Binary" errors.
+        # Use rm without sudo first (works if user owns /usr/local/bin),
+        # fall back to sudo only if needed.
         for f in /usr/local/bin/docker /usr/local/bin/docker-compose \
                  /usr/local/bin/docker-credential-desktop \
                  /usr/local/bin/docker-credential-ecr-login \
@@ -377,22 +382,10 @@ install_docker() {
                  /usr/local/bin/kubectl.docker /usr/local/bin/hub-tool \
                  /usr/local/bin/docker-index; do
           if [ -L "$f" ] && [ ! -e "$f" ]; then
-            sudo rm -f "$f" 2>/dev/null || true
+            rm -f "$f" 2>/dev/null || sudo rm -f "$f" 2>/dev/null || true
           fi
         done
-        brew install --cask docker < /dev/null > /dev/null 2>&1 &
-        BREW_PID=$!
-        BAR="##################################################"
-        EMPTY=".................................................."
-        spinner_i=0
-        while kill -0 "$BREW_PID" 2>/dev/null; do
-          filled=$((spinner_i % 50))
-          printf "\r  [%.${filled}s%.$(( 50 - filled ))s]" "$BAR" "$EMPTY"
-          sleep 1
-          spinner_i=$((spinner_i + 1))
-        done
-        printf "\r  [##################################################] Done!\n"
-        wait "$BREW_PID" || true
+        brew install --cask docker < /dev/null
       else
         echo "  Downloading Docker Desktop for macOS..."
         dmg=$(mktemp /tmp/docker-XXXXXX.dmg)
