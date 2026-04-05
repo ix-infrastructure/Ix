@@ -370,10 +370,9 @@ install_docker() {
         echo "  Installing Docker Desktop via Homebrew..."
         echo "  (this downloads ~700MB — may take a few minutes)"
         echo ""
-        # Remove any stale Docker symlinks from a previous install
-        # that would cause brew to fail with "already a Binary" errors.
-        # Use rm without sudo first (works if user owns /usr/local/bin),
-        # fall back to sudo only if needed.
+        # Remove ANY existing Docker symlinks/binaries that would cause
+        # brew to fail with "already a Binary" errors — whether stale,
+        # broken, or from a previous partial install.
         for f in /usr/local/bin/docker /usr/local/bin/docker-compose \
                  /usr/local/bin/docker-credential-desktop \
                  /usr/local/bin/docker-credential-ecr-login \
@@ -381,10 +380,12 @@ install_docker() {
                  /usr/local/bin/com.docker.cli \
                  /usr/local/bin/kubectl.docker /usr/local/bin/hub-tool \
                  /usr/local/bin/docker-index; do
-          if [ -L "$f" ] && [ ! -e "$f" ]; then
+          if [ -e "$f" ] || [ -L "$f" ]; then
             rm -f "$f" 2>/dev/null || sudo rm -f "$f" 2>/dev/null || true
           fi
         done
+        # Also clean up any failed previous cask install
+        brew uninstall --cask docker 2>/dev/null || true
         brew install --cask docker < /dev/null
       else
         echo "  Downloading Docker Desktop for macOS..."
