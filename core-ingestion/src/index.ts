@@ -312,7 +312,7 @@ function parseYamlFile(filePath: string, source: string): FileParseResult {
   const lineStarts = computeLineStarts(source);
   const lines = source.split(/\r?\n/);
   const stack: Array<{ indent: number; key: string }> = [];
-  const keyLinePattern = /^(\s*)(?:-\s+)?([A-Za-z0-9_.-]+)\s*:(?:\s*.*)?$/;
+  const keyLinePattern = /^(\s*)(?:-\s+)?([A-Za-z0-9_.-]+)\s*:.*$/;
 
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
