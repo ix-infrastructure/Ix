@@ -558,28 +558,21 @@ else
     install_docker
   fi
 
-  # On macOS, Docker Desktop must be launched and the user must accept
-  # the license before the docker CLI and daemon become available.
-  # Open it, tell the user what to do, and wait.
+  # On macOS, launch Docker Desktop and wait for the daemon.
   if [ -d "/Applications/Docker.app" ]; then
-    if ! [ -x "/usr/local/bin/docker" ] || ! docker info < /dev/null >/dev/null 2>&1; then
+    if [ -x "/usr/local/bin/docker" ]; then
+      export PATH="/usr/local/bin:$PATH"
+      hash -r 2>/dev/null || true
+    fi
+
+    if ! command -v docker >/dev/null 2>&1 || ! docker info < /dev/null >/dev/null 2>&1; then
+      echo "  Starting Docker Desktop..."
       open -g -a Docker
-      osascript -e 'tell application "Docker" to activate' 2>/dev/null || true
-      echo ""
-      echo "  ┌─────────────────────────────────────────────────────────────┐"
-      echo "  │  Docker Desktop is open. Complete the setup in its window:  │"
-      echo "  │                                                             │"
-      echo "  │  1. Accept the license agreement                            │"
-      echo "  │  2. Skip sign-in (or sign in — it's optional)              │"
-      echo "  │  3. Wait for the engine to start                            │"
-      echo "  │     (whale icon in menu bar stops animating)                │"
-      echo "  │                                                             │"
-      echo "  │  This installer will continue automatically.                │"
-      echo "  └─────────────────────────────────────────────────────────────┘"
-      echo ""
+
+      # Wait up to 90 seconds quietly — enough for normal startup
       printf "  Waiting for Docker to be ready..."
       i=0
-      while [ "$i" -lt 180 ]; do
+      while [ "$i" -lt 45 ]; do
         if [ -x "/usr/local/bin/docker" ]; then
           export PATH="/usr/local/bin:$PATH"
           hash -r 2>/dev/null || true
@@ -592,6 +585,36 @@ else
         i=$((i + 1))
       done
       echo ""
+
+      # If still not ready after 90s, user probably needs to do something
+      if ! command -v docker >/dev/null 2>&1 || ! docker info < /dev/null >/dev/null 2>&1; then
+        osascript -e 'tell application "Docker" to activate' 2>/dev/null || true
+        echo ""
+        echo "  ┌─────────────────────────────────────────────────────────────┐"
+        echo "  │  Docker Desktop needs you to complete setup in its window:  │"
+        echo "  │                                                             │"
+        echo "  │  1. Accept the license agreement (if shown)                 │"
+        echo "  │  2. Skip sign-in (or sign in — it is optional)             │"
+        echo "  │  3. Wait for the engine to start                            │"
+        echo "  │                                                             │"
+        echo "  │  This installer will continue automatically.                │"
+        echo "  └─────────────────────────────────────────────────────────────┘"
+        echo ""
+        printf "  Waiting..."
+        while [ "$i" -lt 180 ]; do
+          if [ -x "/usr/local/bin/docker" ]; then
+            export PATH="/usr/local/bin:$PATH"
+            hash -r 2>/dev/null || true
+          fi
+          if command -v docker >/dev/null 2>&1 && docker info < /dev/null >/dev/null 2>&1; then
+            break
+          fi
+          printf "."
+          sleep 2
+          i=$((i + 1))
+        done
+        echo ""
+      fi
     fi
   fi
 
