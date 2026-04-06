@@ -562,24 +562,32 @@ else
 
   DOCKER_BIN="$(find_docker)"
 
-  # Install if missing
-  if [ -z "$DOCKER_BIN" ]; then
-    install_docker
-    DOCKER_BIN="$(find_docker)"
-  fi
+  # Already installed and running? Skip everything.
+  if [ -n "$DOCKER_BIN" ] && "$DOCKER_BIN" info < /dev/null >/dev/null 2>&1; then
+    info "Docker is ready"
+    export PATH="/usr/local/bin:$PATH"
+    dc() { "$DOCKER_BIN" compose "$@"; }
 
-  # macOS: launch Docker Desktop and wait for daemon
-  case "$(uname -s)" in
-    Darwin)
-      if [ -d "/Applications/Docker.app" ]; then
-        if [ -z "$DOCKER_BIN" ] || ! "$DOCKER_BIN" info < /dev/null >/dev/null 2>&1; then
+  else
+    # Install if binary doesn't exist at all
+    if [ -z "$DOCKER_BIN" ] && ! [ -d "/Applications/Docker.app" ]; then
+      install_docker
+      DOCKER_BIN="$(find_docker)"
+    fi
+
+    # macOS: launch Docker Desktop and wait for daemon
+    case "$(uname -s)" in
+      Darwin)
+        if [ -d "/Applications/Docker.app" ]; then
+          # Docker Desktop installed but daemon not running — just start it
           echo "  Starting Docker Desktop..."
-          open -g -a Docker
+          open -a Docker
+          osascript -e 'tell application "Docker" to activate' 2>/dev/null || true
 
           printf "  Waiting for Docker to be ready..."
           i=0
           ready=0
-          while [ "$i" -lt 45 ]; do
+          while [ "$i" -lt 60 ]; do
             DOCKER_BIN="$(find_docker)"
             if [ -n "$DOCKER_BIN" ] && "$DOCKER_BIN" info < /dev/null >/dev/null 2>&1; then
               ready=1; break
@@ -588,6 +596,7 @@ else
           done
           echo ""
 
+          # Only show license prompt if still not ready after 2 minutes
           if [ "$ready" = "0" ]; then
             osascript -e 'tell application "Docker" to activate' 2>/dev/null || true
             echo ""
@@ -611,16 +620,15 @@ else
             done
             echo ""
           fi
-        fi
 
-        # Wire up docker for rest of script
-        DOCKER_BIN="$(find_docker)"
-        if [ -n "$DOCKER_BIN" ]; then
-          export PATH="/usr/local/bin:$PATH"
-          dc() { "$DOCKER_BIN" compose "$@"; }
+          # Wire up docker for rest of script
+          DOCKER_BIN="$(find_docker)"
+          if [ -n "$DOCKER_BIN" ]; then
+            export PATH="/usr/local/bin:$PATH"
+            dc() { "$DOCKER_BIN" compose "$@"; }
+          fi
         fi
-      fi
-      ;;
+        ;;
     Linux)
       if [ -n "$DOCKER_BIN" ] && ! "$DOCKER_BIN" info < /dev/null >/dev/null 2>&1; then
         if command -v systemctl >/dev/null 2>&1; then
@@ -643,22 +651,23 @@ else
         DOCKER_BIN="docker"
       fi
       ;;
-  esac
+    esac
 
-  # Final check
-  DOCKER_BIN="$(find_docker)"
-  if [ -z "$DOCKER_BIN" ]; then
-    err "Docker not found. Restart your terminal and re-run this installer."
-  fi
-  if ! "$DOCKER_BIN" info < /dev/null >/dev/null 2>&1; then
-    err "Docker is not running. Start Docker Desktop and re-run this installer."
-  fi
-  info "Docker is ready"
+    # Final check
+    DOCKER_BIN="$(find_docker)"
+    if [ -z "$DOCKER_BIN" ]; then
+      err "Docker not found. Restart your terminal and re-run this installer."
+    fi
+    if ! "$DOCKER_BIN" info < /dev/null >/dev/null 2>&1; then
+      err "Docker is not running. Start Docker Desktop and re-run this installer."
+    fi
+    info "Docker is ready"
 
-  if ! "$DOCKER_BIN" compose version >/dev/null 2>&1; then
-    err "Docker Compose v2 is required. Update Docker or install the compose plugin."
+    if ! "$DOCKER_BIN" compose version >/dev/null 2>&1; then
+      err "Docker Compose v2 is required. Update Docker or install the compose plugin."
+    fi
+    info "Docker Compose $("$DOCKER_BIN" compose version --short 2>/dev/null || echo 'v2') is available"
   fi
-  info "Docker Compose $("$DOCKER_BIN" compose version --short 2>/dev/null || echo 'v2') is available"
 fi
 
 # -- Step 3: Start Backend --
