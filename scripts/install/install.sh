@@ -553,103 +553,112 @@ start_docker_daemon() {
 if [ "${IX_SKIP_BACKEND:-}" = "1" ]; then
   echo "  (skipped via IX_SKIP_BACKEND=1)"
 else
-  # Install Docker if missing
-  if ! command -v docker >/dev/null 2>&1 && ! [ -x "/usr/local/bin/docker" ]; then
+  # Find docker binary by absolute path — command -v breaks in piped sh
+  find_docker() {
+    for p in /usr/local/bin/docker /opt/homebrew/bin/docker /usr/bin/docker; do
+      if [ -x "$p" ]; then echo "$p"; return; fi
+    done
+  }
+
+  DOCKER_BIN="$(find_docker)"
+
+  # Install if missing
+  if [ -z "$DOCKER_BIN" ]; then
     install_docker
+    DOCKER_BIN="$(find_docker)"
   fi
 
-  # On macOS, launch Docker Desktop and wait for the daemon.
-  if [ -d "/Applications/Docker.app" ]; then
-    if [ -x "/usr/local/bin/docker" ]; then
-      export PATH="/usr/local/bin:$PATH"
-      hash -r 2>/dev/null || true
-    fi
-
-    if ! command -v docker >/dev/null 2>&1 || ! docker info < /dev/null >/dev/null 2>&1; then
-      echo "  Starting Docker Desktop..."
-      open -g -a Docker
-
-      # Wait up to 90 seconds quietly — enough for normal startup
-      printf "  Waiting for Docker to be ready..."
-      i=0
-      while [ "$i" -lt 45 ]; do
-        if [ -x "/usr/local/bin/docker" ]; then
-          export PATH="/usr/local/bin:$PATH"
-          hash -r 2>/dev/null || true
-        fi
-        if command -v docker >/dev/null 2>&1 && docker info < /dev/null >/dev/null 2>&1; then
-          break
-        fi
-        printf "."
-        sleep 2
-        i=$((i + 1))
-      done
-      echo ""
-
-      # If still not ready after 90s, user probably needs to do something
-      if ! command -v docker >/dev/null 2>&1 || ! docker info < /dev/null >/dev/null 2>&1; then
-        osascript -e 'tell application "Docker" to activate' 2>/dev/null || true
-        echo ""
-        echo "  ┌─────────────────────────────────────────────────────────────┐"
-        echo "  │  Docker Desktop needs you to complete setup in its window:  │"
-        echo "  │                                                             │"
-        echo "  │  1. Accept the license agreement (if shown)                 │"
-        echo "  │  2. Skip sign-in (or sign in — it is optional)             │"
-        echo "  │  3. Wait for the engine to start                            │"
-        echo "  │                                                             │"
-        echo "  │  This installer will continue automatically.                │"
-        echo "  └─────────────────────────────────────────────────────────────┘"
-        echo ""
-        printf "  Waiting..."
-        while [ "$i" -lt 180 ]; do
-          if [ -x "/usr/local/bin/docker" ]; then
-            export PATH="/usr/local/bin:$PATH"
-            hash -r 2>/dev/null || true
-          fi
-          if command -v docker >/dev/null 2>&1 && docker info < /dev/null >/dev/null 2>&1; then
-            break
-          fi
-          printf "."
-          sleep 2
-          i=$((i + 1))
-        done
-        echo ""
-      fi
-    fi
-  fi
-
-  # Linux: start daemon if not running
+  # macOS: launch Docker Desktop and wait for daemon
   case "$(uname -s)" in
+    Darwin)
+      if [ -d "/Applications/Docker.app" ]; then
+        if [ -z "$DOCKER_BIN" ] || ! "$DOCKER_BIN" info < /dev/null >/dev/null 2>&1; then
+          echo "  Starting Docker Desktop..."
+          open -g -a Docker
+
+          printf "  Waiting for Docker to be ready..."
+          i=0
+          ready=0
+          while [ "$i" -lt 45 ]; do
+            DOCKER_BIN="$(find_docker)"
+            if [ -n "$DOCKER_BIN" ] && "$DOCKER_BIN" info < /dev/null >/dev/null 2>&1; then
+              ready=1; break
+            fi
+            printf "."; sleep 2; i=$((i + 1))
+          done
+          echo ""
+
+          if [ "$ready" = "0" ]; then
+            osascript -e 'tell application "Docker" to activate' 2>/dev/null || true
+            echo ""
+            echo "  ┌─────────────────────────────────────────────────────────────┐"
+            echo "  │  Docker Desktop needs you to complete setup in its window:  │"
+            echo "  │                                                             │"
+            echo "  │  1. Accept the license agreement (if shown)                 │"
+            echo "  │  2. Skip sign-in (or sign in — it is optional)             │"
+            echo "  │  3. Wait for the engine to start                            │"
+            echo "  │                                                             │"
+            echo "  │  This installer will continue automatically.                │"
+            echo "  └─────────────────────────────────────────────────────────────┘"
+            echo ""
+            printf "  Waiting..."
+            while [ "$i" -lt 180 ]; do
+              DOCKER_BIN="$(find_docker)"
+              if [ -n "$DOCKER_BIN" ] && "$DOCKER_BIN" info < /dev/null >/dev/null 2>&1; then
+                ready=1; break
+              fi
+              printf "."; sleep 2; i=$((i + 1))
+            done
+            echo ""
+          fi
+        fi
+
+        # Wire up docker for rest of script
+        DOCKER_BIN="$(find_docker)"
+        if [ -n "$DOCKER_BIN" ]; then
+          export PATH="/usr/local/bin:$PATH"
+          dc() { "$DOCKER_BIN" compose "$@"; }
+        fi
+      fi
+      ;;
     Linux)
-      if command -v docker >/dev/null 2>&1 && ! docker info < /dev/null >/dev/null 2>&1; then
+      if [ -n "$DOCKER_BIN" ] && ! "$DOCKER_BIN" info < /dev/null >/dev/null 2>&1; then
         if command -v systemctl >/dev/null 2>&1; then
           echo "  Starting Docker daemon..."
           sudo systemctl start docker < /dev/null 2>/dev/null || true
           sleep 2
         fi
-        if ! docker info < /dev/null >/dev/null 2>&1; then
-          if sudo docker info < /dev/null >/dev/null 2>&1; then
+        if ! "$DOCKER_BIN" info < /dev/null >/dev/null 2>&1; then
+          if sudo "$DOCKER_BIN" info < /dev/null >/dev/null 2>&1; then
             echo "  Docker requires sudo (group not yet active). Using sudo for this session."
-            dc() { sudo docker compose "$@"; }
+            dc() { sudo "$DOCKER_BIN" compose "$@"; }
           fi
         fi
       fi
       ;;
+    MINGW*|MSYS*|CYGWIN*)
+      # Windows: docker should be in PATH after Docker Desktop install
+      DOCKER_BIN="$(find_docker)"
+      if [ -z "$DOCKER_BIN" ] && command -v docker >/dev/null 2>&1; then
+        DOCKER_BIN="docker"
+      fi
+      ;;
   esac
 
-  # Final check — docker must be working by now
-  if ! command -v docker >/dev/null 2>&1; then
+  # Final check
+  DOCKER_BIN="$(find_docker)"
+  if [ -z "$DOCKER_BIN" ]; then
     err "Docker not found. Restart your terminal and re-run this installer."
   fi
-  if ! docker info < /dev/null >/dev/null 2>&1; then
+  if ! "$DOCKER_BIN" info < /dev/null >/dev/null 2>&1; then
     err "Docker is not running. Start Docker Desktop and re-run this installer."
   fi
   info "Docker is ready"
 
-  if ! docker compose version >/dev/null 2>&1; then
+  if ! "$DOCKER_BIN" compose version >/dev/null 2>&1; then
     err "Docker Compose v2 is required. Update Docker or install the compose plugin."
   fi
-  info "Docker Compose $(docker compose version --short 2>/dev/null || echo 'v2') is available"
+  info "Docker Compose $("$DOCKER_BIN" compose version --short 2>/dev/null || echo 'v2') is available"
 fi
 
 # -- Step 3: Start Backend --
