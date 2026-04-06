@@ -553,7 +553,7 @@ function parseDockerfileFile(filePath: string, source: string): FileParseResult 
 function stripSqlComments(source: string): string {
   // Block comments first, then line comments
   return source
-    .replace(/\/\*[\s\S]*?\*\//g, match => match.replace(/[^\n]/g, ' '))
+    .replace(/\/\*[^*]*\*+(?:[^/*][^*]*\*+)*\//g, match => match.replace(/[^\n]/g, ' '))
     .replace(/--[^\n]*/g, match => ' '.repeat(match.length));
 }
 
