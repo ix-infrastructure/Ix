@@ -9,7 +9,7 @@ import { ParsePool } from './parse-pool.js';
 // import { ResolveWorker } from './resolve-pool.js';
 import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
-import type { GraphPatchPayload } from '../../client/types.js';
+import type { GraphPatchPayload, IngestResult } from '../../client/types.js';
 import { getEndpoint, resolveWorkspaceRoot } from '../config.js';
 import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
@@ -378,6 +378,98 @@ export function registerIngestCommand(program: Command): void {
 }
 
 // ---------------------------------------------------------------------------
+// Remote file ingestion — send file contents to cloud parse service
+// ---------------------------------------------------------------------------
+
+const REMOTE_INGEST_BATCH_SIZE = 500;
+
+async function remoteIngestFiles(
+  parseEndpoint: string,
+  resolvedPath: string,
+  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; mapMode?: boolean },
+): Promise<void> {
+  const start = performance.now();
+
+  if (!fs.existsSync(resolvedPath)) {
+    throw new Error(`Path not found: ${resolvedPath}`);
+  }
+
+  const stat = fs.statSync(resolvedPath);
+  const filePaths: string[] = dedupeDiscoveredFilePaths(
+    stat.isFile()
+      ? (isSupportedSourceFile(resolvedPath) ? [resolvedPath] : [])
+      : (tryGitLsFiles(resolvedPath, opts.recursive ?? true) ?? Array.from(walkFiles(resolvedPath, opts.recursive ?? true))),
+  );
+
+  if (opts.format === 'text') {
+    process.stderr.write(`  Sending ${filePaths.length} files to parse service...\n`);
+  }
+
+  const result: IngestResult = {
+    filesProcessed: 0, patchesApplied: 0, filesSkipped: 0,
+    entitiesCreated: 0, latestRev: 0,
+    skipReasons: { unchanged: 0, emptyFile: 0, parseError: 0, tooLarge: 0 },
+  };
+
+  for (let i = 0; i < filePaths.length; i += REMOTE_INGEST_BATCH_SIZE) {
+    const batch = filePaths.slice(i, i + REMOTE_INGEST_BATCH_SIZE);
+    const files: Array<{ path: string; content: string }> = [];
+
+    for (const filePath of batch) {
+      try {
+        const st = fs.statSync(filePath);
+        if (st.size === 0 || st.size > MAX_FILE_BYTES) continue;
+        files.push({ path: filePath, content: fs.readFileSync(filePath, 'utf-8') });
+      } catch {
+        // skip unreadable files
+      }
+    }
+
+    if (files.length === 0) continue;
+
+    const resp = await fetch(`${parseEndpoint}/v1/ingest`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ files, workspaceRoot: resolvedPath, force: opts.force }),
+      signal: AbortSignal.timeout(30 * 60 * 1000),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Remote parse failed (${resp.status}): ${text}`);
+    }
+
+    const batchResult = await resp.json() as IngestResult;
+    result.filesProcessed += batchResult.filesProcessed;
+    result.patchesApplied += batchResult.patchesApplied;
+    result.filesSkipped = (result.filesSkipped ?? 0) + (batchResult.filesSkipped ?? 0);
+    result.entitiesCreated += batchResult.entitiesCreated;
+    if (batchResult.latestRev > result.latestRev) result.latestRev = batchResult.latestRev;
+
+    if (opts.format === 'text') {
+      const done = Math.min(i + REMOTE_INGEST_BATCH_SIZE, filePaths.length);
+      process.stderr.write(`\r  Parsed ${done}/${filePaths.length} files...`);
+    }
+  }
+
+  if (opts.format === 'text') process.stderr.write('\n');
+
+  if (opts.suppressOutput === true) return;
+
+  const elapsed = ((performance.now() - start) / 1000).toFixed(2);
+
+  if (opts.format === 'json') {
+    console.log(JSON.stringify({ ...result, elapsedSeconds: parseFloat(elapsed) }, null, 2));
+  } else if (opts.printSummary !== false) {
+    console.log(chalk.bold('\nIngest summary'));
+    console.log(`  processed:   ${result.patchesApplied} files (${elapsed}s)`);
+    console.log(`  discovered:  ${filePaths.length} files`);
+    if ((result.filesSkipped ?? 0) > 0) console.log(`  ${chalk.dim('skipped unchanged:')} ${result.filesSkipped}`);
+    console.log(`  rev:         ${result.latestRev}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // File ingestion — parse locally, send via /v1/patch
 // ---------------------------------------------------------------------------
 
@@ -389,15 +481,22 @@ export async function ingestFiles(
   const mapMode = opts.mapMode === true;
   const trueStart = performance.now();
 
-  const [{ parseFile, resolveEdges, isGrammarSupported }, { buildPatchWithResolution }, { languageFromPath }] = await loadIngestionModules();
-  const moduleLoadMs = Math.round(performance.now() - trueStart);
-
-
   const resolvedPath = nodePath.isAbsolute(path)
     ? path
     : nodePath.resolve(resolveWorkspaceRoot(opts.root), path);
 
   const client = new IxClient(getEndpoint());
+
+  // Capabilities handshake — if the backend exposes a remote parse endpoint,
+  // ship file contents there instead of running tree-sitter locally.
+  const caps = await client.capabilities();
+  if (caps.parseEndpoint) {
+    return remoteIngestFiles(caps.parseEndpoint, resolvedPath, opts);
+  }
+
+  const [{ parseFile, resolveEdges, isGrammarSupported }, { buildPatchWithResolution }, { languageFromPath }] = await loadIngestionModules();
+  const moduleLoadMs = Math.round(performance.now() - trueStart);
+
   const start = performance.now();
 
   // Worker pool for parallel file parsing across CPU cores

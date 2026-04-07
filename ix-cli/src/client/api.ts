@@ -7,6 +7,7 @@ import type {
   PatchSummary,
   GraphPatchPayload,
   PatchCommitResult,
+  CapabilitiesResponse,
 } from "./types.js";
 
 export class IxClient {
@@ -309,6 +310,15 @@ export class IxClient {
 
   async health(): Promise<HealthResponse> {
     return this.get("/v1/health");
+  }
+
+  async capabilities(): Promise<CapabilitiesResponse> {
+    try {
+      return await this.get<CapabilitiesResponse>("/v1/capabilities");
+    } catch {
+      // Backend doesn't support capabilities yet — fall back to local mode.
+      return {};
+    }
   }
 
   private async post<T>(path: string, body: unknown): Promise<T> {
