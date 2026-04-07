@@ -41,7 +41,8 @@ export function registerWatchCommand(program: Command): void {
     .description("Watch files and auto-ingest on changes")
     .option("--path <path>", "Restrict watching to a subdirectory")
     .option("--root <dir>", "Workspace root directory")
-    .action(async (opts: { path?: string; root?: string }) => {
+    .option("--branch <branchId>", "Commit changes to a graph branch")
+    .action(async (opts: { path?: string; root?: string; branch?: string }) => {
       try {
         await bootstrap();
       } catch (err: any) {
@@ -63,6 +64,7 @@ export function registerWatchCommand(program: Command): void {
 
       const relative = path.relative(root, watchPath) || ".";
       console.log(chalk.cyan(`[watch] Watching ${relative}`));
+      if (opts.branch) console.log(chalk.cyan(`[watch] Branch: ${opts.branch}`));
       console.log(chalk.dim(`[watch] Debounce: ${DEBOUNCE_MS}ms`));
       console.log(chalk.dim("[watch] Press Ctrl+C to stop.\n"));
 
@@ -101,6 +103,7 @@ export function registerWatchCommand(program: Command): void {
             return;
           }
           const patch = buildPatch(parsed, hash);
+          if (opts.branch) patch.branchId = opts.branch;
           const result = await client.commitPatch(patch);
           lastHash.set(filePath, hash);
           console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(rel)} → rev ${result.rev}`);
@@ -145,7 +148,7 @@ export function registerWatchCommand(program: Command): void {
         // Fallback to polling if fs.watch with recursive isn't supported
         if (err.code === "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM") {
           console.log(chalk.dim("[watch] Falling back to polling mode (2s interval)..."));
-          await pollMode(watchPath, root, client);
+          await pollMode(watchPath, root, client, opts.branch);
         } else {
           throw err;
         }
@@ -159,7 +162,8 @@ export function registerWatchCommand(program: Command): void {
 async function pollMode(
   watchPath: string,
   root: string,
-  client: IxClient
+  client: IxClient,
+  branchId?: string
 ): Promise<void> {
   const [{ parseFile }, { buildPatch }] = await loadWatchIngestionModules();
   const mtimes = new Map<string, number>();
@@ -219,6 +223,7 @@ async function pollMode(
         if (!parsed) continue;
         const hash = hashContent(content);
         const patch = buildPatch(parsed, hash);
+        if (branchId) patch.branchId = branchId;
         const result = await client.commitPatch(patch);
         console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(rel)} → rev ${result.rev}`);
       } catch (err: any) {
