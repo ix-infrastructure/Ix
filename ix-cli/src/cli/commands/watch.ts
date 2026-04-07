@@ -104,6 +104,17 @@ export function registerWatchCommand(program: Command): void {
           const result = await client.commitPatch(patch);
           lastHash.set(filePath, hash);
           console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(rel)} → rev ${result.rev}`);
+
+          // Recalculate the map after successful ingestion
+          try {
+            const mapResult = await client.map();
+            const systems = mapResult.regions?.filter((r: any) => r.label_kind === "system").length ?? 0;
+            const subsystems = mapResult.regions?.filter((r: any) => r.label_kind === "subsystem").length ?? 0;
+            const modules = mapResult.regions?.filter((r: any) => r.label_kind === "module").length ?? 0;
+            console.log(`${chalk.cyan("[watch]")} map updated: ${systems}s/${subsystems}ss/${modules}m regions`);
+          } catch (mapErr: any) {
+            console.error(`${chalk.red("[watch]")} map error: ${mapErr.message}`);
+          }
         } catch (err: any) {
           console.error(`${chalk.red("[watch]")} error ingesting ${rel}: ${err.message}`);
         }
@@ -209,6 +220,7 @@ async function pollMode(
       } catch {}
     }
 
+    let anyIngested = false;
     for (const f of changed) {
       const rel = path.relative(root, f);
       console.log(`${chalk.dim("[watch]")} changed: ${rel}`);
@@ -221,8 +233,22 @@ async function pollMode(
         const patch = buildPatch(parsed, hash);
         const result = await client.commitPatch(patch);
         console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(rel)} → rev ${result.rev}`);
+        anyIngested = true;
       } catch (err: any) {
         console.error(`${chalk.red("[watch]")} error: ${err.message}`);
+      }
+    }
+
+    // Recalculate the map once after processing all changed files
+    if (anyIngested) {
+      try {
+        const mapResult = await client.map();
+        const systems = mapResult.regions?.filter((r: any) => r.label_kind === "system").length ?? 0;
+        const subsystems = mapResult.regions?.filter((r: any) => r.label_kind === "subsystem").length ?? 0;
+        const modules = mapResult.regions?.filter((r: any) => r.label_kind === "module").length ?? 0;
+        console.log(`${chalk.cyan("[watch]")} map updated: ${systems}s/${subsystems}ss/${modules}m regions`);
+      } catch (mapErr: any) {
+        console.error(`${chalk.red("[watch]")} map error: ${mapErr.message}`);
       }
     }
   };
@@ -234,3 +260,4 @@ async function pollMode(
     process.exit(0);
   });
 }
+
