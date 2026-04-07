@@ -14,6 +14,7 @@ services:
       - "127.0.0.1:8529:8529"
     environment:
       ARANGO_NO_AUTH: "1"
+    command: ["arangod", "--server.endpoint", "tcp://0.0.0.0:8529", "--experimental-vector-index"]
     volumes:
       - arangodb-data:/var/lib/arangodb3
     healthcheck:
