@@ -38,6 +38,13 @@ func (s *Service) Run() {
       dstName: 'fmt',
       predicate: 'IMPORTS',
     });
+
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: 'Run', kind: 'method', container: 'Service' }),
+    );
+    expect(result!.chunks).toContainEqual(
+      expect.objectContaining({ name: 'Run', chunkKind: 'method', container: 'Service' }),
+    );
   });
 
   it('captures REFERENCES edges for pointer-typed struct fields (Bug 2)', () => {
