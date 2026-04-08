@@ -9,9 +9,7 @@
     ".": "./dist/index.js",
     "./languages": "./dist/languages.js",
     "./patch-builder": "./dist/patch-builder.js",
-    "./types": "./dist/types.js",
-    "./embedding": "./dist/embedding.js",
-    "./embedding-enrichment": "./dist/embedding-enrichment.js"
+    "./types": "./dist/types.js"
   },
   "scripts": {
     "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",

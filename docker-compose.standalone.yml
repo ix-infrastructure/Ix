@@ -25,6 +25,42 @@ services:
       retries: 15
     restart: unless-stopped
 
+  ollama:
+    image: ollama/ollama:latest
+    networks:
+      - backend
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+    profiles:
+      - semantic
+
+  semantic-extraction:
+    image: ghcr.io/ix-infrastructure/ix-semantic-extraction:latest
+    networks:
+      - backend
+    ports:
+      - "127.0.0.1:11400:11400"
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      IX_EXTRACTION_MODEL: qwen2.5vl:7b
+      IX_EMBEDDING_MODEL: "nomic-embed-text:v2-moe"
+      IX_AUTO_PULL: "true"
+      PORT: "11400"
+    depends_on:
+      - ollama
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:11400/v1/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 120s
+      retries: 10
+    restart: unless-stopped
+    profiles:
+      - semantic
+
   memory-layer:
     image: ghcr.io/ix-infrastructure/ix-memory-layer:latest
     networks:
@@ -42,6 +78,7 @@ services:
       ARANGO_DATABASE: ix_memory
       ARANGO_USER: root
       ARANGO_PASSWORD: ""
+      IX_EXTRACTION_URL: http://semantic-extraction:11400
       PORT: "8090"
     depends_on:
       arangodb:
@@ -56,6 +93,7 @@ services:
 
 volumes:
   arangodb-data:
+  ollama-data:
 
 networks:
   backend:
