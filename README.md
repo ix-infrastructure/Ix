@@ -82,11 +82,6 @@ curl -fsSL https://ix-infra.com/install.sh | sh
 ```bash
 irm https://ix-infra.com/install.ps1 | iex
 ``` 
-### Homebrew
-```bash
-brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/Ix
-brew install ix
-```
 ### Claude Plugin
 ``` bash
 /plugin marketplace add ix-infrastructure/ix-claude-plugin
