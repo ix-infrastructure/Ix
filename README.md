@@ -22,7 +22,8 @@
 <p align="center">
   <a href="https://www.ix-infra.com">Website</a> ·
   <a href="https://www.ix-infra.com/docs">Docs</a> ·
-  <a href="https://compass.ix-infra.com">Demo</a>
+  <a href="https://compass.ix-infra.com">Demo</a> .
+  <a href="https://discord.gg/ncEYVHVqZ8">Discord</a>
 </p>
 
 <p align="center">
