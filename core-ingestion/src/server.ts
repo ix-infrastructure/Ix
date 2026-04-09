@@ -136,6 +136,11 @@ async function handleIngest(req: IngestRequest): Promise<IngestResult> {
   for (const f of toProcess) {
     try {
       const parsed = parseFile(f.path, f.content);
+      if (parsed == null) {
+        result.filesSkipped++;
+        result.skipReasons.parseError++;
+        continue;
+      }
       parsedFiles.push({ parsed, hash: f.hash, previousHash: knownHashes.get(f.path) });
     } catch {
       result.filesSkipped++;
