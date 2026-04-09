@@ -19,10 +19,8 @@ COPY --from=build /build/dist      ./dist
 COPY --from=build /build/node_modules ./node_modules
 COPY --from=build /build/package.json ./
 
-RUN addgroup --gid 1000 ix \
-  && adduser --uid 1000 --gid 1000 --disabled-password --gecos "" ix \
-  && chown -R ix:ix /app
-USER ix
+RUN chown -R node:node /app
+USER node
 
 EXPOSE 3000
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
