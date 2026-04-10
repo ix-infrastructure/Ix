@@ -1335,7 +1335,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
           startByte,
           endByte,
           language,
-          container: enclosing ?? undefined,
+          container: effectiveContainer,
         });
 
         if (kind === 'class' || kind === 'interface' || kind === 'trait') {
