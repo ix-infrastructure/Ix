@@ -13,13 +13,8 @@ import { fileURLToPath } from "url";
 import { createConnection } from "net";
 
 const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
-const STATE_FILE = join(IX_HOME, "compass.json");
+const PID_FILE = join(IX_HOME, "compass.pid");
 const BACKEND_URL = "http://localhost:8090";
-
-interface CompassState {
-  pid: number;
-  port: number;
-}
 
 /** Resolve the compass dist directory — installed path first, then dev fallback. */
 function findCompassDist(): string | null {
@@ -35,23 +30,17 @@ function findCompassDist(): string | null {
   return null;
 }
 
-/** Read state from file and check if the process is alive. */
-function readAliveState(): CompassState | null {
-  if (!existsSync(STATE_FILE)) return null;
+/** Read PID from file and check if the process is alive. */
+function readAlivePid(): number | null {
+  if (!existsSync(PID_FILE)) return null;
+  const pid = parseInt(readFileSync(PID_FILE, "utf-8").trim(), 10);
+  if (isNaN(pid)) return null;
   try {
-    const state: CompassState = JSON.parse(
-      readFileSync(STATE_FILE, "utf-8").trim(),
-    );
-    if (!state.pid || !state.port) return null;
-    process.kill(state.pid, 0); // signal 0 = existence check
-    return state;
+    process.kill(pid, 0); // signal 0 = existence check
+    return pid;
   } catch {
-    // Stale or corrupt state file
-    try {
-      unlinkSync(STATE_FILE);
-    } catch {
-      /* ignore */
-    }
+    // Stale PID file
+    try { unlinkSync(PID_FILE); } catch { /* ignore */ }
     return null;
   }
 }
@@ -64,9 +53,7 @@ function isPortInUse(port: number): Promise<boolean> {
       conn.end();
       resolve(true);
     });
-    conn.on("error", () => {
-      resolve(false);
-    });
+    conn.on("error", () => resolve(false));
   });
 }
 
@@ -149,13 +136,8 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.on("error", (err) => {
-  process.exit(1);
-});
-
 server.listen(PORT, () => {
-  // Signal readiness to parent via stdout
-  process.stdout.write("READY");
+  // Server ready — parent already detached
 });
 `;
 }
@@ -178,26 +160,24 @@ function openBrowser(url: string): void {
 export function registerViewCommand(program: Command): void {
   const view = program
     .command("view")
-    .description("Open the Ix System Compass visualizer");
+    .description("Open the Ix System Compass visualizer")
+    .option("-p, --port <port>", "Port to serve on", "8080");
 
   view
     .command("start", { isDefault: true })
     .description("Start the visualizer (default)")
-    .option("-p, --port <port>", "Port to serve on", "8080")
     .option("--no-open", "Don't auto-open browser")
     .action(async (opts) => {
-      const port = parseInt(opts.port, 10);
+      const port = parseInt(view.opts().port, 10);
       if (isNaN(port) || port < 1 || port > 65535) {
         console.error("[error] Invalid port number.");
         process.exit(1);
       }
 
-      const existing = readAliveState();
+      const existing = readAlivePid();
       if (existing) {
-        console.log(
-          `[ok] Visualizer is already running (PID ${existing.pid})`,
-        );
-        console.log(`  http://localhost:${existing.port}`);
+        console.log(`[ok] Visualizer is already running (PID ${existing})`);
+        console.log(`  http://localhost:${port}`);
         return;
       }
 
@@ -225,62 +205,21 @@ export function registerViewCommand(program: Command): void {
       const scriptPath = join(scriptDir, "compass-server.js");
       writeFileSync(scriptPath, serverScript(distDir, port));
 
-      // Spawn detached process — capture stdout for readiness signal
+      // Spawn detached process
       const child = spawn("node", [scriptPath], {
         detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: "ignore",
       });
+      child.unref();
 
       if (!child.pid) {
         console.error("[error] Failed to start visualizer server.");
         process.exit(1);
       }
 
-      // Wait for the server to signal readiness or fail
-      const ready = await new Promise<boolean>((resolve) => {
-        const timeout = setTimeout(() => {
-          resolve(false);
-        }, 5000);
-
-        child.stdout!.on("data", (data: Buffer) => {
-          if (data.toString().includes("READY")) {
-            clearTimeout(timeout);
-            resolve(true);
-          }
-        });
-
-        child.stderr!.on("data", () => {
-          // Server wrote to stderr — likely an error
-        });
-
-        child.on("exit", () => {
-          clearTimeout(timeout);
-          resolve(false);
-        });
-      });
-
-      if (!ready) {
-        console.error(`[error] Visualizer failed to start on port ${port}.`);
-        console.error(`  The port may be in use. Use -p <port> to specify a different port.`);
-        try {
-          child.kill();
-        } catch {
-          /* ignore */
-        }
-        process.exit(1);
-      }
-
-      // Detach stdio so the parent can exit
-      child.stdout!.destroy();
-      child.stderr!.destroy();
-      child.unref();
-
-      // Save state (PID + port)
-      mkdirSync(dirname(STATE_FILE), { recursive: true });
-      writeFileSync(
-        STATE_FILE,
-        JSON.stringify({ pid: child.pid, port } as CompassState),
-      );
+      // Save PID
+      mkdirSync(dirname(PID_FILE), { recursive: true });
+      writeFileSync(PID_FILE, String(child.pid));
 
       const url = `http://localhost:${port}`;
       console.log(`[ok] Visualizer started (PID ${child.pid})`);
@@ -295,34 +234,29 @@ export function registerViewCommand(program: Command): void {
     .command("stop")
     .description("Stop the visualizer")
     .action(() => {
-      const state = readAliveState();
-      if (!state) {
+      const pid = readAlivePid();
+      if (!pid) {
         console.log("[ok] Visualizer is not running.");
         return;
       }
 
       try {
-        process.kill(state.pid, "SIGTERM");
+        process.kill(pid, "SIGTERM");
       } catch {
         // Already dead
       }
 
-      try {
-        unlinkSync(STATE_FILE);
-      } catch {
-        /* ignore */
-      }
-      console.log(`[ok] Visualizer stopped (PID ${state.pid})`);
+      try { unlinkSync(PID_FILE); } catch { /* ignore */ }
+      console.log(`[ok] Visualizer stopped (PID ${pid})`);
     });
 
   view
     .command("status")
     .description("Show visualizer status")
     .action(() => {
-      const state = readAliveState();
-      if (state) {
-        console.log(`[ok] Visualizer is running (PID ${state.pid})`);
-        console.log(`  http://localhost:${state.port}`);
+      const pid = readAlivePid();
+      if (pid) {
+        console.log(`[ok] Visualizer is running (PID ${pid})`);
       } else {
         console.log("[--] Visualizer is not running.");
         console.log("  Run 'ix view' to start it.");
