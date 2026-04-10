@@ -440,7 +440,7 @@ async function remoteIngestFiles(
     const payload = zlib.gzipSync(JSON.stringify({ files, workspaceRoot: resolvedPath, force: opts.force }));
     const resp = await fetch(`${parseEndpoint}/v1/ingest`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
+      headers: { 'Content-Type': 'application/json', 'X-Body-Encoding': 'gzip' },
       body: payload,
       signal: AbortSignal.timeout(30 * 60 * 1000),
     });

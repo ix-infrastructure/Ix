@@ -192,7 +192,7 @@ const server = http.createServer((req, res) => {
     req.on('data', chunk => { chunks.push(chunk as Buffer); });
     req.on('end', () => {
       const raw = Buffer.concat(chunks);
-      const decode = req.headers['content-encoding'] === 'gzip'
+      const decode = req.headers['x-body-encoding'] === 'gzip'
         ? (buf: Buffer) => zlib.gunzipSync(buf)
         : (buf: Buffer) => buf;
       let parsed: IngestRequest;
