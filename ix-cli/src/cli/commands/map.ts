@@ -5,6 +5,7 @@ import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { roundFloat } from "../format.js";
 import { bootstrap } from "../bootstrap.js";
+import { formatFetchError } from "../errors.js";
 import { ingestFiles } from "./ingest.js";
 
 export interface MapRegion {
@@ -159,7 +160,7 @@ Examples:
           mapMode: true,
         });
       } catch (err: any) {
-        console.error(chalk.red("Error:"), err.message ?? err);
+        console.error(chalk.red("Error:"), formatFetchError(err));
         process.exitCode = 1;
         return;
       }
@@ -183,7 +184,7 @@ Examples:
         result = await client.map({ full: opts.full }) as MapResult;
       } catch (err: any) {
         if (mapInterval) { clearInterval(mapInterval); process.stderr.write('\r' + ' '.repeat(60) + '\r'); }
-        console.error(chalk.red("Error:"), err.message ?? err);
+        console.error(chalk.red("Error:"), formatFetchError(err));
         process.exitCode = 1;
         return;
       }
