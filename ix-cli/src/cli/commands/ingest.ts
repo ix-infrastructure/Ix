@@ -1,5 +1,6 @@
 import * as nodePath from 'node:path';
 import * as fs from 'node:fs';
+import * as zlib from 'node:zlib';
 import * as crypto from 'node:crypto';
 import * as os from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -382,6 +383,7 @@ export function registerIngestCommand(program: Command): void {
 // ---------------------------------------------------------------------------
 
 const REMOTE_INGEST_BATCH_SIZE = 500;
+const REMOTE_INGEST_CONCURRENCY = 1;
 
 async function remoteIngestFiles(
   parseEndpoint: string,
@@ -411,11 +413,19 @@ async function remoteIngestFiles(
     skipReasons: { unchanged: 0, emptyFile: 0, parseError: 0, tooLarge: 0 },
   };
 
+  // Split into path batches upfront; file contents are read lazily inside each task.
+  const pathBatches: string[][] = [];
   for (let i = 0; i < filePaths.length; i += REMOTE_INGEST_BATCH_SIZE) {
-    const batch = filePaths.slice(i, i + REMOTE_INGEST_BATCH_SIZE);
+    pathBatches.push(filePaths.slice(i, i + REMOTE_INGEST_BATCH_SIZE));
+  }
+
+  let filesReported = 0;
+
+  const tasks = pathBatches.map((pathBatch, batchIdx) => async () => {
+    const batchStart = performance.now();
     const files: Array<{ path: string; content: string }> = [];
 
-    for (const filePath of batch) {
+    for (const filePath of pathBatch) {
       try {
         const st = fs.statSync(filePath);
         if (st.size === 0 || st.size > MAX_FILE_BYTES) continue;
@@ -425,12 +435,13 @@ async function remoteIngestFiles(
       }
     }
 
-    if (files.length === 0) continue;
+    if (files.length === 0) return;
 
+    const payload = zlib.gzipSync(JSON.stringify({ files, workspaceRoot: resolvedPath, force: opts.force }));
     const resp = await fetch(`${parseEndpoint}/v1/ingest`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ files, workspaceRoot: resolvedPath, force: opts.force }),
+      headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
+      body: payload,
       signal: AbortSignal.timeout(30 * 60 * 1000),
     });
 
@@ -440,17 +451,33 @@ async function remoteIngestFiles(
     }
 
     const batchResult = await resp.json() as IngestResult;
+    // JS is single-threaded — these += are safe across concurrent async tasks.
     result.filesProcessed += batchResult.filesProcessed;
     result.patchesApplied += batchResult.patchesApplied;
     result.filesSkipped = (result.filesSkipped ?? 0) + (batchResult.filesSkipped ?? 0);
     result.entitiesCreated += batchResult.entitiesCreated;
     if (batchResult.latestRev > result.latestRev) result.latestRev = batchResult.latestRev;
 
+    filesReported += pathBatch.length;
     if (opts.format === 'text') {
-      const done = Math.min(i + REMOTE_INGEST_BATCH_SIZE, filePaths.length);
-      process.stderr.write(`\r  Parsed ${done}/${filePaths.length} files...`);
+      process.stderr.write(`\r  Parsed ${Math.min(filesReported, filePaths.length)}/${filePaths.length} files...`);
+    }
+
+    if (opts.debug) {
+      const elapsed = ((performance.now() - batchStart) / 1000).toFixed(2);
+      process.stderr.write(`\n  [debug] batch ${batchIdx + 1}/${pathBatches.length}: ${files.length} files in ${elapsed}s\n`);
+    }
+  });
+
+  // Dispatch up to REMOTE_INGEST_CONCURRENCY batches at a time.
+  let taskIdx = 0;
+  async function runWorker() {
+    while (taskIdx < tasks.length) {
+      const i = taskIdx++;
+      await tasks[i]();
     }
   }
+  await Promise.all(Array.from({ length: Math.min(REMOTE_INGEST_CONCURRENCY, tasks.length) }, runWorker));
 
   if (opts.format === 'text') process.stderr.write('\n');
 

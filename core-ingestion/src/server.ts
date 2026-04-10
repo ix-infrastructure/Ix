@@ -1,10 +1,10 @@
 import * as http from 'node:http';
 import * as crypto from 'node:crypto';
+import * as zlib from 'node:zlib';
 import { parseFile, isGrammarSupported, resolveEdges } from './index.js';
 import { buildPatchWithResolution } from './patch-builder.js';
 
 const MAX_FILE_BYTES = 1024 * 1024; // 1 MB — matches CLI constant
-const BULK_BATCH_SIZE = 1000;
 
 const memoryLayerUrl = process.env.IX_MEMORY_LAYER_URL ?? 'http://localhost:8090';
 const port = parseInt(process.env.PORT ?? '3000', 10);
@@ -172,13 +172,11 @@ async function handleIngest(req: IngestRequest): Promise<IngestResult> {
     }
   }
 
-  // Commit to memory-layer in bulk batches.
-  for (let i = 0; i < patches.length; i += BULK_BATCH_SIZE) {
-    const batch = patches.slice(i, i + BULK_BATCH_SIZE);
-    const rev = await commitBulk(batch);
-    if (rev > result.latestRev) result.latestRev = rev;
-    result.patchesApplied += batch.length;
-  }
+  // Commit all patches in a single call. memory-layer's commitBatchChunked handles
+  // internal chunking and runs ArangoDB writes concurrently — no reason to loop here.
+  const rev = await commitBulk(patches);
+  result.latestRev = rev;
+  result.patchesApplied = patches.length;
 
   result.filesProcessed = parsedFiles.length;
   return result;
@@ -190,12 +188,16 @@ async function handleIngest(req: IngestRequest): Promise<IngestResult> {
 
 const server = http.createServer((req, res) => {
   if (req.method === 'POST' && req.url === '/v1/ingest') {
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
+    const chunks: Buffer[] = [];
+    req.on('data', chunk => { chunks.push(chunk as Buffer); });
     req.on('end', () => {
+      const raw = Buffer.concat(chunks);
+      const decode = req.headers['content-encoding'] === 'gzip'
+        ? (buf: Buffer) => zlib.gunzipSync(buf)
+        : (buf: Buffer) => buf;
       let parsed: IngestRequest;
       try {
-        parsed = JSON.parse(body) as IngestRequest;
+        parsed = JSON.parse(decode(raw).toString('utf-8')) as IngestRequest;
       } catch {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Invalid JSON' }));
