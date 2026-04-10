@@ -153,6 +153,23 @@ export function getActiveWorkspaceRoot(): string | undefined {
   return getDefaultWorkspace()?.root_path;
 }
 
+// NEEDS HEAVY REVIEW: "needs heavy review as didnt verify this change for additional bug for all of this, this could be completely wrong"
+//
+// Resolve a source_uri from the graph (which is now a workspace-relative
+// POSIX path under the client-agnostic backend design) back to an absolute
+// host filesystem path. If the input is already absolute (e.g. legacy graphs
+// or external absolute paths), it is returned as-is. Used by any command that
+// needs to actually open a file off disk (ix read, ix explain, ...).
+export function absoluteFromSourceUri(sourceUri: string, explicitRoot?: string): string {
+  if (!sourceUri) return sourceUri;
+  // Treat both POSIX abs (`/`) and Windows abs (`C:\`) as already resolved.
+  if (sourceUri.startsWith("/") || /^[A-Za-z]:[\\/]/.test(sourceUri)) return sourceUri;
+  const root = resolveWorkspaceRoot(explicitRoot);
+  // POSIX-normalize the relative segment before joining.
+  const normalized = sourceUri.replace(/\\/g, "/");
+  return require("node:path").resolve(root, normalized);
+}
+
 export function resolveWorkspaceRoot(explicitRoot?: string): string {
   // 1. Explicit --root
   if (explicitRoot) return explicitRoot;

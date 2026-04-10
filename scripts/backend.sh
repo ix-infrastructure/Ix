@@ -21,23 +21,19 @@ set -euo pipefail
 IX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$IX_DIR"
 
-# On Windows/MINGW, Docker Compose (a Windows binary) can mix POSIX and Windows
-# home paths if we rely on nested interpolation defaults in the compose file.
-# Export both sides of the bind mount explicitly instead:
-#   IX_HOST_MOUNT_ROOT      → host bind source  (cygpath -m: C:/Users/...)
-#   IX_CONTAINER_MOUNT_ROOT → container target  ($HOME: /c/Users/... or /Users/...)
-# The dc() helper passes -f with a Windows-format path so docker compose can
-# locate its file regardless of how it resolves the CWD from a MINGW shell.
+# NEEDS HEAVY REVIEW: "needs heavy review as didnt verify this change for additional bug for all of this, this could be completely wrong"
+#
+# The HOME bind mount was removed from docker-compose.standalone.yml because
+# the backend is now client-agnostic and never reads host files. The
+# IX_HOST_MOUNT_ROOT / IX_CONTAINER_MOUNT_ROOT exports that fed that bind mount
+# are therefore no longer needed. On Windows/MINGW we still need the dc()
+# helper so docker compose can locate the compose file from a MINGW shell.
 if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
-  export IX_HOST_MOUNT_ROOT="$(cygpath -m "$HOME")"
-  export IX_CONTAINER_MOUNT_ROOT="${HOME}"
   dc() {
     MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
       docker compose -f "$(cygpath -m "$IX_DIR/$COMPOSE_FILE")" "$@"
   }
 else
-  export IX_HOST_MOUNT_ROOT="${HOME}"
-  export IX_CONTAINER_MOUNT_ROOT="${HOME}"
   dc() { docker compose -f "$COMPOSE_FILE" "$@"; }
 fi
 
