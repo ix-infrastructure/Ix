@@ -349,7 +349,7 @@ function renderProgressLine(phase: string, current: number, total: number): stri
 export function registerIngestCommand(program: Command): void {
   program
     .command('ingest [path]')
-    .description('Ingest source files or GitHub data into the knowledge graph')
+    .description('Bring code into the system map')
     .option('--path <dir>', 'Path to ingest (alternative to positional argument)')
     .option('--no-recursive', 'Do not recurse into subdirectories (recursive is on by default)')
     .option('--github <owner/repo>', 'Ingest issues, PRs, and commits from a GitHub repository')

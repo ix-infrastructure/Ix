@@ -83,7 +83,7 @@ function searchSort(
 export function registerSearchCommand(program: Command): void {
   program
     .command("search <term>")
-    .description("Search the knowledge graph by term — ranked by structural relevance")
+    .description("Find entities across the system by name or concept")
     .option("--limit <n>", "Max results", "10")
     .option("--kind <kind>", "Filter and boost results by node kind (e.g. class, function, decision)")
     .option("--language <lang>", "Filter by language/file extension (e.g. scala, ts)")

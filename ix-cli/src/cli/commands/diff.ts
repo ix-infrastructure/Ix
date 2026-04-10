@@ -551,9 +551,9 @@ export function registerDiffCommand(program: Command): void {
                 }
               }
 
-              // Also show graph-level changes if any
+              // Also show system-level changes if any
               if (changes.length > 0) {
-                console.log(chalk.dim(`\n  Graph changes: ${changes.length}`));
+                console.log(chalk.dim(`\n  System changes: ${changes.length}`));
                 for (const c of changes) {
                   const name = c.atToRev?.name ?? c.atFromRev?.name ?? "?";
                   const kind = c.atToRev?.kind ?? c.atFromRev?.kind ?? "unknown";

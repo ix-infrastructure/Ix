@@ -12,7 +12,7 @@ interface Check {
 export function registerDoctorCommand(program: Command): void {
   program
     .command("doctor")
-    .description("Check Ix system health — server, database, graph integrity")
+    .description("Diagnose issues with the Ix system — server, database, integrity")
     .option("--format <fmt>", "Output format (text|json)", "text")
     .action(async (opts: { format: string }) => {
       const endpoint = getEndpoint();

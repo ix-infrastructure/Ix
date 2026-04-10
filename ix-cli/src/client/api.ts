@@ -9,13 +9,24 @@ import type {
   PatchCommitResult,
   CapabilitiesResponse,
 } from "./types.js";
+import { getAuthToken } from "../cli/config.js";
 
 export class IxClient {
-  constructor(private endpoint: string = "http://localhost:8090") {}
+  private authToken?: string;
+
+  constructor(private endpoint: string = "http://localhost:8090", authToken?: string) {
+    this.authToken = authToken ?? getAuthToken();
+  }
+
+  private authHeaders(): Record<string, string> {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.authToken) headers["Authorization"] = `Bearer ${this.authToken}`;
+    return headers;
+  }
 
   async query(
     question: string,
-    opts?: { asOfRev?: number; depth?: string }
+    opts?: { asOfRev?: number; depth?: string; actor?: string }
   ): Promise<StructuredContext> {
     return this.post("/v1/context", { query: question, ...opts });
   }
@@ -23,7 +34,7 @@ export class IxClient {
   async ingest(path: string, recursive?: boolean, force?: boolean): Promise<IngestResult> {
     const resp = await fetch(`${this.endpoint}/v1/ingest`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.authHeaders(),
       body: JSON.stringify({ path, recursive, force: force || undefined }),
       signal: AbortSignal.timeout(30 * 60 * 1000), // 30 minute timeout for large repos
     });
@@ -44,7 +55,7 @@ export class IxClient {
 
   async search(
     term: string,
-    opts?: { limit?: number; kind?: string; language?: string; asOfRev?: number; nameOnly?: boolean }
+    opts?: { limit?: number; kind?: string; language?: string; asOfRev?: number; nameOnly?: boolean; actor?: string }
   ): Promise<GraphNode[]> {
     return this.post("/v1/search", {
       term,
@@ -53,6 +64,7 @@ export class IxClient {
       language: opts?.language,
       asOfRev: opts?.asOfRev,
       nameOnly: opts?.nameOnly,
+      actor: opts?.actor,
     });
   }
 
@@ -321,10 +333,24 @@ export class IxClient {
     }
   }
 
+  async contributors(): Promise<any[]> {
+    return this.get("/v1/contributors");
+  }
+
+  async exportBundle(
+    user: string,
+    opts?: { scope?: string; since?: string }
+  ): Promise<any> {
+    const params = new URLSearchParams({ user });
+    if (opts?.scope) params.set("scope", opts.scope);
+    if (opts?.since) params.set("since", opts.since);
+    return this.get(`/v1/export?${params.toString()}`);
+  }
+
   private async post<T>(path: string, body: unknown): Promise<T> {
     const resp = await fetch(`${this.endpoint}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.authHeaders(),
       body: JSON.stringify(body),
     });
     if (!resp.ok) {
@@ -335,7 +361,9 @@ export class IxClient {
   }
 
   private async get<T>(path: string): Promise<T> {
-    const resp = await fetch(`${this.endpoint}${path}`);
+    const resp = await fetch(`${this.endpoint}${path}`, {
+      headers: this.authToken ? { Authorization: `Bearer ${this.authToken}` } : {},
+    });
     if (!resp.ok) {
       const text = await resp.text();
       throw new Error(`${resp.status}: ${text}`);

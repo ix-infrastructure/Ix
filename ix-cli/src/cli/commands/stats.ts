@@ -6,7 +6,7 @@ import { getEndpoint } from "../config.js";
 export function registerStatsCommand(program: Command): void {
   program
     .command("stats")
-    .description("Show graph statistics — node/edge counts by type")
+    .description("Show system-level metrics — entity and relationship counts by type")
     .option("--format <fmt>", "Output format (text|json)", "text")
     .action(async (opts: { format: string }) => {
       const client = new IxClient(getEndpoint());

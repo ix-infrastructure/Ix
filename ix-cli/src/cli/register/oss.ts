@@ -1,5 +1,4 @@
 import type { Command } from "commander";
-import { registerQueryCommand } from "../commands/query.js";
 import { registerIngestCommand } from "../commands/ingest.js";
 import { registerSearchCommand } from "../commands/search.js";
 import { registerStatusCommand } from "../commands/status.js";
@@ -61,7 +60,6 @@ const ADVANCED_COMMANDS = [
 ];
 
 export function registerOssCommands(program: Command): void {
-  registerQueryCommand(program);
   registerIngestCommand(program);
   registerSearchCommand(program);
   registerStatusCommand(program);

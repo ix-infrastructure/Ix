@@ -5,7 +5,7 @@ Recommended Development Loop:
 
   1. ix briefing                          Resume context
   2. ix overview <target>                 Understand a component
-  3. ix impact <target>                   Check blast radius before changes
+  3. ix impact <target>                   Check change propagation before changes
   4. ix rank --by callers --kind method   Find hotspots
   5. ix plan next <id> --with-workflow    Get next task with commands
 
@@ -44,17 +44,16 @@ Task Listing:
 `;
 
 const ADVANCED_TEXT = `
-Advanced (low-level graph commands):
+Advanced (low-level commands):
   contains <symbol>     Show members of a class/module/file
   callers <symbol>      Show callers of a function/method
   callees <symbol>      Show callees of a function/method
   imports <symbol>      Show what an entity imports
   imported-by <symbol>  Show what imports an entity
-  depends <symbol>      Show reverse dependencies
-  entity <id>           Get entity details with claims and edges
+  depends <symbol>      Show reverse relationships
+  entity <id>           Get entity details with claims and relationships
   text <term>           Fast lexical/text search (ripgrep)
   conflicts             Detect contradictory information
-  query <nql>           Raw NQL graph query (deprecated)
 
 Use "ix <command> --help" for details on any command.
 `;
