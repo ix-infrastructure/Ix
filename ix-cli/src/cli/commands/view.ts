@@ -10,6 +10,7 @@ import {
 import { join, dirname } from "path";
 import { homedir, platform } from "os";
 import { fileURLToPath } from "url";
+import { createConnection } from "net";
 
 const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
 const PID_FILE = join(IX_HOME, "compass.pid");
@@ -42,6 +43,18 @@ function readAlivePid(): number | null {
     try { unlinkSync(PID_FILE); } catch { /* ignore */ }
     return null;
   }
+}
+
+/** Check whether a port is already in use. */
+function isPortInUse(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const conn = createConnection({ port, host: "127.0.0.1" });
+    conn.on("connect", () => {
+      conn.end();
+      resolve(true);
+    });
+    conn.on("error", () => resolve(false));
+  });
 }
 
 /** Generate the inline server script that serves static files + proxies /v1. */
@@ -147,15 +160,15 @@ function openBrowser(url: string): void {
 export function registerViewCommand(program: Command): void {
   const view = program
     .command("view")
-    .description("Open the Ix System Compass visualizer");
+    .description("Open the Ix System Compass visualizer")
+    .option("-p, --port <port>", "Port to serve on", "8080");
 
   view
     .command("start", { isDefault: true })
     .description("Start the visualizer (default)")
-    .option("--port <port>", "Port to serve on", "8080")
     .option("--no-open", "Don't auto-open browser")
-    .action((opts) => {
-      const port = parseInt(opts.port, 10);
+    .action(async (opts) => {
+      const port = parseInt(view.opts().port, 10);
       if (isNaN(port) || port < 1 || port > 65535) {
         console.error("[error] Invalid port number.");
         process.exit(1);
@@ -166,6 +179,13 @@ export function registerViewCommand(program: Command): void {
         console.log(`[ok] Visualizer is already running (PID ${existing})`);
         console.log(`  http://localhost:${port}`);
         return;
+      }
+
+      // Check if the port is already in use before attempting to start
+      if (await isPortInUse(port)) {
+        console.error(`[error] Port ${port} is already in use.`);
+        console.error(`  Use -p <port> to specify a different port.`);
+        process.exit(1);
       }
 
       const distDir = findCompassDist();
