@@ -173,6 +173,7 @@ export interface GraphPatchPayload {
   ops: PatchOp[];
   replaces: string[];
   intent?: string;
+  branchId?: string;
 }
 
 export interface PatchCommitResult {
