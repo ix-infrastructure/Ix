@@ -325,6 +325,53 @@ export class IxClient {
     return this.get("/v1/health");
   }
 
+  // ── Branch API ──────────────────────────────────────────────────
+
+  async createBranch(name: string, createdBy: string): Promise<{
+    id: string; name: string; baseRev: number; headRev: number;
+    status: string; createdBy: string;
+  }> {
+    return this.post("/v1/branches", { name, createdBy });
+  }
+
+  async listBranches(opts?: { status?: string }): Promise<unknown[]> {
+    const params = new URLSearchParams();
+    if (opts?.status) params.set("status", opts.status);
+    const qs = params.toString();
+    return this.get(`/v1/branches${qs ? `?${qs}` : ""}`);
+  }
+
+  async getBranch(id: string): Promise<unknown> {
+    return this.get(`/v1/branches/${id}`);
+  }
+
+  async mergeBranch(id: string, opts?: { force?: boolean }): Promise<{
+    branchId: string; conflicts: unknown[]; safeToMerge: boolean;
+    merged?: boolean; mergedRev?: number;
+  }> {
+    return this.post(`/v1/branches/${id}/merge`, { force: opts?.force ?? false });
+  }
+
+  async compareBranches(branchIds: string[]): Promise<{
+    conflicts: Array<{ logicalId: string; touchedBy: string[] }>;
+    safeToMerge: boolean;
+  }> {
+    return this.post("/v1/branches/compare", { branches: branchIds });
+  }
+
+  async abandonBranch(id: string): Promise<{ status: string }> {
+    const resp = await fetch(`${this.endpoint}/v1/branches/${id}`, {
+      method: "DELETE",
+      headers: this.authToken ? { Authorization: `Bearer ${this.authToken}` } : {},
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`${resp.status}: ${text}`);
+    }
+    return resp.json() as Promise<{ status: string }>;
+  }
+
   private async post<T>(path: string, body: unknown): Promise<T> {
     const resp = await fetch(`${this.endpoint}${path}`, {
       method: "POST",
