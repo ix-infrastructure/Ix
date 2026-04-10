@@ -22,7 +22,8 @@
 <p align="center">
   <a href="https://www.ix-infra.com">Website</a> ·
   <a href="https://www.ix-infra.com/docs">Docs</a> ·
-  <a href="https://compass.ix-infra.com">Demo</a>
+  <a href="https://compass.ix-infra.com">Demo</a> .
+  <a href="https://discord.gg/ncEYVHVqZ8">Discord</a>
 </p>
 
 <p align="center">
@@ -81,11 +82,6 @@ curl -fsSL https://ix-infra.com/install.sh | sh
 ```bash
 irm https://ix-infra.com/install.ps1 | iex
 ``` 
-### Homebrew
-```bash
-brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/Ix
-brew install ix
-```
 ### Claude Plugin
 ``` bash
 /plugin marketplace add ix-infrastructure/ix-claude-plugin
@@ -107,19 +103,13 @@ gemini extensions install https://github.com/ix-infrastructure/ix-gemini-plugin
 ## Requirements
 
 - macOS, Linux, or Windows
+- Node.js 20 or newer
 - Git installed
 - Docker (for full functionality)
 
 ## Supported Languages
 
-Ix currently supports:
-
-- TypeScript / JavaScript
-- Python
-- Go
-- Java
-- more coming
-
+Ix currently supports over 15 languages!
 (See docs for full list)
 
 ## Quick Start

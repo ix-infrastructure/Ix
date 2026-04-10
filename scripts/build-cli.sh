@@ -20,13 +20,13 @@ CLI_DIR="$IX_DIR/ix-cli"
 check_prerequisites() {
   if ! command -v node &> /dev/null; then
     echo "Error: Node.js is not installed."
-    echo "  Install: https://nodejs.org/ (v18+ required)"
+    echo "  Install: https://nodejs.org/ (v20+ required)"
     exit 1
   fi
 
   NODE_VERSION=$(node -v | sed 's/v//' | cut -d. -f1)
-  if [ "$NODE_VERSION" -lt 18 ]; then
-    echo "Error: Node.js 18+ required (found $(node -v))"
+  if [ "$NODE_VERSION" -lt 20 ]; then
+    echo "Error: Node.js 20+ required (found $(node -v))"
     exit 1
   fi
 
