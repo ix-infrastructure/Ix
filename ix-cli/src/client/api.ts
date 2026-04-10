@@ -186,7 +186,7 @@ export class IxClient {
   async commitPatch(patch: GraphPatchPayload): Promise<PatchCommitResult> {
     const resp = await fetch(`${this.endpoint}/v1/patch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.authHeaders(),
       body: JSON.stringify(patch),
       signal: AbortSignal.timeout(5 * 60 * 1000), // 5 min — matches commitPatchBulk
     });
@@ -214,7 +214,7 @@ export class IxClient {
   async map(opts?: { full?: boolean }): Promise<any> {
     const resp = await fetch(`${this.endpoint}/v1/map`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.authHeaders(),
       body: JSON.stringify(opts ?? {}),
       signal: AbortSignal.timeout(30 * 60 * 1000), // 30 minute timeout
     });
@@ -228,7 +228,7 @@ export class IxClient {
   async commitPatchBulk(patches: GraphPatchPayload[]): Promise<PatchCommitResult> {
     const resp = await fetch(`${this.endpoint}/v1/patches/bulk`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.authHeaders(),
       body: JSON.stringify({ patches }),
       signal: AbortSignal.timeout(5 * 60 * 1000), // 5 min — prevents hang when k8s ingress closes idle connections
     });
@@ -277,7 +277,7 @@ export class IxClient {
   async reset(): Promise<{ ok: boolean; message: string }> {
     const resp = await fetch(`${this.endpoint}/v1/reset`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.authHeaders(),
       body: JSON.stringify({}),
       signal: AbortSignal.timeout(10 * 60 * 1000), // 10 minutes
     });
@@ -291,7 +291,7 @@ export class IxClient {
   async resetCode(): Promise<{ ok: boolean; message: string }> {
     const resp = await fetch(`${this.endpoint}/v1/reset/code`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.authHeaders(),
       body: JSON.stringify({}),
       signal: AbortSignal.timeout(10 * 60 * 1000), // 10 minutes
     });
@@ -308,7 +308,7 @@ export class IxClient {
   }
 
   async savingsReset(): Promise<any> {
-    const resp = await fetch(`${this.endpoint}/v1/savings`, { method: "DELETE" });
+    const resp = await fetch(`${this.endpoint}/v1/savings`, { method: "DELETE", headers: this.authHeaders() });
     if (!resp.ok) {
       const text = await resp.text();
       throw new Error(`${resp.status}: ${text}`);
