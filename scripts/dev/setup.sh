@@ -129,7 +129,7 @@ if [ "${#MISSING_DEPS[@]}" -gt 0 ]; then
   for dep in "${MISSING_DEPS[@]}"; do
     case "$dep" in
       docker) echo "    docker:  https://docs.docker.com/get-docker/" ;;
-      node)   echo "    node:    https://nodejs.org (v18+ required)" ;;
+      node)   echo "    node:    https://nodejs.org (v20+ required)" ;;
     esac
   done
   echo ""

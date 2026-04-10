@@ -29,11 +29,11 @@ git>=2
 #  STEP 1: Node.js (auto-installed/upgraded if missing or too old)
 # ============================================================================
 
-# Node.js >= 18 (installer targets Node 22 LTS)
+# Node.js >= 20 (installer targets Node 22 LTS)
 #   macOS:   brew install node OR official .pkg installer
 #   Linux:   NodeSource apt/dnf/yum repo (setup_22.x) OR apk
 #   Windows: manual from https://nodejs.org/
-node>=18
+node>=20
 npm>=8  # bundled with Node.js
 
 # ============================================================================
