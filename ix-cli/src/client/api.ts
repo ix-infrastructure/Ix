@@ -362,6 +362,7 @@ export class IxClient {
   async abandonBranch(id: string): Promise<{ status: string }> {
     const resp = await fetch(`${this.endpoint}/v1/branches/${id}`, {
       method: "DELETE",
+      headers: this.authToken ? { Authorization: `Bearer ${this.authToken}` } : {},
       signal: AbortSignal.timeout(30_000),
     });
     if (!resp.ok) {
