@@ -1,9 +1,10 @@
+// NEEDS HEAVY REVIEW: "needs heavy review as didnt verify this change for additional bug for all of this, this could be completely wrong"
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
-import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
+import { absoluteFromSourceUri, getEndpoint, resolveWorkspaceRoot } from "../config.js";
 import { resolveEntityFull } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { isFileStale } from "../stale.js";
@@ -181,19 +182,23 @@ Examples:
       const symbolResult = await trySymbolMatch(client, rawTarget, { kind: opts.kind, path: opts.path, pick: opts.pick ? parseInt(opts.pick, 10) : undefined });
       if (symbolResult.type === "resolved") {
         const { node, sourceUri } = symbolResult;
-        const stale = sourceUri ? await checkStale(client, sourceUri) : false;
+        // NEEDS HEAVY REVIEW: sourceUri coming from the graph is now
+        // workspace-relative (client-agnostic backend). Resolve it against the
+        // active workspace root before any fs call.
+        const absSourceUri = sourceUri ? absoluteFromSourceUri(sourceUri, opts.root) : null;
+        const stale = absSourceUri ? await checkStale(client, absSourceUri) : false;
 
         // If the source file exists, extract the symbol's lines
-        if (sourceUri && fs.existsSync(sourceUri)) {
+        if (absSourceUri && fs.existsSync(absSourceUri)) {
           const lineStart = node.attrs?.lineStart ?? node.attrs?.line_start ?? 1;
           const lineEnd = node.attrs?.lineEnd ?? node.attrs?.line_end;
-          const fileContent = fs.readFileSync(sourceUri, "utf-8");
+          const fileContent = fs.readFileSync(absSourceUri, "utf-8");
           const allLines = fileContent.split("\n");
           const effectiveEnd = lineEnd ?? allLines.length;
           const content = allLines.slice(lineStart - 1, effectiveEnd).join("\n");
           const result: ReadResult = {
             targetType: "symbol",
-            path: sourceUri,
+            path: absSourceUri,
             lineStart,
             lineEnd: effectiveEnd,
             content,
@@ -211,7 +216,7 @@ Examples:
           const lines = String(attrContent).split("\n");
           const result: ReadResult = {
             targetType: "symbol",
-            path: sourceUri ?? "(no source file)",
+            path: absSourceUri ?? sourceUri ?? "(no source file)",
             lineStart: 1,
             lineEnd: lines.length,
             content: String(attrContent),
@@ -223,7 +228,7 @@ Examples:
           return;
         }
 
-        stderr(`Source file not found for symbol: ${node.name} (${sourceUri ?? "no provenance"})`);
+        stderr(`Source file not found for symbol: ${node.name} (${absSourceUri ?? sourceUri ?? "no provenance"})`);
         return;
       }
 
