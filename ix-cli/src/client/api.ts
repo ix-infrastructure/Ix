@@ -8,9 +8,20 @@ import type {
   GraphPatchPayload,
   PatchCommitResult,
 } from "./types.js";
+import { getAuthToken } from "../cli/config.js";
 
 export class IxClient {
-  constructor(private endpoint: string = "http://localhost:8090") {}
+  private authToken?: string;
+
+  constructor(private endpoint: string = "http://localhost:8090", authToken?: string) {
+    this.authToken = authToken ?? getAuthToken();
+  }
+
+  private authHeaders(): Record<string, string> {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.authToken) headers["Authorization"] = `Bearer ${this.authToken}`;
+    return headers;
+  }
 
   async query(
     question: string,
@@ -22,7 +33,7 @@ export class IxClient {
   async ingest(path: string, recursive?: boolean, force?: boolean): Promise<IngestResult> {
     const resp = await fetch(`${this.endpoint}/v1/ingest`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.authHeaders(),
       body: JSON.stringify({ path, recursive, force: force || undefined }),
       signal: AbortSignal.timeout(30 * 60 * 1000), // 30 minute timeout for large repos
     });
@@ -173,7 +184,7 @@ export class IxClient {
   async commitPatch(patch: GraphPatchPayload): Promise<PatchCommitResult> {
     const resp = await fetch(`${this.endpoint}/v1/patch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.authHeaders(),
       body: JSON.stringify(patch),
       signal: AbortSignal.timeout(5 * 60 * 1000), // 5 min — matches commitPatchBulk
     });
@@ -201,7 +212,7 @@ export class IxClient {
   async map(opts?: { full?: boolean }): Promise<any> {
     const resp = await fetch(`${this.endpoint}/v1/map`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.authHeaders(),
       body: JSON.stringify(opts ?? {}),
       signal: AbortSignal.timeout(30 * 60 * 1000), // 30 minute timeout
     });
@@ -215,7 +226,7 @@ export class IxClient {
   async commitPatchBulk(patches: GraphPatchPayload[]): Promise<PatchCommitResult> {
     const resp = await fetch(`${this.endpoint}/v1/patches/bulk`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.authHeaders(),
       body: JSON.stringify({ patches }),
       signal: AbortSignal.timeout(5 * 60 * 1000), // 5 min — prevents hang when k8s ingress closes idle connections
     });
@@ -264,7 +275,7 @@ export class IxClient {
   async reset(): Promise<{ ok: boolean; message: string }> {
     const resp = await fetch(`${this.endpoint}/v1/reset`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.authHeaders(),
       body: JSON.stringify({}),
       signal: AbortSignal.timeout(10 * 60 * 1000), // 10 minutes
     });
@@ -278,7 +289,7 @@ export class IxClient {
   async resetCode(): Promise<{ ok: boolean; message: string }> {
     const resp = await fetch(`${this.endpoint}/v1/reset/code`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.authHeaders(),
       body: JSON.stringify({}),
       signal: AbortSignal.timeout(10 * 60 * 1000), // 10 minutes
     });
@@ -295,7 +306,10 @@ export class IxClient {
   }
 
   async savingsReset(): Promise<any> {
-    const resp = await fetch(`${this.endpoint}/v1/savings`, { method: "DELETE" });
+    const resp = await fetch(`${this.endpoint}/v1/savings`, {
+      method: "DELETE",
+      headers: this.authToken ? { Authorization: `Bearer ${this.authToken}` } : {},
+    });
     if (!resp.ok) {
       const text = await resp.text();
       throw new Error(`${resp.status}: ${text}`);
@@ -314,7 +328,7 @@ export class IxClient {
   private async post<T>(path: string, body: unknown): Promise<T> {
     const resp = await fetch(`${this.endpoint}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.authHeaders(),
       body: JSON.stringify(body),
     });
     if (!resp.ok) {
@@ -325,7 +339,9 @@ export class IxClient {
   }
 
   private async get<T>(path: string): Promise<T> {
-    const resp = await fetch(`${this.endpoint}${path}`);
+    const resp = await fetch(`${this.endpoint}${path}`, {
+      headers: this.authToken ? { Authorization: `Bearer ${this.authToken}` } : {},
+    });
     if (!resp.ok) {
       const text = await resp.text();
       throw new Error(`${resp.status}: ${text}`);
