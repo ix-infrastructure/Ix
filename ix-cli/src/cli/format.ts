@@ -5,7 +5,6 @@ export type ResultSource = "graph" | "text" | "graph+text" | "heuristic";
 
 // ── JSON optimization helpers ──────────────────────────────────────────────
 
-// NEEDS HEAVY REVIEW: "needs heavy review as didnt verify this change for additional bug for all of this, this could be completely wrong"
 /**
  * Strip the cwd prefix from absolute paths to save tokens in JSON output.
  *

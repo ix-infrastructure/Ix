@@ -150,7 +150,6 @@ export interface IngestResult {
 
 export interface HealthResponse {
   status: string;
-  // NEEDS HEAVY REVIEW: "needs heavy review as didnt verify this change for additional bug for all of this, this could be completely wrong"
   // Backend on-disk graph format version. When a client's expected version
   // differs from this, it forces a clean re-ingest (e.g. absolute→relative
   // source_uri migration changes every node ID).
@@ -165,7 +164,6 @@ export interface PatchSource {
   sourceHash?: string;
   extractor: string;
   sourceType: string;
-  // NEEDS HEAVY REVIEW: "needs heavy review as didnt verify this change for additional bug for all of this, this could be completely wrong"
   // workspaceId uniquely identifies the workspace whose files produced this
   // patch. Derived client-side as SHA-256 of the workspace root's absolute
   // path. Backend stores it as an opaque attribute for future multi-workspace
