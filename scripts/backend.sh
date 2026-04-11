@@ -21,8 +21,6 @@ set -euo pipefail
 IX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$IX_DIR"
 
-# NEEDS HEAVY REVIEW: "needs heavy review as didnt verify this change for additional bug for all of this, this could be completely wrong"
-#
 # The HOME bind mount was removed from docker-compose.standalone.yml because
 # the backend is now client-agnostic and never reads host files. The
 # IX_HOST_MOUNT_ROOT / IX_CONTAINER_MOUNT_ROOT exports that fed that bind mount

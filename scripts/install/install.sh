@@ -32,7 +32,6 @@ NODE_MIN_MAJOR=18
 
 # -- Windows / POSIX docker compose wrapper --
 #
-# NEEDS HEAVY REVIEW: "needs heavy review as didnt verify this change for additional bug for all of this, this could be completely wrong"
 # IX_HOST_MOUNT_ROOT / IX_CONTAINER_MOUNT_ROOT exports removed: the HOME bind
 # mount is gone from docker-compose.standalone.yml because the backend is now
 # client-agnostic and never reads host files.

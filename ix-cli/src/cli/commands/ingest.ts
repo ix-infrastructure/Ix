@@ -1,4 +1,3 @@
-// NEEDS HEAVY REVIEW: "needs heavy review as didnt verify this change for additional bug for all of this, this could be completely wrong"
 import * as nodePath from 'node:path';
 import * as fs from 'node:fs';
 import * as crypto from 'node:crypto';
@@ -400,8 +399,6 @@ export async function ingestFiles(
     ? path
     : nodePath.resolve(resolveWorkspaceRoot(opts.root), path);
 
-  // NEEDS HEAVY REVIEW: "needs heavy review as didnt verify this change for additional bug for all of this, this could be completely wrong"
-  //
   // Workspace identity for client-agnostic backend.
   //
   // The backend used to dereference provenance.source_uri against the host
@@ -421,9 +418,9 @@ export async function ingestFiles(
 
   const client = new IxClient(getEndpoint());
 
-  // NEEDS HEAVY REVIEW: schema-version check forces a clean re-ingest when the
-  // backend's graph format has changed in a way that invalidates existing node
-  // IDs (e.g. the absolute→relative source_uri migration).
+  // Schema-version check forces a clean re-ingest when the backend's graph
+  // format has changed in a way that invalidates existing node IDs (e.g. the
+  // absolute→relative source_uri migration).
   const CLIENT_EXPECTED_SCHEMA_VERSION = 2;
   try {
     const health = await client.health();
@@ -790,10 +787,10 @@ export async function ingestFiles(
           try {
             let patch = buildPatchFn!(p, hash, batchEdgesByFile.get(p.filePath) ?? emptyEdges, previousHash);
             if (mapMode) patch = stripMapModeOps(patch);
-            // NEEDS HEAVY REVIEW: tag every patch with the workspace_id. The
-            // backend stores this as an opaque attribute. The source.uri has
-            // already been set to the workspace-relative path upstream in
-            // buildPatch (because we passed the relative path to parseFile).
+            // Tag every patch with the workspace_id. The backend stores this
+            // as an opaque attribute. The source.uri has already been set to
+            // the workspace-relative path upstream in buildPatch (because we
+            // passed the relative path to parseFile).
             if (patch?.source) patch.source.workspaceId = workspaceId;
             preparedPatches.push(makePreparedPatch(patch, j + 1, p.filePath));
           } catch (err) {
@@ -861,7 +858,7 @@ export async function ingestFiles(
           try {
             let patch = buildPatchFn!(p, hash, edgesByFile.get(p.filePath) ?? emptyEdges, previousHash);
             if (mapMode) patch = stripMapModeOps(patch);
-            // NEEDS HEAVY REVIEW: tag with workspace_id (see flushBatch).
+            // Tag with workspace_id (see flushBatch).
             if (patch?.source) patch.source.workspaceId = workspaceId;
             preparedPatches.push(makePreparedPatch(patch, j + 1, p.filePath));
           } catch (err) {
@@ -936,9 +933,9 @@ export async function ingestFiles(
             if (debug) process.stderr.write(`\n  [skip minified-likely] ${filePath}\n`);
             continue;
           }
-          // NEEDS HEAVY REVIEW: parseFile receives the workspace-relative path
-          // so every deterministic ID derived in buildPatch (node/edge/chunk/
-          // patch) hashes relative paths. This makes graph IDs portable across
+          // parseFile receives the workspace-relative path so every
+          // deterministic ID derived in buildPatch (node/edge/chunk/patch)
+          // hashes relative paths. This makes graph IDs portable across
           // machines and removes backend dependence on host paths.
           parseable.push({ filePath: toWorkspaceRelative(filePath), absFilePath: filePath, source: sourceText, hash, previousHash });
         }
@@ -966,9 +963,9 @@ export async function ingestFiles(
               if (texts[j] != null) sources.set(batch[j], texts[j]!);
             }
           }
-          // NEEDS HEAVY REVIEW: global resolution index is now keyed on
-          // workspace-relative paths so that edge resolution matches the
-          // relative paths we pass into parseFile.
+          // Global resolution index is keyed on workspace-relative paths so
+          // that edge resolution matches the relative paths we pass into
+          // parseFile.
           const relSources = new Map<string, string>();
           for (const [abs, text] of sources) relSources.set(toWorkspaceRelative(abs), text);
           const relFilePaths = filePaths.map(toWorkspaceRelative);
@@ -1011,8 +1008,8 @@ export async function ingestFiles(
       // Build global resolution index from all repo file paths before the parse loop
       // so cross-batch imports resolve correctly even in streaming per-chunk mode.
       // Read all Go files in parallel to maximize I/O throughput.
-      // NEEDS HEAVY REVIEW: index keys are workspace-relative to match the
-      // relative paths we pass into parseFile below.
+      // Index keys are workspace-relative to match the relative paths we pass
+      // into parseFile below.
       {
         const goIndexStart = performance.now();
         const sources = new Map<string, string>();
@@ -1047,9 +1044,9 @@ export async function ingestFiles(
 
         // Read files asynchronously and dispatch to parse pool as each file completes.
         // This keeps workers busy while I/O is still in flight for other files.
-        // NEEDS HEAVY REVIEW: fd.filePath is the workspace-relative path, which
-        // is what parseFile and all downstream ID derivations see. absFilePath
-        // is kept only so error messages still point at the file on disk.
+        // fd.filePath is the workspace-relative path, which is what parseFile
+        // and all downstream ID derivations see. absFilePath is kept only so
+        // error messages still point at the file on disk.
         const readAndDispatch = chunk.map(async (absFilePath, idx) => {
           try {
             const st = await fs.promises.stat(absFilePath);
@@ -1212,8 +1209,6 @@ export async function ingestFiles(
 // Load existing hashes from the server for change detection
 // ---------------------------------------------------------------------------
 
-// NEEDS HEAVY REVIEW: "needs heavy review as didnt verify this change for additional bug for all of this, this could be completely wrong"
-//
 // The backend now stores workspace-relative source_uri values. The CLI still
 // tracks files internally by absolute path (needed for fs reads), so this
 // helper converts to relative before the wire call and maps the server's

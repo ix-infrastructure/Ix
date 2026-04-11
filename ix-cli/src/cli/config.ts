@@ -153,8 +153,6 @@ export function getActiveWorkspaceRoot(): string | undefined {
   return getDefaultWorkspace()?.root_path;
 }
 
-// NEEDS HEAVY REVIEW: "needs heavy review as didnt verify this change for additional bug for all of this, this could be completely wrong"
-//
 // Resolve a source_uri from the graph (which is now a workspace-relative
 // POSIX path under the client-agnostic backend design) back to an absolute
 // host filesystem path. If the input is already absolute (e.g. legacy graphs

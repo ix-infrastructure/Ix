@@ -1,4 +1,3 @@
-// NEEDS HEAVY REVIEW: "needs heavy review as didnt verify this change for additional bug for all of this, this could be completely wrong"
 export interface PatchSource {
   // uri is the provenance source URI. In the client-agnostic backend design it
   // is a workspace-relative path (POSIX separators), not an absolute host path.

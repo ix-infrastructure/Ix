@@ -1,4 +1,3 @@
-// NEEDS HEAVY REVIEW: "needs heavy review as didnt verify this change for additional bug for all of this, this could be completely wrong"
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Command } from "commander";
@@ -182,9 +181,9 @@ Examples:
       const symbolResult = await trySymbolMatch(client, rawTarget, { kind: opts.kind, path: opts.path, pick: opts.pick ? parseInt(opts.pick, 10) : undefined });
       if (symbolResult.type === "resolved") {
         const { node, sourceUri } = symbolResult;
-        // NEEDS HEAVY REVIEW: sourceUri coming from the graph is now
-        // workspace-relative (client-agnostic backend). Resolve it against the
-        // active workspace root before any fs call.
+        // sourceUri coming from the graph is workspace-relative under the
+        // client-agnostic backend. Resolve it against the active workspace
+        // root before any fs call.
         const absSourceUri = sourceUri ? absoluteFromSourceUri(sourceUri, opts.root) : null;
         const stale = absSourceUri ? await checkStale(client, absSourceUri) : false;
 

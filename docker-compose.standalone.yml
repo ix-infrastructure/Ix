@@ -1,5 +1,3 @@
-# NEEDS HEAVY REVIEW: "needs heavy review as didnt verify this change for additional bug for all of this, this could be completely wrong"
-#
 # docker-compose.standalone.yml — Remote install (no repo checkout needed)
 #
 # Used by: curl -fsSL .../install.sh | bash
