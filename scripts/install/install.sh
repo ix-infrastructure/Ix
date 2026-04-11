@@ -31,17 +31,16 @@ ARANGO_URL="http://localhost:8529/_api/version"
 NODE_MIN_MAJOR=18
 
 # -- Windows / POSIX docker compose wrapper --
+#
+# IX_HOST_MOUNT_ROOT / IX_CONTAINER_MOUNT_ROOT exports removed: the HOME bind
+# mount is gone from docker-compose.standalone.yml because the backend is now
+# client-agnostic and never reads host files.
 
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
-    IX_HOST_MOUNT_ROOT="$(cygpath -m "$HOME")"
-    export IX_HOST_MOUNT_ROOT
-    export IX_CONTAINER_MOUNT_ROOT="${HOME}"
     dc() { MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker compose "$@"; }
     ;;
   *)
-    export IX_HOST_MOUNT_ROOT="${HOME}"
-    export IX_CONTAINER_MOUNT_ROOT="${HOME}"
     dc() { docker compose "$@"; }
     ;;
 esac
