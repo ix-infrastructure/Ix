@@ -105,6 +105,7 @@ gemini extensions install https://github.com/ix-infrastructure/ix-gemini-plugin
 ## Requirements
 
 - macOS, Linux, or Windows
+- Node.js 20 or newer
 - Git installed
 - Docker (for full functionality)
 

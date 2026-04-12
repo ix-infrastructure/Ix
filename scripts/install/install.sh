@@ -28,7 +28,7 @@ COMPOSE_DIR="$IX_HOME/backend"
 HEALTH_URL="http://localhost:8090/v1/health"
 ARANGO_URL="http://localhost:8529/_api/version"
 
-NODE_MIN_MAJOR=18
+NODE_MIN_MAJOR=20
 
 # -- Windows / POSIX docker compose wrapper --
 
