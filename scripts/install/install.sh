@@ -127,6 +127,16 @@ resolve_version() {
   echo "0.1.0"
 }
 
+resolve_backend_version() {
+  _fetch "https://api.github.com/repos/${GITHUB_ORG}/ix-memory-layer-dist/releases/latest" 2>/dev/null \
+    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\([^"]*\)".*/\1/p' || true
+}
+
+resolve_compass_version() {
+  _fetch "https://api.github.com/repos/${GITHUB_ORG}/ix-compass-dist/releases/latest" 2>/dev/null \
+    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\([^"]*\)".*/\1/p' || true
+}
+
 # -- Detect platform --
 
 detect_platform() {
@@ -858,6 +868,16 @@ SHIM
   ensure_path
 
   info "Installed: $IX_BIN/ix"
+fi
+
+# -- Stamp installed versions so upgrade checker doesn't nag --
+
+BACKEND_VER=$(resolve_backend_version)
+COMPASS_VER=$(resolve_compass_version)
+[ -n "$BACKEND_VER" ] && printf '%s' "$BACKEND_VER" > "$IX_HOME/.backend-version"
+if [ -n "$COMPASS_VER" ]; then
+  mkdir -p "$IX_HOME/cli/compass"
+  printf '%s' "$COMPASS_VER" > "$IX_HOME/cli/compass/.version"
 fi
 
 # -- Done --
