@@ -89,8 +89,8 @@ jobs:
         run: |
           STAGING="ix-${{ steps.version.outputs.version }}-linux-amd64"
           mkdir -p "$STAGING/cli" "$STAGING/core-ingestion" "$STAGING/compass"
-          cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
-          cp -r core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
+          cp -rL ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          cp -rL core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
           [ -d system-compass/dist ] && cp -r system-compass/dist/* "$STAGING/compass/" || true
           cat > "$STAGING/ix" <<'WRAPPER'
           #!/bin/sh
@@ -105,8 +105,8 @@ jobs:
         run: |
           STAGING="ix-${{ steps.version.outputs.version }}-linux-arm64"
           mkdir -p "$STAGING/cli" "$STAGING/core-ingestion" "$STAGING/compass"
-          cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
-          cp -r core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
+          cp -rL ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          cp -rL core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
           [ -d system-compass/dist ] && cp -r system-compass/dist/* "$STAGING/compass/" || true
           cat > "$STAGING/ix" <<'WRAPPER'
           #!/bin/sh
@@ -121,8 +121,8 @@ jobs:
         run: |
           STAGING="ix-${{ steps.version.outputs.version }}-darwin-amd64"
           mkdir -p "$STAGING/cli" "$STAGING/core-ingestion" "$STAGING/compass"
-          cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
-          cp -r core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
+          cp -rL ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          cp -rL core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
           [ -d system-compass/dist ] && cp -r system-compass/dist/* "$STAGING/compass/" || true
           cat > "$STAGING/ix" <<'WRAPPER'
           #!/bin/sh
@@ -137,8 +137,8 @@ jobs:
         run: |
           STAGING="ix-${{ steps.version.outputs.version }}-darwin-arm64"
           mkdir -p "$STAGING/cli" "$STAGING/core-ingestion" "$STAGING/compass"
-          cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
-          cp -r core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
+          cp -rL ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          cp -rL core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
           [ -d system-compass/dist ] && cp -r system-compass/dist/* "$STAGING/compass/" || true
           cat > "$STAGING/ix" <<'WRAPPER'
           #!/bin/sh
@@ -153,8 +153,8 @@ jobs:
         run: |
           STAGING="ix-${{ steps.version.outputs.version }}-windows-amd64"
           mkdir -p "$STAGING/cli" "$STAGING/core-ingestion" "$STAGING/compass"
-          cp -r ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
-          cp -r core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
+          cp -rL ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          cp -rL core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
           [ -d system-compass/dist ] && cp -r system-compass/dist/* "$STAGING/compass/" || true
           cat > "$STAGING/ix.cmd" <<'WRAPPER'
           @echo off
