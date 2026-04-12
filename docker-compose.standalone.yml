@@ -4,13 +4,6 @@
 # Location when installed: ~/.ix/backend/docker-compose.yml
 #
 # Uses published Docker images — no local build step required.
-#
-# NOTE: the previous HOME bind mount (${IX_HOST_MOUNT_ROOT:-$HOME}) has been
-# removed. The backend no longer reads host files — staleness detection is now
-# a pure graph comparison (see ix-memory-layer StalenessDetector) and
-# provenance.source_uri is workspace-relative, so the container never needs
-# visibility into the client's filesystem. This closes the privacy hole where
-# the entire user HOME directory was bind-mounted into the backend container.
 
 services:
   arangodb:
@@ -37,9 +30,6 @@ services:
       - backend
     ports:
       - "127.0.0.1:8090:8090"
-    # No host bind mount: the backend is client-agnostic and never reads host
-    # files. If you are on an old backend image that still expects the HOME
-    # bind mount, upgrade to the client-agnostic image (schema_version >= 2).
     environment:
       ARANGO_HOST: arangodb
       ARANGO_PORT: "8529"
