@@ -150,13 +150,25 @@ export interface IngestResult {
 
 export interface HealthResponse {
   status: string;
+  // Backend on-disk graph format version. When a client's expected version
+  // differs from this, it forces a clean re-ingest (e.g. absolute→relative
+  // source_uri migration changes every node ID).
+  schema_version?: number;
 }
 
 export interface PatchSource {
+  // uri is the provenance source URI. In the client-agnostic backend design it
+  // is a workspace-relative path (POSIX separators), not an absolute host path.
+  // The backend treats this as an opaque string key for joins/tombstones.
   uri: string;
   sourceHash?: string;
   extractor: string;
   sourceType: string;
+  // workspaceId uniquely identifies the workspace whose files produced this
+  // patch. Derived client-side as SHA-256 of the workspace root's absolute
+  // path. Backend stores it as an opaque attribute for future multi-workspace
+  // disambiguation; it does not interpret the value.
+  workspaceId?: string;
 }
 
 export interface PatchOp {
@@ -173,6 +185,7 @@ export interface GraphPatchPayload {
   ops: PatchOp[];
   replaces: string[];
   intent?: string;
+  branchId?: string;
 }
 
 export interface PatchCommitResult {

@@ -5,9 +5,17 @@ export type ResultSource = "graph" | "text" | "graph+text" | "heuristic";
 
 // ── JSON optimization helpers ──────────────────────────────────────────────
 
-/** Strip the cwd prefix from absolute paths to save tokens in JSON output. */
+/**
+ * Strip the cwd prefix from absolute paths to save tokens in JSON output.
+ *
+ * Under the client-agnostic backend design, source_uri values are already
+ * workspace-relative. For those we return the input unchanged. Legacy absolute
+ * paths (e.g. from older graphs) are still handled the old way.
+ */
 export function relativePath(absPath: string | undefined | null): string | undefined {
   if (!absPath) return undefined;
+  // Already relative (workspace-relative path from post-migration graphs).
+  if (!absPath.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(absPath)) return absPath;
   const cwd = process.cwd();
   if (absPath.startsWith(cwd + "/")) return absPath.slice(cwd.length + 1);
   // Also handle /Users/.../project/ style without trailing slash match

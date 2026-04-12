@@ -12,6 +12,9 @@
   "bin": {
     "ix": "dist/cli/main.js"
   },
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "build": "node scripts/build-core-ingestion.mjs && node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
     "test": "node scripts/build-core-ingestion.mjs && vitest run --exclude test/parser.test.ts && node test/parser.smoke.mjs",

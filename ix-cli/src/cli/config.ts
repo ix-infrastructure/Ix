@@ -11,11 +11,26 @@ export interface WorkspaceConfig {
   default: boolean;
 }
 
+export interface InstanceAuth {
+  api_key: string;
+  token: string;
+  expires_at: string;
+  org_id: string;
+  plan: string;
+}
+
+export interface InstanceConfig {
+  endpoint: string;
+  auth?: InstanceAuth;
+}
+
 export interface IxConfig {
   endpoint: string;
   format: string;
   workspace?: string;
   workspaces?: WorkspaceConfig[];
+  instances?: Record<string, InstanceConfig>;
+  active?: string;
 }
 
 const defaultConfig: IxConfig = {
@@ -40,8 +55,72 @@ export function saveConfig(config: IxConfig): void {
   writeFileSync(configPath, stringify(config));
 }
 
+export function getActiveInstance(): InstanceConfig | undefined {
+  const config = loadConfig();
+  if (!config.active || !config.instances?.[config.active]) return undefined;
+  return config.instances[config.active];
+}
+
 export function getEndpoint(): string {
-  return process.env.IX_ENDPOINT || loadConfig().endpoint;
+  if (process.env.IX_ENDPOINT) return process.env.IX_ENDPOINT;
+  const instance = getActiveInstance();
+  if (instance) return instance.endpoint;
+  return loadConfig().endpoint;
+}
+
+export function getAuthToken(): string | undefined {
+  const instance = getActiveInstance();
+  if (!instance?.auth) return undefined;
+  const expiresAt = new Date(instance.auth.expires_at);
+  if (expiresAt <= new Date()) return undefined;
+  return instance.auth.token;
+}
+
+export function storeAuth(instanceName: string, auth: InstanceAuth): void {
+  const config = loadConfig() as any;
+  if (!config.instances?.[instanceName]) return;
+  config.instances[instanceName].auth = auth;
+  saveConfig(config);
+}
+
+export function clearAuth(instanceName: string): void {
+  const config = loadConfig() as any;
+  if (!config.instances?.[instanceName]) return;
+  delete config.instances[instanceName].auth;
+  saveConfig(config);
+}
+
+export async function refreshAuthIfNeeded(): Promise<string | undefined> {
+  const config = loadConfig() as any;
+  const instanceName = config.active;
+  if (!instanceName || !config.instances?.[instanceName]) return undefined;
+
+  const instance = config.instances[instanceName] as InstanceConfig;
+  if (!instance.auth) return undefined;
+
+  const expiresAt = new Date(instance.auth.expires_at);
+  const now = new Date();
+  const bufferMs = 2 * 60 * 1000;
+  if (expiresAt.getTime() - now.getTime() > bufferMs) {
+    return instance.auth.token;
+  }
+
+  try {
+    const resp = await fetch(`${instance.endpoint}/auth/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: instance.auth.api_key }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!resp.ok) return undefined;
+    const data = await resp.json() as { token: string; expires_at: string; org_id: string; plan: string };
+    instance.auth.token = data.token;
+    instance.auth.expires_at = data.expires_at;
+    saveConfig(config);
+    return data.token;
+  } catch {
+    return undefined;
+  }
 }
 
 export function loadWorkspaces(): WorkspaceConfig[] {
@@ -72,6 +151,21 @@ export function getActiveWorkspaceRoot(): string | undefined {
   }
 
   return getDefaultWorkspace()?.root_path;
+}
+
+// Resolve a source_uri from the graph (which is now a workspace-relative
+// POSIX path under the client-agnostic backend design) back to an absolute
+// host filesystem path. If the input is already absolute (e.g. legacy graphs
+// or external absolute paths), it is returned as-is. Used by any command that
+// needs to actually open a file off disk (ix read, ix explain, ...).
+export function absoluteFromSourceUri(sourceUri: string, explicitRoot?: string): string {
+  if (!sourceUri) return sourceUri;
+  // Treat both POSIX abs (`/`) and Windows abs (`C:\`) as already resolved.
+  if (sourceUri.startsWith("/") || /^[A-Za-z]:[\\/]/.test(sourceUri)) return sourceUri;
+  const root = resolveWorkspaceRoot(explicitRoot);
+  // POSIX-normalize the relative segment before joining.
+  const normalized = sourceUri.replace(/\\/g, "/");
+  return require("node:path").resolve(root, normalized);
 }
 
 export function resolveWorkspaceRoot(explicitRoot?: string): string {

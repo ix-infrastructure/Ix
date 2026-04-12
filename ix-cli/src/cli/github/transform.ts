@@ -19,9 +19,25 @@ function truncate(s: string | null | undefined, max: number): string {
   return s.length > max ? s.slice(0, max) + "..." : s;
 }
 
+/**
+ * Parse "fixes #N", "closes #N", "resolves #N" references from text.
+ * Returns unique issue numbers referenced.
+ */
+export function parseFixesRefs(text: string | null | undefined): number[] {
+  if (!text) return [];
+  const pattern = /(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\s+#(\d+)/gi;
+  const nums = new Set<number>();
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    nums.add(parseInt(match[1], 10));
+  }
+  return [...nums];
+}
+
 export function transformIssue(repo: GitHubRepo, issue: GitHubIssue): PatchOp[] {
   const uri = `github://${repo.owner}/${repo.repo}/issues/${issue.number}`;
   const nodeId = deterministicId(uri);
+  const isBug = issue.labels.some(l => /bug|defect/i.test(l.name));
   return [
     {
       type: "UpsertNode",
@@ -37,6 +53,9 @@ export function transformIssue(repo: GitHubRepo, issue: GitHubIssue): PatchOp[] 
         created_at: issue.created_at,
         body: truncate(issue.body, 2000),
         source_uri: uri,
+        source: "github",
+        github_type: "issue",
+        is_bug: isBug,
       },
     },
   ];
@@ -62,6 +81,8 @@ export function transformIssueComment(
         created_at: comment.created_at,
         body: truncate(comment.body, 2000),
         source_uri: commentUri,
+        source: "github",
+        github_type: "issue_comment",
       },
     },
     {
@@ -78,7 +99,7 @@ export function transformIssueComment(
 export function transformPR(repo: GitHubRepo, pr: GitHubPR): PatchOp[] {
   const uri = `github://${repo.owner}/${repo.repo}/pull/${pr.number}`;
   const nodeId = deterministicId(uri);
-  return [
+  const ops: PatchOp[] = [
     {
       type: "UpsertNode",
       id: nodeId,
@@ -97,9 +118,29 @@ export function transformPR(repo: GitHubRepo, pr: GitHubPR): PatchOp[] {
         body: truncate(pr.body, 2000),
         rationale: truncate(pr.body, 500),
         source_uri: uri,
+        source: "github",
+        github_type: "pull_request",
       },
     },
   ];
+
+  // Create RESOLVES edges for "fixes #N" / "closes #N" references in PR body + title
+  const fixedIssues = parseFixesRefs(`${pr.title}\n${pr.body ?? ""}`);
+  for (const issueNum of fixedIssues) {
+    const issueUri = `github://${repo.owner}/${repo.repo}/issues/${issueNum}`;
+    const issueNodeId = deterministicId(issueUri);
+    const edgeId = deterministicId(`${uri}:RESOLVES:${issueUri}`);
+    ops.push({
+      type: "UpsertEdge",
+      id: edgeId,
+      src: nodeId,
+      dst: issueNodeId,
+      predicate: "RESOLVES",
+      attrs: { source: "github" },
+    });
+  }
+
+  return ops;
 }
 
 export function transformPRComment(
@@ -122,6 +163,8 @@ export function transformPRComment(
         created_at: comment.created_at,
         body: truncate(comment.body, 2000),
         source_uri: commentUri,
+        source: "github",
+        github_type: "pr_comment",
       },
     },
     {
@@ -153,6 +196,8 @@ export function transformCommit(repo: GitHubRepo, commit: GitHubCommit): PatchOp
         message: truncate(commit.commit.message, 2000),
         changed_files: commit.files?.map(f => f.filename) ?? [],
         source_uri: uri,
+        source: "github",
+        github_type: "commit",
       },
     },
   ];
