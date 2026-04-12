@@ -12,3 +12,5 @@ core-ingestion/dist/
 ix-cli/dist/
 .vscode/
 .mcp.json
+# Ix agent worktrees
+.ix-worktrees/
