@@ -11,7 +11,6 @@
 
 import type { Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { detectSource } from "../sources/detect.js";
 import { fetchContent } from "../sources/fetch.js";

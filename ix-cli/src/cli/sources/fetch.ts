@@ -62,12 +62,9 @@ async function fetchTweet(source: DetectedSource): Promise<FetchedContent> {
   };
 
   // Strip HTML tags to get plain text
-  const plainText = data.html
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
+  const plainText = decodeEntities(
+    data.html.replace(/<[^>]+>/g, " ")
+  )
     .replace(/\s+/g, " ")
     .trim();
 
@@ -331,26 +328,52 @@ function extractByClass(html: string, className: string): string | null {
   return match[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
 
-/** Simple HTML to text conversion — strips tags, decodes entities. */
-function htmlToText(html: string): string {
-  return html
-    // Remove script and style blocks
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<nav[\s\S]*?<\/nav>/gi, "")
-    .replace(/<header[\s\S]*?<\/header>/gi, "")
-    .replace(/<footer[\s\S]*?<\/footer>/gi, "")
-    // Convert block elements to newlines
-    .replace(/<\/?(?:div|p|br|h[1-6]|li|tr|blockquote)[^>]*>/gi, "\n")
-    // Strip remaining tags
-    .replace(/<[^>]+>/g, " ")
-    // Decode common entities
-    .replace(/&amp;/g, "&")
+/** Decode common HTML entities. Run after all tags are stripped. */
+function decodeEntities(text: string): string {
+  return text
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&nbsp;/g, " ")
+    // &amp; must be last to avoid double-decoding
+    .replace(/&amp;/g, "&");
+}
+
+/** Strip dangerous HTML blocks (script, style) using iterative replacement. */
+function stripBlocks(html: string, tag: string): string {
+  const open = new RegExp(`<${tag}[\\s>]`, "i");
+  const close = new RegExp(`</${tag}\\s*>`, "i");
+  let result = html;
+  // Iterate to handle nested/malformed occurrences
+  while (open.test(result)) {
+    const start = result.search(open);
+    const endMatch = close.exec(result.slice(start));
+    if (endMatch) {
+      result = result.slice(0, start) + result.slice(start + endMatch.index + endMatch[0].length);
+    } else {
+      // No closing tag — remove everything from the opening tag onward
+      result = result.slice(0, start);
+      break;
+    }
+  }
+  return result;
+}
+
+/** Simple HTML to text conversion — strips tags, decodes entities. */
+function htmlToText(html: string): string {
+  let text = html;
+  // Remove dangerous and non-content blocks iteratively
+  for (const tag of ["script", "style", "nav", "header", "footer"]) {
+    text = stripBlocks(text, tag);
+  }
+  return decodeEntities(
+    text
+      // Convert block elements to newlines
+      .replace(/<\/?(?:div|p|br|h[1-6]|li|tr|blockquote)[^>]*>/gi, "\n")
+      // Strip remaining tags
+      .replace(/<[^>]+>/g, " ")
+  )
     // Collapse whitespace
     .replace(/[ \t]+/g, " ")
     .replace(/\n{3,}/g, "\n\n")
