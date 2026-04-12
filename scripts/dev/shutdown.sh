@@ -20,9 +20,6 @@ cd "$IX_DIR"
 
 COMPOSE_FILE="docker-compose.standalone.yml"
 
-# IX_HOST_MOUNT_ROOT / IX_CONTAINER_MOUNT_ROOT exports removed: the HOME bind
-# mount is gone from docker-compose.standalone.yml because the backend is now
-# client-agnostic and never reads host files.
 if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
   dc() {
     MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \

@@ -32,10 +32,6 @@ NODE_MIN_MAJOR=20
 
 # -- Windows / POSIX docker compose wrapper --
 #
-# IX_HOST_MOUNT_ROOT / IX_CONTAINER_MOUNT_ROOT exports removed: the HOME bind
-# mount is gone from docker-compose.standalone.yml because the backend is now
-# client-agnostic and never reads host files.
-
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     dc() { MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker compose "$@"; }

@@ -21,11 +21,6 @@ set -euo pipefail
 IX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$IX_DIR"
 
-# The HOME bind mount was removed from docker-compose.standalone.yml because
-# the backend is now client-agnostic and never reads host files. The
-# IX_HOST_MOUNT_ROOT / IX_CONTAINER_MOUNT_ROOT exports that fed that bind mount
-# are therefore no longer needed. On Windows/MINGW we still need the dc()
-# helper so docker compose can locate the compose file from a MINGW shell.
 if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
   dc() {
     MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
