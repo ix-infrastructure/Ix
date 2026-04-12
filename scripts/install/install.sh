@@ -28,20 +28,15 @@ COMPOSE_DIR="$IX_HOME/backend"
 HEALTH_URL="http://localhost:8090/v1/health"
 ARANGO_URL="http://localhost:8529/_api/version"
 
-NODE_MIN_MAJOR=18
+NODE_MIN_MAJOR=20
 
 # -- Windows / POSIX docker compose wrapper --
-
+#
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
-    IX_HOST_MOUNT_ROOT="$(cygpath -m "$HOME")"
-    export IX_HOST_MOUNT_ROOT
-    export IX_CONTAINER_MOUNT_ROOT="${HOME}"
     dc() { MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker compose "$@"; }
     ;;
   *)
-    export IX_HOST_MOUNT_ROOT="${HOME}"
-    export IX_CONTAINER_MOUNT_ROOT="${HOME}"
     dc() { docker compose "$@"; }
     ;;
 esac

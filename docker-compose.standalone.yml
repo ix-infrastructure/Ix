@@ -30,11 +30,6 @@ services:
       - backend
     ports:
       - "127.0.0.1:8090:8090"
-    volumes:
-      - type: bind
-        source: ${IX_HOST_MOUNT_ROOT:-$HOME}
-        target: ${IX_CONTAINER_MOUNT_ROOT:-$HOME}
-        read_only: true
     environment:
       ARANGO_HOST: arangodb
       ARANGO_PORT: "8529"

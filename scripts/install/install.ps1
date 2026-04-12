@@ -27,7 +27,7 @@ $IxBin = "$IxHome\bin"
 $ComposeDir = "$IxHome\backend"
 $HealthUrl = "http://localhost:8090/v1/health"
 $ArangoUrl = "http://localhost:8529/_api/version"
-$NodeMinMajor = 18
+$NodeMinMajor = 20
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 

@@ -9,6 +9,22 @@ import { readFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
+// Runtime Node version guard. Runs before any command work so users on an
+// unsupported Node get an actionable message instead of a cryptic "fetch
+// failed" deep inside undici.
+const MIN_NODE_MAJOR = 20;
+{
+  const current = process.versions.node;
+  const major = parseInt(current.split(".")[0] ?? "0", 10);
+  if (!Number.isFinite(major) || major < MIN_NODE_MAJOR) {
+    process.stderr.write(
+      `Ix requires Node.js ${MIN_NODE_MAJOR} or newer. You are running v${current}.\n` +
+      `Install a supported version from https://nodejs.org/ and re-run.\n`
+    );
+    process.exit(1);
+  }
+}
+
 let cliVersion = "0.0.0";
 try {
   const __dirname = dirname(fileURLToPath(import.meta.url));

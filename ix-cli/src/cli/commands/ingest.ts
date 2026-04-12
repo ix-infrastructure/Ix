@@ -399,7 +399,43 @@ export async function ingestFiles(
     ? path
     : nodePath.resolve(resolveWorkspaceRoot(opts.root), path);
 
+  // Workspace identity for client-agnostic backend.
+  //
+  // The backend used to dereference provenance.source_uri against the host
+  // filesystem (via a broad HOME bind mount). We now emit workspace-relative
+  // paths as the canonical source_uri, and pass a workspace_id derived from
+  // the workspace root's absolute path. The backend treats both as opaque
+  // strings; it never reads host files.
+  const workspaceRoot = fs.statSync(resolvedPath).isDirectory()
+    ? resolvedPath
+    : nodePath.dirname(resolvedPath);
+  const workspaceId = crypto.createHash('sha256').update(workspaceRoot).digest('hex');
+  const toWorkspaceRelative = (absPath: string): string => {
+    // Force workspace-local POSIX separators so IDs are stable across OS.
+    const rel = nodePath.relative(workspaceRoot, absPath);
+    return rel.split(nodePath.sep).join('/');
+  };
+
   const client = new IxClient(getEndpoint());
+
+  // Schema-version check forces a clean re-ingest when the backend's graph
+  // format has changed in a way that invalidates existing node IDs (e.g. the
+  // absolute→relative source_uri migration).
+  const CLIENT_EXPECTED_SCHEMA_VERSION = 2;
+  try {
+    const health = await client.health();
+    const serverVersion = (health as any)?.schema_version;
+    if (typeof serverVersion === 'number' && serverVersion !== CLIENT_EXPECTED_SCHEMA_VERSION) {
+      process.stderr.write(
+        `\n  [schema mismatch] backend schema_version=${serverVersion}, ` +
+        `client expects ${CLIENT_EXPECTED_SCHEMA_VERSION}. Forcing full re-ingest.\n`,
+      );
+      opts.force = true;
+    }
+  } catch (err) {
+    if (debug) process.stderr.write(`\n  [schema check skipped] ${err}\n`);
+  }
+
   const start = performance.now();
 
   // Worker pool for parallel file parsing across CPU cores
@@ -532,7 +568,7 @@ export async function ingestFiles(
     // so the cache wasn't cleared). Invalidate the cache so files are re-ingested.
     if (!opts.force && mtimeCache.size > 0) {
       const samplePaths = [...mtimeCache.keys()].slice(0, 5);
-      const sampleHashes = await loadExistingHashes(client, samplePaths, debug);
+      const sampleHashes = await loadExistingHashes(client, samplePaths, toWorkspaceRelative, debug);
       if (sampleHashes.size === 0) {
         mtimeCache.clear();
         if (debug) process.stderr.write(`\n  DB reset detected — invalidating mtime cache\n`);
@@ -564,7 +600,7 @@ export async function ingestFiles(
     // Phase: hash lookup — only needed when mtime-changed files exist.
     let knownHashes: Map<string, string>;
     if (opts.force || mtimeChangedPaths.length > 0) {
-      knownHashes = await loadExistingHashes(client, opts.force ? filePaths : mtimeChangedPaths, debug);
+      knownHashes = await loadExistingHashes(client, opts.force ? filePaths : mtimeChangedPaths, toWorkspaceRelative, debug);
       if (debug) process.stderr.write(`\n  Source hash lookup: ${knownHashes.size} known hashes (${mtimeChangedPaths.length} mtime-changed)\n`);
     } else {
       // All files are mtime-clean — skip server round-trip entirely.
@@ -751,6 +787,11 @@ export async function ingestFiles(
           try {
             let patch = buildPatchFn!(p, hash, batchEdgesByFile.get(p.filePath) ?? emptyEdges, previousHash);
             if (mapMode) patch = stripMapModeOps(patch);
+            // Tag every patch with the workspace_id. The backend stores this
+            // as an opaque attribute. The source.uri has already been set to
+            // the workspace-relative path upstream in buildPatch (because we
+            // passed the relative path to parseFile).
+            if (patch?.source) patch.source.workspaceId = workspaceId;
             preparedPatches.push(makePreparedPatch(patch, j + 1, p.filePath));
           } catch (err) {
             parseErrors++;
@@ -817,6 +858,8 @@ export async function ingestFiles(
           try {
             let patch = buildPatchFn!(p, hash, edgesByFile.get(p.filePath) ?? emptyEdges, previousHash);
             if (mapMode) patch = stripMapModeOps(patch);
+            // Tag with workspace_id (see flushBatch).
+            if (patch?.source) patch.source.workspaceId = workspaceId;
             preparedPatches.push(makePreparedPatch(patch, j + 1, p.filePath));
           } catch (err) {
             parseErrors++;
@@ -877,7 +920,10 @@ export async function ingestFiles(
         buildPatchFn = patchBuilder.buildPatchWithResolution as Function;
 
         // Pre-filter minified files (main thread) then parse in parallel via worker pool.
-        const parseable: Array<{ filePath: string; source: string; hash: string; previousHash: string | undefined }> = [];
+        // filePath here is the workspace-relative path (what goes to parseFile
+        // and downstream into buildPatch → source_uri). absFilePath is the
+        // absolute path retained for any on-disk ops (reads already happened).
+        const parseable: Array<{ filePath: string; absFilePath: string; source: string; hash: string; previousHash: string | undefined }> = [];
         for (const { filePath, bytes, hash, previousHash } of changedPaths) {
           const sourceText = bytes.toString('utf-8');
           if (isLikelyMinifiedSource(sourceText)) {
@@ -887,7 +933,11 @@ export async function ingestFiles(
             if (debug) process.stderr.write(`\n  [skip minified-likely] ${filePath}\n`);
             continue;
           }
-          parseable.push({ filePath, source: sourceText, hash, previousHash });
+          // parseFile receives the workspace-relative path so every
+          // deterministic ID derived in buildPatch (node/edge/chunk/patch)
+          // hashes relative paths. This makes graph IDs portable across
+          // machines and removes backend dependence on host paths.
+          parseable.push({ filePath: toWorkspaceRelative(filePath), absFilePath: filePath, source: sourceText, hash, previousHash });
         }
 
         progressPhase   = 'Parsing';
@@ -913,13 +963,23 @@ export async function ingestFiles(
               if (texts[j] != null) sources.set(batch[j], texts[j]!);
             }
           }
-          globalIndex = (ingestion.buildGlobalResolutionIndex as Function)(filePaths, sources);
+          // Global resolution index is keyed on workspace-relative paths so
+          // that edge resolution matches the relative paths we pass into
+          // parseFile.
+          const relSources = new Map<string, string>();
+          for (const [abs, text] of sources) relSources.set(toWorkspaceRelative(abs), text);
+          const relFilePaths = filePaths.map(toWorkspaceRelative);
+          globalIndex = (ingestion.buildGlobalResolutionIndex as Function)(relFilePaths, relSources);
           sources.clear();
+          relSources.clear();
         }
 
         let pendingFlush: Promise<void> = Promise.resolve();
         for (let i = 0; i < parseable.length; i += PARSE_STREAM_CHUNK) {
           const chunk = parseable.slice(i, i + PARSE_STREAM_CHUNK);
+          // parseFile receives the workspace-relative path (f.filePath), so
+          // every deterministic ID in the resulting patch hashes relative
+          // paths. f.absFilePath is retained only for debug/error display.
           const parseResults = await Promise.all(
             chunk.map(f =>
               ensureParsePool().parse(f.filePath, f.source).then(r => { progressCurrent++; return r; }),
@@ -948,6 +1008,8 @@ export async function ingestFiles(
       // Build global resolution index from all repo file paths before the parse loop
       // so cross-batch imports resolve correctly even in streaming per-chunk mode.
       // Read all Go files in parallel to maximize I/O throughput.
+      // Index keys are workspace-relative to match the relative paths we pass
+      // into parseFile below.
       {
         const goIndexStart = performance.now();
         const sources = new Map<string, string>();
@@ -957,10 +1019,11 @@ export async function ingestFiles(
           const batch = goFiles.slice(i, i + GO_READ_CONCURRENCY);
           const texts = await Promise.all(batch.map(fp => fs.promises.readFile(fp, 'utf-8').catch(() => null)));
           for (let j = 0; j < batch.length; j++) {
-            if (texts[j] != null) sources.set(batch[j], texts[j]!);
+            if (texts[j] != null) sources.set(toWorkspaceRelative(batch[j]), texts[j]!);
           }
         }
-        globalIndex = ingestion.buildGlobalResolutionIndex(filePaths, sources);
+        const relFilePaths = filePaths.map(toWorkspaceRelative);
+        globalIndex = ingestion.buildGlobalResolutionIndex(relFilePaths, sources);
         sources.clear();
         timings.goIndexMs = Math.round(performance.now() - goIndexStart);
       }
@@ -981,28 +1044,32 @@ export async function ingestFiles(
 
         // Read files asynchronously and dispatch to parse pool as each file completes.
         // This keeps workers busy while I/O is still in flight for other files.
-        const readAndDispatch = chunk.map(async (filePath, idx) => {
+        // fd.filePath is the workspace-relative path, which is what parseFile
+        // and all downstream ID derivations see. absFilePath is kept only so
+        // error messages still point at the file on disk.
+        const readAndDispatch = chunk.map(async (absFilePath, idx) => {
           try {
-            const st = await fs.promises.stat(filePath);
+            const st = await fs.promises.stat(absFilePath);
             if (st.size === 0) { filesSkipped++; return; }
             if (st.size > MAX_FILE_BYTES) { tooLarge++; return; }
-            const bytes = await fs.promises.readFile(filePath);
+            const bytes = await fs.promises.readFile(absFilePath);
             const hash = sha256(bytes);
-            if (!opts.force && knownHashes.get(filePath) === hash) { filesSkipped++; return; }
-            const previousHash = knownHashes.get(filePath);
+            if (!opts.force && knownHashes.get(absFilePath) === hash) { filesSkipped++; return; }
+            const previousHash = knownHashes.get(absFilePath);
             const sourceText = bytes.toString('utf-8');
             if (isLikelyMinifiedSource(sourceText)) {
               minifiedLikely++;
               filesSkipped++;
-              if (debug) process.stderr.write(`\n  [skip minified-likely] ${filePath}\n`);
+              if (debug) process.stderr.write(`\n  [skip minified-likely] ${absFilePath}\n`);
               return;
             }
-            const fd: NonNullable<FileData> = { filePath, source: sourceText, hash, previousHash: previousHash !== hash ? previousHash : undefined };
+            const relFilePath = toWorkspaceRelative(absFilePath);
+            const fd: NonNullable<FileData> = { filePath: relFilePath, source: sourceText, hash, previousHash: previousHash !== hash ? previousHash : undefined };
             fileData[idx] = fd;
             parsePromises[idx] = ensureParsePool().parse(fd.filePath, fd.source).then(r => { progressCurrent++; return r; });
           } catch (err) {
             parseErrors++;
-            process.stderr.write(`\n  [read error] ${filePath}: ${err}\n`);
+            process.stderr.write(`\n  [read error] ${absFilePath}: ${err}\n`);
           }
         });
         await Promise.all(readAndDispatch);
@@ -1142,9 +1209,32 @@ export async function ingestFiles(
 // Load existing hashes from the server for change detection
 // ---------------------------------------------------------------------------
 
-async function loadExistingHashes(client: IxClient, filePaths: string[], debug = false): Promise<Map<string, string>> {
+// The backend now stores workspace-relative source_uri values. The CLI still
+// tracks files internally by absolute path (needed for fs reads), so this
+// helper converts to relative before the wire call and maps the server's
+// response back onto the caller's absolute keys.
+async function loadExistingHashes(
+  client: IxClient,
+  filePaths: string[],
+  toRelative: (absPath: string) => string,
+  debug = false,
+): Promise<Map<string, string>> {
   try {
-    return await client.getSourceHashes(filePaths);
+    const relPaths: string[] = new Array(filePaths.length);
+    const relToAbs = new Map<string, string>();
+    for (let i = 0; i < filePaths.length; i++) {
+      const abs = filePaths[i];
+      const rel = toRelative(abs);
+      relPaths[i] = rel;
+      relToAbs.set(rel, abs);
+    }
+    const serverHashes = await client.getSourceHashes(relPaths);
+    const out = new Map<string, string>();
+    for (const [rel, hash] of serverHashes) {
+      const abs = relToAbs.get(rel);
+      if (abs !== undefined) out.set(abs, hash);
+    }
+    return out;
   } catch (err) {
     if (debug) process.stderr.write(`\n  [hash lookup failed] ${err}\n`);
     return new Map();
