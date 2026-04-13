@@ -182,4 +182,5 @@ export interface PatchCommitResult {
 
 export interface CapabilitiesResponse {
   parseEndpoint?: string;
+  ingestEndpoint?: string;
 }

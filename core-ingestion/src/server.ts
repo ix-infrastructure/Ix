@@ -10,6 +10,31 @@ const memoryLayerUrl = process.env.IX_MEMORY_LAYER_URL ?? 'http://localhost:8090
 const port = parseInt(process.env.PORT ?? '3000', 10);
 
 // ---------------------------------------------------------------------------
+// Commit concurrency semaphore
+// Limits concurrent memory-layer commits to prevent ArangoDB connection pool
+// saturation. Parsing is always fully parallel; only the commit phase is throttled.
+// ---------------------------------------------------------------------------
+const MAX_COMMIT_CONCURRENCY = parseInt(process.env.INGEST_COMMIT_CONCURRENCY ?? '3', 10);
+const MAX_INGEST_CONCURRENCY = parseInt(process.env.INGEST_CONCURRENCY ?? '1', 10);
+
+class Semaphore {
+  private permits: number;
+  private waiters: Array<() => void> = [];
+  constructor(max: number) { this.permits = max; }
+  acquire(): Promise<void> {
+    if (this.permits > 0) { this.permits--; return Promise.resolve(); }
+    return new Promise(resolve => this.waiters.push(resolve));
+  }
+  release(): void {
+    const next = this.waiters.shift();
+    if (next) { next(); } else { this.permits++; }
+  }
+}
+
+const commitSemaphore = new Semaphore(MAX_COMMIT_CONCURRENCY);
+const ingestSemaphore = new Semaphore(MAX_INGEST_CONCURRENCY);
+
+// ---------------------------------------------------------------------------
 // Types (mirrors ix-cli/src/client/types.ts — kept local to avoid cross-package dep)
 // ---------------------------------------------------------------------------
 
@@ -22,6 +47,7 @@ interface IngestRequest {
   files: IngestFile[];
   workspaceRoot: string;
   force?: boolean;
+  mapMode?: boolean;
 }
 
 interface IngestResult {
@@ -75,16 +101,28 @@ async function commitBulk(patches: unknown[]): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
-// Core ingest handler
+// Core parse handler (shared by /v1/parse and /v1/ingest)
 // ---------------------------------------------------------------------------
 
-async function handleIngest(req: IngestRequest): Promise<IngestResult> {
-  const result: IngestResult = {
+interface ParseResult {
+  patches: unknown[];
+  filesProcessed: number;
+  filesSkipped: number;
+  entitiesCreated: number;
+  skipReasons: {
+    unchanged: number;
+    emptyFile: number;
+    parseError: number;
+    tooLarge: number;
+  };
+}
+
+async function handleParse(req: IngestRequest): Promise<ParseResult> {
+  const result: ParseResult = {
+    patches: [],
     filesProcessed: 0,
-    patchesApplied: 0,
     filesSkipped: 0,
     entitiesCreated: 0,
-    latestRev: 0,
     skipReasons: { unchanged: 0, emptyFile: 0, parseError: 0, tooLarge: 0 },
   };
 
@@ -160,11 +198,10 @@ async function handleIngest(req: IngestRequest): Promise<IngestResult> {
   }
 
   // Build patches.
-  const patches: unknown[] = [];
   for (const { parsed, hash, previousHash } of parsedFiles) {
     try {
       const patch = buildPatchWithResolution(parsed, hash, edgesByFile.get(parsed.filePath) ?? [], previousHash);
-      patches.push(patch);
+      result.patches.push(patch);
       result.entitiesCreated += (patch.ops as any[]).filter((op: any) => op.type === 'UpsertNode').length;
     } catch {
       result.filesSkipped++;
@@ -172,13 +209,53 @@ async function handleIngest(req: IngestRequest): Promise<IngestResult> {
     }
   }
 
-  // Commit all patches in a single call. memory-layer's commitBatchChunked handles
-  // internal chunking and runs ArangoDB writes concurrently — no reason to loop here.
-  const rev = await commitBulk(patches);
-  result.latestRev = rev;
-  result.patchesApplied = patches.length;
-
   result.filesProcessed = parsedFiles.length;
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Core ingest handler — parse + commit in one shot
+// ---------------------------------------------------------------------------
+
+/** Strip chunk nodes, chunk edges, and claims — map mode only needs nodes + edges. */
+function applyMapModeFilter(patches: unknown[]): unknown[] {
+  return patches.map((patch: any) => ({
+    ...patch,
+    ops: (patch.ops as any[]).filter((op: any) => {
+      if (op.type === 'AssertClaim' || op.type === 'RetractClaim') return false;
+      if (op.type === 'UpsertNode' && op.kind === 'chunk') return false;
+      if (op.type === 'UpsertEdge' && (op.predicate === 'CONTAINS_CHUNK' || op.predicate === 'NEXT')) return false;
+      return true;
+    }),
+  }));
+}
+
+async function handleIngest(req: IngestRequest): Promise<IngestResult> {
+  const parsed = await handleParse(req);
+  const result: IngestResult = {
+    filesProcessed: parsed.filesProcessed,
+    patchesApplied: 0,
+    filesSkipped: parsed.filesSkipped,
+    entitiesCreated: parsed.entitiesCreated,
+    latestRev: 0,
+    skipReasons: parsed.skipReasons,
+  };
+
+  if (parsed.patches.length === 0) return result;
+
+  const patches = req.mapMode ? applyMapModeFilter(parsed.patches) : parsed.patches;
+
+  await commitSemaphore.acquire();
+  try {
+    const rev = await commitBulk(patches);
+    result.latestRev = rev;
+    result.patchesApplied = patches.length;
+  } catch (err) {
+    console.error('[ingest] commitBulk failed:', err);
+    throw err;
+  } finally {
+    commitSemaphore.release();
+  }
   return result;
 }
 
@@ -187,6 +264,33 @@ async function handleIngest(req: IngestRequest): Promise<IngestResult> {
 // ---------------------------------------------------------------------------
 
 const server = http.createServer((req, res) => {
+  if (req.method === 'POST' && req.url === '/v1/parse') {
+    const chunks: Buffer[] = [];
+    req.on('data', chunk => { chunks.push(chunk as Buffer); });
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks);
+      const decode = req.headers['x-body-encoding'] === 'gzip'
+        ? (buf: Buffer) => zlib.gunzipSync(buf)
+        : (buf: Buffer) => buf;
+      let parsed: IngestRequest;
+      try {
+        parsed = JSON.parse(decode(raw).toString('utf-8')) as IngestRequest;
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON' }));
+        return;
+      }
+      handleParse(parsed).then(result => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      }).catch(err => {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: String(err) }));
+      });
+    });
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/v1/ingest') {
     const chunks: Buffer[] = [];
     req.on('data', chunk => { chunks.push(chunk as Buffer); });
@@ -203,12 +307,16 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({ error: 'Invalid JSON' }));
         return;
       }
-      handleIngest(parsed).then(result => {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(result));
-      }).catch(err => {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: String(err) }));
+      ingestSemaphore.acquire().then(() => {
+        return handleIngest(parsed).then(result => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        }).catch(err => {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: String(err) }));
+        }).finally(() => {
+          ingestSemaphore.release();
+        });
       });
     });
     return;

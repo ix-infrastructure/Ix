@@ -382,36 +382,44 @@ export function registerIngestCommand(program: Command): void {
 // Remote file ingestion — send file contents to cloud parse service
 // ---------------------------------------------------------------------------
 
-const REMOTE_INGEST_BATCH_SIZE = 500;
-const REMOTE_INGEST_CONCURRENCY = 1;
+const REMOTE_INGEST_BATCH_SIZE = 500; // ~7-8MB gzip per batch — stays under GCE 32MB request limit
+const REMOTE_COMMIT_CHUNK_SIZE = 500; // patches per commit call — keeps requests under GCP LB timeout
+
+interface RemoteParseResult {
+  patches: GraphPatchPayload[];
+  filesProcessed: number;
+  filesSkipped: number;
+  entitiesCreated: number;
+  skipReasons: { unchanged: number; emptyFile: number; parseError: number; tooLarge: number };
+}
 
 async function remoteIngestFiles(
   parseEndpoint: string,
   resolvedPath: string,
   opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; mapMode?: boolean },
+  client: IxClient,
 ): Promise<void> {
   const start = performance.now();
+  const phaseLog = process.env.IX_PHASE_TIMING === '1';
+  const phase = (msg: string) => { if (phaseLog) process.stderr.write(`[phase] t+${((performance.now() - start) / 1000).toFixed(3)}s ${msg}\n`); };
+  phase('remoteIngestFiles:start');
 
   if (!fs.existsSync(resolvedPath)) {
     throw new Error(`Path not found: ${resolvedPath}`);
   }
 
+  const discoverStart = performance.now();
   const stat = fs.statSync(resolvedPath);
   const filePaths: string[] = dedupeDiscoveredFilePaths(
     stat.isFile()
       ? (isSupportedSourceFile(resolvedPath) ? [resolvedPath] : [])
       : (tryGitLsFiles(resolvedPath, opts.recursive ?? true) ?? Array.from(walkFiles(resolvedPath, opts.recursive ?? true))),
   );
+  phase(`discover:done files=${filePaths.length} in=${((performance.now() - discoverStart) / 1000).toFixed(3)}s`);
 
   if (opts.format === 'text') {
     process.stderr.write(`  Sending ${filePaths.length} files to parse service...\n`);
   }
-
-  const result: IngestResult = {
-    filesProcessed: 0, patchesApplied: 0, filesSkipped: 0,
-    entitiesCreated: 0, latestRev: 0,
-    skipReasons: { unchanged: 0, emptyFile: 0, parseError: 0, tooLarge: 0 },
-  };
 
   // Split into path batches upfront; file contents are read lazily inside each task.
   const pathBatches: string[][] = [];
@@ -419,12 +427,26 @@ async function remoteIngestFiles(
     pathBatches.push(filePaths.slice(i, i + REMOTE_INGEST_BATCH_SIZE));
   }
 
+  let filesProcessed = 0;
+  let filesSkipped = 0;
+  let entitiesCreated = 0;
+  const skipReasons = { unchanged: 0, emptyFile: 0, parseError: 0, tooLarge: 0 };
+  const allPatches: GraphPatchPayload[] = [];
   let filesReported = 0;
 
-  const tasks = pathBatches.map((pathBatch, batchIdx) => async () => {
+  // Sums across all parallel batches (ms). JS is single-threaded so += is safe.
+  let sumReadMs = 0, sumGzipMs = 0, sumFetchMs = 0, sumJsonMs = 0;
+  let sumBytesRaw = 0, sumBytesGz = 0;
+
+  phase(`parseBatches:start batches=${pathBatches.length}`);
+  const parseBatchesStart = performance.now();
+  // Run all parse batches in parallel — no memory-layer writes happen here, so
+  // there's no write contention to worry about.
+  await Promise.all(pathBatches.map(async (pathBatch, batchIdx) => {
     const batchStart = performance.now();
     const files: Array<{ path: string; content: string }> = [];
 
+    const readStart = performance.now();
     for (const filePath of pathBatch) {
       try {
         const st = fs.statSync(filePath);
@@ -434,65 +456,289 @@ async function remoteIngestFiles(
         // skip unreadable files
       }
     }
+    const readMs = performance.now() - readStart;
+    sumReadMs += readMs;
 
     if (files.length === 0) return;
 
-    const payload = zlib.gzipSync(JSON.stringify({ files, workspaceRoot: resolvedPath, force: opts.force }));
-    const resp = await fetch(`${parseEndpoint}/v1/ingest`, {
+    const gzipStart = performance.now();
+    const bodyJson = JSON.stringify({ files, workspaceRoot: resolvedPath, force: opts.force });
+    const payload = zlib.gzipSync(bodyJson);
+    const gzipMs = performance.now() - gzipStart;
+    sumGzipMs += gzipMs;
+    sumBytesRaw += bodyJson.length;
+    sumBytesGz += payload.length;
+
+    const fetchStart = performance.now();
+    const resp = await fetch(`${parseEndpoint}/v1/parse`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Body-Encoding': 'gzip' },
       body: payload,
       signal: AbortSignal.timeout(30 * 60 * 1000),
     });
+    const fetchMs = performance.now() - fetchStart;
+    sumFetchMs += fetchMs;
 
     if (!resp.ok) {
       const text = await resp.text();
       throw new Error(`Remote parse failed (${resp.status}): ${text}`);
     }
 
-    const batchResult = await resp.json() as IngestResult;
+    const jsonStart = performance.now();
+    const batchResult = await resp.json() as RemoteParseResult;
+    const jsonMs = performance.now() - jsonStart;
+    sumJsonMs += jsonMs;
     // JS is single-threaded — these += are safe across concurrent async tasks.
-    result.filesProcessed += batchResult.filesProcessed;
-    result.patchesApplied += batchResult.patchesApplied;
-    result.filesSkipped = (result.filesSkipped ?? 0) + (batchResult.filesSkipped ?? 0);
-    result.entitiesCreated += batchResult.entitiesCreated;
-    if (batchResult.latestRev > result.latestRev) result.latestRev = batchResult.latestRev;
+    filesProcessed += batchResult.filesProcessed;
+    filesSkipped += batchResult.filesSkipped;
+    entitiesCreated += batchResult.entitiesCreated;
+    skipReasons.unchanged += batchResult.skipReasons.unchanged;
+    skipReasons.emptyFile += batchResult.skipReasons.emptyFile;
+    skipReasons.parseError += batchResult.skipReasons.parseError;
+    skipReasons.tooLarge += batchResult.skipReasons.tooLarge;
+    allPatches.push(...batchResult.patches);
 
     filesReported += pathBatch.length;
     if (opts.format === 'text') {
       process.stderr.write(`\r  Parsed ${Math.min(filesReported, filePaths.length)}/${filePaths.length} files...`);
     }
 
+    if (phaseLog) {
+      process.stderr.write(`[phase] batch=${batchIdx + 1}/${pathBatches.length} files=${files.length} read=${readMs.toFixed(0)}ms gzip=${gzipMs.toFixed(0)}ms fetch=${fetchMs.toFixed(0)}ms json=${jsonMs.toFixed(0)}ms rawKB=${(bodyJson.length / 1024).toFixed(0)} gzKB=${(payload.length / 1024).toFixed(0)} wall=${((performance.now() - batchStart) / 1000).toFixed(2)}s\n`);
+    }
+
     if (opts.debug) {
       const elapsed = ((performance.now() - batchStart) / 1000).toFixed(2);
       process.stderr.write(`\n  [debug] batch ${batchIdx + 1}/${pathBatches.length}: ${files.length} files in ${elapsed}s\n`);
     }
-  });
-
-  // Dispatch up to REMOTE_INGEST_CONCURRENCY batches at a time.
-  let taskIdx = 0;
-  async function runWorker() {
-    while (taskIdx < tasks.length) {
-      const i = taskIdx++;
-      await tasks[i]();
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(REMOTE_INGEST_CONCURRENCY, tasks.length) }, runWorker));
+  }));
+  const parseBatchesWallMs = performance.now() - parseBatchesStart;
+  phase(`parseBatches:done wall=${(parseBatchesWallMs / 1000).toFixed(3)}s sumRead=${(sumReadMs / 1000).toFixed(2)}s sumGzip=${(sumGzipMs / 1000).toFixed(2)}s sumFetch=${(sumFetchMs / 1000).toFixed(2)}s sumJson=${(sumJsonMs / 1000).toFixed(2)}s rawMB=${(sumBytesRaw / 1048576).toFixed(1)} gzMB=${(sumBytesGz / 1048576).toFixed(1)} patches=${allPatches.length}`);
 
   if (opts.format === 'text') process.stderr.write('\n');
 
-  if (opts.suppressOutput === true) return;
+  // In map mode, claims and chunk nodes aren't needed — strip them to cut ArangoDB write time.
+  const stripStart = performance.now();
+  const patchesToCommit = opts.mapMode
+    ? allPatches.map(stripMapModeOps)
+    : allPatches;
+  phase(`stripMapMode:done in=${((performance.now() - stripStart) / 1000).toFixed(3)}s patches=${patchesToCommit.length}`);
+
+  // Commit all patches in chunks. In map mode the graph is always empty (reset runs first),
+  // so we can safely run all chunks in parallel — no write-write conflicts.
+  // Outside map mode, commits are sequential to avoid conflicts on incremental ingest.
+  let latestRev = 0;
+  const commitPhaseStart = performance.now();
+  if (patchesToCommit.length > 0) {
+    const commitChunks: GraphPatchPayload[][] = [];
+    for (let i = 0; i < patchesToCommit.length; i += REMOTE_COMMIT_CHUNK_SIZE) {
+      commitChunks.push(patchesToCommit.slice(i, i + REMOTE_COMMIT_CHUNK_SIZE));
+    }
+    phase(`commitPhase:start chunks=${commitChunks.length}`);
+    const COMMIT_CONCURRENCY = 3; // map mode: DB is empty, 3 concurrent chunks
+
+    if (opts.mapMode) {
+      // Concurrency-limited parallel commits — safe only when graph is empty
+      let active = 0;
+      let idx = 0;
+      const totalChunks = commitChunks.length;
+      if (opts.format === 'text') {
+        process.stderr.write(`\r  Committing ${patchesToCommit.length} patches (${totalChunks} chunks, concurrency ${COMMIT_CONCURRENCY})...`);
+      }
+      await new Promise<void>((resolve, reject) => {
+        const next = () => {
+          while (active < COMMIT_CONCURRENCY && idx < commitChunks.length) {
+            const chunk = commitChunks[idx++];
+            active++;
+            client.commitPatchBulk(chunk)
+              .then(r => { if (r.rev > latestRev) latestRev = r.rev; active--; next(); })
+              .catch(reject);
+          }
+          if (active === 0) resolve();
+        };
+        next();
+      });
+    } else {
+      // Sequential — safe for incremental ingest where graph already has data
+      const totalChunks = commitChunks.length;
+      for (let i = 0; i < commitChunks.length; i++) {
+        if (opts.format === 'text') {
+          process.stderr.write(`\r  Committing ${patchesToCommit.length} patches (chunk ${i + 1}/${totalChunks})...`);
+        }
+        const commitResult = await client.commitPatchBulk(commitChunks[i]);
+        if (commitResult.rev > latestRev) latestRev = commitResult.rev;
+      }
+    }
+    if (opts.format === 'text') process.stderr.write('\n');
+    phase(`commitPhase:done wall=${((performance.now() - commitPhaseStart) / 1000).toFixed(3)}s`);
+  }
+
+  if (opts.suppressOutput === true) { phase('remoteIngestFiles:end (suppressed)'); return; }
+
+  const elapsed = ((performance.now() - start) / 1000).toFixed(2);
+  phase(`remoteIngestFiles:end total=${elapsed}s`);
+
+  if (opts.format === 'json') {
+    console.log(JSON.stringify({ filesProcessed, patchesApplied: patchesToCommit.length, filesSkipped, entitiesCreated, latestRev, elapsedSeconds: parseFloat(elapsed) }, null, 2));
+  } else if (opts.printSummary !== false) {
+    console.log(chalk.bold('\nIngest summary'));
+    console.log(`  processed:   ${patchesToCommit.length} files (${elapsed}s)`);
+    console.log(`  discovered:  ${filePaths.length} files`);
+    if (filesSkipped > 0) console.log(`  ${chalk.dim('skipped unchanged:')} ${filesSkipped}`);
+    console.log(`  rev:         ${latestRev}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Remote file ingestion — direct write (parse + commit inside core-ingestion)
+// Used when backend exposes ingestEndpoint. Eliminates the CLI commit loop and
+// the patch-data round-trip: core-ingestion writes to memory-layer directly.
+// ---------------------------------------------------------------------------
+
+interface DirectIngestBatchResult {
+  filesProcessed: number;
+  patchesApplied: number;
+  filesSkipped: number;
+  entitiesCreated: number;
+  latestRev: number;
+  skipReasons: { unchanged: number; emptyFile: number; parseError: number; tooLarge: number };
+}
+
+async function remoteIngestFilesDirectWrite(
+  ingestEndpoint: string,
+  resolvedPath: string,
+  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; mapMode?: boolean },
+): Promise<void> {
+  const start = performance.now();
+  const phaseLog = process.env.IX_PHASE_TIMING === '1';
+  const phase = (msg: string) => { if (phaseLog) process.stderr.write(`[phase] t+${((performance.now() - start) / 1000).toFixed(3)}s ${msg}\n`); };
+  phase('directWrite:start');
+
+  if (!fs.existsSync(resolvedPath)) {
+    throw new Error(`Path not found: ${resolvedPath}`);
+  }
+
+  const discoverStart = performance.now();
+  const stat = fs.statSync(resolvedPath);
+  const filePaths: string[] = dedupeDiscoveredFilePaths(
+    stat.isFile()
+      ? (isSupportedSourceFile(resolvedPath) ? [resolvedPath] : [])
+      : (tryGitLsFiles(resolvedPath, opts.recursive ?? true) ?? Array.from(walkFiles(resolvedPath, opts.recursive ?? true))),
+  );
+  phase(`discover:done files=${filePaths.length} in=${((performance.now() - discoverStart) / 1000).toFixed(3)}s`);
+
+  if (opts.format === 'text') {
+    process.stderr.write(`  Sending ${filePaths.length} files to ingest service...\n`);
+  }
+
+  const pathBatches: string[][] = [];
+  for (let i = 0; i < filePaths.length; i += REMOTE_INGEST_BATCH_SIZE) {
+    pathBatches.push(filePaths.slice(i, i + REMOTE_INGEST_BATCH_SIZE));
+  }
+
+  let filesProcessed = 0;
+  let filesSkipped = 0;
+  let entitiesCreated = 0;
+  let latestRev = 0;
+  const skipReasons = { unchanged: 0, emptyFile: 0, parseError: 0, tooLarge: 0 };
+  let filesReported = 0;
+
+  let sumReadMs = 0, sumGzipMs = 0, sumFetchMs = 0, sumJsonMs = 0;
+  let sumBytesRaw = 0, sumBytesGz = 0;
+  let firstFetchEndMs = -1;
+
+  phase(`ingestBatches:start batches=${pathBatches.length}`);
+  const ingestBatchesStart = performance.now();
+  // All batches fire in parallel — core-ingestion uses an internal semaphore
+  // to throttle concurrent memory-layer commits (default 3), so we don't
+  // need to serialize here.
+  await Promise.all(pathBatches.map(async (pathBatch, batchIdx) => {
+    const batchStart = performance.now();
+    const files: Array<{ path: string; content: string }> = [];
+
+    const readStart = performance.now();
+    for (const filePath of pathBatch) {
+      try {
+        const st = fs.statSync(filePath);
+        if (st.size === 0 || st.size > MAX_FILE_BYTES) continue;
+        files.push({ path: filePath, content: fs.readFileSync(filePath, 'utf-8') });
+      } catch {
+        // skip unreadable files
+      }
+    }
+    const readMs = performance.now() - readStart;
+    sumReadMs += readMs;
+
+    if (files.length === 0) return;
+
+    const gzipStart = performance.now();
+    const bodyJson = JSON.stringify({ files, workspaceRoot: resolvedPath, force: opts.force, mapMode: opts.mapMode });
+    const payload = zlib.gzipSync(bodyJson);
+    const gzipMs = performance.now() - gzipStart;
+    sumGzipMs += gzipMs;
+    sumBytesRaw += bodyJson.length;
+    sumBytesGz += payload.length;
+    if (phaseLog) process.stderr.write(`[phase] batch=${batchIdx + 1}/${pathBatches.length} ready-to-post t+${((performance.now() - start) / 1000).toFixed(3)}s read=${readMs.toFixed(0)}ms gzip=${gzipMs.toFixed(0)}ms rawKB=${(bodyJson.length / 1024).toFixed(0)} gzKB=${(payload.length / 1024).toFixed(0)}\n`);
+
+    const fetchStart = performance.now();
+    const resp = await fetch(`${ingestEndpoint}/v1/ingest`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Body-Encoding': 'gzip' },
+      body: payload,
+      signal: AbortSignal.timeout(30 * 60 * 1000),
+    });
+    const fetchMs = performance.now() - fetchStart;
+    sumFetchMs += fetchMs;
+    if (firstFetchEndMs < 0 || (performance.now() - start) < firstFetchEndMs) firstFetchEndMs = performance.now() - start;
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Remote ingest failed (${resp.status}): ${text}`);
+    }
+
+    const jsonStart = performance.now();
+    const batchResult = await resp.json() as DirectIngestBatchResult;
+    const jsonMs = performance.now() - jsonStart;
+    sumJsonMs += jsonMs;
+    // JS is single-threaded — these += are safe across concurrent async tasks.
+    filesProcessed += batchResult.filesProcessed;
+    filesSkipped += batchResult.filesSkipped;
+    entitiesCreated += batchResult.entitiesCreated;
+    if (batchResult.latestRev > latestRev) latestRev = batchResult.latestRev;
+    skipReasons.unchanged += batchResult.skipReasons.unchanged;
+    skipReasons.emptyFile += batchResult.skipReasons.emptyFile;
+    skipReasons.parseError += batchResult.skipReasons.parseError;
+    skipReasons.tooLarge += batchResult.skipReasons.tooLarge;
+
+    filesReported += pathBatch.length;
+    if (opts.format === 'text') {
+      process.stderr.write(`\r  Ingested ${Math.min(filesReported, filePaths.length)}/${filePaths.length} files...`);
+    }
+
+    if (phaseLog) {
+      process.stderr.write(`[phase] batch=${batchIdx + 1}/${pathBatches.length} done t+${((performance.now() - start) / 1000).toFixed(3)}s files=${files.length} read=${readMs.toFixed(0)}ms gzip=${gzipMs.toFixed(0)}ms fetch=${fetchMs.toFixed(0)}ms json=${jsonMs.toFixed(0)}ms wall=${((performance.now() - batchStart) / 1000).toFixed(2)}s\n`);
+    }
+
+    if (opts.debug) {
+      const elapsed = ((performance.now() - batchStart) / 1000).toFixed(2);
+      process.stderr.write(`\n  [debug] batch ${batchIdx + 1}/${pathBatches.length}: ${files.length} files in ${elapsed}s\n`);
+    }
+  }));
+  phase(`ingestBatches:done wall=${((performance.now() - ingestBatchesStart) / 1000).toFixed(3)}s sumRead=${(sumReadMs / 1000).toFixed(2)}s sumGzip=${(sumGzipMs / 1000).toFixed(2)}s sumFetch=${(sumFetchMs / 1000).toFixed(2)}s sumJson=${(sumJsonMs / 1000).toFixed(2)}s firstFetchEnd=${(firstFetchEndMs / 1000).toFixed(2)}s rawMB=${(sumBytesRaw / 1048576).toFixed(1)} gzMB=${(sumBytesGz / 1048576).toFixed(1)}`);
+
+  if (opts.format === 'text') process.stderr.write('\n');
+  if (opts.suppressOutput === true) { phase('directWrite:end (suppressed)'); return; }
 
   const elapsed = ((performance.now() - start) / 1000).toFixed(2);
 
   if (opts.format === 'json') {
-    console.log(JSON.stringify({ ...result, elapsedSeconds: parseFloat(elapsed) }, null, 2));
+    console.log(JSON.stringify({ filesProcessed, filesSkipped, entitiesCreated, latestRev, elapsedSeconds: parseFloat(elapsed) }, null, 2));
   } else if (opts.printSummary !== false) {
     console.log(chalk.bold('\nIngest summary'));
-    console.log(`  processed:   ${result.patchesApplied} files (${elapsed}s)`);
+    console.log(`  processed:   ${filesProcessed} files (${elapsed}s)`);
     console.log(`  discovered:  ${filePaths.length} files`);
-    if ((result.filesSkipped ?? 0) > 0) console.log(`  ${chalk.dim('skipped unchanged:')} ${result.filesSkipped}`);
-    console.log(`  rev:         ${result.latestRev}`);
+    if (filesSkipped > 0) console.log(`  ${chalk.dim('skipped unchanged:')} ${filesSkipped}`);
+    console.log(`  rev:         ${latestRev}`);
   }
 }
 
@@ -514,11 +760,17 @@ export async function ingestFiles(
 
   const client = new IxClient(getEndpoint());
 
-  // Capabilities handshake — if the backend exposes a remote parse endpoint,
-  // ship file contents there instead of running tree-sitter locally.
+  const phaseLog = process.env.IX_PHASE_TIMING === '1';
+  const capsStart = performance.now();
+  // Capabilities handshake — prefer direct ingest (parse + commit inside core-ingestion,
+  // no patch round-trip) when available; fall back to parse-only endpoint.
   const caps = await client.capabilities();
+  if (phaseLog) process.stderr.write(`[phase] capabilities:done in=${((performance.now() - capsStart) / 1000).toFixed(3)}s ingestEndpoint=${caps.ingestEndpoint ? 'yes' : 'no'} parseEndpoint=${caps.parseEndpoint ? 'yes' : 'no'}\n`);
+  if (caps.ingestEndpoint) {
+    return remoteIngestFilesDirectWrite(caps.ingestEndpoint, resolvedPath, opts);
+  }
   if (caps.parseEndpoint) {
-    return remoteIngestFiles(caps.parseEndpoint, resolvedPath, opts);
+    return remoteIngestFiles(caps.parseEndpoint, resolvedPath, opts, client);
   }
 
   const [{ parseFile, resolveEdges, isGrammarSupported }, { buildPatchWithResolution }, { languageFromPath }] = await loadIngestionModules();
