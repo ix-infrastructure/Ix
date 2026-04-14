@@ -45,7 +45,6 @@ const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "goals", desc: "List all goals" },
   { name: "patches", desc: "List recent patches" },
   { name: "plan", desc: "Manage plans and plan tasks" },
-  { name: "push", desc: "Upload the repo to the Ix cloud pipeline" },
   { name: "task", desc: "Manage tasks" },
   { name: "plans", desc: "List all plans" },
   { name: "tasks", desc: "List all tasks across plans" },
