@@ -193,5 +193,5 @@ export interface PatchCommitResult {
 }
 
 export interface CapabilitiesResponse {
-  parseEndpoint?: string;
+  repoSplitterEndpoint?: string;
 }
