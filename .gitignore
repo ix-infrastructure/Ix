@@ -12,3 +12,9 @@ core-ingestion/dist/
 ix-cli/dist/
 .vscode/
 .mcp.json
+
+# Local env files — may contain API keys / secrets. Commit .env.example
+# with placeholder values if a template is needed.
+.env
+.env.*
+!.env.example
