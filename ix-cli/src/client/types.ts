@@ -191,3 +191,7 @@ export interface PatchCommitResult {
   status: string;
   rev: number;
 }
+
+export interface CapabilitiesResponse {
+  parseEndpoint?: string;
+}
