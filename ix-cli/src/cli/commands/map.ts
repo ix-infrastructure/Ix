@@ -7,6 +7,7 @@ import { roundFloat } from "../format.js";
 import { bootstrap } from "../bootstrap.js";
 import { formatFetchError } from "../errors.js";
 import { ingestFiles } from "./ingest.js";
+import { getRemoteRunner } from "../remote.js";
 
 export interface MapRegion {
   id: string;
@@ -92,6 +93,7 @@ export function registerMapCommand(program: Command): void {
     .option("--graph", "Render the hierarchy as a graph/tree view (default)")
     .option("--list", "Render the ranked list view instead of the default graph/tree view")
     .option("--full", "Force full local map, bypassing automatic safety limits (advanced/testing)")
+    .option("--remote", "Route ingestion through the cloud pipeline instead of parsing locally (requires Ix Pro)")
     .option("--verbose", "Show raw confidence scores, crosscut scores, boundary ratios, and signals")
     .option("--silent", "Suppress all output except a one-line summary (useful for LLM hooks)")
     .addHelpText(
@@ -128,7 +130,7 @@ Examples:
   ix map . --full
   ix --debug map . --full`
     )
-    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; verbose?: boolean; silent?: boolean }) => {
+    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remote?: boolean; verbose?: boolean; silent?: boolean }) => {
       const cwd = pathArg ? resolve(pathArg) : process.cwd();
 
       try {
@@ -149,20 +151,45 @@ Examples:
         console.log("  This may take a long time or fail on very large systems.\n");
       }
 
-      // Ingest the path before mapping so the graph is up to date
+      // Ingest the path before mapping so the graph is up to date.
+      // --remote routes through the cloud pipeline via a Pro-supplied
+      // RemoteRunner; absence means Pro isn't installed.
       const ingestStart = performance.now();
-      try {
-        await ingestFiles(cwd, {
-          recursive: true,
-          format: (opts.format === "json" || silent) ? "json" : "text",
-          printSummary: false,
-          suppressOutput: true,
-          mapMode: true,
-        });
-      } catch (err: any) {
-        console.error(chalk.red("Error:"), formatFetchError(err));
-        process.exitCode = 1;
-        return;
+      if (opts.remote) {
+        const runner = getRemoteRunner();
+        if (!runner) {
+          console.error(
+            chalk.red("Error:"),
+            "--remote requires Ix Pro. Install @ix/pro to enable remote ingestion."
+          );
+          process.exitCode = 1;
+          return;
+        }
+        try {
+          await runner.runIngestion({
+            cwd,
+            silent,
+            format: (opts.format === "json" || silent) ? "json" : "text",
+          });
+        } catch (err: any) {
+          console.error(chalk.red("Error:"), formatFetchError(err));
+          process.exitCode = 1;
+          return;
+        }
+      } else {
+        try {
+          await ingestFiles(cwd, {
+            recursive: true,
+            format: (opts.format === "json" || silent) ? "json" : "text",
+            printSummary: false,
+            suppressOutput: true,
+            mapMode: true,
+          });
+        } catch (err: any) {
+          console.error(chalk.red("Error:"), formatFetchError(err));
+          process.exitCode = 1;
+          return;
+        }
       }
       const ingestMs = Math.round(performance.now() - ingestStart);
 

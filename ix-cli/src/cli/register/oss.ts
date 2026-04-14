@@ -1,7 +1,6 @@
 import type { Command } from "commander";
 import { registerQueryCommand } from "../commands/query.js";
 import { registerIngestCommand } from "../commands/ingest.js";
-import { registerPushCommand } from "../commands/push.js";
 import { registerSearchCommand } from "../commands/search.js";
 import { registerStatusCommand } from "../commands/status.js";
 import { registerEntityCommand } from "../commands/entity.js";
@@ -46,6 +45,7 @@ const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "goals", desc: "List all goals" },
   { name: "patches", desc: "List recent patches" },
   { name: "plan", desc: "Manage plans and plan tasks" },
+  { name: "push", desc: "Upload the repo to the Ix cloud pipeline" },
   { name: "task", desc: "Manage tasks" },
   { name: "plans", desc: "List all plans" },
   { name: "tasks", desc: "List all tasks across plans" },
@@ -64,7 +64,6 @@ const ADVANCED_COMMANDS = [
 export function registerOssCommands(program: Command): void {
   registerQueryCommand(program);
   registerIngestCommand(program);
-  registerPushCommand(program);
   registerSearchCommand(program);
   registerStatusCommand(program);
   registerEntityCommand(program);
