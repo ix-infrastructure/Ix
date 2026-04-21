@@ -133,14 +133,6 @@ Examples:
     .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remote?: boolean; verbose?: boolean; silent?: boolean }) => {
       const cwd = pathArg ? resolve(pathArg) : process.cwd();
 
-      try {
-        await bootstrap(cwd);
-      } catch (err: any) {
-        console.error(chalk.red("Error:"), err.message);
-        process.exitCode = 1;
-        return;
-      }
-
       const silent = opts.silent === true || opts.format === "silent";
 
       // Print warning when --full override is active
@@ -153,7 +145,9 @@ Examples:
 
       // Ingest the path before mapping so the graph is up to date.
       // --remote routes through the cloud pipeline via a Pro-supplied
-      // RemoteRunner; absence means Pro isn't installed.
+      // RemoteRunner; absence means Pro isn't installed. The local
+      // backend bootstrap only runs on the non-remote path — cloud
+      // ingestion doesn't require a local Ix backend.
       const ingestStart = performance.now();
       if (opts.remote) {
         const runner = getRemoteRunner();
@@ -177,6 +171,13 @@ Examples:
           return;
         }
       } else {
+        try {
+          await bootstrap(cwd);
+        } catch (err: any) {
+          console.error(chalk.red("Error:"), err.message);
+          process.exitCode = 1;
+          return;
+        }
         try {
           await ingestFiles(cwd, {
             recursive: true,
