@@ -1164,6 +1164,39 @@ export const SCALA_QUERIES = `
   (#match? @call.name "^[A-Z]"))
 `;
 
+// R queries - works with @davisvaughan/tree-sitter-r
+export const R_QUERIES = `
+; Function definitions: foo <- function(x, y) { ... }
+; Matches <-, <<-, = assignment forms (operator field is anonymous)
+(binary_operator
+  lhs: (identifier) @name
+  rhs: (function_definition)) @definition.function
+
+; library(pkg) and require(pkg) → IMPORTS
+; Arg is a bare identifier (unquoted package name) wrapped in argument.value
+(call
+  function: (identifier) @_fn
+  arguments: (arguments
+    (argument value: (identifier) @import.source))
+  (#match? @_fn "^(library|require)$")) @import
+
+; source("file.R") → IMPORTS (quoted file path string)
+(call
+  function: (identifier) @_fn
+  arguments: (arguments
+    (argument value: (string) @import.source))
+  (#match? @_fn "^source$")) @import
+
+; Direct function calls: foo(...)
+(call
+  function: (identifier) @call.name) @call
+
+; Method calls via $ operator: obj$method(...)
+(call
+  function: (extract_operator
+    rhs: (identifier) @call.name)) @call
+`;
+
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TypeScript]: TYPESCRIPT_QUERIES,
   [SupportedLanguages.JavaScript]: JAVASCRIPT_QUERIES,
@@ -1185,5 +1218,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.JSON]: '',
   [SupportedLanguages.TOML]: '',
   [SupportedLanguages.Markdown]: '',
+  [SupportedLanguages.R]: R_QUERIES,
 };
  

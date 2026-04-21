@@ -33,6 +33,7 @@ function tryLoadGrammar(pkg: string): any {
 }
 const Kotlin = tryLoadGrammar('tree-sitter-kotlin');
 const Swift = tryLoadGrammar('tree-sitter-swift');
+const R = tryLoadGrammar('@davisvaughan/tree-sitter-r');
 
 import { SupportedLanguages, languageFromPath } from './languages.js';
 import { LANGUAGE_QUERIES } from './queries.js';
@@ -105,6 +106,7 @@ const GRAMMAR_MAP: Partial<Record<SupportedLanguages, any>> = {
   [SupportedLanguages.Scala]: Scala,
   ...(Kotlin ? { [SupportedLanguages.Kotlin]: Kotlin } : {}),
   ...(Swift ? { [SupportedLanguages.Swift]: Swift } : {}),
+  ...(R ? { [SupportedLanguages.R]: R } : {}),
 };
 
 // Capture key prefix → NodeKind string
