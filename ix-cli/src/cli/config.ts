@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
@@ -51,8 +51,15 @@ export function loadConfig(): IxConfig {
 }
 
 export function saveConfig(config: IxConfig): void {
-  const configPath = join(homedir(), ".ix", "config.yaml");
-  writeFileSync(configPath, stringify(config));
+  const configDir = join(homedir(), ".ix");
+  const configPath = join(configDir, "config.yaml");
+  // mode 0700 on the directory + 0600 on the file so a stored API key /
+  // bearer token is not world- or group-readable. writeFileSync's `mode`
+  // only applies on creation; chmodSync after-the-fact tightens any
+  // pre-existing file written by an older client.
+  if (!existsSync(configDir)) mkdirSync(configDir, { mode: 0o700, recursive: true });
+  writeFileSync(configPath, stringify(config), { mode: 0o600 });
+  try { chmodSync(configPath, 0o600); } catch { /* non-POSIX filesystem */ }
 }
 
 export function getActiveInstance(): InstanceConfig | undefined {
@@ -108,10 +115,20 @@ export async function refreshAuthIfNeeded(): Promise<string | undefined> {
   try {
     const resp = await fetch(`${instance.endpoint}/auth/token`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${instance.auth.api_key}`,
+      },
       body: JSON.stringify({ api_key: instance.auth.api_key }),
       signal: AbortSignal.timeout(10000),
     });
+    // 429 from the rate-limit middleware: keep the existing token (it's
+    // still valid for `bufferMs` more) and back off. Returning the
+    // current token avoids a thundering-herd retry; callers see no
+    // disruption until the real expiry.
+    if (resp.status === 429) {
+      return instance.auth.token;
+    }
     if (!resp.ok) return undefined;
     const data = await resp.json() as { token: string; expires_at: string; org_id: string; plan: string };
     instance.auth.token = data.token;
