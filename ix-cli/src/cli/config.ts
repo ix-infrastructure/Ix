@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import { parse, stringify } from "yaml";
+import { IxClient } from "../client/api.js";
 
 export interface WorkspaceConfig {
   workspace_id: string;
@@ -42,6 +43,13 @@ export function saveConfig(config: IxConfig): void {
 
 export function getEndpoint(): string {
   return process.env.IX_ENDPOINT || loadConfig().endpoint;
+}
+
+// Single-place factory for IxClient instances. Pro commands and future OSS
+// code paths should prefer this over `new IxClient(getEndpoint())` so auth
+// and endpoint resolution can evolve in one spot.
+export async function createClient(): Promise<IxClient> {
+  return new IxClient(getEndpoint());
 }
 
 export function loadWorkspaces(): WorkspaceConfig[] {
