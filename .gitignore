@@ -18,3 +18,6 @@ ix-cli/dist/
 .env
 .env.*
 !.env.example
+
+# SBT boot artifacts
+.sbt-boot/
