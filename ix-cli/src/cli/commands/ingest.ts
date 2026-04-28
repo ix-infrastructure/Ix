@@ -395,10 +395,6 @@ export async function ingestFiles(
   const moduleLoadMs = Math.round(performance.now() - trueStart);
 
 
-  const resolvedPath = nodePath.isAbsolute(path)
-    ? path
-    : nodePath.resolve(resolveWorkspaceRoot(opts.root), path);
-
   // Workspace identity for client-agnostic backend.
   //
   // The backend used to dereference provenance.source_uri against the host
@@ -406,9 +402,16 @@ export async function ingestFiles(
   // paths as the canonical source_uri, and pass a workspace_id derived from
   // the workspace root's absolute path. The backend treats both as opaque
   // strings; it never reads host files.
-  const workspaceRoot = fs.statSync(resolvedPath).isDirectory()
-    ? resolvedPath
-    : nodePath.dirname(resolvedPath);
+  //
+  // workspaceRoot is the configured workspace root, NOT the ingest target —
+  // so `ix map .` and `ix map ./src` produce identical workspaceIds and emit
+  // the same relative paths for files they share. The previous derivation
+  // (`isDir(resolvedPath) ? resolvedPath : dirname(resolvedPath)`) made
+  // workspaceId vary by ingest target, fragmenting the graph.
+  const workspaceRoot = resolveWorkspaceRoot(opts.root);
+  const resolvedPath = nodePath.isAbsolute(path)
+    ? path
+    : nodePath.resolve(workspaceRoot, path);
   const workspaceId = crypto.createHash('sha256').update(workspaceRoot).digest('hex');
   const toWorkspaceRelative = (absPath: string): string => {
     // Force workspace-local POSIX separators so IDs are stable across OS.

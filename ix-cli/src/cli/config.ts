@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, chmodSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import { parse, stringify } from "yaml";
@@ -182,7 +182,7 @@ export function absoluteFromSourceUri(sourceUri: string, explicitRoot?: string):
   const root = resolveWorkspaceRoot(explicitRoot);
   // POSIX-normalize the relative segment before joining.
   const normalized = sourceUri.replace(/\\/g, "/");
-  return require("node:path").resolve(root, normalized);
+  return resolvePath(root, normalized);
 }
 
 export function resolveWorkspaceRoot(explicitRoot?: string): string {
