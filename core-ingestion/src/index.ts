@@ -1855,7 +1855,7 @@ export function buildGlobalResolutionIndex(
 
     // R: scan function definitions (name <- function(...))
     // Enables cross-batch Tier-3 resolution for large R repos (>500 files).
-    const rFuncRe = /^([a-zA-Z_.][a-zA-Z0-9_.]*)\s*<-\s*function/gm;
+    const rFuncRe = /^([a-zA-Z_.][a-zA-Z0-9_.]*)\s*<-\s*function\b\s*\(/gm;
     for (const [fp, src] of sources) {
       const ext = nodePath.extname(fp).toLowerCase();
       if (ext !== '.r') continue;
