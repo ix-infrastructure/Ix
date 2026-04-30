@@ -1164,6 +1164,44 @@ export const SCALA_QUERIES = `
   (#match? @call.name "^[A-Z]"))
 `;
 
+// R queries — works with @davisvaughan/tree-sitter-r
+export const R_QUERIES = `
+; Function definitions: name <- function(args) body
+; R functions are assigned, not declared, so we match the assignment pattern.
+(binary_operator
+  lhs: (identifier) @name
+  rhs: (function_definition)) @definition.function
+
+; Direct calls: foo(args)
+(call
+  function: (identifier) @call.name) @call
+
+; Package-qualified calls: pkg::func(args) and pkg:::func(args)
+(call
+  function: (namespace_operator
+    lhs: (identifier) @_qualifier
+    rhs: (identifier) @call.name)) @call
+
+; Imports: library(pkg) / require(pkg) — unquoted symbol form
+; In the R grammar, each positional argument is wrapped in an (argument) node with a value: field.
+(call
+  function: (identifier) @_import_fn
+  arguments: (arguments (argument value: (identifier) @import.source))
+  (#match? @_import_fn "^(library|require)$")) @import
+
+; Imports: library("pkg") / require("pkg") — quoted string form
+(call
+  function: (identifier) @_import_fn
+  arguments: (arguments (argument value: (string) @import.source))
+  (#match? @_import_fn "^(library|require)$")) @import
+
+; Source file imports: source("path/to/file.R")
+(call
+  function: (identifier) @_src
+  arguments: (arguments (argument value: (string) @import.source))
+  (#eq? @_src "source")) @import
+`;
+
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TypeScript]: TYPESCRIPT_QUERIES,
   [SupportedLanguages.JavaScript]: JAVASCRIPT_QUERIES,
@@ -1185,5 +1223,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.JSON]: '',
   [SupportedLanguages.TOML]: '',
   [SupportedLanguages.Markdown]: '',
+  [SupportedLanguages.R]: R_QUERIES,
 };
  
