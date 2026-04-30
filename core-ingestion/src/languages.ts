@@ -56,7 +56,6 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.md':   SupportedLanguages.Markdown,
   '.markdown': SupportedLanguages.Markdown,
   '.r':    SupportedLanguages.R,
-  '.R':    SupportedLanguages.R,
 };
 
 export function languageFromPath(filePath: string): SupportedLanguages | null {
