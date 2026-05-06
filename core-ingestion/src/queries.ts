@@ -1166,10 +1166,16 @@ export const SCALA_QUERIES = `
 
 // R queries — works with @davisvaughan/tree-sitter-r
 export const R_QUERIES = `
-; Function definitions: name <- function(args) body
-; R functions are assigned, not declared, so we match the assignment pattern.
+; Function definitions — mirrors the official tags.scm bundled with the grammar.
+; Covers <- and = operators, identifier and string LHS (S3/R5 method names).
 (binary_operator
   lhs: (identifier) @name
+  operator: ["<-" "="]
+  rhs: (function_definition)) @definition.function
+
+(binary_operator
+  lhs: (string) @name
+  operator: ["<-" "="]
   rhs: (function_definition)) @definition.function
 
 ; Direct calls: foo(args)
@@ -1180,6 +1186,11 @@ export const R_QUERIES = `
 (call
   function: (namespace_operator
     lhs: (identifier) @_qualifier
+    rhs: (identifier) @call.name)) @call
+
+; Method calls: obj$method(args)
+(call
+  function: (extract_operator
     rhs: (identifier) @call.name)) @call
 
 ; Imports: library(pkg) / require(pkg) — unquoted symbol form

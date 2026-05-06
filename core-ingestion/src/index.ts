@@ -1313,8 +1313,10 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
 
       if (defCapture) {
         const kind = DEFINITION_KIND_MAP[defCapture.name] ?? 'function';
-        const name = nameCapture?.node.text
+        const rawName = nameCapture?.node.text
           ?? (defCapture.name === 'definition.constructor' ? 'init' : '');
+        // Strip surrounding quotes for string-keyed definitions (e.g. R S3 method names)
+        const name = rawName.replace(/^(['"`])(.*)\1$/, '$2');
         if (!name || name.length === 0) continue;
 
         const defNode = defCapture.node;
