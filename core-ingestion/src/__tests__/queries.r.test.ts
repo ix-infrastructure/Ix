@@ -120,6 +120,38 @@ makeCounter <- function(start = 0) {
     );
   });
 
+  it('captures function definition via = assignment', () => {
+    const result = parseFile('/repo/utils.R', `
+foo = function(x) x * 2
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: 'foo', kind: 'function' }),
+    );
+  });
+
+  it('captures string-keyed function definition (S3 method name)', () => {
+    const result = parseFile('/repo/methods.R', `
+"print.myClass" <- function(x, ...) invisible(x)
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: 'print.myClass', kind: 'function' }),
+    );
+  });
+
+  it('emits CALLS relationship for method calls via $', () => {
+    const result = parseFile('/repo/main.R', `
+run <- function(obj) {
+  obj$render(obj$data)
+}
+`);
+    expect(result).not.toBeNull();
+    expect(result!.relationships).toContainEqual(
+      expect.objectContaining({ dstName: 'render', predicate: 'CALLS' }),
+    );
+  });
+
   it('returns null for non-R extensions', () => {
     const result = parseFile('/repo/script.unknown', 'x <- 1');
     expect(result).toBeNull();

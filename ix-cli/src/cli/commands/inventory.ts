@@ -25,19 +25,7 @@ Examples:
       const client = new IxClient(getEndpoint());
       const limit = parseInt(opts.limit, 10);
 
-      let nodes = await client.listByKind(opts.kind, { limit });
-
-      if (opts.path) {
-        nodes = nodes.filter((n) => {
-          const uri = String(
-            (n as any).provenance?.source_uri ??
-            n.provenance?.sourceUri ??
-            n.attrs?.path ??
-            ""
-          );
-          return uri.includes(opts.path!);
-        });
-      }
+      let nodes = await client.listByKind(opts.kind, { limit, scope: opts.path });
 
       const scope = opts.path ?? null;
 
