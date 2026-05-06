@@ -57,11 +57,12 @@ export class IxClient {
 
   async listByKind(
     kind: string,
-    opts?: { limit?: number }
+    opts?: { limit?: number; scope?: string }
   ): Promise<GraphNode[]> {
     return this.post("/v1/list", {
       kind,
       limit: opts?.limit,
+      scope: opts?.scope,
     });
   }
 
