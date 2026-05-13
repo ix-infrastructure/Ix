@@ -38,7 +38,21 @@ export function loadConfig(): IxConfig {
 
 export function saveConfig(config: IxConfig): void {
   const configPath = join(homedir(), ".ix", "config.yaml");
-  writeFileSync(configPath, stringify(config));
+  // Preserve unknown fields that extension packages (e.g. Pro's `active`
+  // and `instances` for cloud routing) may have added to the on-disk
+  // config. Without this merge, every OSS command that writes config
+  // wipes those fields and breaks downstream features like auto-routing
+  // to a configured cloud instance.
+  let existing: Record<string, unknown> = {};
+  if (existsSync(configPath)) {
+    try {
+      existing = (parse(readFileSync(configPath, "utf-8")) as Record<string, unknown>) || {};
+    } catch {
+      existing = {};
+    }
+  }
+  const merged: Record<string, unknown> = { ...existing, ...(config as unknown as Record<string, unknown>) };
+  writeFileSync(configPath, stringify(merged));
 }
 
 export function getEndpoint(): string {
