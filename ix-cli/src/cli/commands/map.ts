@@ -7,7 +7,7 @@ import { roundFloat } from "../format.js";
 import { bootstrap } from "../bootstrap.js";
 import { formatFetchError } from "../errors.js";
 import { ingestFiles } from "./ingest.js";
-import { getRemoteRunner } from "../remote.js";
+import { getRemoteRunner, isCloudReady } from "../remote.js";
 
 export interface MapRegion {
   id: string;
@@ -93,7 +93,7 @@ export function registerMapCommand(program: Command): void {
     .option("--graph", "Render the hierarchy as a graph/tree view (default)")
     .option("--list", "Render the ranked list view instead of the default graph/tree view")
     .option("--full", "Force full local map, bypassing automatic safety limits (advanced/testing)")
-    .option("--remote", "Route ingestion through the cloud pipeline instead of parsing locally (requires Ix Pro)")
+    .option("--local", "Force local ingestion even when an active cloud instance is configured (Pro only)")
     .option("--verbose", "Show raw confidence scores, crosscut scores, boundary ratios, and signals")
     .option("--silent", "Suppress all output except a one-line summary (useful for LLM hooks)")
     .addHelpText(
@@ -112,6 +112,9 @@ Advanced:
   --full    Override automatic local safety limits and force the full local map
             path. Bypasses automatic downgrade to fast mode and the persistence
             safety guardrail. Intended for testing and performance diagnosis.
+  --local   Force local ingestion even when an active cloud instance is
+            configured. Useful for CI tests, network outages, or local-only
+            development. (Pro only — OSS users are always local.)
   --silent  Skip the full map rendering. Prints one summary line to stderr and
             exits. Ideal for LLM hooks and automated workflows where the full
             output would waste context tokens.
@@ -130,7 +133,7 @@ Examples:
   ix map . --full
   ix --debug map . --full`
     )
-    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remote?: boolean; verbose?: boolean; silent?: boolean }) => {
+    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; local?: boolean; verbose?: boolean; silent?: boolean }) => {
       const cwd = pathArg ? resolve(pathArg) : process.cwd();
 
       const silent = opts.silent === true || opts.format === "silent";
@@ -144,21 +147,19 @@ Examples:
       }
 
       // Ingest the path before mapping so the graph is up to date.
-      // --remote routes through the cloud pipeline via a Pro-supplied
-      // RemoteRunner; absence means Pro isn't installed. The local
-      // backend bootstrap only runs on the non-remote path — cloud
-      // ingestion doesn't require a local Ix backend.
+      //
+      // Routing: if Pro is loaded AND the user has an active cloud
+      // instance configured (isCloudReady === true), route ingestion
+      // through the cloud pipeline. The --local opt-out forces local
+      // even when cloud is configured (useful for CI tests, network
+      // outages, or local-only development).
+      //
+      // The local backend bootstrap below only runs on the local path —
+      // cloud ingestion doesn't require a local Ix backend.
       const ingestStart = performance.now();
-      if (opts.remote) {
-        const runner = getRemoteRunner();
-        if (!runner) {
-          console.error(
-            chalk.red("Error:"),
-            "--remote requires Ix Pro. Install @ix/pro to enable remote ingestion."
-          );
-          process.exitCode = 1;
-          return;
-        }
+      const cloudReady = !opts.local && (await isCloudReady());
+      if (cloudReady) {
+        const runner = getRemoteRunner()!; // isCloudReady guarantees non-null
         try {
           await runner.runIngestion({
             cwd,
