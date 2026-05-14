@@ -45,6 +45,7 @@
     "vitest": "^4.1.0"
   },
   "overrides": {
-    "vite": "8.0.5"
+    "vite": "8.0.5",
+    "tree-sitter": "^0.25.0"
   }
 }
