@@ -34,7 +34,7 @@
   "optionalDependencies": {
     "tree-sitter-kotlin": "^0.3.8",
     "tree-sitter-swift": "^0.6.0",
-    "tree-sitter-sas": "^0.3.2"
+    "tree-sitter-sas": "^0.3.3"
   },
   "devDependencies": {
     "@emnapi/core": "1.9.2",
