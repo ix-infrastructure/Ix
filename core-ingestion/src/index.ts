@@ -33,6 +33,10 @@ function tryLoadGrammar(pkg: string): any {
 }
 const Kotlin = tryLoadGrammar('tree-sitter-kotlin');
 const Swift = tryLoadGrammar('tree-sitter-swift');
+// tree-sitter-sas uses ESM bindings (top-level await) — must use dynamic import
+let SAS: any = null;
+// @ts-ignore
+try { SAS = (await import('tree-sitter-sas')).default; } catch { }
 
 import { SupportedLanguages, languageFromPath } from './languages.js';
 import { LANGUAGE_QUERIES } from './queries.js';
@@ -114,6 +118,7 @@ const GRAMMAR_MAP: Partial<Record<SupportedLanguages, any>> = {
   [SupportedLanguages.Scala]: Scala,
   ...(Kotlin ? { [SupportedLanguages.Kotlin]: Kotlin } : {}),
   ...(Swift ? { [SupportedLanguages.Swift]: Swift } : {}),
+  ...(SAS ? { [SupportedLanguages.SAS]: SAS } : {}),
 };
 
 // Capture key prefix → NodeKind string
@@ -204,6 +209,16 @@ const JS_BUILTINS = new Set([
   'require', 'fetch', 'parseInt', 'parseFloat', 'isNaN', 'isFinite',
 ]);
 
+// SAS-specific builtins: common PROC names and macro keywords that generate
+// noise as CALLS edges (user-defined macros are what we want to track).
+const SAS_BUILTINS = new Set([
+  ...SHARED_BUILTINS,
+  'print', 'means', 'freq', 'sort', 'import', 'export', 'contents', 'datasets',
+  'sql', 'reg', 'logistic', 'glm', 'anova', 'ttest', 'format', 'report',
+  'univariate', 'corr', 'mixed', 'phreg', 'lifetest', 'transpose', 'append',
+  'put', 'let', 'do', 'end', 'goto', 'abort',
+]);
+
 // Per-language BUILTINS lookup — falls back to shared for languages without a
 // specific set (e.g. Java, Go, Rust) so they only skip obvious non-calls.
 function builtinsForLanguage(lang: SupportedLanguages): Set<string> {
@@ -213,6 +228,8 @@ function builtinsForLanguage(lang: SupportedLanguages): Set<string> {
     case SupportedLanguages.JavaScript:
     case SupportedLanguages.TypeScript:
       return JS_BUILTINS;
+    case SupportedLanguages.SAS:
+      return SAS_BUILTINS;
     default:
       return SHARED_BUILTINS;
   }
@@ -1915,6 +1932,24 @@ export function buildGlobalResolutionIndex(
         if (!qkMap.has(name)) qkMap.set(name, [name]);
       }
 
+      if (qkMap.size > 0) {
+        fileQKeys.set(fp, qkMap);
+        fileHasSymbol.set(fp, new Set(qkMap.keys()));
+      }
+    }
+
+    // SAS: scan macro definitions (%macro name) for cross-file Tier-3 resolution.
+    const sasMacroRe = /^%macro\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[(/;]/gim;
+    for (const [fp, src] of sources) {
+      const ext = nodePath.extname(fp).toLowerCase();
+      if (ext !== '.sas') continue;
+      const qkMap = new Map<string, string[]>();
+      sasMacroRe.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = sasMacroRe.exec(src)) !== null) {
+        const name = m[1];
+        if (!qkMap.has(name)) qkMap.set(name, [name]);
+      }
       if (qkMap.size > 0) {
         fileQKeys.set(fp, qkMap);
         fileHasSymbol.set(fp, new Set(qkMap.keys()));

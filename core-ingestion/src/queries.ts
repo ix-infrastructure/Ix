@@ -1382,6 +1382,39 @@ export const SCALA_QUERIES = `
   (#match? @call.name "^[A-Z]"))
 `;
 
+export const SAS_QUERIES = `
+; Macro definitions — %MACRO name ... %MEND
+(macro_definition
+  name: (macro_name) @name) @definition.macro
+
+; Macro call statements — %name(args);
+(macro_call_statement
+  name: (macro_name) @call.name) @call
+
+; Inline macro calls — %name(args) inside DATA/PROC/etc.
+(macro_call
+  name: (macro_name) @call.name) @call
+
+; DATA step — captures the dataset identifier
+(data_step
+  (data_step_header
+    (dataset_name
+      (identifier) @name))) @definition.module
+
+; PROC step — captures the procedure name
+(proc_step
+  (proc_step_header
+    name: (identifier) @name)) @definition.module
+
+; %INCLUDE — file import
+(include_statement
+  source: (string_literal) @import.source) @import
+
+; LIBNAME — library path import
+(libname_statement
+  (string_literal) @import.source) @import
+`;
+
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TypeScript]: TYPESCRIPT_QUERIES,
   [SupportedLanguages.JavaScript]: JAVASCRIPT_QUERIES,
@@ -1403,5 +1436,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.JSON]: '',
   [SupportedLanguages.TOML]: '',
   [SupportedLanguages.Markdown]: '',
+  [SupportedLanguages.SAS]: SAS_QUERIES,
 };
  
