@@ -32,8 +32,8 @@ function tryLoadGrammar(pkg: string): any {
   try { return _require(pkg); } catch { return null; }
 }
 const Kotlin = tryLoadGrammar('tree-sitter-kotlin');
-const Swift = tryLoadGrammar('tree-sitter-swift');
-// tree-sitter-sas uses ESM bindings (top-level await) — must use dynamic import
+const Swift  = tryLoadGrammar('tree-sitter-swift');
+// tree-sitter-sas uses ESM bindings with top-level await — incompatible with tryLoadGrammar (CJS require)
 let SAS: any = null;
 // @ts-ignore
 try { SAS = (await import('tree-sitter-sas')).default; } catch { }
