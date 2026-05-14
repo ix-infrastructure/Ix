@@ -29,10 +29,18 @@ import PHP from 'tree-sitter-php';
 import Scala from 'tree-sitter-scala';
 const _require = createRequire(import.meta.url);
 function tryLoadGrammar(pkg: string): any {
-  try { return _require(pkg); } catch { return null; }
+  try { return _require(pkg); } catch {
+    // Fallback for ESM-only grammar packages: load the native .node addon directly
+    // via node-gyp-build, bypassing the ESM entry point that require() can't handle.
+    try {
+      const root = nodePath.dirname(_require.resolve(`${pkg}/package.json`));
+      return _require('node-gyp-build')(root);
+    } catch { return null; }
+  }
 }
 const Kotlin = tryLoadGrammar('tree-sitter-kotlin');
-const Swift = tryLoadGrammar('tree-sitter-swift');
+const Swift  = tryLoadGrammar('tree-sitter-swift');
+const SAS    = tryLoadGrammar('tree-sitter-sas');
 
 import { SupportedLanguages, languageFromPath } from './languages.js';
 import { LANGUAGE_QUERIES } from './queries.js';
@@ -104,7 +112,8 @@ const GRAMMAR_MAP: Partial<Record<SupportedLanguages, any>> = {
   [SupportedLanguages.PHP]: PHP.php_only,
   [SupportedLanguages.Scala]: Scala,
   ...(Kotlin ? { [SupportedLanguages.Kotlin]: Kotlin } : {}),
-  ...(Swift ? { [SupportedLanguages.Swift]: Swift } : {}),
+  ...(Swift  ? { [SupportedLanguages.Swift]:  Swift  } : {}),
+  ...(SAS    ? { [SupportedLanguages.SAS]:    SAS    } : {}),
 };
 
 // Capture key prefix → NodeKind string

@@ -1164,6 +1164,42 @@ export const SCALA_QUERIES = `
   (#match? @call.name "^[A-Z]"))
 `;
 
+// SAS queries — works with tree-sitter-sas
+// Node types and field names taken directly from the grammar's src/node-types.json and queries/tags.scm.
+export const SAS_QUERIES = `
+; Macro definitions → definition.macro
+(macro_definition
+  name: (macro_name) @name) @definition.macro
+
+; Macro call statements → call
+(macro_call_statement
+  name: (macro_name) @call.name) @call
+
+; Inline macro calls (inside DATA/PROC steps, %let values, etc.)
+(macro_call
+  name: (macro_name) @call.name) @call
+
+; DATA step → definition.module
+; dataset_name has no field — traverse into its first identifier child
+(data_step
+  (data_step_header
+    (dataset_name
+      (identifier) @name))) @definition.module
+
+; PROC step → definition.module
+(proc_step
+  (proc_step_header
+    name: (identifier) @name)) @definition.module
+
+; %INCLUDE → import
+(include_statement
+  source: (string_literal) @import.source) @import
+
+; LIBNAME → import (library path)
+(libname_statement
+  (string_literal) @import.source) @import
+`;
+
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TypeScript]: TYPESCRIPT_QUERIES,
   [SupportedLanguages.JavaScript]: JAVASCRIPT_QUERIES,
@@ -1185,5 +1221,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.JSON]: '',
   [SupportedLanguages.TOML]: '',
   [SupportedLanguages.Markdown]: '',
+  [SupportedLanguages.SAS]: SAS_QUERIES,
 };
  
