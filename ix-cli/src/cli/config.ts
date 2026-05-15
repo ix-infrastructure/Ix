@@ -36,22 +36,42 @@ export function loadConfig(): IxConfig {
   }
 }
 
+// Keys the OSS schema owns. For these, the in-memory `config` argument is
+// the source of truth — including absence (a missing key means "delete from
+// disk"). Anything outside this set is owned by extension packages (e.g.
+// Pro's `active` / `instances`) or by user hand-edits, and is preserved
+// untouched by OSS writes.
+//
+// Keep this in sync with the IxConfig interface above. New OSS fields must
+// be added here, otherwise OSS code can't delete or unset them.
+const OSS_OWNED_KEYS = new Set<keyof IxConfig>([
+  "endpoint",
+  "format",
+  "workspace",
+  "workspaces",
+]);
+
 export function saveConfig(config: IxConfig): void {
   const configPath = join(homedir(), ".ix", "config.yaml");
-  // Preserve unknown fields that extension packages (e.g. Pro's `active`
-  // and `instances` for cloud routing) may have added to the on-disk
-  // config. Without this merge, every OSS command that writes config
-  // wipes those fields and breaks downstream features like auto-routing
-  // to a configured cloud instance.
   let existing: Record<string, unknown> = {};
   if (existsSync(configPath)) {
     try {
-      existing = (parse(readFileSync(configPath, "utf-8")) as Record<string, unknown>) || {};
+      const parsed = parse(readFileSync(configPath, "utf-8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        existing = parsed as Record<string, unknown>;
+      }
     } catch {
       existing = {};
     }
   }
-  const merged: Record<string, unknown> = { ...existing, ...(config as unknown as Record<string, unknown>) };
+  // Drop OSS-owned keys from the disk snapshot — the in-memory `config`
+  // is authoritative for those. Keep everything else (extension fields,
+  // user-added fields) so OSS writes never clobber them.
+  const preserved: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(existing)) {
+    if (!OSS_OWNED_KEYS.has(k as keyof IxConfig)) preserved[k] = v;
+  }
+  const merged: Record<string, unknown> = { ...preserved, ...(config as unknown as Record<string, unknown>) };
   writeFileSync(configPath, stringify(merged));
 }
 
