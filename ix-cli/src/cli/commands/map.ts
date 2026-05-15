@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import type { Command } from "commander";
+import { Option, type Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
@@ -93,7 +93,16 @@ export function registerMapCommand(program: Command): void {
     .option("--graph", "Render the hierarchy as a graph/tree view (default)")
     .option("--list", "Render the ranked list view instead of the default graph/tree view")
     .option("--full", "Force full local map, bypassing automatic safety limits (advanced/testing)")
-    .option("--local", "Force local ingestion even when an active cloud instance is configured (Pro only)")
+    // --local is hidden from OSS --help. It's a Pro-only escape hatch — when
+    // a cloud instance is configured, it forces local ingestion for that one
+    // invocation. OSS users are always local, so surfacing the flag in their
+    // help text would just be noise.
+    .addOption(
+      new Option(
+        "--local",
+        "Force local ingestion even when an active cloud instance is configured",
+      ).hideHelp(),
+    )
     .option("--verbose", "Show raw confidence scores, crosscut scores, boundary ratios, and signals")
     .option("--silent", "Suppress all output except a one-line summary (useful for LLM hooks)")
     .addHelpText(
@@ -112,9 +121,6 @@ Advanced:
   --full    Override automatic local safety limits and force the full local map
             path. Bypasses automatic downgrade to fast mode and the persistence
             safety guardrail. Intended for testing and performance diagnosis.
-  --local   Force local ingestion even when an active cloud instance is
-            configured. Useful for CI tests, network outages, or local-only
-            development. (Pro only — OSS users are always local.)
   --silent  Skip the full map rendering. Prints one summary line to stderr and
             exits. Ideal for LLM hooks and automated workflows where the full
             output would waste context tokens.
