@@ -39,6 +39,7 @@ export function registerSubsystemsCommand(program: Command): void {
     .description("Show the persisted architectural map saved by 'ix map'")
     .option("--format <fmt>", "Output format (text|json)", "text")
     .option("--list",         "List stored subsystem health scores instead of the persisted architecture map")
+    .option("--detailed",     "Include member files and enriched call/import edges (requires --list)")
     .option("--target <target>", "Scope subsystem output to a persisted architecture region")
     .option("--pick <n>", "Resolve an ambiguous region target by numbered candidate")
     .option("--level <n>",    "Filter to level (1=module, 2=subsystem, 3=system)")
@@ -57,6 +58,8 @@ ingestion or clustering.
 Examples:
   ix subsystems
   ix subsystems --list
+  ix subsystems --list --detailed
+  ix subsystems --list --detailed --format json
   ix subsystems api
   ix subsystems --target "Cli / Client"
   ix subsystems api --pick 2
@@ -64,7 +67,7 @@ Examples:
   ix subsystems --level 2
   ix subsystems --graph
   ix subsystems --format json`)
-    .action(async (positionalTarget: string | undefined, opts: { format: string; list?: boolean; target?: string; pick?: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; verbose?: boolean; explain?: boolean }) => {
+    .action(async (positionalTarget: string | undefined, opts: { format: string; list?: boolean; detailed?: boolean; target?: string; pick?: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; verbose?: boolean; explain?: boolean }) => {
       const client = new IxClient(getEndpoint());
       const target = resolveSubsystemTarget(positionalTarget, opts.target);
       const pick = parsePickOption(opts.pick);
@@ -89,6 +92,11 @@ Examples:
         process.exitCode = 1;
         return;
       }
+      if (opts.detailed && !opts.list) {
+        console.error(chalk.red("Error:"), "--detailed requires --list.");
+        process.exitCode = 1;
+        return;
+      }
       if (!target.value && pick.value !== undefined) {
         console.error(chalk.red("Error:"), "--pick requires a target.");
         process.exitCode = 1;
@@ -103,10 +111,13 @@ Examples:
       if (opts.list) {
         let result: any;
         try {
-          result = await client.listSubsystems();
+          result = await client.listSubsystems({ detailed: opts.detailed });
           // Auto-trigger scoring if no persisted scores exist yet
           if ((result.scores ?? []).length === 0) {
             result = await client.scoreSubsystems();
+            if (opts.detailed) {
+              result = await client.listSubsystems({ detailed: true });
+            }
           }
         } catch (err: any) {
           console.error(chalk.red("Error:"), err.message);
@@ -119,15 +130,23 @@ Examples:
           : scores;
 
         if (opts.format === "json") {
-          const compact = filtered.map(s => ({
-            name: s.name,
-            level: s.level,
-            health: roundFloat(s.health_score),
-            files: s.file_count,
-            chunks_per_file: roundFloat(s.chunk_density),
-            smell_files: s.smell_files,
-          }));
-          console.log(JSON.stringify({ scores: compact }, null, 2));
+          if (opts.detailed) {
+            console.log(JSON.stringify({ scores: filtered }, null, 2));
+          } else {
+            const compact = filtered.map(s => ({
+              name: s.name,
+              level: s.level,
+              health: roundFloat(s.health_score),
+              files: s.file_count,
+              chunks_per_file: roundFloat(s.chunk_density),
+              smell_files: s.smell_files,
+            }));
+            console.log(JSON.stringify({ scores: compact }, null, 2));
+          }
+          return;
+        }
+        if (opts.detailed) {
+          console.log(JSON.stringify({ scores: filtered }, null, 2));
           return;
         }
         printScores(filtered);

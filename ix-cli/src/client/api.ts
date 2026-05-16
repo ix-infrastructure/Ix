@@ -249,8 +249,11 @@ export class IxClient {
     return this.post("/v1/subsystems/score", {});
   }
 
-  async listSubsystems(): Promise<any> {
-    return this.get("/v1/subsystems");
+  async listSubsystems(opts?: { detailed?: boolean }): Promise<any> {
+    const params = new URLSearchParams();
+    if (opts?.detailed) params.set("detailed", "true");
+    const qs = params.toString();
+    return this.get(`/v1/subsystems${qs ? `?${qs}` : ""}`);
   }
 
   async getSubsystemMap(opts?: { target?: string; pick?: number }): Promise<any> {
