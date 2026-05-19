@@ -141,4 +141,80 @@ libname mylib '/data/project';
     const result = parseFile('/repo/script.unknown', '%macro foo; %mend foo;');
     expect(result).toBeNull();
   });
+
+  // SPF production style — inline block comments in parameter lists
+  it('captures macro with trailing inline block comment on parameter (Mode 1)', () => {
+    const result = parseFile('/repo/loadpackage.sas', `
+%macro loadPackage(
+  packageName /* name of a package */
+, path = %sysfunc(pathname(packages)) /* location of a package */
+, options = %str(LOWCASE_MEMNAME)     /* possible options */
+);
+%mend loadPackage;
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: 'loadPackage', kind: 'macro' }),
+    );
+  });
+
+  it('captures macro with multi-line inline block comment on parameter (Mode 1 multi-line)', () => {
+    const result = parseFile('/repo/spf.sas', `
+%macro installPackage(
+  packagesNames /* space separated list of packages names,
+                   without the zip extension */
+, sourcePath =  /* location of the package,
+                   e.g. "www.some.page/", mind the "/" at the end */
+);
+%mend installPackage;
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: 'installPackage', kind: 'macro' }),
+    );
+  });
+
+  it('captures macro with block comment as default value (Mode 2)', () => {
+    const result = parseFile('/repo/spf.sas', `
+%macro loadPackage(
+  source2 = /*source2*/ /* option to print out details */
+);
+%mend loadPackage;
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: 'loadPackage', kind: 'macro' }),
+    );
+  });
+
+  it('captures macro with standalone block comment between parameters (Mode 3)', () => {
+    const result = parseFile('/repo/generatepackage.sas', `
+%macro generatePackage(
+  filesLocation   /* location of package files */
+, buildLocation=  /* location of package ZIP file */
+/* testing options: */
+, testPackage=Y   /* indicator if tests should be executed */
+, packages=       /* location of other packages */
+);
+%mend generatePackage;
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: 'generatePackage', kind: 'macro' }),
+    );
+  });
+
+  it('captures macro with /options and des= clause (Mode 4)', () => {
+    const result = parseFile('/repo/spfinit.sas', `
+%macro SPFinit_intrnl_forceV7DSname(
+  mcParam /* name of a macro parameter */
+)/secure minoperator
+des='SAS Packages Framework internal macro.';
+%mend SPFinit_intrnl_forceV7DSname;
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: 'SPFinit_intrnl_forceV7DSname', kind: 'macro' }),
+    );
+  });
 });
