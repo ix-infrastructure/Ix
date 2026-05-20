@@ -1395,11 +1395,11 @@ export const SAS_QUERIES = `
 (macro_call
   name: (macro_name) @call.name) @call
 
-; DATA step — captures the dataset identifier
+; DATA step — captures the dataset identifier or macro variable reference
 (data_step
   (data_step_header
     (dataset_name
-      (identifier) @name))) @definition.module
+      [(identifier) (macro_variable_ref)] @name))) @definition.module
 
 ; PROC step — captures the procedure name
 (proc_step

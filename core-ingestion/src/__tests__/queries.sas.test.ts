@@ -217,4 +217,53 @@ des='SAS Packages Framework internal macro.';
       expect.objectContaining({ name: 'SPFinit_intrnl_forceV7DSname', kind: 'macro' }),
     );
   });
+
+  // v0.3.6 fix #1 — &var.suffix macro references parsed as one token; previously
+  // &dsname. stopped at the dot leaving the suffix as a stray identifier that could
+  // corrupt surrounding parse nodes.
+  it('captures DATA step whose name is a macro variable reference with dot-suffix', () => {
+    const result = parseFile('/repo/datastep.sas', `
+data &filesWithCodes.addCnt;
+  set &dsname.base;
+run;
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: '&filesWithCodes.addCnt', kind: 'module' }),
+    );
+  });
+
+  // v0.3.6 fix #2 — %" inside double-quoted strings does not close the string early
+  it('parses double-quoted string containing %" without breaking', () => {
+    const result = parseFile('/repo/labels.sas', `
+%macro addLabel;
+  title "value is %str(%'%")";
+%mend addLabel;
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: 'addLabel', kind: 'macro' }),
+    );
+  });
+
+  // v0.3.6 fix #3 — '' escape inside single-quoted strings not consumed by %' pattern
+  it('parses single-quoted string with escaped quote without cascade failure', () => {
+    const result = parseFile('/repo/generatepackage.sas', `
+%macro generatePackage(
+  filesLocation
+, buildLocation=
+, testPackage=Y
+, packages=
+);
+  data _null_;
+    x = 'it''s fine';
+    y = 'another ''quoted'' value';
+  run;
+%mend generatePackage;
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: 'generatePackage', kind: 'macro' }),
+    );
+  });
 });
