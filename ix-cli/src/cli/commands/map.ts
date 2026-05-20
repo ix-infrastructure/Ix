@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { Option, type Command } from "commander";
+import { type Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
@@ -93,16 +93,6 @@ export function registerMapCommand(program: Command): void {
     .option("--graph", "Render the hierarchy as a graph/tree view (default)")
     .option("--list", "Render the ranked list view instead of the default graph/tree view")
     .option("--full", "Force full local map, bypassing automatic safety limits (advanced/testing)")
-    // --local is hidden from OSS --help. It's a Pro-only escape hatch — when
-    // a cloud instance is configured, it forces local ingestion for that one
-    // invocation. OSS users are always local, so surfacing the flag in their
-    // help text would just be noise.
-    .addOption(
-      new Option(
-        "--local",
-        "Force local ingestion even when an active cloud instance is configured",
-      ).hideHelp(),
-    )
     .option("--verbose", "Show raw confidence scores, crosscut scores, boundary ratios, and signals")
     .option("--silent", "Suppress all output except a one-line summary (useful for LLM hooks)")
     .addHelpText(
@@ -139,7 +129,7 @@ Examples:
   ix map . --full
   ix --debug map . --full`
     )
-    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; local?: boolean; verbose?: boolean; silent?: boolean }) => {
+    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; verbose?: boolean; silent?: boolean }) => {
       const cwd = pathArg ? resolve(pathArg) : process.cwd();
 
       const silent = opts.silent === true || opts.format === "silent";
@@ -156,14 +146,14 @@ Examples:
       //
       // Routing: if Pro is loaded AND the user has an active cloud
       // instance configured (isCloudReady === true), route ingestion
-      // through the cloud pipeline. The --local opt-out forces local
-      // even when cloud is configured (useful for CI tests, network
-      // outages, or local-only development).
+      // through the cloud pipeline. To force local, switch the active
+      // instance with `ix instance use local` (or `ix instance bind
+      // local` to scope to one workspace).
       //
       // The local backend bootstrap below only runs on the local path —
       // cloud ingestion doesn't require a local Ix backend.
       const ingestStart = performance.now();
-      const cloudReady = !opts.local && (await isCloudReady());
+      const cloudReady = await isCloudReady();
       if (cloudReady) {
         const runner = getRemoteRunner()!; // isCloudReady guarantees non-null
         try {

@@ -3,9 +3,9 @@
 // OSS ships no remote implementation. A Pro module (or other extension)
 // registers a RemoteRunner at load time via registerRemoteRunner(). OSS
 // command handlers look it up via getRemoteRunner() and route through
-// it automatically when isCloudReady() returns true — no per-command
-// --remote flag required. A --local opt-out is still available for
-// users who want to force local execution.
+// it automatically when isCloudReady() returns true. To force local
+// execution, users switch their active instance with `ix instance use
+// local` (Pro command).
 
 export interface RemoteIngestOptions {
   cwd: string;
