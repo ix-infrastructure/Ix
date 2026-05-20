@@ -263,25 +263,106 @@ export class IxClient {
   }
 
   async reset(): Promise<{ ok: boolean; message: string }> {
-    const resp = await fetch(`${this.endpoint}/v1/reset`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-      signal: AbortSignal.timeout(10 * 60 * 1000), // 10 minutes
-    });
-    if (!resp.ok) {
-      const text = await resp.text();
-      throw new Error(`${resp.status}: ${text}`);
-    }
-    return resp.json() as Promise<{ ok: boolean; message: string }>;
+    return this.runReset(
+      "/v1/reset/async",
+      "/v1/reset",
+      "Graph reset. All nodes and edges deleted.",
+    );
   }
 
   async resetCode(): Promise<{ ok: boolean; message: string }> {
-    const resp = await fetch(`${this.endpoint}/v1/reset/code`, {
+    return this.runReset(
+      "/v1/reset/code/async",
+      "/v1/reset/code",
+      "Code graph reset. Planning artifacts (goals, plans, tasks, bugs, decisions) preserved.",
+    );
+  }
+
+  // True when the configured endpoint is a local memory-layer. A local
+  // backend has no proxy in front of it, so the sync reset path connects
+  // directly and returns in milliseconds — there is nothing to fix there.
+  private isLocalEndpoint(): boolean {
+    try {
+      const host = new URL(this.endpoint).hostname.toLowerCase();
+      return host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" || host === "::1";
+    } catch {
+      return false;
+    }
+  }
+
+  // Reset can take minutes on a large graph. Against a cloud deployment a
+  // single sync request outlives the GCLB stream timeout → spurious 502
+  // even though the truncate succeeded. So for a remote endpoint we drive
+  // the async endpoint — begin returns immediately, then poll for status.
+  //
+  // For a local endpoint there is no proxy and the truncate is near-instant,
+  // so we keep the original sync request unchanged — identical behavior for
+  // OSS and Pro users running against a local memory-layer.
+  //
+  // If a remote backend predates the async endpoints (404 on begin), fall
+  // back to the sync request so old deployments still work.
+  private async runReset(
+    asyncPath: string,
+    syncPath: string,
+    doneMessage: string,
+  ): Promise<{ ok: boolean; message: string }> {
+    if (this.isLocalEndpoint()) {
+      return this.runResetSync(syncPath);
+    }
+
+    const beginResp = await fetch(`${this.endpoint}${asyncPath}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
-      signal: AbortSignal.timeout(10 * 60 * 1000), // 10 minutes
+      signal: AbortSignal.timeout(30 * 1000),
+    });
+
+    if (beginResp.status === 404) {
+      return this.runResetSync(syncPath);
+    }
+    if (!beginResp.ok) {
+      const text = await beginResp.text();
+      throw new Error(`${beginResp.status}: ${text}`);
+    }
+
+    const { opId } = (await beginResp.json()) as { opId: string };
+    const deadlineMs = Date.now() + 15 * 60 * 1000;
+
+    while (Date.now() < deadlineMs) {
+      const statusResp = await fetch(`${this.endpoint}/v1/reset/status/${opId}`, {
+        method: "GET",
+        signal: AbortSignal.timeout(30 * 1000),
+      });
+      // Op state is in-process on the server — a restart drops it. Reset is
+      // idempotent, so the safe recovery is to tell the user to re-run.
+      if (statusResp.status === 404) {
+        throw new Error(
+          `Reset status for operation ${opId} was lost (the server may have ` +
+          `restarted). Reset is idempotent — re-run the command to confirm.`,
+        );
+      }
+      if (!statusResp.ok) {
+        const text = await statusResp.text();
+        throw new Error(`${statusResp.status}: ${text}`);
+      }
+      const status = (await statusResp.json()) as { state: string; error?: string | null };
+      if (status.state === "done") {
+        return { ok: true, message: doneMessage };
+      }
+      if (status.state === "failed") {
+        throw new Error(`Reset failed: ${status.error ?? "unknown error"}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    throw new Error(`Reset did not complete within 15 minutes (operation ${opId}).`);
+  }
+
+  private async runResetSync(syncPath: string): Promise<{ ok: boolean; message: string }> {
+    const resp = await fetch(`${this.endpoint}${syncPath}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(10 * 60 * 1000),
     });
     if (!resp.ok) {
       const text = await resp.text();
