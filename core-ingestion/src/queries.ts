@@ -1185,5 +1185,15 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.JSON]: '',
   [SupportedLanguages.TOML]: '',
   [SupportedLanguages.Markdown]: '',
+  [SupportedLanguages.Text]: '',
+  [SupportedLanguages.PDF]: '',
+  [SupportedLanguages.RST]: '',
+  [SupportedLanguages.TeX]: '',
+  [SupportedLanguages.AsciiDoc]: '',
+  [SupportedLanguages.Org]: '',
+  [SupportedLanguages.RTF]: '',
+  [SupportedLanguages.HTML]: '',
+  [SupportedLanguages.XML]: '',
+  [SupportedLanguages.CSV]: '',
 };
  
