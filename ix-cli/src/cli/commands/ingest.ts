@@ -8,9 +8,9 @@ import type { Command } from 'commander';
 import { ParsePool } from './parse-pool.js';
 // import { ResolveWorker } from './resolve-pool.js';
 import chalk from 'chalk';
-import { IxClient } from '../../client/api.js';
+import type { IxClient } from '../../client/api.js';
 import type { GraphPatchPayload } from '../../client/types.js';
-import { getEndpoint, resolveWorkspaceRoot } from '../config.js';
+import { getEndpoint, resolveWorkspaceRoot, createClient } from '../config.js';
 import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
 import { loadIngestionModules } from './ingestion-loader.js';
@@ -39,6 +39,17 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.json',
   '.toml',
   '.md', '.markdown',
+  // Text / document types — routed to the text pipeline for semantic extraction
+  '.txt', '.text', '.log',
+  '.pdf',
+  '.rst',
+  '.tex', '.latex',
+  '.adoc', '.asciidoc',
+  '.org',
+  '.rtf',
+  '.html', '.htm',
+  '.xml', '.svg',
+  '.csv', '.tsv',
 ]);
 
 export function isSupportedSourceFile(filePath: string): boolean {
@@ -416,7 +427,7 @@ export async function ingestFiles(
     return rel.split(nodePath.sep).join('/');
   };
 
-  const client = new IxClient(getEndpoint());
+  const client = await createClient();
 
   // Schema-version check forces a clean re-ingest when the backend's graph
   // format has changed in a way that invalidates existing node IDs (e.g. the
@@ -1251,7 +1262,7 @@ async function ingestGitHub(opts: {
 }): Promise<void> {
   const repo = parseGitHubRepo(opts.github!);
   const token = await resolveGitHubToken(opts.token);
-  const client = new IxClient(getEndpoint());
+  const client = await createClient();
   const limit = parseInt(opts.limit, 10);
   const start = performance.now();
 

@@ -19,6 +19,17 @@ export enum SupportedLanguages {
   JSON = 'json',
   TOML = 'toml',
   Markdown = 'markdown',
+  // Text / document types — routed to the text pipeline for semantic extraction
+  Text = 'text',
+  PDF = 'pdf',
+  RST = 'rst',
+  TeX = 'tex',
+  AsciiDoc = 'asciidoc',
+  Org = 'org',
+  RTF = 'rtf',
+  HTML = 'html',
+  XML = 'xml',
+  CSV = 'csv',
 }
 
 const EXT_MAP: Record<string, SupportedLanguages> = {
@@ -54,6 +65,24 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.toml': SupportedLanguages.TOML,
   '.md':   SupportedLanguages.Markdown,
   '.markdown': SupportedLanguages.Markdown,
+  // Text / document types
+  '.txt':      SupportedLanguages.Text,
+  '.text':     SupportedLanguages.Text,
+  '.log':      SupportedLanguages.Text,
+  '.pdf':      SupportedLanguages.PDF,
+  '.rst':      SupportedLanguages.RST,
+  '.tex':      SupportedLanguages.TeX,
+  '.latex':    SupportedLanguages.TeX,
+  '.adoc':     SupportedLanguages.AsciiDoc,
+  '.asciidoc': SupportedLanguages.AsciiDoc,
+  '.org':      SupportedLanguages.Org,
+  '.rtf':      SupportedLanguages.RTF,
+  '.html':     SupportedLanguages.HTML,
+  '.htm':      SupportedLanguages.HTML,
+  '.xml':      SupportedLanguages.XML,
+  '.svg':      SupportedLanguages.XML,
+  '.csv':      SupportedLanguages.CSV,
+  '.tsv':      SupportedLanguages.CSV,
 };
 
 export function languageFromPath(filePath: string): SupportedLanguages | null {
