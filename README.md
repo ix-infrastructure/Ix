@@ -6,9 +6,9 @@
 <p align="center"><em>Your context saver and virtual cartographer.</em></p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/stars/ix-infrastructure/IX-Memory" />
-  <img src="https://img.shields.io/github/license/ix-infrastructure/IX-Memory" />
-  <img src="https://img.shields.io/github/actions/workflow/status/ix-infrastructure/IX-Memory/ci.yml?label=tests" />
+  <img src="https://img.shields.io/github/stars/ix-infrastructure/Ix" />
+  <img src="https://img.shields.io/github/license/ix-infrastructure/Ix" />
+  <img src="https://img.shields.io/github/actions/workflow/status/ix-infrastructure/Ix/ci.yml?label=tests" />
   <img src="https://img.shields.io/badge/platform-windows%20%7C%20macOS%20%7C%20linux-lightgrey" />
 </p>
 
