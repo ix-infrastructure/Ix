@@ -1,8 +1,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { renderSection, renderSuccess, renderError } from "../ui.js";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { getEndpoint, createClient } from "../config.js";
 
 interface Check {
   name: string;
@@ -16,7 +15,7 @@ export function registerDoctorCommand(program: Command): void {
     .option("--format <fmt>", "Output format (text|json)", "text")
     .action(async (opts: { format: string }) => {
       const endpoint = getEndpoint();
-      const client = new IxClient(endpoint);
+      const client = await createClient();
 
       const checks: Check[] = [
         {

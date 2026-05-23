@@ -1,7 +1,6 @@
 import type { Command } from "commander";
 import { renderSection, renderKeyValue, renderWarning, renderNote, renderSuccess } from "../ui.js";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
+import { getEndpoint, resolveWorkspaceRoot, createClient } from "../config.js";
 import { detectStaleFiles } from "../stale.js";
 
 export function registerStatusCommand(program: Command): void {
@@ -11,7 +10,7 @@ export function registerStatusCommand(program: Command): void {
     .option("--format <fmt>", "Output format (text|json)", "text")
     .option("--root <dir>", "Workspace root directory")
     .action(async (opts: { format: string; root?: string }) => {
-      const client = new IxClient(getEndpoint());
+      const client = await createClient();
       try {
         const health = await client.health();
         const root = resolveWorkspaceRoot(opts.root);

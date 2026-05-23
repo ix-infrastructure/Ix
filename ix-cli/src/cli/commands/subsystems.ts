@@ -1,7 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../config.js";
 import { roundFloat } from "../format.js";
 import { renderMapText, type MapResult } from "./map.js";
 import {
@@ -65,7 +64,7 @@ Examples:
   ix subsystems --graph
   ix subsystems --format json`)
     .action(async (positionalTarget: string | undefined, opts: { format: string; list?: boolean; target?: string; pick?: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; verbose?: boolean; explain?: boolean }) => {
-      const client = new IxClient(getEndpoint());
+      const client = await createClient();
       const target = resolveSubsystemTarget(positionalTarget, opts.target);
       const pick = parsePickOption(opts.pick);
 

@@ -1,7 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
-import { getActiveWorkspaceRoot, getEndpoint } from "../config.js";
+import { getActiveWorkspaceRoot, createClient } from "../config.js";
 import { formatNodes, relativePath } from "../format.js";
 import { scoreCandidate } from "../resolve.js";
 import { applyRoleFilter, roleHint } from "../role-filter.js";
@@ -114,7 +113,7 @@ Examples:
     .action(async (term: string, opts: {
       limit: string; kind?: string; language?: string; path?: string; asOf?: string; format: string; includeTests?: boolean; testsOnly?: boolean
     }) => {
-      const client = new IxClient(getEndpoint());
+      const client = await createClient();
       const limit = parseInt(opts.limit, 10);
       const effectivePathFilter = opts.path ?? getActiveWorkspaceRoot();
 

@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../config.js";
 import {
   resolveFileOrEntity, resolveEntityFull, printResolved, printAmbiguous,
   looksFileLike, isRawId, type ResolvedEntity,
@@ -44,7 +44,7 @@ export function registerLocateCommand(program: Command): void {
   ix locate ArangoClient --format json
   ix locate scoreCandidate --pick 2`)
     .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: string; format: string }) => {
-      const client = new IxClient(getEndpoint());
+      const client = await createClient();
       const diagnostics: string[] = [];
       const isJson = opts.format === "json";
 

@@ -1,7 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../config.js";
 import { resolveFileOrEntity, printResolved } from "../resolve.js";
 import { relativePath } from "../format.js";
 import { stderr } from "../stderr.js";
@@ -20,7 +19,7 @@ export function registerHistoryCommand(program: Command): void {
   ix history IngestionService --kind class
   ix history <entity-uuid>`)
     .action(async (target: string, opts: { kind?: string; path?: string; pick?: string; format: string }) => {
-      const client = new IxClient(getEndpoint());
+      const client = await createClient();
       const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick ? parseInt(opts.pick, 10) : undefined };
       const resolved = await resolveFileOrEntity(client, target, resolveOpts);
       if (!resolved) return;

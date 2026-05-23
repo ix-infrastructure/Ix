@@ -1,13 +1,13 @@
 import { resolve } from "node:path";
 import type { Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { getEndpoint, getActiveInstance, createClient } from "../config.js";
 import { roundFloat } from "../format.js";
 import { bootstrap } from "../bootstrap.js";
 import { formatFetchError } from "../errors.js";
 import { ingestFiles } from "./ingest.js";
-import { getRemoteRunner } from "../remote.js";
+import { getRemoteRunner, registerRemoteRunner } from "../remote.js";
+import { createRemoteRunner } from "../remoteRunner.js";
 
 export interface MapRegion {
   id: string;
@@ -93,7 +93,8 @@ export function registerMapCommand(program: Command): void {
     .option("--graph", "Render the hierarchy as a graph/tree view (default)")
     .option("--list", "Render the ranked list view instead of the default graph/tree view")
     .option("--full", "Force full local map, bypassing automatic safety limits (advanced/testing)")
-    .option("--remote", "Route ingestion through the cloud pipeline instead of parsing locally (requires Ix Pro)")
+    .option("--remote", "Force ingestion through the cloud pipeline")
+    .option("--local", "Force local parsing even when cloud pipeline is available")
     .option("--verbose", "Show raw confidence scores, crosscut scores, boundary ratios, and signals")
     .option("--silent", "Suppress all output except a one-line summary (useful for LLM hooks)")
     .addHelpText(
@@ -130,7 +131,7 @@ Examples:
   ix map . --full
   ix --debug map . --full`
     )
-    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remote?: boolean; verbose?: boolean; silent?: boolean }) => {
+    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remote?: boolean; local?: boolean; verbose?: boolean; silent?: boolean }) => {
       const cwd = pathArg ? resolve(pathArg) : process.cwd();
 
       try {
@@ -152,15 +153,48 @@ Examples:
       }
 
       // Ingest the path before mapping so the graph is up to date.
-      // --remote routes through the cloud pipeline via a Pro-supplied
-      // RemoteRunner; absence means Pro isn't installed.
+      // Resolve the repo-splitter endpoint with a clear priority chain:
+      //   1. IX_REPO_SPLITTER_ENDPOINT env var
+      //   2. Active instance config (repoSplitterEndpoint field)
+      //   3. Backend /v1/capabilities response
+      // When a cloud instance is active and an endpoint is found, remote
+      // ingestion is used automatically. --local forces local parsing.
+      const client = await createClient();
       const ingestStart = performance.now();
-      if (opts.remote) {
+      const instance = getActiveInstance();
+
+      let useRemote = false;
+      if (opts.local) {
+        useRemote = false;
+      } else {
+        // Resolve repo-splitter endpoint
+        const rsEndpoint =
+          process.env.IX_REPO_SPLITTER_ENDPOINT
+          || instance?.repoSplitterEndpoint
+          || await client.capabilities().then(c => c.repoSplitterEndpoint).catch(() => undefined);
+
+        if (rsEndpoint) {
+          // "self" means the tunnel-server proxies /v1/ingest/* itself —
+          // resolve to the same endpoint the CLI is already talking to.
+          const resolvedEndpoint = rsEndpoint === "self" ? getEndpoint() : rsEndpoint;
+          registerRemoteRunner(createRemoteRunner({
+            repoSplitterEndpoint: resolvedEndpoint,
+            orgId: instance?.auth?.org_id,
+          }));
+          useRemote = true;
+        } else if (opts.remote) {
+          // --remote was explicit but no endpoint found
+          useRemote = true;
+        }
+      }
+
+      if (useRemote) {
         const runner = getRemoteRunner();
         if (!runner) {
           console.error(
             chalk.red("Error:"),
-            "--remote requires Ix Pro. Install @ix/pro to enable remote ingestion."
+            "--remote requires a cloud pipeline endpoint. Set IX_REPO_SPLITTER_ENDPOINT " +
+            "or ensure the backend advertises repoSplitterEndpoint via /v1/capabilities."
           );
           process.exitCode = 1;
           return;
@@ -192,8 +226,6 @@ Examples:
         }
       }
       const ingestMs = Math.round(performance.now() - ingestStart);
-
-      const client = new IxClient(getEndpoint());
 
       const mapBarWidth = 25;
       const mapStart    = performance.now();

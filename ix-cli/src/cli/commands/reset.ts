@@ -5,8 +5,7 @@ import * as os from "node:os";
 import type { Command } from "commander";
 import chalk from "chalk";
 import { spawnSync } from "child_process";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../config.js";
 
 function mtimeCachePath(projectRoot: string): string {
   const key = crypto.createHash("sha256").update(projectRoot).digest("hex").slice(0, 12);
@@ -48,7 +47,7 @@ export function registerResetCommand(program: Command): void {
         }
       }
 
-      const client = new IxClient(getEndpoint());
+      const client = await createClient();
       const label = opts.code ? "Wiping code graph..." : "Wiping graph...";
       const spinnerFrames = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
       let spinIdx = 0;

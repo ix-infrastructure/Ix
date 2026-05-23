@@ -1,7 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../config.js";
 
 interface SmellCandidate {
   file_id: string;
@@ -57,7 +56,7 @@ Examples:
       weakMaxNeighbors: string;
       list?: boolean;
     }) => {
-      const client = new IxClient(getEndpoint());
+      const client = await createClient();
 
       if (opts.list) {
         let result: any;

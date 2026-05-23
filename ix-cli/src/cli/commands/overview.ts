@@ -1,7 +1,7 @@
 import * as nodePath from "node:path";
 import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../config.js";
 import { resolveFileOrEntity, printResolved } from "../resolve.js";
 import { getEffectiveSystemPath, getSystemPath, hasMapData } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
@@ -53,7 +53,7 @@ Examples:
   ix overview scoreCandidate --pick 2`
     )
     .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: string; format: string }) => {
-      const client = new IxClient(getEndpoint());
+      const client = await createClient();
       const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick ? parseInt(opts.pick, 10) : undefined };
       const target = await resolveFileOrEntity(client, symbol, resolveOpts);
       if (!target) return;

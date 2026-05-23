@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../config.js";
 
 type Metric = "dependents" | "callers" | "importers" | "members";
 
@@ -149,7 +149,7 @@ export function registerRankCommand(program: Command): void {
 
         const topN = parseInt(opts.top, 10);
         const isJson = opts.format === "json";
-        const client = new IxClient(getEndpoint());
+        const client = await createClient();
         const diagnostics: string[] = [];
 
         // 1. Fetch all entities of the given kind

@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../config.js";
 import { resolveFileOrEntity, resolveEntityFull, printResolved, looksFileLike, type ResolvedEntity } from "../resolve.js";
 import { formatDiff, relativePath, stripNulls } from "../format.js";
 import { stderr } from "../stderr.js";
@@ -419,7 +419,7 @@ export function registerDiffCommand(program: Command): void {
       entity?: string; summary?: boolean; content?: boolean; limit?: string; full?: boolean; format: string;
       kind?: string; path?: string; pick?: string;
     }) => {
-      const client = new IxClient(getEndpoint());
+      const client = await createClient();
       const from = parseInt(fromRev, 10);
       const to = parseInt(toRev, 10);
 

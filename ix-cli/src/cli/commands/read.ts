@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
-import { absoluteFromSourceUri, getEndpoint, resolveWorkspaceRoot } from "../config.js";
+import { absoluteFromSourceUri, resolveWorkspaceRoot, createClient } from "../config.js";
 import { resolveEntityFull } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { isFileStale } from "../stale.js";
@@ -119,7 +119,7 @@ Examples:
   ix read verify_token --path auth`)
     .action(async (target: string, opts: { format: string; kind?: string; path?: string; pick?: string; root?: string }) => {
       const root = resolveWorkspaceRoot(opts.root);
-      const client = new IxClient(getEndpoint());
+      const client = await createClient();
 
       // --- Step 1: Parse line range if present ---
       const lineRangeMatch = target.match(/^(.+?):(\d+)-(\d+)$/);

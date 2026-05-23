@@ -4,8 +4,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import chalk from "chalk";
-import { IxClient } from "../client/api.js";
-import { getEndpoint, loadConfig, saveConfig, type WorkspaceConfig } from "./config.js";
+import { getEndpoint, getActiveInstance, refreshAuthIfNeeded, createClient, loadConfig, saveConfig, type WorkspaceConfig } from "./config.js";
 
 export interface BootstrapResult {
   createdConfig: boolean;
@@ -52,12 +51,26 @@ export function ensureWorkspaceRegistered(cwd = process.cwd()): { registered: bo
 
 /**
  * Ensure the backend is reachable. If not, auto-start via ix docker start.
+ * When a remote cloud instance is active, never attempt to start local Docker
+ * — surface the connection error directly so the user can diagnose it.
  */
 export async function ensureBackendAvailable(): Promise<void> {
-  const client = new IxClient(getEndpoint());
+  const endpoint = getEndpoint();
+  const isRemote = getActiveInstance() !== undefined;
+
+  // createClient() handles token refresh internally
+  const client = await createClient();
+
   try {
     await client.health();
-  } catch {
+  } catch (err) {
+    if (isRemote) {
+      throw new Error(
+        `Cannot reach remote instance at ${endpoint}. ` +
+        `Check your connection or run 'ix instance status'. ` +
+        `Underlying: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     try {
       execFileSync("ix", ["docker", "start"], { stdio: "inherit", timeout: 120000 });
     } catch {

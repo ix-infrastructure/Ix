@@ -2,8 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
+import { resolveWorkspaceRoot, createClient } from "../config.js";
 import { formatEdgeResults, relativePath } from "../format.js";
 import { resolveFileOrEntity, printResolved } from "../resolve.js";
 import { stderr } from "../stderr.js";
@@ -20,7 +19,7 @@ export function registerCallersCommand(program: Command): void {
     .option("--format <fmt>", "Output format (text|json)", "text")
     .addHelpText("after", "\nExamples:\n  ix callers verify_token\n  ix callers processPayment --format json\n  ix callers parse --kind method --limit 20")
     .action(async (symbol: string, opts: { kind?: string; pick?: string; limit: string; format: string }) => {
-      const client = new IxClient(getEndpoint());
+      const client = await createClient();
       const limit = parseInt(opts.limit, 10);
       const resolveOpts = { kind: opts.kind, pick: opts.pick ? parseInt(opts.pick, 10) : undefined };
       const target = await resolveFileOrEntity(client, symbol, resolveOpts);
@@ -109,7 +108,7 @@ export function registerCallersCommand(program: Command): void {
     .option("--format <fmt>", "Output format (text|json)", "text")
     .addHelpText("after", "\nExamples:\n  ix callees processPayment\n  ix callees parse --format json")
     .action(async (symbol: string, opts: { kind?: string; pick?: string; limit: string; format: string }) => {
-      const client = new IxClient(getEndpoint());
+      const client = await createClient();
       const calleeLimit = parseInt(opts.limit, 10);
       const resolveOpts = { kind: opts.kind, pick: opts.pick ? parseInt(opts.pick, 10) : undefined };
       const target = await resolveFileOrEntity(client, symbol, resolveOpts);

@@ -4,7 +4,7 @@ import * as crypto from "node:crypto";
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
-import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
+import { resolveWorkspaceRoot, createClient } from "../config.js";
 import { bootstrap } from "../bootstrap.js";
 import { loadWatchIngestionModules } from "./ingestion-loader.js";
 import { readFileContent } from "./watch-utils.js";
@@ -59,7 +59,7 @@ export function registerWatchCommand(program: Command): void {
         process.exit(1);
       }
 
-      const client = new IxClient(getEndpoint());
+      const client = await createClient();
 
       const relative = path.relative(root, watchPath) || ".";
       console.log(chalk.cyan(`[watch] Watching ${relative}`));

@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { renderSection, renderKeyValue, renderNote, renderResolvedHeader, colorizeKind } from "../ui.js";
 import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../config.js";
 import { resolveFileOrEntity, printResolved } from "../resolve.js";
 import { bucketByHierarchy, getSystemPath, formatSystemPath, hasMapData, type SystemPath } from "../hierarchy.js";
 import { inferRiskSemantics, humanizeLabel, type ImpactFacts, type RiskSemantics } from "../impact/risk-semantics.js";
@@ -28,7 +28,7 @@ export function registerImpactCommand(program: Command): void {
         symbol: string,
         opts: { kind?: string; pick?: string; depth: string; limit: string; format: string }
       ) => {
-        const client = new IxClient(getEndpoint());
+        const client = await createClient();
         const limit = parseInt(opts.limit, 10);
         const depth = Math.min(Math.max(parseInt(opts.depth, 10) || 1, 1), 3);
         const isJson = opts.format === "json";

@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../config.js";
 import { resolveFileOrEntity, printResolved, isRawId } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { compactTreeNode, relativePath } from "../format.js";
@@ -166,7 +166,7 @@ export function registerDependsCommand(program: Command): void {
   ix depends parser.py --kind file
   ix depends NodeKind --pick 1 --cap 500`)
     .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: string; depth?: string; cap?: string; format: string; includeTests?: boolean; testsOnly?: boolean }) => {
-      const client = new IxClient(getEndpoint());
+      const client = await createClient();
 
       // Validate --pick
       if (opts.pick !== undefined) {

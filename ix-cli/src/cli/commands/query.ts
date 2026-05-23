@@ -1,6 +1,5 @@
 import type { Command } from "commander";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../config.js";
 import { formatContext } from "../format.js";
 import { stderr } from "../stderr.js";
 
@@ -33,7 +32,7 @@ export function registerQueryCommand(program: Command): void {
         return;
       }
       stderr("Running with --unsafe...\n");
-      const client = new IxClient(getEndpoint());
+      const client = await createClient();
       const result = await client.query(question, {
         asOfRev: opts.asOf ? parseInt(opts.asOf, 10) : undefined,
         depth: opts.depth,

@@ -1,7 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../config.js";
 
 export function registerStatsCommand(program: Command): void {
   program
@@ -9,7 +8,7 @@ export function registerStatsCommand(program: Command): void {
     .description("Show graph statistics — node/edge counts by type")
     .option("--format <fmt>", "Output format (text|json)", "text")
     .action(async (opts: { format: string }) => {
-      const client = new IxClient(getEndpoint());
+      const client = await createClient();
       const result = await client.stats();
 
       if (opts.format === "json") {
