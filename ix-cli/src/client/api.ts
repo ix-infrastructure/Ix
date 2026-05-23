@@ -9,6 +9,15 @@ import type {
   PatchCommitResult,
 } from "./types.js";
 
+export interface ListSubsystemsOptions {
+  detailed?: boolean;
+  limit?: number;
+  offset?: number;
+  regions?: string;
+  edgeCap?: number;
+  memberFileCap?: number;
+}
+
 export class IxClient {
   constructor(private endpoint: string = "http://localhost:8090") {}
 
@@ -249,9 +258,14 @@ export class IxClient {
     return this.post("/v1/subsystems/score", {});
   }
 
-  async listSubsystems(opts?: { detailed?: boolean }): Promise<any> {
+  async listSubsystems(opts?: ListSubsystemsOptions): Promise<any> {
     const params = new URLSearchParams();
     if (opts?.detailed) params.set("detailed", "true");
+    if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+    if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
+    if (opts?.regions) params.set("regions", opts.regions);
+    if (opts?.edgeCap !== undefined) params.set("edge_cap", String(opts.edgeCap));
+    if (opts?.memberFileCap !== undefined) params.set("member_file_cap", String(opts.memberFileCap));
     const qs = params.toString();
     return this.get(`/v1/subsystems${qs ? `?${qs}` : ""}`);
   }
