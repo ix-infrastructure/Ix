@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
+import { IxClient, type ListSubsystemsOptions } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { roundFloat } from "../format.js";
 import { renderMapText, type MapResult } from "./map.js";
@@ -33,12 +33,26 @@ interface UnknownSubsystemTargetResult {
   suggestions?: string[];
 }
 
+interface SubsystemListResult {
+  scores: SubsystemScore[];
+  pagination?: Record<string, unknown>;
+  autoPaginated: boolean;
+}
+
+const DETAILED_PAGE_LIMIT = 200;
+
 export function registerSubsystemsCommand(program: Command): void {
   program
     .command("subsystems [target]")
     .description("Show the persisted architectural map saved by 'ix map'")
     .option("--format <fmt>", "Output format (text|json)", "text")
     .option("--list",         "List stored subsystem health scores instead of the persisted architecture map")
+    .option("--detailed",     "Include member files and enriched call/import edges (requires --list)")
+    .option("--limit <n>",    "Max regions per page in detailed mode (default: 200 when auto-paging)")
+    .option("--offset <n>",   "Skip N regions in detailed mode (disables auto-pagination)")
+    .option("--regions <list>", "Comma-separated region IDs or names to scope detailed listing")
+    .option("--edge-cap <n>", "Max edges per direction per region in detailed mode")
+    .option("--member-file-cap <n>", "Max member files per region in detailed mode")
     .option("--target <target>", "Scope subsystem output to a persisted architecture region")
     .option("--pick <n>", "Resolve an ambiguous region target by numbered candidate")
     .option("--level <n>",    "Filter to level (1=module, 2=subsystem, 3=system)")
@@ -57,6 +71,10 @@ ingestion or clustering.
 Examples:
   ix subsystems
   ix subsystems --list
+  ix subsystems --list --detailed
+  ix subsystems --list --detailed --format json
+  ix subsystems --list --detailed --regions "Conflict,Branch"
+  ix subsystems --list --detailed --limit 50 --offset 100
   ix subsystems api
   ix subsystems --target "Cli / Client"
   ix subsystems api --pick 2
@@ -64,7 +82,26 @@ Examples:
   ix subsystems --level 2
   ix subsystems --graph
   ix subsystems --format json`)
-    .action(async (positionalTarget: string | undefined, opts: { format: string; list?: boolean; target?: string; pick?: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; verbose?: boolean; explain?: boolean }) => {
+    .action(async (positionalTarget: string | undefined, opts: {
+      format: string;
+      list?: boolean;
+      detailed?: boolean;
+      limit?: string;
+      offset?: string;
+      regions?: string;
+      edgeCap?: string;
+      memberFileCap?: string;
+      target?: string;
+      pick?: string;
+      level?: string;
+      minConfidence: string;
+      maxItems: string;
+      allItems?: boolean;
+      sort: string;
+      graph?: boolean;
+      verbose?: boolean;
+      explain?: boolean;
+    }) => {
       const client = new IxClient(getEndpoint());
       const target = resolveSubsystemTarget(positionalTarget, opts.target);
       const pick = parsePickOption(opts.pick);
@@ -89,6 +126,17 @@ Examples:
         process.exitCode = 1;
         return;
       }
+      if (opts.detailed && !opts.list) {
+        console.error(chalk.red("Error:"), "--detailed requires --list.");
+        process.exitCode = 1;
+        return;
+      }
+      const detailedQuery = parseDetailedListQuery(opts);
+      if (detailedQuery.error) {
+        console.error(chalk.red("Error:"), detailedQuery.error);
+        process.exitCode = 1;
+        return;
+      }
       if (!target.value && pick.value !== undefined) {
         console.error(chalk.red("Error:"), "--pick requires a target.");
         process.exitCode = 1;
@@ -101,33 +149,45 @@ Examples:
       }
 
       if (opts.list) {
-        let result: any;
+        let result: SubsystemListResult;
         try {
-          result = await client.listSubsystems();
+          result = await loadSubsystemScores(client, detailedQuery.value ?? {});
           // Auto-trigger scoring if no persisted scores exist yet
-          if ((result.scores ?? []).length === 0) {
-            result = await client.scoreSubsystems();
+          if (result.scores.length === 0) {
+            await client.scoreSubsystems();
+            result = await loadSubsystemScores(client, detailedQuery.value ?? {});
           }
         } catch (err: any) {
           console.error(chalk.red("Error:"), err.message);
           process.exitCode = 1;
           return;
         }
-        const scores: SubsystemScore[] = result.scores ?? [];
+
+        warnSubsystemListTruncation(result);
+
+        const scores: SubsystemScore[] = result.scores;
         const filtered = opts.level
           ? scores.filter(s => s.level === parseInt(opts.level!, 10))
           : scores;
 
         if (opts.format === "json") {
-          const compact = filtered.map(s => ({
-            name: s.name,
-            level: s.level,
-            health: roundFloat(s.health_score),
-            files: s.file_count,
-            chunks_per_file: roundFloat(s.chunk_density),
-            smell_files: s.smell_files,
-          }));
-          console.log(JSON.stringify({ scores: compact }, null, 2));
+          if (opts.detailed) {
+            console.log(JSON.stringify(buildDetailedListPayload(filtered, result.pagination), null, 2));
+          } else {
+            const compact = filtered.map(s => ({
+              name: s.name,
+              level: s.level,
+              health: roundFloat(s.health_score),
+              files: s.file_count,
+              chunks_per_file: roundFloat(s.chunk_density),
+              smell_files: s.smell_files,
+            }));
+            console.log(JSON.stringify({ scores: compact }, null, 2));
+          }
+          return;
+        }
+        if (opts.detailed) {
+          console.log(JSON.stringify(buildDetailedListPayload(filtered, result.pagination), null, 2));
           return;
         }
         printScores(filtered);
@@ -297,6 +357,173 @@ function parsePickOption(rawPick: string | undefined): { value?: number; error?:
     return { error: "Invalid --pick value." };
   }
   return { value };
+}
+
+function parseOptionalIntOption(name: string, raw: string | undefined): { value?: number; error?: string } {
+  if (raw === undefined) return {};
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isFinite(value) || value < 0) {
+    return { error: `Invalid ${name} value.` };
+  }
+  return { value };
+}
+
+function parseDetailedListQuery(opts: {
+  detailed?: boolean;
+  limit?: string;
+  offset?: string;
+  regions?: string;
+  edgeCap?: string;
+  memberFileCap?: string;
+}): { value?: ListSubsystemsOptions; error?: string } {
+  const hasDetailedParams = opts.limit !== undefined
+    || opts.offset !== undefined
+    || opts.regions !== undefined
+    || opts.edgeCap !== undefined
+    || opts.memberFileCap !== undefined;
+
+  if (hasDetailedParams && !opts.detailed) {
+    return { error: "--limit, --offset, --regions, --edge-cap, and --member-file-cap require --detailed." };
+  }
+
+  const limit = parseOptionalIntOption("--limit", opts.limit);
+  if (limit.error) return { error: limit.error };
+  const offset = parseOptionalIntOption("--offset", opts.offset);
+  if (offset.error) return { error: offset.error };
+  const edgeCap = parseOptionalIntOption("--edge-cap", opts.edgeCap);
+  if (edgeCap.error) return { error: edgeCap.error };
+  const memberFileCap = parseOptionalIntOption("--member-file-cap", opts.memberFileCap);
+  if (memberFileCap.error) return { error: memberFileCap.error };
+
+  const regions = opts.regions?.trim();
+  if (regions === "") {
+    return { error: "Invalid --regions value." };
+  }
+
+  return {
+    value: {
+      detailed: opts.detailed,
+      limit: limit.value,
+      offset: offset.value,
+      regions: regions || undefined,
+      edgeCap: edgeCap.value,
+      memberFileCap: memberFileCap.value,
+    },
+  };
+}
+
+async function loadSubsystemScores(
+  client: IxClient,
+  query: ListSubsystemsOptions,
+): Promise<SubsystemListResult> {
+  if (!query.detailed) {
+    const result = await client.listSubsystems();
+    return { scores: result.scores ?? [], autoPaginated: false };
+  }
+
+  const explicitPage = query.offset !== undefined || Boolean(query.regions);
+  if (explicitPage) {
+    const page = await client.listSubsystems({
+      ...query,
+      limit: query.limit,
+    });
+    return {
+      scores: page.scores ?? [],
+      pagination: page.pagination,
+      autoPaginated: false,
+    };
+  }
+
+  const pageLimit = query.limit ?? DETAILED_PAGE_LIMIT;
+  const allScores: SubsystemScore[] = [];
+  let offset = 0;
+  let lastPagination: Record<string, unknown> | undefined;
+
+  while (true) {
+    const page = await client.listSubsystems({
+      ...query,
+      limit: pageLimit,
+      offset,
+    });
+    const scores: SubsystemScore[] = page.scores ?? [];
+    allScores.push(...scores);
+    lastPagination = page.pagination;
+
+    const returned = typeof lastPagination?.returned === "number"
+      ? lastPagination.returned
+      : scores.length;
+    const limit = typeof lastPagination?.limit === "number"
+      ? lastPagination.limit
+      : pageLimit;
+
+    if (returned < limit) break;
+    offset += returned;
+  }
+
+  return {
+    scores: allScores,
+    pagination: lastPagination
+      ? { ...lastPagination, offset: 0, returned: allScores.length }
+      : undefined,
+    autoPaginated: true,
+  };
+}
+
+function buildDetailedListPayload(
+  scores: SubsystemScore[],
+  pagination?: Record<string, unknown>,
+): { scores: SubsystemScore[]; pagination?: Record<string, unknown> } {
+  const payload: { scores: SubsystemScore[]; pagination?: Record<string, unknown> } = { scores };
+  if (pagination) payload.pagination = pagination;
+  return payload;
+}
+
+function warnSubsystemListTruncation(result: SubsystemListResult): void {
+  const pagination = result.pagination;
+  if (pagination && !result.autoPaginated) {
+    const returned = pagination.returned;
+    const limit = pagination.limit;
+    const offset = pagination.offset;
+    if (typeof returned === "number" && typeof limit === "number" && returned === limit) {
+      const nextOffset = typeof offset === "number" ? offset + returned : returned;
+      console.error(
+        chalk.yellow(
+          `Warning: Showing ${returned} regions (page full). More may exist — omit --offset to auto-fetch all pages, or use --offset ${nextOffset}.`
+        )
+      );
+    }
+  }
+
+  const truncated = result.scores.filter(scoreHasTruncatedEdges);
+  if (truncated.length === 0) return;
+
+  const names = truncated.slice(0, 5).map((score) => score.name).join(", ");
+  const suffix = truncated.length > 5 ? ` and ${truncated.length - 5} more` : "";
+  console.error(
+    chalk.yellow(
+      `Warning: ${truncated.length} region(s) have truncated edges or member files (${names}${suffix}). Use --edge-cap or --member-file-cap to raise caps, or --regions to scope.`
+    )
+  );
+}
+
+function scoreHasTruncatedEdges(score: SubsystemScore): boolean {
+  const record = score as SubsystemScore & Record<string, unknown>;
+  const checks: Array<[string, string]> = [
+    ["calls_out", "calls_out_total"],
+    ["calls_in", "calls_in_total"],
+    ["imports_out", "imports_out_total"],
+    ["imports_in", "imports_in_total"],
+    ["member_files", "member_files_total"],
+  ];
+
+  for (const [field, totalField] of checks) {
+    const items = record[field];
+    const total = record[totalField];
+    if (typeof total === "number" && Array.isArray(items) && total > items.length) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function renderSubsystemError(body: unknown, explain: boolean = false): void {
