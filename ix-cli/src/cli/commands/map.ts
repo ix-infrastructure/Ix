@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import type { Command } from "commander";
+import { type Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
@@ -7,6 +7,7 @@ import { roundFloat } from "../format.js";
 import { bootstrap } from "../bootstrap.js";
 import { formatFetchError } from "../errors.js";
 import { ingestFiles } from "./ingest.js";
+import { getRemoteRunner, isCloudReady } from "../remote.js";
 
 export interface MapRegion {
   id: string;
@@ -131,14 +132,6 @@ Examples:
     .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; verbose?: boolean; silent?: boolean }) => {
       const cwd = pathArg ? resolve(pathArg) : process.cwd();
 
-      try {
-        await bootstrap(cwd);
-      } catch (err: any) {
-        console.error(chalk.red("Error:"), err.message);
-        process.exitCode = 1;
-        return;
-      }
-
       const silent = opts.silent === true || opts.format === "silent";
 
       // Print warning when --full override is active
@@ -149,20 +142,52 @@ Examples:
         console.log("  This may take a long time or fail on very large systems.\n");
       }
 
-      // Ingest the path before mapping so the graph is up to date
+      // Ingest the path before mapping so the graph is up to date.
+      //
+      // Routing: if Pro is loaded AND the user has an active cloud
+      // instance configured (isCloudReady === true), route ingestion
+      // through the cloud pipeline. To force local, switch the active
+      // instance with `ix instance use local` (or `ix instance bind
+      // local` to scope to one workspace).
+      //
+      // The local backend bootstrap below only runs on the local path —
+      // cloud ingestion doesn't require a local Ix backend.
       const ingestStart = performance.now();
-      try {
-        await ingestFiles(cwd, {
-          recursive: true,
-          format: (opts.format === "json" || silent) ? "json" : "text",
-          printSummary: false,
-          suppressOutput: true,
-          mapMode: true,
-        });
-      } catch (err: any) {
-        console.error(chalk.red("Error:"), formatFetchError(err));
-        process.exitCode = 1;
-        return;
+      const cloudReady = await isCloudReady();
+      if (cloudReady) {
+        const runner = getRemoteRunner()!; // isCloudReady guarantees non-null
+        try {
+          await runner.runIngestion({
+            cwd,
+            silent,
+            format: (opts.format === "json" || silent) ? "json" : "text",
+          });
+        } catch (err: any) {
+          console.error(chalk.red("Error:"), formatFetchError(err));
+          process.exitCode = 1;
+          return;
+        }
+      } else {
+        try {
+          await bootstrap(cwd);
+        } catch (err: any) {
+          console.error(chalk.red("Error:"), err.message);
+          process.exitCode = 1;
+          return;
+        }
+        try {
+          await ingestFiles(cwd, {
+            recursive: true,
+            format: (opts.format === "json" || silent) ? "json" : "text",
+            printSummary: false,
+            suppressOutput: true,
+            mapMode: true,
+          });
+        } catch (err: any) {
+          console.error(chalk.red("Error:"), formatFetchError(err));
+          process.exitCode = 1;
+          return;
+        }
       }
       const ingestMs = Math.round(performance.now() - ingestStart);
 
