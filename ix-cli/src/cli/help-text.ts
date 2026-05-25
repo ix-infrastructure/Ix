@@ -19,7 +19,7 @@ const OSS_HELP = [
   ``,
   chalk.bold(`Explore:`),
   `  trace <symbol>        Trace flow`,
-  `  subsystem             Explore structure`,
+  `  subsystems            Explore structure`,
   `  inventory             List components`,
   `  rank                  Rank importance`,
   `  history <target>      Show history`,

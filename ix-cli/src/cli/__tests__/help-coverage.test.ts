@@ -14,7 +14,7 @@ const ossHelp = buildHelpText();
 
 const REQUIRED_COMMANDS = [
   "search", "locate", "explain", "impact", "overview", "watch",
-  "read", "inventory", "rank", "history", "diff", "smells", "subsystem",
+  "read", "inventory", "rank", "history", "diff", "smells", "subsystems",
   "map", "trace", "status", "stats", "doctor", "docker",
 ];
 
