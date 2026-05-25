@@ -40,6 +40,7 @@ interface SubsystemListResult {
 }
 
 const DETAILED_PAGE_LIMIT = 200;
+const DETAILED_PAGE_ITERATION_CAP = 200;
 
 export function registerSubsystemsCommand(program: Command): void {
   program
@@ -439,7 +440,14 @@ async function loadSubsystemScores(
   let offset = 0;
   let lastPagination: Record<string, unknown> | undefined;
 
-  while (true) {
+  for (let iteration = 0; ; iteration++) {
+    if (iteration >= DETAILED_PAGE_ITERATION_CAP) {
+      throw new Error(
+        `detailed listing exceeded safety cap of ${DETAILED_PAGE_ITERATION_CAP} pages. ` +
+        `The memory-layer endpoint may be paginating incorrectly. ` +
+        `Re-run with explicit --offset to bypass auto-pagination.`
+      );
+    }
     const page = await client.listSubsystems({
       ...query,
       limit: pageLimit,
