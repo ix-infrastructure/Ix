@@ -316,4 +316,29 @@ run;
       expect.objectContaining({ name: 'generatePackage', kind: 'macro' }),
     );
   });
+
+  // v0.4.2 - expression-style macro bodies must still emit macro_definition nodes.
+  it('captures macro definitions with expression-only bodies from AHRQ IQI style macros', () => {
+    const result = parseFile('/repo/iqi_macros.sas', `
+%MACRO MDX1(FMT);
+ ((put(DX1,&FMT.) = '1'))
+%MEND;
+
+%MACRO MDX(FMT);
+ (%DO I = 1 %TO &NDX.-1;
+  (put(DX&I.,&FMT.) = '1') or
+  %END;
+  (put(DX&NDX.,&FMT.) = '1'))
+%MEND;
+
+%MACRO MDX2Q2(FMT);
+ result = 0;
+ if result = 1
+%MEND;
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities.map(e => e.name)).toEqual(
+      expect.arrayContaining(['MDX1', 'MDX', 'MDX2Q2']),
+    );
+  });
 });
