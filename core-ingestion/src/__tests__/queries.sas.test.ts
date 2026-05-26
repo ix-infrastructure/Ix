@@ -316,4 +316,47 @@ run;
       expect.objectContaining({ name: 'generatePackage', kind: 'macro' }),
     );
   });
+
+  // v0.4.2 fix #1 — parenthesized macro-expression body without a trailing semicolon
+  it('captures macro definition with paren-led expression body', () => {
+    const result = parseFile('/repo/iqi.sas', `
+%MACRO MDX1(FMT);
+ ((put(DX1,&FMT.) = '1'))
+%MEND;
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: 'MDX1', kind: 'macro' }),
+    );
+  });
+
+  // v0.4.2 fix #2 — %DO/%END used inside a parenthesized expression generator
+  it('captures macro definition with %DO loop inside parenthesized expression body', () => {
+    const result = parseFile('/repo/iqi.sas', `
+%MACRO MDX(FMT);
+ (%DO I = 1 %TO &NDX.-1;
+  (put(DX&I.,&FMT.) = '1') or
+  %END;
+  (put(DX&NDX.,&FMT.) = '1'))
+%MEND;
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: 'MDX', kind: 'macro' }),
+    );
+  });
+
+  // v0.4.2 fix #3 — final body item can end immediately before %MEND
+  it('captures macro definition whose body ends without semicolon before %MEND', () => {
+    const result = parseFile('/repo/iqi.sas', `
+%MACRO MDX2Q2(FMT);
+ result = 0;
+ if result = 1
+%MEND;
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: 'MDX2Q2', kind: 'macro' }),
+    );
+  });
 });
