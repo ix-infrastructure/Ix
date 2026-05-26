@@ -1,4 +1,4 @@
-import { parseMakefile, resolvePhony } from './makefile-parser';
+import { parseMakefile } from './makefile-parser';
 
 const SAMPLE = `
 CC := gcc
