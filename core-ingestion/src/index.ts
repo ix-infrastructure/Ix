@@ -283,6 +283,14 @@ function normalizeCapturedImport(rawValue: string, language: SupportedLanguages)
     return unwrapped.replace(/^\.+/, '');
   }
 
+  if (language === SupportedLanguages.SAS && !unwrapped.includes('/') && !unwrapped.includes('\\')) {
+    // fileref_source text: FILEREF or FILEREF(member.sas) — no path separators
+    // String-literal %include and LIBNAME paths contain slashes and fall through to the general handler.
+    const memberMatch = unwrapped.match(/^[A-Za-z_][A-Za-z0-9_]*\(([^)]+)\)$/);
+    if (memberMatch) return memberMatch[1];
+    return unwrapped;
+  }
+
   const rawMod = unwrapped.split('/').filter((s: string) => s !== '*').pop() ?? unwrapped;
   return rawMod.replace(/^\.+/, '');
 }

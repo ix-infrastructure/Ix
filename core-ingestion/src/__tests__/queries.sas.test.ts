@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseFile } from '../index.js';
+import { parseFile, buildGlobalResolutionIndex } from '../index.js';
 import { SupportedLanguages } from '../languages.js';
 
 describe('SAS queries', () => {
@@ -216,6 +216,56 @@ des='SAS Packages Framework internal macro.';
     expect(result!.entities).toContainEqual(
       expect.objectContaining({ name: 'SPFinit_intrnl_forceV7DSname', kind: 'macro' }),
     );
+  });
+
+  // Bug 1 regression — fileref %INCLUDE forms (82% of production SAS uses these, not string literals)
+  it('emits IMPORTS for %INCLUDE with fileref(member) syntax', () => {
+    const result = parseFile('/repo/main.sas', `
+%include PROGRMS(IQI_HOSP_FORMATS.SAS);
+`);
+    expect(result).not.toBeNull();
+    // normalizeCapturedImport extracts the member name from FILEREF(member)
+    expect(result!.relationships).toContainEqual(
+      expect.objectContaining({ predicate: 'IMPORTS', dstName: 'IQI_HOSP_FORMATS.SAS' }),
+    );
+  });
+
+  it('emits IMPORTS for %INCLUDE with bare fileref syntax', () => {
+    const result = parseFile('/repo/main.sas', `
+%include MacLib;
+`);
+    expect(result).not.toBeNull();
+    expect(result!.relationships).toContainEqual(
+      expect.objectContaining({ predicate: 'IMPORTS', dstName: 'MacLib' }),
+    );
+  });
+
+  it('emits IMPORTS for %INCLUDE fileref(member) with lowercase extension', () => {
+    const result = parseFile('/repo/main.sas', `
+%include MacLib(MHI_MEASURES_macro.sas);
+`);
+    expect(result).not.toBeNull();
+    expect(result!.relationships).toContainEqual(
+      expect.objectContaining({ predicate: 'IMPORTS', dstName: 'MHI_MEASURES_macro.sas' }),
+    );
+  });
+
+  // Bug 2 regression — indented %MACRO definitions must be indexed for cross-file resolution
+  it('indexes indented %MACRO definitions for cross-file macro resolution', () => {
+    const sources = new Map([
+      ['/repo/macros.sas', ' %MACRO MDX(FMT);\n  %put &FMT;\n %MEND MDX;\n\n %MACRO MDX1(FMT);\n %MEND MDX1;\n'],
+    ]);
+    const index = buildGlobalResolutionIndex(['/repo/macros.sas'], sources);
+    expect(index.symbolToFiles.get('MDX')).toContain('/repo/macros.sas');
+    expect(index.symbolToFiles.get('MDX1')).toContain('/repo/macros.sas');
+  });
+
+  it('does not index column-0-only when macros are indented (confirms old regex was broken)', () => {
+    const brokenRe = /^%macro\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[(/;]/gim;
+    const fixedRe  = /^\s*%macro\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[(/;]/gim;
+    const src = ' %MACRO MDX(FMT);\n %MEND MDX;\n';
+    expect(src.match(brokenRe)).toBeNull();
+    expect(src.match(fixedRe)).not.toBeNull();
   });
 
   // v0.3.6 fix #1 — &var.suffix macro references parsed as one token; previously
