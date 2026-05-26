@@ -1406,13 +1406,53 @@ export const SAS_QUERIES = `
   (proc_step_header
     name: (identifier) @name)) @definition.module
 
-; %INCLUDE — file import
+; %INCLUDE — string literal form: %include 'path/to/file.sas';
 (include_statement
   source: (string_literal) @import.source) @import
+
+; %INCLUDE — fileref form: %include FILEREF; or %include FILEREF(member.sas);
+(include_statement
+  source: (fileref_source) @import.source) @import
 
 ; LIBNAME — library path import
 (libname_statement
   (string_literal) @import.source) @import
+
+; PROC SQL — CREATE TABLE AS output
+(sql_create_statement
+  output: (dataset_name
+    [(identifier) (macro_variable_ref)] @name)) @definition.module
+
+; PROC SQL — FROM table inputs
+(sql_select_statement
+  (table_reference
+    (dataset_name
+      [(identifier) (macro_variable_ref)] @import.source))) @import
+
+; PROC SQL — JOIN table inputs
+(sql_select_statement
+  (sql_join_clause
+    (table_reference
+      (dataset_name
+        [(identifier) (macro_variable_ref)] @import.source)))) @import
+
+; DATA step SET inputs
+(data_step
+  (set_statement
+    (dataset_name
+      [(identifier) (macro_variable_ref)] @import.source))) @import
+
+; DATA step MERGE inputs
+(data_step
+  (merge_statement
+    (dataset_name
+      [(identifier) (macro_variable_ref)] @import.source))) @import
+
+; DATA step UPDATE inputs
+(data_step
+  (update_statement
+    (dataset_name
+      [(identifier) (macro_variable_ref)] @import.source))) @import
 `;
 
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {

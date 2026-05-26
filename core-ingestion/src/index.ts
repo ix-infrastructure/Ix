@@ -1939,7 +1939,7 @@ export function buildGlobalResolutionIndex(
     }
 
     // SAS: scan macro definitions (%macro name) for cross-file Tier-3 resolution.
-    const sasMacroRe = /^%macro\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[(/;]/gim;
+    const sasMacroRe = /^\s*%macro\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[(/;]/gim;
     for (const [fp, src] of sources) {
       const ext = nodePath.extname(fp).toLowerCase();
       if (ext !== '.sas') continue;
@@ -2147,7 +2147,7 @@ export function resolveEdges(
     if (stripped && stripped !== normalizedModName) candidates.push(stripped);
     // Strip file extensions so "explain.js" resolves to the "explain" stem
     // (TS/JS ESM imports use .js extensions that map to .ts source files)
-    const noExt = normalizedModName.replace(/\.(js|ts|mjs|cjs|jsx|tsx|py|scala|java|c|cc|cpp|cxx|h|hh|hpp|hxx)$/, '');
+    const noExt = normalizedModName.replace(/\.(js|ts|mjs|cjs|jsx|tsx|py|scala|java|c|cc|cpp|cxx|h|hh|hpp|hxx|sas)$/i, '');
     if (noExt !== normalizedModName && noExt && !candidates.includes(noExt)) candidates.push(noExt);
     const pathBasename = nodePath.posix.basename(normalizedModName);
     if (pathBasename && !candidates.includes(pathBasename)) candidates.push(pathBasename);
