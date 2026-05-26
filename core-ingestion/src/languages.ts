@@ -19,6 +19,7 @@ export enum SupportedLanguages {
   JSON = 'json',
   TOML = 'toml',
   Markdown = 'markdown',
+  SAS = 'sas',
 }
 
 const EXT_MAP: Record<string, SupportedLanguages> = {
@@ -54,6 +55,7 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.toml': SupportedLanguages.TOML,
   '.md':   SupportedLanguages.Markdown,
   '.markdown': SupportedLanguages.Markdown,
+  '.sas':  SupportedLanguages.SAS,
 };
 
 export function languageFromPath(filePath: string): SupportedLanguages | null {

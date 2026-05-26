@@ -33,6 +33,7 @@
   },
   "optionalDependencies": {
     "tree-sitter-kotlin": "^0.3.8",
+    "tree-sitter-sas": "^0.4.2",
     "tree-sitter-swift": "^0.6.0"
   },
   "devDependencies": {
