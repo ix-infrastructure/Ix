@@ -1164,6 +1164,46 @@ export const SCALA_QUERIES = `
   (#match? @call.name "^[A-Z]"))
 `;
 
+// tree-sitter-elixir: https://github.com/elixir-lang/tree-sitter-elixir
+// Most constructs are represented as `call` nodes with a `target` identifier.
+export const ELIXIR_QUERIES = `
+; ── Module definitions ───────────────────────────────────────────────────────
+(call
+  target: (identifier) @_defmodule
+  (arguments (alias) @name)
+  (#eq? @_defmodule "defmodule")) @definition.class
+
+; ── Function definitions with parens: def foo(args) do … end ─────────────────
+(call
+  target: (identifier) @_def
+  (arguments
+    (call target: (identifier) @name))
+  (#match? @_def "^(def|defp|defmacro|defmacrop)$")) @definition.function
+
+; ── Zero-arity function definitions without parens: def foo do … end ─────────
+(call
+  target: (identifier) @_def0
+  (arguments
+    (identifier) @name)
+  (#match? @_def0 "^(def|defp|defmacro|defmacrop)$")) @definition.function
+
+; ── Module directives → IMPORTS ───────────────────────────────────────────────
+(call
+  target: (identifier) @_directive
+  (arguments (alias) @import.source)
+  (#match? @_directive "^(alias|import|use|require)$")) @import
+
+; ── Qualified calls: Foo.bar() ────────────────────────────────────────────────
+(call
+  target: (dot
+    left: (alias)
+    right: (identifier) @call.name)) @call
+
+; ── Unqualified calls ─────────────────────────────────────────────────────────
+(call
+  target: (identifier) @call.name) @call
+`;
+
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TypeScript]: TYPESCRIPT_QUERIES,
   [SupportedLanguages.JavaScript]: JAVASCRIPT_QUERIES,
@@ -1185,5 +1225,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.JSON]: '',
   [SupportedLanguages.TOML]: '',
   [SupportedLanguages.Markdown]: '',
+  [SupportedLanguages.Elixir]: ELIXIR_QUERIES,
 };
  
