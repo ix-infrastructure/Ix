@@ -39,6 +39,7 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.json',
   '.toml',
   '.md', '.markdown',
+  '.ex', '.exs',
 ]);
 
 export function isSupportedSourceFile(filePath: string): boolean {
