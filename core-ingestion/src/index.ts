@@ -220,6 +220,27 @@ const R_BUILTINS = new Set([
   'is.character', 'is.numeric', 'is.integer', 'is.logical', 'is.null', 'is.na',
   'seq', 'seq_len', 'seq_along', 'rep', 'which', 'match', 'any', 'all', 'ifelse',
   'read.csv', 'write.csv', 'readRDS', 'saveRDS', 'load', 'save',
+  'attr', 'attributes', 'class', 'inherits', 'structure',
+  'nzchar', 'nchar', 'trimws', 'toupper', 'tolower', 'chartr', 'strsplit',
+  'grep', 'grepl', 'regexpr', 'regmatches', 'sub', 'gsub',
+  'isFALSE', 'isTRUE', 'missing', 'exists', 'get', 'assign', 'rm',
+  'srcfile', 'srcref', 'getSrcref', 'getSrcFilename',
+  'tryCatch', 'withCallingHandlers', 'try', 'simpleError', 'simpleCondition',
+  'environment', 'parent.env', 'new.env', 'ls', 'rm',
+  'Recall', 'do.call', 'match.arg', 'match.call', 'sys.call',
+  'identical', 'stopifnot', 'switch', 'invisible', 'force',
+  'numeric', 'character', 'logical', 'integer', 'complex', 'raw',
+  'unlist', 'setdiff', 'union', 'intersect', 'unique', 'duplicated', 'table',
+  'format', 'formatC', 'strtoi', 'chartr', 'startsWith', 'endsWith',
+  'Reduce', 'Filter', 'Find', 'Map', 'Position',
+  // base R functions whose names contain dots (not package::function calls)
+  'on.exit', 'sys.call', 'sys.function', 'sys.frame', 'sys.nframe', 'sys.source',
+  'proc.time', 'date.time',
+  'file.path', 'file.exists', 'file.copy', 'file.remove', 'file.rename',
+  'file.create', 'file.info', 'file.size', 'file.show',
+  'dir.create', 'dir.exists',
+  'Sys.time', 'Sys.sleep', 'Sys.getenv', 'Sys.setenv', 'Sys.getpid',
+  'Sys.info', 'Sys.chmod', 'Sys.umask',
 ]);
 
 // Per-language BUILTINS lookup — falls back to shared for languages without a
