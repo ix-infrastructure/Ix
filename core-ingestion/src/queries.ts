@@ -1167,25 +1167,44 @@ export const SCALA_QUERIES = `
 // tree-sitter-elixir: https://github.com/elixir-lang/tree-sitter-elixir
 // Most constructs are represented as `call` nodes with a `target` identifier.
 export const ELIXIR_QUERIES = `
-; ── Module definitions ───────────────────────────────────────────────────────
+; ── Module / protocol / impl definitions ─────────────────────────────────────
 (call
   target: (identifier) @_defmodule
   (arguments (alias) @name)
-  (#eq? @_defmodule "defmodule")) @definition.class
+  (#match? @_defmodule "^(defmodule|defprotocol)$")) @definition.class
+
+(call
+  target: (identifier) @_defimpl
+  (arguments (alias) @name)
+  (#eq? @_defimpl "defimpl")) @definition.class
 
 ; ── Function definitions with parens: def foo(args) do … end ─────────────────
 (call
   target: (identifier) @_def
   (arguments
     (call target: (identifier) @name))
-  (#match? @_def "^(def|defp|defmacro|defmacrop)$")) @definition.function
+  (#match? @_def "^(def|defp)$")) @definition.function
+
+; ── Macro definitions with parens: defmacro my_macro(x) do … end ─────────────
+(call
+  target: (identifier) @_defmacro
+  (arguments
+    (call target: (identifier) @name))
+  (#match? @_defmacro "^(defmacro|defmacrop)$")) @definition.macro
 
 ; ── Zero-arity function definitions without parens: def foo do … end ─────────
 (call
   target: (identifier) @_def0
   (arguments
     (identifier) @name)
-  (#match? @_def0 "^(def|defp|defmacro|defmacrop)$")) @definition.function
+  (#match? @_def0 "^(def|defp)$")) @definition.function
+
+; ── Zero-arity macro definitions without parens ───────────────────────────────
+(call
+  target: (identifier) @_defmacro0
+  (arguments
+    (identifier) @name)
+  (#match? @_defmacro0 "^(defmacro|defmacrop)$")) @definition.macro
 
 ; ── Module directives → IMPORTS ───────────────────────────────────────────────
 (call
@@ -1193,15 +1212,16 @@ export const ELIXIR_QUERIES = `
   (arguments (alias) @import.source)
   (#match? @_directive "^(alias|import|use|require)$")) @import
 
-; ── Qualified calls: Foo.bar() ────────────────────────────────────────────────
+; ── Qualified calls: Foo.bar() — captures qualifier so resolution is possible ─
 (call
   target: (dot
-    left: (alias)
+    left: (alias) @_qualifier
     right: (identifier) @call.name)) @call
 
-; ── Unqualified calls ─────────────────────────────────────────────────────────
+; ── Unqualified calls — keywords excluded to avoid bogus edges ────────────────
 (call
-  target: (identifier) @call.name) @call
+  target: (identifier) @call.name
+  (#not-match? @call.name "^(def|defp|defmacro|defmacrop|defmodule|defprotocol|defimpl|defstruct|use|alias|import|require|quote|unquote|if|unless|case|cond|with|for|try|receive|raise|throw|fn|do)$")) @call
 `;
 
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {

@@ -78,7 +78,7 @@ end
 
     expect(result).not.toBeNull();
     expect(result!.relationships).toContainEqual(
-      expect.objectContaining({ dstName: 'start_link', predicate: 'CALLS' }),
+      expect.objectContaining({ dstName: 'GenServer.start_link', predicate: 'CALLS' }),
     );
   });
 
@@ -100,7 +100,7 @@ end
     expect(result!.entities.map(e => e.name)).toContain('MyApp.MixProject');
   });
 
-  it('captures defmacro as a function-kind entity', () => {
+  it('captures defmacro as a macro-kind entity', () => {
     const result = parseFile(
       '/repo/macros.ex',
       `
@@ -113,6 +113,68 @@ end
     );
 
     expect(result).not.toBeNull();
-    expect(result!.entities.map(e => e.name)).toContain('my_macro');
+    const macro = result!.entities.find(e => e.name === 'my_macro');
+    expect(macro).toBeDefined();
+    expect(macro!.kind).toBe('macro');
+  });
+
+  it('captures defprotocol and defimpl as class-kind entities', () => {
+    const result = parseFile(
+      '/repo/serializer.ex',
+      `
+defprotocol MyApp.Serializer do
+  def serialize(data)
+end
+
+defimpl MyApp.Serializer, for: MyApp.User do
+  def serialize(data), do: data
+end
+      `,
+    );
+
+    expect(result).not.toBeNull();
+    const names = result!.entities.map(e => e.name);
+    expect(names).toContain('MyApp.Serializer');
+    const protocol = result!.entities.find(e => e.name === 'MyApp.Serializer');
+    expect(protocol!.kind).toBe('class');
+  });
+
+  it('does not emit bogus CALLS edges for keywords or self-calls', () => {
+    const result = parseFile(
+      '/repo/user.ex',
+      `
+defmodule MyApp.User do
+  use GenServer
+  alias MyApp.Repo
+  import Ecto.Query
+
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts)
+  end
+
+  defp validate(user) do
+    Repo.get(User, user.id)
+    user |> Map.put(:validated, true) |> Repo.update()
+  end
+end
+      `,
+    );
+
+    expect(result).not.toBeNull();
+    const callTargets = result!.relationships
+      .filter(r => r.predicate === 'CALLS')
+      .map(r => r.dstName);
+
+    // keywords must not appear as call targets
+    expect(callTargets).not.toContain('defmodule');
+    expect(callTargets).not.toContain('def');
+    expect(callTargets).not.toContain('defp');
+    expect(callTargets).not.toContain('use');
+    expect(callTargets).not.toContain('alias');
+    expect(callTargets).not.toContain('import');
+
+    // function names must not self-call
+    expect(callTargets).not.toContain('start_link');
+    expect(callTargets).not.toContain('validate');
   });
 });

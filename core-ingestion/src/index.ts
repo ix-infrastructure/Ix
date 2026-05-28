@@ -1527,6 +1527,25 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
           if (isDecoratorCall) continue;
         }
 
+        // Elixir: skip the function-name node inside def/defp/defmacro(p) argument lists.
+        // `def foo(args)` parses as call{target:def, args:[call{target:foo, args:[...]}]}.
+        // callName.node is the identifier `foo`; its parent is the inner call node,
+        // whose parent is `arguments`, whose parent is the outer def* call.
+        // Without this, the inner call{target:foo} would emit a `foo CALLS foo` self-edge.
+        if (language === SupportedLanguages.Elixir) {
+          const innerCall = callName.node.parent;       // call{target:foo, ...}
+          const argsNode  = innerCall?.parent;          // arguments
+          if (argsNode?.type === 'arguments') {
+            const defCall = argsNode.parent;            // call{target:def, ...}
+            if (defCall?.type === 'call') {
+              const defTarget = defCall.childForFieldName?.('target');
+              if (defTarget && /^(def|defp|defmacro|defmacrop)$/.test(defTarget.text)) {
+                continue;
+              }
+            }
+          }
+        }
+
         // Find enclosing function/method for the call; fall back to enclosing class
         // (e.g. calls in val/lazy val body at class level) before falling back to file.
         const callLine = callName.node.startPosition.row + 1;
