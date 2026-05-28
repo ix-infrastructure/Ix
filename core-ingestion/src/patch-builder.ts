@@ -215,6 +215,7 @@ export function buildPatch(
   }
 
   // UpsertEdge for each relationship
+  const seenExternalNodes = new Set<string>();
   for (const r of relationships) {
     // For CONTAINS edges, srcName is the container of dstName — use that to disambiguate.
     const srcKey = resolveKey(r.srcName);
@@ -222,15 +223,35 @@ export function buildPatch(
       ? resolveKey(r.dstName, r.srcName)
       : resolveKey(r.dstName);
 
-    // Drop qualified CALLS that aren't defined in this file — they're external package
-    // calls (e.g. R's pkg::func) that have no UpsertNode and would create phantom nodeIds.
-    if (r.predicate === 'CALLS' && dstKey.includes('.') && !allQKeys.has(dstKey)) continue;
+    let dstNid: string;
+    if (r.predicate === 'CALLS' && dstKey.includes('.') && !allQKeys.has(dstKey)) {
+      // Unresolved qualified call (R's pkg::func, Go's external.Func, etc.) —
+      // materialise a stub node under external://<pkg> so ix trace / ix callees
+      // have a real destination instead of a phantom nodeId.
+      const dot = dstKey.lastIndexOf('.');
+      const pkgName = dstKey.slice(0, dot);
+      const funcName = dstKey.slice(dot + 1);
+      const extPath = `external://${pkgName}`;
+      dstNid = nodeId(extPath, dstKey);
+      if (!seenExternalNodes.has(dstNid)) {
+        seenExternalNodes.add(dstNid);
+        ops.push({
+          type: 'UpsertNode',
+          id: dstNid,
+          kind: 'function',
+          name: funcName,
+          attrs: { package: pkgName, external: true, language: result.language },
+        });
+      }
+    } else {
+      dstNid = nodeId(filePath, dstKey);
+    }
 
     ops.push({
       type: 'UpsertEdge',
       id: edgeId(filePath, srcKey, dstKey, r.predicate),
       src: nodeId(filePath, srcKey),
-      dst: nodeId(filePath, dstKey),
+      dst: dstNid,
       predicate: r.predicate,
       attrs: {},
     });
@@ -411,28 +432,39 @@ export function buildPatchWithResolution(
     }
   }
 
+  const seenExternalNodes2 = new Set<string>();
   for (const r of relationships) {
     const srcKey = resolveKey(r.srcName);
     const dstKey = r.predicate === 'CONTAINS'
       ? resolveKey(r.dstName, r.srcName)
       : resolveKey(r.dstName);
 
-    // For cross-file resolved edges (CALLS, EXTENDS), use the defining file's nodeId
     let dstNodeId: string;
     const resolutionKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
 
-    // Drop unresolved qualified CALLS whose dst has no UpsertNode in this file —
-    // they're external package calls (e.g. R's pkg::func) that would create phantom nodeIds.
-    if (
-      r.predicate === 'CALLS' &&
-      !edgeResolution.has(resolutionKey) &&
-      dstKey.includes('.') &&
-      !allQKeys2.has(dstKey)
-    ) continue;
-
     if (edgeResolution.has(resolutionKey)) {
+      // Cross-file resolved — use the defining file's nodeId.
       const { dstFilePath, dstQualifiedKey } = edgeResolution.get(resolutionKey)!;
       dstNodeId = nodeId(dstFilePath, dstQualifiedKey);
+    } else if (r.predicate === 'CALLS' && dstKey.includes('.') && !allQKeys2.has(dstKey)) {
+      // Unresolved qualified call (R's pkg::func, Go's external.Func, etc.) —
+      // materialise a stub node under external://<pkg> so ix trace / ix callees / ix impact
+      // have a real destination instead of a phantom nodeId.
+      const dot = dstKey.lastIndexOf('.');
+      const pkgName = dstKey.slice(0, dot);
+      const funcName = dstKey.slice(dot + 1);
+      const extPath = `external://${pkgName}`;
+      dstNodeId = nodeId(extPath, dstKey);
+      if (!seenExternalNodes2.has(dstNodeId)) {
+        seenExternalNodes2.add(dstNodeId);
+        ops.push({
+          type: 'UpsertNode',
+          id: dstNodeId,
+          kind: 'function',
+          name: funcName,
+          attrs: { package: pkgName, external: true, language: result.language },
+        });
+      }
     } else {
       dstNodeId = nodeId(filePath, dstKey);
     }

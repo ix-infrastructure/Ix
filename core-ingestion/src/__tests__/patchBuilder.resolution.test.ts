@@ -109,8 +109,9 @@ describe('buildPatchWithResolution', () => {
     }));
   });
 
-  it('drops unresolved qualified CALLS (no phantom nodeId)', () => {
+  it('materialises external stub node for unresolved qualified CALLS', () => {
     const file = '/repo/model.R';
+    const externalNodeId = nodeId('external://dplyr', 'dplyr.filter');
     const result = fileResult(
       file,
       SupportedLanguages.R,
@@ -122,10 +123,20 @@ describe('buildPatchWithResolution', () => {
     );
     const patch = buildPatchWithResolution(result, 'hash', []);
     const callEdges = patch.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS');
+    const upsertNodes = patch.ops.filter(op => op.type === 'UpsertNode');
 
+    // dplyr.filter edge must point to the external stub, not to a same-file phantom
+    expect(callEdges).toContainEqual(
+      expect.objectContaining({ src: nodeId(file, 'fitModel'), dst: externalNodeId }),
+    );
     expect(callEdges).not.toContainEqual(
       expect.objectContaining({ dst: nodeId(file, 'dplyr.filter') }),
     );
+    // External stub node must be materialised with correct attrs
+    expect(upsertNodes).toContainEqual(
+      expect.objectContaining({ id: externalNodeId, kind: 'function', name: 'filter' }),
+    );
+    // Unqualified same-file call still resolves within the file
     expect(callEdges).toContainEqual(
       expect.objectContaining({ src: nodeId(file, 'fitModel'), dst: nodeId(file, 'localHelper') }),
     );
@@ -204,8 +215,9 @@ struct Trajectory {};
 });
 
 describe('buildPatch', () => {
-  it('drops qualified CALLS to names not defined in the file (watch-mode phantom guard)', () => {
+  it('materialises external stub node for unresolved qualified CALLS', () => {
     const file = '/repo/model.R';
+    const externalNodeId = nodeId('external://dplyr', 'dplyr.filter');
     const result = fileResult(
       file,
       SupportedLanguages.R,
@@ -217,9 +229,16 @@ describe('buildPatch', () => {
     );
     const patch = buildPatch(result, 'hash');
     const callEdges = patch.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS');
+    const upsertNodes = patch.ops.filter(op => op.type === 'UpsertNode');
 
+    expect(callEdges).toContainEqual(
+      expect.objectContaining({ src: nodeId(file, 'fitModel'), dst: externalNodeId }),
+    );
     expect(callEdges).not.toContainEqual(
       expect.objectContaining({ dst: nodeId(file, 'dplyr.filter') }),
+    );
+    expect(upsertNodes).toContainEqual(
+      expect.objectContaining({ id: externalNodeId, kind: 'function', name: 'filter' }),
     );
     expect(callEdges).toContainEqual(
       expect.objectContaining({ src: nodeId(file, 'fitModel'), dst: nodeId(file, 'localHelper') }),
