@@ -51,11 +51,11 @@ function sourceType(filePath: string): string {
 }
 
 export function extractorName(): string {
-  return `tree-sitter/1.21`;
+  return `tree-sitter/1.22`;
 }
 
 /** Previous extractor versions — their patches are superseded when re-ingesting. */
-export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
+export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
 
 /** Compute a patchId for a (filePath, sourceHash, extractorVersion) triple. */
 function computePatchId(filePath: string, sourceHash: string, extractor: string): string {
@@ -94,6 +94,11 @@ export function buildPatch(
     list.push(qk);
     nameToQKeys.set(e.name, list);
   }
+
+  // Set of all qualified keys defined in this file — used to distinguish same-file
+  // dotted calls (e.g. "Foo.bar" where Foo is defined here) from external qualified
+  // calls (e.g. "dplyr.filter" from R's pkg::func syntax) that would produce phantoms.
+  const allQKeys = new Set<string>(entityQKey.values());
 
   // Resolve a relationship endpoint to the best qualified key.
   // For unambiguous names (appear once), returns the single qualified key.
@@ -217,6 +222,10 @@ export function buildPatch(
       ? resolveKey(r.dstName, r.srcName)
       : resolveKey(r.dstName);
 
+    // Drop qualified CALLS that aren't defined in this file — they're external package
+    // calls (e.g. R's pkg::func) that have no UpsertNode and would create phantom nodeIds.
+    if (r.predicate === 'CALLS' && dstKey.includes('.') && !allQKeys.has(dstKey)) continue;
+
     ops.push({
       type: 'UpsertEdge',
       id: edgeId(filePath, srcKey, dstKey, r.predicate),
@@ -304,6 +313,8 @@ export function buildPatchWithResolution(
     list.push(qk);
     nameToQKeys.set(e.name, list);
   }
+
+  const allQKeys2 = new Set<string>(entityQKey.values());
 
   function resolveKey(name: string, container?: string): string {
     const rawKeys = nameToQKeys.get(name);
@@ -409,6 +420,16 @@ export function buildPatchWithResolution(
     // For cross-file resolved edges (CALLS, EXTENDS), use the defining file's nodeId
     let dstNodeId: string;
     const resolutionKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
+
+    // Drop unresolved qualified CALLS whose dst has no UpsertNode in this file —
+    // they're external package calls (e.g. R's pkg::func) that would create phantom nodeIds.
+    if (
+      r.predicate === 'CALLS' &&
+      !edgeResolution.has(resolutionKey) &&
+      dstKey.includes('.') &&
+      !allQKeys2.has(dstKey)
+    ) continue;
+
     if (edgeResolution.has(resolutionKey)) {
       const { dstFilePath, dstQualifiedKey } = edgeResolution.get(resolutionKey)!;
       dstNodeId = nodeId(dstFilePath, dstQualifiedKey);

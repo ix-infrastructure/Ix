@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import { parseFile, resolveEdges, type FileParseResult, type ParsedEntity, type ParsedRelationship, type ResolvedEdge } from '../index.js';
 import { SupportedLanguages } from '../languages.js';
-import { buildPatchWithResolution } from '../patch-builder.js';
+import { buildPatch, buildPatchWithResolution } from '../patch-builder.js';
 
 const defaultFileRole = { role: 'production' as const, role_confidence: 0.5, role_signals: [] };
 
@@ -109,6 +109,58 @@ describe('buildPatchWithResolution', () => {
     }));
   });
 
+  it('drops unresolved qualified CALLS (no phantom nodeId)', () => {
+    const file = '/repo/model.R';
+    const result = fileResult(
+      file,
+      SupportedLanguages.R,
+      [entity('fitModel', SupportedLanguages.R)],
+      [
+        { srcName: 'fitModel', dstName: 'dplyr.filter', predicate: 'CALLS' },
+        { srcName: 'fitModel', dstName: 'localHelper', predicate: 'CALLS' },
+      ],
+    );
+    const patch = buildPatchWithResolution(result, 'hash', []);
+    const callEdges = patch.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS');
+
+    expect(callEdges).not.toContainEqual(
+      expect.objectContaining({ dst: nodeId(file, 'dplyr.filter') }),
+    );
+    expect(callEdges).toContainEqual(
+      expect.objectContaining({ src: nodeId(file, 'fitModel'), dst: nodeId(file, 'localHelper') }),
+    );
+  });
+
+  it('keeps resolved qualified CALLS that cross-file resolution found', () => {
+    const file = '/repo/utils.R';
+    const result = fileResult(
+      file,
+      SupportedLanguages.R,
+      [entity('myFunc', SupportedLanguages.R)],
+      [{ srcName: 'myFunc', dstName: 'pkg.helper', predicate: 'CALLS' }],
+    );
+    const resolvedEdges: ResolvedEdge[] = [
+      {
+        srcFilePath: file,
+        srcName: 'myFunc',
+        dstFilePath: '/repo/pkg.R',
+        dstName: 'pkg.helper',
+        dstQualifiedKey: 'helper',
+        predicate: 'CALLS',
+        confidence: 0.9,
+      },
+    ];
+    const patch = buildPatchWithResolution(result, 'hash', resolvedEdges);
+    const callEdges = patch.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS');
+
+    expect(callEdges).toContainEqual(
+      expect.objectContaining({
+        src: nodeId(file, 'myFunc'),
+        dst: nodeId('/repo/pkg.R', 'helper'),
+      }),
+    );
+  });
+
   it('rewrites resolved C++ imports to the imported file node', () => {
     const importer = parseFile(
       '/repo/include/KimeraRPGO/outlier/Pcm.h',
@@ -148,5 +200,52 @@ struct Trajectory {};
       src: nodeId('/repo/include/KimeraRPGO/outlier/Pcm.h', 'Pcm.h'),
       dst: nodeId('/repo/include/KimeraRPGO/utils/GraphUtils.h', 'GraphUtils.h'),
     }));
+  });
+});
+
+describe('buildPatch', () => {
+  it('drops qualified CALLS to names not defined in the file (watch-mode phantom guard)', () => {
+    const file = '/repo/model.R';
+    const result = fileResult(
+      file,
+      SupportedLanguages.R,
+      [entity('fitModel', SupportedLanguages.R)],
+      [
+        { srcName: 'fitModel', dstName: 'dplyr.filter', predicate: 'CALLS' },
+        { srcName: 'fitModel', dstName: 'localHelper', predicate: 'CALLS' },
+      ],
+    );
+    const patch = buildPatch(result, 'hash');
+    const callEdges = patch.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS');
+
+    expect(callEdges).not.toContainEqual(
+      expect.objectContaining({ dst: nodeId(file, 'dplyr.filter') }),
+    );
+    expect(callEdges).toContainEqual(
+      expect.objectContaining({ src: nodeId(file, 'fitModel'), dst: nodeId(file, 'localHelper') }),
+    );
+  });
+
+  it('keeps same-file qualified CALLS where qualifier is a defined class', () => {
+    const file = '/repo/models.py';
+    const result = fileResult(
+      file,
+      SupportedLanguages.Python,
+      [
+        entity('MyClass', SupportedLanguages.Python, 'class'),
+        entity('process', SupportedLanguages.Python, 'function', 'MyClass'),
+        entity('run', SupportedLanguages.Python, 'function'),
+      ],
+      [{ srcName: 'run', dstName: 'MyClass.process', predicate: 'CALLS' }],
+    );
+    const patch = buildPatch(result, 'hash');
+    const callEdges = patch.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS');
+
+    expect(callEdges).toContainEqual(
+      expect.objectContaining({
+        src: nodeId(file, 'run'),
+        dst: nodeId(file, 'MyClass.process'),
+      }),
+    );
   });
 });
