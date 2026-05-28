@@ -33,6 +33,7 @@ function tryLoadGrammar(pkg: string): any {
 }
 const Kotlin = tryLoadGrammar('tree-sitter-kotlin');
 const Swift = tryLoadGrammar('tree-sitter-swift');
+const R = tryLoadGrammar('@davisvaughan/tree-sitter-r');
 
 import { SupportedLanguages, languageFromPath } from './languages.js';
 import { LANGUAGE_QUERIES } from './queries.js';
@@ -114,6 +115,7 @@ const GRAMMAR_MAP: Partial<Record<SupportedLanguages, any>> = {
   [SupportedLanguages.Scala]: Scala,
   ...(Kotlin ? { [SupportedLanguages.Kotlin]: Kotlin } : {}),
   ...(Swift ? { [SupportedLanguages.Swift]: Swift } : {}),
+  ...(R ? { [SupportedLanguages.R]: R } : {}),
 };
 
 // Capture key prefix → NodeKind string
@@ -204,6 +206,43 @@ const JS_BUILTINS = new Set([
   'require', 'fetch', 'parseInt', 'parseFloat', 'isNaN', 'isFinite',
 ]);
 
+const R_BUILTINS = new Set([
+  ...SHARED_BUILTINS,
+  'library', 'require', 'source',
+  'print', 'cat', 'message', 'warning', 'stop', 'sprintf', 'paste', 'paste0',
+  'c', 'list', 'vector', 'matrix', 'array', 'data.frame',
+  'length', 'nrow', 'ncol', 'dim', 'names', 'colnames', 'rownames',
+  'head', 'tail', 'subset', 'merge', 'rbind', 'cbind', 'order', 'sort',
+  'apply', 'lapply', 'sapply', 'vapply', 'tapply', 'mapply',
+  'sum', 'mean', 'median', 'sd', 'var', 'min', 'max', 'abs',
+  'round', 'floor', 'ceiling', 'sqrt', 'exp', 'log', 'log10',
+  'as.character', 'as.numeric', 'as.integer', 'as.logical', 'as.factor',
+  'is.character', 'is.numeric', 'is.integer', 'is.logical', 'is.null', 'is.na',
+  'seq', 'seq_len', 'seq_along', 'rep', 'which', 'match', 'any', 'all', 'ifelse',
+  'read.csv', 'write.csv', 'readRDS', 'saveRDS', 'load', 'save',
+  'attr', 'attributes', 'class', 'inherits', 'structure',
+  'nzchar', 'nchar', 'trimws', 'toupper', 'tolower', 'chartr', 'strsplit',
+  'grep', 'grepl', 'regexpr', 'regmatches', 'sub', 'gsub',
+  'isFALSE', 'isTRUE', 'missing', 'exists', 'get', 'assign', 'rm',
+  'srcfile', 'srcref', 'getSrcref', 'getSrcFilename',
+  'tryCatch', 'withCallingHandlers', 'try', 'simpleError', 'simpleCondition',
+  'environment', 'parent.env', 'new.env', 'ls', 'rm',
+  'Recall', 'do.call', 'match.arg', 'match.call', 'sys.call',
+  'identical', 'stopifnot', 'switch', 'invisible', 'force',
+  'numeric', 'character', 'logical', 'integer', 'complex', 'raw',
+  'unlist', 'setdiff', 'union', 'intersect', 'unique', 'duplicated', 'table',
+  'format', 'formatC', 'strtoi', 'chartr', 'startsWith', 'endsWith',
+  'Reduce', 'Filter', 'Find', 'Map', 'Position',
+  // base R functions whose names contain dots (not package::function calls)
+  'on.exit', 'sys.call', 'sys.function', 'sys.frame', 'sys.nframe', 'sys.source',
+  'proc.time', 'date.time',
+  'file.path', 'file.exists', 'file.copy', 'file.remove', 'file.rename',
+  'file.create', 'file.info', 'file.size', 'file.show',
+  'dir.create', 'dir.exists',
+  'Sys.time', 'Sys.sleep', 'Sys.getenv', 'Sys.setenv', 'Sys.getpid',
+  'Sys.info', 'Sys.chmod', 'Sys.umask',
+]);
+
 // Per-language BUILTINS lookup — falls back to shared for languages without a
 // specific set (e.g. Java, Go, Rust) so they only skip obvious non-calls.
 function builtinsForLanguage(lang: SupportedLanguages): Set<string> {
@@ -213,6 +252,8 @@ function builtinsForLanguage(lang: SupportedLanguages): Set<string> {
     case SupportedLanguages.JavaScript:
     case SupportedLanguages.TypeScript:
       return JS_BUILTINS;
+    case SupportedLanguages.R:
+      return R_BUILTINS;
     default:
       return SHARED_BUILTINS;
   }
@@ -1315,8 +1356,10 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
 
       if (defCapture) {
         const kind = DEFINITION_KIND_MAP[defCapture.name] ?? 'function';
-        const name = nameCapture?.node.text
+        const rawName = nameCapture?.node.text
           ?? (defCapture.name === 'definition.constructor' ? 'init' : '');
+        // Strip surrounding quotes for string-keyed definitions (e.g. R S3 method names)
+        const name = rawName.replace(/^(['"`])(.*)\1$/, '$2');
         if (!name || name.length === 0) continue;
 
         const defNode = defCapture.node;
@@ -1915,6 +1958,25 @@ export function buildGlobalResolutionIndex(
         if (!qkMap.has(name)) qkMap.set(name, [name]);
       }
 
+      if (qkMap.size > 0) {
+        fileQKeys.set(fp, qkMap);
+        fileHasSymbol.set(fp, new Set(qkMap.keys()));
+      }
+    }
+
+    // R: scan function definitions (name <- function(...))
+    // Enables cross-batch Tier-3 resolution for large R repos (>500 files).
+    const rFuncRe = /^([a-zA-Z_.][a-zA-Z0-9_.]*)\s*<-\s*function\b\s*\(/gm;
+    for (const [fp, src] of sources) {
+      const ext = nodePath.extname(fp).toLowerCase();
+      if (ext !== '.r') continue;
+      const qkMap = new Map<string, string[]>();
+      rFuncRe.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = rFuncRe.exec(src)) !== null) {
+        const name = m[1];
+        if (!qkMap.has(name)) qkMap.set(name, [name]);
+      }
       if (qkMap.size > 0) {
         fileQKeys.set(fp, qkMap);
         fileHasSymbol.set(fp, new Set(qkMap.keys()));
