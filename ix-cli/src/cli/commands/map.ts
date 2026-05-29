@@ -7,6 +7,7 @@ import { roundFloat } from "../format.js";
 import { bootstrap } from "../bootstrap.js";
 import { formatFetchError } from "../errors.js";
 import { ingestFiles } from "./ingest.js";
+import { isRemoteReady, runRemoteIngestion } from "../remote.js";
 
 export interface MapRegion {
   id: string;
@@ -149,16 +150,21 @@ Examples:
         console.log("  This may take a long time or fail on very large systems.\n");
       }
 
-      // Ingest the path before mapping so the graph is up to date
+      // Ingest the path before mapping so the graph is up to date.
+      // When a cloud runner is registered and ready, route through it instead.
       const ingestStart = performance.now();
       try {
-        await ingestFiles(cwd, {
-          recursive: true,
-          format: (opts.format === "json" || silent) ? "json" : "text",
-          printSummary: false,
-          suppressOutput: true,
-          mapMode: true,
-        });
+        if (await isRemoteReady()) {
+          await runRemoteIngestion({ cwd });
+        } else {
+          await ingestFiles(cwd, {
+            recursive: true,
+            format: (opts.format === "json" || silent) ? "json" : "text",
+            printSummary: false,
+            suppressOutput: true,
+            mapMode: true,
+          });
+        }
       } catch (err: any) {
         console.error(chalk.red("Error:"), formatFetchError(err));
         process.exitCode = 1;

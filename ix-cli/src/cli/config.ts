@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import { parse, stringify } from "yaml";
+import { IxClient } from "../client/api.js";
 
 export interface WorkspaceConfig {
   workspace_id: string;
@@ -42,6 +43,10 @@ export function saveConfig(config: IxConfig): void {
 
 export function getEndpoint(): string {
   return process.env.IX_ENDPOINT || loadConfig().endpoint;
+}
+
+export function createClient(): IxClient {
+  return new IxClient(getEndpoint());
 }
 
 export function loadWorkspaces(): WorkspaceConfig[] {

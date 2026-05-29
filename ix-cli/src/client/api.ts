@@ -1,3 +1,4 @@
+// TEMP: Temporary header comment for in-progress edits.
 import type {
   CommitResult,
   IngestResult,
@@ -309,6 +310,10 @@ export class IxClient {
 
   async health(): Promise<HealthResponse> {
     return this.get("/v1/health");
+  }
+
+  async capabilities(): Promise<{ proFeaturesEnabled?: boolean; repoSplitterEndpoint?: string }> {
+    return this.get("/v1/capabilities");
   }
 
   private async post<T>(path: string, body: unknown): Promise<T> {
