@@ -165,16 +165,35 @@ end
       .filter(r => r.predicate === 'CALLS')
       .map(r => r.dstName);
 
-    // keywords must not appear as call targets
     expect(callTargets).not.toContain('defmodule');
     expect(callTargets).not.toContain('def');
     expect(callTargets).not.toContain('defp');
     expect(callTargets).not.toContain('use');
     expect(callTargets).not.toContain('alias');
     expect(callTargets).not.toContain('import');
-
-    // function names must not self-call
     expect(callTargets).not.toContain('start_link');
     expect(callTargets).not.toContain('validate');
+  });
+
+  it('captures guarded functions', () => {
+    const result = parseFile(
+      '/repo/user.ex',
+      `
+defmodule MyApp.User do
+  def fetch(id) when is_integer(id) do
+    {:ok, id}
+  end
+
+  defp validate(x) when x > 0 do
+    :ok
+  end
+end
+      `,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.entities.map(e => e.name)).toEqual(
+      expect.arrayContaining(['fetch', 'validate']),
+    );
   });
 });

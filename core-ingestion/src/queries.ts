@@ -1222,7 +1222,23 @@ export const ELIXIR_QUERIES = `
 (call
   target: (identifier) @call.name
   (#not-match? @call.name "^(def|defp|defmacro|defmacrop|defmodule|defprotocol|defimpl|defstruct|use|alias|import|require|quote|unquote|if|unless|case|cond|with|for|try|receive|raise|throw|fn|do)$")) @call
-`;
+
+; ── Guarded function definitions: def f(x) when guard do … end ──────────────
+(call
+  target: (identifier) @_defg
+  (arguments
+    (binary_operator
+      left: (call target: (identifier) @name)))
+  (#match? @_defg "^(def|defp)$")) @definition.function
+
+ ; ── Guarded macro definitions ─────────────────────────────────────────────────
+(call
+  target: (identifier) @_defmacrog
+  (arguments
+    (binary_operator
+      left: (call target: (identifier) @name)))
+  (#match? @_defmacrog "^(defmacro|defmacrop)$")) @definition.macro
+ `;
 
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TypeScript]: TYPESCRIPT_QUERIES,
