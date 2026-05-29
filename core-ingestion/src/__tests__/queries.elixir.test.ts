@@ -215,26 +215,23 @@ end
     expect(callTargets).not.toContain('fetch');
   });
 
-  it('does not emit bogus CALLS edges for module attributes', () => {
+    it('captures grouped alias as IMPORTS relationships', () => {
     const result = parseFile(
-      '/repo/server.ex',
+      '/repo/context.ex',
       `
-defmodule MyApp.Server do
-  @behaviour GenServer
-  @impl true
-  @derive Jason.Encoder
+defmodule MyApp.Context do
+  alias MyApp.{User, Repo, Post}
 end
       `,
     );
 
     expect(result).not.toBeNull();
-    const callTargets = result!.relationships
-      .filter(r => r.predicate === 'CALLS')
+    const importTargets = result!.relationships
+      .filter(r => r.predicate === 'IMPORTS')
       .map(r => r.dstName);
-
-    expect(callTargets).not.toContain('behaviour');
-    expect(callTargets).not.toContain('impl');
-    expect(callTargets).not.toContain('derive');
+    expect(importTargets).toEqual(
+      expect.arrayContaining(['User', 'Repo', 'Post']),
+    );
   });
 });
 

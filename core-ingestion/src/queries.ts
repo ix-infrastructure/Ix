@@ -1212,6 +1212,15 @@ export const ELIXIR_QUERIES = `
   (arguments (alias) @import.source)
   (#match? @_directive "^(alias|import|use|require)$")) @import
 
+  ; ── Grouped alias: alias MyApp.{User, Repo, Post} → one IMPORTS per member ───
+(call
+  target: (identifier) @_alias_group
+  (arguments
+    (dot
+      left: (alias)
+      right: (tuple (alias) @import.source)))
+  (#eq? @_alias_group "alias")) @import
+
 ; ── Qualified calls: Foo.bar() — captures qualifier so resolution is possible ─
 (call
   target: (dot
