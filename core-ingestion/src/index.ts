@@ -1533,10 +1533,13 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         // whose parent is `arguments`, whose parent is the outer def* call.
         // Without this, the inner call{target:foo} would emit a `foo CALLS foo` self-edge.
         if (language === SupportedLanguages.Elixir) {
-          const innerCall = callName.node.parent;       // call{target:foo, ...}
-          const argsNode  = innerCall?.parent;          // arguments
+          const innerCall = callName.node.parent;
+          let argsNode = innerCall?.parent;
+          if (argsNode?.type === 'binary_operator') {
+            argsNode = argsNode.parent;           // walk up through when-guard
+          }
           if (argsNode?.type === 'arguments') {
-            const defCall = argsNode.parent;            // call{target:def, ...}
+            const defCall = argsNode.parent;
             if (defCall?.type === 'call') {
               const defTarget = defCall.childForFieldName?.('target');
               if (defTarget && /^(def|defp|defmacro|defmacrop)$/.test(defTarget.text)) {

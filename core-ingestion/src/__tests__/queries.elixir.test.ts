@@ -196,4 +196,39 @@ end
       expect.arrayContaining(['fetch', 'validate']),
     );
   });
+it('does not emit self-call edge for guarded functions', () => {
+    const result = parseFile(
+      '/repo/user.ex',
+      `
+defmodule MyApp.User do
+  def fetch(id) when is_integer(id) do
+    {:ok, id}
+  end
+end
+      `,
+    );
+
+    expect(result).not.toBeNull();
+    const callTargets = result!.relationships
+      .filter(r => r.predicate === 'CALLS')
+      .map(r => r.dstName);
+    expect(callTargets).not.toContain('fetch');
+  });
+
+  it('does not capture operator definitions as functions', () => {
+    const result = parseFile(
+      '/repo/math.ex',
+      `
+defmodule MyApp.Math do
+  def a + b do
+    a + b
+  end
+end
+      `,
+    );
+
+    expect(result).not.toBeNull();
+    const names = result!.entities.map(e => e.name);
+    expect(names).not.toContain('+');
+  });
 });

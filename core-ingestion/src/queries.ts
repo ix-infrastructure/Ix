@@ -1227,7 +1227,7 @@ export const ELIXIR_QUERIES = `
 (call
   target: (identifier) @_defg
   (arguments
-    (binary_operator
+    (binary_operator 
       left: (call target: (identifier) @name)))
   (#match? @_defg "^(def|defp)$")) @definition.function
 
@@ -1235,7 +1235,7 @@ export const ELIXIR_QUERIES = `
 (call
   target: (identifier) @_defmacrog
   (arguments
-    (binary_operator
+    (binary_operator 
       left: (call target: (identifier) @name)))
   (#match? @_defmacrog "^(defmacro|defmacrop)$")) @definition.macro
  `;
