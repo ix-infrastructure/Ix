@@ -215,20 +215,26 @@ end
     expect(callTargets).not.toContain('fetch');
   });
 
-  it('does not capture operator definitions as functions', () => {
+  it('does not emit bogus CALLS edges for module attributes', () => {
     const result = parseFile(
-      '/repo/math.ex',
+      '/repo/server.ex',
       `
-defmodule MyApp.Math do
-  def a + b do
-    a + b
-  end
+defmodule MyApp.Server do
+  @behaviour GenServer
+  @impl true
+  @derive Jason.Encoder
 end
       `,
     );
 
     expect(result).not.toBeNull();
-    const names = result!.entities.map(e => e.name);
-    expect(names).not.toContain('+');
+    const callTargets = result!.relationships
+      .filter(r => r.predicate === 'CALLS')
+      .map(r => r.dstName);
+
+    expect(callTargets).not.toContain('behaviour');
+    expect(callTargets).not.toContain('impl');
+    expect(callTargets).not.toContain('derive');
   });
 });
+

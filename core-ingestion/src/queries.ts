@@ -1221,7 +1221,8 @@ export const ELIXIR_QUERIES = `
 ; ── Unqualified calls — keywords excluded to avoid bogus edges ────────────────
 (call
   target: (identifier) @call.name
-  (#not-match? @call.name "^(def|defp|defmacro|defmacrop|defmodule|defprotocol|defimpl|defstruct|use|alias|import|require|quote|unquote|if|unless|case|cond|with|for|try|receive|raise|throw|fn|do)$")) @call
+    (#not-match? @call.name "^(def|defp|defmacro|defmacrop|defmodule|defprotocol|defimpl|defstruct|use|alias|import|require|quote|unquote|if|unless|case|cond|with|for|try|receive|raise|throw|fn|do|behaviour|behavior|impl|derive|moduledoc|doc|spec|type|typep|opaque|callback|enforce_keys)$")) @call
+
 
 ; ── Guarded function definitions: def f(x) when guard do … end ──────────────
 (call
