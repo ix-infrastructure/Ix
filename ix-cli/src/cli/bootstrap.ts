@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import chalk from "chalk";
 import { IxClient } from "../client/api.js";
-import { getEndpoint, loadConfig, saveConfig, type WorkspaceConfig } from "./config.js";
+import { getEndpoint, loadConfig, saveConfig, findWorkspaceForCwd, getDefaultWorkspace, type WorkspaceConfig } from "./config.js";
 
 export interface BootstrapResult {
   createdConfig: boolean;
@@ -63,6 +63,16 @@ export function ensureWorkspaceRegistered(cwd = process.cwd()): { registered: bo
  */
 export function ensureWorkspaceId(cwd = process.cwd()): string {
   return getOrCreateWorkspace(cwd).ws.workspace_id;
+}
+
+/**
+ * Resolve the workspace id for a READ, without creating one. Returns the id of the
+ * nearest registered workspace containing cwd, else the default workspace, else
+ * undefined — meaning an unscoped/global read, preserving back-compat for callers
+ * run outside any registered workspace.
+ */
+export function resolveWorkspaceId(cwd = process.cwd()): string | undefined {
+  return (findWorkspaceForCwd(cwd) ?? getDefaultWorkspace())?.workspace_id;
 }
 
 /**
