@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
+import { resolveWorkspaceId } from "../bootstrap.js";
 import { relativePath } from "../format.js";
 
 export function registerInventoryCommand(program: Command): void {
@@ -25,7 +26,7 @@ Examples:
       const client = new IxClient(getEndpoint());
       const limit = parseInt(opts.limit, 10);
 
-      let nodes = await client.listByKind(opts.kind, { limit });
+      let nodes = await client.listByKind(opts.kind, { limit, workspaceId: resolveWorkspaceId() });
 
       if (opts.path) {
         nodes = nodes.filter((n) => {

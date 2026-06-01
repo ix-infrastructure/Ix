@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
+import { resolveWorkspaceId } from "../bootstrap.js";
 
 type Metric = "dependents" | "callers" | "importers" | "members";
 
@@ -153,7 +154,7 @@ export function registerRankCommand(program: Command): void {
         const diagnostics: string[] = [];
 
         // 1. Fetch all entities of the given kind
-        const allNodes = await client.listByKind(opts.kind, { limit: 2000 });
+        const allNodes = await client.listByKind(opts.kind, { limit: 2000, workspaceId: resolveWorkspaceId() });
 
         if (allNodes.length === 0) {
           if (isJson) {

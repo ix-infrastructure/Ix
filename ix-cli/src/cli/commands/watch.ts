@@ -5,7 +5,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
-import { bootstrap } from "../bootstrap.js";
+import { bootstrap, ensureWorkspaceId } from "../bootstrap.js";
 import { loadWatchIngestionModules } from "./ingestion-loader.js";
 import { readFileContent } from "./watch-utils.js";
 const SUPPORTED_EXTENSIONS = new Set([
@@ -46,15 +46,6 @@ function toWorkspaceRelative(root: string, absPath: string): string {
   return path.relative(root, absPath).split(path.sep).join("/");
 }
 
-/**
- * Derive the workspace id from the workspace root's absolute path. Matches the
- * value `ix ingest` stamps onto every patch (sha256 of the workspace root) so
- * the two ingest paths agree on source identity.
- */
-function workspaceIdFor(root: string): string {
-  return crypto.createHash("sha256").update(root).digest("hex");
-}
-
 export function registerWatchCommand(program: Command): void {
   program
     .command("watch")
@@ -70,7 +61,7 @@ export function registerWatchCommand(program: Command): void {
       }
 
       const root = resolveWorkspaceRoot(opts.root);
-      const workspaceId = workspaceIdFor(root);
+      const workspaceId = ensureWorkspaceId(root);
       const watchPath = opts.path
         ? path.resolve(root, opts.path)
         : root;
@@ -124,8 +115,7 @@ export function registerWatchCommand(program: Command): void {
             console.log(`${chalk.dim("[watch]")} skipped (unsupported): ${relPath}`);
             return;
           }
-          const patch = buildPatch(parsed, hash);
-          if (patch?.source) patch.source.workspaceId = workspaceId;
+          const patch = buildPatch(parsed, hash, workspaceId);
           const result = await client.commitPatch(patch);
           lastHash.set(filePath, hash);
           console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(relPath)} → rev ${result.rev}`);
@@ -187,7 +177,7 @@ async function pollMode(
   client: IxClient
 ): Promise<void> {
   const [{ parseFile }, { buildPatch }] = await loadWatchIngestionModules();
-  const workspaceId = workspaceIdFor(root);
+  const workspaceId = ensureWorkspaceId(root);
   const mtimes = new Map<string, number>();
 
   function collectFiles(dir: string): string[] {
@@ -244,8 +234,7 @@ async function pollMode(
         const parsed = parseFile(relPath, content);
         if (!parsed) continue;
         const hash = hashContent(content);
-        const patch = buildPatch(parsed, hash);
-        if (patch?.source) patch.source.workspaceId = workspaceId;
+        const patch = buildPatch(parsed, hash, workspaceId);
         const result = await client.commitPatch(patch);
         console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(relPath)} → rev ${result.rev}`);
       } catch (err: any) {

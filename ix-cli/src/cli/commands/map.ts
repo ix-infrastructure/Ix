@@ -4,7 +4,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { roundFloat } from "../format.js";
-import { bootstrap } from "../bootstrap.js";
+import { bootstrap, resolveWorkspaceId } from "../bootstrap.js";
 import { formatFetchError } from "../errors.js";
 import { ingestFiles } from "./ingest.js";
 import { getRemoteRunner, isCloudReady } from "../remote.js";
@@ -206,7 +206,7 @@ Examples:
 
       let result: MapResult;
       try {
-        result = await client.map({ full: opts.full }) as MapResult;
+        result = await client.map({ full: opts.full, workspaceId: resolveWorkspaceId(cwd) }) as MapResult;
       } catch (err: any) {
         if (mapInterval) { clearInterval(mapInterval); process.stderr.write('\r' + ' '.repeat(60) + '\r'); }
         console.error(chalk.red("Error:"), formatFetchError(err));
