@@ -35,6 +35,26 @@ function hashContent(content: string): string {
   return crypto.createHash("sha256").update(content).digest("hex");
 }
 
+/**
+ * Convert an absolute path to a workspace-relative POSIX path. This is the
+ * canonical source_uri and the basis for every deterministic node/edge/chunk
+ * id, so it must match what `ix ingest` emits (see toWorkspaceRelative in
+ * ingest.ts). Forcing POSIX separators keeps ids stable across operating
+ * systems and never embeds an absolute host path.
+ */
+function toWorkspaceRelative(root: string, absPath: string): string {
+  return path.relative(root, absPath).split(path.sep).join("/");
+}
+
+/**
+ * Derive the workspace id from the workspace root's absolute path. Matches the
+ * value `ix ingest` stamps onto every patch (sha256 of the workspace root) so
+ * the two ingest paths agree on source identity.
+ */
+function workspaceIdFor(root: string): string {
+  return crypto.createHash("sha256").update(root).digest("hex");
+}
+
 export function registerWatchCommand(program: Command): void {
   program
     .command("watch")
@@ -50,6 +70,7 @@ export function registerWatchCommand(program: Command): void {
       }
 
       const root = resolveWorkspaceRoot(opts.root);
+      const workspaceId = workspaceIdFor(root);
       const watchPath = opts.path
         ? path.resolve(root, opts.path)
         : root;
@@ -81,7 +102,10 @@ export function registerWatchCommand(program: Command): void {
 
       async function ingestFile(filePath: string): Promise<void> {
         const [{ parseFile }, { buildPatch }] = await loadWatchIngestionModules();
-        const rel = path.relative(root, filePath);
+        // Workspace-relative POSIX path drives source_uri and node identity; it
+        // must match `ix ingest` or the same file ingested via watch vs ingest
+        // would mint divergent node ids and reintroduce absolute-path coupling.
+        const relPath = toWorkspaceRelative(root, filePath);
 
         // Re-read content at actual ingest time (not at event time)
         const content = readFileContent(filePath);
@@ -90,22 +114,23 @@ export function registerWatchCommand(program: Command): void {
         // Skip if content hash is unchanged since last ingest
         const hash = hashContent(content);
         if (lastHash.get(filePath) === hash) {
-          console.log(`${chalk.dim("[watch]")} unchanged (hash): ${rel}`);
+          console.log(`${chalk.dim("[watch]")} unchanged (hash): ${relPath}`);
           return;
         }
 
         try {
-          const parsed = parseFile(filePath, content);
+          const parsed = parseFile(relPath, content);
           if (!parsed) {
-            console.log(`${chalk.dim("[watch]")} skipped (unsupported): ${rel}`);
+            console.log(`${chalk.dim("[watch]")} skipped (unsupported): ${relPath}`);
             return;
           }
           const patch = buildPatch(parsed, hash);
+          if (patch?.source) patch.source.workspaceId = workspaceId;
           const result = await client.commitPatch(patch);
           lastHash.set(filePath, hash);
-          console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(rel)} → rev ${result.rev}`);
+          console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(relPath)} → rev ${result.rev}`);
         } catch (err: any) {
-          console.error(`${chalk.red("[watch]")} error ingesting ${rel}: ${err.message}`);
+          console.error(`${chalk.red("[watch]")} error ingesting ${relPath}: ${err.message}`);
         }
       }
 
@@ -162,6 +187,7 @@ async function pollMode(
   client: IxClient
 ): Promise<void> {
   const [{ parseFile }, { buildPatch }] = await loadWatchIngestionModules();
+  const workspaceId = workspaceIdFor(root);
   const mtimes = new Map<string, number>();
 
   function collectFiles(dir: string): string[] {
@@ -210,17 +236,18 @@ async function pollMode(
     }
 
     for (const f of changed) {
-      const rel = path.relative(root, f);
-      console.log(`${chalk.dim("[watch]")} changed: ${rel}`);
+      const relPath = toWorkspaceRelative(root, f);
+      console.log(`${chalk.dim("[watch]")} changed: ${relPath}`);
       try {
         const content = readFileContent(f);
         if (!content) continue;
-        const parsed = parseFile(f, content);
+        const parsed = parseFile(relPath, content);
         if (!parsed) continue;
         const hash = hashContent(content);
         const patch = buildPatch(parsed, hash);
+        if (patch?.source) patch.source.workspaceId = workspaceId;
         const result = await client.commitPatch(patch);
-        console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(rel)} → rev ${result.rev}`);
+        console.log(`${chalk.cyan("[watch]")} ingested: ${chalk.bold(relPath)} → rev ${result.rev}`);
       } catch (err: any) {
         console.error(`${chalk.red("[watch]")} error: ${err.message}`);
       }
