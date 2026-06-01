@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
+import { resolveWorkspaceId } from "../bootstrap.js";
 
 export function registerStatsCommand(program: Command): void {
   program
@@ -10,7 +11,7 @@ export function registerStatsCommand(program: Command): void {
     .option("--format <fmt>", "Output format (text|json)", "text")
     .action(async (opts: { format: string }) => {
       const client = new IxClient(getEndpoint());
-      const result = await client.stats();
+      const result = await client.stats({ workspaceId: resolveWorkspaceId() });
 
       if (opts.format === "json") {
         console.log(JSON.stringify(result, null, 2));
