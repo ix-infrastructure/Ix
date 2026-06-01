@@ -11,6 +11,8 @@ import { join, dirname } from "path";
 import { homedir, platform } from "os";
 import { fileURLToPath } from "url";
 import { createConnection } from "net";
+import { resolveWorkspaceId } from "../bootstrap.js";
+import { findWorkspaceForCwd } from "../config.js";
 
 const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
 const PID_FILE = join(IX_HOME, "compass.pid");
@@ -58,7 +60,7 @@ function isPortInUse(port: number): Promise<boolean> {
 }
 
 /** Generate the inline server script that serves static files + proxies /v1. */
-function serverScript(distDir: string, port: number): string {
+function serverScript(distDir: string, port: number, workspaceId: string | null): string {
   return `
 const http = require("http");
 const fs = require("fs");
@@ -68,6 +70,7 @@ const url = require("url");
 const DIST = ${JSON.stringify(distDir)};
 const PORT = ${port};
 const BACKEND = ${JSON.stringify(BACKEND_URL)};
+const WORKSPACE_ID = ${JSON.stringify(workspaceId)};
 
 const MIME = {
   ".html": "text/html",
@@ -92,9 +95,15 @@ const server = http.createServer((req, res) => {
   // Proxy /v1 requests to backend
   if (pathname.startsWith("/v1")) {
     const backendUrl = BACKEND + pathname + (parsed.search || "");
+    const proxyHeaders = { ...req.headers, host: "localhost:8090" };
+    // Scope every proxied read to the workspace ix view was launched in, so the
+    // System Compass visualiser isolates by workspace without the browser app
+    // knowing anything about workspaces. The backend reads X-Ix-Workspace as a
+    // fallback when no explicit workspace_id is on the request.
+    if (WORKSPACE_ID) proxyHeaders["x-ix-workspace"] = WORKSPACE_ID;
     const proxyReq = http.request(backendUrl, {
       method: req.method,
-      headers: { ...req.headers, host: "localhost:8090" },
+      headers: proxyHeaders,
     }, (proxyRes) => {
       res.writeHead(proxyRes.statusCode, proxyRes.headers);
       proxyRes.pipe(res);
@@ -167,6 +176,7 @@ export function registerViewCommand(program: Command): void {
     .command("start", { isDefault: true })
     .description("Start the visualizer (default)")
     .option("--no-open", "Don't auto-open browser")
+    .option("--all", "Show every ingested workspace together (no workspace scoping)")
     .action(async (opts) => {
       const port = parseInt(view.opts().port, 10);
       if (isNaN(port) || port < 1 || port > 65535) {
@@ -199,11 +209,19 @@ export function registerViewCommand(program: Command): void {
         process.exit(1);
       }
 
+      // Resolve the workspace this visualizer is scoped to. The proxy stamps it as
+      // X-Ix-Workspace on every /v1 call so Compass isolates by workspace without
+      // any workspace awareness of its own. --all opts out (show the whole backend).
+      const workspaceId = opts.all ? null : (resolveWorkspaceId() ?? null);
+      const workspaceName = workspaceId
+        ? (findWorkspaceForCwd(process.cwd())?.workspace_name ?? workspaceId)
+        : null;
+
       // Write server script to temp location
       const scriptDir = join(IX_HOME, "tmp");
       mkdirSync(scriptDir, { recursive: true });
       const scriptPath = join(scriptDir, "compass-server.js");
-      writeFileSync(scriptPath, serverScript(distDir, port));
+      writeFileSync(scriptPath, serverScript(distDir, port, workspaceId));
 
       // Spawn detached process
       const child = spawn("node", [scriptPath], {
@@ -224,6 +242,11 @@ export function registerViewCommand(program: Command): void {
       const url = `http://localhost:${port}`;
       console.log(`[ok] Visualizer started (PID ${child.pid})`);
       console.log(`  ${url}`);
+      console.log(
+        workspaceName
+          ? `  scope: workspace "${workspaceName}"`
+          : `  scope: all workspaces${opts.all ? " (--all)" : ""}`
+      );
 
       if (opts.open !== false) {
         openBrowser(url);
