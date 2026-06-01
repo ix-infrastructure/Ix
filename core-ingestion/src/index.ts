@@ -1476,6 +1476,21 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         if (importAlias && modName && importAlias !== '.' && importAlias !== '_') {
           importAliases[importAlias] = modName;
         }
+        if (!importAlias && language === SupportedLanguages.Elixir && modName.includes('.')) {
+          const directive = match.captures.find((c: any) => c.name === '_directive')?.node.text;
+          if (directive === 'alias') {
+            importAliases[modName.split('.').pop()!] = modName;
+            }
+        }
+        // Elixir: 'alias MyApp.Repo' implicitly binds the last segment as a short name.
+        // No @import.alias capture exists for this; derive it here so Tier-1b resolution
+        // can translate e.g. 'Repo.insert' → 'MyApp.Repo.insert'.
+        if (!importAlias && language === SupportedLanguages.Elixir && modName.includes('.')) {
+          const directive = match.captures.find((c: any) => c.name === '_directive')?.node.text;
+          if (directive === 'alias') {
+            importAliases[modName.split('.').pop()!] = modName;
+          }
+        }
         if (modName.length > 0 && modName !== '*') {
           if (!modName) continue;                        // skip bare '.' relative imports
           entities.push({ name: modName, kind: 'module', lineStart: importSource.node.startPosition.row + 1, lineEnd: importSource.node.startPosition.row + 1, language });
@@ -2403,10 +2418,10 @@ export function resolveEdges(
         const qualifierPart = dstName.slice(0, qualDot);
         const memberPart = dstName.slice(qualDot + 1);
         if (memberPart && qualifierPart) {
-          const aliasedImportMatches =
-            srcLanguage === SupportedLanguages.Go
-              ? resolveImportQualifierTargets(srcFilePath, srcLanguage, result.importAliases?.[qualifierPart] ?? '')
-              : [];
+          const elixirAliasedModule = srcLanguage === SupportedLanguages.Elixir ? result.importAliases?.[qualifierPart]: undefined;
+          const aliasedImportMatches = srcLanguage === SupportedLanguages.Go ? resolveImportQualifierTargets(srcFilePath, srcLanguage, result.importAliases?.[qualifierPart] ?? '')
+          : elixirAliasedModule ? results.map(r => r.filePath).filter(fp => fp !== srcFilePath && fileHasSymbol.get(fp)?.has(elixirAliasedModule))
+          : [];
           // Try import-scoped qualifier first
           const qualifierSearchPool = aliasedImportMatches.length > 0
             ? aliasedImportMatches
@@ -2424,7 +2439,7 @@ export function resolveEdges(
           }
           if (qualImportMatches.length === 1) {
             const qfp = qualImportMatches[0];
-            const preferredQKey = aliasedImportMatches.length > 0 ? undefined : `${qualifierPart}.${memberPart}`;
+            const preferredQKey = elixirAliasedModule ? `${elixirAliasedModule}.${memberPart}` : aliasedImportMatches.length > 0 ? undefined : `${qualifierPart}.${memberPart}`;
             if (fileHasSymbol.get(qfp)?.has(memberPart)) {
               const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart, preferredQKey);
               if (dstQualifiedKey !== null) {
