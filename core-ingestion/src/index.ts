@@ -2396,7 +2396,7 @@ export function resolveEdges(
       if (canonicalMatches.length === 1) return canonicalMatches;
     }
 
-    if (srcLanguage === SupportedLanguages.Java) {
+    if (srcLanguage === SupportedLanguages.Java || srcLanguage === SupportedLanguages.SAS) {
       const srcParts = srcFilePath.replace(/\\/g, '/').split('/');
       const withProximity = matches.map(fp => {
         const fpParts = fp.replace(/\\/g, '/').split('/');
