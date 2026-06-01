@@ -88,16 +88,32 @@ run;
     );
   });
 
-  it('captures PROC step as module entity', () => {
+  // Finding B — a PROC step is keyed on its out= output dataset, not the
+  // (too-generic) procedure name. proc sort across many files used to emit a
+  // node literally named "sort" once per file.
+  it('keys PROC step module on its out= output dataset', () => {
+    const result = parseFile('/repo/procs.sas', `
+proc sort data=raw out=clean;
+  by id;
+run;
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: 'clean', kind: 'module' }),
+    );
+    // the procedure name itself is never materialized as a module
+    expect(result!.entities.map(e => e.name)).not.toContain('sort');
+  });
+
+  it('drops PROC step that produces no output dataset', () => {
     const result = parseFile('/repo/procs.sas', `
 proc means data=mydata;
   var age weight;
 run;
 `);
     expect(result).not.toBeNull();
-    expect(result!.entities).toContainEqual(
-      expect.objectContaining({ name: 'means', kind: 'module' }),
-    );
+    expect(result!.entities.filter(e => e.kind === 'module')).toHaveLength(0);
+    expect(result!.entities.map(e => e.name)).not.toContain('means');
   });
 
   it('emits IMPORTS for %INCLUDE', () => {
@@ -260,27 +276,78 @@ des='SAS Packages Framework internal macro.';
     expect(index.symbolToFiles.get('MDX1')).toContain('/repo/macros.sas');
   });
 
-  it('does not index column-0-only when macros are indented (confirms old regex was broken)', () => {
-    const brokenRe = /^%macro\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[(/;]/gim;
-    const fixedRe  = /^\s*%macro\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[(/;]/gim;
-    const src = ' %MACRO MDX(FMT);\n %MEND MDX;\n';
-    expect(src.match(brokenRe)).toBeNull();
-    expect(src.match(fixedRe)).not.toBeNull();
+  // Finding E1 — the cross-batch index is parser-derived, so it captures forms
+  // the old regex missed, e.g. a block comment between %macro and the name.
+  it('indexes %macro with a comment between keyword and name (regex→parser)', () => {
+    const sources = new Map([
+      ['/repo/macros.sas', '%macro /* helper */ withComment(arg);\n  %put &arg;\n%mend withComment;\n'],
+    ]);
+    const index = buildGlobalResolutionIndex(['/repo/macros.sas'], sources);
+    expect(index.symbolToFiles.get('withComment')).toContain('/repo/macros.sas');
   });
 
-  // v0.3.6 fix #1 — &var.suffix macro references parsed as one token; previously
-  // &dsname. stopped at the dot leaving the suffix as a stray identifier that could
-  // corrupt surrounding parse nodes.
-  it('captures DATA step whose name is a macro variable reference with dot-suffix', () => {
+  // v0.3.6 fix #1 — &var.suffix macro references parse as one token; previously
+  // &dsname. stopped at the dot leaving a stray identifier that could corrupt
+  // surrounding nodes. Finding A — such macro-var dataset names have no stable
+  // identity, so they are dropped rather than materialized as noise nodes/edges.
+  it('parses macro-var dataset names without corruption and drops them as nodes', () => {
     const result = parseFile('/repo/datastep.sas', `
+%macro build;
 data &filesWithCodes.addCnt;
   set &dsname.base;
+run;
+%mend build;
+`);
+    expect(result).not.toBeNull();
+    // the surrounding macro still parses cleanly (no cascade failure)
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: 'build', kind: 'macro' }),
+    );
+    // the &-prefixed dataset name is neither a module entity nor an IMPORTS target
+    expect(result!.entities.some(e => e.name.includes('&'))).toBe(false);
+    expect(result!.relationships.some(r => r.predicate === 'IMPORTS' && r.dstName.includes('&'))).toBe(false);
+  });
+
+  // Finding A — a two-part dataset_name (work.foo) is one entity, not two
+  // (work + foo). The old unanchored capture double-emitted under dataset_name.
+  it('captures a two-part dataset name as a single module entity', () => {
+    const result = parseFile('/repo/datastep.sas', `
+data work.foo;
+  set lib.bar;
 run;
 `);
     expect(result).not.toBeNull();
     expect(result!.entities).toContainEqual(
-      expect.objectContaining({ name: '&filesWithCodes.addCnt', kind: 'module' }),
+      expect.objectContaining({ name: 'work.foo', kind: 'module' }),
     );
+    expect(result!.entities.map(e => e.name)).not.toContain('foo');
+    // SET input is likewise a single IMPORTS edge, not lib + bar
+    expect(result!.relationships).toContainEqual(
+      expect.objectContaining({ predicate: 'IMPORTS', dstName: 'lib.bar' }),
+    );
+    expect(result!.relationships.filter(r => r.predicate === 'IMPORTS' && r.dstName === 'bar')).toHaveLength(0);
+  });
+
+  // Finding A — side-effect-only DATA steps (data _null_;) produce no dataset.
+  it('drops _null_/_data_/_last_ sentinel DATA steps', () => {
+    const result = parseFile('/repo/datastep.sas', `
+data _null_;
+  set real_input;
+run;
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities.map(e => e.name.toLowerCase())).not.toContain('_null_');
+  });
+
+  // Finding C — Windows single-backslash LIBNAME paths with unexpanded macro
+  // vars (libname X "&P.\SASData") must not leak a node/edge.
+  it('drops LIBNAME targets that are unexpanded macro vars / backslash paths', () => {
+    const result = parseFile('/repo/setup.sas', `
+libname OUTMSR "&PATHNAME.\\SASData";
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities.some(e => e.name.includes('&') || e.name.includes('\\'))).toBe(false);
+    expect(result!.relationships.some(r => r.predicate === 'IMPORTS' && (r.dstName.includes('&') || r.dstName.includes('\\')))).toBe(false);
   });
 
   // v0.3.6 fix #2 — %" inside double-quoted strings does not close the string early

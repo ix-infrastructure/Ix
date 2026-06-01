@@ -1395,13 +1395,16 @@ export const SAS_QUERIES = `
 (macro_call
   name: (macro_name) @call.name) @call
 
-; DATA step — captures the dataset identifier or macro variable reference
+; DATA step — capture the whole dataset_name node so two-part names (work.foo)
+; stay one entity. Sentinels (_null_) and unexpanded macro vars (&ds) are
+; filtered downstream in index.ts (they have no stable identity).
 (data_step
   (data_step_header
-    (dataset_name
-      [(identifier) (macro_variable_ref)] @name))) @definition.module
+    (dataset_name) @name)) @definition.module
 
-; PROC step — captures the procedure name
+; PROC step — the procedure name itself is too generic to be a graph node
+; (means/sort/freq repeat once per file). index.ts re-keys this on the PROC's
+; out= output dataset, or drops it when the step produces no dataset.
 (proc_step
   (proc_step_header
     name: (identifier) @name)) @definition.module
@@ -1420,39 +1423,33 @@ export const SAS_QUERIES = `
 
 ; PROC SQL — CREATE TABLE AS output
 (sql_create_statement
-  output: (dataset_name
-    [(identifier) (macro_variable_ref)] @name)) @definition.module
+  output: (dataset_name) @name) @definition.module
 
 ; PROC SQL — FROM table inputs
 (sql_select_statement
   (table_reference
-    (dataset_name
-      [(identifier) (macro_variable_ref)] @import.source))) @import
+    (dataset_name) @import.source)) @import
 
 ; PROC SQL — JOIN table inputs
 (sql_select_statement
   (sql_join_clause
     (table_reference
-      (dataset_name
-        [(identifier) (macro_variable_ref)] @import.source)))) @import
+      (dataset_name) @import.source))) @import
 
 ; DATA step SET inputs
 (data_step
   (set_statement
-    (dataset_name
-      [(identifier) (macro_variable_ref)] @import.source))) @import
+    (dataset_name) @import.source)) @import
 
 ; DATA step MERGE inputs
 (data_step
   (merge_statement
-    (dataset_name
-      [(identifier) (macro_variable_ref)] @import.source))) @import
+    (dataset_name) @import.source)) @import
 
 ; DATA step UPDATE inputs
 (data_step
   (update_statement
-    (dataset_name
-      [(identifier) (macro_variable_ref)] @import.source))) @import
+    (dataset_name) @import.source)) @import
 `;
 
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
