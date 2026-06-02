@@ -116,6 +116,37 @@ run;
     expect(result!.entities.map(e => e.name)).not.toContain('means');
   });
 
+  // Finding B (extended) — out= often lives in a body OUTPUT statement, not the
+  // PROC header (proc means/summary/univariate). Those output datasets are real
+  // data artifacts and must be captured too, not dropped with the procedure name.
+  it('keys PROC step module on an out= dataset in a body OUTPUT statement', () => {
+    const result = parseFile('/repo/procs.sas', `
+proc means data=mydata noprint;
+  var age;
+  output out=age_summary mean=avg_age;
+run;
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: 'age_summary', kind: 'module' }),
+    );
+    expect(result!.entities.map(e => e.name)).not.toContain('means');
+  });
+
+  // out= can also appear in a TABLES clause (proc freq); still a real dataset.
+  it('keys PROC FREQ module on a TABLES out= dataset', () => {
+    const result = parseFile('/repo/procs.sas', `
+proc freq data=mydata;
+  tables race*sex / out=freq_counts;
+run;
+`);
+    expect(result).not.toBeNull();
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: 'freq_counts', kind: 'module' }),
+    );
+    expect(result!.entities.map(e => e.name)).not.toContain('freq');
+  });
+
   it('emits IMPORTS for %INCLUDE', () => {
     const result = parseFile('/repo/main.sas', `
 %include '/shared/macros/utils.sas';

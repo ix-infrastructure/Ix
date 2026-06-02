@@ -1369,9 +1369,13 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
             // The procedure name (means/sort/freq…) is too generic to be a node.
             // Re-key on the PROC's out= output dataset; drop the step entirely
             // when it produces none (e.g. proc print, proc means with no out=).
+            // out= may sit on the header (proc sort out=) OR in a body statement
+            // (proc means; output out=x; / proc freq; tables a / out=y;), so fall
+            // back to scanning the full step text when the header has none.
             const header = defCapture.node.namedChild(0);
             const headerText = header?.type === 'proc_step_header' ? header.text : defCapture.node.text;
-            const outMatch = headerText.match(/\bout\s*=\s*([A-Za-z_][\w.]*)/i);
+            const outRe = /\bout\s*=\s*([A-Za-z_][\w.]*)/i;
+            const outMatch = headerText.match(outRe) ?? defCapture.node.text.match(outRe);
             if (!outMatch) continue;
             name = outMatch[1];
           }
