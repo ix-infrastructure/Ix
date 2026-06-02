@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
-import { getActiveWorkspaceRoot, getEndpoint } from "../config.js";
+import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { formatNodes, relativePath } from "../format.js";
 import { scoreCandidate } from "../resolve.js";
@@ -117,7 +117,11 @@ Examples:
     }) => {
       const client = new IxClient(getEndpoint());
       const limit = parseInt(opts.limit, 10);
-      const effectivePathFilter = opts.path ?? getActiveWorkspaceRoot();
+      // Only an explicit --path scopes results. The active workspace is already
+      // applied server-side via workspaceId (below), and provenance.sourceUri is
+      // workspace-RELATIVE, so defaulting this to the absolute getActiveWorkspaceRoot()
+      // made the substring filter below drop every match (see issue #228).
+      const effectivePathFilter = opts.path;
 
       // Fetch more results than requested so we can re-rank and trim
       const fetchLimit = Math.min(limit * 3, 60);
