@@ -7,7 +7,17 @@ import type {
   PatchSummary,
   GraphPatchPayload,
   PatchCommitResult,
+  CapabilitiesResponse,
 } from "./types.js";
+
+export interface ListSubsystemsOptions {
+  detailed?: boolean;
+  limit?: number;
+  offset?: number;
+  regions?: string;
+  edgeCap?: number;
+  memberFileCap?: number;
+}
 
 export class IxClient {
   constructor(private endpoint: string = "http://localhost:8090") {}
@@ -43,7 +53,7 @@ export class IxClient {
 
   async search(
     term: string,
-    opts?: { limit?: number; kind?: string; language?: string; asOfRev?: number; nameOnly?: boolean }
+    opts?: { limit?: number; kind?: string; language?: string; asOfRev?: number; nameOnly?: boolean; workspaceId?: string }
   ): Promise<GraphNode[]> {
     return this.post("/v1/search", {
       term,
@@ -52,16 +62,18 @@ export class IxClient {
       language: opts?.language,
       asOfRev: opts?.asOfRev,
       nameOnly: opts?.nameOnly,
+      workspaceId: opts?.workspaceId,
     });
   }
 
   async listByKind(
     kind: string,
-    opts?: { limit?: number }
+    opts?: { limit?: number; workspaceId?: string }
   ): Promise<GraphNode[]> {
     return this.post("/v1/list", {
       kind,
       limit: opts?.limit,
+      workspaceId: opts?.workspaceId,
     });
   }
 
@@ -198,11 +210,14 @@ export class IxClient {
     return new Map(Object.entries(result));
   }
 
-  async map(opts?: { full?: boolean }): Promise<any> {
+  async map(opts?: { full?: boolean; workspaceId?: string }): Promise<any> {
+    // /v1/map reads snake_case keys (full, branch_id, workspace_id) off the raw JSON body.
+    const body: Record<string, unknown> = { full: opts?.full ?? false };
+    if (opts?.workspaceId) body.workspace_id = opts.workspaceId;
     const resp = await fetch(`${this.endpoint}/v1/map`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(opts ?? {}),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(30 * 60 * 1000), // 30 minute timeout
     });
     if (!resp.ok) {
@@ -231,56 +246,151 @@ export class IxClient {
     godModuleChunks?: number;
     godModuleFan?: number;
     weakMaxNeighbors?: number;
+    workspaceId?: string;
   }): Promise<any> {
     const params = new URLSearchParams();
     if (opts?.orphanMaxConnections !== undefined) params.set("orphan-max-connections", String(opts.orphanMaxConnections));
     if (opts?.godModuleChunks      !== undefined) params.set("god-module-chunks",      String(opts.godModuleChunks));
     if (opts?.godModuleFan         !== undefined) params.set("god-module-fan",          String(opts.godModuleFan));
     if (opts?.weakMaxNeighbors     !== undefined) params.set("weak-max-neighbors",      String(opts.weakMaxNeighbors));
+    if (opts?.workspaceId)                        params.set("workspace_id",            opts.workspaceId);
     const qs = params.toString();
     return this.post(qs ? `/v1/smells?${qs}` : "/v1/smells", {});
   }
 
-  async listSmells(): Promise<any> {
-    return this.get("/v1/smells");
+  async listSmells(opts?: { workspaceId?: string }): Promise<any> {
+    const qs = opts?.workspaceId ? `?workspace_id=${encodeURIComponent(opts.workspaceId)}` : "";
+    return this.get(`/v1/smells${qs}`);
   }
 
-  async scoreSubsystems(): Promise<any> {
-    return this.post("/v1/subsystems/score", {});
+  async scoreSubsystems(opts?: { workspaceId?: string }): Promise<any> {
+    const qs = opts?.workspaceId ? `?workspace_id=${encodeURIComponent(opts.workspaceId)}` : "";
+    return this.post(`/v1/subsystems/score${qs}`, {});
   }
 
-  async listSubsystems(): Promise<any> {
-    return this.get("/v1/subsystems");
+  async listSubsystems(opts?: ListSubsystemsOptions & { workspaceId?: string }): Promise<any> {
+    const params = new URLSearchParams();
+    if (opts?.detailed) params.set("detailed", "true");
+    if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+    if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
+    if (opts?.regions) params.set("regions", opts.regions);
+    if (opts?.edgeCap !== undefined) params.set("edge_cap", String(opts.edgeCap));
+    if (opts?.memberFileCap !== undefined) params.set("member_file_cap", String(opts.memberFileCap));
+    if (opts?.workspaceId) params.set("workspace_id", opts.workspaceId);
+    const qs = params.toString();
+    return this.get(`/v1/subsystems${qs ? `?${qs}` : ""}`);
   }
 
-  async getSubsystemMap(opts?: { target?: string; pick?: number }): Promise<any> {
+  async getSubsystemMap(opts?: { target?: string; pick?: number; workspaceId?: string }): Promise<any> {
     const params = new URLSearchParams();
     if (opts?.target) params.set("target", opts.target);
     if (opts?.pick !== undefined) params.set("pick", String(opts.pick));
+    if (opts?.workspaceId) params.set("workspace_id", opts.workspaceId);
     const qs = params.toString();
     return this.get(`/v1/subsystems/map${qs ? `?${qs}` : ""}`);
   }
 
   async reset(): Promise<{ ok: boolean; message: string }> {
-    const resp = await fetch(`${this.endpoint}/v1/reset`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-      signal: AbortSignal.timeout(10 * 60 * 1000), // 10 minutes
-    });
-    if (!resp.ok) {
-      const text = await resp.text();
-      throw new Error(`${resp.status}: ${text}`);
-    }
-    return resp.json() as Promise<{ ok: boolean; message: string }>;
+    return this.runReset(
+      "/v1/reset/async",
+      "/v1/reset",
+      "Graph reset. All nodes and edges deleted.",
+    );
   }
 
   async resetCode(): Promise<{ ok: boolean; message: string }> {
-    const resp = await fetch(`${this.endpoint}/v1/reset/code`, {
+    return this.runReset(
+      "/v1/reset/code/async",
+      "/v1/reset/code",
+      "Code graph reset. Planning artifacts (goals, plans, tasks, bugs, decisions) preserved.",
+    );
+  }
+
+  // True when the configured endpoint is a local memory-layer. A local
+  // backend has no proxy in front of it, so the sync reset path connects
+  // directly and returns in milliseconds — there is nothing to fix there.
+  private isLocalEndpoint(): boolean {
+    try {
+      const host = new URL(this.endpoint).hostname.toLowerCase();
+      return host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" || host === "::1";
+    } catch {
+      return false;
+    }
+  }
+
+  // Reset can take minutes on a large graph. Against a cloud deployment a
+  // single sync request outlives the GCLB stream timeout → spurious 502
+  // even though the truncate succeeded. So for a remote endpoint we drive
+  // the async endpoint — begin returns immediately, then poll for status.
+  //
+  // For a local endpoint there is no proxy and the truncate is near-instant,
+  // so we keep the original sync request unchanged — identical behavior for
+  // OSS and Pro users running against a local memory-layer.
+  //
+  // If a remote backend predates the async endpoints (404 on begin), fall
+  // back to the sync request so old deployments still work.
+  private async runReset(
+    asyncPath: string,
+    syncPath: string,
+    doneMessage: string,
+  ): Promise<{ ok: boolean; message: string }> {
+    if (this.isLocalEndpoint()) {
+      return this.runResetSync(syncPath);
+    }
+
+    const beginResp = await fetch(`${this.endpoint}${asyncPath}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
-      signal: AbortSignal.timeout(10 * 60 * 1000), // 10 minutes
+      signal: AbortSignal.timeout(30 * 1000),
+    });
+
+    if (beginResp.status === 404) {
+      return this.runResetSync(syncPath);
+    }
+    if (!beginResp.ok) {
+      const text = await beginResp.text();
+      throw new Error(`${beginResp.status}: ${text}`);
+    }
+
+    const { opId } = (await beginResp.json()) as { opId: string };
+    const deadlineMs = Date.now() + 15 * 60 * 1000;
+
+    while (Date.now() < deadlineMs) {
+      const statusResp = await fetch(`${this.endpoint}/v1/reset/status/${opId}`, {
+        method: "GET",
+        signal: AbortSignal.timeout(30 * 1000),
+      });
+      // Op state is in-process on the server — a restart drops it. Reset is
+      // idempotent, so the safe recovery is to tell the user to re-run.
+      if (statusResp.status === 404) {
+        throw new Error(
+          `Reset status for operation ${opId} was lost (the server may have ` +
+          `restarted). Reset is idempotent — re-run the command to confirm.`,
+        );
+      }
+      if (!statusResp.ok) {
+        const text = await statusResp.text();
+        throw new Error(`${statusResp.status}: ${text}`);
+      }
+      const status = (await statusResp.json()) as { state: string; error?: string | null };
+      if (status.state === "done") {
+        return { ok: true, message: doneMessage };
+      }
+      if (status.state === "failed") {
+        throw new Error(`Reset failed: ${status.error ?? "unknown error"}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    throw new Error(`Reset did not complete within 15 minutes (operation ${opId}).`);
+  }
+
+  private async runResetSync(syncPath: string): Promise<{ ok: boolean; message: string }> {
+    const resp = await fetch(`${this.endpoint}${syncPath}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(10 * 60 * 1000),
     });
     if (!resp.ok) {
       const text = await resp.text();
@@ -303,12 +413,22 @@ export class IxClient {
     return resp.json();
   }
 
-  async stats(): Promise<any> {
-    return this.get("/v1/stats");
+  async stats(opts?: { workspaceId?: string }): Promise<any> {
+    const qs = opts?.workspaceId ? `?workspace_id=${encodeURIComponent(opts.workspaceId)}` : "";
+    return this.get(`/v1/stats${qs}`);
   }
 
   async health(): Promise<HealthResponse> {
     return this.get("/v1/health");
+  }
+
+  async capabilities(): Promise<CapabilitiesResponse> {
+    try {
+      return await this.get<CapabilitiesResponse>("/v1/capabilities");
+    } catch {
+      // Backend doesn't support capabilities yet — fall back to local mode.
+      return {};
+    }
   }
 
   private async post<T>(path: string, body: unknown): Promise<T> {

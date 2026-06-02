@@ -66,11 +66,21 @@ export function registerTextCommand(program: Command): void {
           stderr("Error: ripgrep (rg) is not installed. Install it: https://github.com/BurntSushi/ripgrep#installation");
           process.exit(1);
         }
+        // rg exit 1 = no matches; render as empty result set
         if (err.code === 1 || err.status === 1) {
           formatTextResults([], opts.format);
-        } else {
-          throw err;
+          return;
         }
+        // rg exit 2 = usage/regex error (e.g. literal "\n" in regex,
+        // unbalanced escape). Surface rg's stderr verbatim so the caller
+        // sees the actual cause instead of a raw Node stack.
+        const rgStderr = typeof err.stderr === "string" ? err.stderr.trim() : "";
+        const firstLine = rgStderr.split("\n", 1)[0] ?? "";
+        stderr(`Error: ripgrep failed${firstLine ? `: ${firstLine}` : ""}`);
+        if (rgStderr && rgStderr !== firstLine) {
+          stderr(rgStderr);
+        }
+        process.exit(1);
       }
     });
 }

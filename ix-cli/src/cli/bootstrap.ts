@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import chalk from "chalk";
 import { IxClient } from "../client/api.js";
-import { getEndpoint, loadConfig, saveConfig, type WorkspaceConfig } from "./config.js";
+import { getEndpoint, loadConfig, saveConfig, findWorkspaceForCwd, getDefaultWorkspace, type WorkspaceConfig } from "./config.js";
 
 export interface BootstrapResult {
   createdConfig: boolean;
@@ -30,24 +30,49 @@ export function ensureLocalConfig(): boolean {
  * Ensure the current directory (or given path) is registered as a workspace.
  * Returns the workspace name. Does nothing if already registered.
  */
-export function ensureWorkspaceRegistered(cwd = process.cwd()): { registered: boolean; name: string } {
+function getOrCreateWorkspace(cwd: string): { ws: WorkspaceConfig; created: boolean } {
   const rootPath = resolve(cwd);
-  const name = basename(rootPath);
   const config = loadConfig();
   const existing = (config.workspaces ?? []).find(w => w.root_path === rootPath);
-  if (existing) return { registered: false, name: existing.workspace_name };
+  if (existing) return { ws: existing, created: false };
 
   const workspaces = config.workspaces ?? [];
   const hasDefault = workspaces.some(w => w.default);
-  const newWs: WorkspaceConfig = {
+  const ws: WorkspaceConfig = {
     workspace_id: randomUUID().slice(0, 8),
-    workspace_name: name,
+    workspace_name: basename(rootPath),
     root_path: rootPath,
     default: !hasDefault,
   };
-  config.workspaces = [...workspaces, newWs];
+  config.workspaces = [...workspaces, ws];
   saveConfig(config);
-  return { registered: true, name };
+  return { ws, created: true };
+}
+
+export function ensureWorkspaceRegistered(cwd = process.cwd()): { registered: boolean; name: string } {
+  const { ws, created } = getOrCreateWorkspace(cwd);
+  return { registered: created, name: ws.workspace_name };
+}
+
+/**
+ * Resolve the stable workspace id for a root, registering the workspace (and
+ * persisting a fresh id) on first use. This id is folded into node identity by
+ * core-ingestion, so it must be stable for a given workspace root and distinct
+ * across roots — that is what keeps two workspaces with the same relative layout
+ * from colliding on a shared backend.
+ */
+export function ensureWorkspaceId(cwd = process.cwd()): string {
+  return getOrCreateWorkspace(cwd).ws.workspace_id;
+}
+
+/**
+ * Resolve the workspace id for a READ, without creating one. Returns the id of the
+ * nearest registered workspace containing cwd, else the default workspace, else
+ * undefined — meaning an unscoped/global read, preserving back-compat for callers
+ * run outside any registered workspace.
+ */
+export function resolveWorkspaceId(cwd = process.cwd()): string | undefined {
+  return (findWorkspaceForCwd(cwd) ?? getDefaultWorkspace())?.workspace_id;
 }
 
 /**

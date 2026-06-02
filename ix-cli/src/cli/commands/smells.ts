@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
+import { resolveWorkspaceId } from "../bootstrap.js";
 
 interface SmellCandidate {
   file_id: string;
@@ -62,7 +63,7 @@ Examples:
       if (opts.list) {
         let result: any;
         try {
-          result = await client.listSmells();
+          result = await client.listSmells({ workspaceId: resolveWorkspaceId() });
         } catch (err: any) {
           console.error(chalk.red("Error:"), err.message);
           process.exitCode = 1;
@@ -105,6 +106,7 @@ Examples:
           godModuleChunks:      parseInt(opts.godModuleChunks, 10),
           godModuleFan:         parseInt(opts.godModuleFan, 10),
           weakMaxNeighbors:     parseInt(opts.weakMaxNeighbors, 10),
+          workspaceId:          resolveWorkspaceId(),
         }) as SmellReport;
       } catch (err: any) {
         console.error(chalk.red("Error:"), err.message);

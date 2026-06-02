@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import { parse, stringify } from "yaml";
+import { IxClient } from "../client/api.js";
 
 export interface WorkspaceConfig {
   workspace_id: string;
@@ -35,13 +36,54 @@ export function loadConfig(): IxConfig {
   }
 }
 
+// Keys the OSS schema owns. For these, the in-memory `config` argument is
+// the source of truth — including absence (a missing key means "delete from
+// disk"). Anything outside this set is owned by extension packages (e.g.
+// Pro's `active` / `instances`) or by user hand-edits, and is preserved
+// untouched by OSS writes.
+//
+// Keep this in sync with the IxConfig interface above. New OSS fields must
+// be added here, otherwise OSS code can't delete or unset them.
+const OSS_OWNED_KEYS = new Set<keyof IxConfig>([
+  "endpoint",
+  "format",
+  "workspace",
+  "workspaces",
+]);
+
 export function saveConfig(config: IxConfig): void {
   const configPath = join(homedir(), ".ix", "config.yaml");
-  writeFileSync(configPath, stringify(config));
+  let existing: Record<string, unknown> = {};
+  if (existsSync(configPath)) {
+    try {
+      const parsed = parse(readFileSync(configPath, "utf-8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        existing = parsed as Record<string, unknown>;
+      }
+    } catch {
+      existing = {};
+    }
+  }
+  // Drop OSS-owned keys from the disk snapshot — the in-memory `config`
+  // is authoritative for those. Keep everything else (extension fields,
+  // user-added fields) so OSS writes never clobber them.
+  const preserved: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(existing)) {
+    if (!OSS_OWNED_KEYS.has(k as keyof IxConfig)) preserved[k] = v;
+  }
+  const merged: Record<string, unknown> = { ...preserved, ...(config as unknown as Record<string, unknown>) };
+  writeFileSync(configPath, stringify(merged));
 }
 
 export function getEndpoint(): string {
   return process.env.IX_ENDPOINT || loadConfig().endpoint;
+}
+
+// Single-place factory for IxClient instances. Pro commands and future OSS
+// code paths should prefer this over `new IxClient(getEndpoint())` so auth
+// and endpoint resolution can evolve in one spot.
+export async function createClient(): Promise<IxClient> {
+  return new IxClient(getEndpoint());
 }
 
 export function loadWorkspaces(): WorkspaceConfig[] {

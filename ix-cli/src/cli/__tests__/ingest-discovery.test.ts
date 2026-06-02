@@ -27,6 +27,12 @@ describe('dedupeDiscoveredFilePaths', () => {
   it('treats Dockerfile variants as supported source inputs', () => {
     expect(isSupportedSourceFile('Dockerfile')).toBe(true);
     expect(isSupportedSourceFile('deploy/prod.dockerfile')).toBe(true);
-    expect(isSupportedSourceFile('Makefile')).toBe(false);
+  });
+
+  it('treats Makefiles as supported source inputs', () => {
+    expect(isSupportedSourceFile('Makefile')).toBe(true);
+    expect(isSupportedSourceFile('GNUmakefile')).toBe(true);
+    expect(isSupportedSourceFile('build/common.mk')).toBe(true);
+    expect(isSupportedSourceFile('README.txt')).toBe(false);
   });
 });

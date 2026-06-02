@@ -9,8 +9,8 @@ type IngestionModule = {
 };
 
 type PatchBuilderModule = {
-  buildPatch: (parsed: any, hash: string, previousSourceHash?: string) => any;
-  buildPatchWithResolution: (parsed: any, hash: string, resolvedEdges: any[], previousSourceHash?: string) => any;
+  buildPatch: (parsed: any, hash: string, workspaceId: string, previousSourceHash?: string) => any;
+  buildPatchWithResolution: (parsed: any, hash: string, workspaceId: string, resolvedEdges: any[], previousSourceHash?: string) => any;
 };
 
 type LanguagesModule = {

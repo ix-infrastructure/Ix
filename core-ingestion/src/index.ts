@@ -34,6 +34,7 @@ function tryLoadGrammar(pkg: string): any {
 const Kotlin = tryLoadGrammar('tree-sitter-kotlin');
 const Swift = tryLoadGrammar('tree-sitter-swift');
 const Elixir = tryLoadGrammar('tree-sitter-elixir');
+const Make = tryLoadGrammar('tree-sitter-make');
 
 import { SupportedLanguages, languageFromPath } from './languages.js';
 import { LANGUAGE_QUERIES } from './queries.js';
@@ -52,6 +53,15 @@ export interface ParsedEntity {
   language: string;
   /** Direct enclosing class/interface/trait, if any (undefined for file-level entities). */
   container?: string;
+  /**
+   * Package name for languages that group entities into namespaces (currently
+   * Go only). Used by downstream layers to prefix qualifiedName so the symbol
+   * table indexes entities under their fully-qualified path. Without this,
+   * bare-name resolution at edge-resolver collides between packages (e.g.
+   * kubernetes has 191 distinct `addKnownTypes` functions, one per API group)
+   * and CALL targets are picked non-deterministically.
+   */
+  packageScope?: string;
 }
 
 /** A semantic code span extracted from the AST. The primary LLM retrieval unit. */
@@ -107,6 +117,7 @@ const GRAMMAR_MAP: Partial<Record<SupportedLanguages, any>> = {
   ...(Kotlin ? { [SupportedLanguages.Kotlin]: Kotlin } : {}),
   ...(Swift ? { [SupportedLanguages.Swift]: Swift } : {}),
   ...(Elixir ? { [SupportedLanguages.Elixir]: Elixir } : {}),
+  ...(Make ? { [SupportedLanguages.Makefile]: Make } : {}),
 };
 
 // Capture key prefix → NodeKind string
@@ -1243,7 +1254,8 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
       for (const c of m.captures) {
         const n = c.name;
         if (n.startsWith('definition.') || n.startsWith('heritage.') ||
-            n === '_typed_param_scope' || n === '_assign_scope' || n === '_typed_var_scope') {
+            n === '_typed_param_scope' || n === '_assign_scope' || n === '_typed_var_scope' ||
+            n === '_go_param_scope') {
           isPass1 = true;
           break;
         }
@@ -1284,6 +1296,18 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
     const declaredTypeMap = new Map<string, Map<string, string>>();
     // Import aliases keyed by the in-file alias name (Go explicit aliases, etc.).
     const importAliases: Record<string, string> = {};
+
+    // Detect the Go package name once (one package_clause per file). Used to
+    // package-prefix Go entity qualifiedNames + bare-call dstNames so
+    // resolution is deterministic across same-named entities in different
+    // packages.
+    let goPackage: string | undefined;
+    if (language === SupportedLanguages.Go) {
+      for (const m of [...pass1Matches, ...pass2Matches]) {
+        const cap = m.captures.find((c: any) => c.name === 'package.name');
+        if (cap) { goPackage = cap.node.text; break; }
+      }
+    }
 
     // --- First pass: collect definitions ---
     for (const match of pass1Matches) {
@@ -1327,6 +1351,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
           lineEnd,
           language,
           container: effectiveContainer,
+          packageScope: goPackage,
         });
 
         pendingChunks.push({
@@ -1412,6 +1437,46 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
               if (!assignTypeMap.has(funcName)) assignTypeMap.set(funcName, new Map());
               assignTypeMap.get(funcName)!.set(assignLhs.node.text, rhsName);
             }
+          }
+          continue;
+        }
+      }
+
+      // Go typed parameters: build paramTypeMap so method calls on
+      // parameters (incl. receivers) resolve to the parameter's declared
+      // type. e.g. `func (s *Scheme) F(opts *Options) { opts.Run() }`
+      // records s → Scheme, opts → Options so `opts.Run()` becomes
+      // `Options.Run` instead of bare `Run` (which is ambiguous across
+      // 100+ same-named methods in a large monorepo).
+      //
+      // For method_declarations, the paramTypeMap key MUST include the
+      // receiver type (i.e. `Container.method`) because that's what
+      // findEnclosingFunction returns at call-resolution time. Without
+      // this, lookups for callers inside methods miss.
+      if (language === SupportedLanguages.Go) {
+        const goParamScope = match.captures.find((c: any) => c.name === '_go_param_scope');
+        const goParamName = match.captures.find((c: any) => c.name === '_go_param_name');
+        const goParamType = match.captures.find((c: any) => c.name === '_go_param_type');
+        if (goParamScope && goParamName && goParamType) {
+          const scopeNode = goParamScope.node;
+          const baseName = scopeNode.childForFieldName?.('name')?.text as string | undefined;
+          if (baseName) {
+            let key = baseName;
+            if (scopeNode.type === 'method_declaration') {
+              const recvList = scopeNode.childForFieldName('receiver');
+              const recvDecl = recvList?.firstNamedChild;
+              const recvType = recvDecl?.childForFieldName('type');
+              let container: string | undefined;
+              if (recvType?.type === 'type_identifier') {
+                container = recvType.text;
+              } else if (recvType?.type === 'pointer_type') {
+                const inner = recvType.firstNamedChild;
+                if (inner?.type === 'type_identifier') container = inner.text;
+              }
+              if (container) key = `${container}.${baseName}`;
+            }
+            if (!paramTypeMap.has(key)) paramTypeMap.set(key, new Map());
+            paramTypeMap.get(key)!.set(goParamName.node.text, goParamType.node.text);
           }
           continue;
         }
@@ -1577,6 +1642,19 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
 
         const effectiveCallee = (() => {
           if (!qualifierCapture) {
+            // Go: bare-function calls (call.name is an `identifier` — i.e.
+            // pattern 1: `Foo()`) resolve to the caller's package, so prepend
+            // the package name for deterministic resolution. Method-shaped
+            // calls captured by the catch-all (call.name is a
+            // `field_identifier` — i.e. `recv.X.Method()`) dispatch on the
+            // receiver's type, NOT the caller's package, so leave them bare.
+            if (
+              language === SupportedLanguages.Go &&
+              goPackage &&
+              callName.node.type === 'identifier'
+            ) {
+              return `${goPackage}.${callee}`;
+            }
             // Python: if the callee is a local alias for a class, substitute the class name.
             // e.g. engineclass = base.Engine; engineclass(pool, ...) → Engine(pool, ...)
             if (language === SupportedLanguages.Python) {
@@ -1610,6 +1688,17 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
               const typeForAssign = assignTypeMap.get(funcName)?.get(qualifier);
               if (typeForParam) qualifier = typeForParam;
               else if (typeForAssign) qualifier = typeForAssign;
+            }
+          } else if (language === SupportedLanguages.Go) {
+            // Go: if the qualifier matches a tracked parameter/receiver in the
+            // enclosing function, substitute with the parameter's declared
+            // type. e.g. `opts.Run()` inside `func F(opts *Options)` → use
+            // qualifier "Options" so dstName is "Options.Run", which
+            // edge-resolver indexes via the container.name fallback key.
+            const funcName = findEnclosingFunction(entities, callLine);
+            if (funcName) {
+              const typeForParam = paramTypeMap.get(funcName)?.get(qualifier);
+              if (typeForParam) qualifier = typeForParam;
             }
           } else if (language === SupportedLanguages.C || language === SupportedLanguages.CPlusPlus) {
             const funcName = findEnclosingFunction(entities, callLine) ?? fileName;
@@ -1711,7 +1800,8 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
       importAliases: Object.keys(importAliases).length > 0 ? importAliases : undefined,
       fileRole: classifyFileRole(filePath, source),
     };
-  } catch {
+  } catch (e) {
+    if (process.env.IX_PARSE_DEBUG === '1') console.error('parseFile threw:', e);
     return null;
   }
 }

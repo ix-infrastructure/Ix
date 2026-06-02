@@ -69,6 +69,24 @@ function Test-DockerRunning {
     return $false
 }
 
+function Get-BackendLatestVersion {
+    try {
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$GithubOrg/ix-memory-layer-dist/releases/latest" -ErrorAction Stop
+        return $release.tag_name -replace '^v', ''
+    } catch {
+        return $null
+    }
+}
+
+function Get-CompassLatestVersion {
+    try {
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$GithubOrg/ix-compass-dist/releases/latest" -ErrorAction Stop
+        return $release.tag_name -replace '^v', ''
+    } catch {
+        return $null
+    }
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 Write-Host "`nIx Installer`n"
@@ -173,6 +191,19 @@ if ($userPath -notlike "*$IxBin*") {
 }
 
 $env:Path = "$IxBin;$env:Path"
+
+# Stamp installed versions so upgrade checker doesn't nag
+$BackendVer = Get-BackendLatestVersion
+if ($BackendVer) {
+    [System.IO.File]::WriteAllText((Join-Path $IxHome ".backend-version"), $BackendVer)
+}
+
+$CompassVer = Get-CompassLatestVersion
+if ($CompassVer) {
+    $CompassDir = Join-Path $IxHome "cli\compass"
+    New-Item -ItemType Directory -Force -Path $CompassDir | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $CompassDir ".version"), $CompassVer)
+}
 
 Write-Ok "CLI installed"
 

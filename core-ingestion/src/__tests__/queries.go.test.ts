@@ -234,4 +234,206 @@ func setup() {
       predicate: 'CALLS',
     });
   });
+
+  it('package-prefixes bare-function CALL dstNames so same-named functions in different packages resolve to disjoint symbols', () => {
+    // Two files, two packages, both defining a bare function `addKnownTypes`
+    // and a caller (`init()`) that invokes it. Without package prefixing,
+    // both CALLs collapse onto the same bare name in the symbol table and
+    // resolution becomes non-deterministic (last-write-wins). With prefixing,
+    // each CALL points at a distinct package-qualified target.
+    const fooResult = parseFile(
+      '/repo/foo/register.go',
+      `
+package foo
+
+var SchemeBuilder = something{}
+
+func addKnownTypes(s *Scheme) error { return nil }
+
+func init() { addKnownTypes(nil) }
+      `,
+    );
+    const barResult = parseFile(
+      '/repo/bar/register.go',
+      `
+package bar
+
+func addKnownTypes(s *Scheme) error { return nil }
+
+func init() { addKnownTypes(nil) }
+      `,
+    );
+
+    expect(fooResult).not.toBeNull();
+    expect(barResult).not.toBeNull();
+
+    // Each init() bare-name CALL should be package-qualified.
+    expect(fooResult!.relationships).toContainEqual({
+      srcName: 'init',
+      dstName: 'foo.addKnownTypes',
+      predicate: 'CALLS',
+    });
+    expect(barResult!.relationships).toContainEqual({
+      srcName: 'init',
+      dstName: 'bar.addKnownTypes',
+      predicate: 'CALLS',
+    });
+
+    // Each entity should carry its package as packageScope so the parse-worker
+    // can compose the symbol-table key as `pkg.name`.
+    for (const e of fooResult!.entities) {
+      if (e.kind === 'function') expect(e.packageScope).toBe('foo');
+    }
+    for (const e of barResult!.entities) {
+      if (e.kind === 'function') expect(e.packageScope).toBe('bar');
+    }
+  });
+
+  it('resolves method-call qualifier to parameter type so opts.Run becomes Options.Run', () => {
+    const result = parseFile(
+      '/repo/svc.go',
+      `
+package svc
+
+type Options struct{}
+func (o *Options) Run()    {}
+
+type Scheme struct{}
+func (s *Scheme) Register() {}
+
+// Parameter type substitution
+func handle(opts *Options) {
+  opts.Run()
+}
+
+// Receiver type substitution
+func (s *Scheme) start(opts *Options) {
+  s.Register()
+  opts.Run()
+}
+      `,
+    );
+
+    expect(result).not.toBeNull();
+    const rels = result!.relationships;
+
+    // Parameter substitution: opts is typed *Options, so opts.Run → Options.Run
+    expect(rels).toContainEqual({
+      srcName: 'handle',
+      dstName: 'Options.Run',
+      predicate: 'CALLS',
+    });
+
+    // Receiver substitution: s is typed *Scheme, so s.Register → Scheme.Register.
+    // Caller srcName for a method is the container-qualified form ("Scheme.start").
+    expect(rels).toContainEqual({
+      srcName: 'Scheme.start',
+      dstName: 'Scheme.Register',
+      predicate: 'CALLS',
+    });
+
+    // Other param within the same method still resolves
+    expect(rels).toContainEqual({
+      srcName: 'Scheme.start',
+      dstName: 'Options.Run',
+      predicate: 'CALLS',
+    });
+  });
+
+  it('captures REFERENCES from type assertions, type switches, var declarations, and qualified composite literals', () => {
+    const result = parseFile(
+      '/repo/refs.go',
+      `
+package refs
+
+import "io"
+
+type Closer interface { Close() error }
+
+func use(x any) {
+  // Type assertion
+  if c, ok := x.(Closer); ok { _ = c }
+  // Type switch
+  switch v := x.(type) {
+    case Closer: _ = v
+    case *Buffer: _ = v
+    case io.Reader: _ = v
+  }
+}
+
+// Var declarations
+var globalBuf Buffer
+var globalReader io.Reader
+var globalSlice []Item
+
+func init() {
+  // Composite literal with qualified type
+  _ = &io.LimitedReader{R: nil}
+}
+      `,
+    );
+
+    expect(result).not.toBeNull();
+    const rels = result!.relationships;
+
+    // Type assertion REFERENCES
+    expect(rels).toContainEqual({ srcName: 'use', dstName: 'Closer', predicate: 'REFERENCES' });
+
+    // Type switch case REFERENCES
+    expect(rels).toContainEqual({ srcName: 'use', dstName: 'Buffer', predicate: 'REFERENCES' });
+    expect(rels).toContainEqual({ srcName: 'use', dstName: 'Reader', predicate: 'REFERENCES' });
+
+    // Var-declaration REFERENCES (caller resolves to file since they're file-scope)
+    const refsTo = (name: string) => rels.filter(r => r.predicate === 'REFERENCES' && r.dstName === name);
+    expect(refsTo('Buffer').length).toBeGreaterThanOrEqual(1);
+    expect(refsTo('Reader').length).toBeGreaterThanOrEqual(1);
+    expect(refsTo('Item').length).toBeGreaterThanOrEqual(1);
+
+    // Composite literal with qualified type
+    expect(refsTo('LimitedReader').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('captures CALLS where the receiver operand is not an identifier or selector chain', () => {
+    // Real-world Go uses many receiver shapes that aren't bare identifiers or
+    // dotted chains. Each block below produces a method call whose function:
+    // selector_expression has a non-(identifier|selector_expression) operand.
+    const result = parseFile(
+      '/repo/shapes.go',
+      `
+package shapes
+
+type Item struct{}
+func (it *Item) Run()  {}
+func (it *Item) Step() {}
+
+type Fooer interface { Foo() }
+
+func factory() *Item { return nil }
+
+func callsViaCall()          { factory().Run() }
+func callsViaIndex(xs []*Item) { xs[0].Run() }
+func callsViaSlice(xs []*Item) { xs[1:][0].Run() }
+func callsViaTypeAssert(x any) { x.(Fooer).Foo() }
+func callsViaParens(it *Item)  { (it).Run() }
+func callsViaDeref(p **Item)   { (*p).Run() }
+      `,
+    );
+
+    expect(result).not.toBeNull();
+    for (const caller of [
+      'callsViaCall',
+      'callsViaIndex',
+      'callsViaSlice',
+      'callsViaTypeAssert',
+      'callsViaParens',
+      'callsViaDeref',
+    ]) {
+      const dst = caller === 'callsViaTypeAssert' ? 'Foo' : 'Run';
+      expect(result!.relationships).toContainEqual({
+        srcName: caller,
+        dstName: dst,
+        predicate: 'CALLS',
+      });
+    }
+  });
 });

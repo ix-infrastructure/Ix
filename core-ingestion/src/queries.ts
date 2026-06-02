@@ -423,6 +423,12 @@ export const C_QUERIES = `
 
 // Go queries - works with tree-sitter-go
 export const GO_QUERIES = `
+; Package declaration — captures the package name so the parser can
+; prefix every Go entity's qualifiedName with it, eliminating the bare-name
+; collision problem that makes call resolution non-deterministic when
+; multiple packages define a function with the same name.
+(package_clause (package_identifier) @package.name)
+
 ; Functions
 (function_declaration name: (identifier) @name) @definition.function
 
@@ -484,6 +490,39 @@ export const GO_QUERIES = `
         (field_declaration .
           (pointer_type (type_identifier) @heritage.extends) .)))))
 
+; Struct embedding — qualified type: type Foo struct { pkg.Bar }
+(type_declaration
+  (type_spec
+    name: (type_identifier) @heritage.class
+    type: (struct_type
+      (field_declaration_list
+        (field_declaration .
+          (qualified_type name: (type_identifier) @heritage.extends) .)))))
+
+; Struct embedding — pointer-to-qualified: type Foo struct { *pkg.Bar }
+(type_declaration
+  (type_spec
+    name: (type_identifier) @heritage.class
+    type: (struct_type
+      (field_declaration_list
+        (field_declaration .
+          (pointer_type (qualified_type name: (type_identifier) @heritage.extends)) .)))))
+
+; Interface embedding — bare: type Reader interface { Closer }
+; Embedded interfaces are wrapped in type_elem in tree-sitter-go's grammar.
+(type_declaration
+  (type_spec
+    name: (type_identifier) @heritage.class
+    type: (interface_type
+      (type_elem (type_identifier) @heritage.extends))))
+
+; Interface embedding — qualified: type Reader interface { io.Reader }
+(type_declaration
+  (type_spec
+    name: (type_identifier) @heritage.class
+    type: (interface_type
+      (type_elem (qualified_type name: (type_identifier) @heritage.extends)))))
+
 ; Calls
 (call_expression function: (identifier) @call.name) @call
 ; Qualified calls: pkg.Func() or localVar.Method() where the operand is a simple
@@ -493,24 +532,203 @@ export const GO_QUERIES = `
 (call_expression function: (selector_expression
   operand: (identifier) @_qualifier
   field: (field_identifier) @call.name)) @call
-; Chained/complex calls: a.b.Method(), call().Method(), index[i].Method() — the
-; operand is not a simple identifier, so emit without qualifier (bare method name).
+; All other method-call shapes — chained off function call, indexed,
+; type-asserted, parenthesized, dereferenced, sliced, etc. We omit the
+; operand field constraint so this matches any subtree. The bare method
+; name (field_identifier) is captured; no @_qualifier means cross-file
+; resolution falls back to method-name-only matching for these calls.
 (call_expression function: (selector_expression
-  operand: (selector_expression)
   field: (field_identifier) @call.name)) @call
 
 ; Struct literal construction: User{Name: "Alice"}
 (composite_literal type: (type_identifier) @call.name) @call
 
-; Type references — captures types used in field/param/return-type positions
+; ── Type references ─────────────────────────────────────────────────
+; Captures types used in field, parameter, variadic, and result positions.
+; The bare patterns below catch the common case (Item param / Item return),
+; but Go signatures lean heavily on pointer, slice, map, channel,
+; qualified-type, and variadic shapes — each needs its own pattern in
+; tree-sitter's structural query language.
+
+; --- Bare type_identifier ---
 (field_declaration type: (type_identifier) @reference.type)
 (parameter_declaration type: (type_identifier) @reference.type)
-; Return types: in tree-sitter-go, return type is a direct type_identifier child of function/method
 (function_declaration result: (type_identifier) @reference.type)
 (method_declaration result: (type_identifier) @reference.type)
+(variadic_parameter_declaration type: (type_identifier) @reference.type)
 
-; Pointer-type variants: e.g. opts *Options, func(*Options) *Result
+; --- Pointer types ---
 (field_declaration type: (pointer_type (type_identifier) @reference.type))
+(parameter_declaration type: (pointer_type (type_identifier) @reference.type))
+(function_declaration result: (pointer_type (type_identifier) @reference.type))
+(method_declaration result: (pointer_type (type_identifier) @reference.type))
+(variadic_parameter_declaration type: (pointer_type (type_identifier) @reference.type))
+
+; --- Qualified types: pkg.Type (capture the bare type_identifier "Type")
+(field_declaration type: (qualified_type name: (type_identifier) @reference.type))
+(parameter_declaration type: (qualified_type name: (type_identifier) @reference.type))
+(function_declaration result: (qualified_type name: (type_identifier) @reference.type))
+(method_declaration result: (qualified_type name: (type_identifier) @reference.type))
+(variadic_parameter_declaration type: (qualified_type name: (type_identifier) @reference.type))
+
+; --- Pointer-to-qualified: *pkg.Type ---
+(field_declaration type: (pointer_type (qualified_type name: (type_identifier) @reference.type)))
+(parameter_declaration type: (pointer_type (qualified_type name: (type_identifier) @reference.type)))
+(function_declaration result: (pointer_type (qualified_type name: (type_identifier) @reference.type)))
+(method_declaration result: (pointer_type (qualified_type name: (type_identifier) @reference.type)))
+
+; --- Slice types: []Item / []*Item / []pkg.Item ---
+(field_declaration type: (slice_type element: (type_identifier) @reference.type))
+(field_declaration type: (slice_type element: (pointer_type (type_identifier) @reference.type)))
+(field_declaration type: (slice_type element: (qualified_type name: (type_identifier) @reference.type)))
+(parameter_declaration type: (slice_type element: (type_identifier) @reference.type))
+(parameter_declaration type: (slice_type element: (pointer_type (type_identifier) @reference.type)))
+(parameter_declaration type: (slice_type element: (qualified_type name: (type_identifier) @reference.type)))
+(function_declaration result: (slice_type element: (type_identifier) @reference.type))
+(function_declaration result: (slice_type element: (pointer_type (type_identifier) @reference.type)))
+(method_declaration result: (slice_type element: (type_identifier) @reference.type))
+(method_declaration result: (slice_type element: (pointer_type (type_identifier) @reference.type)))
+
+; --- Map types: map[K]V (capture both K and V type_identifiers) ---
+(field_declaration type: (map_type key: (type_identifier) @reference.type))
+(field_declaration type: (map_type value: (type_identifier) @reference.type))
+(field_declaration type: (map_type value: (pointer_type (type_identifier) @reference.type)))
+(field_declaration type: (map_type value: (qualified_type name: (type_identifier) @reference.type)))
+(parameter_declaration type: (map_type key: (type_identifier) @reference.type))
+(parameter_declaration type: (map_type value: (type_identifier) @reference.type))
+(parameter_declaration type: (map_type value: (pointer_type (type_identifier) @reference.type)))
+(parameter_declaration type: (map_type value: (qualified_type name: (type_identifier) @reference.type)))
+
+; --- Channel types: chan Item ---
+(field_declaration type: (channel_type value: (type_identifier) @reference.type))
+(parameter_declaration type: (channel_type value: (type_identifier) @reference.type))
+
+; --- Type assertions: x.(SomeType), x.(*pkg.SomeType) ---
+(type_assertion_expression type: (type_identifier) @reference.type)
+(type_assertion_expression type: (pointer_type (type_identifier) @reference.type))
+(type_assertion_expression type: (qualified_type name: (type_identifier) @reference.type))
+(type_assertion_expression type: (pointer_type (qualified_type name: (type_identifier) @reference.type)))
+
+; --- Type switch cases: case Foo, *Bar, pkg.Baz: ... ---
+(type_case type: (type_identifier) @reference.type)
+(type_case type: (pointer_type (type_identifier) @reference.type))
+(type_case type: (qualified_type name: (type_identifier) @reference.type))
+(type_case type: (pointer_type (qualified_type name: (type_identifier) @reference.type)))
+
+; --- Var declarations with explicit type: var x SomeType ---
+(var_spec type: (type_identifier) @reference.type)
+(var_spec type: (pointer_type (type_identifier) @reference.type))
+(var_spec type: (qualified_type name: (type_identifier) @reference.type))
+(var_spec type: (pointer_type (qualified_type name: (type_identifier) @reference.type)))
+(var_spec type: (slice_type element: (type_identifier) @reference.type))
+(var_spec type: (slice_type element: (pointer_type (type_identifier) @reference.type)))
+(var_spec type: (slice_type element: (qualified_type name: (type_identifier) @reference.type)))
+(var_spec type: (map_type key: (type_identifier) @reference.type))
+(var_spec type: (map_type value: (type_identifier) @reference.type))
+(var_spec type: (map_type value: (qualified_type name: (type_identifier) @reference.type)))
+(var_spec type: (channel_type value: (type_identifier) @reference.type))
+
+; --- Const declarations with explicit type: const x SomeType = 0 ---
+(const_spec type: (type_identifier) @reference.type)
+(const_spec type: (qualified_type name: (type_identifier) @reference.type))
+
+; --- Composite literals with qualified type: &pkg.User{...}
+; (bare-type composite literals already captured as @call.name above —
+; that emits a CALLS edge to the type name, which the resolver treats as
+; a constructor-like call. The pattern below covers the qualified form
+; that the bare composite_literal pattern doesn't match.)
+(composite_literal type: (qualified_type name: (type_identifier) @reference.type))
+(composite_literal type: (slice_type element: (type_identifier) @reference.type))
+(composite_literal type: (slice_type element: (qualified_type name: (type_identifier) @reference.type)))
+(composite_literal type: (map_type value: (type_identifier) @reference.type))
+(composite_literal type: (map_type value: (qualified_type name: (type_identifier) @reference.type)))
+(composite_literal type: (array_type element: (type_identifier) @reference.type))
+
+; --- Array types in field/parameter/result/var positions: [N]Item ---
+(field_declaration type: (array_type element: (type_identifier) @reference.type))
+(field_declaration type: (array_type element: (qualified_type name: (type_identifier) @reference.type)))
+(parameter_declaration type: (array_type element: (type_identifier) @reference.type))
+(parameter_declaration type: (array_type element: (qualified_type name: (type_identifier) @reference.type)))
+(function_declaration result: (array_type element: (type_identifier) @reference.type))
+(method_declaration result: (array_type element: (type_identifier) @reference.type))
+(var_spec type: (array_type element: (type_identifier) @reference.type))
+
+; --- Generic type constraints: func F[T Ord](...) ---
+; T is the type-parameter name, Ord is the constraint (a real type reference).
+; type_constraint contains _type children directly (not wrapped in type_elem).
+(type_parameter_declaration type: (type_constraint (type_identifier) @reference.type))
+(type_parameter_declaration type: (type_constraint (qualified_type name: (type_identifier) @reference.type)))
+
+; --- Type instantiation expressions: Container[Item], Pick[int]
+; (rhs of short var decls, function arguments, parametric type uses)
+(type_instantiation_expression type: (type_identifier) @reference.type)
+(type_instantiation_expression type: (qualified_type name: (type_identifier) @reference.type))
+
+; ── Go method-call receiver-type inference ──────────────────────────
+; Track each parameter's declared type so method calls on that parameter
+; can be rewritten from "x.Method" to "Type.Method" — eliminating the
+; bare-name ambiguity that drops or misroutes 15-25% of CALL edges.
+; Mirrors the Python typed-parameter mechanism (_typed_param_scope etc.).
+
+; Function parameter — bare type: func F(x Item) {...}
+(function_declaration
+  parameters: (parameter_list (parameter_declaration
+    name: (identifier) @_go_param_name
+    type: (type_identifier) @_go_param_type))) @_go_param_scope
+
+; Function parameter — pointer type: func F(x *Item) {...}
+(function_declaration
+  parameters: (parameter_list (parameter_declaration
+    name: (identifier) @_go_param_name
+    type: (pointer_type (type_identifier) @_go_param_type)))) @_go_param_scope
+
+; Function parameter — qualified type: func F(x pkg.Item) {...}
+(function_declaration
+  parameters: (parameter_list (parameter_declaration
+    name: (identifier) @_go_param_name
+    type: (qualified_type name: (type_identifier) @_go_param_type)))) @_go_param_scope
+
+; Function parameter — pointer-qualified: func F(x *pkg.Item) {...}
+(function_declaration
+  parameters: (parameter_list (parameter_declaration
+    name: (identifier) @_go_param_name
+    type: (pointer_type (qualified_type name: (type_identifier) @_go_param_type))))) @_go_param_scope
+
+; Method parameter — bare type
+(method_declaration
+  parameters: (parameter_list (parameter_declaration
+    name: (identifier) @_go_param_name
+    type: (type_identifier) @_go_param_type))) @_go_param_scope
+
+; Method parameter — pointer type
+(method_declaration
+  parameters: (parameter_list (parameter_declaration
+    name: (identifier) @_go_param_name
+    type: (pointer_type (type_identifier) @_go_param_type)))) @_go_param_scope
+
+; Method parameter — qualified type
+(method_declaration
+  parameters: (parameter_list (parameter_declaration
+    name: (identifier) @_go_param_name
+    type: (qualified_type name: (type_identifier) @_go_param_type)))) @_go_param_scope
+
+; Method parameter — pointer-qualified
+(method_declaration
+  parameters: (parameter_list (parameter_declaration
+    name: (identifier) @_go_param_name
+    type: (pointer_type (qualified_type name: (type_identifier) @_go_param_type))))) @_go_param_scope
+
+; Method receiver — bare type: func (r Recv) M() {...}  → r → Recv
+(method_declaration
+  receiver: (parameter_list (parameter_declaration
+    name: (identifier) @_go_param_name
+    type: (type_identifier) @_go_param_type))) @_go_param_scope
+
+; Method receiver — pointer type: func (r *Recv) M() {...}
+(method_declaration
+  receiver: (parameter_list (parameter_declaration
+    name: (identifier) @_go_param_name
+    type: (pointer_type (type_identifier) @_go_param_type)))) @_go_param_scope
 (parameter_declaration type: (pointer_type (type_identifier) @reference.type))
 (function_declaration result: (pointer_type (type_identifier) @reference.type))
 (method_declaration result: (pointer_type (type_identifier) @reference.type))
@@ -1163,6 +1381,21 @@ export const SCALA_QUERIES = `
   (#match? @_qualifier "^[A-Z]")
   (#match? @call.name "^[A-Z]"))
 `;
+export const MAKEFILE_QUERIES = `
+; ── Rule targets ─────────────────────────────────────────────────────────────
+(rule
+  (targets (word) @name)
+  (#not-match? @name "^\\.[A-Z]")) @definition.function
+
+; ── Variable assignments ──────────────────────────────────────────────────────
+(variable_assignment
+  name: (word) @name) @definition.macro
+
+; ── Include directives ────────────────────────────────────────────────────────
+(include_directive
+  (list (word) @import.name))
+`;
+
 
 // tree-sitter-elixir: https://github.com/elixir-lang/tree-sitter-elixir
 // Most constructs are represented as `call` nodes with a `target` identifier.
@@ -1272,5 +1505,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TOML]: '',
   [SupportedLanguages.Markdown]: '',
   [SupportedLanguages.Elixir]: ELIXIR_QUERIES,
+  [SupportedLanguages.Makefile]: MAKEFILE_QUERIES,
 };
  

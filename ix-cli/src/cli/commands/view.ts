@@ -11,9 +11,15 @@ import { join, dirname } from "path";
 import { homedir, platform } from "os";
 import { fileURLToPath } from "url";
 import { createConnection } from "net";
+import { resolveWorkspaceId } from "../bootstrap.js";
+import { findWorkspaceForCwd, loadWorkspaces } from "../config.js";
 
 const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
 const PID_FILE = join(IX_HOME, "compass.pid");
+// Records the workspace scope (id, or "*all*") of the running visualizer, so a second
+// `ix view` launched from a different workspace can warn instead of silently showing the
+// already-running (differently-scoped) instance.
+const SCOPE_FILE = join(IX_HOME, "compass.scope");
 const BACKEND_URL = "http://localhost:8090";
 
 /** Resolve the compass dist directory — installed path first, then dev fallback. */
@@ -41,6 +47,7 @@ function readAlivePid(): number | null {
   } catch {
     // Stale PID file
     try { unlinkSync(PID_FILE); } catch { /* ignore */ }
+    try { unlinkSync(SCOPE_FILE); } catch { /* ignore */ }
     return null;
   }
 }
@@ -58,7 +65,7 @@ function isPortInUse(port: number): Promise<boolean> {
 }
 
 /** Generate the inline server script that serves static files + proxies /v1. */
-function serverScript(distDir: string, port: number): string {
+function serverScript(distDir: string, port: number, workspaceId: string | null): string {
   return `
 const http = require("http");
 const fs = require("fs");
@@ -68,6 +75,7 @@ const url = require("url");
 const DIST = ${JSON.stringify(distDir)};
 const PORT = ${port};
 const BACKEND = ${JSON.stringify(BACKEND_URL)};
+const WORKSPACE_ID = ${JSON.stringify(workspaceId)};
 
 const MIME = {
   ".html": "text/html",
@@ -92,9 +100,15 @@ const server = http.createServer((req, res) => {
   // Proxy /v1 requests to backend
   if (pathname.startsWith("/v1")) {
     const backendUrl = BACKEND + pathname + (parsed.search || "");
+    const proxyHeaders = { ...req.headers, host: "localhost:8090" };
+    // Scope every proxied read to the workspace ix view was launched in, so the
+    // System Compass visualiser isolates by workspace without the browser app
+    // knowing anything about workspaces. The backend reads X-Ix-Workspace as a
+    // fallback when no explicit workspace_id is on the request.
+    if (WORKSPACE_ID) proxyHeaders["x-ix-workspace"] = WORKSPACE_ID;
     const proxyReq = http.request(backendUrl, {
       method: req.method,
-      headers: { ...req.headers, host: "localhost:8090" },
+      headers: proxyHeaders,
     }, (proxyRes) => {
       res.writeHead(proxyRes.statusCode, proxyRes.headers);
       proxyRes.pipe(res);
@@ -167,6 +181,7 @@ export function registerViewCommand(program: Command): void {
     .command("start", { isDefault: true })
     .description("Start the visualizer (default)")
     .option("--no-open", "Don't auto-open browser")
+    .option("--all", "Show every ingested workspace together (no workspace scoping)")
     .action(async (opts) => {
       const port = parseInt(view.opts().port, 10);
       if (isNaN(port) || port < 1 || port > 65535) {
@@ -174,10 +189,30 @@ export function registerViewCommand(program: Command): void {
         process.exit(1);
       }
 
+      // Resolve the workspace this visualizer is scoped to. The proxy stamps it as
+      // X-Ix-Workspace on every /v1 call so Compass isolates by workspace without any
+      // workspace awareness of its own. --all opts out (show the whole backend).
+      const workspaceId = opts.all ? null : (resolveWorkspaceId() ?? null);
+      const workspaceName = workspaceId
+        ? (findWorkspaceForCwd(process.cwd())?.workspace_name ?? workspaceId)
+        : null;
+      const scopeKey = workspaceId ?? "*all*";
+      const scopeLabel = workspaceName ? `workspace "${workspaceName}"` : "all workspaces";
+
       const existing = readAlivePid();
       if (existing) {
         console.log(`[ok] Visualizer is already running (PID ${existing})`);
         console.log(`  http://localhost:${port}`);
+        // The running instance has a fixed scope (baked at launch). If this directory
+        // maps to a different workspace, say so rather than silently showing the old one.
+        const runningKey = existsSync(SCOPE_FILE) ? readFileSync(SCOPE_FILE, "utf-8").trim() : null;
+        if (runningKey !== null && runningKey !== scopeKey) {
+          const runningLabel = runningKey === "*all*"
+            ? "all workspaces"
+            : `workspace "${loadWorkspaces().find(w => w.workspace_id === runningKey)?.workspace_name ?? runningKey}"`;
+          console.log(`[!] It is scoped to ${runningLabel}, but this directory maps to ${scopeLabel}.`);
+          console.log(`    Run 'ix view stop' then 'ix view' here to rescope.`);
+        }
         return;
       }
 
@@ -203,7 +238,7 @@ export function registerViewCommand(program: Command): void {
       const scriptDir = join(IX_HOME, "tmp");
       mkdirSync(scriptDir, { recursive: true });
       const scriptPath = join(scriptDir, "compass-server.js");
-      writeFileSync(scriptPath, serverScript(distDir, port));
+      writeFileSync(scriptPath, serverScript(distDir, port, workspaceId));
 
       // Spawn detached process
       const child = spawn("node", [scriptPath], {
@@ -217,13 +252,19 @@ export function registerViewCommand(program: Command): void {
         process.exit(1);
       }
 
-      // Save PID
+      // Save PID + the scope it was launched with (for the mismatch warning above).
       mkdirSync(dirname(PID_FILE), { recursive: true });
       writeFileSync(PID_FILE, String(child.pid));
+      writeFileSync(SCOPE_FILE, scopeKey);
 
       const url = `http://localhost:${port}`;
       console.log(`[ok] Visualizer started (PID ${child.pid})`);
       console.log(`  ${url}`);
+      console.log(
+        workspaceName
+          ? `  scope: workspace "${workspaceName}"`
+          : `  scope: all workspaces${opts.all ? " (--all)" : ""}`
+      );
 
       if (opts.open !== false) {
         openBrowser(url);
@@ -247,6 +288,7 @@ export function registerViewCommand(program: Command): void {
       }
 
       try { unlinkSync(PID_FILE); } catch { /* ignore */ }
+      try { unlinkSync(SCOPE_FILE); } catch { /* ignore */ }
       console.log(`[ok] Visualizer stopped (PID ${pid})`);
     });
 
