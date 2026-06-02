@@ -1381,6 +1381,21 @@ export const SCALA_QUERIES = `
   (#match? @_qualifier "^[A-Z]")
   (#match? @call.name "^[A-Z]"))
 `;
+export const MAKEFILE_QUERIES = `
+; ── Rule targets ─────────────────────────────────────────────────────────────
+(rule
+  (targets (word) @name)
+  (#not-match? @name "^\\.[A-Z]")) @definition.function
+
+; ── Variable assignments ──────────────────────────────────────────────────────
+(variable_assignment
+  name: (word) @name) @definition.macro
+
+; ── Include directives ────────────────────────────────────────────────────────
+(include_directive
+  (list (word) @import.name))
+`;
+
 
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TypeScript]: TYPESCRIPT_QUERIES,
@@ -1403,5 +1418,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.JSON]: '',
   [SupportedLanguages.TOML]: '',
   [SupportedLanguages.Markdown]: '',
+  [SupportedLanguages.Makefile]: MAKEFILE_QUERIES,
 };
  

@@ -40,12 +40,15 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.json',
   '.toml',
   '.md', '.markdown',
+  '.mk', '.makefile',
 ]);
 
 export function isSupportedSourceFile(filePath: string): boolean {
   const fileName = nodePath.basename(filePath).toLowerCase();
   return fileName === 'dockerfile'
     || fileName.endsWith('.dockerfile')
+    || fileName === 'makefile'
+    || fileName === 'gnumakefile'
     || SUPPORTED_EXTENSIONS.has(nodePath.extname(filePath).toLowerCase());
 }
 
