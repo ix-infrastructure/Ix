@@ -61,6 +61,29 @@ clean:
     expect(result!.entities.map(e => e.name)).toContain('clean');
   });
 
+  it('does not emit GNU special targets (.SUFFIXES/.DEFAULT/etc.) as entities', () => {
+    const result = parseFile(
+      '/repo/Makefile',
+      `
+.SUFFIXES:
+.DEFAULT:
+.PRECIOUS: app
+.EXPORT_ALL_VARIABLES:
+
+app:
+\t$(CC) -o app main.c
+      `,
+    );
+
+    expect(result).not.toBeNull();
+    const names = result!.entities.map(e => e.name);
+    expect(names).not.toContain('.SUFFIXES');
+    expect(names).not.toContain('.DEFAULT');
+    expect(names).not.toContain('.PRECIOUS');
+    expect(names).not.toContain('.EXPORT_ALL_VARIABLES');
+    expect(names).toContain('app'); // real targets still captured
+  });
+
   it('captures .mk files by extension', () => {
     const result = parseFile(
       '/repo/config.mk',

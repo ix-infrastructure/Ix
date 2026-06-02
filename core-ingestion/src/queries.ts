@@ -1167,7 +1167,7 @@ export const MAKEFILE_QUERIES = `
 ; ── Rule targets ─────────────────────────────────────────────────────────────
 (rule
   (targets (word) @name)
-  (#not-eq? @name ".PHONY")) @definition.function
+  (#not-match? @name "^\\.[A-Z]")) @definition.function
 
 ; ── Variable assignments ──────────────────────────────────────────────────────
 (variable_assignment
