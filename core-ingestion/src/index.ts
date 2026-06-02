@@ -2174,6 +2174,42 @@ export function buildGlobalResolutionIndex(
   };
 }
 
+// Commodity callee names for the fuzzy resolution tiers (transitive re-export +
+// global symbol fallback; see resolveEdges). Those tiers resolve a call on bare
+// name alone and can cross module/package/repo boundaries. Builtin / stdlib
+// instance methods (`path.resolve()`, `arr.map()`, `obj.get()`, `promise.then()`)
+// are recorded by the parser as a bare callee name, so a single narrowed match
+// links them to whatever unrelated file happens to export a top-level symbol of
+// the same name (observed: `path.resolve()` -> an unrelated repo's `resolve`;
+// `.get()`/`.map()` -> a client class's `get`/`map`).
+//
+// Deliberately conservative: ONLY names that are overwhelmingly builtin instance
+// methods (Array / Object / Map / Set / Promise / Function / JSON) and are
+// essentially never legitimate standalone project-function targets. Domain verbs
+// that double as real function names (run, build, create, save, parse, process,
+// handle, load, send, start, init, filter, find, on/emit, ...) are intentionally
+// EXCLUDED — projects legitimately resolve those across files, so gating them
+// would drop real edges. The frequency gate below catches project-specific
+// commodities that this static list does not. The precise direct-import tier
+// (confidence 0.9) is never gated, so an explicitly-imported `get`/`map` still
+// resolves.
+const COMMODITY_CALLEE_NAMES: ReadonlySet<string> = new Set([
+  // Array / iterable builtins
+  'map', 'forEach', 'reduce', 'reduceRight', 'flatMap', 'flat',
+  'push', 'pop', 'shift', 'unshift', 'splice', 'slice', 'concat',
+  // Map / Set / Object builtins
+  'get', 'set', 'has', 'keys', 'values', 'entries',
+  // Promise builtins
+  'then', 'catch', 'finally', 'resolve', 'race', 'allSettled',
+  // Function / JSON / Object builtins
+  'bind', 'call', 'apply', 'stringify', 'toString', 'valueOf', 'hasOwnProperty',
+]);
+
+// A symbol defined in this many or more distinct files across the resolution
+// set is a project-level commodity; a single narrowed fuzzy-tier match for it is
+// not trustworthy. (Tunable; the named-list above carries the builtin-method load.)
+const COMMODITY_DEF_FILE_THRESHOLD = 5;
+
 /**
  * Resolves CALLS and EXTENDS relationships to their cross-file targets by
  * building a symbol table and import map over the full batch of parsed files.
@@ -2733,7 +2769,16 @@ export function resolveEdges(
             }
             continue;
           }
-          // Global qualifier fallback — check files that define the qualified member
+          // Global qualifier fallback — check files that define the qualified member.
+          // Commodity gate (mirrors the bare-name global fallback below): a member
+          // call like `client.map()` / `cache.get()` resolves on the member name
+          // across module/repo boundaries; for builtin/stdlib member names that is a
+          // false positive, so skip the global fallback (the import-scoped qualifier
+          // tier above already had its chance). Favor under-connection.
+          if (COMMODITY_CALLEE_NAMES.has(memberPart)) {
+            stats.skippedAmbiguous++;
+            continue;
+          }
           const qualGlobalMatches = results
             .map(r => r.filePath)
             .filter(fp => fp !== srcFilePath && fileDefinesQualifiedMember(fp, qualifierPart, memberPart));
@@ -2765,6 +2810,19 @@ export function resolveEdges(
         const dstQualifiedKey = bestQKey(fileQKeys, fp, dstName);
         if (dstQualifiedKey === null) continue; // ambiguous — do not emit bad nodeId
         resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9 });
+        continue;
+      }
+      // Commodity gate: beyond the precise import-scoped tier above, the remaining
+      // tiers (transitive re-export hops at 0.8, global symbol fallback at 0.5)
+      // resolve a bare call on name alone and can cross module/package/repo
+      // boundaries. For builtin/stdlib member names (`.get()`, `.map()`, `.then()`)
+      // a single narrowed match is a false positive (observed: core-ingestion's
+      // `.map()`/`.get()` linking to an unrelated client's `map`/`get`). Symbols
+      // defined in many files are project-level commodities with the same problem.
+      // Favor under-connection: stop here rather than emit a bogus cross-boundary
+      // edge. The explicit import-scoped tier above is unaffected.
+      if (COMMODITY_CALLEE_NAMES.has(dstName) || (symbolToFiles.get(dstName)?.length ?? 0) >= COMMODITY_DEF_FILE_THRESHOLD) {
+        stats.skippedAmbiguous++;
         continue;
       }
       // Tier 2.5: transitive import-scoped (confidence 0.8) — one re-export hop away
