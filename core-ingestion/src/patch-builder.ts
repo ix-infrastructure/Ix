@@ -22,17 +22,35 @@ function normalizePath(filePath: string): string {
   return filePath.replace(/\\/g, '/').toLowerCase();
 }
 
-function nodeId(filePath: string, name: string): string {
-  return deterministicId(`${normalizePath(filePath)}:${name}`);
-}
+/**
+ * Identity helpers bound to a single workspace. Folding `workspaceId` into every
+ * id keeps the same relative path in two different workspaces from colliding on
+ * a shared backend, while staying stable within a workspace. Binding it once via
+ * a factory means every call site below is scoped automatically (no per-call
+ * threading to forget). `workspaceId` is empty only for callers that have not
+ * adopted workspace-scoped identity yet.
+ */
+function makeIds(workspaceId: string) {
+  const ns = workspaceId ? `${workspaceId}:` : '';
+  return {
+    nodeId: (filePath: string, name: string): string =>
+      deterministicId(`${ns}${normalizePath(filePath)}:${name}`),
 
-function edgeId(filePath: string, src: string, dst: string, predicate: string): string {
-  return deterministicId(`${normalizePath(filePath)}:${src}:${dst}:${predicate}`);
-}
+    edgeId: (filePath: string, src: string, dst: string, predicate: string): string =>
+      deterministicId(`${ns}${normalizePath(filePath)}:${src}:${dst}:${predicate}`),
 
-/** Deterministic ID for a chunk — keyed on file + kind + name + start line to survive minor edits. */
-function chunkId(filePath: string, chunkKind: string, name: string | null, startLine: number): string {
-  return deterministicId(`${normalizePath(filePath)}:chunk:${chunkKind}:${name ?? 'file_body'}:${startLine}`);
+    // Chunk id is keyed on file + kind + name + start line to survive minor edits.
+    chunkId: (filePath: string, chunkKind: string, name: string | null, startLine: number): string =>
+      deterministicId(`${ns}${normalizePath(filePath)}:chunk:${chunkKind}:${name ?? 'file_body'}:${startLine}`),
+
+    // patchId for a (filePath, sourceHash, extractorVersion) triple.
+    computePatchId: (filePath: string, sourceHash: string, extractor: string): string =>
+      deterministicId(`${ns}${normalizePath(filePath)}:${sourceHash}:${extractor}`),
+
+    // Legacy patchId (pre-1.1 scheme, no extractor suffix).
+    legacyPatchId: (filePath: string, sourceHash: string): string =>
+      deterministicId(`${ns}${filePath}:${sourceHash}`),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -57,15 +75,8 @@ export function extractorName(): string {
 /** Previous extractor versions — their patches are superseded when re-ingesting. */
 export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
 
-/** Compute a patchId for a (filePath, sourceHash, extractorVersion) triple. */
-function computePatchId(filePath: string, sourceHash: string, extractor: string): string {
-  return deterministicId(`${normalizePath(filePath)}:${sourceHash}:${extractor}`);
-}
-
-/** Compute the legacy patchId (pre-1.1 scheme, no extractor suffix). */
-function legacyPatchId(filePath: string, sourceHash: string): string {
-  return deterministicId(`${filePath}:${sourceHash}`);
-}
+// nodeId / edgeId / chunkId / computePatchId / legacyPatchId are produced by
+// makeIds(workspaceId) above so every id is scoped to its workspace.
 
 // ---------------------------------------------------------------------------
 // Build a GraphPatchPayload from a FileParseResult
@@ -74,9 +85,11 @@ function legacyPatchId(filePath: string, sourceHash: string): string {
 export function buildPatch(
   result: FileParseResult,
   sourceHash: string,
+  workspaceId: string,
   previousSourceHash?: string
 ): GraphPatchPayload {
   const { filePath, entities, chunks, relationships } = result;
+  const { nodeId, edgeId, chunkId, computePatchId, legacyPatchId } = makeIds(workspaceId);
   const ops: PatchOp[] = [];
 
   // Build a qualified-key map so that same-named entities in different
@@ -289,6 +302,7 @@ export function buildPatch(
       sourceHash,
       extractor,
       sourceType: sourceType(filePath),
+      workspaceId,
     },
     baseRev: 0,
     ops,
@@ -305,6 +319,7 @@ export function buildPatch(
 export function buildPatchWithResolution(
   result: FileParseResult,
   sourceHash: string,
+  workspaceId: string,
   resolvedEdges: ResolvedEdge[],
   previousSourceHash?: string,
 ): GraphPatchPayload {
@@ -321,6 +336,7 @@ export function buildPatchWithResolution(
   }
 
   const { filePath, entities, chunks, relationships } = result;
+  const { nodeId, edgeId, chunkId, computePatchId, legacyPatchId } = makeIds(workspaceId);
   const ops: PatchOp[] = [];
 
   const entityQKey = new Map<ParsedEntity, string>();
@@ -506,6 +522,7 @@ export function buildPatchWithResolution(
       sourceHash,
       extractor,
       sourceType: sourceType(filePath),
+      workspaceId,
     },
     baseRev: 0,
     ops,

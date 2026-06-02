@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getActiveWorkspaceRoot, getEndpoint } from "../config.js";
+import { resolveWorkspaceId } from "../bootstrap.js";
 import { formatNodes, relativePath } from "../format.js";
 import { scoreCandidate } from "../resolve.js";
 import { applyRoleFilter, roleHint } from "../role-filter.js";
@@ -125,6 +126,7 @@ Examples:
         kind: opts.kind,
         language: opts.language,
         asOfRev: opts.asOf ? parseInt(opts.asOf, 10) : undefined,
+        workspaceId: resolveWorkspaceId(),
       });
       const nodes = effectivePathFilter
         ? rawNodes.filter((node: any) => {

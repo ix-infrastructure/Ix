@@ -14,6 +14,7 @@ import { getEndpoint, resolveWorkspaceRoot } from '../config.js';
 import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
 import { loadIngestionModules } from './ingestion-loader.js';
+import { ensureWorkspaceId } from '../bootstrap.js';
 import {
   deterministicId,
   transformIssue,
@@ -404,13 +405,14 @@ export async function ingestFiles(
   //
   // The backend used to dereference provenance.source_uri against the host
   // filesystem (via a broad HOME bind mount). We now emit workspace-relative
-  // paths as the canonical source_uri, and pass a workspace_id derived from
-  // the workspace root's absolute path. The backend treats both as opaque
-  // strings; it never reads host files.
+  // paths as the canonical source_uri, plus a stable workspace_id (persisted in
+  // ~/.ix/config.yaml, NOT derived from the absolute path) that core-ingestion
+  // folds into every node id so two workspaces with the same relative layout do
+  // not collide. The backend treats both as opaque strings; it never reads host files.
   const workspaceRoot = fs.statSync(resolvedPath).isDirectory()
     ? resolvedPath
     : nodePath.dirname(resolvedPath);
-  const workspaceId = crypto.createHash('sha256').update(workspaceRoot).digest('hex');
+  const workspaceId = ensureWorkspaceId(workspaceRoot);
   const toWorkspaceRelative = (absPath: string): string => {
     // Force workspace-local POSIX separators so IDs are stable across OS.
     const rel = nodePath.relative(workspaceRoot, absPath);
@@ -421,8 +423,8 @@ export async function ingestFiles(
 
   // Schema-version check forces a clean re-ingest when the backend's graph
   // format has changed in a way that invalidates existing node IDs (e.g. the
-  // absolute→relative source_uri migration).
-  const CLIENT_EXPECTED_SCHEMA_VERSION = 2;
+  // absolute→relative source_uri migration, or folding workspace_id into ids).
+  const CLIENT_EXPECTED_SCHEMA_VERSION = 3;
   try {
     const health = await client.health();
     const serverVersion = (health as any)?.schema_version;
@@ -786,13 +788,10 @@ export async function ingestFiles(
         for (let j = 0; j < batch.length; j++) {
           const { parsed: p, hash, previousHash } = batch[j];
           try {
-            let patch = buildPatchFn!(p, hash, batchEdgesByFile.get(p.filePath) ?? emptyEdges, previousHash);
+            let patch = buildPatchFn!(p, hash, workspaceId, batchEdgesByFile.get(p.filePath) ?? emptyEdges, previousHash);
             if (mapMode) patch = stripMapModeOps(patch);
-            // Tag every patch with the workspace_id. The backend stores this
-            // as an opaque attribute. The source.uri has already been set to
-            // the workspace-relative path upstream in buildPatch (because we
-            // passed the relative path to parseFile).
-            if (patch?.source) patch.source.workspaceId = workspaceId;
+            // source.uri (workspace-relative) and source.workspaceId are set
+            // inside buildPatch; the backend stores both as opaque attributes.
             preparedPatches.push(makePreparedPatch(patch, j + 1, p.filePath));
           } catch (err) {
             parseErrors++;
@@ -857,10 +856,9 @@ export async function ingestFiles(
         for (let j = 0; j < allParsed.length; j++) {
           const { parsed: p, hash, previousHash } = allParsed[j];
           try {
-            let patch = buildPatchFn!(p, hash, edgesByFile.get(p.filePath) ?? emptyEdges, previousHash);
+            let patch = buildPatchFn!(p, hash, workspaceId, edgesByFile.get(p.filePath) ?? emptyEdges, previousHash);
             if (mapMode) patch = stripMapModeOps(patch);
-            // Tag with workspace_id (see flushBatch).
-            if (patch?.source) patch.source.workspaceId = workspaceId;
+            // source.uri and source.workspaceId are set inside buildPatch (see flushBatch).
             preparedPatches.push(makePreparedPatch(patch, j + 1, p.filePath));
           } catch (err) {
             parseErrors++;
