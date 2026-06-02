@@ -1162,7 +1162,7 @@ export const SCALA_QUERIES = `
   (identifier) @call.name
   (#match? @_qualifier "^[A-Z]")
   (#match? @call.name "^[A-Z]"))
-`
+`;
 export const MAKEFILE_QUERIES = `
 ; ── Rule targets ─────────────────────────────────────────────────────────────
 (rule
