@@ -1471,28 +1471,28 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
       // Import captures (JS/TS/Python path-based)
       const importSource = match.captures.find((c: any) => c.name === 'import.source');
       if (importSource) {
-        const modName = normalizeCapturedImport(importSource.node.text, language);
+        // Grouped alias `alias MyApp.{User, Repo}`: each member alias is captured bare
+        // ("User"); the prefix alias ("MyApp") comes through @import.prefix so we can
+        // rebuild the full module name "MyApp.User", matching the single-alias form.
+        const importPrefix = match.captures.find((c: any) => c.name === 'import.prefix')?.node.text;
+        let modName = normalizeCapturedImport(importSource.node.text, language);
+        if (importPrefix) modName = `${importPrefix}.${modName}`;
         const importAlias = match.captures.find((c: any) => c.name === 'import.alias')?.node.text;
         if (importAlias && modName && importAlias !== '.' && importAlias !== '_') {
           importAliases[importAlias] = modName;
         }
+        // Elixir: `alias MyApp.Repo` (and grouped `alias MyApp.{Repo, ...}`) implicitly
+        // bind the last segment as a short name. No @import.alias capture exists, so
+        // derive it here — this is what lets Tier-1b resolution translate e.g.
+        // 'Repo.insert' → 'MyApp.Repo.insert', including through grouped aliases.
         if (!importAlias && language === SupportedLanguages.Elixir && modName.includes('.')) {
-          const directive = match.captures.find((c: any) => c.name === '_directive')?.node.text;
-          if (directive === 'alias') {
-            importAliases[modName.split('.').pop()!] = modName;
-            }
-        }
-        // Elixir: 'alias MyApp.Repo' implicitly binds the last segment as a short name.
-        // No @import.alias capture exists for this; derive it here so Tier-1b resolution
-        // can translate e.g. 'Repo.insert' → 'MyApp.Repo.insert'.
-        if (!importAlias && language === SupportedLanguages.Elixir && modName.includes('.')) {
-          const directive = match.captures.find((c: any) => c.name === '_directive')?.node.text;
+          const directive = match.captures.find((c: any) =>
+            c.name === '_directive' || c.name === '_alias_group')?.node.text;
           if (directive === 'alias') {
             importAliases[modName.split('.').pop()!] = modName;
           }
         }
         if (modName.length > 0 && modName !== '*') {
-          if (!modName) continue;                        // skip bare '.' relative imports
           entities.push({ name: modName, kind: 'module', lineStart: importSource.node.startPosition.row + 1, lineEnd: importSource.node.startPosition.row + 1, language });
           relationships.push({ srcName: fileName, dstName: modName, predicate: 'IMPORTS' });
         }
@@ -1676,6 +1676,30 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         contentHash,
         language,
       });
+    }
+
+    // Elixir: a function/macro with multiple clauses (guards, pattern-matched heads,
+    // or several arities) is emitted as one entity per clause; they collapse to a
+    // single node keyed by (container, name). Merge them so the surviving node spans
+    // the whole clause group (first clause start .. last clause end) instead of only
+    // the first clause. (Per-arity identity, e.g. changeset/2 vs changeset/3, is a
+    // larger follow-up: it needs call-arity capture to keep call resolution precise.)
+    if (language === SupportedLanguages.Elixir) {
+      const firstByKey = new Map<string, ParsedEntity>();
+      const dropIdx: number[] = [];
+      entities.forEach((e, i) => {
+        if (e.kind !== 'function' && e.kind !== 'macro') return;
+        const key = `${e.container ?? ''} ${e.name}`;
+        const keep = firstByKey.get(key);
+        if (keep) {
+          keep.lineStart = Math.min(keep.lineStart, e.lineStart);
+          keep.lineEnd = Math.max(keep.lineEnd, e.lineEnd);
+          dropIdx.push(i);
+        } else {
+          firstByKey.set(key, e);
+        }
+      });
+      for (let j = dropIdx.length - 1; j >= 0; j--) entities.splice(dropIdx[j], 1);
     }
 
     return {

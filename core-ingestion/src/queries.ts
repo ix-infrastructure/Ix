@@ -1217,7 +1217,7 @@ export const ELIXIR_QUERIES = `
   target: (identifier) @_alias_group
   (arguments
     (dot
-      left: (alias)
+      left: (alias) @import.prefix
       right: (tuple (alias) @import.source)))
   (#eq? @_alias_group "alias")) @import
 

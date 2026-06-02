@@ -215,7 +215,7 @@ end
     expect(callTargets).not.toContain('fetch');
   });
 
-    it('captures grouped alias as IMPORTS relationships', () => {
+    it('captures grouped alias MyApp.{User, Repo, Post} as full-dotted IMPORTS + short aliases', () => {
     const result = parseFile(
       '/repo/context.ex',
       `
@@ -229,9 +229,46 @@ end
     const importTargets = result!.relationships
       .filter(r => r.predicate === 'IMPORTS')
       .map(r => r.dstName);
+    // Full module names, consistent with the single-alias form (NOT bare members).
     expect(importTargets).toEqual(
-      expect.arrayContaining(['User', 'Repo', 'Post']),
+      expect.arrayContaining(['MyApp.User', 'MyApp.Repo', 'MyApp.Post']),
     );
+    expect(importTargets).not.toContain('User');
+    expect(importTargets).not.toContain('Repo');
+    // Short names are bound so qualified calls through grouped aliases resolve.
+    expect(result!.importAliases).toMatchObject({
+      User: 'MyApp.User',
+      Repo: 'MyApp.Repo',
+      Post: 'MyApp.Post',
+    });
+  });
+
+  it('merges multi-clause functions into one node spanning all clauses', () => {
+    const result = parseFile(
+      '/repo/multi.ex',
+      `
+defmodule MyApp.Multi do
+  def handle(x) when is_atom(x) do
+    x
+  end
+
+  def handle(x, y) do
+    {x, y}
+  end
+
+  def handle(x) do
+    x
+  end
+end
+      `,
+    );
+
+    expect(result).not.toBeNull();
+    const handles = result!.entities.filter(e => e.name === 'handle');
+    // All clauses (guarded + multi-arity) collapse to a single node...
+    expect(handles).toHaveLength(1);
+    // ...whose span covers the first clause through the last, not just the first.
+    expect(handles[0].lineEnd - handles[0].lineStart).toBeGreaterThanOrEqual(8);
   });
 });
 
