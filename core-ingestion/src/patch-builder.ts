@@ -69,11 +69,11 @@ function sourceType(filePath: string): string {
 }
 
 export function extractorName(): string {
-  return `tree-sitter/1.21`;
+  return `tree-sitter/1.24`;
 }
 
 /** Previous extractor versions — their patches are superseded when re-ingesting. */
-export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
+export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
 
 // nodeId / edgeId / chunkId / computePatchId / legacyPatchId are produced by
 // makeIds(workspaceId) above so every id is scoped to its workspace.
@@ -107,6 +107,11 @@ export function buildPatch(
     list.push(qk);
     nameToQKeys.set(e.name, list);
   }
+
+  // Set of all qualified keys defined in this file — used to distinguish same-file
+  // dotted calls (e.g. "Foo.bar" where Foo is defined here) from external qualified
+  // calls (e.g. "dplyr.filter" from R's pkg::func syntax) that would produce phantoms.
+  const allQKeys = new Set<string>(entityQKey.values());
 
   // Resolve a relationship endpoint to the best qualified key.
   // For unambiguous names (appear once), returns the single qualified key.
@@ -223,6 +228,7 @@ export function buildPatch(
   }
 
   // UpsertEdge for each relationship
+  const seenExternalNodes = new Set<string>();
   for (const r of relationships) {
     // For CONTAINS edges, srcName is the container of dstName — use that to disambiguate.
     const srcKey = resolveKey(r.srcName);
@@ -230,11 +236,32 @@ export function buildPatch(
       ? resolveKey(r.dstName, r.srcName)
       : resolveKey(r.dstName);
 
+    let dstNid: string;
+    if (r.predicate === 'CALLS' && dstKey.includes('::') && !allQKeys.has(dstKey)) {
+      const sep = dstKey.indexOf('::');
+      const pkgName = dstKey.slice(0, sep);
+      const funcName = dstKey.slice(sep + 2);
+      const extPath = `external://${pkgName}`;
+      dstNid = nodeId(extPath, dstKey);
+      if (!seenExternalNodes.has(dstNid)) {
+        seenExternalNodes.add(dstNid);
+        ops.push({
+          type: 'UpsertNode',
+          id: dstNid,
+          kind: 'function',
+          name: funcName,
+          attrs: { package: pkgName, external: true, language: result.language },
+        });
+      }
+    } else {
+      dstNid = nodeId(filePath, dstKey);
+    }
+
     ops.push({
       type: 'UpsertEdge',
       id: edgeId(filePath, srcKey, dstKey, r.predicate),
       src: nodeId(filePath, srcKey),
-      dst: nodeId(filePath, dstKey),
+      dst: dstNid,
       predicate: r.predicate,
       attrs: {},
     });
@@ -320,6 +347,8 @@ export function buildPatchWithResolution(
     list.push(qk);
     nameToQKeys.set(e.name, list);
   }
+
+  const allQKeys2 = new Set<string>(entityQKey.values());
 
   function resolveKey(name: string, container?: string): string {
     const rawKeys = nameToQKeys.get(name);
@@ -416,18 +445,36 @@ export function buildPatchWithResolution(
     }
   }
 
+  const seenExternalNodes2 = new Set<string>();
   for (const r of relationships) {
     const srcKey = resolveKey(r.srcName);
     const dstKey = r.predicate === 'CONTAINS'
       ? resolveKey(r.dstName, r.srcName)
       : resolveKey(r.dstName);
 
-    // For cross-file resolved edges (CALLS, EXTENDS), use the defining file's nodeId
     let dstNodeId: string;
     const resolutionKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
+
     if (edgeResolution.has(resolutionKey)) {
+      // Cross-file resolved — use the defining file's nodeId.
       const { dstFilePath, dstQualifiedKey } = edgeResolution.get(resolutionKey)!;
       dstNodeId = nodeId(dstFilePath, dstQualifiedKey);
+    } else if (r.predicate === 'CALLS' && dstKey.includes('::') && !allQKeys2.has(dstKey)) {
+      const sep = dstKey.indexOf('::');
+      const pkgName = dstKey.slice(0, sep);
+      const funcName = dstKey.slice(sep + 2);
+      const extPath = `external://${pkgName}`;
+      dstNodeId = nodeId(extPath, dstKey);
+      if (!seenExternalNodes2.has(dstNodeId)) {
+        seenExternalNodes2.add(dstNodeId);
+        ops.push({
+          type: 'UpsertNode',
+          id: dstNodeId,
+          kind: 'function',
+          name: funcName,
+          attrs: { package: pkgName, external: true, language: result.language },
+        });
+      }
     } else {
       dstNodeId = nodeId(filePath, dstKey);
     }

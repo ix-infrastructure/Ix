@@ -1553,6 +1553,58 @@ export const SAS_QUERIES = `
     (dataset_name) @import.source)) @import
 `;
 
+// R queries — works with @davisvaughan/tree-sitter-r
+export const R_QUERIES = `
+; Function definitions — mirrors the official tags.scm bundled with the grammar.
+; Covers <- and = operators, identifier and string LHS (S3/R5 method names).
+(binary_operator
+  lhs: (identifier) @name
+  operator: ["<-" "="]
+  rhs: (function_definition)) @definition.function
+
+(binary_operator
+  lhs: (string) @name
+  operator: ["<-" "="]
+  rhs: (function_definition)) @definition.function
+
+; Direct calls: foo(args)
+(call
+  function: (identifier) @call.name) @call
+
+; Package-qualified calls: pkg::func(args) and pkg:::func(args)
+; @_namespace (not @_qualifier) marks a real :: namespace call so the dstName
+; keeps the :: separator. That lets the patch builder externalize only genuine
+; package calls, not base-R dotted names like is.null.
+(call
+  function: (namespace_operator
+    lhs: (identifier) @_namespace
+    rhs: (identifier) @call.name)) @call
+
+; Method calls: obj$method(args)
+(call
+  function: (extract_operator
+    rhs: (identifier) @call.name)) @call
+
+; Imports: library(pkg) / require(pkg) — unquoted symbol form
+; In the R grammar, each positional argument is wrapped in an (argument) node with a value: field.
+(call
+  function: (identifier) @_import_fn
+  arguments: (arguments (argument value: (identifier) @import.source))
+  (#match? @_import_fn "^(library|require)$")) @import
+
+; Imports: library("pkg") / require("pkg") — quoted string form
+(call
+  function: (identifier) @_import_fn
+  arguments: (arguments (argument value: (string) @import.source))
+  (#match? @_import_fn "^(library|require)$")) @import
+
+; Source file imports: source("path/to/file.R")
+(call
+  function: (identifier) @_src
+  arguments: (arguments (argument value: (string) @import.source))
+  (#eq? @_src "source")) @import
+`;
+
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TypeScript]: TYPESCRIPT_QUERIES,
   [SupportedLanguages.JavaScript]: JAVASCRIPT_QUERIES,
@@ -1574,6 +1626,7 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.JSON]: '',
   [SupportedLanguages.TOML]: '',
   [SupportedLanguages.Markdown]: '',
+  [SupportedLanguages.R]: R_QUERIES,
   [SupportedLanguages.SAS]: SAS_QUERIES,
   [SupportedLanguages.Elixir]: ELIXIR_QUERIES,
   [SupportedLanguages.Makefile]: MAKEFILE_QUERIES,

@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import { parseFile, resolveEdges, type FileParseResult, type ParsedEntity, type ParsedRelationship, type ResolvedEdge } from '../index.js';
 import { SupportedLanguages } from '../languages.js';
-import { buildPatchWithResolution } from '../patch-builder.js';
+import { buildPatch, buildPatchWithResolution } from '../patch-builder.js';
 
 const defaultFileRole = { role: 'production' as const, role_confidence: 0.5, role_signals: [] };
 
@@ -109,6 +109,122 @@ describe('buildPatchWithResolution', () => {
     }));
   });
 
+  it('materialises external stub node for unresolved :: package calls', () => {
+    const file = '/repo/model.R';
+    const externalNodeId = nodeId('external://dplyr', 'dplyr::filter');
+    const result = fileResult(
+      file,
+      SupportedLanguages.R,
+      [entity('fitModel', SupportedLanguages.R)],
+      [
+        { srcName: 'fitModel', dstName: 'dplyr::filter', predicate: 'CALLS' },
+        { srcName: 'fitModel', dstName: 'localHelper', predicate: 'CALLS' },
+      ],
+    );
+    const patch = buildPatchWithResolution(result, 'hash', '', []);
+    const callEdges = patch.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS');
+    const upsertNodes = patch.ops.filter(op => op.type === 'UpsertNode');
+
+    // dplyr::filter edge must point to the external stub, not to a same-file phantom
+    expect(callEdges).toContainEqual(
+      expect.objectContaining({ src: nodeId(file, 'fitModel'), dst: externalNodeId }),
+    );
+    expect(callEdges).not.toContainEqual(
+      expect.objectContaining({ dst: nodeId(file, 'dplyr::filter') }),
+    );
+    // External stub node must be materialised with correct attrs
+    expect(upsertNodes).toContainEqual(
+      expect.objectContaining({ id: externalNodeId, kind: 'function', name: 'filter' }),
+    );
+    // Unqualified same-file call still resolves within the file
+    expect(callEdges).toContainEqual(
+      expect.objectContaining({ src: nodeId(file, 'fitModel'), dst: nodeId(file, 'localHelper') }),
+    );
+  });
+
+  it('splits multi-dot :: members on the namespace, not the last dot', () => {
+    // utils::write.csv must externalise as pkg "utils" / func "write.csv",
+    // not pkg "utils.write" / func "csv" (the old lastIndexOf('.') bug).
+    const file = '/repo/io.R';
+    const result = fileResult(
+      file,
+      SupportedLanguages.R,
+      [entity('writeOut', SupportedLanguages.R)],
+      [{ srcName: 'writeOut', dstName: 'utils::write.csv', predicate: 'CALLS' }],
+    );
+    const patch = buildPatchWithResolution(result, 'hash', '', []);
+    const upsertNodes = patch.ops.filter(op => op.type === 'UpsertNode');
+
+    expect(upsertNodes).toContainEqual(
+      expect.objectContaining({
+        id: nodeId('external://utils', 'utils::write.csv'),
+        kind: 'function',
+        name: 'write.csv',
+      }),
+    );
+  });
+
+  it('does NOT externalise plain dotted names (base-R / Go) — only :: namespace calls', () => {
+    // A base-R dotted call (is.null) and a Go dotted call must keep main's
+    // behavior: edge to a local nodeId, no external:// stub. Only genuine
+    // :: namespace calls are externalised.
+    const rFile = '/repo/check.R';
+    const rResult = fileResult(
+      rFile,
+      SupportedLanguages.R,
+      [entity('validate', SupportedLanguages.R)],
+      [{ srcName: 'validate', dstName: 'is.null', predicate: 'CALLS' }],
+    );
+    const rPatch = buildPatchWithResolution(rResult, 'hash', '', []);
+    expect(rPatch.ops.filter(op => op.type === 'UpsertNode' && String((op as any).id).startsWith('external://'))).toEqual([]);
+    expect(rPatch.ops).toContainEqual(
+      expect.objectContaining({ type: 'UpsertEdge', predicate: 'CALLS', dst: nodeId(rFile, 'is.null') }),
+    );
+
+    const goFile = '/repo/main.go';
+    const goResult = fileResult(
+      goFile,
+      SupportedLanguages.Go,
+      [entity('run', SupportedLanguages.Go)],
+      [{ srcName: 'run', dstName: 'fmt.Println', predicate: 'CALLS' }],
+    );
+    const goPatch = buildPatchWithResolution(goResult, 'hash', '', []);
+    expect(goPatch.ops.filter(op => op.type === 'UpsertNode' && String((op as any).id).startsWith('external://'))).toEqual([]);
+    expect(goPatch.ops).toContainEqual(
+      expect.objectContaining({ type: 'UpsertEdge', predicate: 'CALLS', dst: nodeId(goFile, 'fmt.Println') }),
+    );
+  });
+
+  it('keeps resolved qualified CALLS that cross-file resolution found', () => {
+    const file = '/repo/utils.R';
+    const result = fileResult(
+      file,
+      SupportedLanguages.R,
+      [entity('myFunc', SupportedLanguages.R)],
+      [{ srcName: 'myFunc', dstName: 'pkg.helper', predicate: 'CALLS' }],
+    );
+    const resolvedEdges: ResolvedEdge[] = [
+      {
+        srcFilePath: file,
+        srcName: 'myFunc',
+        dstFilePath: '/repo/pkg.R',
+        dstName: 'pkg.helper',
+        dstQualifiedKey: 'helper',
+        predicate: 'CALLS',
+        confidence: 0.9,
+      },
+    ];
+    const patch = buildPatchWithResolution(result, 'hash', '', resolvedEdges);
+    const callEdges = patch.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS');
+
+    expect(callEdges).toContainEqual(
+      expect.objectContaining({
+        src: nodeId(file, 'myFunc'),
+        dst: nodeId('/repo/pkg.R', 'helper'),
+      }),
+    );
+  });
+
   it('rewrites resolved C++ imports to the imported file node', () => {
     const importer = parseFile(
       '/repo/include/KimeraRPGO/outlier/Pcm.h',
@@ -148,5 +264,60 @@ struct Trajectory {};
       src: nodeId('/repo/include/KimeraRPGO/outlier/Pcm.h', 'Pcm.h'),
       dst: nodeId('/repo/include/KimeraRPGO/utils/GraphUtils.h', 'GraphUtils.h'),
     }));
+  });
+});
+
+describe('buildPatch', () => {
+  it('materialises external stub node for unresolved :: package calls', () => {
+    const file = '/repo/model.R';
+    const externalNodeId = nodeId('external://dplyr', 'dplyr::filter');
+    const result = fileResult(
+      file,
+      SupportedLanguages.R,
+      [entity('fitModel', SupportedLanguages.R)],
+      [
+        { srcName: 'fitModel', dstName: 'dplyr::filter', predicate: 'CALLS' },
+        { srcName: 'fitModel', dstName: 'localHelper', predicate: 'CALLS' },
+      ],
+    );
+    const patch = buildPatch(result, 'hash');
+    const callEdges = patch.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS');
+    const upsertNodes = patch.ops.filter(op => op.type === 'UpsertNode');
+
+    expect(callEdges).toContainEqual(
+      expect.objectContaining({ src: nodeId(file, 'fitModel'), dst: externalNodeId }),
+    );
+    expect(callEdges).not.toContainEqual(
+      expect.objectContaining({ dst: nodeId(file, 'dplyr::filter') }),
+    );
+    expect(upsertNodes).toContainEqual(
+      expect.objectContaining({ id: externalNodeId, kind: 'function', name: 'filter' }),
+    );
+    expect(callEdges).toContainEqual(
+      expect.objectContaining({ src: nodeId(file, 'fitModel'), dst: nodeId(file, 'localHelper') }),
+    );
+  });
+
+  it('keeps same-file qualified CALLS where qualifier is a defined class', () => {
+    const file = '/repo/models.py';
+    const result = fileResult(
+      file,
+      SupportedLanguages.Python,
+      [
+        entity('MyClass', SupportedLanguages.Python, 'class'),
+        entity('process', SupportedLanguages.Python, 'function', 'MyClass'),
+        entity('run', SupportedLanguages.Python, 'function'),
+      ],
+      [{ srcName: 'run', dstName: 'MyClass.process', predicate: 'CALLS' }],
+    );
+    const patch = buildPatch(result, 'hash');
+    const callEdges = patch.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS');
+
+    expect(callEdges).toContainEqual(
+      expect.objectContaining({
+        src: nodeId(file, 'run'),
+        dst: nodeId(file, 'MyClass.process'),
+      }),
+    );
   });
 });

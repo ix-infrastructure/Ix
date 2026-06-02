@@ -33,6 +33,7 @@ function tryLoadGrammar(pkg: string): any {
 }
 const Kotlin = tryLoadGrammar('tree-sitter-kotlin');
 const Swift  = tryLoadGrammar('tree-sitter-swift');
+const R = tryLoadGrammar('@davisvaughan/tree-sitter-r');
 const Elixir = tryLoadGrammar('tree-sitter-elixir');
 const Make = tryLoadGrammar('tree-sitter-make');
 // tree-sitter-sas uses ESM bindings with top-level await — incompatible with tryLoadGrammar (CJS require)
@@ -127,6 +128,7 @@ const GRAMMAR_MAP: Partial<Record<SupportedLanguages, any>> = {
   [SupportedLanguages.Scala]: Scala,
   ...(Kotlin ? { [SupportedLanguages.Kotlin]: Kotlin } : {}),
   ...(Swift ? { [SupportedLanguages.Swift]: Swift } : {}),
+  ...(R ? { [SupportedLanguages.R]: R } : {}),
   ...(SAS ? { [SupportedLanguages.SAS]: SAS } : {}),
   ...(Elixir ? { [SupportedLanguages.Elixir]: Elixir } : {}),
   ...(Make ? { [SupportedLanguages.Makefile]: Make } : {}),
@@ -220,6 +222,43 @@ const JS_BUILTINS = new Set([
   'require', 'fetch', 'parseInt', 'parseFloat', 'isNaN', 'isFinite',
 ]);
 
+const R_BUILTINS = new Set([
+  ...SHARED_BUILTINS,
+  'library', 'require', 'source',
+  'print', 'cat', 'message', 'warning', 'stop', 'sprintf', 'paste', 'paste0',
+  'c', 'list', 'vector', 'matrix', 'array', 'data.frame',
+  'length', 'nrow', 'ncol', 'dim', 'names', 'colnames', 'rownames',
+  'head', 'tail', 'subset', 'merge', 'rbind', 'cbind', 'order', 'sort',
+  'apply', 'lapply', 'sapply', 'vapply', 'tapply', 'mapply',
+  'sum', 'mean', 'median', 'sd', 'var', 'min', 'max', 'abs',
+  'round', 'floor', 'ceiling', 'sqrt', 'exp', 'log', 'log10',
+  'as.character', 'as.numeric', 'as.integer', 'as.logical', 'as.factor',
+  'is.character', 'is.numeric', 'is.integer', 'is.logical', 'is.null', 'is.na',
+  'seq', 'seq_len', 'seq_along', 'rep', 'which', 'match', 'any', 'all', 'ifelse',
+  'read.csv', 'write.csv', 'readRDS', 'saveRDS', 'load', 'save',
+  'attr', 'attributes', 'class', 'inherits', 'structure',
+  'nzchar', 'nchar', 'trimws', 'toupper', 'tolower', 'chartr', 'strsplit',
+  'grep', 'grepl', 'regexpr', 'regmatches', 'sub', 'gsub',
+  'isFALSE', 'isTRUE', 'missing', 'exists', 'get', 'assign', 'rm',
+  'srcfile', 'srcref', 'getSrcref', 'getSrcFilename',
+  'tryCatch', 'withCallingHandlers', 'try', 'simpleError', 'simpleCondition',
+  'environment', 'parent.env', 'new.env', 'ls', 'rm',
+  'Recall', 'do.call', 'match.arg', 'match.call', 'sys.call',
+  'identical', 'stopifnot', 'switch', 'invisible', 'force',
+  'numeric', 'character', 'logical', 'integer', 'complex', 'raw',
+  'unlist', 'setdiff', 'union', 'intersect', 'unique', 'duplicated', 'table',
+  'format', 'formatC', 'strtoi', 'chartr', 'startsWith', 'endsWith',
+  'Reduce', 'Filter', 'Find', 'Map', 'Position',
+  // base R functions whose names contain dots (not package::function calls)
+  'on.exit', 'sys.call', 'sys.function', 'sys.frame', 'sys.nframe', 'sys.source',
+  'proc.time', 'date.time',
+  'file.path', 'file.exists', 'file.copy', 'file.remove', 'file.rename',
+  'file.create', 'file.info', 'file.size', 'file.show',
+  'dir.create', 'dir.exists',
+  'Sys.time', 'Sys.sleep', 'Sys.getenv', 'Sys.setenv', 'Sys.getpid',
+  'Sys.info', 'Sys.chmod', 'Sys.umask',
+]);
+
 // SAS-specific builtins: common PROC names and macro keywords that generate
 // noise as CALLS edges (user-defined macros are what we want to track).
 const SAS_BUILTINS = new Set([
@@ -239,6 +278,8 @@ function builtinsForLanguage(lang: SupportedLanguages): Set<string> {
     case SupportedLanguages.JavaScript:
     case SupportedLanguages.TypeScript:
       return JS_BUILTINS;
+    case SupportedLanguages.R:
+      return R_BUILTINS;
     case SupportedLanguages.SAS:
       return SAS_BUILTINS;
     default:
@@ -1362,8 +1403,15 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
 
       if (defCapture) {
         const kind = DEFINITION_KIND_MAP[defCapture.name] ?? 'function';
-        let name = nameCapture?.node.text
+        const rawName = nameCapture?.node.text
           ?? (defCapture.name === 'definition.constructor' ? 'init' : '');
+        // Strip surrounding quotes only for string-keyed definitions (R S3 method
+        // names like "print.myClass"). Leave backtick identifiers intact (Scala
+        // `type`, R `my fn`): the call/heritage paths don't strip, so stripping
+        // here would desync the def name from its call captures.
+        let name = nameCapture?.node.type === 'string'
+          ? rawName.replace(/^(['"])(.*)\1$/, '$2')
+          : rawName;
         if (!name || name.length === 0) continue;
 
         // SAS module entities (DATA/PROC steps, PROC SQL CREATE) need extra
@@ -1654,7 +1702,10 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         // `filter` or `map` are Python builtins when called bare, but are valid
         // user-defined method calls when invoked as `query.filter(...)`.
         const qualifierCapture = match.captures.find((c: any) => c.name === '_qualifier');
-        if (builtinsForLanguage(language).has(callee) && !qualifierCapture) continue;
+        // R package-qualified calls (pkg::func) carry a distinct @_namespace
+        // capture so the dstName can keep the :: separator (vs a plain dotted name).
+        const namespaceCapture = match.captures.find((c: any) => c.name === '_namespace');
+        if (builtinsForLanguage(language).has(callee) && !qualifierCapture && !namespaceCapture) continue;
 
         // For Python: skip calls that are decorator applications.
         // When a method is decorated (e.g. @util.deprecated(...)), the call sits at the
@@ -1706,6 +1757,12 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         const seen = seenCalls.get(scope)!;
 
         const effectiveCallee = (() => {
+          // R package-qualified call (pkg::func / pkg:::func): keep the :: so the
+          // patch builder can externalize it under external://<pkg> and split it
+          // correctly even for multi-dot members (utils::write.csv).
+          if (namespaceCapture) {
+            return `${namespaceCapture.node.text}::${callee}`;
+          }
           if (!qualifierCapture) {
             // Go: bare-function calls (call.name is an `identifier` — i.e.
             // pattern 1: `Foo()`) resolve to the caller's package, so prepend
@@ -2045,6 +2102,29 @@ export function buildGlobalResolutionIndex(
         if (!qkMap.has(name)) qkMap.set(name, [name]);
       }
 
+      if (qkMap.size > 0) {
+        fileQKeys.set(fp, qkMap);
+        fileHasSymbol.set(fp, new Set(qkMap.keys()));
+      }
+    }
+
+    // R: index function definitions for cross-batch Tier-3 resolution. Derive
+    // them from the parser's definition.function entities (not a regex) so this
+    // never drifts from what the in-batch path extracts in resolveEdges — the
+    // parser also captures forms a regex misses (`= function`, string-keyed S3
+    // method names like "print.myClass"). Mirrors the qkMap construction at
+    // resolveEdges (key by name, value qkey). Same pattern as the SAS index.
+    for (const [fp, src] of sources) {
+      if (nodePath.extname(fp).toLowerCase() !== '.r') continue;
+      const parsed = parseFile(fp, src);
+      if (!parsed) continue;
+      const qkMap = new Map<string, string[]>();
+      for (const e of parsed.entities) {
+        if (e.kind !== 'function') continue;
+        const list = qkMap.get(e.name) ?? [];
+        list.push(qualifiedKey(e));
+        qkMap.set(e.name, list);
+      }
       if (qkMap.size > 0) {
         fileQKeys.set(fp, qkMap);
         fileHasSymbol.set(fp, new Set(qkMap.keys()));

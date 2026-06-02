@@ -40,6 +40,7 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.json',
   '.toml',
   '.md', '.markdown',
+  '.r',
   '.sas',
   '.ex', '.exs',
   '.mk', '.makefile',
@@ -56,8 +57,9 @@ export function isSupportedSourceFile(filePath: string): boolean {
 
 // Extensions whose source text must be pre-read so buildGlobalResolutionIndex can
 // extract cross-batch symbols before the streaming parse loop. Go uses a fast
-// regex scan; SAS is parsed (its macro index is derived from definition.macro).
-const INDEX_PRESCAN_EXTENSIONS = new Set(['.go', '.sas']);
+// regex scan; SAS and R are parsed (their cross-batch indexes are derived from
+// the parser's definition entities).
+const INDEX_PRESCAN_EXTENSIONS = new Set(['.go', '.r', '.sas']);
 
 function needsIndexPrescan(filePath: string): boolean {
   return INDEX_PRESCAN_EXTENSIONS.has(nodePath.extname(filePath).toLowerCase());
@@ -959,7 +961,7 @@ export async function ingestFiles(
         // Build global resolution index from all repo file paths (not just changed files)
         // so cross-batch imports resolve correctly even in streaming per-chunk mode.
         // Reuse bytes already read into changedPaths (on first install = all files, zero extra reads).
-        // Only async-read Go files that were mtime-clean and therefore not in changedPaths.
+        // Only async-read Go/R files that were mtime-clean and therefore not in changedPaths.
         {
           const sources = new Map<string, string>();
           const changedSet = new Set(changedPaths.map(c => c.filePath));
@@ -1019,7 +1021,7 @@ export async function ingestFiles(
 
       // Build global resolution index from all repo file paths before the parse loop
       // so cross-batch imports resolve correctly even in streaming per-chunk mode.
-      // Read pre-scan files (Go, SAS) in parallel to maximize I/O throughput.
+      // Read pre-scan files (Go, R, SAS) in parallel to maximize I/O throughput.
       // Index keys are workspace-relative to match the relative paths we pass
       // into parseFile below.
       {
