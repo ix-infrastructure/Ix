@@ -19,6 +19,7 @@ export enum SupportedLanguages {
   JSON = 'json',
   TOML = 'toml',
   Markdown = 'markdown',
+  Elixir = 'elixir',
   Makefile = 'makefile',
 }
 
@@ -55,6 +56,8 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.toml': SupportedLanguages.TOML,
   '.md':   SupportedLanguages.Markdown,
   '.markdown': SupportedLanguages.Markdown,
+  '.ex':   SupportedLanguages.Elixir,
+  '.exs':  SupportedLanguages.Elixir,
   '.mk':   SupportedLanguages.Makefile,
   '.makefile': SupportedLanguages.Makefile,
 };

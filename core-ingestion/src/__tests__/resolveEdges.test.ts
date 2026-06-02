@@ -219,6 +219,40 @@ describe('resolveEdges', () => {
     });
   });
 
+  it('resolves Elixir alias-qualified calls through the implicit short alias', () => {
+  const caller = fileResult(
+    '/repo/lib/my_app/accounts.ex',
+    SupportedLanguages.Elixir,
+    [entity('create_user', SupportedLanguages.Elixir)],
+    [
+      { srcName: 'accounts.ex', dstName: 'MyApp.Repo', predicate: 'IMPORTS' },
+      { srcName: 'create_user', dstName: 'Repo.insert', predicate: 'CALLS' },
+    ],
+  );
+  caller.importAliases = {
+    Repo: 'MyApp.Repo',
+  };
+
+  const callee = fileResult(
+    '/repo/lib/my_app/repo.ex',
+    SupportedLanguages.Elixir,
+    [
+      entity('MyApp.Repo', SupportedLanguages.Elixir, 'class'),
+      entity('insert', SupportedLanguages.Elixir, 'function', 'MyApp.Repo'),
+    ],
+  );
+
+  expect(resolveEdges([caller, callee])).toContainEqual({
+    srcFilePath: '/repo/lib/my_app/accounts.ex',
+    srcName: 'create_user',
+    dstFilePath: '/repo/lib/my_app/repo.ex',
+    dstName: 'Repo.insert',
+    dstQualifiedKey: 'MyApp.Repo.insert',
+    predicate: 'CALLS',
+    confidence: 0.9,
+  });
+});
+
   it('does not resolve qualifier-assisted edges when the member is missing or the qualifier is ambiguous', () => {
     const caller = fileResult(
       '/repo/consumer.scala',

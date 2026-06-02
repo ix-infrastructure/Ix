@@ -1397,6 +1397,92 @@ export const MAKEFILE_QUERIES = `
 `;
 
 
+// tree-sitter-elixir: https://github.com/elixir-lang/tree-sitter-elixir
+// Most constructs are represented as `call` nodes with a `target` identifier.
+export const ELIXIR_QUERIES = `
+; ── Module / protocol / impl definitions ─────────────────────────────────────
+(call
+  target: (identifier) @_defmodule
+  (arguments (alias) @name)
+  (#match? @_defmodule "^(defmodule|defprotocol)$")) @definition.class
+
+(call
+  target: (identifier) @_defimpl
+  (arguments (alias) @name)
+  (#eq? @_defimpl "defimpl")) @definition.class
+
+; ── Function definitions with parens: def foo(args) do … end ─────────────────
+(call
+  target: (identifier) @_def
+  (arguments
+    (call target: (identifier) @name))
+  (#match? @_def "^(def|defp)$")) @definition.function
+
+; ── Macro definitions with parens: defmacro my_macro(x) do … end ─────────────
+(call
+  target: (identifier) @_defmacro
+  (arguments
+    (call target: (identifier) @name))
+  (#match? @_defmacro "^(defmacro|defmacrop)$")) @definition.macro
+
+; ── Zero-arity function definitions without parens: def foo do … end ─────────
+(call
+  target: (identifier) @_def0
+  (arguments
+    (identifier) @name)
+  (#match? @_def0 "^(def|defp)$")) @definition.function
+
+; ── Zero-arity macro definitions without parens ───────────────────────────────
+(call
+  target: (identifier) @_defmacro0
+  (arguments
+    (identifier) @name)
+  (#match? @_defmacro0 "^(defmacro|defmacrop)$")) @definition.macro
+
+; ── Module directives → IMPORTS ───────────────────────────────────────────────
+(call
+  target: (identifier) @_directive
+  (arguments (alias) @import.source)
+  (#match? @_directive "^(alias|import|use|require)$")) @import
+
+  ; ── Grouped alias: alias MyApp.{User, Repo, Post} → one IMPORTS per member ───
+(call
+  target: (identifier) @_alias_group
+  (arguments
+    (dot
+      left: (alias) @import.prefix
+      right: (tuple (alias) @import.source)))
+  (#eq? @_alias_group "alias")) @import
+
+; ── Qualified calls: Foo.bar() — captures qualifier so resolution is possible ─
+(call
+  target: (dot
+    left: (alias) @_qualifier
+    right: (identifier) @call.name)) @call
+
+; ── Unqualified calls — keywords excluded to avoid bogus edges ────────────────
+(call
+  target: (identifier) @call.name
+    (#not-match? @call.name "^(def|defp|defmacro|defmacrop|defmodule|defprotocol|defimpl|defstruct|use|alias|import|require|quote|unquote|if|unless|case|cond|with|for|try|receive|raise|throw|fn|do|behaviour|behavior|impl|derive|moduledoc|doc|spec|type|typep|opaque|callback|enforce_keys)$")) @call
+
+
+; ── Guarded function definitions: def f(x) when guard do … end ──────────────
+(call
+  target: (identifier) @_defg
+  (arguments
+    (binary_operator 
+      left: (call target: (identifier) @name)))
+  (#match? @_defg "^(def|defp)$")) @definition.function
+
+ ; ── Guarded macro definitions ─────────────────────────────────────────────────
+(call
+  target: (identifier) @_defmacrog
+  (arguments
+    (binary_operator 
+      left: (call target: (identifier) @name)))
+  (#match? @_defmacrog "^(defmacro|defmacrop)$")) @definition.macro
+ `;
+
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TypeScript]: TYPESCRIPT_QUERIES,
   [SupportedLanguages.JavaScript]: JAVASCRIPT_QUERIES,
@@ -1418,6 +1504,7 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.JSON]: '',
   [SupportedLanguages.TOML]: '',
   [SupportedLanguages.Markdown]: '',
+  [SupportedLanguages.Elixir]: ELIXIR_QUERIES,
   [SupportedLanguages.Makefile]: MAKEFILE_QUERIES,
 };
  

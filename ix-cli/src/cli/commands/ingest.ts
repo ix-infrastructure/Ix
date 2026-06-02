@@ -40,6 +40,7 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.json',
   '.toml',
   '.md', '.markdown',
+  '.ex', '.exs',
   '.mk', '.makefile',
 ]);
 
