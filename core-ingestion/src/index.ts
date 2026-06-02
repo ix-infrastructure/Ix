@@ -1778,7 +1778,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
       const dropIdx: number[] = [];
       entities.forEach((e, i) => {
         if (e.kind !== 'function' && e.kind !== 'macro') return;
-        const key = `${e.container ?? ''} ${e.name}`;
+        const key = `${e.kind} ${e.container ?? ''} ${e.name}`;
         const keep = firstByKey.get(key);
         if (keep) {
           keep.lineStart = Math.min(keep.lineStart, e.lineStart);

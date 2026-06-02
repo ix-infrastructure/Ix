@@ -270,5 +270,25 @@ end
     // ...whose span covers the first clause through the last, not just the first.
     expect(handles[0].lineEnd - handles[0].lineStart).toBeGreaterThanOrEqual(8);
   });
+
+  it('does not merge a def and a defmacro of the same name (kind distinguishes them)', () => {
+    const result = parseFile(
+      '/repo/fm.ex',
+      `
+defmodule M do
+  def foo(x), do: x
+
+  defmacro foo(x, y) do
+    quote do: unquote(x)
+  end
+end
+      `,
+    );
+
+    expect(result).not.toBeNull();
+    const foos = result!.entities.filter(e => e.name === 'foo');
+    expect(foos).toHaveLength(2);
+    expect(foos.map(e => e.kind).sort()).toEqual(['function', 'macro']);
+  });
 });
 
