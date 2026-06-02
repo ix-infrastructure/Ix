@@ -625,4 +625,21 @@ describe('resolveEdges', () => {
     const resolved = resolveEdges([consumer, lib]);
     expect(resolved.filter(e => e.predicate === 'IMPORTS' && e.dstName === 'HttpClient')).toEqual([]);
   });
+
+  // The R cross-batch index is parser-derived (not regex), so it captures every
+  // definition form the parser does — including `= function` and string-keyed S3
+  // method names that the old `<- function(` regex missed.
+  it('R: cross-batch index captures <-, = and string-keyed S3 function defs', () => {
+    const src = [
+      'clean_data <- function(x) x',
+      'fit_model = function(y) y',
+      '"print.myClass" <- function(z) z',
+    ].join('\n');
+    const sources = new Map([['/repo/funcs.r', src]]);
+    const index = buildGlobalResolutionIndex(['/repo/funcs.r'], sources);
+
+    expect(index.symbolToFiles.get('clean_data')).toContain('/repo/funcs.r');     // <- form
+    expect(index.symbolToFiles.get('fit_model')).toContain('/repo/funcs.r');      // = form (regex missed)
+    expect(index.symbolToFiles.get('print.myClass')).toContain('/repo/funcs.r');  // string-keyed S3 (regex missed)
+  });
 });

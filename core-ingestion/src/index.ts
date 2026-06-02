@@ -1358,8 +1358,13 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         const kind = DEFINITION_KIND_MAP[defCapture.name] ?? 'function';
         const rawName = nameCapture?.node.text
           ?? (defCapture.name === 'definition.constructor' ? 'init' : '');
-        // Strip surrounding quotes for string-keyed definitions (e.g. R S3 method names)
-        const name = rawName.replace(/^(['"`])(.*)\1$/, '$2');
+        // Strip surrounding quotes only for string-keyed definitions (R S3 method
+        // names like "print.myClass"). Leave backtick identifiers intact (Scala
+        // `type`, R `my fn`): the call/heritage paths don't strip, so stripping
+        // here would desync the def name from its call captures.
+        const name = nameCapture?.node.type === 'string'
+          ? rawName.replace(/^(['"])(.*)\1$/, '$2')
+          : rawName;
         if (!name || name.length === 0) continue;
 
         const defNode = defCapture.node;
@@ -1613,7 +1618,10 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         // `filter` or `map` are Python builtins when called bare, but are valid
         // user-defined method calls when invoked as `query.filter(...)`.
         const qualifierCapture = match.captures.find((c: any) => c.name === '_qualifier');
-        if (builtinsForLanguage(language).has(callee) && !qualifierCapture) continue;
+        // R package-qualified calls (pkg::func) carry a distinct @_namespace
+        // capture so the dstName can keep the :: separator (vs a plain dotted name).
+        const namespaceCapture = match.captures.find((c: any) => c.name === '_namespace');
+        if (builtinsForLanguage(language).has(callee) && !qualifierCapture && !namespaceCapture) continue;
 
         // For Python: skip calls that are decorator applications.
         // When a method is decorated (e.g. @util.deprecated(...)), the call sits at the
@@ -1643,6 +1651,12 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         const seen = seenCalls.get(scope)!;
 
         const effectiveCallee = (() => {
+          // R package-qualified call (pkg::func / pkg:::func): keep the :: so the
+          // patch builder can externalize it under external://<pkg> and split it
+          // correctly even for multi-dot members (utils::write.csv).
+          if (namespaceCapture) {
+            return `${namespaceCapture.node.text}::${callee}`;
+          }
           if (!qualifierCapture) {
             // Go: bare-function calls (call.name is an `identifier` — i.e.
             // pattern 1: `Foo()`) resolve to the caller's package, so prepend
@@ -1964,18 +1978,22 @@ export function buildGlobalResolutionIndex(
       }
     }
 
-    // R: scan function definitions (name <- function(...))
-    // Enables cross-batch Tier-3 resolution for large R repos (>500 files).
-    const rFuncRe = /^([a-zA-Z_.][a-zA-Z0-9_.]*)\s*<-\s*function\b\s*\(/gm;
+    // R: index function definitions for cross-batch Tier-3 resolution. Derive
+    // them from the parser's definition.function entities (not a regex) so this
+    // never drifts from what the in-batch path extracts in resolveEdges — the
+    // parser also captures forms a regex misses (`= function`, string-keyed S3
+    // method names like "print.myClass"). Mirrors the qkMap construction at
+    // resolveEdges (key by name, value qkey). Same pattern as the SAS index.
     for (const [fp, src] of sources) {
-      const ext = nodePath.extname(fp).toLowerCase();
-      if (ext !== '.r') continue;
+      if (nodePath.extname(fp).toLowerCase() !== '.r') continue;
+      const parsed = parseFile(fp, src);
+      if (!parsed) continue;
       const qkMap = new Map<string, string[]>();
-      rFuncRe.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      while ((m = rFuncRe.exec(src)) !== null) {
-        const name = m[1];
-        if (!qkMap.has(name)) qkMap.set(name, [name]);
+      for (const e of parsed.entities) {
+        if (e.kind !== 'function') continue;
+        const list = qkMap.get(e.name) ?? [];
+        list.push(qualifiedKey(e));
+        qkMap.set(e.name, list);
       }
       if (qkMap.size > 0) {
         fileQKeys.set(fp, qkMap);

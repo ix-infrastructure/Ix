@@ -50,6 +50,12 @@ export function isSupportedSourceFile(filePath: string): boolean {
     || SUPPORTED_EXTENSIONS.has(nodePath.extname(filePath).toLowerCase());
 }
 
+const INDEX_PRESCAN_EXTENSIONS = new Set(['.go', '.r']);
+
+function needsIndexPrescan(filePath: string): boolean {
+  return INDEX_PRESCAN_EXTENSIONS.has(nodePath.extname(filePath).toLowerCase());
+}
+
 // ---------------------------------------------------------------------------
 // Language filter helpers
 // ---------------------------------------------------------------------------
@@ -951,16 +957,12 @@ export async function ingestFiles(
           const sources = new Map<string, string>();
           const changedSet = new Set(changedPaths.map(c => c.filePath));
           for (const { filePath, bytes } of changedPaths) {
-            const ext = nodePath.extname(filePath).toLowerCase();
-            if (ext === '.go' || ext === '.r') sources.set(filePath, bytes.toString('utf-8'));
+            if (needsIndexPrescan(filePath)) sources.set(filePath, bytes.toString('utf-8'));
           }
-          const remainingIndexableFiles = filePaths.filter(fp => {
-            const ext = nodePath.extname(fp).toLowerCase();
-            return (ext === '.go' || ext === '.r') && !changedSet.has(fp);
-          });
-          const FILE_READ_CONCURRENCY = 2000;
-          for (let i = 0; i < remainingIndexableFiles.length; i += FILE_READ_CONCURRENCY) {
-            const batch = remainingIndexableFiles.slice(i, i + FILE_READ_CONCURRENCY);
+          const remainingIndexFiles = filePaths.filter(fp => needsIndexPrescan(fp) && !changedSet.has(fp));
+          const INDEX_READ_CONCURRENCY = 2000;
+          for (let i = 0; i < remainingIndexFiles.length; i += INDEX_READ_CONCURRENCY) {
+            const batch = remainingIndexFiles.slice(i, i + INDEX_READ_CONCURRENCY);
             const texts = await Promise.all(batch.map(fp => fs.promises.readFile(fp, 'utf-8').catch(() => null)));
             for (let j = 0; j < batch.length; j++) {
               if (texts[j] != null) sources.set(batch[j], texts[j]!);
@@ -1016,13 +1018,10 @@ export async function ingestFiles(
       {
         const goIndexStart = performance.now();
         const sources = new Map<string, string>();
-        const indexableFiles = filePaths.filter(fp => {
-          const ext = nodePath.extname(fp).toLowerCase();
-          return ext === '.go' || ext === '.r';
-        });
-        const FILE_READ_CONCURRENCY = 2000;
-        for (let i = 0; i < indexableFiles.length; i += FILE_READ_CONCURRENCY) {
-          const batch = indexableFiles.slice(i, i + FILE_READ_CONCURRENCY);
+        const indexFiles = filePaths.filter(fp => needsIndexPrescan(fp));
+        const INDEX_READ_CONCURRENCY = 2000;
+        for (let i = 0; i < indexFiles.length; i += INDEX_READ_CONCURRENCY) {
+          const batch = indexFiles.slice(i, i + INDEX_READ_CONCURRENCY);
           const texts = await Promise.all(batch.map(fp => fs.promises.readFile(fp, 'utf-8').catch(() => null)));
           for (let j = 0; j < batch.length; j++) {
             if (texts[j] != null) sources.set(toWorkspaceRelative(batch[j]), texts[j]!);

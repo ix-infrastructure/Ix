@@ -1401,9 +1401,12 @@ export const R_QUERIES = `
   function: (identifier) @call.name) @call
 
 ; Package-qualified calls: pkg::func(args) and pkg:::func(args)
+; @_namespace (not @_qualifier) marks a real :: namespace call so the dstName
+; keeps the :: separator. That lets the patch builder externalize only genuine
+; package calls, not base-R dotted names like is.null.
 (call
   function: (namespace_operator
-    lhs: (identifier) @_qualifier
+    lhs: (identifier) @_namespace
     rhs: (identifier) @call.name)) @call
 
 ; Method calls: obj$method(args)

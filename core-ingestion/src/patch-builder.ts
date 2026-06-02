@@ -237,13 +237,10 @@ export function buildPatch(
       : resolveKey(r.dstName);
 
     let dstNid: string;
-    if (r.predicate === 'CALLS' && dstKey.includes('.') && !allQKeys.has(dstKey)) {
-      // Unresolved qualified call (R's pkg::func, Go's external.Func, etc.) —
-      // materialise a stub node under external://<pkg> so ix trace / ix callees
-      // have a real destination instead of a phantom nodeId.
-      const dot = dstKey.lastIndexOf('.');
-      const pkgName = dstKey.slice(0, dot);
-      const funcName = dstKey.slice(dot + 1);
+    if (r.predicate === 'CALLS' && dstKey.includes('::') && !allQKeys.has(dstKey)) {
+      const sep = dstKey.indexOf('::');
+      const pkgName = dstKey.slice(0, sep);
+      const funcName = dstKey.slice(sep + 2);
       const extPath = `external://${pkgName}`;
       dstNid = nodeId(extPath, dstKey);
       if (!seenExternalNodes.has(dstNid)) {
@@ -462,13 +459,10 @@ export function buildPatchWithResolution(
       // Cross-file resolved — use the defining file's nodeId.
       const { dstFilePath, dstQualifiedKey } = edgeResolution.get(resolutionKey)!;
       dstNodeId = nodeId(dstFilePath, dstQualifiedKey);
-    } else if (r.predicate === 'CALLS' && dstKey.includes('.') && !allQKeys2.has(dstKey)) {
-      // Unresolved qualified call (R's pkg::func, Go's external.Func, etc.) —
-      // materialise a stub node under external://<pkg> so ix trace / ix callees / ix impact
-      // have a real destination instead of a phantom nodeId.
-      const dot = dstKey.lastIndexOf('.');
-      const pkgName = dstKey.slice(0, dot);
-      const funcName = dstKey.slice(dot + 1);
+    } else if (r.predicate === 'CALLS' && dstKey.includes('::') && !allQKeys2.has(dstKey)) {
+      const sep = dstKey.indexOf('::');
+      const pkgName = dstKey.slice(0, sep);
+      const funcName = dstKey.slice(sep + 2);
       const extPath = `external://${pkgName}`;
       dstNodeId = nodeId(extPath, dstKey);
       if (!seenExternalNodes2.has(dstNodeId)) {

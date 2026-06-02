@@ -59,10 +59,24 @@ fitModel <- function(df) {
 }
 `);
     expect(result).not.toBeNull();
-    // qualifier + method: same convention as Go pkg.Func and Python module.method
+    // Package-qualified calls keep the :: separator (dplyr::filter) so the patch
+    // builder can externalise genuine package calls without confusing them for
+    // base-R dotted names like is.null.
     expect(result!.relationships).toContainEqual(
-      expect.objectContaining({ dstName: 'dplyr.filter', predicate: 'CALLS' }),
+      expect.objectContaining({ dstName: 'dplyr::filter', predicate: 'CALLS' }),
     );
+  });
+
+  it('keeps backticks on backtick-named function defs (only string LHS is unquoted)', () => {
+    const result = parseFile('/repo/backtick.r', '`my fn` <- function(x) x\n');
+    expect(result).not.toBeNull();
+    // Backtick identifiers are part of the token text; stripping them on the def
+    // path (but not the call path) would desync resolution. The strip is reserved
+    // for string-keyed S3 names only.
+    expect(result!.entities).toContainEqual(
+      expect.objectContaining({ name: '`my fn`', kind: 'function' }),
+    );
+    expect(result!.entities.map(e => e.name)).not.toContain('my fn');
   });
 
   it('emits IMPORTS for library() with quoted string', () => {
