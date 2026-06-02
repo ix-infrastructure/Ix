@@ -26,7 +26,11 @@ Examples:
       const client = new IxClient(getEndpoint());
       const limit = parseInt(opts.limit, 10);
 
-      let nodes = await client.listByKind(opts.kind, { limit, workspaceId: resolveWorkspaceId() });
+      // Pass --path as a server-side scope so the LIMIT is applied AFTER path
+      // filtering (otherwise a capped fetch can truncate away the target before
+      // the client-side filter below ever sees it). The client-side filter is
+      // kept as a fallback for older servers that ignore the scope field.
+      let nodes = await client.listByKind(opts.kind, { limit, workspaceId: resolveWorkspaceId(), scope: opts.path });
 
       if (opts.path) {
         nodes = nodes.filter((n) => {
