@@ -1483,6 +1483,76 @@ export const ELIXIR_QUERIES = `
   (#match? @_defmacrog "^(defmacro|defmacrop)$")) @definition.macro
  `;
 
+export const SAS_QUERIES = `
+; Macro definitions — %MACRO name ... %MEND
+(macro_definition
+  name: (macro_name) @name) @definition.macro
+
+; Macro call statements — %name(args);
+(macro_call_statement
+  name: (macro_name) @call.name) @call
+
+; Inline macro calls — %name(args) inside DATA/PROC/etc.
+(macro_call
+  name: (macro_name) @call.name) @call
+
+; DATA step — capture the whole dataset_name node so two-part names (work.foo)
+; stay one entity. Sentinels (_null_) and unexpanded macro vars (&ds) are
+; filtered downstream in index.ts (they have no stable identity).
+(data_step
+  (data_step_header
+    (dataset_name) @name)) @definition.module
+
+; PROC step — the procedure name itself is too generic to be a graph node
+; (means/sort/freq repeat once per file). index.ts re-keys this on the PROC's
+; out= output dataset, or drops it when the step produces no dataset.
+(proc_step
+  (proc_step_header
+    name: (identifier) @name)) @definition.module
+
+; %INCLUDE — string literal form: %include 'path/to/file.sas';
+(include_statement
+  source: (string_literal) @import.source) @import
+
+; %INCLUDE — fileref form: %include FILEREF; or %include FILEREF(member.sas);
+(include_statement
+  source: (fileref_source) @import.source) @import
+
+; LIBNAME — library path import
+(libname_statement
+  (string_literal) @import.source) @import
+
+; PROC SQL — CREATE TABLE AS output
+(sql_create_statement
+  output: (dataset_name) @name) @definition.module
+
+; PROC SQL — FROM table inputs
+(sql_select_statement
+  (table_reference
+    (dataset_name) @import.source)) @import
+
+; PROC SQL — JOIN table inputs
+(sql_select_statement
+  (sql_join_clause
+    (table_reference
+      (dataset_name) @import.source))) @import
+
+; DATA step SET inputs
+(data_step
+  (set_statement
+    (dataset_name) @import.source)) @import
+
+; DATA step MERGE inputs
+(data_step
+  (merge_statement
+    (dataset_name) @import.source)) @import
+
+; DATA step UPDATE inputs
+(data_step
+  (update_statement
+    (dataset_name) @import.source)) @import
+`;
+
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TypeScript]: TYPESCRIPT_QUERIES,
   [SupportedLanguages.JavaScript]: JAVASCRIPT_QUERIES,
@@ -1504,6 +1574,7 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.JSON]: '',
   [SupportedLanguages.TOML]: '',
   [SupportedLanguages.Markdown]: '',
+  [SupportedLanguages.SAS]: SAS_QUERIES,
   [SupportedLanguages.Elixir]: ELIXIR_QUERIES,
   [SupportedLanguages.Makefile]: MAKEFILE_QUERIES,
 };

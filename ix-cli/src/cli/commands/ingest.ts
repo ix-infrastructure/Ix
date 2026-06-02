@@ -40,6 +40,7 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.json',
   '.toml',
   '.md', '.markdown',
+  '.sas',
   '.ex', '.exs',
   '.mk', '.makefile',
 ]);
@@ -51,6 +52,15 @@ export function isSupportedSourceFile(filePath: string): boolean {
     || fileName === 'makefile'
     || fileName === 'gnumakefile'
     || SUPPORTED_EXTENSIONS.has(nodePath.extname(filePath).toLowerCase());
+}
+
+// Extensions whose source text must be pre-read so buildGlobalResolutionIndex can
+// extract cross-batch symbols before the streaming parse loop. Go uses a fast
+// regex scan; SAS is parsed (its macro index is derived from definition.macro).
+const INDEX_PRESCAN_EXTENSIONS = new Set(['.go', '.sas']);
+
+function needsIndexPrescan(filePath: string): boolean {
+  return INDEX_PRESCAN_EXTENSIONS.has(nodePath.extname(filePath).toLowerCase());
 }
 
 // ---------------------------------------------------------------------------
@@ -954,12 +964,12 @@ export async function ingestFiles(
           const sources = new Map<string, string>();
           const changedSet = new Set(changedPaths.map(c => c.filePath));
           for (const { filePath, bytes } of changedPaths) {
-            if (nodePath.extname(filePath) === '.go') sources.set(filePath, bytes.toString('utf-8'));
+            if (needsIndexPrescan(filePath)) sources.set(filePath, bytes.toString('utf-8'));
           }
-          const remainingGoFiles = filePaths.filter(fp => nodePath.extname(fp) === '.go' && !changedSet.has(fp));
-          const GO_READ_CONCURRENCY = 2000;
-          for (let i = 0; i < remainingGoFiles.length; i += GO_READ_CONCURRENCY) {
-            const batch = remainingGoFiles.slice(i, i + GO_READ_CONCURRENCY);
+          const remainingIndexFiles = filePaths.filter(fp => needsIndexPrescan(fp) && !changedSet.has(fp));
+          const INDEX_READ_CONCURRENCY = 2000;
+          for (let i = 0; i < remainingIndexFiles.length; i += INDEX_READ_CONCURRENCY) {
+            const batch = remainingIndexFiles.slice(i, i + INDEX_READ_CONCURRENCY);
             const texts = await Promise.all(batch.map(fp => fs.promises.readFile(fp, 'utf-8').catch(() => null)));
             for (let j = 0; j < batch.length; j++) {
               if (texts[j] != null) sources.set(batch[j], texts[j]!);
@@ -1009,16 +1019,16 @@ export async function ingestFiles(
 
       // Build global resolution index from all repo file paths before the parse loop
       // so cross-batch imports resolve correctly even in streaming per-chunk mode.
-      // Read all Go files in parallel to maximize I/O throughput.
+      // Read pre-scan files (Go, SAS) in parallel to maximize I/O throughput.
       // Index keys are workspace-relative to match the relative paths we pass
       // into parseFile below.
       {
         const goIndexStart = performance.now();
         const sources = new Map<string, string>();
-        const goFiles = filePaths.filter(fp => nodePath.extname(fp) === '.go');
-        const GO_READ_CONCURRENCY = 2000;
-        for (let i = 0; i < goFiles.length; i += GO_READ_CONCURRENCY) {
-          const batch = goFiles.slice(i, i + GO_READ_CONCURRENCY);
+        const indexFiles = filePaths.filter(fp => needsIndexPrescan(fp));
+        const INDEX_READ_CONCURRENCY = 2000;
+        for (let i = 0; i < indexFiles.length; i += INDEX_READ_CONCURRENCY) {
+          const batch = indexFiles.slice(i, i + INDEX_READ_CONCURRENCY);
           const texts = await Promise.all(batch.map(fp => fs.promises.readFile(fp, 'utf-8').catch(() => null)));
           for (let j = 0; j < batch.length; j++) {
             if (texts[j] != null) sources.set(toWorkspaceRelative(batch[j]), texts[j]!);
