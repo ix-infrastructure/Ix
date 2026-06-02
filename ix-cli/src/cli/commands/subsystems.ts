@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient, type ListSubsystemsOptions } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
+import { resolveWorkspaceId } from "../bootstrap.js";
 import { roundFloat } from "../format.js";
 import { renderMapText, type MapResult } from "./map.js";
 import {
@@ -155,7 +156,7 @@ Examples:
           result = await loadSubsystemScores(client, detailedQuery.value ?? {});
           // Auto-trigger scoring if no persisted scores exist yet
           if (result.scores.length === 0) {
-            await client.scoreSubsystems();
+            await client.scoreSubsystems({ workspaceId: resolveWorkspaceId() });
             result = await loadSubsystemScores(client, detailedQuery.value ?? {});
           }
         } catch (err: any) {
@@ -200,6 +201,7 @@ Examples:
         result = await client.getSubsystemMap({
           target: target.value,
           pick: pick.value,
+          workspaceId: resolveWorkspaceId(),
         }) as MapResult;
       } catch (err: any) {
         const body = parseErrorBody(err);
@@ -227,9 +229,9 @@ Examples:
 
         let scoreResult: { scores?: SubsystemScore[] };
         try {
-          scoreResult = await client.listSubsystems();
+          scoreResult = await client.listSubsystems({ workspaceId: resolveWorkspaceId() });
           if ((scoreResult.scores ?? []).length === 0) {
-            scoreResult = await client.scoreSubsystems();
+            scoreResult = await client.scoreSubsystems({ workspaceId: resolveWorkspaceId() });
           }
         } catch (err: any) {
           console.error(chalk.red("Error:"), err.message);
@@ -418,7 +420,7 @@ async function loadSubsystemScores(
   query: ListSubsystemsOptions,
 ): Promise<SubsystemListResult> {
   if (!query.detailed) {
-    const result = await client.listSubsystems();
+    const result = await client.listSubsystems({ workspaceId: resolveWorkspaceId() });
     return { scores: result.scores ?? [], autoPaginated: false };
   }
 

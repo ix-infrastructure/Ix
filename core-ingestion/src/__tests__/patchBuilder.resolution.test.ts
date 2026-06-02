@@ -95,7 +95,7 @@ describe('buildPatchWithResolution', () => {
       },
     ];
 
-    const patch = buildPatchWithResolution(result, 'test-hash', resolvedEdges);
+    const patch = buildPatchWithResolution(result, 'test-hash', '', resolvedEdges);
     const callEdges = patch.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS');
 
     expect(callEdges).toHaveLength(2);
@@ -139,7 +139,7 @@ struct Trajectory {};
       confidence: 0.9,
     });
 
-    const patch = buildPatchWithResolution(importer!, 'test-hash', resolvedEdges);
+    const patch = buildPatchWithResolution(importer!, 'test-hash', '', resolvedEdges);
     const importEdge = patch.ops.find(
       (op) => op.type === 'UpsertEdge' && op.predicate === 'IMPORTS',
     );

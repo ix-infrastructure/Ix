@@ -33,6 +33,8 @@ function tryLoadGrammar(pkg: string): any {
 }
 const Kotlin = tryLoadGrammar('tree-sitter-kotlin');
 const Swift  = tryLoadGrammar('tree-sitter-swift');
+const Elixir = tryLoadGrammar('tree-sitter-elixir');
+const Make = tryLoadGrammar('tree-sitter-make');
 // tree-sitter-sas uses ESM bindings with top-level await — incompatible with tryLoadGrammar (CJS require)
 let SAS: any = null;
 // @ts-ignore
@@ -126,6 +128,8 @@ const GRAMMAR_MAP: Partial<Record<SupportedLanguages, any>> = {
   ...(Kotlin ? { [SupportedLanguages.Kotlin]: Kotlin } : {}),
   ...(Swift ? { [SupportedLanguages.Swift]: Swift } : {}),
   ...(SAS ? { [SupportedLanguages.SAS]: SAS } : {}),
+  ...(Elixir ? { [SupportedLanguages.Elixir]: Elixir } : {}),
+  ...(Make ? { [SupportedLanguages.Makefile]: Make } : {}),
 };
 
 // Capture key prefix → NodeKind string
@@ -1597,13 +1601,28 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
       // Import captures (JS/TS/Python path-based)
       const importSource = match.captures.find((c: any) => c.name === 'import.source');
       if (importSource) {
-        const modName = normalizeCapturedImport(importSource.node.text, language);
+        // Grouped alias `alias MyApp.{User, Repo}`: each member alias is captured bare
+        // ("User"); the prefix alias ("MyApp") comes through @import.prefix so we can
+        // rebuild the full module name "MyApp.User", matching the single-alias form.
+        const importPrefix = match.captures.find((c: any) => c.name === 'import.prefix')?.node.text;
+        let modName = normalizeCapturedImport(importSource.node.text, language);
+        if (importPrefix) modName = `${importPrefix}.${modName}`;
         const importAlias = match.captures.find((c: any) => c.name === 'import.alias')?.node.text;
         if (importAlias && modName && importAlias !== '.' && importAlias !== '_') {
           importAliases[importAlias] = modName;
         }
+        // Elixir: `alias MyApp.Repo` (and grouped `alias MyApp.{Repo, ...}`) implicitly
+        // bind the last segment as a short name. No @import.alias capture exists, so
+        // derive it here — this is what lets Tier-1b resolution translate e.g.
+        // 'Repo.insert' → 'MyApp.Repo.insert', including through grouped aliases.
+        if (!importAlias && language === SupportedLanguages.Elixir && modName.includes('.')) {
+          const directive = match.captures.find((c: any) =>
+            c.name === '_directive' || c.name === '_alias_group')?.node.text;
+          if (directive === 'alias') {
+            importAliases[modName.split('.').pop()!] = modName;
+          }
+        }
         if (modName.length > 0 && modName !== '*') {
-          if (!modName) continue;                        // skip bare '.' relative imports
           entities.push({ name: modName, kind: 'module', lineStart: importSource.node.startPosition.row + 1, lineEnd: importSource.node.startPosition.row + 1, language });
           relationships.push({ srcName: fileName, dstName: modName, predicate: 'IMPORTS' });
         }
@@ -1651,6 +1670,28 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
             anc = anc.parent;
           }
           if (isDecoratorCall) continue;
+        }
+
+        // Elixir: skip the function-name node inside def/defp/defmacro(p) argument lists.
+        // `def foo(args)` parses as call{target:def, args:[call{target:foo, args:[...]}]}.
+        // callName.node is the identifier `foo`; its parent is the inner call node,
+        // whose parent is `arguments`, whose parent is the outer def* call.
+        // Without this, the inner call{target:foo} would emit a `foo CALLS foo` self-edge.
+        if (language === SupportedLanguages.Elixir) {
+          const innerCall = callName.node.parent;
+          let argsNode = innerCall?.parent;
+          if (argsNode?.type === 'binary_operator') {
+            argsNode = argsNode.parent;           // walk up through when-guard
+          }
+          if (argsNode?.type === 'arguments') {
+            const defCall = argsNode.parent;
+            if (defCall?.type === 'call') {
+              const defTarget = defCall.childForFieldName?.('target');
+              if (defTarget && /^(def|defp|defmacro|defmacrop)$/.test(defTarget.text)) {
+                continue;
+              }
+            }
+          }
         }
 
         // Find enclosing function/method for the call; fall back to enclosing class
@@ -1789,6 +1830,30 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         contentHash,
         language,
       });
+    }
+
+    // Elixir: a function/macro with multiple clauses (guards, pattern-matched heads,
+    // or several arities) is emitted as one entity per clause; they collapse to a
+    // single node keyed by (container, name). Merge them so the surviving node spans
+    // the whole clause group (first clause start .. last clause end) instead of only
+    // the first clause. (Per-arity identity, e.g. changeset/2 vs changeset/3, is a
+    // larger follow-up: it needs call-arity capture to keep call resolution precise.)
+    if (language === SupportedLanguages.Elixir) {
+      const firstByKey = new Map<string, ParsedEntity>();
+      const dropIdx: number[] = [];
+      entities.forEach((e, i) => {
+        if (e.kind !== 'function' && e.kind !== 'macro') return;
+        const key = `${e.kind} ${e.container ?? ''} ${e.name}`;
+        const keep = firstByKey.get(key);
+        if (keep) {
+          keep.lineStart = Math.min(keep.lineStart, e.lineStart);
+          keep.lineEnd = Math.max(keep.lineEnd, e.lineEnd);
+          dropIdx.push(i);
+        } else {
+          firstByKey.set(key, e);
+        }
+      });
+      for (let j = dropIdx.length - 1; j >= 0; j--) entities.splice(dropIdx[j], 1);
     }
 
     return {
@@ -2557,10 +2622,10 @@ export function resolveEdges(
         const qualifierPart = dstName.slice(0, qualDot);
         const memberPart = dstName.slice(qualDot + 1);
         if (memberPart && qualifierPart) {
-          const aliasedImportMatches =
-            srcLanguage === SupportedLanguages.Go
-              ? resolveImportQualifierTargets(srcFilePath, srcLanguage, result.importAliases?.[qualifierPart] ?? '')
-              : [];
+          const elixirAliasedModule = srcLanguage === SupportedLanguages.Elixir ? result.importAliases?.[qualifierPart]: undefined;
+          const aliasedImportMatches = srcLanguage === SupportedLanguages.Go ? resolveImportQualifierTargets(srcFilePath, srcLanguage, result.importAliases?.[qualifierPart] ?? '')
+          : elixirAliasedModule ? results.map(r => r.filePath).filter(fp => fp !== srcFilePath && fileHasSymbol.get(fp)?.has(elixirAliasedModule))
+          : [];
           // Try import-scoped qualifier first
           const qualifierSearchPool = aliasedImportMatches.length > 0
             ? aliasedImportMatches
@@ -2578,7 +2643,7 @@ export function resolveEdges(
           }
           if (qualImportMatches.length === 1) {
             const qfp = qualImportMatches[0];
-            const preferredQKey = aliasedImportMatches.length > 0 ? undefined : `${qualifierPart}.${memberPart}`;
+            const preferredQKey = elixirAliasedModule ? `${elixirAliasedModule}.${memberPart}` : aliasedImportMatches.length > 0 ? undefined : `${qualifierPart}.${memberPart}`;
             if (fileHasSymbol.get(qfp)?.has(memberPart)) {
               const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart, preferredQKey);
               if (dstQualifiedKey !== null) {
