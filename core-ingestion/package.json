@@ -33,7 +33,10 @@
   },
   "optionalDependencies": {
     "tree-sitter-kotlin": "^0.3.8",
+    "tree-sitter-sas": "^0.4.2",
     "tree-sitter-swift": "^0.6.0",
+    "tree-sitter-elixir": "^0.3.5",
+    "tree-sitter-make": "^1.1.1",
     "@davisvaughan/tree-sitter-r": "^1.2.0"
   },
   "devDependencies": {

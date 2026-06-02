@@ -32,8 +32,21 @@ function tryLoadGrammar(pkg: string): any {
   try { return _require(pkg); } catch { return null; }
 }
 const Kotlin = tryLoadGrammar('tree-sitter-kotlin');
-const Swift = tryLoadGrammar('tree-sitter-swift');
+const Swift  = tryLoadGrammar('tree-sitter-swift');
 const R = tryLoadGrammar('@davisvaughan/tree-sitter-r');
+const Elixir = tryLoadGrammar('tree-sitter-elixir');
+const Make = tryLoadGrammar('tree-sitter-make');
+// tree-sitter-sas uses ESM bindings with top-level await — incompatible with tryLoadGrammar (CJS require)
+let SAS: any = null;
+// @ts-ignore
+try { SAS = (await import('tree-sitter-sas')).default; }
+catch (e: any) {
+  // A genuinely-missing optional dep is expected; surface anything else (e.g. a
+  // broken native build / ABI mismatch) so .sas files aren't silently dropped.
+  if (e?.code !== 'ERR_MODULE_NOT_FOUND' && e?.code !== 'MODULE_NOT_FOUND') {
+    process.stderr.write('[tree-sitter-sas load failed] ' + e + '\n');
+  }
+}
 
 import { SupportedLanguages, languageFromPath } from './languages.js';
 import { LANGUAGE_QUERIES } from './queries.js';
@@ -116,6 +129,9 @@ const GRAMMAR_MAP: Partial<Record<SupportedLanguages, any>> = {
   ...(Kotlin ? { [SupportedLanguages.Kotlin]: Kotlin } : {}),
   ...(Swift ? { [SupportedLanguages.Swift]: Swift } : {}),
   ...(R ? { [SupportedLanguages.R]: R } : {}),
+  ...(SAS ? { [SupportedLanguages.SAS]: SAS } : {}),
+  ...(Elixir ? { [SupportedLanguages.Elixir]: Elixir } : {}),
+  ...(Make ? { [SupportedLanguages.Makefile]: Make } : {}),
 };
 
 // Capture key prefix → NodeKind string
@@ -243,6 +259,16 @@ const R_BUILTINS = new Set([
   'Sys.info', 'Sys.chmod', 'Sys.umask',
 ]);
 
+// SAS-specific builtins: common PROC names and macro keywords that generate
+// noise as CALLS edges (user-defined macros are what we want to track).
+const SAS_BUILTINS = new Set([
+  ...SHARED_BUILTINS,
+  'print', 'means', 'freq', 'sort', 'import', 'export', 'contents', 'datasets',
+  'sql', 'reg', 'logistic', 'glm', 'anova', 'ttest', 'format', 'report',
+  'univariate', 'corr', 'mixed', 'phreg', 'lifetest', 'transpose', 'append',
+  'put', 'let', 'do', 'end', 'goto', 'abort',
+]);
+
 // Per-language BUILTINS lookup — falls back to shared for languages without a
 // specific set (e.g. Java, Go, Rust) so they only skip obvious non-calls.
 function builtinsForLanguage(lang: SupportedLanguages): Set<string> {
@@ -254,6 +280,8 @@ function builtinsForLanguage(lang: SupportedLanguages): Set<string> {
       return JS_BUILTINS;
     case SupportedLanguages.R:
       return R_BUILTINS;
+    case SupportedLanguages.SAS:
+      return SAS_BUILTINS;
     default:
       return SHARED_BUILTINS;
   }
@@ -305,6 +333,25 @@ function normalizeCapturedImport(rawValue: string, language: SupportedLanguages)
 
   if (language === SupportedLanguages.Go) {
     return unwrapped.replace(/^\.+/, '');
+  }
+
+  if (language === SupportedLanguages.SAS) {
+    // Real SAS uses single backslashes in Windows paths (libname "&P.\SASData").
+    // The general pre-normalization only collapses double backslashes, so do it
+    // here before any path inspection.
+    const slashed = unwrapped.replace(/\\/g, '/');
+    // Unexpanded macro-var targets (&OUTFILE, &P.\dir) have no stable identity
+    // until macro expansion — drop them so they create no bogus node/edge.
+    if (slashed.includes('&')) return '';
+    if (!slashed.includes('/')) {
+      // fileref_source text: FILEREF or FILEREF(member.sas) — no path separators.
+      const memberMatch = slashed.match(/^[A-Za-z_][A-Za-z0-9_]*\(([^)]+)\)$/);
+      if (memberMatch) return memberMatch[1];
+      return slashed;
+    }
+    // String-literal %include and LIBNAME paths → basename.
+    const base = slashed.split('/').filter((s: string) => s !== '*').pop() ?? slashed;
+    return base.replace(/^\.+/, '');
   }
 
   const rawMod = unwrapped.split('/').filter((s: string) => s !== '*').pop() ?? unwrapped;
@@ -1362,10 +1409,32 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         // names like "print.myClass"). Leave backtick identifiers intact (Scala
         // `type`, R `my fn`): the call/heritage paths don't strip, so stripping
         // here would desync the def name from its call captures.
-        const name = nameCapture?.node.type === 'string'
+        let name = nameCapture?.node.type === 'string'
           ? rawName.replace(/^(['"])(.*)\1$/, '$2')
           : rawName;
         if (!name || name.length === 0) continue;
+
+        // SAS module entities (DATA/PROC steps, PROC SQL CREATE) need extra
+        // shaping so they reflect real data artifacts rather than parser noise.
+        if (language === SupportedLanguages.SAS && kind === 'module') {
+          if (defCapture.node.type === 'proc_step') {
+            // The procedure name (means/sort/freq…) is too generic to be a node.
+            // Re-key on the PROC's out= output dataset; drop the step entirely
+            // when it produces none (e.g. proc print, proc means with no out=).
+            // out= may sit on the header (proc sort out=) OR in a body statement
+            // (proc means; output out=x; / proc freq; tables a / out=y;), so fall
+            // back to scanning the full step text when the header has none.
+            const header = defCapture.node.namedChild(0);
+            const headerText = header?.type === 'proc_step_header' ? header.text : defCapture.node.text;
+            const outRe = /\bout\s*=\s*([A-Za-z_][\w.]*)/i;
+            const outMatch = headerText.match(outRe) ?? defCapture.node.text.match(outRe);
+            if (!outMatch) continue;
+            name = outMatch[1];
+          }
+          // Drop side-effect-only sentinels (_null_/_data_/_last_) and unexpanded
+          // macro-var names (&ds) — neither denotes a stable dataset identity.
+          if (/^_(null|data|last)_$/i.test(name) || name.includes('&')) continue;
+        }
 
         const defNode = defCapture.node;
         const lineStart = defNode.startPosition.row + 1;
@@ -1580,13 +1649,28 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
       // Import captures (JS/TS/Python path-based)
       const importSource = match.captures.find((c: any) => c.name === 'import.source');
       if (importSource) {
-        const modName = normalizeCapturedImport(importSource.node.text, language);
+        // Grouped alias `alias MyApp.{User, Repo}`: each member alias is captured bare
+        // ("User"); the prefix alias ("MyApp") comes through @import.prefix so we can
+        // rebuild the full module name "MyApp.User", matching the single-alias form.
+        const importPrefix = match.captures.find((c: any) => c.name === 'import.prefix')?.node.text;
+        let modName = normalizeCapturedImport(importSource.node.text, language);
+        if (importPrefix) modName = `${importPrefix}.${modName}`;
         const importAlias = match.captures.find((c: any) => c.name === 'import.alias')?.node.text;
         if (importAlias && modName && importAlias !== '.' && importAlias !== '_') {
           importAliases[importAlias] = modName;
         }
+        // Elixir: `alias MyApp.Repo` (and grouped `alias MyApp.{Repo, ...}`) implicitly
+        // bind the last segment as a short name. No @import.alias capture exists, so
+        // derive it here — this is what lets Tier-1b resolution translate e.g.
+        // 'Repo.insert' → 'MyApp.Repo.insert', including through grouped aliases.
+        if (!importAlias && language === SupportedLanguages.Elixir && modName.includes('.')) {
+          const directive = match.captures.find((c: any) =>
+            c.name === '_directive' || c.name === '_alias_group')?.node.text;
+          if (directive === 'alias') {
+            importAliases[modName.split('.').pop()!] = modName;
+          }
+        }
         if (modName.length > 0 && modName !== '*') {
-          if (!modName) continue;                        // skip bare '.' relative imports
           entities.push({ name: modName, kind: 'module', lineStart: importSource.node.startPosition.row + 1, lineEnd: importSource.node.startPosition.row + 1, language });
           relationships.push({ srcName: fileName, dstName: modName, predicate: 'IMPORTS' });
         }
@@ -1637,6 +1721,28 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
             anc = anc.parent;
           }
           if (isDecoratorCall) continue;
+        }
+
+        // Elixir: skip the function-name node inside def/defp/defmacro(p) argument lists.
+        // `def foo(args)` parses as call{target:def, args:[call{target:foo, args:[...]}]}.
+        // callName.node is the identifier `foo`; its parent is the inner call node,
+        // whose parent is `arguments`, whose parent is the outer def* call.
+        // Without this, the inner call{target:foo} would emit a `foo CALLS foo` self-edge.
+        if (language === SupportedLanguages.Elixir) {
+          const innerCall = callName.node.parent;
+          let argsNode = innerCall?.parent;
+          if (argsNode?.type === 'binary_operator') {
+            argsNode = argsNode.parent;           // walk up through when-guard
+          }
+          if (argsNode?.type === 'arguments') {
+            const defCall = argsNode.parent;
+            if (defCall?.type === 'call') {
+              const defTarget = defCall.childForFieldName?.('target');
+              if (defTarget && /^(def|defp|defmacro|defmacrop)$/.test(defTarget.text)) {
+                continue;
+              }
+            }
+          }
         }
 
         // Find enclosing function/method for the call; fall back to enclosing class
@@ -1781,6 +1887,30 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         contentHash,
         language,
       });
+    }
+
+    // Elixir: a function/macro with multiple clauses (guards, pattern-matched heads,
+    // or several arities) is emitted as one entity per clause; they collapse to a
+    // single node keyed by (container, name). Merge them so the surviving node spans
+    // the whole clause group (first clause start .. last clause end) instead of only
+    // the first clause. (Per-arity identity, e.g. changeset/2 vs changeset/3, is a
+    // larger follow-up: it needs call-arity capture to keep call resolution precise.)
+    if (language === SupportedLanguages.Elixir) {
+      const firstByKey = new Map<string, ParsedEntity>();
+      const dropIdx: number[] = [];
+      entities.forEach((e, i) => {
+        if (e.kind !== 'function' && e.kind !== 'macro') return;
+        const key = `${e.kind} ${e.container ?? ''} ${e.name}`;
+        const keep = firstByKey.get(key);
+        if (keep) {
+          keep.lineStart = Math.min(keep.lineStart, e.lineStart);
+          keep.lineEnd = Math.max(keep.lineEnd, e.lineEnd);
+          dropIdx.push(i);
+        } else {
+          firstByKey.set(key, e);
+        }
+      });
+      for (let j = dropIdx.length - 1; j >= 0; j--) entities.splice(dropIdx[j], 1);
     }
 
     return {
@@ -2001,6 +2131,28 @@ export function buildGlobalResolutionIndex(
       }
     }
 
+    // SAS: index macro definitions for cross-batch Tier-3 resolution. Derive
+    // them from the parser's definition.macro entities (not a regex) so this
+    // never drifts from what the in-batch path extracts in resolveEdges — the
+    // parser also captures forms a regex misses (e.g. %macro /*comment*/ name).
+    // Mirrors the qkMap construction at resolveEdges (key by name, value qkey).
+    for (const [fp, src] of sources) {
+      if (nodePath.extname(fp).toLowerCase() !== '.sas') continue;
+      const parsed = parseFile(fp, src);
+      if (!parsed) continue;
+      const qkMap = new Map<string, string[]>();
+      for (const e of parsed.entities) {
+        if (e.kind !== 'macro') continue;
+        const list = qkMap.get(e.name) ?? [];
+        list.push(qualifiedKey(e));
+        qkMap.set(e.name, list);
+      }
+      if (qkMap.size > 0) {
+        fileQKeys.set(fp, qkMap);
+        fileHasSymbol.set(fp, new Set(qkMap.keys()));
+      }
+    }
+
     for (const [fp, symbols] of fileHasSymbol) {
       for (const sym of symbols) {
         const list = symbolToFiles.get(sym) ?? [];
@@ -2192,7 +2344,10 @@ export function resolveEdges(
     if (stripped && stripped !== normalizedModName) candidates.push(stripped);
     // Strip file extensions so "explain.js" resolves to the "explain" stem
     // (TS/JS ESM imports use .js extensions that map to .ts source files)
-    const noExt = normalizedModName.replace(/\.(js|ts|mjs|cjs|jsx|tsx|py|scala|java|c|cc|cpp|cxx|h|hh|hpp|hxx)$/, '');
+    // Only the SAS extension is case-insensitive (real SAS uses .sas/.SAS
+    // interchangeably). Keeping the rest case-sensitive avoids stripping
+    // uppercase .C/.H (legitimate C++ source) or .TS/.JAVA across languages.
+    const noExt = normalizedModName.replace(/\.(js|ts|mjs|cjs|jsx|tsx|py|scala|java|c|cc|cpp|cxx|h|hh|hpp|hxx|[Ss][Aa][Ss])$/, '');
     if (noExt !== normalizedModName && noExt && !candidates.includes(noExt)) candidates.push(noExt);
     const pathBasename = nodePath.posix.basename(normalizedModName);
     if (pathBasename && !candidates.includes(pathBasename)) candidates.push(pathBasename);
@@ -2390,7 +2545,7 @@ export function resolveEdges(
       if (canonicalMatches.length === 1) return canonicalMatches;
     }
 
-    if (srcLanguage === SupportedLanguages.Java) {
+    if (srcLanguage === SupportedLanguages.Java || srcLanguage === SupportedLanguages.SAS) {
       const srcParts = srcFilePath.replace(/\\/g, '/').split('/');
       const withProximity = matches.map(fp => {
         const fpParts = fp.replace(/\\/g, '/').split('/');
@@ -2547,10 +2702,10 @@ export function resolveEdges(
         const qualifierPart = dstName.slice(0, qualDot);
         const memberPart = dstName.slice(qualDot + 1);
         if (memberPart && qualifierPart) {
-          const aliasedImportMatches =
-            srcLanguage === SupportedLanguages.Go
-              ? resolveImportQualifierTargets(srcFilePath, srcLanguage, result.importAliases?.[qualifierPart] ?? '')
-              : [];
+          const elixirAliasedModule = srcLanguage === SupportedLanguages.Elixir ? result.importAliases?.[qualifierPart]: undefined;
+          const aliasedImportMatches = srcLanguage === SupportedLanguages.Go ? resolveImportQualifierTargets(srcFilePath, srcLanguage, result.importAliases?.[qualifierPart] ?? '')
+          : elixirAliasedModule ? results.map(r => r.filePath).filter(fp => fp !== srcFilePath && fileHasSymbol.get(fp)?.has(elixirAliasedModule))
+          : [];
           // Try import-scoped qualifier first
           const qualifierSearchPool = aliasedImportMatches.length > 0
             ? aliasedImportMatches
@@ -2568,7 +2723,7 @@ export function resolveEdges(
           }
           if (qualImportMatches.length === 1) {
             const qfp = qualImportMatches[0];
-            const preferredQKey = aliasedImportMatches.length > 0 ? undefined : `${qualifierPart}.${memberPart}`;
+            const preferredQKey = elixirAliasedModule ? `${elixirAliasedModule}.${memberPart}` : aliasedImportMatches.length > 0 ? undefined : `${qualifierPart}.${memberPart}`;
             if (fileHasSymbol.get(qfp)?.has(memberPart)) {
               const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart, preferredQKey);
               if (dstQualifiedKey !== null) {

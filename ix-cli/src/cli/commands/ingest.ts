@@ -41,16 +41,25 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.toml',
   '.md', '.markdown',
   '.r',
+  '.sas',
+  '.ex', '.exs',
+  '.mk', '.makefile',
 ]);
 
 export function isSupportedSourceFile(filePath: string): boolean {
   const fileName = nodePath.basename(filePath).toLowerCase();
   return fileName === 'dockerfile'
     || fileName.endsWith('.dockerfile')
+    || fileName === 'makefile'
+    || fileName === 'gnumakefile'
     || SUPPORTED_EXTENSIONS.has(nodePath.extname(filePath).toLowerCase());
 }
 
-const INDEX_PRESCAN_EXTENSIONS = new Set(['.go', '.r']);
+// Extensions whose source text must be pre-read so buildGlobalResolutionIndex can
+// extract cross-batch symbols before the streaming parse loop. Go uses a fast
+// regex scan; SAS and R are parsed (their cross-batch indexes are derived from
+// the parser's definition entities).
+const INDEX_PRESCAN_EXTENSIONS = new Set(['.go', '.r', '.sas']);
 
 function needsIndexPrescan(filePath: string): boolean {
   return INDEX_PRESCAN_EXTENSIONS.has(nodePath.extname(filePath).toLowerCase());
@@ -1012,7 +1021,7 @@ export async function ingestFiles(
 
       // Build global resolution index from all repo file paths before the parse loop
       // so cross-batch imports resolve correctly even in streaming per-chunk mode.
-      // Read Go and R files in parallel to maximize I/O throughput.
+      // Read pre-scan files (Go, R, SAS) in parallel to maximize I/O throughput.
       // Index keys are workspace-relative to match the relative paths we pass
       // into parseFile below.
       {

@@ -20,6 +20,9 @@ export enum SupportedLanguages {
   TOML = 'toml',
   Markdown = 'markdown',
   R = 'r',
+  SAS = 'sas',
+  Elixir = 'elixir',
+  Makefile = 'makefile',
 }
 
 const EXT_MAP: Record<string, SupportedLanguages> = {
@@ -56,6 +59,11 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.md':   SupportedLanguages.Markdown,
   '.markdown': SupportedLanguages.Markdown,
   '.r':    SupportedLanguages.R,
+  '.sas':  SupportedLanguages.SAS,
+  '.ex':   SupportedLanguages.Elixir,
+  '.exs':  SupportedLanguages.Elixir,
+  '.mk':   SupportedLanguages.Makefile,
+  '.makefile': SupportedLanguages.Makefile,
 };
 
 export function languageFromPath(filePath: string): SupportedLanguages | null {
@@ -64,6 +72,9 @@ export function languageFromPath(filePath: string): SupportedLanguages | null {
   const lowerFileName = fileName.toLowerCase();
   if (lowerFileName === 'dockerfile' || lowerFileName.endsWith('.dockerfile')) {
     return SupportedLanguages.Dockerfile;
+  }
+  if(lowerFileName === 'makefile' || lowerFileName === 'makefile.mk' || lowerFileName.endsWith('.makefile') || lowerFileName.endsWith('.mk') || lowerFileName === 'gnumakefile') {
+    return SupportedLanguages.Makefile;
   }
   const dotIndex = lowerFileName.lastIndexOf('.');
   if (dotIndex === -1) return null;

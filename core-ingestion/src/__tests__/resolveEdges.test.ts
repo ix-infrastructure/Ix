@@ -219,6 +219,40 @@ describe('resolveEdges', () => {
     });
   });
 
+  it('resolves Elixir alias-qualified calls through the implicit short alias', () => {
+  const caller = fileResult(
+    '/repo/lib/my_app/accounts.ex',
+    SupportedLanguages.Elixir,
+    [entity('create_user', SupportedLanguages.Elixir)],
+    [
+      { srcName: 'accounts.ex', dstName: 'MyApp.Repo', predicate: 'IMPORTS' },
+      { srcName: 'create_user', dstName: 'Repo.insert', predicate: 'CALLS' },
+    ],
+  );
+  caller.importAliases = {
+    Repo: 'MyApp.Repo',
+  };
+
+  const callee = fileResult(
+    '/repo/lib/my_app/repo.ex',
+    SupportedLanguages.Elixir,
+    [
+      entity('MyApp.Repo', SupportedLanguages.Elixir, 'class'),
+      entity('insert', SupportedLanguages.Elixir, 'function', 'MyApp.Repo'),
+    ],
+  );
+
+  expect(resolveEdges([caller, callee])).toContainEqual({
+    srcFilePath: '/repo/lib/my_app/accounts.ex',
+    srcName: 'create_user',
+    dstFilePath: '/repo/lib/my_app/repo.ex',
+    dstName: 'Repo.insert',
+    dstQualifiedKey: 'MyApp.Repo.insert',
+    predicate: 'CALLS',
+    confidence: 0.9,
+  });
+});
+
   it('does not resolve qualifier-assisted edges when the member is missing or the qualifier is ambiguous', () => {
     const caller = fileResult(
       '/repo/consumer.scala',
@@ -641,5 +675,46 @@ describe('resolveEdges', () => {
     expect(index.symbolToFiles.get('clean_data')).toContain('/repo/funcs.r');     // <- form
     expect(index.symbolToFiles.get('fit_model')).toContain('/repo/funcs.r');      // = form (regex missed)
     expect(index.symbolToFiles.get('print.myClass')).toContain('/repo/funcs.r');  // string-keyed S3 (regex missed)
+  });
+
+  // SAS macro libraries define the same %macro name in many files. With no
+  // %include to scope the call (which would resolve at Tier-2), the closest
+  // definer by path prefix is preferred rather than dropping the edge.
+  it('SAS: resolves a multiply-defined macro call to the closest definer by path proximity', () => {
+    const caller = fileResult(
+      '/repo/qis/a/call.sas',
+      SupportedLanguages.SAS,
+      [entity('driver', SupportedLanguages.SAS, 'macro')],
+      [{ srcName: 'driver', dstName: 'mdx', predicate: 'CALLS' }],
+    );
+    const near = fileResult('/repo/qis/a/mdx_local.sas', SupportedLanguages.SAS, [entity('mdx', SupportedLanguages.SAS, 'macro')]);
+    const far  = fileResult('/repo/other/mdx_lib.sas',   SupportedLanguages.SAS, [entity('mdx', SupportedLanguages.SAS, 'macro')]);
+
+    expect(resolveEdges([caller, near, far])).toEqual([
+      {
+        srcFilePath: '/repo/qis/a/call.sas',
+        srcName: 'driver',
+        dstFilePath: '/repo/qis/a/mdx_local.sas',
+        dstName: 'mdx',
+        dstQualifiedKey: 'mdx',
+        predicate: 'CALLS',
+        confidence: 0.5,
+      },
+    ]);
+  });
+
+  it('SAS: still drops a multiply-defined macro call when definers are equidistant', () => {
+    const caller = fileResult(
+      '/repo/qis/a/call.sas',
+      SupportedLanguages.SAS,
+      [entity('driver', SupportedLanguages.SAS, 'macro')],
+      [{ srcName: 'driver', dstName: 'mdx', predicate: 'CALLS' }],
+    );
+    // Both definers share the same prefix length with the caller (/repo/...),
+    // so proximity can't disambiguate — conservative behavior is to emit nothing.
+    const b = fileResult('/repo/qis/b/mdx.sas', SupportedLanguages.SAS, [entity('mdx', SupportedLanguages.SAS, 'macro')]);
+    const c = fileResult('/repo/qis/c/mdx.sas', SupportedLanguages.SAS, [entity('mdx', SupportedLanguages.SAS, 'macro')]);
+
+    expect(resolveEdges([caller, b, c])).toEqual([]);
   });
 });

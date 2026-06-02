@@ -1381,6 +1381,177 @@ export const SCALA_QUERIES = `
   (#match? @_qualifier "^[A-Z]")
   (#match? @call.name "^[A-Z]"))
 `;
+export const MAKEFILE_QUERIES = `
+; ── Rule targets ─────────────────────────────────────────────────────────────
+(rule
+  (targets (word) @name)
+  (#not-match? @name "^\\.[A-Z]")) @definition.function
+
+; ── Variable assignments ──────────────────────────────────────────────────────
+(variable_assignment
+  name: (word) @name) @definition.macro
+
+; ── Include directives ────────────────────────────────────────────────────────
+(include_directive
+  (list (word) @import.name))
+`;
+
+
+// tree-sitter-elixir: https://github.com/elixir-lang/tree-sitter-elixir
+// Most constructs are represented as `call` nodes with a `target` identifier.
+export const ELIXIR_QUERIES = `
+; ── Module / protocol / impl definitions ─────────────────────────────────────
+(call
+  target: (identifier) @_defmodule
+  (arguments (alias) @name)
+  (#match? @_defmodule "^(defmodule|defprotocol)$")) @definition.class
+
+(call
+  target: (identifier) @_defimpl
+  (arguments (alias) @name)
+  (#eq? @_defimpl "defimpl")) @definition.class
+
+; ── Function definitions with parens: def foo(args) do … end ─────────────────
+(call
+  target: (identifier) @_def
+  (arguments
+    (call target: (identifier) @name))
+  (#match? @_def "^(def|defp)$")) @definition.function
+
+; ── Macro definitions with parens: defmacro my_macro(x) do … end ─────────────
+(call
+  target: (identifier) @_defmacro
+  (arguments
+    (call target: (identifier) @name))
+  (#match? @_defmacro "^(defmacro|defmacrop)$")) @definition.macro
+
+; ── Zero-arity function definitions without parens: def foo do … end ─────────
+(call
+  target: (identifier) @_def0
+  (arguments
+    (identifier) @name)
+  (#match? @_def0 "^(def|defp)$")) @definition.function
+
+; ── Zero-arity macro definitions without parens ───────────────────────────────
+(call
+  target: (identifier) @_defmacro0
+  (arguments
+    (identifier) @name)
+  (#match? @_defmacro0 "^(defmacro|defmacrop)$")) @definition.macro
+
+; ── Module directives → IMPORTS ───────────────────────────────────────────────
+(call
+  target: (identifier) @_directive
+  (arguments (alias) @import.source)
+  (#match? @_directive "^(alias|import|use|require)$")) @import
+
+  ; ── Grouped alias: alias MyApp.{User, Repo, Post} → one IMPORTS per member ───
+(call
+  target: (identifier) @_alias_group
+  (arguments
+    (dot
+      left: (alias) @import.prefix
+      right: (tuple (alias) @import.source)))
+  (#eq? @_alias_group "alias")) @import
+
+; ── Qualified calls: Foo.bar() — captures qualifier so resolution is possible ─
+(call
+  target: (dot
+    left: (alias) @_qualifier
+    right: (identifier) @call.name)) @call
+
+; ── Unqualified calls — keywords excluded to avoid bogus edges ────────────────
+(call
+  target: (identifier) @call.name
+    (#not-match? @call.name "^(def|defp|defmacro|defmacrop|defmodule|defprotocol|defimpl|defstruct|use|alias|import|require|quote|unquote|if|unless|case|cond|with|for|try|receive|raise|throw|fn|do|behaviour|behavior|impl|derive|moduledoc|doc|spec|type|typep|opaque|callback|enforce_keys)$")) @call
+
+
+; ── Guarded function definitions: def f(x) when guard do … end ──────────────
+(call
+  target: (identifier) @_defg
+  (arguments
+    (binary_operator 
+      left: (call target: (identifier) @name)))
+  (#match? @_defg "^(def|defp)$")) @definition.function
+
+ ; ── Guarded macro definitions ─────────────────────────────────────────────────
+(call
+  target: (identifier) @_defmacrog
+  (arguments
+    (binary_operator 
+      left: (call target: (identifier) @name)))
+  (#match? @_defmacrog "^(defmacro|defmacrop)$")) @definition.macro
+ `;
+
+export const SAS_QUERIES = `
+; Macro definitions — %MACRO name ... %MEND
+(macro_definition
+  name: (macro_name) @name) @definition.macro
+
+; Macro call statements — %name(args);
+(macro_call_statement
+  name: (macro_name) @call.name) @call
+
+; Inline macro calls — %name(args) inside DATA/PROC/etc.
+(macro_call
+  name: (macro_name) @call.name) @call
+
+; DATA step — capture the whole dataset_name node so two-part names (work.foo)
+; stay one entity. Sentinels (_null_) and unexpanded macro vars (&ds) are
+; filtered downstream in index.ts (they have no stable identity).
+(data_step
+  (data_step_header
+    (dataset_name) @name)) @definition.module
+
+; PROC step — the procedure name itself is too generic to be a graph node
+; (means/sort/freq repeat once per file). index.ts re-keys this on the PROC's
+; out= output dataset, or drops it when the step produces no dataset.
+(proc_step
+  (proc_step_header
+    name: (identifier) @name)) @definition.module
+
+; %INCLUDE — string literal form: %include 'path/to/file.sas';
+(include_statement
+  source: (string_literal) @import.source) @import
+
+; %INCLUDE — fileref form: %include FILEREF; or %include FILEREF(member.sas);
+(include_statement
+  source: (fileref_source) @import.source) @import
+
+; LIBNAME — library path import
+(libname_statement
+  (string_literal) @import.source) @import
+
+; PROC SQL — CREATE TABLE AS output
+(sql_create_statement
+  output: (dataset_name) @name) @definition.module
+
+; PROC SQL — FROM table inputs
+(sql_select_statement
+  (table_reference
+    (dataset_name) @import.source)) @import
+
+; PROC SQL — JOIN table inputs
+(sql_select_statement
+  (sql_join_clause
+    (table_reference
+      (dataset_name) @import.source))) @import
+
+; DATA step SET inputs
+(data_step
+  (set_statement
+    (dataset_name) @import.source)) @import
+
+; DATA step MERGE inputs
+(data_step
+  (merge_statement
+    (dataset_name) @import.source)) @import
+
+; DATA step UPDATE inputs
+(data_step
+  (update_statement
+    (dataset_name) @import.source)) @import
+`;
 
 // R queries — works with @davisvaughan/tree-sitter-r
 export const R_QUERIES = `
@@ -1456,5 +1627,8 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TOML]: '',
   [SupportedLanguages.Markdown]: '',
   [SupportedLanguages.R]: R_QUERIES,
+  [SupportedLanguages.SAS]: SAS_QUERIES,
+  [SupportedLanguages.Elixir]: ELIXIR_QUERIES,
+  [SupportedLanguages.Makefile]: MAKEFILE_QUERIES,
 };
  
