@@ -15,6 +15,7 @@ import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
 import { loadIngestionModules } from './ingestion-loader.js';
 import { ensureWorkspaceId } from '../bootstrap.js';
+import { detectSystem, repoWorkspaceIdFor } from '../system.js';
 import {
   deterministicId,
   transformIssue,
@@ -434,6 +435,59 @@ export async function ingestFiles(
     return rel.split(nodePath.sep).join('/');
   };
 
+  // ── Multi-repo co-ingest (Ix#225 Path 1) ──────────────────────────────
+  // Auto-detected (no flag): if the mapped dir has >= 2 child repo roots, treat
+  // each as a member repo. Each repo gets its OWN stable workspace_id (so its
+  // node ids match whether ingested alone or in a system), all share the
+  // system_id, and each file carries its repoId. A cross-repo edge's dst id is
+  // resolved in the dst repo's workspace namespace by core-ingestion.
+  const detectedSystem = detectSystem(workspaceRoot);
+  const systemId: string | undefined = detectedSystem?.systemId;
+  const repoOf = (relPath: string): string => (relPath.split('/')[0] || '.');
+  const repoWsCache = new Map<string, string>();
+  const repoWorkspaceId = (repo: string): string => {
+    let ws = repoWsCache.get(repo);
+    if (!ws) { ws = repoWorkspaceIdFor(workspaceRoot, repo); repoWsCache.set(repo, ws); }
+    return ws;
+  };
+  const repoWorkspaceOf = systemId ? (relPath: string) => repoWorkspaceId(repoOf(relPath)) : undefined;
+  // Per-file workspace id + multi-repo context fed to buildPatchWithResolution.
+  const fileWorkspaceId = (relPath: string): string => systemId ? repoWorkspaceId(repoOf(relPath)) : workspaceId;
+  const fileMultiRepo = (relPath: string) =>
+    systemId ? { systemId, repoId: repoOf(relPath), repoWorkspaceOf } : undefined;
+  // Cross-repo dependency gate: map an import module name to the member repo that
+  // publishes that package (exact, or prefix at a package boundary for scoped /
+  // sub-module / sub-path imports like "@babel/types/lib/x", "tokio::sync",
+  // "sqlalchemy.orm", "github.com/org/repo/sub"). The resolver uses this to keep a
+  // cross-repo edge only when the source repo actually imports the target repo.
+  const packageRegistry = detectedSystem?.packageRegistry ?? {};
+  const packageEntries = Object.entries(packageRegistry);
+  const packageOf = (mod: string): string | undefined => {
+    if (!mod) return undefined;
+    // A RELATIVE / source-file import (./x, ../x, "core.ts", "lib/foo.js") is
+    // intra-repo — it must NOT match another member's package stem. (Without this,
+    // babel-types' relative `./core.ts` falsely matches the babel-core package,
+    // inventing a fake dependency that whitelists same-named-symbol false edges.)
+    // A package specifier is a bare name / namespaced path with no source-file
+    // extension and no leading dot/slash.
+    if (mod.startsWith('.') || mod.startsWith('/')) return undefined;
+    if (/\.(?:ts|tsx|js|jsx|mjs|cjs|py|pyi|rs|go|rb|java|ex|exs|c|h|cc|cpp|hpp|cs|scala|kt|swift)$/i.test(mod)) return undefined;
+    if (packageRegistry[mod]) return packageRegistry[mod];               // exact (full name or stem)
+    const lower = mod.toLowerCase();
+    if (packageRegistry[lower]) return packageRegistry[lower];           // lowercased stem
+    for (const [pkg, repo] of packageEntries) {                          // sub-path / submodule
+      if (mod.length > pkg.length && mod.startsWith(pkg)) {
+        const sep = mod[pkg.length];
+        if (sep === '/' || sep === '.' || sep === ':') return repo;
+      }
+    }
+    return undefined;
+  };
+  const resolveOpts = systemId ? { repoOf, packageOf } : undefined;
+  if (systemId && debug) {
+    process.stderr.write(`[multi-repo] system "${detectedSystem!.name}" (${systemId}) members=${detectedSystem!.members.join(', ')} packages=${packageEntries.length}\n`);
+  }
+
   const client = new IxClient(getEndpoint());
 
   // Schema-version check forces a clean re-ingest when the backend's graph
@@ -788,7 +842,7 @@ export async function ingestFiles(
         setCurrentWork(`resolve+commit batch ending ${nodePath.basename(batch[batch.length - 1].filePath)}`);
 
         const resolveStart = performance.now();
-        const resolvedEdges = resolveEdgesFn!(batch.map(f => f.parsed), resolveStats, globalIndex);
+        const resolvedEdges = resolveEdgesFn!(batch.map(f => f.parsed), resolveStats, globalIndex, resolveOpts);
         resolveEdgesMs = Math.round(performance.now() - resolveStart);
         const batchEdgesByFile = new Map<string, any[]>();
         for (const edge of resolvedEdges) {
@@ -803,7 +857,7 @@ export async function ingestFiles(
         for (let j = 0; j < batch.length; j++) {
           const { parsed: p, hash, previousHash } = batch[j];
           try {
-            let patch = buildPatchFn!(p, hash, workspaceId, batchEdgesByFile.get(p.filePath) ?? emptyEdges, previousHash);
+            let patch = buildPatchFn!(p, hash, fileWorkspaceId(p.filePath), batchEdgesByFile.get(p.filePath) ?? emptyEdges, previousHash, fileMultiRepo(p.filePath));
             if (mapMode) patch = stripMapModeOps(patch);
             // source.uri (workspace-relative) and source.workspaceId are set
             // inside buildPatch; the backend stores both as opaque attributes.
@@ -857,7 +911,7 @@ export async function ingestFiles(
       try {
         setCurrentWork(`resolve ${allParsed.length} files`);
         const resolveStart = performance.now();
-        const resolvedEdges = resolveEdgesFn!(allParsed.map(f => f.parsed), resolveStats, globalIndex);
+        const resolvedEdges = resolveEdgesFn!(allParsed.map(f => f.parsed), resolveStats, globalIndex, resolveOpts);
         resolveEdgesMs = Math.round(performance.now() - resolveStart);
         const edgesByFile = new Map<string, any[]>();
         for (const edge of resolvedEdges) {
@@ -871,7 +925,7 @@ export async function ingestFiles(
         for (let j = 0; j < allParsed.length; j++) {
           const { parsed: p, hash, previousHash } = allParsed[j];
           try {
-            let patch = buildPatchFn!(p, hash, workspaceId, edgesByFile.get(p.filePath) ?? emptyEdges, previousHash);
+            let patch = buildPatchFn!(p, hash, fileWorkspaceId(p.filePath), edgesByFile.get(p.filePath) ?? emptyEdges, previousHash, fileMultiRepo(p.filePath));
             if (mapMode) patch = stripMapModeOps(patch);
             // source.uri and source.workspaceId are set inside buildPatch (see flushBatch).
             preparedPatches.push(makePreparedPatch(patch, j + 1, p.filePath));

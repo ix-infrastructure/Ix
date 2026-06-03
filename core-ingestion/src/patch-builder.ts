@@ -86,7 +86,8 @@ export function buildPatch(
   result: FileParseResult,
   sourceHash: string,
   workspaceId: string,
-  previousSourceHash?: string
+  previousSourceHash?: string,
+  multiRepo?: MultiRepoContext,
 ): GraphPatchPayload {
   const { filePath, entities, chunks, relationships } = result;
   const { nodeId, edgeId, chunkId, computePatchId, legacyPatchId } = makeIds(workspaceId);
@@ -300,6 +301,8 @@ export function buildPatch(
       extractor,
       sourceType: sourceType(filePath),
       workspaceId,
+      ...(multiRepo?.systemId ? { systemId: multiRepo.systemId } : {}),
+      ...(multiRepo?.repoId ? { repoId: multiRepo.repoId } : {}),
     },
     baseRev: 0,
     ops,
@@ -313,12 +316,28 @@ export function buildPatch(
 // to the actual defining file for cross-file calls resolved by resolveCallEdges.
 // ---------------------------------------------------------------------------
 
+/**
+ * Multi-repo co-ingest context (Ix#225 Path 1). When several repos are ingested
+ * as one system, each repo keeps its OWN workspace_id (so a repo's node ids are
+ * stable whether ingested alone or in a system), all share a systemId, and each
+ * file carries its repoId. A cross-repo resolved edge's dst node lives in another
+ * repo whose ids are folded with ITS workspace_id, so dst ids must be resolved in
+ * that repo's namespace via repoWorkspaceOf. Absent => single-repo, unchanged.
+ */
+export interface MultiRepoContext {
+  systemId?: string;
+  repoId?: string;
+  /** filePath (workspace-relative, repo-prefixed) -> that file's repo workspace_id. */
+  repoWorkspaceOf?: (filePath: string) => string | undefined;
+}
+
 export function buildPatchWithResolution(
   result: FileParseResult,
   sourceHash: string,
   workspaceId: string,
   resolvedEdges: ResolvedEdge[],
   previousSourceHash?: string,
+  multiRepo?: MultiRepoContext,
 ): GraphPatchPayload {
   // Build lookup: `${srcName}:${predicate}:${dstName}` → { dstFilePath, dstQualifiedKey }
   // Callers should pass only edges for this file (pre-grouped) for best performance,
@@ -334,6 +353,18 @@ export function buildPatchWithResolution(
 
   const { filePath, entities, chunks, relationships } = result;
   const { nodeId, edgeId, chunkId, computePatchId, legacyPatchId } = makeIds(workspaceId);
+  // Resolve a dst node id in the namespace of the repo that OWNS dstFilePath.
+  // For same-repo (or single-repo) dsts this is just nodeId; for a cross-repo
+  // edge it folds with the dst repo's workspace_id so the id matches the node
+  // that repo's own ingest produced.
+  const crossRepoIdsCache = new Map<string, ReturnType<typeof makeIds>>();
+  const dstNodeIdInRepo = (dstFilePath: string, key: string): string => {
+    const ws = multiRepo?.repoWorkspaceOf?.(dstFilePath);
+    if (!ws || ws === workspaceId) return nodeId(dstFilePath, key);
+    let ids = crossRepoIdsCache.get(ws);
+    if (!ids) { ids = makeIds(ws); crossRepoIdsCache.set(ws, ids); }
+    return ids.nodeId(dstFilePath, key);
+  };
   const ops: PatchOp[] = [];
 
   const entityQKey = new Map<ParsedEntity, string>();
@@ -456,9 +487,10 @@ export function buildPatchWithResolution(
     const resolutionKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
 
     if (edgeResolution.has(resolutionKey)) {
-      // Cross-file resolved — use the defining file's nodeId.
+      // Cross-file resolved — use the defining file's nodeId, in the dst repo's
+      // workspace namespace (matters only for cross-repo edges in a co-ingest).
       const { dstFilePath, dstQualifiedKey } = edgeResolution.get(resolutionKey)!;
-      dstNodeId = nodeId(dstFilePath, dstQualifiedKey);
+      dstNodeId = dstNodeIdInRepo(dstFilePath, dstQualifiedKey);
     } else if (r.predicate === 'CALLS' && dstKey.includes('::') && !allQKeys2.has(dstKey)) {
       const sep = dstKey.indexOf('::');
       const pkgName = dstKey.slice(0, sep);
@@ -517,6 +549,8 @@ export function buildPatchWithResolution(
       extractor,
       sourceType: sourceType(filePath),
       workspaceId,
+      ...(multiRepo?.systemId ? { systemId: multiRepo.systemId } : {}),
+      ...(multiRepo?.repoId ? { repoId: multiRepo.repoId } : {}),
     },
     baseRev: 0,
     ops,

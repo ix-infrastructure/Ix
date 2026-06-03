@@ -9,6 +9,10 @@ export interface PatchSource {
   // patch. Derived client-side (SHA-256 of workspace root abs path). Backend
   // stores it as an opaque attribute.
   workspaceId?: string;
+  // Multi-repo co-ingest (Ix#225 Path 1). systemId groups the repos ingested as
+  // one system; repoId is this file's repo. Both optional => single-repo ingest.
+  systemId?: string;
+  repoId?: string;
 }
 
 export interface PatchOp {

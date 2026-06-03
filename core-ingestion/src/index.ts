@@ -2244,6 +2244,16 @@ export function resolveEdges(
     resolvedGlobal: number; resolvedQualifier: number; skippedSameFile: number; skippedAmbiguous: number;
   },
   globalIndex?: GlobalResolutionIndex,
+  opts?: {
+    // Multi-repo co-ingest (Ix#225 Path 1). repoOf maps a file path to its repo;
+    // packageOf maps an import module name to the repo that publishes it. With
+    // both, a CROSS-repo edge is kept only when the source repo actually imports
+    // the target repo's package — killing same-named-symbol false edges between
+    // unrelated repos while preserving genuine cross-repo edges (which ARE
+    // dependency-backed). Absent (single-repo ingest) => no gating, no change.
+    repoOf?: (filePath: string) => string | undefined;
+    packageOf?: (moduleName: string) => string | undefined;
+  },
 ): ResolvedEdge[] {
   // Provide a default no-op stats bag when caller passes none (backward compat).
   if (!stats) stats = {
@@ -2251,6 +2261,45 @@ export function resolveEdges(
     globalCandidateTotal: 0, resolvedImport: 0, resolvedTransitive: 0,
     resolvedGlobal: 0, resolvedQualifier: 0, skippedSameFile: 0, skippedAmbiguous: 0,
   };
+  // Cross-repo dependency graph: repo R depends on repo D when any file in R
+  // imports a module published by D. Built from the raw IMPORTS relationships.
+  const repoOf = opts?.repoOf;
+  const packageOf = opts?.packageOf;
+  let repoDeps: Map<string, Set<string>> | undefined;
+  if (repoOf && packageOf) {
+    repoDeps = new Map<string, Set<string>>();
+    for (const r of results) {
+      const srcRepo = repoOf(r.filePath);
+      if (srcRepo === undefined) continue;
+      for (const rel of r.relationships) {
+        if (rel.predicate !== 'IMPORTS') continue;
+        const mod = typeof rel.dstName === 'string' ? rel.dstName : '';
+        const depRepo = mod ? packageOf(mod) : undefined;
+        if (depRepo !== undefined && depRepo !== srcRepo) {
+          let set = repoDeps.get(srcRepo);
+          if (!set) { set = new Set<string>(); repoDeps.set(srcRepo, set); }
+          set.add(depRepo);
+        }
+      }
+    }
+    // Transitive closure: a monorepo package re-exports its own dependencies
+    // (e.g. @babel/core re-exports @babel/types), so a repo legitimately uses the
+    // symbols of repos it depends on TRANSITIVELY. Without this, genuine
+    // transitive cross-repo edges (helper -> core -> types) would be dropped.
+    // Unrelated repos with no import path between them stay disconnected.
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [, deps] of repoDeps) {
+        for (const b of [...deps]) {
+          const bdeps = repoDeps.get(b);
+          if (bdeps) for (const c of bdeps) {
+            if (!deps.has(c)) { deps.add(c); changed = true; }
+          }
+        }
+      }
+    }
+  }
   // fileQKeys: seed from global index (cross-batch files), then batch entries override.
   // Mirrors the entityQKey computation in buildPatch so nodeIds match exactly.
   const fileQKeys = globalIndex
@@ -2499,8 +2548,30 @@ export function resolveEdges(
     return narrowed;
   }
 
+  // An import targets a file in a compatible language. modNameToFiles matches by
+  // stem alone, so without this a Python `import select` would resolve to a Rust
+  // `select.rs` (observed in cross-language co-ingest). Some languages are one
+  // family: JS+TS (TS imports JS/.d.ts) and C+C++ (a .h header is shared, and
+  // parseFile's content-based detection labels the same .h as `c` or `cpp`
+  // depending on whether it holds a struct or a class — so a C++ file including a
+  // C-classified header must still resolve). Everything else must match exactly.
+  const langFamily = (l: SupportedLanguages): string => {
+    if (l === SupportedLanguages.JavaScript || l === SupportedLanguages.TypeScript) return 'jsts';
+    if (l === SupportedLanguages.C || l === SupportedLanguages.CPlusPlus) return 'c';
+    return l;
+  };
+  const importLanguageCompatible = (src: SupportedLanguages, dst: SupportedLanguages | undefined | null): boolean => {
+    if (dst == null || src === dst) return true;
+    return langFamily(src) === langFamily(dst);
+  };
+
   function resolveImportTargets(srcFilePath: string, srcLanguage: SupportedLanguages, modName: unknown): string[] {
-    const importMatches = modNameToFiles(modName, srcFilePath);
+    // fileLanguage only covers the current parse batch; cross-batch candidates
+    // come from the global stem index, so fall back to the extension-derived
+    // language (always available) — otherwise an undefined dst language would
+    // slip cross-language matches (e.g. a Python import -> a Rust/Elixir file).
+    const importMatches = modNameToFiles(modName, srcFilePath)
+      .filter(fp => importLanguageCompatible(srcLanguage, fileLanguage.get(fp) ?? languageFromPath(fp)));
     if (srcLanguage !== SupportedLanguages.Go || importMatches.length <= 1) return importMatches;
     return narrowGoImportCandidates(srcFilePath, modName, importMatches, files => {
       const anchor = pickGoPackageAnchor(files);
@@ -2781,7 +2852,9 @@ export function resolveEdges(
           }
           const qualGlobalMatches = results
             .map(r => r.filePath)
-            .filter(fp => fp !== srcFilePath && fileDefinesQualifiedMember(fp, qualifierPart, memberPart));
+            .filter(fp => fp !== srcFilePath
+              && importLanguageCompatible(srcLanguage, fileLanguage.get(fp) ?? languageFromPath(fp))
+              && fileDefinesQualifiedMember(fp, qualifierPart, memberPart));
           if (qualGlobalMatches.length === 1) {
             const qfp = qualGlobalMatches[0];
             if (fileHasSymbol.get(qfp)?.has(memberPart)) {
@@ -2877,6 +2950,18 @@ export function resolveEdges(
     }
   }
 
+  // Cross-repo dependency gate (co-ingest): keep a cross-repo edge only when the
+  // source repo imports the target repo's package. Intra-repo and single-repo
+  // edges are untouched. A repo with no detected dependency to the target is
+  // treated as unrelated — its same-named-symbol matches are dropped.
+  if (repoOf && repoDeps) {
+    return resolved.filter(e => {
+      const sr = repoOf(e.srcFilePath);
+      const dr = repoOf(e.dstFilePath);
+      if (sr === undefined || dr === undefined || sr === dr) return true;
+      return repoDeps!.get(sr)?.has(dr) === true;
+    });
+  }
   return resolved;
 }
 

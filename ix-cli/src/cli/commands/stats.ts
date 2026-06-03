@@ -3,6 +3,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
+import { detectSystem } from "../system.js";
 import { llmLine, llmError, type LlmValue } from "../llm.js";
 
 /** Render `ix stats` as llm records: one `nodes` line and one `edges` line. */
@@ -25,9 +26,10 @@ export function registerStatsCommand(program: Command): void {
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .action(async (opts: { format: string }) => {
       const client = new IxClient(getEndpoint());
+      const systemId = detectSystem(process.cwd())?.systemId;
       let result;
       try {
-        result = await client.stats({ workspaceId: resolveWorkspaceId() });
+        result = await client.stats({ workspaceId: systemId ? undefined : resolveWorkspaceId(), systemId });
       } catch (err: any) {
         if (opts.format === "llm") console.log(llmError("backend_error", err.message ?? "stats request failed"));
         else console.error(chalk.red("Error:"), err.message);

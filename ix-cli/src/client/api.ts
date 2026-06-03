@@ -53,7 +53,7 @@ export class IxClient {
 
   async search(
     term: string,
-    opts?: { limit?: number; kind?: string; language?: string; asOfRev?: number; nameOnly?: boolean; workspaceId?: string }
+    opts?: { limit?: number; kind?: string; language?: string; asOfRev?: number; nameOnly?: boolean; workspaceId?: string; systemId?: string }
   ): Promise<GraphNode[]> {
     return this.post("/v1/search", {
       term,
@@ -63,18 +63,20 @@ export class IxClient {
       asOfRev: opts?.asOfRev,
       nameOnly: opts?.nameOnly,
       workspaceId: opts?.workspaceId,
+      systemId: opts?.systemId,
     });
   }
 
   async listByKind(
     kind: string,
-    opts?: { limit?: number; workspaceId?: string; scope?: string }
+    opts?: { limit?: number; workspaceId?: string; scope?: string; systemId?: string }
   ): Promise<GraphNode[]> {
     return this.post("/v1/list", {
       kind,
       limit: opts?.limit,
       workspaceId: opts?.workspaceId,
       scope: opts?.scope,
+      systemId: opts?.systemId,
     });
   }
 
@@ -211,10 +213,11 @@ export class IxClient {
     return new Map(Object.entries(result));
   }
 
-  async map(opts?: { full?: boolean; workspaceId?: string }): Promise<any> {
-    // /v1/map reads snake_case keys (full, branch_id, workspace_id) off the raw JSON body.
+  async map(opts?: { full?: boolean; workspaceId?: string; systemId?: string }): Promise<any> {
+    // /v1/map reads snake_case keys (full, branch_id, workspace_id, system_id) off the raw JSON body.
     const body: Record<string, unknown> = { full: opts?.full ?? false };
     if (opts?.workspaceId) body.workspace_id = opts.workspaceId;
+    if (opts?.systemId) body.system_id = opts.systemId;
     const resp = await fetch(`${this.endpoint}/v1/map`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -248,6 +251,7 @@ export class IxClient {
     godModuleFan?: number;
     weakMaxNeighbors?: number;
     workspaceId?: string;
+    systemId?: string;
   }): Promise<any> {
     const params = new URLSearchParams();
     if (opts?.orphanMaxConnections !== undefined) params.set("orphan-max-connections", String(opts.orphanMaxConnections));
@@ -255,21 +259,28 @@ export class IxClient {
     if (opts?.godModuleFan         !== undefined) params.set("god-module-fan",          String(opts.godModuleFan));
     if (opts?.weakMaxNeighbors     !== undefined) params.set("weak-max-neighbors",      String(opts.weakMaxNeighbors));
     if (opts?.workspaceId)                        params.set("workspace_id",            opts.workspaceId);
+    if (opts?.systemId)                           params.set("system_id",               opts.systemId);
     const qs = params.toString();
     return this.post(qs ? `/v1/smells?${qs}` : "/v1/smells", {});
   }
 
-  async listSmells(opts?: { workspaceId?: string }): Promise<any> {
-    const qs = opts?.workspaceId ? `?workspace_id=${encodeURIComponent(opts.workspaceId)}` : "";
-    return this.get(`/v1/smells${qs}`);
+  async listSmells(opts?: { workspaceId?: string; systemId?: string }): Promise<any> {
+    const params = new URLSearchParams();
+    if (opts?.workspaceId) params.set("workspace_id", opts.workspaceId);
+    if (opts?.systemId)    params.set("system_id",    opts.systemId);
+    const qs = params.toString();
+    return this.get(`/v1/smells${qs ? `?${qs}` : ""}`);
   }
 
-  async scoreSubsystems(opts?: { workspaceId?: string }): Promise<any> {
-    const qs = opts?.workspaceId ? `?workspace_id=${encodeURIComponent(opts.workspaceId)}` : "";
-    return this.post(`/v1/subsystems/score${qs}`, {});
+  async scoreSubsystems(opts?: { workspaceId?: string; systemId?: string }): Promise<any> {
+    const params = new URLSearchParams();
+    if (opts?.workspaceId) params.set("workspace_id", opts.workspaceId);
+    if (opts?.systemId)    params.set("system_id",    opts.systemId);
+    const qs = params.toString();
+    return this.post(`/v1/subsystems/score${qs ? `?${qs}` : ""}`, {});
   }
 
-  async listSubsystems(opts?: ListSubsystemsOptions & { workspaceId?: string }): Promise<any> {
+  async listSubsystems(opts?: ListSubsystemsOptions & { workspaceId?: string; systemId?: string }): Promise<any> {
     const params = new URLSearchParams();
     if (opts?.detailed) params.set("detailed", "true");
     if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
@@ -278,15 +289,17 @@ export class IxClient {
     if (opts?.edgeCap !== undefined) params.set("edge_cap", String(opts.edgeCap));
     if (opts?.memberFileCap !== undefined) params.set("member_file_cap", String(opts.memberFileCap));
     if (opts?.workspaceId) params.set("workspace_id", opts.workspaceId);
+    if (opts?.systemId) params.set("system_id", opts.systemId);
     const qs = params.toString();
     return this.get(`/v1/subsystems${qs ? `?${qs}` : ""}`);
   }
 
-  async getSubsystemMap(opts?: { target?: string; pick?: number; workspaceId?: string }): Promise<any> {
+  async getSubsystemMap(opts?: { target?: string; pick?: number; workspaceId?: string; systemId?: string }): Promise<any> {
     const params = new URLSearchParams();
     if (opts?.target) params.set("target", opts.target);
     if (opts?.pick !== undefined) params.set("pick", String(opts.pick));
     if (opts?.workspaceId) params.set("workspace_id", opts.workspaceId);
+    if (opts?.systemId) params.set("system_id", opts.systemId);
     const qs = params.toString();
     return this.get(`/v1/subsystems/map${qs ? `?${qs}` : ""}`);
   }
@@ -414,9 +427,12 @@ export class IxClient {
     return resp.json();
   }
 
-  async stats(opts?: { workspaceId?: string }): Promise<any> {
-    const qs = opts?.workspaceId ? `?workspace_id=${encodeURIComponent(opts.workspaceId)}` : "";
-    return this.get(`/v1/stats${qs}`);
+  async stats(opts?: { workspaceId?: string; systemId?: string }): Promise<any> {
+    const params = new URLSearchParams();
+    if (opts?.workspaceId) params.set("workspace_id", opts.workspaceId);
+    if (opts?.systemId)    params.set("system_id",    opts.systemId);
+    const qs = params.toString();
+    return this.get(`/v1/stats${qs ? `?${qs}` : ""}`);
   }
 
   async health(): Promise<HealthResponse> {
