@@ -134,9 +134,12 @@ Examples:
       const cwd = pathArg ? resolve(pathArg) : process.cwd();
 
       const silent = opts.silent === true || opts.format === "silent";
+      // json and llm are machine formats: suppress progress chatter and route
+      // ingestion through the quiet path so stdout carries only the result.
+      const machineFormat = opts.format === "json" || opts.format === "llm";
 
       // Print warning when --full override is active
-      if (opts.full && opts.format !== "json" && !silent) {
+      if (opts.full && !machineFormat && !silent) {
         console.log(chalk.yellow("\nWarning"));
         console.log(chalk.yellow("  Full local map override enabled.\n"));
         console.log("  Ix will ignore automatic local safety limits and attempt full local mapping.");
@@ -161,7 +164,7 @@ Examples:
           await runner.runIngestion({
             cwd,
             silent,
-            format: (opts.format === "json" || silent) ? "json" : "text",
+            format: (machineFormat || silent) ? "json" : "text",
           });
         } catch (err: any) {
           console.error(chalk.red("Error:"), formatFetchError(err));
@@ -179,7 +182,7 @@ Examples:
         try {
           await ingestFiles(cwd, {
             recursive: true,
-            format: (opts.format === "json" || silent) ? "json" : "text",
+            format: (machineFormat || silent) ? "json" : "text",
             printSummary: false,
             suppressOutput: true,
             mapMode: true,
@@ -196,7 +199,7 @@ Examples:
 
       const mapBarWidth = 25;
       const mapStart    = performance.now();
-      const mapInterval = (opts.format !== "json" && !silent) ? setInterval(() => {
+      const mapInterval = (!machineFormat && !silent) ? setInterval(() => {
         const elapsed  = performance.now() - mapStart;
         const pct      = 1 - Math.exp(-elapsed / 4000);
         const filled   = Math.round(pct * mapBarWidth);
@@ -227,7 +230,7 @@ Examples:
         return;
       }
 
-      if (opts.format !== "json") {
+      if (!machineFormat) {
         const mapSec = (mapMs / 1000).toFixed(1);
         process.stderr.write(chalk.dim(`  Mapped in ${mapSec}s\n`));
       }

@@ -100,10 +100,12 @@ export async function bootstrap(cwd = process.cwd()): Promise<void> {
   const { registered, name } = ensureWorkspaceRegistered(cwd);
 
   if (createdConfig || registered) {
-    console.log(chalk.bold("Ix\n"));
-    if (createdConfig) console.log(chalk.dim(`Created default config.`));
-    if (registered)    console.log(chalk.dim(`Registered workspace "${name}".`));
-    console.log();
+    // One-time setup notices are side-effect messages, not program output.
+    // Emit them on stderr so stdout stays clean for `--format json|llm` consumers.
+    console.error(chalk.bold("Ix\n"));
+    if (createdConfig) console.error(chalk.dim(`Created default config.`));
+    if (registered)    console.error(chalk.dim(`Registered workspace "${name}".`));
+    console.error();
   }
 
   await ensureBackendAvailable();
