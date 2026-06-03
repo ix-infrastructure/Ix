@@ -93,8 +93,10 @@ error code=unknown_target message="No entity named 'IngestionService' found" sug
 
 Renderers shipped: Tier 1 (`map`, `subsystems`, `impact`, `smells`,
 `overview`) plus `stats`; Tier 2 (`inventory`, `rank`, `depends`, `trace`,
-`contains`, `callers`, `callees`, `imports`, `imported-by`). Remaining commands
-accept `--format llm` and route to `text` until their renderers land (tracked
-on ix-infrastructure/Ix#206). Programmatic
+`contains`, `callers`, `callees`, `imports`, `imported-by`); Tier 3 (`search`,
+`text`, `history`, `patches`); Tier 4 (`entity`, `locate`, `diff`,
+`conflicts`). Commands whose output is verbatim source or prose (`read`,
+`explain`, `doctor`, `status`, `savings`, and `diff --content`) route
+`--format llm` to `text`, the most compact existing form. Programmatic
 consumers that need to parse output should continue to use `--format json`; the
 `llm` format is optimized for being read by a model, not parsed.

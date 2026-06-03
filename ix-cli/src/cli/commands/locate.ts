@@ -9,6 +9,7 @@ import {
 import { isFileStale } from "../stale.js";
 import { stderr } from "../stderr.js";
 import { relativePath } from "../format.js";
+import { llmLine, llmError } from "../llm.js";
 import { getEffectiveSystemPath, hasMapData } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
 import { renderSection, renderKeyValue, renderNote, renderWarning, renderBreadcrumb } from "../ui.js";
@@ -51,7 +52,7 @@ export function registerLocateCommand(program: Command): void {
       const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick ? parseInt(opts.pick, 10) : undefined };
 
       // Resolution with ambiguity detection
-      const { target, ambiguous } = await resolveWithAmbiguity(client, symbol, resolveOpts, isJson);
+      const { target, ambiguous } = await resolveWithAmbiguity(client, symbol, resolveOpts, opts.format);
 
       if (!target) {
         if (ambiguous) {
@@ -68,7 +69,7 @@ export function registerLocateCommand(program: Command): void {
         return;
       }
 
-      if (!isJson) printResolved(target);
+      if (opts.format === "text") printResolved(target);
 
       const isContainer = CONTAINER_KINDS.has(target.kind);
       const isFile = FILE_KINDS.has(target.kind);
@@ -158,7 +159,7 @@ async function resolveWithAmbiguity(
   client: IxClient,
   symbol: string,
   opts: { kind?: string; path?: string; pick?: number },
-  isJson: boolean,
+  format: string,
 ): Promise<{ target: ResolvedEntity | null; ambiguous: boolean }> {
   // For raw IDs and file-like targets, delegate to resolveFileOrEntity (no ambiguity)
   if (isRawId(symbol) || looksFileLike(symbol)) {
@@ -175,7 +176,7 @@ async function resolveWithAmbiguity(
   }
 
   if (result.ambiguous) {
-    if (isJson) {
+    if (format === "json") {
       console.log(JSON.stringify({
         resolvedTarget: null,
         resolutionMode: "ambiguous",
@@ -183,6 +184,10 @@ async function resolveWithAmbiguity(
         systemPath: null,
         diagnostics: result.result.diagnostics ?? [],
       }, null, 2));
+    } else if (format === "llm") {
+      console.log(llmError("ambiguous_target", `Ambiguous symbol "${symbol}".`, [
+        ["candidates", result.result.candidates.map((c, i) => `${i + 1}:${c.name}`).join(",")],
+      ]));
     } else {
       printAmbiguous(symbol, result.result, opts);
     }
@@ -210,9 +215,35 @@ function humanizeBreadcrumb(nodes: Array<{ name: string; kind: string }>): strin
 
 // ── Output ──────────────────────────────────────────────────────────────────
 
+/** Render `ix locate` output as llm records: a `locate` header (or structured error) plus `note` lines. */
+export function renderLocateLlm(output: LocateOutput, symbol: string): string[] {
+  const t = output.resolvedTarget;
+  if (!t) {
+    return [llmError("unknown_target", `No graph entity found for "${symbol}".`)];
+  }
+  const lines = [llmLine("locate", [
+    ["target", t.name],
+    ["kind", t.kind],
+    ["id", typeof t.id === "string" ? t.id.slice(0, 8) : undefined],
+    ["path", t.path],
+    ["line_start", output.lineRange?.start],
+    ["line_end", output.lineRange?.end],
+    ["contained_in", output.container ? `${output.container.kind} ${output.container.name}` : undefined],
+    ["system_path", output.hasMapData && output.systemPath && output.systemPath.length > 0 ? output.systemPath.map((n) => n.name).join(",") : undefined],
+    ["stale", output.stale ? true : undefined],
+    ["mode", output.resolutionMode],
+  ])];
+  for (const d of output.diagnostics ?? []) lines.push(llmLine("note", [["text", d]]));
+  return lines;
+}
+
 function outputLocate(output: LocateOutput, symbol: string, format: string): void {
   if (format === "json") {
     console.log(JSON.stringify(output, null, 2));
+    return;
+  }
+  if (format === "llm") {
+    for (const line of renderLocateLlm(output, symbol)) console.log(line);
     return;
   }
 

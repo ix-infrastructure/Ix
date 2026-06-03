@@ -7,6 +7,23 @@ import { formatNodes, relativePath } from "../format.js";
 import { scoreCandidate } from "../resolve.js";
 import { applyRoleFilter, roleHint } from "../role-filter.js";
 import { stderr } from "../stderr.js";
+import { llmLine } from "../llm.js";
+
+/** Render `ix search` as llm records: a header line then one `node` row per hit (rank = order). */
+export function renderSearchLlm(
+  results: Array<{ name: string; kind: string; id?: string; path?: string; score?: number }>,
+  totalCandidates: number, diagnostics: Array<{ code: string; message: string }>,
+): string[] {
+  const lines = [llmLine("search", [["count", results.length], ["candidates", totalCandidates]])];
+  for (const r of results) {
+    lines.push(llmLine("node", [
+      ["name", r.name], ["kind", r.kind], ["id", r.id?.slice(0, 8)],
+      ["path", r.path], ["score", r.score],
+    ]));
+  }
+  for (const d of diagnostics) lines.push(llmLine("diagnostic", [["code", d.code], ["message", d.message]]));
+  return lines;
+}
 
 /** Structural kinds that should rank higher than incidental matches. */
 const STRUCTURAL_KINDS = new Set([
@@ -156,20 +173,33 @@ Examples:
       const trimmed = roleFilteredScored.slice(0, limit);
       const ranked = trimmed.map(s => s.node);
 
+      const diagnostics: { code: string; message: string }[] = [];
+      if (!opts.kind) {
+        diagnostics.push({
+          code: "unfiltered_search",
+          message: "Results may be broad. Use --kind to filter and boost structural matches.",
+        });
+      }
+      if (hiddenTestCount > 0) {
+        diagnostics.push({
+          code: "test_candidates_hidden",
+          message: roleHint(hiddenTestCount)!,
+        });
+      }
+
+      if (opts.format === "llm") {
+        const rows = trimmed.map((s, i) => ({
+          name: s.node.name || (s.node.attrs as any)?.name || "(unnamed)",
+          kind: s.node.kind,
+          id: s.node.id,
+          path: relativePath(s.node.provenance?.sourceUri) ?? undefined,
+          score: s.rank.score,
+        }));
+        for (const line of renderSearchLlm(rows, rawNodes.length, diagnostics)) console.log(line);
+        return;
+      }
+
       if (opts.format === "json") {
-        const diagnostics: { code: string; message: string }[] = [];
-        if (!opts.kind) {
-          diagnostics.push({
-            code: "unfiltered_search",
-            message: "Results may be broad. Use --kind to filter and boost structural matches.",
-          });
-        }
-        if (hiddenTestCount > 0) {
-          diagnostics.push({
-            code: "test_candidates_hidden",
-            message: roleHint(hiddenTestCount)!,
-          });
-        }
         console.log(JSON.stringify({
           results: trimmed.map((s, i) => ({
             id: s.node.id,
