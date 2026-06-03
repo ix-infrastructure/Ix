@@ -5,6 +5,7 @@ import { getEndpoint } from "../config.js";
 import { resolveFileOrEntity, printResolved, isRawId } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { compactTreeNode, relativePath } from "../format.js";
+import { llmLine, llmError } from "../llm.js";
 
 // ── Tree types ──────────────────────────────────────────────────────
 
@@ -145,6 +146,44 @@ function renderTree(children: DependencyNode[], prefix: string, isLast: boolean[
   return lines;
 }
 
+/**
+ * Render the dependency tree as flat llm records: a header line then one `dep`
+ * row per node with an explicit `parent=<id>` (top-level nodes point at the
+ * target). Consumers re-tree from id/parent alone. Ids are 8-char prefixes.
+ */
+export function renderDependsLlm(
+  target: { id: string; name: string; kind: string; path?: string },
+  tree: DependencyNode[], truncated: boolean, nodesVisited: number, maxDepthReached: number,
+): string[] {
+  const lines = [llmLine("depends", [
+    ["target", target.name],
+    ["kind", target.kind],
+    ["target_id", target.id?.slice(0, 8)],
+    ["semantics", "downstream_dependents"],
+    ["nodes", nodesVisited],
+    ["depth", maxDepthReached],
+    ["truncated", truncated ? true : undefined],
+  ])];
+  if (tree.length === 0) {
+    lines.push(llmLine("diagnostic", [["code", "no_edges"], ["message", "No upstream dependents found."]]));
+  }
+  const emit = (node: DependencyNode, parentId: string): void => {
+    lines.push(llmLine("dep", [
+      ["name", node.resolved ? node.name : undefined],
+      ["kind", node.kind],
+      ["id", node.id?.slice(0, 8)],
+      ["parent", parentId?.slice(0, 8)],
+      ["rel", node.relation],
+      ["path", relativePath(node.path)],
+      ["cycle", node.cycle ? true : undefined],
+      ["resolved", node.resolved ? undefined : false],
+    ]));
+    for (const child of node.children) emit(child, node.id);
+  };
+  for (const node of tree) emit(node, target.id);
+  return lines;
+}
+
 // ── CLI command ─────────────────────────────────────────────────────
 
 export function registerDependsCommand(program: Command): void {
@@ -156,7 +195,7 @@ export function registerDependsCommand(program: Command): void {
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")
     .option("--depth <n>", "Cap traversal depth")
     .option("--cap <n>", "Cap number of nodes visited")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--include-tests", "Include test and fixture entities in results")
     .option("--tests-only", "Show only test and fixture entities")
     .addHelpText("after", `\nExamples:
@@ -185,7 +224,10 @@ export function registerDependsCommand(program: Command): void {
         testsOnly: opts.testsOnly,
       };
       const target = await resolveFileOrEntity(client, symbol, resolveOpts);
-      if (!target) return;
+      if (!target) {
+        if (opts.format === "llm") console.log(llmError("unresolved_target", `No entity resolved for "${symbol}".`));
+        return;
+      }
 
       const maxDepth = opts.depth ? parseInt(opts.depth, 10) : DEFAULT_MAX_DEPTH;
       const maxNodes = opts.cap ? parseInt(opts.cap, 10) : MAX_NODES;
@@ -219,6 +261,12 @@ export function registerDependsCommand(program: Command): void {
           output.diagnostics.push({ code: "truncated", message: `Traversal truncated (depth: ${maxDepth}, node cap: ${maxNodes}).` });
         }
         console.log(JSON.stringify(output, null, 2));
+        return;
+      }
+
+      // ── llm output ───────────────────────────────────────────────
+      if (opts.format === "llm") {
+        for (const line of renderDependsLlm(target, tree, truncated, nodesVisited, maxDepthReached)) console.log(line);
         return;
       }
 

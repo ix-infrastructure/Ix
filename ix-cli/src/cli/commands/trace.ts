@@ -7,6 +7,7 @@ import type { ResolvedEntity } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { renderSection, renderKeyValue, renderResolvedHeader, colorizeKind } from "../ui.js";
 import { compactTreeNode, relativePath } from "../format.js";
+import { llmLine, llmError, type LlmValue } from "../llm.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -319,6 +320,79 @@ function renderTraceTree(
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
+// ── llm rendering ─────────────────────────────────────────────────────
+
+/** Flatten a trace tree into llm records with explicit parent=<id> (8-char ids). */
+function traceNodesLlm(record: string, tree: TraceNode[], rootId: string): string[] {
+  const lines: string[] = [];
+  const emit = (node: TraceNode, parentId: string): void => {
+    lines.push(llmLine(record, [
+      ["name", node.resolved ? node.name : undefined],
+      ["kind", node.kind],
+      ["id", node.id?.slice(0, 8)],
+      ["parent", parentId?.slice(0, 8)],
+      ["path", relativePath(node.path)],
+      ["cycle", node.cycle ? true : undefined],
+      ["resolved", node.resolved ? undefined : false],
+    ]));
+    for (const c of node.children) emit(c, node.id);
+  };
+  for (const n of tree) emit(n, rootId);
+  return lines;
+}
+
+const finiteDepth = (d: number): LlmValue => (Number.isFinite(d) ? d : undefined);
+
+export function renderTracePathLlm(
+  from: { name: string; kind: string }, to: { name: string; kind: string },
+  relKind: string, pathNodes: PathNode[],
+): string[] {
+  const lines = [llmLine("trace", [
+    ["mode", "path"], ["from", from.name], ["to", to.name], ["kind", relKind],
+    ["length", pathNodes.length > 0 ? pathNodes.length : undefined],
+  ])];
+  if (pathNodes.length === 0) {
+    lines.push(llmLine("diagnostic", [["code", "no_path"], ["message", `No route found from ${from.name} to ${to.name}.`]]));
+    return lines;
+  }
+  for (const n of pathNodes) lines.push(llmLine("step", [["name", n.name], ["kind", n.kind]]));
+  return lines;
+}
+
+export function renderTraceBothLlm(
+  target: { id: string; name: string; kind: string }, relKind: string, maxDepth: number,
+  up: { tree: TraceNode[]; nodesVisited: number; maxDepthReached: number },
+  down: { tree: TraceNode[]; nodesVisited: number; maxDepthReached: number },
+): string[] {
+  const lines = [llmLine("trace", [
+    ["mode", "directional"], ["target", target.name], ["kind", relKind],
+    ["direction", "both"], ["depth", finiteDepth(maxDepth)], ["target_id", target.id?.slice(0, 8)],
+    ["up_nodes", up.nodesVisited], ["up_depth", up.maxDepthReached],
+    ["down_nodes", down.nodesVisited], ["down_depth", down.maxDepthReached],
+  ])];
+  lines.push(...traceNodesLlm("up", up.tree, target.id));
+  lines.push(...traceNodesLlm("down", down.tree, target.id));
+  return lines;
+}
+
+export function renderTraceSingleLlm(
+  target: { id: string; name: string; kind: string }, relKind: string, direction: string, maxDepth: number,
+  tree: TraceNode[], truncated: boolean, nodesVisited: number, maxDepthReached: number, maxNodes: number,
+): string[] {
+  const lines = [llmLine("trace", [
+    ["mode", "directional"], ["target", target.name], ["kind", relKind],
+    ["direction", direction], ["depth", finiteDepth(maxDepth)], ["target_id", target.id?.slice(0, 8)],
+    ["nodes", nodesVisited], ["max_depth", maxDepthReached], ["truncated", truncated ? true : undefined],
+  ])];
+  if (tree.length === 0) {
+    lines.push(llmLine("diagnostic", [["code", "no_edges"], ["message", `No ${direction} ${relKind} found for ${target.name}.`]]));
+  }
+  if (truncated) {
+    lines.push(llmLine("diagnostic", [["code", "truncated"], ["message", `Traversal truncated (depth: ${maxDepth}, node cap: ${maxNodes}).`]]));
+  }
+  lines.push(...traceNodesLlm("node", tree, target.id));
+  return lines;
+}
 
 // ── Command ──────────────────────────────────────────────────────────
 
@@ -334,7 +408,7 @@ export function registerTraceCommand(program: Command): void {
     .option("--cap <n>", "Cap number of nodes visited, per direction")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")
     .option("--path <path>", "Prefer symbols from files matching this path substring")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--include-tests", "Include test and fixture entities")
     .option("--tests-only", "Show only test and fixture entities")
     .addHelpText(
@@ -395,7 +469,10 @@ export function registerTraceCommand(program: Command): void {
             resolveFileOrEntity(client, symbol, resolveOpts),
             resolveFileOrEntity(client, opts.to, toResolveOpts),
           ]);
-          if (!fromTarget || !toTarget) return;
+          if (!fromTarget || !toTarget) {
+            if (opts.format === "llm") console.log(llmError("unresolved_target", `Could not resolve ${!fromTarget ? symbol : opts.to}.`));
+            return;
+          }
 
           const relKind = opts.kind ?? "mixed";
           const predicates = kindToPredicates(opts.kind);
@@ -434,6 +511,12 @@ export function registerTraceCommand(program: Command): void {
             return;
           }
 
+          // ── llm output ─────────────────────────────────────────
+          if (opts.format === "llm") {
+            for (const line of renderTracePathLlm(fromTarget, toTarget, relKind, pathNodes)) console.log(line);
+            return;
+          }
+
           // ── Text output ────────────────────────────────────────
           renderResolvedHeader(fromTarget.kind, fromTarget.name);
           renderSection("Trace");
@@ -464,7 +547,10 @@ export function registerTraceCommand(program: Command): void {
 
         // ── Directional mode ────────────────────────────────────────
         const resolvedTarget = await resolveFileOrEntity(client, symbol, resolveOpts);
-        if (!resolvedTarget) return;
+        if (!resolvedTarget) {
+          if (opts.format === "llm") console.log(llmError("unresolved_target", `No entity resolved for "${symbol}".`));
+          return;
+        }
         let target: ResolvedEntity = resolvedTarget;
 
         const predicates = kindToPredicates(opts.kind);
@@ -515,6 +601,12 @@ export function registerTraceCommand(program: Command): void {
                 2,
               ),
             );
+            return;
+          }
+
+          // ── llm ───────────────────────────────────────────────
+          if (opts.format === "llm") {
+            for (const line of renderTraceBothLlm(target, relKind, maxDepth, upResult, downResult)) console.log(line);
             return;
           }
 
@@ -589,6 +681,12 @@ export function registerTraceCommand(program: Command): void {
           }
 
           console.log(JSON.stringify(output, null, 2));
+          return;
+        }
+
+        // ── llm ──────────────────────────────────────────────────────
+        if (opts.format === "llm") {
+          for (const line of renderTraceSingleLlm(target, relKind, direction, maxDepth, tree, truncated, nodesVisited, maxDepthReached, maxNodes)) console.log(line);
           return;
         }
 

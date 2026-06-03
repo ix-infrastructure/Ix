@@ -5,6 +5,38 @@ import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { detectSystem } from "../system.js";
 import { relativePath } from "../format.js";
+import { llmLine } from "../llm.js";
+
+/**
+ * Render `ix inventory` as llm records: a header line then one `file` row per
+ * source file with its entity names comma-joined (entities without a path
+ * become standalone `item` rows). Grouping mirrors the json renderer to avoid
+ * repeating the path on every entity.
+ */
+export function renderInventoryLlm(kind: string, scope: string | null, nodes: any[]): string[] {
+  const byFile = new Map<string, string[]>();
+  const ungrouped: Array<{ name: string; kind: string }> = [];
+  for (const n of nodes) {
+    const name = String(n.name || n.attrs?.name || "(unnamed)");
+    const rawPath = (n as any).provenance?.source_uri ?? n.provenance?.sourceUri ?? n.attrs?.path;
+    const path = relativePath(rawPath);
+    if (path) {
+      const names = byFile.get(path) ?? [];
+      names.push(name);
+      byFile.set(path, names);
+    } else {
+      ungrouped.push({ name, kind: String(n.kind) });
+    }
+  }
+  const lines = [llmLine("inventory", [["kind", kind], ["scope", scope ?? undefined], ["total", nodes.length]])];
+  for (const [path, names] of byFile) {
+    lines.push(llmLine("file", [["path", path], ["items", names.join(",")]]));
+  }
+  for (const u of ungrouped) {
+    lines.push(llmLine("item", [["name", u.name], ["kind", u.kind]]));
+  }
+  return lines;
+}
 
 export function registerInventoryCommand(program: Command): void {
   program
@@ -13,7 +45,7 @@ export function registerInventoryCommand(program: Command): void {
     .requiredOption("--kind <kind>", "Entity kind to list (class, method, function, file, module, etc.)")
     .option("--path <path>", "Filter by source file path substring")
     .option("--limit <n>", "Max results", "50")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", `
 Examples:
   ix inventory --kind class
@@ -76,6 +108,11 @@ Examples:
         };
         if (ungrouped.length > 0) output.ungrouped = ungrouped;
         console.log(JSON.stringify(output, null, 2));
+        return;
+      }
+
+      if (opts.format === "llm") {
+        for (const line of renderInventoryLlm(opts.kind, scope, nodes)) console.log(line);
         return;
       }
 

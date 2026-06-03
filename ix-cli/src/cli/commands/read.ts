@@ -98,7 +98,7 @@ export function registerReadCommand(program: Command): void {
   program
     .command("read <target>")
     .description("Read raw file content, line ranges, or symbol source code")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--kind <kind>", "Filter symbol by kind")
     .option("--path <path>", "Prefer symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")

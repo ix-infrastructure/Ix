@@ -4,6 +4,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { roundFloat } from "../format.js";
+import { llmLine, llmError } from "../llm.js";
 import { bootstrap, resolveWorkspaceId } from "../bootstrap.js";
 import { formatFetchError } from "../errors.js";
 import { ingestFiles } from "./ingest.js";
@@ -85,7 +86,7 @@ export function registerMapCommand(program: Command): void {
   program
     .command("map [path]")
     .description("Map the architectural hierarchy of a codebase")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--level <n>", "Show only regions at this level (1=finest, higher=coarser)")
     .option("--min-confidence <n>", "Only show regions above this confidence threshold (0-1)", "0")
     .option("--max-items <n>", "Max items to show per section in text output (default: 10)", "10")
@@ -137,9 +138,17 @@ Examples:
       const systemId = detectSystem(cwd)?.systemId;
 
       const silent = opts.silent === true || opts.format === "silent";
+      // json and llm are machine formats: suppress progress chatter and route
+      // ingestion through the quiet path so stdout carries only the result.
+      const machineFormat = opts.format === "json" || opts.format === "llm";
+      // Report an error on the right channel: structured record for llm, prose for the rest.
+      const emitError = (msg: string) => {
+        if (opts.format === "llm") console.log(llmError("backend_error", msg));
+        else console.error(chalk.red("Error:"), msg);
+      };
 
       // Print warning when --full override is active
-      if (opts.full && opts.format !== "json" && !silent) {
+      if (opts.full && !machineFormat && !silent) {
         console.log(chalk.yellow("\nWarning"));
         console.log(chalk.yellow("  Full local map override enabled.\n"));
         console.log("  Ix will ignore automatic local safety limits and attempt full local mapping.");
@@ -164,10 +173,10 @@ Examples:
           await runner.runIngestion({
             cwd,
             silent,
-            format: (opts.format === "json" || silent) ? "json" : "text",
+            format: (machineFormat || silent) ? "json" : "text",
           });
         } catch (err: any) {
-          console.error(chalk.red("Error:"), formatFetchError(err));
+          emitError(formatFetchError(err));
           process.exitCode = 1;
           return;
         }
@@ -175,20 +184,20 @@ Examples:
         try {
           await bootstrap(cwd);
         } catch (err: any) {
-          console.error(chalk.red("Error:"), err.message);
+          emitError(err.message);
           process.exitCode = 1;
           return;
         }
         try {
           await ingestFiles(cwd, {
             recursive: true,
-            format: (opts.format === "json" || silent) ? "json" : "text",
+            format: (machineFormat || silent) ? "json" : "text",
             printSummary: false,
             suppressOutput: true,
             mapMode: true,
           });
         } catch (err: any) {
-          console.error(chalk.red("Error:"), formatFetchError(err));
+          emitError(formatFetchError(err));
           process.exitCode = 1;
           return;
         }
@@ -199,7 +208,7 @@ Examples:
 
       const mapBarWidth = 25;
       const mapStart    = performance.now();
-      const mapInterval = (opts.format !== "json" && !silent) ? setInterval(() => {
+      const mapInterval = (!machineFormat && !silent) ? setInterval(() => {
         const elapsed  = performance.now() - mapStart;
         const pct      = 1 - Math.exp(-elapsed / 4000);
         const filled   = Math.round(pct * mapBarWidth);
@@ -213,7 +222,7 @@ Examples:
         result = await client.map({ full: opts.full, workspaceId: systemId ? undefined : resolveWorkspaceId(cwd), systemId }) as MapResult;
       } catch (err: any) {
         if (mapInterval) { clearInterval(mapInterval); process.stderr.write('\r' + ' '.repeat(60) + '\r'); }
-        console.error(chalk.red("Error:"), formatFetchError(err));
+        emitError(formatFetchError(err));
         process.exitCode = 1;
         return;
       }
@@ -230,7 +239,7 @@ Examples:
         return;
       }
 
-      if (opts.format !== "json") {
+      if (!machineFormat) {
         const mapSec = (mapMs / 1000).toFixed(1);
         process.stderr.write(chalk.dim(`  Mapped in ${mapSec}s\n`));
       }
@@ -264,8 +273,41 @@ Examples:
         }, null, 2));
         return;
       }
+      if (opts.format === "llm") {
+        renderMapLlm(result, regions);
+        return;
+      }
       renderMapText(result, cwd, opts);
     });
+}
+
+/** Flat one-record-per-line region listing with explicit parent= for the llm format. */
+export function renderMapLlm(result: MapResult, regions: MapRegion[]): void {
+  console.log(llmLine("map", [
+    ["files", result.file_count],
+    ["regions", regions.length],
+    ["levels", result.levels],
+    ["rev", result.map_rev],
+    ["outcome", result.outcome],
+  ]));
+  for (const r of regions) {
+    console.log(llmLine("region", [
+      ["id", r.id],
+      ["kind", r.label_kind],
+      ["label", r.label],
+      ["level", r.level],
+      ["files", r.file_count],
+      ["parent", r.parent_id],
+      ["children", r.child_region_count > 0 ? r.child_region_count : undefined],
+      ["cohesion", roundFloat(r.cohesion)],
+      ["coupling", roundFloat(r.external_coupling)],
+      // crosscut_score is emitted only when meaningful (>0.01), matching the
+      // compact JSON; consumers (e.g. the ix-architecture skill) gate on it.
+      ["crosscut", r.crosscut_score > 0.01 ? roundFloat(r.crosscut_score) : undefined],
+      ["confidence", roundFloat(r.confidence)],
+      ["signals", r.dominant_signals.length > 0 ? r.dominant_signals.join(",") : undefined],
+    ]));
+  }
 }
 
 export function renderMapText(result: MapResult, cwd: string, opts: MapTextRenderOptions): void {

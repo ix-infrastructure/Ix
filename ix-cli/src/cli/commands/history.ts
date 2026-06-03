@@ -5,6 +5,23 @@ import { getEndpoint } from "../config.js";
 import { resolveFileOrEntity, printResolved } from "../resolve.js";
 import { relativePath } from "../format.js";
 import { stderr } from "../stderr.js";
+import { llmLine, llmError } from "../llm.js";
+
+/** Render an entity's provenance chain as llm records: a header then one `patch` row per revision. */
+export function renderHistoryLlm(
+  resolved: { name: string; kind: string }, patches: any[],
+): string[] {
+  const lines = [llmLine("history", [["target", resolved.name], ["kind", resolved.kind], ["count", patches.length]])];
+  for (const p of patches) {
+    lines.push(llmLine("patch", [
+      ["rev", p.rev ?? p.data?.rev],
+      ["ts", p.data?.timestamp ?? p.timestamp],
+      ["intent", (p.data?.intent ?? p.intent) || undefined],
+      ["source", relativePath(p.data?.source?.uri) || undefined],
+    ]));
+  }
+  return lines;
+}
 
 export function registerHistoryCommand(program: Command): void {
   program
@@ -13,7 +30,7 @@ export function registerHistoryCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Prefer symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", `\nExamples:
   ix history ix-cli/src/cli/commands/decide.ts
   ix history decide.ts
@@ -23,14 +40,23 @@ export function registerHistoryCommand(program: Command): void {
       const client = new IxClient(getEndpoint());
       const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick ? parseInt(opts.pick, 10) : undefined };
       const resolved = await resolveFileOrEntity(client, target, resolveOpts);
-      if (!resolved) return;
+      if (!resolved) {
+        if (opts.format === "llm") console.log(llmError("unresolved_target", `No entity resolved for "${target}".`));
+        return;
+      }
 
-      if (opts.format !== "json") printResolved(resolved);
+      if (opts.format === "text") printResolved(resolved);
 
       const result = await client.provenance(resolved.id);
+      const allPatches = Array.isArray(result) ? result : (result as any)?.patches ?? [];
+
+      if (opts.format === "llm") {
+        for (const line of renderHistoryLlm(resolved, allPatches)) console.log(line);
+        return;
+      }
 
       if (opts.format === "json") {
-        const patches = Array.isArray(result) ? result : (result as any)?.patches ?? [];
+        const patches = allPatches;
         console.log(JSON.stringify({
           resolvedTarget: { kind: resolved.kind, name: resolved.name, path: relativePath(resolved.path) },
           patches: patches.map((p: any) => ({
