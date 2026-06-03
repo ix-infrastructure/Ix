@@ -464,11 +464,17 @@ export async function ingestFiles(
   const packageEntries = Object.entries(packageRegistry);
   const packageOf = (mod: string): string | undefined => {
     if (!mod) return undefined;
+    // A RELATIVE / source-file import (./x, ../x, "core.ts", "lib/foo.js") is
+    // intra-repo — it must NOT match another member's package stem. (Without this,
+    // babel-types' relative `./core.ts` falsely matches the babel-core package,
+    // inventing a fake dependency that whitelists same-named-symbol false edges.)
+    // A package specifier is a bare name / namespaced path with no source-file
+    // extension and no leading dot/slash.
+    if (mod.startsWith('.') || mod.startsWith('/')) return undefined;
+    if (/\.(?:ts|tsx|js|jsx|mjs|cjs|py|pyi|rs|go|rb|java|ex|exs|c|h|cc|cpp|hpp|cs|scala|kt|swift)$/i.test(mod)) return undefined;
     if (packageRegistry[mod]) return packageRegistry[mod];               // exact (full name or stem)
     const lower = mod.toLowerCase();
     if (packageRegistry[lower]) return packageRegistry[lower];           // lowercased stem
-    const noExt = lower.replace(/\.[a-z0-9]+$/, '');                     // parser may keep "types.ts"
-    if (noExt !== lower && packageRegistry[noExt]) return packageRegistry[noExt];
     for (const [pkg, repo] of packageEntries) {                          // sub-path / submodule
       if (mod.length > pkg.length && mod.startsWith(pkg)) {
         const sep = mod[pkg.length];
