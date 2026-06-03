@@ -322,12 +322,14 @@ describe('buildPatch', () => {
   });
 });
 
-// Ix#225 Path 1: a repo's persisted identity must be byte-identical whether it is
+// Ix#225 Path 1: a repo's node/edge IDENTITY must be byte-identical whether it is
 // ingested standalone or as a member of a multi-repo system. Identity is folded over
 // the MEMBER-relative path (repo-dir prefix stripped) paired with the member's own
 // workspace_id, so `ix map svc-a` and `ix map <parent-of-svc-a>` produce the same
-// node ids, source_uri, and patch ids; and a cross-repo edge resolves onto the very
-// node the target repo's own ingest creates.
+// node and edge ids; a cross-repo edge resolves onto the very node the target repo's
+// own ingest creates. PROVENANCE (source_uri / patch id) deliberately stays
+// workspace-relative (repo-prefixed in a co-ingest) so reads reconstruct the right
+// absolute path under the workspace root — it is NOT expected to converge.
 describe('multi-repo co-ingest identity convergence', () => {
   const WS_A = 'aaaaaaaa'; // svc-a's path-based workspace_id (same value in both modes)
   const WS_B = 'bbbbbbbb';
@@ -346,7 +348,7 @@ describe('multi-repo co-ingest identity convergence', () => {
       [{ srcName: 'handler', dstName: 'localHelper', predicate: 'CALLS' }],
     );
 
-  it('produces byte-identical node/edge/patch ids and source_uri solo vs co-ingested', () => {
+  it('produces byte-identical node and edge ids solo vs co-ingested', () => {
     // Solo: filePath is already member-relative; no multiRepo context.
     const solo = buildPatchWithResolution(svcAResult('src/index.ts'), 'h', WS_A, [], undefined, undefined);
     // Co-ingest: filePath is repo-prefixed, multiRepo present, same member workspace_id.
@@ -354,11 +356,13 @@ describe('multi-repo co-ingest identity convergence', () => {
       svcAResult('svc-a/src/index.ts'), 'h', WS_A, [],
       undefined, { systemId: 'sys', repoId: 'svc-a', repoWorkspaceOf });
 
+    // Identity converges (folded over the member-relative path).
     expect(ids(co, 'UpsertNode')).toEqual(ids(solo, 'UpsertNode'));
     expect(ids(co, 'UpsertEdge')).toEqual(ids(solo, 'UpsertEdge'));
-    expect(co.patchId).toBe(solo.patchId);
-    expect(co.source.uri).toBe('src/index.ts'); // member-relative, NOT 'svc-a/src/index.ts'
-    expect(co.source.uri).toBe(solo.source.uri);
+    // Provenance stays workspace-relative — repo-prefixed in the co-ingest so `ix read`
+    // resolves parent/svc-a/src/index.ts, not parent/src/index.ts.
+    expect(co.source.uri).toBe('svc-a/src/index.ts');
+    expect(solo.source.uri).toBe('src/index.ts');
   });
 
   it('stamps systemId/repoId only in co-ingest, never solo', () => {
