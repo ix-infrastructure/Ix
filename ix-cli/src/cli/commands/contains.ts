@@ -3,6 +3,7 @@ import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { formatEdgeResults } from "../format.js";
 import { resolveFileOrEntity, printResolved } from "../resolve.js";
+import { llmError } from "../llm.js";
 
 export function registerContainsCommand(program: Command): void {
   program
@@ -19,8 +20,11 @@ export function registerContainsCommand(program: Command): void {
       const limit = parseInt(opts.limit, 10);
       const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick ? parseInt(opts.pick, 10) : undefined };
       const target = await resolveFileOrEntity(client, symbol, resolveOpts);
-      if (!target) return;
-      if (opts.format !== "json") printResolved(target);
+      if (!target) {
+        if (opts.format === "llm") console.log(llmError("unresolved_target", `No entity resolved for "${symbol}".`));
+        return;
+      }
+      if (opts.format === "text") printResolved(target);
       const result = await client.expand(target.id, { direction: "out", predicates: ["CONTAINS"] });
       const limited = result.nodes.slice(0, limit);
       formatEdgeResults(limited, "contains", target.name, opts.format, target, "graph");
