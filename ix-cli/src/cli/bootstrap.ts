@@ -92,6 +92,21 @@ export async function ensureBackendAvailable(): Promise<void> {
 }
 
 /**
+ * Emit the one-time "Ix / Created config / Registered workspace" setup notice.
+ *
+ * These are side-effect messages, not program output, so they go to stderr —
+ * keeping stdout clean for `--format json|llm` consumers (a banner on stdout
+ * corrupts the first machine-readable response after a workspace is registered).
+ */
+export function emitSetupNotice(createdConfig: boolean, registered: boolean, name: string): void {
+  if (!createdConfig && !registered) return;
+  console.error(chalk.bold("Ix\n"));
+  if (createdConfig) console.error(chalk.dim(`Created default config.`));
+  if (registered)    console.error(chalk.dim(`Registered workspace "${name}".`));
+  console.error();
+}
+
+/**
  * Full lazy bootstrap. Call at the top of map/watch actions.
  * Prints user-friendly output only on first run (when something was created).
  */
@@ -99,14 +114,7 @@ export async function bootstrap(cwd = process.cwd()): Promise<void> {
   const createdConfig = ensureLocalConfig();
   const { registered, name } = ensureWorkspaceRegistered(cwd);
 
-  if (createdConfig || registered) {
-    // One-time setup notices are side-effect messages, not program output.
-    // Emit them on stderr so stdout stays clean for `--format json|llm` consumers.
-    console.error(chalk.bold("Ix\n"));
-    if (createdConfig) console.error(chalk.dim(`Created default config.`));
-    if (registered)    console.error(chalk.dim(`Registered workspace "${name}".`));
-    console.error();
-  }
+  emitSetupNotice(createdConfig, registered, name);
 
   await ensureBackendAvailable();
 }

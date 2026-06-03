@@ -3,7 +3,20 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
-import { llmLine, type LlmValue } from "../llm.js";
+import { llmLine, llmError, type LlmValue } from "../llm.js";
+
+/** Render `ix stats` as llm records: one `nodes` line and one `edges` line. */
+export function renderStatsLlm(result: any): string[] {
+  const nodeFields: Array<[string, LlmValue]> = [["total", result.nodes.total]];
+  for (const entry of result.nodes.byKind) {
+    if ((entry.count ?? 0) > 0) nodeFields.push([entry.kind ?? "unknown", entry.count]);
+  }
+  const edgeFields: Array<[string, LlmValue]> = [["total", result.edges.total]];
+  for (const entry of result.edges.byPredicate) {
+    if ((entry.count ?? 0) > 0) edgeFields.push([entry.predicate ?? "unknown", entry.count]);
+  }
+  return [llmLine("nodes", nodeFields), llmLine("edges", edgeFields)];
+}
 
 export function registerStatsCommand(program: Command): void {
   program
@@ -12,7 +25,15 @@ export function registerStatsCommand(program: Command): void {
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .action(async (opts: { format: string }) => {
       const client = new IxClient(getEndpoint());
-      const result = await client.stats({ workspaceId: resolveWorkspaceId() });
+      let result;
+      try {
+        result = await client.stats({ workspaceId: resolveWorkspaceId() });
+      } catch (err: any) {
+        if (opts.format === "llm") console.log(llmError("backend_error", err.message ?? "stats request failed"));
+        else console.error(chalk.red("Error:"), err.message);
+        process.exitCode = 1;
+        return;
+      }
 
       if (opts.format === "json") {
         console.log(JSON.stringify(result, null, 2));
@@ -20,16 +41,7 @@ export function registerStatsCommand(program: Command): void {
       }
 
       if (opts.format === "llm") {
-        const nodeFields: Array<[string, LlmValue]> = [["total", result.nodes.total]];
-        for (const entry of result.nodes.byKind) {
-          if ((entry.count ?? 0) > 0) nodeFields.push([entry.kind ?? "unknown", entry.count]);
-        }
-        const edgeFields: Array<[string, LlmValue]> = [["total", result.edges.total]];
-        for (const entry of result.edges.byPredicate) {
-          if ((entry.count ?? 0) > 0) edgeFields.push([entry.predicate ?? "unknown", entry.count]);
-        }
-        console.log(llmLine("nodes", nodeFields));
-        console.log(llmLine("edges", edgeFields));
+        for (const line of renderStatsLlm(result)) console.log(line);
         return;
       }
 

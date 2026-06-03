@@ -4,7 +4,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { roundFloat } from "../format.js";
-import { llmLine } from "../llm.js";
+import { llmLine, llmError } from "../llm.js";
 import { bootstrap, resolveWorkspaceId } from "../bootstrap.js";
 import { formatFetchError } from "../errors.js";
 import { ingestFiles } from "./ingest.js";
@@ -137,6 +137,11 @@ Examples:
       // json and llm are machine formats: suppress progress chatter and route
       // ingestion through the quiet path so stdout carries only the result.
       const machineFormat = opts.format === "json" || opts.format === "llm";
+      // Report an error on the right channel: structured record for llm, prose for the rest.
+      const emitError = (msg: string) => {
+        if (opts.format === "llm") console.log(llmError("backend_error", msg));
+        else console.error(chalk.red("Error:"), msg);
+      };
 
       // Print warning when --full override is active
       if (opts.full && !machineFormat && !silent) {
@@ -167,7 +172,7 @@ Examples:
             format: (machineFormat || silent) ? "json" : "text",
           });
         } catch (err: any) {
-          console.error(chalk.red("Error:"), formatFetchError(err));
+          emitError(formatFetchError(err));
           process.exitCode = 1;
           return;
         }
@@ -175,7 +180,7 @@ Examples:
         try {
           await bootstrap(cwd);
         } catch (err: any) {
-          console.error(chalk.red("Error:"), err.message);
+          emitError(err.message);
           process.exitCode = 1;
           return;
         }
@@ -188,7 +193,7 @@ Examples:
             mapMode: true,
           });
         } catch (err: any) {
-          console.error(chalk.red("Error:"), formatFetchError(err));
+          emitError(formatFetchError(err));
           process.exitCode = 1;
           return;
         }
@@ -213,7 +218,7 @@ Examples:
         result = await client.map({ full: opts.full, workspaceId: resolveWorkspaceId(cwd) }) as MapResult;
       } catch (err: any) {
         if (mapInterval) { clearInterval(mapInterval); process.stderr.write('\r' + ' '.repeat(60) + '\r'); }
-        console.error(chalk.red("Error:"), formatFetchError(err));
+        emitError(formatFetchError(err));
         process.exitCode = 1;
         return;
       }

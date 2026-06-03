@@ -161,7 +161,8 @@ Examples:
             result = await loadSubsystemScores(client, detailedQuery.value ?? {});
           }
         } catch (err: any) {
-          console.error(chalk.red("Error:"), err.message);
+          if (opts.format === "llm") console.log(llmError("backend_error", err.message ?? "subsystems request failed"));
+          else console.error(chalk.red("Error:"), err.message);
           process.exitCode = 1;
           return;
         }
@@ -268,7 +269,7 @@ Examples:
 
       if (opts.format === "llm") {
         if (isScopedSubsystemResult(result)) {
-          renderScopedSubsystemLlm(result);
+          for (const line of renderScopedSubsystemLlm(result)) console.log(line);
         } else {
           const mapResult = result as MapResult;
           let regions: MapRegion[] = mapResult.regions;
@@ -300,6 +301,7 @@ Examples:
 // ── llm renderers ────────────────────────────────────────────────────────────
 
 export function renderSubsystemScoreLlm(s: SubsystemScore): string {
+  // chunk_density is dropped when 0 (uncomputed / no signal); see docs/llm-format.md.
   return llmLine("region", [
     ["id", s.region_id],
     ["label", s.name],
@@ -307,33 +309,35 @@ export function renderSubsystemScoreLlm(s: SubsystemScore): string {
     ["level", s.level],
     ["files", s.file_count],
     ["health", roundFloat(s.health_score)],
-    ["chunks_per_file", roundFloat(s.chunk_density)],
+    ["chunks_per_file", s.chunk_density > 0 ? roundFloat(s.chunk_density) : undefined],
     ["smells", s.smell_files > 0 ? s.smell_files : undefined],
     ["confidence", roundFloat(s.confidence)],
   ]);
 }
 
-function renderScopedSubsystemLlm(result: ScopedSubsystemResult): void {
+export function renderScopedSubsystemLlm(result: ScopedSubsystemResult): string[] {
   const t = result.target;
-  console.log(llmLine("target", [
-    ["id", t.id],
-    ["label", t.label],
-    ["kind", t.label_kind],
-    ["level", t.level],
-    ["files", t.file_count],
-    ["confidence", roundFloat(t.confidence)],
-    ["cross_cutting", t.is_cross_cutting ? true : undefined],
-    ["parent", result.parent?.id],
-    ["signals", t.dominant_signals.length > 0 ? t.dominant_signals.join(",") : undefined],
-  ]));
-  console.log(llmLine("health", [
-    ["well_defined", result.summary.well_defined],
-    ["moderate", result.summary.moderate],
-    ["fuzzy", result.summary.fuzzy],
-    ["cross_cutting", result.summary.cross_cutting],
-  ]));
+  const lines = [
+    llmLine("target", [
+      ["id", t.id],
+      ["label", t.label],
+      ["kind", t.label_kind],
+      ["level", t.level],
+      ["files", t.file_count],
+      ["confidence", roundFloat(t.confidence)],
+      ["cross_cutting", t.is_cross_cutting ? true : undefined],
+      ["parent", result.parent?.id],
+      ["signals", t.dominant_signals.length > 0 ? t.dominant_signals.join(",") : undefined],
+    ]),
+    llmLine("health", [
+      ["well_defined", result.summary.well_defined],
+      ["moderate", result.summary.moderate],
+      ["fuzzy", result.summary.fuzzy],
+      ["cross_cutting", result.summary.cross_cutting],
+    ]),
+  ];
   const emit = (region: ScopedSubsystemRegion): void => {
-    console.log(llmLine("region", [
+    lines.push(llmLine("region", [
       ["id", region.id],
       ["label", region.label],
       ["kind", region.label_kind],
@@ -347,9 +351,10 @@ function renderScopedSubsystemLlm(result: ScopedSubsystemResult): void {
     for (const child of region.children ?? []) emit(child);
   };
   for (const child of result.children) emit(child);
+  return lines;
 }
 
-function renderSubsystemErrorLlm(body: unknown): string {
+export function renderSubsystemErrorLlm(body: unknown): string {
   if (isAmbiguousSubsystemResult(body)) {
     return llmError("ambiguous_target", `Multiple regions matched "${body.target_query}".`, [
       ["candidates", body.candidates.map(c => `${c.pick}:${c.label}`).join(",")],

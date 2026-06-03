@@ -6,7 +6,7 @@ import { resolveFileOrEntity, printResolved } from "../resolve.js";
 import { getEffectiveSystemPath, getSystemPath, hasMapData } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
 import { relativePath } from "../format.js";
-import { llmLine, type LlmValue } from "../llm.js";
+import { llmLine, llmError, type LlmValue } from "../llm.js";
 import { renderSection, renderKeyValue, renderNote, renderBreadcrumb } from "../ui.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "trait", "object", "interface"]);
@@ -57,7 +57,11 @@ Examples:
       const client = new IxClient(getEndpoint());
       const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick ? parseInt(opts.pick, 10) : undefined };
       const target = await resolveFileOrEntity(client, symbol, resolveOpts);
-      if (!target) return;
+      if (!target) {
+        // Resolver printed human guidance to stderr; add a structured record for llm.
+        if (opts.format === "llm") console.log(llmError("unresolved_target", `No entity resolved for "${symbol}".`));
+        return;
+      }
 
       if (opts.format === "text") printResolved(target);
 
@@ -196,20 +200,9 @@ async function overviewContainer(
   }
 
   if (format === "llm") {
-    console.log(llmLine("overview", [
-      ["target", target.name],
-      ["kind", target.kind],
-      ["file", displayPath],
-      ["system_path", systemPathMapped.length > 1 && hasMap ? systemPathMapped.map((n) => n.name).join(",") : undefined],
-    ]));
-    const containsEntries = Object.entries(childrenByKind).sort((a, b) => b[1] - a[1]);
-    if (containsEntries.length > 0) {
-      console.log(llmLine("contains", containsEntries as Array<[string, LlmValue]>));
+    for (const line of overviewContainerLlm({ target, displayPath, systemPath: systemPathMapped, hasMap, childrenByKind, keyItems, diagnostics })) {
+      console.log(line);
     }
-    for (const item of keyItems) {
-      console.log(llmLine("item", [["name", item.name], ["kind", item.kind]]));
-    }
-    for (const d of diagnostics) console.log(llmLine("note", [["text", d]]));
     return;
   }
 
@@ -343,21 +336,9 @@ async function overviewLeaf(
   }
 
   if (format === "llm") {
-    console.log(llmLine("overview", [
-      ["target", target.name],
-      ["kind", target.kind],
-      ["file", displayPath],
-      ["contained_in", containedIn ? `${containedIn.kind} ${containedIn.name}` : undefined],
-      ["system_path", systemPathMapped.length > 1 && hasMap ? systemPathMapped.map((n) => n.name).join(",") : undefined],
-    ]));
-    if (siblingsByKind && Object.keys(siblingsByKind).length > 0) {
-      const entries = Object.entries(siblingsByKind).sort((a, b) => b[1] - a[1]);
-      console.log(llmLine("nearby", entries as Array<[string, LlmValue]>));
+    for (const line of overviewLeafLlm({ target, displayPath, containedIn, systemPath: systemPathMapped, hasMap, siblingsByKind, keySiblings, diagnostics })) {
+      console.log(line);
     }
-    for (const s of keySiblings ?? []) {
-      console.log(llmLine("sibling", [["name", s.name], ["kind", s.kind]]));
-    }
-    for (const d of diagnostics) console.log(llmLine("note", [["text", d]]));
     return;
   }
 
@@ -381,6 +362,66 @@ async function overviewLeaf(
   }
 
   renderDiagnostics(diagnostics);
+}
+
+// ── llm rendering ────────────────────────────────────────────────────────────
+
+function systemPathField(systemPath: Array<{ name: string }>, hasMap: boolean): LlmValue {
+  return systemPath.length > 1 && hasMap ? systemPath.map((n) => n.name).join(",") : undefined;
+}
+
+export function overviewContainerLlm(d: {
+  target: { name: string; kind: string };
+  displayPath: string | null;
+  systemPath: Array<{ name: string; kind: string }>;
+  hasMap: boolean;
+  childrenByKind: Record<string, number>;
+  keyItems: Array<{ name: string; kind: string }>;
+  diagnostics: string[];
+}): string[] {
+  const lines = [llmLine("overview", [
+    ["target", d.target.name],
+    ["kind", d.target.kind],
+    ["file", d.displayPath],
+    ["system_path", systemPathField(d.systemPath, d.hasMap)],
+  ])];
+  const containsEntries = Object.entries(d.childrenByKind).sort((a, b) => b[1] - a[1]);
+  if (containsEntries.length > 0) {
+    lines.push(llmLine("contains", containsEntries as Array<[string, LlmValue]>));
+  }
+  for (const item of d.keyItems) {
+    lines.push(llmLine("item", [["name", item.name], ["kind", item.kind]]));
+  }
+  for (const note of d.diagnostics) lines.push(llmLine("note", [["text", note]]));
+  return lines;
+}
+
+export function overviewLeafLlm(d: {
+  target: { name: string; kind: string };
+  displayPath: string | null;
+  containedIn: { kind: string; name: string } | null;
+  systemPath: Array<{ name: string; kind: string }>;
+  hasMap: boolean;
+  siblingsByKind: Record<string, number> | null;
+  keySiblings: Array<{ name: string; kind: string }> | null;
+  diagnostics: string[];
+}): string[] {
+  const lines = [llmLine("overview", [
+    ["target", d.target.name],
+    ["kind", d.target.kind],
+    ["file", d.displayPath],
+    ["contained_in", d.containedIn ? `${d.containedIn.kind} ${d.containedIn.name}` : undefined],
+    ["system_path", systemPathField(d.systemPath, d.hasMap)],
+  ])];
+  if (d.siblingsByKind && Object.keys(d.siblingsByKind).length > 0) {
+    const entries = Object.entries(d.siblingsByKind).sort((a, b) => b[1] - a[1]);
+    lines.push(llmLine("nearby", entries as Array<[string, LlmValue]>));
+  }
+  for (const s of d.keySiblings ?? []) {
+    lines.push(llmLine("sibling", [["name", s.name], ["kind", s.kind]]));
+  }
+  for (const note of d.diagnostics) lines.push(llmLine("note", [["text", note]]));
+  return lines;
 }
 
 // ── Shared rendering ────────────────────────────────────────────────────────
