@@ -297,6 +297,9 @@ export function renderMapLlm(result: MapResult, regions: MapRegion[]): void {
       ["children", r.child_region_count > 0 ? r.child_region_count : undefined],
       ["cohesion", roundFloat(r.cohesion)],
       ["coupling", roundFloat(r.external_coupling)],
+      // crosscut_score is emitted only when meaningful (>0.01), matching the
+      // compact JSON; consumers (e.g. the ix-architecture skill) gate on it.
+      ["crosscut", r.crosscut_score > 0.01 ? roundFloat(r.crosscut_score) : undefined],
       ["confidence", roundFloat(r.confidence)],
       ["signals", r.dominant_signals.length > 0 ? r.dominant_signals.join(",") : undefined],
     ]));
