@@ -478,7 +478,12 @@ export async function ingestFiles(
     for (const [pkg, repo] of packageEntries) {                          // sub-path / submodule
       if (mod.length > pkg.length && mod.startsWith(pkg)) {
         const sep = mod[pkg.length];
-        if (sep === '/' || sep === '.' || sep === ':') return repo;
+        if (sep === '/' || sep === '.') return repo;
+        // A single ':' is a module protocol (node:fs, npm:x, bun:sqlite), NOT a
+        // package sub-path boundary, so e.g. `node:path` must not match a member
+        // named "node" (@babel/node). Only Rust's '::' (tokio::sync) is a real
+        // boundary, so require the second colon.
+        if (sep === ':' && mod[pkg.length + 1] === ':') return repo;
       }
     }
     return undefined;
