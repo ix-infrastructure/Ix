@@ -10,7 +10,7 @@ import { ParsePool } from './parse-pool.js';
 import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
 import type { GraphPatchPayload } from '../../client/types.js';
-import { getEndpoint, resolveWorkspaceRoot } from '../config.js';
+import { getEndpoint, resolveWorkspaceRoot, ingestMtimeCachePath } from '../config.js';
 import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
 import { loadIngestionModules } from './ingestion-loader.js';
@@ -314,14 +314,9 @@ interface MtimeCache {
   files: Record<string, number>; // absolute path → mtime (ms)
 }
 
-function mtimeCachePath(projectRoot: string): string {
-  const key = crypto.createHash('sha256').update(projectRoot).digest('hex').slice(0, 12);
-  return nodePath.join(os.homedir(), '.ix', `ingest_mtimes_${key}.json`);
-}
-
 function loadMtimeCache(projectRoot: string): Map<string, number> {
   try {
-    const raw = fs.readFileSync(mtimeCachePath(projectRoot), 'utf-8');
+    const raw = fs.readFileSync(ingestMtimeCachePath(projectRoot), 'utf-8');
     const data = JSON.parse(raw) as MtimeCache;
     if (data.root !== projectRoot) return new Map();
     return new Map(Object.entries(data.files));
@@ -335,7 +330,7 @@ function saveMtimeCache(projectRoot: string, mtimes: Map<string, number>): void 
     const dir = nodePath.join(os.homedir(), '.ix');
     fs.mkdirSync(dir, { recursive: true });
     const data: MtimeCache = { root: projectRoot, files: Object.fromEntries(mtimes) };
-    fs.writeFileSync(mtimeCachePath(projectRoot), JSON.stringify(data));
+    fs.writeFileSync(ingestMtimeCachePath(projectRoot), JSON.stringify(data));
   } catch {
     // Non-critical: ignore write errors
   }
@@ -432,11 +427,12 @@ export async function ingestFiles(
   const workspaceRoot = fs.statSync(resolvedPath).isDirectory()
     ? resolvedPath
     : nodePath.dirname(resolvedPath);
-  const { workspaceId, migrated: workspaceMigrated } = ensureWorkspaceIdState(workspaceRoot);
+  const { workspaceId, migrated: workspaceMigrated, previousWorkspaceId } = ensureWorkspaceIdState(workspaceRoot);
   if (workspaceMigrated) {
     // Legacy random workspace_id was just re-keyed to the path-based id (Ix#225
     // gap 2). Node identity folds the workspace_id, so the previously-ingested
-    // nodes live under the old id; force a full re-ingest under the new id.
+    // nodes live under the old id; force a full re-ingest under the new id (below)
+    // and delete the old id's orphaned nodes after that succeeds.
     process.stderr.write(
       `Migrated workspace to a stable path-based id; re-ingesting this workspace once.\n`,
     );
@@ -1172,6 +1168,18 @@ export async function ingestFiles(
     // Only save when no parse errors (avoid poisoning cache on partial failures).
     if (!opts.force && parseErrors === 0 && currentMtimes.size > 0) {
       saveMtimeCache(projectRoot, currentMtimes);
+    }
+
+    // Migration cleanup (Ix#225 gap 2): the re-ingest under the new path-based id has
+    // committed, so delete the OLD id's now-orphaned nodes/edges/patches. Best-effort —
+    // a failure here is non-fatal (orphans are harmless dead storage, cleanable later).
+    if (workspaceMigrated && previousWorkspaceId && parseErrors === 0) {
+      try {
+        await client.deleteWorkspace(previousWorkspaceId);
+        if (debug) process.stderr.write(`  Cleaned up pre-migration nodes under ${previousWorkspaceId}.\n`);
+      } catch (err) {
+        if (debug) process.stderr.write(`  [migration cleanup skipped] ${err}\n`);
+      }
     }
   } finally {
     if (pool) {

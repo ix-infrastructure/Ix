@@ -61,6 +61,7 @@ describe("workspace_id migration (Ix#225 gap 2)", () => {
     const state = ensureWorkspaceIdState(root);
     expect(state.workspaceId).toBe(pathId);
     expect(state.migrated).toBe(true);
+    expect(state.previousWorkspaceId).toBe("rand0001"); // captured for orphan cleanup
     expect(readWorkspaceId(root)).toBe(pathId); // persisted
   });
 

@@ -1,9 +1,25 @@
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import { homedir } from "node:os";
+import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
 import { parse, stringify } from "yaml";
 import { IxClient } from "../client/api.js";
+
+/**
+ * Path to the per-project ingest mtime cache (the "skip unchanged files on re-map"
+ * pre-filter). Keyed on a hash of the project root. Single source of truth shared by
+ * ingest (load/save), reset, and watch (clear) — all three MUST agree on this path.
+ */
+export function ingestMtimeCachePath(projectRoot: string): string {
+  const key = createHash("sha256").update(projectRoot).digest("hex").slice(0, 12);
+  return join(homedir(), ".ix", `ingest_mtimes_${key}.json`);
+}
+
+/** Remove the ingest mtime cache so the next map re-ingests every file. Best-effort. */
+export function clearIngestMtimeCache(projectRoot: string): void {
+  try { rmSync(ingestMtimeCachePath(projectRoot), { force: true }); } catch { /* non-critical */ }
+}
 
 export interface WorkspaceConfig {
   workspace_id: string;

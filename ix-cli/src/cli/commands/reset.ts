@@ -1,25 +1,8 @@
-import * as nodePath from "node:path";
-import * as fs from "node:fs";
-import * as crypto from "node:crypto";
-import * as os from "node:os";
 import type { Command } from "commander";
 import chalk from "chalk";
 import { spawnSync } from "child_process";
 import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
-
-function mtimeCachePath(projectRoot: string): string {
-  const key = crypto.createHash("sha256").update(projectRoot).digest("hex").slice(0, 12);
-  return nodePath.join(os.homedir(), ".ix", `ingest_mtimes_${key}.json`);
-}
-
-function clearMtimeCache(projectRoot: string): void {
-  try {
-    fs.rmSync(mtimeCachePath(projectRoot), { force: true });
-  } catch {
-    // Non-critical
-  }
-}
+import { getEndpoint, clearIngestMtimeCache } from "../config.js";
 
 export function registerResetCommand(program: Command): void {
   program
@@ -61,14 +44,14 @@ export function registerResetCommand(program: Command): void {
           clearInterval(interval);
           process.stderr.write("\r\x1b[K");
           // Clear the mtime cache so the next ix map re-ingests all files
-          clearMtimeCache(process.cwd());
+          clearIngestMtimeCache(process.cwd());
           console.log(chalk.green("✓") + " Code graph wiped. Planning artifacts preserved.");
           console.log(chalk.dim("  Run `ix map` to rebuild the code graph."));
         } else {
           await client.reset();
           clearInterval(interval);
           process.stderr.write("\r\x1b[K");
-          clearMtimeCache(process.cwd());
+          clearIngestMtimeCache(process.cwd());
           console.log(chalk.green("✓") + " Graph wiped.");
         }
       } catch (err: any) {

@@ -326,6 +326,13 @@ export class IxClient {
     );
   }
 
+  // Delete all nodes/edges/patches under a single workspace_id (Ix#225 gap 2: clean up
+  // the orphans left when a workspace's id is migrated to the path-based id). Scoped to
+  // exactly that id server-side; other workspaces are untouched.
+  async deleteWorkspace(workspaceId: string): Promise<void> {
+    await this.post("/v1/reset/workspace", { workspaceId });
+  }
+
   // True when the configured endpoint is a local memory-layer. A local
   // backend has no proxy in front of it, so the sync reset path connects
   // directly and returns in milliseconds — there is nothing to fix there.
