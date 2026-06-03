@@ -33,6 +33,7 @@ describe('TypeScript queries', () => {
       srcName: 'example.ts',
       dstName: 'bar',
       predicate: 'IMPORTS',
+      importRaw: './bar',
     });
     expect(result!.relationships).toContainEqual({
       srcName: 'Example',

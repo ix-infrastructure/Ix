@@ -97,6 +97,13 @@ export interface ParsedRelationship {
   srcName: string;
   dstName: string;
   predicate: string;  // "CONTAINS" | "CALLS" | "IMPORTS" | "EXTENDS"
+  // For path-based IMPORTS only: the unwrapped raw import specifier exactly as
+  // written (e.g. "./core", "../util/x", "@nestjs/core", "alpha"), BEFORE it is
+  // flattened to a bare stem. The multi-repo dependency gate needs this to tell a
+  // relative intra-repo import (./core) apart from a package import (@nestjs/core)
+  // that happens to flatten to the same stem ("core"). Absent on non-import rels
+  // and on dotted/symbol imports where dstName is already the full identifier.
+  importRaw?: string;
 }
 
 export interface FileParseResult {
@@ -356,6 +363,18 @@ function normalizeCapturedImport(rawValue: string, language: SupportedLanguages)
 
   const rawMod = unwrapped.split('/').filter((s: string) => s !== '*').pop() ?? unwrapped;
   return rawMod.replace(/^\.+/, '');
+}
+
+/** Unwrap an import specifier's surrounding quotes/brackets WITHOUT reducing it to
+ *  a stem — preserving the leading "./", "../", and "@scope/" so the multi-repo
+ *  dependency gate can distinguish relative (intra-repo) from package imports.
+ *  Mirrors the pre-normalization in normalizeCapturedImport, minus the stem split. */
+function unwrapImportSpecifier(rawValue: string): string {
+  return rawValue
+    .trim()
+    .replace(/\\\\/g, '/')
+    .replace(/^["'`<]/, '')
+    .replace(/[>"'`]$/, '');
 }
 
 function fileEntityName(filePath: string): string {
@@ -1671,8 +1690,11 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
           }
         }
         if (modName.length > 0 && modName !== '*') {
+          // Preserve the raw specifier (./core vs @nestjs/core) for the multi-repo
+          // dependency gate; modName remains the flattened stem used everywhere else.
+          const importRaw = unwrapImportSpecifier(importSource.node.text);
           entities.push({ name: modName, kind: 'module', lineStart: importSource.node.startPosition.row + 1, lineEnd: importSource.node.startPosition.row + 1, language });
-          relationships.push({ srcName: fileName, dstName: modName, predicate: 'IMPORTS' });
+          relationships.push({ srcName: fileName, dstName: modName, predicate: 'IMPORTS', importRaw });
         }
         continue;
       }
@@ -2253,6 +2275,11 @@ export function resolveEdges(
     // dependency-backed). Absent (single-repo ingest) => no gating, no change.
     repoOf?: (filePath: string) => string | undefined;
     packageOf?: (moduleName: string) => string | undefined;
+    // Ground-truth member->member dependency graph from build manifests (npm deps,
+    // Cargo [dependencies], go.mod require, Maven <dependency>, ...). Seeds the
+    // cross-repo gate so genuine edges survive even where import-to-package matching
+    // can't bridge the gap (e.g. Java's Maven artifactId vs `import com.google...`).
+    declaredRepoDeps?: Record<string, string[]>;
   },
 ): ResolvedEdge[] {
   // Provide a default no-op stats bag when caller passes none (backward compat).
@@ -2268,12 +2295,30 @@ export function resolveEdges(
   let repoDeps: Map<string, Set<string>> | undefined;
   if (repoOf && packageOf) {
     repoDeps = new Map<string, Set<string>>();
+    // Seed from the ground-truth declared-dependency graph (manifest deps). This
+    // is the robust signal: it catches deps that import-matching misses (Java).
+    if (opts?.declaredRepoDeps) {
+      for (const [srcRepo, deps] of Object.entries(opts.declaredRepoDeps)) {
+        for (const depRepo of deps) {
+          if (depRepo === srcRepo) continue;
+          let set = repoDeps.get(srcRepo);
+          if (!set) { set = new Set<string>(); repoDeps.set(srcRepo, set); }
+          set.add(depRepo);
+        }
+      }
+    }
     for (const r of results) {
       const srcRepo = repoOf(r.filePath);
       if (srcRepo === undefined) continue;
       for (const rel of r.relationships) {
         if (rel.predicate !== 'IMPORTS') continue;
-        const mod = typeof rel.dstName === 'string' ? rel.dstName : '';
+        // Prefer the raw specifier when the parser preserved it: a relative import
+        // (./x, ../x) is intra-repo by construction and can NEVER denote another
+        // repo's package, so packageOf rejects it and it seeds no cross-repo dep.
+        // Only bare/package specifiers (@scope/name, name) can. Falls back to the
+        // flattened stem for imports without a raw specifier (no behavior change).
+        const mod = typeof rel.importRaw === 'string' ? rel.importRaw
+                  : typeof rel.dstName === 'string' ? rel.dstName : '';
         const depRepo = mod ? packageOf(mod) : undefined;
         if (depRepo !== undefined && depRepo !== srcRepo) {
           let set = repoDeps.get(srcRepo);

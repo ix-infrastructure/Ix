@@ -15,7 +15,7 @@ import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
 import { loadIngestionModules } from './ingestion-loader.js';
 import { ensureWorkspaceId } from '../bootstrap.js';
-import { detectSystem, repoWorkspaceIdFor } from '../system.js';
+import { detectSystem, repoWorkspaceIdFor, lookupPackage } from '../system.js';
 import {
   deterministicId,
   transformIssue,
@@ -460,32 +460,18 @@ export async function ingestFiles(
   // sub-module / sub-path imports like "@babel/types/lib/x", "tokio::sync",
   // "sqlalchemy.orm", "github.com/org/repo/sub"). The resolver uses this to keep a
   // cross-repo edge only when the source repo actually imports the target repo.
+  // packageOf maps an import specifier to the member repo that publishes it
+  // (exact, lowercased stem, or a package-boundary prefix for scoped / sub-module
+  // / sub-path imports). declaredRepoDeps is the ground-truth member->member
+  // dependency graph from manifests; together they decide whether a cross-repo
+  // edge is dependency-backed. See lookupPackage for the matching rules.
   const packageRegistry = detectedSystem?.packageRegistry ?? {};
-  const packageEntries = Object.entries(packageRegistry);
-  const packageOf = (mod: string): string | undefined => {
-    if (!mod) return undefined;
-    // A RELATIVE / source-file import (./x, ../x, "core.ts", "lib/foo.js") is
-    // intra-repo — it must NOT match another member's package stem. (Without this,
-    // babel-types' relative `./core.ts` falsely matches the babel-core package,
-    // inventing a fake dependency that whitelists same-named-symbol false edges.)
-    // A package specifier is a bare name / namespaced path with no source-file
-    // extension and no leading dot/slash.
-    if (mod.startsWith('.') || mod.startsWith('/')) return undefined;
-    if (/\.(?:ts|tsx|js|jsx|mjs|cjs|py|pyi|rs|go|rb|java|ex|exs|c|h|cc|cpp|hpp|cs|scala|kt|swift)$/i.test(mod)) return undefined;
-    if (packageRegistry[mod]) return packageRegistry[mod];               // exact (full name or stem)
-    const lower = mod.toLowerCase();
-    if (packageRegistry[lower]) return packageRegistry[lower];           // lowercased stem
-    for (const [pkg, repo] of packageEntries) {                          // sub-path / submodule
-      if (mod.length > pkg.length && mod.startsWith(pkg)) {
-        const sep = mod[pkg.length];
-        if (sep === '/' || sep === '.' || sep === ':') return repo;
-      }
-    }
-    return undefined;
-  };
-  const resolveOpts = systemId ? { repoOf, packageOf } : undefined;
+  const packageOf = (mod: string): string | undefined => lookupPackage(packageRegistry, mod);
+  const declaredRepoDeps = detectedSystem?.repoDeps;
+  const resolveOpts = systemId ? { repoOf, packageOf, declaredRepoDeps } : undefined;
   if (systemId && debug) {
-    process.stderr.write(`[multi-repo] system "${detectedSystem!.name}" (${systemId}) members=${detectedSystem!.members.join(', ')} packages=${packageEntries.length}\n`);
+    const depCount = declaredRepoDeps ? Object.values(declaredRepoDeps).reduce((a, d) => a + d.length, 0) : 0;
+    process.stderr.write(`[multi-repo] system "${detectedSystem!.name}" (${systemId}) members=${detectedSystem!.members.join(', ')} packages=${Object.keys(packageRegistry).length} declaredDeps=${depCount}\n`);
   }
 
   const client = new IxClient(getEndpoint());

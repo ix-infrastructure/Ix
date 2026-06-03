@@ -37,6 +37,7 @@ func (s *Service) Run() {
       srcName: 'service.go',
       dstName: 'fmt',
       predicate: 'IMPORTS',
+      importRaw: 'fmt',
     });
   });
 
@@ -165,6 +166,7 @@ func Run(sched *scheduler.Scheduler) error {
       srcName: 'server.go',
       dstName: 'k8s.io/kubernetes/pkg/scheduler',
       predicate: 'IMPORTS',
+      importRaw: 'k8s.io/kubernetes/pkg/scheduler',
     });
     expect(result!.relationships).toContainEqual({
       srcName: 'Run',
