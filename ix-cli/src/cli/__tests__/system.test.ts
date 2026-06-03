@@ -76,3 +76,41 @@ describe("Maven name + declared-dependency graph", () => {
     expect(d.repoDeps["lib"]).toBeUndefined();
   });
 });
+
+describe("git-aware system detection (no flags, monorepo vs separate repos)", () => {
+  let base: string;
+  const mk = (rel: string) => fs.mkdirSync(nodePath.join(base, rel), { recursive: true });
+  const wf = (rel: string, c = "{}") => { const p = nodePath.join(base, rel); fs.mkdirSync(nodePath.dirname(p), { recursive: true }); fs.writeFileSync(p, c); };
+
+  beforeAll(() => {
+    base = fs.mkdtempSync(nodePath.join(os.tmpdir(), "ix-gitdet-"));
+    // A monorepo: one .git at the root, package dirs with manifests but no own .git.
+    mk("mono/.git");
+    wf("mono/packages/pkg-a/package.json", '{"name":"pkg-a"}');
+    wf("mono/packages/pkg-b/package.json", '{"name":"pkg-b"}');
+    // A repo with submodule-style git children directly under it.
+    mk("withsubs/.git");
+    wf("withsubs/package.json", '{"name":"withsubs"}');
+    mk("withsubs/sub-a/.git"); wf("withsubs/sub-a/package.json", '{"name":"sub-a"}');
+    mk("withsubs/sub-b/.git"); wf("withsubs/sub-b/package.json", '{"name":"sub-b"}');
+    // A plain folder (no .git) collecting two independently-"cloned" git repos.
+    mk("collection/repo-a/.git"); wf("collection/repo-a/package.json", '{"name":"repo-a"}');
+    mk("collection/repo-b/.git"); wf("collection/repo-b/package.json", '{"name":"repo-b"}');
+  });
+  afterAll(() => { try { fs.rmSync(base, { recursive: true, force: true }); } catch { /* ignore */ } });
+
+  it("treats a monorepo (one .git, package dirs) as a SINGLE repo", () => {
+    expect(detectSystem(nodePath.join(base, "mono"))).toBeUndefined();
+    expect(detectSystem(nodePath.join(base, "mono", "packages"))).toBeUndefined();
+  });
+
+  it("treats a repo WITH submodule git children as a single repo (not a system of submodules)", () => {
+    expect(detectSystem(nodePath.join(base, "withsubs"))).toBeUndefined();
+  });
+
+  it("treats a plain folder of independently-cloned repos as a multi-repo SYSTEM", () => {
+    const d = detectSystem(nodePath.join(base, "collection"));
+    expect(d).toBeTruthy();
+    expect(d!.members.sort()).toEqual(["repo-a", "repo-b"]);
+  });
+});

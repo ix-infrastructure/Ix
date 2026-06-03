@@ -38,6 +38,28 @@ function isRepoRoot(dir: string): boolean {
   }
 }
 
+/** A directory is its own git repository iff it contains a `.git` entry (a dir
+ *  for a normal clone, or a file for a submodule/worktree). This is the
+ *  ground-truth signal that a child is a DISTINCT repository — a monorepo's
+ *  package dirs never have their own .git (they share the root's). */
+function hasOwnGit(dir: string): boolean {
+  try { return fs.existsSync(nodePath.join(dir, ".git")); } catch { return false; }
+}
+
+/** True if `dir` or any ancestor is a git repository root. Used to tell a
+ *  monorepo's package dir (inside one .git) from a plain folder that happens to
+ *  collect several independently-cloned repos. */
+function isInsideGitRepo(dir: string): boolean {
+  let cur = nodePath.resolve(dir);
+  // Walk up to the filesystem root, checking each level for a .git.
+  while (true) {
+    if (hasOwnGit(cur)) return true;
+    const parent = nodePath.dirname(cur);
+    if (parent === cur) return false;
+    cur = parent;
+  }
+}
+
 /**
  * Published package name(s) for a member repo, read (pragmatically) from its
  * build manifest. These are matched against other members' imports to derive the
@@ -264,8 +286,27 @@ function buildRepoDeps(rootPath: string, members: string[], registry: Record<str
   return graph;
 }
 
-/** Returns the detected system, or undefined when `rootPath` is a single repo. */
+/**
+ * Returns the detected multi-repo system, or undefined when `rootPath` is a
+ * single repository (including a monorepo). The discriminator is GIT PROVENANCE,
+ * not directory layout, so `ix map <path>` needs no flags:
+ *
+ *   - >= 2 immediate children are each their OWN git repo  -> a real multi-repo
+ *     system (separately-cloned repos, possibly sharing a lib). Co-ingest them.
+ *   - `rootPath` is inside one git repo (a monorepo / single repo) with no
+ *     nested git-repo children -> ONE repository. Its package dirs are NOT
+ *     separate repos, so they are never split apart (this is what stops a
+ *     monorepo like babel from being shredded into 147 "systems").
+ *   - `rootPath` is not in any git repo -> fall back to manifest-based members
+ *     (a non-git folder that collects several projects).
+ */
 export function detectSystem(rootPath: string): DetectedSystem | undefined {
+  // If the mapped path is within a single git repository (its own .git or an
+  // ancestor's), it IS one repo — a monorepo's package dirs, or a repo with
+  // submodules, are never split into separate "repos". Only a plain folder
+  // (not itself in any git repo) that collects independently-cloned repos
+  // becomes a multi-repo system.
+  if (isInsideGitRepo(rootPath)) return undefined;
   let children: fs.Dirent[];
   try {
     children = fs.readdirSync(rootPath, { withFileTypes: true });
