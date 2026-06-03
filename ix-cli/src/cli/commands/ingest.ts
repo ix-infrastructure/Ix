@@ -459,19 +459,6 @@ export async function ingestFiles(
   const fileWorkspaceId = (relPath: string): string => systemId ? repoWorkspaceId(repoOf(relPath)) : workspaceId;
   const fileMultiRepo = (relPath: string) =>
     systemId ? { systemId, repoId: repoOf(relPath), repoWorkspaceOf } : undefined;
-  // The source_uri persisted by the patch builder is MEMBER-relative in a co-ingest
-  // (the repo-dir prefix is stripped so a member's identity matches solo ingest), so
-  // the baseline hash lookup must query member-relative uris to match what is stored.
-  // Single-repo: identical to toWorkspaceRelative. Member-relative paths can collide
-  // across members (app/src/x and lib/src/x both -> src/x); loadExistingHashes drops
-  // ambiguous uris so a colliding file is re-ingested rather than matched to the wrong
-  // member's hash (never a wrong skip).
-  const toSourceUri = (absPath: string): string => {
-    const rel = toWorkspaceRelative(absPath);
-    if (!systemId) return rel;
-    const slash = rel.indexOf('/');
-    return slash >= 0 ? rel.slice(slash + 1) : rel;
-  };
   // Cross-repo dependency gate: map an import module name to the member repo that
   // publishes that package (exact, or prefix at a package boundary for scoped /
   // sub-module / sub-path imports like "@babel/types/lib/x", "tokio::sync",
@@ -643,7 +630,7 @@ export async function ingestFiles(
     // so the cache wasn't cleared). Invalidate the cache so files are re-ingested.
     if (!opts.force && mtimeCache.size > 0) {
       const samplePaths = [...mtimeCache.keys()].slice(0, 5);
-      const sampleHashes = await loadExistingHashes(client, samplePaths, toSourceUri, debug);
+      const sampleHashes = await loadExistingHashes(client, samplePaths, toWorkspaceRelative, debug);
       if (sampleHashes.size === 0) {
         mtimeCache.clear();
         if (debug) process.stderr.write(`\n  DB reset detected — invalidating mtime cache\n`);
@@ -675,7 +662,7 @@ export async function ingestFiles(
     // Phase: hash lookup — only needed when mtime-changed files exist.
     let knownHashes: Map<string, string>;
     if (opts.force || mtimeChangedPaths.length > 0) {
-      knownHashes = await loadExistingHashes(client, opts.force ? filePaths : mtimeChangedPaths, toSourceUri, debug);
+      knownHashes = await loadExistingHashes(client, opts.force ? filePaths : mtimeChangedPaths, toWorkspaceRelative, debug);
       if (debug) process.stderr.write(`\n  Source hash lookup: ${knownHashes.size} known hashes (${mtimeChangedPaths.length} mtime-changed)\n`);
     } else {
       // All files are mtime-clean — skip server round-trip entirely.
@@ -1284,30 +1271,24 @@ export async function ingestFiles(
 // tracks files internally by absolute path (needed for fs reads), so this
 // helper converts to relative before the wire call and maps the server's
 // response back onto the caller's absolute keys.
-export async function loadExistingHashes(
-  client: Pick<IxClient, "getSourceHashes">,
+async function loadExistingHashes(
+  client: IxClient,
   filePaths: string[],
   toRelative: (absPath: string) => string,
   debug = false,
 ): Promise<Map<string, string>> {
   try {
-    // Map each candidate uri to its abs path, detecting collisions. The server's
-    // source-hashes route keys purely on source_uri, so in a co-ingest two members
-    // sharing a member-relative uri (app/src/x and lib/src/x both -> src/x) are
-    // indistinguishable on the wire. Drop those ambiguous uris entirely so a file is
-    // never matched to another member's hash (it is re-ingested instead — safe).
+    const relPaths: string[] = new Array(filePaths.length);
     const relToAbs = new Map<string, string>();
-    const ambiguous = new Set<string>();
-    for (const abs of filePaths) {
+    for (let i = 0; i < filePaths.length; i++) {
+      const abs = filePaths[i];
       const rel = toRelative(abs);
-      if (relToAbs.has(rel)) ambiguous.add(rel);
-      else relToAbs.set(rel, abs);
+      relPaths[i] = rel;
+      relToAbs.set(rel, abs);
     }
-    const relPaths = [...relToAbs.keys()].filter(rel => !ambiguous.has(rel));
     const serverHashes = await client.getSourceHashes(relPaths);
     const out = new Map<string, string>();
     for (const [rel, hash] of serverHashes) {
-      if (ambiguous.has(rel)) continue;
       const abs = relToAbs.get(rel);
       if (abs !== undefined) out.set(abs, hash);
     }
