@@ -79,8 +79,19 @@ export function readPackageNames(dir: string): string[] {
   const mix = read("mix.exs");                                        // Elixir
   if (mix) { const m = mix.match(/app:\s*:(\w+)/); if (m) add(m[1]); }
 
-  const pom = read("pom.xml");                                        // Java (best-effort)
-  if (pom) { const m = pom.match(/<artifactId>([^<]+)<\/artifactId>/); if (m) add(m[1]); }
+  const pom = read("pom.xml");                                        // Java / Maven
+  if (pom) {
+    // The module's OWN artifactId is a direct <project> child; it must not be
+    // shadowed by the <parent> ref or by a <dependency>'s artifactId, so strip
+    // those sections before taking the first artifactId.
+    const stripped = pom
+      .replace(/<parent>[\s\S]*?<\/parent>/g, "")
+      .replace(/<dependencyManagement>[\s\S]*?<\/dependencyManagement>/g, "")
+      .replace(/<dependencies>[\s\S]*?<\/dependencies>/g, "")
+      .replace(/<build>[\s\S]*?<\/build>/g, "");
+    const m = stripped.match(/<artifactId>([^<]+)<\/artifactId>/);
+    if (m) add(m[1]);
+  }
 
   try {                                                               // Ruby gemspec
     for (const f of fs.readdirSync(dir)) {
@@ -91,6 +102,89 @@ export function readPackageNames(dir: string): string[] {
   } catch { /* ignore */ }
 
   return [...names];
+}
+
+const PACKAGE_SOURCE_EXT =
+  /\.(?:ts|tsx|js|jsx|mjs|cjs|py|pyi|rs|go|rb|java|ex|exs|c|h|cc|cpp|hpp|cs|scala|kt|swift)$/i;
+
+/**
+ * Resolve an import/dependency identifier to the member repo that publishes it,
+ * using the registry. Single source of truth shared by the import-matching gate
+ * (packageOf) and the declared-dependency graph. Rejects relative specifiers and
+ * source-file paths; treats a single ':' as a protocol (node:fs) not a package
+ * boundary, only Rust's '::' (tokio::sync) is. Matches exact, lowercased stem,
+ * then a package-boundary prefix (scoped/sub-path/sub-module imports).
+ */
+export function lookupPackage(registry: Record<string, string>, mod: string): string | undefined {
+  if (!mod) return undefined;
+  if (mod.startsWith(".") || mod.startsWith("/")) return undefined;
+  if (PACKAGE_SOURCE_EXT.test(mod)) return undefined;
+  if (registry[mod]) return registry[mod];
+  const lower = mod.toLowerCase();
+  if (registry[lower]) return registry[lower];
+  for (const pkg in registry) {
+    if (mod.length > pkg.length && mod.startsWith(pkg)) {
+      const sep = mod[pkg.length];
+      if (sep === "/" || sep === ".") return registry[pkg];
+      if (sep === ":" && mod[pkg.length + 1] === ":") return registry[pkg];
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Declared dependency identifiers from a member's build manifest (the ground-truth
+ * dependency graph). Parsed per ecosystem: npm dependencies, Cargo [dependencies],
+ * go.mod require, Maven <dependency> artifactIds, Gradle, pyproject/poetry. These
+ * are matched against member published names to build the inter-repo dep graph,
+ * which is more robust than inferring deps from import matching alone (e.g. Java's
+ * Maven artifactId never appears in `import com.google.common.*`).
+ */
+export function readPackageDeps(dir: string): string[] {
+  const deps = new Set<string>();
+  const read = (f: string): string | null => {
+    try { return fs.readFileSync(nodePath.join(dir, f), "utf8"); } catch { return null; }
+  };
+  const add = (n: unknown) => { if (typeof n === "string" && n.trim()) deps.add(n.trim()); };
+
+  const pkg = read("package.json");                                  // JS / TS
+  if (pkg) { try {
+    const j = JSON.parse(pkg);
+    for (const s of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"])
+      if (j[s] && typeof j[s] === "object") for (const k of Object.keys(j[s])) add(k);
+  } catch { /* ignore */ } }
+
+  const cargo = read("Cargo.toml");                                  // Rust
+  if (cargo) {
+    for (const sect of cargo.matchAll(/\[(?:dev-|build-)?dependencies(?:\.[^\]\n]+)?\]([\s\S]*?)(?:\n\[|$)/g)) {
+      for (const dm of sect[1].matchAll(/^\s*([A-Za-z0-9_-]+)\s*(?:=|\.)/gm)) add(dm[1]);
+    }
+  }
+
+  const gomod = read("go.mod");                                      // Go
+  if (gomod) {
+    for (const m of gomod.matchAll(/^\s*require\s+(\S+)\s+v/gm)) add(m[1]);
+    for (const blk of gomod.matchAll(/require\s*\(([\s\S]*?)\)/g))
+      for (const dm of blk[1].matchAll(/^\s*(\S+)\s+v/gm)) add(dm[1]);
+  }
+
+  const pom = read("pom.xml");                                       // Java / Maven
+  if (pom) for (const m of pom.matchAll(/<dependency>[\s\S]*?<artifactId>([^<]+)<\/artifactId>[\s\S]*?<\/dependency>/g)) add(m[1]);
+
+  const gradle = read("build.gradle") ?? read("build.gradle.kts");   // Java / Kotlin / Gradle
+  if (gradle) {
+    for (const m of gradle.matchAll(/project\(['"]:?([^'"]+)['"]\)/g)) add(m[1].split(":").pop());
+    for (const m of gradle.matchAll(/['"][\w.-]+:([\w.-]+):[^'"]+['"]/g)) add(m[1]);
+  }
+
+  const pyproj = read("pyproject.toml");                             // Python
+  if (pyproj) {
+    for (const m of pyproj.matchAll(/^\s*["']?([A-Za-z0-9_.-]+)["']?\s*(?:[><=~!^]|=\s*["'])/gm)) add(m[1]);
+    for (const blk of pyproj.matchAll(/dependencies\s*=\s*\[([\s\S]*?)\]/g))
+      for (const dm of blk[1].matchAll(/["']([A-Za-z0-9_.-]+)/g)) add(dm[1]);
+  }
+
+  return [...deps];
 }
 
 /**
@@ -146,6 +240,28 @@ export interface DetectedSystem {
   members: string[];
   /** Published package name -> member repo dir, for cross-repo dependency gating. */
   packageRegistry: Record<string, string>;
+  /**
+   * Ground-truth inter-member dependency graph (member dir -> member dirs it
+   * declares a dependency on), read from each member's manifest dependency list
+   * and matched to member published names. Seeds the resolver's cross-repo gate
+   * so genuine cross-repo edges survive even when import-to-package matching
+   * can't bridge the gap (e.g. Java's Maven artifactId vs `com.google.common.*`).
+   */
+  repoDeps: Record<string, string[]>;
+}
+
+/** Member dir -> set of member dirs it declares a dependency on (intra-system only). */
+function buildRepoDeps(rootPath: string, members: string[], registry: Record<string, string>): Record<string, string[]> {
+  const graph: Record<string, string[]> = {};
+  for (const m of members) {
+    const set = new Set<string>();
+    for (const dep of readPackageDeps(nodePath.join(rootPath, m))) {
+      const owner = lookupPackage(registry, dep);
+      if (owner !== undefined && owner !== m) set.add(owner);
+    }
+    if (set.size > 0) graph[m] = [...set];
+  }
+  return graph;
 }
 
 /** Returns the detected system, or undefined when `rootPath` is a single repo. */
@@ -162,11 +278,13 @@ export function detectSystem(rootPath: string): DetectedSystem | undefined {
     .map(c => c.name);
   if (members.length < 2) return undefined;
   const abs = nodePath.resolve(rootPath).split(nodePath.sep).join("/");
+  const packageRegistry = buildPackageRegistry(rootPath, members);
   return {
     systemId: stableId(`system:${abs}`),
     name: nodePath.basename(abs),
     members,
-    packageRegistry: buildPackageRegistry(rootPath, members),
+    packageRegistry,
+    repoDeps: buildRepoDeps(rootPath, members, packageRegistry),
   };
 }
 

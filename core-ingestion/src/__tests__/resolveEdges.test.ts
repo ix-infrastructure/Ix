@@ -756,5 +756,26 @@ describe('resolveEdges', () => {
       const cross = edges.filter(e => repoOf(e.srcFilePath) !== repoOf(e.dstFilePath));
       expect(cross).toEqual([]);
     });
+
+    it('keeps a cross-repo edge via the declared-dependency graph when import-matching cannot bridge it (e.g. Java artifactId vs package namespace)', () => {
+      // packageOf can never resolve the import (simulates Maven artifactId vs
+      // `import com.x.*`), but the manifest declares repo-b depends on repo-a.
+      const onlyCall = fileResult('repo-b/src/index.ts', SupportedLanguages.TypeScript,
+        [entity('run', SupportedLanguages.TypeScript)],
+        [{ srcName: 'run', dstName: 'coreFn', predicate: 'CALLS' }]);
+      const edges = resolveEdges([onlyCall, coreFile()], undefined, undefined,
+        { repoOf, packageOf: () => undefined, declaredRepoDeps: { 'repo-b': ['repo-a'] } });
+      const cross = edges.filter(e => repoOf(e.srcFilePath) !== repoOf(e.dstFilePath));
+      expect(cross.find(e => e.predicate === 'CALLS')).toMatchObject({ srcName: 'run', dstName: 'coreFn' });
+    });
+
+    it('still drops it when neither import-matching nor declared deps back the dependency', () => {
+      const onlyCall = fileResult('repo-b/src/index.ts', SupportedLanguages.TypeScript,
+        [entity('run', SupportedLanguages.TypeScript)],
+        [{ srcName: 'run', dstName: 'coreFn', predicate: 'CALLS' }]);
+      const edges = resolveEdges([onlyCall, coreFile()], undefined, undefined,
+        { repoOf, packageOf: () => undefined });
+      expect(edges.filter(e => repoOf(e.srcFilePath) !== repoOf(e.dstFilePath))).toEqual([]);
+    });
   });
 });

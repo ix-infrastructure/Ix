@@ -2275,6 +2275,11 @@ export function resolveEdges(
     // dependency-backed). Absent (single-repo ingest) => no gating, no change.
     repoOf?: (filePath: string) => string | undefined;
     packageOf?: (moduleName: string) => string | undefined;
+    // Ground-truth member->member dependency graph from build manifests (npm deps,
+    // Cargo [dependencies], go.mod require, Maven <dependency>, ...). Seeds the
+    // cross-repo gate so genuine edges survive even where import-to-package matching
+    // can't bridge the gap (e.g. Java's Maven artifactId vs `import com.google...`).
+    declaredRepoDeps?: Record<string, string[]>;
   },
 ): ResolvedEdge[] {
   // Provide a default no-op stats bag when caller passes none (backward compat).
@@ -2290,6 +2295,18 @@ export function resolveEdges(
   let repoDeps: Map<string, Set<string>> | undefined;
   if (repoOf && packageOf) {
     repoDeps = new Map<string, Set<string>>();
+    // Seed from the ground-truth declared-dependency graph (manifest deps). This
+    // is the robust signal: it catches deps that import-matching misses (Java).
+    if (opts?.declaredRepoDeps) {
+      for (const [srcRepo, deps] of Object.entries(opts.declaredRepoDeps)) {
+        for (const depRepo of deps) {
+          if (depRepo === srcRepo) continue;
+          let set = repoDeps.get(srcRepo);
+          if (!set) { set = new Set<string>(); repoDeps.set(srcRepo, set); }
+          set.add(depRepo);
+        }
+      }
+    }
     for (const r of results) {
       const srcRepo = repoOf(r.filePath);
       if (srcRepo === undefined) continue;
