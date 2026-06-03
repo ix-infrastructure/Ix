@@ -457,6 +457,9 @@ export async function ingestFiles(
   const repoWorkspaceOf = systemId ? (relPath: string) => repoWorkspaceId(repoOf(relPath)) : undefined;
   // Per-file workspace id + multi-repo context fed to buildPatchWithResolution.
   const fileWorkspaceId = (relPath: string): string => systemId ? repoWorkspaceId(repoOf(relPath)) : workspaceId;
+  // The workspace_id a file's nodes are folded under (same value the patch builder
+  // stamps on source.workspaceId) — used to scope the baseline hash lookup per file.
+  const sourceWorkspaceIdOf = (absPath: string): string => fileWorkspaceId(toWorkspaceRelative(absPath));
   const fileMultiRepo = (relPath: string) =>
     systemId ? { systemId, repoId: repoOf(relPath), repoWorkspaceOf } : undefined;
   // Cross-repo dependency gate: map an import module name to the member repo that
@@ -630,7 +633,7 @@ export async function ingestFiles(
     // so the cache wasn't cleared). Invalidate the cache so files are re-ingested.
     if (!opts.force && mtimeCache.size > 0) {
       const samplePaths = [...mtimeCache.keys()].slice(0, 5);
-      const sampleHashes = await loadExistingHashes(client, samplePaths, toWorkspaceRelative, debug);
+      const sampleHashes = await loadExistingHashes(client, samplePaths, toWorkspaceRelative, sourceWorkspaceIdOf, debug);
       if (sampleHashes.size === 0) {
         mtimeCache.clear();
         if (debug) process.stderr.write(`\n  DB reset detected — invalidating mtime cache\n`);
@@ -662,7 +665,7 @@ export async function ingestFiles(
     // Phase: hash lookup — only needed when mtime-changed files exist.
     let knownHashes: Map<string, string>;
     if (opts.force || mtimeChangedPaths.length > 0) {
-      knownHashes = await loadExistingHashes(client, opts.force ? filePaths : mtimeChangedPaths, toWorkspaceRelative, debug);
+      knownHashes = await loadExistingHashes(client, opts.force ? filePaths : mtimeChangedPaths, toWorkspaceRelative, sourceWorkspaceIdOf, debug);
       if (debug) process.stderr.write(`\n  Source hash lookup: ${knownHashes.size} known hashes (${mtimeChangedPaths.length} mtime-changed)\n`);
     } else {
       // All files are mtime-clean — skip server round-trip entirely.
@@ -1271,26 +1274,29 @@ export async function ingestFiles(
 // tracks files internally by absolute path (needed for fs reads), so this
 // helper converts to relative before the wire call and maps the server's
 // response back onto the caller's absolute keys.
-async function loadExistingHashes(
-  client: IxClient,
+export async function loadExistingHashes(
+  client: Pick<IxClient, "getSourceHashes">,
   filePaths: string[],
   toRelative: (absPath: string) => string,
+  workspaceIdOf: (absPath: string) => string,
   debug = false,
 ): Promise<Map<string, string>> {
   try {
-    const relPaths: string[] = new Array(filePaths.length);
-    const relToAbs = new Map<string, string>();
-    for (let i = 0; i < filePaths.length; i++) {
-      const abs = filePaths[i];
-      const rel = toRelative(abs);
-      relPaths[i] = rel;
-      relToAbs.set(rel, abs);
-    }
-    const serverHashes = await client.getSourceHashes(relPaths);
+    // Each file is matched against its OWN workspace's stored hash. The server keys
+    // source_uri globally, so without the workspace_id two members (or two unrelated
+    // repos) sharing a relative path + content would collide; pairing (workspace_id,
+    // uri) makes the baseline collision-free (Ix#225 gap 3).
+    const entries = filePaths.map(abs => ({ abs, uri: toRelative(abs), ws: workspaceIdOf(abs) }));
+    const uris = [...new Set(entries.map(e => e.uri))];
+    const workspaceIds = [...new Set(entries.map(e => e.ws).filter(Boolean))];
+    const rows = await client.getSourceHashes(uris, workspaceIds);
+    const sep = "\u0000";
+    const index = new Map<string, string>();
+    for (const r of rows) index.set(`${r.workspaceId ?? ""}${sep}${r.uri}`, r.hash);
     const out = new Map<string, string>();
-    for (const [rel, hash] of serverHashes) {
-      const abs = relToAbs.get(rel);
-      if (abs !== undefined) out.set(abs, hash);
+    for (const e of entries) {
+      const hash = index.get(`${e.ws}${sep}${e.uri}`);
+      if (hash !== undefined) out.set(e.abs, hash);
     }
     return out;
   } catch (err) {
