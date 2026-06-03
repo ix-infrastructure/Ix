@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
-import { resolveFileOrEntity, isRawId } from "../resolve.js";
+import { resolveFileOrEntity, isRawId, activeReadScope } from "../resolve.js";
 import type { ResolvedEntity } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { renderSection, renderKeyValue, renderResolvedHeader, colorizeKind } from "../ui.js";
@@ -93,6 +93,7 @@ export async function pickTraceTarget(
     limit: 50,
     kind: "config_entry",
     nameOnly: true,
+    ...activeReadScope(),
   }))
     .filter((node: any) => isExactSymbolMatch(node, symbol))
     .filter((node: any, index: number, all: any[]) =>

@@ -4,7 +4,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { absoluteFromSourceUri, getEndpoint, resolveWorkspaceRoot } from "../config.js";
-import { resolveEntityFull } from "../resolve.js";
+import { resolveEntityFull, activeReadScope } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { isFileStale } from "../stale.js";
 import { relativePath } from "../format.js";
@@ -255,16 +255,18 @@ async function tryFilenameMatch(
 ): Promise<Array<{ name: string; path: string }>> {
   const basename = path.basename(target);
   const hasExtension = path.extname(basename) !== "";
+  // Scope to the active workspace / co-ingest system server-side, like trySymbolMatch.
+  const scope = activeReadScope();
 
   // Strategy 1: Search with the exact target (may include extension)
-  let nodes = await client.search(basename, { limit: 20, kind: "file" });
+  let nodes = await client.search(basename, { limit: 20, kind: "file", ...scope });
 
   // Strategy 2: If bare name (no extension), also search with common extensions
   // to avoid being crowded out by unrelated results
   if (!hasExtension && !filterMatches(nodes, basename).length) {
     const extensions = [".scala", ".ts", ".tsx", ".py", ".rs", ".go", ".java", ".js", ".md"];
     for (const ext of extensions) {
-      const extNodes = await client.search(basename + ext, { limit: 5, kind: "file" });
+      const extNodes = await client.search(basename + ext, { limit: 5, kind: "file", ...scope });
       const extMatches = filterMatches(extNodes, basename);
       if (extMatches.length > 0) {
         nodes = [...extNodes, ...nodes];
