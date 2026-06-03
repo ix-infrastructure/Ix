@@ -2499,8 +2499,20 @@ export function resolveEdges(
     return narrowed;
   }
 
+  // An import targets a file in a compatible language. modNameToFiles matches by
+  // stem alone, so without this a Python `import select` would resolve to a Rust
+  // `select.rs` (observed in cross-language co-ingest). JS and TS are one family
+  // (TS imports JS/.d.ts); everything else must match exactly. Mirrors the
+  // same-language guard already on the global symbol fallback.
+  const importLanguageCompatible = (src: SupportedLanguages, dst: SupportedLanguages | undefined): boolean => {
+    if (dst === undefined || src === dst) return true;
+    const jsTs = (l: SupportedLanguages) => l === SupportedLanguages.JavaScript || l === SupportedLanguages.TypeScript;
+    return jsTs(src) && jsTs(dst);
+  };
+
   function resolveImportTargets(srcFilePath: string, srcLanguage: SupportedLanguages, modName: unknown): string[] {
-    const importMatches = modNameToFiles(modName, srcFilePath);
+    const importMatches = modNameToFiles(modName, srcFilePath)
+      .filter(fp => importLanguageCompatible(srcLanguage, fileLanguage.get(fp)));
     if (srcLanguage !== SupportedLanguages.Go || importMatches.length <= 1) return importMatches;
     return narrowGoImportCandidates(srcFilePath, modName, importMatches, files => {
       const anchor = pickGoPackageAnchor(files);
