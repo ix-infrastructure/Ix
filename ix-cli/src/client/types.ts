@@ -193,10 +193,8 @@ export interface PatchCommitResult {
 }
 
 export interface CapabilitiesResponse {
-  repoSplitterEndpoint?: string;
-  // Always present on memory-layer servers that ship the proFeaturesEnabled
-  // field (added 2026-05-15). Optional in the type because older backends
-  // pre-date the field — clients should treat absence as "unknown" rather
-  // than "false" to avoid breaking against older deployments.
+  // Optional because older backends pre-date this field — clients should
+  // treat absence as "unknown" rather than "false" to stay compatible with
+  // older deployments.
   proFeaturesEnabled?: boolean;
 }
