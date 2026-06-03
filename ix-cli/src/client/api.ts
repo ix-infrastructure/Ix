@@ -211,10 +211,11 @@ export class IxClient {
     return new Map(Object.entries(result));
   }
 
-  async map(opts?: { full?: boolean; workspaceId?: string }): Promise<any> {
-    // /v1/map reads snake_case keys (full, branch_id, workspace_id) off the raw JSON body.
+  async map(opts?: { full?: boolean; workspaceId?: string; systemId?: string }): Promise<any> {
+    // /v1/map reads snake_case keys (full, branch_id, workspace_id, system_id) off the raw JSON body.
     const body: Record<string, unknown> = { full: opts?.full ?? false };
     if (opts?.workspaceId) body.workspace_id = opts.workspaceId;
+    if (opts?.systemId) body.system_id = opts.systemId;
     const resp = await fetch(`${this.endpoint}/v1/map`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

@@ -7,6 +7,7 @@ import { roundFloat } from "../format.js";
 import { bootstrap, resolveWorkspaceId } from "../bootstrap.js";
 import { formatFetchError } from "../errors.js";
 import { ingestFiles } from "./ingest.js";
+import { detectSystem } from "../system.js";
 import { getRemoteRunner, isCloudReady } from "../remote.js";
 
 export interface MapRegion {
@@ -131,6 +132,9 @@ Examples:
     )
     .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; verbose?: boolean; silent?: boolean }) => {
       const cwd = pathArg ? resolve(pathArg) : process.cwd();
+      // Auto-detect a multi-repo system (>= 2 child repo roots). When present we
+      // scope the map to its system_id; otherwise it's an ordinary single-repo map.
+      const systemId = detectSystem(cwd)?.systemId;
 
       const silent = opts.silent === true || opts.format === "silent";
 
@@ -206,7 +210,7 @@ Examples:
 
       let result: MapResult;
       try {
-        result = await client.map({ full: opts.full, workspaceId: resolveWorkspaceId(cwd) }) as MapResult;
+        result = await client.map({ full: opts.full, workspaceId: systemId ? undefined : resolveWorkspaceId(cwd), systemId }) as MapResult;
       } catch (err: any) {
         if (mapInterval) { clearInterval(mapInterval); process.stderr.write('\r' + ' '.repeat(60) + '\r'); }
         console.error(chalk.red("Error:"), formatFetchError(err));
