@@ -18,7 +18,7 @@ export function registerExplainCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Prefer symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--raw", "Show raw metadata dump (legacy format)")
     .addHelpText("after", "\nExamples:\n  ix explain IngestionService\n  ix explain expand --path memory-layer\n  ix explain verify_token --kind function --format json\n  ix explain IxClient --raw")
     .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: string; format: string; raw?: boolean }) => {

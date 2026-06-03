@@ -17,7 +17,7 @@ export function registerCallersCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")
     .option("--limit <n>", "Max results to show", "50")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", "\nExamples:\n  ix callers verify_token\n  ix callers processPayment --format json\n  ix callers parse --kind method --limit 20")
     .action(async (symbol: string, opts: { kind?: string; pick?: string; limit: string; format: string }) => {
       const client = new IxClient(getEndpoint());
@@ -106,7 +106,7 @@ export function registerCallersCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")
     .option("--limit <n>", "Max results to show", "50")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", "\nExamples:\n  ix callees processPayment\n  ix callees parse --format json")
     .action(async (symbol: string, opts: { kind?: string; pick?: string; limit: string; format: string }) => {
       const client = new IxClient(getEndpoint());

@@ -13,7 +13,7 @@ export function registerHistoryCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Prefer symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", `\nExamples:
   ix history ix-cli/src/cli/commands/decide.ts
   ix history decide.ts

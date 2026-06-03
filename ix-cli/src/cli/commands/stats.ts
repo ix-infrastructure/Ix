@@ -3,18 +3,33 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
+import { llmLine, type LlmValue } from "../llm.js";
 
 export function registerStatsCommand(program: Command): void {
   program
     .command("stats")
     .description("Show graph statistics — node/edge counts by type")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .action(async (opts: { format: string }) => {
       const client = new IxClient(getEndpoint());
       const result = await client.stats({ workspaceId: resolveWorkspaceId() });
 
       if (opts.format === "json") {
         console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      if (opts.format === "llm") {
+        const nodeFields: Array<[string, LlmValue]> = [["total", result.nodes.total]];
+        for (const entry of result.nodes.byKind) {
+          if ((entry.count ?? 0) > 0) nodeFields.push([entry.kind ?? "unknown", entry.count]);
+        }
+        const edgeFields: Array<[string, LlmValue]> = [["total", result.edges.total]];
+        for (const entry of result.edges.byPredicate) {
+          if ((entry.count ?? 0) > 0) edgeFields.push([entry.predicate ?? "unknown", entry.count]);
+        }
+        console.log(llmLine("nodes", nodeFields));
+        console.log(llmLine("edges", edgeFields));
         return;
       }
 

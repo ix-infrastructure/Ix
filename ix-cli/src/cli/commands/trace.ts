@@ -334,7 +334,7 @@ export function registerTraceCommand(program: Command): void {
     .option("--cap <n>", "Cap number of nodes visited, per direction")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")
     .option("--path <path>", "Prefer symbols from files matching this path substring")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--include-tests", "Include test and fixture entities")
     .option("--tests-only", "Show only test and fixture entities")
     .addHelpText(

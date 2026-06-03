@@ -95,7 +95,7 @@ export function registerSavingsCommand(program: Command): void {
     .description("Show token savings from Ix usage")
     .option("--detail", "Include per-command breakdown")
     .option("--model <model>", "Pricing model (opus|sonnet|haiku|gpt-4o)", "opus")
-    .option("--format <fmt>", "Output format (text|json)", "text");
+    .option("--format <fmt>", "Output format (text|json|llm)", "text");
 
   cmd.action(async (opts: { detail?: boolean; model: string; format: string }) => {
     const client = new IxClient(getEndpoint());

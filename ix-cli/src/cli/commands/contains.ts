@@ -12,7 +12,7 @@ export function registerContainsCommand(program: Command): void {
     .option("--path <path>", "Filter target entity by file path (substring match)")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")
     .option("--limit <n>", "Max results to show", "50")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", "\nExamples:\n  ix contains IngestionService\n  ix contains auth.py --kind file --format json\n  ix contains MyClass --limit 20\n  ix contains package --path crates/regex/Cargo.toml")
     .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: string; limit: string; format: string }) => {
       const client = new IxClient(getEndpoint());

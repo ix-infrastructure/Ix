@@ -117,7 +117,7 @@ export function registerRankCommand(program: Command): void {
     .option("--path <path>", "Filter entities by source path substring")
     .option("--exclude-path <path>", "Exclude entities whose source path contains this substring")
     .option("--exclude-kind <kinds>", "Comma-separated kinds to exclude from results")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText(
       "after",
       `\nExamples:

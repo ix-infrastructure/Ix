@@ -11,7 +11,7 @@ export function registerImportsCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")
     .option("--limit <n>", "Max results to show", "50")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", "\nExamples:\n  ix imports auth.py\n  ix imports IngestionService --format json")
     .action(async (symbol: string, opts: { kind?: string; pick?: string; limit: string; format: string }) => {
       const client = new IxClient(getEndpoint());
@@ -30,7 +30,7 @@ export function registerImportsCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")
     .option("--limit <n>", "Max results to show", "50")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", "\nExamples:\n  ix imported-by AuthProvider\n  ix imported-by io.circe.Json --format json")
     .action(async (symbol: string, opts: { kind?: string; pick?: string; limit: string; format: string }) => {
       const client = new IxClient(getEndpoint());

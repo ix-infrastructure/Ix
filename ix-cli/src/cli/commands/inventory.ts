@@ -12,7 +12,7 @@ export function registerInventoryCommand(program: Command): void {
     .requiredOption("--kind <kind>", "Entity kind to list (class, method, function, file, module, etc.)")
     .option("--path <path>", "Filter by source file path substring")
     .option("--limit <n>", "Max results", "50")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", `
 Examples:
   ix inventory --kind class

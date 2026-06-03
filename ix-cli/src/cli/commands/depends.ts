@@ -156,7 +156,7 @@ export function registerDependsCommand(program: Command): void {
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")
     .option("--depth <n>", "Cap traversal depth")
     .option("--cap <n>", "Cap number of nodes visited")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--include-tests", "Include test and fixture entities in results")
     .option("--tests-only", "Show only test and fixture entities")
     .addHelpText("after", `\nExamples:

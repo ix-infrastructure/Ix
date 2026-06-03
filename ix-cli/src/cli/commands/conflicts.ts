@@ -7,7 +7,7 @@ export function registerConflictsCommand(program: Command): void {
   program
     .command("conflicts")
     .description("List detected conflicts")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .action(async (opts: { format: string }) => {
       const client = new IxClient(getEndpoint());
       const conflicts = await client.conflicts();

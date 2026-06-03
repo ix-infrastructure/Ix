@@ -4,7 +4,8 @@ import { IxClient, type ListSubsystemsOptions } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { roundFloat } from "../format.js";
-import { renderMapText, type MapResult } from "./map.js";
+import { llmLine, llmError } from "../llm.js";
+import { renderMapText, renderMapLlm, type MapRegion, type MapResult } from "./map.js";
 import {
   renderSubsystemExplanationJson,
   renderSubsystemExplanationText,
@@ -47,7 +48,7 @@ export function registerSubsystemsCommand(program: Command): void {
   program
     .command("subsystems [target]")
     .description("Show the persisted architectural map saved by 'ix map'")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--list",         "List stored subsystem health scores instead of the persisted architecture map")
     .option("--detailed",     "Include member files and enriched call/import edges (requires --list)")
     .option("--limit <n>",    "Max regions per page in detailed mode (default: 200 when auto-paging)")
@@ -172,6 +173,12 @@ Examples:
           ? scores.filter(s => s.level === parseInt(opts.level!, 10))
           : scores;
 
+        if (opts.format === "llm") {
+          console.log(llmLine("subsystems", [["count", filtered.length]]));
+          for (const s of filtered) console.log(renderSubsystemScoreLlm(s));
+          return;
+        }
+
         if (opts.format === "json") {
           if (opts.detailed) {
             console.log(JSON.stringify(buildDetailedListPayload(filtered, result.pagination), null, 2));
@@ -208,6 +215,11 @@ Examples:
         if (body) {
           if (opts.format === "json") {
             console.log(JSON.stringify(body, null, 2));
+            process.exitCode = 1;
+            return;
+          }
+          if (opts.format === "llm") {
+            console.log(renderSubsystemErrorLlm(body));
             process.exitCode = 1;
             return;
           }
@@ -254,6 +266,20 @@ Examples:
         return;
       }
 
+      if (opts.format === "llm") {
+        if (isScopedSubsystemResult(result)) {
+          renderScopedSubsystemLlm(result);
+        } else {
+          const mapResult = result as MapResult;
+          let regions: MapRegion[] = mapResult.regions;
+          if (opts.level) regions = regions.filter(r => r.level === parseInt(opts.level!, 10));
+          const minConf = parseFloat(opts.minConfidence ?? "0");
+          if (minConf > 0) regions = regions.filter(r => r.confidence >= minConf);
+          renderMapLlm(mapResult, regions);
+        }
+        return;
+      }
+
       if (isScopedSubsystemResult(result)) {
         renderScopedSubsystemText(result, Boolean(opts.verbose));
         return;
@@ -269,6 +295,75 @@ Examples:
         verbose: opts.verbose,
       });
     });
+}
+
+// ── llm renderers ────────────────────────────────────────────────────────────
+
+export function renderSubsystemScoreLlm(s: SubsystemScore): string {
+  return llmLine("region", [
+    ["id", s.region_id],
+    ["label", s.name],
+    ["kind", s.label_kind],
+    ["level", s.level],
+    ["files", s.file_count],
+    ["health", roundFloat(s.health_score)],
+    ["chunks_per_file", roundFloat(s.chunk_density)],
+    ["smells", s.smell_files > 0 ? s.smell_files : undefined],
+    ["confidence", roundFloat(s.confidence)],
+  ]);
+}
+
+function renderScopedSubsystemLlm(result: ScopedSubsystemResult): void {
+  const t = result.target;
+  console.log(llmLine("target", [
+    ["id", t.id],
+    ["label", t.label],
+    ["kind", t.label_kind],
+    ["level", t.level],
+    ["files", t.file_count],
+    ["confidence", roundFloat(t.confidence)],
+    ["cross_cutting", t.is_cross_cutting ? true : undefined],
+    ["parent", result.parent?.id],
+    ["signals", t.dominant_signals.length > 0 ? t.dominant_signals.join(",") : undefined],
+  ]));
+  console.log(llmLine("health", [
+    ["well_defined", result.summary.well_defined],
+    ["moderate", result.summary.moderate],
+    ["fuzzy", result.summary.fuzzy],
+    ["cross_cutting", result.summary.cross_cutting],
+  ]));
+  const emit = (region: ScopedSubsystemRegion): void => {
+    console.log(llmLine("region", [
+      ["id", region.id],
+      ["label", region.label],
+      ["kind", region.label_kind],
+      ["level", region.level],
+      ["files", region.file_count],
+      ["parent", region.parent_id],
+      ["confidence", roundFloat(region.confidence)],
+      ["cross_cutting", region.is_cross_cutting ? true : undefined],
+      ["signals", region.dominant_signals.length > 0 ? region.dominant_signals.join(",") : undefined],
+    ]));
+    for (const child of region.children ?? []) emit(child);
+  };
+  for (const child of result.children) emit(child);
+}
+
+function renderSubsystemErrorLlm(body: unknown): string {
+  if (isAmbiguousSubsystemResult(body)) {
+    return llmError("ambiguous_target", `Multiple regions matched "${body.target_query}".`, [
+      ["candidates", body.candidates.map(c => `${c.pick}:${c.label}`).join(",")],
+    ]);
+  }
+  if (isUnknownSubsystemTargetResult(body)) {
+    return llmError("unknown_target", body.message, [
+      ["suggestions", (body.suggestions ?? []).join(",") || undefined],
+    ]);
+  }
+  if (typeof body === "object" && body !== null && "error" in body) {
+    return llmError("error", String((body as { error: unknown }).error));
+  }
+  return llmError("error", "Request failed.");
 }
 
 function printScores(scores: SubsystemScore[]): void {
