@@ -104,6 +104,12 @@ export function buildPackageRegistry(rootPath: string, members: string[]): Recor
   const reg: Record<string, string> = {};
   const stemOwners = new Map<string, Set<string>>();
   const stemRepo = new Map<string, string>();
+  // Underscore-normalized aliases: Cargo turns a package name's hyphens into
+  // underscores for the crate identifier used in code (Cargo `grep-matcher` is
+  // imported as `grep_matcher`), so the registry must answer to both forms.
+  // Harmless for JS (its imports keep the hyphen, matched by the exact name).
+  const aliasOwners = new Map<string, Set<string>>();
+  const aliasRepo = new Map<string, string>();
   const stemOf = (name: string): string =>
     (name.split(/[/.:]/).filter(Boolean).pop() ?? name).toLowerCase();
   for (const m of members) {
@@ -113,10 +119,20 @@ export function buildPackageRegistry(rootPath: string, members: string[]): Recor
       if (!stemOwners.has(stem)) stemOwners.set(stem, new Set());
       stemOwners.get(stem)!.add(m);
       stemRepo.set(stem, m);
+      for (const variant of new Set([name.replace(/-/g, '_'), stem.replace(/-/g, '_')])) {
+        if (variant !== name && variant !== stem) {
+          if (!aliasOwners.has(variant)) aliasOwners.set(variant, new Set());
+          aliasOwners.get(variant)!.add(m);
+          aliasRepo.set(variant, m);
+        }
+      }
     }
   }
   for (const [stem, owners] of stemOwners) {
     if (owners.size === 1 && !(stem in reg)) reg[stem] = stemRepo.get(stem)!;  // unambiguous stem
+  }
+  for (const [alias, owners] of aliasOwners) {
+    if (owners.size === 1 && !(alias in reg)) reg[alias] = aliasRepo.get(alias)!;  // unambiguous underscore alias
   }
   return reg;
 }
