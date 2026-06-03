@@ -2550,13 +2550,19 @@ export function resolveEdges(
 
   // An import targets a file in a compatible language. modNameToFiles matches by
   // stem alone, so without this a Python `import select` would resolve to a Rust
-  // `select.rs` (observed in cross-language co-ingest). JS and TS are one family
-  // (TS imports JS/.d.ts); everything else must match exactly. Mirrors the
-  // same-language guard already on the global symbol fallback.
+  // `select.rs` (observed in cross-language co-ingest). Some languages are one
+  // family: JS+TS (TS imports JS/.d.ts) and C+C++ (a .h header is shared, and
+  // parseFile's content-based detection labels the same .h as `c` or `cpp`
+  // depending on whether it holds a struct or a class — so a C++ file including a
+  // C-classified header must still resolve). Everything else must match exactly.
+  const langFamily = (l: SupportedLanguages): string => {
+    if (l === SupportedLanguages.JavaScript || l === SupportedLanguages.TypeScript) return 'jsts';
+    if (l === SupportedLanguages.C || l === SupportedLanguages.CPlusPlus) return 'c';
+    return l;
+  };
   const importLanguageCompatible = (src: SupportedLanguages, dst: SupportedLanguages | undefined | null): boolean => {
     if (dst == null || src === dst) return true;
-    const jsTs = (l: SupportedLanguages) => l === SupportedLanguages.JavaScript || l === SupportedLanguages.TypeScript;
-    return jsTs(src) && jsTs(dst);
+    return langFamily(src) === langFamily(dst);
   };
 
   function resolveImportTargets(srcFilePath: string, srcLanguage: SupportedLanguages, modName: unknown): string[] {
