@@ -13,7 +13,7 @@ export function registerDoctorCommand(program: Command): void {
   program
     .command("doctor")
     .description("Check Ix system health — server, database, graph integrity")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .action(async (opts: { format: string }) => {
       const endpoint = getEndpoint();
       const client = new IxClient(endpoint);

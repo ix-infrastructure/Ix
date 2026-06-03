@@ -8,7 +8,7 @@ export function registerEntityCommand(program: Command): void {
   program
     .command("entity <id>")
     .description("Get entity details with claims and edges")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .action(async (id: string, opts: { format: string }) => {
       const client = new IxClient(getEndpoint());
       const resolvedId = await client.resolvePrefix(id);

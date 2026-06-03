@@ -405,7 +405,7 @@ export function registerDiffCommand(program: Command): void {
     .option("--content", "Show detailed attribute changes for each entity")
     .option("--limit <n>", "Max changes to return (default 100)")
     .option("--full", "Return all changes (no limit)")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Prefer symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")

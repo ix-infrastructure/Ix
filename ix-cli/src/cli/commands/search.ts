@@ -94,7 +94,7 @@ export function registerSearchCommand(program: Command): void {
     .option("--language <lang>", "Filter by language/file extension (e.g. scala, ts)")
     .option("--path <path>", "Boost results from files matching this path substring")
     .option("--as-of <rev>", "Search as of a specific revision")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--include-tests", "Include test and fixture entities in results")
     .option("--tests-only", "Show only test and fixture entities")
     .addHelpText("after", `\nRanking priority:

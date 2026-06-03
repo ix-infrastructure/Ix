@@ -7,6 +7,7 @@ import { resolveFileOrEntity, printResolved } from "../resolve.js";
 import { bucketByHierarchy, getSystemPath, formatSystemPath, hasMapData, type SystemPath } from "../hierarchy.js";
 import { inferRiskSemantics, humanizeLabel, type ImpactFacts, type RiskSemantics } from "../impact/risk-semantics.js";
 import { stripNulls } from "../format.js";
+import { llmLine, llmError } from "../llm.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "object", "trait", "interface"]);
 
@@ -18,7 +19,7 @@ export function registerImpactCommand(program: Command): void {
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)")
     .option("--depth <n>", "Expansion depth for callers/importers (default 1, max 3)", "1")
     .option("--limit <n>", "Max top-impacted members to show", "10")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText(
       "after",
       "\nExamples:\n  ix impact IngestionService\n  ix impact IngestionService --kind class\n  ix impact verify_token --format json\n  ix impact AuthProvider --limit 5"
@@ -31,18 +32,22 @@ export function registerImpactCommand(program: Command): void {
         const client = new IxClient(getEndpoint());
         const limit = parseInt(opts.limit, 10);
         const depth = Math.min(Math.max(parseInt(opts.depth, 10) || 1, 1), 3);
-        const isJson = opts.format === "json";
 
         const resolveOpts = { kind: opts.kind, pick: opts.pick ? parseInt(opts.pick, 10) : undefined };
         const target = await resolveFileOrEntity(client, symbol, resolveOpts);
-        if (!target) return;
+        if (!target) {
+          // The resolver already printed human guidance to stderr; for llm
+          // consumers emit a structured error record on stdout as well.
+          if (opts.format === "llm") console.log(llmError("unresolved_target", `No entity resolved for "${symbol}".`));
+          return;
+        }
 
-        if (!isJson) printResolved(target);
+        if (opts.format === "text") printResolved(target);
 
         if (CONTAINER_KINDS.has(target.kind)) {
-          await containerImpact(client, target, limit, depth, isJson);
+          await containerImpact(client, target, limit, depth, opts.format);
         } else {
-          await leafImpact(client, target, depth, isJson);
+          await leafImpact(client, target, depth, opts.format);
         }
       }
     );
@@ -192,6 +197,68 @@ function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+// ── llm rendering ────────────────────────────────────────────────────────────
+
+export function impactHeaderLlm(
+  target: { kind: string; name: string },
+  risk: RiskSemantics,
+  systemPath: Array<{ name: string; kind: string }>,
+): string[] {
+  const lines = [llmLine("impact", [
+    ["target", target.name],
+    ["kind", target.kind],
+    ["risk", risk.riskLevel],
+    ["category", risk.category],
+    ["system_path", systemPath.length > 0 ? systemPath.map((n) => n.name).join(",") : undefined],
+    ["summary", risk.riskSummary],
+  ])];
+  for (const b of risk.behaviorAtRisk) {
+    lines.push(llmLine("behavior", [["text", b]]));
+  }
+  return lines;
+}
+
+export function impactPropagationLlm(
+  buckets: Array<{ region: { name: string; kind: string }; members: unknown[] }>,
+  flow?: { flowName: string; count: number },
+): string[] {
+  const lines: string[] = [];
+  if (flow) {
+    lines.push(llmLine("flow", [["name", flow.flowName], ["count", flow.count]]));
+  }
+  const sorted = [...buckets].sort((a, b) => b.members.length - a.members.length);
+  for (const bucket of sorted) {
+    lines.push(llmLine("bucket", [
+      ["region", humanizeLabel(bucket.region.name)],
+      ["kind", bucket.region.kind],
+      ["count", bucket.members.length],
+    ]));
+  }
+  return lines;
+}
+
+export function impactTailLlm(
+  risk: RiskSemantics,
+  decisions: Array<{ name: string }>,
+  tasks: Array<{ name: string; status: string }>,
+  bugs: Array<{ name: string; status: string; severity: string }>,
+): string[] {
+  const lines: string[] = [];
+  if (risk.nextStep) {
+    lines.push(llmLine("next", [["text", risk.nextStep]]));
+  }
+  for (const d of decisions) {
+    lines.push(llmLine("decision", [["name", d.name]]));
+  }
+  for (const t of tasks) {
+    lines.push(llmLine("task", [["name", t.name], ["status", t.status]]));
+  }
+  for (const b of bugs) {
+    lines.push(llmLine("bug", [["name", b.name], ["status", b.status], ["severity", b.severity]]));
+  }
+  return lines;
+}
+
 // ── Container impact ─────────────────────────────────────────────────────────
 
 async function containerImpact(
@@ -199,8 +266,9 @@ async function containerImpact(
   target: { id: string; kind: string; name: string; resolutionMode: string },
   limit: number,
   depth: number,
-  isJson: boolean
+  format: string
 ): Promise<void> {
+  const isJson = format === "json";
   const diagnostics: string[] = [];
 
   const [containsResult, importersResult, dependentsResult, systemPath, decisionsResult, tasksResult, bugsResult] = await Promise.all([
@@ -331,6 +399,20 @@ async function containerImpact(
         2
       )
     );
+  } else if (format === "llm") {
+    const lines = [
+      ...impactHeaderLlm(target, risk, systemPathMapped),
+      llmLine("counts", [
+        ["members", members.length],
+        ["importers", directImporters.length],
+        ["dependents", directDependents.length],
+        ["member_callers", totalMemberCallers],
+      ]),
+      ...impactPropagationLlm(propagationBuckets, risk.flowPropagation),
+      ...topMembers.map((m) => llmLine("member", [["name", m.name], ["kind", m.kind], ["callers", m.callerCount]])),
+      ...impactTailLlm(risk, decisions, tasks, bugs),
+    ];
+    for (const line of lines) console.log(line);
   } else {
     // 1. Risk summary + At-risk behavior
     renderRiskHeader(target, risk, systemPath);
@@ -367,8 +449,9 @@ async function leafImpact(
   client: IxClient,
   target: { id: string; kind: string; name: string; resolutionMode: string },
   depth: number,
-  isJson: boolean
+  format: string
 ): Promise<void> {
+  const isJson = format === "json";
   const [callersResult, calleesResult, systemPath, decisionsResult, tasksResult, bugsResult] = await Promise.all([
     client.expand(target.id, { direction: "in", predicates: ["CALLS", "REFERENCES"], hops: depth }),
     client.expand(target.id, { direction: "out", predicates: ["CALLS", "REFERENCES"] }),
@@ -460,6 +543,21 @@ async function leafImpact(
         2
       )
     );
+  } else if (format === "llm") {
+    const toRef = (kind: string) => (n: any) =>
+      llmLine(kind, [["name", n.name || n.attrs?.name || "(unnamed)"], ["kind", n.kind]]);
+    const lines = [
+      ...impactHeaderLlm(target, risk, systemPathMapped),
+      llmLine("counts", [
+        ["callers", callersResult.nodes.length],
+        ["callees", calleesResult.nodes.length],
+      ]),
+      ...impactPropagationLlm(propagationBuckets, risk.flowPropagation),
+      ...callersResult.nodes.map(toRef("caller")),
+      ...calleesResult.nodes.map(toRef("callee")),
+      ...impactTailLlm(risk, decisions, tasks, bugs),
+    ];
+    for (const line of lines) console.log(line);
   } else {
     // 1. Risk summary + At-risk behavior
     renderRiskHeader(target, risk, systemPath);

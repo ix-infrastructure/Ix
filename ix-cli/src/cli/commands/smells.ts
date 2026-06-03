@@ -3,6 +3,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
+import { llmLine, llmError, type LlmValue } from "../llm.js";
 
 interface SmellCandidate {
   file_id: string;
@@ -30,7 +31,7 @@ export function registerSmellsCommand(program: Command): void {
   program
     .command("smells")
     .description("Detect architecture smells in the codebase")
-    .option("--format <fmt>",              "Output format (text|json)",        "text")
+    .option("--format <fmt>",              "Output format (text|json|llm)",    "text")
     .option("--orphan-max-connections <n>","Max connections for orphan files",  "0")
     .option("--god-module-chunks <n>",     "Min chunks for god module",         "20")
     .option("--god-module-fan <n>",        "Min fan-in/out for god module",     "15")
@@ -65,7 +66,8 @@ Examples:
         try {
           result = await client.listSmells({ workspaceId: resolveWorkspaceId() });
         } catch (err: any) {
-          console.error(chalk.red("Error:"), err.message);
+          if (opts.format === "llm") console.log(llmError("backend_error", err.message ?? "smells request failed"));
+          else console.error(chalk.red("Error:"), err.message);
           process.exitCode = 1;
           return;
         }
@@ -83,6 +85,10 @@ Examples:
           return;
         }
         const smells = result.smells ?? [];
+        if (opts.format === "llm") {
+          for (const line of renderSmellsListLlm(smells)) console.log(line);
+          return;
+        }
         if (smells.length === 0) {
           console.log(chalk.dim("No smell claims found. Run `ix smells` to detect."));
           return;
@@ -109,7 +115,8 @@ Examples:
           workspaceId:          resolveWorkspaceId(),
         }) as SmellReport;
       } catch (err: any) {
-        console.error(chalk.red("Error:"), err.message);
+        if (opts.format === "llm") console.log(llmError("backend_error", err.message ?? "smells request failed"));
+        else console.error(chalk.red("Error:"), err.message);
         process.exitCode = 1;
         return;
       }
@@ -129,6 +136,11 @@ Examples:
           })),
         };
         console.log(JSON.stringify(compact, null, 2));
+        return;
+      }
+
+      if (opts.format === "llm") {
+        for (const line of renderSmellsRunLlm(report)) console.log(line);
         return;
       }
 
@@ -173,6 +185,61 @@ function confidenceBar(conf: number): string {
   const bar    = "█".repeat(filled) + "░".repeat(5 - filled);
   const color  = conf >= 0.75 ? chalk.red : conf >= 0.5 ? chalk.yellow : chalk.dim;
   return color(bar);
+}
+
+/** Render `ix smells --list` claims as llm records. */
+export function renderSmellsListLlm(smells: any[]): string[] {
+  const lines = [llmLine("smells", [["count", smells.length], ["version", "smell_v1"]])];
+  for (const s of smells) {
+    lines.push(llmLine("smell", [
+      ["kind", s.smell],
+      ["entity", s.entity_id?.slice(0, 12)],
+      ["confidence", s.confidence],
+      ["version", s.inference_version],
+    ]));
+  }
+  return lines;
+}
+
+/** Render a fresh `ix smells` detection run as llm records, highest-confidence first. */
+export function renderSmellsRunLlm(report: SmellReport): string[] {
+  const lines = [llmLine("smells", [["rev", report.rev], ["count", report.count], ["version", "smell_v1"]])];
+  const sorted = [...report.candidates].sort((a, b) => b.confidence - a.confidence);
+  for (const c of sorted) {
+    lines.push(llmLine("smell", [
+      ["kind", c.smell],
+      ["file", c.file],
+      ["confidence", c.confidence],
+      ...signalFields(c.smell, c.signals),
+    ]));
+  }
+  return lines;
+}
+
+/**
+ * Structured signal fields per smell kind for the llm format. Mirrors the
+ * fields shown in text mode. A god_module's chunk count is dropped when 0
+ * (uncomputed / no signal); fan-in/out are the defining signals and kept.
+ */
+function signalFields(smellKind: string, signals: Record<string, unknown>): Array<[string, LlmValue]> {
+  const num = (v: unknown): LlmValue =>
+    typeof v === "number" || typeof v === "string" ? v : undefined;
+  switch (smellKind) {
+    case "has_smell.orphan_file":
+      return [["connections", num(signals["connectivity"]) ?? 0]];
+    case "has_smell.god_module": {
+      const chunks = num(signals["chunks"]);
+      return [
+        ["chunks", chunks === 0 ? undefined : chunks],
+        ["fan_in", num(signals["fan_in"])],
+        ["fan_out", num(signals["fan_out"])],
+      ];
+    }
+    case "has_smell.weak_component_member":
+      return [["neighbors", num(signals["neighbor_count"]) ?? 0]];
+    default:
+      return [];
+  }
 }
 
 function formatSignals(smellKind: string, signals: Record<string, unknown>): string {

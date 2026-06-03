@@ -8,7 +8,7 @@ export function registerStatusCommand(program: Command): void {
   program
     .command("status")
     .description("Show Ix backend health and status")
-    .option("--format <fmt>", "Output format (text|json)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--root <dir>", "Workspace root directory")
     .action(async (opts: { format: string; root?: string }) => {
       const client = new IxClient(getEndpoint());

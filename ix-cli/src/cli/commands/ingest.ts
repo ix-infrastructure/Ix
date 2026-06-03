@@ -375,7 +375,7 @@ export function registerIngestCommand(program: Command): void {
     .option('--since <date>', 'Only fetch items updated after this date (ISO 8601)')
     .option('--limit <n>', 'Max items per category (default 50)', '50')
     .option('--force', 'Force re-ingest even if files are unchanged (useful after parser upgrades)')
-    .option('--format <fmt>', 'Output format (text|json)', 'text')
+    .option('--format <fmt>', 'Output format (text|json|llm)', 'text')
     .option('--root <dir>', 'Workspace root directory')
     .option('--debug', 'Show phase timing breakdown', false)
     .option('--lang <langs>', 'Comma-separated languages to include (e.g. cpp,c or typescript). Aliases: c++=cpp, c#=csharp, py=python, ts=typescript, js=javascript')
