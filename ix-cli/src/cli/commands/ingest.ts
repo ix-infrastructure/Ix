@@ -455,8 +455,31 @@ export async function ingestFiles(
   const fileWorkspaceId = (relPath: string): string => systemId ? repoWorkspaceId(repoOf(relPath)) : workspaceId;
   const fileMultiRepo = (relPath: string) =>
     systemId ? { systemId, repoId: repoOf(relPath), repoWorkspaceOf } : undefined;
+  // Cross-repo dependency gate: map an import module name to the member repo that
+  // publishes that package (exact, or prefix at a package boundary for scoped /
+  // sub-module / sub-path imports like "@babel/types/lib/x", "tokio::sync",
+  // "sqlalchemy.orm", "github.com/org/repo/sub"). The resolver uses this to keep a
+  // cross-repo edge only when the source repo actually imports the target repo.
+  const packageRegistry = detectedSystem?.packageRegistry ?? {};
+  const packageEntries = Object.entries(packageRegistry);
+  const packageOf = (mod: string): string | undefined => {
+    if (!mod) return undefined;
+    if (packageRegistry[mod]) return packageRegistry[mod];               // exact (full name or stem)
+    const lower = mod.toLowerCase();
+    if (packageRegistry[lower]) return packageRegistry[lower];           // lowercased stem
+    const noExt = lower.replace(/\.[a-z0-9]+$/, '');                     // parser may keep "types.ts"
+    if (noExt !== lower && packageRegistry[noExt]) return packageRegistry[noExt];
+    for (const [pkg, repo] of packageEntries) {                          // sub-path / submodule
+      if (mod.length > pkg.length && mod.startsWith(pkg)) {
+        const sep = mod[pkg.length];
+        if (sep === '/' || sep === '.' || sep === ':') return repo;
+      }
+    }
+    return undefined;
+  };
+  const resolveOpts = systemId ? { repoOf, packageOf } : undefined;
   if (systemId && debug) {
-    process.stderr.write(`[multi-repo] system "${detectedSystem!.name}" (${systemId}) members=${detectedSystem!.members.join(', ')}\n`);
+    process.stderr.write(`[multi-repo] system "${detectedSystem!.name}" (${systemId}) members=${detectedSystem!.members.join(', ')} packages=${packageEntries.length}\n`);
   }
 
   const client = new IxClient(getEndpoint());
@@ -813,7 +836,7 @@ export async function ingestFiles(
         setCurrentWork(`resolve+commit batch ending ${nodePath.basename(batch[batch.length - 1].filePath)}`);
 
         const resolveStart = performance.now();
-        const resolvedEdges = resolveEdgesFn!(batch.map(f => f.parsed), resolveStats, globalIndex);
+        const resolvedEdges = resolveEdgesFn!(batch.map(f => f.parsed), resolveStats, globalIndex, resolveOpts);
         resolveEdgesMs = Math.round(performance.now() - resolveStart);
         const batchEdgesByFile = new Map<string, any[]>();
         for (const edge of resolvedEdges) {
@@ -882,7 +905,7 @@ export async function ingestFiles(
       try {
         setCurrentWork(`resolve ${allParsed.length} files`);
         const resolveStart = performance.now();
-        const resolvedEdges = resolveEdgesFn!(allParsed.map(f => f.parsed), resolveStats, globalIndex);
+        const resolvedEdges = resolveEdgesFn!(allParsed.map(f => f.parsed), resolveStats, globalIndex, resolveOpts);
         resolveEdgesMs = Math.round(performance.now() - resolveStart);
         const edgesByFile = new Map<string, any[]>();
         for (const edge of resolvedEdges) {
