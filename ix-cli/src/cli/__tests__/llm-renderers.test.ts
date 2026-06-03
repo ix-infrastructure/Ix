@@ -54,6 +54,15 @@ describe("renderMapLlm", () => {
     expect(lines[1]).not.toContain("children=");
     expect(lines[1]).not.toContain("signals=");
     expect(lines[1]).not.toContain("parent=");
+    expect(lines[1]).not.toContain("crosscut=");
+  });
+
+  it("emits crosscut only when above the 0.01 threshold (parity with json)", () => {
+    const result: MapResult = { file_count: 1, region_count: 1, levels: 1, map_rev: 1, regions: [], hierarchy: [] };
+    const cross = captureLog(() => renderMapLlm(result, [region({ id: "x", label: "X", crosscut_score: 0.153 })]));
+    expect(cross[1]).toContain("crosscut=0.15");
+    const noCross = captureLog(() => renderMapLlm(result, [region({ id: "y", label: "Y", crosscut_score: 0.005 })]));
+    expect(noCross[1]).not.toContain("crosscut=");
   });
 });
 
