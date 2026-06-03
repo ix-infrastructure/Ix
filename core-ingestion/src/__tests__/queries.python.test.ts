@@ -28,6 +28,7 @@ def top_level():
       srcName: 'example.py',
       dstName: 'models',
       predicate: 'IMPORTS',
+      importRaw: '.models',
     });
     expect(result!.relationships).toContainEqual({
       srcName: 'example.py',
@@ -38,6 +39,7 @@ def top_level():
       srcName: 'example.py',
       dstName: 'package.helpers',
       predicate: 'IMPORTS',
+      importRaw: 'package.helpers',
     });
     expect(result!.relationships).toContainEqual({
       srcName: 'Service',
