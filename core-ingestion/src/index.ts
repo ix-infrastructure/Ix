@@ -2504,15 +2504,19 @@ export function resolveEdges(
   // `select.rs` (observed in cross-language co-ingest). JS and TS are one family
   // (TS imports JS/.d.ts); everything else must match exactly. Mirrors the
   // same-language guard already on the global symbol fallback.
-  const importLanguageCompatible = (src: SupportedLanguages, dst: SupportedLanguages | undefined): boolean => {
-    if (dst === undefined || src === dst) return true;
+  const importLanguageCompatible = (src: SupportedLanguages, dst: SupportedLanguages | undefined | null): boolean => {
+    if (dst == null || src === dst) return true;
     const jsTs = (l: SupportedLanguages) => l === SupportedLanguages.JavaScript || l === SupportedLanguages.TypeScript;
     return jsTs(src) && jsTs(dst);
   };
 
   function resolveImportTargets(srcFilePath: string, srcLanguage: SupportedLanguages, modName: unknown): string[] {
+    // fileLanguage only covers the current parse batch; cross-batch candidates
+    // come from the global stem index, so fall back to the extension-derived
+    // language (always available) — otherwise an undefined dst language would
+    // slip cross-language matches (e.g. a Python import -> a Rust/Elixir file).
     const importMatches = modNameToFiles(modName, srcFilePath)
-      .filter(fp => importLanguageCompatible(srcLanguage, fileLanguage.get(fp)));
+      .filter(fp => importLanguageCompatible(srcLanguage, fileLanguage.get(fp) ?? languageFromPath(fp)));
     if (srcLanguage !== SupportedLanguages.Go || importMatches.length <= 1) return importMatches;
     return narrowGoImportCandidates(srcFilePath, modName, importMatches, files => {
       const anchor = pickGoPackageAnchor(files);
@@ -2793,7 +2797,9 @@ export function resolveEdges(
           }
           const qualGlobalMatches = results
             .map(r => r.filePath)
-            .filter(fp => fp !== srcFilePath && fileDefinesQualifiedMember(fp, qualifierPart, memberPart));
+            .filter(fp => fp !== srcFilePath
+              && importLanguageCompatible(srcLanguage, fileLanguage.get(fp) ?? languageFromPath(fp))
+              && fileDefinesQualifiedMember(fp, qualifierPart, memberPart));
           if (qualGlobalMatches.length === 1) {
             const qfp = qualGlobalMatches[0];
             if (fileHasSymbol.get(qfp)?.has(memberPart)) {
