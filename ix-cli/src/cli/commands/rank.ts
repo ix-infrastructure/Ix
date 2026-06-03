@@ -3,8 +3,26 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
+import { llmLine } from "../llm.js";
 
 type Metric = "dependents" | "callers" | "importers" | "members";
+
+/** Render `ix rank` as llm records: a header line then one `entity` row per result (rank = line order). */
+export function renderRankLlm(
+  metric: string, kind: string, scope: string | null,
+  results: Array<{ name: string; kind: string; score: number }>,
+  evaluated: number, diagnostics: string[],
+): string[] {
+  const lines = [llmLine("rank", [
+    ["metric", metric], ["kind", kind], ["scope", scope ?? undefined],
+    ["evaluated", evaluated], ["returned", results.length],
+  ])];
+  for (const d of diagnostics) lines.push(llmLine("diagnostic", [["message", d]]));
+  for (const r of results) {
+    lines.push(llmLine("entity", [["name", r.name], ["kind", r.kind], ["score", r.score]]));
+  }
+  return lines;
+}
 
 const METRIC_CONFIG: Record<Metric, { direction: string; predicates: string[] }> = {
   dependents: { direction: "in", predicates: ["CALLS", "IMPORTS", "REFERENCES"] },
@@ -157,7 +175,9 @@ export function registerRankCommand(program: Command): void {
         const allNodes = await client.listByKind(opts.kind, { limit: 2000, workspaceId: resolveWorkspaceId() });
 
         if (allNodes.length === 0) {
-          if (isJson) {
+          if (opts.format === "llm") {
+            for (const line of renderRankLlm(metric, opts.kind, opts.path ?? null, [], 0, ["No entities found for the given kind."])) console.log(line);
+          } else if (isJson) {
             console.log(JSON.stringify({
               metric,
               kind: opts.kind,
@@ -185,7 +205,9 @@ export function registerRankCommand(program: Command): void {
             opts.excludePath ? `exclude-path "${opts.excludePath}"` : null,
             excludeKinds.length > 0 ? `exclude-kind "${excludeKinds.join(",")}"` : null,
           ].filter(Boolean).join(", ");
-          if (isJson) {
+          if (opts.format === "llm") {
+            for (const line of renderRankLlm(metric, opts.kind, opts.path ?? null, [], 0, [`No entities matched filters: ${filterDesc}.`])) console.log(line);
+          } else if (isJson) {
             console.log(JSON.stringify({
               metric,
               kind: opts.kind,
@@ -209,7 +231,9 @@ export function registerRankCommand(program: Command): void {
         const results = scored.slice(0, topN);
 
         // 7. Output
-        if (isJson) {
+        if (opts.format === "llm") {
+          for (const line of renderRankLlm(metric, opts.kind, opts.path ?? null, results.map(r => ({ name: r.name, kind: r.kind, score: r.score })), candidates.length, diagnostics)) console.log(line);
+        } else if (isJson) {
           console.log(JSON.stringify({
             metric,
             kind: opts.kind,

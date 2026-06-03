@@ -7,6 +7,12 @@ import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
 import { formatEdgeResults, relativePath } from "../format.js";
 import { resolveFileOrEntity, printResolved } from "../resolve.js";
 import { stderr } from "../stderr.js";
+import { llmLine, llmError } from "../llm.js";
+
+/** Emit a structured llm error for a failed resolution, or nothing for other formats. */
+function llmUnresolved(format: string, symbol: string): void {
+  if (format === "llm") console.log(llmError("unresolved_target", `No entity resolved for "${symbol}".`));
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -24,8 +30,8 @@ export function registerCallersCommand(program: Command): void {
       const limit = parseInt(opts.limit, 10);
       const resolveOpts = { kind: opts.kind, pick: opts.pick ? parseInt(opts.pick, 10) : undefined };
       const target = await resolveFileOrEntity(client, symbol, resolveOpts);
-      if (!target) return;
-      if (opts.format !== "json") printResolved(target);
+      if (!target) { llmUnresolved(opts.format, symbol); return; }
+      if (opts.format === "text") printResolved(target);
       // Use expand by entity ID to avoid aggregating results across all same-named entities
       const result = await client.expand(target.id, {
         direction: "in",
@@ -64,6 +70,20 @@ export function registerCallersCommand(program: Command): void {
           const textResults = allTextResults.slice(0, 10);
 
           if (textResults.length > 0) {
+            if (opts.format === "llm") {
+              console.log(llmLine("callers", [
+                ["target", target.name], ["source", "text"],
+                ["total", textResults.length], ["candidates", candidatesFound],
+              ]));
+              console.log(llmLine("diagnostic", [
+                ["code", "text_fallback_used"],
+                ["message", "No graph-backed CALLS/REFERENCES edges; showing text matches."],
+              ]));
+              for (const r of textResults) {
+                console.log(llmLine("ref", [["path", r.path], ["line", r.line], ["snippet", r.attrs?.snippet ?? ""]]));
+              }
+              return;
+            }
             if (opts.format === "json") {
               console.log(JSON.stringify({
                 results: textResults,
@@ -113,8 +133,8 @@ export function registerCallersCommand(program: Command): void {
       const calleeLimit = parseInt(opts.limit, 10);
       const resolveOpts = { kind: opts.kind, pick: opts.pick ? parseInt(opts.pick, 10) : undefined };
       const target = await resolveFileOrEntity(client, symbol, resolveOpts);
-      if (!target) return;
-      if (opts.format !== "json") printResolved(target);
+      if (!target) { llmUnresolved(opts.format, symbol); return; }
+      if (opts.format === "text") printResolved(target);
       // Use expand by entity ID to avoid aggregating results across all same-named entities
       const result = await client.expand(target.id, {
         direction: "out",

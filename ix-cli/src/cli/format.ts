@@ -1,5 +1,6 @@
 import chalk from "chalk";
 import { resolve } from "path";
+import { llmLine } from "./llm.js";
 
 export type ResultSource = "graph" | "text" | "graph+text" | "heuristic";
 
@@ -401,6 +402,49 @@ export function formatLocateResults(results: LocateResult[], format: string): vo
   }
 }
 
+/**
+ * Render edge-query results (callers/callees/contains/imports/imported-by) as
+ * llm records: a header line keyed by the relation, optional diagnostic lines,
+ * then one `ref` row per related entity. Unresolved targets carry resolved=false.
+ */
+export function renderEdgeResultsLlm(
+  nodes: any[], relation: string, symbol: string,
+  source?: ResultSource, diagnostics?: Diagnostic[]
+): string[] {
+  const isRawId = (s: string) =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(s) || /^[0-9a-f]{32,}$/i.test(s);
+  const refs = nodes.map((n: any) => {
+    const name = n.name || n.attrs?.name || "";
+    return {
+      resolved: !!name && !isRawId(name),
+      name,
+      kind: n.kind ?? undefined,
+      id: n.id ?? undefined,
+      path: relativePath(n.provenance?.source_uri ?? n.provenance?.sourceUri ?? n.attrs?.path ?? undefined),
+    };
+  });
+  const unresolved = refs.filter((r) => !r.resolved).length;
+  const lines = [llmLine(relation, [
+    ["target", symbol],
+    ["total", refs.length],
+    ["resolved", refs.length - unresolved],
+    ["unresolved", unresolved > 0 ? unresolved : undefined],
+    ["source", source && source !== "graph" ? source : undefined],
+  ])];
+  if (refs.length === 0 && (!diagnostics || diagnostics.length === 0)) {
+    lines.push(llmLine("diagnostic", [["code", "no_edges"], ["message", `No ${relation} edges found.`]]));
+  }
+  for (const d of diagnostics ?? []) {
+    lines.push(llmLine("diagnostic", [["code", d.code], ["message", d.message]]));
+  }
+  for (const ref of refs) {
+    lines.push(ref.resolved
+      ? llmLine("ref", [["name", ref.name], ["kind", ref.kind], ["id", ref.id?.slice(0, 8)], ["path", ref.path]])
+      : llmLine("ref", [["kind", ref.kind], ["id", ref.id?.slice(0, 8)], ["resolved", false]]));
+  }
+  return lines;
+}
+
 export function formatEdgeResults(
   nodes: any[], relation: string, symbol: string, format: string,
   resolvedTarget?: { id: string; kind: string; name: string; resolutionMode?: string },
@@ -410,6 +454,13 @@ export function formatEdgeResults(
   // Check for UUID-like names that indicate unresolved references
   const isRawId = (s: string) =>
     /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(s) || /^[0-9a-f]{32,}$/i.test(s);
+
+  if (format === "llm") {
+    for (const line of renderEdgeResultsLlm(nodes, relation, symbol, source, diagnostics)) {
+      console.log(line);
+    }
+    return;
+  }
 
   if (format === "json") {
     const results = nodes.map((n: any) => {
