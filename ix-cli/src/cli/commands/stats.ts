@@ -3,6 +3,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
+import { detectSystem } from "../system.js";
 
 export function registerStatsCommand(program: Command): void {
   program
@@ -11,7 +12,8 @@ export function registerStatsCommand(program: Command): void {
     .option("--format <fmt>", "Output format (text|json)", "text")
     .action(async (opts: { format: string }) => {
       const client = new IxClient(getEndpoint());
-      const result = await client.stats({ workspaceId: resolveWorkspaceId() });
+      const systemId = detectSystem(process.cwd())?.systemId;
+      const result = await client.stats({ workspaceId: systemId ? undefined : resolveWorkspaceId(), systemId });
 
       if (opts.format === "json") {
         console.log(JSON.stringify(result, null, 2));

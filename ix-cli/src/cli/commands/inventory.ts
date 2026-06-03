@@ -3,6 +3,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
+import { detectSystem } from "../system.js";
 import { relativePath } from "../format.js";
 
 export function registerInventoryCommand(program: Command): void {
@@ -30,7 +31,8 @@ Examples:
       // filtering (otherwise a capped fetch can truncate away the target before
       // the client-side filter below ever sees it). The client-side filter is
       // kept as a fallback for older servers that ignore the scope field.
-      let nodes = await client.listByKind(opts.kind, { limit, workspaceId: resolveWorkspaceId(), scope: opts.path });
+      const systemId = detectSystem(process.cwd())?.systemId;
+      let nodes = await client.listByKind(opts.kind, { limit, workspaceId: systemId ? undefined : resolveWorkspaceId(), scope: opts.path, systemId });
 
       if (opts.path) {
         nodes = nodes.filter((n) => {

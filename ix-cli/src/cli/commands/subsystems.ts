@@ -3,6 +3,7 @@ import chalk from "chalk";
 import { IxClient, type ListSubsystemsOptions } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
+import { detectSystem } from "../system.js";
 import { roundFloat } from "../format.js";
 import { renderMapText, type MapResult } from "./map.js";
 import {
@@ -105,6 +106,10 @@ Examples:
       explain?: boolean;
     }) => {
       const client = new IxClient(getEndpoint());
+      // Auto-detect a multi-repo system; scope by system_id (spanning all member
+      // repos) when present, otherwise the single-repo workspace_id.
+      const systemId = detectSystem(process.cwd())?.systemId;
+      const scope = { workspaceId: systemId ? undefined : resolveWorkspaceId(), systemId };
       const target = resolveSubsystemTarget(positionalTarget, opts.target);
       const pick = parsePickOption(opts.pick);
 
@@ -153,11 +158,11 @@ Examples:
       if (opts.list) {
         let result: SubsystemListResult;
         try {
-          result = await loadSubsystemScores(client, detailedQuery.value ?? {});
+          result = await loadSubsystemScores(client, detailedQuery.value ?? {}, scope);
           // Auto-trigger scoring if no persisted scores exist yet
           if (result.scores.length === 0) {
-            await client.scoreSubsystems({ workspaceId: resolveWorkspaceId() });
-            result = await loadSubsystemScores(client, detailedQuery.value ?? {});
+            await client.scoreSubsystems(scope);
+            result = await loadSubsystemScores(client, detailedQuery.value ?? {}, scope);
           }
         } catch (err: any) {
           console.error(chalk.red("Error:"), err.message);
@@ -201,7 +206,7 @@ Examples:
         result = await client.getSubsystemMap({
           target: target.value,
           pick: pick.value,
-          workspaceId: resolveWorkspaceId(),
+          ...scope,
         }) as MapResult;
       } catch (err: any) {
         const body = parseErrorBody(err);
@@ -229,9 +234,9 @@ Examples:
 
         let scoreResult: { scores?: SubsystemScore[] };
         try {
-          scoreResult = await client.listSubsystems({ workspaceId: resolveWorkspaceId() });
+          scoreResult = await client.listSubsystems(scope);
           if ((scoreResult.scores ?? []).length === 0) {
-            scoreResult = await client.scoreSubsystems({ workspaceId: resolveWorkspaceId() });
+            scoreResult = await client.scoreSubsystems(scope);
           }
         } catch (err: any) {
           console.error(chalk.red("Error:"), err.message);
@@ -418,9 +423,10 @@ function parseDetailedListQuery(opts: {
 async function loadSubsystemScores(
   client: IxClient,
   query: ListSubsystemsOptions,
+  scope: { workspaceId?: string; systemId?: string } = {},
 ): Promise<SubsystemListResult> {
   if (!query.detailed) {
-    const result = await client.listSubsystems({ workspaceId: resolveWorkspaceId() });
+    const result = await client.listSubsystems(scope);
     return { scores: result.scores ?? [], autoPaginated: false };
   }
 
@@ -428,6 +434,7 @@ async function loadSubsystemScores(
   if (explicitPage) {
     const page = await client.listSubsystems({
       ...query,
+      ...scope,
       limit: query.limit,
     });
     return {
@@ -452,6 +459,7 @@ async function loadSubsystemScores(
     }
     const page = await client.listSubsystems({
       ...query,
+      ...scope,
       limit: pageLimit,
       offset,
     });

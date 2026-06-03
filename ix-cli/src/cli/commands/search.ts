@@ -3,6 +3,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
+import { detectSystem } from "../system.js";
 import { formatNodes, relativePath } from "../format.js";
 import { scoreCandidate } from "../resolve.js";
 import { applyRoleFilter, roleHint } from "../role-filter.js";
@@ -125,12 +126,16 @@ Examples:
 
       // Fetch more results than requested so we can re-rank and trim
       const fetchLimit = Math.min(limit * 3, 60);
+      // Auto-detect a multi-repo system; when present, scope by system_id (which
+      // spans all member repos) instead of the single-repo workspace_id.
+      const systemId = detectSystem(process.cwd())?.systemId;
       const rawNodes = await client.search(term, {
         limit: fetchLimit,
         kind: opts.kind,
         language: opts.language,
         asOfRev: opts.asOf ? parseInt(opts.asOf, 10) : undefined,
-        workspaceId: resolveWorkspaceId(),
+        workspaceId: systemId ? undefined : resolveWorkspaceId(),
+        systemId,
       });
       const nodes = effectivePathFilter
         ? rawNodes.filter((node: any) => {

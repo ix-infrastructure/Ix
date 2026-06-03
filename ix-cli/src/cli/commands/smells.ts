@@ -3,6 +3,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
+import { detectSystem } from "../system.js";
 
 interface SmellCandidate {
   file_id: string;
@@ -59,11 +60,12 @@ Examples:
       list?: boolean;
     }) => {
       const client = new IxClient(getEndpoint());
+      const systemId = detectSystem(process.cwd())?.systemId;
 
       if (opts.list) {
         let result: any;
         try {
-          result = await client.listSmells({ workspaceId: resolveWorkspaceId() });
+          result = await client.listSmells({ workspaceId: systemId ? undefined : resolveWorkspaceId(), systemId });
         } catch (err: any) {
           console.error(chalk.red("Error:"), err.message);
           process.exitCode = 1;
@@ -106,7 +108,8 @@ Examples:
           godModuleChunks:      parseInt(opts.godModuleChunks, 10),
           godModuleFan:         parseInt(opts.godModuleFan, 10),
           weakMaxNeighbors:     parseInt(opts.weakMaxNeighbors, 10),
-          workspaceId:          resolveWorkspaceId(),
+          workspaceId:          systemId ? undefined : resolveWorkspaceId(),
+          systemId,
         }) as SmellReport;
       } catch (err: any) {
         console.error(chalk.red("Error:"), err.message);
