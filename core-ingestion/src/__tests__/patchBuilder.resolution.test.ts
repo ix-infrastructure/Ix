@@ -321,3 +321,80 @@ describe('buildPatch', () => {
     );
   });
 });
+
+// Ix#225 Path 1: a repo's persisted identity must be byte-identical whether it is
+// ingested standalone or as a member of a multi-repo system. Identity is folded over
+// the MEMBER-relative path (repo-dir prefix stripped) paired with the member's own
+// workspace_id, so `ix map svc-a` and `ix map <parent-of-svc-a>` produce the same
+// node ids, source_uri, and patch ids; and a cross-repo edge resolves onto the very
+// node the target repo's own ingest creates.
+describe('multi-repo co-ingest identity convergence', () => {
+  const WS_A = 'aaaaaaaa'; // svc-a's path-based workspace_id (same value in both modes)
+  const WS_B = 'bbbbbbbb';
+  const repoWorkspaceOf = (fp: string): string | undefined => {
+    const repo = fp.replace(/\\/g, '/').split('/')[0];
+    return repo === 'svc-a' ? WS_A : repo === 'svc-b' ? WS_B : undefined;
+  };
+  const ids = (patch: { ops: { type: string; id: string }[] }, type: string): string[] =>
+    patch.ops.filter(op => op.type === type).map(op => op.id).sort();
+
+  const svcAResult = (filePath: string): FileParseResult =>
+    fileResult(
+      filePath,
+      SupportedLanguages.TypeScript,
+      [entity('handler', SupportedLanguages.TypeScript, 'function')],
+      [{ srcName: 'handler', dstName: 'localHelper', predicate: 'CALLS' }],
+    );
+
+  it('produces byte-identical node/edge/patch ids and source_uri solo vs co-ingested', () => {
+    // Solo: filePath is already member-relative; no multiRepo context.
+    const solo = buildPatchWithResolution(svcAResult('src/index.ts'), 'h', WS_A, [], undefined, undefined);
+    // Co-ingest: filePath is repo-prefixed, multiRepo present, same member workspace_id.
+    const co = buildPatchWithResolution(
+      svcAResult('svc-a/src/index.ts'), 'h', WS_A, [],
+      undefined, { systemId: 'sys', repoId: 'svc-a', repoWorkspaceOf });
+
+    expect(ids(co, 'UpsertNode')).toEqual(ids(solo, 'UpsertNode'));
+    expect(ids(co, 'UpsertEdge')).toEqual(ids(solo, 'UpsertEdge'));
+    expect(co.patchId).toBe(solo.patchId);
+    expect(co.source.uri).toBe('src/index.ts'); // member-relative, NOT 'svc-a/src/index.ts'
+    expect(co.source.uri).toBe(solo.source.uri);
+  });
+
+  it('stamps systemId/repoId only in co-ingest, never solo', () => {
+    const solo = buildPatchWithResolution(svcAResult('src/index.ts'), 'h', WS_A, [], undefined, undefined);
+    const co = buildPatchWithResolution(
+      svcAResult('svc-a/src/index.ts'), 'h', WS_A, [],
+      undefined, { systemId: 'sys', repoId: 'svc-a', repoWorkspaceOf });
+    expect(co.source.systemId).toBe('sys');
+    expect(co.source.repoId).toBe('svc-a');
+    expect(solo.source.systemId).toBeUndefined();
+    expect(solo.source.repoId).toBeUndefined();
+  });
+
+  it('folds a cross-repo edge onto the exact node the target repo ingests standalone', () => {
+    // svc-a.handler CALLS util, resolved to svc-b/src/util.ts.
+    const src = fileResult(
+      'svc-a/src/index.ts', SupportedLanguages.TypeScript,
+      [entity('handler', SupportedLanguages.TypeScript, 'function')],
+      [{ srcName: 'handler', dstName: 'util', predicate: 'CALLS' }],
+    );
+    const resolved: ResolvedEdge[] = [{
+      srcFilePath: 'svc-a/src/index.ts', srcName: 'handler', predicate: 'CALLS',
+      dstName: 'util', dstFilePath: 'svc-b/src/util.ts', dstQualifiedKey: 'util',
+    }];
+    const co = buildPatchWithResolution(
+      src, 'h', WS_A, resolved, undefined,
+      { systemId: 'sys', repoId: 'svc-a', repoWorkspaceOf });
+    const callsDst = co.ops.find(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS')!.dst;
+
+    // svc-b's OWN standalone ingest of util in src/util.ts:
+    const svcbSolo = buildPatchWithResolution(
+      fileResult('src/util.ts', SupportedLanguages.TypeScript,
+        [entity('util', SupportedLanguages.TypeScript, 'function')], []),
+      'h2', WS_B, [], undefined, undefined);
+    const svcbUtilNode = svcbSolo.ops.find(op => op.type === 'UpsertNode' && op.name === 'util')!.id;
+
+    expect(callsDst).toBe(svcbUtilNode);
+  });
+});

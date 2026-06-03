@@ -78,6 +78,23 @@ export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.23', 'tree-sitter/1.22', 'tre
 // nodeId / edgeId / chunkId / computePatchId / legacyPatchId are produced by
 // makeIds(workspaceId) above so every id is scoped to its workspace.
 
+/**
+ * In a multi-repo co-ingest, file paths are workspace-relative AND repo-prefixed:
+ * the first path segment is the member repo directory (see `repoOf` in the CLI).
+ * Persisted identity (node / edge / chunk / patch ids and source_uri) is computed
+ * from the MEMBER-relative path (that prefix stripped) paired with the member's own
+ * workspace_id, so a repo's nodes are byte-identical whether it is ingested alone or
+ * as part of a system. Edge *matching* (resolvedEdges keyed on srcFilePath) still
+ * uses the full system-relative path, and repoWorkspaceOf is given the full path so
+ * it can identify the owning repo. Single-repo ingest (no multiRepo) is unchanged.
+ */
+function toMemberRelativePath(filePath: string, multiRepo?: MultiRepoContext): string {
+  if (!multiRepo) return filePath;
+  const norm = filePath.replace(/\\/g, '/');
+  const slash = norm.indexOf('/');
+  return slash >= 0 ? norm.slice(slash + 1) : norm;
+}
+
 // ---------------------------------------------------------------------------
 // Build a GraphPatchPayload from a FileParseResult
 // ---------------------------------------------------------------------------
@@ -89,7 +106,10 @@ export function buildPatch(
   previousSourceHash?: string,
   multiRepo?: MultiRepoContext,
 ): GraphPatchPayload {
-  const { filePath, entities, chunks, relationships } = result;
+  const { entities, chunks, relationships } = result;
+  // Identity is folded over the member-relative path (see toMemberRelativePath);
+  // in a single repo this is just result.filePath unchanged.
+  const filePath = toMemberRelativePath(result.filePath, multiRepo);
   const { nodeId, edgeId, chunkId, computePatchId, legacyPatchId } = makeIds(workspaceId);
   const ops: PatchOp[] = [];
 
@@ -351,19 +371,25 @@ export function buildPatchWithResolution(
     });
   }
 
-  const { filePath, entities, chunks, relationships } = result;
+  const { entities, chunks, relationships } = result;
+  // Edge matching keys on the full system-relative path (result.filePath); persisted
+  // identity is folded over the member-relative path so a member's nodes are
+  // byte-identical solo vs. co-ingested. Single-repo: identical to result.filePath.
+  const filePath = toMemberRelativePath(result.filePath, multiRepo);
   const { nodeId, edgeId, chunkId, computePatchId, legacyPatchId } = makeIds(workspaceId);
   // Resolve a dst node id in the namespace of the repo that OWNS dstFilePath.
   // For same-repo (or single-repo) dsts this is just nodeId; for a cross-repo
   // edge it folds with the dst repo's workspace_id so the id matches the node
-  // that repo's own ingest produced.
+  // that repo's own ingest produced. repoWorkspaceOf needs the full (repo-prefixed)
+  // dstFilePath to find the owning repo; the id itself uses the member-relative path.
   const crossRepoIdsCache = new Map<string, ReturnType<typeof makeIds>>();
   const dstNodeIdInRepo = (dstFilePath: string, key: string): string => {
     const ws = multiRepo?.repoWorkspaceOf?.(dstFilePath);
-    if (!ws || ws === workspaceId) return nodeId(dstFilePath, key);
+    const dstIdPath = toMemberRelativePath(dstFilePath, multiRepo);
+    if (!ws || ws === workspaceId) return nodeId(dstIdPath, key);
     let ids = crossRepoIdsCache.get(ws);
     if (!ids) { ids = makeIds(ws); crossRepoIdsCache.set(ws, ids); }
-    return ids.nodeId(dstFilePath, key);
+    return ids.nodeId(dstIdPath, key);
   };
   const ops: PatchOp[] = [];
 
