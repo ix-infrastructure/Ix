@@ -3,6 +3,30 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { relativePath, stripNulls } from "../format.js";
+import { llmLine } from "../llm.js";
+
+/** Render entity details as llm records: a header line then one `edge` row per edge. */
+export function renderEntityLlm(result: any): string[] {
+  const node = result.node;
+  const path = relativePath(node.provenance?.sourceUri ?? node.provenance?.source_uri);
+  const edges = result.edges ?? [];
+  const lines = [llmLine("entity", [
+    ["id", node.id],
+    ["kind", node.kind],
+    ["name", node.name || node.attrs?.name],
+    ["path", path],
+    ["rev", node.createdRev],
+    ["claims", (result.claims ?? []).length || undefined],
+    ["edges", edges.length || undefined],
+  ])];
+  for (const e of edges) {
+    lines.push(llmLine("edge", [
+      ["pred", e.predicate],
+      ["dst", typeof e.dst === "string" ? e.dst.slice(0, 8) : e.dst],
+    ]));
+  }
+  return lines;
+}
 
 export function registerEntityCommand(program: Command): void {
   program
@@ -15,6 +39,8 @@ export function registerEntityCommand(program: Command): void {
       const result = await client.entity(resolvedId);
       if (opts.format === "json") {
         console.log(JSON.stringify(compactEntity(result), null, 2));
+      } else if (opts.format === "llm") {
+        for (const line of renderEntityLlm(result)) console.log(line);
       } else {
         const name = result.node.name || (result.node.attrs as any)?.name || "(unnamed)";
         console.log(`Entity: ${result.node.id} ${chalk.bold(name)} (${result.node.kind})`);

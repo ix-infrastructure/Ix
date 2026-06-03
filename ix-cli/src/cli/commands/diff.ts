@@ -9,7 +9,18 @@ import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveFileOrEntity, resolveEntityFull, printResolved, looksFileLike, type ResolvedEntity } from "../resolve.js";
 import { formatDiff, relativePath, stripNulls } from "../format.js";
+import { llmLine, llmError } from "../llm.js";
 import { stderr } from "../stderr.js";
+
+/** Render a `--summary` diff as a single llm record. */
+function renderDiffSummaryLlm(result: any): string {
+  const s = result.summary || {};
+  return llmLine("diff", [
+    ["from", result.fromRev], ["to", result.toRev],
+    ["added", s.added || undefined], ["modified", s.modified || undefined],
+    ["removed", s.removed || undefined], ["total", result.total],
+  ]);
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -456,8 +467,11 @@ export function registerDiffCommand(program: Command): void {
           }
         } else {
           resolved = await resolveFileOrEntity(client, target, resolveOpts);
-          if (!resolved) return;
-          printResolved(resolved);
+          if (!resolved) {
+            if (opts.format === "llm") console.log(llmError("unresolved_target", `No entity resolved for "${target}".`));
+            return;
+          }
+          if (opts.format === "text") printResolved(resolved);
         }
         entityId = resolved.id;
       }
@@ -467,6 +481,8 @@ export function registerDiffCommand(program: Command): void {
 
         if (opts.format === "json") {
           console.log(JSON.stringify(compactDiffResult(result), null, 2));
+        } else if (opts.format === "llm") {
+          console.log(renderDiffSummaryLlm(result));
         } else {
           const s = result.summary || {};
           console.log(chalk.cyan.bold(`\nDiff: rev ${result.fromRev} → ${result.toRev}`));
@@ -621,6 +637,8 @@ export function registerDiffCommand(program: Command): void {
 
       if (opts.format === "json") {
         console.log(JSON.stringify(compactDiffResult(result), null, 2));
+      } else if (opts.format === "llm") {
+        formatDiff(result, "llm");
       } else {
         if (result.truncated) {
           console.log(chalk.yellow(`Showing ${result.changes.length} of ${result.totalChanges} changes. Use --full to see all.\n`));

@@ -130,9 +130,22 @@ export function formatContext(result: any, format: string): void {
   console.log();
 }
 
+/** Render a flat node list as llm `node` records. */
+export function renderNodesLlm(nodes: any[]): string[] {
+  return nodes.map((n) => llmLine("node", [
+    ["kind", n.kind],
+    ["id", typeof n.id === "string" ? n.id.slice(0, 8) : undefined],
+    ["name", n.name || n.attrs?.name || n.attrs?.title || "(unnamed)"],
+  ]));
+}
+
 export function formatNodes(nodes: any[], format: string): void {
   if (format === "json") {
     console.log(JSON.stringify(nodes, null, 2));
+    return;
+  }
+  if (format === "llm") {
+    for (const line of renderNodesLlm(nodes)) console.log(line);
     return;
   }
   if (nodes.length === 0) {
@@ -204,6 +217,17 @@ export function formatBugs(nodes: any[], format: string): void {
   }
 }
 
+/** Render patch records as llm `patch` lines. */
+export function renderPatchesLlm(patches: any[]): string[] {
+  return patches.map((p) => llmLine("patch", [
+    ["rev", p.rev],
+    ["id", p.patch_id?.slice(0, 12)],
+    ["intent", p.intent || undefined],
+    ["ts", p.timestamp],
+    ["source", relativePath(p.source?.uri) || undefined],
+  ]));
+}
+
 export function formatPatches(patches: any[], format: string): void {
   if (format === "json") {
     const compact = patches.map(p => ({
@@ -214,6 +238,10 @@ export function formatPatches(patches: any[], format: string): void {
       source: relativePath(p.source?.uri) || undefined,
     }));
     console.log(JSON.stringify(compact, null, 2));
+    return;
+  }
+  if (format === "llm") {
+    for (const line of renderPatchesLlm(patches)) console.log(line);
     return;
   }
   if (patches.length === 0) {
@@ -281,9 +309,30 @@ export function formatIntents(intents: any[], format: string): void {
   }
 }
 
+/** Render a revision diff as llm records: a header then one `change` row per entity change. */
+export function renderDiffLlm(result: any): string[] {
+  const changes = result.changes ?? [];
+  const lines = [llmLine("diff", [["from", result.fromRev], ["to", result.toRev], ["changes", changes.length]])];
+  for (const c of changes) {
+    const node = c.changeType === "removed" ? c.atFromRev : c.atToRev;
+    const name = node?.name || node?.attrs?.name || c.entityId?.substring(0, 8);
+    lines.push(llmLine("change", [
+      ["type", c.changeType],
+      ["kind", node?.kind],
+      ["name", name],
+      ["summary", c.summary || undefined],
+    ]));
+  }
+  return lines;
+}
+
 export function formatDiff(result: any, format: string): void {
   if (format === "json") {
     console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  if (format === "llm") {
+    for (const line of renderDiffLlm(result)) console.log(line);
     return;
   }
   console.log(chalk.cyan.bold(`\nDiff: rev ${result.fromRev} → ${result.toRev}`));
@@ -352,6 +401,17 @@ export interface TextResult {
   symbol_hint?: string;
 }
 
+/** Render lexical search hits as llm `match` records (one per line). */
+export function renderTextResultsLlm(results: TextResult[]): string[] {
+  return results.map((r) => llmLine("match", [
+    ["path", relativePath(r.path) ?? r.path],
+    ["line", r.line_start],
+    ["lang", r.language],
+    ["symbol", r.symbol_hint],
+    ["snippet", r.snippet.trim()],
+  ]));
+}
+
 export function formatTextResults(results: TextResult[], format: string): void {
   if (format === "json") {
     const compact = results.map(r => ({
@@ -359,6 +419,10 @@ export function formatTextResults(results: TextResult[], format: string): void {
       path: relativePath(r.path) ?? r.path,
     }));
     console.log(JSON.stringify(compact, null, 2));
+    return;
+  }
+  if (format === "llm") {
+    for (const line of renderTextResultsLlm(results)) console.log(line);
     return;
   }
   if (results.length === 0) {
@@ -531,9 +595,27 @@ export function formatEdgeResults(
   }
 }
 
+/** Render detected conflicts as llm `conflict` records. */
+export function renderConflictsLlm(conflicts: any[]): string[] {
+  const lines = [llmLine("conflicts", [["count", conflicts.length]])];
+  for (const c of conflicts) {
+    lines.push(llmLine("conflict", [
+      ["reason", c.reason],
+      ["recommendation", c.recommendation],
+      ["claim_a", c.claimA],
+      ["claim_b", c.claimB],
+    ]));
+  }
+  return lines;
+}
+
 export function formatConflicts(conflicts: any[], format: string): void {
   if (format === "json") {
     console.log(JSON.stringify(conflicts, null, 2));
+    return;
+  }
+  if (format === "llm") {
+    for (const line of renderConflictsLlm(conflicts)) console.log(line);
     return;
   }
   if (conflicts.length === 0) {
