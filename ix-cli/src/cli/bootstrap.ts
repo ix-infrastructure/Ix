@@ -26,15 +26,36 @@ export function ensureLocalConfig(): boolean {
   return true;
 }
 
+// Roots whose workspace_id was re-keyed to the path-based id during THIS process.
+// getOrCreateWorkspace is called more than once per `ix map` (bootstrap() registers,
+// then ingest resolves the id); the first call does the actual re-key, so without
+// this the second call would report migrated=false and the ingest would skip the
+// forced re-ingest. Keyed by resolved root path.
+const migratedRootsThisRun = new Set<string>();
+
 /**
  * Ensure the current directory (or given path) is registered as a workspace.
  * Returns the workspace name. Does nothing if already registered.
  */
-function getOrCreateWorkspace(cwd: string): { ws: WorkspaceConfig; created: boolean } {
+function getOrCreateWorkspace(cwd: string): { ws: WorkspaceConfig; created: boolean; migrated: boolean } {
   const rootPath = resolve(cwd);
   const config = loadConfig();
+  const pathId = workspaceIdForPath(rootPath);
   const existing = (config.workspaces ?? []).find(w => w.root_path === rootPath);
-  if (existing) return { ws: existing, created: false };
+  if (existing) {
+    // Migrate a legacy random workspace_id to the path-based id (Ix#225 gap 2) so
+    // an already-registered repo converges with co-ingest. This changes the
+    // workspace_id that node identity folds, so the next map must re-ingest under
+    // the new id (the caller forces that — see ingest's migration handling). Old
+    // nodes under the random id are left as orphans until a reset.
+    if (existing.workspace_id !== pathId) {
+      existing.workspace_id = pathId;
+      saveConfig(config);
+      migratedRootsThisRun.add(rootPath);
+      return { ws: existing, created: false, migrated: true };
+    }
+    return { ws: existing, created: false, migrated: migratedRootsThisRun.has(rootPath) };
+  }
 
   const workspaces = config.workspaces ?? [];
   const hasDefault = workspaces.some(w => w.default);
@@ -42,19 +63,29 @@ function getOrCreateWorkspace(cwd: string): { ws: WorkspaceConfig; created: bool
     // Path-based id (NOT random): a repo mapped standalone must get the same
     // workspace_id it gets as a member of a system, so its node identity is
     // byte-identical across both. Shared with repoWorkspaceIdFor via system.ts.
-    workspace_id: workspaceIdForPath(rootPath),
+    workspace_id: pathId,
     workspace_name: basename(rootPath),
     root_path: rootPath,
     default: !hasDefault,
   };
   config.workspaces = [...workspaces, ws];
   saveConfig(config);
-  return { ws, created: true };
+  return { ws, created: true, migrated: false };
 }
 
 export function ensureWorkspaceRegistered(cwd = process.cwd()): { registered: boolean; name: string } {
   const { ws, created } = getOrCreateWorkspace(cwd);
   return { registered: created, name: ws.workspace_name };
+}
+
+/**
+ * Like ensureWorkspaceId, but also reports whether the workspace_id was just
+ * migrated from a legacy random id to the path-based id. The map/ingest flow uses
+ * `migrated` to force a full re-ingest under the new id.
+ */
+export function ensureWorkspaceIdState(cwd = process.cwd()): { workspaceId: string; migrated: boolean } {
+  const { ws, migrated } = getOrCreateWorkspace(cwd);
+  return { workspaceId: ws.workspace_id, migrated };
 }
 
 /**

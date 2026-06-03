@@ -14,7 +14,7 @@ import { getEndpoint, resolveWorkspaceRoot } from '../config.js';
 import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
 import { loadIngestionModules } from './ingestion-loader.js';
-import { ensureWorkspaceId } from '../bootstrap.js';
+import { ensureWorkspaceIdState } from '../bootstrap.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage } from '../system.js';
 import {
   deterministicId,
@@ -432,7 +432,15 @@ export async function ingestFiles(
   const workspaceRoot = fs.statSync(resolvedPath).isDirectory()
     ? resolvedPath
     : nodePath.dirname(resolvedPath);
-  const workspaceId = ensureWorkspaceId(workspaceRoot);
+  const { workspaceId, migrated: workspaceMigrated } = ensureWorkspaceIdState(workspaceRoot);
+  if (workspaceMigrated) {
+    // Legacy random workspace_id was just re-keyed to the path-based id (Ix#225
+    // gap 2). Node identity folds the workspace_id, so the previously-ingested
+    // nodes live under the old id; force a full re-ingest under the new id.
+    process.stderr.write(
+      `Migrated workspace to a stable path-based id; re-ingesting this workspace once.\n`,
+    );
+  }
   const toWorkspaceRelative = (absPath: string): string => {
     // Force workspace-local POSIX separators so IDs are stable across OS.
     const rel = nodePath.relative(workspaceRoot, absPath);
@@ -625,7 +633,9 @@ export async function ingestFiles(
     // Phase: mtime pre-filter — skip readFileSync+sha256 for files whose mtime
     // is unchanged since the last successful ingest (common "ix map" re-run case).
     const projectRoot = fs.statSync(resolvedPath).isDirectory() ? resolvedPath : nodePath.dirname(resolvedPath);
-    const mtimeCache  = opts.force ? new Map<string, number>() : loadMtimeCache(projectRoot);
+    // A just-migrated workspace (new path-based id) has no nodes under the new id, so
+    // skip the mtime pre-filter and re-ingest everything, exactly like --force.
+    const mtimeCache  = (opts.force || workspaceMigrated) ? new Map<string, number>() : loadMtimeCache(projectRoot);
     const currentMtimes = new Map<string, number>();
 
     // DB-reset guard: if the mtime cache has entries but the server returns no hashes
