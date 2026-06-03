@@ -422,9 +422,13 @@ export async function ingestFiles(
   // The backend used to dereference provenance.source_uri against the host
   // filesystem (via a broad HOME bind mount). We now emit workspace-relative
   // paths as the canonical source_uri, plus a stable workspace_id (persisted in
-  // ~/.ix/config.yaml, NOT derived from the absolute path) that core-ingestion
-  // folds into every node id so two workspaces with the same relative layout do
-  // not collide. The backend treats both as opaque strings; it never reads host files.
+  // ~/.ix/config.yaml, derived from the workspace's absolute path) that
+  // core-ingestion folds into every node id so two workspaces with the same
+  // relative layout do not collide. The id is path-based (not random) so a repo
+  // mapped standalone gets the SAME workspace_id it gets as a member of a system
+  // (see workspaceIdForPath / repoWorkspaceIdFor), keeping its node identity
+  // byte-identical across both. The backend treats both as opaque strings; it
+  // never reads host files.
   const workspaceRoot = fs.statSync(resolvedPath).isDirectory()
     ? resolvedPath
     : nodePath.dirname(resolvedPath);

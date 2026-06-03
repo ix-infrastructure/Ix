@@ -1,11 +1,11 @@
 import { mkdirSync, existsSync, writeFileSync } from "node:fs";
 import { join, basename, resolve } from "node:path";
 import { homedir } from "node:os";
-import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import chalk from "chalk";
 import { IxClient } from "../client/api.js";
 import { getEndpoint, loadConfig, saveConfig, findWorkspaceForCwd, getDefaultWorkspace, type WorkspaceConfig } from "./config.js";
+import { workspaceIdForPath } from "./system.js";
 
 export interface BootstrapResult {
   createdConfig: boolean;
@@ -39,7 +39,10 @@ function getOrCreateWorkspace(cwd: string): { ws: WorkspaceConfig; created: bool
   const workspaces = config.workspaces ?? [];
   const hasDefault = workspaces.some(w => w.default);
   const ws: WorkspaceConfig = {
-    workspace_id: randomUUID().slice(0, 8),
+    // Path-based id (NOT random): a repo mapped standalone must get the same
+    // workspace_id it gets as a member of a system, so its node identity is
+    // byte-identical across both. Shared with repoWorkspaceIdFor via system.ts.
+    workspace_id: workspaceIdForPath(rootPath),
     workspace_name: basename(rootPath),
     root_path: rootPath,
     default: !hasDefault,
