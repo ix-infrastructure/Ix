@@ -1605,6 +1605,24 @@ export const R_QUERIES = `
   (#eq? @_src "source")) @import
 `;
 
+// HTML. Resource dependencies as imports (<script src>, <link href>, and
+// <a/img/iframe/source/use href|src>), and custom elements (hyphenated tag names
+// = web components) as definitions.
+export const HTML_QUERIES = `
+((script_element
+  (start_tag
+    (attribute (attribute_name) @_a (quoted_attribute_value (attribute_value) @import.source))))
+  (#eq? @_a "src")) @import
+
+((element
+  (start_tag (tag_name) @_t
+    (attribute (attribute_name) @_a (quoted_attribute_value (attribute_value) @import.source))))
+  (#match? @_t "^(link|a|img|iframe|source|use)$")
+  (#match? @_a "^(href|src)$")) @import
+
+((element (start_tag (tag_name) @name) (#match? @name "-")) @definition.class)
+`;
+
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TypeScript]: TYPESCRIPT_QUERIES,
   [SupportedLanguages.JavaScript]: JAVASCRIPT_QUERIES,
@@ -1630,5 +1648,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.SAS]: SAS_QUERIES,
   [SupportedLanguages.Elixir]: ELIXIR_QUERIES,
   [SupportedLanguages.Makefile]: MAKEFILE_QUERIES,
+  [SupportedLanguages.HTML]: HTML_QUERIES,
 };
  
