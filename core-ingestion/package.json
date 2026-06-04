@@ -17,7 +17,7 @@
     "test:watch": "vitest --pool threads"
   },
   "dependencies": {
-    "tree-sitter": "^0.21.0",
+    "tree-sitter": "^0.25.0",
     "tree-sitter-c": "^0.21.0",
     "tree-sitter-c-sharp": "^0.21.0",
     "tree-sitter-cpp": "^0.22.0",
@@ -33,6 +33,8 @@
   },
   "optionalDependencies": {
     "@davisvaughan/tree-sitter-r": "^1.2.0",
+    "@tree-sitter-grammars/tree-sitter-lua": "^0.2.0",
+    "tree-sitter-bash": "^0.21.0",
     "tree-sitter-elixir": "^0.3.5",
     "tree-sitter-haskell": "^0.23.1",
     "tree-sitter-kotlin": "^0.3.8",
