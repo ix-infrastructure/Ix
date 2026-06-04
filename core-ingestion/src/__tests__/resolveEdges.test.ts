@@ -777,5 +777,38 @@ describe('resolveEdges', () => {
         { repoOf, packageOf: () => undefined });
       expect(edges.filter(e => repoOf(e.srcFilePath) !== repoOf(e.dstFilePath))).toEqual([]);
     });
+
+    // Ambiguous cross-repo symbol: `coreFn` is defined identically in repo-a AND
+    // repo-c. A bare call from repo-b must fold onto the member repo-b DEPENDS on,
+    // not be skipped as ambiguous (which left it unresolved and the patch builder
+    // then fell back to a phantom same-file dst = a dangling edge). Ix#225.
+    const coreFileIn = (repo: string) =>
+      fileResult(`${repo}/src/core.ts`, SupportedLanguages.TypeScript, [
+        entity('coreFn', SupportedLanguages.TypeScript),
+      ]);
+    const bareCaller = () =>
+      fileResult('repo-b/src/index.ts', SupportedLanguages.TypeScript,
+        [entity('run', SupportedLanguages.TypeScript)],
+        [{ srcName: 'run', dstName: 'coreFn', predicate: 'CALLS' }]);
+
+    it('disambiguates an ambiguous cross-repo symbol via the declared dependency (repo-b depends on repo-a, not repo-c)', () => {
+      const edges = resolveEdges([bareCaller(), coreFileIn('repo-a'), coreFileIn('repo-c')], undefined, undefined,
+        { repoOf, packageOf: () => undefined, declaredRepoDeps: { 'repo-b': ['repo-a'] } });
+      const cross = edges.filter(e => e.predicate === 'CALLS' && repoOf(e.srcFilePath) !== repoOf(e.dstFilePath));
+      expect(cross).toHaveLength(1);
+      expect(cross[0]).toMatchObject({ srcName: 'run', dstName: 'coreFn', dstFilePath: 'repo-a/src/core.ts' });
+    });
+
+    it('stays under-connected (no cross-repo edge) when the source repo depends on BOTH defining repos (genuinely ambiguous)', () => {
+      const edges = resolveEdges([bareCaller(), coreFileIn('repo-a'), coreFileIn('repo-c')], undefined, undefined,
+        { repoOf, packageOf: () => undefined, declaredRepoDeps: { 'repo-b': ['repo-a', 'repo-c'] } });
+      expect(edges.filter(e => e.predicate === 'CALLS' && repoOf(e.srcFilePath) !== repoOf(e.dstFilePath))).toEqual([]);
+    });
+
+    it('emits no cross-repo edge to an ambiguous symbol when the source repo depends on NEITHER defining repo', () => {
+      const edges = resolveEdges([bareCaller(), coreFileIn('repo-a'), coreFileIn('repo-c')], undefined, undefined,
+        { repoOf, packageOf: () => undefined });
+      expect(edges.filter(e => e.predicate === 'CALLS' && repoOf(e.srcFilePath) !== repoOf(e.dstFilePath))).toEqual([]);
+    });
   });
 });

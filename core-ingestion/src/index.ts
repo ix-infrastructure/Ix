@@ -2345,6 +2345,26 @@ export function resolveEdges(
       }
     }
   }
+  // Disambiguate multiple candidates using the declared-dependency graph: a symbol
+  // defined identically in several members (e.g. two repos each export `init`)
+  // resolves to the one the SOURCE repo actually depends on. Same-repo and
+  // unknown-repo candidates are always kept; cross-repo candidates survive only if
+  // the source repo depends on their repo. This mirrors the post-resolution
+  // cross-repo gate below, but is applied DURING resolution so an ambiguous-by-name
+  // match folds onto the real cross-repo node instead of being skipped (which left
+  // the call unresolved -> a phantom same-file dst / dangling edge, Ix#225). No-op
+  // for single-repo ingests (no repoDeps) and for unambiguous matches (<= 1).
+  const narrowByRepoDeps = (candidates: string[], srcFilePath: string): string[] => {
+    if (!repoOf || !repoDeps || candidates.length <= 1) return candidates;
+    const sr = repoOf(srcFilePath);
+    if (sr === undefined) return candidates;
+    const kept = candidates.filter(fp => {
+      const dr = repoOf!(fp);
+      if (dr === undefined || dr === sr) return true;
+      return repoDeps!.get(sr)?.has(dr) === true;
+    });
+    return kept.length > 0 ? kept : candidates;
+  };
   // fileQKeys: seed from global index (cross-batch files), then batch entries override.
   // Mirrors the entityQKey computation in buildPatch so nodeIds match exactly.
   const fileQKeys = globalIndex
@@ -2921,7 +2941,7 @@ export function resolveEdges(
       for (const fp of importedFilePaths) {
         if (fileHasSymbol.get(fp)?.has(dstName)) importMatches.push(fp);
       }
-      const narrowedImportMatches = narrowCCandidates(importMatches, srcFilePath, srcLanguage, srcName, dstName);
+      const narrowedImportMatches = narrowByRepoDeps(narrowCCandidates(importMatches, srcFilePath, srcLanguage, srcName, dstName), srcFilePath);
 
       if (narrowedImportMatches.length === 1) {
         const fp = narrowedImportMatches[0];
@@ -2948,7 +2968,7 @@ export function resolveEdges(
       for (const fp of transitiveFilePaths) {
         if (fileHasSymbol.get(fp)?.has(dstName)) transitiveMatches.push(fp);
       }
-      const narrowedTransitiveMatches = narrowCCandidates(transitiveMatches, srcFilePath, srcLanguage, srcName, dstName);
+      const narrowedTransitiveMatches = narrowByRepoDeps(narrowCCandidates(transitiveMatches, srcFilePath, srcLanguage, srcName, dstName), srcFilePath);
 
       if (narrowedTransitiveMatches.length === 1) {
         const fp = narrowedTransitiveMatches[0];
@@ -2978,7 +2998,7 @@ export function resolveEdges(
       }
       stats.globalCandidateTotal += globalMatches.length;
 
-      const resolvedMatches = narrowCCandidates(globalMatches, srcFilePath, srcLanguage, srcName, dstName);
+      const resolvedMatches = narrowByRepoDeps(narrowCCandidates(globalMatches, srcFilePath, srcLanguage, srcName, dstName), srcFilePath);
 
       if (resolvedMatches.length === 1) {
         const fp = resolvedMatches[0];
