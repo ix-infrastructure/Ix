@@ -23,6 +23,7 @@ export enum SupportedLanguages {
   SAS = 'sas',
   Elixir = 'elixir',
   Makefile = 'makefile',
+  Haskell = 'haskell',
 }
 
 const EXT_MAP: Record<string, SupportedLanguages> = {
@@ -64,6 +65,8 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.exs':  SupportedLanguages.Elixir,
   '.mk':   SupportedLanguages.Makefile,
   '.makefile': SupportedLanguages.Makefile,
+  '.hs':   SupportedLanguages.Haskell,
+  '.lhs':  SupportedLanguages.Haskell,
 };
 
 export function languageFromPath(filePath: string): SupportedLanguages | null {

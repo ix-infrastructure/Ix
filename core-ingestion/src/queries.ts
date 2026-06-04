@@ -1605,6 +1605,23 @@ export const R_QUERIES = `
   (#eq? @_src "source")) @import
 `;
 
+// Haskell. Function definitions (with args) and top-level binds (no args), data
+// types / newtypes / type synonyms, type classes, the module header, function
+// application as calls (bare and module-qualified), and module imports.
+// NOTE: `type_synomym` is the grammar's actual (misspelled) node name.
+export const HASKELL_QUERIES = `
+(function name: (variable) @name) @definition.function
+(bind name: (variable) @name) @definition.function
+(data_type name: (name) @name) @definition.type
+(newtype name: (name) @name) @definition.type
+(type_synomym (name) @name) @definition.type
+(class name: (name) @name) @definition.interface
+(header module: (module) @name) @definition.module
+(apply function: (variable) @call.name) @call
+(apply function: (qualified (variable) @call.name)) @call
+(import module: (module) @import.source) @import
+`;
+
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TypeScript]: TYPESCRIPT_QUERIES,
   [SupportedLanguages.JavaScript]: JAVASCRIPT_QUERIES,
@@ -1630,5 +1647,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.SAS]: SAS_QUERIES,
   [SupportedLanguages.Elixir]: ELIXIR_QUERIES,
   [SupportedLanguages.Makefile]: MAKEFILE_QUERIES,
+  [SupportedLanguages.Haskell]: HASKELL_QUERIES,
 };
  

@@ -36,6 +36,7 @@ const Swift  = tryLoadGrammar('tree-sitter-swift');
 const R = tryLoadGrammar('@davisvaughan/tree-sitter-r');
 const Elixir = tryLoadGrammar('tree-sitter-elixir');
 const Make = tryLoadGrammar('tree-sitter-make');
+const Haskell = tryLoadGrammar('tree-sitter-haskell');
 // tree-sitter-sas uses ESM bindings with top-level await — incompatible with tryLoadGrammar (CJS require)
 let SAS: any = null;
 // @ts-ignore
@@ -167,6 +168,7 @@ const GRAMMAR_MAP: Partial<Record<SupportedLanguages, any>> = {
   ...(SAS ? { [SupportedLanguages.SAS]: SAS } : {}),
   ...(Elixir ? { [SupportedLanguages.Elixir]: Elixir } : {}),
   ...(Make ? { [SupportedLanguages.Makefile]: Make } : {}),
+  ...(Haskell ? { [SupportedLanguages.Haskell]: Haskell } : {}),
 };
 
 // Capture key prefix → NodeKind string
