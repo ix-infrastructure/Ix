@@ -47,6 +47,15 @@ catch (e: any) {
     process.stderr.write('[tree-sitter-sas load failed] ' + e + '\n');
   }
 }
+// tree-sitter-lua ships ESM bindings with top-level await (like SAS) — load via import().
+let Lua: any = null;
+// @ts-ignore
+try { Lua = (await import('@tree-sitter-grammars/tree-sitter-lua')).default; }
+catch (e: any) {
+  if (e?.code !== 'ERR_MODULE_NOT_FOUND' && e?.code !== 'MODULE_NOT_FOUND') {
+    process.stderr.write('[tree-sitter-lua load failed] ' + e + '\n');
+  }
+}
 
 import { SupportedLanguages, languageFromPath } from './languages.js';
 import { LANGUAGE_QUERIES } from './queries.js';
@@ -167,6 +176,7 @@ const GRAMMAR_MAP: Partial<Record<SupportedLanguages, any>> = {
   ...(SAS ? { [SupportedLanguages.SAS]: SAS } : {}),
   ...(Elixir ? { [SupportedLanguages.Elixir]: Elixir } : {}),
   ...(Make ? { [SupportedLanguages.Makefile]: Make } : {}),
+  ...(Lua ? { [SupportedLanguages.Lua]: Lua } : {}),
 };
 
 // Capture key prefix → NodeKind string
