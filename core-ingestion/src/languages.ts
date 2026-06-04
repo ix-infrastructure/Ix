@@ -23,6 +23,10 @@ export enum SupportedLanguages {
   SAS = 'sas',
   Elixir = 'elixir',
   Makefile = 'makefile',
+  Lua = 'lua',
+  Bash = 'bash',
+  Haskell = 'haskell',
+  Zig = 'zig',
   HTML = 'html',
 }
 
@@ -63,8 +67,16 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.sas':  SupportedLanguages.SAS,
   '.ex':   SupportedLanguages.Elixir,
   '.exs':  SupportedLanguages.Elixir,
+  '.lua':  SupportedLanguages.Lua,
   '.mk':   SupportedLanguages.Makefile,
   '.makefile': SupportedLanguages.Makefile,
+  '.sh':   SupportedLanguages.Bash,
+  '.bash': SupportedLanguages.Bash,
+  '.zsh':  SupportedLanguages.Bash,
+  '.ksh':  SupportedLanguages.Bash,
+  '.hs':   SupportedLanguages.Haskell,
+  '.lhs':  SupportedLanguages.Haskell,
+  '.zig':  SupportedLanguages.Zig,
   '.html': SupportedLanguages.HTML,
   '.htm':  SupportedLanguages.HTML,
   '.xhtml': SupportedLanguages.HTML,
@@ -79,6 +91,12 @@ export function languageFromPath(filePath: string): SupportedLanguages | null {
   }
   if(lowerFileName === 'makefile' || lowerFileName === 'makefile.mk' || lowerFileName.endsWith('.makefile') || lowerFileName.endsWith('.mk') || lowerFileName === 'gnumakefile') {
     return SupportedLanguages.Makefile;
+  }
+  // Common extensionless shell config scripts (dotfiles have no real extension).
+  if (lowerFileName === '.bashrc' || lowerFileName === '.bash_profile' || lowerFileName === '.bash_aliases'
+    || lowerFileName === '.zshrc' || lowerFileName === '.zprofile' || lowerFileName === '.profile'
+    || lowerFileName === '.zshenv' || lowerFileName === '.bash_logout') {
+    return SupportedLanguages.Bash;
   }
   const dotIndex = lowerFileName.lastIndexOf('.');
   if (dotIndex === -1) return null;
