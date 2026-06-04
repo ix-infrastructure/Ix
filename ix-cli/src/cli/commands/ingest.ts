@@ -520,6 +520,10 @@ export async function ingestFiles(
       for (const e of (p.entities ?? [])) {
         const qk = e.container ? `${e.container}.${e.name}` : e.name;
         stitchDefs.set(e.name, { qk, filePath: p.filePath });
+        // A call FROM inside a class/namespace method has a QUALIFIED srcName
+        // (e.g. "Ora.constructor"); also key the def by its qualified key so the
+        // caller node resolves (else cross-repo calls from methods are dropped).
+        if (qk !== e.name) stitchDefs.set(qk, { qk, filePath: p.filePath });
         if (!e.container && (e.kind === 'function' || e.kind === 'class') && !stitchExportNames.has(e.name)) {
           stitchExportNames.add(e.name);
           stitchExports.push({ name: e.name, nodeId: symbolNodeId(workspaceId, p.filePath, qk) });
