@@ -2365,6 +2365,32 @@ export function resolveEdges(
     });
     return kept.length > 0 ? kept : candidates;
   };
+
+  // A deterministic "entry file" per member repo: the file a cross-repo package
+  // import couples to when no specific symbol resolves (e.g. a dynamic/property
+  // API like `chalk[color]`). Prefers an index/main-style basename, then the
+  // shallowest path, then lexical order — a total order, so it is independent of
+  // the parse/iteration order. Only built for co-ingest (repoOf present).
+  let entryFileOf: Map<string, string> | undefined;
+  if (repoOf) {
+    entryFileOf = new Map<string, string>();
+    const ENTRY_NAMES = new Set(['index', 'main', 'mod', 'lib', '__init__', 'app', 'init']);
+    const entryScore = (fp: string): [number, number, string] => {
+      const norm = fp.replace(/\\/g, '/');
+      const base = nodePath.basename(norm).replace(/\.[^.]+$/, '').toLowerCase();
+      return [ENTRY_NAMES.has(base) ? 0 : 1, norm.split('/').length, norm];
+    };
+    const better = (a: [number, number, string], b: [number, number, string]) =>
+      a[0] !== b[0] ? a[0] < b[0] : a[1] !== b[1] ? a[1] < b[1] : a[2] < b[2];
+    const bestScore = new Map<string, [number, number, string]>();
+    for (const r of results) {
+      const repo = repoOf(r.filePath);
+      if (repo === undefined) continue;
+      const s = entryScore(r.filePath);
+      const cur = bestScore.get(repo);
+      if (!cur || better(s, cur)) { bestScore.set(repo, s); entryFileOf.set(repo, r.filePath); }
+    }
+  }
   // fileQKeys: seed from global index (cross-batch files), then batch entries override.
   // Mirrors the entityQKey computation in buildPatch so nodeIds match exactly.
   const fileQKeys = globalIndex
@@ -2855,8 +2881,30 @@ export function resolveEdges(
           stats.skippedAmbiguous++;
           continue;
         }
-        // importMatches.length === 0: if dstName is a PascalCase symbol (class/function name
-        // captured via import.name from "from X import ClassName"), fall through to Tier 2/3
+        // importMatches.length === 0: no in-repo file resolves the import.
+        // Cross-repo package import (co-ingest): the specifier names another
+        // co-ingested member's published package (packageOf), so emit an IMPORTS
+        // edge to that member's entry file. This couples genuinely-dependent repos
+        // even when the consumer uses a dynamic/property API that resolves no
+        // symbol call (e.g. ora -> chalk via `chalk[color]`). Ground truth: the
+        // import specifier IS the dependency. Down-weighted by G3 at the map layer;
+        // the post-resolution dep gate keeps it (the same import seeds repoDeps).
+        // No-op for single-repo (no repoOf/entryFileOf).
+        if (repoOf && packageOf && entryFileOf) {
+          const srcRepo = repoOf(srcFilePath);
+          const mod = typeof rel.importRaw === 'string' ? rel.importRaw : rel.dstName;
+          const depRepo = mod ? packageOf(mod) : undefined;
+          if (srcRepo !== undefined && depRepo !== undefined && depRepo !== srcRepo) {
+            const entryFp = entryFileOf.get(depRepo);
+            if (entryFp && entryFp !== srcFilePath) {
+              resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: entryFp, dstName: rel.dstName, dstQualifiedKey: fileEntityName(entryFp), predicate: 'IMPORTS', confidence: 0.7 });
+              stats.resolvedImport++;
+              continue;
+            }
+          }
+        }
+        // if dstName is a PascalCase symbol (class/function name captured via
+        // import.name from "from X import ClassName"), fall through to Tier 2/3
         // symbol resolution so the edge connects to the actual class node rather than a file.
         if (srcLanguage !== SupportedLanguages.Python || !/^[A-Z]/.test(rel.dstName)) continue;
         // fall through to Tier 1b → Tier 2 → Tier 3 below

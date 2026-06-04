@@ -811,4 +811,45 @@ describe('resolveEdges', () => {
       expect(edges.filter(e => e.predicate === 'CALLS' && repoOf(e.srcFilePath) !== repoOf(e.dstFilePath))).toEqual([]);
     });
   });
+
+  // Recall: a genuine dependency that imports another member's PACKAGE must couple
+  // the repos even when the consumer uses a dynamic/property API that resolves no
+  // symbol call (the real-world ora -> chalk via `chalk[color]` case). The import
+  // specifier IS the dependency, so emit a cross-repo IMPORTS edge to the dep
+  // member's entry file. Precision: relative imports and non-member packages must
+  // NOT couple, and single-repo resolution is a no-op.
+  describe('package-import cross-repo edge', () => {
+    const repoOf = (fp: string) => fp.split('/')[0];
+    const packageOf = (mod: string) => {
+      if (!mod || mod.startsWith('.') || mod.startsWith('/')) return undefined;
+      return (mod === '@acme/widget' || mod === 'widget') ? 'lib' : undefined;
+    };
+    const lib = () => fileResult('lib/core.ts', SupportedLanguages.TypeScript, [entity('makeWidget', SupportedLanguages.TypeScript)]);
+    // dstName 'widget' matches no in-repo file, so resolution falls to the package path.
+    const consumer = (importRaw: string) =>
+      fileResult('app/main.ts', SupportedLanguages.TypeScript,
+        [entity('run', SupportedLanguages.TypeScript)],
+        [{ srcName: 'main.ts', dstName: 'widget', predicate: 'IMPORTS', importRaw }]);
+
+    it('couples a consumer to a dep member on a package import even with no resolved symbol call', () => {
+      const edges = resolveEdges([consumer('@acme/widget'), lib()], undefined, undefined, { repoOf, packageOf });
+      const cross = edges.filter(e => repoOf(e.srcFilePath) !== repoOf(e.dstFilePath));
+      expect(cross).toEqual([expect.objectContaining({ srcFilePath: 'app/main.ts', dstFilePath: 'lib/core.ts', predicate: 'IMPORTS' })]);
+    });
+
+    it('does NOT couple on a relative import (./widget is intra-repo, not a member package)', () => {
+      const edges = resolveEdges([consumer('./widget'), lib()], undefined, undefined, { repoOf, packageOf });
+      expect(edges.filter(e => repoOf(e.srcFilePath) !== repoOf(e.dstFilePath))).toEqual([]);
+    });
+
+    it('does NOT couple on an import of a non-member package', () => {
+      const edges = resolveEdges([consumer('left-pad'), lib()], undefined, undefined, { repoOf, packageOf });
+      expect(edges.filter(e => repoOf(e.srcFilePath) !== repoOf(e.dstFilePath))).toEqual([]);
+    });
+
+    it('is a no-op for single-repo resolution (no co-ingest opts)', () => {
+      const edges = resolveEdges([consumer('@acme/widget'), lib()]);
+      expect(edges.filter(e => repoOf(e.srcFilePath) !== repoOf(e.dstFilePath) && e.predicate === 'IMPORTS')).toEqual([]);
+    });
+  });
 });
