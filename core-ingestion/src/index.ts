@@ -36,6 +36,8 @@ const Swift  = tryLoadGrammar('tree-sitter-swift');
 const R = tryLoadGrammar('@davisvaughan/tree-sitter-r');
 const Elixir = tryLoadGrammar('tree-sitter-elixir');
 const Make = tryLoadGrammar('tree-sitter-make');
+const Bash = tryLoadGrammar('tree-sitter-bash');
+const Haskell = tryLoadGrammar('tree-sitter-haskell');
 const Zig = tryLoadGrammar('@tree-sitter-grammars/tree-sitter-zig');
 // tree-sitter-sas uses ESM bindings with top-level await — incompatible with tryLoadGrammar (CJS require)
 let SAS: any = null;
@@ -46,6 +48,15 @@ catch (e: any) {
   // broken native build / ABI mismatch) so .sas files aren't silently dropped.
   if (e?.code !== 'ERR_MODULE_NOT_FOUND' && e?.code !== 'MODULE_NOT_FOUND') {
     process.stderr.write('[tree-sitter-sas load failed] ' + e + '\n');
+  }
+}
+// tree-sitter-lua ships ESM bindings with top-level await (like SAS) — load via import().
+let Lua: any = null;
+// @ts-ignore
+try { Lua = (await import('@tree-sitter-grammars/tree-sitter-lua')).default; }
+catch (e: any) {
+  if (e?.code !== 'ERR_MODULE_NOT_FOUND' && e?.code !== 'MODULE_NOT_FOUND') {
+    process.stderr.write('[tree-sitter-lua load failed] ' + e + '\n');
   }
 }
 
@@ -168,6 +179,9 @@ const GRAMMAR_MAP: Partial<Record<SupportedLanguages, any>> = {
   ...(SAS ? { [SupportedLanguages.SAS]: SAS } : {}),
   ...(Elixir ? { [SupportedLanguages.Elixir]: Elixir } : {}),
   ...(Make ? { [SupportedLanguages.Makefile]: Make } : {}),
+  ...(Lua ? { [SupportedLanguages.Lua]: Lua } : {}),
+  ...(Bash ? { [SupportedLanguages.Bash]: Bash } : {}),
+  ...(Haskell ? { [SupportedLanguages.Haskell]: Haskell } : {}),
   ...(Zig ? { [SupportedLanguages.Zig]: Zig } : {}),
 };
 
