@@ -34,6 +34,7 @@
   "optionalDependencies": {
     "@davisvaughan/tree-sitter-r": "^1.2.0",
     "@tree-sitter-grammars/tree-sitter-lua": "^0.2.0",
+    "tree-sitter-bash": "^0.21.0",
     "tree-sitter-elixir": "^0.3.5",
     "tree-sitter-kotlin": "^0.3.8",
     "tree-sitter-make": "^1.1.1",
