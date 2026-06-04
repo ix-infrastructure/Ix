@@ -3,7 +3,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
-import { detectSystem } from "../system.js";
+import { resolveReadSystemId } from "../resolve.js";
 import { relativePath } from "../format.js";
 import { llmLine } from "../llm.js";
 
@@ -63,7 +63,7 @@ Examples:
       // filtering (otherwise a capped fetch can truncate away the target before
       // the client-side filter below ever sees it). The client-side filter is
       // kept as a fallback for older servers that ignore the scope field.
-      const systemId = detectSystem(process.cwd())?.systemId;
+      const systemId = await resolveReadSystemId(client);
       let nodes = await client.listByKind(opts.kind, { limit, workspaceId: systemId ? undefined : resolveWorkspaceId(), scope: opts.path, systemId });
 
       if (opts.path) {

@@ -15,7 +15,7 @@ import { resolveWorkspaceId } from "./bootstrap.js";
  * (getActiveWorkspaceRoot vs. workspace-relative source_uri) dropped every candidate
  * (issue #228, originally fixed in search.ts only).
  */
-let _scopeCache: { cwd: string; workspaceId?: string; systemId?: string } | undefined;
+let _scopeCache: { cwd: string; workspaceId?: string; systemId?: string; stitchChecked?: boolean } | undefined;
 export function activeReadScope(): { workspaceId?: string; systemId?: string } {
   return activeScope();
 }
@@ -24,8 +24,40 @@ function activeScope(): { workspaceId?: string; systemId?: string } {
   if (_scopeCache?.cwd === cwd) return _scopeCache;
   const systemId = detectSystem(cwd)?.systemId;
   const workspaceId = systemId ? undefined : resolveWorkspaceId(cwd);
-  _scopeCache = { cwd, workspaceId, systemId };
+  _scopeCache = { cwd, workspaceId, systemId, stitchChecked: false };
   return _scopeCache;
+}
+
+/**
+ * Make the read scope aware of a Path-2 STITCHED system (Ix#225 Half B): a
+ * separately-ingested repo has no local system marker (detectSystem returns none),
+ * but the stitcher may have joined it into a system server-side. Look that up once
+ * and fold it into the same cache activeScope() reads, so every read that calls
+ * this (then resolves) spans the whole stitched system — matching `ix map`.
+ * Best-effort + cached (one lookup per cwd); an older backend or a true singleton
+ * leaves the scope at workspace level. Read commands `await` this before resolving.
+ */
+export async function ensureReadScope(client: Pick<IxClient, "workspaceSystem">): Promise<void> {
+  const cwd = process.cwd();
+  if (_scopeCache?.cwd === cwd && _scopeCache.stitchChecked) return;
+  const localSystem = detectSystem(cwd)?.systemId;
+  if (localSystem) { _scopeCache = { cwd, systemId: localSystem, stitchChecked: true }; return; }
+  const ws = resolveWorkspaceId(cwd);
+  let systemId: string | undefined;
+  if (ws) {
+    try { systemId = (await client.workspaceSystem(ws)).systemId ?? undefined; } catch { /* best-effort */ }
+  }
+  _scopeCache = { cwd, workspaceId: systemId ? undefined : ws, systemId, stitchChecked: true };
+}
+
+/**
+ * The system_id an aggregate read (inventory/search/stats/smells/subsystems) should
+ * scope to: a co-ingest system (detectSystem) OR a Path-2 stitched system (backend
+ * lookup), else undefined (workspace-scoped). Drop-in for `detectSystem(cwd)?.systemId`.
+ */
+export async function resolveReadSystemId(client: Pick<IxClient, "workspaceSystem">): Promise<string | undefined> {
+  await ensureReadScope(client);
+  return activeReadScope().systemId;
 }
 
 export type ResolutionMode = "exact" | "preferred-kind" | "scored" | "ambiguous" | "heuristic";
@@ -175,6 +207,7 @@ export async function resolveEntityFull(
   // EXPLICIT --path narrows further, client-side; we no longer default the path filter
   // to the absolute workspace root, which never matched workspace-relative source_uris.
   const effectivePath = opts?.path;
+  await ensureReadScope(client); // fold in a Path-2 stitched system (Ix#225 Half B)
   const { workspaceId, systemId } = activeScope();
   const kindFilter = opts?.kind;
   const nodes = await client.search(symbol, {
@@ -627,6 +660,7 @@ async function tryFileGraphMatch(
   const targetHasPath = target.includes("/") || target.includes("\\");
   // Explicit --path only (not the absolute workspace root); scope server-side instead.
   const effectivePath = opts?.path;
+  await ensureReadScope(client); // fold in a Path-2 stitched system (Ix#225 Half B)
   const { workspaceId, systemId } = activeScope();
 
   // Search for file entities matching the basename

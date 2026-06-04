@@ -3,7 +3,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
-import { detectSystem } from "../system.js";
+import { resolveReadSystemId } from "../resolve.js";
 import { llmLine, llmError, type LlmValue } from "../llm.js";
 
 interface SmellCandidate {
@@ -61,7 +61,7 @@ Examples:
       list?: boolean;
     }) => {
       const client = new IxClient(getEndpoint());
-      const systemId = detectSystem(process.cwd())?.systemId;
+      const systemId = await resolveReadSystemId(client);
 
       if (opts.list) {
         let result: any;

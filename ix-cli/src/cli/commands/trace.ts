@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
-import { resolveFileOrEntity, isRawId, activeReadScope } from "../resolve.js";
+import { resolveFileOrEntity, isRawId, activeReadScope, ensureReadScope } from "../resolve.js";
 import type { ResolvedEntity } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { renderSection, renderKeyValue, renderResolvedHeader, colorizeKind } from "../ui.js";
@@ -89,6 +89,7 @@ export async function pickTraceTarget(
   if (target.kind !== "config_entry") return target;
   if (opts.path) return target;
 
+  await ensureReadScope(client);
   const candidates = (await client.search(symbol, {
     limit: 50,
     kind: "config_entry",

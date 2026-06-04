@@ -3,9 +3,8 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
-import { detectSystem } from "../system.js";
 import { formatNodes, relativePath } from "../format.js";
-import { scoreCandidate } from "../resolve.js";
+import { scoreCandidate, resolveReadSystemId } from "../resolve.js";
 import { applyRoleFilter, roleHint } from "../role-filter.js";
 import { stderr } from "../stderr.js";
 import { llmLine } from "../llm.js";
@@ -145,7 +144,7 @@ Examples:
       const fetchLimit = Math.min(limit * 3, 60);
       // Auto-detect a multi-repo system; when present, scope by system_id (which
       // spans all member repos) instead of the single-repo workspace_id.
-      const systemId = detectSystem(process.cwd())?.systemId;
+      const systemId = await resolveReadSystemId(client);
       const rawNodes = await client.search(term, {
         limit: fetchLimit,
         kind: opts.kind,
