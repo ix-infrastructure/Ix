@@ -15,7 +15,7 @@ import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
 import { loadIngestionModules } from './ingestion-loader.js';
 import { ensureWorkspaceIdState } from '../bootstrap.js';
-import { detectSystem, repoWorkspaceIdFor, lookupPackage } from '../system.js';
+import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import {
   deterministicId,
   transformIssue,
@@ -404,7 +404,7 @@ export async function ingestFiles(
   const mapMode = opts.mapMode === true;
   const trueStart = performance.now();
 
-  const [{ parseFile, resolveEdges, isGrammarSupported }, { buildPatchWithResolution }, { languageFromPath }] = await loadIngestionModules();
+  const [{ parseFile, resolveEdges, isGrammarSupported }, { buildPatchWithResolution, fileNodeId }, { languageFromPath }] = await loadIngestionModules();
   const moduleLoadMs = Math.round(performance.now() - trueStart);
 
 
@@ -480,6 +480,56 @@ export async function ingestFiles(
   const packageOf = (mod: string): string | undefined => lookupPackage(packageRegistry, mod);
   const declaredRepoDeps = detectedSystem?.repoDeps;
   const resolveOpts = systemId ? { repoOf, packageOf, declaredRepoDeps } : undefined;
+
+  // ── Path-2 separate-ingest stitcher (Ix#225 Half A) ──────────────────
+  // Co-ingest already forms cross-repo edges in-batch, so the stitcher only runs
+  // for a SOLO ingest: it registers this repo's published packages (provides) and
+  // its production-dep external imports (consumes), and the backend joins them
+  // bidirectionally against other separately-ingested repos to recreate the
+  // cross-repo IMPORTS edges. Production-dep gated (mirrors #244): an import only
+  // counts as a consume if the package is a declared production dependency.
+  const stitchEnabled = systemId === undefined;
+  const stitchProdDeps = stitchEnabled ? new Set<string>(readPackageDeps(workspaceRoot)) : new Set<string>();
+  const stitchConsumes: Array<{ name: string; consumerNodeId: string }> = [];
+  const stitchConsumeSeen = new Set<string>();
+  const stitchFiles: string[] = [];
+  const specToPkg = (spec: string | undefined): string | null => {
+    if (!spec || spec.startsWith('.') || spec.startsWith('/')) return null;
+    if (spec.startsWith('@')) { const parts = spec.split('/'); return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : null; }
+    return spec.split('/')[0] || null;
+  };
+  const collectStitch = (parsedFiles: Array<{ filePath: string; relationships?: Array<{ predicate: string; dstName?: string; importRaw?: string }> }>): void => {
+    for (const p of parsedFiles) {
+      stitchFiles.push(p.filePath);
+      for (const rel of (p.relationships ?? [])) {
+        if (rel.predicate !== 'IMPORTS') continue;
+        const pkg = specToPkg(typeof rel.importRaw === 'string' ? rel.importRaw : rel.dstName);
+        if (!pkg || !stitchProdDeps.has(pkg)) continue;
+        const consumerNodeId = fileNodeId(workspaceId, p.filePath);
+        const k = `${pkg} ${consumerNodeId}`;
+        if (stitchConsumeSeen.has(k)) continue;
+        stitchConsumeSeen.add(k);
+        stitchConsumes.push({ name: pkg, consumerNodeId });
+      }
+    }
+  };
+  // Deterministic entry file (index/main basename -> shallowest -> lexical): the
+  // node a cross-repo import couples to. Mirrors resolveEdges' entryFileOf so a
+  // stitched edge targets the SAME node a co-ingest would have.
+  const pickEntryFile = (files: string[]): string | undefined => {
+    const ENTRY = new Set(['index', 'main', 'mod', 'lib', '__init__', 'app', 'init']);
+    let best: string | undefined;
+    let bestScore: [number, number, string] | undefined;
+    for (const f of files) {
+      const norm = f.replace(/\\/g, '/');
+      const base = (norm.split('/').pop() ?? '').replace(/\.[^.]+$/, '').toLowerCase();
+      const score: [number, number, string] = [ENTRY.has(base) ? 0 : 1, norm.split('/').length, norm];
+      if (!bestScore || score[0] < bestScore[0] ||
+          (score[0] === bestScore[0] && (score[1] < bestScore[1] ||
+          (score[1] === bestScore[1] && score[2] < bestScore[2])))) { best = f; bestScore = score; }
+    }
+    return best;
+  };
   if (systemId && debug) {
     const depCount = declaredRepoDeps ? Object.values(declaredRepoDeps).reduce((a, d) => a + d.length, 0) : 0;
     process.stderr.write(`[multi-repo] system "${detectedSystem!.name}" (${systemId}) members=${detectedSystem!.members.join(', ')} packages=${Object.keys(packageRegistry).length} declaredDeps=${depCount}\n`);
@@ -843,6 +893,7 @@ export async function ingestFiles(
         const resolveStart = performance.now();
         const resolvedEdges = resolveEdgesFn!(batch.map(f => f.parsed), resolveStats, globalIndex, resolveOpts);
         resolveEdgesMs = Math.round(performance.now() - resolveStart);
+        if (stitchEnabled) collectStitch(batch.map(f => f.parsed));
         const batchEdgesByFile = new Map<string, any[]>();
         for (const edge of resolvedEdges) {
           let arr = batchEdgesByFile.get(edge.srcFilePath);
@@ -912,6 +963,7 @@ export async function ingestFiles(
         const resolveStart = performance.now();
         const resolvedEdges = resolveEdgesFn!(allParsed.map(f => f.parsed), resolveStats, globalIndex, resolveOpts);
         resolveEdgesMs = Math.round(performance.now() - resolveStart);
+        if (stitchEnabled) collectStitch(allParsed.map(f => f.parsed));
         const edgesByFile = new Map<string, any[]>();
         for (const edge of resolvedEdges) {
           let arr = edgesByFile.get(edge.srcFilePath);
@@ -1179,6 +1231,30 @@ export async function ingestFiles(
         if (debug) process.stderr.write(`  Cleaned up pre-migration nodes under ${previousWorkspaceId}.\n`);
       } catch (err) {
         if (debug) process.stderr.write(`  [migration cleanup skipped] ${err}\n`);
+      }
+    }
+
+    // Path-2 stitch (Ix#225 Half A): register this repo's provides/consumes and
+    // write the cross-repo IMPORTS edges to other separately-ingested repos.
+    // Best-effort: a failure (or an older backend with no /v1/stitch) never fails
+    // the ingest. Collection is over the files actually parsed this run, so it is
+    // only COMPLETE on a full ingest. Gating on filesSkipped === 0 means a partial
+    // incremental re-map (some files mtime-skipped) leaves the prior full
+    // registration intact rather than overwriting it with a partial set; a fresh
+    // map, `--force`, or a post-reset re-map re-registers. (Incremental registry
+    // updates that touch only changed files are a future refinement.)
+    if (stitchEnabled && filesSkipped === 0 && stitchFiles.length > 0 && parseErrors === 0) {
+      try {
+        const entry = pickEntryFile(stitchFiles);
+        const provides = entry
+          ? readPackageNames(workspaceRoot).map(name => ({ name, entryNodeId: fileNodeId(workspaceId, entry), entryUri: entry }))
+          : [];
+        if (provides.length > 0 || stitchConsumes.length > 0) {
+          const res = await client.stitch({ workspaceId, provides, consumes: stitchConsumes });
+          if (debug) process.stderr.write(`  [stitch] provides=${provides.length} consumes=${stitchConsumes.length} -> ${res.stitched} cross-repo edges\n`);
+        }
+      } catch (err) {
+        if (debug) process.stderr.write(`  [stitch skipped] ${err}\n`);
       }
     }
   } finally {

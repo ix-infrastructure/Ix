@@ -219,6 +219,18 @@ export class IxClient {
     return this.post('/v1/source-hashes', { uris: filePaths, workspaceIds });
   }
 
+  // Path-2 separate-ingest stitcher (Ix#225). Registers this workspace's published
+  // packages (provides) + production-dep external imports (consumes), then the
+  // backend joins them bidirectionally against other workspaces and writes the
+  // cross-repo IMPORTS edges. Returns how many edges were stitched.
+  async stitch(payload: {
+    workspaceId: string;
+    provides: Array<{ name: string; entryNodeId: string; entryUri?: string }>;
+    consumes: Array<{ name: string; consumerNodeId: string }>;
+  }): Promise<{ stitched: number; edges: Array<{ src: string; dst: string; name: string }> }> {
+    return this.post('/v1/stitch', payload);
+  }
+
   async map(opts?: { full?: boolean; workspaceId?: string; systemId?: string }): Promise<any> {
     // /v1/map reads snake_case keys (full, branch_id, workspace_id, system_id) off the raw JSON body.
     const body: Record<string, unknown> = { full: opts?.full ?? false };

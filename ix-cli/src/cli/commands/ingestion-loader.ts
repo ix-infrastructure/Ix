@@ -11,6 +11,7 @@ type IngestionModule = {
 type PatchBuilderModule = {
   buildPatch: (parsed: any, hash: string, workspaceId: string, previousSourceHash?: string) => any;
   buildPatchWithResolution: (parsed: any, hash: string, workspaceId: string, resolvedEdges: any[], previousSourceHash?: string) => any;
+  fileNodeId: (workspaceId: string, filePath: string) => string;
 };
 
 type LanguagesModule = {
