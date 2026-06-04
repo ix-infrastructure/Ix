@@ -76,3 +76,65 @@ describe("Maven name + declared-dependency graph", () => {
     expect(d.repoDeps["lib"]).toBeUndefined();
   });
 });
+
+describe("git-aware system detection (no flags, monorepo vs separate repos)", () => {
+  let base: string;
+  const mk = (rel: string) => fs.mkdirSync(nodePath.join(base, rel), { recursive: true });
+  const wf = (rel: string, c = "{}") => { const p = nodePath.join(base, rel); fs.mkdirSync(nodePath.dirname(p), { recursive: true }); fs.writeFileSync(p, c); };
+
+  beforeAll(() => {
+    base = fs.mkdtempSync(nodePath.join(os.tmpdir(), "ix-gitdet-"));
+    // A monorepo: one .git at the root, package dirs with manifests but no own .git.
+    mk("mono/.git");
+    wf("mono/packages/pkg-a/package.json", '{"name":"pkg-a"}');
+    wf("mono/packages/pkg-b/package.json", '{"name":"pkg-b"}');
+    // A repo with submodule-style git children directly under it.
+    mk("withsubs/.git");
+    wf("withsubs/package.json", '{"name":"withsubs"}');
+    mk("withsubs/sub-a/.git"); wf("withsubs/sub-a/package.json", '{"name":"sub-a"}');
+    mk("withsubs/sub-b/.git"); wf("withsubs/sub-b/package.json", '{"name":"sub-b"}');
+    // A plain folder (no .git) collecting two independently-"cloned" git repos.
+    mk("collection/repo-a/.git"); wf("collection/repo-a/package.json", '{"name":"repo-a"}');
+    mk("collection/repo-b/.git"); wf("collection/repo-b/package.json", '{"name":"repo-b"}');
+    // A monorepo with NO .git (downloaded tarball) but a workspaces declaration.
+    wf("ws_npm/package.json", '{"name":"root","workspaces":["packages/*"]}');
+    wf("ws_npm/packages/a/package.json", '{"name":"a"}');
+    wf("ws_npm/packages/b/package.json", '{"name":"b"}');
+    // A no-.git monorepo declared via pnpm-workspace.yaml.
+    wf("ws_pnpm/pnpm-workspace.yaml", 'packages: ["*"]');
+    wf("ws_pnpm/pkg-a/package.json", '{"name":"a"}');
+    wf("ws_pnpm/pkg-b/package.json", '{"name":"b"}');
+    // A no-.git, no-workspace folder of separate projects (genuinely ambiguous).
+    wf("plain/proj-a/package.json", '{"name":"proj-a"}');
+    wf("plain/proj-b/package.json", '{"name":"proj-b"}');
+  });
+  afterAll(() => { try { fs.rmSync(base, { recursive: true, force: true }); } catch { /* ignore */ } });
+
+  it("treats a monorepo (one .git, package dirs) as a SINGLE repo", () => {
+    expect(detectSystem(nodePath.join(base, "mono"))).toBeUndefined();
+    expect(detectSystem(nodePath.join(base, "mono", "packages"))).toBeUndefined();
+  });
+
+  it("treats a repo WITH submodule git children as a single repo (not a system of submodules)", () => {
+    expect(detectSystem(nodePath.join(base, "withsubs"))).toBeUndefined();
+  });
+
+  it("treats a plain folder of independently-cloned repos as a multi-repo SYSTEM", () => {
+    const d = detectSystem(nodePath.join(base, "collection"));
+    expect(d).toBeTruthy();
+    expect(d!.members.sort()).toEqual(["repo-a", "repo-b"]);
+  });
+
+  it("treats a no-.git monorepo (workspaces / pnpm-workspace) as a SINGLE repo", () => {
+    // A monorepo extracted without its .git must NOT be split into separate repos.
+    expect(detectSystem(nodePath.join(base, "ws_npm"))).toBeUndefined();
+    expect(detectSystem(nodePath.join(base, "ws_npm", "packages"))).toBeUndefined();
+    expect(detectSystem(nodePath.join(base, "ws_pnpm"))).toBeUndefined();
+  });
+
+  it("still treats a no-.git, no-workspace folder of projects as a SYSTEM", () => {
+    const d = detectSystem(nodePath.join(base, "plain"));
+    expect(d).toBeTruthy();
+    expect(d!.members.sort()).toEqual(["proj-a", "proj-b"]);
+  });
+});

@@ -38,6 +38,56 @@ function isRepoRoot(dir: string): boolean {
   }
 }
 
+/** A directory is its own git repository iff it contains a `.git` entry (a dir
+ *  for a normal clone, or a file for a submodule/worktree). This is the
+ *  ground-truth signal that a child is a DISTINCT repository — a monorepo's
+ *  package dirs never have their own .git (they share the root's). */
+function hasOwnGit(dir: string): boolean {
+  try { return fs.existsSync(nodePath.join(dir, ".git")); } catch { return false; }
+}
+
+/**
+ * True if `dir` declares itself the root of a single multi-package project (a
+ * monorepo / workspace), independent of git. Covers the case where a monorepo is
+ * mapped without its .git (a downloaded tarball/zip): the workspace config is an
+ * explicit "these subdirs are MY packages, not separate repos" declaration.
+ */
+function hasWorkspaceMarker(dir: string): boolean {
+  const has = (f: string) => { try { return fs.existsSync(nodePath.join(dir, f)); } catch { return false; } };
+  const reads = (f: string): string | null => { try { return fs.readFileSync(nodePath.join(dir, f), "utf8"); } catch { return null; } };
+  // Dedicated workspace/monorepo config files.
+  if (has("pnpm-workspace.yaml") || has("lerna.json") || has("nx.json") ||
+      has("turbo.json") || has("rush.json") || has("go.work") ||
+      has("WORKSPACE") || has("WORKSPACE.bazel") || has("MODULE.bazel")) return true;
+  // package.json with a `workspaces` field (npm / yarn / bun workspaces).
+  const pkg = reads("package.json");
+  if (pkg) { try { if ("workspaces" in (JSON.parse(pkg) as Record<string, unknown>)) return true; } catch { /* ignore */ } }
+  // Cargo workspace.
+  const cargo = reads("Cargo.toml");
+  if (cargo && /^\s*\[workspace\]/m.test(cargo)) return true;
+  // Maven multi-module / Gradle multi-project.
+  const pom = reads("pom.xml");
+  if (pom && /<modules>/.test(pom)) return true;
+  const settings = reads("settings.gradle") ?? reads("settings.gradle.kts");
+  if (settings && /\binclude\b/.test(settings)) return true;
+  return false;
+}
+
+/** True if `dir` or any ancestor is a single repository: a git repo root (.git)
+ *  OR a declared monorepo/workspace root. Used to tell a monorepo's package dir
+ *  (part of ONE repo) from a plain folder that collects independently-cloned
+ *  repos. */
+function isInsideSingleRepo(dir: string): boolean {
+  let cur = nodePath.resolve(dir);
+  // Walk up to the filesystem root, checking each level.
+  while (true) {
+    if (hasOwnGit(cur) || hasWorkspaceMarker(cur)) return true;
+    const parent = nodePath.dirname(cur);
+    if (parent === cur) return false;
+    cur = parent;
+  }
+}
+
 /**
  * Published package name(s) for a member repo, read (pragmatically) from its
  * build manifest. These are matched against other members' imports to derive the
@@ -264,8 +314,29 @@ function buildRepoDeps(rootPath: string, members: string[], registry: Record<str
   return graph;
 }
 
-/** Returns the detected system, or undefined when `rootPath` is a single repo. */
+/**
+ * Returns the detected multi-repo system, or undefined when `rootPath` is a
+ * single repository (including a monorepo). The discriminator is GIT PROVENANCE,
+ * not directory layout, so `ix map <path>` needs no flags:
+ *
+ *   - >= 2 immediate children are each their OWN git repo  -> a real multi-repo
+ *     system (separately-cloned repos, possibly sharing a lib). Co-ingest them.
+ *   - `rootPath` is inside one git repo (a monorepo / single repo) with no
+ *     nested git-repo children -> ONE repository. Its package dirs are NOT
+ *     separate repos, so they are never split apart (this is what stops a
+ *     monorepo like babel from being shredded into 147 "systems").
+ *   - `rootPath` is not in any git repo -> fall back to manifest-based members
+ *     (a non-git folder that collects several projects).
+ */
 export function detectSystem(rootPath: string): DetectedSystem | undefined {
+  // If the mapped path is within a single repository — a git repo (its own .git
+  // or an ancestor's) OR a declared monorepo/workspace root (workspaces,
+  // pnpm/lerna/nx/turbo, Cargo [workspace], go.work, Maven modules, ...) — it IS
+  // one repo. A monorepo's package dirs, or a repo with submodules, are never
+  // split into separate "repos" (the workspace check covers a monorepo mapped
+  // without its .git). Only a plain folder that collects independently-cloned
+  // repos becomes a multi-repo system.
+  if (isInsideSingleRepo(rootPath)) return undefined;
   let children: fs.Dirent[];
   try {
     children = fs.readdirSync(rootPath, { withFileTypes: true });
