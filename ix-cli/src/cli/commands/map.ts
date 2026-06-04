@@ -217,9 +217,22 @@ Examples:
         process.stderr.write(`\r  Computing map...  ${bar}  ${pctStr}`);
       }, 80) : null;
 
+      // Path-2 grouping (Ix#225 Half B): a co-ingest system is found by detectSystem
+      // above; a SEPARATELY-ingested repo that the stitcher joined into a system has
+      // no local marker, so look its system_id up from the backend and scope to it,
+      // making `ix map <repo>` show the whole stitched system.
+      let effectiveSystemId = systemId;
+      if (!effectiveSystemId) {
+        const ws = resolveWorkspaceId(cwd);
+        if (ws) {
+          const looked = await client.workspaceSystem(ws);
+          if (looked.systemId) effectiveSystemId = looked.systemId;
+        }
+      }
+
       let result: MapResult;
       try {
-        result = await client.map({ full: opts.full, workspaceId: systemId ? undefined : resolveWorkspaceId(cwd), systemId }) as MapResult;
+        result = await client.map({ full: opts.full, workspaceId: effectiveSystemId ? undefined : resolveWorkspaceId(cwd), systemId: effectiveSystemId }) as MapResult;
       } catch (err: any) {
         if (mapInterval) { clearInterval(mapInterval); process.stderr.write('\r' + ' '.repeat(60) + '\r'); }
         emitError(formatFetchError(err));

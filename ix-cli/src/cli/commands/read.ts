@@ -4,7 +4,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { absoluteFromSourceUri, getEndpoint, resolveWorkspaceRoot } from "../config.js";
-import { resolveEntityFull, activeReadScope } from "../resolve.js";
+import { resolveEntityFull, activeReadScope, ensureReadScope } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { isFileStale } from "../stale.js";
 import { relativePath } from "../format.js";
@@ -255,7 +255,8 @@ async function tryFilenameMatch(
 ): Promise<Array<{ name: string; path: string }>> {
   const basename = path.basename(target);
   const hasExtension = path.extname(basename) !== "";
-  // Scope to the active workspace / co-ingest system server-side, like trySymbolMatch.
+  // Scope to the active workspace / co-ingest system / Path-2 stitched system.
+  await ensureReadScope(client);
   const scope = activeReadScope();
 
   // Strategy 1: Search with the exact target (may include extension)

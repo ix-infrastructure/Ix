@@ -53,6 +53,16 @@ function makeIds(workspaceId: string) {
   };
 }
 
+/**
+ * The node id of a file's `file` node, for a SOLO ingest (no member prefix).
+ * Exposed so the Path-2 stitcher (CLI) can reference a repo's entry node and its
+ * importing nodes by the SAME id buildPatch produces — never a recomputed guess.
+ * Mirrors buildPatch: the file node's key is the file entity name = basename.
+ */
+export function fileNodeId(workspaceId: string, filePath: string): string {
+  return makeIds(workspaceId).nodeId(filePath, nodePath.basename(filePath));
+}
+
 // ---------------------------------------------------------------------------
 // Source type from file extension
 // ---------------------------------------------------------------------------
