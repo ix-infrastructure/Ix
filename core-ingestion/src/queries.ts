@@ -1605,6 +1605,20 @@ export const R_QUERIES = `
   (#eq? @_src "source")) @import
 `;
 
+// Bash / shell. Functions (both `foo() {}` and `function foo {}`), command
+// invocations as calls (system commands dangle at resolution; calls to defined
+// functions resolve), and `source FILE` / `. FILE` as imports.
+export const BASH_QUERIES = `
+(function_definition name: (word) @name) @definition.function
+
+(command name: (command_name (word) @call.name)) @call
+
+(command
+  name: (command_name (word) @_src)
+  argument: [(word) (string) (concatenation)] @import.source
+  (#match? @_src "^(source|\\.)$")) @import
+`;
+
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TypeScript]: TYPESCRIPT_QUERIES,
   [SupportedLanguages.JavaScript]: JAVASCRIPT_QUERIES,
@@ -1630,5 +1644,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.SAS]: SAS_QUERIES,
   [SupportedLanguages.Elixir]: ELIXIR_QUERIES,
   [SupportedLanguages.Makefile]: MAKEFILE_QUERIES,
+  [SupportedLanguages.Bash]: BASH_QUERIES,
 };
  
