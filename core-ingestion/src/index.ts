@@ -106,6 +106,30 @@ export interface ParsedRelationship {
   importRaw?: string;
 }
 
+/**
+ * A single named/default import binding in a JS/TS file: the in-file local name
+ * mapped to the PUBLIC symbol it refers to in the source package. `imported` is
+ * the public export name ("default" for a default import). Lets a consumer's
+ * call to the LOCAL name (e.g. `fmt()` from `import { format as fmt }`) be
+ * resolved back to the provider's public symbol for cross-repo stitching.
+ */
+export interface ImportBinding {
+  pkg: string;       // raw import specifier, e.g. "libcore", "@scope/pkg", "./local"
+  local: string;     // in-file binding name (the call site uses this)
+  imported: string;  // public symbol in the source package ("default" for default import)
+}
+
+/**
+ * A provider-side public export whose public name differs from the local entity
+ * name: `export default function debug` → { local: "debug", public: "default" };
+ * `export { impl as format }` → { local: "impl", public: "format" }. Lets the
+ * provider advertise the symbol by the name consumers actually import.
+ */
+export interface ExportPublicName {
+  local: string;   // local entity name in the provider file
+  public: string;  // name consumers import it by ("default" for default export)
+}
+
 export interface FileParseResult {
   filePath: string;
   language: SupportedLanguages;
@@ -113,6 +137,10 @@ export interface FileParseResult {
   chunks: ParsedChunk[];
   relationships: ParsedRelationship[];
   importAliases?: Record<string, string>;
+  /** JS/TS named/default import bindings (local → public symbol). */
+  importBindings?: ImportBinding[];
+  /** JS/TS provider-side aliased/default public export names. */
+  exportPublicNames?: ExportPublicName[];
   fileRole: RoleClassification;
 }
 
@@ -375,6 +403,100 @@ function unwrapImportSpecifier(rawValue: string): string {
     .replace(/\\\\/g, '/')
     .replace(/^["'`<]/, '')
     .replace(/[>"'`]$/, '');
+}
+
+/**
+ * Walk a JS/TS `import_statement` node and return its named/default bindings.
+ * Namespace imports (`* as ns`) are intentionally skipped: a call like `ns.foo()`
+ * already resolves to "foo" through the member_expression call query, so it needs
+ * no rewrite. Purely additive — does not alter any emitted relationship.
+ */
+function extractJsImportBindings(stmtNode: any, rawSpec: string): ImportBinding[] {
+  const out: ImportBinding[] = [];
+  if (!stmtNode || stmtNode.type !== 'import_statement') return out;
+  let clause: any = null;
+  for (let i = 0; i < stmtNode.namedChildCount; i++) {
+    const c = stmtNode.namedChild(i);
+    if (c.type === 'import_clause') { clause = c; break; }
+  }
+  if (!clause) return out;
+  for (let i = 0; i < clause.namedChildCount; i++) {
+    const child = clause.namedChild(i);
+    if (child.type === 'identifier') {
+      // `import dbg from "pkg"` — default import.
+      if (child.text) out.push({ pkg: rawSpec, local: child.text, imported: 'default' });
+    } else if (child.type === 'named_imports') {
+      for (let j = 0; j < child.namedChildCount; j++) {
+        const spec = child.namedChild(j);
+        if (spec.type !== 'import_specifier') continue;
+        const nameNode = spec.namedChild(0);
+        const aliasNode = spec.namedChildCount > 1 ? spec.namedChild(1) : null;
+        if (!nameNode || !nameNode.text) continue;
+        const imported = nameNode.text;
+        const local = aliasNode && aliasNode.text ? aliasNode.text : imported;
+        out.push({ pkg: rawSpec, local, imported });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Walk a JS/TS tree for provider-side public export names that differ from the
+ * local entity name: `export { impl as format }` (no source) → {impl, format};
+ * `export default function debug` → {debug, "default"}. Lets a provider advertise
+ * a symbol by the name a consumer imports it as. Purely additive.
+ */
+function extractJsExportPublicNames(rootNode: any): ExportPublicName[] {
+  const out: ExportPublicName[] = [];
+  const seen = new Set<string>();
+  const visit = (node: any): void => {
+    if (node.type === 'export_statement') {
+      let hasSource = false;
+      let isDefault = false;
+      for (let i = 0; i < node.childCount; i++) {
+        const c = node.child(i);
+        if (c.type === 'default') isDefault = true;
+        if (c.type === 'string') hasSource = true;
+      }
+      let clause: any = null;
+      let decl: any = null;
+      for (let i = 0; i < node.namedChildCount; i++) {
+        const c = node.namedChild(i);
+        if (c.type === 'export_clause') clause = c;
+        else if (c.type === 'function_declaration' || c.type === 'class_declaration'
+          || c.type === 'lexical_declaration' || c.type === 'generator_function_declaration') decl = c;
+      }
+      // Local re-export `export { a as b }` (NOT `... from './x'`): a is public as b.
+      if (clause && !hasSource) {
+        for (let j = 0; j < clause.namedChildCount; j++) {
+          const spec = clause.namedChild(j);
+          if (spec.type !== 'export_specifier') continue;
+          const localN = spec.namedChild(0);
+          const pubN = spec.namedChildCount > 1 ? spec.namedChild(1) : null;
+          if (!localN || !localN.text) continue;
+          const local = localN.text;
+          const pub = pubN && pubN.text ? pubN.text : local;
+          if (pub !== local) {
+            const k = `${local} ${pub}`;
+            if (!seen.has(k)) { seen.add(k); out.push({ local, public: pub }); }
+          }
+        }
+      }
+      // `export default function debug(){}` / `export default class X {}` → public "default".
+      if (isDefault && decl) {
+        const nameNode = (decl.childForFieldName && decl.childForFieldName('name')) || decl.namedChild(0);
+        const nm = nameNode?.text;
+        if (nm) {
+          const k = `${nm} default`;
+          if (!seen.has(k)) { seen.add(k); out.push({ local: nm, public: 'default' }); }
+        }
+      }
+    }
+    for (let i = 0; i < node.namedChildCount; i++) visit(node.namedChild(i));
+  };
+  visit(rootNode);
+  return out;
 }
 
 function fileEntityName(filePath: string): string {
@@ -1399,6 +1521,10 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
     const declaredTypeMap = new Map<string, Map<string, string>>();
     // Import aliases keyed by the in-file alias name (Go explicit aliases, etc.).
     const importAliases: Record<string, string> = {};
+    // JS/TS named/default import bindings (local → public symbol) for cross-repo
+    // alias resolution. Additive: never alters emitted relationships.
+    const isJsTs = language === SupportedLanguages.JavaScript || language === SupportedLanguages.TypeScript;
+    const importBindings: ImportBinding[] = [];
 
     // Detect the Go package name once (one package_clause per file). Used to
     // package-prefix Go entity qualifiedNames + bare-call dstNames so
@@ -1668,6 +1794,15 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
       // Import captures (JS/TS/Python path-based)
       const importSource = match.captures.find((c: any) => c.name === 'import.source');
       if (importSource) {
+        // JS/TS: pull per-specifier bindings off the whole import_statement node
+        // (@import). Additive — leaves the IMPORTS/CALLS relationships untouched.
+        if (isJsTs) {
+          const stmtNode = match.captures.find((c: any) => c.name === 'import')?.node;
+          if (stmtNode) {
+            const rawSpec = unwrapImportSpecifier(importSource.node.text);
+            for (const b of extractJsImportBindings(stmtNode, rawSpec)) importBindings.push(b);
+          }
+        }
         // Grouped alias `alias MyApp.{User, Repo}`: each member alias is captured bare
         // ("User"); the prefix alias ("MyApp") comes through @import.prefix so we can
         // rebuild the full module name "MyApp.User", matching the single-alias form.
@@ -1935,6 +2070,8 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
       for (let j = dropIdx.length - 1; j >= 0; j--) entities.splice(dropIdx[j], 1);
     }
 
+    const exportPublicNames = isJsTs ? extractJsExportPublicNames(tree.rootNode) : [];
+
     return {
       filePath,
       language,
@@ -1942,6 +2079,8 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
       chunks,
       relationships,
       importAliases: Object.keys(importAliases).length > 0 ? importAliases : undefined,
+      importBindings: importBindings.length > 0 ? importBindings : undefined,
+      exportPublicNames: exportPublicNames.length > 0 ? exportPublicNames : undefined,
       fileRole: classifyFileRole(filePath, source),
     };
   } catch (e) {
@@ -2288,6 +2427,22 @@ export function resolveEdges(
     globalCandidateTotal: 0, resolvedImport: 0, resolvedTransitive: 0,
     resolvedGlobal: 0, resolvedQualifier: 0, skippedSameFile: 0, skippedAmbiguous: 0,
   };
+  // Renamed-import call resolution (Z): a call to a renamed local binding (`import
+  // { format as fmt }; fmt()`) should resolve as the provider's public symbol
+  // (`format`), so in-repo AND co-ingest resolution link it to the real definition.
+  // Map per file: local binding name -> imported public symbol, EXCLUDING default
+  // imports (imported == "default" is not a by-name symbol in the provider; those are
+  // handled in the cross-repo stitch path) and no-op named imports (local == imported).
+  const callBindings = new Map<string, Map<string, string>>();
+  for (const r of results) {
+    if (!r.importBindings) continue;
+    for (const b of r.importBindings) {
+      if (b.imported === 'default' || b.local === b.imported) continue;
+      let m = callBindings.get(r.filePath);
+      if (!m) { m = new Map(); callBindings.set(r.filePath, m); }
+      if (!m.has(b.local)) m.set(b.local, b.imported);
+    }
+  }
   // Cross-repo dependency graph: repo R depends on repo D when any file in R
   // imports a module published by D. Built from the raw IMPORTS relationships.
   const repoOf = opts?.repoOf;
@@ -2910,7 +3065,11 @@ export function resolveEdges(
         // fall through to Tier 1b → Tier 2 → Tier 3 below
       }
 
-      const dstName = rel.dstName;
+      const origDstName = rel.dstName;
+      // Z: resolve a renamed-import call by the provider's public symbol, but keep the
+      // ORIGINAL local name on the emitted edge (buildPatchWithResolution maps the edge
+      // back to the source call by name). No-op unless this is a renamed-import call.
+      const dstName = (rel.predicate === 'CALLS' ? callBindings.get(srcFilePath)?.get(rel.dstName) : undefined) ?? rel.dstName;
       const srcName = rel.srcName;
 
       // Tier 1b: qualifier-assisted (confidence 0.9 / 0.7)
@@ -2948,7 +3107,7 @@ export function resolveEdges(
               const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart, preferredQKey);
               if (dstQualifiedKey !== null) {
                 // dstName must match rel.dstName so buildPatchWithResolution can look it up
-                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9 });
+                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9 });
               }
             }
             continue;
@@ -2973,7 +3132,7 @@ export function resolveEdges(
             if (fileHasSymbol.get(qfp)?.has(memberPart)) {
               const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart, `${qualifierPart}.${memberPart}`);
               if (dstQualifiedKey !== null) {
-                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.7 });
+                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.7 });
               }
             }
           }
@@ -2995,7 +3154,7 @@ export function resolveEdges(
         const fp = narrowedImportMatches[0];
         const dstQualifiedKey = bestQKey(fileQKeys, fp, dstName);
         if (dstQualifiedKey === null) continue; // ambiguous — do not emit bad nodeId
-        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9 });
+        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9 });
         continue;
       }
       // Commodity gate: beyond the precise import-scoped tier above, the remaining
@@ -3022,7 +3181,7 @@ export function resolveEdges(
         const fp = narrowedTransitiveMatches[0];
         const dstQualifiedKey = bestQKey(fileQKeys, fp, dstName);
         if (dstQualifiedKey === null) continue;
-        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.8 });
+        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.8 });
         continue;
       }
       // Tier 3: global fallback (confidence 0.5) — uses inverted symbol index
@@ -3052,7 +3211,7 @@ export function resolveEdges(
         const fp = resolvedMatches[0];
         const dstQualifiedKey = bestQKey(fileQKeys, fp, dstName);
         if (dstQualifiedKey === null) continue; // ambiguous — do not emit bad nodeId
-        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.5 });
+        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.5 });
         stats.resolvedGlobal++;
         continue;
       }

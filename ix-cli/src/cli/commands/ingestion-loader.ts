@@ -12,6 +12,7 @@ type PatchBuilderModule = {
   buildPatch: (parsed: any, hash: string, workspaceId: string, previousSourceHash?: string) => any;
   buildPatchWithResolution: (parsed: any, hash: string, workspaceId: string, resolvedEdges: any[], previousSourceHash?: string) => any;
   fileNodeId: (workspaceId: string, filePath: string) => string;
+  symbolNodeId: (workspaceId: string, filePath: string, qualifiedKey: string) => string;
 };
 
 type LanguagesModule = {
