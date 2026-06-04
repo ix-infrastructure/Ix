@@ -3,9 +3,10 @@ import * as path from "node:path";
 import * as crypto from "node:crypto";
 import type { Command } from "commander";
 import chalk from "chalk";
+import { spawnSync } from "node:child_process";
 import { IxClient } from "../../client/api.js";
-import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
-import { bootstrap, ensureWorkspaceId } from "../bootstrap.js";
+import { getEndpoint, resolveWorkspaceRoot, clearIngestMtimeCache } from "../config.js";
+import { bootstrap, ensureWorkspaceId, ensureWorkspaceIdState } from "../bootstrap.js";
 import { loadWatchIngestionModules } from "./ingestion-loader.js";
 import { readFileContent } from "./watch-utils.js";
 const SUPPORTED_EXTENSIONS = new Set([
@@ -61,7 +62,16 @@ export function registerWatchCommand(program: Command): void {
       }
 
       const root = resolveWorkspaceRoot(opts.root);
-      const workspaceId = ensureWorkspaceId(root);
+      const { workspaceId, migrated } = ensureWorkspaceIdState(root);
+      // If the workspace_id was just migrated to the path-based id (Ix#225 gap 2), the
+      // new id has no nodes yet and watch only ingests files as they change — so do a
+      // one-time full re-ingest under the new id first (clear the mtime cache so the
+      // spawned map re-ingests everything, then run it synchronously before watching).
+      if (migrated) {
+        console.error(chalk.dim("[watch] Workspace migrated to a stable id; re-ingesting once before watching..."));
+        clearIngestMtimeCache(root);
+        spawnSync(process.argv[0], [process.argv[1], "map", root, "--silent"], { stdio: "inherit" });
+      }
       const watchPath = opts.path
         ? path.resolve(root, opts.path)
         : root;

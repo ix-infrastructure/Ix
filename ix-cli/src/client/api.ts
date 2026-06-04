@@ -208,9 +208,15 @@ export class IxClient {
     return this.post("/v1/patches/batch", patches);
   }
 
-  async getSourceHashes(filePaths: string[]): Promise<Map<string, string>> {
-    const result = await this.post<Record<string, string>>('/v1/source-hashes', { uris: filePaths });
-    return new Map(Object.entries(result));
+  // Workspace-scoped baseline lookup (Ix#225). Returns one row per (workspace_id, uri)
+  // so the caller can match each file against its OWN workspace's hash, instead of a
+  // bare uri->hash map that collides across workspaces sharing a relative path. Passing
+  // workspaceIds bounds the query server-side. workspaceId is null for legacy patches.
+  async getSourceHashes(
+    filePaths: string[],
+    workspaceIds?: string[],
+  ): Promise<Array<{ workspaceId: string | null; uri: string; hash: string }>> {
+    return this.post('/v1/source-hashes', { uris: filePaths, workspaceIds });
   }
 
   async map(opts?: { full?: boolean; workspaceId?: string; systemId?: string }): Promise<any> {
@@ -318,6 +324,13 @@ export class IxClient {
       "/v1/reset/code",
       "Code graph reset. Planning artifacts (goals, plans, tasks, bugs, decisions) preserved.",
     );
+  }
+
+  // Delete all nodes/edges/patches under a single workspace_id (Ix#225 gap 2: clean up
+  // the orphans left when a workspace's id is migrated to the path-based id). Scoped to
+  // exactly that id server-side; other workspaces are untouched.
+  async deleteWorkspace(workspaceId: string): Promise<void> {
+    await this.post("/v1/reset/workspace", { workspaceId });
   }
 
   // True when the configured endpoint is a local memory-layer. A local

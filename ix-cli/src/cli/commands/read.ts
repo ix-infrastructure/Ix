@@ -4,7 +4,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { absoluteFromSourceUri, getEndpoint, resolveWorkspaceRoot } from "../config.js";
-import { resolveEntityFull } from "../resolve.js";
+import { resolveEntityFull, activeReadScope } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { isFileStale } from "../stale.js";
 import { relativePath } from "../format.js";
@@ -255,22 +255,27 @@ async function tryFilenameMatch(
 ): Promise<Array<{ name: string; path: string }>> {
   const basename = path.basename(target);
   const hasExtension = path.extname(basename) !== "";
+  // Scope to the active workspace / co-ingest system server-side, like trySymbolMatch.
+  const scope = activeReadScope();
 
   // Strategy 1: Search with the exact target (may include extension)
-  let nodes = await client.search(basename, { limit: 20, kind: "file" });
+  let nodes = await client.search(basename, { limit: 20, kind: "file", ...scope });
 
   // Strategy 2: If bare name (no extension), also search with common extensions
-  // to avoid being crowded out by unrelated results
+  // to avoid being crowded out by unrelated results. Fire the per-extension searches
+  // CONCURRENTLY — sequentially they were ~9 round trips that hung `ix read <symbol>`
+  // on large backends. Results are merged in extension-priority order (a .scala hit
+  // still ranks before a .ts hit), and the downstream filter/sort picks the winner.
   if (!hasExtension && !filterMatches(nodes, basename).length) {
     const extensions = [".scala", ".ts", ".tsx", ".py", ".rs", ".go", ".java", ".js", ".md"];
-    for (const ext of extensions) {
-      const extNodes = await client.search(basename + ext, { limit: 5, kind: "file" });
-      const extMatches = filterMatches(extNodes, basename);
-      if (extMatches.length > 0) {
-        nodes = [...extNodes, ...nodes];
-        break;
-      }
-    }
+    const perExt = await Promise.all(
+      extensions.map(ext =>
+        client.search(basename + ext, { limit: 5, kind: "file", ...scope })
+          .then(r => (filterMatches(r, basename).length ? r : []))
+          .catch(() => [] as any[])),
+    );
+    const merged = perExt.flat();
+    if (merged.length) nodes = [...merged, ...nodes];
   }
 
   const matches = filterMatches(nodes, basename);

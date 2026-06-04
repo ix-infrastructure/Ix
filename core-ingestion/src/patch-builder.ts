@@ -78,6 +78,25 @@ export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.23', 'tree-sitter/1.22', 'tre
 // nodeId / edgeId / chunkId / computePatchId / legacyPatchId are produced by
 // makeIds(workspaceId) above so every id is scoped to its workspace.
 
+/**
+ * In a multi-repo co-ingest, file paths are workspace-relative AND repo-prefixed:
+ * the first path segment is the member repo directory (see `repoOf` in the CLI).
+ * Node / edge / chunk IDENTITY is folded over the MEMBER-relative path (that prefix
+ * stripped) paired with the member's own workspace_id, so a repo's ids are
+ * byte-identical whether it is ingested alone or as part of a system. PROVENANCE
+ * (source_uri / file_uri / patch id) deliberately keeps the full workspace-relative
+ * path so reads can reconstruct an absolute path under the workspace root. Edge
+ * *matching* (resolvedEdges keyed on srcFilePath) also uses the full path, and
+ * repoWorkspaceOf is given the full path to identify the owning repo. Single-repo
+ * ingest (no multiRepo) is unchanged (idPath === filePath).
+ */
+function toMemberRelativePath(filePath: string, multiRepo?: MultiRepoContext): string {
+  if (!multiRepo) return filePath;
+  const norm = filePath.replace(/\\/g, '/');
+  const slash = norm.indexOf('/');
+  return slash >= 0 ? norm.slice(slash + 1) : norm;
+}
+
 // ---------------------------------------------------------------------------
 // Build a GraphPatchPayload from a FileParseResult
 // ---------------------------------------------------------------------------
@@ -89,7 +108,16 @@ export function buildPatch(
   previousSourceHash?: string,
   multiRepo?: MultiRepoContext,
 ): GraphPatchPayload {
-  const { filePath, entities, chunks, relationships } = result;
+  const { entities, chunks, relationships } = result;
+  // Two paths, deliberately distinct (see toMemberRelativePath):
+  //  - filePath (workspace-relative, repo-prefixed in a co-ingest) is PROVENANCE:
+  //    source_uri / file_uri / patch id. Reads reconstruct an absolute path by
+  //    joining it to the workspace root, so it must stay relative to that root.
+  //  - idPath (member-relative) is IDENTITY: node / edge / chunk ids fold it so a
+  //    member's ids are byte-identical whether ingested alone or in a system.
+  // Single repo: idPath === filePath.
+  const filePath = result.filePath;
+  const idPath = toMemberRelativePath(result.filePath, multiRepo);
   const { nodeId, edgeId, chunkId, computePatchId, legacyPatchId } = makeIds(workspaceId);
   const ops: PatchOp[] = [];
 
@@ -139,7 +167,7 @@ export function buildPatch(
   const seenNodeIds = new Set<string>();
   for (const e of entities) {
     const qk = entityQKey.get(e)!;
-    const id = nodeId(filePath, qk);
+    const id = nodeId(idPath, qk);
     if (!seenNodeIds.has(id)) {
       seenNodeIds.add(id);
       const roleAttrs = e.kind === 'file'
@@ -161,9 +189,9 @@ export function buildPatch(
   }
 
   // UpsertNode + edges for each chunk
-  const fileNodeId = nodeId(filePath, entities.find(e => e.kind === 'file')?.name ?? filePath);
+  const fileNodeId = nodeId(idPath, entities.find(e => e.kind === 'file')?.name ?? idPath);
   for (const chunk of chunks) {
-    const cid = chunkId(filePath, chunk.chunkKind, chunk.name, chunk.lineStart);
+    const cid = chunkId(idPath, chunk.chunkKind, chunk.name, chunk.lineStart);
     const chunkName = chunk.name ?? `file_body:${chunk.lineStart}`;
     const chunkNodeKind = chunk.chunkKind === 'section' ? 'section' : 'chunk';
     ops.push({
@@ -186,7 +214,7 @@ export function buildPatch(
     // File -[CONTAINS]-> Chunk
     ops.push({
       type: 'UpsertEdge',
-      id: edgeId(filePath, 'file', chunkName, 'CONTAINS_CHUNK'),
+      id: edgeId(idPath, 'file', chunkName, 'CONTAINS_CHUNK'),
       src: fileNodeId,
       dst: cid,
       predicate: 'CONTAINS_CHUNK',
@@ -195,10 +223,10 @@ export function buildPatch(
     // Chunk -[DEFINES]-> Symbol (only for named chunks)
     if (chunk.name !== null) {
       const symbolKey = chunk.container ? `${chunk.container}.${chunk.name}` : chunk.name;
-      const symbolNid = nodeId(filePath, symbolKey);
+      const symbolNid = nodeId(idPath, symbolKey);
       ops.push({
         type: 'UpsertEdge',
-        id: edgeId(filePath, chunkName, symbolKey, 'DEFINES'),
+        id: edgeId(idPath, chunkName, symbolKey, 'DEFINES'),
         src: cid,
         dst: symbolNid,
         predicate: 'DEFINES',
@@ -213,13 +241,13 @@ export function buildPatch(
     const b = chunks[i + 1];
     // Only link top-level chunks (no container) to avoid intra-class ordering noise
     if (a.container == null && b.container == null) {
-      const aid = chunkId(filePath, a.chunkKind, a.name, a.lineStart);
-      const bid = chunkId(filePath, b.chunkKind, b.name, b.lineStart);
+      const aid = chunkId(idPath, a.chunkKind, a.name, a.lineStart);
+      const bid = chunkId(idPath, b.chunkKind, b.name, b.lineStart);
       const aName = a.name ?? `file_body:${a.lineStart}`;
       const bName = b.name ?? `file_body:${b.lineStart}`;
       ops.push({
         type: 'UpsertEdge',
-        id: edgeId(filePath, aName, bName, 'NEXT'),
+        id: edgeId(idPath, aName, bName, 'NEXT'),
         src: aid,
         dst: bid,
         predicate: 'NEXT',
@@ -255,13 +283,13 @@ export function buildPatch(
         });
       }
     } else {
-      dstNid = nodeId(filePath, dstKey);
+      dstNid = nodeId(idPath, dstKey);
     }
 
     ops.push({
       type: 'UpsertEdge',
-      id: edgeId(filePath, srcKey, dstKey, r.predicate),
-      src: nodeId(filePath, srcKey),
+      id: edgeId(idPath, srcKey, dstKey, r.predicate),
+      src: nodeId(idPath, srcKey),
       dst: dstNid,
       predicate: r.predicate,
       attrs: {},
@@ -273,7 +301,7 @@ export function buildPatch(
     const srcKey = resolveKey(r.srcName);
     ops.push({
       type: 'AssertClaim',
-      entityId: nodeId(filePath, srcKey),
+      entityId: nodeId(idPath, srcKey),
       field: `${r.predicate.toLowerCase()}:${r.dstName}`,
       value: r.dstName,
       confidence: null,
@@ -351,19 +379,27 @@ export function buildPatchWithResolution(
     });
   }
 
-  const { filePath, entities, chunks, relationships } = result;
+  const { entities, chunks, relationships } = result;
+  // filePath = workspace-relative PROVENANCE (source_uri / file_uri / patch id);
+  // idPath = member-relative IDENTITY (node / edge / chunk ids) so a member's ids are
+  // byte-identical solo vs. co-ingested. Edge matching still keys on the full
+  // result.filePath above. Single-repo: idPath === filePath.
+  const filePath = result.filePath;
+  const idPath = toMemberRelativePath(result.filePath, multiRepo);
   const { nodeId, edgeId, chunkId, computePatchId, legacyPatchId } = makeIds(workspaceId);
   // Resolve a dst node id in the namespace of the repo that OWNS dstFilePath.
   // For same-repo (or single-repo) dsts this is just nodeId; for a cross-repo
   // edge it folds with the dst repo's workspace_id so the id matches the node
-  // that repo's own ingest produced.
+  // that repo's own ingest produced. repoWorkspaceOf needs the full (repo-prefixed)
+  // dstFilePath to find the owning repo; the id itself uses the member-relative path.
   const crossRepoIdsCache = new Map<string, ReturnType<typeof makeIds>>();
   const dstNodeIdInRepo = (dstFilePath: string, key: string): string => {
     const ws = multiRepo?.repoWorkspaceOf?.(dstFilePath);
-    if (!ws || ws === workspaceId) return nodeId(dstFilePath, key);
+    const dstIdPath = toMemberRelativePath(dstFilePath, multiRepo);
+    if (!ws || ws === workspaceId) return nodeId(dstIdPath, key);
     let ids = crossRepoIdsCache.get(ws);
     if (!ids) { ids = makeIds(ws); crossRepoIdsCache.set(ws, ids); }
-    return ids.nodeId(dstFilePath, key);
+    return ids.nodeId(dstIdPath, key);
   };
   const ops: PatchOp[] = [];
 
@@ -396,7 +432,7 @@ export function buildPatchWithResolution(
   const seenNodeIds2 = new Set<string>();
   for (const e of entities) {
     const qk = entityQKey.get(e)!;
-    const id = nodeId(filePath, qk);
+    const id = nodeId(idPath, qk);
     if (!seenNodeIds2.has(id)) {
       seenNodeIds2.add(id);
       const roleAttrs = e.kind === 'file'
@@ -413,9 +449,9 @@ export function buildPatchWithResolution(
   }
 
   // UpsertNode + edges for each chunk (same logic as buildPatch)
-  const fileNodeId2 = nodeId(filePath, entities.find(e => e.kind === 'file')?.name ?? filePath);
+  const fileNodeId2 = nodeId(idPath, entities.find(e => e.kind === 'file')?.name ?? idPath);
   for (const chunk of chunks) {
-    const cid = chunkId(filePath, chunk.chunkKind, chunk.name, chunk.lineStart);
+    const cid = chunkId(idPath, chunk.chunkKind, chunk.name, chunk.lineStart);
     const chunkName = chunk.name ?? `file_body:${chunk.lineStart}`;
     const chunkNodeKind2 = chunk.chunkKind === 'section' ? 'section' : 'chunk';
     ops.push({
@@ -437,7 +473,7 @@ export function buildPatchWithResolution(
     });
     ops.push({
       type: 'UpsertEdge',
-      id: edgeId(filePath, 'file', chunkName, 'CONTAINS_CHUNK'),
+      id: edgeId(idPath, 'file', chunkName, 'CONTAINS_CHUNK'),
       src: fileNodeId2,
       dst: cid,
       predicate: 'CONTAINS_CHUNK',
@@ -445,10 +481,10 @@ export function buildPatchWithResolution(
     });
     if (chunk.name !== null) {
       const symbolKey = chunk.container ? `${chunk.container}.${chunk.name}` : chunk.name;
-      const symbolNid = nodeId(filePath, symbolKey);
+      const symbolNid = nodeId(idPath, symbolKey);
       ops.push({
         type: 'UpsertEdge',
-        id: edgeId(filePath, chunkName, symbolKey, 'DEFINES'),
+        id: edgeId(idPath, chunkName, symbolKey, 'DEFINES'),
         src: cid,
         dst: symbolNid,
         predicate: 'DEFINES',
@@ -461,13 +497,13 @@ export function buildPatchWithResolution(
     const a = chunks[i];
     const b = chunks[i + 1];
     if (a.container == null && b.container == null) {
-      const aid = chunkId(filePath, a.chunkKind, a.name, a.lineStart);
-      const bid = chunkId(filePath, b.chunkKind, b.name, b.lineStart);
+      const aid = chunkId(idPath, a.chunkKind, a.name, a.lineStart);
+      const bid = chunkId(idPath, b.chunkKind, b.name, b.lineStart);
       const aName = a.name ?? `file_body:${a.lineStart}`;
       const bName = b.name ?? `file_body:${b.lineStart}`;
       ops.push({
         type: 'UpsertEdge',
-        id: edgeId(filePath, aName, bName, 'NEXT'),
+        id: edgeId(idPath, aName, bName, 'NEXT'),
         src: aid,
         dst: bid,
         predicate: 'NEXT',
@@ -508,13 +544,13 @@ export function buildPatchWithResolution(
         });
       }
     } else {
-      dstNodeId = nodeId(filePath, dstKey);
+      dstNodeId = nodeId(idPath, dstKey);
     }
 
     ops.push({
       type: 'UpsertEdge',
-      id: edgeId(filePath, srcKey, dstKey, r.predicate),
-      src: nodeId(filePath, srcKey),
+      id: edgeId(idPath, srcKey, dstKey, r.predicate),
+      src: nodeId(idPath, srcKey),
       dst: dstNodeId,
       predicate: r.predicate,
       attrs: {},
@@ -525,7 +561,7 @@ export function buildPatchWithResolution(
     const srcKey = resolveKey(r.srcName);
     ops.push({
       type: 'AssertClaim',
-      entityId: nodeId(filePath, srcKey),
+      entityId: nodeId(idPath, srcKey),
       field: `${r.predicate.toLowerCase()}:${r.dstName}`,
       value: r.dstName,
       confidence: null,

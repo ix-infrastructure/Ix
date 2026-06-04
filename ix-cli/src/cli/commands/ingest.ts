@@ -10,11 +10,11 @@ import { ParsePool } from './parse-pool.js';
 import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
 import type { GraphPatchPayload } from '../../client/types.js';
-import { getEndpoint, resolveWorkspaceRoot } from '../config.js';
+import { getEndpoint, resolveWorkspaceRoot, ingestMtimeCachePath } from '../config.js';
 import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
 import { loadIngestionModules } from './ingestion-loader.js';
-import { ensureWorkspaceId } from '../bootstrap.js';
+import { ensureWorkspaceIdState } from '../bootstrap.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage } from '../system.js';
 import {
   deterministicId,
@@ -314,14 +314,9 @@ interface MtimeCache {
   files: Record<string, number>; // absolute path → mtime (ms)
 }
 
-function mtimeCachePath(projectRoot: string): string {
-  const key = crypto.createHash('sha256').update(projectRoot).digest('hex').slice(0, 12);
-  return nodePath.join(os.homedir(), '.ix', `ingest_mtimes_${key}.json`);
-}
-
 function loadMtimeCache(projectRoot: string): Map<string, number> {
   try {
-    const raw = fs.readFileSync(mtimeCachePath(projectRoot), 'utf-8');
+    const raw = fs.readFileSync(ingestMtimeCachePath(projectRoot), 'utf-8');
     const data = JSON.parse(raw) as MtimeCache;
     if (data.root !== projectRoot) return new Map();
     return new Map(Object.entries(data.files));
@@ -335,7 +330,7 @@ function saveMtimeCache(projectRoot: string, mtimes: Map<string, number>): void 
     const dir = nodePath.join(os.homedir(), '.ix');
     fs.mkdirSync(dir, { recursive: true });
     const data: MtimeCache = { root: projectRoot, files: Object.fromEntries(mtimes) };
-    fs.writeFileSync(mtimeCachePath(projectRoot), JSON.stringify(data));
+    fs.writeFileSync(ingestMtimeCachePath(projectRoot), JSON.stringify(data));
   } catch {
     // Non-critical: ignore write errors
   }
@@ -422,13 +417,26 @@ export async function ingestFiles(
   // The backend used to dereference provenance.source_uri against the host
   // filesystem (via a broad HOME bind mount). We now emit workspace-relative
   // paths as the canonical source_uri, plus a stable workspace_id (persisted in
-  // ~/.ix/config.yaml, NOT derived from the absolute path) that core-ingestion
-  // folds into every node id so two workspaces with the same relative layout do
-  // not collide. The backend treats both as opaque strings; it never reads host files.
+  // ~/.ix/config.yaml, derived from the workspace's absolute path) that
+  // core-ingestion folds into every node id so two workspaces with the same
+  // relative layout do not collide. The id is path-based (not random) so a repo
+  // mapped standalone gets the SAME workspace_id it gets as a member of a system
+  // (see workspaceIdForPath / repoWorkspaceIdFor), keeping its node identity
+  // byte-identical across both. The backend treats both as opaque strings; it
+  // never reads host files.
   const workspaceRoot = fs.statSync(resolvedPath).isDirectory()
     ? resolvedPath
     : nodePath.dirname(resolvedPath);
-  const workspaceId = ensureWorkspaceId(workspaceRoot);
+  const { workspaceId, migrated: workspaceMigrated, previousWorkspaceId } = ensureWorkspaceIdState(workspaceRoot);
+  if (workspaceMigrated) {
+    // Legacy random workspace_id was just re-keyed to the path-based id (Ix#225
+    // gap 2). Node identity folds the workspace_id, so the previously-ingested
+    // nodes live under the old id; force a full re-ingest under the new id (below)
+    // and delete the old id's orphaned nodes after that succeeds.
+    process.stderr.write(
+      `Migrated workspace to a stable path-based id; re-ingesting this workspace once.\n`,
+    );
+  }
   const toWorkspaceRelative = (absPath: string): string => {
     // Force workspace-local POSIX separators so IDs are stable across OS.
     const rel = nodePath.relative(workspaceRoot, absPath);
@@ -453,6 +461,9 @@ export async function ingestFiles(
   const repoWorkspaceOf = systemId ? (relPath: string) => repoWorkspaceId(repoOf(relPath)) : undefined;
   // Per-file workspace id + multi-repo context fed to buildPatchWithResolution.
   const fileWorkspaceId = (relPath: string): string => systemId ? repoWorkspaceId(repoOf(relPath)) : workspaceId;
+  // The workspace_id a file's nodes are folded under (same value the patch builder
+  // stamps on source.workspaceId) — used to scope the baseline hash lookup per file.
+  const sourceWorkspaceIdOf = (absPath: string): string => fileWorkspaceId(toWorkspaceRelative(absPath));
   const fileMultiRepo = (relPath: string) =>
     systemId ? { systemId, repoId: repoOf(relPath), repoWorkspaceOf } : undefined;
   // Cross-repo dependency gate: map an import module name to the member repo that
@@ -618,7 +629,9 @@ export async function ingestFiles(
     // Phase: mtime pre-filter — skip readFileSync+sha256 for files whose mtime
     // is unchanged since the last successful ingest (common "ix map" re-run case).
     const projectRoot = fs.statSync(resolvedPath).isDirectory() ? resolvedPath : nodePath.dirname(resolvedPath);
-    const mtimeCache  = opts.force ? new Map<string, number>() : loadMtimeCache(projectRoot);
+    // A just-migrated workspace (new path-based id) has no nodes under the new id, so
+    // skip the mtime pre-filter and re-ingest everything, exactly like --force.
+    const mtimeCache  = (opts.force || workspaceMigrated) ? new Map<string, number>() : loadMtimeCache(projectRoot);
     const currentMtimes = new Map<string, number>();
 
     // DB-reset guard: if the mtime cache has entries but the server returns no hashes
@@ -626,7 +639,7 @@ export async function ingestFiles(
     // so the cache wasn't cleared). Invalidate the cache so files are re-ingested.
     if (!opts.force && mtimeCache.size > 0) {
       const samplePaths = [...mtimeCache.keys()].slice(0, 5);
-      const sampleHashes = await loadExistingHashes(client, samplePaths, toWorkspaceRelative, debug);
+      const sampleHashes = await loadExistingHashes(client, samplePaths, toWorkspaceRelative, sourceWorkspaceIdOf, debug);
       if (sampleHashes.size === 0) {
         mtimeCache.clear();
         if (debug) process.stderr.write(`\n  DB reset detected — invalidating mtime cache\n`);
@@ -658,7 +671,7 @@ export async function ingestFiles(
     // Phase: hash lookup — only needed when mtime-changed files exist.
     let knownHashes: Map<string, string>;
     if (opts.force || mtimeChangedPaths.length > 0) {
-      knownHashes = await loadExistingHashes(client, opts.force ? filePaths : mtimeChangedPaths, toWorkspaceRelative, debug);
+      knownHashes = await loadExistingHashes(client, opts.force ? filePaths : mtimeChangedPaths, toWorkspaceRelative, sourceWorkspaceIdOf, debug);
       if (debug) process.stderr.write(`\n  Source hash lookup: ${knownHashes.size} known hashes (${mtimeChangedPaths.length} mtime-changed)\n`);
     } else {
       // All files are mtime-clean — skip server round-trip entirely.
@@ -1156,6 +1169,18 @@ export async function ingestFiles(
     if (!opts.force && parseErrors === 0 && currentMtimes.size > 0) {
       saveMtimeCache(projectRoot, currentMtimes);
     }
+
+    // Migration cleanup (Ix#225 gap 2): the re-ingest under the new path-based id has
+    // committed, so delete the OLD id's now-orphaned nodes/edges/patches. Best-effort —
+    // a failure here is non-fatal (orphans are harmless dead storage, cleanable later).
+    if (workspaceMigrated && previousWorkspaceId && parseErrors === 0) {
+      try {
+        await client.deleteWorkspace(previousWorkspaceId);
+        if (debug) process.stderr.write(`  Cleaned up pre-migration nodes under ${previousWorkspaceId}.\n`);
+      } catch (err) {
+        if (debug) process.stderr.write(`  [migration cleanup skipped] ${err}\n`);
+      }
+    }
   } finally {
     if (pool) {
       await pool.destroy();
@@ -1267,26 +1292,29 @@ export async function ingestFiles(
 // tracks files internally by absolute path (needed for fs reads), so this
 // helper converts to relative before the wire call and maps the server's
 // response back onto the caller's absolute keys.
-async function loadExistingHashes(
-  client: IxClient,
+export async function loadExistingHashes(
+  client: Pick<IxClient, "getSourceHashes">,
   filePaths: string[],
   toRelative: (absPath: string) => string,
+  workspaceIdOf: (absPath: string) => string,
   debug = false,
 ): Promise<Map<string, string>> {
   try {
-    const relPaths: string[] = new Array(filePaths.length);
-    const relToAbs = new Map<string, string>();
-    for (let i = 0; i < filePaths.length; i++) {
-      const abs = filePaths[i];
-      const rel = toRelative(abs);
-      relPaths[i] = rel;
-      relToAbs.set(rel, abs);
-    }
-    const serverHashes = await client.getSourceHashes(relPaths);
+    // Each file is matched against its OWN workspace's stored hash. The server keys
+    // source_uri globally, so without the workspace_id two members (or two unrelated
+    // repos) sharing a relative path + content would collide; pairing (workspace_id,
+    // uri) makes the baseline collision-free (Ix#225 gap 3).
+    const entries = filePaths.map(abs => ({ abs, uri: toRelative(abs), ws: workspaceIdOf(abs) }));
+    const uris = [...new Set(entries.map(e => e.uri))];
+    const workspaceIds = [...new Set(entries.map(e => e.ws).filter(Boolean))];
+    const rows = await client.getSourceHashes(uris, workspaceIds);
+    const sep = "\u0000";
+    const index = new Map<string, string>();
+    for (const r of rows) index.set(`${r.workspaceId ?? ""}${sep}${r.uri}`, r.hash);
     const out = new Map<string, string>();
-    for (const [rel, hash] of serverHashes) {
-      const abs = relToAbs.get(rel);
-      if (abs !== undefined) out.set(abs, hash);
+    for (const e of entries) {
+      const hash = index.get(`${e.ws}${sep}${e.uri}`);
+      if (hash !== undefined) out.set(e.abs, hash);
     }
     return out;
   } catch (err) {

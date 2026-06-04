@@ -1,9 +1,32 @@
 import * as path from "node:path";
 import chalk from "chalk";
 import type { IxClient } from "../client/api.js";
-import { getActiveWorkspaceRoot } from "./config.js";
 import { stderr } from "./stderr.js";
 import { applyRoleFilter } from "./role-filter.js";
+import { detectSystem } from "./system.js";
+import { resolveWorkspaceId } from "./bootstrap.js";
+
+/**
+ * The read scope for the current working directory: a co-ingested multi-repo system
+ * scopes by system_id (spanning all members); otherwise by the single workspace_id.
+ * Computed once per cwd (detectSystem does FS reads) since a command never changes cwd.
+ * Mirrors the server-side scoping that search/inventory/stats already apply — without
+ * it, entity resolution searched the whole backend and a stale absolute path filter
+ * (getActiveWorkspaceRoot vs. workspace-relative source_uri) dropped every candidate
+ * (issue #228, originally fixed in search.ts only).
+ */
+let _scopeCache: { cwd: string; workspaceId?: string; systemId?: string } | undefined;
+export function activeReadScope(): { workspaceId?: string; systemId?: string } {
+  return activeScope();
+}
+function activeScope(): { workspaceId?: string; systemId?: string } {
+  const cwd = process.cwd();
+  if (_scopeCache?.cwd === cwd) return _scopeCache;
+  const systemId = detectSystem(cwd)?.systemId;
+  const workspaceId = systemId ? undefined : resolveWorkspaceId(cwd);
+  _scopeCache = { cwd, workspaceId, systemId };
+  return _scopeCache;
+}
 
 export type ResolutionMode = "exact" | "preferred-kind" | "scored" | "ambiguous" | "heuristic";
 
@@ -148,12 +171,18 @@ export async function resolveEntityFull(
   preferredKinds: string[],
   opts?: { kind?: string; path?: string; pick?: number; includeTests?: boolean; testsOnly?: boolean; searchLimit?: number }
 ): Promise<ResolveResult> {
-  const effectivePath = opts?.path ?? getActiveWorkspaceRoot();
+  // Scope is applied server-side (workspace_id, or system_id for a co-ingest). Only an
+  // EXPLICIT --path narrows further, client-side; we no longer default the path filter
+  // to the absolute workspace root, which never matched workspace-relative source_uris.
+  const effectivePath = opts?.path;
+  const { workspaceId, systemId } = activeScope();
   const kindFilter = opts?.kind;
   const nodes = await client.search(symbol, {
-    limit: opts?.searchLimit ?? (effectivePath ? 200 : looksTypeLikeSymbol(symbol) ? 50 : 20),
+    limit: opts?.searchLimit ?? (effectivePath ? 200 : looksTypeLikeSymbol(symbol) ? 50 : 30),
     kind: kindFilter,
     nameOnly: true,
+    workspaceId,
+    systemId,
   });
 
   if (nodes.length === 0) {
@@ -596,13 +625,17 @@ async function tryFileGraphMatch(
 ): Promise<ResolvedEntity | null> {
   const basename = path.basename(target);
   const targetHasPath = target.includes("/") || target.includes("\\");
-  const effectivePath = opts?.path ?? getActiveWorkspaceRoot();
+  // Explicit --path only (not the absolute workspace root); scope server-side instead.
+  const effectivePath = opts?.path;
+  const { workspaceId, systemId } = activeScope();
 
   // Search for file entities matching the basename
   const nodes = await client.search(basename, {
-    limit: effectivePath ? 200 : 20,
+    limit: effectivePath ? 200 : 50,
     kind: "file",
     nameOnly: true,
+    workspaceId,
+    systemId,
   });
 
   // Filter to actual matches

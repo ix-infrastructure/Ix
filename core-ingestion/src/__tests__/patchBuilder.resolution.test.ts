@@ -321,3 +321,84 @@ describe('buildPatch', () => {
     );
   });
 });
+
+// Ix#225 Path 1: a repo's node/edge IDENTITY must be byte-identical whether it is
+// ingested standalone or as a member of a multi-repo system. Identity is folded over
+// the MEMBER-relative path (repo-dir prefix stripped) paired with the member's own
+// workspace_id, so `ix map svc-a` and `ix map <parent-of-svc-a>` produce the same
+// node and edge ids; a cross-repo edge resolves onto the very node the target repo's
+// own ingest creates. PROVENANCE (source_uri / patch id) deliberately stays
+// workspace-relative (repo-prefixed in a co-ingest) so reads reconstruct the right
+// absolute path under the workspace root — it is NOT expected to converge.
+describe('multi-repo co-ingest identity convergence', () => {
+  const WS_A = 'aaaaaaaa'; // svc-a's path-based workspace_id (same value in both modes)
+  const WS_B = 'bbbbbbbb';
+  const repoWorkspaceOf = (fp: string): string | undefined => {
+    const repo = fp.replace(/\\/g, '/').split('/')[0];
+    return repo === 'svc-a' ? WS_A : repo === 'svc-b' ? WS_B : undefined;
+  };
+  const ids = (patch: { ops: { type: string; id: string }[] }, type: string): string[] =>
+    patch.ops.filter(op => op.type === type).map(op => op.id).sort();
+
+  const svcAResult = (filePath: string): FileParseResult =>
+    fileResult(
+      filePath,
+      SupportedLanguages.TypeScript,
+      [entity('handler', SupportedLanguages.TypeScript, 'function')],
+      [{ srcName: 'handler', dstName: 'localHelper', predicate: 'CALLS' }],
+    );
+
+  it('produces byte-identical node and edge ids solo vs co-ingested', () => {
+    // Solo: filePath is already member-relative; no multiRepo context.
+    const solo = buildPatchWithResolution(svcAResult('src/index.ts'), 'h', WS_A, [], undefined, undefined);
+    // Co-ingest: filePath is repo-prefixed, multiRepo present, same member workspace_id.
+    const co = buildPatchWithResolution(
+      svcAResult('svc-a/src/index.ts'), 'h', WS_A, [],
+      undefined, { systemId: 'sys', repoId: 'svc-a', repoWorkspaceOf });
+
+    // Identity converges (folded over the member-relative path).
+    expect(ids(co, 'UpsertNode')).toEqual(ids(solo, 'UpsertNode'));
+    expect(ids(co, 'UpsertEdge')).toEqual(ids(solo, 'UpsertEdge'));
+    // Provenance stays workspace-relative — repo-prefixed in the co-ingest so `ix read`
+    // resolves parent/svc-a/src/index.ts, not parent/src/index.ts.
+    expect(co.source.uri).toBe('svc-a/src/index.ts');
+    expect(solo.source.uri).toBe('src/index.ts');
+  });
+
+  it('stamps systemId/repoId only in co-ingest, never solo', () => {
+    const solo = buildPatchWithResolution(svcAResult('src/index.ts'), 'h', WS_A, [], undefined, undefined);
+    const co = buildPatchWithResolution(
+      svcAResult('svc-a/src/index.ts'), 'h', WS_A, [],
+      undefined, { systemId: 'sys', repoId: 'svc-a', repoWorkspaceOf });
+    expect(co.source.systemId).toBe('sys');
+    expect(co.source.repoId).toBe('svc-a');
+    expect(solo.source.systemId).toBeUndefined();
+    expect(solo.source.repoId).toBeUndefined();
+  });
+
+  it('folds a cross-repo edge onto the exact node the target repo ingests standalone', () => {
+    // svc-a.handler CALLS util, resolved to svc-b/src/util.ts.
+    const src = fileResult(
+      'svc-a/src/index.ts', SupportedLanguages.TypeScript,
+      [entity('handler', SupportedLanguages.TypeScript, 'function')],
+      [{ srcName: 'handler', dstName: 'util', predicate: 'CALLS' }],
+    );
+    const resolved: ResolvedEdge[] = [{
+      srcFilePath: 'svc-a/src/index.ts', srcName: 'handler', predicate: 'CALLS',
+      dstName: 'util', dstFilePath: 'svc-b/src/util.ts', dstQualifiedKey: 'util',
+    }];
+    const co = buildPatchWithResolution(
+      src, 'h', WS_A, resolved, undefined,
+      { systemId: 'sys', repoId: 'svc-a', repoWorkspaceOf });
+    const callsDst = co.ops.find(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS')!.dst;
+
+    // svc-b's OWN standalone ingest of util in src/util.ts:
+    const svcbSolo = buildPatchWithResolution(
+      fileResult('src/util.ts', SupportedLanguages.TypeScript,
+        [entity('util', SupportedLanguages.TypeScript, 'function')], []),
+      'h2', WS_B, [], undefined, undefined);
+    const svcbUtilNode = svcbSolo.ops.find(op => op.type === 'UpsertNode' && op.name === 'util')!.id;
+
+    expect(callsDst).toBe(svcbUtilNode);
+  });
+});

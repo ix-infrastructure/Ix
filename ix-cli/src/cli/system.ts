@@ -360,11 +360,23 @@ export function detectSystem(rootPath: string): DetectedSystem | undefined {
 }
 
 /**
+ * The canonical, path-based workspace_id for a repo root. A repo gets the SAME
+ * id whether it is ingested standalone (`ix map <repo>`) or as a member of a
+ * system (`ix map <parent>`), which is exactly what keeps a member's node
+ * identity byte-identical across both modes. Single source of truth shared by the
+ * solo path (bootstrap.getOrCreateWorkspace) and the co-ingest path
+ * (repoWorkspaceIdFor); both MUST agree or solo and co-ingest nodes diverge.
+ */
+export function workspaceIdForPath(absPath: string): string {
+  const abs = nodePath.resolve(absPath).split(nodePath.sep).join("/");
+  return stableId(`repo:${abs}`);
+}
+
+/**
  * A member repo's stable workspace_id, derived from its absolute path so it is
  * independent of which system it sits in (Path-2 friendly) and stable across
  * re-ingests of the same location.
  */
 export function repoWorkspaceIdFor(rootPath: string, repoDir: string): string {
-  const abs = nodePath.resolve(rootPath, repoDir).split(nodePath.sep).join("/");
-  return stableId(`repo:${abs}`);
+  return workspaceIdForPath(nodePath.resolve(rootPath, repoDir));
 }

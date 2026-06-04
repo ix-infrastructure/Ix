@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
 
-import { buildPackageRegistry, detectSystem, readPackageNames, readPackageDeps } from "../system.js";
+import { buildPackageRegistry, detectSystem, readPackageNames, readPackageDeps, repoWorkspaceIdFor, workspaceIdForPath } from "../system.js";
 
 // Real on-disk fixtures: buildPackageRegistry reads each member's build manifest.
 let root: string;
@@ -136,5 +136,22 @@ describe("git-aware system detection (no flags, monorepo vs separate repos)", ()
     const d = detectSystem(nodePath.join(base, "plain"));
     expect(d).toBeTruthy();
     expect(d!.members.sort()).toEqual(["proj-a", "proj-b"]);
+  });
+});
+
+describe("workspace_id convergence (solo vs co-ingest)", () => {
+  // The solo path (bootstrap.getOrCreateWorkspace) and the co-ingest member path
+  // (repoWorkspaceIdFor) must derive the SAME path-based id for a given repo root,
+  // else a repo's nodes diverge between `ix map <repo>` and `ix map <parent>`.
+  it("repoWorkspaceIdFor(parent, member) === workspaceIdForPath(parent/member)", () => {
+    const memberAbs = nodePath.join(root, "app");
+    expect(repoWorkspaceIdFor(root, "app")).toBe(workspaceIdForPath(memberAbs));
+  });
+
+  it("is stable and path-distinct (different roots -> different ids)", () => {
+    expect(workspaceIdForPath(root)).toBe(workspaceIdForPath(root)); // deterministic
+    expect(workspaceIdForPath(nodePath.join(root, "app")))
+      .not.toBe(workspaceIdForPath(nodePath.join(root, "lib")));
+    expect(workspaceIdForPath(root)).toMatch(/^[0-9a-f]{8}$/); // 8-hex, not a random UUID slice
   });
 });
