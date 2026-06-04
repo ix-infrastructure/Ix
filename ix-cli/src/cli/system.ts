@@ -197,17 +197,29 @@ export function readPackageDeps(dir: string): string[] {
   };
   const add = (n: unknown) => { if (typeof n === "string" && n.trim()) deps.add(n.trim()); };
 
+  // PRODUCTION deps only. The declared-dependency graph gates cross-repo edges,
+  // i.e. it asserts "repo A's code genuinely depends on repo B's code." dev/test
+  // and build-tool deps are NOT production architecture: every repo dev-depends on
+  // its test/build tooling, and treating those as coupling falsely merges
+  // unrelated repos into one system (e.g. express dev-depends on morgan only for
+  // its tests; chalk dev-depends on execa; lodash dev-depends on chalk) and lets
+  // symbol-name collisions slip the gate. So devDependencies / Cargo
+  // [dev-dependencies] / [build-dependencies] are intentionally excluded; runtime
+  // peer/optional deps are kept (they are real runtime coupling).
   const pkg = read("package.json");                                  // JS / TS
   if (pkg) { try {
     const j = JSON.parse(pkg);
-    for (const s of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"])
+    for (const s of ["dependencies", "peerDependencies", "optionalDependencies"])
       if (j[s] && typeof j[s] === "object") for (const k of Object.keys(j[s])) add(k);
   } catch { /* ignore */ } }
 
   const cargo = read("Cargo.toml");                                  // Rust
   if (cargo) {
-    for (const sect of cargo.matchAll(/\[(?:dev-|build-)?dependencies(?:\.[^\]\n]+)?\]([\s\S]*?)(?:\n\[|$)/g)) {
-      for (const dm of sect[1].matchAll(/^\s*([A-Za-z0-9_-]+)\s*(?:=|\.)/gm)) add(dm[1]);
+    // Match [dependencies], [dependencies.x], [target.'cfg'.dependencies], but
+    // skip [dev-dependencies] / [build-dependencies] (not runtime coupling).
+    for (const sect of cargo.matchAll(/\[([^\]\n]*\bdependencies\b[^\]\n]*)\]([\s\S]*?)(?:\n\[|$)/g)) {
+      if (/\b(?:dev|build)-dependencies\b/.test(sect[1])) continue;
+      for (const dm of sect[2].matchAll(/^\s*([A-Za-z0-9_-]+)\s*(?:=|\.)/gm)) add(dm[1]);
     }
   }
 

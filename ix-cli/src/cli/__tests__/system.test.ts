@@ -69,6 +69,32 @@ describe("Maven name + declared-dependency graph", () => {
     expect(readPackageDeps(nodePath.join(root, "consumer"))).toContain("acme-lib");
   });
 
+  it("readPackageDeps returns PRODUCTION deps only (dev/test deps are not architectural coupling)", () => {
+    const d = nodePath.join(root, "proddep");
+    fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(nodePath.join(d, "package.json"), JSON.stringify({
+      name: "proddep",
+      dependencies: { "real-dep": "^1.0.0" },
+      peerDependencies: { "peer-dep": "*" },
+      optionalDependencies: { "opt-dep": "^1.0.0" },
+      devDependencies: { "test-dep": "^1.0.0" },
+    }));
+    const deps = readPackageDeps(d);
+    expect(deps).toEqual(expect.arrayContaining(["real-dep", "peer-dep", "opt-dep"]));
+    expect(deps).not.toContain("test-dep");
+  });
+
+  it("readPackageDeps excludes Cargo [dev-dependencies] and [build-dependencies]", () => {
+    const d = nodePath.join(root, "rustdep");
+    fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(nodePath.join(d, "Cargo.toml"),
+      '[package]\nname = "rustdep"\n\n[dependencies]\nserde = "1"\n\n[dev-dependencies]\ncriterion = "0.5"\n\n[build-dependencies]\ncc = "1"\n');
+    const deps = readPackageDeps(d);
+    expect(deps).toContain("serde");
+    expect(deps).not.toContain("criterion");
+    expect(deps).not.toContain("cc");
+  });
+
   it("detectSystem builds the ground-truth repoDeps graph (consumer -> lib)", () => {
     const d = detectSystem(root)!;
     expect(d.repoDeps["consumer"]).toContain("lib");
