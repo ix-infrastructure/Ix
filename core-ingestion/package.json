@@ -32,12 +32,13 @@
     "tree-sitter-typescript": "^0.21.0"
   },
   "optionalDependencies": {
-    "tree-sitter-kotlin": "^0.3.8",
-    "tree-sitter-sas": "^0.4.2",
-    "tree-sitter-swift": "^0.6.0",
+    "@davisvaughan/tree-sitter-r": "^1.2.0",
+    "tree-sitter-css": "^0.25.0",
     "tree-sitter-elixir": "^0.3.5",
+    "tree-sitter-kotlin": "^0.3.8",
     "tree-sitter-make": "^1.1.1",
-    "@davisvaughan/tree-sitter-r": "^1.2.0"
+    "tree-sitter-sas": "^0.4.2",
+    "tree-sitter-swift": "^0.6.0"
   },
   "devDependencies": {
     "@emnapi/core": "1.9.2",

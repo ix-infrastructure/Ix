@@ -1605,6 +1605,20 @@ export const R_QUERIES = `
   (#eq? @_src "source")) @import
 `;
 
+// CSS. @import (string or url(...)) as stylesheet imports; class and id selectors
+// as definitions (repeats of the same name fold to one node per file); @keyframes
+// animation names as definitions.
+export const CSS_QUERIES = `
+(import_statement (string_value (string_content) @import.source)) @import
+(import_statement
+  (call_expression (function_name) @_f (arguments (string_value (string_content) @import.source)))
+  (#eq? @_f "url")) @import
+
+(class_selector (class_name) @name) @definition.class
+(id_selector (id_name) @name) @definition.class
+(keyframes_statement (keyframes_name) @name) @definition.const
+`;
+
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TypeScript]: TYPESCRIPT_QUERIES,
   [SupportedLanguages.JavaScript]: JAVASCRIPT_QUERIES,
@@ -1630,5 +1644,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.SAS]: SAS_QUERIES,
   [SupportedLanguages.Elixir]: ELIXIR_QUERIES,
   [SupportedLanguages.Makefile]: MAKEFILE_QUERIES,
+  [SupportedLanguages.CSS]: CSS_QUERIES,
 };
  
