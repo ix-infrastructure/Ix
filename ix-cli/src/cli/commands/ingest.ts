@@ -404,7 +404,7 @@ export async function ingestFiles(
   const mapMode = opts.mapMode === true;
   const trueStart = performance.now();
 
-  const [{ parseFile, resolveEdges, isGrammarSupported }, { buildPatchWithResolution, fileNodeId }, { languageFromPath }] = await loadIngestionModules();
+  const [{ parseFile, resolveEdges, isGrammarSupported }, { buildPatchWithResolution, fileNodeId, symbolNodeId }, { languageFromPath }] = await loadIngestionModules();
   const moduleLoadMs = Math.round(performance.now() - trueStart);
 
 
@@ -493,15 +493,35 @@ export async function ingestFiles(
   const stitchConsumes: Array<{ name: string; consumerNodeId: string }> = [];
   const stitchConsumeSeen = new Set<string>();
   const stitchFiles: string[] = [];
+  // Symbol-level stitch (Ix#225): a provider's exported top-level symbols + a
+  // consumer's calls (collected raw; resolved post-ingest once the full repo symbol
+  // set is known, so "external" = a call to a symbol not defined anywhere in this repo).
+  const stitchDefs = new Map<string, { qk: string; filePath: string }>(); // name -> def (caller-key + local set)
+  const stitchExportNames = new Set<string>();
+  const stitchExports: Array<{ name: string; nodeId: string }> = [];
+  const stitchCalls: Array<{ symbol: string; caller: string; callerFilePath: string }> = [];
+  // Builtin instance-method names that are never a real cross-repo call target.
+  const STITCH_COMMODITY = new Set(['map', 'forEach', 'reduce', 'reduceRight', 'flatMap', 'flat', 'push', 'pop', 'shift', 'unshift', 'splice', 'slice', 'concat', 'get', 'set', 'has', 'keys', 'values', 'entries', 'then', 'catch', 'finally', 'resolve', 'race', 'allSettled', 'bind', 'call', 'apply', 'stringify', 'toString', 'valueOf', 'hasOwnProperty']);
   const specToPkg = (spec: string | undefined): string | null => {
     if (!spec || spec.startsWith('.') || spec.startsWith('/')) return null;
     if (spec.startsWith('@')) { const parts = spec.split('/'); return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : null; }
     return spec.split('/')[0] || null;
   };
-  const collectStitch = (parsedFiles: Array<{ filePath: string; relationships?: Array<{ predicate: string; dstName?: string; importRaw?: string }> }>): void => {
+  const collectStitch = (parsedFiles: Array<{ filePath: string; entities?: Array<{ name: string; kind: string; container?: string }>; relationships?: Array<{ predicate: string; srcName?: string; dstName?: string; importRaw?: string }> }>): void => {
     for (const p of parsedFiles) {
       stitchFiles.push(p.filePath);
+      for (const e of (p.entities ?? [])) {
+        const qk = e.container ? `${e.container}.${e.name}` : e.name;
+        stitchDefs.set(e.name, { qk, filePath: p.filePath });
+        if (!e.container && (e.kind === 'function' || e.kind === 'class') && !stitchExportNames.has(e.name)) {
+          stitchExportNames.add(e.name);
+          stitchExports.push({ name: e.name, nodeId: symbolNodeId(workspaceId, p.filePath, qk) });
+        }
+      }
       for (const rel of (p.relationships ?? [])) {
+        if (rel.predicate === 'CALLS' && typeof rel.dstName === 'string' && typeof rel.srcName === 'string' && !STITCH_COMMODITY.has(rel.dstName)) {
+          stitchCalls.push({ symbol: rel.dstName, caller: rel.srcName, callerFilePath: p.filePath });
+        }
         if (rel.predicate !== 'IMPORTS') continue;
         const pkg = specToPkg(typeof rel.importRaw === 'string' ? rel.importRaw : rel.dstName);
         if (!pkg || !stitchProdDeps.has(pkg)) continue;
@@ -1249,9 +1269,24 @@ export async function ingestFiles(
         const provides = entry
           ? readPackageNames(workspaceRoot).map(name => ({ name, entryNodeId: fileNodeId(workspaceId, entry), entryUri: entry }))
           : [];
-        if (provides.length > 0 || stitchConsumes.length > 0) {
-          const res = await client.stitch({ workspaceId, provides, consumes: stitchConsumes });
-          if (debug) process.stderr.write(`  [stitch] provides=${provides.length} consumes=${stitchConsumes.length} -> ${res.stitched} cross-repo edges\n`);
+        // Symbol-level consumes: a call to a symbol NOT defined anywhere in this
+        // repo (external) whose caller IS a known local symbol (so the edge src is a
+        // real node). The backend matches these to providers' exports by name.
+        const symbolConsumes: Array<{ symbol: string; callerNodeId: string }> = [];
+        const symbolConsumeSeen = new Set<string>();
+        for (const c of stitchCalls) {
+          if (stitchDefs.has(c.symbol)) continue;
+          const callerDef = stitchDefs.get(c.caller);
+          if (!callerDef) continue;
+          const callerNodeId = symbolNodeId(workspaceId, callerDef.filePath, callerDef.qk);
+          const sk = `${c.symbol} ${callerNodeId}`;
+          if (symbolConsumeSeen.has(sk)) continue;
+          symbolConsumeSeen.add(sk);
+          symbolConsumes.push({ symbol: c.symbol, callerNodeId });
+        }
+        if (provides.length > 0 || stitchConsumes.length > 0 || stitchExports.length > 0 || symbolConsumes.length > 0) {
+          const res = await client.stitch({ workspaceId, provides, consumes: stitchConsumes, exports: stitchExports, symbolConsumes });
+          if (debug) process.stderr.write(`  [stitch] provides=${provides.length} consumes=${stitchConsumes.length} exports=${stitchExports.length} symConsumes=${symbolConsumes.length} -> ${res.stitched} edges\n`);
         }
       } catch (err) {
         if (debug) process.stderr.write(`  [stitch skipped] ${err}\n`);

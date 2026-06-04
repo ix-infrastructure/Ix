@@ -63,6 +63,16 @@ export function fileNodeId(workspaceId: string, filePath: string): string {
   return makeIds(workspaceId).nodeId(filePath, nodePath.basename(filePath));
 }
 
+/**
+ * The node id of a symbol (function/class/...) in a SOLO ingest, by its qualified
+ * key (`name`, or `container.name` for a member). Lets the Path-2 symbol-level
+ * stitcher reference a provider's exported symbol and a consumer's calling symbol
+ * by the SAME id buildPatch produces — so cross-repo CALL edges land on real nodes.
+ */
+export function symbolNodeId(workspaceId: string, filePath: string, qualifiedKey: string): string {
+  return makeIds(workspaceId).nodeId(filePath, qualifiedKey);
+}
+
 // ---------------------------------------------------------------------------
 // Source type from file extension
 // ---------------------------------------------------------------------------
