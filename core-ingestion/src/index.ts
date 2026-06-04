@@ -2427,6 +2427,22 @@ export function resolveEdges(
     globalCandidateTotal: 0, resolvedImport: 0, resolvedTransitive: 0,
     resolvedGlobal: 0, resolvedQualifier: 0, skippedSameFile: 0, skippedAmbiguous: 0,
   };
+  // Renamed-import call resolution (Z): a call to a renamed local binding (`import
+  // { format as fmt }; fmt()`) should resolve as the provider's public symbol
+  // (`format`), so in-repo AND co-ingest resolution link it to the real definition.
+  // Map per file: local binding name -> imported public symbol, EXCLUDING default
+  // imports (imported == "default" is not a by-name symbol in the provider; those are
+  // handled in the cross-repo stitch path) and no-op named imports (local == imported).
+  const callBindings = new Map<string, Map<string, string>>();
+  for (const r of results) {
+    if (!r.importBindings) continue;
+    for (const b of r.importBindings) {
+      if (b.imported === 'default' || b.local === b.imported) continue;
+      let m = callBindings.get(r.filePath);
+      if (!m) { m = new Map(); callBindings.set(r.filePath, m); }
+      if (!m.has(b.local)) m.set(b.local, b.imported);
+    }
+  }
   // Cross-repo dependency graph: repo R depends on repo D when any file in R
   // imports a module published by D. Built from the raw IMPORTS relationships.
   const repoOf = opts?.repoOf;
@@ -3049,7 +3065,11 @@ export function resolveEdges(
         // fall through to Tier 1b → Tier 2 → Tier 3 below
       }
 
-      const dstName = rel.dstName;
+      const origDstName = rel.dstName;
+      // Z: resolve a renamed-import call by the provider's public symbol, but keep the
+      // ORIGINAL local name on the emitted edge (buildPatchWithResolution maps the edge
+      // back to the source call by name). No-op unless this is a renamed-import call.
+      const dstName = (rel.predicate === 'CALLS' ? callBindings.get(srcFilePath)?.get(rel.dstName) : undefined) ?? rel.dstName;
       const srcName = rel.srcName;
 
       // Tier 1b: qualifier-assisted (confidence 0.9 / 0.7)
@@ -3087,7 +3107,7 @@ export function resolveEdges(
               const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart, preferredQKey);
               if (dstQualifiedKey !== null) {
                 // dstName must match rel.dstName so buildPatchWithResolution can look it up
-                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9 });
+                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9 });
               }
             }
             continue;
@@ -3112,7 +3132,7 @@ export function resolveEdges(
             if (fileHasSymbol.get(qfp)?.has(memberPart)) {
               const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart, `${qualifierPart}.${memberPart}`);
               if (dstQualifiedKey !== null) {
-                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.7 });
+                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.7 });
               }
             }
           }
@@ -3134,7 +3154,7 @@ export function resolveEdges(
         const fp = narrowedImportMatches[0];
         const dstQualifiedKey = bestQKey(fileQKeys, fp, dstName);
         if (dstQualifiedKey === null) continue; // ambiguous — do not emit bad nodeId
-        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9 });
+        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9 });
         continue;
       }
       // Commodity gate: beyond the precise import-scoped tier above, the remaining
@@ -3161,7 +3181,7 @@ export function resolveEdges(
         const fp = narrowedTransitiveMatches[0];
         const dstQualifiedKey = bestQKey(fileQKeys, fp, dstName);
         if (dstQualifiedKey === null) continue;
-        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.8 });
+        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.8 });
         continue;
       }
       // Tier 3: global fallback (confidence 0.5) — uses inverted symbol index
@@ -3191,7 +3211,7 @@ export function resolveEdges(
         const fp = resolvedMatches[0];
         const dstQualifiedKey = bestQKey(fileQKeys, fp, dstName);
         if (dstQualifiedKey === null) continue; // ambiguous — do not emit bad nodeId
-        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.5 });
+        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.5 });
         stats.resolvedGlobal++;
         continue;
       }
