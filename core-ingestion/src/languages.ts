@@ -26,6 +26,7 @@ export enum SupportedLanguages {
   Lua = 'lua',
   Bash = 'bash',
   Haskell = 'haskell',
+  Zig = 'zig',
 }
 
 const EXT_MAP: Record<string, SupportedLanguages> = {
@@ -74,6 +75,7 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.ksh':  SupportedLanguages.Bash,
   '.hs':   SupportedLanguages.Haskell,
   '.lhs':  SupportedLanguages.Haskell,
+  '.zig':  SupportedLanguages.Zig,
 };
 
 export function languageFromPath(filePath: string): SupportedLanguages | null {

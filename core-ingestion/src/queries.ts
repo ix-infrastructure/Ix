@@ -1605,6 +1605,25 @@ export const R_QUERIES = `
   (#eq? @_src "source")) @import
 `;
 
+// Zig. Functions (top-level + struct/union methods are all function_declaration),
+// const-bound struct/enum/union types, calls (bare + field-access), and the
+// @import("path") builtin as an import.
+export const ZIG_QUERIES = `
+(function_declaration name: (identifier) @name) @definition.function
+
+(variable_declaration (identifier) @name (struct_declaration)) @definition.struct
+(variable_declaration (identifier) @name (enum_declaration)) @definition.enum
+(variable_declaration (identifier) @name (union_declaration)) @definition.struct
+
+(call_expression function: (identifier) @call.name) @call
+(call_expression function: (field_expression member: (identifier) @call.name)) @call
+
+(builtin_function
+  (builtin_identifier) @_imp
+  (arguments (string) @import.source)
+  (#eq? @_imp "@import")) @import
+`;
+
 // Haskell. Function definitions (with args) and top-level binds (no args), data
 // types / newtypes / type synonyms, type classes, the module header, function
 // application as calls (bare and module-qualified), and module imports.
@@ -1701,5 +1720,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.Lua]: LUA_QUERIES,
   [SupportedLanguages.Bash]: BASH_QUERIES,
   [SupportedLanguages.Haskell]: HASKELL_QUERIES,
+  [SupportedLanguages.Zig]: ZIG_QUERIES,
 };
  
