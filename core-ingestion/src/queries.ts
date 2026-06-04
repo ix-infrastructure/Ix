@@ -1619,6 +1619,43 @@ export const BASH_QUERIES = `
   (#match? @_src "^(source|\\.)$")) @import
 `;
 
+// Lua — mirrors the grammar's bundled tags.scm, mapped to Ix capture names.
+// Covers: function declarations (plain / local / table-dot / method-colon),
+// function expressions assigned to a name or table field, calls (bare / dotted /
+// method), and require("mod") / require "mod" imports.
+export const LUA_QUERIES = `
+(function_declaration
+  name: [
+    (identifier) @name
+    (dot_index_expression field: (identifier) @name)
+  ]) @definition.function
+
+(function_declaration
+  name: (method_index_expression method: (identifier) @name)) @definition.method
+
+(assignment_statement
+  (variable_list . name: [
+    (identifier) @name
+    (dot_index_expression field: (identifier) @name)
+  ])
+  (expression_list . value: (function_definition))) @definition.function
+
+(table_constructor
+  (field name: (identifier) @name value: (function_definition))) @definition.function
+
+(function_call
+  name: [
+    (identifier) @call.name
+    (dot_index_expression field: (identifier) @call.name)
+    (method_index_expression method: (identifier) @call.name)
+  ]) @call
+
+(function_call
+  name: (identifier) @_req
+  arguments: (arguments (string) @import.source)
+  (#eq? @_req "require")) @import
+`;
+
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TypeScript]: TYPESCRIPT_QUERIES,
   [SupportedLanguages.JavaScript]: JAVASCRIPT_QUERIES,
@@ -1644,6 +1681,7 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.SAS]: SAS_QUERIES,
   [SupportedLanguages.Elixir]: ELIXIR_QUERIES,
   [SupportedLanguages.Makefile]: MAKEFILE_QUERIES,
+  [SupportedLanguages.Lua]: LUA_QUERIES,
   [SupportedLanguages.Bash]: BASH_QUERIES,
 };
  

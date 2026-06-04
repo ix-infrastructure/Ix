@@ -23,6 +23,7 @@ export enum SupportedLanguages {
   SAS = 'sas',
   Elixir = 'elixir',
   Makefile = 'makefile',
+  Lua = 'lua',
   Bash = 'bash',
 }
 
@@ -63,6 +64,7 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.sas':  SupportedLanguages.SAS,
   '.ex':   SupportedLanguages.Elixir,
   '.exs':  SupportedLanguages.Elixir,
+  '.lua':  SupportedLanguages.Lua,
   '.mk':   SupportedLanguages.Makefile,
   '.makefile': SupportedLanguages.Makefile,
   '.sh':   SupportedLanguages.Bash,
