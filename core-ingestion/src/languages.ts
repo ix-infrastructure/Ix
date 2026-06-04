@@ -23,6 +23,7 @@ export enum SupportedLanguages {
   SAS = 'sas',
   Elixir = 'elixir',
   Makefile = 'makefile',
+  XML = 'xml',
 }
 
 const EXT_MAP: Record<string, SupportedLanguages> = {
@@ -64,6 +65,17 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.exs':  SupportedLanguages.Elixir,
   '.mk':   SupportedLanguages.Makefile,
   '.makefile': SupportedLanguages.Makefile,
+  '.xml':  SupportedLanguages.XML,
+  '.xsd':  SupportedLanguages.XML,
+  '.xsl':  SupportedLanguages.XML,
+  '.xslt': SupportedLanguages.XML,
+  '.wsdl': SupportedLanguages.XML,
+  '.csproj': SupportedLanguages.XML,
+  '.vbproj': SupportedLanguages.XML,
+  '.fsproj': SupportedLanguages.XML,
+  '.props': SupportedLanguages.XML,
+  '.targets': SupportedLanguages.XML,
+  '.plist': SupportedLanguages.XML,
 };
 
 export function languageFromPath(filePath: string): SupportedLanguages | null {

@@ -1605,6 +1605,19 @@ export const R_QUERIES = `
   (#eq? @_src "source")) @import
 `;
 
+// XML. The useful cross-file signal in XML config is its dependency references,
+// so the queries extract IMPORTS from the attributes that name another file or
+// package: href (XInclude), resource (Spring), schemaLocation (XSD), src, and
+// Include (MSBuild PackageReference/ProjectReference). Quotes are stripped by the
+// shared import-specifier normalization.
+export const XML_QUERIES = `
+((element (STag (Attribute (Name) @_a (AttValue) @import.source)))
+  (#match? @_a "^(href|resource|schemaLocation|src|Include)$")) @import
+
+((element (EmptyElemTag (Attribute (Name) @_a (AttValue) @import.source)))
+  (#match? @_a "^(href|resource|schemaLocation|src|Include)$")) @import
+`;
+
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TypeScript]: TYPESCRIPT_QUERIES,
   [SupportedLanguages.JavaScript]: JAVASCRIPT_QUERIES,
@@ -1630,5 +1643,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.SAS]: SAS_QUERIES,
   [SupportedLanguages.Elixir]: ELIXIR_QUERIES,
   [SupportedLanguages.Makefile]: MAKEFILE_QUERIES,
+  [SupportedLanguages.XML]: XML_QUERIES,
 };
  
