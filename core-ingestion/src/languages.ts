@@ -27,6 +27,7 @@ export enum SupportedLanguages {
   Bash = 'bash',
   Haskell = 'haskell',
   Zig = 'zig',
+  HTML = 'html',
 }
 
 const EXT_MAP: Record<string, SupportedLanguages> = {
@@ -76,6 +77,9 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.hs':   SupportedLanguages.Haskell,
   '.lhs':  SupportedLanguages.Haskell,
   '.zig':  SupportedLanguages.Zig,
+  '.html': SupportedLanguages.HTML,
+  '.htm':  SupportedLanguages.HTML,
+  '.xhtml': SupportedLanguages.HTML,
 };
 
 export function languageFromPath(filePath: string): SupportedLanguages | null {

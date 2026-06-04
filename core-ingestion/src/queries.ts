@@ -1605,6 +1605,24 @@ export const R_QUERIES = `
   (#eq? @_src "source")) @import
 `;
 
+// HTML. Resource dependencies as imports (<script src>, <link href>, and
+// <a/img/iframe/source/use href|src>), and custom elements (hyphenated tag names
+// = web components) as definitions.
+export const HTML_QUERIES = `
+((script_element
+  (start_tag
+    (attribute (attribute_name) @_a (quoted_attribute_value (attribute_value) @import.source))))
+  (#eq? @_a "src")) @import
+
+((element
+  (start_tag (tag_name) @_t
+    (attribute (attribute_name) @_a (quoted_attribute_value (attribute_value) @import.source))))
+  (#match? @_t "^(link|a|img|iframe|source|use)$")
+  (#match? @_a "^(href|src)$")) @import
+
+((element (start_tag (tag_name) @name) (#match? @name "-")) @definition.class)
+`;
+
 // Zig. Functions (top-level + struct/union methods are all function_declaration),
 // const-bound struct/enum/union types, calls (bare + field-access), and the
 // @import("path") builtin as an import.
@@ -1721,5 +1739,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.Bash]: BASH_QUERIES,
   [SupportedLanguages.Haskell]: HASKELL_QUERIES,
   [SupportedLanguages.Zig]: ZIG_QUERIES,
+  [SupportedLanguages.HTML]: HTML_QUERIES,
 };
  
