@@ -25,6 +25,7 @@ export enum SupportedLanguages {
   Makefile = 'makefile',
   Lua = 'lua',
   Bash = 'bash',
+  Haskell = 'haskell',
 }
 
 const EXT_MAP: Record<string, SupportedLanguages> = {
@@ -71,6 +72,8 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.bash': SupportedLanguages.Bash,
   '.zsh':  SupportedLanguages.Bash,
   '.ksh':  SupportedLanguages.Bash,
+  '.hs':   SupportedLanguages.Haskell,
+  '.lhs':  SupportedLanguages.Haskell,
 };
 
 export function languageFromPath(filePath: string): SupportedLanguages | null {
