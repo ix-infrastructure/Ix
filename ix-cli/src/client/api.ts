@@ -228,7 +228,7 @@ export class IxClient {
     provides: Array<{ name: string; entryNodeId: string; entryUri?: string }>;
     consumes: Array<{ name: string; consumerNodeId: string }>;
     exports?: Array<{ name: string; nodeId: string }>;
-    symbolConsumes?: Array<{ symbol: string; callerNodeId: string }>;
+    symbolConsumes?: Array<{ symbol: string; callerNodeId: string; pkg?: string }>;
   }): Promise<{ stitched: number; systemId?: string | null; edges: Array<{ src: string; dst: string; name: string }> }> {
     return this.post('/v1/stitch', payload);
   }
