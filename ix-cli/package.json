@@ -17,7 +17,7 @@
   },
   "scripts": {
     "build": "node scripts/build-core-ingestion.mjs && node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
-    "test": "node scripts/build-core-ingestion.mjs && vitest run --exclude test/parser.test.ts && node test/parser.smoke.mjs",
+    "test": "node scripts/build-core-ingestion.mjs && vitest run && node test/parser.smoke.mjs",
     "dev": "node scripts/build-core-ingestion.mjs && tsx src/cli/main.ts"
   },
   "dependencies": {
@@ -29,7 +29,7 @@
     "@types/node": "^20.0.0",
     "tsx": "^4.7.0",
     "typescript": "^5.4.0",
-    "vitest": "^3.2.4"
+    "vitest": "^4.1.0"
   },
   "overrides": {
     "vite": ">=7.3.2 <8.0.0"
