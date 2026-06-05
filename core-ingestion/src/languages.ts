@@ -30,6 +30,7 @@ export enum SupportedLanguages {
   HTML = 'html',
   XML = 'xml',
   HCL = 'hcl',
+  CSS = 'css',
 }
 
 const EXT_MAP: Record<string, SupportedLanguages> = {
@@ -96,6 +97,10 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.tf':   SupportedLanguages.HCL,
   '.tfvars': SupportedLanguages.HCL,
   '.hcl':  SupportedLanguages.HCL,
+  '.css':  SupportedLanguages.CSS,
+  '.scss': SupportedLanguages.CSS,
+  '.sass': SupportedLanguages.CSS,
+  '.less': SupportedLanguages.CSS,
 };
 
 export function languageFromPath(filePath: string): SupportedLanguages | null {

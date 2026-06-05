@@ -65,6 +65,15 @@ catch (e: any) {
     process.stderr.write('[tree-sitter-lua load failed] ' + e + '\n');
   }
 }
+// tree-sitter-css ships ESM bindings with top-level await — load via import().
+let Css: any = null;
+// @ts-ignore
+try { const c = await import('tree-sitter-css'); Css = c.default ?? c; }
+catch (e: any) {
+  if (e?.code !== 'ERR_MODULE_NOT_FOUND' && e?.code !== 'MODULE_NOT_FOUND') {
+    process.stderr.write('[tree-sitter-css load failed] ' + e + '\n');
+  }
+}
 
 import { SupportedLanguages, languageFromPath } from './languages.js';
 import { LANGUAGE_QUERIES } from './queries.js';
@@ -192,6 +201,7 @@ const GRAMMAR_MAP: Partial<Record<SupportedLanguages, any>> = {
   ...(Html ? { [SupportedLanguages.HTML]: Html } : {}),
   ...(Xml ? { [SupportedLanguages.XML]: Xml } : {}),
   ...(Hcl ? { [SupportedLanguages.HCL]: Hcl } : {}),
+  ...(Css ? { [SupportedLanguages.CSS]: Css } : {}),
 };
 
 // Capture key prefix → NodeKind string
