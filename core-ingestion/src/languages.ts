@@ -28,6 +28,7 @@ export enum SupportedLanguages {
   Haskell = 'haskell',
   Zig = 'zig',
   HTML = 'html',
+  XML = 'xml',
 }
 
 const EXT_MAP: Record<string, SupportedLanguages> = {
@@ -80,6 +81,17 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.html': SupportedLanguages.HTML,
   '.htm':  SupportedLanguages.HTML,
   '.xhtml': SupportedLanguages.HTML,
+  '.xml':  SupportedLanguages.XML,
+  '.xsd':  SupportedLanguages.XML,
+  '.xsl':  SupportedLanguages.XML,
+  '.xslt': SupportedLanguages.XML,
+  '.wsdl': SupportedLanguages.XML,
+  '.csproj': SupportedLanguages.XML,
+  '.vbproj': SupportedLanguages.XML,
+  '.fsproj': SupportedLanguages.XML,
+  '.props': SupportedLanguages.XML,
+  '.targets': SupportedLanguages.XML,
+  '.plist': SupportedLanguages.XML,
 };
 
 export function languageFromPath(filePath: string): SupportedLanguages | null {
