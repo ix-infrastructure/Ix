@@ -64,7 +64,11 @@ const Hcl = HclPkg?.default ?? HclPkg;
 // files go unparsed, exactly as with any unavailable CJS grammar.
 const SAS = await tryImportGrammar('tree-sitter-sas');
 const Lua = await tryImportGrammar('@tree-sitter-grammars/tree-sitter-lua');
-const Css = await tryImportGrammar('tree-sitter-css');
+// Import the binding by its explicit file path. tree-sitter-css's package.json
+// `main` is "bindings/node" (no filename/extension), which makes Node emit a
+// DEP0151 deprecation warning on every ESM resolution, once per parse worker,
+// flooding `ix map`. Pointing straight at the file skips that resolution.
+const Css = await tryImportGrammar('tree-sitter-css/bindings/node/index.js');
 
 import { SupportedLanguages, languageFromPath } from './languages.js';
 import { LANGUAGE_QUERIES } from './queries.js';
