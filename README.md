@@ -16,7 +16,7 @@
   <img src="https://img.shields.io/badge/status-alpha-blue" />
   <img src="https://img.shields.io/badge/focus-system--intelligence-purple" />
   <img src="https://img.shields.io/badge/AI-persistent--memory-blueviolet" />
-  <img src="https://img.shields.io/badge/LLMs-Claude%20%7C%20Codex%20%7C%20OpenClaw%20%7C%20Gemini-orange" />
+  <img src="https://img.shields.io/badge/LLMs-Claude%20%7C%20Codex%20%7C%20OpenClaw%20%7C%20Gemini%20%7C%20OpenCode-orange" />
 </p>
 
 <p align="center">
@@ -41,13 +41,11 @@ Running out of tokens while developing?
 Not anymore...
 
 
-Software systems are too complex to understand.
+Modern software is complicated.
 
 You read code.
 You search logs.
 You still guess.
-
-Ix maps your system instead.
 
 AI can’t reason about systems.
 LLMs can’t remember them either.
@@ -83,38 +81,58 @@ curl -fsSL https://ix-infra.com/install.sh | sh
 irm https://ix-infra.com/install.ps1 | iex
 ``` 
 ### Claude Plugin
-``` bash
+```bash
 /plugin marketplace add ix-infrastructure/ix-claude-plugin
 /plugin install ix-memory
 /reload-plugin
 ```
 ### Codex Plugin
-[Codex Plugin Repo](https://github.com/ix-infrastructure/ix-codex-plugin)
-
+```bash
+curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/ix-codex-plugin/main/codex-install.sh | sh
+```
 ### OpenClaw Plugin
-``` bash
+```bash
 openclaw plugins install ix-infrastructure/ix-openclaw-plugin
 ```
-### Gemini Extension 
-``` bash
+### Gemini Extension
+```bash
 gemini extensions install https://github.com/ix-infrastructure/ix-gemini-plugin
 ```
 ### OpenCode Plugin
-[OpenCode Plugin Repo](https://github.com/ix-infrastructure/ix-opencode-plugin)
+```bash
+curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/ix-opencode-plugin/main/install.sh | bash
+```
 
 ## Requirements
 
-- macOS, Linux, or Windows
+The install script sets up everything for you on macOS and Linux. It checks for and installs anything that is missing:
+
 - Node.js 20 or newer
-- Git installed
-- Docker (for full functionality)
+- Git
+- ripgrep (powers `ix text`)
+- Docker and Docker Compose (for the local backend)
+
+All you need beforehand is a terminal with `curl` (or `wget`). On Windows, install Node.js 20+ and Docker Desktop first, then run the installer.
+
+Works on macOS, Linux, and Windows, on both x86-64 and arm64.
 
 ## Supported Languages
 
-Ix currently supports over 15 languages!
-(See docs for full list)
+Ix parses and extracts symbols, calls, and imports across 26 languages, and recognizes several more config and data formats.
+
+**Languages:**
+JavaScript, TypeScript, Python, Java, C, C++, C#, Go, Ruby, Rust, PHP, Kotlin, Swift, Scala, R, SAS, Elixir, Haskell, Zig, Lua, Bash, HTML, XML, CSS, HCL / Terraform, Makefile
+
+**Also recognized:**
+YAML, JSON, TOML, SQL, Dockerfile, Markdown
 
 ## Quick Start
+
+Just type `ix` to see everything it can do:
+
+<p align="center">
+  <img src="./assets/help.png" width="42%" />
+</p>
 
 Map your system:
 
@@ -146,7 +164,7 @@ Map → Explain → Trace → Impact
 
 ## Why Ix
 
-Modern systems are not just complex — they're constantly changing.
+Modern systems are not just complex, they're constantly changing.
 
 Every time you switch context, onboard to a new service, or debug a flow, you start from zero.
 
@@ -155,7 +173,7 @@ Every time you switch context, onboard to a new service, or debug a flow, you st
 - understanding does not persist
 
 AI doesn’t solve this.
-It amplifies it — reasoning is limited to the current prompt, and memory disappears between interactions.
+It amplifies it: reasoning is limited to the current prompt, and memory disappears between interactions.
 
 Ix is built to fix this at the system level.
 
@@ -203,7 +221,7 @@ Developers use Ix to explore and understand systems.
 LLMs use Ix as persistent system memory.
 
 Instead of guessing from limited context,
-AI can navigate a real system map — with structure, history, and relationships.
+AI can navigate a real system map, with structure, history, and relationships.
 
 The result:
 
@@ -218,10 +236,10 @@ The result:
 
 **How it works:**
 
-1. **Map** — build a system map from code and signals  
-2. **Structure** — identify boundaries, flows, and relationships  
-3. **Remember** — persist decisions and system knowledge  
-4. **Understand** — explore, trace, and analyze with context  
+1. **Map**: build a system map from code and signals  
+2. **Structure**: identify boundaries, flows, and relationships  
+3. **Remember**: persist decisions and system knowledge  
+4. **Understand**: explore, trace, and analyze with context  
 
 ## Core Capabilities
 
@@ -250,7 +268,7 @@ LLMs process. Ix remembers.
 
 Early stage. Rapidly evolving.
 
-If you're building complex systems — we'd love your feedback.
+If you're building complex systems, we'd love your feedback.
 
 ## Contributing
 
