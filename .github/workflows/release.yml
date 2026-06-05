@@ -31,6 +31,10 @@ permissions:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
+    env:
+      # node-tree-sitter 0.25 is compiled from source; node 24's V8 headers need C++20.
+      CXXFLAGS: "-std=c++20"
+      CXX: "g++ -std=c++20"
 
     steps:
       - name: Checkout
