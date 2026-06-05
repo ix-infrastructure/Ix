@@ -31,6 +31,19 @@ const _require = createRequire(import.meta.url);
 function tryLoadGrammar(pkg: string): any {
   try { return _require(pkg); } catch { return null; }
 }
+// Async sibling of tryLoadGrammar for grammars that publish ESM bindings with
+// top-level await (they can't go through CJS require). Returns null silently
+// when the optional grammar can't load on this platform — same contract as
+// tryLoadGrammar. An unavailable optional grammar (e.g. no native prebuild for
+// this OS/arch) is expected and must not be logged per parse worker.
+async function tryImportGrammar(pkg: string): Promise<any> {
+  try {
+    const mod: any = await import(pkg);
+    return mod?.default ?? mod;
+  } catch {
+    return null;
+  }
+}
 const Kotlin = tryLoadGrammar('tree-sitter-kotlin');
 const Swift  = tryLoadGrammar('tree-sitter-swift');
 const R = tryLoadGrammar('@davisvaughan/tree-sitter-r');
@@ -45,35 +58,13 @@ const XmlPkg = tryLoadGrammar('@tree-sitter-grammars/tree-sitter-xml');
 const Xml = XmlPkg?.xml ?? null;
 const HclPkg = tryLoadGrammar('@tree-sitter-grammars/tree-sitter-hcl');
 const Hcl = HclPkg?.default ?? HclPkg;
-// tree-sitter-sas uses ESM bindings with top-level await — incompatible with tryLoadGrammar (CJS require)
-let SAS: any = null;
-// @ts-ignore
-try { SAS = (await import('tree-sitter-sas')).default; }
-catch (e: any) {
-  // A genuinely-missing optional dep is expected; surface anything else (e.g. a
-  // broken native build / ABI mismatch) so .sas files aren't silently dropped.
-  if (e?.code !== 'ERR_MODULE_NOT_FOUND' && e?.code !== 'MODULE_NOT_FOUND') {
-    process.stderr.write('[tree-sitter-sas load failed] ' + e + '\n');
-  }
-}
-// tree-sitter-lua ships ESM bindings with top-level await (like SAS) — load via import().
-let Lua: any = null;
-// @ts-ignore
-try { Lua = (await import('@tree-sitter-grammars/tree-sitter-lua')).default; }
-catch (e: any) {
-  if (e?.code !== 'ERR_MODULE_NOT_FOUND' && e?.code !== 'MODULE_NOT_FOUND') {
-    process.stderr.write('[tree-sitter-lua load failed] ' + e + '\n');
-  }
-}
-// tree-sitter-css ships ESM bindings with top-level await — load via import().
-let Css: any = null;
-// @ts-ignore
-try { const c = await import('tree-sitter-css'); Css = c.default ?? c; }
-catch (e: any) {
-  if (e?.code !== 'ERR_MODULE_NOT_FOUND' && e?.code !== 'MODULE_NOT_FOUND') {
-    process.stderr.write('[tree-sitter-css load failed] ' + e + '\n');
-  }
-}
+// SAS / Lua / CSS publish ESM bindings with top-level await, so they load via
+// import() through the quiet helper above. A grammar that can't load on this
+// platform (e.g. tree-sitter-sas has no win32 prebuild) is simply absent; its
+// files go unparsed, exactly as with any unavailable CJS grammar.
+const SAS = await tryImportGrammar('tree-sitter-sas');
+const Lua = await tryImportGrammar('@tree-sitter-grammars/tree-sitter-lua');
+const Css = await tryImportGrammar('tree-sitter-css');
 
 import { SupportedLanguages, languageFromPath } from './languages.js';
 import { LANGUAGE_QUERIES } from './queries.js';
