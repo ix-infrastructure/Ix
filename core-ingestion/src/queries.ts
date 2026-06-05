@@ -1618,6 +1618,124 @@ export const HCL_QUERIES = `
   (#eq? @_t "module") (#eq? @_a "source")) @import
 `;
 
+// XML. The useful cross-file signal in XML config is its dependency references,
+// so the queries extract IMPORTS from the attributes that name another file or
+// package: href (XInclude), resource (Spring), schemaLocation (XSD), src, and
+// Include (MSBuild PackageReference/ProjectReference). Quotes are stripped by the
+// shared import-specifier normalization.
+export const XML_QUERIES = `
+((element (STag (Attribute (Name) @_a (AttValue) @import.source)))
+  (#match? @_a "^(href|resource|schemaLocation|src|Include)$")) @import
+
+((element (EmptyElemTag (Attribute (Name) @_a (AttValue) @import.source)))
+  (#match? @_a "^(href|resource|schemaLocation|src|Include)$")) @import
+`;
+
+// HTML. Resource dependencies as imports (<script src>, <link href>, and
+// <a/img/iframe/source/use href|src>), and custom elements (hyphenated tag names
+// = web components) as definitions.
+export const HTML_QUERIES = `
+((script_element
+  (start_tag
+    (attribute (attribute_name) @_a (quoted_attribute_value (attribute_value) @import.source))))
+  (#eq? @_a "src")) @import
+
+((element
+  (start_tag (tag_name) @_t
+    (attribute (attribute_name) @_a (quoted_attribute_value (attribute_value) @import.source))))
+  (#match? @_t "^(link|a|img|iframe|source|use)$")
+  (#match? @_a "^(href|src)$")) @import
+
+((element (start_tag (tag_name) @name) (#match? @name "-")) @definition.class)
+`;
+
+// Zig. Functions (top-level + struct/union methods are all function_declaration),
+// const-bound struct/enum/union types, calls (bare + field-access), and the
+// @import("path") builtin as an import.
+export const ZIG_QUERIES = `
+(function_declaration name: (identifier) @name) @definition.function
+
+(variable_declaration (identifier) @name (struct_declaration)) @definition.struct
+(variable_declaration (identifier) @name (enum_declaration)) @definition.enum
+(variable_declaration (identifier) @name (union_declaration)) @definition.struct
+
+(call_expression function: (identifier) @call.name) @call
+(call_expression function: (field_expression member: (identifier) @call.name)) @call
+
+(builtin_function
+  (builtin_identifier) @_imp
+  (arguments (string) @import.source)
+  (#eq? @_imp "@import")) @import
+`;
+
+// Haskell. Function definitions (with args) and top-level binds (no args), data
+// types / newtypes / type synonyms, type classes, the module header, function
+// application as calls (bare and module-qualified), and module imports.
+// NOTE: `type_synomym` is the grammar's actual (misspelled) node name.
+export const HASKELL_QUERIES = `
+(function name: (variable) @name) @definition.function
+(bind name: (variable) @name) @definition.function
+(data_type name: (name) @name) @definition.type
+(newtype name: (name) @name) @definition.type
+(type_synomym (name) @name) @definition.type
+(class name: (name) @name) @definition.interface
+(header module: (module) @name) @definition.module
+(apply function: (variable) @call.name) @call
+(apply function: (qualified (variable) @call.name)) @call
+(import module: (module) @import.source) @import
+`;
+
+// Bash / shell. Functions (both `foo() {}` and `function foo {}`), command
+// invocations as calls (system commands dangle at resolution; calls to defined
+// functions resolve), and `source FILE` / `. FILE` as imports.
+export const BASH_QUERIES = `
+(function_definition name: (word) @name) @definition.function
+
+(command name: (command_name (word) @call.name)) @call
+
+(command
+  name: (command_name (word) @_src)
+  argument: [(word) (string) (concatenation)] @import.source
+  (#match? @_src "^(source|\\.)$")) @import
+`;
+
+// Lua — mirrors the grammar's bundled tags.scm, mapped to Ix capture names.
+// Covers: function declarations (plain / local / table-dot / method-colon),
+// function expressions assigned to a name or table field, calls (bare / dotted /
+// method), and require("mod") / require "mod" imports.
+export const LUA_QUERIES = `
+(function_declaration
+  name: [
+    (identifier) @name
+    (dot_index_expression field: (identifier) @name)
+  ]) @definition.function
+
+(function_declaration
+  name: (method_index_expression method: (identifier) @name)) @definition.method
+
+(assignment_statement
+  (variable_list . name: [
+    (identifier) @name
+    (dot_index_expression field: (identifier) @name)
+  ])
+  (expression_list . value: (function_definition))) @definition.function
+
+(table_constructor
+  (field name: (identifier) @name value: (function_definition))) @definition.function
+
+(function_call
+  name: [
+    (identifier) @call.name
+    (dot_index_expression field: (identifier) @call.name)
+    (method_index_expression method: (identifier) @call.name)
+  ]) @call
+
+(function_call
+  name: (identifier) @_req
+  arguments: (arguments (string) @import.source)
+  (#eq? @_req "require")) @import
+`;
+
 export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.TypeScript]: TYPESCRIPT_QUERIES,
   [SupportedLanguages.JavaScript]: JAVASCRIPT_QUERIES,
@@ -1643,6 +1761,12 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.SAS]: SAS_QUERIES,
   [SupportedLanguages.Elixir]: ELIXIR_QUERIES,
   [SupportedLanguages.Makefile]: MAKEFILE_QUERIES,
+  [SupportedLanguages.Lua]: LUA_QUERIES,
+  [SupportedLanguages.Bash]: BASH_QUERIES,
+  [SupportedLanguages.Haskell]: HASKELL_QUERIES,
+  [SupportedLanguages.Zig]: ZIG_QUERIES,
+  [SupportedLanguages.HTML]: HTML_QUERIES,
+  [SupportedLanguages.XML]: XML_QUERIES,
   [SupportedLanguages.HCL]: HCL_QUERIES,
 };
  
