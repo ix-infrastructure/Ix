@@ -29,6 +29,7 @@ export enum SupportedLanguages {
   Zig = 'zig',
   HTML = 'html',
   XML = 'xml',
+  HCL = 'hcl',
 }
 
 const EXT_MAP: Record<string, SupportedLanguages> = {
@@ -92,6 +93,9 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.props': SupportedLanguages.XML,
   '.targets': SupportedLanguages.XML,
   '.plist': SupportedLanguages.XML,
+  '.tf':   SupportedLanguages.HCL,
+  '.tfvars': SupportedLanguages.HCL,
+  '.hcl':  SupportedLanguages.HCL,
 };
 
 export function languageFromPath(filePath: string): SupportedLanguages | null {

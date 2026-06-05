@@ -1605,6 +1605,19 @@ export const R_QUERIES = `
   (#eq? @_src "source")) @import
 `;
 
+// HCL / Terraform. Each labeled block (resource/data/variable/output/module/
+// provider) is a definition named by its primary (last) label; a module's
+// `source` attribute is an import to the referenced module.
+export const HCL_QUERIES = `
+((block (identifier) @_t (string_lit (template_literal) @name) . (block_start))
+  (#match? @_t "^(resource|data|variable|output|module|provider)$")) @definition.class
+
+((block (identifier) @_t
+   (body (attribute (identifier) @_a
+     (expression (literal_value (string_lit (template_literal) @import.source))))))
+  (#eq? @_t "module") (#eq? @_a "source")) @import
+`;
+
 // XML. The useful cross-file signal in XML config is its dependency references,
 // so the queries extract IMPORTS from the attributes that name another file or
 // package: href (XInclude), resource (Spring), schemaLocation (XSD), src, and
@@ -1754,5 +1767,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.Zig]: ZIG_QUERIES,
   [SupportedLanguages.HTML]: HTML_QUERIES,
   [SupportedLanguages.XML]: XML_QUERIES,
+  [SupportedLanguages.HCL]: HCL_QUERIES,
 };
  

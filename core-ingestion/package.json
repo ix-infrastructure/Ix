@@ -33,6 +33,7 @@
   },
   "optionalDependencies": {
     "@davisvaughan/tree-sitter-r": "^1.2.0",
+    "@tree-sitter-grammars/tree-sitter-hcl": "^1.2.0",
     "@tree-sitter-grammars/tree-sitter-lua": "^0.2.0",
     "@tree-sitter-grammars/tree-sitter-xml": "^0.7.0",
     "@tree-sitter-grammars/tree-sitter-zig": "^1.1.2",

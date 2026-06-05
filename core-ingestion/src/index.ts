@@ -43,6 +43,8 @@ const Html = tryLoadGrammar('tree-sitter-html');
 // tree-sitter-xml exports { xml, dtd }; we use the xml sub-grammar.
 const XmlPkg = tryLoadGrammar('@tree-sitter-grammars/tree-sitter-xml');
 const Xml = XmlPkg?.xml ?? null;
+const HclPkg = tryLoadGrammar('@tree-sitter-grammars/tree-sitter-hcl');
+const Hcl = HclPkg?.default ?? HclPkg;
 // tree-sitter-sas uses ESM bindings with top-level await — incompatible with tryLoadGrammar (CJS require)
 let SAS: any = null;
 // @ts-ignore
@@ -189,6 +191,7 @@ const GRAMMAR_MAP: Partial<Record<SupportedLanguages, any>> = {
   ...(Zig ? { [SupportedLanguages.Zig]: Zig } : {}),
   ...(Html ? { [SupportedLanguages.HTML]: Html } : {}),
   ...(Xml ? { [SupportedLanguages.XML]: Xml } : {}),
+  ...(Hcl ? { [SupportedLanguages.HCL]: Hcl } : {}),
 };
 
 // Capture key prefix → NodeKind string
