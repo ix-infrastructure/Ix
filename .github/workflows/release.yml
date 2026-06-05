@@ -145,6 +145,11 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           STAGING="ix-${VERSION}-${{ matrix.target }}"
+          # Compute the checksum with node (always present on every runner);
+          # `shasum` is missing from the bash shell on GitHub's Windows image.
+          sha256file() {
+            node -e "const c=require('crypto'),f=require('fs'),p=process.argv[1];process.stdout.write(c.createHash('sha256').update(f.readFileSync(p)).digest('hex')+'  '+p+'\n')" "$1"
+          }
           mkdir -p "$STAGING/cli" "$STAGING/core-ingestion" "$STAGING/compass"
           cp -rL ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
           cp -rL core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
@@ -157,7 +162,7 @@ jobs:
           node "%~dp0cli\dist\cli\main.js" %*
           WRAPPER
             7z a -tzip "$STAGING.zip" "$STAGING" >/dev/null
-            shasum -a 256 "$STAGING.zip" > "$STAGING.zip.sha256"
+            sha256file "$STAGING.zip" > "$STAGING.zip.sha256"
           else
             cat > "$STAGING/ix" <<'WRAPPER'
           #!/bin/sh
@@ -166,7 +171,7 @@ jobs:
           WRAPPER
             chmod +x "$STAGING/ix"
             tar -czf "$STAGING.tar.gz" "$STAGING"
-            shasum -a 256 "$STAGING.tar.gz" > "$STAGING.tar.gz.sha256"
+            sha256file "$STAGING.tar.gz" > "$STAGING.tar.gz.sha256"
           fi
 
       - name: Upload tarball
