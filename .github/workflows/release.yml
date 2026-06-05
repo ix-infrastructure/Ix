@@ -132,7 +132,10 @@ jobs:
           npm run build
           npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
 
+      # Compass is best-effort (only built when COMPASS_TOKEN is set); never let a
+      # missing/empty compass artifact block a platform build.
       - name: Download compass bundle
+        continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: compass-dist
@@ -145,7 +148,7 @@ jobs:
           mkdir -p "$STAGING/cli" "$STAGING/core-ingestion" "$STAGING/compass"
           cp -rL ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
           cp -rL core-ingestion/dist core-ingestion/node_modules core-ingestion/package.json "$STAGING/core-ingestion/"
-          if [ -d compass-dist ] && [ -n "$(ls -A compass-dist 2>/dev/null)" ]; then
+          if [ -f compass-dist/index.html ]; then
             cp -r compass-dist/* "$STAGING/compass/"
           fi
           if [ "${{ runner.os }}" = "Windows" ]; then
