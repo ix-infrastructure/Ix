@@ -30,6 +30,10 @@ on:
       tag:
         description: "Tag to release (e.g. v0.4.9)"
         required: true
+      dry_run:
+        description: "Build + package on all platforms only; skip publishing the release and the Homebrew PR"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -175,8 +179,11 @@ jobs:
           retention-days: 1
 
   # ── 3 + 4. Collect artifacts, create the Release, update Homebrew ─────────
+  # Skipped entirely on a dry run: the build matrix above still validates every
+  # platform's native compile + packaging, but nothing is published.
   release:
     needs: build
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
