@@ -85,13 +85,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Intel macOS (darwin-amd64 / macos-13) is intentionally omitted: those
+        # runners are being retired and queue indefinitely, which would stall the
+        # release job (it waits on every build leg). Apple-Silicon macOS covers
+        # current Macs. Re-add a `darwin-amd64` entry if/when macos-13 is reliable.
         include:
           - target: linux-amd64
             runner: ubuntu-latest
           - target: linux-arm64
             runner: ubuntu-24.04-arm
-          - target: darwin-amd64
-            runner: macos-13
           - target: darwin-arm64
             runner: macos-14
           - target: windows-amd64
