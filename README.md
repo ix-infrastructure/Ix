@@ -128,8 +128,10 @@ YAML, JSON, TOML, SQL, Dockerfile, Markdown
 
 ## Quick Start
 
+Just type `ix` to see everything it can do:
+
 <p align="center">
-  <img src="./assets/help.png" width="70%" />
+  <img src="./assets/help.png" width="42%" />
 </p>
 
 Map your system:
