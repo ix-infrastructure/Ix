@@ -173,3 +173,22 @@ jobs:
       - name: Backend logs on failure
         if: failure()
         run: docker compose -f docker-compose.standalone.yml logs --tail 200
+
+  # ── Aggregate gate ───────────────────────────────────────────────────────
+  # One stable required-status-check context. Branch protection requires only
+  # this job, so the matrix can be reshaped without orphaning required checks.
+  # Fails if any upstream job failed OR was skipped/cancelled.
+  ci-success:
+    name: CI Passed
+    if: always()
+    needs: [static, test, e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required jobs succeeded
+        run: |
+          echo "static=${{ needs.static.result }}"
+          echo "test=${{ needs.test.result }}"
+          echo "e2e=${{ needs.e2e.result }}"
+          [ "${{ needs.static.result }}" = "success" ] \
+            && [ "${{ needs.test.result }}" = "success" ] \
+            && [ "${{ needs.e2e.result }}" = "success" ]
