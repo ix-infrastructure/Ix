@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { execFileSync } from "child_process";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, mkdtempSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, mkdtempSync, lstatSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { homedir, tmpdir } from "os";
@@ -274,6 +274,36 @@ export function registerUpgradeCommand(program: Command): void {
           }
 
           console.log(`[ok] Upgraded ix: ${current} → ${latest}`);
+        }
+      }
+
+      // ── Pro plugin refresh (entitlement-gated, OSS-safe) ─────────────
+      // @ix/pro is an optional private plugin installed OUTSIDE ~/.ix/cli, at
+      // ~/.ix/node_modules, so it survives the wholesale rmSync(~/.ix/cli) above
+      // (KNOWN_ISSUES #27). Runs regardless of whether the CLI itself updated, so
+      // a single `ix upgrade` keeps both in sync. Behaviour by install shape:
+      //   - real install present  -> npm update it (tracks CLI releases)
+      //   - dev symlink present    -> leave it (the dev rebuilds their own repo)
+      //   - absent (OSS users)     -> do nothing, print nothing; Pro stays invisible
+      if (!opts.check) {
+        const proDir = join(IX_HOME, "node_modules", "@ix", "pro");
+        let proPresent = false;
+        let proIsLink = false;
+        try {
+          proPresent = existsSync(proDir);
+          proIsLink = proPresent && lstatSync(proDir).isSymbolicLink();
+        } catch { /* treat as absent */ }
+        if (proPresent && !proIsLink) {
+          try {
+            console.log("Refreshing @ix/pro...");
+            execFileSync("npm", ["update", "--prefix", IX_HOME, "@ix/pro"], {
+              stdio: "ignore",
+              timeout: 120000,
+            });
+            console.log("[ok] @ix/pro refreshed");
+          } catch {
+            console.error("[!!] Could not refresh @ix/pro. Run: npm update --prefix ~/.ix @ix/pro");
+          }
         }
       }
 
