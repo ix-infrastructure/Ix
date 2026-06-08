@@ -114,6 +114,7 @@ export function registerSearchCommand(program: Command): void {
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--include-tests", "Include test and fixture entities in results")
     .option("--tests-only", "Show only test and fixture entities")
+    .option("--semantic", "Use vector-similarity (embedding) search instead of keyword matching")
     .addHelpText("after", `\nRanking priority:
   1. Exact name + exact kind match
   2. Exact name + structural kind (class, function, etc.)
@@ -130,7 +131,7 @@ Examples:
   ix search expand --path memory-layer
   ix search "" --kind file --limit 50 --format json`)
     .action(async (term: string, opts: {
-      limit: string; kind?: string; language?: string; path?: string; asOf?: string; format: string; includeTests?: boolean; testsOnly?: boolean
+      limit: string; kind?: string; language?: string; path?: string; asOf?: string; format: string; includeTests?: boolean; testsOnly?: boolean; semantic?: boolean
     }) => {
       const client = new IxClient(getEndpoint());
       const limit = parseInt(opts.limit, 10);
@@ -145,14 +146,25 @@ Examples:
       // Auto-detect a multi-repo system; when present, scope by system_id (which
       // spans all member repos) instead of the single-repo workspace_id.
       const systemId = await resolveReadSystemId(client);
-      const rawNodes = await client.search(term, {
-        limit: fetchLimit,
-        kind: opts.kind,
-        language: opts.language,
-        asOfRev: opts.asOf ? parseInt(opts.asOf, 10) : undefined,
-        workspaceId: systemId ? undefined : resolveWorkspaceId(),
-        systemId,
-      });
+      const workspaceId = systemId ? undefined : resolveWorkspaceId();
+      // Semantic search hits a different backend endpoint that embeds the term and
+      // returns nodes already ordered by vector similarity. It ignores --language
+      // and --as-of (the endpoint accepts neither); scoping is shared.
+      const rawNodes = opts.semantic
+        ? await client.semanticSearch(term, {
+            limit: fetchLimit,
+            kind: opts.kind,
+            workspaceId,
+            systemId,
+          })
+        : await client.search(term, {
+            limit: fetchLimit,
+            kind: opts.kind,
+            language: opts.language,
+            asOfRev: opts.asOf ? parseInt(opts.asOf, 10) : undefined,
+            workspaceId,
+            systemId,
+          });
       const nodes = effectivePathFilter
         ? rawNodes.filter((node: any) => {
             const sourceUri = normalizePath(node.provenance?.sourceUri ?? node.provenance?.source_uri ?? "");
@@ -160,13 +172,16 @@ Examples:
           })
         : rawNodes;
 
-      // Re-rank client-side using shared scoring + backend weight
+      // Re-rank client-side using shared scoring + backend weight. The rank object
+      // is still computed for display (tier/score), but for semantic search we keep
+      // the backend's vector-similarity order and skip the keyword-based re-sort,
+      // which would otherwise demote semantically-relevant results lacking the term.
       const scored = nodes.map(n => ({
         node: n,
         rank: rankScore(n, term, opts.kind, effectivePathFilter),
       }));
 
-      scored.sort(searchSort);
+      if (!opts.semantic) scored.sort(searchSort);
 
       const { filtered: roleFiltered, hiddenTestCount } = applyRoleFilter(
         scored.map(s => s.node),
