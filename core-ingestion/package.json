@@ -48,11 +48,11 @@
     "tree-sitter-swift": "^0.6.0"
   },
   "devDependencies": {
-    "@emnapi/core": "1.9.2",
-    "@emnapi/runtime": "1.9.2",
-    "@types/node": "^20.0.0",
+    "@emnapi/core": "1.11.0",
+    "@emnapi/runtime": "1.11.0",
+    "@types/node": "^25.9.2",
     "fast-check": "^4.6.0",
-    "typescript": "^5.4.0",
+    "typescript": "^6.0.3",
     "vitest": "^4.1.0"
   },
   "overrides": {
