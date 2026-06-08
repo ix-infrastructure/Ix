@@ -5,6 +5,7 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { homedir, tmpdir } from "os";
 import chalk from "chalk";
+import { BACKEND_IMAGE, checkBackendImage, isNonStandardBackend } from "../backend-status.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -265,6 +266,7 @@ export function registerUpgradeCommand(program: Command): void {
 
       // ── Backend (memory-layer) upgrade ───────────────────────────────
       const backendCurrent = getTrackedVersion(BACKEND_VERSION_FILE);
+      let backendImageChanged = false;
       if (backendLatest && isNewer(backendLatest, backendCurrent)) {
         console.log(
           `Backend update available: ${backendCurrent === "0.0.0" ? "none" : backendCurrent} → ${chalk.green(backendLatest)}`
@@ -280,6 +282,7 @@ export function registerUpgradeCommand(program: Command): void {
             );
             mkdirSync(IX_HOME, { recursive: true });
             writeFileSync(BACKEND_VERSION_FILE, backendLatest);
+            backendImageChanged = true;
             console.log(`[ok] Backend image updated to ${backendLatest}`);
           } catch {
             console.error("[!!] Could not pull latest backend image. Run: ix docker restart");
@@ -309,6 +312,41 @@ export function registerUpgradeCommand(program: Command): void {
         console.log(`[ok] Backend already on the latest version (${backendCurrent})`);
       } else {
         console.log("[--] Could not check backend version");
+      }
+
+      // ── Backend running-image verification (Ix#270) ──────────────────
+      // The version stamp above only reflects what was last pulled, not what is
+      // actually running. Inspect the live container so a stale local/dev image
+      // is surfaced even when the stamp reads current.
+      if (!opts.check) {
+        const imageStatus = checkBackendImage();
+        if (imageStatus.kind === "local-build") {
+          console.log(
+            chalk.yellow(
+              `[!!] Backend container is a local build (${imageStatus.container.imageRef}), not the released image.`
+            )
+          );
+          console.log(chalk.dim("     Run: ix docker stop && ix docker start  (pulls " + BACKEND_IMAGE + ":latest)"));
+        } else if (imageStatus.kind === "digest-mismatch") {
+          console.log(chalk.yellow("[!!] Backend container is running an older image digest than :latest."));
+          console.log(chalk.dim("     Run: ix docker stop && ix docker start  (pulls the released image)"));
+        } else if (imageStatus.kind === "ok" && isNonStandardBackend(imageStatus.container)) {
+          console.log(
+            chalk.yellow(
+              `[!!] Backend is served by a non-standard compose project (${imageStatus.container.composeProject ?? "unknown"}), not ~/.ix/backend.`
+            )
+          );
+        }
+      }
+
+      // ── Re-map prompt after a backend update (Ix#271) ────────────────
+      // A graph written by the previous engine may lack fields the new read
+      // paths filter on (workspace_id/system_id), so scoped reads return empty
+      // until the user re-maps. Nudge them once, right after the image changes.
+      if (backendImageChanged) {
+        console.log("");
+        console.log(chalk.yellow("  Backend engine updated. Re-map your repositories so the graph matches:"));
+        console.log(chalk.dim("    ix map ."));
       }
 
       // ── Compass upgrade ──────────────────────────────────────────────
