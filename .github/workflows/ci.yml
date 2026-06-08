@@ -9,32 +9,173 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs on the same ref so rapid pushes don't pile up runners.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  cli:
-    name: CLI (TypeScript)
+  # ── Fast static gate ─────────────────────────────────────────────────────
+  # Lint + typecheck + format need no native build, so this fails in ~1 min and
+  # gives PR authors quick signal while the heavier matrix runs in parallel.
+  static:
+    name: Lint & Typecheck
     runs-on: ubuntu-latest
-    env:
-      # node-tree-sitter 0.25 has no prebuilt binary and is compiled from source;
-      # node 24's V8 headers require C++20, so force the standard for node-gyp.
-      CXXFLAGS: "-std=c++20"
-      CXX: "g++ -std=c++20"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0 # needed for the changed-files Prettier diff below
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: ix-cli/package-lock.json
+      - name: Install (ix-cli only — no native build needed)
+        working-directory: ix-cli
+        run: npm ci --silent
+      - name: Lint
+        working-directory: ix-cli
+        run: npm run lint
+      - name: Typecheck
+        working-directory: ix-cli
+        run: npm run typecheck
+      - name: Prettier (changed files)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          mapfile -t files < <(git diff --name-only --diff-filter=ACMR "$base"...HEAD -- 'ix-cli/src/**/*.ts')
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No changed ix-cli TypeScript files to format-check."
+            exit 0
+          fi
+          printf '%s\n' "${files[@]}"
+          # Strip the ix-cli/ prefix so paths resolve against the package's config.
+          rel=("${files[@]/#ix-cli\//}")
+          cd ix-cli && npx prettier --check "${rel[@]}"
+
+  # ── Cross-platform test matrix ───────────────────────────────────────────
+  # Every OS the CLI ships to, on the release Node (22) plus the next major (24).
+  # node-tree-sitter 0.25 compiles from source; node 24's V8 headers need C++20,
+  # so the native flags are configured per-leg below.
+  test:
+    name: Test (${{ matrix.os }} · node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, node: "22", coverage: true }
+          - { os: ubuntu-latest, node: "24" }
+          - { os: windows-latest, node: "22" }
+          - { os: windows-latest, node: "24" }
+          - { os: macos-14, node: "22" }
+          - { os: macos-14, node: "24" }
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "24"
+          node-version: ${{ matrix.node }}
           cache: "npm"
           cache-dependency-path: |
             ix-cli/package-lock.json
             core-ingestion/package-lock.json
-      - name: Install core-ingestion deps
-        working-directory: core-ingestion
-        run: npm ci --silent
-      - name: Install & Build
+
+      # Cache the compiled native tree-sitter grammars (the slow, flaky step).
+      # Key includes OS + node + lockfile so a cache hit is binary-compatible;
+      # build-core-ingestion.mjs then skips `npm ci` entirely on a hit.
+      - name: Cache core-ingestion native deps
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: core-ingestion/node_modules
+          key: core-ingestion-${{ runner.os }}-node${{ matrix.node }}-${{ hashFiles('core-ingestion/package-lock.json') }}
+
+      - name: Configure native build flags (node 24)
+        if: matrix.node == '24'
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            echo "CXXFLAGS=-std=c++20" >> "$GITHUB_ENV"
+            echo "CXX=g++ -std=c++20" >> "$GITHUB_ENV"
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            echo "CXXFLAGS=-std=c++20" >> "$GITHUB_ENV"
+          fi
+          # Windows (MSVC) uses node-gyp defaults; revisit if the node-24 native
+          # compile fails on the first run.
+
+      - name: Install & build
         working-directory: ix-cli
         run: |
           npm ci --silent
           npm run build
-      - name: Test
+
+      - name: Unit tests
+        if: ${{ !matrix.coverage }}
         working-directory: ix-cli
-        run: npm test
+        run: npm run test:unit
+
+      - name: Unit tests + coverage
+        if: ${{ matrix.coverage }}
+        working-directory: ix-cli
+        run: npm run test:coverage
+
+      - name: Parser smoke test
+        working-directory: ix-cli
+        run: npm run smoke
+
+      - name: Upload coverage
+        if: ${{ matrix.coverage }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage
+          path: ix-cli/coverage
+          if-no-files-found: ignore
+
+  # ── End-to-end against a real backend ────────────────────────────────────
+  # Boots the published memory-layer + ArangoDB, then drives the built CLI
+  # through the full write→read path: this is the class of bug (scoped reads,
+  # schema drift) that unit tests can't reach.
+  e2e:
+    name: E2E (real backend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: |
+            ix-cli/package-lock.json
+            core-ingestion/package-lock.json
+      - name: Cache core-ingestion native deps
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: core-ingestion/node_modules
+          key: core-ingestion-${{ runner.os }}-node22-${{ hashFiles('core-ingestion/package-lock.json') }}
+
+      - name: Build CLI
+        working-directory: ix-cli
+        run: |
+          npm ci --silent
+          npm run build
+
+      - name: Start backend (memory-layer + ArangoDB)
+        run: docker compose -f docker-compose.standalone.yml up -d --wait --wait-timeout 180
+
+      - name: Smoke the full write→read path
+        working-directory: ix-cli
+        run: |
+          set -euo pipefail
+          IX="node dist/cli/main.js"
+          echo "::group::status"; $IX status; echo "::endgroup::"
+          echo "::group::map fixture"; $IX map test/fixtures/sample_project --silent; echo "::endgroup::"
+          echo "::group::search"; $IX search BillingService --format json | tee search.json; echo "::endgroup::"
+          node -e "const r=require('./search.json');const n=(r.results||r).length||0;if(!n){console.error('no search results after map');process.exit(1)}console.log('search returned',n,'results')"
+          echo "::group::doctor"; $IX doctor --format json | tee doctor.json; echo "::endgroup::"
+          node -e "const d=require('./doctor.json');if(!d.healthy){console.error('doctor not healthy');process.exit(1)}"
+
+      - name: Backend logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.standalone.yml logs --tail 200

@@ -8,9 +8,8 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveFileOrEntity, resolveEntityFull, printResolved, looksFileLike, type ResolvedEntity } from "../resolve.js";
-import { formatDiff, relativePath, stripNulls } from "../format.js";
+import { formatDiff, relativePath } from "../format.js";
 import { llmLine, llmError } from "../llm.js";
-import { stderr } from "../stderr.js";
 
 /** Render a `--summary` diff as a single llm record. */
 function renderDiffSummaryLlm(result: any): string {

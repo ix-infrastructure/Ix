@@ -1,4 +1,3 @@
-import * as nodePath from "node:path";
 import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";

@@ -4,7 +4,6 @@ import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveFileOrEntity, printResolved } from "../resolve.js";
 import { relativePath } from "../format.js";
-import { stderr } from "../stderr.js";
 import { llmLine, llmError } from "../llm.js";
 
 /** Render an entity's provenance chain as llm records: a header then one `patch` row per revision. */

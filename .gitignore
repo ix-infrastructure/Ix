@@ -10,6 +10,7 @@ ix-cli/node_modules/*
 core-ingestion/node_modules/*
 core-ingestion/dist/
 ix-cli/dist/
+ix-cli/coverage/
 .vscode/
 .mcp.json
 

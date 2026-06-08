@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { inferRole } from "../explain/role-inference.js";
 import { inferImportance } from "../explain/importance.js";
 import { renderExplanation } from "../explain/render.js";
-import { inferHierarchySemantics, synthesizeSystemRole, hierarchyImpactPhrase } from "../explain/hierarchy-semantics.js";
+import { inferHierarchySemantics, synthesizeSystemRole } from "../explain/hierarchy-semantics.js";
 import { inferSystemMeaning } from "../explain/system-meaning.js";
 import type { EntityFacts } from "../explain/facts.js";
 

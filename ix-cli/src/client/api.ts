@@ -1,5 +1,4 @@
 import type {
-  CommitResult,
   IngestResult,
   StructuredContext,
   GraphNode,
