@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, rmSync, chmodSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, rmSync, chmodSync, renameSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
@@ -88,15 +88,25 @@ export function saveConfig(config: IxConfig): void {
     if (!OSS_OWNED_KEYS.has(k as keyof IxConfig)) preserved[k] = v;
   }
   const merged: Record<string, unknown> = { ...preserved, ...(config as unknown as Record<string, unknown>) };
-  // 0600 — the config holds credentials (Pro's instances carry a tunnel JWT and
-  // a long-lived IdP refresh token). `mode` on writeFileSync only applies when
-  // CREATING the file, so chmodSync enforces it on an already-existing file too
-  // (a pre-existing config written before this fix may be group/world-readable).
-  writeFileSync(configPath, stringify(merged), { mode: 0o600 });
+  // Atomic write: serialize to a private (0600) temp file in the SAME directory,
+  // then rename it over the target. The config holds credentials (Pro's instances
+  // carry a tunnel JWT and a long-lived IdP refresh token), so this avoids both a
+  // partially-written/looser-mode window and the read-modify-write race (CodeQL
+  // js/file-system-race). Same-dir keeps the rename atomic; rename replaces on
+  // POSIX and Windows alike, and inherits the temp's 0600 mode (tightening any
+  // pre-existing group/world-readable config).
+  const tmpPath = `${configPath}.${process.pid}.tmp`;
+  writeFileSync(tmpPath, stringify(merged), { mode: 0o600 });
   try {
-    chmodSync(configPath, 0o600);
+    renameSync(tmpPath, configPath);
+  } catch (err) {
+    try { rmSync(tmpPath, { force: true }); } catch { /* best effort */ }
+    throw err;
+  }
+  try {
+    chmodSync(configPath, 0o600); // belt-and-suspenders if umask altered the temp mode
   } catch {
-    // chmod can fail on exotic filesystems; the create-mode above is the primary guard.
+    // chmod can fail on exotic filesystems; the temp's create-mode is the primary guard.
   }
 }
 

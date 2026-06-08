@@ -1,4 +1,4 @@
-import { mkdirSync, existsSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join, basename, resolve } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -20,10 +20,16 @@ export interface BootstrapResult {
 export function ensureLocalConfig(): boolean {
   const configDir = join(homedir(), ".ix");
   const configPath = join(configDir, "config.yaml");
-  if (existsSync(configPath)) return false;
   mkdirSync(configDir, { recursive: true });
-  writeFileSync(configPath, `endpoint: ${getEndpoint()}\nformat: text\n`);
-  return true;
+  try {
+    // 'wx' creates the file atomically and throws EEXIST if it already exists,
+    // avoiding the existsSync-then-write TOCTOU (CodeQL js/file-system-race).
+    writeFileSync(configPath, `endpoint: ${getEndpoint()}\nformat: text\n`, { flag: "wx" });
+    return true;
+  } catch (err: any) {
+    if (err?.code === "EEXIST") return false;
+    throw err;
+  }
 }
 
 // Roots whose workspace_id was re-keyed to the path-based id during THIS process,

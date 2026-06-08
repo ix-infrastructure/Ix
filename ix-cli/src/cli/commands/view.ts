@@ -222,6 +222,13 @@ export function registerViewCommand(program: Command): void {
             // workspace scoping (single-repo behavior is unaffected).
           }
         }
+        // The system id (from a local marker or the backend) is embedded in the
+        // generated, then-executed compass server script and the scope file, so
+        // constrain it to the known id charset before use (CodeQL
+        // js/http-to-file-access barrier; serverScript also JSON-encodes it).
+        if (systemId !== null && !/^[A-Za-z0-9_.:-]+$/.test(systemId)) {
+          systemId = null;
+        }
       }
       const workspaceName = workspaceId
         ? (findWorkspaceForCwd(process.cwd())?.workspace_name ?? workspaceId)

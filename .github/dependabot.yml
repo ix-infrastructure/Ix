@@ -13,6 +13,13 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # Toolchain majors need a deliberate, tested migration, not an auto-bump:
+      # TypeScript 6.0 broke typescript-eslint 8.x here (#278). Minor/patch still flow.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
     groups:
       dev-dependencies:
         dependency-type: development

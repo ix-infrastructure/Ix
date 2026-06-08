@@ -162,10 +162,12 @@ export async function computeTextualDiff(
   before: string,
   after: string,
 ): Promise<string[]> {
-  const tmpDir = os.tmpdir();
-  const ts = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const beforePath = path.join(tmpDir, `ix-diff-a-${ts}`);
-  const afterPath = path.join(tmpDir, `ix-diff-b-${ts}`);
+  // Create a private temp directory atomically (0700, unique name) rather than
+  // writing predictably-named files into the shared tmpdir, which is a symlink/
+  // race vector (CodeQL js/insecure-temporary-file).
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ix-diff-"));
+  const beforePath = path.join(tmpRoot, "a");
+  const afterPath = path.join(tmpRoot, "b");
   fs.writeFileSync(beforePath, before);
   fs.writeFileSync(afterPath, after);
 
@@ -182,8 +184,7 @@ export async function computeTextualDiff(
     if (!stdout) return [];
     return parseDiffOutput(stdout);
   } finally {
-    try { fs.unlinkSync(beforePath); } catch {}
-    try { fs.unlinkSync(afterPath); } catch {}
+    try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
   }
 }
 

@@ -38,6 +38,13 @@ function getCurrentVersion(): string {
   }
 }
 
+// Strict semver (X.Y.Z with optional -prerelease/+build). The release tag comes
+// from the network and later flows into file paths, the install shim, and
+// download URLs, so it is validated here at the source: anything that isn't a
+// plain version is rejected (CodeQL js/http-to-file-access barrier + general
+// hardening against a tampered/unexpected tag).
+const VERSION_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+
 async function fetchLatestRelease(repo: string): Promise<string | null> {
   try {
     const resp = await fetch(
@@ -45,7 +52,9 @@ async function fetchLatestRelease(repo: string): Promise<string | null> {
     );
     if (!resp.ok) return null;
     const data = (await resp.json()) as { tag_name?: string };
-    return data.tag_name?.replace(/^v/, "") ?? null;
+    const version = data.tag_name?.replace(/^v/, "") ?? null;
+    if (version === null || !VERSION_RE.test(version)) return null;
+    return version;
   } catch {
     return null;
   }
@@ -255,9 +264,13 @@ export function registerUpgradeCommand(program: Command): void {
             try {
               jsPath = execFileSync("cygpath", ["-u", jsPathWin], { encoding: "utf-8" }).trim();
             } catch { /* use windows path */ }
-            if (existsSync(shimPath)) {
+            // Write the shim directly (creating ~/.local/bin if needed) rather than
+            // existsSync-then-write, which is a TOCTOU (CodeQL js/file-system-race).
+            // jsPath derives only from the validated-semver `latest` + install dir.
+            try {
+              mkdirSync(dirname(shimPath), { recursive: true });
               writeFileSync(shimPath, `#!/usr/bin/env bash\nexec node "${jsPath}" "$@"\n`);
-            }
+            } catch { /* shim refresh is best-effort */ }
           }
 
           console.log(`[ok] Upgraded ix: ${current} → ${latest}`);
