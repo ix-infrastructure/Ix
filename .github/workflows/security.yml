@@ -6,14 +6,17 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege at the top; the scanning job elevates to upload SARIF.
 permissions:
   contents: read
-  security-events: write
 
 jobs:
   trivy-repo:
     name: Trivy (repo)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to code scanning
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:

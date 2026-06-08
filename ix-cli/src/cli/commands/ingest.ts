@@ -1209,10 +1209,18 @@ export async function ingestFiles(
         // error messages still point at the file on disk.
         const readAndDispatch = chunk.map(async (absFilePath, idx) => {
           try {
-            const st = await fs.promises.stat(absFilePath);
-            if (st.size === 0) { filesSkipped++; return; }
-            if (st.size > MAX_FILE_BYTES) { tooLarge++; return; }
-            const bytes = await fs.promises.readFile(absFilePath);
+            // Open once and fstat the same handle so the size check and the read
+            // observe the same inode (no stat→read TOCTOU; CodeQL js/file-system-race).
+            const fh = await fs.promises.open(absFilePath, 'r');
+            let bytes!: Buffer;
+            try {
+              const st = await fh.stat();
+              if (st.size === 0) { filesSkipped++; return; }
+              if (st.size > MAX_FILE_BYTES) { tooLarge++; return; }
+              bytes = await fh.readFile();
+            } finally {
+              await fh.close();
+            }
             const hash = sha256(bytes);
             if (!opts.force && knownHashes.get(absFilePath) === hash) { filesSkipped++; return; }
             const previousHash = knownHashes.get(absFilePath);

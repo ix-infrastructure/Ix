@@ -174,9 +174,12 @@ describe("diff.ts textual diff model", () => {
     expect(diffContent).toContain("computeTextualDiff(beforeSource, afterSource)");
   });
 
-  it("writes temp files to os.tmpdir for git diff --no-index", () => {
+  it("uses a private temp dir under os.tmpdir for git diff --no-index and cleans it up", () => {
     expect(diffContent).toContain("os.tmpdir()");
-    expect(diffContent).toContain("unlinkSync");
+    // Atomic private temp dir (mkdtempSync) + recursive cleanup, not predictably
+    // named files in the shared tmpdir (CodeQL js/insecure-temporary-file).
+    expect(diffContent).toContain("mkdtempSync");
+    expect(diffContent).toContain("rmSync");
   });
 });
 
