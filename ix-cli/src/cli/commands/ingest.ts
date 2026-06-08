@@ -922,7 +922,7 @@ export async function ingestFiles(
       const saveStart = performance.now();
       let resolveEdgesMs = 0;
       let buildPatchMs = 0;
-      let localStripMs = 0;
+      const localStripMs = 0;
       let commitMs = 0;
       let batchNodes = 0;
       let batchEdges = 0;
@@ -991,7 +991,7 @@ export async function ingestFiles(
       const saveStart = performance.now();
       let resolveEdgesMs = 0;
       let buildPatchMs = 0;
-      let localStripMs = 0;
+      const localStripMs = 0;
       let commitMs = 0;
       let batchNodes = 0;
       let batchEdges = 0;

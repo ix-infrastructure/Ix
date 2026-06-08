@@ -18,6 +18,14 @@
   "scripts": {
     "build": "node scripts/build-core-ingestion.mjs && node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
     "test": "node scripts/build-core-ingestion.mjs && vitest run && node test/parser.smoke.mjs",
+    "test:unit": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "smoke": "node test/parser.smoke.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
     "dev": "node scripts/build-core-ingestion.mjs && tsx src/cli/main.ts"
   },
   "dependencies": {
@@ -26,9 +34,16 @@
     "yaml": "^2.4.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^20.0.0",
+    "@vitest/coverage-v8": "^4.1.8",
+    "eslint": "^10.4.1",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-unused-imports": "^4.4.1",
+    "prettier": "^3.8.3",
     "tsx": "^4.7.0",
     "typescript": "^5.4.0",
+    "typescript-eslint": "^8.61.0",
     "vitest": "^4.1.0"
   },
   "overrides": {

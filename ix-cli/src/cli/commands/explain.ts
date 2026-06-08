@@ -8,7 +8,6 @@ import { collectFacts } from "../explain/facts.js";
 import { inferRole } from "../explain/role-inference.js";
 import { inferImportance } from "../explain/importance.js";
 import { renderExplanation } from "../explain/render.js";
-import { stderr } from "../stderr.js";
 import { renderSection, renderWarning, renderNote } from "../ui.js";
 
 export function registerExplainCommand(program: Command): void {

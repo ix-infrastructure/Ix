@@ -1,5 +1,4 @@
 import chalk from "chalk";
-import { resolve } from "path";
 import { llmLine } from "./llm.js";
 
 export type ResultSource = "graph" | "text" | "graph+text" | "heuristic";
