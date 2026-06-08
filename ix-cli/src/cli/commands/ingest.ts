@@ -16,6 +16,7 @@ import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
 import { loadIngestionModules } from './ingestion-loader.js';
 import { ensureWorkspaceIdState } from '../bootstrap.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
+import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
 import {
   deterministicId,
   transformIssue,
@@ -580,7 +581,7 @@ export async function ingestFiles(
   // Schema-version check forces a clean re-ingest when the backend's graph
   // format has changed in a way that invalidates existing node IDs (e.g. the
   // absolute→relative source_uri migration, or folding workspace_id into ids).
-  const CLIENT_EXPECTED_SCHEMA_VERSION = 3;
+  // CLIENT_EXPECTED_SCHEMA_VERSION is shared with doctor/upgrade (backend-status).
   try {
     const health = await client.health();
     const serverVersion = (health as any)?.schema_version;
