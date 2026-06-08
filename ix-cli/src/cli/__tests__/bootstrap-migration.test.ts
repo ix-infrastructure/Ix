@@ -40,7 +40,9 @@ function readWorkspaceId(rootPath: string): string | undefined {
   const lines = raw.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     if (lines[i].includes("workspace_id:")) {
-      const id = lines[i].split("workspace_id:")[1].trim();
+      // Strip surrounding quotes: YAML quotes an all-digit id (e.g. "62868610")
+      // to keep it a string, and this crude reader must match the parsed value.
+      const id = lines[i].split("workspace_id:")[1].trim().replace(/^["']|["']$/g, "");
       for (let j = i; j < i + 4 && j < lines.length; j++) {
         if (lines[j].includes("root_path:") && lines[j].includes(rootPath)) return id;
       }

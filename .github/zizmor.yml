@@ -1,0 +1,15 @@
+# zizmor configuration. Everything fixable is fixed in-place; this file records
+# the few accepted, documented exceptions in the release workflow.
+rules:
+  artipacked:
+    ignore:
+      # The release job's checkout intentionally persists the token: the Homebrew
+      # step pushes a branch and opens a PR with it. All other checkouts in the
+      # repo set persist-credentials: false.
+      - release.yml
+  cache-poisoning:
+    ignore:
+      # release.yml is tag-triggered (a privileged, publishing context) and uses
+      # setup-node's npm cache for build speed; the cache key is lockfile-pinned.
+      # Accepted for the release workflow only.
+      - release.yml

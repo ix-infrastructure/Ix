@@ -25,6 +25,19 @@ on:
   push:
     tags:
       - "v*"
+  # Packaging dry-run: on PRs that touch the packaging surface, run the full
+  # per-platform build + package matrix (no publish) so a broken release leg is
+  # caught before tagging instead of mid-release.
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/release.yml"
+      - "scripts/install/**"
+      - "ix-cli/package.json"
+      - "ix-cli/package-lock.json"
+      - "core-ingestion/package.json"
+      - "core-ingestion/package-lock.json"
+      - "docker-compose.standalone.yml"
   workflow_dispatch:
     inputs:
       tag:
@@ -35,13 +48,16 @@ on:
         type: boolean
         default: false
 
+# Least privilege at the top; the release job elevates to what it needs.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   # ── 1. Build System Compass once (platform-independent) ───────────────────
+  # Skipped on PR dry-runs (compass needs a private-repo token; the package step
+  # treats a missing compass bundle as best-effort anyway).
   compass:
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     steps:
       - name: Set up Node.js
@@ -81,6 +97,8 @@ jobs:
   build:
     name: Package (${{ matrix.target }})
     needs: compass
+    # Run on tag releases (compass succeeded) and on PR dry-runs (compass skipped).
+    if: ${{ always() && needs.compass.result != 'failure' && needs.compass.result != 'cancelled' }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -106,12 +124,22 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Extract version from tag
         id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # Dry-run: no real tag. Use a valid placeholder semver for `npm version`.
+            echo "version=0.0.0-pr" >> "$GITHUB_OUTPUT"
+          else
+            TAG="${INPUT_TAG:-$REF_NAME}"
+            echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -129,10 +157,12 @@ jobs:
 
       - name: Build CLI
         working-directory: ix-cli
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           npm ci --silent
           npm run build
-          npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
 
       # Compass is best-effort (only built when COMPASS_TOKEN is set); never let a
       # missing/empty compass artifact block a platform build.
@@ -144,9 +174,12 @@ jobs:
           path: compass-dist
 
       - name: Package CLI (${{ matrix.target }})
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          RUNNER_OS: ${{ runner.os }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          STAGING="ix-${VERSION}-${{ matrix.target }}"
+          STAGING="ix-${VERSION}-${TARGET}"
           # Compute the checksum with node (always present on every runner);
           # `shasum` is missing from the bash shell on GitHub's Windows image.
           sha256file() {
@@ -158,7 +191,7 @@ jobs:
           if [ -f compass-dist/index.html ]; then
             cp -r compass-dist/* "$STAGING/compass/"
           fi
-          if [ "${{ runner.os }}" = "Windows" ]; then
+          if [ "$RUNNER_OS" = "Windows" ]; then
             cat > "$STAGING/ix.cmd" <<'WRAPPER'
           @echo off
           node "%~dp0cli\dist\cli\main.js" %*
@@ -176,6 +209,14 @@ jobs:
             sha256file "$STAGING.tar.gz" > "$STAGING.tar.gz.sha256"
           fi
 
+      - name: Generate SBOM (${{ matrix.target }})
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: ix-cli
+          format: spdx-json
+          output-file: ix-${{ steps.version.outputs.version }}-${{ matrix.target }}.sbom.spdx.json
+          artifact-name: sbom-${{ matrix.target }}.spdx.json
+
       - name: Upload tarball
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -185,6 +226,7 @@ jobs:
             ix-*-${{ matrix.target }}.tar.gz.sha256
             ix-*-${{ matrix.target }}.zip
             ix-*-${{ matrix.target }}.zip.sha256
+            ix-*-${{ matrix.target }}.sbom.spdx.json
           if-no-files-found: error
           retention-days: 1
 
@@ -193,10 +235,17 @@ jobs:
   # platform's native compile + packaging, but nothing is published.
   release:
     needs: build
-    if: ${{ !inputs.dry_run }}
+    if: ${{ !inputs.dry_run && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release + push the brew branch
+      pull-requests: write # open the brew formula PR
+      id-token: write # keyless signing for provenance attestation
+      attestations: write # record the build provenance attestation
     steps:
       - name: Checkout
+        # Credentials are intentionally persisted here: the Homebrew step pushes a
+        # branch and opens a PR with this token (see .github/zizmor.yml).
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
@@ -204,8 +253,11 @@ jobs:
 
       - name: Extract version from tag
         id: version
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          TAG="${INPUT_TAG:-$REF_NAME}"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Download all platform tarballs
@@ -214,6 +266,11 @@ jobs:
           path: _artifacts
           pattern: ix-*
           merge-multiple: true
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: "_artifacts/*.tar.gz,_artifacts/*.zip"
 
       - name: Create Release
         uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
@@ -246,14 +303,16 @@ jobs:
             _artifacts/*.tar.gz.sha256
             _artifacts/*.zip
             _artifacts/*.zip.sha256
+            _artifacts/*.sbom.spdx.json
 
       - name: Update Homebrew formula
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          REPO: ${{ github.repository }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/v${VERSION}.tar.gz"
+          TARBALL_URL="https://github.com/${REPO}/archive/refs/tags/v${VERSION}.tar.gz"
           SHA256=$(curl -sL "$TARBALL_URL" | shasum -a 256 | cut -d' ' -f1)
 
           sed -i "s|url \".*\"|url \"${TARBALL_URL}\"|" Formula/ix.rb
