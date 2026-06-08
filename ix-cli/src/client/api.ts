@@ -67,6 +67,24 @@ export class IxClient {
     });
   }
 
+  // Vector-similarity search. The backend (POST /v1/search/semantic) embeds the
+  // term and returns nodes already ordered by similarity, so callers must NOT
+  // re-rank. Requires the extraction service to be configured (cloud); otherwise
+  // the backend returns 503. The request field is `term` (not `query`), and this
+  // endpoint does not accept a `language` filter — only term/limit/kind/scoping.
+  async semanticSearch(
+    term: string,
+    opts?: { limit?: number; kind?: string; workspaceId?: string; systemId?: string }
+  ): Promise<GraphNode[]> {
+    return this.post("/v1/search/semantic", {
+      term,
+      limit: opts?.limit,
+      kind: opts?.kind,
+      workspaceId: opts?.workspaceId,
+      systemId: opts?.systemId,
+    });
+  }
+
   async listByKind(
     kind: string,
     opts?: { limit?: number; workspaceId?: string; scope?: string; systemId?: string }
