@@ -47,7 +47,7 @@ case "${1:---build}" in
 
     echo "Installing dependencies..."
     cd "$CLI_DIR"
-    npm install --silent
+    npm ci --silent  # install exactly from the committed lockfile (pinned/reproducible)
     echo "[ok] Dependencies installed"
 
     echo "Building CLI..."
@@ -79,7 +79,7 @@ case "${1:---build}" in
     if [ ! -d "$CLI_DIR/node_modules" ]; then
       echo "Installing dependencies..."
       cd "$CLI_DIR"
-      npm install --silent
+      npm ci --silent  # install exactly from the committed lockfile (pinned/reproducible)
       echo "[ok] Dependencies installed"
     else
       echo "[ok] Dependencies already installed"

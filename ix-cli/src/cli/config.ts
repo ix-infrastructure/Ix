@@ -46,6 +46,13 @@ export function loadConfig(): IxConfig {
   try {
     const raw = readFileSync(configPath, "utf-8");
     const parsed = parse(raw) as Partial<IxConfig>;
+    // Normalize workspace_id to a string. saveConfig quotes an all-digit path-hash
+    // id, but a hand-edited or legacy unquoted value parses from YAML as a number,
+    // which then silently breaks string id comparisons (e.g. migration detection
+    // would re-key a workspace that is already on the correct id).
+    if (Array.isArray(parsed.workspaces)) {
+      parsed.workspaces = parsed.workspaces.map((w) => ({ ...w, workspace_id: String(w.workspace_id) }));
+    }
     return { ...defaultConfig, ...parsed };
   } catch {
     return defaultConfig;
@@ -123,7 +130,7 @@ export async function createClient(): Promise<IxClient> {
 
 export function loadWorkspaces(): WorkspaceConfig[] {
   const config = loadConfig();
-  return config.workspaces ?? [];
+  return config.workspaces ?? []; // workspace_id already normalized to string in loadConfig
 }
 
 export function findWorkspaceForCwd(cwd: string): WorkspaceConfig | undefined {
