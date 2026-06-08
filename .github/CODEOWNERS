@@ -1,0 +1,7 @@
+# Default owners for everything in the repo.
+* @josephismikhail
+
+# CI/CD, security policy, and release machinery.
+/.github/ @josephismikhail
+/scripts/ @josephismikhail
+/docker-compose.standalone.yml @josephismikhail

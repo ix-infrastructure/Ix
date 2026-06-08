@@ -24,6 +24,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
     "lint:fix": "eslint src --fix",
+    "knip": "knip",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
     "dev": "node scripts/build-core-ingestion.mjs && tsx src/cli/main.ts"
@@ -40,6 +41,7 @@
     "eslint": "^10.4.1",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-unused-imports": "^4.4.1",
+    "knip": "^6.16.1",
     "prettier": "^3.8.3",
     "tsx": "^4.7.0",
     "typescript": "^5.4.0",

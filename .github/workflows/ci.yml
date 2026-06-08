@@ -37,6 +37,9 @@ jobs:
       - name: Typecheck
         working-directory: ix-cli
         run: npm run typecheck
+      - name: Dead-code check (knip)
+        working-directory: ix-cli
+        run: npm run knip
       # Prettier config + `npm run format` ship for local/editor use. A blocking
       # CI format gate is intentionally deferred: the legacy tree isn't formatted,
       # so enforcing on touched files would force full-file reformats and conflict
