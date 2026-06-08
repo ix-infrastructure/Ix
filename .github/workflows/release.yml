@@ -244,8 +244,8 @@ jobs:
       attestations: write # record the build provenance attestation
     steps:
       - name: Checkout
-        # Credentials are intentionally persisted: the Homebrew step pushes a
-        # branch and opens a PR with this token. zizmor: ignore[artipacked]
+        # Credentials are intentionally persisted here: the Homebrew step pushes a
+        # branch and opens a PR with this token (see .github/zizmor.yml).
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
