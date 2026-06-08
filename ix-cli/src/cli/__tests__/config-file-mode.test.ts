@@ -27,13 +27,18 @@ afterEach(() => {
 
 const cfgPath = () => nodePath.join(home, ".ix", "config.yaml");
 
+// POSIX permission bits are meaningless on Windows (chmod only toggles the
+// read-only bit), so statSync reports modes like 0o666 and these assertions
+// can't hold. The 0600 guard protects unix-like systems; skip the checks there.
+const posix = process.platform !== "win32";
+
 describe("saveConfig file mode (credentials live in this file)", () => {
-  it("creates the config 0600", () => {
+  it.skipIf(!posix)("creates the config 0600", () => {
     saveConfig({ endpoint: "http://localhost:8090", format: "text" });
     expect(fs.statSync(cfgPath()).mode & 0o777).toBe(0o600);
   });
 
-  it("tightens a pre-existing group/world-readable config to 0600", () => {
+  it.skipIf(!posix)("tightens a pre-existing group/world-readable config to 0600", () => {
     fs.writeFileSync(cfgPath(), "endpoint: http://localhost:8090\nformat: text\n", { mode: 0o644 });
     fs.chmodSync(cfgPath(), 0o644); // force 0644 regardless of umask
     saveConfig({ endpoint: "http://localhost:8090", format: "text" });
