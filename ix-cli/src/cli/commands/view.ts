@@ -12,7 +12,9 @@ import { homedir, platform } from "os";
 import { fileURLToPath } from "url";
 import { createConnection } from "net";
 import { resolveWorkspaceId } from "../bootstrap.js";
-import { findWorkspaceForCwd, loadWorkspaces } from "../config.js";
+import { findWorkspaceForCwd, loadWorkspaces, getEndpoint } from "../config.js";
+import { detectSystem } from "../system.js";
+import { IxClient } from "../../client/api.js";
 
 const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
 const PID_FILE = join(IX_HOME, "compass.pid");
@@ -65,7 +67,7 @@ function isPortInUse(port: number): Promise<boolean> {
 }
 
 /** Generate the inline server script that serves static files + proxies /v1. */
-function serverScript(distDir: string, port: number, workspaceId: string | null): string {
+function serverScript(distDir: string, port: number, workspaceId: string | null, systemId: string | null): string {
   return `
 const http = require("http");
 const fs = require("fs");
@@ -76,6 +78,7 @@ const DIST = ${JSON.stringify(distDir)};
 const PORT = ${port};
 const BACKEND = ${JSON.stringify(BACKEND_URL)};
 const WORKSPACE_ID = ${JSON.stringify(workspaceId)};
+const SYSTEM_ID = ${JSON.stringify(systemId)};
 
 const MIME = {
   ".html": "text/html",
@@ -106,6 +109,13 @@ const server = http.createServer((req, res) => {
     // knowing anything about workspaces. The backend reads X-Ix-Workspace as a
     // fallback when no explicit workspace_id is on the request.
     if (WORKSPACE_ID) proxyHeaders["x-ix-workspace"] = WORKSPACE_ID;
+    // When the launch directory is a multi-repo system, scope by system instead.
+    // Co-ingest stores each member repo under its own workspace_id plus a shared
+    // system_id, so a workspace-only scope (the parent dir's path-id) matches no
+    // member nodes and Compass renders empty. X-Ix-System unions every member's
+    // nodes plus the cross-repo edges; the backend (SystemScope) gives it
+    // precedence over the workspace scope, so sending both is safe.
+    if (SYSTEM_ID) proxyHeaders["x-ix-system"] = SYSTEM_ID;
     const proxyReq = http.request(backendUrl, {
       method: req.method,
       headers: proxyHeaders,
@@ -193,11 +203,35 @@ export function registerViewCommand(program: Command): void {
       // X-Ix-Workspace on every /v1 call so Compass isolates by workspace without any
       // workspace awareness of its own. --all opts out (show the whole backend).
       const workspaceId = opts.all ? null : (resolveWorkspaceId() ?? null);
+
+      // If the launch directory is a multi-repo system, scope by system_id instead of
+      // workspace_id: co-ingested member repos live under their own workspace_ids, so a
+      // workspace-only scope finds nothing (this is the "Compass not connected" bug).
+      // Mirror `ix map`: detectSystem finds a locally co-ingested system; a repo the
+      // stitcher joined into a system has no local marker, so fall back to the backend
+      // lookup. --all opts out of all scoping.
+      let systemId: string | null = null;
+      if (!opts.all) {
+        systemId = detectSystem(process.cwd())?.systemId ?? null;
+        if (!systemId && workspaceId) {
+          try {
+            const looked = await new IxClient(getEndpoint()).workspaceSystem(workspaceId);
+            systemId = looked.systemId ?? null;
+          } catch {
+            // Older backend without the stitch endpoint, or backend down — fall back to
+            // workspace scoping (single-repo behavior is unaffected).
+          }
+        }
+      }
       const workspaceName = workspaceId
         ? (findWorkspaceForCwd(process.cwd())?.workspace_name ?? workspaceId)
         : null;
-      const scopeKey = workspaceId ?? "*all*";
-      const scopeLabel = workspaceName ? `workspace "${workspaceName}"` : "all workspaces";
+      // A system scope takes precedence (it's what the proxy sends), so it also keys the
+      // running-instance scope so launching from a member repo rescopes correctly.
+      const scopeKey = systemId ? `system:${systemId}` : (workspaceId ?? "*all*");
+      const scopeLabel = systemId
+        ? `system "${systemId}"`
+        : (workspaceName ? `workspace "${workspaceName}"` : "all workspaces");
 
       const existing = readAlivePid();
       if (existing) {
@@ -238,7 +272,7 @@ export function registerViewCommand(program: Command): void {
       const scriptDir = join(IX_HOME, "tmp");
       mkdirSync(scriptDir, { recursive: true });
       const scriptPath = join(scriptDir, "compass-server.js");
-      writeFileSync(scriptPath, serverScript(distDir, port, workspaceId));
+      writeFileSync(scriptPath, serverScript(distDir, port, workspaceId, systemId));
 
       // Spawn detached process
       const child = spawn("node", [scriptPath], {
@@ -261,9 +295,11 @@ export function registerViewCommand(program: Command): void {
       console.log(`[ok] Visualizer started (PID ${child.pid})`);
       console.log(`  ${url}`);
       console.log(
-        workspaceName
-          ? `  scope: workspace "${workspaceName}"`
-          : `  scope: all workspaces${opts.all ? " (--all)" : ""}`
+        systemId
+          ? `  scope: ${scopeLabel}`
+          : workspaceName
+            ? `  scope: workspace "${workspaceName}"`
+            : `  scope: all workspaces${opts.all ? " (--all)" : ""}`
       );
 
       if (opts.open !== false) {
