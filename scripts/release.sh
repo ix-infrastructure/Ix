@@ -36,7 +36,7 @@ fi
 # Verify CLI builds
 echo "Verifying CLI build..."
 cd "$IX_DIR/ix-cli"
-npm install --silent
+npm ci --silent  # install exactly from the committed lockfile (pinned/reproducible)
 npm run build
 echo "[ok] CLI builds successfully"
 
