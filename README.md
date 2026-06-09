@@ -88,7 +88,7 @@ irm https://ix-infra.com/install.ps1 | iex
 ```
 ### Codex Plugin
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/ix-codex-plugin/main/codex-install.sh | sh
+curl -fsSL https://ix-infra.com/codex-install.sh | sh
 ```
 ### OpenClaw Plugin
 ```bash
@@ -101,6 +101,11 @@ gemini extensions install https://github.com/ix-infrastructure/ix-gemini-plugin
 ### OpenCode Plugin
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/ix-opencode-plugin/main/install.sh | bash
+```
+
+### Cursor Plugin
+```bash
+curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/ix-cursor-plugin/main/install.sh | bash
 ```
 
 ## Requirements
