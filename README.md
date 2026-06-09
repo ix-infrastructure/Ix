@@ -77,9 +77,9 @@ Directed context. More signal. Persistent system memory.
 curl -fsSL https://ix-infra.com/install.sh | sh
 ```
 ### Windows
-```bash
+```powershell
 irm https://ix-infra.com/install.ps1 | iex
-``` 
+```
 ### Claude Plugin
 ```bash
 /plugin marketplace add ix-infrastructure/ix-claude-plugin
@@ -87,8 +87,13 @@ irm https://ix-infra.com/install.ps1 | iex
 /reload-plugin
 ```
 ### Codex Plugin
+macOS / Linux:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/ix-codex-plugin/main/codex-install.sh | sh
+curl -fsSL https://ix-infra.com/codex-install.sh | sh
+```
+Windows (PowerShell):
+```powershell
+irm https://ix-infra.com/codex-install.ps1 | iex
 ```
 ### OpenClaw Plugin
 ```bash
@@ -99,8 +104,22 @@ openclaw plugins install ix-infrastructure/ix-openclaw-plugin
 gemini extensions install https://github.com/ix-infrastructure/ix-gemini-plugin
 ```
 ### OpenCode Plugin
+macOS / Linux:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/ix-opencode-plugin/main/install.sh | bash
+```
+Windows (PowerShell):
+```powershell
+irm https://raw.githubusercontent.com/ix-infrastructure/ix-opencode-plugin/main/install.ps1 | iex
+```
+### Cursor Plugin
+macOS / Linux:
+```bash
+curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/ix-cursor-plugin/main/install.sh | bash
+```
+Windows (PowerShell):
+```powershell
+irm https://raw.githubusercontent.com/ix-infrastructure/ix-cursor-plugin/main/install.ps1 | iex
 ```
 
 ## Requirements
