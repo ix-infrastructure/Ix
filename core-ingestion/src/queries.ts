@@ -1783,5 +1783,8 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.XML]: XML_QUERIES,
   [SupportedLanguages.HCL]: HCL_QUERIES,
   [SupportedLanguages.CSS]: CSS_QUERIES,
+  // LaTeX/TeX has no tree-sitter grammar in this stack; it is parsed by the
+  // hand-rolled scanner in parseLatexFile (index.ts), like Markdown/YAML/etc.
+  [SupportedLanguages.LaTeX]: '',
 };
  

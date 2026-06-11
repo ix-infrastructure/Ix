@@ -356,7 +356,7 @@ function builtinsForLanguage(lang: SupportedLanguages): Set<string> {
 export function isGrammarSupported(filePath: string): boolean {
   const language = languageFromPath(filePath);
   if (!language) return false;
-  if (language === SupportedLanguages.YAML || language === SupportedLanguages.Dockerfile || language === SupportedLanguages.SQL || language === SupportedLanguages.JSON || language === SupportedLanguages.TOML || language === SupportedLanguages.Markdown) return true;
+  if (language === SupportedLanguages.YAML || language === SupportedLanguages.Dockerfile || language === SupportedLanguages.SQL || language === SupportedLanguages.JSON || language === SupportedLanguages.TOML || language === SupportedLanguages.Markdown || language === SupportedLanguages.LaTeX) return true;
   if (filePath.endsWith('.tsx')) return true; // TSX uses TypeScript.tsx, always available
   return GRAMMAR_MAP[language] !== undefined;
 }
@@ -995,6 +995,352 @@ function parseMarkdownFile(filePath: string, source: string): FileParseResult {
   return { filePath, language, entities, chunks, relationships, fileRole };
 }
 
+// ---------------------------------------------------------------------------
+// LaTeX / TeX (.tex, .sty, .cls, .ltx, .latex)
+//
+// Hand-rolled scanner rather than tree-sitter: there is no maintained Node
+// tree-sitter-latex binding for this ABI, and TeX is a macro-expansion language
+// whose custom-macro arities a static grammar cannot know — real grammars emit
+// ERROR nodes on ordinary documents. A targeted single-pass scanner extracts the
+// constructs Ix models (sectioning hierarchy, macro/environment/theorem defs,
+// labels, package/file dependencies, ref/cite cross-references) and degrades
+// gracefully on malformed input. O(n), deterministic.
+// ---------------------------------------------------------------------------
+
+const LATEX_SECTION_LEVELS: Record<string, number> = {
+  part: 0, chapter: 1, section: 2, subsection: 3,
+  subsubsection: 4, paragraph: 5, subparagraph: 6,
+};
+const LATEX_MACRO_DEFS = new Set([
+  'newcommand', 'renewcommand', 'providecommand', 'DeclareRobustCommand',
+  'DeclareMathOperator', 'newcommandx', 'renewcommandx', 'providecommandx',
+]);
+const LATEX_CS_DEFS = new Set(['def', 'gdef', 'edef', 'xdef', 'let']);
+// When a definition's target is one of these primitives the real name is built
+// at expansion time (e.g. \def\csname foo\endcsname{...} defines "foo", not
+// "csname"), so it is not statically knowable — skip rather than emit noise.
+const LATEX_DYNAMIC_CS = new Set(['csname', 'endcsname']);
+const LATEX_ENV_DEFS = new Set(['newenvironment', 'renewenvironment', 'newenvironmentx']);
+const LATEX_THEOREM_DEFS = new Set(['newtheorem']);
+const LATEX_PACKAGE_IMPORTS = new Set([
+  'usepackage', 'RequirePackage', 'RequirePackageWithOptions',
+  'documentclass', 'LoadClass', 'LoadClassWithOptions', 'documentstyle',
+]);
+const LATEX_FILE_INCLUDES = new Set([
+  'input', 'include', 'subfile', 'subfileinclude', 'includeonly',
+]);
+const LATEX_BIB_INCLUDES = new Set(['bibliography', 'addbibresource']);
+const LATEX_REF_CMDS = new Set([
+  'ref', 'eqref', 'pageref', 'cref', 'Cref', 'autoref', 'nameref',
+  'vref', 'vpageref', 'labelcref', 'cpageref', 'Autoref', 'fref', 'thref',
+]);
+const LATEX_CITE_CMDS = new Set([
+  'cite', 'citep', 'citet', 'citealt', 'citealp', 'citeauthor', 'citeyear',
+  'citeyearpar', 'Citep', 'Citet', 'Cite', 'textcite', 'parencite', 'footcite',
+  'autocite', 'smartcite', 'citenum', 'fullcite', 'nocite', 'citealp',
+]);
+// Inside these environments backslashes are literal text, not commands; skip
+// scanning their body so listings/verbatim content never produces spurious nodes.
+const LATEX_VERBATIM_ENVS = new Set([
+  'verbatim', 'verbatim*', 'Verbatim', 'BVerbatim', 'LVerbatim',
+  'lstlisting', 'minted', 'comment', 'alltt', 'filecontents', 'filecontents*',
+]);
+
+function parseLatexFile(filePath: string, source: string): FileParseResult {
+  const language = SupportedLanguages.LaTeX;
+  const fileName = nodePath.basename(filePath);
+  const sourceLineCount = countSourceLines(source);
+  const fileRole = classifyFileRole(filePath);
+  const entities: ParsedEntity[] = [
+    { name: fileName, kind: 'file', lineStart: 1, lineEnd: sourceLineCount, language },
+  ];
+  const chunks: ParsedChunk[] = [];
+  const relationships: ParsedRelationship[] = [];
+  const lineStarts = computeLineStarts(source);
+  const n = source.length;
+
+  const lineAt = (idx: number): number => {
+    let lo = 0, hi = lineStarts.length - 1, ans = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (lineStarts[mid] <= idx) { ans = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    return ans + 1;
+  };
+
+  // Read a balanced { ... } group starting at `open` (source[open] === '{').
+  // Honors \{ and \} escapes. On imbalance, returns the rest of the source.
+  const readBraceGroup = (open: number): { text: string; end: number } => {
+    let depth = 0;
+    for (let q = open; q < n; q++) {
+      const cc = source[q];
+      if (cc === '\\') { q++; continue; }
+      if (cc === '{') depth++;
+      else if (cc === '}') { depth--; if (depth === 0) return { text: source.slice(open + 1, q), end: q + 1 }; }
+    }
+    return { text: source.slice(open + 1, n), end: n };
+  };
+
+  // Read an optional [ ... ] group; stops at the first unescaped ] not nested in {}.
+  const readOptGroup = (open: number): { text: string; end: number } => {
+    let braceDepth = 0;
+    for (let q = open + 1; q < n; q++) {
+      const cc = source[q];
+      if (cc === '\\') { q++; continue; }
+      if (cc === '{') braceDepth++;
+      else if (cc === '}') { if (braceDepth > 0) braceDepth--; }
+      else if (cc === ']' && braceDepth === 0) return { text: source.slice(open + 1, q), end: q + 1 };
+    }
+    return { text: source.slice(open + 1, n), end: n };
+  };
+
+  // From `start`, greedily collect immediately-following { } (required) and [ ]
+  // (optional) argument groups. Only spaces/tabs may separate them — never a
+  // newline — so an unrelated brace group on a later line is not misattributed.
+  const collectArgs = (start: number): { args: string[]; opts: string[]; end: number } => {
+    const args: string[] = [];
+    const opts: string[] = [];
+    let p = start;
+    for (;;) {
+      let q = p;
+      while (q < n && (source[q] === ' ' || source[q] === '\t')) q++;
+      if (source[q] === '{') { const g = readBraceGroup(q); args.push(g.text); p = g.end; }
+      else if (source[q] === '[') { const g = readOptGroup(q); opts.push(g.text); p = g.end; }
+      else break;
+    }
+    return { args, opts, end: p };
+  };
+
+  // Strip nested commands/braces from a sectioning/environment title for a clean name.
+  const cleanTitle = (raw: string): string =>
+    raw.replace(/\\[a-zA-Z@]+\*?/g, '').replace(/[{}$]/g, '').replace(/\s+/g, ' ').trim();
+  const csName = (raw: string): string => {
+    const m = /\\([a-zA-Z@]+)/.exec(raw);
+    return (m ? m[1] : raw.trim().replace(/^\\/, '')).trim();
+  };
+  const splitList = (raw: string): string[] =>
+    raw.split(',').map(s => s.trim()).filter(Boolean);
+  const ensureExt = (raw: string, ext: string): string =>
+    /\.[a-zA-Z0-9]+$/.test(raw) ? raw : `${raw}${ext}`;
+
+  // Sectioning hierarchy (levels 0..6); deepest active section is the live container.
+  const sectionStack: (string | null)[] = [null, null, null, null, null, null, null];
+  const sectionMarks: { name: string; level: number; line: number }[] = [];
+  const envStack: { name: string }[] = [];
+  const seenEnv = new Set<string>();
+  const currentSection = (): string | null => {
+    for (let l = 6; l >= 0; l--) if (sectionStack[l]) return sectionStack[l];
+    return null;
+  };
+  // The containment parent for definitions, labels, environments and references
+  // is the nearest enclosing SECTION (or the file). It deliberately does NOT use
+  // the open-environment name: environment type names ("figure", "table") are not
+  // unique within a file, and patch-builder resolves a CONTAINS edge's *source*
+  // by bare name with no container hint — so an environment used as a parent would
+  // be ambiguous and its children's edges would dangle. Sections (unique titles)
+  // are safe parents. Environments are still recorded as section members.
+  const container = (): string => currentSection() ?? fileName;
+
+  const addImport = (rawSpec: string, dst: string, line: number): void => {
+    if (!dst) return;
+    entities.push({ name: dst, kind: 'module', lineStart: line, lineEnd: line, language });
+    relationships.push({ srcName: fileName, dstName: dst, predicate: 'IMPORTS', importRaw: rawSpec });
+  };
+  const addDef = (name: string, kind: string, line: number): void => {
+    if (!name) return;
+    const cont = container();
+    entities.push({ name, kind, lineStart: line, lineEnd: line, language, container: cont === fileName ? undefined : cont });
+    relationships.push({ srcName: cont, dstName: name, predicate: 'CONTAINS' });
+  };
+
+  let i = 0;
+  while (i < n) {
+    const ch = source[i];
+    if (ch === '%') { while (i < n && source[i] !== '\n') i++; continue; }
+    if (ch !== '\\') { i++; continue; }
+
+    // Read the control-sequence name. A single non-letter after '\' (\\, \%, \{,
+    // \,, \$) is an escape/control symbol — consume and skip.
+    let j = i + 1;
+    if (j >= n) { i = j; continue; }
+    const c0 = source[j];
+    if (!/[a-zA-Z@]/.test(c0)) { i = j + 1; continue; }
+    let k = j;
+    while (k < n && /[a-zA-Z@]/.test(source[k])) k++;
+    const name = source.slice(j, k);
+    let after = k;
+    if (source[after] === '*') after++; // starred form (\section*, \newtheorem*)
+    const line = lineAt(i);
+
+    if (LATEX_SECTION_LEVELS[name] !== undefined) {
+      const { args, opts, end } = collectArgs(after);
+      const title = cleanTitle(args[0] ?? opts[0] ?? '');
+      if (title) {
+        const level = LATEX_SECTION_LEVELS[name];
+        let cont: string = fileName;
+        for (let l = level - 1; l >= 0; l--) if (sectionStack[l]) { cont = sectionStack[l]!; break; }
+        for (let l = level; l <= 6; l++) sectionStack[l] = null;
+        sectionStack[level] = title;
+        entities.push({ name: title, kind: 'section', lineStart: line, lineEnd: line, language, container: cont === fileName ? undefined : cont });
+        relationships.push({ srcName: cont, dstName: title, predicate: 'CONTAINS' });
+        sectionMarks.push({ name: title, level, line });
+      }
+      i = end; continue;
+    }
+
+    if (name === 'begin') {
+      const { args, end } = collectArgs(after);
+      const envName = (args[0] ?? '').trim();
+      if (envName) {
+        const cont = container();
+        const key = `${cont} ${envName}`;
+        if (!seenEnv.has(key)) {
+          seenEnv.add(key);
+          entities.push({ name: envName, kind: 'environment', lineStart: line, lineEnd: line, language, container: cont === fileName ? undefined : cont });
+          relationships.push({ srcName: cont, dstName: envName, predicate: 'CONTAINS' });
+        }
+        envStack.push({ name: envName });
+        if (LATEX_VERBATIM_ENVS.has(envName)) {
+          // Jump to the matching \end so it pops normally. Tolerate whitespace
+          // (\end {verbatim}, \end{ verbatim }) — all legal TeX.
+          const esc = envName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const m = new RegExp(`\\\\end\\s*\\{\\s*${esc}\\s*\\}`).exec(source.slice(end));
+          i = m ? end + m.index : n;
+          continue;
+        }
+      }
+      i = end; continue;
+    }
+
+    if (name === 'end') {
+      const { args, end } = collectArgs(after);
+      const envName = (args[0] ?? '').trim();
+      // Pop to the nearest matching open environment; ignore stray \end gracefully.
+      for (let s = envStack.length - 1; s >= 0; s--) {
+        if (envStack[s].name === envName) { envStack.length = s; break; }
+      }
+      i = end; continue;
+    }
+
+    if (LATEX_MACRO_DEFS.has(name)) {
+      let p = after;
+      while (p < n && (source[p] === ' ' || source[p] === '\t')) p++;
+      let macro: string | null = null;
+      if (source[p] === '\\') { const m = /^\\([a-zA-Z@]+)/.exec(source.slice(p, p + 80)); if (m) { macro = m[1]; p += m[0].length; } }
+      else if (source[p] === '{') { const g = readBraceGroup(p); macro = csName(g.text); p = g.end; }
+      if (macro && !LATEX_DYNAMIC_CS.has(macro)) addDef(macro, 'function', line);
+      i = p; continue;
+    }
+
+    if (LATEX_CS_DEFS.has(name)) {
+      let p = after;
+      while (p < n && (source[p] === ' ' || source[p] === '\t')) p++;
+      if (source[p] === '\\') { const m = /^\\([a-zA-Z@]+)/.exec(source.slice(p, p + 80)); if (m) { if (!LATEX_DYNAMIC_CS.has(m[1])) addDef(m[1], 'function', line); p += m[0].length; } }
+      i = p; continue;
+    }
+
+    if (LATEX_ENV_DEFS.has(name)) {
+      const { args, end } = collectArgs(after);
+      addDef((args[0] ?? '').trim(), 'class', line);
+      i = end; continue;
+    }
+    if (LATEX_THEOREM_DEFS.has(name)) {
+      const { args, end } = collectArgs(after);
+      addDef((args[0] ?? '').trim(), 'class', line);
+      i = end; continue;
+    }
+
+    if (LATEX_PACKAGE_IMPORTS.has(name)) {
+      const { args, end } = collectArgs(after);
+      for (const pkg of splitList(args[0] ?? '')) addImport(pkg, pkg, line);
+      i = end; continue;
+    }
+
+    if (LATEX_FILE_INCLUDES.has(name)) {
+      const { args, end } = collectArgs(after);
+      for (const raw of splitList(args[0] ?? '')) addImport(raw, ensureExt(raw, '.tex'), line);
+      i = end; continue;
+    }
+    // \import{dir}{file} / \subimport{dir}{file}: path is dir + file
+    if (name === 'import' || name === 'subimport' || name === 'inputfrom' || name === 'subinputfrom') {
+      const { args, end } = collectArgs(after);
+      if (args.length >= 2 && args[1].trim()) {
+        const dir = args[0].trim().replace(/\/?$/, '/');
+        const raw = `${dir}${args[1].trim()}`;
+        addImport(raw, ensureExt(raw, '.tex'), line);
+      }
+      i = end; continue;
+    }
+    if (LATEX_BIB_INCLUDES.has(name)) {
+      const { args, end } = collectArgs(after);
+      for (const raw of splitList(args[0] ?? '')) addImport(raw, ensureExt(raw, '.bib'), line);
+      i = end; continue;
+    }
+
+    if (name === 'label') {
+      const { args, end } = collectArgs(after);
+      addDef((args[0] ?? '').trim(), 'label', line);
+      i = end; continue;
+    }
+    if (name === 'bibitem') {
+      const { args, end } = collectArgs(after);
+      addDef((args[0] ?? '').trim(), 'label', line);
+      i = end; continue;
+    }
+
+    if (LATEX_REF_CMDS.has(name) || LATEX_CITE_CMDS.has(name)) {
+      const { args, end } = collectArgs(after);
+      const src = container();
+      for (const target of splitList(args[0] ?? '')) {
+        relationships.push({ srcName: src, dstName: target, predicate: 'REFERENCES' });
+      }
+      i = end; continue;
+    }
+
+    // Unknown command: advance past the name only, so any cross-references nested
+    // in its argument groups (e.g. \caption{... \ref{x}}, \footnote{\cite{y}}) are
+    // still scanned as ordinary content on the next iterations.
+    i = after;
+  }
+
+  // Section chunks: each spans to the line before the next section at the same or
+  // shallower level, so a parent section's chunk includes its sub-sections.
+  for (let h = 0; h < sectionMarks.length; h++) {
+    const { name, level, line } = sectionMarks[h];
+    let endLine = sourceLineCount;
+    for (let m = h + 1; m < sectionMarks.length; m++) {
+      if (sectionMarks[m].level <= level) { endLine = sectionMarks[m].line - 1; break; }
+    }
+    const startByte = lineStarts[line - 1] ?? 0;
+    const endByte = endLine < lineStarts.length ? (lineStarts[endLine] ?? source.length) : source.length;
+    const content = source.slice(startByte, endByte);
+    chunks.push({
+      name,
+      chunkKind: 'section',
+      lineStart: line,
+      lineEnd: endLine,
+      startByte,
+      endByte,
+      contentHash: crypto.createHash('sha256').update(content).digest('hex'),
+      language,
+    });
+  }
+  if (sectionMarks.length === 0) {
+    chunks.push({
+      name: null,
+      chunkKind: 'file_body',
+      lineStart: 1,
+      lineEnd: Math.max(sourceLineCount, 1),
+      startByte: 0,
+      endByte: source.length,
+      contentHash: crypto.createHash('sha256').update(source).digest('hex'),
+      language,
+    });
+  }
+
+  return { filePath, language, entities, chunks, relationships, fileRole };
+}
+
 function parseDockerfileFile(filePath: string, source: string): FileParseResult {
   const language = SupportedLanguages.Dockerfile;
   const fileName = nodePath.basename(filePath);
@@ -1460,6 +1806,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
   if (language === SupportedLanguages.JSON) return parseJsonFile(filePath, source);
   if (language === SupportedLanguages.TOML) return parseTomlFile(filePath, source);
   if (language === SupportedLanguages.Markdown) return parseMarkdownFile(filePath, source);
+  if (language === SupportedLanguages.LaTeX) return parseLatexFile(filePath, source);
 
   // TypeScript TSX uses a separate grammar
   const isTsx = filePath.endsWith('.tsx');

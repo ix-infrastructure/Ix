@@ -35,4 +35,23 @@ describe('dedupeDiscoveredFilePaths', () => {
     expect(isSupportedSourceFile('build/common.mk')).toBe(true);
     expect(isSupportedSourceFile('README.txt')).toBe(false);
   });
+
+  it('discovers TeX/LaTeX source files', () => {
+    expect(isSupportedSourceFile('paper/main.tex')).toBe(true);
+    expect(isSupportedSourceFile('pkg/mystyle.sty')).toBe(true);
+    expect(isSupportedSourceFile('cls/thesis.cls')).toBe(true);
+    expect(isSupportedSourceFile('legacy/doc.ltx')).toBe(true);
+    expect(isSupportedSourceFile('notes.latex')).toBe(true);
+  });
+
+  it('discovers the grammar-based parsers that ship in core-ingestion', () => {
+    // These extensions are parsed by core-ingestion but were missing from the
+    // discovery allowlist, so their files were never walked. Guard against regress.
+    for (const f of [
+      'init.lua', 'deploy.sh', 'run.bash', 'Main.hs', 'build.zig',
+      'index.html', 'pom.xml', 'app.csproj', 'main.tf', 'theme.css', 'styles.scss',
+    ]) {
+      expect(isSupportedSourceFile(f)).toBe(true);
+    }
+  });
 });

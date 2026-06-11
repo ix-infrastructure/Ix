@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { IxClient } from "../client/api.js";
+import { SUPPORTED_EXTENSIONS } from "./supported-extensions.js";
 
 export interface StaleInfo {
   lastIngestAt: string | null;
@@ -8,15 +9,6 @@ export interface StaleInfo {
   staleFiles: number;
   sampleChangedFiles: string[];
 }
-
-const SUPPORTED_EXTENSIONS = new Set([
-  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
-  ".scala", ".sc", ".java",
-  ".py", ".rb", ".go", ".rs",
-  ".md", ".mdx",
-  ".json", ".yaml", ".yml", ".toml",
-  ".sql", ".graphql", ".gql",
-]);
 
 const SUPPORTED_NAMES = new Set([
   ".gitignore", ".gitattributes", ".editorconfig", ".env",

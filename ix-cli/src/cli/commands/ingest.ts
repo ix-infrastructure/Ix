@@ -17,6 +17,7 @@ import { loadIngestionModules } from './ingestion-loader.js';
 import { ensureWorkspaceIdState } from '../bootstrap.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
+import { SUPPORTED_EXTENSIONS } from '../supported-extensions.js';
 import {
   deterministicId,
   transformIssue,
@@ -28,25 +29,6 @@ import {
 // ---------------------------------------------------------------------------
 // File discovery
 // ---------------------------------------------------------------------------
-
-// Inline extension set — mirrors core-ingestion/dist/languages.js EXT_MAP.
-// Kept here so file discovery does NOT require loading tree-sitter grammars.
-const SUPPORTED_EXTENSIONS = new Set([
-  '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
-  '.py', '.java', '.c', '.h', '.cpp', '.cc', '.cxx', '.hpp',
-  '.cs', '.go', '.rb', '.rs', '.php', '.kt', '.kts', '.swift',
-  '.scala', '.sc',
-  '.yaml', '.yml',
-  '.dockerfile',
-  '.sql',
-  '.json',
-  '.toml',
-  '.md', '.markdown',
-  '.r',
-  '.sas',
-  '.ex', '.exs',
-  '.mk', '.makefile',
-]);
 
 export function isSupportedSourceFile(filePath: string): boolean {
   const fileName = nodePath.basename(filePath).toLowerCase();

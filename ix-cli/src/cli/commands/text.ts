@@ -97,6 +97,8 @@ function inferLanguage(filePath: string): string | undefined {
   if (filePath.endsWith(".md")) return "markdown";
   if (filePath.endsWith(".json")) return "json";
   if (filePath.endsWith(".yaml") || filePath.endsWith(".yml")) return "yaml";
+  if (filePath.endsWith(".tex") || filePath.endsWith(".sty") || filePath.endsWith(".cls")
+    || filePath.endsWith(".ltx") || filePath.endsWith(".latex")) return "latex";
   return undefined;
 }
 
@@ -111,6 +113,7 @@ function languageGlobs(lang: string): string[] {
     case "rust": return ["*.rs"];
     case "ruby": return ["*.rb"];
     case "markdown": return ["*.md", "*.mdx"];
+    case "latex": case "tex": return ["*.tex", "*.sty", "*.cls", "*.ltx", "*.latex"];
     case "config": return ["*.json", "*.yaml", "*.yml", "*.toml"];
     default: return [`*.${lang}`];
   }
