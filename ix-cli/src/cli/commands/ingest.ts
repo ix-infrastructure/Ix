@@ -31,6 +31,9 @@ import {
 
 // Inline extension set — mirrors core-ingestion/dist/languages.js EXT_MAP.
 // Kept here so file discovery does NOT require loading tree-sitter grammars.
+// Kept in sync with core-ingestion's EXT_MAP (languages.ts). The directory walk
+// and `git ls-files` discovery gate on this set, so any extension a parser
+// handles MUST appear here or those files are never discovered for `ix map`.
 const SUPPORTED_EXTENSIONS = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
   '.py', '.java', '.c', '.h', '.cpp', '.cc', '.cxx', '.hpp',
@@ -46,6 +49,16 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.sas',
   '.ex', '.exs',
   '.mk', '.makefile',
+  '.lua',
+  '.sh', '.bash', '.zsh', '.ksh',
+  '.hs', '.lhs',
+  '.zig',
+  '.html', '.htm', '.xhtml',
+  '.xml', '.xsd', '.xsl', '.xslt', '.wsdl',
+  '.csproj', '.vbproj', '.fsproj', '.props', '.targets', '.plist',
+  '.tf', '.tfvars', '.hcl',
+  '.css', '.scss', '.sass', '.less',
+  '.tex', '.sty', '.cls', '.ltx', '.latex',
 ]);
 
 export function isSupportedSourceFile(filePath: string): boolean {
