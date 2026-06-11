@@ -131,7 +131,7 @@ Also \\cref{sec:results,eq:main}.
     expect(refs).toEqual(['goossens1993', 'knuth1984', 'lamport1994', 'wilson2020']);
   });
 
-  it('chains environments under their section (file -> section -> environment)', () => {
+  it('records environments and their content under the enclosing section', () => {
     const r = parseFile('/r/m.tex', `
 \\section{Figures}
 \\begin{figure}
@@ -146,8 +146,43 @@ Also \\cref{sec:results,eq:main}.
     const contains = rels(r, 'CONTAINS').map(e => `${e.srcName}>${e.dstName}`);
     expect(contains).toContain('Figures>figure');
     expect(contains).toContain('Figures>table');
-    // a label inside the figure is contained by the figure environment
-    expect(contains).toContain('figure>fig:a');
+    // Content attaches to the section, not the (non-unique) environment name —
+    // an environment name is never used as a CONTAINS source (it would dangle:
+    // patch-builder resolves edge sources by bare name with no container hint).
+    expect(contains).toContain('Figures>fig:a');
+    expect(rels(r, 'CONTAINS').some(e => e.srcName === 'figure' || e.srcName === 'table')).toBe(false);
+  });
+
+  it('keeps labels resolvable when the same environment type repeats across sections', () => {
+    const r = parseFile('/r/m.tex', `
+\\section{Results}
+\\begin{figure}\\label{fig:a}\\end{figure}
+\\section{Discussion}
+\\begin{figure}\\label{fig:b}\\end{figure}
+`);
+    const contains = rels(r, 'CONTAINS').map(e => `${e.srcName}>${e.dstName}`);
+    // Each label is contained by its own (uniquely named) section, so no edge
+    // is sourced from the ambiguous "figure" node.
+    expect(contains).toContain('Results>fig:a');
+    expect(contains).toContain('Discussion>fig:b');
+    expect(rels(r, 'CONTAINS').some(e => e.srcName === 'figure')).toBe(false);
+  });
+
+  it('does not prefix file-level definitions with the file name (container undefined)', () => {
+    const r = parseFile('/r/m.tex', '\\newcommand{\\toplevel}{x}\n\\label{top}\n');
+    const defs = r!.entities.filter(e => e.kind === 'function' || e.kind === 'label');
+    expect(defs.every(e => e.container === undefined)).toBe(true);
+  });
+
+  it('skips a verbatim body closed with whitespace (\\end {verbatim})', () => {
+    const r = parseFile('/r/m.tex', `
+\\begin{verbatim}
+\\newcommand{\\fake}{nope}
+\\end {verbatim}
+\\section{Real}
+`);
+    expect(r!.entities.filter(e => e.kind === 'function')).toHaveLength(0);
+    expect(r!.entities.filter(e => e.kind === 'section').map(e => e.name)).toEqual(['Real']);
   });
 
   it('does not scan command bodies inside verbatim/lstlisting environments', () => {

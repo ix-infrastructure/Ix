@@ -9,13 +9,7 @@ import { getEndpoint, resolveWorkspaceRoot, clearIngestMtimeCache } from "../con
 import { bootstrap, ensureWorkspaceId, ensureWorkspaceIdState } from "../bootstrap.js";
 import { loadWatchIngestionModules } from "./ingestion-loader.js";
 import { readFileContent } from "./watch-utils.js";
-const SUPPORTED_EXTENSIONS = new Set([
-  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
-  ".scala", ".sc", ".java",
-  ".py", ".rb", ".go", ".rs", ".kt", ".kts", ".cs", ".php", ".swift",
-  ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp",
-  ".yaml", ".yml",
-]);
+import { SUPPORTED_EXTENSIONS } from "../supported-extensions.js";
 
 const SUPPORTED_NAMES = new Set([
   ".gitignore", ".gitattributes", ".editorconfig", ".env",

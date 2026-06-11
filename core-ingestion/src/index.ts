@@ -1132,7 +1132,14 @@ function parseLatexFile(filePath: string, source: string): FileParseResult {
     for (let l = 6; l >= 0; l--) if (sectionStack[l]) return sectionStack[l];
     return null;
   };
-  const container = (): string => envStack.length ? envStack[envStack.length - 1].name : (currentSection() ?? fileName);
+  // The containment parent for definitions, labels, environments and references
+  // is the nearest enclosing SECTION (or the file). It deliberately does NOT use
+  // the open-environment name: environment type names ("figure", "table") are not
+  // unique within a file, and patch-builder resolves a CONTAINS edge's *source*
+  // by bare name with no container hint — so an environment used as a parent would
+  // be ambiguous and its children's edges would dangle. Sections (unique titles)
+  // are safe parents. Environments are still recorded as section members.
+  const container = (): string => currentSection() ?? fileName;
 
   const addImport = (rawSpec: string, dst: string, line: number): void => {
     if (!dst) return;
@@ -1142,7 +1149,7 @@ function parseLatexFile(filePath: string, source: string): FileParseResult {
   const addDef = (name: string, kind: string, line: number): void => {
     if (!name) return;
     const cont = container();
-    entities.push({ name, kind, lineStart: line, lineEnd: line, language, container: cont });
+    entities.push({ name, kind, lineStart: line, lineEnd: line, language, container: cont === fileName ? undefined : cont });
     relationships.push({ srcName: cont, dstName: name, predicate: 'CONTAINS' });
   };
 
@@ -1194,9 +1201,11 @@ function parseLatexFile(filePath: string, source: string): FileParseResult {
         }
         envStack.push({ name: envName });
         if (LATEX_VERBATIM_ENVS.has(envName)) {
-          const endTok = `\\end{${envName}}`;
-          const idx = source.indexOf(endTok, end);
-          i = idx === -1 ? n : idx; // jump to the \end so it pops normally
+          // Jump to the matching \end so it pops normally. Tolerate whitespace
+          // (\end {verbatim}, \end{ verbatim }) — all legal TeX.
+          const esc = envName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const m = new RegExp(`\\\\end\\s*\\{\\s*${esc}\\s*\\}`).exec(source.slice(end));
+          i = m ? end + m.index : n;
           continue;
         }
       }

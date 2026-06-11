@@ -17,6 +17,7 @@ import { loadIngestionModules } from './ingestion-loader.js';
 import { ensureWorkspaceIdState } from '../bootstrap.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
+import { SUPPORTED_EXTENSIONS } from '../supported-extensions.js';
 import {
   deterministicId,
   transformIssue,
@@ -28,38 +29,6 @@ import {
 // ---------------------------------------------------------------------------
 // File discovery
 // ---------------------------------------------------------------------------
-
-// Inline extension set — mirrors core-ingestion/dist/languages.js EXT_MAP.
-// Kept here so file discovery does NOT require loading tree-sitter grammars.
-// Kept in sync with core-ingestion's EXT_MAP (languages.ts). The directory walk
-// and `git ls-files` discovery gate on this set, so any extension a parser
-// handles MUST appear here or those files are never discovered for `ix map`.
-const SUPPORTED_EXTENSIONS = new Set([
-  '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
-  '.py', '.java', '.c', '.h', '.cpp', '.cc', '.cxx', '.hpp',
-  '.cs', '.go', '.rb', '.rs', '.php', '.kt', '.kts', '.swift',
-  '.scala', '.sc',
-  '.yaml', '.yml',
-  '.dockerfile',
-  '.sql',
-  '.json',
-  '.toml',
-  '.md', '.markdown',
-  '.r',
-  '.sas',
-  '.ex', '.exs',
-  '.mk', '.makefile',
-  '.lua',
-  '.sh', '.bash', '.zsh', '.ksh',
-  '.hs', '.lhs',
-  '.zig',
-  '.html', '.htm', '.xhtml',
-  '.xml', '.xsd', '.xsl', '.xslt', '.wsdl',
-  '.csproj', '.vbproj', '.fsproj', '.props', '.targets', '.plist',
-  '.tf', '.tfvars', '.hcl',
-  '.css', '.scss', '.sass', '.less',
-  '.tex', '.sty', '.cls', '.ltx', '.latex',
-]);
 
 export function isSupportedSourceFile(filePath: string): boolean {
   const fileName = nodePath.basename(filePath).toLowerCase();
