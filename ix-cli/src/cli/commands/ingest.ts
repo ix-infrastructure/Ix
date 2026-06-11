@@ -287,7 +287,19 @@ const COMMIT_CONFLICT_RETRY_PATTERNS = [
   'econnrefused',
 ];
 
+// An abort from the shared wall-clock deadline (or a per-request timeout) must
+// NOT be retried — the whole point of the deadline is to stop work. Retrying
+// here would defeat it and add 6 more backed-off requests to an already-late
+// run. AbortSignal.timeout raises a TimeoutError; an aborted deadline raises an
+// AbortError; both also stringify with "aborted".
+export function isAbortError(err: unknown): boolean {
+  const name = (err as { name?: string } | null)?.name;
+  if (name === "AbortError" || name === "TimeoutError") return true;
+  return String(err).toLowerCase().includes("aborted");
+}
+
 export function isRetryableCommitConflict(err: unknown): boolean {
+  if (isAbortError(err)) return false;
   const message = String(err).toLowerCase();
   return COMMIT_CONFLICT_RETRY_PATTERNS.some(pattern => message.includes(pattern));
 }
@@ -399,7 +411,7 @@ export function registerIngestCommand(program: Command): void {
 
 export async function ingestFiles(
   path: string,
-  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean }
+  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean; deadlineSignal?: AbortSignal }
 ): Promise<void> {
   const debug = opts.debug || process.env.IX_DEBUG === '1';
   const mapMode = opts.mapMode === true;
@@ -576,7 +588,7 @@ export async function ingestFiles(
     process.stderr.write(`[multi-repo] system "${detectedSystem!.name}" (${systemId}) members=${detectedSystem!.members.join(', ')} packages=${Object.keys(packageRegistry).length} declaredDeps=${depCount}\n`);
   }
 
-  const client = new IxClient(getEndpoint());
+  const client = new IxClient(getEndpoint(), opts.deadlineSignal);
 
   // Schema-version check forces a clean re-ingest when the backend's graph
   // format has changed in a way that invalidates existing node IDs (e.g. the
