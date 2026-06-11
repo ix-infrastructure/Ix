@@ -10,6 +10,32 @@ import { formatFetchError } from "../errors.js";
 import { ingestFiles } from "./ingest.js";
 import { detectSystem } from "../system.js";
 import { getRemoteRunner, isCloudReady } from "../remote.js";
+import { acquireMapLock } from "../single-flight.js";
+
+// Hard wall-clock budget for a single `ix map`. Past this, the shared deadline
+// signal aborts every in-flight request and the command exits, so a single
+// invocation can never grind for hours against an unhealthy backend. Tunable
+// via IX_MAP_DEADLINE_MS; 0 disables the budget.
+const DEFAULT_MAP_DEADLINE_MS = 15 * 60 * 1000;
+
+function mapDeadlineSignal(): AbortSignal | undefined {
+  const raw = process.env.IX_MAP_DEADLINE_MS;
+  const budget = raw !== undefined ? Number.parseInt(raw, 10) : DEFAULT_MAP_DEADLINE_MS;
+  if (!Number.isFinite(budget) || budget <= 0) return undefined; // disabled
+  return AbortSignal.timeout(budget);
+}
+
+// Whether an automatically-triggered map should be skipped. Background refresh
+// (the editor/agent hooks that re-map on change) is a local-only convenience:
+// against a remote backend it would push a write on every change from every
+// client, so it is skipped there and remote ingestion stays deliberate. Manual
+// `ix map` never sets IX_AUTO_MAP, so it is never skipped. IX_AUTO_MAP_CLOUD=1
+// opts the automatic path back in for users who do want remote auto-refresh.
+export function shouldSkipAutoMap(opts: { auto: boolean; cloudReady: boolean }): boolean {
+  if (!opts.auto || !opts.cloudReady) return false;
+  if (process.env.IX_AUTO_MAP_CLOUD === "1") return false;
+  return true;
+}
 
 export interface MapRegion {
   id: string;
@@ -133,11 +159,47 @@ Examples:
     )
     .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; verbose?: boolean; silent?: boolean }) => {
       const cwd = pathArg ? resolve(pathArg) : process.cwd();
+
+      const silent = opts.silent === true || opts.format === "silent";
+
+      // Single-flight: refuse to stack. Background refresh can fire `ix map`
+      // repeatedly (e.g. once per change); if a map is slow or the backend is
+      // unhealthy, those invocations would otherwise pile up and run concurrently
+      // against the backend. The first map for a workspace holds the lock; any
+      // concurrent one coalesces and exits 0 here. The lock auto-releases on
+      // process exit (see single-flight.ts) and a stale lock from a crashed map
+      // is stolen, so this never wedges.
+      const mapLock = acquireMapLock(cwd, `ix map ${cwd}`);
+      if (!mapLock) {
+        if (!silent && opts.format !== "json" && opts.format !== "llm") {
+          process.stderr.write(chalk.dim("  Another ix map is already running for this workspace — skipping.\n"));
+        }
+        return; // coalesce; the in-flight map will refresh the graph
+      }
+
+      // Background refresh is a local-only convenience. When invoked
+      // automatically (IX_AUTO_MAP=1, set by the editor/agent hooks) against a
+      // remote backend, skip: a remote graph should be fed deliberately, not by
+      // a write on every change from every client. Manual `ix map` is never
+      // skipped; opt the automatic path back in with IX_AUTO_MAP_CLOUD=1.
+      const autoMap = process.env.IX_AUTO_MAP === "1";
+      const cloudReady = await isCloudReady();
+      if (shouldSkipAutoMap({ auto: autoMap, cloudReady })) {
+        if (!silent && opts.format !== "json" && opts.format !== "llm") {
+          process.stderr.write(chalk.dim("  Skipping automatic map: active backend is remote (run `ix map` manually to refresh it).\n"));
+        }
+        return; // lock releases on process exit
+      }
+
+      // Shared wall-clock deadline applied to every backend request this command
+      // makes (ingest + map), so the whole operation is bounded even if the
+      // backend stalls on individual long per-request timeouts.
+      const deadlineSignal = mapDeadlineSignal();
+
       // Auto-detect a multi-repo system (>= 2 child repo roots). When present we
       // scope the map to its system_id; otherwise it's an ordinary single-repo map.
       const systemId = detectSystem(cwd)?.systemId;
 
-      const silent = opts.silent === true || opts.format === "silent";
       // json and llm are machine formats: suppress progress chatter and route
       // ingestion through the quiet path so stdout carries only the result.
       const machineFormat = opts.format === "json" || opts.format === "llm";
@@ -166,7 +228,6 @@ Examples:
       // The local backend bootstrap below only runs on the local path —
       // cloud ingestion doesn't require a local Ix backend.
       const ingestStart = performance.now();
-      const cloudReady = await isCloudReady();
       if (cloudReady) {
         const runner = getRemoteRunner()!; // isCloudReady guarantees non-null
         try {
@@ -195,6 +256,7 @@ Examples:
             printSummary: false,
             suppressOutput: true,
             mapMode: true,
+            deadlineSignal,
           });
         } catch (err: any) {
           emitError(formatFetchError(err));
@@ -204,7 +266,7 @@ Examples:
       }
       const ingestMs = Math.round(performance.now() - ingestStart);
 
-      const client = new IxClient(getEndpoint());
+      const client = new IxClient(getEndpoint(), deadlineSignal);
 
       const mapBarWidth = 25;
       const mapStart    = performance.now();

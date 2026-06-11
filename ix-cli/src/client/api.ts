@@ -19,7 +19,24 @@ export interface ListSubsystemsOptions {
 }
 
 export class IxClient {
-  constructor(private endpoint: string = "http://localhost:8090") {}
+  // An optional deadline signal shared across every request this client makes.
+  // `ix map` sets it to a hard wall-clock budget so that, even when the backend
+  // is unhealthy and individual requests would otherwise sit on their long
+  // per-request timeouts (5-30 min each), the whole operation aborts and the
+  // process exits instead of grinding for hours and stacking with re-launches.
+  constructor(
+    private endpoint: string = "http://localhost:8090",
+    private deadlineSignal?: AbortSignal,
+  ) {}
+
+  // Combine a per-request timeout with the optional shared deadline. Whichever
+  // fires first aborts the fetch. AbortSignal.any propagates the first abort.
+  private signalFor(perRequestMs: number): AbortSignal {
+    const perRequest = AbortSignal.timeout(perRequestMs);
+    return this.deadlineSignal
+      ? AbortSignal.any([perRequest, this.deadlineSignal])
+      : perRequest;
+  }
 
   async query(
     question: string,
@@ -33,7 +50,7 @@ export class IxClient {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path, recursive, force: force || undefined }),
-      signal: AbortSignal.timeout(30 * 60 * 1000), // 30 minute timeout for large repos
+      signal: this.signalFor(30 * 60 * 1000), // 30 minute timeout for large repos
     });
     if (!resp.ok) {
       const text = await resp.text();
@@ -207,7 +224,7 @@ export class IxClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
-      signal: AbortSignal.timeout(5 * 60 * 1000), // 5 min — matches commitPatchBulk
+      signal: this.signalFor(5 * 60 * 1000), // 5 min — matches commitPatchBulk
     });
     if (!resp.ok) {
       const text = await resp.text();
@@ -266,7 +283,7 @@ export class IxClient {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(30 * 60 * 1000), // 30 minute timeout
+      signal: this.signalFor(30 * 60 * 1000), // 30 minute timeout
     });
     if (!resp.ok) {
       const text = await resp.text();
@@ -280,7 +297,7 @@ export class IxClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ patches }),
-      signal: AbortSignal.timeout(5 * 60 * 1000), // 5 min — prevents hang when k8s ingress closes idle connections
+      signal: this.signalFor(5 * 60 * 1000), // 5 min — prevents hang when k8s ingress closes idle connections
     });
     if (!resp.ok) {
       const text = await resp.text();
@@ -504,6 +521,10 @@ export class IxClient {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      // These small reads/writes (source-hashes, stitch, list, ...) had no
+      // timeout, so a stalled connection could hang the process indefinitely.
+      // 2 min per request, also bounded by the shared deadline when set.
+      signal: this.signalFor(2 * 60 * 1000),
     });
     if (!resp.ok) {
       const text = await resp.text();
@@ -513,7 +534,9 @@ export class IxClient {
   }
 
   private async get<T>(path: string): Promise<T> {
-    const resp = await fetch(`${this.endpoint}${path}`);
+    const resp = await fetch(`${this.endpoint}${path}`, {
+      signal: this.signalFor(2 * 60 * 1000),
+    });
     if (!resp.ok) {
       const text = await resp.text();
       throw new Error(`${resp.status}: ${text}`);
