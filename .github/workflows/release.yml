@@ -115,7 +115,10 @@ jobs:
           - target: darwin-arm64
             runner: macos-14
           - target: windows-amd64
-            runner: windows-latest
+            # Pinned to windows-2022: windows-latest ships Visual Studio 18,
+            # which node 22's bundled node-gyp cannot detect, breaking the
+            # native tree-sitter compile. VS2022 is the supported toolchain.
+            runner: windows-2022
     defaults:
       run:
         shell: bash
