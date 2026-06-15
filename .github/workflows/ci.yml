@@ -115,8 +115,6 @@ jobs:
 
       - name: Install & build
         working-directory: ix-cli
-        env:
-          IX_FORCE_INSTALL: "1" # DIAGNOSTIC: force fresh tree-sitter compile to surface MSVC error
         run: |
           npm ci --silent
           npm run build
