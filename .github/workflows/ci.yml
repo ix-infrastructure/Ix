@@ -67,7 +67,12 @@ jobs:
         include:
           - { os: ubuntu-latest, node: "22", coverage: true }
           - { os: ubuntu-latest, node: "24" }
-          - { os: windows-latest, node: "22" }
+          # Pinned to windows-2022: windows-latest now ships Visual Studio 18,
+          # which the node-gyp bundled with node 22's npm cannot detect
+          # ("unknown version") so the native tree-sitter compile fails. VS2022
+          # is the toolchain node-gyp supports. Revisit when node-gyp ships
+          # VS18 support (then windows-latest can return).
+          - { os: windows-2022, node: "22" }
           - { os: macos-14, node: "22" }
           - { os: macos-14, node: "24" }
     defaults:
@@ -92,7 +97,9 @@ jobs:
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: core-ingestion/node_modules
-          key: core-ingestion-${{ runner.os }}-node${{ matrix.node }}-${{ hashFiles('core-ingestion/package-lock.json') }}
+          # v2: invalidate caches potentially poisoned by the failed VS18 runs
+          # (runner.os is "Windows" for both windows-latest and windows-2022).
+          key: core-ingestion-v2-${{ runner.os }}-node${{ matrix.node }}-${{ hashFiles('core-ingestion/package-lock.json') }}
 
       - name: Configure native build flags (node 24)
         if: matrix.node == '24'
@@ -156,7 +163,7 @@ jobs:
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: core-ingestion/node_modules
-          key: core-ingestion-${{ runner.os }}-node22-${{ hashFiles('core-ingestion/package-lock.json') }}
+          key: core-ingestion-v2-${{ runner.os }}-node22-${{ hashFiles('core-ingestion/package-lock.json') }}
 
       - name: Build CLI
         working-directory: ix-cli
