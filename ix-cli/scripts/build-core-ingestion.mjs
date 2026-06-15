@@ -11,7 +11,7 @@ const nodeModules = resolve(coreIngestionDir, 'node_modules');
 // skips the native tree-sitter recompile, which is the slowest and most
 // failure-prone step. Set IX_FORCE_INSTALL=1 to force a clean `npm ci`.
 if (process.env.IX_FORCE_INSTALL === '1' || !existsSync(nodeModules)) {
-  execSync(`${npmCmd} ci --silent`, {
+  execSync(`${npmCmd} ci --foreground-scripts`, {
     cwd: coreIngestionDir,
     shell: true,
     stdio: 'inherit',
