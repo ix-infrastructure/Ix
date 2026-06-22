@@ -41,7 +41,7 @@
     "eslint": "^10.5.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-unused-imports": "^4.4.1",
-    "knip": "^6.16.1",
+    "knip": "^6.17.1",
     "prettier": "^3.8.4",
     "tsx": "^4.22.4",
     "typescript": "^5.4.0",
