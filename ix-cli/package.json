@@ -41,11 +41,11 @@
     "eslint": "^10.6.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-unused-imports": "^4.4.1",
-    "knip": "^6.23.0",
-    "prettier": "^3.9.1",
-    "tsx": "^4.22.4",
+    "knip": "^6.24.0",
+    "prettier": "^3.9.4",
+    "tsx": "^4.23.0",
     "typescript": "^5.4.0",
-    "typescript-eslint": "^8.62.0",
+    "typescript-eslint": "^8.62.1",
     "vitest": "^4.1.0"
   },
   "overrides": {
