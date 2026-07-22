@@ -32,10 +32,10 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     ignore:
-      # Toolchain majors need a deliberate, tested migration, not an auto-bump:
-      # TypeScript 7 is the native Go port; typescript-eslint throws at module
-      # load on it and Next.js 16.2 can't detect it, so the org holds TS 7
-      # everywhere. Minor/patch still flow.
+      # Toolchain majors need a deliberate, tested migration, not an auto-bump.
+      # core-ingestion is already on TypeScript 7 (#311). A TS 8 major would be a
+      # deliberate migration validated by the tsc build plus the vitest suite over
+      # the tree-sitter grammars, not an auto-bump. Minor/patch still flow.
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
     groups:
