@@ -38,7 +38,7 @@
     "@eslint/js": "^10.0.1",
     "@types/node": "^20.19.43",
     "@vitest/coverage-v8": "^4.1.10",
-    "eslint": "^10.7.0",
+    "eslint": "^10.8.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-unused-imports": "^4.4.1",
     "knip": "^6.29.0",
