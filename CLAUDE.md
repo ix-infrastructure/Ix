@@ -81,7 +81,7 @@ Underlying structural commands — useful for debugging or fine-grained inspecti
 | Goal | Command | Example |
 |---|---|---|
 | Create a goal | `ix goal create` | `ix goal create "Support GitHub" --format json` |
-| List goals | `ix goals` | `ix goals --status active --format json` |
+| List goals | `ix goal list` | `ix goal list --status active --format json` |
 | Create a plan | `ix plan create` | `ix plan create "Fix auth" --goal <id> --responds-to <bugId> --format json` |
 | Add a task | `ix plan task` | `ix plan task "Step 1" --plan <id> --depends-on <taskId> --resolves <bugId> --workflow-staged '{"discover":["ix overview X"],"implement":["ix map"],"validate":["ix smells"]}' --format json` |
 | Plan status | `ix plan status` | `ix plan status <id> --format json` |
