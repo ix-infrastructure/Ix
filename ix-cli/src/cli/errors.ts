@@ -103,7 +103,37 @@ export function formatFetchError(err: unknown): string {
   return base;
 }
 
-export function renderCliError(err: unknown, debug = false): void {
+/**
+ * Transport-level codes meaning "we never reached the backend at all", as
+ * opposed to the backend answering with an error. Node's fetch surfaces these
+ * as `TypeError: fetch failed` with the real error nested under `cause`.
+ */
+const UNREACHABLE_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+/**
+ * True when the error is a failure to reach the backend at all. This is by far
+ * the most common failure for a fresh install — the CLI is on PATH but the
+ * Docker backend was never started — so it gets its own actionable message
+ * instead of an undici stack trace.
+ */
+export function isBackendUnreachable(err: unknown): boolean {
+  const e = err as { code?: unknown; cause?: unknown } | null | undefined;
+  if (typeof e?.code === "string" && UNREACHABLE_CODES.has(e.code)) return true;
+  const cause = e?.cause as { code?: unknown } | null | undefined;
+  return typeof cause?.code === "string" && UNREACHABLE_CODES.has(cause.code);
+}
+
+export function renderCliError(err: unknown, debug = false, endpoint?: string): void {
   if (err instanceof CliUsageError || err instanceof CliResolutionError) {
     process.stderr.write(chalk.red(`Error: ${err.message}\n`));
     if (err.hint) {
@@ -116,7 +146,31 @@ export function renderCliError(err: unknown, debug = false): void {
   }
 
   const e = err as any;
-  const msg = e?.message ?? String(err);
+
+  if (isBackendUnreachable(err)) {
+    renderStructuredError({
+      error: "backend_unreachable",
+      message: `Ix backend not reachable${endpoint ? ` at ${endpoint}` : ""}.`,
+      next: "Start it with `ix docker start`, then check `ix status`.",
+    });
+    if (debug && e?.stack) {
+      process.stderr.write(chalk.dim(`${e.stack}\n`));
+    }
+    process.exit(1);
+  }
+
+  const structured = typeof e?.message === "string" ? parseBackendError(e.message) : null;
+  if (structured) {
+    renderStructuredError(structured);
+    if (debug && e?.stack) {
+      process.stderr.write(chalk.dim(`${e.stack}\n`));
+    }
+    process.exit(1);
+  }
+
+  // formatFetchError unwraps `fetch failed` so the transport cause is visible
+  // rather than being hidden behind a message that says nothing.
+  const msg = err === null || err === undefined ? String(err) : formatFetchError(err);
   process.stderr.write(chalk.red(`Error: ${msg}\n`));
 
   if (debug && e?.stack) {

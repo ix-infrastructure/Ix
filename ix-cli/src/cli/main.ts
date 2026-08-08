@@ -4,6 +4,8 @@ import { registerOssCommands, registerProStubs } from "./register/oss.js";
 import { tryLoadProCommands } from "./register/pro-loader.js";
 import { buildHelpText } from "./help-text.js";
 import { checkForUpdate } from "./commands/upgrade.js";
+import { renderCliError } from "./errors.js";
+import { getEndpoint } from "./config.js";
 
 import { readFileSync } from "fs";
 import { join, dirname } from "path";
@@ -31,6 +33,30 @@ try {
   const pkg = JSON.parse(readFileSync(join(__dirname, "../../package.json"), "utf-8"));
   cliVersion = pkg.version || "0.0.0";
 } catch {}
+
+// Set IX_DEBUG=1 to append stack traces to any rendered error.
+const debug = process.env.IX_DEBUG === "1";
+
+// Resolving the endpoint reads config off disk, which can itself fail. An
+// error renderer must never throw, so failure here just drops the endpoint
+// from the message rather than replacing one crash with another.
+function safeEndpoint(): string | undefined {
+  try {
+    return getEndpoint();
+  } catch {
+    return undefined;
+  }
+}
+
+// Last line of defence. Without these, any rejection escaping a command — most
+// commonly the backend not running — reaches Node's default handler and prints
+// an undici stack trace that exposes internal paths and tells the user nothing.
+process.on("unhandledRejection", (err: unknown) => {
+  renderCliError(err, debug, safeEndpoint());
+});
+process.on("uncaughtException", (err: unknown) => {
+  renderCliError(err, debug, safeEndpoint());
+});
 
 const program = new Command();
 program
@@ -63,5 +89,11 @@ registerOssCommands(program);
     checkForUpdate();
   }
 
-  program.parse();
+  // parseAsync (not parse) so rejections from async action handlers surface
+  // here instead of floating off as unhandled rejections.
+  try {
+    await program.parseAsync();
+  } catch (err) {
+    renderCliError(err, debug, safeEndpoint());
+  }
 })();
