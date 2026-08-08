@@ -326,15 +326,24 @@ jobs:
         with:
           tag_name: v${{ steps.version.outputs.version }}
           generate_release_notes: true
-          # Without these, a v0.9.0-rc.1 tag publishes as a normal release and
+          # Without this, a v0.9.0-rc.1 tag publishes as a normal release and
           # becomes "latest" — and both install.sh's resolve_version() and the
           # CLI's checkForUpdate() read /releases/latest, so an RC would install
           # itself onto every new user and prompt every existing one to upgrade
           # to it. GitHub excludes prereleases from /releases/latest, so this is
           # what makes a release-candidate tag safe to push at all.
+          #
+          # `make_latest` is deliberately NOT set. The action documents it as
+          # "uses GitHub api default if not provided", and this job also runs on
+          # workflow_dispatch against an arbitrary tag — where it *updates* an
+          # existing release. Passing make_latest:true there would re-point
+          # /releases/latest at whatever old tag was re-run, which is the exact
+          # pointer this block exists to protect. Marking the tag prerelease is
+          # sufficient on its own: GitHub refuses to make a prerelease latest.
           prerelease: ${{ steps.version.outputs.prerelease }}
-          make_latest: ${{ steps.version.outputs.prerelease == 'false' }}
           body: |
+            ${{ steps.version.outputs.prerelease == 'true' && format('> **Release candidate — the install commands below will NOT give you this build.** `/releases/latest` still points at the last stable release, by design. Install this one explicitly with `IX_VERSION={0}` in front of the install command, e.g. `IX_VERSION={0} curl -fsSL https://raw.githubusercontent.com/{1}/main/scripts/install/install.sh | bash`', steps.version.outputs.version, github.repository) || '' }}
+
             ## Install
 
             ### Quick install (no repo needed)
