@@ -357,7 +357,15 @@ function refreshLaunchers(installDir: string, installedRoot: string, isWindows: 
         // this same file at their working tree; silently repointing it at the
         // released build makes their rebuilds appear to do nothing. This is the
         // convention the @ix/pro refresh below already follows.
-        const existing = existsSync(cmdShim) ? readFileSync(cmdShim, "utf-8") : "";
+        //
+        // Read-or-default rather than existsSync-then-read: guarding a write
+        // with an existence check is a TOCTOU (CodeQL js/file-system-race).
+        let existing = "";
+        try {
+          existing = readFileSync(cmdShim, "utf-8");
+        } catch {
+          /* no shim yet — install.ps1 has not run on this machine */
+        }
         if (existing && !existing.includes("%~dp0..\\cli\\") && !existing.includes(installDir)) {
           console.log("  Left your dev ix.cmd shim untouched (re-run scripts/dev/setup.sh to repoint it).");
         } else {
@@ -381,15 +389,18 @@ function refreshLaunchers(installDir: string, installedRoot: string, isWindows: 
   }
   const body = `#!/usr/bin/env bash\nexec node "${jsPath}" "$@"\n`;
   const candidates = ["/usr/local/bin/ix", join(homedir(), ".local", "bin", "ix")];
-  // Only refresh shims that already exist. Creating one that install.sh chose
-  // not to create would put a second, competing `ix` on PATH.
-  const targets = candidates.filter((p) => existsSync(p));
 
-  for (const target of targets) {
+  for (const target of candidates) {
+    // Probe by reading rather than existsSync-then-write, which is a TOCTOU
+    // (CodeQL js/file-system-race). Only refresh a shim that is already there:
+    // creating one install.sh chose not to create would put a second,
+    // competing `ix` on PATH.
     try {
-      // Write directly rather than existsSync-then-write, which is a TOCTOU
-      // (CodeQL js/file-system-race).
-      mkdirSync(dirname(target), { recursive: true });
+      readFileSync(target);
+    } catch {
+      continue;
+    }
+    try {
       writeFileSync(target, body, { mode: 0o755 });
     } catch (err) {
       problems.push(`${target}: ${(err as Error).message}`);
