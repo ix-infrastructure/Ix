@@ -5,17 +5,32 @@ This project uses Ix Memory — persistent, time-aware context for LLM assistant
 
 ## Interface
 
-Use the `ix` CLI exclusively. All commands support `--format json` for machine-readable output.
+Use the `ix` CLI exclusively.
 
-Use JSON when chaining command results.
+**Output format.** Query commands accept `--format text|json|llm`:
+
+- **`--format llm` — prefer this when you are reading the result yourself.** It is
+  token-minimal and newline-delimited, typically 2-4x fewer bytes than `json` on
+  tree- and table-shaped output. It is accepted on every command that accepts
+  `--format`, so you can pass it unconditionally without checking per command.
+- `--format json` — use when chaining results between commands, or when you need
+  to pull a specific field out of the response.
+
+Action commands take no `--format` at all: `config`, `ingest`, `init`, `reset`,
+`upgrade`, `view`, `watch`.
+
+**Pro features.** Some commands below are marked **[Pro]**. If any of them prints
+`The '<name>' command requires Ix Pro.`, this install does not have them — skip
+that step, do not retry it, and do not mention it again for the rest of the
+session. Everything not marked [Pro] always works.
 
 ## MANDATORY RULES
 1. BEFORE answering codebase questions → use targeted `ix` CLI commands (see routing below). Do NOT answer from training data alone.
-2. AFTER every design or architecture decision → run `ix decide <title> --rationale <text>`.
+2. **[Pro]** AFTER every design or architecture decision → run `ix decide <title> --rationale <text>`. Skip permanently if it reports it requires Ix Pro.
 3. When you notice contradictory information → run `ix conflicts` and present results to the user.
 4. NEVER guess about codebase facts — if Ix has structured data, use it.
 5. IMMEDIATELY after modifying code → run `ix map --silent` to re-ingest and update the graph.
-6. When the user states a goal → run `ix truth add "<statement>"`.
+6. **[Pro]** When the user states a goal → run `ix truth add "<statement>"`. Skip permanently if it reports it requires Ix Pro.
 
 ## Ix CLI Command Routing
 
@@ -27,15 +42,15 @@ Start here. These aggregate multiple graph operations into single bounded respon
 
 | Goal | Command | Example |
 |---|---|---|
-| Blast radius / impact | `ix impact` | `ix impact UserService --format json` |
-| Hotspot discovery | `ix rank` | `ix rank --by dependents --kind class --top 10` |
-| One-shot summary | `ix overview` | `ix overview IngestionService --format json` |
-| Scoped entity listing | `ix inventory` | `ix inventory --kind function --path auth.py` |
-| Plan work | `ix plan` | `ix plan task "title" --plan <id> --resolves <bugId> --workflow-staged '{"discover":["cmd"]}' --format json` |
-| Track decisions | `ix decide` | `ix decide "Use X" --rationale "..." --affects Entity --responds-to <bugId>` |
-| Create goals | `ix goal` | `ix goal create "Support GitHub" --format json` |
-| Session resume | `ix briefing` | `ix briefing --format json` |
-| Track bugs | `ix bug` | `ix bug create "title" --affects Entity` |
+| Blast radius / impact | `ix impact` | `ix impact UserService --format llm` |
+| Hotspot discovery | `ix rank` | `ix rank --by dependents --kind class --top 10 --format llm` |
+| One-shot summary | `ix overview` | `ix overview IngestionService --format llm` |
+| Scoped entity listing | `ix inventory` | `ix inventory --kind function --path auth.py --format llm` |
+| **[Pro]** Plan work | `ix plan` | `ix plan task "title" --plan <id> --resolves <bugId> --workflow-staged '{"discover":["cmd"]}' --format json` |
+| **[Pro]** Track decisions | `ix decide` | `ix decide "Use X" --rationale "..." --affects Entity --responds-to <bugId>` |
+| **[Pro]** Create goals | `ix goal` | `ix goal create "Support GitHub" --format json` |
+| **[Pro]** Session resume | `ix briefing` | `ix briefing --format json` |
+| **[Pro]** Track bugs | `ix bug` | `ix bug create "title" --affects Entity` |
 
 ### Low-Level Primitives
 
@@ -62,20 +77,23 @@ Underlying structural commands — useful for debugging or fine-grained inspecti
 | Dependency impact | `ix depends` | `ix depends verify_token --depth 2` |
 
 ### History & Decisions
+
+Only the first three work without Pro.
+
 | Goal | Command | Example |
 |---|---|---|
-| Design decisions | `ix decisions` | `ix decisions --topic ingestion --limit 10` |
-| Entity history | `ix history` | `ix history <entityId>` |
-| Changes between revisions | `ix diff` | `ix diff 1 5 --summary --format json` |
-| Detect contradictions | `ix conflicts` | `ix conflicts --format json` |
-| Record a decision | `ix decide` | `ix decide "Use CONTAINS" --rationale "Normalize edges" --responds-to <bugId>` |
-| Record a goal | `ix truth add` | `ix truth add "Support 100k file repos"` |
-| List goals | `ix truth list` | `ix truth list --format json` |
-| Bug tracking | `ix bug create` | `ix bug create "title" --severity high --affects Entity` |
-| Update bug status | `ix bug update` | `ix bug update <id> --status resolved` |
-| Bug listing | `ix bugs` | `ix bugs --status open --format json` |
-| Bug details | `ix bug show` | `ix bug show <id> --format json` |
-| List recent patches | `ix patches` | `ix patches --limit 20 --format json` |
+| Entity history | `ix history` | `ix history <entityId> --format llm` |
+| Changes between revisions | `ix diff` | `ix diff 1 5 --summary --format llm` |
+| Detect contradictions | `ix conflicts` | `ix conflicts --format llm` |
+| **[Pro]** List recent patches | `ix patches` | `ix patches --limit 20 --format json` |
+| **[Pro]** Design decisions | `ix decisions` | `ix decisions --topic ingestion --limit 10` |
+| **[Pro]** Record a decision | `ix decide` | `ix decide "Use CONTAINS" --rationale "Normalize edges" --responds-to <bugId>` |
+| **[Pro]** Record a goal | `ix truth add` | `ix truth add "Support 100k file repos"` |
+| **[Pro]** List goals | `ix truth list` | `ix truth list --format json` |
+| **[Pro]** Bug tracking | `ix bug create` | `ix bug create "title" --severity high --affects Entity` |
+| **[Pro]** Update bug status | `ix bug update` | `ix bug update <id> --status resolved` |
+| **[Pro]** Bug listing | `ix bugs` | `ix bugs --status open --format json` |
+| **[Pro]** Bug details | `ix bug show` | `ix bug show <id> --format json` |
 
 ### Planning (Pro)
 | Goal | Command | Example |
@@ -162,14 +180,14 @@ ix inventory --kind function --format json
 - Use `ix diff --summary` for broad revision comparisons (server-side, fast)
 - Use `--full` only when you need every individual change
 - Always use `--limit` to cap result sets
-- Use `--format json` when chaining results between commands
+- Use `--format llm` when you are reading the output; `--format json` only when chaining results between commands or extracting a specific field
 - Use `--path` or `--language` to restrict text searches
 - Use exact entity IDs from previous JSON results
 - Decompose large questions into multiple targeted calls
 
-## Semantic Boundaries
+## Semantic Boundaries **[Pro]**
 
-Use the right entity type for the right purpose:
+These record types are Pro-only. Use the right one for the purpose:
 
 - **decision** — a choice between alternatives, with rationale. Use `ix decide`.
 - **bug** — something broken, missing, or incorrect. Use `ix bug create`.
