@@ -100,7 +100,10 @@ ix-memory-layer==latest
 
 # Pre-built tarball from GitHub Releases, extracted to ~/.ix/cli/
 # Wrapper script placed in /usr/local/bin/ix or ~/.local/bin/ix
-# Platforms: linux-amd64, linux-arm64, darwin-amd64, darwin-arm64, windows-amd64
+# Platforms: linux-amd64, linux-arm64, darwin-arm64, windows-amd64
+# No darwin-amd64 (Intel Mac) tarball is published — install with Homebrew,
+# which builds from source. The README links here as the full list, so this
+# has to agree with it.
 
 # ============================================================================
 #  ALSO INSTALLED (used by ix commands)

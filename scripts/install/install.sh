@@ -870,7 +870,39 @@ check_installed_version() {
   fi
 }
 
-if [ -x "$IX_BIN/ix" ]; then
+# Intel Macs have no pre-built asset on the current release matrix —
+# darwin-amd64 is deliberately omitted because the macos-13 runners queue
+# indefinitely. Decide this BEFORE the upgrade branch below removes the existing
+# install: reaching it after `rm -rf "$INSTALL_DIR"` would delete a working CLI
+# and then abort, leaving the user worse off than not running the script.
+#
+# Only for the resolved-latest path. IX_VERSION is an explicit request for a
+# specific release, and every build before #259 did publish darwin-amd64 — so a
+# pinned rollback is allowed through to the normal download-and-404 handling.
+SKIP_CLI_INSTALL=0
+if [ "$PLATFORM" = "darwin-amd64" ] && [ -z "${IX_VERSION:-}" ]; then
+  echo ""
+  warn "Ix does not publish a pre-built CLI for Intel Macs (darwin-amd64)."
+  echo ""
+  echo "  Install the CLI with Homebrew instead — it builds from source:"
+  echo "    brew tap ${GITHUB_ORG}/ix https://github.com/${GITHUB_ORG}/${GITHUB_REPO}"
+  echo "    brew install ix"
+  echo ""
+  if [ -x "$IX_BIN/ix" ]; then
+    # A CLI is already here (Homebrew, or a pre-#259 release). Leave it exactly
+    # as it is and carry on with the backend setup, which is platform-neutral
+    # and is the rest of what this script does.
+    warn "Leaving your existing ix CLI untouched and continuing with the backend setup."
+    echo ""
+    SKIP_CLI_INSTALL=1
+  else
+    echo "  Apple Silicon Macs are supported by this installer directly."
+    echo ""
+    err "No darwin-amd64 release asset. Install the CLI with Homebrew (above), then re-run this script to set up the backend."
+  fi
+fi
+
+if [ "$SKIP_CLI_INSTALL" = "0" ] && [ -x "$IX_BIN/ix" ]; then
   existing_version=$(check_installed_version)
   if [ "$existing_version" = "$VERSION" ]; then
     info "ix CLI v${VERSION} is already installed"
@@ -880,30 +912,11 @@ if [ -x "$IX_BIN/ix" ]; then
   fi
 fi
 
-if [ ! -x "$IX_BIN/ix" ] || [ "$(check_installed_version)" != "$VERSION" ]; then
+if [ "$SKIP_CLI_INSTALL" = "0" ] && { [ ! -x "$IX_BIN/ix" ] || [ "$(check_installed_version)" != "$VERSION" ]; }; then
   mkdir -p "$INSTALL_DIR"
 
   TMP_DIR=$(mktemp -d)
   TMP_FILE="$TMP_DIR/${TARBALL_NAME}"
-
-  # Intel Macs have no pre-built asset and never will on the current release
-  # matrix — darwin-amd64 is deliberately omitted because the macos-13 runners
-  # queue indefinitely. Say so up front rather than letting the download 404 and
-  # then blaming a missing upload. Homebrew is a real answer here: the formula
-  # builds from source and carries no architecture restriction.
-  if [ "$PLATFORM" = "darwin-amd64" ]; then
-    rm -rf "$TMP_DIR"
-    echo ""
-    warn "Ix does not publish a pre-built CLI for Intel Macs (darwin-amd64)."
-    echo ""
-    echo "  Install with Homebrew instead — it builds from source and works on Intel:"
-    echo "    brew tap ${GITHUB_ORG}/ix https://github.com/${GITHUB_ORG}/${GITHUB_REPO}"
-    echo "    brew install ix"
-    echo ""
-    echo "  Apple Silicon Macs are supported by this installer directly."
-    echo ""
-    err "No darwin-amd64 release asset. Use Homebrew (above)."
-  fi
 
   echo "  Downloading ix CLI v${VERSION} for ${PLATFORM}..."
   echo "  URL: $TARBALL_URL"
@@ -917,9 +930,23 @@ if [ ! -x "$IX_BIN/ix" ] || [ "$(check_installed_version)" != "$VERSION" ]; then
     echo "  Check available releases at:"
     echo "    https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/releases"
     echo ""
-    echo "  Or install with Homebrew, which builds from source:"
-    echo "    brew tap ${GITHUB_ORG}/ix https://github.com/${GITHUB_ORG}/${GITHUB_REPO}"
-    echo "    brew install ix"
+    # This branch is reached on every platform, so the advice has to work on
+    # every platform. Homebrew is the right answer on macOS specifically; it is
+    # no help at all to the Linux and Windows users who also land here.
+    case "$PLATFORM" in
+      darwin-*)
+        echo "  Or install with Homebrew, which builds from source:"
+        echo "    brew tap ${GITHUB_ORG}/ix https://github.com/${GITHUB_ORG}/${GITHUB_REPO}"
+        echo "    brew install ix"
+        ;;
+      *)
+        # scripts/dev/setup.sh, not ./setup.sh — the root-level script this used
+        # to cite has never existed in this repo.
+        echo "  Or build from source:"
+        echo "    git clone https://github.com/${GITHUB_ORG}/${GITHUB_REPO}.git"
+        echo "    cd ${GITHUB_REPO} && ./scripts/dev/setup.sh"
+        ;;
+    esac
     echo ""
     err "CLI download failed. See above for alternatives."
   fi
