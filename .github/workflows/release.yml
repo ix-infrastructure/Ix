@@ -202,19 +202,41 @@ jobs:
       # genuine runtime deps and the parser is useless without them. Only
       # devDependencies go.
       #
-      # This also fixes the SBOM below, which scans `ix-cli` and until now
-      # described the build toolchain as shipped content.
+      # This also tightens the SBOM below for `ix-cli`, which until now described
+      # the build toolchain as shipped content. Note the SBOM still scans only
+      # `ix-cli`; core-ingestion's runtime tree is shipped but not catalogued.
       - name: Prune dev dependencies before packaging
         run: |
-          size() { du -sm "$1" 2>/dev/null | cut -f1 | head -1; }
+          # `|| true`: this step runs under `bash -eo pipefail`, so a non-zero du
+          # anywhere in the pipeline would abort the whole release. Reporting a
+          # size is not worth that, and the `:-?` fallbacks below only mean
+          # something if the failure is allowed to reach them.
+          size() { du -sm "$1" 2>/dev/null | cut -f1 | head -1 || true; }
           before_cli=$(size ix-cli/node_modules)
           before_ing=$(size core-ingestion/node_modules)
           (cd ix-cli && npm prune --omit=dev)
           (cd core-ingestion && npm prune --omit=dev)
           echo "ix-cli/node_modules:         ${before_cli:-?} MB -> $(size ix-cli/node_modules) MB"
           echo "core-ingestion/node_modules: ${before_ing:-?} MB -> $(size core-ingestion/node_modules) MB"
-          # The CLI must still start from the pruned tree, or the tarball ships broken.
+
+          # The CLI must still start from the pruned tree, or the tarball ships
+          # broken. `--version` only resolves the eager import graph, so it
+          # proves nothing about core-ingestion: the CLI reaches that through a
+          # dynamic import in ingestion-loader.ts and would fail first on a
+          # user's `ix map`, long after this step went green.
+          #
+          # So actually parse something. A grammar dropped by mistake makes
+          # parseFile return null here rather than at a user's first ingest.
+          # (parse-worker.js is deliberately not imported — it throws by design
+          # unless it is running inside a worker thread.)
           node ix-cli/dist/cli/main.js --version
+          node --input-type=module -e "
+            const { parseFile } = await import('./core-ingestion/dist/index.js');
+            await import('./core-ingestion/dist/patch-builder.js');
+            const result = parseFile('smoke.ts', 'export const smoke = 1;\n');
+            if (!result) throw new Error('core-ingestion parsed nothing from the pruned tree');
+            console.log('core-ingestion parses from the pruned tree');
+          "
 
       # The compass job does not run on PR dry-runs, so the artifact is legitimately
       # absent there. continue-on-error covers only that case; a real release

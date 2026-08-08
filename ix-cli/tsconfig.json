@@ -10,5 +10,7 @@
     "declaration": true,
     "skipLibCheck": true
   },
+  // Covers tests too, so `npm run typecheck` keeps checking them.
+  // The shipped build uses tsconfig.build.json, which excludes them from dist.
   "include": ["src"]
 }

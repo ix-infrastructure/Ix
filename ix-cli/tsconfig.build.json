@@ -1,0 +1,13 @@
+{
+  // Build-only config: same settings as tsconfig.json, minus the tests.
+  //
+  // tsconfig.json deliberately still includes them so `npm run typecheck`
+  // covers test files. But emitting them is a different matter: tsc would write
+  // every src/**/__tests__ file into dist/, the Package step copies dist/
+  // wholesale into the release tarball, and the result is ~35 shipped modules
+  // importing vitest — inside a tree from which the release workflow's
+  // `npm prune --omit=dev` has just removed vitest. It also made the SBOM
+  // describe test-only imports as shipped content.
+  "extends": "./tsconfig.json",
+  "exclude": ["src/**/__tests__/**", "src/**/*.test.ts"]
+}

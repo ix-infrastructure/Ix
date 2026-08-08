@@ -16,7 +16,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "build": "node scripts/build-core-ingestion.mjs && node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
+    "build": "node scripts/build-core-ingestion.mjs && node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
     "test": "node scripts/build-core-ingestion.mjs && vitest run && node test/parser.smoke.mjs",
     "test:unit": "vitest run",
     "test:coverage": "vitest run --coverage",
