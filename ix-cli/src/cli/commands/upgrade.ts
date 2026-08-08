@@ -148,6 +148,11 @@ export async function checkForUpdate(): Promise<void> {
     if (hasCliUpdate || hasCompassUpdate || hasBackendUpdate) {
       printUpdateNotice(current, latest, !!hasCompassUpdate, !!hasBackendUpdate);
     }
+  }).catch(() => {
+    // Best-effort background check: it must never affect the command the user
+    // actually ran. Without this catch the floating promise would reach the
+    // process-level unhandledRejection handler and abort an otherwise
+    // successful command.
   });
 }
 
