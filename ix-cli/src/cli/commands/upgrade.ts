@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { execFileSync } from "child_process";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, mkdtempSync, lstatSync, renameSync, readdirSync } from "fs";
-import { dirname, join } from "path";
+import { basename, dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { homedir, tmpdir } from "os";
 import chalk from "chalk";
@@ -162,22 +162,60 @@ function extractZipOnWindows(zipPath: string, destDir: string): void {
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        `Expand-Archive -LiteralPath ${psQuote(zipPath)} -DestinationPath ${psQuote(destDir)} -Force`,
+        // $ErrorActionPreference is load-bearing. Expand-Archive reports
+        // unreadable entries and per-file access denials as *non-terminating*
+        // errors, and powershell.exe still exits 0 for those — so without this
+        // a half-extracted tree reads as success and the fallback below is
+        // never tried.
+        `$ErrorActionPreference='Stop'; Expand-Archive -LiteralPath ${psQuote(zipPath)} ` +
+          `-DestinationPath ${psQuote(destDir)} -Force`,
       ],
     },
-    { cmd: "unzip", args: ["-q", toUnixPath(zipPath), "-d", toUnixPath(destDir)] },
+    { cmd: "unzip", args: ["-q", "-o", toUnixPath(zipPath), "-d", toUnixPath(destDir)] },
   ];
 
   const failures: string[] = [];
   for (const { cmd, args } of attempts) {
+    // Start each attempt from an empty destination. A previous extractor may
+    // have left a partial tree behind, and merging a second attempt into it
+    // would produce a directory that looks complete and is not.
+    rmSync(destDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    mkdirSync(destDir, { recursive: true });
     try {
-      execFileSync(cmd, args, { stdio: "ignore" });
-      return;
+      // Capture stderr rather than discarding it: the aggregated message below
+      // is the only diagnostic the user ever sees, and "Command failed:
+      // powershell ..." on its own is unactionable.
+      execFileSync(cmd, args, { stdio: ["ignore", "ignore", "pipe"] });
     } catch (err) {
-      failures.push(`${cmd}: ${(err as Error).message}`);
+      const e = err as Error & { stderr?: Buffer | string };
+      const detail = e.stderr ? String(e.stderr).trim() : "";
+      failures.push(`${cmd}: ${detail || e.message}`);
+      continue;
     }
+    // An extractor that exits 0 without producing anything has not succeeded.
+    if (readdirSync(destDir).length === 0) {
+      failures.push(`${cmd}: exited 0 but extracted nothing`);
+      continue;
+    }
+    return;
   }
   throw new Error(`no usable zip extractor found (${failures.join("; ")})`);
+}
+
+/**
+ * Delete a directory without letting the failure escape.
+ *
+ * Used only for housekeeping — staging leftovers and the previous install once
+ * the swap has already succeeded. On Windows `rmSync` defaults to no retries
+ * and an AV or indexer handle on a tree the process was running from moments
+ * ago is enough to throw, so the retries matter and the failure must not.
+ */
+function rmQuiet(target: string): void {
+  try {
+    rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  } catch {
+    /* a leftover directory is reclaimed by sweepUpgradeOrphans on the next run */
+  }
 }
 
 /**
@@ -186,12 +224,178 @@ function extractZipOnWindows(zipPath: string, destDir: string): void {
  * and reading it back beats assuming the name — the shim has to point inside it.
  */
 export function soleChildDir(dir: string): string | null {
+  let entries;
   try {
-    const entries = readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory());
-    return entries.length === 1 && entries[0] ? join(dir, entries[0].name) : null;
-  } catch {
-    return null;
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    // A directory that is not there genuinely has no sole child. Anything else
+    // — EACCES from a group-policy ACL, EMFILE — is a fault on this machine,
+    // and swallowing it would surface downstream as "the release archive is
+    // malformed", pointing the user at the wrong thing entirely.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
   }
+  const dirs = entries.filter((e) => e.isDirectory());
+  return dirs.length === 1 && dirs[0] ? join(dir, dirs[0].name) : null;
+}
+
+/**
+ * Characters we are willing to interpolate into a launcher script.
+ *
+ * The version directory is read back out of the downloaded archive rather than
+ * derived from the VERSION_RE-validated tag, so it has not been through that
+ * barrier. `cmd.exe` splits a batch line on `&` and expands `%VAR%`, so a
+ * directory name carrying either would change what the launcher runs.
+ */
+const SAFE_DIR_NAME = /^[A-Za-z0-9._-]+$/;
+
+/**
+ * Replace `installDir` with the tree staged in `stagingDir`.
+ *
+ * Cleanup of the previous install deliberately sits *outside* the failure
+ * boundary. Once the second rename returns, the upgrade has happened; deleting
+ * the old tree is housekeeping, and on Windows it is the single step most
+ * likely to fail. Letting that failure propagate would abort the caller before
+ * it repoints the launcher shims, leaving them aimed at a directory that no
+ * longer exists — precisely the brick this path exists to prevent.
+ *
+ * Throws only when the install is still intact (or has been put back).
+ */
+export function swapInStagedTree(installDir: string, stagingDir: string, backupDir: string): void {
+  rmQuiet(backupDir);
+  if (existsSync(installDir)) renameSync(installDir, backupDir);
+  try {
+    renameSync(stagingDir, installDir);
+  } catch (err) {
+    try {
+      if (existsSync(backupDir) && !existsSync(installDir)) renameSync(backupDir, installDir);
+    } catch {
+      /* caller reports where the surviving copy is */
+    }
+    throw err;
+  }
+  rmQuiet(backupDir);
+}
+
+/**
+ * Reclaim `.cli-staging-*` / `.cli-backup-*` directories left behind by an
+ * upgrade that died mid-swap, and put the install back if it is missing.
+ *
+ * The swap has a window between the two renames in which no install exists.
+ * Ctrl-C, a killed process or a lost machine inside that window terminates
+ * without running any catch, so in-process recovery cannot help — and with no
+ * `ix` on disk the user cannot run `ix upgrade` to repair it either.
+ */
+export function sweepUpgradeOrphans(ixHome: string, installDir: string): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(ixHome);
+  } catch {
+    return;
+  }
+  const backups = entries.filter((e) => e.startsWith(".cli-backup-")).sort();
+  const lastBackup = backups[backups.length - 1];
+
+  if (!existsSync(installDir) && lastBackup) {
+    try {
+      renameSync(join(ixHome, lastBackup), installDir);
+      console.log(`  Recovered the previous install from ${lastBackup} (an earlier upgrade was interrupted).`);
+    } catch {
+      /* fall through to the sweep; nothing is made worse by leaving it */
+    }
+  }
+  for (const name of entries) {
+    if (name.startsWith(".cli-staging-") || name.startsWith(".cli-backup-")) {
+      const target = join(ixHome, name);
+      if (target !== installDir && existsSync(target)) rmQuiet(target);
+    }
+  }
+}
+
+/**
+ * Repoint the Windows launchers at the newly installed tree.
+ *
+ * Only Windows needs this. install.sh writes a *version-encoded* path on
+ * Windows (`$INSTALL_DIR/ix-<VERSION>-windows-amd64/cli/dist/cli/main.js`) but
+ * on POSIX writes `exec "$INSTALL_DIR/ix"`, which has no version in it and so
+ * never goes stale — rewriting that one would be churn at best, and at worst
+ * fails on a root-owned /usr/local/bin that the user cannot write.
+ *
+ * On Windows three shims exist, not two:
+ *   - `%IX_HOME%\bin\ix.cmd`      written by install.ps1
+ *   - `/usr/local/bin/ix`         written by install.sh when that dir is writable
+ *   - `~/.local/bin/ix`           written by install.sh otherwise
+ *
+ * install.sh picks one of the latter two via pick_bin_dir() and *deletes* the
+ * other as a stale duplicate, so refreshing a hard-coded `~/.local/bin/ix`
+ * recreates the copy it removed while leaving the live one pointing into the
+ * version directory the swap just deleted. Refresh whichever already exist.
+ *
+ * Returns a list of human-readable problems; empty means everything on PATH now
+ * points at the new install.
+ */
+function refreshLaunchers(installDir: string, installedRoot: string, isWindows: boolean): string[] {
+  if (!isWindows) return [];
+  const problems: string[] = [];
+  const entryPath = join(installedRoot, "cli", "dist", "cli", "main.js");
+
+  {
+    const cmdShim = join(IX_HOME, "bin", "ix.cmd");
+    // Mirror install.ps1's *relative* form (`%~dp0..\cli\<dir>\ix.cmd`) rather
+    // than embedding an absolute path. %~dp0 is expanded by cmd.exe at run
+    // time, so the user's profile directory never has to survive a round trip
+    // through a batch file's encoding — an absolute path written as "ascii"
+    // silently corrupts any non-ASCII home (C:\Users\José\...) and produces a
+    // launcher that points nowhere.
+    const dirName = installedRoot === installDir ? "" : basename(installedRoot);
+    if (dirName && !SAFE_DIR_NAME.test(dirName)) {
+      problems.push(`refused to write ${cmdShim}: unsafe directory name ${JSON.stringify(dirName)}`);
+    } else {
+      const inner = dirName ? `%~dp0..\\cli\\${dirName}\\ix.cmd` : `%~dp0..\\cli\\ix.cmd`;
+      try {
+        // Leave a contributor's dev shim alone. scripts/dev/setup.sh points
+        // this same file at their working tree; silently repointing it at the
+        // released build makes their rebuilds appear to do nothing. This is the
+        // convention the @ix/pro refresh below already follows.
+        const existing = existsSync(cmdShim) ? readFileSync(cmdShim, "utf-8") : "";
+        if (existing && !existing.includes("%~dp0..\\cli\\") && !existing.includes(installDir)) {
+          console.log("  Left your dev ix.cmd shim untouched (re-run scripts/dev/setup.sh to repoint it).");
+        } else {
+          mkdirSync(dirname(cmdShim), { recursive: true });
+          writeFileSync(cmdShim, `@echo off\r\n"${inner}" %*\r\n`, "ascii");
+        }
+      } catch (err) {
+        problems.push(`${cmdShim}: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  // The bash shim install.sh writes under Git Bash / MSYS, which also carries
+  // the version-encoded path. pick_bin_dir() puts it in whichever of these two
+  // it chose, so refresh the one that is actually there.
+  let jsPath = entryPath;
+  try {
+    jsPath = execFileSync("cygpath", ["-u", entryPath], { encoding: "utf-8" }).trim();
+  } catch {
+    /* use the windows path */
+  }
+  const body = `#!/usr/bin/env bash\nexec node "${jsPath}" "$@"\n`;
+  const candidates = ["/usr/local/bin/ix", join(homedir(), ".local", "bin", "ix")];
+  // Only refresh shims that already exist. Creating one that install.sh chose
+  // not to create would put a second, competing `ix` on PATH.
+  const targets = candidates.filter((p) => existsSync(p));
+
+  for (const target of targets) {
+    try {
+      // Write directly rather than existsSync-then-write, which is a TOCTOU
+      // (CodeQL js/file-system-race).
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, body, { mode: 0o755 });
+    } catch (err) {
+      problems.push(`${target}: ${(err as Error).message}`);
+    }
+  }
+  return problems;
 }
 
 function detectPlatform(): string {
@@ -340,12 +544,16 @@ export function registerUpgradeCommand(program: Command): void {
           // than the temp dir so the swap is a same-filesystem rename.
           const stagingDir = join(IX_HOME, `.cli-staging-${process.pid}`);
           const cleanupStaging = () => {
-            rmSync(stagingDir, { recursive: true, force: true });
-            rmSync(tmpDirRaw, { recursive: true, force: true });
+            rmQuiet(stagingDir);
+            rmQuiet(tmpDirRaw);
           };
 
+          // Reclaim anything an interrupted upgrade left behind, and put the
+          // install back if a previous run died between the two renames.
+          sweepUpgradeOrphans(IX_HOME, installDir);
+
           try {
-            rmSync(stagingDir, { recursive: true, force: true });
+            rmQuiet(stagingDir);
             mkdirSync(stagingDir, { recursive: true });
             if (isWindows) {
               extractZipOnWindows(tmpFile, stagingDir);
@@ -376,60 +584,64 @@ export function registerUpgradeCommand(program: Command): void {
             process.exit(1);
           }
 
+          // Actually start the staged CLI before trusting it. existsSync on
+          // main.js cannot distinguish a good tree from a truncated extraction
+          // or a tarball whose node_modules is missing a lazily-required
+          // module — and the working install is about to be deleted, so this is
+          // the last point at which that is recoverable.
+          try {
+            execFileSync(process.execPath, [stagedEntry, "--version"], {
+              stdio: ["ignore", "ignore", "pipe"],
+              timeout: 120000,
+            });
+          } catch (err) {
+            const e = err as Error & { stderr?: Buffer | string };
+            console.error("[error] The downloaded CLI did not run.");
+            console.error(`  ${String(e.stderr || "").trim() || e.message}`);
+            console.error("  Your existing install is untouched.");
+            cleanupStaging();
+            process.exit(1);
+          }
+
           // Move the old install aside rather than deleting it outright, so a
           // failure part-way through the swap can put it back instead of
           // leaving the user with nothing.
           const backupDir = join(IX_HOME, `.cli-backup-${process.pid}`);
           try {
-            rmSync(backupDir, { recursive: true, force: true });
-            if (existsSync(installDir)) renameSync(installDir, backupDir);
-            renameSync(stagingDir, installDir);
-            rmSync(backupDir, { recursive: true, force: true });
-            rmSync(tmpDirRaw, { recursive: true, force: true });
+            swapInStagedTree(installDir, stagingDir, backupDir);
           } catch (err) {
             console.error("[error] Failed to install the CLI update.");
             console.error(`  ${(err as Error).message}`);
-            // Put the previous install back if the swap left it moved aside.
-            try {
-              if (existsSync(backupDir) && !existsSync(installDir)) {
-                renameSync(backupDir, installDir);
-                console.error("  Restored your previous install.");
-              }
-            } catch { /* nothing further we can do */ }
+            if (existsSync(installDir)) {
+              console.error("  Your existing install is untouched.");
+            } else {
+              // The restore inside swapInStagedTree could not put it back.
+              // Say where the surviving copy is — otherwise the user cannot
+              // tell that the install is gone rather than merely unchanged.
+              console.error(`  Your previous install is still at: ${backupDir}`);
+              console.error(`  Rename that directory to ${installDir} to restore it, or reinstall:`);
+              console.error(
+                `  curl -fsSL https://raw.githubusercontent.com/${GITHUB_ORG}/${GITHUB_REPO}/main/scripts/install/install.sh | bash`
+              );
+            }
             cleanupStaging();
             process.exit(1);
           }
+          rmQuiet(tmpDirRaw);
 
-          // Repoint the launcher at the new install. Both shim shapes have to be
-          // handled: install.ps1 writes %IX_HOME%\bin\ix.cmd containing a
-          // *version-encoded* path into ~/.ix/cli, while install.sh (Git Bash)
-          // writes a bash shim to ~/.local/bin/ix. Only the latter was ever
-          // refreshed, so a PowerShell-installed user was left with a launcher
-          // pointing into the version directory this upgrade had just deleted.
-          if (isWindows) {
-            const installedRoot = soleChildDir(installDir) ?? installDir;
-            const entryWin = join(installedRoot, "cli", "dist", "cli", "main.js");
-
-            // The .cmd launcher install.ps1 puts on PATH.
-            try {
-              const cmdShim = join(IX_HOME, "bin", "ix.cmd");
-              mkdirSync(dirname(cmdShim), { recursive: true });
-              writeFileSync(cmdShim, `@echo off\r\nnode "${entryWin}" %*\r\n`, "ascii");
-            } catch { /* shim refresh is best-effort */ }
-
-            // The bash shim install.sh puts on PATH under Git Bash / MSYS.
-            const shimPath = join(homedir(), ".local", "bin", "ix");
-            let jsPath = entryWin;
-            try {
-              jsPath = execFileSync("cygpath", ["-u", entryWin], { encoding: "utf-8" }).trim();
-            } catch { /* use windows path */ }
-            // Write the shim directly (creating ~/.local/bin if needed) rather than
-            // existsSync-then-write, which is a TOCTOU (CodeQL js/file-system-race).
-            // jsPath derives only from the validated-semver `latest` + install dir.
-            try {
-              mkdirSync(dirname(shimPath), { recursive: true });
-              writeFileSync(shimPath, `#!/usr/bin/env bash\nexec node "${jsPath}" "$@"\n`);
-            } catch { /* shim refresh is best-effort */ }
+          // Repoint every launcher on PATH at the new install. This is not
+          // best-effort any more: the tree the old shims named has just been
+          // deleted, so a shim left stale is a CLI that no longer starts.
+          const installedRoot = (isWindows ? soleChildDir(installDir) : null) ?? installDir;
+          const shimProblems = refreshLaunchers(installDir, installedRoot, isWindows);
+          if (shimProblems.length > 0) {
+            console.error("[error] Installed the update but could not repoint the launcher:");
+            for (const p of shimProblems) console.error(`  ${p}`);
+            console.error("  Re-run the installer to repair it:");
+            console.error(
+              `  curl -fsSL https://raw.githubusercontent.com/${GITHUB_ORG}/${GITHUB_REPO}/main/scripts/install/install.sh | bash`
+            );
+            process.exit(1);
           }
 
           console.log(`[ok] Upgraded ix: ${current} → ${latest}`);
