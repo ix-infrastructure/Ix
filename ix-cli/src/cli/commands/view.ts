@@ -270,8 +270,14 @@ export function registerViewCommand(program: Command): void {
         console.error("  Expected at: $IX_HOME/cli/compass/ (installed)");
         console.error("  or: <repo>/compass/dist/ (development)");
         console.error("");
-        console.error("  The visualizer ships with the Ix release tarball.");
-        console.error("  Reinstall Ix or build system-compass locally.");
+        // Releases v0.7.0-v0.8.1 shipped an empty compass/ directory, so for
+        // most users the bundle is genuinely absent rather than misplaced.
+        // `ix upgrade` fetches it from ix-compass-dist and repairs the install.
+        console.error("  Fetch it with:  ix upgrade");
+        console.error("");
+        console.error("  The visualizer normally ships inside the Ix release tarball.");
+        console.error("  If 'ix upgrade' does not resolve it, please report the issue at");
+        console.error("  https://github.com/ix-infrastructure/Ix/issues");
         process.exit(1);
       }
 

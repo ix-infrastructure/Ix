@@ -91,6 +91,21 @@ function isNewer(latest: string, current: string): boolean {
   return false;
 }
 
+/**
+ * The compass version actually on disk.
+ *
+ * A `.version` stamp is only meaningful if the bundle it describes is really
+ * there. Installers used to write the stamp without installing anything, which
+ * made every version comparison below report "already current" and skip the
+ * download that would have fixed it — `ix view` then failed permanently. Treat
+ * a stamp with no `index.html` beside it as "not installed" so the repair path
+ * always runs.
+ */
+function getInstalledCompassVersion(): string {
+  if (!existsSync(join(COMPASS_DIR, "index.html"))) return "0.0.0";
+  return getTrackedVersion(COMPASS_VERSION_FILE);
+}
+
 function getTrackedVersion(versionFile: string): string {
   try {
     if (!existsSync(versionFile)) return "0.0.0";
@@ -119,7 +134,7 @@ export async function checkForUpdate(): Promise<void> {
 
   if (cache && Date.now() - cache.checkedAt < 3600_000) {
     const hasCliUpdate = isNewer(cache.latest, current);
-    const compassCurrent = getTrackedVersion(COMPASS_VERSION_FILE);
+    const compassCurrent = getInstalledCompassVersion();
     const hasCompassUpdate =
       cache.compassLatest && isNewer(cache.compassLatest, compassCurrent);
     const backendCurrent = getTrackedVersion(BACKEND_VERSION_FILE);
@@ -139,7 +154,7 @@ export async function checkForUpdate(): Promise<void> {
     if (!latest) return;
     writeCache(latest, compassLatest ?? undefined, backendLatest ?? undefined);
     const hasCliUpdate = isNewer(latest, current);
-    const compassCurrent = getTrackedVersion(COMPASS_VERSION_FILE);
+    const compassCurrent = getInstalledCompassVersion();
     const hasCompassUpdate =
       compassLatest && isNewer(compassLatest, compassCurrent);
     const backendCurrent = getTrackedVersion(BACKEND_VERSION_FILE);
@@ -393,7 +408,7 @@ export function registerUpgradeCommand(program: Command): void {
       }
 
       // ── Compass upgrade ──────────────────────────────────────────────
-      const compassCurrent = getTrackedVersion(COMPASS_VERSION_FILE);
+      const compassCurrent = getInstalledCompassVersion();
       if (compassLatest && isNewer(compassLatest, compassCurrent)) {
         console.log(
           `Compass update available: ${compassCurrent === "0.0.0" ? "none" : compassCurrent} → ${chalk.green(compassLatest)}`

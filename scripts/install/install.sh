@@ -873,11 +873,19 @@ fi
 # -- Stamp installed versions so upgrade checker doesn't nag --
 
 BACKEND_VER=$(resolve_backend_version)
-COMPASS_VER=$(resolve_compass_version)
 [ -n "$BACKEND_VER" ] && printf '%s' "$BACKEND_VER" > "$IX_HOME/.backend-version"
-if [ -n "$COMPASS_VER" ]; then
-  mkdir -p "$IX_HOME/cli/compass"
+
+# Only stamp compass if a compass was actually installed. Stamping unconditionally
+# created $IX_HOME/cli/compass/ containing nothing but a .version file, which made
+# `ix upgrade` believe compass was already current (it compares against this stamp)
+# and permanently skip the download that would have repaired it — so `ix view`
+# stayed broken forever. The bundle ships inside the release tarball; if it is
+# absent, leaving the stamp off lets `ix upgrade` self-heal from ix-compass-dist.
+COMPASS_VER=$(resolve_compass_version)
+if [ -n "$COMPASS_VER" ] && [ -f "$IX_HOME/cli/compass/index.html" ]; then
   printf '%s' "$COMPASS_VER" > "$IX_HOME/cli/compass/.version"
+elif [ ! -f "$IX_HOME/cli/compass/index.html" ]; then
+  warn "System Compass was not included in this build — 'ix view' is unavailable. Run 'ix upgrade' to fetch it."
 fi
 
 # -- Done --
