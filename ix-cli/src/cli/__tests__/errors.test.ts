@@ -98,20 +98,17 @@ describe("isBackendUnreachable", () => {
   });
 
   it("does not claim unreachability for a connection dropped mid-flight", () => {
-    // A backend behind an ingress that drops idle connections is up and serving.
-    // Calling that "not started" sends the user to `ix docker start` for nothing.
+    // A connection that was working and then died is a different problem with a
+    // different remedy; "start the backend" is the wrong thing to say about it.
     expect(isBackendUnreachable(midFlightFailure("ECONNRESET"))).toBe(false);
     expect(isBackendUnreachable(midFlightFailure("ETIMEDOUT"))).toBe(false);
-    // undici's "other side closed" is only ever an already-established socket.
-    expect(isBackendUnreachable(fetchFailure("UND_ERR_SOCKET"))).toBe(false);
   });
 
-  it("still claims unreachability when the connect attempt itself failed", () => {
-    // `connect ETIMEDOUT` is a SYN nobody answered — firewall, VPN off, wrong
-    // host. That user needs the guidance, so the phase is what decides, not the
-    // code alone.
-    expect(isBackendUnreachable(fetchFailure("ETIMEDOUT"))).toBe(true);
-    expect(isBackendUnreachable(fetchFailure("ECONNRESET"))).toBe(true);
+  it("claims unreachability when the port accepts but nothing serves", () => {
+    // Measured shape of a container that is still booting, or a published port
+    // with a dead container behind it: undici accepts, gets a FIN, and reports
+    // "other side closed". That user does need `ix docker start` / `ix status`.
+    expect(isBackendUnreachable(fetchFailure("UND_ERR_SOCKET"))).toBe(true);
   });
 });
 

@@ -67,8 +67,15 @@ function readCache(): VersionCache | null {
     // JSON.parse only proves it is JSON, not that it is *this* shape. A cache
     // file holding `{"latest": 123}` used to reach isNewer() and throw
     // "latest.split is not a function", which surfaced as a successful command
-    // exiting 1. Treat a malformed cache as no cache and re-fetch.
-    if (typeof parsed?.latest !== "string" || typeof parsed?.checkedAt !== "number") {
+    // exiting 1. Every field that reaches isNewer() has to be checked, not just
+    // `latest` — the optional two get there behind a bare truthiness test.
+    const optionalString = (v: unknown) => v === undefined || typeof v === "string";
+    if (
+      typeof parsed?.latest !== "string" ||
+      typeof parsed?.checkedAt !== "number" ||
+      !optionalString(parsed.compassLatest) ||
+      !optionalString(parsed.backendLatest)
+    ) {
       return null;
     }
     return parsed as VersionCache;

@@ -86,7 +86,11 @@ export function formatFetchError(err: unknown): string {
     ? e.message
     : String(err);
 
-  if (base.toLowerCase().includes("fetch failed") && e.cause) {
+  // "terminated" is what undici reports when a connection dies after the
+  // response headers — the commonest mid-flight shape, and one that carries no
+  // detail at all without this unwrap.
+  const lower = base.toLowerCase();
+  if ((lower.includes("fetch failed") || lower.includes("terminated")) && e.cause) {
     const cause = e.cause as { code?: unknown; message?: unknown };
     const parts: string[] = [];
     if (typeof cause.code === "string" && cause.code.length > 0) {
@@ -104,14 +108,22 @@ export function formatFetchError(err: unknown): string {
 }
 
 /**
- * Transport-level codes meaning "we never reached the backend at all", as
- * opposed to the backend answering with an error. Node's fetch surfaces these
- * as `TypeError: fetch failed` with the real error nested under `cause`.
+ * Transport-level codes meaning "we did not get a working backend on the other
+ * end", as opposed to the backend answering with an error. Node's fetch
+ * surfaces these as `TypeError: fetch failed` with the real error under `cause`.
  *
- * `UND_ERR_SOCKET` is deliberately absent. It is undici's "other side closed",
- * which is only ever emitted for a socket that was already established — a
- * healthy backend behind an ingress that drops idle connections produces it
- * routinely, and "start the backend" is the wrong thing to tell that user.
+ * `UND_ERR_SOCKET` ("other side closed") belongs here despite describing an
+ * established socket: measured, it is what you get from a port that accepts and
+ * then closes without answering — a container that is still booting, a dead
+ * container behind a published port, a port-forward to nothing. That user does
+ * need "start the backend, then check status".
+ *
+ * `ECONNRESET` and `ETIMEDOUT` are deliberately absent. Those are a connection
+ * that was working and then died, which is a different problem with a different
+ * remedy; they fall through to the generic path, which names the cause. The
+ * connect-phase half of `ETIMEDOUT` does not need special handling: undici's
+ * 10s connect timeout fires first and reports `UND_ERR_CONNECT_TIMEOUT`, which
+ * is already listed here.
  */
 const UNREACHABLE_CODES = new Set([
   "ECONNREFUSED",
@@ -120,23 +132,11 @@ const UNREACHABLE_CODES = new Set([
   "ENETUNREACH",
   "EAI_AGAIN",
   "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
 ]);
 
-/**
- * Codes that mean "never reached it" only when they happen during connect.
- *
- * `connect ETIMEDOUT` is a SYN nobody answered — a firewall, a VPN that is off,
- * the wrong host — and that user does need the guidance. `read ETIMEDOUT`, and
- * a reset on an established socket, are a connection that was working and then
- * died, which is not the same problem at all. Node records which phase failed
- * in `syscall`, so the two halves stay separable without parsing messages.
- */
-const CONNECT_PHASE_CODES = new Set(["ETIMEDOUT", "ECONNRESET"]);
-
-function isUnreachableCode(e: { code?: unknown; syscall?: unknown } | null | undefined): boolean {
-  if (typeof e?.code !== "string") return false;
-  if (UNREACHABLE_CODES.has(e.code)) return true;
-  return CONNECT_PHASE_CODES.has(e.code) && e.syscall === "connect";
+function isUnreachableCode(e: { code?: unknown } | null | undefined): boolean {
+  return typeof e?.code === "string" && UNREACHABLE_CODES.has(e.code);
 }
 
 /** True for an endpoint served from this machine, where `ix docker start` applies. */
@@ -188,9 +188,9 @@ function writeDebugDetail(err: unknown): void {
  * instead of an undici stack trace.
  */
 export function isBackendUnreachable(err: unknown): boolean {
-  const e = err as { code?: unknown; syscall?: unknown; cause?: unknown } | null | undefined;
+  const e = err as { code?: unknown; cause?: unknown } | null | undefined;
   if (isUnreachableCode(e)) return true;
-  return isUnreachableCode(e?.cause as { code?: unknown; syscall?: unknown } | null | undefined);
+  return isUnreachableCode(e?.cause as { code?: unknown } | null | undefined);
 }
 
 export function renderCliError(err: unknown, debug = false, endpoint?: string): void {
