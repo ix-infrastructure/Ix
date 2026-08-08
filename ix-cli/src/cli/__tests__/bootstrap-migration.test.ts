@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
+import { parse } from "yaml";
 
 import { ensureWorkspaceIdState } from "../bootstrap.js";
 import { workspaceIdForPath } from "../system.js";
@@ -27,10 +28,26 @@ afterEach(() => {
 });
 
 function writeConfig(workspaces: object[]) {
+  // workspace_id MUST be quoted. It is 8 hex chars, so ~1.6% of ids are
+  // numeric-looking to YAML — "709e7420" parses as Infinity, "01311916" as
+  // 1311916 — and loadConfig's String() normalization cannot recover the
+  // original text once the parser has coerced it. An unquoted fixture then
+  // fires a spurious migration and fails "does NOT migrate" at that rate.
+  // saveConfig (yaml.stringify) quotes these for real, so quoting here is
+  // also what makes the fixture faithful to a config the CLI actually wrote.
   const body = "endpoint: http://localhost:8090\n" +
     "workspaces:\n" +
     workspaces.map((w: any) =>
-      `  - workspace_id: ${w.workspace_id}\n    workspace_name: ${w.workspace_name}\n    root_path: ${w.root_path}\n    default: ${w.default ?? false}\n`).join("");
+      `  - workspace_id: "${w.workspace_id}"\n    workspace_name: ${w.workspace_name}\n    root_path: ${w.root_path}\n    default: ${w.default ?? false}\n`).join("");
+
+  // Enforce it rather than trusting the template: an unquoted id reintroduces
+  // a 1-in-60 heisenbug, and this turns that into a deterministic failure.
+  const parsed = parse(body) as { workspaces?: { workspace_id: unknown }[] };
+  (parsed.workspaces ?? []).forEach((w, i) => {
+    expect(typeof w.workspace_id, "workspace_id must survive YAML as a string").toBe("string");
+    expect(w.workspace_id).toBe((workspaces[i] as any).workspace_id);
+  });
+
   fs.writeFileSync(nodePath.join(home, ".ix", "config.yaml"), body);
 }
 
