@@ -32,9 +32,33 @@
 
 <br/>
 
----
+## Sign up for Kartr
 
-<br/>
+We built Kartr on top of this technology.
+
+An agentic platform where AI agents with persistent memory work alongside you, at your job and in your day to day life.
+
+Kartr aggregates your knowledge from every source you already use:
+
+- your code and systems
+- your docs and files
+- your email and calendar
+- your meetings and notes
+- your team chat
+
+One memory, built from all of it, that your agents can reason over.
+
+Agents that remember.
+Agents that carry context across sources and sessions.
+Agents that get more useful the longer you use them.
+
+Kartr is in alpha. We're onboarding early users now.
+
+<p align="center">
+  <a href="https://docs.google.com/forms/d/e/1FAIpQLSdh5IXVGW9mNBUtyBAsP_uysS38GgilpTNMbKRAVQf1FZ1eBg/viewform?usp=pp_url&amp;entry.2087374943=ix_github" target="_blank" rel="noopener noreferrer">
+    <img src="https://img.shields.io/badge/Sign%20up%20for%20the%20Kartr%20alpha-%E2%86%92-8A2BE2?style=for-the-badge" />
+  </a>
+</p>
 
 ## Problem
 Running out of tokens while developing?
