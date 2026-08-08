@@ -82,6 +82,14 @@ describe("isBackendUnreachable", () => {
     expect(isBackendUnreachable(undefined)).toBe(false);
     expect(isBackendUnreachable("a string")).toBe(false);
   });
+
+  it("does not claim unreachability for a connection dropped mid-flight", () => {
+    // A healthy backend behind the k8s ingress resets idle connections — see the
+    // 5-minute signal in client/api.ts. Calling that "backend not started" sends
+    // the user to `ix docker start` for a backend that is up and serving.
+    expect(isBackendUnreachable(fetchFailure("ECONNRESET"))).toBe(false);
+    expect(isBackendUnreachable(fetchFailure("ETIMEDOUT"))).toBe(false);
+  });
 });
 
 describe("renderCliError", () => {
@@ -135,6 +143,33 @@ describe("renderCliError", () => {
     err.stack = "TypeError: fetch failed\n    at node:internal/deps/undici/undici:14976:13";
     expect(capture(() => renderCliError(err, false, "http://x")).out).not.toContain("node:internal");
     expect(capture(() => renderCliError(err, true, "http://x")).out).toContain("node:internal");
+  });
+
+  it("does not tell a remote user to start Docker", () => {
+    // Pro syncs config.endpoint to a cloud instance; `ix docker start` cannot
+    // fix that endpoint and starts a backend the user is not pointed at.
+    const { out } = capture(() =>
+      renderCliError(fetchFailure("ECONNREFUSED"), false, "https://prod.cloud.ix-infra.com"),
+    );
+    expect(out).toContain("Ix backend not reachable at https://prod.cloud.ix-infra.com");
+    expect(out).not.toContain("ix docker start");
+    expect(out).toContain("ix config get endpoint");
+  });
+
+  it("keeps the docker remedy for a loopback endpoint", () => {
+    const { out } = capture(() =>
+      renderCliError(fetchFailure("ECONNREFUSED"), false, "http://127.0.0.1:8090"),
+    );
+    expect(out).toContain("ix docker start");
+  });
+
+  it("shows the cause chain in debug mode when the error carries no stack", () => {
+    // The case this module exists for: Node's fetch TypeError loses its frames
+    // across the async boundary, so `err.stack` alone renders nothing useful.
+    const err = fetchFailure("ECONNREFUSED");
+    err.stack = undefined;
+    const { out } = capture(() => renderCliError(err, true, "http://localhost:8090"));
+    expect(out).toContain("ECONNREFUSED");
   });
 
   it("does not throw on null or undefined", () => {

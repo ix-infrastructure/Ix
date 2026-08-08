@@ -86,7 +86,12 @@ registerOssCommands(program);
   // Check for updates (non-blocking, cached 1hr) — skip for upgrade command itself
   const args = process.argv.slice(2);
   if (args[0] !== "upgrade") {
-    checkForUpdate();
+    // Deliberately not awaited — but it must still be caught here. The catch
+    // inside checkForUpdate only guards its inner fetch chain; the function's
+    // own promise covers the synchronous cached-read path, and a corrupt
+    // ~/.ix/.version-check.json makes that throw. Uncaught, the new
+    // unhandledRejection handler then aborts a command that already succeeded.
+    checkForUpdate().catch(() => {});
   }
 
   // parseAsync (not parse) so rejections from async action handlers surface

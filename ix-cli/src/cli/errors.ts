@@ -1,4 +1,5 @@
 import chalk from "chalk";
+import { inspect } from "util";
 
 /**
  * Structured error with user-facing message and optional next-step guidance.
@@ -107,18 +108,42 @@ export function formatFetchError(err: unknown): string {
  * Transport-level codes meaning "we never reached the backend at all", as
  * opposed to the backend answering with an error. Node's fetch surfaces these
  * as `TypeError: fetch failed` with the real error nested under `cause`.
+ *
+ * Deliberately excludes `ECONNRESET` and `ETIMEDOUT`: those mean the connection
+ * died mid-flight, which a perfectly healthy backend does routinely — see
+ * `client/api.ts`, which sets a 5-minute signal precisely because the k8s
+ * ingress closes idle connections. Treating them as "never started" would tell
+ * someone whose long `ix map` was reset by the ingress to go start Docker.
+ * They fall through to the generic path, which names the transport cause.
  */
 const UNREACHABLE_CODES = new Set([
   "ECONNREFUSED",
-  "ECONNRESET",
   "ENOTFOUND",
   "EHOSTUNREACH",
   "ENETUNREACH",
-  "ETIMEDOUT",
   "EAI_AGAIN",
   "UND_ERR_CONNECT_TIMEOUT",
   "UND_ERR_SOCKET",
 ]);
+
+/** True for an endpoint served from this machine, where `ix docker start` applies. */
+function isLocalEndpoint(endpoint?: string): boolean {
+  if (!endpoint) return true; // unresolved endpoint defaults to the local install
+  return /^\w+:\/\/(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)(:\d+)?(\/|$)/i.test(endpoint);
+}
+
+/**
+ * Under IX_DEBUG, print the error *and its cause chain*.
+ *
+ * `err.stack` alone is empty for the very case this module exists to handle:
+ * Node's fetch rejects with a `TypeError: fetch failed` whose frames are lost
+ * across the async boundary, so the whole diagnostic — ECONNREFUSED vs
+ * ENOTFOUND vs a TLS failure — lives in `err.cause`. Printing only the stack
+ * meant `IX_DEBUG=1` emitted one useless line for a backend-down error.
+ */
+function writeDebugDetail(err: unknown): void {
+  process.stderr.write(chalk.dim(`${inspect(err, { depth: 4 })}\n`));
+}
 
 /**
  * True when the error is a failure to reach the backend at all. This is by far
@@ -151,20 +176,21 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string): 
     renderStructuredError({
       error: "backend_unreachable",
       message: `Ix backend not reachable${endpoint ? ` at ${endpoint}` : ""}.`,
-      next: "Start it with `ix docker start`, then check `ix status`.",
+      // `ix docker start` only fixes a backend this machine is supposed to run.
+      // Pro points `config.endpoint` at a cloud instance, where that advice is
+      // both useless and actively wrong — it starts a backend you aren't using.
+      next: isLocalEndpoint(endpoint)
+        ? "Start it with `ix docker start`, then check `ix status`."
+        : "Check your network, and that the endpoint is right (`ix config get endpoint`).",
     });
-    if (debug && e?.stack) {
-      process.stderr.write(chalk.dim(`${e.stack}\n`));
-    }
+    if (debug) writeDebugDetail(err);
     process.exit(1);
   }
 
   const structured = typeof e?.message === "string" ? parseBackendError(e.message) : null;
   if (structured) {
     renderStructuredError(structured);
-    if (debug && e?.stack) {
-      process.stderr.write(chalk.dim(`${e.stack}\n`));
-    }
+    if (debug) writeDebugDetail(err);
     process.exit(1);
   }
 
@@ -173,9 +199,7 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string): 
   const msg = err === null || err === undefined ? String(err) : formatFetchError(err);
   process.stderr.write(chalk.red(`Error: ${msg}\n`));
 
-  if (debug && e?.stack) {
-    process.stderr.write(chalk.dim(`${e.stack}\n`));
-  }
+  if (debug) writeDebugDetail(err);
 
   process.exit(1);
 }
