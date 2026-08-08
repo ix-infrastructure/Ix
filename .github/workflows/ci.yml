@@ -25,6 +25,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # A raw NUL byte makes a file "binary" to grep/ripgrep, which then skips it
+      # silently — including `ix text`, which shells out to rg. Two of the
+      # largest sources in this repo carried them and were invisible to search.
+      # Needs no toolchain, so it runs first and fails in seconds.
+      - name: No raw NUL bytes in tracked sources
+        run: |
+          status=0
+          for f in $(git ls-files '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs'); do
+            n=$(tr -dc '\000' < "$f" | wc -c)
+            if [ "$n" -gt 0 ]; then
+              echo "::error file=$f::$n raw NUL byte(s) — use the \\x00 escape instead; a raw NUL makes this file binary to grep/ripgrep, which silently skips it"
+              status=1
+            fi
+          done
+          exit $status
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"

@@ -508,7 +508,7 @@ function extractJsExportPublicNames(rootNode: any): ExportPublicName[] {
           const local = localN.text;
           const pub = pubN && pubN.text ? pubN.text : local;
           if (pub !== local) {
-            const k = `${local} ${pub}`;
+            const k = `${local}\x00${pub}`;
             if (!seen.has(k)) { seen.add(k); out.push({ local, public: pub }); }
           }
         }
@@ -518,7 +518,7 @@ function extractJsExportPublicNames(rootNode: any): ExportPublicName[] {
         const nameNode = (decl.childForFieldName && decl.childForFieldName('name')) || decl.namedChild(0);
         const nm = nameNode?.text;
         if (nm) {
-          const k = `${nm} default`;
+          const k = `${nm}\x00default`;
           if (!seen.has(k)) { seen.add(k); out.push({ local: nm, public: 'default' }); }
         }
       }
@@ -1193,7 +1193,7 @@ function parseLatexFile(filePath: string, source: string): FileParseResult {
       const envName = (args[0] ?? '').trim();
       if (envName) {
         const cont = container();
-        const key = `${cont} ${envName}`;
+        const key = `${cont}\x00${envName}`;
         if (!seenEnv.has(key)) {
           seenEnv.add(key);
           entities.push({ name: envName, kind: 'environment', lineStart: line, lineEnd: line, language, container: cont === fileName ? undefined : cont });

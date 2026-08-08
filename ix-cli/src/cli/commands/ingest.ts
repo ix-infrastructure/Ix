@@ -541,7 +541,7 @@ export async function ingestFiles(
         const pkg = specToPkg(typeof rel.importRaw === 'string' ? rel.importRaw : rel.dstName);
         if (!pkg || !stitchProdDeps.has(pkg)) continue;
         const consumerNodeId = fileNodeId(workspaceId, p.filePath);
-        const k = `${pkg} ${consumerNodeId}`;
+        const k = `${pkg}\u0000${consumerNodeId}`;
         if (stitchConsumeSeen.has(k)) continue;
         stitchConsumeSeen.add(k);
         stitchConsumes.push({ name: pkg, consumerNodeId });
@@ -1299,7 +1299,7 @@ export async function ingestFiles(
           const def = stitchDefs.get(a.local);
           if (!def) continue;
           const nodeId = symbolNodeId(workspaceId, def.filePath, def.qk);
-          const ek = `${a.pub} ${nodeId}`;
+          const ek = `${a.pub}\u0000${nodeId}`;
           if (stitchExportAliasSeen.has(ek)) continue;
           stitchExportAliasSeen.add(ek);
           stitchExports.push({ name: a.pub, nodeId });
@@ -1327,7 +1327,7 @@ export async function ingestFiles(
             if (stitchDefs.has(c.symbol)) continue;
           }
           const callerNodeId = symbolNodeId(workspaceId, callerDef.filePath, callerDef.qk);
-          const sk = `${symbol} ${pkg ?? ''} ${callerNodeId}`;
+          const sk = `${symbol}\u0000${pkg ?? ''}\u0000${callerNodeId}`;
           if (symbolConsumeSeen.has(sk)) continue;
           symbolConsumeSeen.add(sk);
           symbolConsumes.push({ symbol, callerNodeId, pkg });
