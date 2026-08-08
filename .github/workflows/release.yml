@@ -193,6 +193,29 @@ jobs:
           npm run build
           npm version "$VERSION" --no-git-tag-version --allow-same-version
 
+      # Drop the build toolchain before anything reads node_modules. `npm run
+      # build` above has already consumed it, and every later step only copies
+      # or scans files, so nothing downstream needs it.
+      #
+      # --omit=dev keeps `dependencies` AND `optionalDependencies`, so all 27
+      # tree-sitter grammars (13 required + 14 optional) survive — they are
+      # genuine runtime deps and the parser is useless without them. Only
+      # devDependencies go.
+      #
+      # This also fixes the SBOM below, which scans `ix-cli` and until now
+      # described the build toolchain as shipped content.
+      - name: Prune dev dependencies before packaging
+        run: |
+          size() { du -sm "$1" 2>/dev/null | cut -f1 | head -1; }
+          before_cli=$(size ix-cli/node_modules)
+          before_ing=$(size core-ingestion/node_modules)
+          (cd ix-cli && npm prune --omit=dev)
+          (cd core-ingestion && npm prune --omit=dev)
+          echo "ix-cli/node_modules:         ${before_cli:-?} MB -> $(size ix-cli/node_modules) MB"
+          echo "core-ingestion/node_modules: ${before_ing:-?} MB -> $(size core-ingestion/node_modules) MB"
+          # The CLI must still start from the pruned tree, or the tarball ships broken.
+          node ix-cli/dist/cli/main.js --version
+
       # The compass job does not run on PR dry-runs, so the artifact is legitimately
       # absent there. continue-on-error covers only that case; a real release
       # asserts the bundle is present in the packaging step below.
