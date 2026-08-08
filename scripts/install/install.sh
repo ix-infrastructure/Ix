@@ -886,6 +886,25 @@ if [ ! -x "$IX_BIN/ix" ] || [ "$(check_installed_version)" != "$VERSION" ]; then
   TMP_DIR=$(mktemp -d)
   TMP_FILE="$TMP_DIR/${TARBALL_NAME}"
 
+  # Intel Macs have no pre-built asset and never will on the current release
+  # matrix — darwin-amd64 is deliberately omitted because the macos-13 runners
+  # queue indefinitely. Say so up front rather than letting the download 404 and
+  # then blaming a missing upload. Homebrew is a real answer here: the formula
+  # builds from source and carries no architecture restriction.
+  if [ "$PLATFORM" = "darwin-amd64" ]; then
+    rm -rf "$TMP_DIR"
+    echo ""
+    warn "Ix does not publish a pre-built CLI for Intel Macs (darwin-amd64)."
+    echo ""
+    echo "  Install with Homebrew instead — it builds from source and works on Intel:"
+    echo "    brew tap ${GITHUB_ORG}/ix https://github.com/${GITHUB_ORG}/${GITHUB_REPO}"
+    echo "    brew install ix"
+    echo ""
+    echo "  Apple Silicon Macs are supported by this installer directly."
+    echo ""
+    err "No darwin-amd64 release asset. Use Homebrew (above)."
+  fi
+
   echo "  Downloading ix CLI v${VERSION} for ${PLATFORM}..."
   echo "  URL: $TARBALL_URL"
   if ! _download "$TARBALL_URL" "$TMP_FILE" 2>/dev/null; then
@@ -898,9 +917,9 @@ if [ ! -x "$IX_BIN/ix" ] || [ "$(check_installed_version)" != "$VERSION" ]; then
     echo "  Check available releases at:"
     echo "    https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/releases"
     echo ""
-    echo "  Or build from source:"
-    echo "    git clone https://github.com/${GITHUB_ORG}/${GITHUB_REPO}.git"
-    echo "    cd ${GITHUB_REPO} && ./setup.sh"
+    echo "  Or install with Homebrew, which builds from source:"
+    echo "    brew tap ${GITHUB_ORG}/ix https://github.com/${GITHUB_ORG}/${GITHUB_REPO}"
+    echo "    brew install ix"
     echo ""
     err "CLI download failed. See above for alternatives."
   fi

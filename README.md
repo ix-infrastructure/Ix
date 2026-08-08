@@ -157,7 +157,10 @@ The install script sets up everything for you on macOS and Linux. It checks for 
 
 All you need beforehand is a terminal with `curl` (or `wget`). On Windows, install Node.js 22+ and Docker Desktop first, then run the installer.
 
-Works on macOS, Linux, and Windows, on both x86-64 and arm64.
+Works on macOS, Linux, and Windows. Pre-built CLI packages are published for
+Apple Silicon macOS, Linux (x86-64 and arm64) and Windows x86-64. **Intel Macs**
+have no pre-built package — install with Homebrew, which builds from
+source: `brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/Ix && brew install ix`.
 
 For the full list, including the endpoints the installer reaches and the directories it creates, see [docs/prerequisites.md](docs/prerequisites.md).
 
