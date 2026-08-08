@@ -191,7 +191,7 @@ backend not being up yet:
 ```bash
 ix status          # is the backend reachable?
 ix docker start    # start the backend (ArangoDB + memory layer)
-ix doctor          # check the whole install and report what is wrong
+ix doctor          # check system health — server, database, graph integrity
 ```
 
 If a command reports `Ix backend not reachable`, run `ix docker start` and try again.
