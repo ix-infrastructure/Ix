@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { execFileSync } from "child_process";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, mkdtempSync, lstatSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, mkdtempSync, lstatSync, renameSync, readdirSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { homedir, tmpdir } from "os";
@@ -127,6 +127,70 @@ function getTrackedVersion(versionFile: string): string {
     return readFileSync(versionFile, "utf-8").trim() || "0.0.0";
   } catch {
     return "0.0.0";
+  }
+}
+
+/**
+ * Extract a .zip on Windows, trying every extractor a Windows box might have.
+ *
+ * This used to call `unzip` alone, which is NOT present on stock Windows — it
+ * only exists if the user happens to have Git Bash or MSYS. Combined with the
+ * install directory being deleted before extraction, a missing `unzip` removed
+ * the user's CLI and installed nothing in its place.
+ *
+ * Order matters: bsdtar ships with Windows 10 1803+ and reads zip archives, so
+ * it is both the most likely to exist and the fastest. PowerShell is always
+ * present. `unzip` stays last for MSYS shells where it may be the only one.
+ */
+function extractZipOnWindows(zipPath: string, destDir: string): void {
+  const toUnixPath = (p: string): string => {
+    try {
+      return execFileSync("cygpath", ["-u", p], { encoding: "utf-8" }).trim();
+    } catch {
+      return p;
+    }
+  };
+
+  // PowerShell single-quoted strings escape a quote by doubling it.
+  const psQuote = (p: string): string => `'${p.replace(/'/g, "''")}'`;
+
+  const attempts: Array<{ cmd: string; args: string[] }> = [
+    { cmd: "tar", args: ["-xf", zipPath, "-C", destDir] },
+    {
+      cmd: "powershell",
+      args: [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `Expand-Archive -LiteralPath ${psQuote(zipPath)} -DestinationPath ${psQuote(destDir)} -Force`,
+      ],
+    },
+    { cmd: "unzip", args: ["-q", toUnixPath(zipPath), "-d", toUnixPath(destDir)] },
+  ];
+
+  const failures: string[] = [];
+  for (const { cmd, args } of attempts) {
+    try {
+      execFileSync(cmd, args, { stdio: "ignore" });
+      return;
+    } catch (err) {
+      failures.push(`${cmd}: ${(err as Error).message}`);
+    }
+  }
+  throw new Error(`no usable zip extractor found (${failures.join("; ")})`);
+}
+
+/**
+ * The single top-level directory an archive extracted into, if there is exactly
+ * one. Windows release zips nest everything under `ix-<version>-<platform>/`,
+ * and reading it back beats assuming the name — the shim has to point inside it.
+ */
+export function soleChildDir(dir: string): string | null {
+  try {
+    const entries = readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory());
+    return entries.length === 1 && entries[0] ? join(dir, entries[0].name) : null;
+  } catch {
+    return null;
   }
 }
 
@@ -266,38 +330,98 @@ export function registerUpgradeCommand(program: Command): void {
           }
 
           console.log("Installing...");
+
+          // Extract into a staging directory beside the install, verify the
+          // result actually runs, and only then swap it in. The previous order
+          // was rmSync(installDir) *first*, so any extraction failure left the
+          // user with no CLI at all — and on Windows that failure was the
+          // default case, because the extractor it called (`unzip`) is not
+          // present on a stock Windows box. Staging lives under IX_HOME rather
+          // than the temp dir so the swap is a same-filesystem rename.
+          const stagingDir = join(IX_HOME, `.cli-staging-${process.pid}`);
+          const cleanupStaging = () => {
+            rmSync(stagingDir, { recursive: true, force: true });
+            rmSync(tmpDirRaw, { recursive: true, force: true });
+          };
+
           try {
-            rmSync(installDir, { recursive: true, force: true });
-            mkdirSync(installDir, { recursive: true });
+            rmSync(stagingDir, { recursive: true, force: true });
+            mkdirSync(stagingDir, { recursive: true });
             if (isWindows) {
-              let unixTmpFile = tmpFile;
-              let unixInstallDir = installDir;
-              try {
-                unixTmpFile = execFileSync("cygpath", ["-u", tmpFile], { encoding: "utf-8" }).trim();
-                unixInstallDir = execFileSync("cygpath", ["-u", installDir], { encoding: "utf-8" }).trim();
-              } catch { /* use as-is */ }
-              execFileSync("unzip", ["-q", unixTmpFile, "-d", unixInstallDir], { stdio: "ignore" });
+              extractZipOnWindows(tmpFile, stagingDir);
             } else {
               execFileSync(
                 "tar",
-                ["-xzf", tmpFile, "-C", installDir, "--strip-components=1"],
+                ["-xzf", tmpFile, "-C", stagingDir, "--strip-components=1"],
                 { stdio: "ignore" }
               );
             }
-            rmSync(tmpDirRaw, { recursive: true, force: true });
-          } catch {
+          } catch (err) {
             console.error("[error] Failed to extract CLI update.");
-            rmSync(tmpDirRaw, { recursive: true, force: true });
+            console.error(`  ${(err as Error).message}`);
+            console.error("  Your existing install is untouched.");
+            cleanupStaging();
             process.exit(1);
           }
 
-          // On Windows, update the shim to point to the new versioned directory
-          if (isWindows) {
-            const shimPath = join(homedir(), ".local", "bin", "ix");
-            const jsPathWin = join(installDir, `ix-${latest}-${platform}`, "cli", "dist", "cli", "main.js");
-            let jsPath = jsPathWin;
+          // Windows zips nest under ix-<version>-<platform>/; POSIX tarballs are
+          // already flattened by --strip-components. Resolve either shape.
+          const stagedRoot = isWindows ? (soleChildDir(stagingDir) ?? stagingDir) : stagingDir;
+          const stagedEntry = join(stagedRoot, "cli", "dist", "cli", "main.js");
+          if (!existsSync(stagedEntry)) {
+            console.error("[error] Downloaded archive did not contain the expected CLI entry point.");
+            console.error(`  Expected: ${stagedEntry}`);
+            console.error("  Your existing install is untouched.");
+            cleanupStaging();
+            process.exit(1);
+          }
+
+          // Move the old install aside rather than deleting it outright, so a
+          // failure part-way through the swap can put it back instead of
+          // leaving the user with nothing.
+          const backupDir = join(IX_HOME, `.cli-backup-${process.pid}`);
+          try {
+            rmSync(backupDir, { recursive: true, force: true });
+            if (existsSync(installDir)) renameSync(installDir, backupDir);
+            renameSync(stagingDir, installDir);
+            rmSync(backupDir, { recursive: true, force: true });
+            rmSync(tmpDirRaw, { recursive: true, force: true });
+          } catch (err) {
+            console.error("[error] Failed to install the CLI update.");
+            console.error(`  ${(err as Error).message}`);
+            // Put the previous install back if the swap left it moved aside.
             try {
-              jsPath = execFileSync("cygpath", ["-u", jsPathWin], { encoding: "utf-8" }).trim();
+              if (existsSync(backupDir) && !existsSync(installDir)) {
+                renameSync(backupDir, installDir);
+                console.error("  Restored your previous install.");
+              }
+            } catch { /* nothing further we can do */ }
+            cleanupStaging();
+            process.exit(1);
+          }
+
+          // Repoint the launcher at the new install. Both shim shapes have to be
+          // handled: install.ps1 writes %IX_HOME%\bin\ix.cmd containing a
+          // *version-encoded* path into ~/.ix/cli, while install.sh (Git Bash)
+          // writes a bash shim to ~/.local/bin/ix. Only the latter was ever
+          // refreshed, so a PowerShell-installed user was left with a launcher
+          // pointing into the version directory this upgrade had just deleted.
+          if (isWindows) {
+            const installedRoot = soleChildDir(installDir) ?? installDir;
+            const entryWin = join(installedRoot, "cli", "dist", "cli", "main.js");
+
+            // The .cmd launcher install.ps1 puts on PATH.
+            try {
+              const cmdShim = join(IX_HOME, "bin", "ix.cmd");
+              mkdirSync(dirname(cmdShim), { recursive: true });
+              writeFileSync(cmdShim, `@echo off\r\nnode "${entryWin}" %*\r\n`, "ascii");
+            } catch { /* shim refresh is best-effort */ }
+
+            // The bash shim install.sh puts on PATH under Git Bash / MSYS.
+            const shimPath = join(homedir(), ".local", "bin", "ix");
+            let jsPath = entryWin;
+            try {
+              jsPath = execFileSync("cygpath", ["-u", entryWin], { encoding: "utf-8" }).trim();
             } catch { /* use windows path */ }
             // Write the shim directly (creating ~/.local/bin if needed) rather than
             // existsSync-then-write, which is a TOCTOU (CodeQL js/file-system-race).
