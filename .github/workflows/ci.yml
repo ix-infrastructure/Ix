@@ -30,15 +30,28 @@ jobs:
       # largest sources in this repo carried them and were invisible to search.
       # Needs no toolchain, so it runs first and fails in seconds.
       - name: No raw NUL bytes in tracked sources
+        # `shell: bash` for -o pipefail: without it the `tr | wc` pipeline below
+        # reports wc's exit status, so a failed read would score as "0 NULs".
+        shell: bash
         run: |
           status=0
-          for f in $(git ls-files '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs'); do
+          checked=0
+          # -z / read -d '': a path containing a space would otherwise word-split,
+          # the redirect would fail, and `wc -c` would still print 0 — passing the
+          # file as clean. A guard against silent skipping must not skip silently.
+          while IFS= read -r -d '' f; do
+            checked=$((checked + 1))
             n=$(tr -dc '\000' < "$f" | wc -c)
             if [ "$n" -gt 0 ]; then
               echo "::error file=$f::$n raw NUL byte(s) — use the \\x00 escape instead; a raw NUL makes this file binary to grep/ripgrep, which silently skips it"
               status=1
             fi
-          done
+          done < <(git ls-files -z '*.ts' '*.tsx' '*.mts' '*.cts' '*.js' '*.jsx' '*.mjs' '*.cjs')
+          if [ "$checked" -eq 0 ]; then
+            echo "::error::NUL-byte guard matched no files — the pathspecs or working directory are wrong, so this check is protecting nothing"
+            exit 1
+          fi
+          echo "checked $checked tracked sources"
           exit $status
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
