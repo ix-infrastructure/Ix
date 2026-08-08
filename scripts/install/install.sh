@@ -881,11 +881,19 @@ BACKEND_VER=$(resolve_backend_version)
 # and permanently skip the download that would have repaired it — so `ix view`
 # stayed broken forever. The bundle ships inside the release tarball; if it is
 # absent, leaving the stamp off lets `ix upgrade` self-heal from ix-compass-dist.
+# This tests the path the CLI actually reads (COMPASS_DIR in upgrade.ts,
+# findCompassDist in view.ts), not wherever the archive happened to extract.
+# Those differ on Windows: the zip is expanded without stripping its top-level
+# directory, so a bundled compass lands in cli/ix-<version>-windows-amd64/ and
+# the CLI cannot see it. Do not "fix" this by pointing at that path — stamping a
+# version for a bundle `ix view` will never find re-creates the poisoned stamp
+# this change exists to remove. Leaving it unstamped lets `ix upgrade` install a
+# copy where the CLI does look.
 COMPASS_VER=$(resolve_compass_version)
 if [ -n "$COMPASS_VER" ] && [ -f "$IX_HOME/cli/compass/index.html" ]; then
   printf '%s' "$COMPASS_VER" > "$IX_HOME/cli/compass/.version"
 elif [ ! -f "$IX_HOME/cli/compass/index.html" ]; then
-  warn "System Compass was not included in this build — 'ix view' is unavailable. Run 'ix upgrade' to fetch it."
+  warn "System Compass is not installed at $IX_HOME/cli/compass — 'ix view' is unavailable until you run 'ix upgrade', which will fetch it."
 fi
 
 # -- Done --

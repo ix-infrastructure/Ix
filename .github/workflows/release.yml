@@ -78,9 +78,14 @@ jobs:
             echo "::error::COMPASS_TOKEN is not set. It is required to build System Compass from the private ix-infrastructure/system-compass repo. Add a fine-grained PAT with Contents:read on that repo as the COMPASS_TOKEN secret."
             exit 1
           fi
-          # Never interpolate the token into a traceable command.
+          # Do not pipe this clone through a redaction filter. This job runs on
+          # the runner's default `bash -e {0}`, which has no `pipefail`, so the
+          # pipeline would exit with the filter's status (0) and the guard below
+          # could never fire — the failure would surface as a confusing `cd:
+          # system-compass: No such file or directory` two lines down instead of
+          # the message telling you to rotate the token. The runner already masks
+          # `secrets.*` in log output, so the token in this URL is redacted anyway.
           git clone "https://x-access-token:${COMPASS_TOKEN}@github.com/ix-infrastructure/system-compass.git" 2>&1 \
-            | sed "s/${COMPASS_TOKEN}/***/g" \
             || {
               echo "::error::Could not clone ix-infrastructure/system-compass. COMPASS_TOKEN is set but was rejected — it is most likely expired or lacks Contents:read on that repo. Rotate it and re-run."
               exit 1

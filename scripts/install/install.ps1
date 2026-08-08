@@ -203,13 +203,21 @@ if ($BackendVer) {
 # `ix upgrade` believe compass was already current (it compares against this stamp)
 # and permanently skip the download that would have repaired it — so `ix view`
 # stayed broken forever.
+#
+# This tests the path the CLI actually reads (COMPASS_DIR in upgrade.ts,
+# findCompassDist in view.ts), not where the archive extracted. They differ here:
+# Expand-Archive has no --strip-components, so a bundled compass lands in
+# cli\ix-<version>-windows-amd64\compass\ and the CLI cannot see it. Do not
+# "fix" this by pointing at that path — stamping a version for a bundle
+# `ix view` will never find re-creates the poisoned stamp this change removes.
+# Leaving it unstamped lets `ix upgrade` install a copy where the CLI looks.
 $CompassVer = Get-CompassLatestVersion
 $CompassDir = Join-Path $IxHome "cli\compass"
 $CompassIndex = Join-Path $CompassDir "index.html"
 if ($CompassVer -and (Test-Path $CompassIndex)) {
     [System.IO.File]::WriteAllText((Join-Path $CompassDir ".version"), $CompassVer)
 } elseif (-not (Test-Path $CompassIndex)) {
-    Write-Warn "System Compass was not included in this build — 'ix view' is unavailable. Run 'ix upgrade' to fetch it."
+    Write-Warn "System Compass is not installed at $CompassDir — 'ix view' is unavailable until you run 'ix upgrade', which will fetch it."
 }
 
 Write-Ok "CLI installed"
