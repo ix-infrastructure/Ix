@@ -19,6 +19,20 @@ function fetchFailure(code: string): Error {
 }
 
 /**
+ * The same shape for a socket that was established and then died — Node records
+ * the failing phase in `syscall`, which is what separates "never got there"
+ * from "was working, then dropped".
+ */
+function midFlightFailure(code: string): Error {
+  const err = new TypeError("fetch failed");
+  (err as { cause?: unknown }).cause = Object.assign(
+    new Error(`read ${code} 127.0.0.1:8090`),
+    { code, errno: -104, syscall: "read" },
+  );
+  return err;
+}
+
+/**
  * renderCliError writes to stderr and then exits. It reaches stderr two ways —
  * process.stderr.write directly, and console.error via renderStructuredError —
  * so both are captured here. Exit is turned into a throw so asserting on the
@@ -84,11 +98,20 @@ describe("isBackendUnreachable", () => {
   });
 
   it("does not claim unreachability for a connection dropped mid-flight", () => {
-    // A healthy backend behind the k8s ingress resets idle connections — see the
-    // 5-minute signal in client/api.ts. Calling that "backend not started" sends
-    // the user to `ix docker start` for a backend that is up and serving.
-    expect(isBackendUnreachable(fetchFailure("ECONNRESET"))).toBe(false);
-    expect(isBackendUnreachable(fetchFailure("ETIMEDOUT"))).toBe(false);
+    // A backend behind an ingress that drops idle connections is up and serving.
+    // Calling that "not started" sends the user to `ix docker start` for nothing.
+    expect(isBackendUnreachable(midFlightFailure("ECONNRESET"))).toBe(false);
+    expect(isBackendUnreachable(midFlightFailure("ETIMEDOUT"))).toBe(false);
+    // undici's "other side closed" is only ever an already-established socket.
+    expect(isBackendUnreachable(fetchFailure("UND_ERR_SOCKET"))).toBe(false);
+  });
+
+  it("still claims unreachability when the connect attempt itself failed", () => {
+    // `connect ETIMEDOUT` is a SYN nobody answered — firewall, VPN off, wrong
+    // host. That user needs the guidance, so the phase is what decides, not the
+    // code alone.
+    expect(isBackendUnreachable(fetchFailure("ETIMEDOUT"))).toBe(true);
+    expect(isBackendUnreachable(fetchFailure("ECONNRESET"))).toBe(true);
   });
 });
 
@@ -170,6 +193,17 @@ describe("renderCliError", () => {
     err.stack = undefined;
     const { out } = capture(() => renderCliError(err, true, "http://localhost:8090"));
     expect(out).toContain("ECONNREFUSED");
+  });
+
+  it("does not print arbitrary error properties in debug mode", () => {
+    // This is the process-wide boundary. Dumping every own property of whatever
+    // was thrown would put credentials into output the user pastes into an issue.
+    const err = Object.assign(new Error("boom"), {
+      request: { headers: { authorization: "Bearer sk-SECRET-TOKEN" } },
+    });
+    const { out } = capture(() => renderCliError(err, true));
+    expect(out).toContain("boom");
+    expect(out).not.toContain("sk-SECRET-TOKEN");
   });
 
   it("does not throw on null or undefined", () => {

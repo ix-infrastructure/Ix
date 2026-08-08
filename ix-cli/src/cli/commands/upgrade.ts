@@ -63,7 +63,15 @@ async function fetchLatestRelease(repo: string): Promise<string | null> {
 function readCache(): VersionCache | null {
   try {
     if (!existsSync(VERSION_CACHE)) return null;
-    return JSON.parse(readFileSync(VERSION_CACHE, "utf-8"));
+    const parsed = JSON.parse(readFileSync(VERSION_CACHE, "utf-8"));
+    // JSON.parse only proves it is JSON, not that it is *this* shape. A cache
+    // file holding `{"latest": 123}` used to reach isNewer() and throw
+    // "latest.split is not a function", which surfaced as a successful command
+    // exiting 1. Treat a malformed cache as no cache and re-fetch.
+    if (typeof parsed?.latest !== "string" || typeof parsed?.checkedAt !== "number") {
+      return null;
+    }
+    return parsed as VersionCache;
   } catch {
     return null;
   }

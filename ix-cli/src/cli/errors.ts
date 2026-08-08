@@ -1,5 +1,4 @@
 import chalk from "chalk";
-import { inspect } from "util";
 
 /**
  * Structured error with user-facing message and optional next-step guidance.
@@ -109,12 +108,10 @@ export function formatFetchError(err: unknown): string {
  * opposed to the backend answering with an error. Node's fetch surfaces these
  * as `TypeError: fetch failed` with the real error nested under `cause`.
  *
- * Deliberately excludes `ECONNRESET` and `ETIMEDOUT`: those mean the connection
- * died mid-flight, which a perfectly healthy backend does routinely — see
- * `client/api.ts`, which sets a 5-minute signal precisely because the k8s
- * ingress closes idle connections. Treating them as "never started" would tell
- * someone whose long `ix map` was reset by the ingress to go start Docker.
- * They fall through to the generic path, which names the transport cause.
+ * `UND_ERR_SOCKET` is deliberately absent. It is undici's "other side closed",
+ * which is only ever emitted for a socket that was already established — a
+ * healthy backend behind an ingress that drops idle connections produces it
+ * routinely, and "start the backend" is the wrong thing to tell that user.
  */
 const UNREACHABLE_CODES = new Set([
   "ECONNREFUSED",
@@ -123,8 +120,24 @@ const UNREACHABLE_CODES = new Set([
   "ENETUNREACH",
   "EAI_AGAIN",
   "UND_ERR_CONNECT_TIMEOUT",
-  "UND_ERR_SOCKET",
 ]);
+
+/**
+ * Codes that mean "never reached it" only when they happen during connect.
+ *
+ * `connect ETIMEDOUT` is a SYN nobody answered — a firewall, a VPN that is off,
+ * the wrong host — and that user does need the guidance. `read ETIMEDOUT`, and
+ * a reset on an established socket, are a connection that was working and then
+ * died, which is not the same problem at all. Node records which phase failed
+ * in `syscall`, so the two halves stay separable without parsing messages.
+ */
+const CONNECT_PHASE_CODES = new Set(["ETIMEDOUT", "ECONNRESET"]);
+
+function isUnreachableCode(e: { code?: unknown; syscall?: unknown } | null | undefined): boolean {
+  if (typeof e?.code !== "string") return false;
+  if (UNREACHABLE_CODES.has(e.code)) return true;
+  return CONNECT_PHASE_CODES.has(e.code) && e.syscall === "connect";
+}
 
 /** True for an endpoint served from this machine, where `ix docker start` applies. */
 function isLocalEndpoint(endpoint?: string): boolean {
@@ -140,9 +153,32 @@ function isLocalEndpoint(endpoint?: string): boolean {
  * across the async boundary, so the whole diagnostic — ECONNREFUSED vs
  * ENOTFOUND vs a TLS failure — lives in `err.cause`. Printing only the stack
  * meant `IX_DEBUG=1` emitted one useless line for a backend-down error.
+ *
+ * Walks the chain by hand rather than handing the error to `util.inspect`.
+ * This is the process-wide error boundary, and inspect prints every own
+ * property of whatever was thrown; Pro holds a tunnel JWT and a long-lived
+ * refresh token, so the day something throws an error carrying its own request
+ * we would print credentials into output the user is about to paste into an
+ * issue. Only stack, message and code are ever emitted.
  */
 function writeDebugDetail(err: unknown): void {
-  process.stderr.write(chalk.dim(`${inspect(err, { depth: 4 })}\n`));
+  const lines: string[] = [];
+  const seen = new Set<unknown>();
+  let cur: unknown = err;
+
+  while (cur !== null && cur !== undefined && !seen.has(cur)) {
+    seen.add(cur);
+    const e = cur as { stack?: unknown; message?: unknown; code?: unknown; cause?: unknown };
+    const code = typeof e.code === "string" ? `${e.code}: ` : "";
+    const body =
+      typeof e.stack === "string" && e.stack.length > 0
+        ? `${code}${e.stack}`
+        : `${code}${typeof e.message === "string" ? e.message : String(cur)}`;
+    lines.push(lines.length === 0 ? body : `  [cause] ${body}`);
+    cur = typeof cur === "object" ? e.cause : undefined;
+  }
+
+  process.stderr.write(chalk.dim(`${lines.length > 0 ? lines.join("\n") : String(err)}\n`));
 }
 
 /**
@@ -152,10 +188,9 @@ function writeDebugDetail(err: unknown): void {
  * instead of an undici stack trace.
  */
 export function isBackendUnreachable(err: unknown): boolean {
-  const e = err as { code?: unknown; cause?: unknown } | null | undefined;
-  if (typeof e?.code === "string" && UNREACHABLE_CODES.has(e.code)) return true;
-  const cause = e?.cause as { code?: unknown } | null | undefined;
-  return typeof cause?.code === "string" && UNREACHABLE_CODES.has(cause.code);
+  const e = err as { code?: unknown; syscall?: unknown; cause?: unknown } | null | undefined;
+  if (isUnreachableCode(e)) return true;
+  return isUnreachableCode(e?.cause as { code?: unknown; syscall?: unknown } | null | undefined);
 }
 
 export function renderCliError(err: unknown, debug = false, endpoint?: string): void {
