@@ -19,9 +19,12 @@ function fetchFailure(code: string): Error {
 }
 
 /**
- * The same shape for a socket that was established and then died — Node records
- * the failing phase in `syscall`, which is what separates "never got there"
- * from "was working, then dropped".
+ * The same shape for a socket that was established and then died.
+ *
+ * The classifier keys on the code alone, so as an input this differs from
+ * `fetchFailure` only in fields nothing reads. It is here to name the scenario
+ * the mid-flight codes stand for — it is not a phase discriminator, and a code
+ * moved into UNREACHABLE_CODES would not be caught by using this helper.
  */
 function midFlightFailure(code: string): Error {
   const err = new TypeError("fetch failed");
