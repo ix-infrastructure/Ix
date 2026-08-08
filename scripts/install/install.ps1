@@ -288,11 +288,18 @@ if ($BackendVer) {
     [System.IO.File]::WriteAllText((Join-Path $IxHome ".backend-version"), $BackendVer)
 }
 
+# Only stamp compass if a compass was actually installed. Stamping unconditionally
+# created a cli\compass directory containing nothing but a .version file, which made
+# `ix upgrade` believe compass was already current (it compares against this stamp)
+# and permanently skip the download that would have repaired it — so `ix view`
+# stayed broken forever.
 $CompassVer = Get-CompassLatestVersion
-if ($CompassVer) {
-    $CompassDir = Join-Path $IxHome "cli\compass"
-    New-Item -ItemType Directory -Force -Path $CompassDir | Out-Null
+$CompassDir = Join-Path $IxHome "cli\compass"
+$CompassIndex = Join-Path $CompassDir "index.html"
+if ($CompassVer -and (Test-Path $CompassIndex)) {
     [System.IO.File]::WriteAllText((Join-Path $CompassDir ".version"), $CompassVer)
+} elseif (-not (Test-Path $CompassIndex)) {
+    Write-Warn "System Compass was not included in this build — 'ix view' is unavailable. Run 'ix upgrade' to fetch it."
 }
 
 Write-Ok "CLI installed"
