@@ -96,12 +96,64 @@ function writeCache(latest: string, compassLatest?: string, backendLatest?: stri
   }
 }
 
-function isNewer(latest: string, current: string): boolean {
-  const l = latest.split(".").map(Number);
-  const c = current.split(".").map(Number);
+/**
+ * Split a version into its numeric release triple and its pre-release
+ * identifiers. `0.9.0-rc.1` -> `[[0,9,0], ["rc","1"]]`.
+ */
+function splitVersion(v: string): [number[], string[]] {
+  // Build metadata (`+sha`) never participates in precedence.
+  const [core = "", pre = ""] = v.split("+")[0]!.split("-", 2) as [string, string?];
+  const nums = core.split(".").map((n) => {
+    const parsed = Number(n);
+    return Number.isFinite(parsed) ? parsed : 0;
+  });
+  return [nums, pre ? pre.split(".") : []];
+}
+
+/**
+ * Is `latest` a higher version than `current`?
+ *
+ * The old implementation was `split(".").map(Number)`, which turns
+ * `0.9.0-rc.1` into `[0, 9, NaN, 1]`. Every NaN compared false and was then
+ * coerced to 0 by `(l[i] || 0)`, so `isNewer("0.9.0", "0.9.0-rc.1")` returned
+ * false: anyone running a release candidate was never told the GA shipped, and
+ * `ix upgrade` reported them already current. `0.9.0-rc.2` over `0.9.0-rc.1`
+ * failed the same way, so candidates could not even be updated to each other.
+ *
+ * Follows semver precedence: compare the release triple numerically; a version
+ * with no pre-release outranks one that has it; otherwise compare pre-release
+ * identifiers left to right, numeric ones numerically and below alphanumeric
+ * ones, and a longer identifier list wins when all preceding fields are equal.
+ */
+export function isNewer(latest: string, current: string): boolean {
+  const [lNums, lPre] = splitVersion(latest);
+  const [cNums, cPre] = splitVersion(current);
+
   for (let i = 0; i < 3; i++) {
-    if ((l[i] || 0) > (c[i] || 0)) return true;
-    if ((l[i] || 0) < (c[i] || 0)) return false;
+    const a = lNums[i] ?? 0;
+    const b = cNums[i] ?? 0;
+    if (a > b) return true;
+    if (a < b) return false;
+  }
+
+  // Same release triple. A release outranks any pre-release of itself.
+  if (lPre.length === 0 && cPre.length === 0) return false;
+  if (lPre.length === 0) return true;
+  if (cPre.length === 0) return false;
+
+  for (let i = 0; i < Math.max(lPre.length, cPre.length); i++) {
+    const a = lPre[i];
+    const b = cPre[i];
+    if (a === undefined) return false; // shorter list is lower
+    if (b === undefined) return true;
+    if (a === b) continue;
+
+    const aNum = /^\d+$/.test(a);
+    const bNum = /^\d+$/.test(b);
+    if (aNum && bNum) return Number(a) > Number(b);
+    // Numeric identifiers always rank below alphanumeric ones.
+    if (aNum !== bNum) return bNum;
+    return a > b;
   }
   return false;
 }
