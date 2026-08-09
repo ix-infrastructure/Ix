@@ -16,7 +16,12 @@ import Parser from 'tree-sitter';
 //   @tree-sitter-grammars/tree-sitter-lua   optional  type=module    -> 1
 //   tree-sitter-css                         optional  type=module    -> 1
 //   the other 11 required grammars          required  type=commonjs  -> 0
-//   every other optional grammar            optional  type=commonjs  -> 0
+//   the other 11 optional grammars          optional  type=commonjs  -> 0
+//   tree-sitter-sas                         optional  type=module    -> 0
+//                                             (full-filename main + "exports")
+//
+// The two 11s are a coincidence, not a copy-paste: 12 required grammars minus
+// c-sharp, and 14 optional minus lua, css and sas.
 //
 // So the rule is `"type": "module"` + a directory `"main"` + no `"exports"`,
 // which today means exactly c-sharp (static, below), plus css and lua (dynamic,
