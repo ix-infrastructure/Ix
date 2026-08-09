@@ -368,6 +368,99 @@ export function swapInStagedTree(installDir: string, stagingDir: string, backupD
 }
 
 /**
+ * The staged tree to install, given the directory an archive extracted into.
+ *
+ * Windows zips nest everything under `ix-<version>-<platform>/`; POSIX tarballs
+ * are already flattened by `--strip-components`. Resolve either shape.
+ */
+export function resolveStagedRoot(stagingDir: string, isWindows: boolean): string {
+  return isWindows ? (soleChildDir(stagingDir) ?? stagingDir) : stagingDir;
+}
+
+/**
+ * Install the tree staged in `stagingDir` at `installDir`.
+ *
+ * The choice of *which* directory to swap in lives here rather than at the call
+ * site, because that choice was the bug. The upgrade path resolved the staged
+ * root to read the CLI entry point out of it, then handed `swapInStagedTree`
+ * the *outer* staging directory — reproducing inside `cli\` exactly the nesting
+ * it had just seen through. COMPASS_DIR and findCompassDist read `cli\compass`
+ * and nothing else, so `ix view` broke.
+ *
+ * Keeping the composition in one function is what makes it testable. A test
+ * that resolves the staged root itself and then calls `swapInStagedTree`
+ * directly passes just as happily against the bug as against the fix, because
+ * the defect was never in either helper — it was in the line that joined them.
+ */
+export function installStagedTree(
+  installDir: string,
+  stagingDir: string,
+  backupDir: string,
+  isWindows: boolean
+): void {
+  swapInStagedTree(installDir, resolveStagedRoot(stagingDir, isWindows), backupDir);
+  // The staged root moved out from under stagingDir, so on Windows the outer
+  // directory survives the swap as an empty husk. Before the fix the swap
+  // consumed it whole and there was nothing left to clear.
+  rmQuiet(stagingDir);
+}
+
+/**
+ * Replace the installed compass with the bundle in `tarPath`.
+ *
+ * Unpack beside the live copy and swap, rather than emptying `compassDir` and
+ * extracting into the hole. The old order deleted the working compass first, so
+ * a tar that failed — the exact failure the caller now bothers to report — left
+ * no compass at all and `ix view` broken. That cost nothing while the Windows
+ * bundle sat unreachable at `cli\ix-<version>-<platform>\compass`, but
+ * install.ps1 now puts it exactly here, so the repair path would destroy the
+ * copy the install just got right.
+ *
+ * `stagingDir` and `backupDir` belong under IX_HOME so the swap is a
+ * same-filesystem rename; the OS temp dir can be on another volume.
+ *
+ * Throws with the working compass still in place.
+ */
+export function installCompassBundle(
+  tarPath: string,
+  compassDir: string,
+  stagingDir: string,
+  backupDir: string
+): void {
+  rmQuiet(stagingDir);
+  mkdirSync(stagingDir, { recursive: true });
+
+  let tarFile = tarPath;
+  let tarDest = stagingDir;
+  if (process.platform === "win32") {
+    try {
+      tarFile = execFileSync("cygpath", ["-u", tarPath], { encoding: "utf-8" }).trim();
+      tarDest = execFileSync("cygpath", ["-u", stagingDir], { encoding: "utf-8" }).trim();
+    } catch { /* use as-is */ }
+  }
+  execFileSync(
+    "tar",
+    ["-xzf", tarFile, "-C", tarDest, "--strip-components=1"],
+    // Capture stderr rather than discarding it: this is the step that failed on
+    // Windows and it left nothing behind to diagnose.
+    { stdio: ["ignore", "ignore", "pipe"] }
+  );
+
+  // An extract that "succeeded" without producing index.html is not a compass.
+  // Swapping it in would replace a working bundle with one findCompassDist
+  // rejects, and the caller's version stamp would then tell `ix upgrade` never
+  // to try again — the poisoned-stamp failure both installers now avoid.
+  if (!existsSync(join(stagingDir, "index.html"))) {
+    throw new Error(`archive did not contain index.html (extracted to ${stagingDir})`);
+  }
+
+  // compassDir's parent is the install dir. It exists in every real install,
+  // but not necessarily in a dev tree that only sets IX_HOME.
+  mkdirSync(dirname(compassDir), { recursive: true });
+  swapInStagedTree(compassDir, stagingDir, backupDir);
+}
+
+/**
  * Reclaim `.cli-staging-*` / `.cli-backup-*` directories left behind by an
  * upgrade that died mid-swap, and put the install back if it is missing.
  *
@@ -675,7 +768,7 @@ export function registerUpgradeCommand(program: Command): void {
 
           // Windows zips nest under ix-<version>-<platform>/; POSIX tarballs are
           // already flattened by --strip-components. Resolve either shape.
-          const stagedRoot = isWindows ? (soleChildDir(stagingDir) ?? stagingDir) : stagingDir;
+          const stagedRoot = resolveStagedRoot(stagingDir, isWindows);
           const stagedEntry = join(stagedRoot, "cli", "dist", "cli", "main.js");
           if (!existsSync(stagedEntry)) {
             console.error("[error] Downloaded archive did not contain the expected CLI entry point.");
@@ -709,14 +802,13 @@ export function registerUpgradeCommand(program: Command): void {
           // leaving the user with nothing.
           const backupDir = join(IX_HOME, `.cli-backup-${process.pid}`);
           try {
-            // Swap in stagedRoot, not stagingDir. On Windows those differ: the
-            // zip nests under ix-<version>-<platform>/, and moving the outer
-            // directory reproduced that nesting inside cli\. Compass then sat
-            // at cli\ix-<version>-<platform>\compass while COMPASS_DIR and
-            // findCompassDist only ever read cli\compass, so `ix view` broke —
-            // and it broke *again* on the first upgrade after install.ps1 had
-            // laid the install down flat. One shape on every platform.
-            swapInStagedTree(installDir, stagedRoot, backupDir);
+            // installStagedTree owns the staged-root resolution. It swaps in the
+            // *inner* directory on Windows, so the zip's ix-<version>-<platform>/
+            // wrapper does not get reproduced inside cli\ — which is what put
+            // compass at cli\ix-<version>-<platform>\compass while COMPASS_DIR
+            // and findCompassDist only ever read cli\compass. One shape on every
+            // platform, and one function a test can hold to that.
+            installStagedTree(installDir, stagingDir, backupDir, isWindows);
           } catch (err) {
             console.error("[error] Failed to install the CLI update.");
             console.error(`  ${(err as Error).message}`);
@@ -735,10 +827,6 @@ export function registerUpgradeCommand(program: Command): void {
             cleanupStaging();
             process.exit(1);
           }
-          // stagedRoot moved out from under stagingDir, so on Windows the outer
-          // directory survives the swap as an empty husk. Previously the swap
-          // consumed it whole and there was nothing left to clear.
-          rmQuiet(stagingDir);
           rmQuiet(tmpDirRaw);
 
           // Repoint every launcher on PATH at the new install. This is not
@@ -893,6 +981,8 @@ export function registerUpgradeCommand(program: Command): void {
           // Windows investigation at the wrong half — and `tar` ran with stdio
           // "ignore", so the only step that had actually failed was also the
           // one that printed nothing at all.
+          const compassStaging = join(IX_HOME, `.compass-staging-${process.pid}`);
+          const compassBackup = join(IX_HOME, `.compass-backup-${process.pid}`);
           let stage = "download";
           try {
             execFileSync("curl", ["-fsSL", compassUrl, "-o", compassTar], {
@@ -900,30 +990,23 @@ export function registerUpgradeCommand(program: Command): void {
               timeout: 60000,
             });
             stage = "extract";
-            mkdirSync(COMPASS_DIR, { recursive: true });
-            rmSync(COMPASS_DIR, { recursive: true, force: true });
-            mkdirSync(COMPASS_DIR, { recursive: true });
-            let tarFile = compassTar;
-            let tarDest = COMPASS_DIR;
-            if (process.platform === "win32") {
-              try {
-                tarFile = execFileSync("cygpath", ["-u", compassTar], { encoding: "utf-8" }).trim();
-                tarDest = execFileSync("cygpath", ["-u", COMPASS_DIR], { encoding: "utf-8" }).trim();
-              } catch { /* use as-is */ }
-            }
-            execFileSync(
-              "tar",
-              ["-xzf", tarFile, "-C", tarDest, "--strip-components=1"],
-              // Capture stderr rather than discarding it: this is the step that
-              // failed on Windows and it left nothing behind to diagnose.
-              { stdio: ["ignore", "ignore", "pipe"] }
-            );
+            installCompassBundle(compassTar, COMPASS_DIR, compassStaging, compassBackup);
             writeFileSync(COMPASS_VERSION_FILE, compassLatest);
             console.log(`[ok] Compass upgraded to ${compassLatest}`);
           } catch (err) {
             console.error(`[!!] Compass ${stage} failed: ${describeExecFailure(err)}`);
-            console.error(`     ix view stays unavailable until this succeeds (source: ${compassUrl})`);
+            // Whether this is a degraded upgrade or a broken `ix view` depends
+            // on what survived, and only the second is worth alarming about.
+            // getInstalledCompassVersion reports "0.0.0" for a bundle with no
+            // stamp beside it, so read the disk rather than quoting a version.
+            if (existsSync(join(COMPASS_DIR, "index.html"))) {
+              console.error(`     ix view keeps working on the compass already installed (source: ${compassUrl})`);
+            } else {
+              console.error(`     ix view stays unavailable until this succeeds (source: ${compassUrl})`);
+            }
           }
+          rmQuiet(compassStaging);
+          rmQuiet(compassBackup);
           rmSync(compassTmp, { recursive: true, force: true });
         }
       } else if (compassLatest) {

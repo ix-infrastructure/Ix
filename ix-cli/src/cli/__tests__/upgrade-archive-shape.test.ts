@@ -3,7 +3,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { soleChildDir, swapInStagedTree, sweepUpgradeOrphans } from "../commands/upgrade.js";
+import {
+  installStagedTree,
+  soleChildDir,
+  swapInStagedTree,
+  sweepUpgradeOrphans,
+} from "../commands/upgrade.js";
 
 let root: string;
 
@@ -15,14 +20,20 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-// The two helpers above are each correct in isolation; the bug was in how the
-// upgrade path combined them. It resolved stagedRoot to read the CLI entry
-// point, then swapped in the *outer* staging directory, so a Windows install
-// ended up at cli\ix-<version>-windows-amd64\ — reproducing inside cli\ exactly
-// the nesting stagedRoot had just seen through. COMPASS_DIR and
+// soleChildDir and swapInStagedTree are each correct in isolation; the bug was
+// in how the upgrade path combined them. It resolved the staged root to read
+// the CLI entry point, then swapped in the *outer* staging directory, so a
+// Windows install ended up at cli\ix-<version>-windows-amd64\ — reproducing
+// inside cli\ exactly the nesting it had just seen through. COMPASS_DIR and
 // findCompassDist read cli\compass and nothing else, so `ix view` was broken on
 // every Windows install and broke again on the first upgrade after install.ps1
 // started laying the tree down flat.
+//
+// So these go through installStagedTree, which is where the upgrade path makes
+// that choice. Resolving the staged root here and calling swapInStagedTree
+// directly would pass against the bug too — the defect was never in either
+// helper, only in the line that joined them, and a test that re-derives the
+// composition cannot see it.
 describe("staged swap, as the upgrade path composes it", () => {
   function seedWindowsZipStaging(home: string, ver: string) {
     const staging = join(home, `.cli-staging-${ver}`);
@@ -38,8 +49,7 @@ describe("staged swap, as the upgrade path composes it", () => {
     const installDir = join(root, "cli");
     const staging = seedWindowsZipStaging(root, "0.9.0");
 
-    const stagedRoot = soleChildDir(staging) ?? staging;
-    swapInStagedTree(installDir, stagedRoot, join(root, ".cli-backup-1"));
+    installStagedTree(installDir, staging, join(root, ".cli-backup-1"), true);
 
     // COMPASS_DIR / findCompassDist read exactly this path.
     expect(existsSync(join(installDir, "compass", "index.html"))).toBe(true);
@@ -48,10 +58,23 @@ describe("staged swap, as the upgrade path composes it", () => {
     expect(existsSync(join(installDir, "ix-0.9.0-windows-amd64"))).toBe(false);
   });
 
+  it("clears the staging husk the inner move leaves behind", () => {
+    const installDir = join(root, "cli");
+    const staging = seedWindowsZipStaging(root, "0.9.0");
+
+    installStagedTree(installDir, staging, join(root, ".cli-backup-husk"), true);
+
+    // Moving the inner directory out leaves the outer one standing. Left in
+    // place it is a `.cli-staging-<pid>` that only the next run's sweep
+    // reclaims, and on a reused pid that sweep is what the *next* upgrade
+    // trips over.
+    expect(existsSync(staging)).toBe(false);
+  });
+
   it("keeps the launcher pointing at the install root once the tree is flat", () => {
     const installDir = join(root, "cli");
     const staging = seedWindowsZipStaging(root, "0.9.0");
-    swapInStagedTree(installDir, soleChildDir(staging) ?? staging, join(root, ".cli-backup-2"));
+    installStagedTree(installDir, staging, join(root, ".cli-backup-2"), true);
 
     // refreshLaunchers derives the shim target this way: a flat install has
     // several directories, so there is no sole child and the shim resolves to
@@ -67,12 +90,29 @@ describe("staged swap, as the upgrade path composes it", () => {
     mkdirSync(join(staging, "compass"), { recursive: true });
     writeFileSync(join(staging, "compass", "index.html"), "<!doctype html>\n");
 
-    // soleChildDir returns null here, so stagedRoot falls back to staging.
-    const stagedRoot = soleChildDir(staging) ?? staging;
-    expect(stagedRoot).toBe(staging);
-    swapInStagedTree(installDir, stagedRoot, join(root, ".cli-backup-3"));
+    // isWindows false: the staged root is the staging directory itself, so the
+    // tree is installed whole and there is no husk to clear.
+    installStagedTree(installDir, staging, join(root, ".cli-backup-3"), false);
 
     expect(existsSync(join(installDir, "compass", "index.html"))).toBe(true);
+    expect(existsSync(join(installDir, "cli", "dist", "cli", "main.js"))).toBe(true);
+  });
+
+  it("installs a Windows tree that is already flat without re-nesting it", () => {
+    // install.ps1 now lays the tree down flat, so the *next* upgrade sees a
+    // Windows staging directory with no sole child. soleChildDir returns null
+    // and the fallback has to install the staging directory itself.
+    const installDir = join(root, "cli");
+    const staging = join(root, ".cli-staging-flat");
+    mkdirSync(join(staging, "cli", "dist", "cli"), { recursive: true });
+    writeFileSync(join(staging, "cli", "dist", "cli", "main.js"), "// flat\n");
+    mkdirSync(join(staging, "compass"), { recursive: true });
+    writeFileSync(join(staging, "compass", "index.html"), "<!doctype html>\n");
+
+    installStagedTree(installDir, staging, join(root, ".cli-backup-4"), true);
+
+    expect(existsSync(join(installDir, "compass", "index.html"))).toBe(true);
+    expect(existsSync(join(installDir, "cli", "dist", "cli", "main.js"))).toBe(true);
   });
 });
 
