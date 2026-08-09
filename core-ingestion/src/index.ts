@@ -12,10 +12,11 @@ import Parser from 'tree-sitter';
 // grammar here is CJS, so almost none of them warn — measured per package in a
 // fresh process on Node 26:
 //
-//   tree-sitter-c-sharp                     type=module    -> 1 warning
-//   @tree-sitter-grammars/tree-sitter-lua   type=module    -> 1 warning
-//   tree-sitter-css                         type=module    -> 1 warning
-//   the other ten required grammars         type=commonjs  -> 0
+//   tree-sitter-c-sharp                     required  type=module    -> 1
+//   @tree-sitter-grammars/tree-sitter-lua   optional  type=module    -> 1
+//   tree-sitter-css                         optional  type=module    -> 1
+//   the other 11 required grammars          required  type=commonjs  -> 0
+//   every other optional grammar            optional  type=commonjs  -> 0
 //
 // So the rule is `"type": "module"` + a directory `"main"` + no `"exports"`,
 // which today means exactly c-sharp (static, below), plus css and lua (dynamic,
