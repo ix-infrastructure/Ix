@@ -1,5 +1,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Ix — Windows Installer (PowerShell)
+#
+# Environment:
+#   $env:IX_VERSION = "0.9.0-rc.1"   Install a specific release (default: latest
+#                                    stable; required for a release candidate)
+#   $env:IX_HOME    = "C:\ix"        Install root (default: $env:USERPROFILE\.ix)
 # ─────────────────────────────────────────────────────────────────────────────
 
 $ErrorActionPreference = "Stop"
@@ -60,6 +65,16 @@ function Get-LatestVersion {
     } catch { return "0.6.0" }
 }
 
+function Resolve-Version {
+    # Mirrors resolve_version() in install.sh, IX_VERSION included. That
+    # override is the only way to install a release candidate from either
+    # script: /releases/latest excludes prereleases by design, so the network
+    # path above always resolves to the last stable build no matter what was
+    # tagged most recently.
+    if ($env:IX_VERSION) { return $env:IX_VERSION }
+    return Get-LatestVersion
+}
+
 function Test-DockerRunning {
     $output = cmd /c "docker info 2>&1"
     if ($LASTEXITCODE -eq 0) { return $true }
@@ -91,7 +106,7 @@ function Get-CompassLatestVersion {
 
 Write-Host "`nIx Installer`n"
 
-$Version = Get-LatestVersion
+$Version = Resolve-Version
 Write-Host "Version: $Version"
 
 # ── Node ──

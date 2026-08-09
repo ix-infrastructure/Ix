@@ -298,6 +298,7 @@ jobs:
         env:
           INPUT_TAG: ${{ github.event.inputs.tag }}
           REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
           TAG="${INPUT_TAG:-$REF_NAME}"
           VERSION="${TAG#v}"
@@ -305,9 +306,47 @@ jobs:
           # A semver pre-release identifier (0.9.0-rc.1, 1.0.0-beta.2) marks this
           # as not-for-general-consumption. Everything below keys off it.
           case "$VERSION" in
-            *-*) echo "prerelease=true"  >> "$GITHUB_OUTPUT" ;;
-            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+            *-*) PRERELEASE=true  ;;
+            *)   PRERELEASE=false ;;
           esac
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+
+          # The banner that leads a release candidate's own release page.
+          #
+          # Built here rather than inline in the release body because it needs
+          # real newlines for the fenced blocks, and an Actions expression
+          # cannot produce one: `format()` strings have no escape sequences, so
+          # a `\n` in there is emitted as a literal backslash-n. Empty for a
+          # stable release, which leaves the body starting at "## Install".
+          {
+            echo "banner<<IX_BANNER_EOF"
+            if [ "$PRERELEASE" = "true" ]; then
+              cat <<EOF
+          > **Release candidate — the install commands further down will NOT give you this build.**
+          > \`/releases/latest\` deliberately excludes prereleases and still points
+          > at the last stable release, so both installers resolve to that unless
+          > you pin the version. Use one of these instead:
+          >
+          > \`\`\`bash
+          > # macOS / Linux
+          > curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install/install.sh | IX_VERSION=${VERSION} bash
+          > \`\`\`
+          >
+          > \`\`\`powershell
+          > # Windows
+          > \$env:IX_VERSION="${VERSION}"; irm https://raw.githubusercontent.com/${REPO}/main/scripts/install/install.ps1 | iex
+          > \`\`\`
+          >
+          > On the bash line \`IX_VERSION=\` must sit on \`bash\`, not on \`curl\`: an
+          > assignment prefixing \`curl\` applies to that command alone and never
+          > reaches the installer on the other side of the pipe.
+          >
+          > Homebrew cannot install a release candidate — the formula tracks
+          > stable releases only.
+          EOF
+            fi
+            echo "IX_BANNER_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Download all platform tarballs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -349,7 +388,7 @@ jobs:
           prerelease: ${{ steps.version.outputs.prerelease }}
           make_latest: ${{ steps.version.outputs.prerelease == 'true' && 'false' || 'legacy' }}
           body: |
-            ${{ steps.version.outputs.prerelease == 'true' && format('> **Release candidate — the install commands below will NOT give you this build.** `/releases/latest` still points at the last stable release, by design. Install this one with `curl -fsSL https://raw.githubusercontent.com/{0}/main/scripts/install/install.sh | IX_VERSION={1} bash` — the `IX_VERSION=` assignment must sit on `bash`, not on `curl`, because a prefix on `curl` applies only to the first command of the pipeline and never reaches the installer. The PowerShell and Homebrew paths below cannot install a release candidate at all.', github.repository, steps.version.outputs.version) || '' }}
+            ${{ steps.version.outputs.banner }}
 
             ## Install
 
