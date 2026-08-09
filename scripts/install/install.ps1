@@ -304,16 +304,18 @@ Write-Host "Extracting CLI..."
 # of the release into IX_HOME forever. The pid also keeps two concurrent runs
 # from sharing a staging directory.
 $Staging = "$IxHome\.cli-staging-$PID"
-Remove-Item -Recurse -Force $Staging -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force -LiteralPath $Staging -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Staging | Out-Null
-Expand-Archive -Path $tmp -DestinationPath $Staging -Force
+# -LiteralPath: -Path glob-expands, so a home directory containing [ or ] makes
+# these fail. extractZipOnWindows in upgrade.ts already uses it for this reason.
+Expand-Archive -LiteralPath $tmp -DestinationPath $Staging -Force
 
 # Exactly one directory, not merely the first of several — the same rule
 # soleChildDir applies in upgrade.ts. `Select-Object -First 1` would pick one
 # of several arbitrarily and could collapse the wrong tree into cli\.
-$TopDirs = @(Get-ChildItem -Path $Staging -Directory)
-if ($TopDirs.Count -ne 1 -or -not (Test-Path (Join-Path $TopDirs[0].FullName "ix.cmd"))) {
-    Remove-Item -Recurse -Force $Staging -ErrorAction SilentlyContinue
+$TopDirs = @(Get-ChildItem -LiteralPath $Staging -Directory)
+if ($TopDirs.Count -ne 1 -or -not (Test-Path -LiteralPath (Join-Path $TopDirs[0].FullName "ix.cmd"))) {
+    Remove-Item -Recurse -Force -LiteralPath $Staging -ErrorAction SilentlyContinue
     Write-Err "Extracted archive is not an ix release: expected one top-level directory containing ix.cmd, found $($TopDirs.Count). Left the existing install untouched."
 }
 $Extracted = $TopDirs[0]
@@ -323,28 +325,61 @@ $Extracted = $TopDirs[0]
 # Windows users with no CLI at all in #337.
 $Backup = "$IxHome\.cli-backup-$PID"
 
-# Clear the backup path first, exactly as swapInStagedTree does with
-# rmQuiet(backupDir). Move-Item onto an existing directory moves the source
-# *inside* it rather than renaming over it, so a stale .cli-backup-<pid> — left
-# by an earlier run that died mid-swap, on a pid Windows has since reused —
-# would turn the old install into .cli-backup-<pid>\cli. The restore below then
-# reinstates that as cli\cli\, destroying the CLI in the one situation the
-# restore exists to protect.
-Remove-Item -Recurse -Force $Backup -ErrorAction SilentlyContinue
-
-try {
-    if (Test-Path $InstallDir) { Move-Item -Path $InstallDir -Destination $Backup -Force }
-    Move-Item -Path $Extracted.FullName -Destination $InstallDir -Force
-    Remove-Item -Recurse -Force $Backup -ErrorAction SilentlyContinue
-} catch {
-    if ((Test-Path $Backup) -and -not (Test-Path $InstallDir)) {
-        Move-Item -Path $Backup -Destination $InstallDir -Force
-        Write-Warn "Restored the previous CLI after a failed update."
-    }
-    Remove-Item -Recurse -Force $Staging -ErrorAction SilentlyContinue
-    Write-Err "Could not install to $InstallDir : $($_.Exception.Message)"
+# Clear the backup path first, as swapInStagedTree does with rmQuiet(backupDir).
+# Directory::Move refuses to move onto an existing destination, so a stale
+# .cli-backup-<pid> — left by an earlier run that died mid-swap, on a pid Windows
+# has since reused — would abort the swap. Check it actually went: -ErrorAction
+# SilentlyContinue hides a removal that *failed* exactly as well as one that had
+# nothing to do, and a locked leftover would otherwise send the swap in blind.
+Remove-Item -Recurse -Force -LiteralPath $Backup -ErrorAction SilentlyContinue
+if (Test-Path -LiteralPath $Backup) {
+    Remove-Item -Recurse -Force -LiteralPath $Staging -ErrorAction SilentlyContinue
+    Write-Err "Could not clear a leftover backup at $Backup. Remove it and re-run. Left the existing install untouched."
 }
-Remove-Item -Recurse -Force $Staging -ErrorAction SilentlyContinue
+
+# [System.IO.Directory]::Move, not Move-Item.
+#
+# Move-Item on a directory falls back to a recursive copy-then-delete whenever
+# the rename cannot be done, and then throws *part way through* — leaving the
+# tree split across both paths, ix.cmd in the backup and cli\dist\cli\main.js
+# still in cli\. The restore below cannot fire in that state, because it guards
+# on `-not (Test-Path $InstallDir)` and $InstallDir still exists. So the branch
+# written to protect the user's CLI is skipped in precisely the case that
+# destroyed it, and the installer exits reporting only the lock message.
+#
+# On Windows an open handle under cli\ is routine rather than exotic: a running
+# `ix view` serving compass out of cli\compass, `ix watch` holding tree-sitter's
+# .node addons mapped for the life of the process, or Defender scanning the
+# native modules the extract just wrote.
+#
+# Directory::Move is a plain rename — it either happens or the source is left
+# untouched, and it will not move a directory *inside* an existing destination
+# the way Move-Item does. That is the atomicity swapInStagedTree gets for free
+# from fs.renameSync, and which this block only claimed to match.
+try {
+    if (Test-Path -LiteralPath $InstallDir) { [System.IO.Directory]::Move($InstallDir, $Backup) }
+    [System.IO.Directory]::Move($Extracted.FullName, $InstallDir)
+    Remove-Item -Recurse -Force -LiteralPath $Backup -ErrorAction SilentlyContinue
+} catch {
+    # Capture before the nested try below rebinds $_, and unwrap the
+    # MethodInvocationException so the message is the IO error itself rather
+    # than 'Exception calling "Move" with "2" argument(s)'.
+    $failure = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
+    if ((Test-Path -LiteralPath $Backup) -and -not (Test-Path -LiteralPath $InstallDir)) {
+        try {
+            [System.IO.Directory]::Move($Backup, $InstallDir)
+            Write-Warn "Restored the previous CLI after a failed update."
+        } catch {
+            # Name the surviving copy, the way upgrade.ts does when its own
+            # restore fails. Without this the user cannot tell that the install
+            # is gone rather than merely unchanged.
+            Write-Warn "Your previous CLI is still at $Backup — rename it to $InstallDir to restore it."
+        }
+    }
+    Remove-Item -Recurse -Force -LiteralPath $Staging -ErrorAction SilentlyContinue
+    Write-Err "Could not install to $InstallDir : $failure"
+}
+Remove-Item -Recurse -Force -LiteralPath $Staging -ErrorAction SilentlyContinue
 Write-Ok "Extraction complete"
 
 Remove-Item $tmp -Force

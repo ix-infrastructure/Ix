@@ -215,9 +215,18 @@ function getTrackedVersion(versionFile: string): string {
 export function describeExecFailure(err: unknown): string {
   if (!(err instanceof Error)) return String(err);
   const e = err as NodeJS.ErrnoException & { stderr?: Buffer | string };
-  if (e.code === "ENOENT") return `${e.message} — is it installed and on PATH?`;
+  // ENOENT on its own does not mean "no such binary" — every filesystem miss
+  // carries it too (`ENOENT: ... open '...\.version'`, syscall "open"). Only a
+  // spawn failure is a PATH problem, and advising someone to put their version
+  // file on PATH sends them nowhere. The syscall is what separates the two.
+  if (e.code === "ENOENT" && e.syscall?.startsWith("spawn")) {
+    return `${e.message} — is it installed and on PATH?`;
+  }
+  // execFileSync folds piped stderr into `message` already, so appending it
+  // unconditionally printed the command's entire complaint twice. Only reach
+  // for `.stderr` when the message did not already carry it.
   const stderr = e.stderr?.toString().trim();
-  return stderr ? `${e.message}: ${stderr}` : e.message;
+  return stderr && !e.message.includes(stderr) ? `${e.message}: ${stderr}` : e.message;
 }
 
 /**
@@ -991,6 +1000,10 @@ export function registerUpgradeCommand(program: Command): void {
             });
             stage = "extract";
             installCompassBundle(compassTar, COMPASS_DIR, compassStaging, compassBackup);
+            // Its own stage: a failure here is a bundle that installed fine and
+            // did not get stamped, which is not an extract problem and should
+            // not be reported as one.
+            stage = "stamp";
             writeFileSync(COMPASS_VERSION_FILE, compassLatest);
             console.log(`[ok] Compass upgraded to ${compassLatest}`);
           } catch (err) {
