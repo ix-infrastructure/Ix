@@ -3,30 +3,49 @@ import * as crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 // @ts-ignore — tree-sitter has no bundled types
 import Parser from 'tree-sitter';
+// Every grammar below is imported by the explicit path to its binding rather
+// than by the bare package name.
+//
+// All of these publish `"main": "bindings/node"` with no filename, extension or
+// `exports` field, so resolving the bare specifier from ESM makes Node fall
+// back to directory-index lookup and emit a DEP0151 deprecation warning. The
+// parse pool loads this module once per worker, so on a Node release that emits
+// DEP0151 the warnings arrive twelve at a time per worker and shred the `ix map`
+// progress bar, which shares stderr with them.
+//
+// This is the same fix already applied to tree-sitter-css further down, and for
+// the same reason; it was only ever applied to that one grammar. The optional
+// grammars are unaffected because `tryLoadGrammar` goes through createRequire,
+// and CJS resolution does not warn. `tree-sitter` itself needs nothing — its
+// main is a real filename.
+//
+// Verified equivalent: for all twelve, the bare and explicit specifiers resolve
+// to the same export keys, including the multi-grammar packages
+// (typescript -> {typescript, tsx}, php -> {php, php_only}).
 // @ts-ignore
-import JavaScript from 'tree-sitter-javascript';
+import JavaScript from 'tree-sitter-javascript/bindings/node/index.js';
 // @ts-ignore
-import TypeScript from 'tree-sitter-typescript';
+import TypeScript from 'tree-sitter-typescript/bindings/node/index.js';
 // @ts-ignore
-import Python from 'tree-sitter-python';
+import Python from 'tree-sitter-python/bindings/node/index.js';
 // @ts-ignore
-import Java from 'tree-sitter-java';
+import Java from 'tree-sitter-java/bindings/node/index.js';
 // @ts-ignore
-import C from 'tree-sitter-c';
+import C from 'tree-sitter-c/bindings/node/index.js';
 // @ts-ignore
-import CPP from 'tree-sitter-cpp';
+import CPP from 'tree-sitter-cpp/bindings/node/index.js';
 // @ts-ignore
-import CSharp from 'tree-sitter-c-sharp';
+import CSharp from 'tree-sitter-c-sharp/bindings/node/index.js';
 // @ts-ignore
-import Go from 'tree-sitter-go';
+import Go from 'tree-sitter-go/bindings/node/index.js';
 // @ts-ignore
-import Rust from 'tree-sitter-rust';
+import Rust from 'tree-sitter-rust/bindings/node/index.js';
 // @ts-ignore
-import Ruby from 'tree-sitter-ruby';
+import Ruby from 'tree-sitter-ruby/bindings/node/index.js';
 // @ts-ignore
-import PHP from 'tree-sitter-php';
+import PHP from 'tree-sitter-php/bindings/node/index.js';
 // @ts-ignore
-import Scala from 'tree-sitter-scala';
+import Scala from 'tree-sitter-scala/bindings/node/index.js';
 const _require = createRequire(import.meta.url);
 function tryLoadGrammar(pkg: string): any {
   try { return _require(pkg); } catch { return null; }
