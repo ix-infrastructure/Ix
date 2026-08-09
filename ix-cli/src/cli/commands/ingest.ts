@@ -463,8 +463,14 @@ export function describeCommitOutcome(
  * records the file as ingested at its current mtime, so the next run skips it
  * as unchanged and it stays missing from the graph until a `--force` — a worse
  * bug than the silent success this change removes, and one introduced *by*
- * splitting the counters. Named and exported so that is pinned by a test
- * rather than by three call sites remembering to say `&& commitErrors === 0`.
+ * splitting the counters. Named and exported so the rule itself is pinned by a
+ * test instead of living as a conjunct three call sites have to remember.
+ *
+ * That pins the rule, not its application: nothing yet fails if a call site
+ * stops calling this. `ingestFiles` has no test at all — it needs a backend —
+ * so the three call sites below, the `process.exitCode` on a partial failure,
+ * and the debug-flag wiring are all still verified by reading rather than by
+ * execution.
  */
 export function ingestCompletedCleanly(parseErrors: number, commitErrors: number): boolean {
   return parseErrors === 0 && commitErrors === 0;
@@ -1519,7 +1525,13 @@ export async function ingestFiles(
 
     if (patchesApplied === 0 && filesDiscovered === 0) {
       console.log(chalk.yellow('\n  Warning: No files found. Check the path and supported extensions.'));
-    } else if (patchesApplied === 0 && filesDiscovered > 0) {
+    } else if (patchesApplied === 0 && filesDiscovered > 0 && commitErrors === 0) {
+      // commitErrors === 0, or this reads "All files unchanged since last
+      // ingest" directly under "commit errors: 12". Files were not unchanged —
+      // they were rejected. This branch was unreachable on the fatal path until
+      // the throw moved below the summary so `--format json` could still emit,
+      // which is exactly the kind of false statement about the graph this
+      // change exists to stop making.
       console.log(chalk.dim('\n  All files unchanged since last ingest.'));
     }
 

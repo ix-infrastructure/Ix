@@ -121,7 +121,7 @@ export function registerMapCommand(program: Command): void {
     .option("--graph", "Render the hierarchy as a graph/tree view (default)")
     .option("--list", "Render the ranked list view instead of the default graph/tree view")
     .option("--full", "Force full local map, bypassing automatic safety limits (advanced/testing)")
-    .option("--verbose", "Show raw confidence scores, crosscut scores, boundary ratios, and signals")
+    .option("--verbose", "Show raw confidence/crosscut scores and signals, plus per-file ingest diagnostics (including why a patch failed to commit)")
     .option("--silent", "Suppress all output except a one-line summary (useful for LLM hooks)")
     .addHelpText(
       "after",
@@ -155,7 +155,7 @@ Examples:
   ix map --list
   ix map --all-items
   ix map . --full
-  ix --debug map . --full`
+  ix map . --full --verbose`
     )
     .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; verbose?: boolean; silent?: boolean }) => {
       const cwd = pathArg ? resolve(pathArg) : process.cwd();
