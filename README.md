@@ -52,8 +52,6 @@ The graph lives on your machine, and it persists — so context survives between
 sessions, and your assistant can navigate a real map of your system instead of
 re-deriving it from whatever fits in a prompt.
 
-<br/>
-
 ## Sign up for Kartr
 
 We built Kartr on top of this technology.
