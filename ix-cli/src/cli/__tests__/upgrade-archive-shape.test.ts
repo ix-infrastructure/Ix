@@ -15,6 +15,67 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
+// The two helpers above are each correct in isolation; the bug was in how the
+// upgrade path combined them. It resolved stagedRoot to read the CLI entry
+// point, then swapped in the *outer* staging directory, so a Windows install
+// ended up at cli\ix-<version>-windows-amd64\ — reproducing inside cli\ exactly
+// the nesting stagedRoot had just seen through. COMPASS_DIR and
+// findCompassDist read cli\compass and nothing else, so `ix view` was broken on
+// every Windows install and broke again on the first upgrade after install.ps1
+// started laying the tree down flat.
+describe("staged swap, as the upgrade path composes it", () => {
+  function seedWindowsZipStaging(home: string, ver: string) {
+    const staging = join(home, `.cli-staging-${ver}`);
+    const nested = join(staging, `ix-${ver}-windows-amd64`);
+    mkdirSync(join(nested, "cli", "dist", "cli"), { recursive: true });
+    writeFileSync(join(nested, "cli", "dist", "cli", "main.js"), `// ${ver}\n`);
+    mkdirSync(join(nested, "compass"), { recursive: true });
+    writeFileSync(join(nested, "compass", "index.html"), "<!doctype html>\n");
+    return staging;
+  }
+
+  it("leaves compass where the CLI looks for it, given a nested Windows zip", () => {
+    const installDir = join(root, "cli");
+    const staging = seedWindowsZipStaging(root, "0.9.0");
+
+    const stagedRoot = soleChildDir(staging) ?? staging;
+    swapInStagedTree(installDir, stagedRoot, join(root, ".cli-backup-1"));
+
+    // COMPASS_DIR / findCompassDist read exactly this path.
+    expect(existsSync(join(installDir, "compass", "index.html"))).toBe(true);
+    expect(existsSync(join(installDir, "cli", "dist", "cli", "main.js"))).toBe(true);
+    // The nesting must not survive into the install.
+    expect(existsSync(join(installDir, "ix-0.9.0-windows-amd64"))).toBe(false);
+  });
+
+  it("keeps the launcher pointing at the install root once the tree is flat", () => {
+    const installDir = join(root, "cli");
+    const staging = seedWindowsZipStaging(root, "0.9.0");
+    swapInStagedTree(installDir, soleChildDir(staging) ?? staging, join(root, ".cli-backup-2"));
+
+    // refreshLaunchers derives the shim target this way: a flat install has
+    // several directories, so there is no sole child and the shim resolves to
+    // %~dp0..\cli\ix.cmd — the form install.ps1 now writes.
+    expect(soleChildDir(installDir)).toBeNull();
+  });
+
+  it("is unchanged for a POSIX tarball, already flattened by --strip-components", () => {
+    const installDir = join(root, "cli");
+    const staging = join(root, ".cli-staging-posix");
+    mkdirSync(join(staging, "cli", "dist", "cli"), { recursive: true });
+    writeFileSync(join(staging, "cli", "dist", "cli", "main.js"), "// posix\n");
+    mkdirSync(join(staging, "compass"), { recursive: true });
+    writeFileSync(join(staging, "compass", "index.html"), "<!doctype html>\n");
+
+    // soleChildDir returns null here, so stagedRoot falls back to staging.
+    const stagedRoot = soleChildDir(staging) ?? staging;
+    expect(stagedRoot).toBe(staging);
+    swapInStagedTree(installDir, stagedRoot, join(root, ".cli-backup-3"));
+
+    expect(existsSync(join(installDir, "compass", "index.html"))).toBe(true);
+  });
+});
+
 describe("soleChildDir", () => {
   it("finds the single nested directory a Windows release zip extracts to", () => {
     // Windows zips wrap everything in ix-<version>-<platform>/; the launcher

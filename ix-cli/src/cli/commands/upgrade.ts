@@ -205,6 +205,22 @@ function getTrackedVersion(versionFile: string): string {
 }
 
 /**
+ * Render a failed `execFileSync` as something a user can act on.
+ *
+ * Two shapes matter. A missing binary throws `ENOENT` with a message that names
+ * the spawn but not the cause, so the fix — put it on PATH — has to be spelled
+ * out. A binary that ran and exited non-zero puts the real explanation on
+ * stderr, which is lost unless the caller piped it and reads it back here.
+ */
+export function describeExecFailure(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const e = err as NodeJS.ErrnoException & { stderr?: Buffer | string };
+  if (e.code === "ENOENT") return `${e.message} — is it installed and on PATH?`;
+  const stderr = e.stderr?.toString().trim();
+  return stderr ? `${e.message}: ${stderr}` : e.message;
+}
+
+/**
  * Extract a .zip on Windows, trying every extractor a Windows box might have.
  *
  * This used to call `unzip` alone, which is NOT present on stock Windows — it
@@ -693,7 +709,14 @@ export function registerUpgradeCommand(program: Command): void {
           // leaving the user with nothing.
           const backupDir = join(IX_HOME, `.cli-backup-${process.pid}`);
           try {
-            swapInStagedTree(installDir, stagingDir, backupDir);
+            // Swap in stagedRoot, not stagingDir. On Windows those differ: the
+            // zip nests under ix-<version>-<platform>/, and moving the outer
+            // directory reproduced that nesting inside cli\. Compass then sat
+            // at cli\ix-<version>-<platform>\compass while COMPASS_DIR and
+            // findCompassDist only ever read cli\compass, so `ix view` broke —
+            // and it broke *again* on the first upgrade after install.ps1 had
+            // laid the install down flat. One shape on every platform.
+            swapInStagedTree(installDir, stagedRoot, backupDir);
           } catch (err) {
             console.error("[error] Failed to install the CLI update.");
             console.error(`  ${(err as Error).message}`);
@@ -712,6 +735,10 @@ export function registerUpgradeCommand(program: Command): void {
             cleanupStaging();
             process.exit(1);
           }
+          // stagedRoot moved out from under stagingDir, so on Windows the outer
+          // directory survives the swap as an empty husk. Previously the swap
+          // consumed it whole and there was nothing left to clear.
+          rmQuiet(stagingDir);
           rmQuiet(tmpDirRaw);
 
           // Repoint every launcher on PATH at the new install. This is not
@@ -860,11 +887,19 @@ export function registerUpgradeCommand(program: Command): void {
           const compassTmp = mkdtempSync(join(tmpdir(), "ix-compass-"));
           const compassTar = join(compassTmp, `compass-${compassLatest}.tar.gz`);
 
+          // Which step failed decides where to look: a download failure is a
+          // network, URL or proxy problem; an extract failure is a local tar
+          // problem. One `catch` reporting both as "could not download" sent a
+          // Windows investigation at the wrong half — and `tar` ran with stdio
+          // "ignore", so the only step that had actually failed was also the
+          // one that printed nothing at all.
+          let stage = "download";
           try {
             execFileSync("curl", ["-fsSL", compassUrl, "-o", compassTar], {
               stdio: ["ignore", "inherit", "inherit"],
               timeout: 60000,
             });
+            stage = "extract";
             mkdirSync(COMPASS_DIR, { recursive: true });
             rmSync(COMPASS_DIR, { recursive: true, force: true });
             mkdirSync(COMPASS_DIR, { recursive: true });
@@ -879,12 +914,15 @@ export function registerUpgradeCommand(program: Command): void {
             execFileSync(
               "tar",
               ["-xzf", tarFile, "-C", tarDest, "--strip-components=1"],
-              { stdio: "ignore" }
+              // Capture stderr rather than discarding it: this is the step that
+              // failed on Windows and it left nothing behind to diagnose.
+              { stdio: ["ignore", "ignore", "pipe"] }
             );
             writeFileSync(COMPASS_VERSION_FILE, compassLatest);
             console.log(`[ok] Compass upgraded to ${compassLatest}`);
-          } catch {
-            console.error("[!!] Could not download compass update. ix view may use the bundled version.");
+          } catch (err) {
+            console.error(`[!!] Compass ${stage} failed: ${describeExecFailure(err)}`);
+            console.error(`     ix view stays unavailable until this succeeds (source: ${compassUrl})`);
           }
           rmSync(compassTmp, { recursive: true, force: true });
         }

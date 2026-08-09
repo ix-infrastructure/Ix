@@ -256,7 +256,6 @@ $Url = "https://github.com/$GithubOrg/$GithubRepo/releases/download/v$Version/$T
 $tmp = "$env:TEMP\$Tarball"
 $InstallDir = "$IxHome\cli"
 
-New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 New-Item -ItemType Directory -Force -Path $IxBin | Out-Null
 
 Write-Host "Downloading CLI..."
@@ -280,14 +279,58 @@ if ($size -lt 100000) {
 }
 
 Write-Host "Extracting CLI..."
-Expand-Archive -Path $tmp -DestinationPath $InstallDir -Force
+
+# The zip nests everything under ix-<version>-windows-amd64\, and Expand-Archive
+# has no --strip-components. Extracting straight into cli\ therefore produced
+# cli\ix-<version>-windows-amd64\compass\, while the CLI only ever looks in
+# cli\compass (COMPASS_DIR in upgrade.ts, findCompassDist in view.ts). Every
+# Windows install shipped a Compass that `ix view` could not see and fell back
+# to a network repair that is not guaranteed to work — so `ix view` was broken
+# on Windows even when the release bundled Compass correctly.
+#
+# Collapse that directory here. install.sh has always stripped it via tar, and
+# `ix upgrade` already resolves either shape, so this makes a fresh Windows
+# install match both.
+# `.cli-staging-<pid>`, not a fixed name: sweepUpgradeOrphans in upgrade.ts
+# reclaims `.cli-staging-*` and `.cli-backup-*`, so an installer killed
+# mid-extract is cleaned up by the next `ix upgrade` instead of leaking a copy
+# of the release into IX_HOME forever. The pid also keeps two concurrent runs
+# from sharing a staging directory.
+$Staging = "$IxHome\.cli-staging-$PID"
+Remove-Item -Recurse -Force $Staging -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path $Staging | Out-Null
+Expand-Archive -Path $tmp -DestinationPath $Staging -Force
+
+$Extracted = Get-ChildItem -Path $Staging -Directory | Select-Object -First 1
+if (-not $Extracted -or -not (Test-Path (Join-Path $Extracted.FullName "ix.cmd"))) {
+    Remove-Item -Recurse -Force $Staging -ErrorAction SilentlyContinue
+    Write-Err "Extracted archive is not an ix release (no ix.cmd inside). Left the existing install untouched."
+}
+
+# Swap only once the new tree is known good, and move the old one aside instead
+# of deleting it so a failed move can be undone. Deleting first is what left
+# Windows users with no CLI at all in #337.
+$Backup = "$IxHome\.cli-backup-$PID"
+try {
+    if (Test-Path $InstallDir) { Move-Item -Path $InstallDir -Destination $Backup -Force }
+    Move-Item -Path $Extracted.FullName -Destination $InstallDir -Force
+    Remove-Item -Recurse -Force $Backup -ErrorAction SilentlyContinue
+} catch {
+    if ((Test-Path $Backup) -and -not (Test-Path $InstallDir)) {
+        Move-Item -Path $Backup -Destination $InstallDir -Force
+        Write-Warn "Restored the previous CLI after a failed update."
+    }
+    Remove-Item -Recurse -Force $Staging -ErrorAction SilentlyContinue
+    Write-Err "Could not install to $InstallDir : $($_.Exception.Message)"
+}
+Remove-Item -Recurse -Force $Staging -ErrorAction SilentlyContinue
 Write-Ok "Extraction complete"
 
 Remove-Item $tmp -Force
 
 @"
 @echo off
-"%~dp0..\cli\ix-$Version-windows-amd64\ix.cmd" %*
+"%~dp0..\cli\ix.cmd" %*
 "@ | Out-File "$IxBin\ix.cmd" -Encoding ascii
 
 $userPath = [Environment]::GetEnvironmentVariable("PATH","User")
@@ -310,12 +353,12 @@ if ($BackendVer) {
 # stayed broken forever.
 #
 # This tests the path the CLI actually reads (COMPASS_DIR in upgrade.ts,
-# findCompassDist in view.ts), not where the archive extracted. They differ here:
-# Expand-Archive has no --strip-components, so a bundled compass lands in
-# cli\ix-<version>-windows-amd64\compass\ and the CLI cannot see it. Do not
-# "fix" this by pointing at that path — stamping a version for a bundle
-# `ix view` will never find re-creates the poisoned stamp this change removes.
-# Leaving it unstamped lets `ix upgrade` install a copy where the CLI looks.
+# findCompassDist in view.ts). The extraction above collapses the archive's
+# top-level directory, so that is now also where the bundled compass lands and
+# this branch stamps a bundle `ix view` can genuinely serve. Keep the Test-Path
+# on index.html: stamping a version for a compass that is not on disk is what
+# made `ix upgrade` skip the repair download and break `ix view` permanently.
+# The warning below is now a real failure signal, not the normal Windows path.
 $CompassVer = Get-CompassLatestVersion
 $CompassDir = Join-Path $IxHome "cli\compass"
 $CompassIndex = Join-Path $CompassDir "index.html"
