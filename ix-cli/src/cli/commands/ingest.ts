@@ -387,6 +387,43 @@ export function registerIngestCommand(program: Command): void {
     });
 }
 
+export type CommitOutcome =
+  | { kind: "ok" }
+  | { kind: "warn"; message: string }
+  | { kind: "fatal"; message: string };
+
+/**
+ * Decide how loudly a run should complain about patches that failed to commit.
+ *
+ * Split out of `ingestFiles` so the rule is testable without a backend: the
+ * failure it guards against is one nobody can see, so a rule nobody can test
+ * is not much of an improvement.
+ *
+ * Partial failure warns rather than throws — some patches landed, the graph
+ * moved forward, and the mtime cache is not written on a run with commit
+ * errors, so the next run retries the rest. Committing nothing is the case
+ * where carrying on would state something false about the graph, and `map.ts`
+ * already turns a throw into `emitError` plus exit 1.
+ */
+export function describeCommitOutcome(commitErrors: number, patchesApplied: number): CommitOutcome {
+  if (commitErrors <= 0) return { kind: "ok" };
+  if (patchesApplied === 0) {
+    const patches = commitErrors === 1 ? "patch" : "patches";
+    return {
+      kind: "fatal",
+      message:
+        `Ingest committed nothing: all ${commitErrors} ${patches} failed to commit. ` +
+        `The graph is unchanged and may now be stale. Re-run with --debug to see why.`,
+    };
+  }
+  return {
+    kind: "warn",
+    message:
+      `Warning: ${commitErrors} of ${commitErrors + patchesApplied} file patches failed to commit; ` +
+      `the graph is missing those files. Re-run 'ix map' to retry, or --debug to see why.`,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // File ingestion — parse locally, send via /v1/patch
 // ---------------------------------------------------------------------------
@@ -627,6 +664,7 @@ export async function ingestFiles(
   let patchesApplied = 0;
   let filesSkipped = 0;
   let parseErrors = 0;
+  let commitErrors = 0;
   let tooLarge = 0;
   let minifiedLikely = 0;
   let latestRev = 0;
@@ -876,7 +914,12 @@ export async function ingestFiles(
                 if (result.rev > latestRev) latestRev = result.rev;
                 patchesApplied++;
               } catch (commitErr) {
-                parseErrors++;
+                // Counted apart from parseErrors: a patch that parsed fine and
+                // failed to commit means the graph is now behind the working
+                // tree, which is a different problem from a file we could not
+                // read. Reporting it as a parse error hid that distinction in
+                // both the summary and the JSON contract.
+                commitErrors++;
                 if (debug) {
                   const errMsg = String(commitErr);
                   const truncated = errMsg.length > 200 ? errMsg.slice(0, 200) + '…' : errMsg;
@@ -1261,14 +1304,19 @@ export async function ingestFiles(
 
     // Persist mtime cache so next run can skip unchanged files quickly.
     // Only save when no parse errors (avoid poisoning cache on partial failures).
-    if (!opts.force && parseErrors === 0 && currentMtimes.size > 0) {
+    // commitErrors counts here too, and must: it used to be folded into
+    // parseErrors, so splitting the counters without naming it in each of these
+    // three guards would start caching mtimes for files whose patches never
+    // landed. The next run would skip them as unchanged and they would stay
+    // missing from the graph until a --force.
+    if (!opts.force && parseErrors === 0 && commitErrors === 0 && currentMtimes.size > 0) {
       saveMtimeCache(projectRoot, currentMtimes);
     }
 
     // Migration cleanup (Ix#225 gap 2): the re-ingest under the new path-based id has
     // committed, so delete the OLD id's now-orphaned nodes/edges/patches. Best-effort —
     // a failure here is non-fatal (orphans are harmless dead storage, cleanable later).
-    if (workspaceMigrated && previousWorkspaceId && parseErrors === 0) {
+    if (workspaceMigrated && previousWorkspaceId && parseErrors === 0 && commitErrors === 0) {
       try {
         await client.deleteWorkspace(previousWorkspaceId);
         if (debug) process.stderr.write(`  Cleaned up pre-migration nodes under ${previousWorkspaceId}.\n`);
@@ -1286,7 +1334,7 @@ export async function ingestFiles(
     // registration intact rather than overwriting it with a partial set; a fresh
     // map, `--force`, or a post-reset re-map re-registers. (Incremental registry
     // updates that touch only changed files are a future refinement.)
-    if (stitchEnabled && filesSkipped === 0 && stitchFiles.length > 0 && parseErrors === 0) {
+    if (stitchEnabled && filesSkipped === 0 && stitchFiles.length > 0 && parseErrors === 0 && commitErrors === 0) {
       try {
         const entry = pickEntryFile(stitchFiles);
         const provides = entry
@@ -1357,6 +1405,19 @@ export async function ingestFiles(
 
   const elapsed = ((performance.now() - start) / 1000).toFixed(2);
 
+  // Reported before the suppressOutput return, and thrown when nothing landed.
+  //
+  // `ix map` passes suppressOutput unconditionally, so every commit failure
+  // used to exit here silently: ingestFiles never threw, never set exitCode,
+  // and map.ts went on to print its regions. CLAUDE.md RULE 5 has every agent
+  // run `ix map --silent` after an edit, so a backend that accepted nothing
+  // left the agent believing the graph was current while `ix search` and
+  // `ix impact` answered from a stale one. A wrong answer nobody can see is
+  // worse than a failed command.
+  const commitReport = describeCommitOutcome(commitErrors, patchesApplied);
+  if (commitReport.kind === "fatal") throw new Error(commitReport.message);
+  if (commitReport.kind === "warn") process.stderr.write(`  ${commitReport.message}\n`);
+
   if (opts.suppressOutput === true) {
     return;
   }
@@ -1370,6 +1431,7 @@ export async function ingestFiles(
       entitiesParsed,
       latestRev,
       skipReasons: { unchanged: filesSkipped, emptyFile: 0, parseError: parseErrors, tooLarge, minifiedLikely },
+      commitErrors,
       elapsedSeconds: parseFloat(elapsed),
       timings: {
         ...timings,
@@ -1389,6 +1451,7 @@ export async function ingestFiles(
     console.log(`  changed:     ${filesChanged} files`);
     if (filesSkipped > 0) console.log(`  ${chalk.dim('skipped unchanged:')} ${filesSkipped}`);
     if (parseErrors > 0) console.log(`  ${chalk.red('parse errors:')}      ${parseErrors}`);
+    if (commitErrors > 0) console.log(`  ${chalk.red('commit errors:')}     ${commitErrors}`);
     if (tooLarge > 0) console.log(`  ${chalk.dim('skipped too large:')} ${tooLarge}`);
     if (minifiedLikely > 0) console.log(`  ${chalk.dim('skipped minified:')} ${minifiedLikely}`);
     console.log(`  rev:         ${latestRev}`);
