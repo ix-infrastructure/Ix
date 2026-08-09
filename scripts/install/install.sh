@@ -996,20 +996,37 @@ if [ "$SKIP_CLI_INSTALL" = "0" ] && { [ ! -x "$IX_BIN/ix" ] || [ "$(check_instal
     # silently nest the tree inside it, recreating the exact layout this is
     # here to remove.
     ZIP_BACKUP="$IX_HOME/.cli-backup-$$"
-    rm -rf "$ZIP_BACKUP"
+    # `|| true` on every cleanup rm below. Under `set -e` a bare rm that fails
+    # aborts the script where it stands — verified — and the ones after the swap
+    # sit between the new tree and the shim write, so a locked leftover would
+    # install the CLI and then skip the launcher, ensure_path and both version
+    # stamps. That is the brick rmQuiet() exists to prevent on the TS side and
+    # that install.ps1 avoids with -ErrorAction SilentlyContinue.
+    if ! rm -rf "$ZIP_BACKUP" 2>/dev/null && [ -e "$ZIP_BACKUP" ]; then
+      rm -rf "$TMP_DIR" || true
+      err "Could not clear a leftover backup at $ZIP_BACKUP. Remove it and re-run. The existing install is untouched."
+    fi
+    # Drop the empty directory `mkdir -p` just made, so a first-time install has
+    # no backup at all and cannot report restoring a CLI that never existed.
+    # rmdir fails harmlessly on a populated install, which is the one we want to
+    # move aside.
+    rmdir "$INSTALL_DIR" 2>/dev/null || true
     if [ -e "$INSTALL_DIR" ] && ! mv "$INSTALL_DIR" "$ZIP_BACKUP"; then
-      rm -rf "$TMP_DIR"
+      rm -rf "$TMP_DIR" || true
       err "Could not move the existing install aside from $INSTALL_DIR. It is untouched."
     fi
     if mv "$ZIP_TOP" "$INSTALL_DIR"; then
-      rm -rf "$ZIP_BACKUP"
+      rm -rf "$ZIP_BACKUP" || true
     else
-      if [ -d "$ZIP_BACKUP" ] && [ ! -e "$INSTALL_DIR" ]; then
-        mv "$ZIP_BACKUP" "$INSTALL_DIR" && warn "Restored the previous CLI after a failed update."
-      else
+      # if/else, not `mv ... && warn`: with && a *failed* restore short-circuits
+      # and says nothing at all, so the user is never told the only surviving
+      # copy is at $ZIP_BACKUP — which is the case the backup exists for.
+      if [ -d "$ZIP_BACKUP" ] && [ ! -e "$INSTALL_DIR" ] && mv "$ZIP_BACKUP" "$INSTALL_DIR"; then
+        warn "Restored the previous CLI after a failed update."
+      elif [ -d "$ZIP_BACKUP" ]; then
         warn "Your previous CLI is at $ZIP_BACKUP — move it to $INSTALL_DIR to restore it."
       fi
-      rm -rf "$TMP_DIR"
+      rm -rf "$TMP_DIR" || true
       err "Could not install to $INSTALL_DIR."
     fi
   else

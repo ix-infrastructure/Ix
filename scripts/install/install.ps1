@@ -394,7 +394,7 @@ Remove-Item -LiteralPath $tmp -Force
 @"
 @echo off
 "%~dp0..\cli\ix.cmd" %*
-"@ | Out-File "$IxBin\ix.cmd" -Encoding ascii
+"@ | Out-File -LiteralPath "$IxBin\ix.cmd" -Encoding ascii
 
 $userPath = [Environment]::GetEnvironmentVariable("PATH","User")
 if ($userPath -notlike "*$IxBin*") {

@@ -149,6 +149,39 @@ describe("installCompassBundle", () => {
     expect(existsSync(backupDir)).toBe(false);
   });
 
+  it("keeps the backup when the compass directory exists but holds no compass", () => {
+    // `compass/` containing only a .version is a real state: install.ps1 used
+    // to create exactly that, and v0.7.0-v0.8.1 shipped an empty compass/.
+    // Treating the bare directory as "back in place" would drop the backup the
+    // caller had just told the user to go and rescue.
+    const compassDir = join(root, "cli", "compass");
+    mkdirSync(compassDir, { recursive: true });
+    writeFileSync(join(compassDir, ".version"), "0.2.0");
+    const backupDir = join(root, ".compass-backup-empty");
+    mkdirSync(backupDir, { recursive: true });
+    writeFileSync(join(backupDir, "index.html"), "<!-- the real one -->");
+
+    cleanupCompassSwap(compassDir, join(root, ".compass-staging-empty"), backupDir);
+
+    expect(existsSync(join(backupDir, "index.html"))).toBe(true);
+  });
+
+  it("reclaims a stale backup rather than rolling a healthy compass back", () => {
+    // The mirror of the bug above: with a working compass installed, a leftover
+    // .compass-backup-* from an earlier torn run must be reclaimed, not
+    // restored over the top. A wrong existsSync(dest) here would silently
+    // downgrade the user to whatever that backup happens to hold.
+    seedInstalledCompass("<!-- current -->");
+    const stale = join(root, ".compass-backup-0001");
+    mkdirSync(stale, { recursive: true });
+    writeFileSync(join(stale, "index.html"), "<!-- ancient -->");
+
+    sweepUpgradeOrphans(root, join(root, "cli"));
+
+    expect(readFileSync(join(root, "cli", "compass", "index.html"), "utf-8")).toBe("<!-- current -->");
+    expect(existsSync(stale)).toBe(false);
+  });
+
   it("reclaims compass scratch directories an interrupted run left behind", () => {
     // Nothing swept .compass-staging-* / .compass-backup-* before, so a run
     // killed mid-swap leaked a full copy of the bundle into IX_HOME forever.

@@ -481,7 +481,14 @@ export function installCompassBundle(
  */
 export function cleanupCompassSwap(compassDir: string, stagingDir: string, backupDir: string): void {
   rmQuiet(stagingDir);
-  if (existsSync(compassDir)) rmQuiet(backupDir);
+  // index.html, not the directory: a `compass/` holding only a `.version` is a
+  // real state — install.ps1 used to create exactly that, and v0.7.0-v0.8.1
+  // shipped an empty compass/ — and it is not a compass anyone can serve. A
+  // bare existsSync(compassDir) would call that "back in place" and drop a
+  // backup the caller had just told the user to go and rescue. Safe on the
+  // success path: installCompassBundle proves index.html is there before it
+  // swaps, so this is the same test findCompassDist applies.
+  if (existsSync(join(compassDir, "index.html"))) rmQuiet(backupDir);
 }
 
 /**
@@ -1026,6 +1033,17 @@ export function registerUpgradeCommand(program: Command): void {
         );
 
         if (!opts.check) {
+          // Sweep here too, not only in the CLI branch above. That call sits
+          // behind "the CLI itself needs updating", so on a machine already on
+          // the latest CLI it never runs — and this block is about to create
+          // the very scratch directories it reclaims. Without this, a compass
+          // swap interrupted on a current install stays torn until the *next*
+          // CLI release, which is the one moment the user cannot wait for: the
+          // backup may hold their only compass. Idempotent when the CLI branch
+          // already ran, since it finds nothing left. (installDir is scoped to
+          // that branch; COMPASS_DIR's parent is the same directory.)
+          sweepUpgradeOrphans(IX_HOME, dirname(COMPASS_DIR));
+
           const compassUrl = `https://github.com/${GITHUB_ORG}/${COMPASS_DIST_REPO}/releases/download/v${compassLatest}/compass-${compassLatest}.tar.gz`;
           const compassTmp = mkdtempSync(join(tmpdir(), "ix-compass-"));
           const compassTar = join(compassTmp, `compass-${compassLatest}.tar.gz`);
