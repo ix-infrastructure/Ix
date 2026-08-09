@@ -308,16 +308,30 @@ Remove-Item -Recurse -Force $Staging -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Staging | Out-Null
 Expand-Archive -Path $tmp -DestinationPath $Staging -Force
 
-$Extracted = Get-ChildItem -Path $Staging -Directory | Select-Object -First 1
-if (-not $Extracted -or -not (Test-Path (Join-Path $Extracted.FullName "ix.cmd"))) {
+# Exactly one directory, not merely the first of several — the same rule
+# soleChildDir applies in upgrade.ts. `Select-Object -First 1` would pick one
+# of several arbitrarily and could collapse the wrong tree into cli\.
+$TopDirs = @(Get-ChildItem -Path $Staging -Directory)
+if ($TopDirs.Count -ne 1 -or -not (Test-Path (Join-Path $TopDirs[0].FullName "ix.cmd"))) {
     Remove-Item -Recurse -Force $Staging -ErrorAction SilentlyContinue
-    Write-Err "Extracted archive is not an ix release (no ix.cmd inside). Left the existing install untouched."
+    Write-Err "Extracted archive is not an ix release: expected one top-level directory containing ix.cmd, found $($TopDirs.Count). Left the existing install untouched."
 }
+$Extracted = $TopDirs[0]
 
 # Swap only once the new tree is known good, and move the old one aside instead
 # of deleting it so a failed move can be undone. Deleting first is what left
 # Windows users with no CLI at all in #337.
 $Backup = "$IxHome\.cli-backup-$PID"
+
+# Clear the backup path first, exactly as swapInStagedTree does with
+# rmQuiet(backupDir). Move-Item onto an existing directory moves the source
+# *inside* it rather than renaming over it, so a stale .cli-backup-<pid> — left
+# by an earlier run that died mid-swap, on a pid Windows has since reused —
+# would turn the old install into .cli-backup-<pid>\cli. The restore below then
+# reinstates that as cli\cli\, destroying the CLI in the one situation the
+# restore exists to protect.
+Remove-Item -Recurse -Force $Backup -ErrorAction SilentlyContinue
+
 try {
     if (Test-Path $InstallDir) { Move-Item -Path $InstallDir -Destination $Backup -Force }
     Move-Item -Path $Extracted.FullName -Destination $InstallDir -Force
