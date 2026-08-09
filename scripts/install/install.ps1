@@ -52,8 +52,15 @@ trap {
 
 function Test-Healthy {
     try {
-        $null = Invoke-WebRequest -Uri $HealthUrl -TimeoutSec 3 -ErrorAction Stop
-        $null = Invoke-WebRequest -Uri $ArangoUrl -TimeoutSec 3 -ErrorAction Stop
+        # -UseBasicParsing, or Windows PowerShell hands the response to the IE
+        # engine and stops the install on an interactive "Script Execution Risk"
+        # prompt that defaults to No. It only fires once a backend is actually
+        # up and returning a body — a first install has nothing listening, the
+        # request fails outright, and the parse never happens. So this bites on
+        # re-runs and upgrades, never on the machine you first tested. Both
+        # endpoints return JSON that nothing here reads; only the status matters.
+        $null = Invoke-WebRequest -Uri $HealthUrl -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
+        $null = Invoke-WebRequest -Uri $ArangoUrl -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
         return $true
     } catch { return $false }
 }
