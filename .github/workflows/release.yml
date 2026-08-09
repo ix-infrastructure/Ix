@@ -333,16 +333,23 @@ jobs:
           # to it. GitHub excludes prereleases from /releases/latest, so this is
           # what makes a release-candidate tag safe to push at all.
           #
-          # `make_latest` is deliberately NOT set. The action documents it as
-          # "uses GitHub api default if not provided", and this job also runs on
-          # workflow_dispatch against an arbitrary tag — where it *updates* an
-          # existing release. Passing make_latest:true there would re-point
-          # /releases/latest at whatever old tag was re-run, which is the exact
-          # pointer this block exists to protect. Marking the tag prerelease is
-          # sufficient on its own: GitHub refuses to make a prerelease latest.
+          # `legacy`, not `true` and not omitted.
+          #
+          # Omitting it does NOT mean "leave the pointer alone": the action's
+          # parseMakeLatest returns undefined for an absent input, the key is
+          # dropped from the payload, and GitHub's REST default of `true`
+          # applies on PATCH as well as POST. Since this job also runs on
+          # workflow_dispatch against an arbitrary tag — where the action
+          # *updates* an existing release — both `true` and omitted would
+          # re-point /releases/latest at whatever old tag was re-run.
+          #
+          # `legacy` asks GitHub to pick latest by date and semver instead, so
+          # re-running v0.8.1 after v0.9.0 has shipped leaves the pointer where
+          # it belongs. Prereleases stay pinned to `false`.
           prerelease: ${{ steps.version.outputs.prerelease }}
+          make_latest: ${{ steps.version.outputs.prerelease == 'true' && 'false' || 'legacy' }}
           body: |
-            ${{ steps.version.outputs.prerelease == 'true' && format('> **Release candidate — the install commands below will NOT give you this build.** `/releases/latest` still points at the last stable release, by design. Install this one explicitly with `IX_VERSION={0}` in front of the install command, e.g. `IX_VERSION={0} curl -fsSL https://raw.githubusercontent.com/{1}/main/scripts/install/install.sh | bash`', steps.version.outputs.version, github.repository) || '' }}
+            ${{ steps.version.outputs.prerelease == 'true' && format('> **Release candidate — the install commands below will NOT give you this build.** `/releases/latest` still points at the last stable release, by design. Install this one with `curl -fsSL https://raw.githubusercontent.com/{0}/main/scripts/install/install.sh | IX_VERSION={1} bash` — the `IX_VERSION=` assignment must sit on `bash`, not on `curl`, because a prefix on `curl` applies only to the first command of the pipeline and never reaches the installer. The PowerShell and Homebrew paths below cannot install a release candidate at all.', github.repository, steps.version.outputs.version) || '' }}
 
             ## Install
 
