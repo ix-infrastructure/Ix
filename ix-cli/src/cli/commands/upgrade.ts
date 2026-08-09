@@ -470,13 +470,34 @@ export function installCompassBundle(
 }
 
 /**
- * Reclaim `.cli-staging-*` / `.cli-backup-*` directories left behind by an
- * upgrade that died mid-swap, and put the install back if it is missing.
+ * Clear the scratch directories a compass swap used.
  *
- * The swap has a window between the two renames in which no install exists.
- * Ctrl-C, a killed process or a lost machine inside that window terminates
- * without running any catch, so in-process recovery cannot help — and with no
- * `ix` on disk the user cannot run `ix upgrade` to repair it either.
+ * `backupDir` goes only once the compass is actually back in place. If the swap
+ * tore — the old bundle moved aside, the new one failed to land, and
+ * swapInStagedTree's own restore failed too — then the backup holds the only
+ * copy of a working compass. Clearing it unconditionally turns a recoverable
+ * failure into a permanently broken `ix view`, which is the one outcome the
+ * backup exists to prevent. sweepUpgradeOrphans puts it back on the next run.
+ */
+export function cleanupCompassSwap(compassDir: string, stagingDir: string, backupDir: string): void {
+  rmQuiet(stagingDir);
+  if (existsSync(compassDir)) rmQuiet(backupDir);
+}
+
+/**
+ * Reclaim `.cli-staging-*` / `.cli-backup-*` and `.compass-staging-*` /
+ * `.compass-backup-*` directories left behind by an upgrade that died mid-swap,
+ * and put the install or the compass back if either is missing.
+ *
+ * Each swap has a window between its two renames in which nothing exists at the
+ * destination. Ctrl-C, a killed process or a lost machine inside that window
+ * terminates without running any catch, so in-process recovery cannot help —
+ * and with no `ix` on disk the user cannot run `ix upgrade` to repair it either.
+ *
+ * The compass gets the same treatment as the CLI rather than a bare delete: its
+ * backup is the only copy of a working bundle while the swap is torn, so a
+ * sweep that just reclaimed it would turn an interrupted upgrade into a
+ * permanently broken `ix view`.
  */
 export function sweepUpgradeOrphans(ixHome: string, installDir: string): void {
   let entries: string[];
@@ -485,19 +506,37 @@ export function sweepUpgradeOrphans(ixHome: string, installDir: string): void {
   } catch {
     return;
   }
-  const backups = entries.filter((e) => e.startsWith(".cli-backup-")).sort();
-  const lastBackup = backups[backups.length - 1];
 
-  if (!existsSync(installDir) && lastBackup) {
-    try {
-      renameSync(join(ixHome, lastBackup), installDir);
-      console.log(`  Recovered the previous install from ${lastBackup} (an earlier upgrade was interrupted).`);
-    } catch {
-      /* fall through to the sweep; nothing is made worse by leaving it */
+  const recover = (prefix: string, dest: string, label: string) => {
+    const backups = entries.filter((e) => e.startsWith(prefix)).sort();
+    const last = backups[backups.length - 1];
+    if (!existsSync(dest) && last) {
+      try {
+        mkdirSync(dirname(dest), { recursive: true });
+        renameSync(join(ixHome, last), dest);
+        console.log(`  Recovered the previous ${label} from ${last} (an earlier upgrade was interrupted).`);
+      } catch {
+        /* fall through to the sweep; nothing is made worse by leaving it */
+      }
     }
-  }
+  };
+
+  recover(".cli-backup-", installDir, "install");
+  // join(installDir, "compass"), not the module-level COMPASS_DIR: that constant
+  // is bound to the real IX_HOME, and this function takes ixHome as an argument
+  // precisely so it can be pointed elsewhere. Using the constant would make a
+  // test sweeping a temp directory rename its fixture into the developer's own
+  // ~/.ix/cli/compass. Recovered second because the restore above may be what
+  // creates the parent directory it needs.
+  recover(".compass-backup-", join(installDir, "compass"), "compass");
+
   for (const name of entries) {
-    if (name.startsWith(".cli-staging-") || name.startsWith(".cli-backup-")) {
+    if (
+      name.startsWith(".cli-staging-") ||
+      name.startsWith(".cli-backup-") ||
+      name.startsWith(".compass-staging-") ||
+      name.startsWith(".compass-backup-")
+    ) {
       const target = join(ixHome, name);
       if (target !== installDir && existsSync(target)) rmQuiet(target);
     }
@@ -507,11 +546,18 @@ export function sweepUpgradeOrphans(ixHome: string, installDir: string): void {
 /**
  * Repoint the Windows launchers at the newly installed tree.
  *
- * Only Windows needs this. install.sh writes a *version-encoded* path on
- * Windows (`$INSTALL_DIR/ix-<VERSION>-windows-amd64/cli/dist/cli/main.js`) but
- * on POSIX writes `exec "$INSTALL_DIR/ix"`, which has no version in it and so
- * never goes stale — rewriting that one would be churn at best, and at worst
- * fails on a root-owned /usr/local/bin that the user cannot write.
+ * Only Windows needs this. install.sh writes an *absolute* path into the shim
+ * on Windows (`$INSTALL_DIR/cli/dist/cli/main.js`) but on POSIX writes
+ * `exec "$INSTALL_DIR/ix"`, which resolves through the install directory itself
+ * and so never goes stale — rewriting that one would be churn at best, and at
+ * worst fails on a root-owned /usr/local/bin that the user cannot write.
+ *
+ * That Windows path used to carry the release version in it
+ * (`ix-<VERSION>-windows-amd64/`), which is why refreshing it mattered so much.
+ * Both installers now lay the tree down flat, so it no longer changes between
+ * releases — but the shim is still rewritten, because an install made by an
+ * older script still has the version-encoded form on disk and nothing else
+ * would ever repoint it.
  *
  * On Windows three shims exist, not two:
  *   - `%IX_HOME%\bin\ix.cmd`      written by install.ps1
@@ -1014,12 +1060,17 @@ export function registerUpgradeCommand(program: Command): void {
             // stamp beside it, so read the disk rather than quoting a version.
             if (existsSync(join(COMPASS_DIR, "index.html"))) {
               console.error(`     ix view keeps working on the compass already installed (source: ${compassUrl})`);
+            } else if (existsSync(compassBackup)) {
+              // swapInStagedTree moved the old compass aside and then could not
+              // put it back, so this is the only copy left. Name it rather than
+              // letting the cleanup below take it, exactly as the CLI swap does.
+              console.error(`     Your previous compass is still at: ${compassBackup}`);
+              console.error(`     Rename that directory to ${COMPASS_DIR} to restore ix view, or re-run ix upgrade.`);
             } else {
               console.error(`     ix view stays unavailable until this succeeds (source: ${compassUrl})`);
             }
           }
-          rmQuiet(compassStaging);
-          rmQuiet(compassBackup);
+          cleanupCompassSwap(COMPASS_DIR, compassStaging, compassBackup);
           rmSync(compassTmp, { recursive: true, force: true });
         }
       } else if (compassLatest) {

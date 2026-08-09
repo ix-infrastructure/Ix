@@ -1,10 +1,22 @@
 import { execFileSync } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  renameSync,
+  existsSync,
+  readFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { installCompassBundle } from "../commands/upgrade.js";
+import {
+  cleanupCompassSwap,
+  installCompassBundle,
+  sweepUpgradeOrphans,
+} from "../commands/upgrade.js";
 
 // The compass repair used to empty COMPASS_DIR and extract into the hole, so
 // any tar failure left no compass at all. While the Windows bundle sat
@@ -110,6 +122,46 @@ describe("installCompassBundle", () => {
     installCompassBundle(tarPath, compassDir, staging(), backup());
 
     expect(readFileSync(join(compassDir, "index.html"), "utf-8")).toBe("<!-- fresh -->");
+  });
+
+  it("leaves the old compass recoverable when the swap tears", () => {
+    // swapInStagedTree moves the live compass to backupDir and then renames
+    // staging into place. If that second rename fails and its restore fails
+    // too, the backup is the only copy left — so the caller must not clear it
+    // unconditionally, and the sweep must put it back rather than delete it.
+    const compassDir = seedInstalledCompass("<!-- the only copy -->");
+    const backupDir = join(root, ".compass-backup-torn");
+
+    // Reproduce the torn state directly: swapInStagedTree got as far as moving
+    // the compass aside, then failed.
+    renameSync(compassDir, backupDir);
+    expect(existsSync(compassDir)).toBe(false);
+
+    // Cleanup must spare the backup while the compass is missing. Driving
+    // cleanupCompassSwap rather than re-deriving its condition here: that guard
+    // *is* the fix, so a test that restates it would pass either way.
+    cleanupCompassSwap(compassDir, join(root, ".compass-staging-torn"), backupDir);
+    expect(existsSync(join(backupDir, "index.html"))).toBe(true);
+
+    // And the next run's sweep restores it rather than reclaiming it.
+    sweepUpgradeOrphans(root, join(root, "cli"));
+    expect(readFileSync(join(compassDir, "index.html"), "utf-8")).toBe("<!-- the only copy -->");
+    expect(existsSync(backupDir)).toBe(false);
+  });
+
+  it("reclaims compass scratch directories an interrupted run left behind", () => {
+    // Nothing swept .compass-staging-* / .compass-backup-* before, so a run
+    // killed mid-swap leaked a full copy of the bundle into IX_HOME forever.
+    seedInstalledCompass("<!-- installed -->");
+    const staging = join(root, ".compass-staging-9999");
+    mkdirSync(staging, { recursive: true });
+    writeFileSync(join(staging, "index.html"), "<!-- half-extracted -->");
+
+    sweepUpgradeOrphans(root, join(root, "cli"));
+
+    expect(existsSync(staging)).toBe(false);
+    // The installed compass is untouched by the sweep.
+    expect(readFileSync(join(root, "cli", "compass", "index.html"), "utf-8")).toBe("<!-- installed -->");
   });
 
   it("does not leave the staging directory behind on success", () => {

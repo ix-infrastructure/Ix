@@ -52,9 +52,13 @@ describe("describeExecFailure", () => {
     const msg = describeExecFailure(err);
     expect(msg).toBe(e.message);
     // tar's wording varies by implementation, so count rather than match: every
-    // line stderr produced appears once, not twice.
-    for (const line of captured.split("\n").filter((l) => l.trim())) {
-      expect(msg.split(line).length - 1).toBe(1);
+    // distinct line stderr produced appears in the result as many times as it
+    // appeared in stderr, not twice that. Deduplicated because a tar that
+    // genuinely repeats a line would otherwise fail this against correct code
+    // — GNU tar emits 4 distinct lines here, bsdtar 1.
+    for (const line of new Set(captured.split("\n").filter((l) => l.trim()))) {
+      const inStderr = captured.split(line).length - 1;
+      expect(msg.split(line).length - 1).toBe(inStderr);
     }
   });
 

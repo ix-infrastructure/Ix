@@ -276,11 +276,11 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Ok "Downloaded to $tmp"
 
-if (-not (Test-Path $tmp)) {
+if (-not (Test-Path -LiteralPath $tmp)) {
     Write-Err "Zip missing"
 }
 
-$size = (Get-Item $tmp).Length
+$size = (Get-Item -LiteralPath $tmp).Length
 if ($size -lt 100000) {
     Write-Err "Downloaded file too small (likely failed)"
 }
@@ -306,14 +306,21 @@ Write-Host "Extracting CLI..."
 $Staging = "$IxHome\.cli-staging-$PID"
 Remove-Item -Recurse -Force -LiteralPath $Staging -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Staging | Out-Null
-# -LiteralPath: -Path glob-expands, so a home directory containing [ or ] makes
-# these fail. extractZipOnWindows in upgrade.ts already uses it for this reason.
+# -LiteralPath: -Path glob-expands, so a home directory containing [ or ] takes
+# these off the real file — measured on 5.1, `Test-Path` returns False for a
+# file that exists and `Remove-Item` silently no-ops. extractZipOnWindows in
+# upgrade.ts already uses it for this reason. Applied to every path-taking
+# cmdlet from the download onwards, not just this block: the zip's own
+# Test-Path/Get-Item run first, so hardening only the extract would still have
+# left the installer dying at "Zip missing" on such a home.
 Expand-Archive -LiteralPath $tmp -DestinationPath $Staging -Force
 
 # Exactly one directory, not merely the first of several — the same rule
 # soleChildDir applies in upgrade.ts. `Select-Object -First 1` would pick one
 # of several arbitrarily and could collapse the wrong tree into cli\.
-$TopDirs = @(Get-ChildItem -LiteralPath $Staging -Directory)
+# -Force counts hidden directories, so this stays the same test install.sh
+# makes with `find -type d`, which counts them too.
+$TopDirs = @(Get-ChildItem -LiteralPath $Staging -Directory -Force)
 if ($TopDirs.Count -ne 1 -or -not (Test-Path -LiteralPath (Join-Path $TopDirs[0].FullName "ix.cmd"))) {
     Remove-Item -Recurse -Force -LiteralPath $Staging -ErrorAction SilentlyContinue
     Write-Err "Extracted archive is not an ix release: expected one top-level directory containing ix.cmd, found $($TopDirs.Count). Left the existing install untouched."
@@ -382,7 +389,7 @@ try {
 Remove-Item -Recurse -Force -LiteralPath $Staging -ErrorAction SilentlyContinue
 Write-Ok "Extraction complete"
 
-Remove-Item $tmp -Force
+Remove-Item -LiteralPath $tmp -Force
 
 @"
 @echo off
@@ -418,9 +425,9 @@ if ($BackendVer) {
 $CompassVer = Get-CompassLatestVersion
 $CompassDir = Join-Path $IxHome "cli\compass"
 $CompassIndex = Join-Path $CompassDir "index.html"
-if ($CompassVer -and (Test-Path $CompassIndex)) {
+if ($CompassVer -and (Test-Path -LiteralPath $CompassIndex)) {
     [System.IO.File]::WriteAllText((Join-Path $CompassDir ".version"), $CompassVer)
-} elseif (-not (Test-Path $CompassIndex)) {
+} elseif (-not (Test-Path -LiteralPath $CompassIndex)) {
     Write-Warn "System Compass is not installed at $CompassDir — 'ix view' is unavailable until you run 'ix upgrade', which will fetch it."
 }
 

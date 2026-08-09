@@ -983,10 +983,35 @@ if [ "$SKIP_CLI_INSTALL" = "0" ] && { [ ! -x "$IX_BIN/ix" ] || [ "$(check_instal
       rm -rf "$TMP_DIR"
       err "Extracted archive is not an ix release: expected one top-level directory containing ix.cmd, found $ZIP_TOP_COUNT."
     fi
-    # $INSTALL_DIR was created empty by mkdir -p above; replace it with the
-    # staged tree rather than moving the tree inside it.
-    rmdir "$INSTALL_DIR" 2>/dev/null || rm -rf "$INSTALL_DIR"
-    mv "$ZIP_TOP" "$INSTALL_DIR"
+    # Move the old install aside rather than deleting it, then put it back if
+    # the swap fails — the same shape as install.ps1 and swapInStagedTree.
+    #
+    # $INSTALL_DIR is not reliably the empty directory `mkdir -p` just made. The
+    # `rm -rf "$INSTALL_DIR"` in the upgrade branch above only runs when
+    # `[ -x "$IX_BIN/ix" ]`, and install.ps1 writes %IX_HOME%\bin\ix.cmd rather
+    # than $IX_BIN/ix — so a populated install reaches here whenever the two
+    # installers are mixed, or pick_bin_dir() resolves differently than it did
+    # last run. Deleting that outright would destroy a working CLI with nothing
+    # to restore from, and `mv` onto a directory that survived the delete would
+    # silently nest the tree inside it, recreating the exact layout this is
+    # here to remove.
+    ZIP_BACKUP="$IX_HOME/.cli-backup-$$"
+    rm -rf "$ZIP_BACKUP"
+    if [ -e "$INSTALL_DIR" ] && ! mv "$INSTALL_DIR" "$ZIP_BACKUP"; then
+      rm -rf "$TMP_DIR"
+      err "Could not move the existing install aside from $INSTALL_DIR. It is untouched."
+    fi
+    if mv "$ZIP_TOP" "$INSTALL_DIR"; then
+      rm -rf "$ZIP_BACKUP"
+    else
+      if [ -d "$ZIP_BACKUP" ] && [ ! -e "$INSTALL_DIR" ]; then
+        mv "$ZIP_BACKUP" "$INSTALL_DIR" && warn "Restored the previous CLI after a failed update."
+      else
+        warn "Your previous CLI is at $ZIP_BACKUP — move it to $INSTALL_DIR to restore it."
+      fi
+      rm -rf "$TMP_DIR"
+      err "Could not install to $INSTALL_DIR."
+    fi
   else
     tar -xzf "$TMP_FILE" -C "$INSTALL_DIR" --strip-components=1
   fi
