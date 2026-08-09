@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isNewer } from "../commands/upgrade.js";
+import { isNewer, VERSION_RE } from "../commands/upgrade.js";
 
 describe("isNewer", () => {
   it("compares plain releases", () => {
@@ -81,7 +81,8 @@ describe("isNewer", () => {
   it("accepts a tag carrying both a pre-release and build metadata", () => {
     // VERSION_RE gates every version that reaches isNewer. It used to reject
     // this shape, which surfaced as "Could not reach GitHub" and exit 1.
-    const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+    // Imported, not re-declared: a local copy of the literal passes no matter
+    // what upgrade.ts actually does, so it would guard nothing.
     expect(VERSION_RE.test("0.9.0-rc.1+abc1234")).toBe(true);
     expect(VERSION_RE.test("0.9.0-rc.1")).toBe(true);
     expect(VERSION_RE.test("0.9.0+abc1234")).toBe(true);

@@ -48,7 +48,7 @@ function getCurrentVersion(): string {
 // — `0.9.0-rc.1+abc1234`, valid semver — failed the test. fetchLatestRelease
 // then returned null and `ix upgrade` reported "Could not reach GitHub to check
 // for updates" and exited 1 against a perfectly reachable GitHub.
-const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+export const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 async function fetchLatestRelease(repo: string): Promise<string | null> {
   try {
