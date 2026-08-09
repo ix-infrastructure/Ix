@@ -43,7 +43,12 @@ function getCurrentVersion(): string {
 // download URLs, so it is validated here at the source: anything that isn't a
 // plain version is rejected (CodeQL js/http-to-file-access barrier + general
 // hardening against a tampered/unexpected tag).
-const VERSION_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+// The pre-release and build parts are separate optional groups. Written as one
+// `(?:[-+]...)?` group, the character class had no `+`, so a tag carrying both
+// — `0.9.0-rc.1+abc1234`, valid semver — failed the test. fetchLatestRelease
+// then returned null and `ix upgrade` reported "Could not reach GitHub to check
+// for updates" and exited 1 against a perfectly reachable GitHub.
+const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 async function fetchLatestRelease(repo: string): Promise<string | null> {
   try {
@@ -102,7 +107,15 @@ function writeCache(latest: string, compassLatest?: string, backendLatest?: stri
  */
 function splitVersion(v: string): [number[], string[]] {
   // Build metadata (`+sha`) never participates in precedence.
-  const [core = "", pre = ""] = v.split("+")[0]!.split("-", 2) as [string, string?];
+  const withoutBuild = v.split("+")[0]!;
+  // Split at the FIRST hyphen and keep everything after it. `split("-", 2)`
+  // looks right and is not: the limit truncates rather than capturing the
+  // remainder, so `0.9.0-rc-1` would yield pre-release "rc" and drop the "-1"
+  // — making 0.9.0-rc-1 and 0.9.0-rc-2 compare equal, which is the same
+  // stranded-on-a-candidate bug this function exists to fix.
+  const hyphen = withoutBuild.indexOf("-");
+  const core = hyphen === -1 ? withoutBuild : withoutBuild.slice(0, hyphen);
+  const pre = hyphen === -1 ? "" : withoutBuild.slice(hyphen + 1);
   const nums = core.split(".").map((n) => {
     const parsed = Number(n);
     return Number.isFinite(parsed) ? parsed : 0;
@@ -150,7 +163,16 @@ export function isNewer(latest: string, current: string): boolean {
 
     const aNum = /^\d+$/.test(a);
     const bNum = /^\d+$/.test(b);
-    if (aNum && bNum) return Number(a) > Number(b);
+    if (aNum && bNum) {
+      // Only return once the comparison is actually decided. Two identifiers
+      // can differ as text but not as numbers (`01` vs `1`), and returning
+      // here would end the whole comparison as "not newer" instead of moving
+      // on to the next identifier.
+      const na = Number(a);
+      const nb = Number(b);
+      if (na !== nb) return na > nb;
+      continue;
+    }
     // Numeric identifiers always rank below alphanumeric ones.
     if (aNum !== bNum) return bNum;
     return a > b;

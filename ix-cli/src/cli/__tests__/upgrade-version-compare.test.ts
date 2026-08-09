@@ -52,9 +52,42 @@ describe("isNewer", () => {
     }
   });
 
+  it("handles pre-release identifiers that themselves contain hyphens", () => {
+    // `split("-", 2)` truncates rather than capturing the remainder, so a first
+    // attempt at this parsed `0.9.0-rc-1` as pre-release ["rc"] and dropped the
+    // "-1" — making rc-1 and rc-2 compare equal in both directions, i.e. the
+    // same stranded-on-a-candidate bug this function exists to fix.
+    expect(isNewer("0.9.0-rc-2", "0.9.0-rc-1")).toBe(true);
+    expect(isNewer("0.9.0-rc-1", "0.9.0-rc-2")).toBe(false);
+    expect(isNewer("0.9.0-next-20260201", "0.9.0-next-20260101")).toBe(true);
+    expect(isNewer("0.9.0", "0.9.0-rc-1")).toBe(true);
+  });
+
+  it("keeps comparing when two numeric identifiers are textually different but equal", () => {
+    // Returning on an undecided comparison ends the whole thing as "not newer".
+    expect(isNewer("1.0.0-rc.01.2", "1.0.0-rc.1.1")).toBe(true);
+    expect(isNewer("1.0.0-rc.1.1", "1.0.0-rc.01.2")).toBe(false);
+  });
+
   it("ignores build metadata, which carries no precedence", () => {
     expect(isNewer("0.9.0+abc123", "0.9.0")).toBe(false);
     expect(isNewer("0.9.1+abc123", "0.9.0")).toBe(true);
+    // Stripping must happen before the pre-release split, or the metadata ends
+    // up inside the last identifier and compares lexically.
+    expect(isNewer("0.9.0", "0.9.0-rc.1+abc123")).toBe(true);
+    expect(isNewer("0.9.0-rc.2+aaa", "0.9.0-rc.1+zzz")).toBe(true);
+  });
+
+  it("accepts a tag carrying both a pre-release and build metadata", () => {
+    // VERSION_RE gates every version that reaches isNewer. It used to reject
+    // this shape, which surfaced as "Could not reach GitHub" and exit 1.
+    const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+    expect(VERSION_RE.test("0.9.0-rc.1+abc1234")).toBe(true);
+    expect(VERSION_RE.test("0.9.0-rc.1")).toBe(true);
+    expect(VERSION_RE.test("0.9.0+abc1234")).toBe(true);
+    expect(VERSION_RE.test("0.9.0")).toBe(true);
+    expect(VERSION_RE.test("not-a-version")).toBe(false);
+    expect(VERSION_RE.test("0.9")).toBe(false);
   });
 
   it("does not throw on malformed input", () => {
