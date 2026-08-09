@@ -10,9 +10,11 @@ Use the `ix` CLI exclusively.
 **Output format.** Query commands accept `--format text|json|llm`:
 
 - **`--format llm` — prefer this when you are reading the result yourself.** It is
-  token-minimal and newline-delimited, typically 2-4x fewer bytes than `json` on
-  tree- and table-shaped output. It is accepted on every command that accepts
-  `--format`, so you can pass it unconditionally without checking per command.
+  token-minimal and newline-delimited, and noticeably smaller than `json` on tree-
+  and table-shaped output. Every command in the routing tables below accepts it,
+  so you can pass it without checking per command. (The one command that takes
+  `--format` but not `llm` is `ix query`, which silently falls back to text — it
+  is deprecated and listed under "Do NOT Use" anyway.)
 - `--format json` — use when chaining results between commands, or when you need
   to pull a specific field out of the response.
 
