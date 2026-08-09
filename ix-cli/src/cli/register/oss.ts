@@ -112,7 +112,17 @@ export function registerProStubs(program: Command): void {
     const stub = program
       .command(name)
       .description(desc)
+      // Swallow whatever the caller passed. `allowUnknownOption` alone only
+      // covers flags; commander still rejects excess *operands*, and it does so
+      // before the action runs. So `ix bug` reached this message but
+      // `ix bug create "title" --affects Entity` — the form the docs and every
+      // agent actually use — died with "too many arguments for 'bug'" and never
+      // said anything about Pro. The subcommand and its arguments are
+      // deliberately ignored: the only thing worth saying here is that the
+      // whole command needs Pro.
+      .argument("[args...]")
       .allowUnknownOption(true)
+      .allowExcessArguments(true)
       .action(() => {
         console.error(`The '${name}' command requires Ix Pro.`);
         console.error(`Install @ix/pro to enable premium features.`);

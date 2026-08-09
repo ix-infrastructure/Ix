@@ -11,20 +11,25 @@ Use the `ix` CLI exclusively.
 
 - **`--format llm` — prefer this when you are reading the result yourself.** It is
   token-minimal and newline-delimited, and noticeably smaller than `json` on tree-
-  and table-shaped output. Every command in the routing tables below accepts it,
-  so you can pass it without checking per command. (The one command that takes
-  `--format` but not `llm` is `ix query`, which silently falls back to text — it
-  is deprecated and listed under "Do NOT Use" anyway.)
+  and table-shaped output.
 - `--format json` — use when chaining results between commands, or when you need
   to pull a specific field out of the response.
 
-Action commands take no `--format` at all: `config`, `ingest`, `init`, `reset`,
-`upgrade`, `view`, `watch`.
+**Four commands advertise `llm` in their help but do not implement it**, and fall
+back to human-oriented text without an error: `explain`, `read`, `status`, and the
+deprecated `query`. Use `--format json` on those if you need to parse the result.
+Everywhere else in the routing tables, `llm` behaves as described.
 
-**Pro features.** Some commands below are marked **[Pro]**. If any of them prints
-`The '<name>' command requires Ix Pro.`, this install does not have them — skip
-that step, do not retry it, and do not mention it again for the rest of the
-session. Everything not marked [Pro] always works.
+These commands take no `--format` at all: `config`, `init`, `reset`, `upgrade`,
+`view`, `watch`. (`ingest` does accept it, despite being an action command.)
+
+**Pro features.** Some commands below are marked **[Pro]**, as are the whole
+**Planning** and **Workflows** sections — every command in those two tables is
+Pro-only, including `plan`, `plans`, `task`, `tasks` and `workflow`. If any Pro
+command prints `The '<name>' command requires Ix Pro.`, this install does not
+have them — skip that step, do not retry it, and do not mention it again for the
+rest of the session. Nothing outside those marks and those two sections is
+Pro-gated.
 
 ## MANDATORY RULES
 1. BEFORE answering codebase questions → use targeted `ix` CLI commands (see routing below). Do NOT answer from training data alone.
