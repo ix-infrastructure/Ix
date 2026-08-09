@@ -405,23 +405,69 @@ export type CommitOutcome =
  * where carrying on would state something false about the graph, and `map.ts`
  * already turns a throw into `emitError` plus exit 1.
  */
-export function describeCommitOutcome(commitErrors: number, patchesApplied: number): CommitOutcome {
+export function describeCommitOutcome(
+  commitErrors: number,
+  patchesApplied: number,
+  /**
+   * The flag that turns on per-file commit detail for the command being run.
+   * `ix map` has no `--debug` and never passes one — telling its users to use
+   * it sent them to an option that does not exist, on the one path where the
+   * failure is otherwise invisible.
+   */
+  debugFlag: string = "--debug",
+  /** True when the run was cut short by the map deadline rather than rejected. */
+  deadlineHit: boolean = false
+): CommitOutcome {
   if (commitErrors <= 0) return { kind: "ok" };
+  const attempted = commitErrors + patchesApplied;
+
+  if (deadlineHit) {
+    // Distinguishable because the two need opposite responses: a rejected
+    // patch is a backend problem, a deadline is our own wall clock and the fix
+    // is a longer budget or a smaller repo. Folding both into "failed to
+    // commit" is the same information loss this change exists to undo.
+    return {
+      kind: patchesApplied === 0 ? "fatal" : "warn",
+      message:
+        `Ingest ran out of time: ${commitErrors} of ${attempted} file patches were abandoned when ` +
+        `the map deadline fired. The graph is missing those files. Raise IX_MAP_DEADLINE_MS or map a smaller path.`,
+    };
+  }
+
   if (patchesApplied === 0) {
     const patches = commitErrors === 1 ? "patch" : "patches";
     return {
       kind: "fatal",
       message:
         `Ingest committed nothing: all ${commitErrors} ${patches} failed to commit. ` +
-        `The graph is unchanged and may now be stale. Re-run with --debug to see why.`,
+        `The graph is unchanged and may now be stale. Re-run with ${debugFlag} to see why.`,
     };
   }
   return {
     kind: "warn",
     message:
-      `Warning: ${commitErrors} of ${commitErrors + patchesApplied} file patches failed to commit; ` +
-      `the graph is missing those files. Re-run 'ix map' to retry, or --debug to see why.`,
+      `Warning: ${commitErrors} of ${attempted} file patches failed to commit; ` +
+      `the graph is missing those files. Re-run 'ix map' to retry, or ${debugFlag} to see why.`,
   };
+}
+
+/**
+ * Did the run finish with the graph fully matching what it set out to ingest?
+ *
+ * Three things are conditional on this: persisting the mtime cache, the
+ * post-migration cleanup of the old workspace id, and writing the stitch
+ * registry. All three were previously written as `parseErrors === 0`, which
+ * worked only because commit failures were folded into `parseErrors`.
+ *
+ * The mtime cache is the one that bites. Persisting it after a failed commit
+ * records the file as ingested at its current mtime, so the next run skips it
+ * as unchanged and it stays missing from the graph until a `--force` — a worse
+ * bug than the silent success this change removes, and one introduced *by*
+ * splitting the counters. Named and exported so that is pinned by a test
+ * rather than by three call sites remembering to say `&& commitErrors === 0`.
+ */
+export function ingestCompletedCleanly(parseErrors: number, commitErrors: number): boolean {
+  return parseErrors === 0 && commitErrors === 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1309,14 +1355,14 @@ export async function ingestFiles(
     // three guards would start caching mtimes for files whose patches never
     // landed. The next run would skip them as unchanged and they would stay
     // missing from the graph until a --force.
-    if (!opts.force && parseErrors === 0 && commitErrors === 0 && currentMtimes.size > 0) {
+    if (!opts.force && ingestCompletedCleanly(parseErrors, commitErrors) && currentMtimes.size > 0) {
       saveMtimeCache(projectRoot, currentMtimes);
     }
 
     // Migration cleanup (Ix#225 gap 2): the re-ingest under the new path-based id has
     // committed, so delete the OLD id's now-orphaned nodes/edges/patches. Best-effort —
     // a failure here is non-fatal (orphans are harmless dead storage, cleanable later).
-    if (workspaceMigrated && previousWorkspaceId && parseErrors === 0 && commitErrors === 0) {
+    if (workspaceMigrated && previousWorkspaceId && ingestCompletedCleanly(parseErrors, commitErrors)) {
       try {
         await client.deleteWorkspace(previousWorkspaceId);
         if (debug) process.stderr.write(`  Cleaned up pre-migration nodes under ${previousWorkspaceId}.\n`);
@@ -1334,7 +1380,7 @@ export async function ingestFiles(
     // registration intact rather than overwriting it with a partial set; a fresh
     // map, `--force`, or a post-reset re-map re-registers. (Incremental registry
     // updates that touch only changed files are a future refinement.)
-    if (stitchEnabled && filesSkipped === 0 && stitchFiles.length > 0 && parseErrors === 0 && commitErrors === 0) {
+    if (stitchEnabled && filesSkipped === 0 && stitchFiles.length > 0 && ingestCompletedCleanly(parseErrors, commitErrors)) {
       try {
         const entry = pickEntryFile(stitchFiles);
         const provides = entry
@@ -1414,11 +1460,26 @@ export async function ingestFiles(
   // left the agent believing the graph was current while `ix search` and
   // `ix impact` answered from a stale one. A wrong answer nobody can see is
   // worse than a failed command.
-  const commitReport = describeCommitOutcome(commitErrors, patchesApplied);
-  if (commitReport.kind === "fatal") throw new Error(commitReport.message);
-  if (commitReport.kind === "warn") process.stderr.write(`  ${commitReport.message}\n`);
+  const commitReport = describeCommitOutcome(
+    commitErrors,
+    patchesApplied,
+    // ix map has no --debug and never passes one; --verbose is its equivalent.
+    opts.mapMode === true ? "--verbose" : "--debug",
+    opts.deadlineSignal?.aborted === true
+  );
+  if (commitReport.kind === "warn") {
+    process.stderr.write(`  ${commitReport.message}\n`);
+    // Non-zero even though we do not throw. A partial failure still means the
+    // graph does not match the working tree, and the caller — usually a hook
+    // running `ix map --silent` under CLAUDE.md RULE 5 — reads the exit code,
+    // not stderr. Exiting 0 here made the severity of an identical fault depend
+    // on how many files happened to change: one file failing was fatal, the
+    // same failure alongside a file that landed was silent.
+    process.exitCode = 1;
+  }
 
   if (opts.suppressOutput === true) {
+    if (commitReport.kind === "fatal") throw new Error(commitReport.message);
     return;
   }
 
@@ -1504,6 +1565,13 @@ export async function ingestFiles(
 
     console.log();
   }
+
+  // Thrown last, so a total failure still emits its report first. Throwing
+  // before the JSON branch made `ix ingest --format json` print nothing at all
+  // on the very run a consumer most needs to parse — empty stdout and exit 1,
+  // where main emitted a valid document carrying patchesApplied: 0. The
+  // suppressOutput path above throws earlier because it has no report to emit.
+  if (commitReport.kind === "fatal") throw new Error(commitReport.message);
 }
 
 // ---------------------------------------------------------------------------

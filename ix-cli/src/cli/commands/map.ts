@@ -257,6 +257,11 @@ Examples:
             suppressOutput: true,
             mapMode: true,
             deadlineSignal,
+            // `ix map` has no --debug, so the per-file `[commit error] <uri>`
+            // detail was unreachable from the command that produced the
+            // failure — and the failure message told the user to pass a flag
+            // that does not exist. --verbose is map's equivalent lever.
+            debug: Boolean(opts.verbose),
           });
         } catch (err: any) {
           emitError(formatFetchError(err));
