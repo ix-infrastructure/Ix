@@ -3,49 +3,62 @@ import * as crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 // @ts-ignore — tree-sitter has no bundled types
 import Parser from 'tree-sitter';
-// Every grammar below is imported by the explicit path to its binding rather
-// than by the bare package name.
+// A grammar is imported by the explicit path to its binding ONLY when Node
+// would otherwise emit DEP0151 for it. That is a narrower set than it looks.
 //
-// All of these publish `"main": "bindings/node"` with no filename, extension or
-// `exports` field, so resolving the bare specifier from ESM makes Node fall
-// back to directory-index lookup and emit a DEP0151 deprecation warning. The
-// parse pool loads this module once per worker, so on a Node release that emits
-// DEP0151 the warnings arrive twelve at a time per worker and shred the `ix map`
-// progress bar, which shares stderr with them.
+// DEP0151 fires when an **ESM** resolution lands on a `"main"` with no filename
+// or extension. It is gated on the resolved format: a CommonJS package with
+// `"main": "bindings/node"` never warns, however it is imported. Almost every
+// grammar here is CJS, so almost none of them warn — measured per package in a
+// fresh process on Node 26:
 //
-// This is the same fix already applied to tree-sitter-css further down, and for
-// the same reason; it was only ever applied to that one grammar. The optional
-// grammars are unaffected because `tryLoadGrammar` goes through createRequire,
-// and CJS resolution does not warn. `tree-sitter` itself needs nothing — its
-// main is a real filename.
+//   tree-sitter-c-sharp                     type=module    -> 1 warning
+//   @tree-sitter-grammars/tree-sitter-lua   type=module    -> 1 warning
+//   tree-sitter-css                         type=module    -> 1 warning
+//   the other ten required grammars         type=commonjs  -> 0
 //
-// Verified equivalent: for all twelve, the bare and explicit specifiers resolve
-// to the same export keys, including the multi-grammar packages
-// (typescript -> {typescript, tsx}, php -> {php, php_only}).
+// So the rule is `"type": "module"` + a directory `"main"` + no `"exports"`,
+// which today means exactly c-sharp (static, below), plus css and lua (dynamic,
+// through tryImportGrammar further down). The parse pool loads this module once
+// per worker and every worker shares the parent's stderr, so each warning
+// arrives once per worker and shreds the `ix map` progress bar.
+//
+// Do NOT pre-emptively convert the CJS grammars "for consistency". A subpath
+// import is a dependency on a package's internal layout, and it fails *hard* —
+// a static import that cannot resolve takes down this whole module, every
+// language with it. tree-sitter-sas is already the counterexample: it ships
+// `"exports": { ".": "./bindings/node/index.js" }`, so its bare specifier is
+// fine and `tree-sitter-sas/bindings/node/index.js` throws
+// ERR_PACKAGE_PATH_NOT_EXPORTED. That is the direction these packages are
+// migrating, so the explicit form is the exception to justify, not the default.
+//
+// `tree-sitter` itself needs nothing — its main is a real filename.
 // @ts-ignore
-import JavaScript from 'tree-sitter-javascript/bindings/node/index.js';
+import JavaScript from 'tree-sitter-javascript';
 // @ts-ignore
-import TypeScript from 'tree-sitter-typescript/bindings/node/index.js';
+import TypeScript from 'tree-sitter-typescript';
 // @ts-ignore
-import Python from 'tree-sitter-python/bindings/node/index.js';
+import Python from 'tree-sitter-python';
 // @ts-ignore
-import Java from 'tree-sitter-java/bindings/node/index.js';
+import Java from 'tree-sitter-java';
 // @ts-ignore
-import C from 'tree-sitter-c/bindings/node/index.js';
+import C from 'tree-sitter-c';
 // @ts-ignore
-import CPP from 'tree-sitter-cpp/bindings/node/index.js';
+import CPP from 'tree-sitter-cpp';
+// tree-sitter-c-sharp is `"type": "module"` with a directory `"main"` and no
+// `"exports"` — the one required grammar that actually triggers DEP0151.
 // @ts-ignore
 import CSharp from 'tree-sitter-c-sharp/bindings/node/index.js';
 // @ts-ignore
-import Go from 'tree-sitter-go/bindings/node/index.js';
+import Go from 'tree-sitter-go';
 // @ts-ignore
-import Rust from 'tree-sitter-rust/bindings/node/index.js';
+import Rust from 'tree-sitter-rust';
 // @ts-ignore
-import Ruby from 'tree-sitter-ruby/bindings/node/index.js';
+import Ruby from 'tree-sitter-ruby';
 // @ts-ignore
-import PHP from 'tree-sitter-php/bindings/node/index.js';
+import PHP from 'tree-sitter-php';
 // @ts-ignore
-import Scala from 'tree-sitter-scala/bindings/node/index.js';
+import Scala from 'tree-sitter-scala';
 const _require = createRequire(import.meta.url);
 function tryLoadGrammar(pkg: string): any {
   try { return _require(pkg); } catch { return null; }
@@ -81,12 +94,20 @@ const Hcl = HclPkg?.default ?? HclPkg;
 // import() through the quiet helper above. A grammar that can't load on this
 // platform (e.g. tree-sitter-sas has no win32 prebuild) is simply absent; its
 // files go unparsed, exactly as with any unavailable CJS grammar.
+//
+// These three are genuine ESM imports, so the DEP0151 rule described at the top
+// of this file applies to them exactly as it does to the static ones — being
+// optional and going through a helper does not exempt them.
+//
+// tree-sitter-sas stays bare: its `main` is already a full filename and it
+// declares `"exports"`, so it never warns and a subpath import of it throws
+// ERR_PACKAGE_PATH_NOT_EXPORTED.
 const SAS = await tryImportGrammar('tree-sitter-sas');
-const Lua = await tryImportGrammar('@tree-sitter-grammars/tree-sitter-lua');
-// Import the binding by its explicit file path. tree-sitter-css's package.json
-// `main` is "bindings/node" (no filename/extension), which makes Node emit a
-// DEP0151 deprecation warning on every ESM resolution, once per parse worker,
-// flooding `ix map`. Pointing straight at the file skips that resolution.
+// Lua and CSS are both `"type": "module"` with a directory `"main"` and no
+// `"exports"`, so the bare specifier makes Node fall back to directory-index
+// lookup and warn — once per parse worker, onto the same stderr the `ix map`
+// progress bar draws on. Pointing straight at the file skips that resolution.
+const Lua = await tryImportGrammar('@tree-sitter-grammars/tree-sitter-lua/bindings/node/index.js');
 const Css = await tryImportGrammar('tree-sitter-css/bindings/node/index.js');
 
 import { SupportedLanguages, languageFromPath } from './languages.js';
