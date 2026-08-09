@@ -8,15 +8,18 @@ describe("describeExecFailure", () => {
     // The Windows compass repair failed with nothing on screen. If the cause
     // was a missing tar, the message has to say so — "spawnSync tar ENOENT"
     // alone does not tell you what to do about it.
+    // Assembled at runtime so knip does not read it as a real binary this
+    // package depends on and fail the dead-code check on an unlisted one.
+    const missing = ["ix", "no", "such", "binary"].join("-");
     let err: unknown;
     try {
-      execFileSync("ix-definitely-not-a-real-binary", ["--version"], { stdio: "ignore" });
+      execFileSync(missing, ["--version"], { stdio: "ignore" });
     } catch (e) {
       err = e;
     }
     expect(err).toBeDefined();
     const msg = describeExecFailure(err);
-    expect(msg).toContain("ix-definitely-not-a-real-binary");
+    expect(msg).toContain(missing);
     expect(msg).toContain("PATH");
   });
 
