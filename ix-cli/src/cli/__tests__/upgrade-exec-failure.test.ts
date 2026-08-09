@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -75,11 +75,18 @@ describe("describeExecFailure", () => {
     // open '...\\.version' — is it installed and on PATH?" is advice about a
     // file, and there is nothing the user can do with it. Only a spawn failure
     // is a PATH problem, which is what the syscall distinguishes.
+    // mkdtempSync, not a fixed name under tmpdir(): a predictable temp path is
+    // CodeQL js/insecure-temporary-file, and it flags the write regardless of
+    // the fact that this one is meant to fail. The nested directory below it is
+    // never created, so the ENOENT is real.
+    const dir = mkdtempSync(join(tmpdir(), "ix-exec-failure-"));
     let err: unknown;
     try {
-      writeFileSync(join(tmpdir(), "ix-no-such-dir-here", "nested", ".version"), "1.0.0");
+      writeFileSync(join(dir, "no-such-dir", ".version"), "1.0.0");
     } catch (e) {
       err = e;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
     expect((err as NodeJS.ErrnoException).code).toBe("ENOENT");
     expect(describeExecFailure(err)).not.toContain("PATH");
