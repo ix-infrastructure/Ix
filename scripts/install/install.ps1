@@ -24,27 +24,38 @@ $NodeMinMajor = 22
 
 # Installer scratch files live under $IxHome, never under $env:TEMP.
 #
-# Windows sets TEMP to the 8.3 short form of the profile path when that path
-# contains a space -- `C:\Users\Win 10` becomes `C:\Users\WIN10~1` -- and
-# PowerShell's FileSystem provider cannot resolve a short-name segment. Any
-# provider cmdlet handed such a path fails with "An object at the specified
-# path C:\Users\WIN10~1 does not exist", naming the first segment it could not
-# resolve rather than the file it was actually given, which is why the error
-# reads as though it were about the profile rather than the file being written.
-# curl.exe and Expand-Archive go straight to Win32 and succeed on that very same
-# path, so the install got all the way through downloading and extracting before
-# falling over.
+# #349: on a profile at `C:\Users\Win 10`, Windows hands the installer a TEMP
+# path in 8.3 short form and the run dies after extraction with
+# `An object at the specified path C:\Users\WIN10~1 does not exist.`
+# The reporter confirmed that pointing TEMP and TMP at a path without a space
+# lets the same install finish, so the short TEMP path is what breaks it.
 #
-# $IxHome comes from USERPROFILE, which is the long form, so routing scratch
-# through it sidesteps the whole class rather than expanding short names at each
-# call site.
+# $IxHome comes from USERPROFILE, which is the long form. $Staging was already
+# there, so moving these two takes the script off TEMP completely.
+#
+# What is NOT established is which call fails, or why -- treat the mechanism as
+# open until a fresh transcript says otherwise:
+#   - The provider cmdlets this script runs on the zip (`Test-Path
+#     -LiteralPath`, `Get-Item -LiteralPath`) resolve 8.3 segments fine on both
+#     Windows PowerShell 5.1 and 7, and the reporter's transcript shows them
+#     succeeding -- extraction completes before the error appears.
+#   - `Expand-Archive` resolves through the provider too (Resolve-Path in
+#     Microsoft.PowerShell.Archive), so this is not a Win32-vs-provider split.
+#   - That error string could not be reproduced from any cmdlet this script
+#     calls; the ones that fail on a missing path say "Cannot find path".
+# The likeliest remaining explanation is that 8.3 alias *creation* is disabled
+# on that volume while TEMP still carries a stale short path, so nothing
+# resolves it. Moving off TEMP fixes that reading too, which is why this is
+# worth shipping ahead of the diagnosis.
+#
+# Note `ix upgrade` still stages through os.tmpdir() (upgrade.ts), which on
+# Windows is TEMP verbatim. If this class is real, it is unfixed there.
 #
 # The `.cli-staging-` prefix on both scratch names is deliberate:
-# sweepUpgradeOrphans in upgrade.ts reclaims `.cli-staging-*` out of IX_HOME, so
-# an installer killed mid-run still leaves nothing permanent behind -- the one
-# property TEMP was giving us for free. It must not be `.cli-backup-`: that
-# prefix is a *recovery* candidate there, and a leftover zip would be renamed
-# over the install directory on the next upgrade.
+# sweepUpgradeOrphans in upgrade.ts reclaims `.cli-staging-*` out of IX_HOME.
+# It must not be `.cli-backup-`: that prefix is a *recovery* candidate there,
+# and a leftover zip would be renamed over the install directory on the next
+# upgrade.
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -57,8 +68,22 @@ function Pause-On-Failure {
 
 function Write-Ok($msg) { Write-Host "  [ok] $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "  [!!] $msg" -ForegroundColor Yellow }
+# Leaving TEMP also left the OS's own cleanup, so every exit has to clear its
+# own scratch. sweepUpgradeOrphans covers a process killed outright, but it runs
+# only from `ix upgrade` and only when an update is actually available -- and a
+# first install that dies at the download leaves no `ix` on the machine to ever
+# run it, so a partial multi-MB zip would sit in ~/.ix forever. Write-Err is the
+# single exit for every failure below, which makes it the one place this has to
+# be right.
+function Remove-InstallerScratch {
+    foreach ($p in @($script:tmp, $script:pullLog)) {
+        if ($p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 function Write-Err($msg) {
     Write-Host "  [error] $msg" -ForegroundColor Red
+    Remove-InstallerScratch
     Pause-On-Failure
     exit 1
 }
