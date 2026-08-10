@@ -95,20 +95,24 @@ function Write-Warn($msg) { Write-Host "  [!!] $msg" -ForegroundColor Yellow }
 #
 # -PathType Leaf so a *directory* sitting on either name is skipped rather than
 # removed. (Not $Staging -- that is `.cli-staging-<pid>` with no suffix and
-# cannot collide with the `.zip`/`.log` names built here.) Two cases it does
-# cover, both measured: a stale directory squatting the exact name, where
-# `Remove-Item -Force` on one with children throws, since there is no host UI
-# for the prompt and -ErrorAction SilentlyContinue does not catch it; and a
-# directory junction at that name, which is skipped outright so PS 5.1 never
-# gets the chance to recurse into whatever it points at.
+# cannot collide with the `.zip`/`.log` names built here.) Two measured cases:
+# a stale directory squatting the exact name, where `Remove-Item -Force` on one
+# with children throws, since there is no host UI for the prompt and
+# -ErrorAction SilentlyContinue does not catch it; and a junction at that name,
+# where the guard keeps the installer from deleting a reparse point it did not
+# create, and turns 5.1's NullReferenceException into a clean skip. Neither
+# host recurses into a junction's target without -Recurse, so that is not the
+# risk being avoided.
 #
-# The whole body is wrapped because this runs *from the error path*. Anything
-# escaping here lands in the trap and prints a second, meaningless error over
-# the actionable one the user actually needs -- which is what an unguarded
-# Test-Path does under `$ErrorActionPreference = "Stop"` when IX_HOME names a
-# detached drive: it throws DriveNotFoundException rather than returning false,
-# on both 5.1 and 7. Join-Path throws on illegal characters on 5.1 for the same
-# reason. Best-effort cleanup must never be the loudest thing in the output.
+# The whole body is wrapped because this runs *from the error path*: anything
+# escaping lands in the trap and prints a second, meaningless error over the
+# actionable one. Under `$ErrorActionPreference = "Stop"` the two statements
+# fail on different inputs, which is why guarding one of them is not enough --
+# with IX_HOME on a detached drive it is `Join-Path` that throws
+# DriveNotFoundException, on both 5.1 and 7, before Test-Path is ever reached;
+# with illegal characters in the path `Join-Path` returns and `Test-Path`
+# throws ArgumentException, on 5.1 only. Best-effort cleanup must never be the
+# loudest thing in the output.
 function Remove-InstallerScratch {
     if (-not $IxHome) { return }
     try {
