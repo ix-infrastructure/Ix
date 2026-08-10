@@ -180,11 +180,18 @@ describe("view running port state", () => {
     expect(await runView(["status"])).toContain("http://localhost:19123");
   });
 
-  it("omits the URL from status when the port is unknown", async () => {
+  it("says the port is unknown from status instead of printing nothing", async () => {
     seedRunningState();
     vi.spyOn(process, "kill").mockReturnValue(true);
 
-    expect(await runView(["status"])).not.toContain("http://localhost");
+    const output = await runView(["status"]);
+
+    // Still no guessed URL — that is the bug #358 removed. But silence left
+    // someone who ran status *for* the URL with nothing to act on, while
+    // `ix view` in the identical state told them how to recover.
+    expect(output).not.toContain("http://localhost");
+    expect(output).toContain("unknown");
+    expect(output).toContain("ix view stop");
   });
 });
 

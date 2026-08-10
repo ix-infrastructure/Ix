@@ -430,11 +430,15 @@ export function registerViewCommand(program: Command): void {
       if (pid) {
         console.log(`[ok] Visualizer is running (PID ${pid})`);
         // Now that the port is recorded, status can answer the question people
-        // actually run it to answer. Silent rather than guessing for an instance
-        // started before the port file existed and with no server script to
-        // recover it from.
-        const runningPort = readRunningPort();
-        if (runningPort !== null) console.log(`  http://localhost:${runningPort}`);
+        // actually run it to answer. Shares runningInstanceLines with the
+        // already-running branch above so the two cannot drift: an instance
+        // started before the port file existed still has no port to report, and
+        // saying so beats printing nothing to someone who ran status *for* the
+        // URL. Never guessed either way — a confidently wrong URL is #358.
+        // `status` takes no -p, so the mismatch branch cannot fire here.
+        for (const line of runningInstanceLines(readRunningPort(), 0, false)) {
+          console.log(line);
+        }
       } else {
         console.log("[--] Visualizer is not running.");
         console.log("  Run 'ix view' to start it.");
