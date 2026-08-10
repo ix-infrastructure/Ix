@@ -62,11 +62,19 @@ export function saveIngestBaseline(
 ): void {
   try {
     const previousRev = loadIngestBaseline(projectRoot)?.currentRev ?? 0;
+    // The rev reaches us straight off the backend's commit response, and until
+    // now only the read side checked its shape. That asymmetry is a quiet trap:
+    // a non-integer rev (an older backend answering with a string, say) sails
+    // through a bare `> 0`, gets written, and is then rejected by
+    // loadIngestBaseline on the next run — which resets the rev to 0 and costs a
+    // full re-ingest, every run, with nothing said. Insist on the same shape
+    // both sides already agree on.
+    const rev = Number.isInteger(currentRev) && currentRev > 0 ? currentRev : previousRev;
     const data: SerializedIngestBaseline = {
       root: projectRoot,
       files: Object.fromEntries(mtimes),
       deletedFiles: Object.fromEntries(deletedFiles),
-      currentRev: currentRev > 0 ? currentRev : previousRev,
+      currentRev: rev,
       lastIngestAt: now.toISOString(),
     };
     fs.mkdirSync(path.dirname(ingestMtimeCachePath(projectRoot)), { recursive: true });

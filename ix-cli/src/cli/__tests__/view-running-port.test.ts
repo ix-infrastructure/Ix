@@ -138,6 +138,22 @@ describe("view running port state", () => {
     expect(existsSync(portFile())).toBe(false);
   });
 
+  it("clears the state when the PID file exists but cannot be read", async () => {
+    // A directory where the PID file belongs: existsSync passes, the read
+    // throws. The old check-then-read shape let that EISDIR escape the command
+    // instead of treating it as "not running", and no amount of existsSync
+    // could close the window anyway — the file can change between the two calls.
+    mkdirSync(pidFile(), { recursive: true });
+    writeFileSync(scopeFile(), "*all*");
+    writeFileSync(portFile(), "19123");
+
+    const output = await runView(["status"]);
+
+    expect(output).toContain("Visualizer is not running.");
+    expect(existsSync(scopeFile())).toBe(false);
+    expect(existsSync(portFile())).toBe(false);
+  });
+
   it("removes persisted state when the visualizer stops", async () => {
     seedRunningState(19123);
     const kill = vi.spyOn(process, "kill").mockReturnValue(true);

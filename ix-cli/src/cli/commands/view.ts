@@ -51,18 +51,22 @@ function parsePort(value: string): number | null {
   return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
 }
 
-/** Read the persisted port, falling back to the server script written by older releases. */
+/**
+ * Read the persisted port, falling back to the server script written by older releases.
+ *
+ * No existsSync guard ahead of either read: a missing file throws into the same
+ * catch that already handles unreadable content, so the check bought nothing and
+ * only opened a window for the file to change between the two calls (CodeQL
+ * js/file-system-race).
+ */
 function readRunningPort(): number | null {
-  if (existsSync(PORT_FILE)) {
-    try {
-      const port = parsePort(readFileSync(PORT_FILE, "utf-8"));
-      if (port !== null) return port;
-    } catch {
-      // Fall through to the legacy server script.
-    }
+  try {
+    const port = parsePort(readFileSync(PORT_FILE, "utf-8"));
+    if (port !== null) return port;
+  } catch {
+    // Fall through to the legacy server script.
   }
 
-  if (!existsSync(SERVER_SCRIPT_FILE)) return null;
   try {
     const match = readFileSync(SERVER_SCRIPT_FILE, "utf-8").match(/^const PORT = (\d+);$/m);
     const port = match?.[1] ? parsePort(match[1]) : null;
@@ -110,11 +114,16 @@ export function runningInstanceLines(
 
 /** Read PID from file and check if the process is alive. */
 function readAlivePid(): number | null {
-  if (!existsSync(PID_FILE)) {
+  let pid: number;
+  try {
+    pid = Number(readFileSync(PID_FILE, "utf-8").trim());
+  } catch {
+    // Absent or unreadable — same disposition either way. Reading straight out
+    // also fixes the old shape, where an existsSync pass followed by a failing
+    // read threw out of the command instead of clearing the stale state.
     removeCompassState();
     return null;
   }
-  const pid = Number(readFileSync(PID_FILE, "utf-8").trim());
   if (!Number.isInteger(pid) || pid <= 0) {
     removeCompassState();
     return null;
@@ -328,7 +337,8 @@ export function registerViewCommand(program: Command): void {
         }
         // The running instance has a fixed scope (baked at launch). If this directory
         // maps to a different workspace, say so rather than silently showing the old one.
-        const runningKey = existsSync(SCOPE_FILE) ? readFileSync(SCOPE_FILE, "utf-8").trim() : null;
+        let runningKey: string | null = null;
+        try { runningKey = readFileSync(SCOPE_FILE, "utf-8").trim(); } catch { /* no scope file */ }
         if (runningKey !== null && runningKey !== scopeKey) {
           const runningLabel = runningKey === "*all*"
             ? "all workspaces"
