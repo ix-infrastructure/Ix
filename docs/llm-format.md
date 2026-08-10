@@ -95,8 +95,31 @@ Renderers shipped: Tier 1 (`map`, `subsystems`, `impact`, `smells`,
 `overview`) plus `stats`; Tier 2 (`inventory`, `rank`, `depends`, `trace`,
 `contains`, `callers`, `callees`, `imports`, `imported-by`); Tier 3 (`search`,
 `text`, `history`, `patches`); Tier 4 (`entity`, `locate`, `diff`,
-`conflicts`). Commands whose output is verbatim source or prose (`read`,
-`explain`, `doctor`, `status`, `savings`, and `diff --content`) route
-`--format llm` to `text`, the most compact existing form. Programmatic
-consumers that need to parse output should continue to use `--format json`; the
-`llm` format is optimized for being read by a model, not parsed.
+`conflicts`); Tier 5 (`explain`, `read`, `status`, `doctor`, `savings`).
+
+Tier 5 closes the prose fallback. Those five routed `--format llm` to `text` on
+the theory that verbatim source and prose have no record form, which is true of
+the *payload* but not of what surrounds it — `explain`'s prose is a rendering of
+facts the agent can have directly, and `read`'s source was arriving under a
+per-line number gutter and ANSI escapes. `explain` is the one that mattered
+most: it is the first call most plugins make, and its records are ~55% smaller
+than the `--format json` that `text` sent people to as a workaround.
+
+Two deliberate exceptions remain:
+
+- **`read`'s content block is not records.** An agent asked for source and wants
+  it byte-for-byte, so the payload is emitted raw after a `content lines=<n>`
+  record that makes the block self-delimiting. This is the only place the
+  one-record-per-line invariant is relaxed, and the count is what lets a
+  consumer relax it safely.
+- **`status` is not smaller** — it is within a byte or two of `json`, because
+  the payload is a handful of scalars either way. It is in Tier 5 for the
+  explicit `stale=true|false` field, which is the question the command gets
+  called to answer and which `text` only implied through a warning line.
+
+Still routing to `text`: `diff --content` (verbatim hunks) and `ingest`, a
+hidden implementation-detail command whose output is a completion summary.
+
+Programmatic consumers that need to parse output should continue to use
+`--format json`; the `llm` format is optimized for being read by a model, not
+parsed.

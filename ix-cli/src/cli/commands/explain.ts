@@ -8,6 +8,8 @@ import { collectFacts } from "../explain/facts.js";
 import { inferRole } from "../explain/role-inference.js";
 import { inferImportance } from "../explain/importance.js";
 import { renderExplanation } from "../explain/render.js";
+import { renderExplainLlm, renderExplainRawLlm } from "../explain/llm.js";
+import { printLlmLines } from "../llm.js";
 import { renderSection, renderWarning, renderNote } from "../ui.js";
 
 export function registerExplainCommand(program: Command): void {
@@ -37,7 +39,9 @@ export function registerExplainCommand(program: Command): void {
       const importance = inferImportance(facts);
       const rendered = renderExplanation(facts, role, importance);
 
-      if (opts.format === "json") {
+      if (opts.format === "llm") {
+        printLlmLines(renderExplainLlm(facts, role, importance, rendered));
+      } else if (opts.format === "json") {
         const output: any = {
           resolvedTarget: { kind: target.kind, name: target.name },
           facts,
@@ -199,7 +203,9 @@ async function rawExplain(
     (result as any).warning = "Results may be stale; file has changed since last ingest.";
   }
 
-  if (format === "json") {
+  if (format === "llm") {
+    printLlmLines(renderExplainRawLlm(result));
+  } else if (format === "json") {
     const output: any = {
       resolvedTarget: { kind: target.kind, name: target.name },
       result,

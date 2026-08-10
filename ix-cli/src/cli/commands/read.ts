@@ -8,6 +8,7 @@ import { resolveEntityFull, activeReadScope, ensureReadScope } from "../resolve.
 import { stderr } from "../stderr.js";
 import { isFileStale } from "../stale.js";
 import { relativePath } from "../format.js";
+import { llmLine, printLlmLines } from "../llm.js";
 
 /** Common file extensions that signal the target is file-like, not a symbol name. */
 const FILE_EXTENSIONS = new Set([
@@ -57,8 +58,71 @@ function readFileRange(filePath: string, start?: number, end?: number): { conten
   return { content, lineStart, lineEnd };
 }
 
+/**
+ * `ix read --format llm`.
+ *
+ * The one command whose payload is not records: an agent asked for source and
+ * wants it byte-for-byte. Everything around it goes, though — `text` prefixes
+ * every single line with a 4-column padded line number and an ANSI dim escape,
+ * which on a 200-line read is 200 gutters of pure overhead for information the
+ * `line_start` field already carries once.
+ *
+ * The `content lines=<n>` record makes the block self-delimiting, so a
+ * consumer knows exactly how many following lines are payload and never has to
+ * guess whether a line of source is another record.
+ */
+export function renderReadLlm(result: ReadResult): string[] {
+  const contentLines = result.content.split("\n");
+  return [
+    llmLine("file", [
+      ["path", relativePath(result.path) ?? result.path],
+      ["line_start", String(result.lineStart)],
+      ["line_end", String(result.lineEnd)],
+      ["target", result.targetType],
+      ["symbol", result.symbol],
+      ["kind", result.kind],
+      ["stale", result.stale ? "true" : null],
+    ]),
+    llmLine("content", [["lines", String(contentLines.length)]]),
+    ...contentLines,
+  ];
+}
+
+/** `ix read --format llm` when the target resolves to more than one thing. */
+export function renderReadAmbiguityLlm(result: AmbiguityResult, target: string): string[] {
+  const isFile = result.targetType === "ambiguous-file";
+  const lines = [
+    llmLine("ambiguous", [
+      ["kind", isFile ? "file" : "symbol"],
+      ["target", target],
+      ["count", String(result.candidates.length)],
+    ]),
+  ];
+  result.candidates.forEach((c, i) => {
+    lines.push(llmLine("candidate", [
+      ["n", String(i + 1)],
+      ["name", c.name],
+      ["kind", c.kind],
+      ["path", c.path ? relativePath(c.path) ?? c.path : undefined],
+      ["id", c.id],
+    ]));
+  });
+  lines.push(llmLine("hint", [[
+    "text",
+    isFile
+      ? "Provide a more specific path to disambiguate."
+      : "Use --pick <n>, --kind, or --path to disambiguate.",
+  ]]));
+  for (const d of result.diagnostics ?? []) {
+    lines.push(llmLine("diagnostic", [["code", d.code], ["message", d.message]]));
+  }
+  return lines;
+}
+
 function outputResult(result: ReadResult, format: string): void {
-  if (format === "json") {
+  if (format === "llm") {
+    printLlmLines(renderReadLlm(result));
+  } else if (format === "json") {
     const out = { ...result, path: relativePath(result.path) ?? result.path };
     console.log(JSON.stringify(out, null, 2));
   } else {
@@ -74,7 +138,9 @@ function outputResult(result: ReadResult, format: string): void {
 }
 
 function outputAmbiguity(result: AmbiguityResult, target: string, format: string): void {
-  if (format === "json") {
+  if (format === "llm") {
+    printLlmLines(renderReadAmbiguityLlm(result, target));
+  } else if (format === "json") {
     console.log(JSON.stringify(result, null, 2));
   } else {
     const label = result.targetType === "ambiguous-file" ? "file" : "symbol";

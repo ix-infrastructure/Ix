@@ -3,6 +3,7 @@ import chalk from "chalk";
 import { renderSection, renderSuccess, renderError } from "../ui.js";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
+import { llmLine, printLlmLines } from "../llm.js";
 import {
   BACKEND_IMAGE,
   checkBackendImage,
@@ -16,6 +17,41 @@ interface CheckResult {
   // A warning is surfaced (yellow) but does not fail the overall run — e.g. an
   // intentional local dev backend, or an inconclusive image comparison.
   warn?: boolean;
+}
+
+/**
+ * `ix doctor --format llm`.
+ *
+ * `text` renders a ✓/!/✗ glyph per check and then, on failure, the singularly
+ * unhelpful "Run with --format json for details" — the details were already in
+ * hand, they were just not printed. Every check's status and detail is emitted
+ * here, so an agent never has to make a second call to find out what broke.
+ *
+ * Status is a word rather than a symbol because `ok`/`warn`/`fail` survives
+ * being read back by something that is not a terminal.
+ */
+export function renderDoctorLlm(
+  results: Array<{ name: string } & CheckResult>,
+  hasFailure: boolean,
+  hasWarning: boolean,
+): string[] {
+  const lines = [llmLine("doctor", [
+    ["healthy", hasFailure ? "false" : "true"],
+    ["warnings", hasWarning ? "true" : "false"],
+    ["checks", String(results.length)],
+  ])];
+  for (const r of results) {
+    lines.push(llmLine("check", [
+      ["name", r.name],
+      // Same precedence as the glyphs and as `hasFailure` below: a warning is
+      // `{ ok: false, warn: true }`, so `warn` has to be checked on the
+      // not-ok branch. Testing it on the ok branch reports every warning as a
+      // hard failure, which is the opposite of what `hasFailure` concludes.
+      ["status", r.ok ? "ok" : r.warn ? "warn" : "fail"],
+      ["detail", r.detail],
+    ]));
+  }
+  return lines;
 }
 
 interface Check {
@@ -141,6 +177,11 @@ export function registerDoctorCommand(program: Command): void {
 
       const hasFailure = results.some((r) => !r.ok && !r.warn);
       const hasWarning = results.some((r) => r.warn);
+
+      if (opts.format === "llm") {
+        printLlmLines(renderDoctorLlm(results, hasFailure, hasWarning));
+        return;
+      }
 
       if (opts.format === "json") {
         console.log(JSON.stringify({ healthy: !hasFailure, hasWarnings: hasWarning, checks: results }, null, 2));

@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
+import { llmLine, printLlmLines } from "../llm.js";
 
 interface CommandBreakdown {
   count: number;
@@ -19,6 +20,49 @@ interface SavingsData {
 interface SavingsResponse {
   session: SavingsData;
   lifetime: SavingsData;
+}
+
+/**
+ * `ix savings --format llm`.
+ *
+ * `text` draws a rule, two labelled blocks and a per-command table. The numbers
+ * are the whole content, so they go out as two `scope` records with the
+ * breakdown behind `--detail` exactly as the other formats gate it.
+ *
+ * Money and water are computed here rather than left to the caller because the
+ * pricing table lives in this file — a consumer cannot derive them from
+ * `tokens_saved` without it.
+ */
+export function renderSavingsLlm(
+  result: SavingsResponse,
+  model: string,
+  detail: boolean,
+): string[] {
+  const pricing = PRICING[model] ?? PRICING.opus;
+  const lines = [llmLine("savings", [["model", pricing.label]])];
+
+  for (const [scope, data] of [["session", result.session], ["lifetime", result.lifetime]] as const) {
+    lines.push(llmLine("scope", [
+      ["name", scope],
+      ["commands", String(data.commandCount)],
+      ["tokens_saved", String(data.tokensSaved)],
+      ["naive_tokens", String(data.naiveTokens)],
+      ["actual_tokens", String(data.actualTokens)],
+      ["money_saved", estimateMoney(data.tokensSaved, model).toFixed(2)],
+      ["water_saved_ml", String(estimateWater(data.tokensSaved))],
+    ]));
+    if (!detail) continue;
+    for (const [command, breakdown] of Object.entries(data.byCommandType)) {
+      lines.push(llmLine("command", [
+        ["scope", scope],
+        ["name", command],
+        ["count", String(breakdown.count)],
+        ["tokens_saved", String(breakdown.saved)],
+      ]));
+    }
+  }
+
+  return lines;
 }
 
 // Pricing models: input $/MTok, output $/MTok
@@ -101,6 +145,11 @@ export function registerSavingsCommand(program: Command): void {
     const client = new IxClient(getEndpoint());
     const detail = opts.detail ?? false;
     const result: SavingsResponse = await client.savings(detail);
+
+    if (opts.format === "llm") {
+      printLlmLines(renderSavingsLlm(result, opts.model, detail));
+      return;
+    }
 
     if (opts.format === "json") {
       const pricing = PRICING[opts.model] ?? PRICING.opus;

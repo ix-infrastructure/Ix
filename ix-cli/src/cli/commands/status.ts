@@ -3,6 +3,43 @@ import { renderSection, renderKeyValue, renderWarning, renderNote, renderSuccess
 import { IxClient } from "../../client/api.js";
 import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
 import { detectStaleFiles } from "../stale.js";
+import { llmError, llmLine, printLlmLines } from "../llm.js";
+
+interface StatusStaleInfo {
+  currentRev: number;
+  lastIngestAt: string | null;
+  staleFiles: number;
+  sampleChangedFiles: string[];
+}
+
+/**
+ * `ix status --format llm`.
+ *
+ * The reason to call `status` from an agent is to decide one thing: is the
+ * graph current enough to trust, or does it need `ix map` first. `text` buries
+ * that behind section headers, a "Last ingest" field humanised to "3h ago", and
+ * a sampled file list. The `stale` field answers it directly, and
+ * `last_ingest_at` stays ISO so the consumer can do its own arithmetic instead
+ * of parsing prose.
+ */
+export function renderStatusLlm(
+  backend: string,
+  endpoint: string,
+  staleInfo: StatusStaleInfo | null,
+): string[] {
+  const lines = [llmLine("status", [
+    ["backend", backend],
+    ["endpoint", endpoint],
+    ["rev", staleInfo ? String(staleInfo.currentRev) : null],
+    ["last_ingest_at", staleInfo?.lastIngestAt ?? null],
+    ["stale_files", staleInfo ? String(staleInfo.staleFiles) : null],
+    ["stale", staleInfo ? (staleInfo.staleFiles > 0 ? "true" : "false") : null],
+  ])];
+  for (const f of staleInfo?.sampleChangedFiles ?? []) {
+    lines.push(llmLine("changed", [["path", f]]));
+  }
+  return lines;
+}
 
 export function registerStatusCommand(program: Command): void {
   program
@@ -24,7 +61,9 @@ export function registerStatusCommand(program: Command): void {
           staleInfo = null;
         }
 
-        if (opts.format === "json") {
+        if (opts.format === "llm") {
+          printLlmLines(renderStatusLlm(health.status, getEndpoint(), staleInfo ?? null));
+        } else if (opts.format === "json") {
           const result: any = {
             backend: health.status,
             currentRev: staleInfo?.currentRev ?? null,
@@ -58,7 +97,14 @@ export function registerStatusCommand(program: Command): void {
           }
         }
       } catch (err) {
-        console.error(`Ix backend not reachable at ${getEndpoint()}`);
+        // The spec's uniform error record, so a consumer that pipes `--format
+        // llm` parses the failure the same way it parses a result rather than
+        // hitting an unparseable human sentence. Exit code is unchanged.
+        if (opts.format === "llm") {
+          console.log(llmError("backend_unreachable", `Ix backend not reachable at ${getEndpoint()}`));
+        } else {
+          console.error(`Ix backend not reachable at ${getEndpoint()}`);
+        }
         process.exit(1);
       }
     });

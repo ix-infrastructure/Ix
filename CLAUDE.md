@@ -15,10 +15,14 @@ Use the `ix` CLI exclusively.
 - `--format json` — use when chaining results between commands, or when you need
   to pull a specific field out of the response.
 
-**Four commands advertise `llm` in their help but do not implement it**, and fall
-back to human-oriented text without an error: `explain`, `read`, `status`, and the
-deprecated `query`. Use `--format json` on those if you need to parse the result.
-Everywhere else in the routing tables, `llm` behaves as described.
+Every command that accepts `--format` implements `llm`, with two exceptions that
+fall back to text without an error: `diff --content` (verbatim hunks) and
+`ingest`. The deprecated `query` accepts only `text|json` — passing `--format
+llm` to it silently renders text.
+
+`--format llm` is **not** accepted at all by `config`, `init`, `reset`,
+`upgrade`, `view`, `watch` and `docker`, which take no `--format`; passing it is
+an `unknown option` error, not a fallback. Do not pass it blind.
 
 These commands take no `--format` at all: `config`, `init`, `reset`, `upgrade`,
 `view`, `watch`. (`ingest` does accept it, despite being an action command.)
