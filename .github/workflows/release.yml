@@ -535,10 +535,18 @@ jobs:
           git add Formula/ix.rb
           # `chore(brew):`, not `brew:` — pr-title.yml runs
           # action-semantic-pull-request against a fixed type list that has
-          # never included `brew`, so every release opened a formula PR whose
-          # Conventional title check failed on arrival. It is not a required
-          # check, so the PR stayed technically mergeable and the red X was
-          # written off as noise each time rather than traced back here.
+          # never included `brew`, so the formula PR this step opens has to be
+          # retitled by hand before its Conventional title check can pass.
+          # That check is not in the ruleset's required set (only `CI Passed`
+          # is), so it never blocked the merge — this removes the rename, not a
+          # blocker. Applies from v0.9.0 on: pr-title.yml arrived in #282
+          # (2026-06-08) and every earlier formula PR predates it. #367 is the
+          # instance that was renamed by hand.
+          #
+          # Note the real hold is elsewhere: this PR is created by
+          # github-actions[bot], so its workflow runs land in `action_required`
+          # and `CI Passed` never reports until someone approves them. On #364
+          # that meant the title check never ran at all.
           git commit -m "chore(brew): update formula for v${VERSION}" || exit 0
           git push --force-with-lease origin "$BRANCH"
           gh pr create --title "chore(brew): update formula for v${VERSION}" --body "Auto-generated: updates Homebrew formula SHA for v${VERSION}" --base main || true
