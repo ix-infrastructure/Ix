@@ -22,10 +22,8 @@ llm` to it silently renders text.
 
 `--format llm` is **not** accepted at all by `config`, `init`, `reset`,
 `upgrade`, `view`, `watch` and `docker`, which take no `--format`; passing it is
-an `unknown option` error, not a fallback. Do not pass it blind.
-
-These commands take no `--format` at all: `config`, `init`, `reset`, `upgrade`,
-`view`, `watch`. (`ingest` does accept it, despite being an action command.)
+an `unknown option` error, not a fallback. Do not pass it blind. (`ingest` does
+accept `--format`, despite being an action command.)
 
 **Pro features.** Some commands below are marked **[Pro]**, as are the whole
 **Planning** and **Workflows** sections — every command in those two tables is

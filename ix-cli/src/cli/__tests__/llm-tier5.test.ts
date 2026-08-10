@@ -1,6 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { renderExplainLlm, renderExplainRawLlm } from "../explain/llm.js";
-import { renderReadLlm, renderReadAmbiguityLlm } from "../commands/read.js";
+import { renderReadLlm, renderReadAmbiguityLlm, outputResult } from "../commands/read.js";
+import type { ReadResult } from "../commands/read.js";
 import { renderStatusLlm } from "../commands/status.js";
 import { renderDoctorLlm } from "../commands/doctor.js";
 import { renderSavingsLlm } from "../commands/savings.js";
@@ -176,6 +177,25 @@ describe("doctor --format llm", () => {
     expect(lines).toContain('check name="Graph schema matches engine" status=warn detail="graph schema v2, expected v3"');
     expect(lines).toContain('check name="Docker running" status=fail detail="daemon not up"');
   });
+
+  // {ok:true, warn:true} is the only shape the ternary's ordering decides —
+  // `latest-not-pulled` returns it, and every other combination reads the same
+  // either way round. Without this row the comment explaining why `ok` must be
+  // tested first sits above an untested branch.
+  //
+  // `ok`, not `warn`, because that is what the glyph line renders for the same
+  // record (green ✓, not yellow !). The two formats describing one check
+  // differently is the bug worth guarding; the header still carries
+  // warnings=true, so nothing is lost.
+  it("agrees with the glyph on a check that passes with a warning", () => {
+    const lines = renderDoctorLlm(
+      [{ name: "Backend image", ok: true, warn: true, detail: "can't verify — :latest not pulled" }],
+      false, true,
+    );
+
+    expect(lines[0]).toBe("doctor healthy=true warnings=true checks=1");
+    expect(lines).toContain('check name="Backend image" status=ok detail="can\'t verify — :latest not pulled"');
+  });
 });
 
 describe("savings --format llm", () => {
@@ -202,5 +222,63 @@ describe("savings --format llm", () => {
 
     expect(without.some(l => l.startsWith("command "))).toBe(false);
     expect(with_).toContain("command scope=session name=explain count=4 tokens_saved=20000");
+  });
+});
+
+/**
+ * The `content lines=<n>` header is only true of render *composed with* print.
+ * renderReadLlm returns the blank lines correctly; printLlmLines used to drop
+ * them on the way to stdout, so the count promised more lines than a consumer
+ * ever received and it ate the following records as source. Asserting on the
+ * returned array cannot see that — these drive the real print path.
+ */
+describe("read --format llm content framing", () => {
+  function emit(content: string, over: Partial<ReadResult> = {}): string[] {
+    const out: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => {
+      out.push(a.map(String).join(" "));
+    });
+    try {
+      outputResult({
+        targetType: "file", path: "/repo/src/a.ts",
+        lineStart: 1, lineEnd: 1, content, stale: false,
+        ...over,
+      } as ReadResult, "llm");
+    } finally {
+      spy.mockRestore();
+    }
+    return out;
+  }
+
+  function framing(content: string): { declared: number; emitted: number } {
+    const out = emit(content);
+    const header = out.findIndex(l => l.startsWith("content lines="));
+    return {
+      declared: Number(/content lines=(\d+)/.exec(out[header])![1]),
+      emitted: out.length - header - 1,
+    };
+  }
+
+  it.each([
+    ["a blank line in the middle", "def verify():\n\n    return True\n"],
+    ["an empty file", ""],
+    ["CRLF content", "a\r\nb\r\n"],
+    ["no trailing newline", "x\ny"],
+    ["only blank lines", "\n\n\n"],
+  ])("emits exactly as many lines as it declares: %s", (_label, content) => {
+    const { declared, emitted } = framing(content);
+    expect(emitted).toBe(declared);
+  });
+
+  it("keeps the blank line in place rather than closing the gap", () => {
+    const out = emit("a\n\nb\n");
+    expect(out.slice(out.findIndex(l => l.startsWith("content lines=")) + 1))
+      .toEqual(["a", "", "b", ""]);
+  });
+
+  it("routes --format llm to records, not the numbered gutter", () => {
+    const out = emit("x\ny");
+    expect(out[0]).toContain("file path=");
+    expect(out.some(l => /^\s*\d+ /.test(l))).toBe(false);
   });
 });

@@ -82,9 +82,19 @@ export function llmError(
   return llmLine("error", [["code", code], ["message", message], ...fieldEntries(extra)]);
 }
 
-/** Print rendered lines, skipping any that are empty. */
+/**
+ * Print rendered lines, skipping only the ones that were omitted.
+ *
+ * `!= null`, not truthiness: `read` pushes raw source through here after a
+ * `content lines=<n>` header, and a blank source line is `""`. Dropping those
+ * left the header counting lines that never reached stdout, so a consumer
+ * honouring the count ate the following records as source. Nothing else can
+ * arrive empty — every renderer builds its lines with a record kind, and
+ * `llmLine` only returns `""` for a null kind with no surviving fields, which
+ * no caller does.
+ */
 export function printLlmLines(lines: Array<string | null | undefined>): void {
   for (const line of lines) {
-    if (line) console.log(line);
+    if (line != null) console.log(line);
   }
 }

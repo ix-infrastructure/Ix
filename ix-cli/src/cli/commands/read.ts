@@ -27,7 +27,7 @@ function looksFileLike(target: string): boolean {
   return false;
 }
 
-interface ReadResult {
+export interface ReadResult {
   targetType: "file" | "file-range" | "filename-match" | "symbol";
   path: string;
   lineStart: number;
@@ -119,7 +119,11 @@ export function renderReadAmbiguityLlm(result: AmbiguityResult, target: string):
   return lines;
 }
 
-function outputResult(result: ReadResult, format: string): void {
+// Exported for the tests: the `content lines=<n>` invariant is a property of
+// render *composed with* print, not of either alone. Asserting on
+// renderReadLlm's return value passes just as happily when printLlmLines drops
+// the blank lines out from under the count.
+export function outputResult(result: ReadResult, format: string): void {
   if (format === "llm") {
     printLlmLines(renderReadLlm(result));
   } else if (format === "json") {
