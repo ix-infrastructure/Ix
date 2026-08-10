@@ -11,12 +11,9 @@ backend is NOT in this repo — it is the released Docker image running at
 |---|---|
 | `ix-cli/` | The `@ix/cli` TypeScript package — command routing (`src/cli/`), registration hub (`src/cli/register/oss.ts`), HTTP client (`src/client/api.ts`), response types (`src/client/types.ts`) |
 | `core-ingestion/` | Tree-sitter parser/classifier (26 languages) |
-| `skills/ix/` | The agent skill this project ships: `SKILL.md`, `references/` (commands, output-formats, troubleshooting), `scripts/` (bootstrap.sh/ps1, `compass-patch/apply.sh` + `fit-view.js`) |
-| `upstream/compass-fit-view/` | React port of the fit-view patch (the would-be upstream PR) — `src/FitViewHint.tsx` |
+| `skills/ix/` | The agent skill this project ships: `SKILL.md`, `references/` (commands, output-formats, troubleshooting), `scripts/` (bootstrap.sh/ps1) |
 | `docs/` | `api/` (HTTP API reference + OpenAPI spec), `llm-format.md`, `prerequisites.md` |
 | `scripts/` | `bootstrap.sh` (first-run), `install-skill.sh` (deploy skill to `~/.claude/skills` + `~/.agents/skills`) |
-| `dist/ix.zip` | Packaged skill artifact (rebuilt via the skill-creator `package_skill.py`) |
-| `.freebuff/run.md` | **Run doc** — how to reproduce preview artifacts and run the Compass preview server |
 
 ## Commands
 
@@ -30,9 +27,9 @@ npm run dev           # tsx src/cli/main.ts
 # Skill + tooling (from repo root)
 bash scripts/bootstrap.sh [repo-root]   # install CLI, start backend, map repo
 bash scripts/install-skill.sh           # deploy skills/ix to ~/.claude + ~/.agents
-bash skills/ix/scripts/compass-patch/apply.sh   # re-apply Compass patch (after EVERY ix upgrade)
-# Repackage the skill zip (Windows: set PYTHONIOENCODING=utf-8 or the emoji print crashes):
-PYTHONIOENCODING=utf-8 python "C:/Users/jacob/.agents/skills/skill-creator/scripts/package_skill.py" skills/ix ./dist
+# Repackage the skill zip into ./dist (gitignored). Needs the skill-creator
+# skill installed; on Windows set PYTHONIOENCODING=utf-8 or its emoji print crashes.
+python "$HOME/.agents/skills/skill-creator/scripts/package_skill.py" skills/ix ./dist
 
 # Visualizer / preview
 ix view start --all --no-open --port 8080   # combined multi-workspace view
@@ -52,27 +49,18 @@ ix map --silent                             # refresh the graph after code chang
   be awaited.
 - **`registerPatchesCommand` is defined but never registered** in `oss.ts` —
   `ix patches` is an "unknown command" today.
-- **The Compass patch lives in the skill, not the repo.** Every `ix upgrade`
-  wipes `~/.ix/cli/compass`; `bootstrap.sh` re-runs `ix upgrade` when the UI
-  is missing and `apply.sh` re-applies the fit-view patch after every
-  install/upgrade. If the F-key / hint chip / no-map chip stop working, the
-  patch was wiped — re-run `apply.sh` and restart the visualizer.
-- **The no-map chip debounce:** it requires 2 consecutive empty-state
-  observations (~800ms) before appearing, so a transient empty render (backend
-  blip, mid-remap reload) never sticks a permanent chip.
+- **`ix upgrade` wipes `~/.ix/cli/compass`.** The Compass assets ship only via
+  `ix upgrade`, and re-running the installer re-extracts over them, so a
+  re-install can leave `ix view` with no UI. `bootstrap.sh` re-runs `ix upgrade`
+  when it finds the directory missing; skip that with `IX_SKIP_COMPASS=1`.
 - **Windows path trap:** Git Bash `/tmp` ≠ Windows `C:\tmp` — node/python
   cannot read files Git Bash wrote to `/tmp`. Use project-relative paths.
 
 ## Patterns
 
-- **Compass patch workflow:** edit `skills/ix/scripts/compass-patch/fit-view.js`
-  → `node --check` → copy to `~/.ix/cli/compass/fit-view.js` → test on the live
-  preview (reload; the F-hint chip fades at 7s, so temporarily extend the fade
-  to ~120s in the served copy for testing) → `apply.sh` → `install-skill.sh` →
-  repackage zip → verify the zip contains the change.
-- **Theme tokens:** the app exposes `--card` / `--border` / `--foreground` CSS
-  variables on `<html>` that flip synchronously with the `dark` class — read
-  those instead of sampling a transitioning element.
+- **Skill edit workflow:** edit `skills/ix/` → `bash scripts/install-skill.sh`
+  to deploy to `~/.claude/skills/ix` and `~/.agents/skills/ix` → start a new
+  agent session so the skill is re-read.
 - **After modifying code:** run `ix map --silent` to re-ingest.
 
 ## Typecheck & Test Discipline

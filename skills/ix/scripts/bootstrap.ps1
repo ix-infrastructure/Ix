@@ -93,16 +93,6 @@ if ($env:IX_SKIP_COMPASS -ne "1") {
   }
 }
 
-# Re-apply the Compass fit-view patch (F-key fit view + auto-frame on load).
-# The installer wipes the Compass dir, so re-apply after every install/upgrade.
-if ($env:IX_SKIP_COMPASS_PATCH -ne "1") {
-  $apply = Join-Path $PSScriptRoot "compass-patch\apply.sh"
-  if (Test-Path $apply) {
-    try { & bash $apply *> $null; Info "Compass fit-view patch applied (F = fit view)." }
-    catch { Warn "Compass fit-view patch not applied - run: bash skills/ix/scripts/compass-patch/apply.sh" }
-  }
-}
-
 # --- Backend -------------------------------------------------------------------
 if (-not $NoBackend) {
   Info "Starting the Ix backend (ArangoDB + memory layer)..."

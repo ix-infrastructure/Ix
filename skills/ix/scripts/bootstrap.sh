@@ -43,7 +43,11 @@ fail() { printf '\033[1;31m[ix-skill]\033[0m %s\n' "$*" >&2; exit 1; }
 is_windows() { [ -n "${MSYSTEM:-}" ] || [ -n "${WSL_DISTRO_NAME:-}" ] || case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; *) return 1 ;; esac; }
 
 version_ge() { # version_ge <got> <want>
-  printf '%s\n%s\n' "$2" "$1" | sort -V -C -r 2>/dev/null
+  # `sort -C` succeeds when its input is already in order, so feeding it
+  # want-then-got asks "is want <= got" — which is the question. The `-r` this
+  # used to carry asked the reverse and inverted the whole check: Node 22.22.2
+  # against a floor of 22 warned, and Node 18 passed silently.
+  printf '%s\n%s\n' "$2" "$1" | sort -V -C 2>/dev/null
 }
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
@@ -129,16 +133,6 @@ ensure_compass() {
 }
 if [ "${IX_SKIP_COMPASS:-0}" != "1" ]; then
   ensure_compass
-fi
-
-# Re-apply the Compass fit-view patch (F-key fit view + auto-frame on load).
-# The installer wipes the Compass dir, so re-apply after every install/upgrade.
-if [ "${IX_SKIP_COMPASS_PATCH:-0}" != "1" ]; then
-  if bash "$(dirname "${BASH_SOURCE[0]}")/compass-patch/apply.sh" >/dev/null 2>&1; then
-    info "Compass fit-view patch applied (F = fit view)."
-  else
-    warn "Compass fit-view patch not applied — run: bash skills/ix/scripts/compass-patch/apply.sh"
-  fi
 fi
 
 # --- Backend ------------------------------------------------------------------

@@ -18,10 +18,22 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/skills/ix"
 [ -f "$SRC/SKILL.md" ] || { echo "error: $SRC/SKILL.md not found" >&2; exit 1; }
 
+FORCE=0
+[ "${1:-}" = "--force" ] && FORCE=1
+
 installed=0
 for dest in "$HOME/.claude/skills/ix" "$HOME/.agents/skills/ix"; do
   mkdir -p "$(dirname "$dest")"
   if [ -e "$dest" ]; then
+    # Refuse to delete something that is not a previous install of this skill.
+    # `ix` is a short name, and the unconditional `rm -rf` this replaces would
+    # silently destroy a hand-written skill that happened to share it — with no
+    # prompt, no backup, and nothing in the output to say it had happened.
+    if [ "$FORCE" != "1" ] && ! grep -qs '^name: ix$' "$dest/SKILL.md"; then
+      echo "error: $dest exists and is not an Ix skill install." >&2
+      echo "       Move it aside, or re-run with --force to overwrite it." >&2
+      exit 1
+    fi
     rm -rf "$dest"
   fi
   cp -R "$SRC" "$dest"

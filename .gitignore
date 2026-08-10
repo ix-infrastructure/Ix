@@ -1,6 +1,9 @@
 target/
-# Skill distribution artifact (skills/ix packaged zip)
-dist/
+# Skill distribution artifact (skills/ix packaged zip).
+# Anchored: a bare `dist/` matches at any depth, which would also swallow
+# ix-cli/dist and core-ingestion/dist — already ignored explicitly below, and
+# better kept that way so the intent of each is visible.
+/dist/
 
 # Session/tooling artifacts (Freebuff preview state, generated knowledge graphs)
 .freebuff/

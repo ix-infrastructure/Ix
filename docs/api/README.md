@@ -476,11 +476,10 @@ backend:
 1. **`/v1/*` proxy** — every backend request is proxied to `localhost:8090`
    with `x-ix-workspace` and `x-ix-system` headers baked in at launch, so the
    browser app never knows about workspaces. `--all` opts out of scoping.
-2. **`POST /__ix/remap`** — rebuild the code map for the workspace the
-   visualizer was launched from (its cwd) by running `ix map .` with a 30-minute
-   timeout. *Patched by the skill's `compass-patch/apply.sh` — the stock
-   endpoint was an SPA fallback stub.*
-3. **SPA fallback** — any other path serves `index.html`.
+2. **SPA fallback** — any other path serves `index.html`. There is no
+   `/__ix/remap` endpoint: a `POST` to it falls through to this handler and
+   returns the SPA HTML with a `200`, so a caller cannot tell it did nothing.
+   Re-map from the CLI with `ix map .` instead.
 
 ## Data Models
 
