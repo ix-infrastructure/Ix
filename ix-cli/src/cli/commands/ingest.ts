@@ -11,7 +11,7 @@ import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
 import type { GraphPatchPayload } from '../../client/types.js';
 import { getEndpoint, resolveWorkspaceRoot } from '../config.js';
-import { loadIngestBaseline, saveIngestBaseline } from '../ingest-baseline.js';
+import { isRev, loadIngestBaseline, saveIngestBaseline } from '../ingest-baseline.js';
 import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
 import { loadIngestionModules } from './ingestion-loader.js';
@@ -482,6 +482,21 @@ async function retryOnConflict<T>(fn: () => Promise<T>, maxRetries: number): Pro
       await new Promise<void>(r => setTimeout(r, delay));
     }
   }
+}
+
+/**
+ * Advance the running max revision, ignoring anything that is not a revision.
+ *
+ * `result.rev` comes off the wire, and a bare `>` is not safe on it. A string
+ * "9" clears `> 0` by coercion and becomes the max; the next comparison is then
+ * string-to-string, so `"10" > "9"` is false and the max walks backwards. That
+ * value also reaches the user verbatim as the `latestRev` field of
+ * `ix ingest --format json`, where every consumer reads it as a number.
+ * Screening it here fixes the max, the JSON contract and the persisted baseline
+ * in one place, rather than papering over the last of the three.
+ */
+export function advanceRev(current: number, incoming: unknown): number {
+  return isRev(incoming) && incoming > current ? incoming : current;
 }
 
 // ---------------------------------------------------------------------------
@@ -1242,7 +1257,7 @@ export async function ingestFiles(
                 const chunkMs = Math.round(performance.now() - commitStart);
                 commitMsPerChunk[ci] += chunkMs;
                 timings.fallbackCommitMs += chunkMs;
-                if (result.rev > latestRev) latestRev = result.rev;
+                latestRev = advanceRev(latestRev, result.rev);
                 patchesApplied++;
                 opts?.onCommitted?.(item, result.rev);
               } catch (commitErr) {
@@ -1276,7 +1291,7 @@ export async function ingestFiles(
             const chunkMs = Math.round(performance.now() - commitStart);
             commitMsPerChunk[ci] = chunkMs;
             timings.bulkCommitMs += chunkMs;
-            if (result.rev > latestRev) latestRev = result.rev;
+            latestRev = advanceRev(latestRev, result.rev);
             patchesApplied += patches.length;
             for (const item of chunk) opts?.onCommitted?.(item, result.rev);
           } catch (err) {

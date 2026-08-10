@@ -52,23 +52,47 @@ function parsePort(value: string): number | null {
 }
 
 /**
+ * Read a file, keeping "not there" and "there but unreadable" apart.
+ *
+ * Collapsing both to null is the tempting shape and the wrong one. An
+ * unreadable compass.pid — a directory left by a botched extract, a root-owned
+ * file after one `sudo ix` — would read as "no visualizer running", and the
+ * callers act on that: one deletes a live server's state files, the other goes
+ * on to spawn a second server it then cannot record or stop. Only ENOENT means
+ * absent. Anything else is a real problem and belongs to the caller.
+ *
+ * Reading straight out instead of checking existsSync first is what closes
+ * CodeQL js/file-system-race: the check could always go stale before the read,
+ * and it never told us the read would succeed anyway.
+ */
+function readTextIfPresent(path: string): string | null {
+  try {
+    return readFileSync(path, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+/**
  * Read the persisted port, falling back to the server script written by older releases.
  *
- * No existsSync guard ahead of either read: a missing file throws into the same
- * catch that already handles unreadable content, so the check bought nothing and
- * only opened a window for the file to change between the two calls (CodeQL
- * js/file-system-race).
+ * Unlike the PID and scope reads, this one does swallow an unreadable file: it
+ * is a best-effort lookup for a URL to print, not a liveness check, so a corrupt
+ * compass.port should degrade to the legacy script rather than fail the command.
+ * That was already the behaviour; only the existsSync guards are gone.
  */
 function readRunningPort(): number | null {
   try {
-    const port = parsePort(readFileSync(PORT_FILE, "utf-8"));
+    const raw = readTextIfPresent(PORT_FILE);
+    const port = raw === null ? null : parsePort(raw);
     if (port !== null) return port;
   } catch {
     // Fall through to the legacy server script.
   }
 
   try {
-    const match = readFileSync(SERVER_SCRIPT_FILE, "utf-8").match(/^const PORT = (\d+);$/m);
+    const match = readTextIfPresent(SERVER_SCRIPT_FILE)?.match(/^const PORT = (\d+);$/m);
     const port = match?.[1] ? parsePort(match[1]) : null;
     if (port !== null) {
       // Best-effort migration for a visualizer started before compass.port existed.
@@ -112,18 +136,21 @@ export function runningInstanceLines(
   return lines;
 }
 
-/** Read PID from file and check if the process is alive. */
+/**
+ * Read PID from file and check if the process is alive.
+ *
+ * An unreadable PID file throws rather than reporting "not running". Both
+ * callers treat null as licence to act — `stop` wipes the state files, `start`
+ * launches a detached server — so answering null for a file we simply could not
+ * read would delete a live server's only record, or orphan a fresh one.
+ */
 function readAlivePid(): number | null {
-  let pid: number;
-  try {
-    pid = Number(readFileSync(PID_FILE, "utf-8").trim());
-  } catch {
-    // Absent or unreadable — same disposition either way. Reading straight out
-    // also fixes the old shape, where an existsSync pass followed by a failing
-    // read threw out of the command instead of clearing the stale state.
+  const raw = readTextIfPresent(PID_FILE);
+  if (raw === null) {
     removeCompassState();
     return null;
   }
+  const pid = Number(raw.trim());
   if (!Number.isInteger(pid) || pid <= 0) {
     removeCompassState();
     return null;
@@ -337,8 +364,11 @@ export function registerViewCommand(program: Command): void {
         }
         // The running instance has a fixed scope (baked at launch). If this directory
         // maps to a different workspace, say so rather than silently showing the old one.
-        let runningKey: string | null = null;
-        try { runningKey = readFileSync(SCOPE_FILE, "utf-8").trim(); } catch { /* no scope file */ }
+        // Unreadable must not read as "no scope": that would skip the check
+        // below and quietly hand back another workspace's graph, which is the
+        // exact confusion the scope file exists to prevent. Empty counts as
+        // unknown too, not as a scope literally named "".
+        const runningKey = readTextIfPresent(SCOPE_FILE)?.trim() || null;
         if (runningKey !== null && runningKey !== scopeKey) {
           const runningLabel = runningKey === "*all*"
             ? "all workspaces"

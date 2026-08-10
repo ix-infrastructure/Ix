@@ -17,6 +17,19 @@ export interface IngestBaseline {
   lastIngestAt: string;
 }
 
+/**
+ * What counts as a revision, for both sides of this file.
+ *
+ * The rev arrives off the backend's commit response, so it is response data
+ * rather than anything this process computed, and `typeof` is not enough — the
+ * read side has always insisted on a non-negative integer. One predicate so the
+ * two sides cannot drift apart again; they were previously three lines apart
+ * and disagreed.
+ */
+export function isRev(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
 export function loadIngestBaseline(projectRoot: string): IngestBaseline | null {
   const cachePath = ingestMtimeCachePath(projectRoot);
   try {
@@ -40,12 +53,7 @@ export function loadIngestBaseline(projectRoot: string): IngestBaseline | null {
     const lastIngestAt = Number.isFinite(parsedTimestamp)
       ? new Date(parsedTimestamp).toISOString()
       : fs.statSync(cachePath).mtime.toISOString();
-    const currentRev =
-      typeof data.currentRev === "number" &&
-      Number.isInteger(data.currentRev) &&
-      data.currentRev >= 0
-        ? data.currentRev
-        : 0;
+    const currentRev = isRev(data.currentRev) ? data.currentRev : 0;
 
     return { files, deletedFiles, currentRev, lastIngestAt };
   } catch {
@@ -61,15 +69,16 @@ export function saveIngestBaseline(
   deletedFiles: Map<string, string[]> = new Map(),
 ): void {
   try {
-    const previousRev = loadIngestBaseline(projectRoot)?.currentRev ?? 0;
-    // The rev reaches us straight off the backend's commit response, and until
-    // now only the read side checked its shape. That asymmetry is a quiet trap:
-    // a non-integer rev (an older backend answering with a string, say) sails
-    // through a bare `> 0`, gets written, and is then rejected by
-    // loadIngestBaseline on the next run — which resets the rev to 0 and costs a
-    // full re-ingest, every run, with nothing said. Insist on the same shape
-    // both sides already agree on.
-    const rev = Number.isInteger(currentRev) && currentRev > 0 ? currentRev : previousRev;
+    // Keep the last good rev rather than writing a shape the read side will
+    // reject. `ix status` is the only thing that reads this number, so a bad one
+    // costs a wrong Revision line, not a re-ingest — incremental skipping runs
+    // off the mtime map below and is unaffected either way. The lookup is lazy
+    // because it parses the entire baseline for one integer, and the reject
+    // branch is the only one that wants it: onCommitted calls this once per
+    // deleted file, so an eager read would re-parse the whole map N times.
+    const rev = isRev(currentRev) && currentRev > 0
+      ? currentRev
+      : (loadIngestBaseline(projectRoot)?.currentRev ?? 0);
     const data: SerializedIngestBaseline = {
       root: projectRoot,
       files: Object.fromEntries(mtimes),
