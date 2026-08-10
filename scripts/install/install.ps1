@@ -93,18 +93,33 @@ function Write-Warn($msg) { Write-Host "  [!!] $msg" -ForegroundColor Yellow }
 # it. $IxHome is assigned unconditionally at the top, long before any Write-Err
 # is reachable, so it is always ours.
 #
-# -PathType Leaf because $Staging is `.cli-staging-<pid>` -- a *directory* the
-# failure sites clean themselves. Without it, `Remove-Item -Force` on a
-# directory with children throws (there is no host UI for the prompt, and
-# -ErrorAction SilentlyContinue does not catch it), which would escape into the
-# trap and print a second, meaningless error over the real one.
+# -PathType Leaf so a *directory* sitting on either name is skipped rather than
+# removed. (Not $Staging -- that is `.cli-staging-<pid>` with no suffix and
+# cannot collide with the `.zip`/`.log` names built here.) Two cases it does
+# cover, both measured: a stale directory squatting the exact name, where
+# `Remove-Item -Force` on one with children throws, since there is no host UI
+# for the prompt and -ErrorAction SilentlyContinue does not catch it; and a
+# directory junction at that name, which is skipped outright so PS 5.1 never
+# gets the chance to recurse into whatever it points at.
+#
+# The whole body is wrapped because this runs *from the error path*. Anything
+# escaping here lands in the trap and prints a second, meaningless error over
+# the actionable one the user actually needs -- which is what an unguarded
+# Test-Path does under `$ErrorActionPreference = "Stop"` when IX_HOME names a
+# detached drive: it throws DriveNotFoundException rather than returning false,
+# on both 5.1 and 7. Join-Path throws on illegal characters on 5.1 for the same
+# reason. Best-effort cleanup must never be the loudest thing in the output.
 function Remove-InstallerScratch {
     if (-not $IxHome) { return }
-    foreach ($name in @(".cli-staging-$PID.zip", ".cli-staging-pull-$PID.log")) {
-        $p = Join-Path $IxHome $name
-        if (Test-Path -LiteralPath $p -PathType Leaf) {
-            Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+    try {
+        foreach ($name in @(".cli-staging-$PID.zip", ".cli-staging-pull-$PID.log")) {
+            $p = Join-Path $IxHome $name
+            if (Test-Path -LiteralPath $p -PathType Leaf) {
+                Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+            }
         }
+    } catch {
+        # Deliberately silent: see above.
     }
 }
 
