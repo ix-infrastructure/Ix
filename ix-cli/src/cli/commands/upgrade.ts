@@ -323,6 +323,49 @@ function rmQuiet(target: string): void {
  * one. Windows release zips nest everything under `ix-<version>-<platform>/`,
  * and reading it back beats assuming the name — the shim has to point inside it.
  */
+/**
+ * The body of `%IX_HOME%\bin\ix.cmd`, which is the launcher every native
+ * Windows shell actually runs.
+ *
+ * It checks its own target before invoking it, because the failure it is
+ * guarding against is unrecoverable from inside the CLI. `ix upgrade` on any
+ * version before 0.9.0 refreshed only the *bash* shim under Git Bash and left
+ * this file pointing at a `cli\ix.cmd` that the upgrade had just replaced with
+ * a version-nested directory (Ix#385). The user is then holding a launcher that
+ * cannot start the program that would have told them what to do — cmd.exe says
+ * only:
+ *
+ *   '"C:\Users\...\.ix\bin\..\cli\ix.cmd"' is not recognized as an internal or
+ *   external command, operable program or batch file.
+ *
+ * which names the wrapper rather than the cause and reads like a broken install
+ * rather than a broken upgrade. So the recovery instruction has to live in the
+ * batch file itself. Nothing else in the system can reach them at that point:
+ * `ix doctor` is exactly as unreachable as `ix`.
+ *
+ * `^|` is an escaped pipe — cmd.exe would otherwise treat it as a pipeline.
+ */
+export function windowsShimBody(inner: string): string {
+  return [
+    "@echo off",
+    `if not exist "${inner}" goto :ix_missing`,
+    `"${inner}" %*`,
+    "exit /b %errorlevel%",
+    "",
+    ":ix_missing",
+    "echo(",
+    `echo   The Ix CLI is not at "${inner}".`,
+    "echo(",
+    "echo   An 'ix upgrade' from a version before 0.9.0 moved the CLI and left",
+    "echo   this launcher pointing at the old path. Reinstalling repairs it:",
+    "echo(",
+    "echo     irm https://ix-infra.com/install.ps1 ^| iex",
+    "echo(",
+    "exit /b 1",
+    "",
+  ].join("\r\n");
+}
+
 export function soleChildDir(dir: string): string | null {
   let entries;
   try {
@@ -696,7 +739,7 @@ function refreshLaunchers(installDir: string, installedRoot: string, isWindows: 
           console.log("  Left your dev ix.cmd shim untouched (re-run scripts/dev/setup.sh to repoint it).");
         } else {
           mkdirSync(dirname(cmdShim), { recursive: true });
-          writeFileSync(cmdShim, `@echo off\r\n"${inner}" %*\r\n`, "ascii");
+          writeFileSync(cmdShim, windowsShimBody(inner), "ascii");
         }
       } catch (err) {
         problems.push(`${cmdShim}: ${(err as Error).message}`);

@@ -486,9 +486,28 @@ Write-Ok "Extraction complete"
 
 Remove-Item -LiteralPath $tmp -Force
 
+# Checks its own target before invoking it. `ix upgrade` on any version before
+# 0.9.0 refreshed only the bash shim and left this file pointing at a
+# `cli\ix.cmd` the upgrade had just replaced with a version-nested directory
+# (Ix#385). cmd.exe's own error names this wrapper rather than the cause, and
+# the CLI that would explain it is exactly as unreachable as the launcher — so
+# the recovery instruction has to live here. `^|` is an escaped pipe.
 @"
 @echo off
+if not exist "%~dp0..\cli\ix.cmd" goto :ix_missing
 "%~dp0..\cli\ix.cmd" %*
+exit /b %errorlevel%
+
+:ix_missing
+echo(
+echo   The Ix CLI is not at "%~dp0..\cli\ix.cmd".
+echo(
+echo   An 'ix upgrade' from a version before 0.9.0 moved the CLI and left
+echo   this launcher pointing at the old path. Reinstalling repairs it:
+echo(
+echo     irm https://ix-infra.com/install.ps1 ^| iex
+echo(
+exit /b 1
 "@ | Out-File -LiteralPath "$IxBin\ix.cmd" -Encoding ascii
 
 $userPath = [Environment]::GetEnvironmentVariable("PATH","User")

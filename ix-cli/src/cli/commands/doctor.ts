@@ -4,6 +4,9 @@ import { renderSection, renderSuccess, renderError } from "../ui.js";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { llmLine, printLlmLines } from "../llm.js";
+import { existsSync, readFileSync } from "node:fs";
+import { join as pathJoin, win32 as winPath } from "node:path";
+import { homedir } from "node:os";
 import {
   BACKEND_IMAGE,
   checkBackendImage,
@@ -57,6 +60,54 @@ export function renderDoctorLlm(
 interface Check {
   name: string;
   run: () => Promise<CheckResult>;
+}
+
+/**
+ * Does `%IX_HOME%\bin\ix.cmd` still point at a CLI that exists?
+ *
+ * `ix upgrade` before 0.9.0 refreshed only the bash shim and left this launcher
+ * aimed at a `cli\ix.cmd` the upgrade had just replaced with a version-nested
+ * directory (Ix#385).
+ *
+ * The obvious objection is that a user whose launcher is broken cannot run
+ * `ix doctor` to be told so. True from PowerShell — which is why the launcher
+ * now diagnoses itself. This check covers the case that shim cannot: the *bash*
+ * shim under Git Bash / MSYS is refreshed by every version, so `ix` keeps
+ * working there while the native launcher is quietly dead. Someone who lives in
+ * Git Bash can be broken in PowerShell for weeks without knowing.
+ */
+export function checkWindowsLauncher(
+  ixHome: string,
+  readShim: (path: string) => string | null,
+  exists: (path: string) => boolean,
+): CheckResult {
+  const shimPath = pathJoin(ixHome, "bin", "ix.cmd");
+  const body = readShim(shimPath);
+  if (body === null) {
+    return { ok: true, detail: "no ix.cmd launcher (not installed by install.ps1)" };
+  }
+
+  // The launcher invokes its target as the first quoted %~dp0-relative path.
+  const target = body.match(/"(%~dp0[^"]+)"/)?.[1];
+  if (!target) {
+    return { ok: true, warn: true, detail: `${shimPath}: unrecognized launcher, left alone` };
+  }
+
+  // %~dp0 is the directory of ix.cmd itself — IX_HOME\bin — and the target is
+  // written with backslashes. Resolve with win32 semantics explicitly rather
+  // than the ambient `path`, so the separator handling does not depend on which
+  // OS happens to be evaluating it. (Production only reaches here on Windows,
+  // but a resolver that silently misreads its input off-Windows is untestable.)
+  const resolved = winPath.join(ixHome, "bin", target.replace(/^%~dp0/, ""));
+  if (exists(resolved)) return { ok: true, detail: `ix.cmd → ${target}` };
+
+  return {
+    ok: false,
+    detail:
+      `${shimPath} points at ${target}, which does not exist — ` +
+      "an upgrade from before 0.9.0 moved the CLI. Reinstall to repair: " +
+      "irm https://ix-infra.com/install.ps1 | iex",
+  };
 }
 
 export function registerDoctorCommand(program: Command): void {
@@ -168,6 +219,19 @@ export function registerDoctorCommand(program: Command): void {
           },
         },
       ];
+
+      // Windows-only: a launcher pointing at a CLI the upgrade moved (Ix#385).
+      if (process.platform === "win32") {
+        checks.push({
+          name: "Windows launcher",
+          run: async () =>
+            checkWindowsLauncher(
+              process.env.IX_HOME || pathJoin(homedir(), ".ix"),
+              (p) => { try { return readFileSync(p, "utf-8"); } catch { return null; } },
+              existsSync,
+            ),
+        });
+      }
 
       const results: Array<{ name: string } & CheckResult> = [];
       for (const check of checks) {
