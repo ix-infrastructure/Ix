@@ -166,6 +166,46 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/ix-infrastructure/ix-cursor-plugin/main/install.ps1 | iex
 ```
 
+## Claude Code / Freebuff Skill
+
+[`skills/ix/`](skills/ix/SKILL.md) is a self-contained **Claude Code skill** (also
+loaded natively by Freebuff / Codebuff) that teaches any LLM agent to drive the
+`ix` CLI: build the graph, explain symbols, trace flows, analyze impact, and
+detect smells — instead of grepping and guessing.
+
+**Install it** (deploys to `~/.claude/skills/ix` and `~/.agents/skills/ix` so it
+works in every project):
+
+```bash
+bash scripts/install-skill.sh
+```
+
+Then start a new session and ask your agent to set it up:
+
+> Set up Ix and map this repo
+
+The skill's bootstrap script does the rest — installs the `ix` CLI if missing,
+starts the local Docker backend, and maps the current repo:
+
+```bash
+# Bash / Git Bash / macOS / Linux
+bash skills/ix/scripts/bootstrap.sh .
+
+# Windows PowerShell
+powershell -ExecutionPolicy Bypass -File skills/ix/scripts/bootstrap.ps1 .
+```
+
+The skill follows the progressive-disclosure layout — a lean `SKILL.md` with the
+full command reference, output-format rules, and troubleshooting split into
+`references/`, plus `scripts/` for first-run setup — so it is portable to Claude
+Code, Freebuff, and any other skill-compatible agent. Edit `skills/ix/` and
+re-run `scripts/install-skill.sh` to update your installed copy. To produce a
+distributable zip:
+
+```bash
+python "$HOME/.agents/skills/skill-creator/scripts/package_skill.py" skills/ix dist
+```
+
 ## Requirements
 
 The install script sets up everything for you on macOS and Linux. It checks for and installs anything that is missing:

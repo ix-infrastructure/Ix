@@ -1,0 +1,1101 @@
+openapi: 3.0.0
+info:
+  title: Ix Backend API
+  description: |
+    JSON-over-HTTP API for the Ix persistent codebase graph. Served by the
+    local backend at http://localhost:8090 (Docker memory-layer). The `ix` CLI
+    and Compass visualizer are the primary clients. Local deployments have no
+    authentication; remote deployments may gate Pro features (see
+    /v1/capabilities). Scoping is via `workspace_id` / `system_id` query/body
+    params, or the `x-ix-workspace` / `x-ix-system` headers stamped by the
+    visualizer proxy.
+  version: "1.0.0"
+  contact:
+    name: Ix
+    url: https://github.com/ix-infrastructure/Ix
+servers:
+  - url: http://localhost:8090
+    description: Local backend (Docker memory-layer)
+  - url: http://localhost:8080
+    description: Compass visualizer (proxies /v1 to the backend)
+tags:
+  - name: health
+  - name: context
+  - name: ingestion
+  - name: search
+  - name: entities
+  - name: planning
+  - name: patches
+  - name: analysis
+  - name: stats
+  - name: reset
+
+paths:
+  /v1/health:
+    get:
+      tags: [health]
+      summary: Liveness probe and graph schema version
+      operationId: getHealth
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /v1/capabilities:
+    get:
+      tags: [health]
+      summary: Feature detection (Pro flags)
+      operationId: getCapabilities
+      responses:
+        "200":
+          description: Capability flags
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CapabilitiesResponse"
+
+  /v1/context:
+    post:
+      tags: [context]
+      summary: Structured-context question answering
+      operationId: queryContext
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: { type: string }
+                asOfRev: { type: integer, description: Read the graph as of this revision }
+                depth: { type: string, description: Traversal depth hint }
+      responses:
+        "200":
+          description: Structured context
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StructuredContext"
+
+  /v1/ingest:
+    post:
+      tags: [ingestion]
+      summary: Ingest a path into the graph (long-running, up to 30 min)
+      operationId: ingest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path: { type: string, description: Absolute path to ingest }
+                recursive: { type: boolean }
+                force: { type: boolean, description: Re-ingest unchanged files }
+      responses:
+        "200":
+          description: Ingestion result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResult"
+
+  /v1/map:
+    post:
+      tags: [ingestion]
+      summary: Full code map (systems → subsystems → members)
+      operationId: getMap
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                full: { type: boolean, default: false }
+                workspace_id: { type: string }
+                system_id: { type: string }
+      responses:
+        "200":
+          description: Code map
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  file_count: { type: integer }
+                  region_count: { type: integer }
+                  levels: { type: integer }
+                  map_rev: { type: integer }
+                  outcome: { type: string }
+                  regions: { type: array, items: { type: object } }
+                  edges: { type: array, items: { type: object } }
+                  hierarchy: { type: array, items: { type: object } }
+
+  /v1/source-hashes:
+    post:
+      tags: [ingestion]
+      summary: Workspace-scoped source-hash baseline lookup
+      operationId: getSourceHashes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [uris]
+              properties:
+                uris: { type: array, items: { type: string }, description: Workspace-relative paths }
+                workspaceIds: { type: array, items: { type: string } }
+      responses:
+        "200":
+          description: One row per (workspace_id, uri)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    workspaceId:
+                      type: string
+                      nullable: true
+                    uri: { type: string }
+                    hash: { type: string }
+
+  /v1/source-hashes/exists:
+    get:
+      tags: [ingestion]
+      summary: Whether an ingest baseline exists
+      operationId: hasIngestBaseline
+      responses:
+        "200":
+          description: Baseline existence
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  exists: { type: boolean }
+
+  /v1/stitch:
+    post:
+      tags: [ingestion]
+      summary: Cross-repo stitching (register provides/consumes, join edges)
+      operationId: stitch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [workspaceId, provides, consumes]
+              properties:
+                workspaceId: { type: string }
+                provides:
+                  type: array
+                  items:
+                    type: object
+                    required: [name, entryNodeId]
+                    properties:
+                      name: { type: string }
+                      entryNodeId: { type: string }
+                      entryUri: { type: string }
+                consumes:
+                  type: array
+                  items:
+                    type: object
+                    required: [name, consumerNodeId]
+                    properties:
+                      name: { type: string }
+                      consumerNodeId: { type: string }
+                exports:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name: { type: string }
+                      nodeId: { type: string }
+                symbolConsumes:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      symbol: { type: string }
+                      callerNodeId: { type: string }
+                      pkg: { type: string }
+      responses:
+        "200":
+          description: Stitch result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stitched: { type: integer }
+                  systemId:
+                    type: string
+                    nullable: true
+                  edges:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        src: { type: string }
+                        dst: { type: string }
+                        name: { type: string }
+
+  /v1/stitch/system/{workspaceId}:
+    get:
+      tags: [ingestion]
+      summary: System id a workspace belongs to (null for singleton)
+      operationId: workspaceSystem
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: System membership
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  systemId:
+                    type: string
+                    nullable: true
+
+  /v1/search:
+    post:
+      tags: [search]
+      summary: Search nodes by term
+      operationId: search
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [term]
+              properties:
+                term: { type: string }
+                limit: { type: integer }
+                kind: { type: string }
+                language: { type: string }
+                asOfRev: { type: integer }
+                nameOnly: { type: boolean }
+                workspaceId: { type: string }
+                systemId: { type: string }
+      responses:
+        "200":
+          description: Matching nodes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GraphNode"
+
+  /v1/search/semantic:
+    post:
+      tags: [search]
+      summary: Vector-similarity search (ordered by similarity; do not re-rank)
+      operationId: semanticSearch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [term]
+              properties:
+                term: { type: string }
+                limit: { type: integer }
+                kind: { type: string }
+                workspaceId: { type: string }
+                systemId: { type: string }
+      responses:
+        "200":
+          description: Nodes ordered by similarity
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GraphNode"
+        "503":
+          description: Extraction service not configured
+
+  /v1/list:
+    post:
+      tags: [search]
+      summary: List entities by kind
+      operationId: listByKind
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind]
+              properties:
+                kind: { type: string }
+                limit: { type: integer }
+                scope: { type: string }
+                workspaceId: { type: string }
+                systemId: { type: string }
+      responses:
+        "200":
+          description: Entities
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GraphNode"
+
+  /v1/entity/{id}:
+    get:
+      tags: [entities]
+      summary: Fetch a node with claims and edges
+      operationId: getEntity
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Node bundle
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  node: { $ref: "#/components/schemas/GraphNode" }
+                  claims: { type: array, items: { type: object } }
+                  edges: { type: array, items: { $ref: "#/components/schemas/GraphEdge" } }
+
+  /v1/resolve-prefix/{prefix}:
+    get:
+      tags: [entities]
+      summary: Resolve a shortened id prefix
+      operationId: resolvePrefix
+      parameters:
+        - name: prefix
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Resolved id or ambiguity error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  error: { type: string, enum: [ambiguous] }
+                  matches: { type: array, items: { type: string } }
+
+  /v1/expand:
+    post:
+      tags: [entities]
+      summary: Expand a node's neighborhood
+      operationId: expand
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nodeId]
+              properties:
+                nodeId: { type: string }
+                direction: { type: string, default: both }
+                predicates: { type: array, items: { type: string } }
+                hops: { type: integer, default: 1 }
+      responses:
+        "200":
+          description: Neighborhood
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodes: { type: array, items: { $ref: "#/components/schemas/GraphNode" } }
+                  edges: { type: array, items: { $ref: "#/components/schemas/GraphEdge" } }
+
+  /v1/expand-by-name:
+    post:
+      tags: [entities]
+      summary: Expand by entity name
+      operationId: expandByName
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                direction: { type: string, default: both }
+                predicates: { type: array, items: { type: string } }
+                kinds: { type: array, items: { type: string } }
+      responses:
+        "200":
+          description: Neighborhood
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodes: { type: array, items: { $ref: "#/components/schemas/GraphNode" } }
+                  edges: { type: array, items: { $ref: "#/components/schemas/GraphEdge" } }
+
+  /v1/truth:
+    get:
+      tags: [planning]
+      summary: List planning artifacts (goals, truth statements)
+      operationId: listTruth
+      responses:
+        "200":
+          description: Artifacts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GraphNode"
+    post:
+      tags: [planning]
+      summary: Create a goal/truth statement
+      operationId: createTruth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [statement]
+              properties:
+                statement: { type: string }
+                parentIntent: { type: string }
+      responses:
+        "200":
+          description: Created artifact
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeCreationResult"
+
+  /v1/decide:
+    post:
+      tags: [planning]
+      summary: Record a decision
+      operationId: decide
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, rationale]
+              properties:
+                title: { type: string }
+                rationale: { type: string }
+                intentId: { type: string }
+      responses:
+        "200":
+          description: Created decision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeCreationResult"
+
+  /v1/decisions:
+    get:
+      tags: [planning]
+      summary: List decisions
+      operationId: listDecisions
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer }
+        - name: topic
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Decisions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GraphNode"
+
+  /v1/patches:
+    get:
+      tags: [patches]
+      summary: List patches
+      operationId: listPatches
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Patch summaries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PatchSummary"
+
+  /v1/patches/{id}:
+    get:
+      tags: [patches]
+      summary: Fetch a single patch
+      operationId: getPatch
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Patch
+
+  /v1/patch:
+    post:
+      tags: [patches]
+      summary: Commit a single patch (5 min client timeout)
+      operationId: commitPatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GraphPatchPayload"
+      responses:
+        "200":
+          description: Commit result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PatchCommitResult"
+
+  /v1/patches/batch:
+    post:
+      tags: [patches]
+      summary: Commit an array of patches (unwrapped body)
+      operationId: commitPatchBatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/GraphPatchPayload"
+      responses:
+        "200":
+          description: Commit results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PatchCommitResult"
+
+  /v1/patches/bulk:
+    post:
+      tags: [patches]
+      summary: "Commit patches wrapped as { patches: [...] } (5 min client timeout)"
+      operationId: commitPatchBulk
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [patches]
+              properties:
+                patches:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/GraphPatchPayload"
+      responses:
+        "200":
+          description: Commit results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PatchCommitResult"
+
+  /v1/provenance/{entityId}:
+    post:
+      tags: [patches]
+      summary: Provenance for an entity
+      operationId: provenance
+      parameters:
+        - name: entityId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Provenance
+
+  /v1/diff:
+    post:
+      tags: [analysis]
+      summary: Diff between graph revisions
+      operationId: diff
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fromRev, toRev]
+              properties:
+                fromRev: { type: integer }
+                toRev: { type: integer }
+                entityId: { type: string }
+                summary: { type: boolean }
+                limit: { type: integer }
+      responses:
+        "200":
+          description: Diff
+
+  /v1/conflicts:
+    get:
+      tags: [analysis]
+      summary: List detected conflicts
+      operationId: conflicts
+      responses:
+        "200":
+          description: Conflicts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /v1/smells:
+    get:
+      tags: [analysis]
+      summary: List computed smells
+      operationId: listSmells
+      parameters:
+        - name: workspace_id
+          in: query
+          schema: { type: string }
+        - name: system_id
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Smells
+    post:
+      tags: [analysis]
+      summary: Run smell analysis
+      operationId: runSmells
+      parameters:
+        - name: orphan-max-connections
+          in: query
+          schema: { type: integer }
+        - name: god-module-chunks
+          in: query
+          schema: { type: integer }
+        - name: god-module-fan
+          in: query
+          schema: { type: integer }
+        - name: weak-max-neighbors
+          in: query
+          schema: { type: integer }
+        - name: workspace_id
+          in: query
+          schema: { type: string }
+        - name: system_id
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Smell analysis result
+
+  /v1/subsystems:
+    get:
+      tags: [analysis]
+      summary: List subsystems
+      operationId: listSubsystems
+      parameters:
+        - name: detailed
+          in: query
+          schema: { type: boolean }
+        - name: limit
+          in: query
+          schema: { type: integer }
+        - name: offset
+          in: query
+          schema: { type: integer }
+        - name: regions
+          in: query
+          schema: { type: string }
+        - name: edge_cap
+          in: query
+          schema: { type: integer }
+        - name: member_file_cap
+          in: query
+          schema: { type: integer }
+        - name: workspace_id
+          in: query
+          schema: { type: string }
+        - name: system_id
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Subsystems
+
+  /v1/subsystems/score:
+    post:
+      tags: [analysis]
+      summary: Score subsystems
+      operationId: scoreSubsystems
+      parameters:
+        - name: workspace_id
+          in: query
+          schema: { type: string }
+        - name: system_id
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Scores
+
+  /v1/subsystems/map:
+    get:
+      tags: [analysis]
+      summary: Subsystem map for the visualizer
+      operationId: getSubsystemMap
+      parameters:
+        - name: target
+          in: query
+          schema: { type: string }
+        - name: pick
+          in: query
+          schema: { type: integer, description: 1-based candidate for ambiguous targets }
+        - name: workspace_id
+          in: query
+          schema: { type: string }
+        - name: system_id
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Subsystem map
+
+  /v1/stats:
+    get:
+      tags: [stats]
+      summary: Graph statistics
+      operationId: stats
+      parameters:
+        - name: workspace_id
+          in: query
+          schema: { type: string }
+        - name: system_id
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Node/edge totals by kind
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodes:
+                    type: object
+                    properties:
+                      total: { type: integer }
+                      byKind:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            kind: { type: string }
+                            count: { type: integer }
+                  edges:
+                    type: object
+                    properties:
+                      total: { type: integer }
+                      byKind:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            kind: { type: string }
+                            count: { type: integer }
+
+  /v1/savings:
+    get:
+      tags: [stats]
+      summary: Token-savings metrics
+      operationId: savings
+      parameters:
+        - name: detail
+          in: query
+          schema: { type: boolean }
+      responses:
+        "200":
+          description: Savings metrics
+    delete:
+      tags: [stats]
+      summary: Reset savings metrics
+      operationId: savingsReset
+      responses:
+        "200":
+          description: Reset confirmation
+
+  /v1/reset:
+    post:
+      tags: [reset]
+      summary: Wipe ALL nodes and edges (global — no workspace scoping)
+      operationId: reset
+      responses:
+        "200":
+          description: Reset confirmation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResetResult"
+
+  /v1/reset/async:
+    post:
+      tags: [reset]
+      summary: Begin an async wipe (remote deployments)
+      operationId: resetAsync
+      responses:
+        "200":
+          description: Operation handle
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  opId: { type: string }
+
+  /v1/reset/status/{opId}:
+    get:
+      tags: [reset]
+      summary: Poll an async reset operation
+      operationId: resetStatus
+      parameters:
+        - name: opId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Operation state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state: { type: string, enum: [done, failed, running] }
+                  error:
+                    type: string
+                    nullable: true
+
+  /v1/reset/code:
+    post:
+      tags: [reset]
+      summary: Wipe only the code graph (preserves planning artifacts)
+      operationId: resetCode
+      responses:
+        "200":
+          description: Reset confirmation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResetResult"
+
+  /v1/reset/code/async:
+    post:
+      tags: [reset]
+      summary: Begin an async code-graph wipe
+      operationId: resetCodeAsync
+      responses:
+        "200":
+          description: Operation handle
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  opId: { type: string }
+
+  /v1/reset/workspace:
+    post:
+      tags: [reset]
+      summary: Wipe exactly one workspace (other workspaces untouched)
+      operationId: deleteWorkspace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [workspaceId]
+              properties:
+                workspaceId: { type: string }
+      responses:
+        "200":
+          description: Workspace wiped
+
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status: { type: string }
+        schema_version: { type: integer, description: On-disk graph format version }
+    CapabilitiesResponse:
+      type: object
+      properties:
+        proFeaturesEnabled:
+          type: boolean
+          description: Absent = unknown (older backends), not false
+    GraphNode:
+      type: object
+      required: [id, kind, name, attrs, provenance, createdRev, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        kind: { type: string }
+        name: { type: string }
+        attrs: { type: object, additionalProperties: true }
+        provenance:
+          type: object
+          properties:
+            sourceUri: { type: string, description: Workspace-relative path }
+            sourceHash: { type: string }
+            extractor: { type: string }
+            sourceType: { type: string }
+            observedAt: { type: string, format: date-time }
+        createdRev: { type: integer }
+        deletedRev: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    GraphEdge:
+      type: object
+      required: [id, src, dst, predicate, attrs, createdRev]
+      properties:
+        id: { type: string }
+        src: { type: string }
+        dst: { type: string }
+        predicate: { type: string, description: calls | imports | contains | … }
+        attrs: { type: object, additionalProperties: true }
+        createdRev: { type: integer }
+        deletedRev: { type: integer }
+    StructuredContext:
+      type: object
+      properties:
+        claims: { type: array, items: { type: object } }
+        compactClaims: { type: array, items: { type: object } }
+        conflicts: { type: array, items: { type: object } }
+        decisions: { type: array, items: { type: object } }
+        intents: { type: array, items: { type: object } }
+        nodes: { type: array, items: { $ref: "#/components/schemas/GraphNode" } }
+        edges: { type: array, items: { $ref: "#/components/schemas/GraphEdge" } }
+        metadata:
+          type: object
+          properties:
+            query: { type: string }
+            seedEntities: { type: array, items: { type: string } }
+            hopsExpanded: { type: integer }
+            asOfRev: { type: integer }
+            depth: { type: string }
+    IngestResult:
+      type: object
+      properties:
+        filesProcessed: { type: integer }
+        patchesApplied: { type: integer }
+        filesSkipped: { type: integer }
+        entitiesCreated: { type: integer }
+        latestRev: { type: integer }
+        skipReasons:
+          type: object
+          properties:
+            unchanged: { type: integer }
+            emptyFile: { type: integer }
+            parseError: { type: integer }
+            tooLarge: { type: integer }
+            minifiedLikely: { type: integer }
+    NodeCreationResult:
+      type: object
+      properties:
+        status: { type: string }
+        nodeId: { type: string }
+        rev: { type: integer }
+    PatchSummary:
+      type: object
+      properties:
+        patch_id: { type: string }
+        rev: { type: integer }
+        intent: { type: string }
+        source_uri: { type: string }
+        timestamp: { type: string }
+    PatchSource:
+      type: object
+      required: [uri, extractor, sourceType]
+      properties:
+        uri: { type: string, description: Workspace-relative path; opaque join key }
+        sourceHash: { type: string }
+        extractor: { type: string }
+        sourceType: { type: string }
+        workspaceId: { type: string, description: SHA-256 of the workspace root path }
+    PatchOp:
+      type: object
+      required: [type]
+      properties:
+        type: { type: string }
+      additionalProperties: true
+    GraphPatchPayload:
+      type: object
+      required: [patchId, actor, timestamp, source, baseRev, ops, replaces]
+      properties:
+        patchId: { type: string }
+        actor: { type: string }
+        timestamp: { type: string, format: date-time }
+        source: { $ref: "#/components/schemas/PatchSource" }
+        baseRev: { type: integer }
+        ops: { type: array, items: { $ref: "#/components/schemas/PatchOp" } }
+        replaces: { type: array, items: { type: string } }
+        intent: { type: string }
+    PatchCommitResult:
+      type: object
+      properties:
+        status: { type: string }
+        rev: { type: integer }
+    ResetResult:
+      type: object
+      properties:
+        ok: { type: boolean }
+        message: { type: string }

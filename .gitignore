@@ -1,4 +1,10 @@
 target/
+# Skill distribution artifact (skills/ix packaged zip)
+dist/
+
+# Session/tooling artifacts (Freebuff preview state, generated knowledge graphs)
+.freebuff/
+.understand-anything/
 .bsp/
 .idea/
 *.class
