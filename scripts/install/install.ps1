@@ -25,10 +25,18 @@ $NodeMinMajor = 22
 # Installer scratch files live under $IxHome, never under $env:TEMP.
 #
 # #349: on a profile at `C:\Users\Win 10`, Windows hands the installer a TEMP
-# path in 8.3 short form and the run dies after extraction with
-# `An object at the specified path C:\Users\WIN10~1 does not exist.`
-# The reporter confirmed that pointing TEMP and TMP at a path without a space
-# lets the same install finish, so the short TEMP path is what breaks it.
+# path in 8.3 short form and the run dies after extraction. The reporter
+# confirmed that pointing TEMP and TMP at a path without a space lets the same
+# install finish, so the short TEMP path is what breaks it.
+#
+# The issue quotes the error verbatim as
+#   An object at the specified path C:\Users\WIN10\~1 does not exist.
+# -- note the backslash before `~1`. Probably a copy artifact, since
+# `C:\Users\WIN10~1` is the 8.3 alias of `C:\Users\Win 10` and a literal `~1`
+# directory makes no sense, but it has not been confirmed with the reporter and
+# the 8.3 reading depends on that one character. Quoted as written rather than
+# normalised, because the whole point of the block below is which parts of this
+# are established.
 #
 # $IxHome comes from USERPROFILE, which is the long form. $Staging was already
 # there, so moving these two takes the script off TEMP completely.
@@ -75,9 +83,28 @@ function Write-Warn($msg) { Write-Host "  [!!] $msg" -ForegroundColor Yellow }
 # run it, so a partial multi-MB zip would sit in ~/.ix forever. Write-Err is the
 # single exit for every failure below, which makes it the one place this has to
 # be right.
+#
+# Rebuilds the two names from $IxHome and $PID rather than reading $tmp and
+# $pullLog. README ships this as `irm ... | iex`, so the script body runs in the
+# *caller's* scope -- the same hazard the $Matches note below already calls out.
+# Every Write-Err above the assignments (and all of them, on the re-run path,
+# where $pullLog is never assigned because the backend is already healthy) would
+# otherwise read whatever the user's own session had in those names and delete
+# it. $IxHome is assigned unconditionally at the top, long before any Write-Err
+# is reachable, so it is always ours.
+#
+# -PathType Leaf because $Staging is `.cli-staging-<pid>` -- a *directory* the
+# failure sites clean themselves. Without it, `Remove-Item -Force` on a
+# directory with children throws (there is no host UI for the prompt, and
+# -ErrorAction SilentlyContinue does not catch it), which would escape into the
+# trap and print a second, meaningless error over the real one.
 function Remove-InstallerScratch {
-    foreach ($p in @($script:tmp, $script:pullLog)) {
-        if ($p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+    if (-not $IxHome) { return }
+    foreach ($name in @(".cli-staging-$PID.zip", ".cli-staging-pull-$PID.log")) {
+        $p = Join-Path $IxHome $name
+        if (Test-Path -LiteralPath $p -PathType Leaf) {
+            Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
