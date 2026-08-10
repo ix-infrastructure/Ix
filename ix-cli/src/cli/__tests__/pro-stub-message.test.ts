@@ -57,6 +57,7 @@ describe("Pro stubs", () => {
     ["truth", ["truth", "add", "Support 100k file repos"]],
     ["truth", ["truth", "list", "--format", "json"]],
     ["goal", ["goal", "create", "Support GitHub", "--format", "json"]],
+    ["goals", ["goals", "--status", "active", "--format", "json"]],
     ["decide", ["decide", "Use X", "--rationale", "because", "--affects", "Entity"]],
     ["briefing", ["briefing", "--format", "json"]],
     ["decisions", ["decisions", "--topic", "ingestion", "--limit", "10"]],
@@ -69,6 +70,22 @@ describe("Pro stubs", () => {
     expect(err).toContain(`The '${name}' command requires Ix Pro.`);
     expect(err).not.toContain("too many arguments");
     expect(exitCode).toBe(1);
+  });
+
+  // @ix/pro registers a plural list command alongside each singular manager
+  // (`bug`/`bugs`, `plan`/`plans`, `task`/`tasks`, `goal`/`goals`). Stubbing only
+  // the singular is the failure this pins: `ix goals` fell through to commander's
+  // "unknown command" instead of the sentinel above, so an agent told to stop on
+  // `requires Ix Pro.` saw an unrecognized error and had nothing to match.
+  it.each([
+    ["bug", "bugs"],
+    ["plan", "plans"],
+    ["task", "tasks"],
+    ["goal", "goals"],
+  ])("stubs both %s and %s", (singular, plural) => {
+    for (const name of [singular, plural]) {
+      expect(runStub([name]).err).toContain(`The '${name}' command requires Ix Pro.`);
+    }
   });
 
   it("emits the message verbatim as CLAUDE.md quotes it", () => {

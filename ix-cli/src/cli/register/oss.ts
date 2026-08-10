@@ -42,6 +42,7 @@ const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "decide", desc: "Record a design decision" },
   { name: "decisions", desc: "List recorded design decisions" },
   { name: "goal", desc: "Manage project goals" },
+  { name: "goals", desc: "List all goals" },
   { name: "patches", desc: "List recent patches" },
   { name: "plan", desc: "Manage plans and plan tasks" },
   { name: "task", desc: "Manage tasks" },
