@@ -533,6 +533,12 @@ jobs:
           BRANCH="chore/brew-update-v${VERSION}"
           git checkout -b "$BRANCH"
           git add Formula/ix.rb
-          git commit -m "brew: update formula for v${VERSION}" || exit 0
+          # `chore(brew):`, not `brew:` — pr-title.yml runs
+          # action-semantic-pull-request against a fixed type list that has
+          # never included `brew`, so every release opened a formula PR whose
+          # Conventional title check failed on arrival. It is not a required
+          # check, so the PR stayed technically mergeable and the red X was
+          # written off as noise each time rather than traced back here.
+          git commit -m "chore(brew): update formula for v${VERSION}" || exit 0
           git push --force-with-lease origin "$BRANCH"
-          gh pr create --title "brew: update formula for v${VERSION}" --body "Auto-generated: updates Homebrew formula SHA for v${VERSION}" --base main || true
+          gh pr create --title "chore(brew): update formula for v${VERSION}" --body "Auto-generated: updates Homebrew formula SHA for v${VERSION}" --base main || true
