@@ -90,7 +90,11 @@ describe("collapsed plural help topics resolve", () => {
     const { stdout, stderr, exitCode } = runHelp(plural);
     expect(stderr).not.toContain("Unknown help topic");
     expect(exitCode).toBeUndefined();
-    expect(stdout).toContain(`Usage: ix ${singular}`);
+    // Anchored on a word boundary, not a prefix: `goals` is still a registered
+    // Pro stub, and its own help starts `Usage: ix goals` — which *contains*
+    // `Usage: ix goal`. Without the boundary this assertion passes with the
+    // forwarder deleted outright, which is exactly how it was first written.
+    expect(stdout).toMatch(new RegExp(`^Usage: ix ${singular}\\b`, "m"));
   });
 
   it("still rejects a topic that was never a command", () => {

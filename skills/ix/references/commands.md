@@ -125,9 +125,10 @@ ix inventory --kind function --path auth.py --format llm
   - `registerProCommands` is async (each Pro command is dynamically imported)
     and MUST be awaited; skipping the await makes every `ix <pro-cmd>` fail
     with "unknown command".
-  - Real example: `registerPatchesCommand` is defined but never called in
-    `oss.ts`, so `ix patches` errors as an unknown command today; wiring it in
-    would flip it to OSS.
+  - Real example: `registerPatchesCommand` was defined but never called in
+    `oss.ts`, so a `patches` entry in `PRO_COMMANDS` shadowed it and `ix
+    patches` answered "requires Ix Pro" (#371). #390 wired the call in and
+    dropped the stub, so `ix patches` is an OSS command today.
 
 ## Do NOT Use
 
