@@ -1,0 +1,71 @@
+name: CodeQL
+
+# Advanced setup, replacing default setup for one reason: default setup does not
+# analyze pull requests from forks. Measured on this repo before the switch —
+# 16/16 non-fork PRs scanned, 0/5 fork PRs — and it is not an approval problem,
+# since #380 and #382 ran the whole CI suite and still got no CodeQL. With 56
+# forks that means every external contribution was first scanned only once it
+# had already landed on main.
+#
+# Settings below mirror what default setup was configured with, so the switch
+# changes when analysis runs, not what it looks for:
+#   query_suite: extended  -> queries: security-extended
+#   languages: actions, javascript-typescript, ruby
+#   schedule: weekly
+#   threat_model: remote   -> no input needed; remote is CodeQL's default
+#     (there is no threat-models input on codeql-action v4).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, matching what default setup ran. Offset from the Scorecard job
+    # (Mon 05:27) so the two do not contend for runners.
+    - cron: "41 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to code scanning
+      actions: read # CodeQL reads workflow run info for the `actions` language
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # build-mode: none for all three — nothing here is a compiled language,
+        # so there is no build to observe.
+        language: [actions, javascript-typescript, ruby]
+
+    steps:
+      - uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        with:
+          category: "/language:${{ matrix.language }}"
