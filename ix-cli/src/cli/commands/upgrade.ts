@@ -817,6 +817,29 @@ export function sweepUpgradeOrphans(ixHome: string, installDir: string): void {
 }
 
 /**
+ * Create the scratch directory an upgrade downloads into, having first
+ * reclaimed whatever an interrupted run left behind.
+ *
+ * The two steps live in one function because their **order** is load-bearing
+ * and was otherwise only a comment. `sweepUpgradeOrphans` now reclaims
+ * `.cli-download-*` and `.compass-download-*`, so running it *after* the
+ * scratch is created deletes the archive that is about to be extracted — which
+ * breaks every upgrade on every platform, not just the Windows one #349 is
+ * about. The old call sat between the download and the extract, safe only
+ * while the scratch lived in `os.tmpdir()`; moving the downloads under IX_HOME
+ * is what made the position matter. Sweeping first also puts an interrupted
+ * install back even when the download then fails.
+ *
+ * `mkdirSync` first because `mkdtemp` needs the parent to exist, and a first
+ * upgrade after a manual install can reach here before anything has created it.
+ */
+export function prepareDownloadDir(ixHome: string, installDir: string, prefix: string): string {
+  mkdirSync(ixHome, { recursive: true });
+  sweepUpgradeOrphans(ixHome, installDir);
+  return mkdtempSync(join(ixHome, prefix));
+}
+
+/**
  * Repoint the Windows launchers at the newly installed tree.
  *
  * Only Windows needs this. install.sh writes an *absolute* path into the shim
@@ -1043,23 +1066,10 @@ export function registerUpgradeCommand(program: Command): void {
           // Windows *is* TEMP verbatim, so the same hazard was left live on the
           // upgrade path — where it breaks an install that already works.
           //
-          // IX_HOME comes from USERPROFILE in its long form. mkdtemp needs the
-          // parent to exist, and on a first upgrade after a manual install it
-          // may not.
-          mkdirSync(IX_HOME, { recursive: true });
-
-          // Reclaim anything an interrupted upgrade left behind, and put the
-          // install back if a previous run died between the two renames.
-          //
-          // Must run BEFORE the download directory is created: the sweep now
-          // reclaims `.cli-download-*` too, so from below this line it would
-          // delete the archive it is about to extract. It used to sit between
-          // the download and the extract, which was safe only while the scratch
-          // lived in os.tmpdir(). Recovering before the download also means an
-          // interrupted install is put back even when the download then fails.
-          sweepUpgradeOrphans(IX_HOME, installDir);
-
-          const tmpDirRaw = mkdtempSync(join(IX_HOME, ".cli-download-"));
+          // IX_HOME comes from USERPROFILE in its long form. prepareDownloadDir
+          // also reclaims anything an interrupted upgrade left behind, and must
+          // do so before the scratch exists — see its docstring.
+          const tmpDirRaw = prepareDownloadDir(IX_HOME, installDir, ".cli-download-");
           const tmpFile = join(tmpDirRaw, archiveName);
 
           console.log(`Downloading ix ${latest} for ${platform}...`);
@@ -1329,12 +1339,15 @@ export function registerUpgradeCommand(program: Command): void {
           // backup may hold their only compass. Idempotent when the CLI branch
           // already ran, since it finds nothing left. (installDir is scoped to
           // that branch; COMPASS_DIR's parent is the same directory.)
-          sweepUpgradeOrphans(IX_HOME, dirname(COMPASS_DIR));
-
+          //
+          // Under IX_HOME for the same reason as the CLI download above (#349),
+          // and swept before the scratch exists for the same reason too.
           const compassUrl = `https://github.com/${GITHUB_ORG}/${COMPASS_DIST_REPO}/releases/download/v${compassLatest}/compass-${compassLatest}.tar.gz`;
-          // Under IX_HOME for the same reason as the CLI download above (#349).
-          mkdirSync(IX_HOME, { recursive: true });
-          const compassTmp = mkdtempSync(join(IX_HOME, ".compass-download-"));
+          const compassTmp = prepareDownloadDir(
+            IX_HOME,
+            dirname(COMPASS_DIR),
+            ".compass-download-",
+          );
           const compassTar = join(compassTmp, `compass-${compassLatest}.tar.gz`);
 
           // Which step failed decides where to look: a download failure is a

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 
 import {
   installStagedTree,
+  prepareDownloadDir,
   soleChildDir,
   swapInStagedTree,
   sweepUpgradeOrphans,
@@ -324,5 +325,51 @@ describe("sweepUpgradeOrphans", () => {
     sweepUpgradeOrphans(root, installDir);
 
     expect(existsSync(installDir)).toBe(false);
+  });
+});
+
+/**
+ * The ordering that #349's fix turns on, and the one thing about it no test
+ * reached while it was written inline in the command action: the sweep must run
+ * BEFORE the download scratch is created. Once the sweep reclaims
+ * `.cli-download-*`, running it afterwards deletes the archive the extract is
+ * about to read — breaking every upgrade on every platform, not just the
+ * Windows one. Both call sites go through this function so the order cannot
+ * drift back apart.
+ */
+describe("prepareDownloadDir", () => {
+  it("reclaims an earlier run's scratch but keeps the one it just made", () => {
+    const installDir = join(root, "cli");
+    mkdirSync(join(root, ".cli-download-stale1"), { recursive: true });
+    writeFileSync(join(root, ".cli-download-stale1", "ix-0.9.1-linux-amd64.tar.gz"), "old");
+
+    const dir = prepareDownloadDir(root, installDir, ".cli-download-");
+
+    expect(existsSync(join(root, ".cli-download-stale1"))).toBe(false);
+    // Swept after the mkdtemp instead of before, this directory is gone too and
+    // the download that follows writes an archive nothing will extract.
+    expect(existsSync(dir)).toBe(true);
+
+    writeFileSync(join(dir, "ix-0.9.2-linux-amd64.tar.gz"), "gz");
+    expect(existsSync(join(dir, "ix-0.9.2-linux-amd64.tar.gz"))).toBe(true);
+  });
+
+  it("puts an interrupted install back before downloading anything", () => {
+    // The other half of sweeping first: the recovery happens even if the
+    // download then fails, which the old position could not do.
+    const installDir = join(root, "cli");
+    mkdirSync(join(root, ".cli-backup-999", "cli", "dist", "cli"), { recursive: true });
+    writeFileSync(join(root, ".cli-backup-999", "cli", "dist", "cli", "main.js"), "// prev\n");
+
+    const dir = prepareDownloadDir(root, installDir, ".cli-download-");
+
+    expect(readFileSync(join(installDir, "cli", "dist", "cli", "main.js"), "utf-8")).toBe("// prev\n");
+    expect(existsSync(dir)).toBe(true);
+  });
+
+  it("creates IX_HOME when a manual install never did", () => {
+    const ixHome = join(root, "fresh");
+    const dir = prepareDownloadDir(ixHome, join(ixHome, "cli"), ".compass-download-");
+    expect(existsSync(dir)).toBe(true);
   });
 });
