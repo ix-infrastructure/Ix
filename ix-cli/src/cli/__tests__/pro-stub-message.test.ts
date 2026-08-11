@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Command } from "commander";
 
-import { registerProStubs } from "../register/oss.js";
+import { registerOssCommands, registerProStubs } from "../register/oss.js";
 
 /**
  * CLAUDE.md tells agents to detect a Pro-gated install by the exact string
@@ -82,6 +82,23 @@ describe("Pro stubs", () => {
     program.name("ix").exitOverride();
     registerProStubs(program);
     expect(program.commands.map(c => c.name())).not.toContain("patches");
+  });
+
+  // The other half, and the one that actually delivers #371. Absence from the
+  // stub list only helps if `oss.ts` registers the real command — drop the
+  // registerPatchesCommand(program) call and the test above still passes while
+  // `ix patches` becomes commander's "unknown command", which is where #371
+  // started. Both halves have to be pinned or either can silently regress.
+  it("registers patches as an OSS command", () => {
+    const program = new Command();
+    program.name("ix").exitOverride();
+    registerOssCommands(program);
+
+    const patches = program.commands.find(c => c.name() === "patches");
+    expect(patches).toBeDefined();
+    // --format llm is why the OSS implementation is the one worth keeping when
+    // commander drops @ix/pro's duplicate registration on a Kartr install.
+    expect(patches?.options.map(o => o.long)).toContain("--format");
   });
 
   // @ix/pro registers a plural list command alongside each singular manager
