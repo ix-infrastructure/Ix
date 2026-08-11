@@ -39,7 +39,6 @@ import { registerPatchesCommand } from "../commands/patches.js";
 const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "briefing", desc: "Session-resume briefing" },
   { name: "bug", desc: "Manage bugs" },
-  { name: "bugs", desc: "List all bugs" },
   { name: "decide", desc: "Record a design decision" },
   { name: "decisions", desc: "List recorded design decisions" },
   { name: "goal", desc: "Manage project goals" },

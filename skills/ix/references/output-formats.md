@@ -33,7 +33,7 @@ does not have them — skip that step, do not retry it, and do not mention it
 again for the rest of the session. Nothing outside those marks is Pro-gated.
 
 Pro-only surface: `plan`, `plans`, `task`, `tasks`, `workflow`, `decide`,
-`decisions`, `goal`, `truth`, `bug`, `bugs`, `briefing`, `patches`.
+`decisions`, `goal`, `truth`, `bug`, `briefing`, `patches`.
 
 ### Semantic boundaries (Pro record types)
 

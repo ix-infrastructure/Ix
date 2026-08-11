@@ -29,7 +29,7 @@ Staged Workflows:
   ix workflow run task <id> --stage discover   Run one stage
 
 Bug Workflow:
-  ix bugs --status open                   See open bugs
+  ix bug list --status open               See open bugs
   ix bug show <id>                        Get bug details
   ix plan create "Fix X" --goal <id> --responds-to <bugId>
   ix plan task "Step 1" --plan <id> --resolves <bugId>

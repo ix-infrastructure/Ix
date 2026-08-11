@@ -180,7 +180,7 @@ Only the first four work without Pro.
 | **[Pro]** List goals | `ix truth list` | `ix truth list --format json` |
 | **[Pro]** Bug tracking | `ix bug create` | `ix bug create "title" --severity high --affects Entity` |
 | **[Pro]** Update bug status | `ix bug update` | `ix bug update <id> --status resolved` |
-| **[Pro]** Bug listing | `ix bugs` | `ix bugs --status open --format json` |
+| **[Pro]** Bug listing | `ix bug list` | `ix bug list --status open --format json` |
 | **[Pro]** Bug details | `ix bug show` | `ix bug show <id> --format json` |
 
 ### Planning (Pro)

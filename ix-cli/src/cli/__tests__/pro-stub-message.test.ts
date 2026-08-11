@@ -53,7 +53,6 @@ describe("Pro stubs", () => {
     ["bug", ["bug", "create", "a title", "--affects", "Entity"]],
     ["bug", ["bug", "update", "abc123", "--status", "resolved"]],
     ["bug", ["bug", "show", "abc123", "--format", "json"]],
-    ["bugs", ["bugs", "--status", "open", "--format", "json"]],
     ["truth", ["truth", "add", "Support 100k file repos"]],
     ["truth", ["truth", "list", "--format", "json"]],
     ["goal", ["goal", "create", "Support GitHub", "--format", "json"]],
@@ -101,13 +100,12 @@ describe("Pro stubs", () => {
     expect(patches?.options.map(o => o.long)).toContain("--format");
   });
 
-  // @ix/pro registers a plural list command alongside each singular manager
-  // (`bug`/`bugs`, `plan`/`plans`, `task`/`tasks`, `goal`/`goals`). Stubbing only
-  // the singular is the failure this pins: `ix goals` fell through to commander's
-  // "unknown command" instead of the sentinel above, so an agent told to stop on
+  // @ix/pro registers a plural list command alongside some singular managers
+  // (`plan`/`plans`, `task`/`tasks`, `goal`/`goals`). Stubbing only the singular
+  // is the failure this pins: `ix goals` fell through to commander's "unknown
+  // command" instead of the sentinel above, so an agent told to stop on
   // `requires Ix Pro.` saw an unrecognized error and had nothing to match.
   it.each([
-    ["bug", "bugs"],
     ["plan", "plans"],
     ["task", "tasks"],
     ["goal", "goals"],
@@ -115,6 +113,17 @@ describe("Pro stubs", () => {
     for (const name of [singular, plural]) {
       expect(runStub([name]).err).toContain(`The '${name}' command requires Ix Pro.`);
     }
+  });
+
+  // `bugs` is deliberately absent from the pairs above: @ix/pro collapsed it into
+  // `ix bug list` (Ix-pro#108), so there is no plural command left to stub. The
+  // singular stub has to cover the subcommand form instead — it swallows operands,
+  // so `bug list` still reaches the sentinel rather than "unknown command".
+  it("stubs the collapsed 'bug list' subcommand, not a 'bugs' command", () => {
+    expect(runStub(["bug", "list", "--status", "open", "--format", "json"]).err).toContain(
+      "The 'bug' command requires Ix Pro.",
+    );
+    expect(runStub(["bugs"]).err).not.toContain("requires Ix Pro");
   });
 
   it("emits the message verbatim as CLAUDE.md quotes it", () => {
