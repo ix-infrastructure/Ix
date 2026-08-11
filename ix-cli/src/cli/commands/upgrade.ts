@@ -772,11 +772,24 @@ export function sweepUpgradeOrphans(ixHome: string, installDir: string): void {
     return;
   }
 
-  const recover = (prefix: string, dest: string, label: string) => {
+  // `intact` decides whether what is at `dest` counts as a real thing or a
+  // husk, and it must be the same test the swap's own cleanup applies.
+  // cleanupCompassSwap uses `index.html`, not a bare existsSync, and says why:
+  // a `compass/` holding only a `.version` is a real state, and a bare
+  // existsSync "would call that 'back in place' and drop a backup the caller had
+  // just told the user to go and rescue".
+  //
+  // recover() used a bare existsSync, so the two disagreed on exactly the state
+  // that matters: with a husk at dest it declined to restore, and the sweep
+  // below then deleted the only working bundle. Preserved by cleanup, destroyed
+  // by the sweep. The same reasoning applies to the CLI — a `cli/` with no entry
+  // point cannot start and is not an install worth keeping a backup from.
+  const recover = (prefix: string, dest: string, intact: string, label: string) => {
     const backups = entries.filter((e) => e.startsWith(prefix)).sort();
     const last = backups[backups.length - 1];
-    if (!existsSync(dest) && last) {
+    if (!existsSync(join(dest, intact)) && last) {
       try {
+        rmQuiet(dest);
         mkdirSync(dirname(dest), { recursive: true });
         renameSync(join(ixHome, last), dest);
         console.log(`  Recovered the previous ${label} from ${last} (an earlier upgrade was interrupted).`);
@@ -786,33 +799,74 @@ export function sweepUpgradeOrphans(ixHome: string, installDir: string): void {
     }
   };
 
-  recover(".cli-backup-", installDir, "install");
+  recover(".cli-backup-", installDir, join("cli", "dist", "cli", "main.js"), "install");
   // join(installDir, "compass"), not the module-level COMPASS_DIR: that constant
   // is bound to the real IX_HOME, and this function takes ixHome as an argument
   // precisely so it can be pointed elsewhere. Using the constant would make a
   // test sweeping a temp directory rename its fixture into the developer's own
   // ~/.ix/cli/compass. Recovered second because the restore above may be what
   // creates the parent directory it needs.
-  recover(".compass-backup-", join(installDir, "compass"), "compass");
+  recover(".compass-backup-", join(installDir, "compass"), "index.html", "compass");
 
   for (const name of entries) {
+    // The download scratch, moved here from os.tmpdir() with #349. It holds a
+    // multi-MB archive, and leaving TEMP also left the OS's own cleanup — so an
+    // upgrade killed mid-download would park that in ~/.ix forever. These two
+    // prefixes are deliberately NOT `-backup-`: `recover()` above renames the
+    // last `.cli-backup-*` over the install directory, and a stray archive
+    // directory must never be a candidate for that.
+    const isDownload =
+      name.startsWith(".cli-download-") || name.startsWith(".compass-download-");
+
     if (
       name.startsWith(".cli-staging-") ||
       name.startsWith(".cli-backup-") ||
       name.startsWith(".compass-staging-") ||
       name.startsWith(".compass-backup-") ||
-      // The download scratch, moved here from os.tmpdir() with #349. It holds a
-      // multi-MB archive, and leaving TEMP also left the OS's own cleanup — so
-      // an upgrade killed mid-download would park that in ~/.ix forever. These
-      // two prefixes are deliberately NOT `-backup-`: `recover()` above renames
-      // the last `.cli-backup-*` over the install directory, and a stray
-      // archive directory must never be a candidate for that.
-      name.startsWith(".cli-download-") ||
-      name.startsWith(".compass-download-")
+      isDownload
     ) {
+      // Never reclaim a directory another live `ix upgrade` is downloading
+      // into. While the scratch lived in os.tmpdir() no sweep could match it;
+      // moving it under IX_HOME put it in range for the whole 300s curl
+      // timeout, so a second upgrade — a second terminal, or bootstrap.sh
+      // re-running `ix upgrade` when it finds compass missing — would delete
+      // the first run's archive out from under it. On POSIX the unlink
+      // succeeds silently and curl still exits 0, so the victim fails at the
+      // extract and reports a download it actually completed.
+      //
+      // Downloads only: staging and backup directories are named `<prefix><pid>`
+      // with no trailing segment, so they carry no pid this can read, and
+      // widening the guard to them would change reclaim behaviour that is not
+      // what this PR is about.
+      if (isDownload && isLiveScratch(name)) continue;
       const target = join(ixHome, name);
       if (target !== installDir && existsSync(target)) rmQuiet(target);
     }
+  }
+}
+
+/**
+ * Does this scratch directory belong to a process that is still running?
+ *
+ * Download directories are named `<prefix><pid>-<random>`, so the owner is
+ * recoverable from the name alone — no lockfile to leak, and a crashed run
+ * leaves a pid that no longer resolves, which is exactly when the sweep should
+ * reclaim it. Anything unparseable is treated as dead: the pre-existing naming
+ * had no pid, and those must stay collectable.
+ *
+ * `process.kill(pid, 0)` sends no signal; it only asks whether the process is
+ * addressable. EPERM means it exists but belongs to another user, which still
+ * counts as live.
+ */
+function isLiveScratch(name: string): boolean {
+  const pid = Number(/-(\d+)-[^-]*$/.exec(name)?.[1]);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
   }
 }
 
@@ -832,11 +886,17 @@ export function sweepUpgradeOrphans(ixHome: string, installDir: string): void {
  *
  * `mkdirSync` first because `mkdtemp` needs the parent to exist, and a first
  * upgrade after a manual install can reach here before anything has created it.
+ *
+ * The pid goes in the name so a *concurrent* upgrade's sweep can tell this
+ * directory is still in use — see isLiveScratch. Sweeping first protects this
+ * run from itself; the pid protects it from the other one.
  */
 export function prepareDownloadDir(ixHome: string, installDir: string, prefix: string): string {
   mkdirSync(ixHome, { recursive: true });
   sweepUpgradeOrphans(ixHome, installDir);
-  return mkdtempSync(join(ixHome, prefix));
+  // mkdtemp appends its own randomness, so the shape is `<prefix><pid>-<rand>`
+  // and isLiveScratch's `-<digits>-<rand>` match finds the pid.
+  return mkdtempSync(join(ixHome, `${prefix}${process.pid}-`));
 }
 
 /**
@@ -1086,7 +1146,11 @@ export function registerUpgradeCommand(program: Command): void {
             console.error(
               `  curl -fsSL https://raw.githubusercontent.com/${GITHUB_ORG}/${GITHUB_REPO}/main/scripts/install/install.sh | bash`
             );
-            rmSync(tmpDirRaw, { recursive: true, force: true });
+            // rmQuiet, not a bare rmSync: this directory now lives under the
+            // user profile rather than TEMP, where an AV or indexer handle on
+            // the archive curl just wrote is routine — and a throw here would
+            // replace the actionable message above with a raw EPERM.
+            rmQuiet(tmpDirRaw);
             process.exit(1);
           }
 
@@ -1396,7 +1460,11 @@ export function registerUpgradeCommand(program: Command): void {
             }
           }
           cleanupCompassSwap(COMPASS_DIR, compassStaging, compassBackup);
-          rmSync(compassTmp, { recursive: true, force: true });
+          // rmQuiet, not a bare rmSync — same reason as the CLI download above,
+          // and this one runs on the *success* path. A throw here escapes the
+          // action, so writeCache() below never runs and the "update available"
+          // notice keeps firing for the compass just installed.
+          rmQuiet(compassTmp);
         }
       } else if (compassLatest && readCompassStamp().source === "release") {
         // Not "already latest" — it is a different series. Say what it is, so
