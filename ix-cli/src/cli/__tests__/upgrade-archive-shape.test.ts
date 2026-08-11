@@ -463,3 +463,70 @@ describe("prepareDownloadDir", () => {
     expect(existsSync(dir)).toBe(true);
   });
 });
+
+/**
+ * #349's reporter is on a profile at `C:\Users\Win 10`, and their confirmed
+ * workaround was pointing TEMP at a space-free path.
+ *
+ * That matters more since the scratch moved into IX_HOME (#392). The old TEMP
+ * path was `C:\Users\WIN10~1\AppData\Local\Temp\...` — an 8.3 alias, which
+ * never contains a space. The new one is `C:\Users\Win 10\.ix\...`, which does.
+ * So if that failure is space-driven rather than short-path-driven, the move
+ * put a space onto the upgrade path where there previously wasn't one.
+ *
+ * The mechanism is still unreproduced and this cannot settle it — it runs on
+ * whatever platform CI is on, and the suspected fault is a Windows path
+ * provider. What it does do is prove our own code does not assume a space-free
+ * IX_HOME, so that when the reporter tries again the remaining suspects are
+ * outside this repo. Nothing else in the suite passes a path with a space.
+ */
+describe("an IX_HOME containing a space", () => {
+  let spaced: string;
+
+  beforeEach(() => {
+    spaced = join(root, "Win 10", ".ix");
+    mkdirSync(spaced, { recursive: true });
+  });
+
+  it("prepares a download directory inside it", () => {
+    const dir = prepareDownloadDir(spaced, join(spaced, "cli"), ".cli-download-");
+    expect(existsSync(dir)).toBe(true);
+    expect(dir).toContain("Win 10");
+    // The pid marker has to survive the join, or the sweep cannot tell a live
+    // download from an abandoned one.
+    expect(dir).toMatch(/\.cli-download-\d+-/);
+  });
+
+  it("creates IX_HOME when a manual install never did", () => {
+    const missing = join(root, "Some Where", ".ix");
+    const dir = prepareDownloadDir(missing, join(missing, "cli"), ".cli-download-");
+    expect(existsSync(dir)).toBe(true);
+  });
+
+  it("sweeps its own orphans", () => {
+    const installDir = join(spaced, "cli");
+    mkdirSync(join(installDir, "cli", "dist", "cli"), { recursive: true });
+    writeFileSync(join(installDir, "cli", "dist", "cli", "main.js"), "// live\n");
+    // A pid that is not running. Not 1 — that is init, always alive, and the
+    // sweep would correctly skip it as an in-flight download by another
+    // process. (It did, the first time this was written.)
+    const deadPid = 0x7ffffff0;
+    mkdirSync(join(spaced, `.cli-download-${deadPid}-abc`), { recursive: true });
+
+    sweepUpgradeOrphans(spaced, installDir);
+
+    expect(existsSync(join(spaced, `.cli-download-${deadPid}-abc`))).toBe(false);
+    expect(readFileSync(join(installDir, "cli", "dist", "cli", "main.js"), "utf-8")).toBe("// live\n");
+  });
+
+  it("restores an interrupted install into it", () => {
+    const installDir = join(spaced, "cli");
+    const backup = join(spaced, ".cli-backup-999");
+    mkdirSync(join(backup, "cli", "dist", "cli"), { recursive: true });
+    writeFileSync(join(backup, "cli", "dist", "cli", "main.js"), "// 0.9.4\n");
+
+    sweepUpgradeOrphans(spaced, installDir);
+
+    expect(existsSync(join(installDir, "cli", "dist", "cli", "main.js"))).toBe(true);
+  });
+});
