@@ -1102,6 +1102,23 @@ export function registerUpgradeCommand(program: Command): void {
         process.exit(1);
       }
 
+      // Reclaim orphans and restore an interrupted swap once, up front, for
+      // every real `ix upgrade`.
+      //
+      // Both other sweep calls sit behind "something needs updating" — one
+      // inside the CLI branch, one inside the compass branch. That was already
+      // fragile, and #376 tightened the compass gate to skip release-bundled
+      // compasses entirely, so on a healthy current install *neither* fires and
+      // nothing is ever reclaimed. The archives this PR teaches the sweep about
+      // are multi-MB, and the whole reason for sweeping them is that leaving
+      // os.tmpdir() also left the OS's own cleanup — a sweep that only runs when
+      // an update happens to be available does not deliver that.
+      //
+      // Cheap when there is nothing to do: one readdir of ~/.ix. The calls
+      // inside prepareDownloadDir stay, because that is where the
+      // sweep-before-scratch ordering is enforced; they simply find nothing.
+      if (!opts.check) sweepUpgradeOrphans(IX_HOME, join(IX_HOME, "cli"));
+
       // ── CLI upgrade ──────────────────────────────────────────────────
       const cliUpToDate = !isNewer(latest, current);
       if (cliUpToDate) {
