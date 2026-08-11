@@ -100,11 +100,17 @@ describe("Pro stubs", () => {
     expect(patches?.options.map(o => o.long)).toContain("--format");
   });
 
-  // @ix/pro registers a plural list command alongside some singular managers
-  // (`plan`/`plans`, `task`/`tasks`, `goal`/`goals`). Stubbing only the singular
-  // is the failure this pins: `ix goals` fell through to commander's "unknown
-  // command" instead of the sentinel above, so an agent told to stop on
+  // @ix/pro registers a plural list command alongside `plan` and `task`
+  // (register.ts: registerPlansCommand, registerTasksCommand). Stubbing only the
+  // singular is the failure this pins: the plural fell through to commander's
+  // "unknown command" instead of the sentinel above, so an agent told to stop on
   // `requires Ix Pro.` saw an unrecognized error and had nothing to match.
+  //
+  // `goals` is NOT in that category and is only still stubbed by oversight:
+  // Ix-pro#103 deleted the command, #327 correctly dropped the stub, and #384
+  // re-added it on the stated premise that Pro registers a plural for *every*
+  // singular — which was already false. Do not use this row as evidence that
+  // `ix goals` exists; removing it is a pending follow-up.
   it.each([
     ["plan", "plans"],
     ["task", "tasks"],

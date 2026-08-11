@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
+import { Command } from "commander";
 import * as fs from "node:fs";
 import * as path from "node:path";
+
+import { registerProStubs } from "../register/oss.js";
+import { registerWorkflowsHelpCommand } from "../commands/workflows.js";
 
 /**
  * Verify that the help command properly routes topic arguments
@@ -37,5 +41,61 @@ describe("help topic routing", () => {
 
   it("help action handles unknown topics with an error", () => {
     expect(workflowsContent).toContain("Unknown help topic");
+  });
+});
+
+/**
+ * Behavioral coverage for the collapsed-plural forwarder. The assertions above
+ * are source-text greps, which is how `ix help bugs` broke unnoticed: @ix/pro
+ * collapsed `ix bugs` into `ix bug list` (Ix-pro#108) and dropping the `bugs`
+ * stub left the topic resolving to nothing. Run the real command instead.
+ */
+describe("collapsed plural help topics resolve", () => {
+  function runHelp(topic: string): { stdout: string; stderr: string; exitCode: number | string | undefined } {
+    const program = new Command();
+    program.name("ix").exitOverride();
+    registerProStubs(program);
+    registerWorkflowsHelpCommand(program);
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const origWrite = process.stdout.write.bind(process.stdout);
+    const origErr = console.error;
+    const origExit = process.exitCode;
+    process.stdout.write = ((chunk: unknown) => {
+      stdout.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    console.error = (...a: unknown[]) => void stderr.push(a.join(" "));
+    process.exitCode = undefined;
+
+    let code: number | string | undefined;
+    try {
+      program.parse(["node", "ix", "help", topic]);
+    } catch (e) {
+      stderr.push(String((e as Error).message));
+    } finally {
+      code = process.exitCode;
+      process.stdout.write = origWrite;
+      console.error = origErr;
+      process.exitCode = origExit;
+    }
+    return { stdout: stdout.join(""), stderr: stderr.join("\n"), exitCode: code };
+  }
+
+  it.each([
+    ["bugs", "bug"],
+    ["goals", "goal"],
+  ])("ix help %s forwards to the %s command instead of erroring", (plural, singular) => {
+    const { stdout, stderr, exitCode } = runHelp(plural);
+    expect(stderr).not.toContain("Unknown help topic");
+    expect(exitCode).toBeUndefined();
+    expect(stdout).toContain(`Usage: ix ${singular}`);
+  });
+
+  it("still rejects a topic that was never a command", () => {
+    const { stderr, exitCode } = runHelp("nonsense");
+    expect(stderr).toContain('Unknown help topic: "nonsense"');
+    expect(exitCode).toBe(1);
   });
 });

@@ -59,6 +59,12 @@ Advanced (low-level graph commands):
 Use "ix <command> --help" for details on any command.
 `;
 
+/** Retired plural names -> the singular that absorbed them as a subcommand. */
+const COLLAPSED_HELP_TOPICS: Record<string, string> = {
+  goals: "goal",
+  bugs: "bug",
+};
+
 export function registerWorkflowsHelpCommand(program: Command): void {
   const help = program
     .command("help [topic]")
@@ -80,13 +86,18 @@ export function registerWorkflowsHelpCommand(program: Command): void {
         return;
       }
 
-      // "goals" → forward to "goal" command help
-      if (topic === "goals") {
-        const goalCmd = program.commands.find(
-          (c: Command) => c.name() === "goal"
+      // Plural commands @ix/pro collapsed into a subcommand of the singular
+      // (`ix goals` -> `ix goal list`, Ix-pro#103; `ix bugs` -> `ix bug list`,
+      // Ix-pro#108). The plural is no longer a command anywhere, so `ix help
+      // bugs` would fall through to "Unknown help topic". Forward it to the
+      // singular, whose help documents the new subcommand.
+      const collapsed = COLLAPSED_HELP_TOPICS[topic];
+      if (collapsed) {
+        const target = program.commands.find(
+          (c: Command) => c.name() === collapsed
         );
-        if (goalCmd) {
-          goalCmd.outputHelp();
+        if (target) {
+          target.outputHelp();
           return;
         }
       }
