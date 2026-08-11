@@ -61,7 +61,27 @@ the editor integrations:
 ix mcp
 ```
 
-Configure an MCP client to launch `ix` with the argument `mcp`. For Codex:
+To register it with every AI client on the machine at once:
+
+```bash
+ix mcp install            # detect clients and register `ix mcp` with each
+ix mcp install --dry-run  # show what would change, write nothing
+ix mcp doctor             # check each client's registration
+```
+
+`install` knows Claude Code, Codex, Cursor, VS Code, Gemini CLI, OpenClaw and
+opencode. It writes through each client's own MCP command where one exists
+(`claude mcp add`, `codex mcp add`, `gemini mcp add`, `openclaw mcp set`,
+`code --add-mcp`), so the client owns its config format; only Cursor and
+opencode are edited directly, and both are merged in place with a `.bak` kept
+alongside.
+
+**It never overwrites.** If the name `ix-memory` already belongs to a different
+server — an earlier Ix plugin, say — that client is reported and left exactly as
+it was. Pass `--force` to replace it, or `--host <id>` to limit the run.
+
+To register a single client by hand instead, point it at `ix` with the argument
+`mcp`. For Codex:
 
 ```bash
 codex mcp add ix-memory -- ix mcp
