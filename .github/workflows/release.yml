@@ -296,24 +296,32 @@ jobs:
             # Windows an unrelated tar failure masked it, and everywhere else the
             # swap succeeded and silently reverted the map to a June build.
             #
-            # `source=release` is load-bearing, not decoration. This bundle is
-            # built from system-compass main and has no ix-compass-dist release
-            # number, so the version recorded here is an *Ix* version. install.sh
-            # and the compass-upgrade path write the same file with a *dist*
-            # version. Until v0.9.2 the stamp was a bare number with no way to
-            # tell the two apart, so `isNewer(distLatest, stamp)` compared two
-            # unrelated series and was correct only while Ix's numbers happened
-            # to be the larger ones — the first dist tag above the running Ix
-            # version would have replaced this newer bundle with an older dist
-            # build (Ix#376). The marker lets the CLI skip the comparison
-            # entirely for release bundles, which is the only correct answer:
-            # a dist release published after this one arrives with the next Ix
-            # release, which bundles main again.
+            # The `+release.<sha>` marker is load-bearing, not decoration. This
+            # bundle is built from system-compass main and has no
+            # ix-compass-dist release number, so the version recorded here is an
+            # *Ix* version. install.sh and the compass-upgrade path write the
+            # same file with a *dist* version. Until v0.9.2 the stamp was a bare
+            # number with no way to tell the two apart, so
+            # `isNewer(distLatest, stamp)` compared two unrelated series and was
+            # correct only while Ix's numbers happened to be the larger ones —
+            # the first dist tag above the running Ix version would have
+            # replaced this newer bundle with an older dist build (Ix#376). The
+            # marker lets the CLI skip the comparison entirely for release
+            # bundles, which is the only correct answer: a dist release
+            # published after this one arrives with the next Ix release, which
+            # bundles main again.
             #
-            # Keep the key=value shape. parseCompassStamp() reads a bare number
-            # as dist-series for backwards compatibility, so dropping the marker
-            # silently reintroduces the bug rather than failing loudly.
-            printf 'source=release\nix=%s\ncompass=%s\n' \
+            # ONE LINE, and semver build metadata rather than key=value. This
+            # file has readers we cannot upgrade: every already-shipped CLI
+            # reads it with `readFileSync(...).trim()` — the whole file — and
+            # feeds that to splitVersion. A multi-line stamp makes the major
+            # parse as NaN -> 0, so an old CLI sees a 1.x release as [0,0,0] and
+            # downloads ix-compass-dist over the newer bundle it just installed:
+            # Ix#376 again, reintroduced by the format change, on exactly the
+            # upgrade that ships the fix. splitVersion drops everything after
+            # `+`, so old CLIs read this as a plain "$VERSION" and behave as
+            # they do today. Do not add a second line, and do not drop the `+`.
+            printf '%s+release.%s\n' \
               "$VERSION" "${COMPASS_SHA:-unknown}" > "$STAGING/compass/.version"
             test -s "$STAGING/compass/.version" \
               || { echo "::error::failed to stamp $STAGING/compass/.version"; exit 1; }

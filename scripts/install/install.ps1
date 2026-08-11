@@ -539,7 +539,16 @@ if ($BackendVer) {
 # release bundle as a dist build and clobbered the correct stamp the tarball
 # already carried, leaving `ix upgrade` ready to downgrade a newer bundled
 # compass to an older dist build (Ix#376). Prefer the tarball's own stamp; only
-# write one if the bundle has none.
+# write one if the bundle has none (zips up to v0.9.2 predate it).
+#
+# Unlike install.sh this needs no "did we extract?" guard: there is no
+# already-current skip path here, so the compass under cli\ always came from the
+# zip this run just unpacked and really is a release bundle.
+#
+# One line, and semver build metadata rather than key=value — see the note in
+# release.yml. Every already-shipped CLI reads this file whole and feeds it to
+# splitVersion, so a second line makes the version parse as 0 and hands an old
+# CLI a reason to replace this bundle with an older dist build.
 $CompassDir = Join-Path $IxHome "cli\compass"
 $CompassIndex = Join-Path $CompassDir "index.html"
 $CompassStamp = Join-Path $CompassDir ".version"
@@ -547,7 +556,7 @@ if (Test-Path -LiteralPath $CompassIndex) {
     $HasStamp = (Test-Path -LiteralPath $CompassStamp) -and `
         ((Get-Item -LiteralPath $CompassStamp).Length -gt 0)
     if (-not $HasStamp) {
-        [System.IO.File]::WriteAllText($CompassStamp, "source=release`nix=$Version`n")
+        [System.IO.File]::WriteAllText($CompassStamp, "$Version+release`n")
     }
 } elseif (-not (Test-Path -LiteralPath $CompassIndex)) {
     Write-Warn "System Compass is not installed at $CompassDir — 'ix view' is unavailable until you run 'ix upgrade', which will fetch it."

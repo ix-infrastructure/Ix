@@ -887,6 +887,7 @@ check_installed_version() {
 # specific release, and every build before #259 did publish darwin-amd64 — so a
 # pinned rollback is allowed through to the normal download-and-404 handling.
 SKIP_CLI_INSTALL=0
+CLI_EXTRACTED=0
 if [ "$PLATFORM" = "darwin-amd64" ] && [ -z "${IX_VERSION:-}" ]; then
   echo ""
   warn "Ix does not publish a pre-built CLI for Intel Macs (darwin-amd64)."
@@ -920,6 +921,10 @@ if [ "$SKIP_CLI_INSTALL" = "0" ] && [ -x "$IX_BIN/ix" ]; then
 fi
 
 if [ "$SKIP_CLI_INSTALL" = "0" ] && { [ ! -x "$IX_BIN/ix" ] || [ "$(check_installed_version)" != "$VERSION" ]; }; then
+  # Records that the compass now under $IX_HOME/cli came out of THIS release
+  # tarball. The stamp block near the end of the script needs to know: it must
+  # never label a bundle it did not install (Ix#376).
+  CLI_EXTRACTED=1
   mkdir -p "$INSTALL_DIR"
 
   TMP_DIR=$(mktemp -d)
@@ -1087,11 +1092,27 @@ BACKEND_VER=$(resolve_backend_version)
 # update and would have *downgraded* the bundle to an older build (Ix#376).
 #
 # Prefer the stamp the tarball shipped with, which since v0.9.3 carries the
-# source commit too. Only write one if the bundle has none (tarballs up to
-# v0.9.2 that predate the stamp, or a bundle assembled some other way).
+# source commit too. Only write one if the bundle has none — tarballs up to
+# v0.9.2 predate the stamp.
+#
+# Gated on CLI_EXTRACTED, and that gate is the whole correctness argument. This
+# block runs even when the CLI install was skipped: the version on disk already
+# matched, or SKIP_CLI_INSTALL=1 on darwin-amd64. In that case the compass under
+# cli/ is whatever was already there, which can be an *ix-compass-dist* bundle
+# left unstamped by an interrupted `ix upgrade` (its stage="stamp" failure
+# installs the bundle and then fails to write .version). Stamping that
+# `+release` would freeze it: shouldOfferCompassUpgradeFor refuses every future
+# dist update for a release bundle, so a genuinely stale compass would never be
+# replaced and `ix upgrade` would print a claim about it that is simply untrue.
+#
+# Nothing is lost by skipping it. When we DID extract, the tarball's own stamp
+# has already landed and is authoritative — which is also what repairs an
+# install mislabelled by the pre-#376 installer. One line, semver build
+# metadata: see the note in release.yml on why this file must stay readable by
+# already-shipped CLIs.
 if [ -f "$IX_HOME/cli/compass/index.html" ]; then
-  if [ ! -s "$IX_HOME/cli/compass/.version" ]; then
-    printf 'source=release\nix=%s\n' "$VERSION" > "$IX_HOME/cli/compass/.version"
+  if [ "$CLI_EXTRACTED" = "1" ] && [ ! -s "$IX_HOME/cli/compass/.version" ]; then
+    printf '%s+release\n' "$VERSION" > "$IX_HOME/cli/compass/.version"
   fi
 elif [ ! -f "$IX_HOME/cli/compass/index.html" ]; then
   warn "System Compass is not installed at $IX_HOME/cli/compass — 'ix view' is unavailable until you run 'ix upgrade', which will fetch it."
