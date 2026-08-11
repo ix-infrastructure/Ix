@@ -47,8 +47,12 @@ ix map --silent                             # refresh the graph after code chang
   Pro probe diffs against it. Adding a command to `oss.ts` silently makes it
   OSS; removing one makes Pro own it. `registerProCommands` is async and MUST
   be awaited.
-- **`registerPatchesCommand` is defined but never registered** in `oss.ts` —
-  `ix patches` is an "unknown command" today.
+- **`ix patches` is OSS, not Pro** (#371). It is implemented here and registered
+  in `oss.ts`. `@ix/pro` also registers a `patches`; commander throws on the
+  duplicate and Pro's `tryRegister` swallows the throw, so the OSS one — which
+  registers first — wins on a Kartr install too. Do not re-add it to
+  `PRO_COMMANDS`: a stub for a command that exists in OSS shadows the real
+  implementation, and the failure is silent rather than a crash.
 - **`ix upgrade` wipes `~/.ix/cli/compass`.** The Compass assets ship only via
   `ix upgrade`, and re-running the installer re-extracts over them, so a
   re-install can leave `ix view` with no UI. `bootstrap.sh` re-runs `ix upgrade`
@@ -162,14 +166,14 @@ Underlying structural commands — useful for debugging or fine-grained inspecti
 
 ### History & Decisions
 
-Only the first three work without Pro.
+Only the first four work without Pro.
 
 | Goal | Command | Example |
 |---|---|---|
 | Entity history | `ix history` | `ix history <entityId> --format llm` |
 | Changes between revisions | `ix diff` | `ix diff 1 5 --summary --format llm` |
 | Detect contradictions | `ix conflicts` | `ix conflicts --format llm` |
-| **[Pro]** List recent patches | `ix patches` | `ix patches --limit 20 --format json` |
+| List recent patches | `ix patches` | `ix patches --limit 20 --format llm` |
 | **[Pro]** Design decisions | `ix decisions` | `ix decisions --topic ingestion --limit 10` |
 | **[Pro]** Record a decision | `ix decide` | `ix decide "Use CONTAINS" --rationale "Normalize edges" --responds-to <bugId>` |
 | **[Pro]** Record a goal | `ix truth add` | `ix truth add "Support 100k file repos"` |
