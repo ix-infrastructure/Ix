@@ -192,8 +192,19 @@ export function isNewer(latest: string, current: string): boolean {
  * always runs.
  */
 function getInstalledCompassVersion(): string {
-  if (!existsSync(join(COMPASS_DIR, "index.html"))) return "0.0.0";
-  return readCompassStamp().version;
+  return installedCompass().version;
+}
+
+/**
+ * The installed bundle's stamp, with a missing bundle reported as version
+ * "0.0.0" — see the note above on why `index.html` and not the stamp decides
+ * that. Returns the whole stamp rather than just the number because the source
+ * marker is half the answer: `shouldOfferCompassUpgrade` needs both, and
+ * reading the file once keeps them from disagreeing.
+ */
+function installedCompass(): CompassStamp {
+  if (!existsSync(join(COMPASS_DIR, "index.html"))) return { source: "dist", version: "0.0.0" };
+  return readCompassStamp();
 }
 
 /**
@@ -232,7 +243,9 @@ function getInstalledCompassVersion(): string {
  * until compass-dist passes the Ix version, and no worse than before; new
  * releases carry the explicit form and are immune.
  */
-export function parseCompassStamp(raw: string): { source: "release" | "dist"; version: string } {
+export type CompassStamp = { source: "release" | "dist"; version: string };
+
+export function parseCompassStamp(raw: string): CompassStamp {
   const text = raw.trim();
   if (!text) return { source: "dist", version: "0.0.0" };
 
@@ -249,7 +262,7 @@ export function parseCompassStamp(raw: string): { source: "release" | "dist"; ve
   return { source: "dist", version: fields.get("version") || "0.0.0" };
 }
 
-function readCompassStamp(): { source: "release" | "dist"; version: string } {
+function readCompassStamp(): CompassStamp {
   try {
     if (!existsSync(COMPASS_VERSION_FILE)) return { source: "dist", version: "0.0.0" };
     return parseCompassStamp(readFileSync(COMPASS_VERSION_FILE, "utf-8"));
@@ -267,16 +280,28 @@ function readCompassStamp(): { source: "release" | "dist"; version: string } {
  * cut, so it is at least as new as any dist release published before it, and a
  * dist release published *after* it arrives with the next Ix release, which
  * bundles `main` again. The dist download stays the **repair** path for a
- * missing or gutted bundle — that still fires, because
- * getInstalledCompassVersion() reports "0.0.0" when index.html is absent,
- * which no real release number can match.
+ * missing or gutted bundle — that still fires, because installedCompass()
+ * reports "0.0.0" when index.html is absent, which no real release number can
+ * match, and that check is deliberately ahead of the source check so a gutted
+ * *release* bundle is still repaired.
+ *
+ * Takes the stamp as an argument rather than reading it: this decision is the
+ * whole point of #376, and with the file read inlined the only thing a test
+ * could reach was parseCompassStamp — so deleting the source check left every
+ * test passing while the inversion came straight back.
  */
-function shouldOfferCompassUpgrade(compassLatest: string | undefined): boolean {
+export function shouldOfferCompassUpgradeFor(
+  compassLatest: string | undefined,
+  installed: CompassStamp,
+): boolean {
   if (!compassLatest) return false;
-  const installed = getInstalledCompassVersion();
-  if (installed === "0.0.0") return true; // missing or gutted — repair.
-  if (readCompassStamp().source === "release") return false;
-  return isNewer(compassLatest, installed);
+  if (installed.version === "0.0.0") return true; // missing or gutted — repair.
+  if (installed.source === "release") return false;
+  return isNewer(compassLatest, installed.version);
+}
+
+function shouldOfferCompassUpgrade(compassLatest: string | undefined): boolean {
+  return shouldOfferCompassUpgradeFor(compassLatest, installedCompass());
 }
 
 function getTrackedVersion(versionFile: string): string {
