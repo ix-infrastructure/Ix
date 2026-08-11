@@ -34,6 +34,7 @@ import { registerSubsystemsCommand } from "../commands/subsystems.js";
 import { registerUpgradeCommand } from "../commands/upgrade.js";
 import { registerViewCommand } from "../commands/view.js";
 import { registerSavingsCommand } from "../commands/savings.js";
+import { registerPatchesCommand } from "../commands/patches.js";
 
 const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "briefing", desc: "Session-resume briefing" },
@@ -43,7 +44,10 @@ const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "decisions", desc: "List recorded design decisions" },
   { name: "goal", desc: "Manage project goals" },
   { name: "goals", desc: "List all goals" },
-  { name: "patches", desc: "List recent patches" },
+  // `patches` is deliberately absent: ix-cli owns the real implementation
+  // (commands/patches.ts, registered above). It sat in this list while never
+  // being registered, so `ix patches` answered "requires Ix Pro" on OSS and
+  // shadowed a working command — see #371.
   { name: "plan", desc: "Manage plans and plan tasks" },
   { name: "task", desc: "Manage tasks" },
   { name: "plans", desc: "List all plans" },
@@ -96,6 +100,7 @@ export function registerOssCommands(program: Command): void {
   registerUpgradeCommand(program);
   registerViewCommand(program);
   registerSavingsCommand(program);
+  registerPatchesCommand(program);
 
   // Hide advanced commands from default help
   const advancedSet = new Set(ADVANCED_COMMANDS);

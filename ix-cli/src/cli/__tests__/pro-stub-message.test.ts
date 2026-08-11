@@ -61,7 +61,6 @@ describe("Pro stubs", () => {
     ["decide", ["decide", "Use X", "--rationale", "because", "--affects", "Entity"]],
     ["briefing", ["briefing", "--format", "json"]],
     ["decisions", ["decisions", "--topic", "ingestion", "--limit", "10"]],
-    ["patches", ["patches", "--limit", "20", "--format", "json"]],
     ["plan", ["plan", "task", "title", "--plan", "p1", "--resolves", "b1"]],
     ["task", ["task", "show", "t1"]],
     ["workflow", ["workflow", "attach", "w1"]],
@@ -70,6 +69,19 @@ describe("Pro stubs", () => {
     expect(err).toContain(`The '${name}' command requires Ix Pro.`);
     expect(err).not.toContain("too many arguments");
     expect(exitCode).toBe(1);
+  });
+
+  // `patches` is NOT Pro. ix-cli implements it (commands/patches.ts), but it
+  // sat in PRO_COMMANDS while never being registered, so the stub answered
+  // "requires Ix Pro" for a command this repo ships — #371. Pinning its absence
+  // here is what stops it being re-added to the list: a stub for a command that
+  // exists in OSS shadows the real implementation, and because
+  // registerOssCommands runs first the symptom is silent rather than a crash.
+  it("does not stub patches — ix-cli owns it", () => {
+    const program = new Command();
+    program.name("ix").exitOverride();
+    registerProStubs(program);
+    expect(program.commands.map(c => c.name())).not.toContain("patches");
   });
 
   // @ix/pro registers a plural list command alongside each singular manager
