@@ -291,4 +291,38 @@ describe("sweepUpgradeOrphans", () => {
   it("is a no-op when IX_HOME does not exist yet", () => {
     expect(() => sweepUpgradeOrphans(join(root, "nope"), join(root, "nope", "cli"))).not.toThrow();
   });
+
+  // `ix upgrade` downloads into `.cli-download-*` / `.compass-download-*` under
+  // IX_HOME rather than os.tmpdir(), which on Windows is TEMP verbatim and is
+  // the path #349 died on. Leaving TEMP also left the OS's own cleanup, so a
+  // run killed mid-download would park a multi-MB archive in ~/.ix forever
+  // unless this sweep reclaims it.
+  it("reclaims an interrupted download's scratch directory", () => {
+    const installDir = join(root, "cli");
+    mkdirSync(join(installDir, "cli", "dist", "cli"), { recursive: true });
+    writeFileSync(join(installDir, "cli", "dist", "cli", "main.js"), "// live\n");
+    mkdirSync(join(root, ".cli-download-abc123"), { recursive: true });
+    writeFileSync(join(root, ".cli-download-abc123", "ix-0.9.2-linux-amd64.tar.gz"), "gz");
+    mkdirSync(join(root, ".compass-download-def456"), { recursive: true });
+
+    sweepUpgradeOrphans(root, installDir);
+
+    expect(existsSync(join(root, ".cli-download-abc123"))).toBe(false);
+    expect(existsSync(join(root, ".compass-download-def456"))).toBe(false);
+    expect(readFileSync(join(installDir, "cli", "dist", "cli", "main.js"), "utf-8")).toBe("// live\n");
+  });
+
+  // The counterpart to the `.cli-backup-` note above, and the reason the sweep
+  // call had to move above the download rather than staying between the
+  // download and the extract: a download directory must never be a recovery
+  // candidate, or an interrupted upgrade would rename an archive over ~/.ix/cli.
+  it("does not treat a download directory as an install worth recovering", () => {
+    const installDir = join(root, "cli");
+    mkdirSync(join(root, ".cli-download-abc123"), { recursive: true });
+    writeFileSync(join(root, ".cli-download-abc123", "ix-0.9.2-linux-amd64.tar.gz"), "gz");
+
+    sweepUpgradeOrphans(root, installDir);
+
+    expect(existsSync(installDir)).toBe(false);
+  });
 });

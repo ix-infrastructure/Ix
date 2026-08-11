@@ -3,7 +3,7 @@ import { execFileSync } from "child_process";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, mkdtempSync, lstatSync, renameSync, readdirSync } from "fs";
 import { basename, dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { homedir, tmpdir } from "os";
+import { homedir } from "os";
 import chalk from "chalk";
 import { BACKEND_IMAGE, checkBackendImage, isNonStandardBackend } from "../backend-status.js";
 import { canRenderProgress } from "../stderr.js";
@@ -800,7 +800,15 @@ export function sweepUpgradeOrphans(ixHome: string, installDir: string): void {
       name.startsWith(".cli-staging-") ||
       name.startsWith(".cli-backup-") ||
       name.startsWith(".compass-staging-") ||
-      name.startsWith(".compass-backup-")
+      name.startsWith(".compass-backup-") ||
+      // The download scratch, moved here from os.tmpdir() with #349. It holds a
+      // multi-MB archive, and leaving TEMP also left the OS's own cleanup — so
+      // an upgrade killed mid-download would park that in ~/.ix forever. These
+      // two prefixes are deliberately NOT `-backup-`: `recover()` above renames
+      // the last `.cli-backup-*` over the install directory, and a stray
+      // archive directory must never be a candidate for that.
+      name.startsWith(".cli-download-") ||
+      name.startsWith(".compass-download-")
     ) {
       const target = join(ixHome, name);
       if (target !== installDir && existsSync(target)) rmQuiet(target);
@@ -1027,7 +1035,31 @@ export function registerUpgradeCommand(program: Command): void {
           const url = `https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/releases/download/v${latest}/${archiveName}`;
           const installDir = join(IX_HOME, "cli");
 
-          const tmpDirRaw = mkdtempSync(join(tmpdir(), "ix-upgrade-"));
+          // Under IX_HOME, not os.tmpdir(). #349 is a Windows install that died
+          // because TEMP arrived in 8.3 short form (`C:\Users\WIN10\~1\...`) on
+          // a profile named `C:\Users\Win 10`, and setting TEMP to a path
+          // without a space let the same install finish. install.ps1 was moved
+          // off TEMP for that; `ix upgrade` stages through os.tmpdir(), which on
+          // Windows *is* TEMP verbatim, so the same hazard was left live on the
+          // upgrade path — where it breaks an install that already works.
+          //
+          // IX_HOME comes from USERPROFILE in its long form. mkdtemp needs the
+          // parent to exist, and on a first upgrade after a manual install it
+          // may not.
+          mkdirSync(IX_HOME, { recursive: true });
+
+          // Reclaim anything an interrupted upgrade left behind, and put the
+          // install back if a previous run died between the two renames.
+          //
+          // Must run BEFORE the download directory is created: the sweep now
+          // reclaims `.cli-download-*` too, so from below this line it would
+          // delete the archive it is about to extract. It used to sit between
+          // the download and the extract, which was safe only while the scratch
+          // lived in os.tmpdir(). Recovering before the download also means an
+          // interrupted install is put back even when the download then fails.
+          sweepUpgradeOrphans(IX_HOME, installDir);
+
+          const tmpDirRaw = mkdtempSync(join(IX_HOME, ".cli-download-"));
           const tmpFile = join(tmpDirRaw, archiveName);
 
           console.log(`Downloading ix ${latest} for ${platform}...`);
@@ -1062,10 +1094,6 @@ export function registerUpgradeCommand(program: Command): void {
             rmQuiet(stagingDir);
             rmQuiet(tmpDirRaw);
           };
-
-          // Reclaim anything an interrupted upgrade left behind, and put the
-          // install back if a previous run died between the two renames.
-          sweepUpgradeOrphans(IX_HOME, installDir);
 
           try {
             rmQuiet(stagingDir);
@@ -1304,7 +1332,9 @@ export function registerUpgradeCommand(program: Command): void {
           sweepUpgradeOrphans(IX_HOME, dirname(COMPASS_DIR));
 
           const compassUrl = `https://github.com/${GITHUB_ORG}/${COMPASS_DIST_REPO}/releases/download/v${compassLatest}/compass-${compassLatest}.tar.gz`;
-          const compassTmp = mkdtempSync(join(tmpdir(), "ix-compass-"));
+          // Under IX_HOME for the same reason as the CLI download above (#349).
+          mkdirSync(IX_HOME, { recursive: true });
+          const compassTmp = mkdtempSync(join(IX_HOME, ".compass-download-"));
           const compassTar = join(compassTmp, `compass-${compassLatest}.tar.gz`);
 
           // Which step failed decides where to look: a download failure is a
