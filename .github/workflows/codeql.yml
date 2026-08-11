@@ -30,21 +30,35 @@ permissions:
 
 concurrency:
   group: codeql-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # PRs only. For push and schedule, github.ref is refs/heads/main, so cancelling
+  # would put every merge in one group with the weekly cron and let a burst of
+  # merges kill main's analysis before it uploads — and a cancelled run renders
+  # grey, not red, on a check that is not required. Default setup analysed every
+  # commit on main to completion; that is the net that caught #44 after the fact,
+  # and it has to survive the switch.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   analyze:
-    name: Analyze (${{ matrix.language }})
+    # Deliberately not "Analyze (<lang>)": that is byte-for-byte what default
+    # setup names its checks, and during the cutover both configurations report
+    # at once, so identical names would sit in the checks list with opposite
+    # results and no way to tell which is which.
+    name: CodeQL (${{ matrix.language }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
       security-events: write # upload SARIF to code scanning
-      actions: read # CodeQL reads workflow run info for the `actions` language
 
     strategy:
       fail-fast: false
       matrix:
+        # Hand-maintained, and default setup's was not: it auto-detected new
+        # languages as they appeared. This repo already carries .py and .scala
+        # files, so adding a Python or Go component means adding it here too —
+        # nothing fails if you forget, the Security tab simply reads clean.
+        #
         # build-mode: none for all three — nothing here is a compiled language,
         # so there is no build to observe.
         language: [actions, javascript-typescript, ruby]
