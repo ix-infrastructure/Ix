@@ -35,6 +35,7 @@ import { registerUpgradeCommand } from "../commands/upgrade.js";
 import { registerViewCommand } from "../commands/view.js";
 import { registerSavingsCommand } from "../commands/savings.js";
 import { registerPatchesCommand } from "../commands/patches.js";
+import { registerMcpCommand } from "../commands/mcp.js";
 
 const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "briefing", desc: "Session-resume briefing" },
@@ -100,6 +101,7 @@ export function registerOssCommands(program: Command): void {
   registerViewCommand(program);
   registerSavingsCommand(program);
   registerPatchesCommand(program);
+  registerMcpCommand(program);
 
   // Hide advanced commands from default help
   const advancedSet = new Set(ADVANCED_COMMANDS);

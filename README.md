@@ -52,6 +52,28 @@ The graph lives on your machine, and it persists — so context survives between
 sessions, and your assistant can navigate a real map of your system instead of
 re-deriving it from whatever fits in a prompt.
 
+### Use Ix from any MCP client
+
+The CLI includes a canonical stdio MCP server with the same graph tools used by
+the editor integrations:
+
+```bash
+ix mcp
+```
+
+Configure an MCP client to launch `ix` with the argument `mcp`. For Codex:
+
+```bash
+codex mcp add ix-memory -- ix mcp
+```
+
+The client launches the server in the active workspace, so every Ix tool uses
+that repository's graph and configuration.
+
+Tool calls run inside the server process. Set `IX_MCP_SUBPROCESS=1` to run each
+one as a separate `ix` child process instead — slower by roughly the CLI's
+startup time per call, but fully isolated.
+
 ## Sign up for Kartr
 
 We built Kartr on top of this technology.

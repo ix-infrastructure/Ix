@@ -85,7 +85,7 @@ registerOssCommands(program);
 
   // Check for updates (non-blocking, cached 1hr) — skip for upgrade command itself
   const args = process.argv.slice(2);
-  if (args[0] !== "upgrade") {
+  if (args[0] !== "upgrade" && args[0] !== "mcp" && process.env.IX_MCP_CHILD !== "1") {
     // Deliberately not awaited — but it must still be caught here. The catch
     // inside checkForUpdate only guards its inner fetch chain; the function's
     // own promise covers the synchronous cached-read path, and a corrupt

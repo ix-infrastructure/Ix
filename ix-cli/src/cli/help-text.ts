@@ -29,6 +29,7 @@ const OSS_HELP = [
   `  status                Check status`,
   `  stats                 Show stats`,
   `  doctor                Diagnose issues`,
+  `  mcp                   Serve agent tools`,
   `  docker <action>       Manage backend`,
   `  view                  Open visualizer`,
   `  reset                 Reset map`,
