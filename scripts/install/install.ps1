@@ -195,14 +195,10 @@ function Get-BackendLatestVersion {
     }
 }
 
-function Get-CompassLatestVersion {
-    try {
-        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$GithubOrg/ix-compass-dist/releases/latest" -ErrorAction Stop
-        return $release.tag_name -replace '^v', ''
-    } catch {
-        return $null
-    }
-}
+# Get-CompassLatestVersion was removed with Ix#376: the compass this script
+# installs comes from the release tarball, so the latest ix-compass-dist release
+# number was never the right thing to stamp it with. `ix upgrade` asks that
+# question, at a point where it can also tell which series the bundle is in.
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -536,11 +532,23 @@ if ($BackendVer) {
 # on index.html: stamping a version for a compass that is not on disk is what
 # made `ix upgrade` skip the repair download and break `ix view` permanently.
 # The warning below is now a real failure signal, not the normal Windows path.
-$CompassVer = Get-CompassLatestVersion
+#
+# The compass installed here always comes from the release tarball, never from
+# ix-compass-dist — so it must be stamped as a *release* bundle. This used to
+# write the latest ix-compass-dist release number instead, which mislabelled a
+# release bundle as a dist build and clobbered the correct stamp the tarball
+# already carried, leaving `ix upgrade` ready to downgrade a newer bundled
+# compass to an older dist build (Ix#376). Prefer the tarball's own stamp; only
+# write one if the bundle has none.
 $CompassDir = Join-Path $IxHome "cli\compass"
 $CompassIndex = Join-Path $CompassDir "index.html"
-if ($CompassVer -and (Test-Path -LiteralPath $CompassIndex)) {
-    [System.IO.File]::WriteAllText((Join-Path $CompassDir ".version"), $CompassVer)
+$CompassStamp = Join-Path $CompassDir ".version"
+if (Test-Path -LiteralPath $CompassIndex) {
+    $HasStamp = (Test-Path -LiteralPath $CompassStamp) -and `
+        ((Get-Item -LiteralPath $CompassStamp).Length -gt 0)
+    if (-not $HasStamp) {
+        [System.IO.File]::WriteAllText($CompassStamp, "source=release`nix=$Version`n")
+    }
 } elseif (-not (Test-Path -LiteralPath $CompassIndex)) {
     Write-Warn "System Compass is not installed at $CompassDir — 'ix view' is unavailable until you run 'ix upgrade', which will fetch it."
 }

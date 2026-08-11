@@ -132,10 +132,11 @@ resolve_backend_version() {
     | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\([^"]*\)".*/\1/p' || true
 }
 
-resolve_compass_version() {
-  _fetch "https://api.github.com/repos/${GITHUB_ORG}/ix-compass-dist/releases/latest" 2>/dev/null \
-    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\([^"]*\)".*/\1/p' || true
-}
+# resolve_compass_version() was removed with Ix#376: the compass this script
+# installs comes from the release tarball, so the latest ix-compass-dist release
+# number was never the right thing to stamp it with. Nothing here needs to know
+# what dist has published — `ix upgrade` asks that question, at a point where it
+# can also tell which series the installed bundle belongs to.
 
 # -- Detect platform --
 
@@ -1076,9 +1077,22 @@ BACKEND_VER=$(resolve_backend_version)
 # Windows path. Keep the -f test on index.html: stamping a version for a
 # compass that is not on disk is what made `ix upgrade` skip the repair
 # download and break `ix view` permanently.
-COMPASS_VER=$(resolve_compass_version)
-if [ -n "$COMPASS_VER" ] && [ -f "$IX_HOME/cli/compass/index.html" ]; then
-  printf '%s' "$COMPASS_VER" > "$IX_HOME/cli/compass/.version"
+#
+# The compass installed here always comes from the release tarball, never from
+# ix-compass-dist — so it must be stamped as a *release* bundle. This used to
+# write the latest ix-compass-dist release number instead, which mislabelled a
+# release bundle as a dist build and clobbered the correct stamp the tarball
+# already carried. The result was live on real installs: a v0.9.x bundle
+# stamped `0.2.0`, against a dist latest of `0.3.0`, so `ix upgrade` reported an
+# update and would have *downgraded* the bundle to an older build (Ix#376).
+#
+# Prefer the stamp the tarball shipped with, which since v0.9.3 carries the
+# source commit too. Only write one if the bundle has none (tarballs up to
+# v0.9.2 that predate the stamp, or a bundle assembled some other way).
+if [ -f "$IX_HOME/cli/compass/index.html" ]; then
+  if [ ! -s "$IX_HOME/cli/compass/.version" ]; then
+    printf 'source=release\nix=%s\n' "$VERSION" > "$IX_HOME/cli/compass/.version"
+  fi
 elif [ ! -f "$IX_HOME/cli/compass/index.html" ]; then
   warn "System Compass is not installed at $IX_HOME/cli/compass — 'ix view' is unavailable until you run 'ix upgrade', which will fetch it."
 fi

@@ -59,6 +59,13 @@ jobs:
   compass:
     if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
+    outputs:
+      # The system-compass commit this bundle was built from. Recorded in the
+      # bundle's .version stamp so a build is identifiable after the fact —
+      # system-compass's package.json version is not maintained against the
+      # ix-compass-dist release series (it read 0.2.0 while dist was on v0.3.0),
+      # so the commit is the only reliable identity the bundle has.
+      sha: ${{ steps.build-compass.outputs.sha }}
     steps:
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -70,6 +77,7 @@ jobs:
       # a fully green release that shipped an empty compass/ directory and a
       # broken `ix view` for every user. A compass failure must fail the release.
       - name: Build System Compass
+        id: build-compass
         env:
           COMPASS_TOKEN: ${{ secrets.COMPASS_TOKEN }}
         run: |
@@ -98,6 +106,9 @@ jobs:
               exit 1
             }
           cd system-compass
+          # Capture the source commit before building, so the stamp written in
+          # the package job can identify this bundle (see the job's `outputs`).
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           npm ci --legacy-peer-deps
           npm run build
           if [ ! -f dist/index.html ]; then
@@ -256,6 +267,9 @@ jobs:
           # A PR dry-run skips the compass job, so an absent bundle is expected
           # there and only there.
           REQUIRE_COMPASS: ${{ github.event_name != 'pull_request' }}
+          # Empty on a PR dry-run (the compass job is skipped); the stamp falls
+          # back to `unknown`, which is fine because no bundle is staged either.
+          COMPASS_SHA: ${{ needs.compass.outputs.sha }}
         run: |
           STAGING="ix-${VERSION}-${TARGET}"
           # Compute the checksum with node (always present on every runner);
@@ -282,16 +296,25 @@ jobs:
             # Windows an unrelated tar failure masked it, and everywhere else the
             # swap succeeded and silently reverted the map to a June build.
             #
-            # The Ix version rather than a compass version: the bundle is built
-            # from compass main at release time, so it is always at least as new
-            # as any ix-compass-dist release cut before it. That makes the Ix
-            # version a monotonic stand-in, and isNewer() still offers a genuine
-            # dist upgrade published later at a higher number.
+            # `source=release` is load-bearing, not decoration. This bundle is
+            # built from system-compass main and has no ix-compass-dist release
+            # number, so the version recorded here is an *Ix* version. install.sh
+            # and the compass-upgrade path write the same file with a *dist*
+            # version. Until v0.9.2 the stamp was a bare number with no way to
+            # tell the two apart, so `isNewer(distLatest, stamp)` compared two
+            # unrelated series and was correct only while Ix's numbers happened
+            # to be the larger ones — the first dist tag above the running Ix
+            # version would have replaced this newer bundle with an older dist
+            # build (Ix#376). The marker lets the CLI skip the comparison
+            # entirely for release bundles, which is the only correct answer:
+            # a dist release published after this one arrives with the next Ix
+            # release, which bundles main again.
             #
-            # install.sh writes this same file after extracting, using the dist
-            # release number. Either value suppresses the spurious update; the
-            # stamp being present at all is what matters.
-            printf '%s' "$VERSION" > "$STAGING/compass/.version"
+            # Keep the key=value shape. parseCompassStamp() reads a bare number
+            # as dist-series for backwards compatibility, so dropping the marker
+            # silently reintroduces the bug rather than failing loudly.
+            printf 'source=release\nix=%s\ncompass=%s\n' \
+              "$VERSION" "${COMPASS_SHA:-unknown}" > "$STAGING/compass/.version"
             test -s "$STAGING/compass/.version" \
               || { echo "::error::failed to stamp $STAGING/compass/.version"; exit 1; }
             COMPASS_STAGED=1
