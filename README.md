@@ -75,9 +75,9 @@ opencode. It writes through each client's own MCP command where one exists
 everywhere but Windows), so the client owns its config format. Cursor, VS Code
 and opencode are edited directly instead, as is OpenClaw on Windows — its
 registration is passed as a JSON argument, which cmd cannot carry intact. Every
-direct write is merged in place with a `.bak` kept alongside, and those clients
-are detected by their config directory rather than by a shell command, since
-`cursor` and `code` are opt-in shims a GUI install may not have.
+direct write is merged in place with a `.bak` kept alongside. Cursor, VS Code
+and opencode are also detected by their config directory rather than by a shell
+command, since `cursor` and `code` are opt-in shims a GUI install may not have.
 
 **It never overwrites.** If the name `ix-memory` already belongs to a different
 server — an earlier Ix plugin, say — that client is reported and left exactly as

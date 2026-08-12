@@ -243,6 +243,27 @@ function isAbsolutePath(value: string): boolean {
 }
 
 /**
+ * The launcher a rendered listing row records, when there is no parsed entry.
+ *
+ * Claude Code, Codex and Gemini answer with a table, not JSON, so `launcherOf`
+ * has nothing to read — and those are exactly the hosts that record an absolute
+ * `ix.cmd` on Windows. Dropping to no launcher at all for them silently
+ * un-fixed staleness where it mattered most.
+ *
+ * Two properties earn their keep here. The match must start at a token boundary:
+ * letting it begin at an interior `/` made it latch onto the `/npm/ix.cmd`
+ * *suffix* of a live path, stat the wrong file and report a working
+ * registration stale — a rewrite with no `--force`. And the body must tolerate
+ * spaces, because a Windows launcher normally sits under a username; stopping at
+ * the first space missed `C:\Users\Jane Doe\...`, the common case. The lazy
+ * body plus the trailing `ix` anchor is what lets both hold at once.
+ */
+function launcherInText(text: string): string | null {
+  const match = /(?:^|[\s"'])((?:[A-Za-z]:[\\/]|\/)[^"']*?[\\/]ix(?:\.\w+)?)(?=[\s"',\]]|$)/.exec(text);
+  return match?.[1] ?? null;
+}
+
+/**
  * Lines that mention a server name only because something went wrong.
  *
  * Gemini writes its whole listing to stderr behind ~28 lines of extension
@@ -347,11 +368,15 @@ function judge(text: string, launcher: string | null): Pick<HostStatus, "registr
   // entry dies whenever the npm prefix moves — an nvm switch, a reinstall
   // elsewhere. Judging that healthy from the command string alone is what made
   // `install` skip the one host it should have repaired, while `doctor` agreed
-  // it was fine and no command anywhere would rewrite it. Only checked when the
-  // caller could hand us the recorded command itself; guessing it back out of
-  // rendered text is what made the first attempt both miss and misfire.
-  if (launcher !== null && isAbsolutePath(launcher) && !pathExists(launcher)) {
-    return { registration: "stale", detail: `${launcher} no longer exists` };
+  // it was fine and no command anywhere would rewrite it.
+  //
+  // The parsed entry is preferred, since a recorded command needs no guessing
+  // at all. Hosts that answer with a rendered table have no entry to parse, so
+  // the row is read instead — see {@link launcherInText} for what that has to
+  // get right.
+  const recorded = launcher ?? launcherInText(text);
+  if (recorded !== null && isAbsolutePath(recorded) && !pathExists(recorded)) {
+    return { registration: "stale", detail: `${recorded} no longer exists` };
   }
   return { registration: "ours", detail: truncate(text) };
 }
@@ -380,13 +405,6 @@ function cliHost(spec: {
    * double quote cannot be encoded through cmd.
    */
   windowsFallback?: (launcher: { command: string; args: string[] }) => void;
-  /**
-   * Read path matching {@link windowsFallback}, so the platform that writes a
-   * file also reads it. Without the pair, install writes the file and inspect
-   * asks the CLI, which is how a wrong path or shape would report `+ registered`
-   * and `not registered` forever with nothing to notice it.
-   */
-  windowsInspect?: () => Pick<HostStatus, "registration" | "detail">;
 }): McpHost {
   return {
     id: spec.id,
@@ -394,7 +412,6 @@ function cliHost(spec: {
     bin: spec.bin,
     target: spec.target,
     async inspect() {
-      if (spec.windowsInspect && platform() === "win32") return spec.windowsInspect();
       if (spec.showArgs) {
         const shown = await run(spec.bin, spec.showArgs);
         return classifyShown(`${shown.stdout}\n${shown.stderr}`, shown.ok);
@@ -596,7 +613,13 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       // argument cannot be encoded through cmd (see `run`). Windows therefore
       // writes the documented config shape directly; every other platform keeps
       // going through the CLI so openclaw owns its own format.
-      windowsInspect: () => inspectJsonFile(openclawConfigPath(), "mcp", "servers"),
+      //
+      // The *read* stays on `openclaw mcp show` on every platform, deliberately.
+      // Its argv carries no quote and no `%`, so cmd handles it, and asking
+      // openclaw whether it can see the entry is the only check that the shape
+      // written here is one openclaw actually reads. Pairing the read with the
+      // write would make a wrong key report `already registered` forever
+      // instead of `not registered` — trading a loud failure for a silent one.
       windowsFallback: (ix) =>
         writeJson(openclawConfigPath(), (config) => {
           const mcp = (config.mcp ??= {}) as Record<string, unknown>;

@@ -384,13 +384,41 @@ describe("registration classification", () => {
     );
   });
 
-  it("does not invent a stale launcher out of a path that is merely rendered", () => {
-    // The recovered-by-regex version latched onto the `/npm/ix.cmd` suffix of a
-    // live path and stat'd that instead, so `install` rewrote a working
-    // registration with no --force and `doctor` exited 1 on a healthy machine.
-    const rendered = "ix-memory  C:/Users/jane/Program Files/npm/ix.cmd  mcp  -  enabled";
+  it("does not invent a stale launcher out of a suffix of a live path", () => {
+    // A launcher that genuinely exists, sitting under a `.../npm/ix.cmd` tail.
+    // A regex allowed to start at an interior `/` matched only that tail,
+    // stat'd `/npm/ix.cmd` from the filesystem root, found nothing, and called
+    // a working registration stale — so `install` rewrote it with no --force
+    // and `doctor` exited 1 on a healthy machine. The fixture has to use a path
+    // that exists, or it cannot tell the two behaviours apart.
+    const dir = join(tempDir(), "Program Files", "npm");
+    mkdirSync(dir, { recursive: true });
+    const launcher = join(dir, "ix.cmd");
+    writeFileSync(launcher, "@echo off");
+    // Both properties are needed to reproduce it: the space stops an
+    // unanchored match from spanning the path from its start, and the forward
+    // slashes then give it an interior `/npm/ix.cmd` to latch onto instead.
+    // A temp path without either cannot tell the two behaviours apart.
+    const rendered = launcher.replaceAll("\\", "/");
 
-    expect(classifyListing(rendered).registration).toBe("ours");
+    expect(classifyListing(`ix-memory  ${rendered}  mcp  -  enabled`).registration).toBe("ours");
+  });
+
+  // The three hosts that answer with a rendered table rather than JSON, so
+  // there is no entry to parse — and the three that record an absolute
+  // `ix.cmd` on Windows, which is where staleness matters at all. Reading the
+  // launcher only from parsed entries left these silently unchecked.
+  it.each([
+    ["claude mcp list", (p: string) => `ix-memory: ${p} mcp - ✓ Connected`],
+    ["codex mcp list", (p: string) => `ix-memory  ${p}  mcp  -  -  enabled`],
+    ["gemini mcp list", (p: string) => `✓ ix-memory (from ix-memory): ${p} mcp (stdio) - Connected`],
+  ])("spots a dead launcher in a %s row", (_host, render) => {
+    const dead = String.raw`C:\Users\Jane Doe\AppData\Roaming\npm\ix.cmd`;
+
+    expect(classifyListing(render(dead))).toMatchObject({
+      registration: "stale",
+      detail: expect.stringContaining("no longer exists"),
+    });
   });
 
   it("recognises a pretty-printed definition split across lines", () => {

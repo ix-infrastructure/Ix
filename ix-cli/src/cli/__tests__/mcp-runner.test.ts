@@ -288,6 +288,50 @@ describe("in-process ix runner", () => {
     });
   });
 
+  it("does not release a still-running command's lock when its own grace fires", async () => {
+    await withLockDir(async () => {
+      const run = createInProcessRunner({
+        version: "test-version",
+        createProgram: createTestProgram,
+        orphanGraceMs: 60,
+      });
+
+      // Abandoned at 40ms, grace fires at ~100ms, still working until ~400ms.
+      // The grace drops the distrust; the command is still entitled to its lock
+      // until it actually finishes, and releasing it there hands a second map
+      // the workspace out from under this one.
+      expect((await run(["map", "--hold", "400"], 40)).ok).toBe(false);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect((await run(["map"], 5_000)).stdout).toBe("coalesced\n");
+
+      // Drained before returning: an abandoned command outlives the test that
+      // started it, and its settle-path afterCommand would otherwise land in
+      // the middle of whichever test is running by then.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    });
+  });
+
+  it("still resets the read scope when a command that overran its grace finishes", async () => {
+    await withLockDir(async () => {
+      const run = createInProcessRunner({
+        version: "test-version",
+        createProgram: createTestProgram,
+        orphanGraceMs: 40,
+      });
+      resetReadScope.mockClear();
+
+      // Abandoned at 30ms, grace at ~70ms, ingest completes at ~300ms. Resetting
+      // at the grace instead would fire mid-ingest and never fire again, leaving
+      // the pre-map scope pinned with nothing left to invalidate it.
+      await run(["map", "--hold", "300"], 30);
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      expect(resetReadScope).not.toHaveBeenCalled();
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(resetReadScope).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("stops distrusting the exit code once an abandoned command overruns its grace", async () => {
     await withLockDir(async () => {
       const run = createInProcessRunner({

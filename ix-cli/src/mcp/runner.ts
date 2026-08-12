@@ -415,23 +415,35 @@ async function executeInProcess(
       afterCommand(args);
     } else {
       liveOrphans.add(finished);
-      const forget = (): void => {
-        // Whichever arrives first wins; the other is a no-op.
-        if (!liveOrphans.delete(finished)) return;
-        afterCommand(args);
-      };
-      void finished.then(forget);
 
       // A command that never settles at all — a hung fetch, or a rejection that
       // used to end the process and is now only logged — would otherwise hold
-      // this entry forever. Everything keyed off it fails permanently open:
+      // this entry forever, and everything keyed off it fails permanently open:
       // exit codes stay distrusted, so *every* later failure reports ok, and
       // locks are never released again. The wait is bounded to as long again as
-      // the command was allowed to run. Past that, an abandoned command has no
-      // exit code worth honouring anyway.
-      const grace = setTimeout(forget, orphanGraceMs ?? Math.max(timeoutMs, DEFAULT_TIMEOUT_MS));
+      // the command was allowed to run.
+      //
+      // The cost of that bound is real and lands on someone else: past the
+      // grace this command's late `process.exitCode` is charged to whichever
+      // call is running by then, which is #400's original symptom in delayed
+      // form. Bounded-open beats permanently-open, so the trade stands — but it
+      // is a trade, not a free win.
+      //
+      // Membership is all the grace drops. It must not run {@link afterCommand}:
+      // the command is by definition *still running* there, so releasing its
+      // single-flight lock would hand a second `ix map` the workspace out from
+      // under it, and resetting the read scope mid-ingest would leave the stale
+      // scope pinned with nothing left to invalidate it.
+      const grace = setTimeout(() => liveOrphans.delete(finished), orphanGraceMs ?? Math.max(timeoutMs, DEFAULT_TIMEOUT_MS));
       grace.unref?.();
-      void finished.then(() => clearTimeout(grace));
+
+      void finished.then(() => {
+        liveOrphans.delete(finished);
+        clearTimeout(grace);
+        // Runs on settle whether or not the grace already fired, so a command
+        // that overran it still gets its locks released and its scope reset.
+        afterCommand(args);
+      });
     }
   }
 
