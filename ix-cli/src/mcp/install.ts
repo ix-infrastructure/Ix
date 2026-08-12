@@ -5,6 +5,7 @@ import {
   createHosts,
   isOnPath,
   SERVER_NAME,
+  stripJsonComments,
   type HostStatus,
   type McpHost,
   type Registration,
@@ -21,7 +22,9 @@ export type Outcome =
   | "failed"
   | "would-register"
   /** Doctor only: host is present and the name is free, but nothing points at us. */
-  | "not-registered";
+  | "not-registered"
+  /** Doctor only: ours, but the launcher path it records is gone. */
+  | "stale";
 
 export interface HostReport extends HostStatus {
   outcome: Outcome;
@@ -89,7 +92,13 @@ export function writeJsonConfig(path: string, mutate: (config: Record<string, un
     if (raw.trim() !== "") {
       let parsed: unknown;
       try {
-        parsed = JSON.parse(raw);
+        // Comments are stripped for the same reason the read path strips them:
+        // VS Code and Cursor both accept JSON-with-comments here. Parsing raw
+        // meant a hand-annotated config passed `inspect`, reported its name as
+        // free, and then hard-failed the write telling the user to fix a file
+        // their editor reads without complaint. The `.bak` below is what makes
+        // losing those comments recoverable.
+        parsed = JSON.parse(stripJsonComments(raw));
       } catch {
         // Refuse rather than overwrite: a file we cannot parse is a file whose
         // contents we would be destroying.
@@ -112,10 +121,42 @@ export function writeJsonConfig(path: string, mutate: (config: Record<string, un
 function outcomeFor(registration: Registration, force: boolean): Exclude<Outcome, "not-installed" | "failed"> | null {
   if (registration === "none") return null; // proceed
   if (registration === "ours") return "already-registered";
+  // Already ours, just pointing at a launcher that no longer exists. Rewriting
+  // it is the repair, and it needs no --force: nothing of the user's is at risk.
+  if (registration === "stale") return null;
   return force ? null : "conflict";
 }
 
+/**
+ * The hosts named by `--host`, or all of them.
+ *
+ * An unrecognised id used to filter every host out and report success, so a
+ * typo in a setup script (`--host claude-code`, when the id is `claude`)
+ * registered nothing and exited 0.
+ */
+function selectHosts(all: McpHost[], only?: string[]): McpHost[] {
+  if (!only?.length) return all;
+  const known = new Set(all.map((host) => host.id));
+  const unknown = only.filter((id) => !known.has(id));
+  if (unknown.length > 0) {
+    throw new Error(
+      `unknown host ${unknown.map((id) => `'${id}'`).join(", ")} — known hosts: ${[...known].join(", ")}`,
+    );
+  }
+  return all.filter((host) => only.includes(host.id));
+}
+
+/** Whether the host is present. Falls back to the PATH probe. */
+async function hostInstalled(host: McpHost): Promise<boolean> {
+  return host.detectInstalled ? host.detectInstalled() : isOnPath(host.bin);
+}
+
 function noteFor(registration: Registration, detail?: string): string | undefined {
+  if (registration === "stale") {
+    return detail
+      ? `registered, but its launcher is gone: ${detail}`
+      : "registered, but the launcher path it records no longer exists";
+  }
   if (registration === "other") {
     return detail
       ? `'${SERVER_NAME}' already points at something else: ${detail}`
@@ -128,16 +169,14 @@ function noteFor(registration: Registration, detail?: string): string | undefine
 }
 
 export async function runInstall(options: InstallOptions = {}): Promise<InstallReport> {
-  const hosts = (options.hosts ?? createHosts(writeJsonConfig)).filter(
-    (host) => !options.only?.length || options.only.includes(host.id),
-  );
+  const hosts = selectHosts(options.hosts ?? createHosts(writeJsonConfig), options.only);
 
   const reports: HostReport[] = [];
 
   for (const host of hosts) {
     const base = { id: host.id, label: host.label, target: host.target };
 
-    if (!(await isOnPath(host.bin))) {
+    if (!(await hostInstalled(host))) {
       reports.push({ ...base, installed: false, registration: "none", outcome: "not-installed" });
       continue;
     }
@@ -175,15 +214,22 @@ export async function runInstall(options: InstallOptions = {}): Promise<InstallR
   };
 }
 
+/** What each registration means when nothing is being written. */
+const DOCTOR_OUTCOME: Record<Registration, Outcome> = {
+  ours: "already-registered",
+  none: "not-registered",
+  stale: "stale",
+  other: "conflict",
+  unknown: "conflict",
+};
+
 export async function runDoctor(options: { hosts?: McpHost[]; only?: string[] } = {}): Promise<DoctorReport> {
-  const hosts = (options.hosts ?? createHosts(writeJsonConfig)).filter(
-    (host) => !options.only?.length || options.only.includes(host.id),
-  );
+  const hosts = selectHosts(options.hosts ?? createHosts(writeJsonConfig), options.only);
 
   const reports: HostReport[] = [];
   for (const host of hosts) {
     const base = { id: host.id, label: host.label, target: host.target };
-    if (!(await isOnPath(host.bin))) {
+    if (!(await hostInstalled(host))) {
       reports.push({ ...base, installed: false, registration: "none", outcome: "not-installed" });
       continue;
     }
@@ -192,8 +238,7 @@ export async function runDoctor(options: { hosts?: McpHost[]; only?: string[] } 
       ...base,
       installed: true,
       registration,
-      outcome:
-        registration === "ours" ? "already-registered" : registration === "none" ? "not-registered" : "conflict",
+      outcome: DOCTOR_OUTCOME[registration],
       note: noteFor(registration, detail),
     });
   }

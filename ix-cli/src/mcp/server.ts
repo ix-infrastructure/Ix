@@ -7,6 +7,7 @@ import {
   createProtocolStdout,
   DEFAULT_TIMEOUT_MS,
   detectPro,
+  installServerErrorHandlers,
   resolveDefaultRunner,
   type IxRunner,
 } from "./runner.js";
@@ -69,6 +70,26 @@ interface CreateServerOptions {
 
 type ToolInput = Record<string, unknown>;
 
+/**
+ * One Ix invocation, with its options kept apart from its positional values.
+ *
+ * The split is what lets every positional go behind a `--` separator. Appending
+ * them as bare tokens let commander read any value beginning with `-` as a
+ * flag: `ix_text` searching for `--force` failed outright, and searching for
+ * `--path` quietly consumed the following `--limit` as its value and ranked
+ * hits for the literal text `20` instead — a wrong answer the caller had no way
+ * to detect.
+ */
+interface IxArgv {
+  command: string;
+  positionals: string[];
+  options: string[];
+}
+
+function ix(command: string, positionals: string[] = [], options: string[] = []): IxArgv {
+  return { command, positionals, options };
+}
+
 export function createIxMcpServer(options: CreateServerOptions = {}): McpServer {
   const version = options.version ?? "0.0.0";
 
@@ -87,14 +108,14 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
   });
 
   registerTool(server, "ix_health", "Check Ix backend and graph readiness", {}, async () =>
-    runFormatted(runIx, "ix_health", ["status"]),
+    runFormatted(runIx, "ix_health", ix("status")),
   );
   registerTool(
     server,
     "ix_locate",
     "Resolve a symbol to its canonical graph-backed target",
     { symbol: z.string().min(1) },
-    async (input) => runFormatted(runIx, "ix_locate", ["locate", stringArg(input, "symbol")]),
+    async (input) => runFormatted(runIx, "ix_locate", ix("locate", [stringArg(input, "symbol")])),
   );
   registerTool(
     server,
@@ -107,15 +128,10 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       language: z.string().min(1).optional(),
     },
     async (input) => {
-      const args = [
-        "text",
-        stringArg(input, "pattern"),
-        "--limit",
-        numberArg(input, "limit").toString(),
-      ];
-      pushOption(args, "--path", input.path);
-      pushOption(args, "--language", input.language);
-      return runFormatted(runIx, "ix_text", args);
+      const options = [`--limit=${numberArg(input, "limit")}`];
+      pushOption(options, "--path", input.path);
+      pushOption(options, "--language", input.language);
+      return runFormatted(runIx, "ix_text", ix("text", [stringArg(input, "pattern")], options));
     },
   );
   registerTool(
@@ -123,7 +139,7 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
     "ix_impact",
     "Analyze the blast radius and risk of changing a symbol or file",
     { target: z.string().min(1) },
-    async (input) => runFormatted(runIx, "ix_impact", ["impact", stringArg(input, "target")]),
+    async (input) => runFormatted(runIx, "ix_impact", ix("impact", [stringArg(input, "target")])),
   );
   registerTool(
     server,
@@ -131,9 +147,8 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
     "Ingest one path or refresh the full workspace architecture map",
     { file: z.string().min(1).optional() },
     async (input) => {
-      const args = ["map"];
-      if (typeof input.file === "string") args.push(input.file);
-      return runJson(runIx, "ix_map", args, 120_000);
+      const positionals = typeof input.file === "string" ? [input.file] : [];
+      return runJson(runIx, "ix_map", ix("map", positionals), 120_000);
     },
   );
   registerTool(
@@ -141,14 +156,14 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
     "ix_overview",
     "Return the structural overview of a symbol, file, or subsystem",
     { target: z.string().min(1) },
-    async (input) => runFormatted(runIx, "ix_overview", ["overview", stringArg(input, "target")]),
+    async (input) => runFormatted(runIx, "ix_overview", ix("overview", [stringArg(input, "target")])),
   );
   registerTool(
     server,
     "ix_read",
     "Read graph-bounded source for a symbol or indexed file",
     { symbol: z.string().min(1) },
-    async (input) => runFormatted(runIx, "ix_read", ["read", stringArg(input, "symbol")]),
+    async (input) => runFormatted(runIx, "ix_read", ix("read", [stringArg(input, "symbol")])),
   );
   registerTool(
     server,
@@ -161,14 +176,12 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       summary: z.boolean().default(false),
     },
     async (input) => {
-      const args = [
-        "diff",
+      const positionals = [
         numberArg(input, "from_rev").toString(),
         numberArg(input, "to_rev").toString(),
       ];
-      if (typeof input.target === "string") args.push(input.target);
-      if (input.summary === true) args.push("--summary");
-      return runFormatted(runIx, "ix_diff", args);
+      if (typeof input.target === "string") positionals.push(input.target);
+      return runFormatted(runIx, "ix_diff", ix("diff", positionals, input.summary === true ? ["--summary"] : []));
     },
   );
   registerSymbolTool(server, runIx, "ix_callers", "List incoming call edges", "callers");
@@ -184,12 +197,9 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       depth: z.number().int().min(1).max(5).default(2),
     },
     async (input) =>
-      runFormatted(runIx, "ix_depends", [
-        "depends",
-        stringArg(input, "symbol"),
-        "--depth",
-        numberArg(input, "depth").toString(),
-      ]),
+      runFormatted(runIx, "ix_depends", ix("depends", [stringArg(input, "symbol")], [
+        `--depth=${numberArg(input, "depth")}`,
+      ])),
   );
   registerTool(
     server,
@@ -200,9 +210,9 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       to: z.string().min(1).optional(),
     },
     async (input) => {
-      const args = ["trace", stringArg(input, "symbol")];
-      pushOption(args, "--to", input.to);
-      return runFormatted(runIx, "ix_trace", args);
+      const options: string[] = [];
+      pushOption(options, "--to", input.to);
+      return runFormatted(runIx, "ix_trace", ix("trace", [stringArg(input, "symbol")], options));
     },
   );
   registerSymbolTool(
@@ -223,35 +233,34 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       path: z.string().min(1).optional(),
     },
     async (input) => {
-      const args = [
-        "rank",
-        "--by",
-        stringArg(input, "by"),
-        "--kind",
-        stringArg(input, "kind"),
-        "--top",
-        numberArg(input, "top").toString(),
+      const options = [
+        `--by=${stringArg(input, "by")}`,
+        `--kind=${stringArg(input, "kind")}`,
+        `--top=${numberArg(input, "top")}`,
       ];
-      pushOption(args, "--path", input.path);
-      return runFormatted(runIx, "ix_rank", args);
+      pushOption(options, "--path", input.path);
+      return runFormatted(runIx, "ix_rank", ix("rank", [], options));
     },
   );
   registerTool(
     server,
     "ix_inventory",
-    "List graph entities within a repository path",
+    "List graph entities by kind, optionally scoped to a repository path",
     {
-      path: z.string().min(1),
+      // Optional, and `--limit` is forwarded, because the CLI's own contract is
+      // `--kind` required and `--path` an optional filter. Requiring a path
+      // made the documented `ix inventory --kind function` call impossible over
+      // MCP, and dropping the limit capped every answer at the CLI's default 50
+      // with no way to ask for more.
       kind: z.string().min(1).default("file"),
+      path: z.string().min(1).optional(),
+      limit: z.number().int().min(1).max(500).default(50),
     },
-    async (input) =>
-      runFormatted(runIx, "ix_inventory", [
-        "inventory",
-        "--kind",
-        stringArg(input, "kind"),
-        "--path",
-        stringArg(input, "path"),
-      ]),
+    async (input) => {
+      const options = [`--kind=${stringArg(input, "kind")}`, `--limit=${numberArg(input, "limit")}`];
+      pushOption(options, "--path", input.path);
+      return runFormatted(runIx, "ix_inventory", ix("inventory", [], options));
+    },
   );
   registerTool(
     server,
@@ -264,17 +273,17 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
     async (input) => runSmells(runIx, input),
   );
   registerTool(server, "ix_stats", "Return graph-wide statistics", {}, async () =>
-    runFormatted(runIx, "ix_stats", ["stats"]),
+    runFormatted(runIx, "ix_stats", ix("stats")),
   );
   registerTool(server, "ix_subsystems", "List graph-derived subsystems", {}, async () =>
-    runFormatted(runIx, "ix_subsystems", ["subsystems"]),
+    runFormatted(runIx, "ix_subsystems", ix("subsystems")),
   );
   registerTool(
     server,
     "ix_history",
     "Show provenance and patch history for a file or symbol",
     { target: z.string().min(1) },
-    async (input) => runFormatted(runIx, "ix_history", ["history", stringArg(input, "target")]),
+    async (input) => runFormatted(runIx, "ix_history", ix("history", [stringArg(input, "target")])),
   );
   registerTool(
     server,
@@ -287,20 +296,20 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       since: z.string().min(1).optional().describe("ISO 8601 date"),
     },
     async (input) => {
-      const args = ["ingest"];
-      if (typeof input.path === "string") args.push(input.path);
-      pushOption(args, "--github", input.github);
-      pushOption(args, "--since", input.since);
-      if (typeof input.github === "string") args.push("--limit", numberArg(input, "limit").toString());
+      const options: string[] = [];
+      pushOption(options, "--github", input.github);
+      pushOption(options, "--since", input.since);
+      if (typeof input.github === "string") options.push(`--limit=${numberArg(input, "limit")}`);
+      const positionals = typeof input.path === "string" ? [input.path] : [];
       // Ingestion walks the tree or pages a GitHub API, so it gets the same
       // headroom as ix_map rather than the default read timeout.
-      return runJson(runIx, "ix_ingest", args, 120_000);
+      return runJson(runIx, "ix_ingest", ix("ingest", positionals, options), 120_000);
     },
   );
 
   if (options.proAvailable) {
     registerTool(server, "ix_briefing", "Load the Ix Pro session briefing", {}, async () =>
-      runJson(runIx, "ix_briefing", ["briefing"]),
+      runJson(runIx, "ix_briefing", ix("briefing")),
     );
     registerTool(
       server,
@@ -308,9 +317,9 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       "List Ix Pro architecture decisions, optionally scoped to a path",
       { path: z.string().min(1).optional() },
       async (input) => {
-        const args = ["decisions"];
-        pushOption(args, "--path", input.path);
-        return runJson(runIx, "ix_decisions", args);
+        const options: string[] = [];
+        pushOption(options, "--path", input.path);
+        return runJson(runIx, "ix_decisions", ix("decisions", [], options));
       },
     );
     registerTool(
@@ -323,9 +332,9 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
         affects: z.string().min(1).optional().describe("entity the decision affects"),
       },
       async (input) => {
-        const args = ["decide", stringArg(input, "title"), "--rationale", stringArg(input, "rationale")];
-        pushOption(args, "--affects", input.affects);
-        return runJson(runIx, "ix_decide", args);
+        const options = [`--rationale=${stringArg(input, "rationale")}`];
+        pushOption(options, "--affects", input.affects);
+        return runJson(runIx, "ix_decide", ix("decide", [stringArg(input, "title")], options));
       },
     );
   }
@@ -334,6 +343,9 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
 }
 
 export async function startIxMcpServer(version = "0.0.0"): Promise<void> {
+  // Before anything can throw: the CLI's own handlers exit the process on any
+  // stray error, which for a server means losing every tool mid-session.
+  installServerErrorHandlers();
   const server = createIxMcpServer({ version, proAvailable: await detectPro() });
   // A dedicated handle on fd 1 rather than process.stdout, which the in-process
   // runner patches to capture command output.
@@ -348,7 +360,7 @@ function registerSymbolTool(
   command: string,
 ): void {
   registerTool(server, name, description, { symbol: z.string().min(1) }, async (input) =>
-    runFormatted(runIx, name, [command, stringArg(input, "symbol")]),
+    runFormatted(runIx, name, ix(command, [stringArg(input, "symbol")])),
   );
 }
 
@@ -364,22 +376,34 @@ function registerTool(
   );
 }
 
+/**
+ * Flatten to argv: options first, then every positional behind `--`.
+ *
+ * Option values use the `--flag=value` form for the same reason, so a value of
+ * `--rationale` cannot be mistaken for the next flag.
+ */
+export function toArgv(argv: IxArgv, format: string): string[] {
+  const args = [argv.command, ...argv.options, `--format=${format}`];
+  if (argv.positionals.length > 0) args.push("--", ...argv.positionals);
+  return args;
+}
+
 async function runFormatted(
   runIx: IxRunner,
   tool: string,
-  args: string[],
+  argv: IxArgv,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<CallToolResult> {
-  return runCommand(runIx, tool, [...args, "--format", "llm"], timeoutMs);
+  return runCommand(runIx, tool, toArgv(argv, "llm"), timeoutMs);
 }
 
 async function runJson(
   runIx: IxRunner,
   tool: string,
-  args: string[],
+  argv: IxArgv,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<CallToolResult> {
-  return runCommand(runIx, tool, [...args, "--format", "json"], timeoutMs);
+  return runCommand(runIx, tool, toArgv(argv, "json"), timeoutMs);
 }
 
 async function runCommand(
@@ -401,7 +425,7 @@ async function runCommand(
 }
 
 async function runSmells(runIx: IxRunner, input: ToolInput): Promise<CallToolResult> {
-  const result = await runIx(["smells", "--format", "json"], DEFAULT_TIMEOUT_MS);
+  const result = await runIx(toArgv(ix("smells"), "json"), DEFAULT_TIMEOUT_MS);
   if (!result.ok) {
     const detail = result.stderr.trim() || result.stdout.trim() || "smells failed without output";
     return textResult(JSON.stringify({ error: detail, tool: "ix_smells" }), true);
@@ -419,8 +443,12 @@ async function runSmells(runIx: IxRunner, input: ToolInput): Promise<CallToolRes
       if (path === null || !isRecord(candidate) || typeof candidate.file !== "string") {
         return path === null;
       }
-      const file = normalizePath(candidate.file);
-      return file === path || file.startsWith(`${path}/`);
+      // Substring, matching what `--path` means everywhere else in the CLI
+      // ("Filter by source file path substring" on inventory, the same on
+      // rank). Prefix matching answered `{"count": 0}` — a confident "no
+      // architecture smells here" — for the `src` an agent had just used
+      // successfully against ix_inventory on files stored as `ix-cli/src/...`.
+      return normalizePath(candidate.file).includes(path);
     })
     .slice(0, limit);
 
@@ -442,9 +470,9 @@ function numberArg(input: ToolInput, key: string): number {
   return input[key] as number;
 }
 
-function pushOption(args: string[], flag: string, value: unknown): void {
+function pushOption(options: string[], flag: string, value: unknown): void {
   if (typeof value === "string" && value.length > 0) {
-    args.push(flag, value);
+    options.push(`${flag}=${value}`);
   }
 }
 

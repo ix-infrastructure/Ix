@@ -71,14 +71,18 @@ ix mcp doctor             # check each client's registration
 
 `install` knows Claude Code, Codex, Cursor, VS Code, Gemini CLI, OpenClaw and
 opencode. It writes through each client's own MCP command where one exists
-(`claude mcp add`, `codex mcp add`, `gemini mcp add`, `openclaw mcp set`,
-`code --add-mcp`), so the client owns its config format; only Cursor and
-opencode are edited directly, and both are merged in place with a `.bak` kept
-alongside.
+(`claude mcp add`, `codex mcp add`, `gemini mcp add`, `openclaw mcp set`), so
+the client owns its config format; Cursor, VS Code and opencode are edited
+directly, and each is merged in place with a `.bak` kept alongside. Those three
+are also detected by their config directory rather than by a shell command,
+since `cursor` and `code` are opt-in shims a GUI install may not have.
 
 **It never overwrites.** If the name `ix-memory` already belongs to a different
 server — an earlier Ix plugin, say — that client is reported and left exactly as
-it was. Pass `--force` to replace it, or `--host <id>` to limit the run.
+it was. Pass `--force` to replace it, or `--host <id>` to limit the run; an
+unrecognised id is an error rather than a silent no-op. `doctor` additionally
+reports a registration of ours whose recorded launcher path has since
+disappeared, which `install` then repairs without `--force`.
 
 To register a single client by hand instead, point it at `ix` with the argument
 `mcp`. For Codex:

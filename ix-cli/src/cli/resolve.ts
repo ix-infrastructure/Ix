@@ -16,6 +16,20 @@ import { resolveWorkspaceId } from "./bootstrap.js";
  * (issue #228, originally fixed in search.ts only).
  */
 let _scopeCache: { cwd: string; workspaceId?: string; systemId?: string; stitchChecked?: boolean } | undefined;
+
+/**
+ * Drop the cached scope so the next read resolves it again.
+ *
+ * The cache is keyed on cwd alone and never expires, which was safe while a
+ * command's process ended with it. `ix mcp` runs many commands in one
+ * long-lived process, so it calls this after anything that can change what a
+ * repo is scoped to — an ingest, or a map that stitches the repo into a System
+ * server-side. Without it, every later read in the session still answers
+ * against the pre-map workspace.
+ */
+export function resetReadScope(): void {
+  _scopeCache = undefined;
+}
 export function activeReadScope(): { workspaceId?: string; systemId?: string } {
   return activeScope();
 }

@@ -12,6 +12,7 @@ const OUTCOME_STYLE: Record<Outcome, { mark: string; paint: (text: string) => st
   conflict: { mark: "!", paint: chalk.yellow },
   failed: { mark: "x", paint: chalk.red },
   "not-registered": { mark: "o", paint: chalk.yellow },
+  stale: { mark: "!", paint: chalk.yellow },
   "not-installed": { mark: "-", paint: chalk.dim },
 };
 
@@ -22,6 +23,7 @@ const OUTCOME_TEXT: Record<Outcome, string> = {
   conflict: "conflict — left alone",
   failed: "failed",
   "not-registered": "not registered",
+  stale: "registered, but its launcher is gone",
   "not-installed": "not installed",
 };
 
@@ -125,7 +127,9 @@ export function registerMcpCommand(program: Command): void {
       const { runDoctor } = await import("../../mcp/install.js");
       const report = await runDoctor({ only: opts.host });
       renderDoctor(report, opts.format);
-      const broken = report.hosts.some((host) => host.outcome === "conflict" || host.outcome === "not-registered");
+      const broken = report.hosts.some(
+        (host) => host.outcome === "conflict" || host.outcome === "not-registered" || host.outcome === "stale",
+      );
       if (!report.ixOnPath || broken) process.exitCode = 1;
     });
 }

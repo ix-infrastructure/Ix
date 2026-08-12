@@ -75,7 +75,7 @@ describe("ix mcp", () => {
       arguments: { symbol: "Widget" },
     });
 
-    expect(calls).toEqual([["locate", "Widget", "--format", "llm"]]);
+    expect(calls).toEqual([["locate", "--format=llm", "--", "Widget"]]);
     expect(result.content).toEqual([{ type: "text", text: "match name=Widget" }]);
   });
 
@@ -127,7 +127,7 @@ describe("ix mcp", () => {
 
     await client.callTool({ name: "ix_map", arguments: { file: "src/service.ts" } });
 
-    expect(calls).toEqual([["map", "src/service.ts", "--format", "json"]]);
+    expect(calls).toEqual([["map", "--format=json", "--", "src/service.ts"]]);
   });
 
   it("applies ix_smells path and limit compatibility without unsupported CLI flags", async () => {
@@ -139,7 +139,7 @@ describe("ix mcp", () => {
         stdout: JSON.stringify({
           count: 3,
           candidates: [
-            { file: "src/a.ts", smell: "orphan" },
+            { file: "ix-cli/src/a.ts", smell: "orphan" },
             { file: "src/nested/b.ts", smell: "orphan" },
             { file: "test/c.ts", smell: "orphan" },
           ],
@@ -153,12 +153,14 @@ describe("ix mcp", () => {
       arguments: { path: "src", limit: 1 },
     });
 
-    expect(calls).toEqual([["smells", "--format", "json"]]);
+    expect(calls).toEqual([["smells", "--format=json"]]);
     const content = (result as CallToolResult).content[0];
     expect(content?.type).toBe("text");
     const parsed = JSON.parse(content?.type === "text" ? content.text : "{}");
     expect(parsed.count).toBe(1);
-    expect(parsed.candidates).toEqual([{ file: "src/a.ts", smell: "orphan" }]);
+    // Substring, not prefix: `ix-cli/src/a.ts` is what `ix inventory --path src`
+    // would have returned, and ix_smells must agree with it.
+    expect(parsed.candidates).toEqual([{ file: "ix-cli/src/a.ts", smell: "orphan" }]);
   });
 
   it("maps ix_ingest onto the github form the plugins used", async () => {
@@ -170,7 +172,7 @@ describe("ix mcp", () => {
 
     await client.callTool({ name: "ix_ingest", arguments: { github: "owner/repo", limit: 25 } });
 
-    expect(calls).toEqual([["ingest", "--github", "owner/repo", "--limit", "25", "--format", "json"]]);
+    expect(calls).toEqual([["ingest", "--github=owner/repo", "--limit=25", "--format=json"]]);
   });
 
   it("does not pass --limit when ingesting a local path", async () => {
@@ -183,7 +185,37 @@ describe("ix mcp", () => {
     await client.callTool({ name: "ix_ingest", arguments: { path: "src" } });
 
     // --limit is a GitHub paging cap; on a path ingest it is meaningless.
-    expect(calls).toEqual([["ingest", "src", "--format", "json"]]);
+    expect(calls).toEqual([["ingest", "--format=json", "--", "src"]]);
+  });
+
+  it("puts positional values behind -- so a leading dash is not read as a flag", async () => {
+    const calls: string[][] = [];
+    const client = await connect(async (args) => {
+      calls.push(args);
+      return { ok: true, stdout: "{}", stderr: "" };
+    });
+
+    await client.callTool({ name: "ix_text", arguments: { pattern: "--path", limit: 20 } });
+
+    // Without the separator commander read `--path` as a flag and swallowed the
+    // following `--limit` as its value, so the tool searched for the literal
+    // text `20` under a directory named `--limit` and reported ok.
+    expect(calls).toEqual([["text", "--limit=20", "--format=llm", "--", "--path"]]);
+  });
+
+  it("lists entities by kind without demanding a path, and forwards the limit", async () => {
+    const calls: string[][] = [];
+    const client = await connect(async (args) => {
+      calls.push(args);
+      return { ok: true, stdout: "{}", stderr: "" };
+    });
+
+    // The form CLAUDE.md tells agents to use. A required `path` made it
+    // impossible over MCP, and a dropped `--limit` silently capped every answer
+    // at the CLI's default 50.
+    await client.callTool({ name: "ix_inventory", arguments: { kind: "function", limit: 200 } });
+
+    expect(calls).toEqual([["inventory", "--kind=function", "--limit=200", "--format=llm"]]);
   });
 
   it("maps ix_decide onto the decide command", async () => {
@@ -199,7 +231,7 @@ describe("ix mcp", () => {
     });
 
     expect(calls).toEqual([
-      ["decide", "Use CONTAINS", "--rationale", "Normalize edges", "--affects", "Ingestion", "--format", "json"],
+      ["decide", "--rationale=Normalize edges", "--affects=Ingestion", "--format=json", "--", "Use CONTAINS"],
     ]);
   });
 });

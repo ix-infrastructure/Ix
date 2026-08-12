@@ -4,7 +4,16 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { classifyDefinition, classifyListing, type McpHost, type Registration } from "../../mcp/hosts.js";
+import {
+  ADD_ARGS,
+  classifyDefinition,
+  classifyListing,
+  classifyShown,
+  pickWindowsLauncher,
+  quoteForCmd,
+  type McpHost,
+  type Registration,
+} from "../../mcp/hosts.js";
 import { IX_MCP_OSS_TOOL_NAMES, IX_MCP_PRO_TOOL_NAMES } from "../../mcp/server.js";
 import { runDoctor, runInstall, writeJsonConfig } from "../../mcp/install.js";
 
@@ -27,7 +36,7 @@ function tempDir(): string {
 function fakeHost(
   id: string,
   registration: Registration,
-  options: { installed?: boolean; fails?: boolean } = {},
+  options: { installed?: boolean; fails?: boolean; detectInstalled?: () => Promise<boolean> } = {},
 ): McpHost & { registerCalls: number } {
   const host = {
     id,
@@ -35,6 +44,7 @@ function fakeHost(
     bin: options.installed === false ? "definitely-not-a-real-binary-xyz" : "node",
     target: `${id}-config`,
     registerCalls: 0,
+    ...(options.detectInstalled ? { detectInstalled: options.detectInstalled } : {}),
     async inspect() {
       return { registration };
     },
@@ -130,6 +140,42 @@ describe("ix mcp install", () => {
     expect(report.hosts.map((h) => h.id)).toEqual(["b"]);
     expect(hosts[0]!.registerCalls).toBe(0);
   });
+
+  it("rejects an unknown host id instead of reporting a silent success", async () => {
+    const hosts = [fakeHost("claude", "none")];
+
+    // Filtering everything out and returning `registered: 0` let a typo in a
+    // setup script register nothing and still exit 0.
+    await expect(runInstall({ hosts, only: ["claude-code"] })).rejects.toThrow(/unknown host 'claude-code'/);
+    await expect(runDoctor({ hosts, only: ["vs-code"] })).rejects.toThrow(/unknown host/);
+    expect(hosts[0]!.registerCalls).toBe(0);
+  });
+
+  it("repairs a registration whose launcher path is gone, without --force", async () => {
+    const host = fakeHost("moved", "stale");
+
+    const report = await runInstall({ hosts: [host] });
+
+    // Still ours, so nothing of the user's is at risk — and re-resolving the
+    // path is the only thing that fixes it. Reported as healthy, install
+    // skipped the one host it should have rewritten.
+    expect(host.registerCalls).toBe(1);
+    expect(report.hosts[0]?.outcome).toBe("registered");
+  });
+
+  it("consults a host's own installed check before falling back to PATH", async () => {
+    // Cursor and VS Code are read and written through config files; their shell
+    // shims are opt-in and say nothing about whether the editor is there.
+    const host = fakeHost("cursor", "none", {
+      installed: false,
+      detectInstalled: async () => true,
+    });
+
+    const report = await runInstall({ hosts: [host] });
+
+    expect(report.hosts[0]).toMatchObject({ outcome: "registered", installed: true });
+    expect(host.registerCalls).toBe(1);
+  });
 });
 
 describe("ix mcp doctor", () => {
@@ -149,6 +195,17 @@ describe("ix mcp doctor", () => {
       IX_MCP_OSS_TOOL_NAMES.length,
       IX_MCP_OSS_TOOL_NAMES.length + IX_MCP_PRO_TOOL_NAMES.length,
     ]).toContain(report.toolCount);
+  });
+});
+
+describe("ix mcp doctor reporting", () => {
+  it("names a dead launcher rather than calling it registered", async () => {
+    const report = await runDoctor({ hosts: [fakeHost("moved", "stale")] });
+
+    // `= already registered` plus `+ ix on PATH` was the report a user got
+    // while every client failed to load a single Ix tool.
+    expect(report.hosts[0]?.outcome).toBe("stale");
+    expect(report.hosts[0]?.note).toMatch(/launcher/);
   });
 });
 
@@ -191,6 +248,28 @@ describe("writeJsonConfig", () => {
     });
 
     expect(JSON.parse(readFileSync(path, "utf8")).servers["ix-memory"].command).toBe("ix");
+  });
+
+  it("accepts the JSON-with-comments the read path already accepts", () => {
+    const path = join(tempDir(), "mcp.json");
+    // Valid for Cursor, and `inspect` reads it happily. The write path parsed
+    // it raw, so install reported the name free and then hard-failed, telling
+    // the user to fix a file their editor reads without complaint.
+    writeFileSync(
+      path,
+      ['{', '  // my servers', '  "mcpServers": { "theirs": { "command": "other" } }', "}", ""].join("\n"),
+    );
+
+    writeJsonConfig(path, (config) => {
+      const servers = (config.mcpServers ??= {}) as Record<string, unknown>;
+      servers["ix-memory"] = { command: "ix", args: ["mcp"] };
+    });
+
+    const written = JSON.parse(readFileSync(path, "utf8"));
+    expect(written.mcpServers.theirs.command).toBe("other");
+    expect(written.mcpServers["ix-memory"].command).toBe("ix");
+    // The comments are gone, which is what the .bak is for.
+    expect(readFileSync(`${path}.bak`, "utf8")).toContain("// my servers");
   });
 
   it("refuses to overwrite a file it cannot parse", () => {
@@ -260,6 +339,28 @@ describe("registration classification", () => {
     expect(classifyListing("some-other-server: npx thing").registration).toBe("none");
   });
 
+  it("reports an absolute launcher path that no longer resolves as stale", () => {
+    // What a Windows registration looks like after an nvm switch or a reinstall
+    // to a different prefix. Judged from the command string alone this reads as
+    // healthy, so install skipped it and doctor called it registered while every
+    // client failed to start a single Ix tool.
+    const entry = JSON.stringify({ command: "C:\\Users\\gone\\AppData\\Roaming\\npm\\ix.cmd", args: ["mcp"] });
+
+    expect(classifyListing(`ix-memory ${entry}`)).toMatchObject({
+      registration: "stale",
+      detail: expect.stringContaining("no longer exists"),
+    });
+  });
+
+  it("keeps an absolute launcher that does resolve as ours", () => {
+    const launcher = join(tempDir(), "ix.cmd");
+    writeFileSync(launcher, "@echo off");
+
+    expect(classifyListing(`ix-memory ${JSON.stringify({ command: launcher, args: ["mcp"] })}`).registration).toBe(
+      "ours",
+    );
+  });
+
   it("recognises a pretty-printed definition split across lines", () => {
     // `openclaw mcp show` puts "ix" and "mcp" on separate lines; matching one
     // line at a time reads our own entry as a stranger's.
@@ -267,5 +368,76 @@ describe("registration classification", () => {
 
     expect(classifyDefinition(shown).registration).toBe("ours");
     expect(classifyListing(shown).registration).toBe("other");
+  });
+});
+
+describe("windows launcher resolution", () => {
+  it("skips npm's extensionless POSIX shim, which CreateProcess cannot launch", () => {
+    // The exact output of `where ix` on a machine with npm's shims: the
+    // exact-name match comes first, and it is a `#!/bin/sh` script. Recording
+    // it registered a command no host could start, in every host at once, while
+    // `ix mcp doctor` still reported `+ ix on PATH`.
+    const entries = [
+      String.raw`C:\Users\me\AppData\Roaming\npm\ix`,
+      String.raw`C:\Users\me\AppData\Roaming\npm\ix.cmd`,
+    ];
+
+    expect(pickWindowsLauncher(entries)).toBe(String.raw`C:\Users\me\AppData\Roaming\npm\ix.cmd`);
+  });
+
+  it("falls back to nothing when no entry is executable", () => {
+    expect(pickWindowsLauncher([String.raw`C:\tools\ix`])).toBeUndefined();
+  });
+});
+
+describe("quoteForCmd", () => {
+  it("quotes a path with spaces and cmd metacharacters", () => {
+    // A quoted region is literal to cmd, so `&` and `(` survive it. Unquoted,
+    // cmd reads the `&` as a command separator.
+    expect(quoteForCmd(String.raw`C:\Program Files\a&b(c)\ix.cmd`)).toBe(
+      String.raw`"C:\Program Files\a&b(c)\ix.cmd"`,
+    );
+  });
+
+  it("leaves an ordinary argument alone", () => {
+    expect(quoteForCmd("--scope")).toBe("--scope");
+  });
+});
+
+describe("classifyShown", () => {
+  it("reads a host that could not answer as occupied, not free", () => {
+    // openclaw's config is wedged, or its output format moved. Reading that as
+    // an empty slot replaced the user's own server under our name, without
+    // --force, and reported `+ registered`.
+    expect(classifyShown("Error: failed to read config\n", false)).toMatchObject({
+      registration: "unknown",
+    });
+  });
+
+  it("still reads an explicit 'no such server' as free", () => {
+    expect(classifyShown("No MCP server named ix-memory\n", false).registration).toBe("none");
+  });
+
+  it("reads a definition body as ours", () => {
+    const shown = 'MCP server "ix-memory":\n{\n  "command": "ix",\n  "args": ["mcp"]\n}';
+
+    expect(classifyShown(shown, true).registration).toBe("ours");
+  });
+});
+
+describe("host registration arguments", () => {
+  it("pins gemini to user scope", () => {
+    // `gemini mcp add` defaults to project scope, writing `<cwd>/.gemini/` —
+    // invisible from every other directory, while the report named the
+    // user-level file.
+    expect(ADD_ARGS.gemini({ command: "ix", args: ["mcp"] })).toEqual([
+      "mcp",
+      "add",
+      "--scope",
+      "user",
+      "ix-memory",
+      "ix",
+      "mcp",
+    ]);
   });
 });

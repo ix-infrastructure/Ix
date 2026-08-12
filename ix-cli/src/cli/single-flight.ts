@@ -126,20 +126,49 @@ export function acquireMapLock(workspaceRoot: string, label: string): LockHandle
   return null; // a live holder owns it — caller should coalesce
 }
 
+// Locks this process still holds. `ix mcp` runs commands in-process, so "the
+// process exits" is no longer the end of a command — see releaseHeldLocks.
+const held = new Set<() => void>();
+
 function makeHandle(path: string): LockHandle {
   let released = false;
   const release = (): void => {
     if (released) return;
     released = true;
+    held.delete(release);
+    // Both listeners are removed with the lock. A long-lived process that maps
+    // repeatedly would otherwise accumulate one set per map and trip Node's
+    // max-listeners warning.
+    process.off("exit", release);
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
     try { rmSync(path, { force: true }); } catch { /* best effort */ }
   };
+  const onSigint = (): void => { release(); process.exit(130); };
+  const onSigterm = (): void => { release(); process.exit(143); };
+
+  held.add(release);
   // Release on normal exit and on the common termination signals so a killed
   // map (hook timeout, Ctrl-C) does not leave a lock that blocks the next run
   // until it ages out.
   process.once("exit", release);
-  process.once("SIGINT", () => { release(); process.exit(130); });
-  process.once("SIGTERM", () => { release(); process.exit(143); });
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
   return { release };
+}
+
+/**
+ * Release every lock this process still holds.
+ *
+ * `ix map` takes its lock and leaves it to process exit, which was the end of
+ * the command until `ix mcp` began running commands in-process. There, the
+ * holder PID is the server's own and stays alive, so the lock never reads as
+ * stale: the first ix_map works and every later one coalesces into an empty
+ * success while the graph is never refreshed. The MCP runner calls this when a
+ * command finishes, restoring the boundary the process used to provide.
+ */
+export function releaseHeldLocks(): void {
+  for (const release of [...held]) release();
 }
 
 // ── Test-only surface ──────────────────────────────────────────────────────

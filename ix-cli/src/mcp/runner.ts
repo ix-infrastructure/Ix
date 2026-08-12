@@ -10,6 +10,8 @@ import { Command, CommanderError } from "commander";
 
 import { registerOssCommands, registerProStubs } from "../cli/register/oss.js";
 import { tryLoadProCommands } from "../cli/register/pro-loader.js";
+import { resetReadScope } from "../cli/resolve.js";
+import { releaseHeldLocks } from "../cli/single-flight.js";
 
 const execFileAsync = promisify(execFile);
 const CLI_ENTRYPOINT = fileURLToPath(new URL("../cli/main.js", import.meta.url));
@@ -64,6 +66,9 @@ interface ActiveRun {
  * Node 22, so it cannot be. Isolating output per async context while the exit
  * code stayed global would attribute a call's output to the right result and
  * its success to the wrong one. See `createInProcessRunner`.
+ *
+ * A timeout breaks that serialization — the queue advances while the abandoned
+ * command runs on — which is what {@link liveOrphans} exists to contain.
  */
 let activeRun: ActiveRun | null = null;
 let captureInstalled = false;
@@ -78,6 +83,36 @@ let redirectIdleStdout = false;
  * narrow the damage, never widen it.
  */
 const runContext = new AsyncLocalStorage<ActiveRun>();
+
+/**
+ * Commands abandoned at their timeout that are still running.
+ *
+ * Nothing cancels a timed-out command — no Ix command takes an abort signal —
+ * so it keeps writing to the process globals after the queue has moved on.
+ * Output is attributed per run through {@link runContext}; `process.exitCode`
+ * cannot be, because it is a non-configurable accessor and so cannot be made
+ * context-local (verified on Node 26: `Object.defineProperty` throws).
+ *
+ * What is knowable is when it is untrustworthy. While an orphan is alive, its
+ * late `process.exitCode = 1` — the failure shape most commands use — is
+ * indistinguishable from the running command's own, and reading it reported a
+ * *successful* tool call as failed, with its real answer buried inside an
+ * `error` string. A run started while this set is non-empty therefore ignores
+ * `process.exitCode` and judges only by what the command threw.
+ */
+const liveOrphans = new Set<Promise<void>>();
+
+/**
+ * Commands whose effects invalidate `cli/resolve.ts`'s per-cwd scope cache.
+ *
+ * That cache never expires — one command per process *was* its invalidation.
+ * Left alone in a long-lived server, the first tool call in a not-yet-ingested
+ * repo pinned the scope, and every read after an `ix_map` that stitched the
+ * repo into a System still resolved against the pre-map workspace: "not found"
+ * for symbols the agent had just watched itself ingest, until the host
+ * restarted the server.
+ */
+const SCOPE_CHANGING_COMMANDS = new Set(["map", "ingest"]);
 
 /** The run a write belongs to: its own context first, else whoever holds the globals. */
 function resolveRun(): ActiveRun | null {
@@ -256,6 +291,48 @@ export interface InProcessRunnerOptions {
   maxOutputBytes?: number;
 }
 
+/**
+ * Undo the process-lifetime state a finished command left behind.
+ *
+ * Every one of these was released by process exit when a command *was* a
+ * process. In a server that never exits they are leaks, and each of them makes
+ * the next tool call answer from something stale rather than fail loudly.
+ */
+function afterCommand(args: string[]): void {
+  if (SCOPE_CHANGING_COMMANDS.has(args[0] ?? "")) resetReadScope();
+
+  // `ix map` takes a single-flight lock it never releases itself, relying on
+  // process exit. Held by a long-lived server, the lock file names the server's
+  // own live PID — so it never reads as stale — and every later ix_map coalesces
+  // and returns an empty success while the graph goes unrefreshed. It also
+  // blocks the user's own editor-hook `ix map` for the same 20 minutes. Skipped
+  // while an orphan is in flight: a map still running is entitled to its lock.
+  if (liveOrphans.size === 0) releaseHeldLocks();
+}
+
+/**
+ * Replace the CLI's fatal error handlers for the lifetime of the server.
+ *
+ * `main.ts` installs `unhandledRejection`/`uncaughtException` handlers whose
+ * every path ends in `process.exit(1)`. That is right for one command in one
+ * process and fatal for a server: a stray rejection from any command's
+ * fire-and-forget work would either exit outright, or — once the in-process
+ * capture is installed — throw ProcessExitSignal out of the handler, which
+ * becomes an uncaughtException, which throws again from inside the fatal
+ * handler and aborts Node. Either way the client loses the server and all its
+ * tools mid-session over an error that belonged to one tool call.
+ */
+export function installServerErrorHandlers(): void {
+  process.removeAllListeners("uncaughtException");
+  process.removeAllListeners("unhandledRejection");
+  const report = (label: string) => (error: unknown) => {
+    const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+    pristineStderrWrite(`[ix mcp] ${label}: ${detail}\n`);
+  };
+  process.on("uncaughtException", report("uncaught exception"));
+  process.on("unhandledRejection", report("unhandled rejection"));
+}
+
 async function executeInProcess(
   args: string[],
   timeoutMs: number,
@@ -277,15 +354,29 @@ async function executeInProcess(
   process.exitCode = undefined;
   activeRun = run;
 
+  // Decided before the command starts: an orphan already in flight can write
+  // process.exitCode at any point during this run, and there is no way to tell
+  // its write from this command's own.
+  const exitCodeIsOurs = liveOrphans.size === 0;
+
   let failure: string | null = null;
   let commandExitCode: number | string | undefined;
 
+  const work = runContext.run(run, () => program.parseAsync(args, { from: "user" }));
+  // Settles either way and never rejects, so it can be watched without adding a
+  // second rejection handler to `work`.
+  let commandSettled = false;
+  const finished = work.then(
+    () => {
+      commandSettled = true;
+    },
+    () => {
+      commandSettled = true;
+    },
+  );
+
   try {
-    await withTimeout(
-      runContext.run(run, () => program.parseAsync(args, { from: "user" })),
-      timeoutMs,
-      args[0] ?? "ix",
-    );
+    await withTimeout(work, timeoutMs, args[0] ?? "ix");
   } catch (error) {
     if (error instanceof ProcessExitSignal) {
       // An explicit exit; the command already explained itself on stdout/stderr.
@@ -297,10 +388,20 @@ async function executeInProcess(
       failure = error instanceof Error ? error.message : String(error);
     }
   } finally {
-    commandExitCode = commandExitCode ?? process.exitCode;
+    commandExitCode = commandExitCode ?? (exitCodeIsOurs ? process.exitCode : undefined);
     process.exitCode = callerExitCode;
     run.closed = true;
     activeRun = null;
+
+    if (commandSettled) {
+      afterCommand(args);
+    } else {
+      liveOrphans.add(finished);
+      void finished.then(() => {
+        liveOrphans.delete(finished);
+        afterCommand(args);
+      });
+    }
   }
 
   const ok = failure === null && (commandExitCode === undefined || commandExitCode === 0);
@@ -317,7 +418,9 @@ async function executeInProcess(
  * Booting `main.js` costs ~0.58s before any query runs, which a tool-calling
  * agent pays on every hop of a `locate → callers → read` chain. Running the
  * same command tree here removes that entirely and lets `cli/resolve.ts`'s
- * per-cwd scope cache survive between calls.
+ * per-cwd scope cache survive between calls — but only between *reads*: see
+ * {@link afterCommand} for the state whose sole invalidation used to be the
+ * process ending, and which is therefore reset per command here.
  *
  * Runs are serialized. Commands report failure through `process.exitCode` and
  * print through `process.stdout`, both of which are process-wide, so two

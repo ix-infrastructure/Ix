@@ -1,7 +1,18 @@
-import { Command } from "commander";
-import { afterEach, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
+import { Command } from "commander";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { acquireMapLock } from "../single-flight.js";
 import { createInProcessRunner, resolveDefaultRunner, runCurrentIx } from "../../mcp/runner.js";
+
+const resetReadScope = vi.hoisted(() => vi.fn());
+vi.mock("../resolve.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../resolve.js")>()),
+  resetReadScope,
+}));
 
 /**
  * A stand-in command tree. The capture machinery is what is under test here,
@@ -49,6 +60,28 @@ function createTestProgram(): Command {
     .action(() => {
       for (let i = 0; i < 20; i += 1) console.log("x".repeat(100));
     });
+
+  // A command that outlives its timeout and *then* reports failure the way
+  // `ix map` does — the shape that used to be charged to whichever call was
+  // running by the time it landed.
+  program
+    .command("late-fail")
+    .option("--delay <ms>", "how long before it reports failure", "150")
+    .action(async (opts: { delay: string }) => {
+      await new Promise((resolve) => setTimeout(resolve, Number(opts.delay)));
+      process.exitCode = 1;
+    });
+
+  // Stands in for `ix map`, which takes a single-flight lock and leaves it to
+  // process exit to release.
+  program
+    .command("map")
+    .action(() => {
+      const lock = acquireMapLock(process.env.IX_TEST_WORKSPACE ?? "workspace", "ix map test");
+      console.log(lock ? "mapped" : "coalesced");
+    });
+
+  program.command("ingest").action(() => console.log("ingested"));
 
   return program;
 }
@@ -125,7 +158,11 @@ describe("in-process ix runner", () => {
   it("fails a run that outlives its timeout", async () => {
     const run = testRunner();
 
-    const result = await run(["slow"], 50);
+    // Bounded rather than left on the 5s default: an abandoned command stays
+    // in flight after the test that started it, and while one is alive the
+    // runner distrusts process.exitCode and holds off releasing locks — so a
+    // long orphan silently changes what later tests in this file observe.
+    const result = await run(["slow", "--delay", "200"], 50);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("timed out after 50ms");
@@ -134,7 +171,7 @@ describe("in-process ix runner", () => {
   it("stays usable after a timeout rather than stranding the queue", async () => {
     const run = testRunner();
 
-    await run(["slow"], 50);
+    await run(["slow", "--delay", "200"], 50);
 
     expect(await run(["say", "after"])).toMatchObject({ ok: true, stdout: "out:after\n" });
   });
@@ -150,6 +187,76 @@ describe("in-process ix runner", () => {
 
     expect(timedOut.ok).toBe(false);
     expect(covering).toEqual({ ok: true, stdout: "done:covering\n", stderr: "" });
+  });
+
+  it("does not charge a timed-out command's late exit code to the next call", async () => {
+    const run = testRunner();
+    process.exitCode = undefined;
+
+    // Abandoned at 50ms; sets process.exitCode = 1 at ~150ms.
+    const timedOut = await run(["late-fail", "--delay", "150"], 50);
+    // Runs across that moment. Its own command succeeds.
+    const covering = await run(["slow", "--delay", "250", "--tag", "covering"], 5_000);
+
+    expect(timedOut.ok).toBe(false);
+    // The orphan's write is the only thing that could make this false, and a
+    // successful lookup reported as a failure hides its answer inside an
+    // `error` string the agent cannot tell from a real fault.
+    expect(covering).toEqual({ ok: true, stdout: "done:covering\n", stderr: "" });
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("trusts process.exitCode again once no orphan is in flight", async () => {
+    const run = testRunner();
+    process.exitCode = undefined;
+
+    await run(["late-fail", "--delay", "60"], 30);
+    // Long enough for the orphan to finish and leave the set.
+    await run(["slow", "--delay", "150", "--tag", "drain"], 5_000);
+
+    // Distrust must be temporary: a genuinely failing command still fails.
+    expect(await run(["soft-fail"])).toMatchObject({ ok: false });
+  });
+
+  it("releases the map single-flight lock when the command ends, not the process", async () => {
+    const lockDir = mkdtempSync(join(tmpdir(), "ix-mcp-lock-"));
+    const previousLockDir = process.env.IX_LOCK_DIR;
+    const previousWorkspace = process.env.IX_TEST_WORKSPACE;
+    process.env.IX_LOCK_DIR = lockDir;
+    process.env.IX_TEST_WORKSPACE = join(lockDir, "workspace");
+
+    try {
+      const run = testRunner();
+
+      const first = await run(["map"]);
+      const second = await run(["map"]);
+
+      expect(first.stdout).toBe("mapped\n");
+      // The lock records the server's own live PID, so it never ages out as
+      // stale. Held across calls, every later ix_map coalesced into an empty
+      // success while the graph was never refreshed.
+      expect(second.stdout).toBe("mapped\n");
+    } finally {
+      if (previousLockDir === undefined) delete process.env.IX_LOCK_DIR;
+      else process.env.IX_LOCK_DIR = previousLockDir;
+      if (previousWorkspace === undefined) delete process.env.IX_TEST_WORKSPACE;
+      else process.env.IX_TEST_WORKSPACE = previousWorkspace;
+      rmSync(lockDir, { recursive: true, force: true });
+    }
+  });
+
+  it("invalidates the read-scope cache after a command that can change it", async () => {
+    const run = testRunner();
+    resetReadScope.mockClear();
+
+    await run(["say", "read"]);
+    expect(resetReadScope).not.toHaveBeenCalled();
+
+    // `ix map` can stitch the repo into a System server-side; every later read
+    // in the session would otherwise still scope to the pre-map workspace.
+    await run(["map"]);
+    await run(["ingest"]);
+    expect(resetReadScope).toHaveBeenCalledTimes(2);
   });
 
   it("truncates output instead of growing the server heap without bound", async () => {
@@ -180,6 +287,37 @@ describe("in-process ix runner", () => {
 
     expect(result.ok).toBe(true);
     expect(result.stdout).toContain("test-version");
+  });
+});
+
+describe("installServerErrorHandlers", () => {
+  it("replaces the CLI's exit-on-error handlers with reporting ones", async () => {
+    const { installServerErrorHandlers } = await import("../../mcp/runner.js");
+    const before = {
+      uncaught: process.listeners("uncaughtException"),
+      unhandled: process.listeners("unhandledRejection"),
+    };
+    const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+
+    try {
+      installServerErrorHandlers();
+      const handler = process.listeners("uncaughtException").at(-1) as (err: unknown) => void;
+      handler(new Error("stray rejection from a fire-and-forget fetch"));
+
+      // main.ts's handlers end in process.exit(1) on every path. For a server
+      // that is the whole session and all 22 tools, over an error that belonged
+      // to one tool call.
+      expect(exit).not.toHaveBeenCalled();
+      // And they are gone, not merely outnumbered: one handler each, ours.
+      expect(process.listeners("uncaughtException")).toHaveLength(1);
+      expect(process.listeners("unhandledRejection")).toHaveLength(1);
+    } finally {
+      exit.mockRestore();
+      process.removeAllListeners("uncaughtException");
+      process.removeAllListeners("unhandledRejection");
+      for (const listener of before.uncaught) process.on("uncaughtException", listener);
+      for (const listener of before.unhandled) process.on("unhandledRejection", listener);
+    }
   });
 });
 

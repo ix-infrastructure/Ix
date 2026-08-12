@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { homedir, platform } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -21,6 +21,7 @@ const HOST_CLI_TIMEOUT_MS = 20_000;
 export type Registration =
   | "none" // nothing under our name; safe to add
   | "ours" // already points at `ix mcp`; nothing to do
+  | "stale" // ours, but the recorded launcher path is gone — re-register over it
   | "other" // a different server holds the name — never overwrite without --force
   | "unknown"; // could not tell, so treat it as occupied
 
@@ -38,6 +39,16 @@ export interface McpHost {
   label: string;
   /** Executable whose presence on PATH means the host is installed. */
   bin: string;
+  /**
+   * Whether the host is present, when {@link bin} does not answer that.
+   *
+   * Cursor, VS Code and opencode are read and written through their config
+   * files, so their shell commands are irrelevant to whether registration can
+   * work — and `cursor`/`code` are opt-in shims a GUI user may never have
+   * installed. Gating those hosts on PATH reported "not installed" for an
+   * editor sitting right there and wrote nothing.
+   */
+  detectInstalled?(): Promise<boolean>;
   /** Read-only look at what holds {@link SERVER_NAME} today. */
   inspect(): Promise<Pick<HostStatus, "registration" | "detail">>;
   /** Register `ix mcp`. Only called once inspect reports it is safe. */
@@ -52,13 +63,73 @@ interface RunResult {
   stderr: string;
 }
 
+/** How a host is told to reach `ix mcp`. */
+export interface Launcher {
+  command: string;
+  args: string[];
+}
+
+/**
+ * Quote one argument for a Windows command line.
+ *
+ * Wrapping in double quotes is what makes a path containing a space — or a
+ * `&`, or parentheses — survive: cmd treats a quoted region as literal. An
+ * argument carrying a double quote of its own cannot be encoded this way and
+ * is refused by {@link run}. Escaping it as `\"` satisfies the callee's own
+ * argv parsing but flips cmd's quote tracking mid-argument, so a space later in
+ * the same argument is then read as an argument separator. Verified against a
+ * round-trip echo: every cmd encoding mangles such a value.
+ */
+export function quoteForCmd(arg: string): string {
+  if (arg !== "" && !/[\s"]/.test(arg)) return arg;
+  let out = '"';
+  let slashes = 0;
+  for (const ch of arg) {
+    if (ch === "\\") {
+      slashes += 1;
+      out += ch;
+      continue;
+    }
+    if (ch === '"') {
+      out += `${"\\".repeat(slashes)}\\"`;
+      slashes = 0;
+      continue;
+    }
+    slashes = 0;
+    out += ch;
+  }
+  return `${out}${"\\".repeat(slashes)}"`;
+}
+
+/**
+ * Invoke a host's own CLI.
+ *
+ * Windows cannot spawn these directly. npm ships them as `.cmd` shims, which
+ * Node has refused to spawn without a shell since CVE-2024-27980 (`spawn
+ * EINVAL`), while the bare name never resolves at all because CreateProcess
+ * consults no PATHEXT. Both failures surfaced as ENOENT, which `inspect` read
+ * as "cannot tell" and reported as a conflict — so on Windows every CLI-backed
+ * host was left alone and nothing was ever registered.
+ *
+ * The Windows path therefore goes through cmd, as a single pre-quoted string.
+ * Handing `shell: true` an args array instead lets Node concatenate them
+ * unescaped (DEP0190), which loses any path containing a space.
+ */
 async function run(bin: string, args: string[]): Promise<RunResult> {
+  const options = { encoding: "utf8" as const, timeout: HOST_CLI_TIMEOUT_MS, windowsHide: true };
   try {
-    const { stdout, stderr } = await execFileAsync(bin, args, {
-      encoding: "utf8",
-      timeout: HOST_CLI_TIMEOUT_MS,
-      windowsHide: true,
-    });
+    if (platform() === "win32") {
+      const unencodable = [bin, ...args].find((arg) => arg.includes('"'));
+      if (unencodable !== undefined) {
+        // Refused rather than mangled: a half-parsed argument reaches the host
+        // as several arguments and writes a corrupt entry.
+        return { ok: false, stdout: "", stderr: `cannot pass a quoted argument through cmd.exe: ${unencodable}` };
+      }
+      const line = [bin, ...args].map(quoteForCmd).join(" ");
+      const { stdout, stderr } = await execFileAsync(line, { ...options, shell: true });
+      return { ok: true, stdout, stderr };
+    }
+    const { stdout, stderr } = await execFileAsync(bin, args, options);
     return { ok: true, stdout, stderr };
   } catch (error) {
     const failure = error as Error & { stdout?: string; stderr?: string };
@@ -86,12 +157,59 @@ async function resolveLauncher(): Promise<{ command: string; args: string[] }> {
   if (platform() !== "win32") return { command: "ix", args: ["mcp"] };
 
   const found = await run("where", ["ix"]);
-  const resolved = found.stdout
+  const entries = found.stdout
     .split(/\r?\n/)
     .map((entry) => entry.trim())
-    .filter(Boolean)[0];
+    .filter(Boolean);
 
-  return { command: resolved || "ix", args: ["mcp"] };
+  // `where` lists the exact-name match ahead of the PATHEXT variants, and npm's
+  // exact-name entry is an extensionless `#!/bin/sh` shim — precisely the file
+  // CreateProcess cannot launch. Taking the first line recorded that shim into
+  // every host, so nothing started while `ix mcp doctor` still reported `+ ix on
+  // PATH`. Only an entry Windows can actually execute counts.
+  return { command: pickWindowsLauncher(entries) ?? "ix", args: ["mcp"] };
+}
+
+/** The first `where ix` entry Windows can actually execute. */
+export function pickWindowsLauncher(entries: string[]): string | undefined {
+  return entries.find(isWindowsExecutable);
+}
+
+function isWindowsExecutable(entry: string): boolean {
+  const extensions = (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+    .split(";")
+    .map((ext) => ext.trim().toLowerCase())
+    .filter(Boolean);
+  const lower = entry.toLowerCase();
+  return extensions.some((ext) => lower.endsWith(ext));
+}
+
+/**
+ * Whether a path resolves today.
+ *
+ * Only ENOENT counts as absent — a permission error means something is there,
+ * and reporting that as a dead launcher would rewrite a registration that is
+ * fine.
+ */
+function pathExists(path: string): boolean {
+  try {
+    statSync(path);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+}
+
+/**
+ * The absolute launcher path inside a registration, if it records one.
+ *
+ * Unix registers the bare name, so this finds nothing there and staleness never
+ * applies. JSON-encoded entries arrive with their backslashes doubled, which is
+ * undone here so the path can be checked.
+ */
+function absoluteLauncherIn(text: string): string | null {
+  const match = /(?:[A-Za-z]:[\\/]|\/)[^"'\s,\]]*[\\/]ix(?:\.\w+)?(?=["'\s,\]]|$)/.exec(text);
+  return match ? match[0].replace(/\\\\/g, "\\") : null;
 }
 
 /**
@@ -103,6 +221,14 @@ async function resolveLauncher(): Promise<{ command: string; args: string[] }> {
  * row reports a diagnostic as though it were the registration.
  */
 const LOG_LINE = /^\[|^\s*(error|warning|warn|failed|validation)\b|Error:|Failed to|Validation failed/i;
+
+/**
+ * A host saying, in its own words, that nothing holds the name.
+ *
+ * Some hosts report that by exiting non-zero, which is otherwise indistinguishable
+ * from a host that could not answer at all.
+ */
+const MISSING_ENTRY = /\b(no (mcp )?server|not found|unknown server|does not exist|no such)\b/i;
 
 /**
  * Decide what a host's own listing says about our name.
@@ -139,12 +265,45 @@ export function classifyDefinition(blob: string): Pick<HostStatus, "registration
   return judge(blob.replace(/\s+/g, " ").trim());
 }
 
+/**
+ * Classify what `<host> mcp show <name>` printed.
+ *
+ * Whether the host answered at all is part of the evidence, for the same reason
+ * the listing path treats a failed `list` as occupied: guessing "none" is the
+ * one wrong guess that overwrites something. A wedged config, a permissions
+ * error, or an output format that changed upstream all fail the substring
+ * checks below, and reading that as an empty slot replaced whatever the user
+ * had — without `--force`, and reported as a cheerful `+ registered`. Only a
+ * host that answered, or one that said outright it has no such server, may read
+ * as free.
+ */
+export function classifyShown(blob: string, ok: boolean): Pick<HostStatus, "registration" | "detail"> {
+  // "No MCP server named X" also mentions the name and also exits 0, so the
+  // presence of a definition body is what distinguishes the two.
+  const definition = blob.includes(SERVER_NAME) && blob.includes("{");
+  if (definition) return classifyDefinition(blob);
+  if (!ok && !MISSING_ENTRY.test(blob)) {
+    return { registration: "unknown", detail: firstLine(blob) };
+  }
+  return { registration: "none" };
+}
+
 /** Ours iff the entry invokes the `ix` binary with the `mcp` subcommand. */
 function judge(text: string): Pick<HostStatus, "registration" | "detail"> {
-  if (/(^|[\s"'/\\])ix(\.\w+)?([\s"',\]]|$)/.test(text) && /\bmcp\b/.test(text)) {
-    return { registration: "ours", detail: truncate(text) };
+  if (!(/(^|[\s"'/\\])ix(\.\w+)?([\s"',\]]|$)/.test(text) && /\bmcp\b/.test(text))) {
+    return { registration: "other", detail: truncate(text) };
   }
-  return { registration: "other", detail: truncate(text) };
+
+  // Windows records an absolute launcher path rather than the bare name, so the
+  // entry dies whenever the npm prefix moves — an nvm switch, a reinstall
+  // elsewhere. Judging that healthy from the command string alone is what made
+  // `install` skip the one host it should have repaired, while `doctor` agreed
+  // it was fine and no command anywhere would rewrite it.
+  const launcher = absoluteLauncherIn(text);
+  if (launcher !== null && !pathExists(launcher)) {
+    return { registration: "stale", detail: `${launcher} no longer exists` };
+  }
+  return { registration: "ours", detail: truncate(text) };
 }
 
 function truncate(line: string, max = 120): string {
@@ -166,6 +325,11 @@ function cliHost(spec: {
    * is ours.
    */
   showArgs?: string[];
+  /**
+   * Used in place of `addArgs` on Windows, where an argument containing a
+   * double quote cannot be encoded through cmd.
+   */
+  windowsFallback?: (launcher: { command: string; args: string[] }) => void;
 }): McpHost {
   return {
     id: spec.id,
@@ -175,11 +339,7 @@ function cliHost(spec: {
     async inspect() {
       if (spec.showArgs) {
         const shown = await run(spec.bin, spec.showArgs);
-        const blob = `${shown.stdout}\n${shown.stderr}`;
-        // "No MCP server named X" also mentions the name and also exits 0, so
-        // presence of a definition body is what distinguishes the two.
-        if (!blob.includes(SERVER_NAME) || !blob.includes("{")) return { registration: "none" };
-        return classifyDefinition(blob);
+        return classifyShown(`${shown.stdout}\n${shown.stderr}`, shown.ok);
       }
 
       const result = await run(spec.bin, spec.listArgs);
@@ -191,7 +351,12 @@ function cliHost(spec: {
       return classifyListing(`${result.stdout}\n${result.stderr}`);
     },
     async register() {
-      const result = await run(spec.bin, spec.addArgs(await resolveLauncher()));
+      const launcher = await resolveLauncher();
+      if (spec.windowsFallback && platform() === "win32") {
+        spec.windowsFallback(launcher);
+        return;
+      }
+      const result = await run(spec.bin, spec.addArgs(launcher));
       if (!result.ok) {
         throw new Error(firstLine(result.stderr) || firstLine(result.stdout) || "registration failed");
       }
@@ -227,7 +392,7 @@ function readJsonFile(path: string): { value: Record<string, unknown> | null; mi
  * VS Code and Cursor both accept JSON-with-comments in these files, and a user
  * who has hand-annotated theirs must not read as corrupt.
  */
-function stripJsonComments(raw: string): string {
+export function stripJsonComments(raw: string): string {
   let out = "";
   let inString = false;
   let inLine = false;
@@ -285,6 +450,42 @@ function opencodeConfigPath(): string {
   return join(homedir(), ".config", "opencode", "opencode.json");
 }
 
+function openclawConfigPath(): string {
+  return join(homedir(), ".openclaw", "openclaw.json");
+}
+
+/**
+ * A file-configured host counts as present if its shell command resolves *or*
+ * its config directory exists.
+ *
+ * `cursor` and `code` are opt-in PATH shims — on macOS they appear only after
+ * the user runs "Shell Command: Install 'code' command in PATH" — so their
+ * absence says nothing about whether the editor is installed, and the config
+ * file is what registration actually touches.
+ */
+function fileHostInstalled(bin: string, configPath: string): () => Promise<boolean> {
+  return async () => (await isOnPath(bin)) || pathExists(dirname(configPath)) || pathExists(configPath);
+}
+
+/**
+ * The argv each CLI-backed host is registered with.
+ *
+ * Exported so the flags stay pinned: `gemini mcp add` defaults to *project*
+ * scope, and leaving that to the host default wrote `<cwd>/.gemini/settings.json`
+ * while the report named the user-level file.
+ */
+export const ADD_ARGS = {
+  claude: (ix: Launcher) => ["mcp", "add", "--scope", "user", SERVER_NAME, ix.command, ...ix.args],
+  codex: (ix: Launcher) => ["mcp", "add", SERVER_NAME, "--", ix.command, ...ix.args],
+  gemini: (ix: Launcher) => ["mcp", "add", "--scope", "user", SERVER_NAME, ix.command, ...ix.args],
+  openclaw: (ix: Launcher) => [
+    "mcp",
+    "set",
+    SERVER_NAME,
+    JSON.stringify({ command: ix.command, args: ix.args }),
+  ],
+} satisfies Record<string, (ix: Launcher) => string[]>;
+
 /**
  * The hosts `ix mcp install` knows about.
  *
@@ -301,7 +502,7 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       bin: "claude",
       target: "user scope",
       listArgs: ["mcp", "list"],
-      addArgs: (ix) => ["mcp", "add", "--scope", "user", SERVER_NAME, ix.command, ...ix.args],
+      addArgs: ADD_ARGS.claude,
     }),
     cliHost({
       id: "codex",
@@ -309,7 +510,7 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       bin: "codex",
       target: "~/.codex/config.toml",
       listArgs: ["mcp", "list"],
-      addArgs: (ix) => ["mcp", "add", SERVER_NAME, "--", ix.command, ...ix.args],
+      addArgs: ADD_ARGS.codex,
     }),
     cliHost({
       id: "gemini",
@@ -317,7 +518,7 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       bin: "gemini",
       target: "~/.gemini/settings.json",
       listArgs: ["mcp", "list"],
-      addArgs: (ix) => ["mcp", "add", SERVER_NAME, ix.command, ...ix.args],
+      addArgs: ADD_ARGS.gemini,
     }),
     cliHost({
       id: "openclaw",
@@ -328,22 +529,38 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       // `openclaw mcp list` prints names only ("- ix-memory"), so the command
       // behind the name is invisible there.
       showArgs: ["mcp", "show", SERVER_NAME],
-      addArgs: (ix) => ["mcp", "set", SERVER_NAME, JSON.stringify({ command: ix.command, args: ix.args })],
+      addArgs: ADD_ARGS.openclaw,
+      // `openclaw mcp set` takes its definition as a JSON argument, and a JSON
+      // argument cannot be encoded through cmd (see `run`). Windows therefore
+      // writes the documented config shape directly; every other platform keeps
+      // going through the CLI so openclaw owns its own format.
+      windowsFallback: (ix) =>
+        writeJson(openclawConfigPath(), (config) => {
+          const mcp = (config.mcp ??= {}) as Record<string, unknown>;
+          const servers = (mcp.servers ??= {}) as Record<string, unknown>;
+          servers[SERVER_NAME] = { command: ix.command, args: ix.args };
+        }),
     }),
     {
       id: "vscode",
       label: "VS Code",
       bin: "code",
       target: vsCodeUserConfig(),
+      detectInstalled: fileHostInstalled("code", vsCodeUserConfig()),
       // No list subcommand, so the user-profile file is the only read path.
       async inspect() {
         return inspectJsonFile(vsCodeUserConfig(), "servers");
       },
       async register() {
         const ix = await resolveLauncher();
-        const definition = JSON.stringify({ name: SERVER_NAME, command: ix.command, args: ix.args });
-        const result = await run("code", ["--add-mcp", definition]);
-        if (!result.ok) throw new Error(firstLine(result.stderr) || "code --add-mcp failed");
+        // Written rather than handed to `code --add-mcp`, so the write lands in
+        // the same file `inspect` reads. Shelling out needed `code` on PATH —
+        // which a GUI-only install does not have — and passed a JSON argument,
+        // which Windows cannot encode.
+        writeJson(vsCodeUserConfig(), (config) => {
+          const servers = (config.servers ??= {}) as Record<string, unknown>;
+          servers[SERVER_NAME] = { command: ix.command, args: ix.args };
+        });
       },
     },
     {
@@ -351,6 +568,7 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       label: "Cursor",
       bin: "cursor",
       target: cursorConfigPath(),
+      detectInstalled: fileHostInstalled("cursor", cursorConfigPath()),
       async inspect() {
         return inspectJsonFile(cursorConfigPath(), "mcpServers");
       },
@@ -367,6 +585,7 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       label: "opencode",
       bin: "opencode",
       target: opencodeConfigPath(),
+      detectInstalled: fileHostInstalled("opencode", opencodeConfigPath()),
       async inspect() {
         return inspectJsonFile(opencodeConfigPath(), "mcp");
       },
