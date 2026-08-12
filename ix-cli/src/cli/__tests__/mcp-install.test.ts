@@ -370,8 +370,11 @@ describe("registration classification", () => {
     ).toBe("ours");
   });
 
-  it("leaves a launcher it cannot conclusively stat alone", () => {
-    // An unreachable UNC path fails to stat with something other than ENOENT.
+  // Windows-only by nature: a UNC path is a network location there, and stat
+  // fails on it with something other than ENOENT. Everywhere else those
+  // backslashes are ordinary filename characters, so the path really is absent
+  // and `stale` is the right answer.
+  it.skipIf(process.platform !== "win32")("leaves a launcher it cannot conclusively stat alone", () => {
     // A file server being offline is not evidence the launcher is gone, and
     // `stale` triggers a rewrite with no --force, so only ENOENT counts.
     const unc = String.raw`\\server-that-does-not-exist\share\npm\ix.cmd`;
