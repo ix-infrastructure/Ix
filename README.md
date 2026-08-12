@@ -82,11 +82,13 @@ command, since `cursor` and `code` are opt-in shims a GUI install may not have.
 **It never overwrites.** If the name `ix-memory` already belongs to a different
 server — an earlier Ix plugin, say — that client is reported and left exactly as
 it was. Pass `--force` to replace it, or `--host <id>` to limit the run; an
-unrecognised id is an error rather than a silent no-op. For the clients written
-directly, `doctor` also reports a registration of ours whose recorded launcher
-path has since disappeared, and `install` repairs it without `--force`; the
-clients written through their own CLI print a table rather than their stored
-command, so a launcher that has moved there needs `ix mcp install --force`.
+unrecognised id is an error rather than a silent no-op. Where a client's own
+config can be read back — Cursor, VS Code, opencode, and OpenClaw off Windows —
+`doctor` also reports a registration of ours whose recorded launcher path has
+since disappeared, and `install` repairs it. The clients that answer with a
+rendered table instead expose no stored command, so a launcher that has moved
+there is not detected: clear the name with that client's own command
+(`claude mcp remove ix-memory`) and re-run `ix mcp install`.
 
 To register a single client by hand instead, point it at `ix` with the argument
 `mcp`. For Codex:

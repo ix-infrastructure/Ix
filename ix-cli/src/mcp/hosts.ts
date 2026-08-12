@@ -51,14 +51,8 @@ export interface McpHost {
   detectInstalled?(): Promise<boolean>;
   /** Read-only look at what holds {@link SERVER_NAME} today. */
   inspect(): Promise<Pick<HostStatus, "registration" | "detail">>;
-  /**
-   * Register `ix mcp`. Only called once inspect reports it is safe.
-   *
-   * `replacing` says the name is currently held — by a stale entry of ours, or
-   * by a different server the caller has chosen to overwrite with `--force`.
-   * Hosts whose `add` refuses an occupied name need to clear it first.
-   */
-  register(replacing: boolean): Promise<void>;
+  /** Register `ix mcp`. Only called once inspect reports it is safe. */
+  register(): Promise<void>;
   /** Where the registration lands, shown in the report. */
   target: string;
 }
@@ -177,7 +171,7 @@ export async function isOnPath(bin: string): Promise<boolean> {
  */
 let launcherProbe: Promise<Launcher> | undefined;
 
-/** Memoised: `doctor` inspects every host, and each would re-run `where ix`. */
+/** Memoised: `install` resolves this once per host it registers. */
 function resolveLauncher(): Promise<Launcher> {
   return (launcherProbe ??= probeLauncher());
 }
@@ -254,7 +248,6 @@ function launcherOf(entry: unknown): string | null {
 function isAbsolutePath(value: string): boolean {
   return /^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(value);
 }
-
 
 /**
  * Lines that mention a server name only because something went wrong.
@@ -379,9 +372,12 @@ function judge(text: string, recorded: string | null): Pick<HostStatus, "registr
   // mangled, so a hand-repaired config was overwritten with an unstartable
   // path. The repair could not land on Claude Code anyway (see `register`).
   //
-  // So this reports `ours`, and a moved npm prefix on those hosts stays a
-  // manual `ix mcp install --force`. That is a real gap, and a smaller one than
-  // silently rewriting configs that were fine.
+  // So this reports `ours`. A moved npm prefix on those hosts is not detected
+  // and not repairable through `ix mcp install` at all — `--force` does not
+  // apply to a registration already judged ours — so the user has to clear the
+  // name with the host's own command (`claude mcp remove ix-memory`) and run
+  // install again. That is a real gap, and a smaller one than silently
+  // rewriting configs that were fine.
   return { registration: "ours", detail: truncate(text) };
 }
 
@@ -409,15 +405,6 @@ function cliHost(spec: {
    * double quote cannot be encoded through cmd.
    */
   windowsFallback?: (launcher: { command: string; args: string[] }) => void;
-  /**
-   * How to clear an existing entry, for hosts whose `add` will not overwrite.
-   *
-   * `claude mcp add` fails with "already exists in user config" and offers no
-   * force flag, so without this `--force` was inert for Claude Code: install
-   * reported `failed`, quoting a message naming nothing the user could act on,
-   * and left the entry it was asked to replace exactly where it was.
-   */
-  removeArgs?: string[];
 }): McpHost {
   return {
     id: spec.id,
@@ -438,10 +425,7 @@ function cliHost(spec: {
       }
       return classifyListing(`${result.stdout}\n${result.stderr}`);
     },
-    async register(replacing: boolean) {
-      // Best-effort: a host whose `add` overwrites happily (codex does) needs
-      // no removal, and a failed removal just leaves `add` to report why.
-      if (replacing && spec.removeArgs) await run(spec.bin, spec.removeArgs);
+    async register() {
       const launcher = await resolveLauncher();
       if (spec.windowsFallback && platform() === "win32") {
         spec.windowsFallback(launcher);
@@ -582,19 +566,6 @@ export const ADD_ARGS = {
 } satisfies Record<string, (ix: Launcher) => string[]>;
 
 /**
- * How each CLI-backed host is told to drop an existing entry.
- *
- * Exported so the argv stays pinned: the wiring that calls it is only
- * observable against a real host binary, which CI has none of.
- */
-export const REMOVE_ARGS = {
-  claude: ["mcp", "remove", "--scope", "user", SERVER_NAME],
-  codex: ["mcp", "remove", SERVER_NAME],
-  gemini: ["mcp", "remove", SERVER_NAME],
-  openclaw: ["mcp", "unset", SERVER_NAME],
-} satisfies Record<string, string[]>;
-
-/**
  * The hosts `ix mcp install` knows about.
  *
  * Writes go through each host's own CLI wherever one exists, so the host owns
@@ -611,7 +582,6 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       target: "user scope",
       listArgs: ["mcp", "list"],
       addArgs: ADD_ARGS.claude,
-      removeArgs: REMOVE_ARGS.claude,
     }),
     cliHost({
       id: "codex",
@@ -620,7 +590,6 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       target: "~/.codex/config.toml",
       listArgs: ["mcp", "list"],
       addArgs: ADD_ARGS.codex,
-      removeArgs: REMOVE_ARGS.codex,
     }),
     cliHost({
       id: "gemini",
@@ -629,7 +598,6 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       target: "~/.gemini/settings.json",
       listArgs: ["mcp", "list"],
       addArgs: ADD_ARGS.gemini,
-      removeArgs: REMOVE_ARGS.gemini,
     }),
     cliHost({
       id: "openclaw",
@@ -640,7 +608,6 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       // `openclaw mcp list` prints names only ("- ix-memory"), so the command
       // behind the name is invisible there.
       showArgs: ["mcp", "show", SERVER_NAME],
-      removeArgs: REMOVE_ARGS.openclaw,
       addArgs: ADD_ARGS.openclaw,
       // `openclaw mcp set` takes its definition as a JSON argument, and a JSON
       // argument cannot be encoded through cmd (see `run`). Windows therefore

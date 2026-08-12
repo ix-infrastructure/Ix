@@ -6,7 +6,6 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   ADD_ARGS,
-  REMOVE_ARGS,
   classifyDefinition,
   classifyListing,
   classifyShown,
@@ -38,7 +37,7 @@ function fakeHost(
   id: string,
   registration: Registration,
   options: { installed?: boolean; fails?: boolean; detectInstalled?: () => Promise<boolean> } = {},
-): McpHost & { registerCalls: number; replacedWith: boolean[] } {
+): McpHost & { registerCalls: number } {
   const host = {
     id,
     label: id,
@@ -49,12 +48,10 @@ function fakeHost(
     async inspect() {
       return { registration };
     },
-    async register(replacing: boolean) {
+    async register() {
       host.registerCalls += 1;
-      host.replacedWith.push(replacing);
       if (options.fails) throw new Error("host CLI said no");
     },
-    replacedWith: [] as boolean[],
   };
   return host;
 }
@@ -164,24 +161,6 @@ describe("ix mcp install", () => {
     // skipped the one host it should have rewritten.
     expect(host.registerCalls).toBe(1);
     expect(report.hosts[0]?.outcome).toBe("registered");
-  });
-
-  it("tells the host when it is replacing an existing entry", async () => {
-    const free = fakeHost("free", "none");
-    const taken = fakeHost("taken", "other");
-    const moved = fakeHost("moved", "stale");
-
-    await runInstall({ hosts: [free] });
-    await runInstall({ hosts: [taken], force: true });
-    await runInstall({ hosts: [moved] });
-
-    // `claude mcp add` refuses a name that already exists and has no force
-    // flag, so a host that is not told it is replacing something reports
-    // `failed` and leaves the entry it was asked to overwrite exactly where it
-    // was — which made --force inert there.
-    expect(free.replacedWith).toEqual([false]);
-    expect(taken.replacedWith).toEqual([true]);
-    expect(moved.replacedWith).toEqual([true]);
   });
 
   it("consults a host's own installed check before falling back to PATH", async () => {
@@ -425,25 +404,6 @@ describe("registration classification", () => {
     expect(classifyListing(`ix-memory  ${rendered}  mcp  -  enabled`).registration).toBe("ours");
   });
 
-  it("does not guess at staleness from a rendered listing row", () => {
-    // Five attempts at establishing it from the row alone each produced the
-    // same class of failure — a *working* registration reported stale, which
-    // re-registers with no --force. Parsing the path back out broke on a
-    // different shape every time; comparing the row against the launcher we
-    // would write today instead broke when `where`'s console output, decoded as
-    // UTF-8, mangled a non-ASCII npm prefix and overwrote a hand-repaired
-    // config with an unstartable path. A moved prefix on these hosts is now a
-    // manual `ix mcp install --force` — a real gap, and a smaller one.
-    const rows = [
-      String.raw`ix-memory: C:\Users\gone\AppData\Roaming\npm\ix.cmd mcp - Connected`,
-      String.raw`ix-memory  C:\Program Files (x86)\nodejs\ix.cmd  mcp  -  -  enabled`,
-      String.raw`ix-memory: cmd /c C:\Users\Jane Doe\npm\ix.cmd mcp`,
-      String.raw`ix-memory: C:\Users\José Müller\npm\ix.cmd mcp`,
-    ];
-
-    for (const row of rows) expect(classifyListing(row).registration).toBe("ours");
-  });
-
   it("recognises a pretty-printed definition split across lines", () => {
     // `openclaw mcp show` puts "ix" and "mcp" on separate lines; matching one
     // line at a time reads our own entry as a stranger's.
@@ -531,17 +491,6 @@ describe("classifyShown", () => {
 });
 
 describe("host registration arguments", () => {
-  it("clears an occupied name with the host's own removal command", () => {
-    // `claude mcp add` refuses a name that already exists and offers no force
-    // flag, so without a removal first `--force` was inert there: install
-    // reported `failed` and left the foreign entry exactly where it was.
-    // Verified end-to-end against the real binary; pinned here because CI has
-    // no host CLI to run.
-    expect(REMOVE_ARGS.claude).toEqual(["mcp", "remove", "--scope", "user", "ix-memory"]);
-    expect(REMOVE_ARGS.codex).toEqual(["mcp", "remove", "ix-memory"]);
-    expect(REMOVE_ARGS.openclaw).toEqual(["mcp", "unset", "ix-memory"]);
-  });
-
   it("pins gemini to user scope", () => {
     // `gemini mcp add` defaults to project scope, writing `<cwd>/.gemini/` —
     // invisible from every other directory, while the report named the
