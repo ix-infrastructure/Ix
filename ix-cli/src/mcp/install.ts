@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 import {
@@ -53,6 +53,28 @@ export interface InstallOptions {
 }
 
 /**
+ * Read a config file, distinguishing "absent" from "unreadable".
+ *
+ * Reading straight out instead of checking existsSync first is what closes
+ * CodeQL js/file-system-race — the same fix view.ts carries for the same rule.
+ * The check could always go stale before the read, and it never told us the
+ * read would succeed anyway.
+ *
+ * Only ENOENT means absent. Anything else has to surface: collapsing
+ * "unreadable" into "absent" here would take the mkdir-and-write branch and
+ * overwrite a config we merely failed to read — with no `.bak`, since the copy
+ * only happens on the branch that read something.
+ */
+function readTextIfPresent(path: string): string | null {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+/**
  * Merge into a JSON config in place, keeping a `.bak` of what was there.
  *
  * Only used for the two hosts with no usable CLI. Everything the user already
@@ -61,10 +83,9 @@ export interface InstallOptions {
  */
 export function writeJsonConfig(path: string, mutate: (config: Record<string, unknown>) => void): void {
   let config: Record<string, unknown> = {};
-  const exists = existsSync(path);
+  const raw = readTextIfPresent(path);
 
-  if (exists) {
-    const raw = readFileSync(path, "utf8");
+  if (raw !== null) {
     if (raw.trim() !== "") {
       let parsed: unknown;
       try {

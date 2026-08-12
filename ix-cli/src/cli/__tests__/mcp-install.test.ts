@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -200,6 +200,32 @@ describe("writeJsonConfig", () => {
     expect(() => writeJsonConfig(path, () => {})).toThrow(/not valid JSON/);
     // The user's content must still be there after the refusal.
     expect(readFileSync(path, "utf8")).toBe("{ this is not json");
+  });
+
+  // Needs a read to fail where the write would have succeeded. Permission bits
+  // give that only on POSIX and only for a non-root caller: root bypasses them,
+  // and on Windows chmod moves the read-only flag, which blocks the write too.
+  const readCanFailAlone =
+    process.platform !== "win32" && typeof process.getuid === "function" && process.getuid() !== 0;
+
+  it.skipIf(!readCanFailAlone)("surfaces an unreadable config instead of overwriting it", () => {
+    // Write-only: the read fails, the write would go through. That is the one
+    // shape where collapsing "unreadable" into "absent" is destructive — the
+    // mkdir-and-write branch replaces a config we never managed to read, and
+    // leaves no `.bak`, because the copy only runs on the branch that read one.
+    const path = join(tempDir(), "mcp.json");
+    writeFileSync(path, JSON.stringify({ mcpServers: { theirs: { command: "other" } } }));
+    chmodSync(path, 0o200);
+
+    expect(() =>
+      writeJsonConfig(path, (config) => {
+        (config.mcpServers as unknown) = { "ix-memory": { command: "ix" } };
+      }),
+    ).toThrow(/EACCES/);
+
+    chmodSync(path, 0o600);
+    expect(JSON.parse(readFileSync(path, "utf8")).mcpServers.theirs.command).toBe("other");
+    expect(existsSync(`${path}.bak`)).toBe(false);
   });
 });
 
