@@ -9,7 +9,8 @@ import {
   type McpHost,
   type Registration,
 } from "./hosts.js";
-import { IX_MCP_TOOL_NAMES } from "./server.js";
+import { IX_MCP_OSS_TOOL_NAMES, IX_MCP_PRO_TOOL_NAMES } from "./server.js";
+import { detectPro } from "./runner.js";
 
 /** What install decided to do about one host. */
 export type Outcome =
@@ -178,7 +179,8 @@ export async function runDoctor(options: { hosts?: McpHost[]; only?: string[] } 
 
   return {
     ixOnPath: await isOnPath("ix"),
-    toolCount: IX_MCP_TOOL_NAMES.length,
+    // What this install actually advertises, not the theoretical maximum.
+    toolCount: IX_MCP_OSS_TOOL_NAMES.length + (await detectPro() ? IX_MCP_PRO_TOOL_NAMES.length : 0),
     hosts: reports,
   };
 }

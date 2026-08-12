@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { classifyDefinition, classifyListing, type McpHost, type Registration } from "../../mcp/hosts.js";
+import { IX_MCP_OSS_TOOL_NAMES, IX_MCP_PRO_TOOL_NAMES } from "../../mcp/server.js";
 import { runDoctor, runInstall, writeJsonConfig } from "../../mcp/install.js";
 
 const scratch: string[] = [];
@@ -142,7 +143,12 @@ describe("ix mcp doctor", () => {
       "conflict",
       "already-registered",
     ]);
-    expect(report.toolCount).toBe(23);
+    // Pro is resolvable on some machines and not others, so the count is one
+    // of exactly two values rather than a fixed number.
+    expect([
+      IX_MCP_OSS_TOOL_NAMES.length,
+      IX_MCP_OSS_TOOL_NAMES.length + IX_MCP_PRO_TOOL_NAMES.length,
+    ]).toContain(report.toolCount);
   });
 });
 

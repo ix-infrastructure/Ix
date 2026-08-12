@@ -346,6 +346,18 @@ export function createInProcessRunner(options: InProcessRunnerOptions = {}): IxR
   };
 }
 
+let proProbe: Promise<boolean> | undefined;
+
+/**
+ * Whether `@ix/pro` is installed, probed once per process.
+ *
+ * The MCP server uses this to decide whether to advertise the Pro tools at all,
+ * rather than offering tools whose every call answers "requires Ix Pro".
+ */
+export function detectPro(): Promise<boolean> {
+  return (proProbe ??= tryLoadProCommands(new Command()));
+}
+
 /** Spawn the CLI as a child process — one command per process, fully isolated. */
 export async function runCurrentIx(
   args: string[],

@@ -3,7 +3,13 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createIxMcpServer, IX_MCP_TOOL_NAMES, type IxRunner } from "../../mcp/server.js";
+import {
+  createIxMcpServer,
+  IX_MCP_OSS_TOOL_NAMES,
+  IX_MCP_PRO_TOOL_NAMES,
+  IX_MCP_TOOL_NAMES,
+  type IxRunner,
+} from "../../mcp/server.js";
 
 const clients: Client[] = [];
 
@@ -11,8 +17,8 @@ afterEach(async () => {
   await Promise.all(clients.splice(0).map((client) => client.close()));
 });
 
-async function connect(runIx: IxRunner): Promise<Client> {
-  const server = createIxMcpServer({ version: "test", runIx });
+async function connect(runIx: IxRunner, proAvailable = false): Promise<Client> {
+  const server = createIxMcpServer({ version: "test", runIx, proAvailable });
   const client = new Client({ name: "ix-mcp-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
@@ -23,12 +29,38 @@ async function connect(runIx: IxRunner): Promise<Client> {
 }
 
 describe("ix mcp", () => {
-  it("exposes one canonical tool catalog", async () => {
+  it("exposes only the OSS catalog when Pro is not installed", async () => {
     const client = await connect(async () => ({ ok: true, stdout: "ok", stderr: "" }));
 
     const result = await client.listTools();
 
+    // Advertising a Pro tool on an OSS install hands the agent something whose
+    // every call answers "requires Ix Pro" — indistinguishable from a failure.
+    expect(result.tools.map((tool) => tool.name)).toEqual(IX_MCP_OSS_TOOL_NAMES);
+    for (const pro of IX_MCP_PRO_TOOL_NAMES) {
+      expect(result.tools.map((tool) => tool.name)).not.toContain(pro);
+    }
+  });
+
+  it("adds the Pro catalog when Pro is installed", async () => {
+    const client = await connect(async () => ({ ok: true, stdout: "ok", stderr: "" }), true);
+
+    const result = await client.listTools();
+
     expect(result.tools.map((tool) => tool.name)).toEqual(IX_MCP_TOOL_NAMES);
+  });
+
+  it("covers every plugin tool that is not a composite or deprecated", async () => {
+    const client = await connect(async () => ({ ok: true, stdout: "ok", stderr: "" }), true);
+    const names = (await client.listTools()).tools.map((tool) => tool.name);
+
+    // The union exposed by ix-codex/cursor/gemini/openclaw/opencode-plugin,
+    // less ix_query (deprecated), ix_neighbors and ix_docs_tool (composites of
+    // callers/callees/depends and of overview), and ix_status (gemini's name
+    // for ix_health).
+    for (const tool of ["ix_decide", "ix_ingest", "ix_health", "ix_locate", "ix_impact"]) {
+      expect(names).toContain(tool);
+    }
   });
 
   it("maps tool input to the matching Ix command with compact output", async () => {
@@ -127,5 +159,47 @@ describe("ix mcp", () => {
     const parsed = JSON.parse(content?.type === "text" ? content.text : "{}");
     expect(parsed.count).toBe(1);
     expect(parsed.candidates).toEqual([{ file: "src/a.ts", smell: "orphan" }]);
+  });
+
+  it("maps ix_ingest onto the github form the plugins used", async () => {
+    const calls: string[][] = [];
+    const client = await connect(async (args) => {
+      calls.push(args);
+      return { ok: true, stdout: "{}", stderr: "" };
+    });
+
+    await client.callTool({ name: "ix_ingest", arguments: { github: "owner/repo", limit: 25 } });
+
+    expect(calls).toEqual([["ingest", "--github", "owner/repo", "--limit", "25", "--format", "json"]]);
+  });
+
+  it("does not pass --limit when ingesting a local path", async () => {
+    const calls: string[][] = [];
+    const client = await connect(async (args) => {
+      calls.push(args);
+      return { ok: true, stdout: "{}", stderr: "" };
+    });
+
+    await client.callTool({ name: "ix_ingest", arguments: { path: "src" } });
+
+    // --limit is a GitHub paging cap; on a path ingest it is meaningless.
+    expect(calls).toEqual([["ingest", "src", "--format", "json"]]);
+  });
+
+  it("maps ix_decide onto the decide command", async () => {
+    const calls: string[][] = [];
+    const client = await connect(async (args) => {
+      calls.push(args);
+      return { ok: true, stdout: "{}", stderr: "" };
+    }, true);
+
+    await client.callTool({
+      name: "ix_decide",
+      arguments: { title: "Use CONTAINS", rationale: "Normalize edges", affects: "Ingestion" },
+    });
+
+    expect(calls).toEqual([
+      ["decide", "Use CONTAINS", "--rationale", "Normalize edges", "--affects", "Ingestion", "--format", "json"],
+    ]);
   });
 });

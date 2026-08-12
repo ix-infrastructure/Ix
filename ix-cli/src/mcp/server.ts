@@ -6,15 +6,24 @@ import { z } from "zod";
 import {
   createProtocolStdout,
   DEFAULT_TIMEOUT_MS,
+  detectPro,
   resolveDefaultRunner,
   type IxRunner,
 } from "./runner.js";
 
 export { runCurrentIx, type IxRunner, type IxRunResult } from "./runner.js";
 
-export const IX_MCP_TOOL_NAMES = [
+/**
+ * Tools every install can run.
+ *
+ * This set is the union of what the per-host Ix plugins expose, minus three
+ * deliberate drops: `ix_query` is the deprecated command the CLI docs tell
+ * agents not to use, and `ix_neighbors` / `ix_docs_tool` are convenience
+ * composites of `ix_callers` + `ix_callees` + `ix_depends` and of
+ * `ix_overview`, all of which are here individually.
+ */
+export const IX_MCP_OSS_TOOL_NAMES = [
   "ix_health",
-  "ix_briefing",
   "ix_locate",
   "ix_text",
   "ix_impact",
@@ -34,13 +43,28 @@ export const IX_MCP_TOOL_NAMES = [
   "ix_smells",
   "ix_stats",
   "ix_subsystems",
-  "ix_decisions",
   "ix_history",
+  "ix_ingest",
 ] as const;
+
+/**
+ * Tools that need Ix Pro.
+ *
+ * Advertised only when the Pro package actually loads. Listing them
+ * unconditionally — as this server did for `ix_briefing` and `ix_decisions` —
+ * hands an OSS agent tools whose every call returns "requires Ix Pro", which it
+ * cannot tell apart from a real failure.
+ */
+export const IX_MCP_PRO_TOOL_NAMES = ["ix_briefing", "ix_decisions", "ix_decide"] as const;
+
+/** Every tool this server can serve, across both tiers. */
+export const IX_MCP_TOOL_NAMES = [...IX_MCP_OSS_TOOL_NAMES, ...IX_MCP_PRO_TOOL_NAMES] as const;
 
 interface CreateServerOptions {
   version?: string;
   runIx?: IxRunner;
+  /** Advertise the Pro tools. Resolved by {@link detectPro} at startup. */
+  proAvailable?: boolean;
 }
 
 type ToolInput = Record<string, unknown>;
@@ -64,9 +88,6 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
 
   registerTool(server, "ix_health", "Check Ix backend and graph readiness", {}, async () =>
     runFormatted(runIx, "ix_health", ["status"]),
-  );
-  registerTool(server, "ix_briefing", "Load the Ix Pro session briefing", {}, async () =>
-    runJson(runIx, "ix_briefing", ["briefing"]),
   );
   registerTool(
     server,
@@ -250,28 +271,70 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
   );
   registerTool(
     server,
-    "ix_decisions",
-    "List Ix Pro architecture decisions, optionally scoped to a path",
-    { path: z.string().min(1).optional() },
-    async (input) => {
-      const args = ["decisions"];
-      pushOption(args, "--path", input.path);
-      return runJson(runIx, "ix_decisions", args);
-    },
-  );
-  registerTool(
-    server,
     "ix_history",
     "Show provenance and patch history for a file or symbol",
     { target: z.string().min(1) },
     async (input) => runFormatted(runIx, "ix_history", ["history", stringArg(input, "target")]),
   );
+  registerTool(
+    server,
+    "ix_ingest",
+    "Ingest a path, or issues/PRs/commits from a GitHub repository, into the graph",
+    {
+      path: z.string().min(1).optional(),
+      github: z.string().min(1).optional().describe("owner/repo"),
+      limit: z.number().int().min(1).max(500).default(50),
+      since: z.string().min(1).optional().describe("ISO 8601 date"),
+    },
+    async (input) => {
+      const args = ["ingest"];
+      if (typeof input.path === "string") args.push(input.path);
+      pushOption(args, "--github", input.github);
+      pushOption(args, "--since", input.since);
+      if (typeof input.github === "string") args.push("--limit", numberArg(input, "limit").toString());
+      // Ingestion walks the tree or pages a GitHub API, so it gets the same
+      // headroom as ix_map rather than the default read timeout.
+      return runJson(runIx, "ix_ingest", args, 120_000);
+    },
+  );
+
+  if (options.proAvailable) {
+    registerTool(server, "ix_briefing", "Load the Ix Pro session briefing", {}, async () =>
+      runJson(runIx, "ix_briefing", ["briefing"]),
+    );
+    registerTool(
+      server,
+      "ix_decisions",
+      "List Ix Pro architecture decisions, optionally scoped to a path",
+      { path: z.string().min(1).optional() },
+      async (input) => {
+        const args = ["decisions"];
+        pushOption(args, "--path", input.path);
+        return runJson(runIx, "ix_decisions", args);
+      },
+    );
+    registerTool(
+      server,
+      "ix_decide",
+      "Record an architecture decision with its rationale",
+      {
+        title: z.string().min(1),
+        rationale: z.string().min(1),
+        affects: z.string().min(1).optional().describe("entity the decision affects"),
+      },
+      async (input) => {
+        const args = ["decide", stringArg(input, "title"), "--rationale", stringArg(input, "rationale")];
+        pushOption(args, "--affects", input.affects);
+        return runJson(runIx, "ix_decide", args);
+      },
+    );
+  }
 
   return server;
 }
 
 export async function startIxMcpServer(version = "0.0.0"): Promise<void> {
-  const server = createIxMcpServer({ version });
+  const server = createIxMcpServer({ version, proAvailable: await detectPro() });
   // A dedicated handle on fd 1 rather than process.stdout, which the in-process
   // runner patches to capture command output.
   await server.connect(new StdioServerTransport(process.stdin, createProtocolStdout()));
