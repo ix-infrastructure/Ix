@@ -43,14 +43,17 @@ const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "decide", desc: "Record a design decision" },
   { name: "decisions", desc: "List recorded design decisions" },
   { name: "goal", desc: "Manage project goals" },
-  { name: "goals", desc: "List all goals" },
+  // `goals` and `plans` are deliberately absent: @ix/pro collapsed both into a
+  // subcommand of the singular (`ix goal list`, Ix-pro#103; `ix plan list`,
+  // Ix-pro#109), so stubbing them upsold Pro for commands Pro does not have.
+  // The singular stubs still cover the new subcommand form — they swallow
+  // operands, so `plan list` reaches the sentinel. Same fix as `bugs` in #396.
   // `patches` is deliberately absent: ix-cli owns the real implementation
   // (commands/patches.ts, registered above). It sat in this list while never
   // being registered, so `ix patches` answered "requires Ix Pro" on OSS and
   // shadowed a working command — see #371.
   { name: "plan", desc: "Manage plans and plan tasks" },
   { name: "task", desc: "Manage tasks" },
-  { name: "plans", desc: "List all plans" },
   { name: "tasks", desc: "List all tasks across plans" },
   { name: "truth", desc: "Manage project intents (truth)" },
   { name: "workflow", desc: "Attach, show, validate, or run staged workflows" },

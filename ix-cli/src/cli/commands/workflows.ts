@@ -63,6 +63,7 @@ Use "ix <command> --help" for details on any command.
 const COLLAPSED_HELP_TOPICS: Record<string, string> = {
   goals: "goal",
   bugs: "bug",
+  plans: "plan",
 };
 
 export function registerWorkflowsHelpCommand(program: Command): void {

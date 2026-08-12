@@ -106,7 +106,7 @@ accept `--format`, despite being an action command.)
 
 **Pro features.** Some commands below are marked **[Pro]**, as are the whole
 **Planning** and **Workflows** sections — every command in those two tables is
-Pro-only, including `plan`, `plans`, `task`, `tasks` and `workflow`. If any Pro
+Pro-only, including `plan`, `task`, `tasks` and `workflow`. If any Pro
 command prints `The '<name>' command requires Ix Pro.`, this install does not
 have them — skip that step, do not retry it, and do not mention it again for the
 rest of the session. Nothing outside those marks and those two sections is
@@ -193,7 +193,7 @@ Only the first four work without Pro.
 | Plan status | `ix plan status` | `ix plan status <id> --format json` |
 | Next actionable task | `ix plan next` | `ix plan next <id> --with-workflow --format json` |
 | Run next task workflow | `ix plan next` | `ix plan next <id> --run-workflow --stage discover --format json` |
-| List all plans | `ix plans` | `ix plans --format json` |
+| List all plans | `ix plan list` | `ix plan list --format json` |
 | List tasks | `ix tasks` | `ix tasks --status pending --plan <id> --format json` |
 | Task details | `ix task show` | `ix task show <id> --with-workflow --format json` |
 | Update task | `ix task update` | `ix task update <id> --status done --format json` |

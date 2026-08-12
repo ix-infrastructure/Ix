@@ -56,7 +56,6 @@ describe("Pro stubs", () => {
     ["truth", ["truth", "add", "Support 100k file repos"]],
     ["truth", ["truth", "list", "--format", "json"]],
     ["goal", ["goal", "create", "Support GitHub", "--format", "json"]],
-    ["goals", ["goals", "--status", "active", "--format", "json"]],
     ["decide", ["decide", "Use X", "--rationale", "because", "--affects", "Entity"]],
     ["briefing", ["briefing", "--format", "json"]],
     ["decisions", ["decisions", "--topic", "ingestion", "--limit", "10"]],
@@ -100,25 +99,35 @@ describe("Pro stubs", () => {
     expect(patches?.options.map(o => o.long)).toContain("--format");
   });
 
-  // @ix/pro registers a plural list command alongside `plan` and `task`
-  // (register.ts: registerPlansCommand, registerTasksCommand). Stubbing only the
-  // singular is the failure this pins: the plural fell through to commander's
-  // "unknown command" instead of the sentinel above, so an agent told to stop on
+  // `tasks` is the ONLY plural @ix/pro still registers as its own command
+  // (register.ts: registerTasksCommand). Stubbing only the singular is the
+  // failure this pins: the plural fell through to commander's "unknown command"
+  // instead of the sentinel above, so an agent told to stop on
   // `requires Ix Pro.` saw an unrecognized error and had nothing to match.
   //
-  // `goals` is NOT in that category and is only still stubbed by oversight:
-  // Ix-pro#103 deleted the command, #327 correctly dropped the stub, and #384
-  // re-added it on the stated premise that Pro registers a plural for *every*
-  // singular — which was already false. Do not use this row as evidence that
-  // `ix goals` exists; removing it is a pending follow-up.
+  // This list is NOT "every singular has a plural" — that premise was already
+  // false when it was written, and acting on it is what re-added the dead
+  // `goals` stub in #384. Add a row only after confirming @ix/pro registers
+  // that exact plural.
   it.each([
-    ["plan", "plans"],
     ["task", "tasks"],
-    ["goal", "goals"],
   ])("stubs both %s and %s", (singular, plural) => {
     for (const name of [singular, plural]) {
       expect(runStub([name]).err).toContain(`The '${name}' command requires Ix Pro.`);
     }
+  });
+
+  // The collapsed plurals: the singular stub must cover the new subcommand form
+  // (it swallows operands), and the retired plural must NOT answer at all.
+  // Without the second half, restoring either stub goes unnoticed.
+  it.each([
+    ["goal", "list", "goals"],
+    ["plan", "list", "plans"],
+  ])("stubs the collapsed '%s %s' subcommand, not a '%s' command", (singular, sub, plural) => {
+    expect(runStub([singular, sub, "--format", "json"]).err).toContain(
+      `The '${singular}' command requires Ix Pro.`,
+    );
+    expect(runStub([plural]).err).not.toContain("requires Ix Pro");
   });
 
   // `bugs` is deliberately absent from the pairs above: @ix/pro collapsed it into
