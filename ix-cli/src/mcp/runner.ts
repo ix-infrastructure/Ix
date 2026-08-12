@@ -99,6 +99,11 @@ const runContext = new AsyncLocalStorage<ActiveRun>();
  * *successful* tool call as failed, with its real answer buried inside an
  * `error` string. A run started while this set is non-empty therefore ignores
  * `process.exitCode` and judges only by what the command threw.
+ *
+ * Membership is bounded by a grace timer as well as by the command settling,
+ * because distrust is not free: while it holds, a genuinely failing command
+ * reports success. An entry that could never be removed would make that
+ * permanent.
  */
 const liveOrphans = new Set<Promise<void>>();
 
@@ -289,6 +294,12 @@ export interface InProcessRunnerOptions {
   createProgram?: (version: string) => Command | Promise<Command>;
   /** Output cap for a single run. Defaults to {@link MAX_OUTPUT_BYTES}. */
   maxOutputBytes?: number;
+  /**
+   * How long an abandoned command keeps {@link liveOrphans} membership before
+   * it is dropped regardless. Defaults to as long again as the command was
+   * given. Tests shorten it; nothing else should need to.
+   */
+  orphanGraceMs?: number;
 }
 
 /**
@@ -305,9 +316,15 @@ function afterCommand(args: string[]): void {
   // process exit. Held by a long-lived server, the lock file names the server's
   // own live PID — so it never reads as stale — and every later ix_map coalesces
   // and returns an empty success while the graph goes unrefreshed. It also
-  // blocks the user's own editor-hook `ix map` for the same 20 minutes. Skipped
-  // while an orphan is in flight: a map still running is entitled to its lock.
-  if (liveOrphans.size === 0) releaseHeldLocks();
+  // blocks the user's own editor-hook `ix map` for the same 20 minutes.
+  //
+  // Only when nothing at all is running: releaseHeldLocks drops every lock this
+  // process holds, not just the finishing command's. This is also reached from
+  // an orphan settling, which can happen part-way through an unrelated `ix map`
+  // — and deleting that map's lock mid-run reopens exactly the window
+  // single-flight exists to close. The command holding a lock always reaches
+  // its own finally, where activeRun is already null, so nothing is stranded.
+  if (activeRun === null && liveOrphans.size === 0) releaseHeldLocks();
 }
 
 /**
@@ -339,6 +356,7 @@ async function executeInProcess(
   version: string,
   createProgram: (version: string) => Command | Promise<Command>,
   maxBytes: number,
+  orphanGraceMs?: number,
 ): Promise<IxRunResult> {
   const program = throwOnUsageError(await createProgram(version));
   const run: ActiveRun = {
@@ -397,10 +415,23 @@ async function executeInProcess(
       afterCommand(args);
     } else {
       liveOrphans.add(finished);
-      void finished.then(() => {
-        liveOrphans.delete(finished);
+      const forget = (): void => {
+        // Whichever arrives first wins; the other is a no-op.
+        if (!liveOrphans.delete(finished)) return;
         afterCommand(args);
-      });
+      };
+      void finished.then(forget);
+
+      // A command that never settles at all — a hung fetch, or a rejection that
+      // used to end the process and is now only logged — would otherwise hold
+      // this entry forever. Everything keyed off it fails permanently open:
+      // exit codes stay distrusted, so *every* later failure reports ok, and
+      // locks are never released again. The wait is bounded to as long again as
+      // the command was allowed to run. Past that, an abandoned command has no
+      // exit code worth honouring anyway.
+      const grace = setTimeout(forget, orphanGraceMs ?? Math.max(timeoutMs, DEFAULT_TIMEOUT_MS));
+      grace.unref?.();
+      void finished.then(() => clearTimeout(grace));
     }
   }
 
@@ -434,12 +465,13 @@ export function createInProcessRunner(options: InProcessRunnerOptions = {}): IxR
   const version = options.version ?? "0.0.0";
   const createProgram = options.createProgram ?? buildProgram;
   const maxBytes = options.maxOutputBytes ?? MAX_OUTPUT_BYTES;
+  const orphanGraceMs = options.orphanGraceMs;
 
   let queue: Promise<unknown> = Promise.resolve();
 
   return (args, timeoutMs = DEFAULT_TIMEOUT_MS) => {
     const result = queue.then(() =>
-      executeInProcess(args, timeoutMs, version, createProgram, maxBytes),
+      executeInProcess(args, timeoutMs, version, createProgram, maxBytes, orphanGraceMs),
     );
     // The chain must survive a rejection, or one failed run would strand every
     // later call behind it. executeInProcess resolves rather than throws for

@@ -70,6 +70,20 @@ export interface Launcher {
 }
 
 /**
+ * Characters an argument may contain and still be passed to cmd bare.
+ *
+ * A whitelist rather than a blacklist of whitespace and quotes: `&`, `^`, `|`,
+ * `<` and `>` are all argument-splitting or escaping characters to cmd, and a
+ * launcher path under `C:\Users\R&D\` contains no space, so a
+ * "does it need quoting?" test that asks only about whitespace let it through
+ * bare. Verified against a round-trip echo: `C:\Users\R&D\npm\ix.cmd` arrived
+ * as `C:\Users\R`, with cmd then trying to run `D\npm\ix.cmd` as a second
+ * command, and `C:\a^b\ix.cmd` arrived silently as `C:\ab\ix.cmd` — a wrong
+ * launcher written into every host config and reported as a success.
+ */
+const SAFE_BARE_ARG = /^[A-Za-z0-9_@:.,=+\-\\/]+$/;
+
+/**
  * Quote one argument for a Windows command line.
  *
  * Wrapping in double quotes is what makes a path containing a space — or a
@@ -81,7 +95,7 @@ export interface Launcher {
  * round-trip echo: every cmd encoding mangles such a value.
  */
 export function quoteForCmd(arg: string): string {
-  if (arg !== "" && !/[\s"]/.test(arg)) return arg;
+  if (SAFE_BARE_ARG.test(arg)) return arg;
   let out = '"';
   let slashes = 0;
   for (const ch of arg) {
@@ -119,11 +133,13 @@ async function run(bin: string, args: string[]): Promise<RunResult> {
   const options = { encoding: "utf8" as const, timeout: HOST_CLI_TIMEOUT_MS, windowsHide: true };
   try {
     if (platform() === "win32") {
-      const unencodable = [bin, ...args].find((arg) => arg.includes('"'));
+      // Refused rather than mangled: a half-parsed argument reaches the host as
+      // several arguments and writes a corrupt entry. A double quote flips
+      // cmd's quote tracking mid-argument, and `%` is expanded by cmd before
+      // the quoting has any say — neither survives quoting, so neither is sent.
+      const unencodable = [bin, ...args].find((arg) => arg.includes('"') || arg.includes("%"));
       if (unencodable !== undefined) {
-        // Refused rather than mangled: a half-parsed argument reaches the host
-        // as several arguments and writes a corrupt entry.
-        return { ok: false, stdout: "", stderr: `cannot pass a quoted argument through cmd.exe: ${unencodable}` };
+        return { ok: false, stdout: "", stderr: `cannot pass this argument through cmd.exe: ${unencodable}` };
       }
       const line = [bin, ...args].map(quoteForCmd).join(" ");
       const { stdout, stderr } = await execFileAsync(line, { ...options, shell: true });
@@ -201,15 +217,29 @@ function pathExists(path: string): boolean {
 }
 
 /**
- * The absolute launcher path inside a registration, if it records one.
+ * The launcher a registration records, read from the parsed entry.
  *
- * Unix registers the bare name, so this finds nothing there and staleness never
- * applies. JSON-encoded entries arrive with their backslashes doubled, which is
- * undone here so the path can be checked.
+ * Deliberately structural. Recovering the path by regex from the rendered text
+ * cannot work: a Windows launcher normally sits under a username, and a path
+ * containing a space is indistinguishable from two columns of a listing table.
+ * The first attempt stopped at the space, so `C:\Users\Jane Doe\...\ix.cmd`
+ * matched nothing and a dead launcher went on reading as healthy — the common
+ * case, not the edge one. Worse, allowing a match to start at an interior `/`
+ * made it latch onto a suffix like `/npm/ix.cmd` of a path that was perfectly
+ * fine, report it stale, and silently rewrite a working registration.
  */
-function absoluteLauncherIn(text: string): string | null {
-  const match = /(?:[A-Za-z]:[\\/]|\/)[^"'\s,\]]*[\\/]ix(?:\.\w+)?(?=["'\s,\]]|$)/.exec(text);
-  return match ? match[0].replace(/\\\\/g, "\\") : null;
+function launcherOf(entry: unknown): string | null {
+  if (typeof entry !== "object" || entry === null) return null;
+  const command = (entry as { command?: unknown }).command;
+  if (typeof command === "string") return command;
+  // opencode records `command: ["ix", "mcp"]`.
+  if (Array.isArray(command) && typeof command[0] === "string") return command[0];
+  return null;
+}
+
+/** Absolute paths are the only ones whose disappearance we can check for. */
+function isAbsolutePath(value: string): boolean {
+  return /^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(value);
 }
 
 /**
@@ -238,7 +268,10 @@ const MISSING_ENTRY = /\b(no (mcp )?server|not found|unknown server|does not exi
  * `python3 .../server.py` or `node dist/server.js`, and those must read as
  * `other` so they are reported rather than replaced.
  */
-export function classifyListing(listing: string): Pick<HostStatus, "registration" | "detail"> {
+export function classifyListing(
+  listing: string,
+  launcher: string | null = null,
+): Pick<HostStatus, "registration" | "detail"> {
   const matches = listing
     .split("\n")
     .map((entry) => entry.trim())
@@ -251,7 +284,7 @@ export function classifyListing(listing: string): Pick<HostStatus, "registration
   const candidates = matches.filter((entry) => !LOG_LINE.test(entry));
   const line = candidates.at(-1) ?? matches[0]!;
 
-  return judge(line);
+  return judge(line, launcher);
 }
 
 /**
@@ -262,7 +295,19 @@ export function classifyListing(listing: string): Pick<HostStatus, "registration
  * registration as a stranger's and reports a false conflict on every re-run.
  */
 export function classifyDefinition(blob: string): Pick<HostStatus, "registration" | "detail"> {
-  return judge(blob.replace(/\s+/g, " ").trim());
+  return judge(blob.replace(/\s+/g, " ").trim(), launcherOf(parseEmbeddedObject(blob)));
+}
+
+/** The first JSON object in a blob, for hosts that pretty-print one. */
+function parseEmbeddedObject(blob: string): unknown {
+  const start = blob.indexOf("{");
+  const end = blob.lastIndexOf("}");
+  if (start === -1 || end <= start) return null;
+  try {
+    return JSON.parse(blob.slice(start, end + 1));
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -282,14 +327,18 @@ export function classifyShown(blob: string, ok: boolean): Pick<HostStatus, "regi
   // presence of a definition body is what distinguishes the two.
   const definition = blob.includes(SERVER_NAME) && blob.includes("{");
   if (definition) return classifyDefinition(blob);
-  if (!ok && !MISSING_ENTRY.test(blob)) {
+  // Tied to our own name: "not found" and "no such" turn up in plenty of
+  // unrelated failures (a missing plugin, the host's own loader), and reading
+  // one of those as "the name is free" overwrites the user's server — the very
+  // thing this function exists to prevent.
+  if (!ok && !(MISSING_ENTRY.test(blob) && blob.includes(SERVER_NAME))) {
     return { registration: "unknown", detail: firstLine(blob) };
   }
   return { registration: "none" };
 }
 
 /** Ours iff the entry invokes the `ix` binary with the `mcp` subcommand. */
-function judge(text: string): Pick<HostStatus, "registration" | "detail"> {
+function judge(text: string, launcher: string | null): Pick<HostStatus, "registration" | "detail"> {
   if (!(/(^|[\s"'/\\])ix(\.\w+)?([\s"',\]]|$)/.test(text) && /\bmcp\b/.test(text))) {
     return { registration: "other", detail: truncate(text) };
   }
@@ -298,9 +347,10 @@ function judge(text: string): Pick<HostStatus, "registration" | "detail"> {
   // entry dies whenever the npm prefix moves — an nvm switch, a reinstall
   // elsewhere. Judging that healthy from the command string alone is what made
   // `install` skip the one host it should have repaired, while `doctor` agreed
-  // it was fine and no command anywhere would rewrite it.
-  const launcher = absoluteLauncherIn(text);
-  if (launcher !== null && !pathExists(launcher)) {
+  // it was fine and no command anywhere would rewrite it. Only checked when the
+  // caller could hand us the recorded command itself; guessing it back out of
+  // rendered text is what made the first attempt both miss and misfire.
+  if (launcher !== null && isAbsolutePath(launcher) && !pathExists(launcher)) {
     return { registration: "stale", detail: `${launcher} no longer exists` };
   }
   return { registration: "ours", detail: truncate(text) };
@@ -330,6 +380,13 @@ function cliHost(spec: {
    * double quote cannot be encoded through cmd.
    */
   windowsFallback?: (launcher: { command: string; args: string[] }) => void;
+  /**
+   * Read path matching {@link windowsFallback}, so the platform that writes a
+   * file also reads it. Without the pair, install writes the file and inspect
+   * asks the CLI, which is how a wrong path or shape would report `+ registered`
+   * and `not registered` forever with nothing to notice it.
+   */
+  windowsInspect?: () => Pick<HostStatus, "registration" | "detail">;
 }): McpHost {
   return {
     id: spec.id,
@@ -337,6 +394,7 @@ function cliHost(spec: {
     bin: spec.bin,
     target: spec.target,
     async inspect() {
+      if (spec.windowsInspect && platform() === "win32") return spec.windowsInspect();
       if (spec.showArgs) {
         const shown = await run(spec.bin, spec.showArgs);
         return classifyShown(`${shown.stdout}\n${shown.stderr}`, shown.ok);
@@ -422,17 +480,21 @@ export function stripJsonComments(raw: string): string {
 }
 
 /** Inspect a host by reading the JSON file its servers live in. */
-function inspectJsonFile(path: string, key: string): Pick<HostStatus, "registration" | "detail"> {
+function inspectJsonFile(path: string, ...keys: string[]): Pick<HostStatus, "registration" | "detail"> {
   const { value, missing } = readJsonFile(path);
   if (missing) return { registration: "none" };
   if (value === null) return { registration: "unknown", detail: `${path} is not valid JSON` };
 
-  const servers = value[key];
+  let servers: unknown = value;
+  for (const key of keys) {
+    if (typeof servers !== "object" || servers === null) return { registration: "none" };
+    servers = (servers as Record<string, unknown>)[key];
+  }
   if (typeof servers !== "object" || servers === null) return { registration: "none" };
 
   const entry = (servers as Record<string, unknown>)[SERVER_NAME];
   if (entry === undefined) return { registration: "none" };
-  return classifyListing(`${SERVER_NAME} ${JSON.stringify(entry)}`);
+  return classifyListing(`${SERVER_NAME} ${JSON.stringify(entry)}`, launcherOf(entry));
 }
 
 function vsCodeUserConfig(): string {
@@ -534,6 +596,7 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       // argument cannot be encoded through cmd (see `run`). Windows therefore
       // writes the documented config shape directly; every other platform keeps
       // going through the CLI so openclaw owns its own format.
+      windowsInspect: () => inspectJsonFile(openclawConfigPath(), "mcp", "servers"),
       windowsFallback: (ix) =>
         writeJson(openclawConfigPath(), (config) => {
           const mcp = (config.mcp ??= {}) as Record<string, unknown>;
