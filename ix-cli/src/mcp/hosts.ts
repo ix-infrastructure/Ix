@@ -82,7 +82,7 @@ export async function isOnPath(bin: string): Promise<boolean> {
  * that fix instead of handing the same problem to seven hosts. Falls back to
  * the bare name, which is no worse than not trying.
  */
-export async function resolveLauncher(): Promise<{ command: string; args: string[] }> {
+async function resolveLauncher(): Promise<{ command: string; args: string[] }> {
   if (platform() !== "win32") return { command: "ix", args: ["mcp"] };
 
   const found = await run("where", ["ix"]);
@@ -277,11 +277,11 @@ function vsCodeUserConfig(): string {
   return join(home, ".config", "Code", "User", "mcp.json");
 }
 
-export function cursorConfigPath(): string {
+function cursorConfigPath(): string {
   return join(homedir(), ".cursor", "mcp.json");
 }
 
-export function opencodeConfigPath(): string {
+function opencodeConfigPath(): string {
   return join(homedir(), ".config", "opencode", "opencode.json");
 }
 

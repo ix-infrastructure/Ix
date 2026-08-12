@@ -11,7 +11,7 @@ import {
   type IxRunner,
 } from "./runner.js";
 
-export { runCurrentIx, type IxRunner, type IxRunResult } from "./runner.js";
+export type { IxRunner } from "./runner.js";
 
 /**
  * Tools every install can run.

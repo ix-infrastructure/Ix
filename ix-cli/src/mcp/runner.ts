@@ -22,7 +22,7 @@ export const DEFAULT_TIMEOUT_MS = 30_000;
  * unbounded `ix text` on a large repo would otherwise grow the long-lived
  * server's heap instead of a short-lived child's.
  */
-export const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 
 export interface IxRunResult {
   ok: boolean;
