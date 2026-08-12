@@ -194,7 +194,8 @@ export async function runInstall(options: InstallOptions = {}): Promise<InstallR
     }
 
     try {
-      await host.register();
+      // Anything other than a free name means we are replacing something.
+      await host.register(registration !== "none");
       reports.push({ ...base, installed: true, registration, outcome: "registered" });
     } catch (error) {
       reports.push({

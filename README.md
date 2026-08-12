@@ -82,9 +82,11 @@ command, since `cursor` and `code` are opt-in shims a GUI install may not have.
 **It never overwrites.** If the name `ix-memory` already belongs to a different
 server — an earlier Ix plugin, say — that client is reported and left exactly as
 it was. Pass `--force` to replace it, or `--host <id>` to limit the run; an
-unrecognised id is an error rather than a silent no-op. `doctor` additionally
-reports a registration of ours whose recorded launcher path has since
-disappeared, which `install` then repairs without `--force`.
+unrecognised id is an error rather than a silent no-op. For the clients written
+directly, `doctor` also reports a registration of ours whose recorded launcher
+path has since disappeared, and `install` repairs it without `--force`; the
+clients written through their own CLI print a table rather than their stored
+command, so a launcher that has moved there needs `ix mcp install --force`.
 
 To register a single client by hand instead, point it at `ix` with the argument
 `mcp`. For Codex:

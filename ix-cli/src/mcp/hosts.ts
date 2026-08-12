@@ -51,8 +51,14 @@ export interface McpHost {
   detectInstalled?(): Promise<boolean>;
   /** Read-only look at what holds {@link SERVER_NAME} today. */
   inspect(): Promise<Pick<HostStatus, "registration" | "detail">>;
-  /** Register `ix mcp`. Only called once inspect reports it is safe. */
-  register(): Promise<void>;
+  /**
+   * Register `ix mcp`. Only called once inspect reports it is safe.
+   *
+   * `replacing` says the name is currently held — by a stale entry of ours, or
+   * by a different server the caller has chosen to overwrite with `--force`.
+   * Hosts whose `add` refuses an occupied name need to clear it first.
+   */
+  register(replacing: boolean): Promise<void>;
   /** Where the registration lands, shown in the report. */
   target: string;
 }
@@ -249,29 +255,6 @@ function isAbsolutePath(value: string): boolean {
   return /^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(value);
 }
 
-/**
- * Whether a rendered listing row still names the launcher that works now.
- *
- * Hosts that answer with a table rather than JSON leave nothing to parse, and
- * those are exactly the ones recording an absolute `ix.cmd` on Windows. Four
- * attempts at recovering that path out of the row each failed on a different
- * shape: stopping at the first space missed `C:\Users\Jane Doe\...`; scanning
- * forward swallowed the `cmd /c` in front of it; trimming a row's punctuation
- * off every token turned `C:\Program Files (x86)\...` into a path that does not
- * exist. Every one of them called a *working* registration stale, which
- * re-registers with no `--force`.
- *
- * So this stops parsing. The only thing staleness has to establish is whether
- * the row records the launcher we would write today — and a row that does
- * contains that string verbatim, whatever surrounds it. No tokens, no
- * delimiters, no reconstruction, and therefore no path shape left to get wrong.
- * Compared case-insensitively with separators normalised, since a host may
- * render either and Windows treats both alike.
- */
-function recordsLauncher(text: string, expected: string): boolean {
-  const normalise = (value: string): string => value.replaceAll("\\", "/").toLowerCase();
-  return normalise(text).includes(normalise(expected));
-}
 
 /**
  * Lines that mention a server name only because something went wrong.
@@ -302,7 +285,6 @@ const MISSING_ENTRY = /\b(no (mcp )?server|not found|unknown server|does not exi
 export function classifyListing(
   listing: string,
   recorded: string | null = null,
-  expected: string | null = null,
 ): Pick<HostStatus, "registration" | "detail"> {
   const matches = listing
     .split("\n")
@@ -316,7 +298,7 @@ export function classifyListing(
   const candidates = matches.filter((entry) => !LOG_LINE.test(entry));
   const line = candidates.at(-1) ?? matches[0]!;
 
-  return judge(line, recorded, expected);
+  return judge(line, recorded);
 }
 
 /**
@@ -327,7 +309,7 @@ export function classifyListing(
  * registration as a stranger's and reports a false conflict on every re-run.
  */
 export function classifyDefinition(blob: string): Pick<HostStatus, "registration" | "detail"> {
-  return judge(blob.replace(/\s+/g, " ").trim(), launcherOf(parseEmbeddedObject(blob)), null);
+  return judge(blob.replace(/\s+/g, " ").trim(), launcherOf(parseEmbeddedObject(blob)));
 }
 
 /** The first JSON object in a blob, for hosts that pretty-print one. */
@@ -370,11 +352,7 @@ export function classifyShown(blob: string, ok: boolean): Pick<HostStatus, "regi
 }
 
 /** Ours iff the entry invokes the `ix` binary with the `mcp` subcommand. */
-function judge(
-  text: string,
-  recorded: string | null,
-  expected: string | null,
-): Pick<HostStatus, "registration" | "detail"> {
+function judge(text: string, recorded: string | null): Pick<HostStatus, "registration" | "detail"> {
   if (!(/(^|[\s"'/\\])ix(\.\w+)?([\s"',\]]|$)/.test(text) && /\bmcp\b/.test(text))) {
     return { registration: "other", detail: truncate(text) };
   }
@@ -391,13 +369,19 @@ function judge(
     return { registration: "stale", detail: `${recorded} no longer exists` };
   }
 
-  // Without one, the question becomes whether the row still names the launcher
-  // we would write today. Only asked when that is an absolute path: on Unix it
-  // is the bare name `ix`, which survives the install moving and which every
-  // row of ours contains anyway.
-  if (recorded === null && expected !== null && isAbsolutePath(expected) && !recordsLauncher(text, expected)) {
-    return { registration: "stale", detail: `does not point at ${expected}` };
-  }
+  // Hosts that answer with a rendered table give us no recorded command, and
+  // staleness is not attempted for them. Five attempts at establishing it from
+  // the row alone each produced the same class of failure — a *working*
+  // registration reported stale, which re-registers with no `--force`. Parsing
+  // the path back out broke on a different shape every time; comparing the row
+  // against the launcher we would write today instead broke when `where`'s
+  // console output was decoded as UTF-8 and a non-ASCII npm prefix came back
+  // mangled, so a hand-repaired config was overwritten with an unstartable
+  // path. The repair could not land on Claude Code anyway (see `register`).
+  //
+  // So this reports `ours`, and a moved npm prefix on those hosts stays a
+  // manual `ix mcp install --force`. That is a real gap, and a smaller one than
+  // silently rewriting configs that were fine.
   return { registration: "ours", detail: truncate(text) };
 }
 
@@ -425,6 +409,15 @@ function cliHost(spec: {
    * double quote cannot be encoded through cmd.
    */
   windowsFallback?: (launcher: { command: string; args: string[] }) => void;
+  /**
+   * How to clear an existing entry, for hosts whose `add` will not overwrite.
+   *
+   * `claude mcp add` fails with "already exists in user config" and offers no
+   * force flag, so without this `--force` was inert for Claude Code: install
+   * reported `failed`, quoting a message naming nothing the user could act on,
+   * and left the entry it was asked to replace exactly where it was.
+   */
+  removeArgs?: string[];
 }): McpHost {
   return {
     id: spec.id,
@@ -437,16 +430,18 @@ function cliHost(spec: {
         return classifyShown(`${shown.stdout}\n${shown.stderr}`, shown.ok);
       }
 
-      const expected = (await resolveLauncher()).command;
       const result = await run(spec.bin, spec.listArgs);
       // A host that cannot answer is treated as occupied rather than empty:
       // guessing "none" here is the one wrong guess that overwrites something.
       if (!result.ok && !result.stdout.includes(SERVER_NAME)) {
         return { registration: "unknown", detail: firstLine(result.stderr) };
       }
-      return classifyListing(`${result.stdout}\n${result.stderr}`, null, expected);
+      return classifyListing(`${result.stdout}\n${result.stderr}`);
     },
-    async register() {
+    async register(replacing: boolean) {
+      // Best-effort: a host whose `add` overwrites happily (codex does) needs
+      // no removal, and a failed removal just leaves `add` to report why.
+      if (replacing && spec.removeArgs) await run(spec.bin, spec.removeArgs);
       const launcher = await resolveLauncher();
       if (spec.windowsFallback && platform() === "win32") {
         spec.windowsFallback(launcher);
@@ -532,7 +527,7 @@ function inspectJsonFile(path: string, ...keys: string[]): Pick<HostStatus, "reg
 
   const entry = (servers as Record<string, unknown>)[SERVER_NAME];
   if (entry === undefined) return { registration: "none" };
-  return classifyListing(`${SERVER_NAME} ${JSON.stringify(entry)}`, launcherOf(entry), null);
+  return classifyListing(`${SERVER_NAME} ${JSON.stringify(entry)}`, launcherOf(entry));
 }
 
 function vsCodeUserConfig(): string {
@@ -587,6 +582,19 @@ export const ADD_ARGS = {
 } satisfies Record<string, (ix: Launcher) => string[]>;
 
 /**
+ * How each CLI-backed host is told to drop an existing entry.
+ *
+ * Exported so the argv stays pinned: the wiring that calls it is only
+ * observable against a real host binary, which CI has none of.
+ */
+export const REMOVE_ARGS = {
+  claude: ["mcp", "remove", "--scope", "user", SERVER_NAME],
+  codex: ["mcp", "remove", SERVER_NAME],
+  gemini: ["mcp", "remove", SERVER_NAME],
+  openclaw: ["mcp", "unset", SERVER_NAME],
+} satisfies Record<string, string[]>;
+
+/**
  * The hosts `ix mcp install` knows about.
  *
  * Writes go through each host's own CLI wherever one exists, so the host owns
@@ -603,6 +611,7 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       target: "user scope",
       listArgs: ["mcp", "list"],
       addArgs: ADD_ARGS.claude,
+      removeArgs: REMOVE_ARGS.claude,
     }),
     cliHost({
       id: "codex",
@@ -611,6 +620,7 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       target: "~/.codex/config.toml",
       listArgs: ["mcp", "list"],
       addArgs: ADD_ARGS.codex,
+      removeArgs: REMOVE_ARGS.codex,
     }),
     cliHost({
       id: "gemini",
@@ -619,6 +629,7 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       target: "~/.gemini/settings.json",
       listArgs: ["mcp", "list"],
       addArgs: ADD_ARGS.gemini,
+      removeArgs: REMOVE_ARGS.gemini,
     }),
     cliHost({
       id: "openclaw",
@@ -629,6 +640,7 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       // `openclaw mcp list` prints names only ("- ix-memory"), so the command
       // behind the name is invisible there.
       showArgs: ["mcp", "show", SERVER_NAME],
+      removeArgs: REMOVE_ARGS.openclaw,
       addArgs: ADD_ARGS.openclaw,
       // `openclaw mcp set` takes its definition as a JSON argument, and a JSON
       // argument cannot be encoded through cmd (see `run`). Windows therefore
