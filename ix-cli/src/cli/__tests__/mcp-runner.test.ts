@@ -77,13 +77,15 @@ function createTestProgram(): Command {
   program
     .command("map")
     .option("--hold <ms>", "keep working after taking the lock", "0")
-    .action(async (opts: { hold: string }) => {
+    .option("--hang", "take the lock and never finish")
+    .action(async (opts: { hold: string; hang?: boolean }) => {
       const workspace = process.env.IX_TEST_WORKSPACE ?? "workspace";
       const lock = acquireMapLock(workspace, "ix map test");
       if (!lock) {
         console.log("coalesced");
         return;
       }
+      if (opts.hang) await new Promise(() => {});
       await new Promise((resolve) => setTimeout(resolve, Number(opts.hold)));
       // Whether the lock this command took is still its own by the time it
       // finishes — anything releasing it mid-run reopens the window.
@@ -130,9 +132,20 @@ async function withLockDir(body: () => Promise<void>): Promise<void> {
 
 const originalSubprocessFlag = process.env.IX_MCP_SUBPROCESS;
 
-afterEach(() => {
+/** Longer than the slowest command any test here abandons. */
+const DRAIN_MS = 500;
+
+afterEach(async () => {
   if (originalSubprocessFlag === undefined) delete process.env.IX_MCP_SUBPROCESS;
   else process.env.IX_MCP_SUBPROCESS = originalSubprocessFlag;
+
+  // Several tests deliberately abandon a command at its timeout, and an
+  // abandoned command outlives the test that started it. The runner's state is
+  // module-level, so while one is in flight every later test sees exit codes
+  // distrusted and a lock held — which is correct behaviour, and silently
+  // changes what an unrelated assertion observes. Draining here rather than at
+  // the end of each body means a failing assertion cannot skip it.
+  await new Promise((resolve) => setTimeout(resolve, DRAIN_MS));
 });
 
 describe("in-process ix runner", () => {
@@ -297,21 +310,38 @@ describe("in-process ix runner", () => {
       });
 
       // Abandoned at 40ms, grace fires at ~100ms, still working until ~400ms.
-      // The grace drops the distrust; the command is still entitled to its lock
-      // until it actually finishes, and releasing it there hands a second map
-      // the workspace out from under this one.
+      // The grace drops the exit-code distrust; the lock is a separate lifetime
+      // and stays with the command that is still using it.
       expect((await run(["map", "--hold", "400"], 40)).ok).toBe(false);
       await new Promise((resolve) => setTimeout(resolve, 200));
-      expect((await run(["map"], 5_000)).stdout).toBe("coalesced\n");
 
-      // Drained before returning: an abandoned command outlives the test that
-      // started it, and its settle-path afterCommand would otherwise land in
-      // the middle of whichever test is running by then.
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      // An unrelated command completing must not take the running map's lock
+      // with it — releasing everything held is what did, one call later than
+      // the grace itself.
+      expect((await run(["say", "unrelated"], 5_000)).stdout).toBe("out:unrelated\n");
+      expect((await run(["map"], 5_000)).stdout).toBe("coalesced\n");
     });
   });
 
-  it("still resets the read scope when a command that overran its grace finishes", async () => {
+  it("releases the lock of a command that overran its grace once it finishes", async () => {
+    await withLockDir(async () => {
+      const run = createInProcessRunner({
+        version: "test-version",
+        createProgram: createTestProgram,
+        orphanGraceMs: 40,
+      });
+
+      // The other direction: holding every lock back to protect a running
+      // command stranded the ones whose command had genuinely finished, and the
+      // next ix_map coalesced forever. Ownership is what lets both hold.
+      await run(["map", "--hold", "250"], 30);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+
+      expect((await run(["map"], 5_000)).stdout).toBe("mapped\n");
+    });
+  });
+
+  it("invalidates the read scope for a command that never settles at all", async () => {
     await withLockDir(async () => {
       const run = createInProcessRunner({
         version: "test-version",
@@ -320,15 +350,13 @@ describe("in-process ix runner", () => {
       });
       resetReadScope.mockClear();
 
-      // Abandoned at 30ms, grace at ~70ms, ingest completes at ~300ms. Resetting
-      // at the grace instead would fire mid-ingest and never fire again, leaving
-      // the pre-map scope pinned with nothing left to invalidate it.
-      await run(["map", "--hold", "300"], 30);
-      await new Promise((resolve) => setTimeout(resolve, 120));
-      expect(resetReadScope).not.toHaveBeenCalled();
+      // A hung `ix map` has no settle to hang the invalidation off, so the
+      // grace has to carry it — otherwise the pre-map scope stays pinned for
+      // the life of the server with nothing left to clear it.
+      await run(["map", "--hang"], 30);
+      await new Promise((resolve) => setTimeout(resolve, 150));
 
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      expect(resetReadScope).toHaveBeenCalledTimes(1);
+      expect(resetReadScope).toHaveBeenCalled();
     });
   });
 

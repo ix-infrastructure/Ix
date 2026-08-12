@@ -127,8 +127,32 @@ export function acquireMapLock(workspaceRoot: string, label: string): LockHandle
 }
 
 // Locks this process still holds. `ix mcp` runs commands in-process, so "the
-// process exits" is no longer the end of a command — see releaseHeldLocks.
-const held = new Set<() => void>();
+// process exits" is no longer the end of a command — see releaseLocksOwnedBy.
+/**
+ * Whatever the caller uses to identify the command taking a lock.
+ *
+ * Opaque here: single-flight only ever compares it by identity.
+ */
+export type LockOwner = unknown;
+
+let resolveOwner: () => LockOwner = () => null;
+
+/**
+ * Teach single-flight how to tell which command is acquiring a lock.
+ *
+ * "The process holds this lock" stopped meaning "this command holds it" when
+ * `ix mcp` began running many commands in one process. Without an owner the
+ * only available release is "drop everything", which either takes a still-
+ * running command's lock away or, if held back to avoid that, never releases
+ * the finished command's at all. The MCP runner installs a resolver backed by
+ * its async-context store; the plain CLI leaves this unset and keeps releasing
+ * on process exit, exactly as before.
+ */
+export function setLockOwnerResolver(resolve: () => LockOwner): void {
+  resolveOwner = resolve;
+}
+
+const held = new Map<() => void, LockOwner>();
 
 function makeHandle(path: string): LockHandle {
   let released = false;
@@ -147,7 +171,7 @@ function makeHandle(path: string): LockHandle {
   const onSigint = (): void => { release(); process.exit(130); };
   const onSigterm = (): void => { release(); process.exit(143); };
 
-  held.add(release);
+  held.set(release, resolveOwner());
   // Release on normal exit and on the common termination signals so a killed
   // map (hook timeout, Ctrl-C) does not leave a lock that blocks the next run
   // until it ages out.
@@ -158,7 +182,7 @@ function makeHandle(path: string): LockHandle {
 }
 
 /**
- * Release every lock this process still holds.
+ * Release the locks one command took, and only those.
  *
  * `ix map` takes its lock and leaves it to process exit, which was the end of
  * the command until `ix mcp` began running commands in-process. There, the
@@ -166,9 +190,13 @@ function makeHandle(path: string): LockHandle {
  * stale: the first ix_map works and every later one coalesces into an empty
  * success while the graph is never refreshed. The MCP runner calls this when a
  * command finishes, restoring the boundary the process used to provide.
+ *
+ * Scoped by owner rather than releasing everything, so a command that outlived
+ * its timeout keeps the lock it is still using while a *different* command that
+ * has genuinely finished still gives its own up.
  */
-export function releaseHeldLocks(): void {
-  for (const release of [...held]) release();
+export function releaseLocksOwnedBy(owner: LockOwner): void {
+  for (const [release, heldBy] of [...held]) if (heldBy === owner) release();
 }
 
 // ── Test-only surface ──────────────────────────────────────────────────────

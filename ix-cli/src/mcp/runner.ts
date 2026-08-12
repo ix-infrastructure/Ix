@@ -11,7 +11,7 @@ import { Command, CommanderError } from "commander";
 import { registerOssCommands, registerProStubs } from "../cli/register/oss.js";
 import { tryLoadProCommands } from "../cli/register/pro-loader.js";
 import { resetReadScope } from "../cli/resolve.js";
-import { releaseHeldLocks } from "../cli/single-flight.js";
+import { releaseLocksOwnedBy, setLockOwnerResolver } from "../cli/single-flight.js";
 
 const execFileAsync = promisify(execFile);
 const CLI_ENTRYPOINT = fileURLToPath(new URL("../cli/main.js", import.meta.url));
@@ -225,6 +225,10 @@ function installCapture(options: { redirectIdleStdout?: boolean } = {}): void {
     if (!resolveRun()) return pristineExit(code);
     throw new ProcessExitSignal(code ?? 0);
   }) as typeof process.exit;
+
+  // Single-flight locks are taken deep inside a command, so the command has to
+  // be identifiable from there. The same attribution the output capture uses.
+  setLockOwnerResolver(resolveRun);
 }
 
 /**
@@ -309,22 +313,27 @@ export interface InProcessRunnerOptions {
  * process. In a server that never exits they are leaks, and each of them makes
  * the next tool call answer from something stale rather than fail loudly.
  */
-function afterCommand(args: string[]): void {
+function invalidateAfter(args: string[]): void {
   if (SCOPE_CHANGING_COMMANDS.has(args[0] ?? "")) resetReadScope();
+}
 
-  // `ix map` takes a single-flight lock it never releases itself, relying on
-  // process exit. Held by a long-lived server, the lock file names the server's
-  // own live PID — so it never reads as stale — and every later ix_map coalesces
-  // and returns an empty success while the graph goes unrefreshed. It also
-  // blocks the user's own editor-hook `ix map` for the same 20 minutes.
-  //
-  // Only when nothing at all is running: releaseHeldLocks drops every lock this
-  // process holds, not just the finishing command's. This is also reached from
-  // an orphan settling, which can happen part-way through an unrelated `ix map`
-  // — and deleting that map's lock mid-run reopens exactly the window
-  // single-flight exists to close. The command holding a lock always reaches
-  // its own finally, where activeRun is already null, so nothing is stranded.
-  if (activeRun === null && liveOrphans.size === 0) releaseHeldLocks();
+/**
+ * Give up the single-flight locks this command took.
+ *
+ * `ix map` takes its lock and never releases it, relying on process exit. Held
+ * by a long-lived server the lock names the server's own live PID, so it never
+ * reads as stale: every later ix_map coalesces into an empty success while the
+ * graph goes unrefreshed, and the user's own editor-hook `ix map` is blocked
+ * for the same 20 minutes.
+ *
+ * Scoped to this run, which is the whole point. Releasing everything held was
+ * wrong in both directions — it took the lock of a map still running, and
+ * holding it back to avoid that then stranded the lock of a map that had
+ * finished. Ownership makes the question local: this command is over, so its
+ * own locks go, and nobody else's are touched.
+ */
+function releaseLocksOf(run: ActiveRun): void {
+  releaseLocksOwnedBy(run);
 }
 
 /**
@@ -412,7 +421,8 @@ async function executeInProcess(
     activeRun = null;
 
     if (commandSettled) {
-      afterCommand(args);
+      invalidateAfter(args);
+      releaseLocksOf(run);
     } else {
       liveOrphans.add(finished);
 
@@ -429,20 +439,25 @@ async function executeInProcess(
       // form. Bounded-open beats permanently-open, so the trade stands — but it
       // is a trade, not a free win.
       //
-      // Membership is all the grace drops. It must not run {@link afterCommand}:
-      // the command is by definition *still running* there, so releasing its
-      // single-flight lock would hand a second `ix map` the workspace out from
-      // under it, and resetting the read scope mid-ingest would leave the stale
-      // scope pinned with nothing left to invalidate it.
-      const grace = setTimeout(() => liveOrphans.delete(finished), orphanGraceMs ?? Math.max(timeoutMs, DEFAULT_TIMEOUT_MS));
+      // The grace drops the distrust and invalidates, and nothing else. It must
+      // not release the lock: the command is by definition *still running*
+      // there, and its lock is still doing its job. Scope invalidation is
+      // idempotent, so running it here as well as on settle costs nothing and
+      // covers the command that never settles at all — which would otherwise
+      // leave the pre-map scope pinned with nothing left to invalidate it.
+      const grace = setTimeout(() => {
+        liveOrphans.delete(finished);
+        invalidateAfter(args);
+      }, orphanGraceMs ?? Math.max(timeoutMs, DEFAULT_TIMEOUT_MS));
       grace.unref?.();
 
       void finished.then(() => {
         liveOrphans.delete(finished);
         clearTimeout(grace);
-        // Runs on settle whether or not the grace already fired, so a command
-        // that overran it still gets its locks released and its scope reset.
-        afterCommand(args);
+        // On settle the command really is over, however long it overran, so its
+        // locks go now.
+        invalidateAfter(args);
+        releaseLocksOf(run);
       });
     }
   }

@@ -404,6 +404,26 @@ describe("registration classification", () => {
     expect(classifyListing(`ix-memory  ${rendered}  mcp  -  enabled`).registration).toBe("ours");
   });
 
+  it.each([
+    ["a cmd wrapper", (p: string) => `ix-memory: cmd /c ${p} mcp - Connected`],
+    ["a flag before the path", (p: string) => `ix-memory: wrapper /q ${p} mcp`],
+    ["a path earlier in the row", (p: string) => `ix-memory (from /home/j/.gemini/settings.json): ${p} mcp`],
+    ["quotes", (p: string) => `ix-memory: "${p}" mcp`],
+  ])("does not mistake %s for the launcher", (_case, render) => {
+    // Reading the row left-to-right, whatever bound the match had was applied
+    // from the wrong end: it started at the first absolute-looking token and
+    // swallowed everything up to the launcher, so `cmd /c C:\...\ix.cmd` — the
+    // documented Windows wrapper form — yielded `/c C:\...\ix.cmd`, stat'd
+    // nothing, and reported a live launcher dead. `stale` re-registers with no
+    // --force, so this silently rewrites a working config.
+    const dir = join(tempDir(), "Program Files", "npm");
+    mkdirSync(dir, { recursive: true });
+    const launcher = join(dir, "ix.cmd");
+    writeFileSync(launcher, "@echo off");
+
+    expect(classifyListing(render(launcher)).registration).toBe("ours");
+  });
+
   // The three hosts that answer with a rendered table rather than JSON, so
   // there is no entry to parse — and the three that record an absolute
   // `ix.cmd` on Windows, which is where staleness matters at all. Reading the

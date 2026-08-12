@@ -259,8 +259,35 @@ function isAbsolutePath(value: string): boolean {
  * body plus the trailing `ix` anchor is what lets both hold at once.
  */
 function launcherInText(text: string): string | null {
-  const match = /(?:^|[\s"'])((?:[A-Za-z]:[\\/]|\/)[^"']*?[\\/]ix(?:\.\w+)?)(?=[\s"',\]]|$)/.exec(text);
-  return match?.[1] ?? null;
+  const tokens = text.split(/\s+/).filter(Boolean).map(trimDelimiters);
+
+  // Anchor on the `ix` end and walk backwards. Scanning forward is what sank
+  // both previous attempts: whatever bound the match had, it was applied from
+  // the left, so it either stopped at the first space (missing the common
+  // `C:\Users\Jane Doe\...`) or swallowed everything from an earlier
+  // absolute-looking token — `cmd /c C:\...\ix.cmd`, the documented Windows
+  // wrapper form, yielded `/c C:\...\ix.cmd` and reported a live launcher dead.
+  let end = -1;
+  for (let i = tokens.length - 1; i >= 0; i -= 1) {
+    if (/[\\/]ix(?:\.\w+)?$/.test(tokens[i]!)) {
+      end = i;
+      break;
+    }
+  }
+  if (end === -1) return null;
+
+  // The nearest absolute-path start at or before it. Nearest, not earliest:
+  // a path only ever extends leftwards to where it begins, and stopping at the
+  // first one found going back is what keeps a preceding flag out of the match.
+  for (let start = end; start >= 0; start -= 1) {
+    if (isAbsolutePath(tokens[start]!)) return tokens.slice(start, end + 1).join(" ");
+  }
+  return null;
+}
+
+/** Strip the punctuation a listing wraps a value in, without touching the path. */
+function trimDelimiters(token: string): string {
+  return token.replace(/^["'([]+/, "").replace(/["'),\]:]+$/, "");
 }
 
 /**
