@@ -169,7 +169,14 @@ export async function isOnPath(bin: string): Promise<boolean> {
  * that fix instead of handing the same problem to seven hosts. Falls back to
  * the bare name, which is no worse than not trying.
  */
-async function resolveLauncher(): Promise<{ command: string; args: string[] }> {
+let launcherProbe: Promise<Launcher> | undefined;
+
+/** Memoised: `doctor` inspects every host, and each would re-run `where ix`. */
+function resolveLauncher(): Promise<Launcher> {
+  return (launcherProbe ??= probeLauncher());
+}
+
+async function probeLauncher(): Promise<Launcher> {
   if (platform() !== "win32") return { command: "ix", args: ["mcp"] };
 
   const found = await run("where", ["ix"]);
@@ -243,51 +250,27 @@ function isAbsolutePath(value: string): boolean {
 }
 
 /**
- * The launcher a rendered listing row records, when there is no parsed entry.
+ * Whether a rendered listing row still names the launcher that works now.
  *
- * Claude Code, Codex and Gemini answer with a table, not JSON, so `launcherOf`
- * has nothing to read — and those are exactly the hosts that record an absolute
- * `ix.cmd` on Windows. Dropping to no launcher at all for them silently
- * un-fixed staleness where it mattered most.
+ * Hosts that answer with a table rather than JSON leave nothing to parse, and
+ * those are exactly the ones recording an absolute `ix.cmd` on Windows. Four
+ * attempts at recovering that path out of the row each failed on a different
+ * shape: stopping at the first space missed `C:\Users\Jane Doe\...`; scanning
+ * forward swallowed the `cmd /c` in front of it; trimming a row's punctuation
+ * off every token turned `C:\Program Files (x86)\...` into a path that does not
+ * exist. Every one of them called a *working* registration stale, which
+ * re-registers with no `--force`.
  *
- * Two properties earn their keep here. The match must start at a token boundary:
- * letting it begin at an interior `/` made it latch onto the `/npm/ix.cmd`
- * *suffix* of a live path, stat the wrong file and report a working
- * registration stale — a rewrite with no `--force`. And the body must tolerate
- * spaces, because a Windows launcher normally sits under a username; stopping at
- * the first space missed `C:\Users\Jane Doe\...`, the common case. The lazy
- * body plus the trailing `ix` anchor is what lets both hold at once.
+ * So this stops parsing. The only thing staleness has to establish is whether
+ * the row records the launcher we would write today — and a row that does
+ * contains that string verbatim, whatever surrounds it. No tokens, no
+ * delimiters, no reconstruction, and therefore no path shape left to get wrong.
+ * Compared case-insensitively with separators normalised, since a host may
+ * render either and Windows treats both alike.
  */
-function launcherInText(text: string): string | null {
-  const tokens = text.split(/\s+/).filter(Boolean).map(trimDelimiters);
-
-  // Anchor on the `ix` end and walk backwards. Scanning forward is what sank
-  // both previous attempts: whatever bound the match had, it was applied from
-  // the left, so it either stopped at the first space (missing the common
-  // `C:\Users\Jane Doe\...`) or swallowed everything from an earlier
-  // absolute-looking token — `cmd /c C:\...\ix.cmd`, the documented Windows
-  // wrapper form, yielded `/c C:\...\ix.cmd` and reported a live launcher dead.
-  let end = -1;
-  for (let i = tokens.length - 1; i >= 0; i -= 1) {
-    if (/[\\/]ix(?:\.\w+)?$/.test(tokens[i]!)) {
-      end = i;
-      break;
-    }
-  }
-  if (end === -1) return null;
-
-  // The nearest absolute-path start at or before it. Nearest, not earliest:
-  // a path only ever extends leftwards to where it begins, and stopping at the
-  // first one found going back is what keeps a preceding flag out of the match.
-  for (let start = end; start >= 0; start -= 1) {
-    if (isAbsolutePath(tokens[start]!)) return tokens.slice(start, end + 1).join(" ");
-  }
-  return null;
-}
-
-/** Strip the punctuation a listing wraps a value in, without touching the path. */
-function trimDelimiters(token: string): string {
-  return token.replace(/^["'([]+/, "").replace(/["'),\]:]+$/, "");
+function recordsLauncher(text: string, expected: string): boolean {
+  const normalise = (value: string): string => value.replaceAll("\\", "/").toLowerCase();
+  return normalise(text).includes(normalise(expected));
 }
 
 /**
@@ -318,7 +301,8 @@ const MISSING_ENTRY = /\b(no (mcp )?server|not found|unknown server|does not exi
  */
 export function classifyListing(
   listing: string,
-  launcher: string | null = null,
+  recorded: string | null = null,
+  expected: string | null = null,
 ): Pick<HostStatus, "registration" | "detail"> {
   const matches = listing
     .split("\n")
@@ -332,7 +316,7 @@ export function classifyListing(
   const candidates = matches.filter((entry) => !LOG_LINE.test(entry));
   const line = candidates.at(-1) ?? matches[0]!;
 
-  return judge(line, launcher);
+  return judge(line, recorded, expected);
 }
 
 /**
@@ -343,7 +327,7 @@ export function classifyListing(
  * registration as a stranger's and reports a false conflict on every re-run.
  */
 export function classifyDefinition(blob: string): Pick<HostStatus, "registration" | "detail"> {
-  return judge(blob.replace(/\s+/g, " ").trim(), launcherOf(parseEmbeddedObject(blob)));
+  return judge(blob.replace(/\s+/g, " ").trim(), launcherOf(parseEmbeddedObject(blob)), null);
 }
 
 /** The first JSON object in a blob, for hosts that pretty-print one. */
@@ -386,7 +370,11 @@ export function classifyShown(blob: string, ok: boolean): Pick<HostStatus, "regi
 }
 
 /** Ours iff the entry invokes the `ix` binary with the `mcp` subcommand. */
-function judge(text: string, launcher: string | null): Pick<HostStatus, "registration" | "detail"> {
+function judge(
+  text: string,
+  recorded: string | null,
+  expected: string | null,
+): Pick<HostStatus, "registration" | "detail"> {
   if (!(/(^|[\s"'/\\])ix(\.\w+)?([\s"',\]]|$)/.test(text) && /\bmcp\b/.test(text))) {
     return { registration: "other", detail: truncate(text) };
   }
@@ -396,14 +384,19 @@ function judge(text: string, launcher: string | null): Pick<HostStatus, "registr
   // elsewhere. Judging that healthy from the command string alone is what made
   // `install` skip the one host it should have repaired, while `doctor` agreed
   // it was fine and no command anywhere would rewrite it.
-  //
-  // The parsed entry is preferred, since a recorded command needs no guessing
-  // at all. Hosts that answer with a rendered table have no entry to parse, so
-  // the row is read instead — see {@link launcherInText} for what that has to
-  // get right.
-  const recorded = launcher ?? launcherInText(text);
+
+  // A parsed entry gives the recorded command exactly, so it can be checked for
+  // what it is: a path that has since disappeared.
   if (recorded !== null && isAbsolutePath(recorded) && !pathExists(recorded)) {
     return { registration: "stale", detail: `${recorded} no longer exists` };
+  }
+
+  // Without one, the question becomes whether the row still names the launcher
+  // we would write today. Only asked when that is an absolute path: on Unix it
+  // is the bare name `ix`, which survives the install moving and which every
+  // row of ours contains anyway.
+  if (recorded === null && expected !== null && isAbsolutePath(expected) && !recordsLauncher(text, expected)) {
+    return { registration: "stale", detail: `does not point at ${expected}` };
   }
   return { registration: "ours", detail: truncate(text) };
 }
@@ -444,13 +437,14 @@ function cliHost(spec: {
         return classifyShown(`${shown.stdout}\n${shown.stderr}`, shown.ok);
       }
 
+      const expected = (await resolveLauncher()).command;
       const result = await run(spec.bin, spec.listArgs);
       // A host that cannot answer is treated as occupied rather than empty:
       // guessing "none" here is the one wrong guess that overwrites something.
       if (!result.ok && !result.stdout.includes(SERVER_NAME)) {
         return { registration: "unknown", detail: firstLine(result.stderr) };
       }
-      return classifyListing(`${result.stdout}\n${result.stderr}`);
+      return classifyListing(`${result.stdout}\n${result.stderr}`, null, expected);
     },
     async register() {
       const launcher = await resolveLauncher();
@@ -538,7 +532,7 @@ function inspectJsonFile(path: string, ...keys: string[]): Pick<HostStatus, "reg
 
   const entry = (servers as Record<string, unknown>)[SERVER_NAME];
   if (entry === undefined) return { registration: "none" };
-  return classifyListing(`${SERVER_NAME} ${JSON.stringify(entry)}`, launcherOf(entry));
+  return classifyListing(`${SERVER_NAME} ${JSON.stringify(entry)}`, launcherOf(entry), null);
 }
 
 function vsCodeUserConfig(): string {

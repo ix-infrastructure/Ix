@@ -132,8 +132,14 @@ async function withLockDir(body: () => Promise<void>): Promise<void> {
 
 const originalSubprocessFlag = process.env.IX_MCP_SUBPROCESS;
 
-/** Longer than the slowest command any test here abandons. */
-const DRAIN_MS = 500;
+/**
+ * Longer than the slowest command any test here abandons and then waits for.
+ *
+ * Every test pays it, so it is kept close to what the slowest one needs rather
+ * than padded: at 500 it added ~11s to this file alone. The two commands that
+ * never settle are unaffected either way — their grace is what bounds them.
+ */
+const DRAIN_MS = 250;
 
 afterEach(async () => {
   if (originalSubprocessFlag === undefined) delete process.env.IX_MCP_SUBPROCESS;
@@ -293,7 +299,7 @@ describe("in-process ix runner", () => {
       const mapped = run(["map", "--hold", "400"]);
 
       expect((await orphan).ok).toBe(false);
-      // releaseHeldLocks drops *every* lock this process holds, not the
+      // Releasing every lock the process holds drops more than the
       // finishing command's, so an orphan settling mid-map deleted the lock of
       // the map that was still running — reopening the exact window
       // single-flight exists to close.

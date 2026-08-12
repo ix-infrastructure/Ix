@@ -227,8 +227,13 @@ function installCapture(options: { redirectIdleStdout?: boolean } = {}): void {
   }) as typeof process.exit;
 
   // Single-flight locks are taken deep inside a command, so the command has to
-  // be identifiable from there. The same attribution the output capture uses.
-  setLockOwnerResolver(resolveRun);
+  // be identifiable from there. Deliberately the async context alone, without
+  // resolveRun's fallback to activeRun: for output that fallback only ever
+  // narrows the damage, but an owner guessed wrong here means a *different*
+  // command's settle deletes a lock that is still in use. Unattributed is the
+  // safe direction — the lock outlives its command and ages out — so a lock
+  // taken outside any run context simply gets no owner.
+  setLockOwnerResolver(() => runContext.getStore() ?? null);
 }
 
 /**
@@ -428,10 +433,11 @@ async function executeInProcess(
 
       // A command that never settles at all — a hung fetch, or a rejection that
       // used to end the process and is now only logged — would otherwise hold
-      // this entry forever, and everything keyed off it fails permanently open:
-      // exit codes stay distrusted, so *every* later failure reports ok, and
-      // locks are never released again. The wait is bounded to as long again as
-      // the command was allowed to run.
+      // this entry forever, and exit codes would stay distrusted, so *every*
+      // later failure would report ok. The wait is bounded to as long again as
+      // the command was allowed to run. Locks are not keyed off this set at all
+      // any more, so the bound says nothing about them: a command that never
+      // settles keeps the lock it is still using until it ages out.
       //
       // The cost of that bound is real and lands on someone else: past the
       // grace this command's late `process.exitCode` is charged to whichever
@@ -477,7 +483,7 @@ async function executeInProcess(
  * agent pays on every hop of a `locate → callers → read` chain. Running the
  * same command tree here removes that entirely and lets `cli/resolve.ts`'s
  * per-cwd scope cache survive between calls — but only between *reads*: see
- * {@link afterCommand} for the state whose sole invalidation used to be the
+ * {@link invalidateAfter} for the state whose sole invalidation used to be the
  * process ending, and which is therefore reset per command here.
  *
  * Runs are serialized. Commands report failure through `process.exitCode` and

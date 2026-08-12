@@ -404,41 +404,58 @@ describe("registration classification", () => {
     expect(classifyListing(`ix-memory  ${rendered}  mcp  -  enabled`).registration).toBe("ours");
   });
 
-  it.each([
-    ["a cmd wrapper", (p: string) => `ix-memory: cmd /c ${p} mcp - Connected`],
-    ["a flag before the path", (p: string) => `ix-memory: wrapper /q ${p} mcp`],
-    ["a path earlier in the row", (p: string) => `ix-memory (from /home/j/.gemini/settings.json): ${p} mcp`],
-    ["quotes", (p: string) => `ix-memory: "${p}" mcp`],
-  ])("does not mistake %s for the launcher", (_case, render) => {
-    // Reading the row left-to-right, whatever bound the match had was applied
-    // from the wrong end: it started at the first absolute-looking token and
-    // swallowed everything up to the launcher, so `cmd /c C:\...\ix.cmd` — the
-    // documented Windows wrapper form — yielded `/c C:\...\ix.cmd`, stat'd
-    // nothing, and reported a live launcher dead. `stale` re-registers with no
-    // --force, so this silently rewrites a working config.
-    const dir = join(tempDir(), "Program Files", "npm");
-    mkdirSync(dir, { recursive: true });
-    const launcher = join(dir, "ix.cmd");
-    writeFileSync(launcher, "@echo off");
+  // Every row format a host actually prints, and every launcher shape that has
+  // broken one attempt or another at recovering the path back out of the row:
+  // a space, parentheses, brackets, a comma, a wrapper prefix, quotes. All of
+  // them name the launcher we would write today, so all of them are healthy —
+  // and each was reported `stale` by some iteration of the parsing approach,
+  // which re-registers with no --force over a config that was working.
+  const HOST_ROWS: Array<[string, (p: string) => string]> = [
+    ["claude mcp list", (p) => `ix-memory: ${p} mcp - ✓ Connected`],
+    ["codex mcp list", (p) => `ix-memory  ${p}  mcp  -  -  enabled`],
+    ["gemini mcp list", (p) => `✓ ix-memory (from ix-memory): ${p} mcp (stdio) - Connected`],
+    ["a cmd wrapper", (p) => `ix-memory: cmd /c ${p} mcp - Connected`],
+    ["a quoted path", (p) => `ix-memory: "${p}" mcp`],
+  ];
 
-    expect(classifyListing(render(launcher)).registration).toBe("ours");
+  const LAUNCHER_SHAPES = [
+    String.raw`C:\Users\Jane Doe\AppData\Roaming\npm\ix.cmd`,
+    String.raw`C:\Program Files (x86)\nodejs\ix.cmd`,
+    String.raw`C:\Users\J [work]\npm\ix.cmd`,
+    String.raw`C:\Users\A, B\npm\ix.cmd`,
+    "/opt/my tools/bin/ix",
+  ];
+
+  for (const [host, render] of HOST_ROWS) {
+    it.each(LAUNCHER_SHAPES)(`reads %s in a ${host} row as ours`, (launcher) => {
+      expect(classifyListing(render(launcher), null, launcher).registration).toBe("ours");
+    });
+  }
+
+  it.each(HOST_ROWS)("spots a launcher that is no longer the current one in a %s row", (_host, render) => {
+    // The npm prefix moved — an nvm switch, a reinstall elsewhere. The row
+    // still names the old path, which is what makes every client fail to start
+    // while install skips the repair and doctor calls it healthy.
+    const recorded = String.raw`C:\Users\gone\AppData\Roaming\npm\ix.cmd`;
+    const current = String.raw`C:\Users\now\AppData\Roaming\npm\ix.cmd`;
+
+    expect(classifyListing(render(recorded), null, current)).toMatchObject({
+      registration: "stale",
+      detail: expect.stringContaining(current),
+    });
   });
 
-  // The three hosts that answer with a rendered table rather than JSON, so
-  // there is no entry to parse — and the three that record an absolute
-  // `ix.cmd` on Windows, which is where staleness matters at all. Reading the
-  // launcher only from parsed entries left these silently unchecked.
-  it.each([
-    ["claude mcp list", (p: string) => `ix-memory: ${p} mcp - ✓ Connected`],
-    ["codex mcp list", (p: string) => `ix-memory  ${p}  mcp  -  -  enabled`],
-    ["gemini mcp list", (p: string) => `✓ ix-memory (from ix-memory): ${p} mcp (stdio) - Connected`],
-  ])("spots a dead launcher in a %s row", (_host, render) => {
-    const dead = String.raw`C:\Users\Jane Doe\AppData\Roaming\npm\ix.cmd`;
+  it("ignores separator and case differences in how a host renders the path", () => {
+    const current = String.raw`C:\Users\Me\AppData\Roaming\npm\ix.cmd`;
 
-    expect(classifyListing(render(dead))).toMatchObject({
-      registration: "stale",
-      detail: expect.stringContaining("no longer exists"),
-    });
+    expect(
+      classifyListing("ix-memory: c:/users/me/appdata/roaming/npm/ix.cmd mcp", null, current).registration,
+    ).toBe("ours");
+  });
+
+  it("does not judge staleness at all when the launcher is the bare name", () => {
+    // Unix registers `ix`, which survives the install moving. Nothing to check.
+    expect(classifyListing("ix-memory: ix mcp - Connected", null, "ix").registration).toBe("ours");
   });
 
   it("recognises a pretty-printed definition split across lines", () => {
