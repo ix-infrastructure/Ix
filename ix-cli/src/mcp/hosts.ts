@@ -72,6 +72,29 @@ export async function isOnPath(bin: string): Promise<boolean> {
 }
 
 /**
+ * The command a host should launch to reach `ix mcp`.
+ *
+ * On Unix the bare name is right: it survives an upgrade that moves the
+ * install. On Windows it is not — npm ships no `ix.exe`, only `ix.CMD`, and a
+ * host spawning the bare name through CreateProcess never consults PATHEXT, so
+ * it fails however well-formed the rest of the argv is. `ix-codex-plugin` hit
+ * exactly this (its #13) and resolved the path itself; resolving it here keeps
+ * that fix instead of handing the same problem to seven hosts. Falls back to
+ * the bare name, which is no worse than not trying.
+ */
+export async function resolveLauncher(): Promise<{ command: string; args: string[] }> {
+  if (platform() !== "win32") return { command: "ix", args: ["mcp"] };
+
+  const found = await run("where", ["ix"]);
+  const resolved = found.stdout
+    .split(/\r?\n/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)[0];
+
+  return { command: resolved || "ix", args: ["mcp"] };
+}
+
+/**
  * Lines that mention a server name only because something went wrong.
  *
  * Gemini writes its whole listing to stderr behind ~28 lines of extension
@@ -135,7 +158,8 @@ function cliHost(spec: {
   bin: string;
   target: string;
   listArgs: string[];
-  addArgs: string[];
+  /** Built from the resolved launcher, so Windows gets the real path. */
+  addArgs: (launcher: { command: string; args: string[] }) => string[];
   /**
    * Preferred over `listArgs` where the host can print one server's full
    * definition. A listing that shows only names cannot say whether the entry
@@ -167,7 +191,7 @@ function cliHost(spec: {
       return classifyListing(`${result.stdout}\n${result.stderr}`);
     },
     async register() {
-      const result = await run(spec.bin, spec.addArgs);
+      const result = await run(spec.bin, spec.addArgs(await resolveLauncher()));
       if (!result.ok) {
         throw new Error(firstLine(result.stderr) || firstLine(result.stdout) || "registration failed");
       }
@@ -277,7 +301,7 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       bin: "claude",
       target: "user scope",
       listArgs: ["mcp", "list"],
-      addArgs: ["mcp", "add", "--scope", "user", SERVER_NAME, "ix", "mcp"],
+      addArgs: (ix) => ["mcp", "add", "--scope", "user", SERVER_NAME, ix.command, ...ix.args],
     }),
     cliHost({
       id: "codex",
@@ -285,7 +309,7 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       bin: "codex",
       target: "~/.codex/config.toml",
       listArgs: ["mcp", "list"],
-      addArgs: ["mcp", "add", SERVER_NAME, "--", "ix", "mcp"],
+      addArgs: (ix) => ["mcp", "add", SERVER_NAME, "--", ix.command, ...ix.args],
     }),
     cliHost({
       id: "gemini",
@@ -293,7 +317,7 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       bin: "gemini",
       target: "~/.gemini/settings.json",
       listArgs: ["mcp", "list"],
-      addArgs: ["mcp", "add", SERVER_NAME, "ix", "mcp"],
+      addArgs: (ix) => ["mcp", "add", SERVER_NAME, ix.command, ...ix.args],
     }),
     cliHost({
       id: "openclaw",
@@ -304,7 +328,7 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       // `openclaw mcp list` prints names only ("- ix-memory"), so the command
       // behind the name is invisible there.
       showArgs: ["mcp", "show", SERVER_NAME],
-      addArgs: ["mcp", "set", SERVER_NAME, JSON.stringify({ command: "ix", args: ["mcp"] })],
+      addArgs: (ix) => ["mcp", "set", SERVER_NAME, JSON.stringify({ command: ix.command, args: ix.args })],
     }),
     {
       id: "vscode",
@@ -316,7 +340,8 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
         return inspectJsonFile(vsCodeUserConfig(), "servers");
       },
       async register() {
-        const definition = JSON.stringify({ name: SERVER_NAME, command: "ix", args: ["mcp"] });
+        const ix = await resolveLauncher();
+        const definition = JSON.stringify({ name: SERVER_NAME, command: ix.command, args: ix.args });
         const result = await run("code", ["--add-mcp", definition]);
         if (!result.ok) throw new Error(firstLine(result.stderr) || "code --add-mcp failed");
       },
@@ -330,9 +355,10 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
         return inspectJsonFile(cursorConfigPath(), "mcpServers");
       },
       async register() {
+        const ix = await resolveLauncher();
         writeJson(cursorConfigPath(), (config) => {
           const servers = (config.mcpServers ??= {}) as Record<string, unknown>;
-          servers[SERVER_NAME] = { command: "ix", args: ["mcp"] };
+          servers[SERVER_NAME] = { command: ix.command, args: ix.args };
         });
       },
     },
@@ -345,11 +371,12 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
         return inspectJsonFile(opencodeConfigPath(), "mcp");
       },
       async register() {
+        const ix = await resolveLauncher();
         writeJson(opencodeConfigPath(), (config) => {
           const servers = (config.mcp ??= {}) as Record<string, unknown>;
           // Shape per https://opencode.ai/config.json — `type` and `command`
           // are required and the schema forbids extra properties.
-          servers[SERVER_NAME] = { type: "local", command: ["ix", "mcp"], enabled: true };
+          servers[SERVER_NAME] = { type: "local", command: [ix.command, ...ix.args], enabled: true };
         });
       },
     },
