@@ -382,7 +382,7 @@ function registerTool(
  * Option values use the `--flag=value` form for the same reason, so a value of
  * `--rationale` cannot be mistaken for the next flag.
  */
-export function toArgv(argv: IxArgv, format: string): string[] {
+function toArgv(argv: IxArgv, format: string): string[] {
   const args = [argv.command, ...argv.options, `--format=${format}`];
   if (argv.positionals.length > 0) args.push("--", ...argv.positionals);
   return args;
