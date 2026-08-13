@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
+import { parseFile } from '../index.js';
 import {
+  buildPatch,
+  buildPatchWithResolution,
   buildDeletionPatch,
   extractorName,
   PREVIOUS_EXTRACTORS,
@@ -46,5 +49,36 @@ describe('patch-builder extractor policy', () => {
     expect(patch.source.sourceHash).not.toBe(sourceHash);
     expect(patch.ops).toEqual(ops);
     expect(patch.replaces).toEqual(candidates);
+  });
+});
+
+describe('patch-builder edge identity', () => {
+  it.each([
+    ['buildPatch', (result: NonNullable<ReturnType<typeof parseFile>>) => buildPatch(result, 'source-hash')],
+    ['buildPatchWithResolution', (result: NonNullable<ReturnType<typeof parseFile>>) =>
+      buildPatchWithResolution(result, 'source-hash', '', [])],
+  ])('emits each deterministic edge once for Python overloads via %s', (_name, build) => {
+    const result = parseFile('backend/tests/unit/test_exir_adapter.py', `
+from typing import overload
+
+class Adapter:
+    @overload
+    def convert(self, value: int) -> int: ...
+
+    @overload
+    def convert(self, value: str) -> str: ...
+
+    def convert(self, value):
+        return value
+`);
+
+    expect(result).not.toBeNull();
+    const patch = build(result!);
+    const edgeIds = patch.ops
+      .filter(op => op.type === 'UpsertEdge')
+      .map(op => op.id);
+
+    expect(edgeIds.length).toBeGreaterThan(0);
+    expect(edgeIds).toHaveLength(new Set(edgeIds).size);
   });
 });

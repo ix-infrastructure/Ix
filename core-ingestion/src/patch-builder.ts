@@ -88,6 +88,24 @@ function sourceType(filePath: string): string {
   return 'code';
 }
 
+/**
+ * Keep each logical edge once per patch. Parsers can emit the same relationship
+ * more than once (for example, every declaration in a Python @overload group).
+ * Edge ids intentionally collapse those declarations to one graph edge, so
+ * forwarding every occurrence would send duplicate physical keys to ArangoDB.
+ */
+function deduplicateUpsertEdges(ops: PatchOp[]): PatchOp[] {
+  const seenEdgeIds = new Set<string>();
+  return ops.filter(op => {
+    if (op.type !== 'UpsertEdge') return true;
+    const edgeId = op.id;
+    if (typeof edgeId !== 'string') return true;
+    if (seenEdgeIds.has(edgeId)) return false;
+    seenEdgeIds.add(edgeId);
+    return true;
+  });
+}
+
 export function extractorName(): string {
   return `tree-sitter/1.24`;
 }
@@ -367,7 +385,7 @@ export function buildPatch(
       ...(multiRepo?.repoId ? { repoId: multiRepo.repoId } : {}),
     },
     baseRev: 0,
-    ops,
+    ops: deduplicateUpsertEdges(ops),
     replaces,
     intent: `Parsed ${nodePath.basename(filePath)}`,
   };
@@ -659,7 +677,7 @@ export function buildPatchWithResolution(
       ...(multiRepo?.repoId ? { repoId: multiRepo.repoId } : {}),
     },
     baseRev: 0,
-    ops,
+    ops: deduplicateUpsertEdges(ops),
     replaces,
     intent: `Parsed ${nodePath.basename(filePath)}`,
   };
