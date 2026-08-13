@@ -73,11 +73,14 @@ describe("view server (/__ix/remap)", () => {
     );
 
     port = await getFreePort();
-    const script = serverScript(distDir, port, "test-workspace", null, mapRoot);
+    const script = serverScript();
     // The generated script must survive template-literal emission intact.
     expect(script).toContain('"/__ix/remap"');
     expect(script).toContain("IX_VIEW_MAP_MAIN");
     expect(script).toContain('server.listen(PORT, "127.0.0.1"');
+    // Backend-derived scope is supplied only at runtime, never written into
+    // the generated executable script.
+    expect(script).toContain("const SYSTEM_ID = process.argv[5] || null");
 
     await startServer({ STUB_EXIT: "0" });
   });
@@ -111,8 +114,16 @@ describe("view server (/__ix/remap)", () => {
   async function startServer(extraEnv: Record<string, string>, root: string | null = mapRoot) {
     await stopServer();
     const scriptPath = join(distDir, "compass-server.js");
-    writeFileSync(scriptPath, serverScript(distDir, port, "test-workspace", null, root));
-    const spawned = spawn(process.execPath, [scriptPath], {
+    writeFileSync(scriptPath, serverScript());
+    const spawned = spawn(process.execPath, [
+      scriptPath,
+      distDir,
+      String(port),
+      "test-workspace",
+      "",
+      root ?? "",
+      stubMain,
+    ], {
       env: {
         ...process.env,
         NODE_ENV: "test", // the IX_VIEW_MAP_MAIN seam is honoured only under this

@@ -187,15 +187,15 @@ function cliMainForScript(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "main.js");
 }
 
-/** Generate the inline server script that serves static files + proxies /v1. */
-export function serverScript(
-  distDir: string,
-  port: number,
-  workspaceId: string | null,
-  systemId: string | null,
-  mapRoot: string | null = null,
-): string {
-  const cliMainPath = cliMainForScript();
+/**
+ * Generate the invariant server script that serves static files + proxies /v1.
+ *
+ * Runtime values are supplied as argv when the script is spawned. In
+ * particular, SYSTEM_ID may come from the backend, so embedding it here would
+ * create a network-data-to-executable-file path even though JSON.stringify
+ * made the generated JavaScript syntactically safe.
+ */
+export function serverScript(): string {
   return `
 const http = require("http");
 const fs = require("fs");
@@ -203,18 +203,18 @@ const path = require("path");
 const url = require("url");
 const { execFile } = require("child_process");
 
-const DIST = ${JSON.stringify(distDir)};
-const PORT = ${port};
+const DIST = process.argv[2];
+const PORT = Number(process.argv[3]);
 const BACKEND = ${JSON.stringify(BACKEND_URL)};
-const WORKSPACE_ID = ${JSON.stringify(workspaceId)};
-const SYSTEM_ID = ${JSON.stringify(systemId)};
+const WORKSPACE_ID = process.argv[4] || null;
+const SYSTEM_ID = process.argv[5] || null;
 
-// The workspace root /__ix/remap maps, resolved by ix view start and baked in
-// rather than re-derived here — null when --all left the view unscoped.
-const MAP_ROOT = ${JSON.stringify(mapRoot)};
+// The workspace root /__ix/remap maps, resolved by ix view start rather than
+// re-derived here — empty/null when --all left the view unscoped.
+const MAP_ROOT = process.argv[6] || null;
 
 // The CLI that generated this script, resolved from its own location at
-// generation time. Deriving it here from DIST only worked for the installed
+// launch time. Deriving it here from DIST only worked for the installed
 // layout; findCompassDist's dev branch returns a repo path, from which the
 // same arithmetic lands on a file that never exists.
 //
@@ -223,7 +223,11 @@ const MAP_ROOT = ${JSON.stringify(mapRoot)};
 // environment.
 const MAP_MAIN = (process.env.NODE_ENV === "test" && process.env.IX_VIEW_MAP_MAIN)
   ? process.env.IX_VIEW_MAP_MAIN
-  : ${JSON.stringify(cliMainPath)};
+  : process.argv[7];
+
+if (!DIST || !Number.isInteger(PORT) || PORT < 1 || PORT > 65535 || !MAP_MAIN) {
+  throw new Error("invalid ix view server arguments");
+}
 
 // One map at a time. execFile is asynchronous, so nothing else serialises them.
 let mapInFlight = null;
@@ -534,10 +538,21 @@ export function registerViewCommand(program: Command): void {
       // Write server script to temp location
       const scriptDir = dirname(SERVER_SCRIPT_FILE);
       mkdirSync(scriptDir, { recursive: true });
-      writeFileSync(SERVER_SCRIPT_FILE, serverScript(distDir, port, workspaceId, systemId, mapRoot));
+      // The file is deliberately invariant: systemId can be returned by the
+      // backend and must never flow into JavaScript that is written and then
+      // executed. Runtime values travel as argv instead.
+      writeFileSync(SERVER_SCRIPT_FILE, serverScript());
 
       // Spawn detached process
-      const child = spawn("node", [SERVER_SCRIPT_FILE], {
+      const child = spawn(process.execPath, [
+        SERVER_SCRIPT_FILE,
+        distDir,
+        String(port),
+        workspaceId ?? "",
+        systemId ?? "",
+        mapRoot ?? "",
+        cliMainForScript(),
+      ], {
         detached: true,
         stdio: "ignore",
       });
