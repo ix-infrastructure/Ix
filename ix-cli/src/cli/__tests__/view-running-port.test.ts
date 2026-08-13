@@ -41,9 +41,20 @@ beforeEach(() => {
   writeFileSync(join(compassDir, "index.html"), "<!doctype html>");
 
   mocks.spawn.mockReturnValue({ pid: 4242, unref: vi.fn() });
+  // The same probe answers two opposite questions: before the spawn, "is this
+  // port already taken?" (it must not be), and after it, "is the server up
+  // yet?" (it must be). A mock that always refuses satisfies the first and
+  // hangs the second for the whole readiness budget, so model the transition:
+  // refuse until the server is spawned, accept once it has been.
   mocks.createConnection.mockImplementation(() => {
-    const connection = new EventEmitter();
-    queueMicrotask(() => connection.emit("error", new Error("not listening")));
+    // `end()` because the connect path closes the socket it just opened.
+    const connection = Object.assign(new EventEmitter(), { end: vi.fn() });
+    const listening = mocks.spawn.mock.calls.length > 0;
+    queueMicrotask(() =>
+      listening
+        ? connection.emit("connect")
+        : connection.emit("error", new Error("not listening")),
+    );
     return connection;
   });
 });

@@ -178,6 +178,27 @@ function isPortInUse(port: number): Promise<boolean> {
 }
 
 /**
+ * Wait for the detached server to accept connections.
+ *
+ * It is spawned with `stdio: "ignore"`, so anything it writes on the way down
+ * goes nowhere — including the throw that now guards its argument contract.
+ * Without this the CLI printed "[ok] Visualizer started", wrote a PID file for
+ * a dead process and opened a browser on a closed port.
+ *
+ * Polls rather than watching for `exit`: the child is detached and unref'd, and
+ * the question worth answering is whether the port is actually serving, not
+ * whether the process happens to still be alive.
+ */
+async function waitForServer(port: number, timeoutMs = 8000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await isPortInUse(port)) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
+}
+
+/**
  * Path to the CLI entry point of the install generating this script.
  *
  * Taken from this module's own location rather than derived from the compass
@@ -563,6 +584,9 @@ export function registerViewCommand(program: Command): void {
         process.exit(1);
       }
 
+      // A pid only means the spawn succeeded — see waitForServer.
+      const ready = await waitForServer(port);
+
       // Save PID, scope, and port for subsequent start/status/stop commands.
       mkdirSync(dirname(PID_FILE), { recursive: true });
       writeFileSync(PID_FILE, String(child.pid));
@@ -570,6 +594,18 @@ export function registerViewCommand(program: Command): void {
       writeFileSync(PORT_FILE, String(port));
 
       const url = `http://localhost:${port}`;
+
+      // Reported rather than fatal: the wait is a heuristic, and a machine slow
+      // enough to exceed it would otherwise have a working visualizer killed off
+      // or the command fail. The PID/scope/port files are written either way, so
+      // `ix view status` and `ix view stop` still work on whatever did start.
+      if (!ready) {
+        console.error(`[!] Visualizer started (PID ${child.pid}) but is not yet serving ${url}.`);
+        console.error("    If it does not come up shortly, run 'ix view stop', then");
+        console.error("    'ix upgrade' if the Compass bundle is missing or incomplete.");
+        return;
+      }
+
       console.log(`[ok] Visualizer started (PID ${child.pid})`);
       console.log(`  ${url}`);
       console.log(
