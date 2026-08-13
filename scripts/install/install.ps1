@@ -56,8 +56,8 @@ $NodeMinMajor = 22
 # resolves it. Moving off TEMP fixes that reading too, which is why this is
 # worth shipping ahead of the diagnosis.
 #
-# Note `ix upgrade` still stages through os.tmpdir() (upgrade.ts), which on
-# Windows is TEMP verbatim. If this class is real, it is unfixed there.
+# `ix upgrade` originally retained the same os.tmpdir()/TEMP exposure. #392
+# moved its CLI and Compass download scratch under IX_HOME as well.
 #
 # The `.cli-staging-` prefix on both scratch names is deliberate:
 # sweepUpgradeOrphans in upgrade.ts reclaims `.cli-staging-*` out of IX_HOME.
