@@ -93,25 +93,44 @@ function sourceType(filePath: string): string {
  * more than once (for example, every declaration in a Python @overload group).
  * Edge ids intentionally collapse those declarations to one graph edge, so
  * forwarding every occurrence would send duplicate physical keys to ArangoDB.
+ * A repeated id with different endpoints is an identity bug, not a duplicate;
+ * fail before commit rather than silently disconnecting part of the graph.
  */
 function deduplicateUpsertEdges(ops: PatchOp[]): PatchOp[] {
-  const seenEdgeIds = new Set<string>();
-  return ops.filter(op => {
-    if (op.type !== 'UpsertEdge') return true;
+  const deduplicated: PatchOp[] = [];
+  const edgeIndexById = new Map<string, number>();
+  for (const op of ops) {
+    if (op.type !== 'UpsertEdge') {
+      deduplicated.push(op);
+      continue;
+    }
     const edgeId = op.id;
-    if (typeof edgeId !== 'string') return true;
-    if (seenEdgeIds.has(edgeId)) return false;
-    seenEdgeIds.add(edgeId);
-    return true;
-  });
+    if (typeof edgeId !== 'string') {
+      deduplicated.push(op);
+      continue;
+    }
+    const existingIndex = edgeIndexById.get(edgeId);
+    if (existingIndex === undefined) {
+      edgeIndexById.set(edgeId, deduplicated.length);
+      deduplicated.push(op);
+      continue;
+    }
+    const existing = deduplicated[existingIndex];
+    if (existing.src !== op.src || existing.dst !== op.dst || existing.predicate !== op.predicate) {
+      throw new Error(`Conflicting UpsertEdge identity for deterministic id ${edgeId}`);
+    }
+    // Exact logical duplicate: retain the last operation's attributes.
+    deduplicated[existingIndex] = op;
+  }
+  return deduplicated;
 }
 
 export function extractorName(): string {
-  return `tree-sitter/1.24`;
+  return `tree-sitter/1.25`;
 }
 
 /** Previous extractor versions — their patches are superseded when re-ingesting. */
-export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
+export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.24', 'tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
 
 /** Patch ids that may own the active graph entities for a stored source hash. */
 export function sourcePatchIdCandidates(
@@ -266,7 +285,7 @@ export function buildPatch(
     // File -[CONTAINS]-> Chunk
     ops.push({
       type: 'UpsertEdge',
-      id: edgeId(idPath, 'file', chunkName, 'CONTAINS_CHUNK'),
+      id: edgeId(idPath, fileNodeId, cid, 'CONTAINS_CHUNK'),
       src: fileNodeId,
       dst: cid,
       predicate: 'CONTAINS_CHUNK',
@@ -278,7 +297,7 @@ export function buildPatch(
       const symbolNid = nodeId(idPath, symbolKey);
       ops.push({
         type: 'UpsertEdge',
-        id: edgeId(idPath, chunkName, symbolKey, 'DEFINES'),
+        id: edgeId(idPath, cid, symbolNid, 'DEFINES'),
         src: cid,
         dst: symbolNid,
         predicate: 'DEFINES',
@@ -295,11 +314,9 @@ export function buildPatch(
     if (a.container == null && b.container == null) {
       const aid = chunkId(idPath, a.chunkKind, a.name, a.lineStart);
       const bid = chunkId(idPath, b.chunkKind, b.name, b.lineStart);
-      const aName = a.name ?? `file_body:${a.lineStart}`;
-      const bName = b.name ?? `file_body:${b.lineStart}`;
       ops.push({
         type: 'UpsertEdge',
-        id: edgeId(idPath, aName, bName, 'NEXT'),
+        id: edgeId(idPath, aid, bid, 'NEXT'),
         src: aid,
         dst: bid,
         predicate: 'NEXT',
@@ -561,7 +578,7 @@ export function buildPatchWithResolution(
     });
     ops.push({
       type: 'UpsertEdge',
-      id: edgeId(idPath, 'file', chunkName, 'CONTAINS_CHUNK'),
+      id: edgeId(idPath, fileNodeId2, cid, 'CONTAINS_CHUNK'),
       src: fileNodeId2,
       dst: cid,
       predicate: 'CONTAINS_CHUNK',
@@ -572,7 +589,7 @@ export function buildPatchWithResolution(
       const symbolNid = nodeId(idPath, symbolKey);
       ops.push({
         type: 'UpsertEdge',
-        id: edgeId(idPath, chunkName, symbolKey, 'DEFINES'),
+        id: edgeId(idPath, cid, symbolNid, 'DEFINES'),
         src: cid,
         dst: symbolNid,
         predicate: 'DEFINES',
@@ -587,11 +604,9 @@ export function buildPatchWithResolution(
     if (a.container == null && b.container == null) {
       const aid = chunkId(idPath, a.chunkKind, a.name, a.lineStart);
       const bid = chunkId(idPath, b.chunkKind, b.name, b.lineStart);
-      const aName = a.name ?? `file_body:${a.lineStart}`;
-      const bName = b.name ?? `file_body:${b.lineStart}`;
       ops.push({
         type: 'UpsertEdge',
-        id: edgeId(idPath, aName, bName, 'NEXT'),
+        id: edgeId(idPath, aid, bid, 'NEXT'),
         src: aid,
         dst: bid,
         predicate: 'NEXT',

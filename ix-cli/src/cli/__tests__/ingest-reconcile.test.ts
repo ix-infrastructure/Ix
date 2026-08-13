@@ -16,7 +16,7 @@ function patchWith(ops: GraphPatchPayload["ops"]): GraphPatchPayload {
     source: {
       uri: "src/example.ts",
       sourceHash: "next-hash",
-      extractor: "tree-sitter/1.24",
+      extractor: "tree-sitter/1.25",
       sourceType: "code",
       workspaceId: "deadbeef",
     },

@@ -77,8 +77,52 @@ class Adapter:
     const edgeIds = patch.ops
       .filter(op => op.type === 'UpsertEdge')
       .map(op => op.id);
+    const chunkNodeIds = patch.ops
+      .filter(op => op.type === 'UpsertNode' && (op.kind === 'chunk' || op.kind === 'section'))
+      .map(op => op.id);
+    const containsChunkEdges = patch.ops.filter(
+      op => op.type === 'UpsertEdge' && op.predicate === 'CONTAINS_CHUNK',
+    );
+    const definesEdges = patch.ops.filter(
+      op => op.type === 'UpsertEdge' && op.predicate === 'DEFINES',
+    );
 
     expect(edgeIds.length).toBeGreaterThan(0);
     expect(edgeIds).toHaveLength(new Set(edgeIds).size);
+    expect(result!.chunks.every(chunk => chunk.name !== null)).toBe(true);
+    expect(containsChunkEdges).toHaveLength(result!.chunks.length);
+    expect(definesEdges).toHaveLength(result!.chunks.length);
+    expect(new Set(containsChunkEdges.map(edge => edge.dst))).toEqual(new Set(chunkNodeIds));
+    expect(new Set(definesEdges.map(edge => edge.src))).toEqual(new Set(chunkNodeIds));
+  });
+
+  it.each([
+    ['buildPatch', (result: NonNullable<ReturnType<typeof parseFile>>) => buildPatch(result, 'source-hash')],
+    ['buildPatchWithResolution', (result: NonNullable<ReturnType<typeof parseFile>>) =>
+      buildPatchWithResolution(result, 'source-hash', '', [])],
+  ])('keeps distinct NEXT edges between top-level overload chunks via %s', (_name, build) => {
+    const result = parseFile('adapter.py', `
+from typing import overload
+
+@overload
+def convert(value: int) -> int: ...
+
+@overload
+def convert(value: str) -> str: ...
+
+def convert(value):
+    return value
+`);
+
+    expect(result).not.toBeNull();
+    const patch = build(result!);
+    const nextEdges = patch.ops.filter(
+      op => op.type === 'UpsertEdge' && op.predicate === 'NEXT',
+    );
+
+    expect(result!.chunks).toHaveLength(3);
+    expect(nextEdges).toHaveLength(2);
+    expect(new Set(nextEdges.map(edge => edge.id)).size).toBe(2);
+    expect(nextEdges[0].dst).toBe(nextEdges[1].src);
   });
 });
