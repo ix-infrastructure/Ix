@@ -5,7 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import * as http from "node:http";
-import { serverScript } from "../commands/view.js";
+import { serverRuntimeArgs, serverScript } from "../commands/view.js";
+
+interface StartServerOptions {
+  workspaceId?: string;
+  systemId?: string;
+  backendUrl?: string;
+  useMapMainOverride?: boolean;
+}
 
 /** Pick a free TCP port by binding port 0 and releasing it. */
 function getFreePort(): Promise<number> {
@@ -44,12 +51,12 @@ describe("view server (/__ix/remap)", () => {
 
   beforeAll(async () => {
     // A fake Compass dist: index.html is the SPA entry the fallback serves.
-    distDir = mkdtempSync(join(tmpdir(), "ix-view-dist-"));
+    distDir = mkdtempSync(join(tmpdir(), "ix view dist "));
     writeFileSync(join(distDir, "index.html"), "<h1>fake compass</h1>");
 
     // The workspace the server is scoped to. The endpoint maps this, not its
     // own cwd, so the test has to supply one.
-    mapRoot = mkdtempSync(join(tmpdir(), "ix-view-root-"));
+    mapRoot = mkdtempSync(join(tmpdir(), "ix view root "));
 
     // The marker records every stub invocation. It lives in the temp tree and
     // is passed by env rather than written to process.cwd(): the stub's cwd is
@@ -111,23 +118,30 @@ describe("view server (/__ix/remap)", () => {
    * could lose the bind to EADDRINUSE — invisibly, because stdio is ignored —
    * while waitForPort was satisfied by the still-dying old server.
    */
-  async function startServer(extraEnv: Record<string, string>, root: string | null = mapRoot) {
+  async function startServer(
+    extraEnv: Record<string, string>,
+    root: string | null = mapRoot,
+    options: StartServerOptions = {},
+  ) {
     await stopServer();
     const scriptPath = join(distDir, "compass-server.js");
     writeFileSync(scriptPath, serverScript());
     const spawned = spawn(process.execPath, [
       scriptPath,
-      distDir,
-      String(port),
-      "test-workspace",
-      "",
-      root ?? "",
-      stubMain,
+      ...serverRuntimeArgs(
+        distDir,
+        port,
+        options.workspaceId ?? "test-workspace",
+        options.systemId ?? null,
+        root,
+        stubMain,
+      ),
     ], {
       env: {
         ...process.env,
-        NODE_ENV: "test", // the IX_VIEW_MAP_MAIN seam is honoured only under this
-        IX_VIEW_MAP_MAIN: stubMain,
+        NODE_ENV: options.useMapMainOverride === false ? "production" : "test",
+        IX_VIEW_MAP_MAIN: options.useMapMainOverride === false ? "" : stubMain,
+        IX_VIEW_BACKEND_URL: options.backendUrl ?? "",
         STUB_MARKER: marker,
         STUB_MS: "0",
         ...extraEnv,
@@ -214,6 +228,51 @@ describe("view server (/__ix/remap)", () => {
     // The recorded workspace root, never the server's own cwd, and --silent
     // because nothing reads the output.
     expect(runs()).toEqual([`map ${mapRoot} --silent`]);
+  });
+
+  it("uses the argv CLI path outside the test-only MAP_MAIN override", async () => {
+    await startServer({ STUB_EXIT: "0" }, mapRoot, { useMapMainOverride: false });
+    try {
+      resetRuns();
+      const res = await post("/__ix/remap", { host: `127.0.0.1:${port}` });
+      expect(res.status).toBe(200);
+      expect(runs()).toEqual([`map ${mapRoot} --silent`]);
+    } finally {
+      await startServer({ STUB_EXIT: "0" });
+    }
+  });
+
+  it("passes argv workspace and system scopes to proxied backend requests", async () => {
+    let proxiedHeaders: http.IncomingHttpHeaders | null = null;
+    const backend = http.createServer((req, res) => {
+      proxiedHeaders = req.headers;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end('{"ok":true}');
+    });
+    await new Promise<void>((resolve, reject) => {
+      backend.once("error", reject);
+      backend.listen(0, "127.0.0.1", resolve);
+    });
+    const backendAddress = backend.address();
+    if (!backendAddress || typeof backendAddress === "string") throw new Error("backend did not bind a TCP port");
+
+    try {
+      await startServer({}, mapRoot, {
+        workspaceId: "workspace:test",
+        systemId: "system:test",
+        backendUrl: `http://127.0.0.1:${backendAddress.port}`,
+      });
+      const res = await fetch(`http://127.0.0.1:${port}/v1/probe?source=test`);
+      expect(res.status).toBe(200);
+      expect(proxiedHeaders?.["x-ix-workspace"]).toBe("workspace:test");
+      expect(proxiedHeaders?.["x-ix-system"]).toBe("system:test");
+    } finally {
+      await stopServer();
+      await new Promise<void>((resolve, reject) =>
+        backend.close((err) => err ? reject(err) : resolve()),
+      );
+      await startServer({ STUB_EXIT: "0" });
+    }
   });
 
   it("accepts a same-origin loopback Origin", async () => {

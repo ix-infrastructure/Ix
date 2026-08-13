@@ -208,6 +208,25 @@ function cliMainForScript(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "main.js");
 }
 
+/** Build the argv payload shared by the production launcher and server tests. */
+export function serverRuntimeArgs(
+  distDir: string,
+  port: number,
+  workspaceId: string | null,
+  systemId: string | null,
+  mapRoot: string | null,
+  cliMainPath: string = cliMainForScript(),
+): string[] {
+  return [
+    distDir,
+    String(port),
+    workspaceId ?? "",
+    systemId ?? "",
+    mapRoot ?? "",
+    cliMainPath,
+  ];
+}
+
 /**
  * Generate the invariant server script that serves static files + proxies /v1.
  *
@@ -226,7 +245,9 @@ const { execFile } = require("child_process");
 
 const DIST = process.argv[2];
 const PORT = Number(process.argv[3]);
-const BACKEND = ${JSON.stringify(BACKEND_URL)};
+const BACKEND = (process.env.NODE_ENV === "test" && process.env.IX_VIEW_BACKEND_URL)
+  ? process.env.IX_VIEW_BACKEND_URL
+  : ${JSON.stringify(BACKEND_URL)};
 const WORKSPACE_ID = process.argv[4] || null;
 const SYSTEM_ID = process.argv[5] || null;
 
@@ -345,7 +366,8 @@ const server = http.createServer((req, res) => {
     // stream open for the whole map.
     req.resume();
     // MAP_ROOT is the workspace this visualizer is showing, resolved once by
-    // ix view start and baked in. Mapping process.cwd() instead would follow
+    // ix view start and supplied at launch. Mapping process.cwd() instead would
+    // follow
     // whatever directory the detached server was launched from: --all does not
     // require that to be a workspace at all, so "ix view start --all" run from
     // a home directory turned one click into an ingest of the whole of it.
@@ -491,10 +513,9 @@ export function registerViewCommand(program: Command): void {
             // workspace scoping (single-repo behavior is unaffected).
           }
         }
-        // The system id (from a local marker or the backend) is embedded in the
-        // generated, then-executed compass server script and the scope file, so
-        // constrain it to the known id charset before use (CodeQL
-        // js/http-to-file-access barrier; serverScript also JSON-encodes it).
+        // The system id (from a local marker or the backend) becomes a proxy
+        // header and persisted scope label, so constrain it to the known id
+        // charset before either use.
         if (systemId !== null && !/^[A-Za-z0-9_.:-]+$/.test(systemId)) {
           systemId = null;
         }
@@ -567,12 +588,7 @@ export function registerViewCommand(program: Command): void {
       // Spawn detached process
       const child = spawn(process.execPath, [
         SERVER_SCRIPT_FILE,
-        distDir,
-        String(port),
-        workspaceId ?? "",
-        systemId ?? "",
-        mapRoot ?? "",
-        cliMainForScript(),
+        ...serverRuntimeArgs(distDir, port, workspaceId, systemId, mapRoot),
       ], {
         detached: true,
         stdio: "ignore",
