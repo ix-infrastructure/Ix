@@ -1,9 +1,11 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { Command } from "commander";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { isPathInside, isReadablePath, readableRoots } from "../config.js";
+import { registerReadCommand } from "../commands/read.js";
 
 // `ix read` used to hand back any absolute path that existed on disk: no
 // workspace containment, no graph lookup. These cover the boundary itself
@@ -115,5 +117,49 @@ describe("isReadablePath", () => {
     } finally {
       rmSync(other, { recursive: true, force: true });
     }
+  });
+});
+
+// The cases above pin the boundary. These pin that `ix read` is actually behind
+// it — delete the guard call sites and everything above still passes, because a
+// helper nobody calls is still a correct helper.
+describe("ix read enforces the boundary", () => {
+  async function runRead(target: string, root: string): Promise<{ out: string; err: string }> {
+    const out: string[] = [];
+    const err: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((...a) => { out.push(a.join(" ")); });
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(((s: string) => { err.push(String(s)); return true; }) as never);
+    try {
+      const program = new Command();
+      program.exitOverride();
+      registerReadCommand(program);
+      await program.parseAsync(["read", target, "--root", root, "--format", "json"], { from: "user" });
+      return { out: out.join("\n"), err: err.join("") };
+    } finally {
+      log.mockRestore();
+      write.mockRestore();
+    }
+  }
+
+  it("reads a file inside the workspace", async () => {
+    const { out } = await runRead(join(workspace, "src", "main.ts"), workspace);
+    expect(out).toContain("export const answer = 42;");
+  });
+
+  it("refuses a file outside it, and emits no content", async () => {
+    const { out, err } = await runRead(join(outside, "secret.txt"), workspace);
+    // The refusal names the boundary; an agent that cannot see it just retries.
+    expect(err).toContain("Refusing to read file outside the workspace");
+    expect(err).toContain("allowed root:");
+    expect(out).not.toContain("SENTINEL");
+    expect(out).toBe("");
+  });
+
+  it("refuses a symlink inside the workspace that points outside it", async () => {
+    const link = join(workspace, "src", "escape.txt");
+    symlinkSync(join(outside, "secret.txt"), link);
+    const { out, err } = await runRead(link, workspace);
+    expect(err).toContain("Refusing to read file outside the workspace");
+    expect(out).not.toContain("SENTINEL");
   });
 });
