@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
-import { absoluteFromSourceUri, getEndpoint, resolveWorkspaceRoot } from "../config.js";
+import { absoluteFromSourceUri, getEndpoint, isReadablePath, readableRoots, resolveWorkspaceRoot } from "../config.js";
 import { resolveEntityFull, activeReadScope, ensureReadScope } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { isFileStale } from "../stale.js";
@@ -47,6 +47,28 @@ interface AmbiguityResult {
 
 function checkStale(filePath: string): boolean {
   try { return isFileStale(filePath); } catch { return false; }
+}
+
+/**
+ * Refuse a file outside every readable workspace root, and say so.
+ *
+ * `ix read` resolves its target four ways, and three of them can end at an
+ * arbitrary absolute path: the caller passes one directly, or the graph hands
+ * back a `source_uri` that is already absolute. Nothing downstream re-checked
+ * it, so `ix read /etc/shadow` read `/etc/shadow` — no workspace involved, no
+ * backend involved. That matters most through `ix mcp`, where the caller is an
+ * agent and the target is a string it chose.
+ *
+ * Returns true when the read may proceed. On refusal it prints the reason and
+ * the roots that WOULD have been allowed, because "denied" with no boundary is
+ * indistinguishable from a broken install.
+ */
+function guardReadable(absPath: string, explicitRoot: string | undefined, what: string): boolean {
+  if (isReadablePath(absPath, explicitRoot)) return true;
+  stderr(chalk.red(`Refusing to read ${what} outside the workspace: ${absPath}`));
+  for (const root of readableRoots(explicitRoot)) stderr(chalk.dim(`  allowed root: ${root}`));
+  stderr(chalk.dim("  Use --root to read from a different workspace, or ix init to register one."));
+  return false;
 }
 
 function readFileRange(filePath: string, start?: number, end?: number): { content: string; lineStart: number; lineEnd: number } {
@@ -200,6 +222,7 @@ Examples:
       // --- Step 2: Try exact file path ---
       const resolvedPath = path.isAbsolute(rawTarget) ? rawTarget : path.resolve(root, rawTarget);
       if (fs.existsSync(resolvedPath) && fs.statSync(resolvedPath).isFile()) {
+        if (!guardReadable(resolvedPath, opts.root, "file")) return;
         const stale = checkStale(resolvedPath);
         const { content, lineStart, lineEnd } = readFileRange(resolvedPath, rangeStart, rangeEnd);
         const result: ReadResult = {
@@ -222,6 +245,9 @@ Examples:
         if (filenameMatches.length === 1) {
           const matchPath = filenameMatches[0].path;
           if (matchPath && fs.existsSync(matchPath)) {
+            // The path came back from the graph rather than the caller, so this
+            // guard is what stops a backend from naming a file off the disk.
+            if (!guardReadable(matchPath, opts.root, "graph file match")) return;
             const stale = checkStale(matchPath);
             const { content, lineStart, lineEnd } = readFileRange(matchPath, rangeStart, rangeEnd);
             const result: ReadResult = {
@@ -259,6 +285,9 @@ Examples:
 
         // If the source file exists, extract the symbol's lines
         if (absSourceUri && fs.existsSync(absSourceUri)) {
+          // absoluteFromSourceUri passes an already-absolute source_uri through
+          // untouched, so a graph row can still point anywhere on the disk.
+          if (!guardReadable(absSourceUri, opts.root, "symbol source")) return;
           const lineStart = node.attrs?.lineStart ?? node.attrs?.line_start ?? 1;
           const lineEnd = node.attrs?.lineEnd ?? node.attrs?.line_end;
           const fileContent = fs.readFileSync(absSourceUri, "utf-8");

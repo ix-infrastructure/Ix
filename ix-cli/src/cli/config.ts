@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, rmSync, chmodSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, rmSync, chmodSync, renameSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
@@ -133,19 +133,58 @@ export function loadWorkspaces(): WorkspaceConfig[] {
   return config.workspaces ?? []; // workspace_id already normalized to string in loadConfig
 }
 
+/**
+ * Is `candidate` `root` itself, or somewhere underneath it?
+ *
+ * The `relative()` form is the one this file already used to pick a workspace
+ * for a cwd. It handles the two cases a `startsWith` prefix test gets wrong: a
+ * `..` traversal comes back with leading `..` segments, and on Windows a path on
+ * a different drive comes back absolute. Both sides are resolved first so a
+ * relative input cannot slip past.
+ */
+export function isPathInside(root: string, candidate: string): boolean {
+  const rel = relative(resolvePath(root), resolvePath(candidate));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/**
+ * The roots a read command may open a file from: the workspace this invocation
+ * resolves to, plus every workspace the user has registered with `ix init`.
+ *
+ * Registered workspaces are included because reads legitimately span them — a
+ * stitched system, or `ix view --all` — and every one of them is a path the user
+ * put in their own config. What is NOT in the list is the rest of the disk.
+ */
+export function readableRoots(explicitRoot?: string): string[] {
+  const roots = [resolveWorkspaceRoot(explicitRoot), ...loadWorkspaces().map(w => w.root_path)];
+  return [...new Set(roots.filter(Boolean).map(r => resolvePath(r)))];
+}
+
+/**
+ * May `ix read` open this file?
+ *
+ * Symlinks are resolved on both sides before comparing, so a link planted inside
+ * a workspace cannot be used to hand back a file outside it. Resolving both sides
+ * is what keeps that from backfiring: workspace roots are themselves often
+ * symlinks (macOS `/tmp`, a checkout reached through one), and comparing a real
+ * path against a symlinked root would reject perfectly ordinary reads.
+ * `realpathSync` is best-effort — if either side cannot be resolved, the lexical
+ * path stands in, which is the same answer for everything that is not a link.
+ */
+export function isReadablePath(candidate: string, explicitRoot?: string): boolean {
+  const real = (p: string) => { try { return realpathSync(p); } catch { return resolvePath(p); } };
+  const realCandidate = real(candidate);
+  return readableRoots(explicitRoot).some(
+    root => isPathInside(root, candidate) && isPathInside(real(root), realCandidate),
+  );
+}
+
 export function selectWorkspaceForCwd(
   workspaces: WorkspaceConfig[],
   cwd: string,
 ): WorkspaceConfig | undefined {
-  const resolvedCwd = resolvePath(cwd);
   return workspaces
-    .filter((workspace) => {
-      const relativePath = relative(resolvePath(workspace.root_path), resolvedCwd);
-      return (
-        relativePath === "" ||
-        (relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath))
-      );
-    })
+    .filter(workspace => isPathInside(workspace.root_path, cwd))
     .sort((a, b) => b.root_path.length - a.root_path.length)[0];
 }
 
