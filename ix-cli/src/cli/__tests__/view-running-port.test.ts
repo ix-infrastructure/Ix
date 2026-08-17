@@ -26,7 +26,7 @@ let originalIxHome: string | undefined;
 const pidFile = () => join(ixHome, "compass.pid");
 const scopeFile = () => join(ixHome, "compass.scope");
 const portFile = () => join(ixHome, "compass.port");
-const serverScriptFile = () => join(ixHome, "tmp", "compass-server.js");
+const serverScriptFile = () => join(ixHome, "tmp", "compass-server.cjs");
 
 beforeEach(() => {
   vi.resetModules();

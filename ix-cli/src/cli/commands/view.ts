@@ -23,7 +23,18 @@ const PID_FILE = join(IX_HOME, "compass.pid");
 // already-running (differently-scoped) instance.
 const SCOPE_FILE = join(IX_HOME, "compass.scope");
 const PORT_FILE = join(IX_HOME, "compass.port");
-const SERVER_SCRIPT_FILE = join(IX_HOME, "tmp", "compass-server.js");
+/**
+ * `.cjs`, not `.js`.
+ *
+ * The script this writes is CommonJS — it `require`s http, fs and path. A `.js`
+ * file's module system is decided by the nearest `package.json` *above it*, so
+ * with `IX_HOME` anywhere under a directory declaring `"type": "module"`, node
+ * refuses the script with `require is not defined in ES module scope` and
+ * `ix view` reports only "started … but is not yet serving", which names
+ * neither the cause nor the fix. `.cjs` is CommonJS whatever any ancestor
+ * says. (`$HOME/package.json` is rare but real — this box has one.)
+ */
+const SERVER_SCRIPT_FILE = join(IX_HOME, "tmp", "compass-server.cjs");
 const BACKEND_URL = "http://localhost:8090";
 
 /** Resolve the compass dist directory — installed path first, then dev fallback. */

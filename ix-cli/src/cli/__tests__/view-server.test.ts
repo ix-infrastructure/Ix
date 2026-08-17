@@ -53,6 +53,14 @@ describe("view server (/__ix/remap)", () => {
     // A fake Compass dist: index.html is the SPA entry the fallback serves.
     distDir = mkdtempSync(join(tmpdir(), "ix view dist "));
     writeFileSync(join(distDir, "index.html"), "<h1>fake compass</h1>");
+    // The server script is CommonJS, and a `.js` file's module system is
+    // decided by the nearest package.json above it. Declaring this directory
+    // ESM makes every test below run under the condition that used to break
+    // `ix view` outright — node refusing the script with "require is not
+    // defined in ES module scope" while the CLI reported only "started … but
+    // is not yet serving". `ix-cli` is itself `"type": "module"`, so this is
+    // the ordinary case for anyone whose IX_HOME sits inside a package.
+    writeFileSync(join(distDir, "package.json"), JSON.stringify({ type: "module" }));
 
     // The workspace the server is scoped to. The endpoint maps this, not its
     // own cwd, so the test has to supply one.
@@ -67,7 +75,10 @@ describe("view server (/__ix/remap)", () => {
     // A stub `ix` CLI main: the server runs `node <MAP_MAIN> map <root> --silent`.
     // STUB_MS holds it open so overlapping requests are observable; STUB_EXIT
     // drives the failure path.
-    stubMain = join(distDir, "stub-main.js");
+    // `.cjs` for the same reason the server script is: this stub is CommonJS
+    // and the directory above it now declares ESM. (The real main it stands in
+    // for is ESM, so only the fixture needs saying.)
+    stubMain = join(distDir, "stub-main.cjs");
     writeFileSync(
       stubMain,
       [
@@ -124,7 +135,7 @@ describe("view server (/__ix/remap)", () => {
     options: StartServerOptions = {},
   ) {
     await stopServer();
-    const scriptPath = join(distDir, "compass-server.js");
+    const scriptPath = join(distDir, "compass-server.cjs");
     writeFileSync(scriptPath, serverScript());
     const spawned = spawn(process.execPath, [
       scriptPath,
