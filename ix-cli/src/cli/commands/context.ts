@@ -372,6 +372,22 @@ export function loadInvestigation(id: string): SavedInvestigation | undefined {
       renderWarning(`Saved investigation "${id}" has an unknown schema; refusing to resume.`);
       return undefined;
     }
+    // Validate the bundle coming back off disk against the same versioned
+    // contract the write side already enforces (saveInvestigation and --out).
+    // The two halves were asymmetric: writes were schema-checked, reads trusted
+    // a bare `as` cast, so the envelope check above was the only thing standing
+    // between a hand-edited, truncated or version-skewed state file and the
+    // rest of the command. That gap is reachable — `--diff` re-resolves
+    // `bundle.target.name` and sends it to the backend, and `--resume` renders
+    // the bundle — so a file whose `schema` field is right and whose body is
+    // anything at all used to be honoured.
+    const bundle = contextBundleSchema.safeParse(parsed.bundle);
+    if (!bundle.success) {
+      renderWarning(
+        `Saved investigation "${id}" does not match the ${BUNDLE_SCHEMA} schema (${bundle.error.issues.length} issue(s)); refusing to resume.`,
+      );
+      return undefined;
+    }
     return parsed;
   } catch {
     renderWarning(`Saved investigation "${id}" is not valid JSON; refusing to resume.`);

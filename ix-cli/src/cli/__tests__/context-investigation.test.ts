@@ -156,6 +156,35 @@ describe("ix context investigation state", () => {
     expect(loadInvestigation("broken")).toBeUndefined();
   });
 
+  it("refuses to resume a tampered bundle whose envelope still looks valid", () => {
+    // The write path is schema-checked, so a non-conforming bundle can only
+    // reach disk by being put there — a hand-edited file, a truncated write, or
+    // a state file from a different version. The envelope is deliberately
+    // *correct* here (`schema` matches, `bundle` is truthy), so the pre-existing
+    // envelope guard cannot be what rejects it; only validating the bundle
+    // itself can. `entities` is a string where the contract demands an array.
+    mkdirSync(investigationsDir(), { recursive: true });
+    const tampered = {
+      schema: "ix-investigation/1",
+      id: "tampered",
+      savedAt: new Date().toISOString(),
+      bundle: { ...bundleWith([]), entities: "not-an-array" },
+    };
+    writeFileSync(join(investigationsDir(), "tampered.json"), JSON.stringify(tampered), "utf8");
+    // Guard the guard: if the envelope check were what fired, this fixture
+    // would be indistinguishable from the "unknown schema" case above.
+    expect(tampered.schema).toBe("ix-investigation/1");
+    expect(tampered.bundle).toBeTruthy();
+    expect(loadInvestigation("tampered")).toBeUndefined();
+  });
+
+  it("still resumes a well-formed bundle", () => {
+    // Control for the test above: same code path, conforming bundle, so a
+    // validator that rejected everything would fail here instead of passing.
+    saveInvestigation("well-formed", bundleWith([makeClaim("renders to DOM", 0.9)]));
+    expect(loadInvestigation("well-formed")).toBeDefined();
+  });
+
   it("refuses to save a bundle that does not match the versioned contract", () => {
     const malformed = { ...bundleWith([]), entities: "not-an-array" } as unknown as ReturnType<typeof buildBundle>;
     saveInvestigation("bad-shape", malformed);
