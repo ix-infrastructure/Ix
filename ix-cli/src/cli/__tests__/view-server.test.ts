@@ -344,4 +344,30 @@ describe("view server (/__ix/remap)", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("fake compass");
   });
+
+  it("answers 504 when the backend accepts and never replies", async () => {
+    // The failure this closes: node puts no timeout on an outgoing request, so
+    // a backend that accepts the socket and then goes quiet left the browser
+    // waiting for ever. Compass recorded neither a result nor a failure, and
+    // the region sat at "loading …" with nothing to tell a slow map from a
+    // dead one. A 504 is a state the client can render.
+    const hung = http.createServer(() => {
+      /* accept the connection and never answer */
+    });
+    await new Promise<void>((resolve) => hung.listen(0, "127.0.0.1", () => resolve()));
+    const hungPort = (hung.address() as { port: number }).port;
+
+    try {
+      await startServer(
+        { IX_VIEW_PROXY_TIMEOUT_MS: "300" },
+        mapRoot,
+        { backendUrl: `http://127.0.0.1:${hungPort}` },
+      );
+      const res = await fetch(`http://127.0.0.1:${port}/v1/health`);
+      expect(res.status).toBe(504);
+      expect(await res.text()).toMatch(/timed out/i);
+    } finally {
+      await new Promise<void>((resolve) => hung.close(() => resolve()));
+    }
+  }, 20000);
 });

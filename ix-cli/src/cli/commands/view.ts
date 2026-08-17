@@ -256,6 +256,16 @@ const { execFile } = require("child_process");
 
 const DIST = process.argv[2];
 const PORT = Number(process.argv[3]);
+// How long to wait on the backend before answering 504. Generous, because it
+// must not fire on a legitimately slow read: /v1/map rebuilds the whole map on
+// every call and has been measured at 276s on a large graph. Overridable only
+// under NODE_ENV=test, like the seams below, so a shipped install cannot be
+// given a short timeout through the environment — and so the timeout itself
+// can be tested without a ten-minute test.
+const PROXY_TIMEOUT_MS = (process.env.NODE_ENV === "test" && process.env.IX_VIEW_PROXY_TIMEOUT_MS)
+  ? Number(process.env.IX_VIEW_PROXY_TIMEOUT_MS)
+  : 600000;
+
 const BACKEND = (process.env.NODE_ENV === "test" && process.env.IX_VIEW_BACKEND_URL)
   ? process.env.IX_VIEW_BACKEND_URL
   : ${JSON.stringify(BACKEND_URL)};
@@ -328,9 +338,26 @@ const server = http.createServer((req, res) => {
       res.writeHead(proxyRes.statusCode, proxyRes.headers);
       proxyRes.pipe(res);
     });
-    proxyReq.on("error", () => {
-      res.writeHead(502, { "Content-Type": "text/plain" });
-      res.end("Backend unavailable");
+    // A backend that accepts the socket and then never answers used to hang
+    // here for ever: node puts no timeout on an outgoing request, so the
+    // browser waited indefinitely, Compass recorded neither a result nor a
+    // failure, and the region sat at "loading …" with nothing to distinguish a
+    // slow map from a dead one. Answering 504 turns that into a state the
+    // client can render and a user can act on.
+    //
+    // Generous, because it must not fire on a legitimately slow read: /v1/map
+    // rebuilds the whole map on every call and has been measured at 276s on a
+    // large graph. This is the point past which silence is a fault rather than
+    // patience.
+    proxyReq.setTimeout(PROXY_TIMEOUT_MS, () => {
+      proxyReq.destroy(new Error("backend timed out"));
+    });
+    proxyReq.on("error", (err) => {
+      // Whatever went wrong, the client is still waiting; say something.
+      if (res.headersSent) { res.destroy(); return; }
+      const timedOut = err && err.message === "backend timed out";
+      res.writeHead(timedOut ? 504 : 502, { "Content-Type": "text/plain" });
+      res.end(timedOut ? "Backend timed out" : "Backend unavailable");
     });
     req.pipe(proxyReq);
     return;
