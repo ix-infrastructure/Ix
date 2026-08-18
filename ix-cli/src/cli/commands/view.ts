@@ -450,6 +450,27 @@ const server = http.createServer((req, res) => {
   }
 
   // Serve static files
+  //
+  // Sending no cache headers is not the same as sending "do not cache": with no
+  // Cache-Control, no ETag and no Last-Modified, a browser picks its own
+  // freshness heuristic and may reuse a response without ever asking. This
+  // server always serves 127.0.0.1 on a port it reuses, so that cache outlives
+  // an upgrade -- the old index.html comes back, names the old content-hashed
+  // bundles, and the entire previous Compass runs while /.version, fetched
+  // separately, reports the new build. The result is a status bar that says the
+  // fix shipped while the screen shows the build before it.
+  //
+  // Everything under assets/ is fingerprinted by content, so its name changes
+  // whenever it does and it can be kept forever. The entry points carry no
+  // fingerprint and must never be served stale.
+  //
+  // startsWith, not a regex, and no backticks anywhere in this block: the whole
+  // script is emitted from a template literal, so a backslash escape is eaten
+  // before it reaches the generated file and a backtick ends the literal
+  // outright. Both were tried here; the second took the server down.
+  const cacheControl = (p) =>
+    p.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-store";
+
   let filePath = path.join(DIST, pathname === "/" ? "index.html" : pathname);
 
   // SPA fallback: if file doesn't exist and no extension, serve index.html
@@ -466,14 +487,20 @@ const server = http.createServer((req, res) => {
           res.end("Not found");
           return;
         }
-        res.writeHead(200, { "Content-Type": "text/html" });
+        res.writeHead(200, {
+          "Content-Type": "text/html",
+          "Cache-Control": "no-store",
+        });
         res.end(fallback);
       });
       return;
     }
     const ext = path.extname(filePath).toLowerCase();
     const mime = MIME[ext] || "application/octet-stream";
-    res.writeHead(200, { "Content-Type": mime });
+    res.writeHead(200, {
+      "Content-Type": mime,
+      "Cache-Control": cacheControl(pathname),
+    });
     res.end(data);
   });
 });

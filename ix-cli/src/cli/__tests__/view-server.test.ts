@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
@@ -370,4 +370,55 @@ describe("view server (/__ix/remap)", () => {
       await new Promise<void>((resolve) => hung.close(() => resolve()));
     }
   }, 20000);
+
+  // ── Cache headers ────────────────────────────────────────────────────────
+  //
+  // Reported as "it reads the new release but looks the same": rc.10 installed,
+  // /.version showed the new stamp, and the screen showed the previous build.
+  // The server sent no cache headers at all — which is not "do not cache". With
+  // no Cache-Control, no ETag and no Last-Modified the browser picks its own
+  // freshness heuristic, and `ix view` reuses 127.0.0.1 on the same port across
+  // upgrades, so the entry point it cached before the upgrade is still a hit
+  // after it. The old index.html then names the old hashed bundles and the
+  // whole previous Compass runs, while /.version is fetched separately and
+  // reports the new build.
+
+  it("never lets the entry point be served from cache", async () => {
+    await startServer({ STUB_EXIT: "0" });
+    const res = await fetch(`http://127.0.0.1:${port}/`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  }, 20000);
+
+  it("never lets the build stamp be served from cache", async () => {
+    // The stamp is what a bug report quotes. A stale one is worse than none:
+    // it makes the wrong build look like the right one.
+    writeFileSync(join(distDir, ".version"), "0.10.0-rc.10+release.6bce261\n");
+    await startServer({ STUB_EXIT: "0" });
+    const res = await fetch(`http://127.0.0.1:${port}/.version`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("0.10.0-rc.10");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  }, 20000);
+
+  it("keeps fingerprinted assets cacheable", async () => {
+    // The point is not to disable caching — everything under assets/ is named
+    // by its own content, so it is safe to keep and expensive to refetch.
+    mkdirSync(join(distDir, "assets"), { recursive: true });
+    writeFileSync(join(distDir, "assets", "index-BbVrNAev.js"), "export const x = 1;\n");
+    await startServer({ STUB_EXIT: "0" });
+    const res = await fetch(`http://127.0.0.1:${port}/assets/index-BbVrNAev.js`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+  }, 20000);
+
+  it("does not let a missing asset poison the cache with the SPA fallback", async () => {
+    // A stale index.html asks for a bundle that no longer exists. The fallback
+    // answers with index.html, and caching *that* under the asset's URL is how
+    // one bad load becomes permanent.
+    await startServer({ STUB_EXIT: "0" });
+    const res = await fetch(`http://127.0.0.1:${port}/assets/index-GONE.js`);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  }, 20000);
+
 });
