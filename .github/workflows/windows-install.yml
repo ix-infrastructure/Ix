@@ -11,6 +11,15 @@
 # So this runs the real script, on a real Windows runner, and asserts the shape
 # of what it leaves behind. Every check below is a bug that actually shipped.
 #
+# It is *called* by the release workflow rather than triggered by
+# `release: published`, and that is not a style choice. The release is created
+# by `github-actions[bot]` with `secrets.GITHUB_TOKEN`, and GitHub does not start
+# new workflow runs from events created with that token — so a `release:`
+# trigger here never fires. It was written that way first and silently did
+# nothing for a release; being called keeps the check inside the run that
+# produced the artifact, where a failure is attached to the release that caused
+# it.
+#
 # `IX_SKIP_BACKEND=1` is what makes it possible at all: the runner has no Linux
 # Docker, and `Write-Err` exits, so without the skip the run dies at the Docker
 # check having never unpacked the CLI — the part that keeps breaking.
@@ -23,10 +32,14 @@ on:
     paths:
       - "scripts/install/install.ps1"
       - ".github/workflows/windows-install.yml"
-  # A published release is the moment the installer's inputs change, and the
-  # only moment a real user is about to run it against them.
-  release:
-    types: [published]
+  # Called by the release workflow once the assets are up — see below for why
+  # this is a call rather than a `release: published` trigger.
+  workflow_call:
+    inputs:
+      version:
+        description: "Version to install, without the leading v."
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       version:
@@ -61,7 +74,7 @@ jobs:
         shell: pwsh
         env:
           IX_SKIP_BACKEND: "1"
-          IX_VERSION: ${{ inputs.version || (github.event_name == 'release' && github.event.release.tag_name) || '' }}
+          IX_VERSION: ${{ inputs.version || '' }}
         run: |
           $env:IX_HOME = Join-Path $env:RUNNER_TEMP 'ix home'
           # The tag carries a leading v; IX_VERSION does not.
@@ -126,7 +139,7 @@ jobs:
         shell: pwsh
         env:
           IX_SKIP_BACKEND: "1"
-          IX_VERSION: ${{ inputs.version || (github.event_name == 'release' && github.event.release.tag_name) || '' }}
+          IX_VERSION: ${{ inputs.version || '' }}
         run: |
           if ($env:IX_VERSION) { $env:IX_VERSION = $env:IX_VERSION -replace '^v', '' }
           & .\scripts\install\install.ps1

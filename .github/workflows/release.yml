@@ -404,6 +404,8 @@ jobs:
     needs: build
     if: ${{ !inputs.dry_run && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     permissions:
       contents: write # create the release + push the brew branch
       pull-requests: write # open the brew formula PR
@@ -581,3 +583,21 @@ jobs:
           git commit -m "chore(brew): update formula for v${VERSION}" || exit 0
           git push --force-with-lease origin "$BRANCH"
           gh pr create --title "chore(brew): update formula for v${VERSION}" --body "Auto-generated: updates Homebrew formula SHA for v${VERSION}" --base main || true
+
+  # ── Verify the installer against the release it just made ────────────────
+  #
+  # The artifact was verified by packaging it; this verifies the script that
+  # unpacks it, which is where every Windows install bug has actually lived.
+  # Called rather than triggered by `release: published`: the release is created
+  # with `secrets.GITHUB_TOKEN`, and GitHub does not start new workflow runs
+  # from events created with that token, so the trigger never fired.
+  #
+  # Not a gate on the release — the assets are already published by the time it
+  # runs — but a failure here lands on the run that produced them, which is the
+  # difference between finding out now and finding out from a user.
+  verify-install:
+    needs: release
+    if: ${{ !inputs.dry_run && github.event_name != 'pull_request' }}
+    uses: ./.github/workflows/windows-install.yml
+    with:
+      version: ${{ needs.release.outputs.version }}
