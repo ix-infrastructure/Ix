@@ -13,3 +13,10 @@ rules:
       # setup-node's npm cache for build speed; the cache key is lockfile-pinned.
       # Accepted for the release workflow only.
       - release.yml
+      # windows-install.yml runs on `release: published`, which zizmor treats as
+      # a privileged context, and the finding is raised against setup-node on
+      # that basis alone. This one passes no `cache:` input, so setup-node
+      # neither restores nor saves a cache — there is nothing to poison, and the
+      # job publishes no artifact. It installs a already-published release and
+      # asserts the layout. Reported by zizmor at low confidence.
+      - windows-install.yml
