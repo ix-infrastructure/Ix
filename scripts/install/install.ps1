@@ -5,6 +5,7 @@
 #   $env:IX_VERSION = "0.9.0-rc.1"   Install a specific release (default: latest
 #                                    stable; required for a release candidate)
 #   $env:IX_HOME    = "C:\ix"        Install root (default: $env:USERPROFILE\.ix)
+#   $env:IX_SKIP_BACKEND = "1"       Install the CLI only, no Docker backend
 # ─────────────────────────────────────────────────────────────────────────────
 
 $ErrorActionPreference = "Stop"
@@ -241,24 +242,43 @@ if ($node) {
 }
 
 # ── Docker ──
+#
+# `IX_SKIP_BACKEND` is not new: install.sh has honoured it since it was written,
+# and it is the very thing install.sh *tells a Windows user to do* when it
+# declines to install Docker for them ("To install the CLI only (no backend):
+# IX_SKIP_BACKEND=1 sh install.sh"). This script never implemented it, so the
+# advice pointed at a flag that did nothing here and there was no way to install
+# the CLI against a memory layer that already exists — a remote endpoint, a
+# backend on another host, or a machine where Docker is managed separately.
+#
+# Both sections are gated, not just the second: `Write-Err` exits, so an absent
+# Docker ends the run before the CLI is ever unpacked.
+$SkipBackend = $env:IX_SKIP_BACKEND -eq "1"
+
 Write-Host "`n-- Docker --"
 
-if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-    Write-Err "Docker not installed"
+if ($SkipBackend) {
+    Write-Host "  (skipped via IX_SKIP_BACKEND=1)"
+} else {
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        Write-Err "Docker not installed"
+    }
+
+    Write-Ok "Docker installed"
+
+    if (-not (Test-DockerRunning)) {
+        Write-Err "Docker not running"
+    }
+
+    Write-Ok "Docker running"
 }
-
-Write-Ok "Docker installed"
-
-if (-not (Test-DockerRunning)) {
-    Write-Err "Docker not running"
-}
-
-Write-Ok "Docker running"
 
 # ── Backend ──
 Write-Host "`n-- Backend --"
 
-if (Test-Healthy) {
+if ($SkipBackend) {
+    Write-Host "  (skipped via IX_SKIP_BACKEND=1)"
+} elseif (Test-Healthy) {
     Write-Ok "Backend already running"
 } else {
     New-Item -ItemType Directory -Force -Path $ComposeDir | Out-Null

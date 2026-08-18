@@ -1,0 +1,152 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Windows installer smoke test
+#
+# Every Windows install bug this project has shipped got through because
+# nothing ever ran `install.ps1`. The release job packages the CLI on a Windows
+# runner and stops there, so what was verified each time was the *artifact* —
+# never the script that unpacks it. The three bugs found by hand on v0.9.0-rc.1
+# (archive nesting, upgrade re-nesting, the IE-parse prompt) were all in that
+# gap, and each was reported by a user rather than by CI.
+#
+# So this runs the real script, on a real Windows runner, and asserts the shape
+# of what it leaves behind. Every check below is a bug that actually shipped.
+#
+# `IX_SKIP_BACKEND=1` is what makes it possible at all: the runner has no Linux
+# Docker, and `Write-Err` exits, so without the skip the run dies at the Docker
+# check having never unpacked the CLI — the part that keeps breaking.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Windows install
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "scripts/install/install.ps1"
+      - ".github/workflows/windows-install.yml"
+  # A published release is the moment the installer's inputs change, and the
+  # only moment a real user is about to run it against them.
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to install (e.g. 0.10.0-rc.10). Blank = latest stable."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-install-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install:
+    name: install.ps1 on Windows
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      # A path with a space, deliberately: #349 was a profile at `C:\Users\Win 10`,
+      # where Windows handed the installer an 8.3 short TEMP path and the run died
+      # after extraction. A test on a space-free path would not have caught it.
+      - name: Install
+        shell: pwsh
+        env:
+          IX_SKIP_BACKEND: "1"
+          IX_VERSION: ${{ inputs.version || (github.event_name == 'release' && github.event.release.tag_name) || '' }}
+        run: |
+          $env:IX_HOME = Join-Path $env:RUNNER_TEMP 'ix home'
+          # The tag carries a leading v; IX_VERSION does not.
+          if ($env:IX_VERSION) { $env:IX_VERSION = $env:IX_VERSION -replace '^v', '' }
+          Write-Host "IX_HOME=$env:IX_HOME  IX_VERSION=$($env:IX_VERSION -replace '^$','(latest stable)')"
+          & .\scripts\install\install.ps1
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 exited $LASTEXITCODE" }
+          "IX_HOME=$env:IX_HOME" >> $env:GITHUB_ENV
+
+      - name: Layout is flat
+        shell: pwsh
+        run: |
+          $cli = Join-Path $env:IX_HOME 'cli'
+          $names = (Get-ChildItem -LiteralPath $cli -Name) -join ', '
+          Write-Host "cli\ contains: $names"
+
+          # The canonical layout is flat. `findCompassDist` and `COMPASS_DIR`
+          # read $IX_HOME\cli\compass and nothing else, so anything nested here
+          # breaks `ix view` — which is exactly what Expand-Archive did, having
+          # no --strip-components to match what install.sh does with tar.
+          $nested = Get-ChildItem -LiteralPath $cli -Directory |
+                    Where-Object { $_.Name -match '^ix-.*-windows-amd64$' }
+          if ($nested) { throw "archive is nested under $($nested.Name) — flat layout expected" }
+
+          foreach ($entry in 'cli', 'compass', 'core-ingestion', 'ix.cmd') {
+            if (-not (Test-Path -LiteralPath (Join-Path $cli $entry))) {
+              throw "missing $entry in $cli (found: $names)"
+            }
+          }
+
+      - name: Launcher runs
+        shell: pwsh
+        run: |
+          # By absolute path, not through PATH: a shim that resolves only because
+          # the session happens to have the right PATH is not a working install.
+          $shim = Join-Path $env:IX_HOME 'bin\ix.cmd'
+          if (-not (Test-Path -LiteralPath $shim)) { throw "no launcher at $shim" }
+          $out = & $shim --version 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "ix --version exited $LASTEXITCODE`n$out" }
+          Write-Host $out.Trim()
+
+      - name: Compass is present and stamped
+        shell: pwsh
+        run: |
+          $compass = Join-Path $env:IX_HOME 'cli\compass'
+          if (-not (Test-Path -LiteralPath (Join-Path $compass 'index.html'))) {
+            throw "no compass bundle — 'ix view' would exit with 'Compass UI not found'"
+          }
+          # An unstamped bundle reads as version 0.0.0, which made `ix upgrade`
+          # treat "none -> x" as an upgrade and replace a current Compass with an
+          # older dist build. A bundle that ships must declare its own version.
+          $stamp = Join-Path $compass '.version'
+          if (-not (Test-Path -LiteralPath $stamp)) { throw "compass has no .version stamp" }
+          $v = (Get-Content -LiteralPath $stamp -Raw).Trim()
+          if (-not $v) { throw "compass .version is empty" }
+          Write-Host "compass: $v"
+
+      # Re-running is the common case — it is how a user upgrades — and it is a
+      # path a first install can never exercise. It is also where the installer
+      # has historically re-nested the tree it had just laid out flat.
+      - name: Re-run is idempotent
+        shell: pwsh
+        env:
+          IX_SKIP_BACKEND: "1"
+          IX_VERSION: ${{ inputs.version || (github.event_name == 'release' && github.event.release.tag_name) || '' }}
+        run: |
+          if ($env:IX_VERSION) { $env:IX_VERSION = $env:IX_VERSION -replace '^v', '' }
+          & .\scripts\install\install.ps1
+          if ($LASTEXITCODE -ne 0) { throw "second install.ps1 exited $LASTEXITCODE" }
+
+          $cli = Join-Path $env:IX_HOME 'cli'
+          $nested = Get-ChildItem -LiteralPath $cli -Directory |
+                    Where-Object { $_.Name -match '^ix-.*-windows-amd64$' }
+          if ($nested) { throw "re-install re-nested the tree under $($nested.Name)" }
+
+          $out = & (Join-Path $env:IX_HOME 'bin\ix.cmd') --version 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "ix --version broken after re-install`n$out" }
+          Write-Host "after re-install: $($out.Trim())"
+
+      # Leaving scratch behind is how #349 was found: the installer used to work
+      # in TEMP, and the failure it produced there was unreadable.
+      - name: No scratch left behind
+        shell: pwsh
+        run: |
+          $leftovers = Get-ChildItem -LiteralPath $env:IX_HOME -Filter '.cli-*' -Force -ErrorAction SilentlyContinue
+          if ($leftovers) {
+            throw "installer scratch left in IX_HOME: $(($leftovers | Select-Object -ExpandProperty Name) -join ', ')"
+          }
