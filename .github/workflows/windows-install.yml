@@ -124,12 +124,16 @@ jobs:
 
           # Assert *which* release we just installed, when one was named.
           #
-          # `${{ inputs.version || '' }}` degrades an empty input to "latest
-          # stable", and workflow_call accepts an empty string for a
-          # `required: true` input — so if `needs.release.outputs.version` ever
-          # resolves empty (a renamed step id, a reworked release job), this job
-          # installs an unrelated build and every check below passes against it.
-          # That is the same silent-no-op the `release: published` trigger was.
+          # The IX_VERSION expression above falls back to an empty string, which
+          # install.ps1 reads as "latest stable" -- and workflow_call accepts an
+          # empty string for a required input. So if needs.release.outputs.version
+          # ever resolves empty (a renamed step id, a reworked release job) this
+          # job installs an unrelated build and every check below passes against
+          # it, which is the same silent no-op the release-published trigger was.
+          #
+          # No expression syntax in this comment. zizmor reads a template
+          # expansion anywhere inside a run block as an injection site, comments
+          # included, and it is right that it cannot tell the difference.
           if ($env:IX_VERSION) {
             $want = $env:IX_VERSION -replace '^v', ''
             if ($out -notmatch [regex]::Escape($want)) {
