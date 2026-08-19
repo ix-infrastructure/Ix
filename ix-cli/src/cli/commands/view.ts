@@ -464,12 +464,22 @@ const server = http.createServer((req, res) => {
   // whenever it does and it can be kept forever. The entry points carry no
   // fingerprint and must never be served stale.
   //
-  // startsWith, not a regex, and no backticks anywhere in this block: the whole
-  // script is emitted from a template literal, so a backslash escape is eaten
-  // before it reaches the generated file and a backtick ends the literal
-  // outright. Both were tried here; the second took the server down.
-  const cacheControl = (p) =>
-    p.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-store";
+  // Keyed on the file that is about to be sent, not on the URL that asked for
+  // it. Those are not the same path: the SPA fallback below rewrites filePath
+  // to index.html for any extensionless miss, so GET /assets/anything answers
+  // with index.html -- and deciding from the URL would then stamp the entry
+  // point "immutable" for a year under an /assets/ key. That is the permanent
+  // form of the very bug this block exists to prevent.
+  //
+  // path.sep rather than a literal separator, and startsWith rather than a
+  // regex: the whole script is emitted from a template literal, so a backslash
+  // escape is eaten before it reaches the generated file and a backtick ends
+  // the literal outright. Both were tried here; the second took the server
+  // down. The trailing separator is what keeps a sibling directory named
+  // assets-old from matching.
+  const ASSET_PREFIX = path.join(DIST, "assets") + path.sep;
+  const cacheControl = (f) =>
+    f.startsWith(ASSET_PREFIX) ? "public, max-age=31536000, immutable" : "no-store";
 
   let filePath = path.join(DIST, pathname === "/" ? "index.html" : pathname);
 
@@ -499,7 +509,7 @@ const server = http.createServer((req, res) => {
     const mime = MIME[ext] || "application/octet-stream";
     res.writeHead(200, {
       "Content-Type": mime,
-      "Cache-Control": cacheControl(pathname),
+      "Cache-Control": cacheControl(filePath),
     });
     res.end(data);
   });
@@ -509,6 +519,44 @@ server.listen(PORT, "127.0.0.1", () => {
   // Server ready — parent already detached
 });
 `;
+}
+
+/**
+ * The URL to hand the browser: the server's URL, keyed by the build stamp.
+ *
+ * `Cache-Control: no-store` only reaches a response the browser actually asks
+ * for. A client that cached `/` before the upgrade never asks — its entry is
+ * still fresh, so it keeps serving the old index.html, which names the old
+ * hashed bundles, and never learns the policy changed. `ix view` reuses
+ * 127.0.0.1 on the same port across upgrades, so that entry outlives the
+ * install meant to replace it. Without this, the header is prospective only:
+ * it protects the next upgrade, not the one the user just ran, which is the
+ * one they are looking at.
+ *
+ * A different query string is a different cache key, so the tab we open is a
+ * real fetch whatever the browser is holding. The stamp comes from the dist,
+ * so the key changes exactly when the bundle does and a start that changed
+ * nothing still hits cache. The *printed* URL stays clean: this is a bust for
+ * the tab we open, not a URL anyone should have to type.
+ */
+export function browserUrl(serverUrl: string, distDir: string): string {
+  let stamp: string;
+  try {
+    stamp = readFileSync(join(distDir, ".version"), "utf8");
+  } catch {
+    // Absent and unreadable are the same answer here — there is no stamp to
+    // key on — and the fallback is the plain URL either way, so nothing is
+    // hidden by merging them. A dev build and a bundle from before the stamp
+    // existed both land here.
+    return serverUrl;
+  }
+  // Restrict to the characters a release stamp is actually made of
+  // (`0.10.0-rc.10+release.6bce261`). Everything below runs the URL through a
+  // shell, where `&` starts a second command; a stamp is a file on disk, so it
+  // is not the CLI's own string to trust. Dropping the rest costs nothing —
+  // any surviving difference is still a different cache key.
+  const key = stamp.trim().replace(/[^A-Za-z0-9._+-]/g, "");
+  return key ? `${serverUrl}/?v=${key}` : serverUrl;
 }
 
 function openBrowser(url: string): void {
@@ -698,7 +746,7 @@ export function registerViewCommand(program: Command): void {
       );
 
       if (opts.open !== false) {
-        openBrowser(url);
+        openBrowser(browserUrl(url, distDir));
       }
     });
 

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import * as http from "node:http";
-import { serverRuntimeArgs, serverScript } from "../commands/view.js";
+import { browserUrl, serverRuntimeArgs, serverScript } from "../commands/view.js";
 
 interface StartServerOptions {
   workspaceId?: string;
@@ -421,4 +421,83 @@ describe("view server (/__ix/remap)", () => {
     expect(res.headers.get("cache-control")).toBe("no-store");
   }, 20000);
 
+  it("does not let an extensionless /assets/ miss poison the cache", async () => {
+    // The case above has an extension, so it takes the readFile-error branch
+    // and its hardcoded no-store — it never reaches the asset/entry decision at
+    // all. Without an extension the *earlier* SPA rewrite fires instead:
+    // filePath becomes index.html and readFile succeeds, so the response body
+    // is the entry point while the URL still says /assets/. Choosing the policy
+    // from the URL stamps that body `immutable` for a year, which is this bug
+    // made permanent. Choosing it from the resolved file does not.
+    await startServer({ STUB_EXIT: "0" });
+    const res = await fetch(`http://127.0.0.1:${port}/assets/index-GONE`);
+    expect(res.status).toBe(200);
+    // Proof the body really is the entry point, not a 404 that happens to
+    // carry the right header.
+    expect(await res.text()).toContain("fake compass");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  }, 20000);
+
+});
+
+// ── Entry-point cache busting ────────────────────────────────────────────────
+//
+// `no-store` fixes the *next* upgrade. It cannot fix the one the reporter just
+// ran: their browser cached `/` before it, so it never issues the request that
+// would carry the new header. A distinct query string is a distinct cache key,
+// which is the only thing that reaches an entry the browser is not asking about.
+describe("view browser URL", () => {
+  let dist: string;
+
+  beforeAll(() => {
+    dist = mkdtempSync(join(tmpdir(), "ix view stamp "));
+  });
+
+  afterAll(() => {
+    rmSync(dist, { recursive: true, force: true });
+  });
+
+  it("keys the opened URL on the build stamp", () => {
+    writeFileSync(join(dist, ".version"), "0.10.0-rc.10+release.6bce261\n");
+    expect(browserUrl("http://localhost:4173", dist)).toBe(
+      "http://localhost:4173/?v=0.10.0-rc.10+release.6bce261",
+    );
+  });
+
+  it("changes the key when the build changes, and only then", () => {
+    // Two starts on one build must hit cache; a start after an upgrade must not.
+    writeFileSync(join(dist, ".version"), "0.10.0+release.aaaaaaa\n");
+    const before = browserUrl("http://localhost:4173", dist);
+    expect(browserUrl("http://localhost:4173", dist)).toBe(before);
+    writeFileSync(join(dist, ".version"), "0.10.1+release.bbbbbbb\n");
+    expect(browserUrl("http://localhost:4173", dist)).not.toBe(before);
+  });
+
+  it("leaves the URL alone when the dist carries no stamp", () => {
+    // A dev build, or a bundle from before the stamp existed. Inventing a key
+    // would refetch the entry point on every start for nothing.
+    const bare = mkdtempSync(join(tmpdir(), "ix view nostamp "));
+    try {
+      expect(browserUrl("http://localhost:4173", bare)).toBe("http://localhost:4173");
+      writeFileSync(join(bare, ".version"), "  \n");
+      expect(browserUrl("http://localhost:4173", bare)).toBe("http://localhost:4173");
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
+  });
+
+  it("does not let a stamp file smuggle a second shell command", () => {
+    // The URL is interpolated into `start`/`open`/`xdg-open` through a shell,
+    // and the stamp is a file on disk rather than a string the CLI built.
+    const evil = mkdtempSync(join(tmpdir(), "ix view evil "));
+    try {
+      writeFileSync(join(evil, ".version"), "0.10.0 & calc.exe\n");
+      const opened = browserUrl("http://localhost:4173", evil);
+      expect(opened).toBe("http://localhost:4173/?v=0.10.0calc.exe");
+      expect(opened).not.toContain("&");
+      expect(opened).not.toContain(" ");
+    } finally {
+      rmSync(evil, { recursive: true, force: true });
+    }
+  });
 });
