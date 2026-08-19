@@ -5,7 +5,7 @@ import { basename, dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { homedir } from "os";
 import chalk from "chalk";
-import { BACKEND_IMAGE, checkBackendImage, isNonStandardBackend } from "../backend-status.js";
+import { BACKEND_IMAGE, checkBackendImage, isNonStandardBackend, type BackendImageStatus } from "../backend-status.js";
 import { canRenderProgress } from "../stderr.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1013,6 +1013,65 @@ function detectPlatform(): string {
 }
 
 /**
+ * Whether to tell the user their backend is behind.
+ *
+ * Pure, so the decision can be tested without a docker daemon. The tracked
+ * version alone is not evidence: `.backend-version` is written by `ix upgrade`
+ * and by nothing else, so anyone who pulled the image through docker compose,
+ * or through `ix docker start` after the tag moved, keeps a file that says an
+ * old version while running the current one — and is told to upgrade on every
+ * command, for ever.
+ *
+ * `ix doctor` already knows better. `checkBackendImage` compares the *running
+ * container's* image id against `:latest` ("Ix#270: trust the running
+ * container, not the version stamp"), and `ok` means they are the same image.
+ * That is proof the file is stale, and the only state that is: with docker
+ * unavailable, no container running, or `:latest` never pulled, the question is
+ * open and the tracked version stays the answer.
+ */
+export function shouldOfferBackendUpgrade(
+  backendLatest: string | undefined,
+  trackedVersion: string,
+  runningImage: BackendImageStatus["kind"],
+): boolean {
+  if (!backendLatest || !isNewer(backendLatest, trackedVersion)) return false;
+  return runningImage !== "ok";
+}
+
+/**
+ * The same decision, with the IO around it.
+ *
+ * The docker calls happen only once the tracked version has already said
+ * "behind" — so a correct tracker costs nothing, and an incorrect one costs
+ * three `docker inspect` calls once. Once, because finding the container
+ * already on `:latest` repairs the file it disagreed with: the running image
+ * *is* the latest release, so that is the version to record.
+ */
+function backendUpdatePending(backendLatest: string | undefined): boolean {
+  const tracked = getTrackedVersion(BACKEND_VERSION_FILE);
+  if (!backendLatest || !isNewer(backendLatest, tracked)) return false;
+
+  let kind: BackendImageStatus["kind"];
+  try {
+    kind = checkBackendImage().kind;
+  } catch {
+    // Never let a docker probe decide whether the command the user actually
+    // ran gets to finish. Unknown means the tracked version stands.
+    return true;
+  }
+
+  if (kind === "ok") {
+    try {
+      writeFileSync(BACKEND_VERSION_FILE, backendLatest);
+    } catch {
+      /* best effort: the notice is suppressed either way */
+    }
+    return false;
+  }
+  return shouldOfferBackendUpgrade(backendLatest, tracked, kind);
+}
+
+/**
  * Check for updates (non-blocking, cached for 1 hour).
  * Call this from other commands to notify users.
  */
@@ -1023,9 +1082,7 @@ export async function checkForUpdate(): Promise<void> {
   if (cache && Date.now() - cache.checkedAt < 3600_000) {
     const hasCliUpdate = isNewer(cache.latest, current);
     const hasCompassUpdate = shouldOfferCompassUpgrade(cache.compassLatest);
-    const backendCurrent = getTrackedVersion(BACKEND_VERSION_FILE);
-    const hasBackendUpdate =
-      cache.backendLatest && isNewer(cache.backendLatest, backendCurrent);
+    const hasBackendUpdate = backendUpdatePending(cache.backendLatest);
     if (hasCliUpdate || hasCompassUpdate || hasBackendUpdate) {
       printUpdateNotice(current, cache.latest, !!hasCompassUpdate, !!hasBackendUpdate);
     }
@@ -1041,9 +1098,7 @@ export async function checkForUpdate(): Promise<void> {
     writeCache(latest, compassLatest ?? undefined, backendLatest ?? undefined);
     const hasCliUpdate = isNewer(latest, current);
     const hasCompassUpdate = shouldOfferCompassUpgrade(compassLatest ?? undefined);
-    const backendCurrent = getTrackedVersion(BACKEND_VERSION_FILE);
-    const hasBackendUpdate =
-      backendLatest && isNewer(backendLatest, backendCurrent);
+    const hasBackendUpdate = backendUpdatePending(backendLatest ?? undefined);
     if (hasCliUpdate || hasCompassUpdate || hasBackendUpdate) {
       printUpdateNotice(current, latest, !!hasCompassUpdate, !!hasBackendUpdate);
     }
