@@ -32,3 +32,46 @@ jobs:
         run: |
           pipx install zizmor
           zizmor --min-severity=medium .github/workflows/
+
+  # ── Workflow correctness ──────────────────────────────────────────────────
+  #
+  # zizmor audits for security; nothing here checked that the workflows are
+  # *wired up*. That gap has a cost: `release.yml` calls `windows-install.yml`
+  # as a reusable workflow, and until a tag is pushed nothing runs that call —
+  # a mistyped `uses:` path or a renamed input would surface for the first time
+  # on a production release. (The `release: published` trigger it replaced
+  # failed the same way, silently, for a whole release.) actionlint resolves
+  # local `uses:` targets and matches the supplied `with:` keys against the
+  # callee's declared inputs, so both of those are now caught on the PR.
+  #
+  # It does not check everything: a reusable-workflow *permission* restriction
+  # is an org setting no linter can see. This closes the mechanical half.
+  #
+  # shellcheck and pyflakes are off deliberately. actionlint shells out to them
+  # for `run:` blocks when they are on PATH, which they are on ubuntu-latest —
+  # so leaving them on makes this job's verdict depend on the runner image's
+  # shellcheck version rather than on anything in the repo.
+  actionlint:
+    name: actionlint (workflow correctness)
+    runs-on: ubuntu-latest
+    env:
+      # Pinned by version *and* checksum, like every action above is pinned by
+      # SHA: this step runs a downloaded binary over the workflow definitions.
+      ACTIONLINT_VERSION: 1.7.7
+      ACTIONLINT_SHA256: 023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
+    steps:
+      - uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run actionlint
+        run: |
+          set -euo pipefail
+          TARBALL="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$TARBALL" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${TARBALL}"
+          echo "${ACTIONLINT_SHA256}  ${TARBALL}" | sha256sum --check --strict -
+          tar -xzf "$TARBALL" actionlint
+          ./actionlint -shellcheck= -pyflakes=

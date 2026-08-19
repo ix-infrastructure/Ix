@@ -77,7 +77,11 @@ jobs:
           IX_VERSION: ${{ inputs.version || '' }}
         run: |
           $env:IX_HOME = Join-Path $env:RUNNER_TEMP 'ix home'
-          # The tag carries a leading v; IX_VERSION does not.
+          # Tolerance for the hand-typed case, not a translation of the tag: the
+          # release workflow passes `${TAG#v}`, already stripped, so this is a
+          # no-op on that path. The one input a human fills in is
+          # workflow_dispatch's, where the release is called v0.10.0 everywhere
+          # it is named and typing the v back in is the obvious mistake.
           if ($env:IX_VERSION) { $env:IX_VERSION = $env:IX_VERSION -replace '^v', '' }
           Write-Host "IX_HOME=$env:IX_HOME  IX_VERSION=$($env:IX_VERSION -replace '^$','(latest stable)')"
           & .\scripts\install\install.ps1
@@ -141,6 +145,7 @@ jobs:
           IX_SKIP_BACKEND: "1"
           IX_VERSION: ${{ inputs.version || '' }}
         run: |
+          # Same hand-typed tolerance as the first install — see the note there.
           if ($env:IX_VERSION) { $env:IX_VERSION = $env:IX_VERSION -replace '^v', '' }
           & .\scripts\install\install.ps1
           if ($LASTEXITCODE -ne 0) { throw "second install.ps1 exited $LASTEXITCODE" }
