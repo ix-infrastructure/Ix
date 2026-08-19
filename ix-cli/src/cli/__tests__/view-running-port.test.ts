@@ -267,15 +267,18 @@ describe("view running port state", () => {
 describe("runningInstanceLines", () => {
   it("never builds a URL from the requested port", async () => {
     const { runningInstanceLines } = await import("../commands/view.js");
-    const lines = runningInstanceLines(19123, 19124, true);
+    // The token is supplied so the assertion stays exact; it is the cache bust
+    // that makes an already-running visualizer reachable after `ix upgrade`
+    // replaced the dist underneath it.
+    const lines = runningInstanceLines(19123, 19124, true, "tok");
 
-    expect(lines[0]).toBe("  http://localhost:19123");
+    expect(lines[0]).toBe("  http://localhost:19123/?ix=tok");
     expect(lines.some(l => l.includes("http://localhost:19124"))).toBe(false);
   });
 
   it("does not warn when the running port is the one that was asked for", async () => {
     const { runningInstanceLines } = await import("../commands/view.js");
-    expect(runningInstanceLines(8080, 8080, true)).toEqual(["  http://localhost:8080"]);
+    expect(runningInstanceLines(8080, 8080, true, "tok")).toEqual(["  http://localhost:8080/?ix=tok"]);
   });
 
   it("admits it does not know rather than guessing", async () => {

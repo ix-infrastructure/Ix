@@ -126,11 +126,18 @@ function readRunningPort(): number | null {
  *
  * Pure, because the decision is all this is, and inline in a command action it
  * could only be exercised by launching a detached server.
+ *
+ * `token` is threaded rather than read from `CACHE_BUST` so this stays pure.
+ * The URL it prints carries the bust for a reason: `ix upgrade` replaces the
+ * dist in place and leaves the server running, so the next `ix view` lands
+ * here, prints a URL and opens nothing. That is the reporter's exact path, and
+ * a bust that only covered the opened tab would miss it.
  */
 export function runningInstanceLines(
   runningPort: number | null,
   requestedPort: number,
   portWasRequested: boolean,
+  token: string = CACHE_BUST,
 ): string[] {
   if (runningPort === null) {
     return [
@@ -139,7 +146,7 @@ export function runningInstanceLines(
     ];
   }
 
-  const lines = [`  http://localhost:${runningPort}`];
+  const lines = [`  ${browserUrl(`http://localhost:${runningPort}`, token)}`];
   if (portWasRequested && runningPort !== requestedPort) {
     lines.push(`[!] You asked for port ${requestedPort}, but it is serving on ${runningPort}.`);
     lines.push(`    Run 'ix view stop' then 'ix view -p ${requestedPort}' to move it.`);
@@ -311,6 +318,50 @@ const MIME = {
   ".map":  "application/json",
 };
 
+// ── Cache policy ────────────────────────────────────────────────────────────
+//
+// Sending no cache headers is not the same as sending "do not cache": with no
+// Cache-Control, no ETag and no Last-Modified, a browser picks its own freshness
+// heuristic and may reuse a response without ever asking. This server always
+// serves 127.0.0.1 on a port it reuses, so that cache outlives an upgrade -- the
+// old index.html comes back, names the old content-hashed bundles, and the
+// entire previous Compass runs while /.version, fetched separately, reports the
+// new build. The result is a status bar that says the fix shipped while the
+// screen shows the build before it.
+//
+// The decision is keyed on the file about to be sent, never on the URL that
+// asked for it. Those are not the same path: the SPA fallback rewrites filePath
+// to index.html for any extensionless miss, so GET /assets/anything answers with
+// index.html -- and deciding from the URL would stamp the entry point
+// "immutable" for a year under an /assets/ key, which is the permanent form of
+// the bug this exists to prevent.
+//
+// A content hash in the name is what makes "keep this forever" safe: the name
+// changes whenever the bytes do. Sitting under assets/ is not the same claim.
+// Compass is built in another repo, so nothing here can verify what it puts
+// there, and one stable name -- a hand-placed file, a build whose
+// assetFileNames drops [hash] -- would be pinned in a user's browser for a year
+// against a fixed origin, with no revalidation path and no recovery short of
+// clearing site data. So the guard checks for the hash it is asserting. The
+// charset excludes the dash on purpose: a hash containing one simply misses
+// the optimisation and is revalidated, while my-long-name.css matching would
+// be the unrecoverable direction.
+//
+// No backslash escapes and no backticks anywhere in this block: the whole
+// script is emitted from a template literal, so an escape is eaten before it
+// reaches the generated file and a backtick ends the literal outright. Both
+// were tried here; the second took the server down. Hence a bracketed dot
+// rather than an escaped one, path.sep rather than a literal separator, and
+// no backticks even inside these comments -- one here ends the literal just
+// as surely as one in the code, which is how this block first failed to parse.
+const DIST_ROOT = path.resolve(DIST);
+const ASSET_PREFIX = path.join(DIST_ROOT, "assets") + path.sep;
+const FINGERPRINTED = /-[A-Za-z0-9_]{8,}[.]/;
+const cacheControl = (f) =>
+  f.startsWith(ASSET_PREFIX) && FINGERPRINTED.test(path.basename(f))
+    ? "public, max-age=31536000, immutable"
+    : "no-store";
+
 const server = http.createServer((req, res) => {
   const parsed = url.parse(req.url);
   const pathname = parsed.pathname || "/";
@@ -449,39 +500,22 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Serve static files
-  //
-  // Sending no cache headers is not the same as sending "do not cache": with no
-  // Cache-Control, no ETag and no Last-Modified, a browser picks its own
-  // freshness heuristic and may reuse a response without ever asking. This
-  // server always serves 127.0.0.1 on a port it reuses, so that cache outlives
-  // an upgrade -- the old index.html comes back, names the old content-hashed
-  // bundles, and the entire previous Compass runs while /.version, fetched
-  // separately, reports the new build. The result is a status bar that says the
-  // fix shipped while the screen shows the build before it.
-  //
-  // Everything under assets/ is fingerprinted by content, so its name changes
-  // whenever it does and it can be kept forever. The entry points carry no
-  // fingerprint and must never be served stale.
-  //
-  // Keyed on the file that is about to be sent, not on the URL that asked for
-  // it. Those are not the same path: the SPA fallback below rewrites filePath
-  // to index.html for any extensionless miss, so GET /assets/anything answers
-  // with index.html -- and deciding from the URL would then stamp the entry
-  // point "immutable" for a year under an /assets/ key. That is the permanent
-  // form of the very bug this block exists to prevent.
-  //
-  // path.sep rather than a literal separator, and startsWith rather than a
-  // regex: the whole script is emitted from a template literal, so a backslash
-  // escape is eaten before it reaches the generated file and a backtick ends
-  // the literal outright. Both were tried here; the second took the server
-  // down. The trailing separator is what keeps a sibling directory named
-  // assets-old from matching.
-  const ASSET_PREFIX = path.join(DIST, "assets") + path.sep;
-  const cacheControl = (f) =>
-    f.startsWith(ASSET_PREFIX) ? "public, max-age=31536000, immutable" : "no-store";
+  // Serve static files.
+  let filePath = path.resolve(path.join(DIST, pathname === "/" ? "index.html" : pathname));
 
-  let filePath = path.join(DIST, pathname === "/" ? "index.html" : pathname);
+  // Everything served comes from inside DIST. url.parse does not normalise
+  // a dot-dot segment, and path.join resolves straight out of the tree, so
+  // without this GET /../../../../etc/passwd is read and returned 200. A
+  // browser normalises dot-dot before sending, so the exposure is to other local
+  // processes reading files as the user who ran the CLI rather than as
+  // themselves -- which is still a file read this server has no business
+  // doing. Checked before the SPA fallback, because an escaping path that
+  // happens to exist never reaches it.
+  if (filePath !== DIST_ROOT && !filePath.startsWith(DIST_ROOT + path.sep)) {
+    res.writeHead(404, { "Content-Type": "text/plain", "Cache-Control": "no-store" });
+    res.end("Not found");
+    return;
+  }
 
   // SPA fallback: if file doesn't exist and no extension, serve index.html
   if (!fs.existsSync(filePath) && !path.extname(filePath)) {
@@ -522,41 +556,40 @@ server.listen(PORT, "127.0.0.1", () => {
 }
 
 /**
- * The URL to hand the browser: the server's URL, keyed by the build stamp.
+ * One cache-bust token per CLI invocation.
+ *
+ * Base-36 milliseconds: short, URL-safe, and made here rather than read from
+ * anywhere, so nothing on disk reaches the shell `openBrowser` runs.
+ */
+const CACHE_BUST = Date.now().toString(36);
+
+/**
+ * The visualizer URL, with the cache-bust token.
  *
  * `Cache-Control: no-store` only reaches a response the browser actually asks
- * for. A client that cached `/` before the upgrade never asks — its entry is
- * still fresh, so it keeps serving the old index.html, which names the old
- * hashed bundles, and never learns the policy changed. `ix view` reuses
- * 127.0.0.1 on the same port across upgrades, so that entry outlives the
- * install meant to replace it. Without this, the header is prospective only:
- * it protects the next upgrade, not the one the user just ran, which is the
- * one they are looking at.
+ * for. The client that reported this cached `/` before the upgrade, so it never
+ * asks — its entry is still fresh, it keeps serving the old index.html naming
+ * the old hashed bundles, and it never learns the policy changed. `ix view`
+ * reuses 127.0.0.1 on the same port across upgrades, so that entry outlives the
+ * install meant to replace it. Without a different key the header is
+ * prospective only: it protects the next upgrade, not the one the user just
+ * ran, which is the one they are looking at.
  *
- * A different query string is a different cache key, so the tab we open is a
- * real fetch whatever the browser is holding. The stamp comes from the dist,
- * so the key changes exactly when the bundle does and a start that changed
- * nothing still hits cache. The *printed* URL stays clean: this is a bust for
- * the tab we open, not a URL anyone should have to type.
+ * Every URL the CLI names goes through this, not just the one it opens. The
+ * reporter's path is `ix upgrade` (which replaces the dist in place and leaves
+ * the server running) then `ix view`, which takes the already-running branch
+ * and only *prints* a URL; a bust on the opened tab alone would miss it
+ * entirely, along with `--no-open`, a copied URL and a bookmark.
+ *
+ * Per invocation rather than keyed on the build stamp. The entry point is
+ * `no-store` now, so there is no cache entry a repeat start could have hit and
+ * nothing is lost by changing the key every time — while a stamp would have to
+ * be read from the dist, which is absent in a dev build, exactly where an
+ * iterating developer needs this most. Assets keep their own URLs, so they
+ * still come from cache.
  */
-export function browserUrl(serverUrl: string, distDir: string): string {
-  let stamp: string;
-  try {
-    stamp = readFileSync(join(distDir, ".version"), "utf8");
-  } catch {
-    // Absent and unreadable are the same answer here — there is no stamp to
-    // key on — and the fallback is the plain URL either way, so nothing is
-    // hidden by merging them. A dev build and a bundle from before the stamp
-    // existed both land here.
-    return serverUrl;
-  }
-  // Restrict to the characters a release stamp is actually made of
-  // (`0.10.0-rc.10+release.6bce261`). Everything below runs the URL through a
-  // shell, where `&` starts a second command; a stamp is a file on disk, so it
-  // is not the CLI's own string to trust. Dropping the rest costs nothing —
-  // any surviving difference is still a different cache key.
-  const key = stamp.trim().replace(/[^A-Za-z0-9._+-]/g, "");
-  return key ? `${serverUrl}/?v=${key}` : serverUrl;
+export function browserUrl(serverUrl: string, token: string = CACHE_BUST): string {
+  return `${serverUrl}/?ix=${token}`;
 }
 
 function openBrowser(url: string): void {
@@ -722,7 +755,11 @@ export function registerViewCommand(program: Command): void {
       writeFileSync(SCOPE_FILE, scopeKey);
       writeFileSync(PORT_FILE, String(port));
 
-      const url = `http://localhost:${port}`;
+      // One URL, printed and opened. They used to differ: only the opened
+      // one carried the cache bust, so --no-open, a copied URL, a bookmark
+      // and the not-ready branch below all still resolved to the entry the
+      // browser cached before the upgrade.
+      const url = browserUrl(`http://localhost:${port}`);
 
       // Reported rather than fatal: the wait is a heuristic, and a machine slow
       // enough to exceed it would otherwise have a working visualizer killed off
@@ -746,7 +783,7 @@ export function registerViewCommand(program: Command): void {
       );
 
       if (opts.open !== false) {
-        openBrowser(browserUrl(url, distDir));
+        openBrowser(url);
       }
     });
 

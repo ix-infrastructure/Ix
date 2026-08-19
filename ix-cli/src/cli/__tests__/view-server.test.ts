@@ -4,8 +4,9 @@ import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
+import { Script } from "node:vm";
 import * as http from "node:http";
-import { browserUrl, serverRuntimeArgs, serverScript } from "../commands/view.js";
+import { browserUrl, runningInstanceLines, serverRuntimeArgs, serverScript } from "../commands/view.js";
 
 interface StartServerOptions {
   workspaceId?: string;
@@ -421,6 +422,55 @@ describe("view server (/__ix/remap)", () => {
     expect(res.headers.get("cache-control")).toBe("no-store");
   }, 20000);
 
+  it("only marks a file immutable when its name carries a content hash", async () => {
+    // Being under assets/ is not the claim that makes a year-long pin safe --
+    // a name that changes with the bytes is, and Compass is built in another
+    // repo, so nothing here can verify what it puts in that directory. One
+    // stable name pinned for a year against a fixed origin has no revalidation
+    // path and no recovery short of clearing site data.
+    mkdirSync(join(distDir, "assets"), { recursive: true });
+    writeFileSync(join(distDir, "assets", "logo.svg"), "<svg/>");
+    writeFileSync(join(distDir, "assets", "vendor-2f9ab31c.css"), "body{}");
+    await startServer({ STUB_EXIT: "0" });
+
+    const unhashed = await fetch(`http://127.0.0.1:${port}/assets/logo.svg`);
+    expect(unhashed.status).toBe(200);
+    expect(unhashed.headers.get("cache-control")).toBe("no-store");
+
+    const hashed = await fetch(`http://127.0.0.1:${port}/assets/vendor-2f9ab31c.css`);
+    expect(hashed.status).toBe(200);
+    expect(hashed.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+  }, 20000);
+
+  it("refuses to read outside the dist directory", async () => {
+    // url.parse leaves dot-dot segments intact and path.join resolves straight
+    // out of the tree. A browser normalises the path before sending, so the
+    // reader here is another local process -- which still gets a file read as
+    // whoever ran the CLI. --path-as-is is how curl reproduces it; fetch()
+    // normalises, so the request is built by hand.
+    await startServer({ STUB_EXIT: "0" });
+    const outside = join(distDir, "..", "outside-secret.txt");
+    writeFileSync(outside, "top secret");
+    try {
+      const status = await new Promise<{ code: number; body: string }>((resolve, reject) => {
+        const req = http.request(
+          { host: "127.0.0.1", port, path: "/../outside-secret.txt", method: "GET" },
+          (res) => {
+            let body = "";
+            res.on("data", (c) => (body += c));
+            res.on("end", () => resolve({ code: res.statusCode ?? 0, body }));
+          },
+        );
+        req.on("error", reject);
+        req.end();
+      });
+      expect(status.body).not.toContain("top secret");
+      expect(status.code).toBe(404);
+    } finally {
+      rmSync(outside, { force: true });
+    }
+  }, 20000);
+
   it("does not let an extensionless /assets/ miss poison the cache", async () => {
     // The case above has an extension, so it takes the readFile-error branch
     // and its hardcoded no-store — it never reaches the asset/entry decision at
@@ -444,60 +494,50 @@ describe("view server (/__ix/remap)", () => {
 //
 // `no-store` fixes the *next* upgrade. It cannot fix the one the reporter just
 // ran: their browser cached `/` before it, so it never issues the request that
-// would carry the new header. A distinct query string is a distinct cache key,
-// which is the only thing that reaches an entry the browser is not asking about.
-describe("view browser URL", () => {
-  let dist: string;
-
-  beforeAll(() => {
-    dist = mkdtempSync(join(tmpdir(), "ix view stamp "));
-  });
-
-  afterAll(() => {
-    rmSync(dist, { recursive: true, force: true });
-  });
-
-  it("keys the opened URL on the build stamp", () => {
-    writeFileSync(join(dist, ".version"), "0.10.0-rc.10+release.6bce261\n");
-    expect(browserUrl("http://localhost:4173", dist)).toBe(
-      "http://localhost:4173/?v=0.10.0-rc.10+release.6bce261",
+// would carry the new header. A different query string is a different cache
+// key, which is the only thing that reaches an entry the browser is not asking
+// about.
+describe("view URLs", () => {
+  it("busts the cache key on every URL the CLI names", () => {
+    expect(browserUrl("http://localhost:4173", "abc123")).toBe(
+      "http://localhost:4173/?ix=abc123",
+    );
+    // The already-running branch is the reporter's path: `ix upgrade` replaces
+    // the dist in place and leaves the server up, so the next `ix view` prints
+    // a URL and opens nothing. A bust on the opened tab alone would miss it.
+    expect(runningInstanceLines(8080, 8080, false, "abc123")).toEqual([
+      "  http://localhost:8080/?ix=abc123",
+    ]);
+    // …and the port-mismatch advice still comes with it.
+    expect(runningInstanceLines(19123, 19124, true, "abc123")[0]).toBe(
+      "  http://localhost:19123/?ix=abc123",
     );
   });
 
-  it("changes the key when the build changes, and only then", () => {
-    // Two starts on one build must hit cache; a start after an upgrade must not.
-    writeFileSync(join(dist, ".version"), "0.10.0+release.aaaaaaa\n");
-    const before = browserUrl("http://localhost:4173", dist);
-    expect(browserUrl("http://localhost:4173", dist)).toBe(before);
-    writeFileSync(join(dist, ".version"), "0.10.1+release.bbbbbbb\n");
-    expect(browserUrl("http://localhost:4173", dist)).not.toBe(before);
+  it("uses a fresh key per invocation rather than the build stamp", () => {
+    // The entry point is `no-store` now, so there is no cache entry a repeat
+    // start could have hit and nothing is lost by changing the key every time.
+    // A stamp would have to be read from the dist — which a dev build does not
+    // have, exactly where an iterating developer needs this most.
+    expect(browserUrl("http://localhost:4173")).toMatch(/^http:\/\/localhost:4173\/\?ix=[a-z0-9]+$/);
+    expect(browserUrl("http://localhost:4173")).toBe(browserUrl("http://localhost:4173"));
+  });
+});
+
+// The server script is emitted from a template literal, so a stray backtick
+// anywhere in it — including inside a comment — ends the literal, and a
+// backslash escape is eaten before it reaches the generated file. Both have
+// happened; the second took the server down, and a backtick in a comment
+// warning about backticks is what broke this block most recently. Compiling
+// the emitted source is the check that would have caught every one of them.
+describe("generated server script", () => {
+  it("is syntactically valid JavaScript", () => {
+    expect(() => new Script(serverScript())).not.toThrow();
   });
 
-  it("leaves the URL alone when the dist carries no stamp", () => {
-    // A dev build, or a bundle from before the stamp existed. Inventing a key
-    // would refetch the entry point on every start for nothing.
-    const bare = mkdtempSync(join(tmpdir(), "ix view nostamp "));
-    try {
-      expect(browserUrl("http://localhost:4173", bare)).toBe("http://localhost:4173");
-      writeFileSync(join(bare, ".version"), "  \n");
-      expect(browserUrl("http://localhost:4173", bare)).toBe("http://localhost:4173");
-    } finally {
-      rmSync(bare, { recursive: true, force: true });
-    }
-  });
-
-  it("does not let a stamp file smuggle a second shell command", () => {
-    // The URL is interpolated into `start`/`open`/`xdg-open` through a shell,
-    // and the stamp is a file on disk rather than a string the CLI built.
-    const evil = mkdtempSync(join(tmpdir(), "ix view evil "));
-    try {
-      writeFileSync(join(evil, ".version"), "0.10.0 & calc.exe\n");
-      const opened = browserUrl("http://localhost:4173", evil);
-      expect(opened).toBe("http://localhost:4173/?v=0.10.0calc.exe");
-      expect(opened).not.toContain("&");
-      expect(opened).not.toContain(" ");
-    } finally {
-      rmSync(evil, { recursive: true, force: true });
-    }
+  it("carries no backtick or backslash into the emitted file", () => {
+    const script = serverScript();
+    expect(script).not.toContain("`");
+    expect(script).not.toContain("\\");
   });
 });
