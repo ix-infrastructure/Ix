@@ -42,6 +42,57 @@ function isRepoRoot(dir: string): boolean {
  *  for a normal clone, or a file for a submodule/worktree). This is the
  *  ground-truth signal that a child is a DISTINCT repository — a monorepo's
  *  package dirs never have their own .git (they share the root's). */
+/**
+ * How much of a build manifest is worth reading, in bytes.
+ *
+ * The same 1 MB the ingest walker gives a source file and the module resolver
+ * gives a tsconfig. A `package.json` past that is not a manifest anyone wrote.
+ */
+const MAX_MANIFEST_BYTES = 1024 * 1024;
+
+/**
+ * Read a manifest out of a scanned directory, or null.
+ *
+ * Every path this module reads is *named by the repository being scanned*, and
+ * these three readers were the last ones in the ingest path with no guard on
+ * what came back. `readFileSync(path, "utf8")` will happily follow
+ * `package.json -> /dev/zero` and never return — verified: it does not throw,
+ * it consumes memory until the process dies — and a plain 2 GB `Cargo.toml`
+ * does the same without needing a symlink.
+ *
+ * The same shape as `readObject` in ts-module-resolution.ts, whose comment
+ * makes the point this file missed: manifests "sit outside ingestion's own
+ * size gate, so they need their own". Open once and ask the handle:
+ *
+ * - `O_NONBLOCK` so opening a FIFO returns instead of waiting for a writer.
+ *   Undefined on Windows, where it degrades to a plain read — and Windows has
+ *   no FIFO to open this way.
+ * - `fstat` on the handle rather than `stat` on the path: same open file, so
+ *   there is no window between the check and the read for the file to change
+ *   (CodeQL js/file-system-race).
+ * - `isFile()` refuses a device, a FIFO and a directory. A size check cannot:
+ *   `/dev/zero` and a FIFO both report size 0.
+ * - `size` refuses the honest-but-enormous file, at the same 1 MB the ingest
+ *   walker gives a source file.
+ */
+function readManifest(dir: string, file: string): string | null {
+  try {
+    const handle = fs.openSync(
+      nodePath.join(dir, file),
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+    try {
+      const stats = fs.fstatSync(handle);
+      if (!stats.isFile() || stats.size > MAX_MANIFEST_BYTES) return null;
+      return fs.readFileSync(handle, "utf8");
+    } finally {
+      fs.closeSync(handle);
+    }
+  } catch {
+    return null;
+  }
+}
+
 function hasOwnGit(dir: string): boolean {
   try { return fs.existsSync(nodePath.join(dir, ".git")); } catch { return false; }
 }
@@ -54,7 +105,7 @@ function hasOwnGit(dir: string): boolean {
  */
 function hasWorkspaceMarker(dir: string): boolean {
   const has = (f: string) => { try { return fs.existsSync(nodePath.join(dir, f)); } catch { return false; } };
-  const reads = (f: string): string | null => { try { return fs.readFileSync(nodePath.join(dir, f), "utf8"); } catch { return null; } };
+  const reads = (f: string): string | null => readManifest(dir, f);
   // Dedicated workspace/monorepo config files.
   if (has("pnpm-workspace.yaml") || has("lerna.json") || has("nx.json") ||
       has("turbo.json") || has("rush.json") || has("go.work") ||
@@ -97,9 +148,7 @@ function isInsideSingleRepo(dir: string): boolean {
  */
 export function readPackageNames(dir: string): string[] {
   const names = new Set<string>();
-  const read = (f: string): string | null => {
-    try { return fs.readFileSync(nodePath.join(dir, f), "utf8"); } catch { return null; }
-  };
+  const read = (f: string): string | null => readManifest(dir, f);
   const add = (n: unknown) => { if (typeof n === "string" && n.trim()) names.add(n.trim()); };
 
   const pkg = read("package.json");                                  // JS / TS
@@ -192,9 +241,7 @@ export function lookupPackage(registry: Record<string, string>, mod: string): st
  */
 export function readPackageDeps(dir: string): string[] {
   const deps = new Set<string>();
-  const read = (f: string): string | null => {
-    try { return fs.readFileSync(nodePath.join(dir, f), "utf8"); } catch { return null; }
-  };
+  const read = (f: string): string | null => readManifest(dir, f);
   const add = (n: unknown) => { if (typeof n === "string" && n.trim()) deps.add(n.trim()); };
 
   // PRODUCTION deps only. The declared-dependency graph gates cross-repo edges,

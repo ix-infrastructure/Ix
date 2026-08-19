@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
+import { execFileSync } from "node:child_process";
 
 import { buildPackageRegistry, detectSystem, readPackageNames, readPackageDeps, repoWorkspaceIdFor, workspaceIdForPath } from "../system.js";
 
@@ -179,5 +180,83 @@ describe("workspace_id convergence (solo vs co-ingest)", () => {
     expect(workspaceIdForPath(nodePath.join(root, "app")))
       .not.toBe(workspaceIdForPath(nodePath.join(root, "lib")));
     expect(workspaceIdForPath(root)).toMatch(/^[0-9a-f]{8}$/); // 8-hex, not a random UUID slice
+  });
+});
+
+// ── Manifest reads are bounded ───────────────────────────────────────────────
+//
+// Every path this module reads is named by the *scanned repository*, so a
+// hostile or merely broken one decides what `ix map` opens. `readFileSync` on
+// `/dev/zero` does not throw — it consumes memory until the process dies — and
+// a 2 GB `Cargo.toml` needs no symlink to do the same.
+describe("manifest reads are bounded and typed", () => {
+  let dir: string;
+
+  beforeAll(() => {
+    dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "ix-manifest-"));
+  });
+
+  afterAll(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("still reads an ordinary manifest", () => {
+    const ok = nodePath.join(dir, "ok");
+    fs.mkdirSync(ok, { recursive: true });
+    fs.writeFileSync(nodePath.join(ok, "package.json"), '{ "name": "reads-fine" }');
+    expect(readPackageNames(ok)).toContain("reads-fine");
+  });
+
+  it("refuses a manifest larger than the cap instead of loading it", () => {
+    const big = nodePath.join(dir, "big");
+    fs.mkdirSync(big, { recursive: true });
+    // Just over 1 MB, and valid JSON, so only the size can be what rejects it.
+    const padding = "x".repeat(1024 * 1024);
+    fs.writeFileSync(
+      nodePath.join(big, "package.json"),
+      JSON.stringify({ name: "too-big", description: padding }),
+    );
+    expect(readPackageNames(big)).toEqual([]);
+  });
+
+  it("refuses a manifest that is a directory", () => {
+    const weird = nodePath.join(dir, "weird");
+    fs.mkdirSync(nodePath.join(weird, "package.json"), { recursive: true });
+    expect(() => readPackageNames(weird)).not.toThrow();
+    expect(readPackageNames(weird)).toEqual([]);
+  });
+
+  // POSIX only: /dev/zero has no Windows equivalent, and creating a symlink
+  // there needs privileges the runner does not have.
+  it.skipIf(process.platform === "win32")(
+    "refuses a manifest symlinked to a character device, rather than reading it forever",
+    () => {
+      const dev = nodePath.join(dir, "dev");
+      fs.mkdirSync(dev, { recursive: true });
+      fs.symlinkSync("/dev/zero", nodePath.join(dev, "package.json"));
+
+      // The assertion that matters is that this returns at all: unguarded,
+      // the read never does.
+      const started = Date.now();
+      expect(readPackageNames(dev)).toEqual([]);
+      expect(readPackageDeps(dev)).toEqual([]);
+      expect(Date.now() - started).toBeLessThan(2000);
+    },
+  );
+
+  it.skipIf(process.platform === "win32")("refuses a manifest that is a FIFO, without blocking on it", () => {
+    const fifoDir = nodePath.join(dir, "fifo");
+    fs.mkdirSync(fifoDir, { recursive: true });
+    const fifo = nodePath.join(fifoDir, "package.json");
+    try {
+      execFileSync("mkfifo", [fifo]);
+    } catch {
+      return; // no mkfifo on this runner; the device case already covers the shape
+    }
+    // Opening a FIFO blocks until a writer appears, which is why the guard
+    // stats rather than opens.
+    const started = Date.now();
+    expect(readPackageNames(fifoDir)).toEqual([]);
+    expect(Date.now() - started).toBeLessThan(2000);
   });
 });
