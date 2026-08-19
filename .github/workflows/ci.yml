@@ -53,6 +53,50 @@ jobs:
           fi
           echo "checked $checked tracked sources"
           exit $status
+      # ── Workflow wiring ─────────────────────────────────────────────────
+      #
+      # In this job, not in actions-lint.yml beside zizmor, and that placement
+      # is the point. The `main` ruleset requires exactly one status check,
+      # `CI Passed`, whose `needs` this job is in; a check in any other workflow
+      # reports and gates nothing. actions-lint.yml also carries
+      # `paths: ['.github/workflows/**']`, so it is absent from most PRs and
+      # could not be made required without hanging them.
+      #
+      # What it buys: release.yml calls windows-install.yml as a reusable
+      # workflow, and nothing runs that call until a tag is pushed, so a
+      # mistyped `uses:` path or a renamed input would surface for the first
+      # time on a production release — the same blind spot as the
+      # `release: published` trigger it replaces, which silently did nothing for
+      # a whole release. actionlint resolves local `uses:` targets and matches
+      # `with:` keys against the callee's declared inputs. It cannot see a
+      # reusable-workflow permission restriction; that is an org setting no
+      # linter reaches.
+      #
+      # shellcheck and pyflakes are off deliberately: actionlint shells out to
+      # them for `run:` blocks when they are on PATH, which they are on
+      # ubuntu-latest, so leaving them on makes a required check's verdict
+      # depend on the runner image's shellcheck version rather than on the repo.
+      #
+      # Pinned by version and checksum, like every action here is pinned by SHA,
+      # because this runs a downloaded binary. Dependabot's github-actions
+      # ecosystem updates `uses:` refs and not `run:` downloads, so the bump is
+      # manual — same as the `pipx install zizmor` next door, which pins nothing
+      # at all.
+      - name: Workflows are wired up (actionlint)
+        env:
+          ACTIONLINT_VERSION: 1.7.7
+          ACTIONLINT_SHA256: 023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
+        run: |
+          set -euo pipefail
+          TARBALL="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          # Retried: this repo has already had a red check that was a release
+          # asset download failing at the install step, reported as a workflow
+          # problem it was not.
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors -o "$TARBALL" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${TARBALL}"
+          echo "${ACTIONLINT_SHA256}  ${TARBALL}" | sha256sum --check --strict -
+          tar -xzf "$TARBALL" actionlint
+          ./actionlint -shellcheck= -pyflakes=
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"

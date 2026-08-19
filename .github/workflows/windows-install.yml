@@ -111,6 +111,8 @@ jobs:
 
       - name: Launcher runs
         shell: pwsh
+        env:
+          IX_VERSION: ${{ inputs.version || '' }}
         run: |
           # By absolute path, not through PATH: a shim that resolves only because
           # the session happens to have the right PATH is not a working install.
@@ -119,6 +121,22 @@ jobs:
           $out = & $shim --version 2>&1 | Out-String
           if ($LASTEXITCODE -ne 0) { throw "ix --version exited $LASTEXITCODE`n$out" }
           Write-Host $out.Trim()
+
+          # Assert *which* release we just installed, when one was named.
+          #
+          # `${{ inputs.version || '' }}` degrades an empty input to "latest
+          # stable", and workflow_call accepts an empty string for a
+          # `required: true` input — so if `needs.release.outputs.version` ever
+          # resolves empty (a renamed step id, a reworked release job), this job
+          # installs an unrelated build and every check below passes against it.
+          # That is the same silent-no-op the `release: published` trigger was.
+          if ($env:IX_VERSION) {
+            $want = $env:IX_VERSION -replace '^v', ''
+            if ($out -notmatch [regex]::Escape($want)) {
+              throw "installed $($out.Trim()) but the release under test is $want"
+            }
+            Write-Host "verified against release $want"
+          }
 
       - name: Compass is present and stamped
         shell: pwsh
