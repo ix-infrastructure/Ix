@@ -47,7 +47,11 @@ function contextBundle() {
     decisions: [],
     conflicts: [],
     intents: [],
-    provenance: {},
+    // buildBundle always emits these two (context.ts: `historyLength:
+    // facts.historyLength` and `stale`), so an empty provenance is a bundle the
+    // CLI cannot actually produce. The fixture has to be a bundle that could
+    // come off the wire, or it proves nothing about the real contract.
+    provenance: { historyLength: 0, stale: false },
     freshness: { stale: false, classification: "current" },
     evidence: [],
     budgets: { maxEntities: 50, maxRelationships: 100, maxEvidence: 25, maxChars: 12000 },

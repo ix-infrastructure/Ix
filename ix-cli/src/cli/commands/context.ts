@@ -3,7 +3,11 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-import { contextBundleSchema } from "../context-bundle-schema.js";
+import {
+  BUNDLE_SCHEMA,
+  contextBundleSchema,
+  savedInvestigationSchema,
+} from "../context-bundle-schema.js";
 
 import { IxClient } from "../../client/api.js";
 import type {
@@ -20,12 +24,6 @@ import { parsePickOption } from "../options.js";
 import { resolveFileOrEntity } from "../resolve.js";
 import { createStaleProbe } from "../stale.js";
 import { renderNote, renderSection, renderWarning } from "../ui.js";
-
-/**
- * Schema version for the deterministic bundle shape. Bump only on a breaking
- * shape change, never per run.
- */
-const BUNDLE_SCHEMA = "ix-context-bundle/1";
 
 interface ContextOptions {
   kind?: string;
@@ -360,39 +358,68 @@ export function mergeDiffOptions(
   };
 }
 
+/**
+ * Refuse a saved investigation: warn, and set a non-zero status so a scripted
+ * `--resume`/`--diff` can tell a refusal from a successful render. The sibling
+ * commands (config, init, map) already signal refusals this way.
+ */
+function refuseInvestigation(message: string): undefined {
+  renderWarning(message);
+  process.exitCode = 1;
+  return undefined;
+}
+
 export function loadInvestigation(id: string): SavedInvestigation | undefined {
   const path = investigationPath(id);
   if (!existsSync(path)) {
-    renderWarning(`No saved investigation "${id}" at ${path}`);
-    return undefined;
+    return refuseInvestigation(`No saved investigation "${id}" at ${path}`);
   }
+  let raw: unknown;
+  // Scoped to the read and the parse: those are the only calls here that throw,
+  // and widening it would report a validation or rendering failure below as
+  // "not valid JSON" — naming the wrong cause on a file that parses fine.
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as SavedInvestigation;
-    if (parsed.schema !== "ix-investigation/1" || !parsed.bundle) {
-      renderWarning(`Saved investigation "${id}" has an unknown schema; refusing to resume.`);
-      return undefined;
-    }
-    // Validate the bundle coming back off disk against the same versioned
-    // contract the write side already enforces (saveInvestigation and --out).
-    // The two halves were asymmetric: writes were schema-checked, reads trusted
-    // a bare `as` cast, so the envelope check above was the only thing standing
-    // between a hand-edited, truncated or version-skewed state file and the
-    // rest of the command. That gap is reachable — `--diff` re-resolves
-    // `bundle.target.name` and sends it to the backend, and `--resume` renders
-    // the bundle — so a file whose `schema` field is right and whose body is
-    // anything at all used to be honoured.
-    const bundle = contextBundleSchema.safeParse(parsed.bundle);
-    if (!bundle.success) {
-      renderWarning(
-        `Saved investigation "${id}" does not match the ${BUNDLE_SCHEMA} schema (${bundle.error.issues.length} issue(s)); refusing to resume.`,
-      );
-      return undefined;
-    }
-    return parsed;
+    raw = JSON.parse(readFileSync(path, "utf8"));
   } catch {
-    renderWarning(`Saved investigation "${id}" is not valid JSON; refusing to resume.`);
-    return undefined;
+    return refuseInvestigation(`Saved investigation "${id}" is not valid JSON; refusing to resume.`);
   }
+
+  // Validate the whole envelope coming back off disk against the same versioned
+  // contract the write side enforces (saveInvestigation and --out). The two
+  // halves were asymmetric: writes were schema-checked, reads trusted a bare
+  // `as` cast guarded only by a truthiness check on `bundle`. That gap is
+  // reachable — `--diff` re-resolves `bundle.target.name`, `metadata.depth` and
+  // `metadata.asOfRev` and sends them to the backend, and `--resume` renders the
+  // bundle — so a file whose `schema` field was right and whose body was
+  // anything at all used to be honoured.
+  const parsed = savedInvestigationSchema.safeParse(raw);
+  if (!parsed.success) {
+    const issues = parsed.error.issues;
+    // Distinguish the two version-skew cases from a generic shape mismatch, so
+    // the warning names which contract was not met.
+    if (issues.some((issue) => issue.path[0] === "schema")) {
+      return refuseInvestigation(`Saved investigation "${id}" has an unknown schema; refusing to resume.`);
+    }
+    if (issues.some((issue) => issue.path[0] === "bundle" && issue.path[1] === "schema")) {
+      return refuseInvestigation(
+        `Saved investigation "${id}" holds a bundle from a different contract than ${BUNDLE_SCHEMA}; refusing to resume.`,
+      );
+    }
+    return refuseInvestigation(
+      `Saved investigation "${id}" does not match the ${BUNDLE_SCHEMA} schema (${issues.length} issue(s)); refusing to resume.`,
+    );
+  }
+  // Return the validated value, not the raw parse: saveInvestigation persists
+  // `parsed.data` for the same reason, so unknown keys smuggled into a
+  // hand-edited file are dropped here rather than echoed back out by
+  // `--resume --format json` or copied into the emitted diff.
+  //
+  // The assertion re-narrows the three report arrays the schema deliberately
+  // leaves as open records (decisions/conflicts/intents, whose shapes belong to
+  // the backend) plus the literals zod widens to `string`. Every field this file
+  // dereferences has been checked by this point — unlike the `as` cast on raw
+  // JSON.parse output that this replaces, which checked nothing.
+  return parsed.data as unknown as SavedInvestigation;
 }
 
 function renderSavedInvestigation(id: string, format: string): void {
