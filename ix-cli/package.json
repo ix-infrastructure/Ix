@@ -1,6 +1,6 @@
 {
   "name": "@ix/cli",
-  "version": "0.9.3",
+  "version": "0.10.0",
   "type": "module",
   "description": "Ix Memory — Persistent Memory for LLM Systems",
   "main": "dist/index.js",
