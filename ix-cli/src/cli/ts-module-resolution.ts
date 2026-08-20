@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as nodePath from "node:path";
-import { MAX_REPO_FILE_BYTES, isWithinRoot, readRepoFile } from "./bounded-read.js";
+import { readBoundedFile } from "./bounded-read.js";
 
 interface PathRule {
   pattern: string;
@@ -134,15 +134,66 @@ function parseJsonc(text: string): unknown {
 }
 
 /**
- * Read and parse a tsconfig, or undefined.
- *
  * Config files are read while the resolver is built, which happens *before*
- * ingestion's own size gate, and their paths are named by the repository being
- * ingested — so the read needs its own bound and its own containment check.
- * Both live in `readRepoFile`, which the ingest-path manifest readers share.
+ * ingestion's own size gate, so they need their own. Mirrors `MAX_FILE_BYTES`
+ * in `ingest.ts`: anything larger is not a tsconfig, and parsing one is how a
+ * 64 MB JSONC file takes the process out with an uncatchable OOM.
  */
+const MAX_CONFIG_BYTES = 1024 * 1024;
+
+/**
+ * True when the file we are *holding open* lives inside the workspace.
+ *
+ * The lexical check in {@link isWithinWorkspace} cannot see through a symlinked
+ * directory: every segment of `./linked/tsconfig.json` is inside the workspace
+ * by path arithmetic even when `linked/` points somewhere else entirely. Only
+ * the resolved path shows that, so resolve it and re-check.
+ *
+ * Resolving the name a second time reopens the question of whether it still
+ * denotes the file we hold, so the resolved path is confirmed to be the same
+ * inode as the open handle. Without that, swapping the symlink between the open
+ * and the resolve would let an outside file be read under an inside name.
+ * (`ino` is 0 on filesystems that do not report one — chiefly some Windows
+ * configurations — where this degrades to the plain resolved-path check.)
+ *
+ * The ROOT is resolved too, and that is not symmetry for its own sake: a
+ * resolved file compared against an unresolved root rejects every config
+ * whenever the workspace is itself reached through a link — macOS `/var` ->
+ * `/private/var`, a home directory on a network mount, a `~/code` symlink. That
+ * would silently switch tsconfig resolution off for those users, and no CI
+ * runner here has a symlinked root to notice it.
+ */
+function openedWithinWorkspace(
+  workspaceRoot: string,
+  filePath: string,
+  opened: fs.Stats,
+): boolean {
+  try {
+    const resolved = fs.realpathSync(filePath);
+    const viaResolved = fs.statSync(resolved);
+    if (viaResolved.dev !== opened.dev || viaResolved.ino !== opened.ino) return false;
+    let resolvedRoot: string;
+    try {
+      resolvedRoot = fs.realpathSync(workspaceRoot);
+    } catch {
+      resolvedRoot = workspaceRoot; // unreadable root: fall back to the lexical check
+    }
+    return isWithinWorkspace(resolvedRoot, resolved);
+  } catch {
+    return false;
+  }
+}
+
 function readObject(workspaceRoot: string, filePath: string): Record<string, unknown> | undefined {
-  const text = readRepoFile(workspaceRoot, filePath, MAX_REPO_FILE_BYTES);
+  // The FIFO-safe open, the regular-file check and the bound are shared with
+  // the manifest readers — see bounded-read.ts, which also explains why the
+  // size check alone does not bound the read. Containment stays here: the root
+  // it is measured against is this caller's, and it runs on the same open
+  // handle, before any content is read.
+  const text = readBoundedFile(filePath, {
+    maxBytes: MAX_CONFIG_BYTES,
+    accept: (stats) => openedWithinWorkspace(workspaceRoot, filePath, stats),
+  });
   if (text === null) return undefined;
   try {
     const parsed = parseJsonc(text);
@@ -168,7 +219,19 @@ function resolveExtends(workspaceRoot: string, configPath: string, value: unknow
     // filesystem root, so "../../../../../../.." names any absolute path from
     // any depth. The config is repo content, so without this an ingested repo
     // chooses which files on the machine get read.
-    (candidate) => isWithinRoot(workspaceRoot, candidate),
+    (candidate) => isWithinWorkspace(workspaceRoot, candidate),
+  );
+}
+
+function isWithinWorkspace(workspaceRoot: string, candidate: string): boolean {
+  const relative = nodePath.relative(nodePath.resolve(workspaceRoot), candidate);
+  // Compare path *segments*: a bare `..startsWith` also rejects a legitimate
+  // sibling directory whose name merely begins with dots, e.g. `..shared/`.
+  return (
+    relative !== "" &&
+    relative !== ".." &&
+    !relative.startsWith(`..${nodePath.sep}`) &&
+    !nodePath.isAbsolute(relative)
   );
 }
 

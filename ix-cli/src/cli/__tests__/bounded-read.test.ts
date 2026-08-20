@@ -3,14 +3,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
 
-import { readRepoFile } from "../bounded-read.js";
+import { readBoundedFile, readCapped } from "../bounded-read.js";
 
 /**
- * `readRepoFile` is the one guard standing between ingestion and a file whose
- * path AND contents the scanned repository chose. Every case below is a way a
- * repo can name something that is not the small text file the caller expects.
+ * `readBoundedFile` stands between ingestion and a file whose path AND contents
+ * the scanned repository chose. Every case below is a way a repo can name
+ * something that is not the small text file the caller expects.
  */
-describe("readRepoFile", () => {
+describe("readBoundedFile", () => {
   let root: string;
 
   beforeAll(() => {
@@ -24,93 +24,153 @@ describe("readRepoFile", () => {
   it("reads an ordinary file", () => {
     const p = nodePath.join(root, "plain.json");
     fs.writeFileSync(p, '{ "name": "reads-fine" }');
-    expect(readRepoFile(root, p)).toBe('{ "name": "reads-fine" }');
+    expect(readBoundedFile(p)).toBe('{ "name": "reads-fine" }');
   });
 
   it("refuses a file whose reported size is over the cap", () => {
     const p = nodePath.join(root, "big.json");
     fs.writeFileSync(p, "x".repeat(4096));
-    expect(readRepoFile(root, p, 1024)).toBeNull();
+    expect(readBoundedFile(p, { maxBytes: 1024 })).toBeNull();
     // ...and the same file is fine under a cap that admits it, so it is the cap
     // doing the work rather than anything else about the file.
-    expect(readRepoFile(root, p, 8192)).not.toBeNull();
+    expect(readBoundedFile(p, { maxBytes: 8192 })).not.toBeNull();
   });
 
   it("refuses a directory", () => {
     const p = nodePath.join(root, "adir");
     fs.mkdirSync(p, { recursive: true });
-    expect(readRepoFile(root, p)).toBeNull();
+    expect(readBoundedFile(p)).toBeNull();
   });
 
   it("refuses a file that does not exist", () => {
-    expect(readRepoFile(root, nodePath.join(root, "absent.json"))).toBeNull();
+    expect(readBoundedFile(nodePath.join(root, "absent.json"))).toBeNull();
   });
 
-  /**
-   * The case the outer size check cannot catch, and the reason the read is
-   * capped separately.
-   *
-   * A `/proc` entry is a REGULAR file — `isFile()` is true — that reports size
-   * 0 while holding kilobytes. `fs.readFileSync(handle)` re-stats, sees 0, and
-   * falls back to reading 8 KB chunks until EOF with no limit, so a guard built
-   * only from `fstat().size` admits the whole file. Remove the cap inside
-   * `readCapped` and this goes green while nothing else in the suite moves.
-   */
-  it.skipIf(process.platform !== "linux")(
-    "refuses a size-0 regular file whose contents exceed the cap",
-    () => {
-      // Present on every Linux, stable, and comfortably over 100 bytes.
-      expect(fs.statSync("/proc/meminfo").isFile()).toBe(true);
-      expect(fs.statSync("/proc/meminfo").size).toBe(0);
-      expect(readRepoFile("/proc", "/proc/meminfo", 100)).toBeNull();
-      // A cap it does fit under still reads, so the refusal above is the cap.
-      expect(readRepoFile("/proc", "/proc/meminfo", 1024 * 1024)).toContain("MemTotal");
-    },
-  );
+  it("refuses when the caller's accept check says no, and reads when it says yes", () => {
+    const p = nodePath.join(root, "gated.json");
+    fs.writeFileSync(p, "gated");
+    expect(readBoundedFile(p, { accept: () => false })).toBeNull();
+    expect(readBoundedFile(p, { accept: () => true })).toBe("gated");
+  });
 
-  // POSIX only: creating a symlink on Windows needs privileges the runner does
-  // not have, and /dev/zero has no Windows equivalent.
-  describe.skipIf(process.platform === "win32")("symlinks", () => {
-    it("refuses a file symlinked outside the root", () => {
-      const outside = nodePath.join(os.tmpdir(), `ix-outside-${process.pid}.txt`);
-      fs.writeFileSync(outside, "SECRET");
-      const inside = nodePath.join(root, "escapes.json");
-      fs.symlinkSync(outside, inside);
-      try {
-        expect(readRepoFile(root, inside)).toBeNull();
-      } finally {
-        fs.rmSync(outside, { force: true });
-      }
+  it("hands accept the stats of the file it actually opened", () => {
+    const p = nodePath.join(root, "stats.json");
+    fs.writeFileSync(p, "12345");
+    const real = fs.statSync(p);
+    let seen: fs.Stats | null = null;
+    readBoundedFile(p, {
+      accept: (stats) => {
+        seen = stats;
+        return true;
+      },
     });
+    // Same inode as the path names, so a caller can tie a resolved path back to
+    // the handle rather than to a name that may have been swapped underneath.
+    expect(seen!.ino).toBe(real.ino);
+    expect(seen!.dev).toBe(real.dev);
+    expect(seen!.size).toBe(5);
+  });
+});
 
-    it("still reads when the ROOT itself is reached through a symlink", () => {
-      // Resolving the file but not the root would reject every read on macOS
-      // (/var -> /private/var), on a network home, or in a pnpm workspace whose
-      // package directory is a link. No CI runner here has a symlinked root, so
-      // nothing else would notice.
-      const realRoot = fs.mkdtempSync(nodePath.join(os.tmpdir(), "ix-realroot-"));
-      const linkedRoot = nodePath.join(os.tmpdir(), `ix-linkedroot-${process.pid}`);
-      fs.writeFileSync(nodePath.join(realRoot, "package.json"), '{ "name": "via-link" }');
-      fs.symlinkSync(realRoot, linkedRoot, "dir");
-      try {
-        expect(readRepoFile(linkedRoot, nodePath.join(linkedRoot, "package.json"))).toContain(
-          "via-link",
-        );
-      } finally {
-        fs.rmSync(linkedRoot, { force: true });
-        fs.rmSync(realRoot, { recursive: true, force: true });
-      }
-    });
+/**
+ * The cap lives in the READ, not in the fstat, because `fs.readFileSync(handle)`
+ * re-stats and reads that size instead. Pinning `readCapped` directly is the
+ * only way to assert that on every platform: the wiring can only be caught
+ * where a size-0 regular file exists, which is Linux alone.
+ */
+describe("readCapped", () => {
+  let root: string;
 
-    it("refuses a character device, rather than reading it forever", () => {
-      const dev = nodePath.join(root, "zero.json");
-      fs.symlinkSync("/dev/zero", dev);
+  beforeAll(() => {
+    root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "ix-capped-"));
+  });
+
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const withHandle = <T>(p: string, fn: (fd: number) => T): T => {
+    const fd = fs.openSync(p, "r");
+    try {
+      return fn(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  };
+
+  it("refuses a handle holding more than the cap", () => {
+    const p = nodePath.join(root, "over.txt");
+    fs.writeFileSync(p, "x".repeat(4096));
+    expect(withHandle(p, (fd) => readCapped(fd, 1024))).toBeNull();
+    expect(withHandle(p, (fd) => readCapped(fd, 8192))).toHaveLength(4096);
+  });
+
+  it("admits a file exactly at the cap and refuses one byte more", () => {
+    const at = nodePath.join(root, "at.txt");
+    fs.writeFileSync(at, "y".repeat(100));
+    expect(withHandle(at, (fd) => readCapped(fd, 100))).toHaveLength(100);
+    expect(withHandle(at, (fd) => readCapped(fd, 99))).toBeNull();
+  });
+
+  it("reads a file that spans several chunks, without corrupting a split character", () => {
+    // A 2-byte character straddling the 64 KiB chunk boundary: decoding per
+    // chunk instead of after the concat would turn it into replacement chars.
+    const p = nodePath.join(root, "multibyte.txt");
+    const head = "a".repeat(64 * 1024 - 1);
+    fs.writeFileSync(p, head + "é" + "b".repeat(10), "utf8");
+    const out = withHandle(p, (fd) => readCapped(fd, 1024 * 1024));
+    expect(out).toBe(head + "é" + "b".repeat(10));
+  });
+
+  it("returns empty string for an empty file", () => {
+    const p = nodePath.join(root, "empty.txt");
+    fs.writeFileSync(p, "");
+    expect(withHandle(p, (fd) => readCapped(fd, 1024))).toBe("");
+  });
+});
+
+/**
+ * The case the fstat size check cannot catch, and the reason the read is capped
+ * separately. A `/proc` entry is a REGULAR file — `isFile()` true — that reports
+ * size 0 while holding kilobytes, so a guard built only from `fstat().size`
+ * admits the whole file.
+ */
+describe.skipIf(process.platform !== "linux")("size-0 regular files", () => {
+  it("refuses one whose contents exceed the cap", (ctx) => {
+    // Not every /proc is the kernel's: lxcfs and gVisor overlays report a real
+    // size, and there the premise of this test simply does not hold. Skip
+    // explicitly rather than assert, and never pass silently.
+    let stats: fs.Stats;
+    try {
+      stats = fs.statSync("/proc/meminfo");
+    } catch {
+      return ctx.skip("no /proc/meminfo on this runner");
+    }
+    if (!stats.isFile() || stats.size !== 0) {
+      return ctx.skip("/proc/meminfo is not a size-0 regular file here");
+    }
+    expect(readBoundedFile("/proc/meminfo", { maxBytes: 100 })).toBeNull();
+    // A cap it does fit under still reads, so the refusal above is the cap.
+    expect(readBoundedFile("/proc/meminfo")).toContain("MemTotal");
+  });
+});
+
+// POSIX only: creating a symlink on Windows needs privileges the runner does
+// not have, and /dev/zero has no Windows equivalent.
+describe.skipIf(process.platform === "win32")("character devices", () => {
+  it("refuses one reached through a symlink, rather than reading it forever", () => {
+    const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "ix-dev-"));
+    const dev = nodePath.join(dir, "zero.json");
+    fs.symlinkSync("/dev/zero", dev);
+    try {
       // The assertion that matters is that this returns at all: an unguarded
       // read of /dev/zero does not throw and does not finish, it consumes
       // memory until the process dies.
       const started = Date.now();
-      expect(readRepoFile(root, dev)).toBeNull();
+      expect(readBoundedFile(dev)).toBeNull();
       expect(Date.now() - started).toBeLessThan(2000);
-    });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

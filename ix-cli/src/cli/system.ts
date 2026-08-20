@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as nodePath from "node:path";
 import { createHash } from "node:crypto";
-import { MAX_REPO_FILE_BYTES, readRepoFile } from "./bounded-read.js";
+import { readBoundedFile } from "./bounded-read.js";
 
 /**
  * Multi-repo system auto-detection (Ix#225 Path 1).
@@ -50,11 +50,17 @@ function isRepoRoot(dir: string): boolean {
  * `Cargo.toml` does the same without needing a symlink.
  *
  * The guard is shared with the module resolver, which reads tsconfigs under
- * exactly these conditions; `readRepoFile` documents what each part of it is
+ * exactly these conditions; `readBoundedFile` documents what each part of it is
  * for, and why a size check alone bounds nothing.
+ *
+ * No containment check: the only root available here is the scanned directory
+ * itself, and rooting there both refuses manifests a repo legitimately symlinks
+ * within itself AND fails to refuse the case worth refusing, since a symlinked
+ * member directory resolves to its own target. Containment for this path needs
+ * the ingest root, which this module is not given.
  */
 function readManifest(dir: string, file: string): string | null {
-  return readRepoFile(dir, nodePath.join(dir, file), MAX_REPO_FILE_BYTES);
+  return readBoundedFile(nodePath.join(dir, file));
 }
 
 /** A directory is its own git repository iff it contains a `.git` entry (a dir
