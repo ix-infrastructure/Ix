@@ -49,9 +49,6 @@ function getCurrentVersion(): string {
 // — `0.9.0-rc.1+abc1234`, valid semver — failed the test. fetchLatestRelease
 // then returned null and `ix upgrade` reported "Could not reach GitHub to check
 // for updates" and exited 1 against a perfectly reachable GitHub.
-/** How long a cached release lookup is trusted, shared by every reader of it. */
-const VERSION_CACHE_TTL_MS = 3600_000;
-
 export const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 async function fetchLatestRelease(
@@ -454,18 +451,14 @@ export function composeTracksLatestBackend(composeText: string): boolean {
  * a registry, so a container matching the local `:latest` proves only that
  * nothing has been pulled since, which is equally true of a months-old image.
  *
- * Prefers the version cache `checkForUpdate` already maintains: `main.ts` fires
- * that unawaited on this very command, so fetching again races it for the same
- * tag against a 60/hour unauthenticated rate limit. The cached value is
- * re-validated against VERSION_RE, because `readCache` only checks that it is a
- * string — and unlike a fetched tag it would otherwise reach the stamp file
- * without passing the barrier at the top of this module.
- *
- * The stamp only ever moves FORWARD. A cache up to an hour old can name an
- * earlier release than the file already holds — an installer run stamps the
- * true latest without touching the cache — and overwriting with that would
- * restore the very nag this exists to remove. Refusing to go backwards costs
- * nothing: the next `checkForUpdate` refreshes the cache.
+ * Always asks the release feed rather than reading the version cache, on a short
+ * bound. Preferring the cache looked like a free saving and was not: a cache up
+ * to an hour old can name an EARLIER release than the file already holds (an
+ * installer stamps the true latest without touching the cache), so it needed a
+ * "never go backwards" rule to be safe — and that rule then pinned a file that
+ * had got AHEAD, which is a state this very module documents as reachable, since
+ * the GHCR tag and the release feed are published separately. Fetching keeps the
+ * write self-healing in both directions, and only on a cold start.
  *
  * If the release cannot be established the stamp is left alone: the user keeps a
  * notice they may not need, which is the failure worth having. A write that
@@ -475,17 +468,18 @@ export function composeTracksLatestBackend(composeText: string): boolean {
 export async function stampBackendVersionAfterPull(composeFile: string): Promise<void> {
   try {
     if (!composeTracksLatestBackend(readFileSync(composeFile, "utf-8"))) return;
-    const cached = readCache();
-    const fresh =
-      cached && Date.now() - cached.checkedAt < VERSION_CACHE_TTL_MS ? cached.backendLatest : null;
-    const latest =
-      fresh && VERSION_RE.test(fresh) ? fresh : await fetchLatestRelease(MEMORY_LAYER_DIST_REPO);
-    if (!latest || !isNewer(latest, getTrackedVersion(BACKEND_VERSION_FILE))) return;
-    if (!writeVersionStamp(BACKEND_VERSION_FILE, latest)) {
-      // Must not fail the start — the containers are already up — but the user
-      // is about to be told to upgrade on every command, so say why once.
+    // Short bound: this is awaited behind `ix docker start`, whose containers
+    // are already up, so a proxy that accepts and never answers must not hold
+    // the command open for the generous default the upgrade path wants.
+    const latest = await fetchLatestRelease(MEMORY_LAYER_DIST_REPO, 10_000);
+    if (!writeVersionStamp(BACKEND_VERSION_FILE, latest) && latest) {
+      // Must not fail the start, but the user is about to be told to upgrade on
+      // every command, so say why — with the same consequence the upgrade path
+      // names, since it is the same failure.
       console.error(
-        chalk.dim(`  Could not record the backend version in ${BACKEND_VERSION_FILE}`),
+        chalk.yellow(
+          `[!!] Could not record the version in ${BACKEND_VERSION_FILE}; the update notice will keep firing.`
+        )
       );
     }
   } catch {
@@ -1174,7 +1168,7 @@ export async function checkForUpdate(): Promise<void> {
   const current = getCurrentVersion();
   const cache = readCache();
 
-  if (cache && Date.now() - cache.checkedAt < VERSION_CACHE_TTL_MS) {
+  if (cache && Date.now() - cache.checkedAt < 3600_000) {
     const hasCliUpdate = isNewer(cache.latest, current);
     const hasCompassUpdate = shouldOfferCompassUpgrade(cache.compassLatest);
     const hasBackendUpdate = backendUpdateAvailable(
@@ -1477,7 +1471,7 @@ export function registerUpgradeCommand(program: Command): void {
       // ── Backend (memory-layer) upgrade ───────────────────────────────
       const backendCurrent = getTrackedVersion(BACKEND_VERSION_FILE);
       let backendImageChanged = false;
-      if (backendUpdateAvailable(backendLatest ?? undefined, backendCurrent)) {
+      if (backendLatest && backendUpdateAvailable(backendLatest, backendCurrent)) {
         console.log(
           `Backend update available: ${backendCurrent === "0.0.0" ? "none" : backendCurrent} → ${chalk.green(backendLatest)}`
         );

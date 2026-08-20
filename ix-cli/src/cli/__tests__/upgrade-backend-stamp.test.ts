@@ -214,6 +214,9 @@ describe("stampBackendVersionAfterPull, isolated", () => {
     if (priorHome === undefined) delete process.env.IX_HOME;
     else process.env.IX_HOME = priorHome;
     rmSync(home, { recursive: true, force: true });
+    // Symmetric with beforeEach: otherwise the registry keeps an upgrade.js
+    // whose IX_HOME points at the directory just deleted.
+    vi.resetModules();
   });
 
   /** Re-imported so IX_HOME above is the one the module reads. */
@@ -237,73 +240,6 @@ describe("stampBackendVersionAfterPull, isolated", () => {
     expect(existsSync(join(home, ".backend-version"))).toBe(false);
   });
 
-  it("does not move the stamp backwards from a stale cache", async () => {
-    // An installer stamps the true latest without touching the version cache,
-    // so a cache up to an hour old can name an EARLIER release. Overwriting
-    // with it restores the nag this whole change exists to remove.
-    const compose = join(home, "docker-compose.yml");
-    writeFileSync(
-      compose,
-      "services:\n  memory-layer:\n    image: ghcr.io/ix-infrastructure/ix-memory-layer:latest\n",
-    );
-    writeFileSync(join(home, ".backend-version"), "1.0.17");
-    writeFileSync(
-      join(home, ".version-check.json"),
-      JSON.stringify({ latest: "1.0.0", backendLatest: "1.0.16", checkedAt: Date.now() }),
-    );
-    const mod = await load();
-    await mod.stampBackendVersionAfterPull(compose);
-    expect(readFileSync(join(home, ".backend-version"), "utf-8")).toBe("1.0.17");
-  });
-
-  it("stamps a fresh cached release that is genuinely newer", async () => {
-    const compose = join(home, "docker-compose.yml");
-    writeFileSync(
-      compose,
-      "services:\n  memory-layer:\n    image: ghcr.io/ix-infrastructure/ix-memory-layer:latest\n",
-    );
-    writeFileSync(join(home, ".backend-version"), "1.0.13");
-    writeFileSync(
-      join(home, ".version-check.json"),
-      JSON.stringify({ latest: "1.0.0", backendLatest: "1.0.16", checkedAt: Date.now() }),
-    );
-    const mod = await load();
-    await mod.stampBackendVersionAfterPull(compose);
-    expect(readFileSync(join(home, ".backend-version"), "utf-8")).toBe("1.0.16");
-  });
-
-  it("refuses a cached value that is not a version", async () => {
-    // `readCache` only checks that it is a string, so the cache is the one way
-    // an unvalidated value can reach a file — the module validates the FETCHED
-    // tag at the source precisely because it "flows into file paths, the
-    // install shim, and download URLs" (CodeQL js/http-to-file-access).
-    //
-    // The value has to survive isNewer to isolate the check: `../../evil`
-    // parses to 0.0.0 and the monotonic guard alone would stop it, whereas
-    // `9.9.9/../../evil` parses to 9.9.9 and does not.
-    //
-    // Tracked is set to 5.0.0 so the outcome does not depend on the network: an
-    // unvalidated cache writes 9.9.9/../../evil, while the validated path falls
-    // through to a fetch whose real release is far below 5.0.0 and so writes
-    // nothing either way.
-    const compose = join(home, "docker-compose.yml");
-    writeFileSync(
-      compose,
-      "services:\n  memory-layer:\n    image: ghcr.io/ix-infrastructure/ix-memory-layer:latest\n",
-    );
-    writeFileSync(join(home, ".backend-version"), "5.0.0");
-    writeFileSync(
-      join(home, ".version-check.json"),
-      JSON.stringify({
-        latest: "1.0.0",
-        backendLatest: "9.9.9/../../evil",
-        checkedAt: Date.now(),
-      }),
-    );
-    const mod = await load();
-    await mod.stampBackendVersionAfterPull(compose);
-    expect(readFileSync(join(home, ".backend-version"), "utf-8")).toBe("5.0.0");
-  });
 });
 
 /**
@@ -352,13 +288,16 @@ describe("the stamp is wired where it is true", () => {
     // Bounding it above by the loop pins the one position that always runs
     // after a successful pull.
     const stamp = startAction.indexOf("await stampBackendVersionAfterPull(composeFile)");
-    const failureExit = startAction.indexOf(
-      "process.exit(1)",
-      startAction.indexOf('"[error] Failed to start Docker containers."'),
-    );
+    const failureMessage = startAction.indexOf('"[error] Failed to start Docker containers."');
+    // Asserted BEFORE it is used as a fromIndex: indexOf(x, -1) searches from 0
+    // and silently finds the unrelated `!dockerAvailable()` exit higher up, so
+    // an inlined search would let the stamp sit inside the failure branch.
+    expect(failureMessage).toBeGreaterThan(-1);
+    const failureExit = startAction.indexOf("process.exit(1)", failureMessage);
     const healthWait = startAction.indexOf("Waiting for services to become healthy");
     expect(failureExit).toBeGreaterThan(-1);
     expect(healthWait).toBeGreaterThan(-1);
+    expect(stamp).toBeGreaterThan(-1);
     expect(stamp).toBeGreaterThan(failureExit);
     expect(stamp).toBeLessThan(healthWait);
   });
@@ -373,15 +312,34 @@ describe("the stamp is wired where it is true", () => {
     expect(from).toBeGreaterThan(-1);
     const fn = upgradeSource.slice(from, upgradeSource.indexOf("\n}", from));
 
-    // Matching `signal:` anywhere in the function is not enough — building the
+    // The signal must be INSIDE the fetch(...) argument list: building the
     // options object and then calling `fetch(url)` without it leaves the fetch
-    // unbounded and the assertion green. The signal has to be INSIDE the
-    // fetch(...) argument list, so match the whole call.
+    // unbounded. The first argument is matched loosely so hoisting the URL to a
+    // const does not read as a missing timeout.
     expect(fn).toMatch(
-      /await fetch\(\s*`[^`]*`\s*,\s*\{\s*signal:\s*AbortSignal\.timeout\([^)]+\)\s*,?\s*\}\s*,?\s*\)/,
+      /await fetch\(\s*[^,]+,\s*\{\s*signal:\s*AbortSignal\.timeout\(\s*timeoutMs\s*\)\s*,?\s*\}\s*,?\s*\)/,
     );
     // ...and there is only the one fetch, so the matched call is the one made.
     expect(fn.match(/\bfetch\(/g)).toHaveLength(1);
+
+    // Matching `timeout(timeoutMs)` says nothing about the value, so pin the
+    // default itself — 300_000 is undici's own, i.e. no bound at all.
+    const declared = /timeoutMs: number = ([0-9_]+)/.exec(upgradeSource);
+    expect(declared).not.toBeNull();
+    expect(Number(declared![1].replace(/_/g, ""))).toBeLessThanOrEqual(60_000);
+  });
+
+  it("gives the stamp path its own shorter bound", () => {
+    // The default is sized for `ix upgrade`, which the user chose to wait for.
+    // The stamp runs behind `ix docker start` with the containers already up,
+    // and an argument that is never passed is a bound that does not exist —
+    // which is exactly what happened when this parameter was first added.
+    const from = upgradeSource.indexOf("export async function stampBackendVersionAfterPull");
+    expect(from).toBeGreaterThan(-1);
+    const body = upgradeSource.slice(from, upgradeSource.indexOf("\n}", from));
+    const call = /fetchLatestRelease\(\s*MEMORY_LAYER_DIST_REPO\s*,\s*([0-9_]+)\s*\)/.exec(body);
+    expect(call).not.toBeNull();
+    expect(Number(call![1].replace(/_/g, ""))).toBeLessThanOrEqual(15_000);
   });
 
   it("stampBackendVersionAfterPull checks the compose before fetching or writing", () => {
