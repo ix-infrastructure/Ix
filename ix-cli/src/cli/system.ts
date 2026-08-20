@@ -53,11 +53,21 @@ function isRepoRoot(dir: string): boolean {
  * exactly these conditions; `readBoundedFile` documents what each part of it is
  * for, and why a size check alone bounds nothing.
  *
- * No containment check: the only root available here is the scanned directory
- * itself, and rooting there both refuses manifests a repo legitimately symlinks
- * within itself AND fails to refuse the case worth refusing, since a symlinked
- * member directory resolves to its own target. Containment for this path needs
- * the ingest root, which this module is not given.
+ * No containment check, deliberately. Both roots that could be used here break
+ * a layout that works today, and break it silently:
+ *
+ * - the scanned directory itself refuses a manifest a repo legitimately
+ *   symlinks within itself, and does not refuse the case worth refusing — a
+ *   symlinked member directory resolves root and file to the same outside tree;
+ * - the mapped root refuses every symlinked member repo, which `detectSystem`
+ *   has admitted on purpose since Ix#225 (see the `isSymbolicLink()` filter
+ *   below): a folder collecting independently-cloned repos is exactly what it
+ *   is for, and collecting them by symlink is the ordinary way to do it.
+ *
+ * A refusal here is indistinguishable from "no manifest", so either choice
+ * deletes a package from the registry with nothing said. Confining what a
+ * scanned repo may name is worth doing, but it needs a diagnostic and a way
+ * out, not a silent default bolted onto a read.
  */
 function readManifest(dir: string, file: string): string | null {
   return readBoundedFile(nodePath.join(dir, file));

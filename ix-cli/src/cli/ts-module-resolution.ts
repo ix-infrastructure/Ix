@@ -134,14 +134,6 @@ function parseJsonc(text: string): unknown {
 }
 
 /**
- * Config files are read while the resolver is built, which happens *before*
- * ingestion's own size gate, so they need their own. Mirrors `MAX_FILE_BYTES`
- * in `ingest.ts`: anything larger is not a tsconfig, and parsing one is how a
- * 64 MB JSONC file takes the process out with an uncatchable OOM.
- */
-const MAX_CONFIG_BYTES = 1024 * 1024;
-
-/**
  * True when the file we are *holding open* lives inside the workspace.
  *
  * The lexical check in {@link isWithinWorkspace} cannot see through a symlinked
@@ -191,7 +183,6 @@ function readObject(workspaceRoot: string, filePath: string): Record<string, unk
   // it is measured against is this caller's, and it runs on the same open
   // handle, before any content is read.
   const text = readBoundedFile(filePath, {
-    maxBytes: MAX_CONFIG_BYTES,
     accept: (stats) => openedWithinWorkspace(workspaceRoot, filePath, stats),
   });
   if (text === null) return undefined;

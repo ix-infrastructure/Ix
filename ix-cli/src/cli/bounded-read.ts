@@ -45,8 +45,10 @@ const MAX_REPO_FILE_BYTES = 1024 * 1024;
  * decode happens after the concat, so a multi-byte character straddling a chunk
  * boundary round-trips intact.
  *
- * Exported so the cap can be pinned directly on every platform; the wiring that
- * uses it can only be pinned where a size-0 regular file exists.
+ * @internal Exported only so the cap can be pinned directly on every platform.
+ * Not a reader: it does no open, no type check and no containment, so nothing
+ * outside this module should call it. {@link readBoundedFile} is the entry
+ * point.
  */
 export function readCapped(handle: number, maxBytes: number): string | null {
   const chunks: Buffer[] = [];

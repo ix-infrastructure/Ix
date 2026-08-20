@@ -89,8 +89,10 @@ describe("readCapped", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  // The same flags readBoundedFile opens with, so these exercise the handle
+  // production actually hands to readCapped.
   const withHandle = <T>(p: string, fn: (fd: number) => T): T => {
-    const fd = fs.openSync(p, "r");
+    const fd = fs.openSync(p, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
     try {
       return fn(fd);
     } finally {
@@ -105,7 +107,7 @@ describe("readCapped", () => {
     expect(withHandle(p, (fd) => readCapped(fd, 8192))).toHaveLength(4096);
   });
 
-  it("admits a file exactly at the cap and refuses one byte more", () => {
+  it("admits a file exactly at the cap and refuses a cap one byte tighter", () => {
     const at = nodePath.join(root, "at.txt");
     fs.writeFileSync(at, "y".repeat(100));
     expect(withHandle(at, (fd) => readCapped(fd, 100))).toHaveLength(100);
@@ -113,13 +115,18 @@ describe("readCapped", () => {
   });
 
   it("reads a file that spans several chunks, without corrupting a split character", () => {
-    // A 2-byte character straddling the 64 KiB chunk boundary: decoding per
-    // chunk instead of after the concat would turn it into replacement chars.
+    // Every character is 3 bytes and the chunk is 65536, which is not a
+    // multiple of 3 — so whichever byte a read happens to stop on, some
+    // character straddles a boundary. Placing one 2-byte character at offset
+    // 65535 instead would only split it if the first read returned exactly
+    // 65536 bytes, which POSIX does not promise and FUSE/network mounts do not
+    // deliver; that test would pass vacuously there. Decoding per chunk rather
+    // than after the concat turns the split character into replacement chars.
     const p = nodePath.join(root, "multibyte.txt");
-    const head = "a".repeat(64 * 1024 - 1);
-    fs.writeFileSync(p, head + "é" + "b".repeat(10), "utf8");
-    const out = withHandle(p, (fd) => readCapped(fd, 1024 * 1024));
-    expect(out).toBe(head + "é" + "b".repeat(10));
+    const text = "€".repeat(30000); // 90000 bytes, > 64 KiB
+    fs.writeFileSync(p, text, "utf8");
+    expect(fs.statSync(p).size).toBe(90000);
+    expect(withHandle(p, (fd) => readCapped(fd, 1024 * 1024))).toBe(text);
   });
 
   it("returns empty string for an empty file", () => {
@@ -159,10 +166,11 @@ describe.skipIf(process.platform !== "linux")("size-0 regular files", () => {
 // not have, and /dev/zero has no Windows equivalent.
 describe.skipIf(process.platform === "win32")("character devices", () => {
   it("refuses one reached through a symlink, rather than reading it forever", () => {
-    const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "ix-dev-"));
-    const dev = nodePath.join(dir, "zero.json");
-    fs.symlinkSync("/dev/zero", dev);
+    let dir: string | undefined;
     try {
+      dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "ix-dev-"));
+      const dev = nodePath.join(dir, "zero.json");
+      fs.symlinkSync("/dev/zero", dev);
       // The assertion that matters is that this returns at all: an unguarded
       // read of /dev/zero does not throw and does not finish, it consumes
       // memory until the process dies.
@@ -170,7 +178,71 @@ describe.skipIf(process.platform === "win32")("character devices", () => {
       expect(readBoundedFile(dev)).toBeNull();
       expect(Date.now() - started).toBeLessThan(2000);
     } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
+      if (dir) fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("refuses a character device that reads as empty", () => {
+    // /dev/null returns EOF immediately, so the cap never fires on it: without
+    // the isFile() check it reads as "" rather than being refused. Every other
+    // non-regular case in this suite is now caught by the cap instead, so this
+    // is the one that pins the type check itself.
+    expect(readBoundedFile("/dev/null")).toBeNull();
+  });
+});
+
+/**
+ * The defect this module exists for, reproduced through the public API and
+ * therefore pinned on every platform.
+ *
+ * `accept` runs between the fstat and the read, so a test can grow the file at
+ * exactly the moment the real bug needs it to grow. That single assertion kills
+ * both ways of getting this wrong: reverting to `fs.readFileSync(handle)` (which
+ * re-stats and reads the NEW size), and reordering so the content is read before
+ * `accept` decides (which would return the pre-growth content instead of null).
+ * The /proc case covers the other half of the same defect — a size that was
+ * never right to begin with — but exists on one of the four platforms this
+ * suite runs on, and skips itself on an lxcfs or gVisor overlay.
+ */
+describe("the cap binds against a file that changes under it", () => {
+  let root: string;
+
+  beforeAll(() => {
+    root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "ix-grow-"));
+  });
+
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("refuses a file that grows past the cap after its size was checked", () => {
+    const p = nodePath.join(root, "grows.json");
+    fs.writeFileSync(p, "x".repeat(10));
+    let grew = false;
+    const out = readBoundedFile(p, {
+      maxBytes: 1024,
+      accept: () => {
+        fs.appendFileSync(p, "y".repeat(4096));
+        grew = true;
+        return true;
+      },
+    });
+    expect(grew).toBe(true);
+    expect(out).toBeNull();
+  });
+
+  it("still returns the content when the growth stays under the cap", () => {
+    // The control: the refusal above is the cap reacting to the new size, not
+    // the write itself upsetting the read.
+    const p = nodePath.join(root, "grows-a-little.json");
+    fs.writeFileSync(p, "x".repeat(10));
+    const out = readBoundedFile(p, {
+      maxBytes: 1024,
+      accept: () => {
+        fs.appendFileSync(p, "y".repeat(100));
+        return true;
+      },
+    });
+    expect(out).toBe("x".repeat(10) + "y".repeat(100));
   });
 });
