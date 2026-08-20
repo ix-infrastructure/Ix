@@ -211,10 +211,22 @@ describe("stampBackendVersionAfterPull, isolated", () => {
   });
 
   afterEach(() => {
+    // Unstub and reset BEFORE the rmSync: on Windows a just-written temp tree
+    // can throw EBUSY/EPERM even with force, and anything after the throw never
+    // runs — which would leave a fake global fetch installed for the rest of
+    // the file. resetModules is here as well as in beforeEach because
+    // beforeEach is describe-scoped: without it the NEXT behavioural describe
+    // added to this file inherits this one's module instance, still bound to
+    // the IX_HOME about to be deleted, and writes into a resurrected directory.
+    vi.unstubAllGlobals();
+    vi.resetModules();
+    // vi.spyOn on an ALREADY-spied method hands back the existing mock, so
+    // without this a later test's `warn` still carries the earlier test's
+    // calls — which is how the console assertions below first went red.
+    vi.restoreAllMocks();
     if (priorHome === undefined) delete process.env.IX_HOME;
     else process.env.IX_HOME = priorHome;
     rmSync(home, { recursive: true, force: true });
-    vi.unstubAllGlobals();
   });
 
   /** Re-imported so IX_HOME above is the one the module reads. */
@@ -223,11 +235,15 @@ describe("stampBackendVersionAfterPull, isolated", () => {
   it("stamps nothing, and reaches no network, when the compose cannot be read", async () => {
     // The compose read is the one call in here that can throw, and it must not
     // escape into `ix docker start`, which has already brought containers up.
+    const fetchMock = feedReturns("v1.0.16");
     const mod = await load();
     await expect(
       mod.stampBackendVersionAfterPull(join(home, "no-such-compose.yml")),
     ).resolves.toBeUndefined();
     expect(existsSync(join(home, ".backend-version"))).toBe(false);
+    // The half the name claims and nothing used to check: hoisting the fetch
+    // above the compose guard passes every other assertion here.
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   /** A compose the guard accepts, so the fetch-and-write path is reached. */
@@ -240,12 +256,31 @@ describe("stampBackendVersionAfterPull, isolated", () => {
     return compose;
   };
 
-  /** The release feed, stubbed — no test here reaches the network. */
-  const feedReturns = (tag: string) =>
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => ({ ok: true, json: async () => ({ tag_name: tag }) })),
-    );
+  /**
+   * The release feed, stubbed — no test in here reaches the network. Each
+   * returns the mock so a test can assert the request was (or was not) made.
+   */
+  const feedReturns = (tag: string) => {
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ tag_name: tag }) }));
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  };
+
+  /** The feed answering with an error status. */
+  const feedRefuses = () => {
+    const fetchMock = vi.fn(async () => ({ ok: false, json: async () => ({}) }));
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  };
+
+  /** The feed unreachable — offline REJECTS, it does not answer !ok. */
+  const feedUnreachable = () => {
+    const fetchMock = vi.fn(async () => {
+      throw new Error("ENOTFOUND api.github.com");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  };
 
   it("records the release it just pulled", async () => {
     // The behaviour this whole change exists to add. Without it, gutting the
@@ -272,7 +307,7 @@ describe("stampBackendVersionAfterPull, isolated", () => {
     // Offline or rate-limited. Erring behind costs a nag; erring ahead hides a
     // stale backend, so this must not write.
     writeFileSync(join(home, ".backend-version"), "1.0.13");
-    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, json: async () => ({}) })));
+    feedRefuses();
     const mod = await load();
     await mod.stampBackendVersionAfterPull(tracksLatest());
     expect(readFileSync(join(home, ".backend-version"), "utf-8")).toBe("1.0.13");
@@ -282,12 +317,50 @@ describe("stampBackendVersionAfterPull, isolated", () => {
     // Stubbed so a regression in the guard is caught here rather than quietly
     // reaching the network — which is also what made this test pass offline
     // with the guard deleted.
-    feedReturns("v1.0.16");
+    const fetchMock = feedReturns("v1.0.16");
     const compose = join(home, "docker-compose.yml");
     writeFileSync(compose, "services:\n  memory-layer:\n    image: ix-memory-layer:dev\n");
     const mod = await load();
     await mod.stampBackendVersionAfterPull(compose);
     expect(existsSync(join(home, ".backend-version"))).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("leaves the stamp alone when the feed is unreachable", async () => {
+    // Offline REJECTS; it does not answer with `ok: false`. That throw is
+    // caught inside fetchLatestRelease, and no test reached that path — so a
+    // narrowing of its catch would escape into the outer one here, whose
+    // comment says it cannot.
+    writeFileSync(join(home, ".backend-version"), "1.0.13");
+    const fetchMock = feedUnreachable();
+    const mod = await load();
+    await expect(mod.stampBackendVersionAfterPull(tracksLatest())).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalled();
+    expect(readFileSync(join(home, ".backend-version"), "utf-8")).toBe("1.0.13");
+  });
+
+  it("says why when the stamp cannot be written and the file is wrong", async () => {
+    // The user is about to be nagged on every command; this is the only thing
+    // that explains it. A directory where the file belongs makes the write fail
+    // portably, and makes getTrackedVersion read 0.0.0.
+    mkdirSync(join(home, ".backend-version"), { recursive: true });
+    feedReturns("v1.0.16");
+    const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await load();
+    await mod.stampBackendVersionAfterPull(tracksLatest());
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain(".backend-version");
+  });
+
+  it("stays quiet when the stamp cannot be written but already matches", async () => {
+    // Same unwritable stamp, but nothing is out of date: tracked reads 0.0.0
+    // and the feed says 0.0.0, so warning would promise a nag that never comes.
+    mkdirSync(join(home, ".backend-version"), { recursive: true });
+    feedReturns("v0.0.0");
+    const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await load();
+    await mod.stampBackendVersionAfterPull(tracksLatest());
+    expect(warn).not.toHaveBeenCalled();
   });
 
 });

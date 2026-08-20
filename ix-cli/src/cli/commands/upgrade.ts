@@ -485,18 +485,24 @@ export async function stampBackendVersionAfterPull(composeFile: string): Promise
     // it reads in the order it applies and does not lean on the writer's own
     // falsy check to make a null call a no-op.
     if (latest && !writeVersionStamp(BACKEND_VERSION_FILE, latest)) {
-      // Must not fail the start. Only worth saying when the notice really is
-      // about to fire — a root-owned stamp already holding the current release
-      // fails to write on every cold start while nothing is behind, and warning
-      // there would be a promise of a nag that never comes.
-      if (backendUpdateAvailable(latest, getTrackedVersion(BACKEND_VERSION_FILE))) {
+      // Must not fail the start, and only worth saying when the file really is
+      // wrong: a root-owned stamp already holding what we just pulled fails to
+      // write on every cold start with nothing actually out of date.
+      //
+      // "Differs from what we pulled" rather than "is behind the release we
+      // fetched": a stamp stuck AHEAD is also wrong and also cannot be
+      // corrected here, and the notice this warns about is computed from the
+      // CACHED release, which can be up to an hour out of step with `latest`.
+      if (getTrackedVersion(BACKEND_VERSION_FILE) !== latest) {
         console.error(chalk.yellow(stampFailureMessage(BACKEND_VERSION_FILE)));
       }
     }
   } catch {
-    // Only the compose read reaches here: fetchLatestRelease and
-    // writeVersionStamp both swallow their own failures, so offline and
-    // rate-limited arrive as `latest === null` on the normal path above.
+    // In practice only the compose read: fetchLatestRelease and
+    // writeVersionStamp swallow their own failures, so offline and rate-limited
+    // arrive as `latest === null` on the normal path above. Kept broad rather
+    // than narrowed to that one call, because nothing here is worth failing a
+    // start the user already got containers out of.
   }
 }
 
