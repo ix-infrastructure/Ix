@@ -100,9 +100,9 @@ const modeProbe = (() => {
       try {
         rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
       } catch {
-        // Never let cleanup of the probe fail COLLECTION: this runs in a
-        // describe body, so a throw here would take every test in the file
-        // down, including everything unrelated to file modes.
+        // Never let cleanup of the probe fail COLLECTION: this runs at MODULE
+        // scope, so a throw here is an import error for the whole file — every
+        // test in it, including everything unrelated to file modes.
       }
     }
   }
@@ -115,15 +115,23 @@ const modeBlocksWrite = modeProbe.blocked;
  * `CI=false` is a widely used way of saying "not CI" (react-scripts, Netlify),
  * and a bare truthiness check reads it as CI. Lower-cased because `CI=False` is
  * the spelling a PowerShell user is most likely to export, which react-scripts
- * also handles.
+ * also handles; `0`, `no` and `off` are the same intent spelled differently, and
+ * "0" is truthy as a string, so they need naming too.
  */
-const onCI = !!process.env.CI && process.env.CI.toLowerCase() !== "false";
+const onCI =
+  !!process.env.CI && !["false", "0", "no", "off"].includes(process.env.CI.toLowerCase());
 
-if (!modeBlocksWrite && !onCI) {
+if (!modeBlocksWrite) {
   // stderr directly, not console.warn: vitest's default reporter prints
   // console output from a passing file nowhere at all — measured — so the
   // warning would be silent on exactly the runs it exists for. A raw stderr
   // write is not intercepted and does show up.
+  //
+  // Unconditional, NOT `&& !onCI`. Suppressing it on CI made one env-var read
+  // the only gate on both signals at once: an `onCI` that is wrongly false
+  // skips the assertion AND, with the guard, silenced this. Saying the reason
+  // twice on a CI failure is cheap; saying it nowhere is the failure this
+  // whole mechanism exists to prevent.
   process.stderr.write(`[stamp gate skipped] ${modeProbe.why}\n`);
 }
 
@@ -459,6 +467,21 @@ describe("stampBackendVersionAfterPull, isolated", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("records a release carrying build metadata verbatim", async () => {
+    // The control for the wiring pin below. That test proves the call site
+    // stays QUIET for a build-metadata tag — which is also what happens if the
+    // tag never arrives at all, because `fetchLatestRelease` rejected it and
+    // `latest` came back null. Asserting VERSION_RE accepts the spelling is not
+    // enough: a `.replace(/\+.*$/, "")` added to the strip would keep that
+    // assertion green and still empty the pin. This is the one that fails,
+    // because it asserts the metadata reached the FILE.
+    const fetchMock = feedReturns("v1.0.16+build77");
+    const mod = await load();
+    await mod.stampBackendVersionAfterPull(tracksLatest());
+    expect(fetchMock).toHaveBeenCalled();
+    expect(readFileSync(stampPath(), "utf-8")).toBe("1.0.16+build77");
+  });
+
   it("records the release it just pulled", async () => {
     // The behaviour this whole change exists to add. Without it, gutting the
     // write entirely leaves every other test in this file green.
@@ -632,22 +655,28 @@ describe("stampBackendVersionAfterPull, isolated", () => {
  * first and the diagnostic would never be seen.
  */
 describe("the mode gate is exercisable where it has to be", () => {
-  it("can exercise the mode gate on CI", () => {
-    // Read on every run, not only on CI: `it.skipIf` would make this body dead
-    // code locally, so a stale binding here would first surface as a red merge
-    // gate after a push rather than as a local failure.
-    const reason = modeProbe.why;
-    if (!onCI) return;
-    // One assertion, not two: `why === ""` holds exactly when `blocked` is true
-    // — every non-blocking path assigns a reason — so a second expectation on
-    // `blocked` reads as an independent check and is a restatement. The reason
-    // goes in the message instead, because it is the half that says what to do,
-    // and it distinguishes root from a mount with no chmod.
+  // `skipIf`, not an early return. A body that returns early reports a green
+  // PASS for a test named "can exercise the mode gate on CI" on every machine
+  // where it asserted nothing — strictly easier to miss than a skip, which is
+  // what this describe exists to avoid. The early-return version was justified
+  // as keeping the body from going stale; that benefit does not exist, because
+  // `modeProbe` is a module-scope const and any stale reference is a `tsc`
+  // error whether the line executes or not.
+  it.skipIf(!onCI)("can exercise the mode gate on CI", () => {
+    // BOTH, not just `why`. It is true today that `why === ""` exactly when
+    // `blocked` is true, but nothing enforces it: a future non-blocking branch
+    // that forgets to set a reason yields blocked=false with why="", and then
+    // all three gate tests skip while this one passes — green and silent on the
+    // one leg that is supposed to catch it. Demonstrated by mutation, which is
+    // why the `blocked` line is back after being removed as "a restatement".
     expect(
-      reason,
+      modeProbe.why,
       "the stamp gate could not be exercised on CI, so the AHEAD-stamp warning " +
-        "and the quiet-when-agreeing case are untested on this leg",
+        "and the quiet-when-agreeing case are untested on this leg. If this leg " +
+        "now runs as root or in a container, run it unprivileged; if the mount " +
+        "does not honour chmod, move the gate to one that does.",
     ).toBe("");
+    expect(modeProbe.blocked, "the probe reported no reason but did not block").toBe(true);
   });
 });
 
@@ -733,7 +762,7 @@ describe("the stamp is wired where it is true", () => {
 
     // Matching `timeout(timeoutMs)` says nothing about the value, so pin the
     // default itself — 300_000 is undici's own, i.e. no bound at all.
-    const declared = /timeoutMs: number = ([0-9_]+)/.exec(upgradeSource);
+    const declared = /timeoutMs: number = ([0-9_]+)/.exec(fn);
     expect(declared).not.toBeNull();
     expect(Number(declared![1].replace(/_/g, ""))).toBeLessThanOrEqual(60_000);
   });
