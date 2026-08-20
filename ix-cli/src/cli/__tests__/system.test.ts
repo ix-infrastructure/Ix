@@ -222,7 +222,8 @@ describe("manifest reads are bounded and typed", () => {
   it("refuses a manifest that is a directory", () => {
     const weird = nodePath.join(dir, "weird");
     fs.mkdirSync(nodePath.join(weird, "package.json"), { recursive: true });
-    expect(() => readPackageNames(weird)).not.toThrow();
+    // A throw would fail the test on its own, so one call proves both that it
+    // does not throw and that it yields nothing.
     expect(readPackageNames(weird)).toEqual([]);
   });
 
@@ -251,10 +252,15 @@ describe("manifest reads are bounded and typed", () => {
     try {
       execFileSync("mkfifo", [fifo]);
     } catch {
-      return; // no mkfifo on this runner; the device case already covers the shape
+      // Returning here would report a pass having asserted nothing, which is
+      // indistinguishable from a working guard. Fail loudly instead: every
+      // POSIX runner this suite targets has mkfifo.
+      throw new Error("mkfifo is required to exercise the FIFO guard on this platform");
     }
-    // Opening a FIFO blocks until a writer appears, which is why the guard
-    // stats rather than opens.
+    // Opening a FIFO for reading blocks until a writer appears, so the guard
+    // cannot stat-then-open: it opens with O_NONBLOCK and fstats the handle.
+    // Drop that flag and this test does not go red, it HANGS — the open blocks
+    // the same event loop vitest would fire its timeout on.
     const started = Date.now();
     expect(readPackageNames(fifoDir)).toEqual([]);
     expect(Date.now() - started).toBeLessThan(2000);

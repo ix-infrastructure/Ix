@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as nodePath from "node:path";
+import { MAX_REPO_FILE_BYTES, isWithinRoot, readRepoFile } from "./bounded-read.js";
 
 interface PathRule {
   pattern: string;
@@ -133,82 +134,17 @@ function parseJsonc(text: string): unknown {
 }
 
 /**
+ * Read and parse a tsconfig, or undefined.
+ *
  * Config files are read while the resolver is built, which happens *before*
- * ingestion's own size gate, so they need their own. Mirrors `MAX_FILE_BYTES`
- * in `ingest.ts`: anything larger is not a tsconfig, and parsing one is how a
- * 64 MB JSONC file takes the process out with an uncatchable OOM.
+ * ingestion's own size gate, and their paths are named by the repository being
+ * ingested — so the read needs its own bound and its own containment check.
+ * Both live in `readRepoFile`, which the ingest-path manifest readers share.
  */
-const MAX_CONFIG_BYTES = 1024 * 1024;
-
-/**
- * True when the file we are *holding open* lives inside the workspace.
- *
- * The lexical check in {@link isWithinWorkspace} cannot see through a symlinked
- * directory: every segment of `./linked/tsconfig.json` is inside the workspace
- * by path arithmetic even when `linked/` points somewhere else entirely. Only
- * the resolved path shows that, so resolve it and re-check.
- *
- * Resolving the name a second time reopens the question of whether it still
- * denotes the file we hold, so the resolved path is confirmed to be the same
- * inode as the open handle. Without that, swapping the symlink between the open
- * and the resolve would let an outside file be read under an inside name.
- * (`ino` is 0 on filesystems that do not report one — chiefly some Windows
- * configurations — where this degrades to the plain resolved-path check.)
- *
- * The ROOT is resolved too, and that is not symmetry for its own sake: a
- * resolved file compared against an unresolved root rejects every config
- * whenever the workspace is itself reached through a link — macOS `/var` ->
- * `/private/var`, a home directory on a network mount, a `~/code` symlink. That
- * would silently switch tsconfig resolution off for those users, and no CI
- * runner here has a symlinked root to notice it.
- */
-function openedWithinWorkspace(
-  workspaceRoot: string,
-  filePath: string,
-  opened: fs.Stats,
-): boolean {
-  try {
-    const resolved = fs.realpathSync(filePath);
-    const viaResolved = fs.statSync(resolved);
-    if (viaResolved.dev !== opened.dev || viaResolved.ino !== opened.ino) return false;
-    let resolvedRoot: string;
-    try {
-      resolvedRoot = fs.realpathSync(workspaceRoot);
-    } catch {
-      resolvedRoot = workspaceRoot; // unreadable root: fall back to the lexical check
-    }
-    return isWithinWorkspace(resolvedRoot, resolved);
-  } catch {
-    return false;
-  }
-}
-
 function readObject(workspaceRoot: string, filePath: string): Record<string, unknown> | undefined {
+  const text = readRepoFile(workspaceRoot, filePath, MAX_REPO_FILE_BYTES);
+  if (text === null) return undefined;
   try {
-    // Open once and fstat the same handle so the checks and the read observe the
-    // same inode — no stat-then-read window (CodeQL js/file-system-race). This is
-    // the pattern ingest.ts already uses.
-    //
-    // O_NONBLOCK is load-bearing, not tidiness: opening a FIFO for reading
-    // *blocks until a writer appears*, so without it the open never returns and
-    // no later check can help. It is the one case a guard placed after the open
-    // cannot cover. Undefined on Windows, where `|` with undefined degrades to
-    // a plain read — and Windows has no FIFO to open this way.
-    const handle = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
-    let text: string;
-    try {
-      const stats = fs.fstatSync(handle);
-      // `openSync` follows symlinks, so fstat describes the *target*. Refusing
-      // anything that is not a regular file is what stops a link to /dev/zero
-      // (an unbounded read) and a FIFO (which would otherwise deliver no data
-      // and no EOF) — neither of which a size check catches, since both
-      // report size 0.
-      if (!stats.isFile() || stats.size > MAX_CONFIG_BYTES) return undefined;
-      if (!openedWithinWorkspace(workspaceRoot, filePath, stats)) return undefined;
-      text = fs.readFileSync(handle, "utf8");
-    } finally {
-      fs.closeSync(handle);
-    }
     const parsed = parseJsonc(text);
     return parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? (parsed as Record<string, unknown>)
@@ -232,19 +168,7 @@ function resolveExtends(workspaceRoot: string, configPath: string, value: unknow
     // filesystem root, so "../../../../../../.." names any absolute path from
     // any depth. The config is repo content, so without this an ingested repo
     // chooses which files on the machine get read.
-    (candidate) => isWithinWorkspace(workspaceRoot, candidate),
-  );
-}
-
-function isWithinWorkspace(workspaceRoot: string, candidate: string): boolean {
-  const relative = nodePath.relative(nodePath.resolve(workspaceRoot), candidate);
-  // Compare path *segments*: a bare `..startsWith` also rejects a legitimate
-  // sibling directory whose name merely begins with dots, e.g. `..shared/`.
-  return (
-    relative !== "" &&
-    relative !== ".." &&
-    !relative.startsWith(`..${nodePath.sep}`) &&
-    !nodePath.isAbsolute(relative)
+    (candidate) => isWithinRoot(workspaceRoot, candidate),
   );
 }
 
