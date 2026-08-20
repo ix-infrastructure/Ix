@@ -1,13 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// stampBackendVersionAfterPull is imported dynamically below instead: it reads
+// IX_HOME at module load, so it has to be loaded after the tests set one.
 import {
   backendUpdateAvailable,
   composeTracksLatestBackend,
-  stampBackendVersionAfterPull,
   writeVersionStamp,
 } from "../commands/upgrade.js";
 
@@ -85,7 +86,9 @@ describe("writeVersionStamp", () => {
     const file = join(home, ".backend-version");
     writeFileSync(file, "1.0.13");
     for (const unknown of [null, undefined, ""]) {
-      writeVersionStamp(file, unknown);
+      // The return value is the contract ("whether it was written"), and the
+      // `ix upgrade` caller branches on it — so assert it, not just the file.
+      expect(writeVersionStamp(file, unknown)).toBe(false);
       expect(readFileSync(file, "utf-8")).toBe("1.0.13");
     }
   });
@@ -183,18 +186,123 @@ describe("composeTracksLatestBackend", () => {
     ).toBe(false);
   });
 
-  it("returns quietly, and stamps nothing, when the compose cannot be read", () => {
-    // Reachable: the compose read is the one call in stampBackendVersionAfterPull
-    // that can throw. It must not escape into `ix docker start`, which has
-    // already brought the containers up by the time this runs. No network is
-    // reached either — the read fails before the fetch.
-    return expect(
-      stampBackendVersionAfterPull(join(tmpdir(), "ix-no-such-compose-file.yml")),
-    ).resolves.toBeUndefined();
-  });
-
   it("refuses a compose that names no image at all", () => {
     expect(composeTracksLatestBackend("services:\n  memory-layer:\n    build: .")).toBe(false);
+  });
+});
+
+/**
+ * `stampBackendVersionAfterPull` against a real, isolated IX_HOME.
+ *
+ * The module resolves BACKEND_VERSION_FILE and VERSION_CACHE from IX_HOME at
+ * load, so IX_HOME is set and the module re-imported — without that, a
+ * regression in the early return would have this reaching api.github.com and
+ * overwriting the developer's own ~/.ix/.backend-version.
+ */
+describe("stampBackendVersionAfterPull, isolated", () => {
+  let home: string;
+  let priorHome: string | undefined;
+
+  beforeEach(() => {
+    priorHome = process.env.IX_HOME;
+    home = mkdtempSync(join(tmpdir(), "ix-stamp-home-"));
+    process.env.IX_HOME = home;
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    if (priorHome === undefined) delete process.env.IX_HOME;
+    else process.env.IX_HOME = priorHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  /** Re-imported so IX_HOME above is the one the module reads. */
+  const load = () => import("../commands/upgrade.js");
+
+  it("stamps nothing, and reaches no network, when the compose cannot be read", async () => {
+    // The compose read is the one call in here that can throw, and it must not
+    // escape into `ix docker start`, which has already brought containers up.
+    const mod = await load();
+    await expect(
+      mod.stampBackendVersionAfterPull(join(home, "no-such-compose.yml")),
+    ).resolves.toBeUndefined();
+    expect(existsSync(join(home, ".backend-version"))).toBe(false);
+  });
+
+  it("stamps nothing when the compose does not track :latest", async () => {
+    const compose = join(home, "docker-compose.yml");
+    writeFileSync(compose, "services:\n  memory-layer:\n    image: ix-memory-layer:dev\n");
+    const mod = await load();
+    await mod.stampBackendVersionAfterPull(compose);
+    expect(existsSync(join(home, ".backend-version"))).toBe(false);
+  });
+
+  it("does not move the stamp backwards from a stale cache", async () => {
+    // An installer stamps the true latest without touching the version cache,
+    // so a cache up to an hour old can name an EARLIER release. Overwriting
+    // with it restores the nag this whole change exists to remove.
+    const compose = join(home, "docker-compose.yml");
+    writeFileSync(
+      compose,
+      "services:\n  memory-layer:\n    image: ghcr.io/ix-infrastructure/ix-memory-layer:latest\n",
+    );
+    writeFileSync(join(home, ".backend-version"), "1.0.17");
+    writeFileSync(
+      join(home, ".version-check.json"),
+      JSON.stringify({ latest: "1.0.0", backendLatest: "1.0.16", checkedAt: Date.now() }),
+    );
+    const mod = await load();
+    await mod.stampBackendVersionAfterPull(compose);
+    expect(readFileSync(join(home, ".backend-version"), "utf-8")).toBe("1.0.17");
+  });
+
+  it("stamps a fresh cached release that is genuinely newer", async () => {
+    const compose = join(home, "docker-compose.yml");
+    writeFileSync(
+      compose,
+      "services:\n  memory-layer:\n    image: ghcr.io/ix-infrastructure/ix-memory-layer:latest\n",
+    );
+    writeFileSync(join(home, ".backend-version"), "1.0.13");
+    writeFileSync(
+      join(home, ".version-check.json"),
+      JSON.stringify({ latest: "1.0.0", backendLatest: "1.0.16", checkedAt: Date.now() }),
+    );
+    const mod = await load();
+    await mod.stampBackendVersionAfterPull(compose);
+    expect(readFileSync(join(home, ".backend-version"), "utf-8")).toBe("1.0.16");
+  });
+
+  it("refuses a cached value that is not a version", async () => {
+    // `readCache` only checks that it is a string, so the cache is the one way
+    // an unvalidated value can reach a file — the module validates the FETCHED
+    // tag at the source precisely because it "flows into file paths, the
+    // install shim, and download URLs" (CodeQL js/http-to-file-access).
+    //
+    // The value has to survive isNewer to isolate the check: `../../evil`
+    // parses to 0.0.0 and the monotonic guard alone would stop it, whereas
+    // `9.9.9/../../evil` parses to 9.9.9 and does not.
+    //
+    // Tracked is set to 5.0.0 so the outcome does not depend on the network: an
+    // unvalidated cache writes 9.9.9/../../evil, while the validated path falls
+    // through to a fetch whose real release is far below 5.0.0 and so writes
+    // nothing either way.
+    const compose = join(home, "docker-compose.yml");
+    writeFileSync(
+      compose,
+      "services:\n  memory-layer:\n    image: ghcr.io/ix-infrastructure/ix-memory-layer:latest\n",
+    );
+    writeFileSync(join(home, ".backend-version"), "5.0.0");
+    writeFileSync(
+      join(home, ".version-check.json"),
+      JSON.stringify({
+        latest: "1.0.0",
+        backendLatest: "9.9.9/../../evil",
+        checkedAt: Date.now(),
+      }),
+    );
+    const mod = await load();
+    await mod.stampBackendVersionAfterPull(compose);
+    expect(readFileSync(join(home, ".backend-version"), "utf-8")).toBe("5.0.0");
   });
 });
 
@@ -234,16 +342,25 @@ describe("the stamp is wired where it is true", () => {
     expect(stamp).toBeGreaterThan(pull);
   });
 
-  it("stamps on the success path, not from inside the failure branch", () => {
-    // The compose `up` catch ends in process.exit(1). A stamp reached from
-    // there would record a release for a start that never happened, and
-    // "after the pull" alone does not exclude it.
-    const failure = startAction.indexOf('"[error] Failed to start Docker containers."');
-    expect(failure).toBeGreaterThan(-1);
-    const exitsFailure = startAction.indexOf("process.exit(1)", failure);
+  it("stamps between the pull and the health wait, on the path that always runs", () => {
+    // Three positions have to be excluded, and "after the pull" excludes none
+    // of them on its own:
+    //   - inside the compose `up` catch, which exits 1 having started nothing;
+    //   - after the health loop, which `return`s on the first healthy poll, so
+    //     the stamp would run ONLY when the start timed out;
+    //   - inside the loop's success branch, which is fine but not where it is.
+    // Bounding it above by the loop pins the one position that always runs
+    // after a successful pull.
     const stamp = startAction.indexOf("await stampBackendVersionAfterPull(composeFile)");
-    expect(exitsFailure).toBeGreaterThan(-1);
-    expect(stamp).toBeGreaterThan(exitsFailure);
+    const failureExit = startAction.indexOf(
+      "process.exit(1)",
+      startAction.indexOf('"[error] Failed to start Docker containers."'),
+    );
+    const healthWait = startAction.indexOf("Waiting for services to become healthy");
+    expect(failureExit).toBeGreaterThan(-1);
+    expect(healthWait).toBeGreaterThan(-1);
+    expect(stamp).toBeGreaterThan(failureExit);
+    expect(stamp).toBeLessThan(healthWait);
   });
 
   it("bounds the release fetch, which is now awaited on a command", () => {
@@ -255,8 +372,16 @@ describe("the stamp is wired where it is true", () => {
     const from = upgradeSource.indexOf("async function fetchLatestRelease");
     expect(from).toBeGreaterThan(-1);
     const fn = upgradeSource.slice(from, upgradeSource.indexOf("\n}", from));
-    expect(fn).toContain("await fetch(");
-    expect(fn).toMatch(/signal:\s*AbortSignal\.timeout\(/);
+
+    // Matching `signal:` anywhere in the function is not enough — building the
+    // options object and then calling `fetch(url)` without it leaves the fetch
+    // unbounded and the assertion green. The signal has to be INSIDE the
+    // fetch(...) argument list, so match the whole call.
+    expect(fn).toMatch(
+      /await fetch\(\s*`[^`]*`\s*,\s*\{\s*signal:\s*AbortSignal\.timeout\([^)]+\)\s*,?\s*\}\s*,?\s*\)/,
+    );
+    // ...and there is only the one fetch, so the matched call is the one made.
+    expect(fn.match(/\bfetch\(/g)).toHaveLength(1);
   });
 
   it("stampBackendVersionAfterPull checks the compose before fetching or writing", () => {

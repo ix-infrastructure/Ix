@@ -49,18 +49,26 @@ function getCurrentVersion(): string {
 // — `0.9.0-rc.1+abc1234`, valid semver — failed the test. fetchLatestRelease
 // then returned null and `ix upgrade` reported "Could not reach GitHub to check
 // for updates" and exited 1 against a perfectly reachable GitHub.
+/** How long a cached release lookup is trusted, shared by every reader of it. */
+const VERSION_CACHE_TTL_MS = 3600_000;
+
 export const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
-async function fetchLatestRelease(repo: string): Promise<string | null> {
+async function fetchLatestRelease(
+  repo: string,
+  timeoutMs: number = 30_000,
+): Promise<string | null> {
   try {
-    // Bounded, because this is now awaited on a command the user is watching:
-    // `ix docker start` stamps the version it pulled. Undici's default
-    // headersTimeout is 300s, so a proxy or captive portal that accepts the
-    // connection and never answers would stall the command for five minutes
-    // with nothing printed. Every other fetch in this codebase bounds itself.
+    // Bounded: undici's default headersTimeout is 300s, so a proxy or captive
+    // portal that accepts the connection and never answers stalls whatever is
+    // waiting for five minutes with nothing printed. Every other fetch in this
+    // codebase bounds itself. The default stays generous because `ix upgrade`
+    // awaits three of these and the user chose to wait; the stamp path, which
+    // runs behind `ix docker start` after the containers are already up, passes
+    // a short one instead of making a slow link look like an unreachable GitHub.
     const resp = await fetch(
       `https://api.github.com/repos/${GITHUB_ORG}/${repo}/releases/latest`,
-      { signal: AbortSignal.timeout(10_000) }
+      { signal: AbortSignal.timeout(timeoutMs) }
     );
     if (!resp.ok) return null;
     const data = (await resp.json()) as { tag_name?: string };
@@ -448,21 +456,38 @@ export function composeTracksLatestBackend(composeText: string): boolean {
  *
  * Prefers the version cache `checkForUpdate` already maintains: `main.ts` fires
  * that unawaited on this very command, so fetching again races it for the same
- * tag against a 60/hour unauthenticated rate limit. An hour of staleness here
- * only ever errs behind.
+ * tag against a 60/hour unauthenticated rate limit. The cached value is
+ * re-validated against VERSION_RE, because `readCache` only checks that it is a
+ * string — and unlike a fetched tag it would otherwise reach the stamp file
+ * without passing the barrier at the top of this module.
+ *
+ * The stamp only ever moves FORWARD. A cache up to an hour old can name an
+ * earlier release than the file already holds — an installer run stamps the
+ * true latest without touching the cache — and overwriting with that would
+ * restore the very nag this exists to remove. Refusing to go backwards costs
+ * nothing: the next `checkForUpdate` refreshes the cache.
  *
  * If the release cannot be established the stamp is left alone: the user keeps a
- * notice they may not need, which is the failure worth having.
+ * notice they may not need, which is the failure worth having. A write that
+ * fails says so, because "update available" for ever with no explanation is the
+ * symptom this whole change is about.
  */
 export async function stampBackendVersionAfterPull(composeFile: string): Promise<void> {
   try {
     if (!composeTracksLatestBackend(readFileSync(composeFile, "utf-8"))) return;
     const cached = readCache();
+    const fresh =
+      cached && Date.now() - cached.checkedAt < VERSION_CACHE_TTL_MS ? cached.backendLatest : null;
     const latest =
-      cached && Date.now() - cached.checkedAt < 3600_000 && cached.backendLatest
-        ? cached.backendLatest
-        : await fetchLatestRelease(MEMORY_LAYER_DIST_REPO);
-    writeVersionStamp(BACKEND_VERSION_FILE, latest);
+      fresh && VERSION_RE.test(fresh) ? fresh : await fetchLatestRelease(MEMORY_LAYER_DIST_REPO);
+    if (!latest || !isNewer(latest, getTrackedVersion(BACKEND_VERSION_FILE))) return;
+    if (!writeVersionStamp(BACKEND_VERSION_FILE, latest)) {
+      // Must not fail the start — the containers are already up — but the user
+      // is about to be told to upgrade on every command, so say why once.
+      console.error(
+        chalk.dim(`  Could not record the backend version in ${BACKEND_VERSION_FILE}`),
+      );
+    }
   } catch {
     /* offline, rate-limited, unreadable compose: the tracked version stands */
   }
@@ -1149,7 +1174,7 @@ export async function checkForUpdate(): Promise<void> {
   const current = getCurrentVersion();
   const cache = readCache();
 
-  if (cache && Date.now() - cache.checkedAt < 3600_000) {
+  if (cache && Date.now() - cache.checkedAt < VERSION_CACHE_TTL_MS) {
     const hasCliUpdate = isNewer(cache.latest, current);
     const hasCompassUpdate = shouldOfferCompassUpgrade(cache.compassLatest);
     const hasBackendUpdate = backendUpdateAvailable(
@@ -1452,7 +1477,7 @@ export function registerUpgradeCommand(program: Command): void {
       // ── Backend (memory-layer) upgrade ───────────────────────────────
       const backendCurrent = getTrackedVersion(BACKEND_VERSION_FILE);
       let backendImageChanged = false;
-      if (backendLatest && isNewer(backendLatest, backendCurrent)) {
+      if (backendUpdateAvailable(backendLatest ?? undefined, backendCurrent)) {
         console.log(
           `Backend update available: ${backendCurrent === "0.0.0" ? "none" : backendCurrent} → ${chalk.green(backendLatest)}`
         );
@@ -1465,16 +1490,26 @@ export function registerUpgradeCommand(program: Command): void {
               ["pull", "ghcr.io/ix-infrastructure/ix-memory-layer:latest"],
               { stdio: "inherit", timeout: 120000 }
             );
-            // A failed stamp has to surface here, as it did when this was a bare
-            // writeFileSync: on a read-only or permission-denied IX_HOME the
-            // image is pulled but the file never moves, so reporting success
-            // would re-pull on every run and keep nagging with nothing to
-            // explain it.
-            if (!writeVersionStamp(BACKEND_VERSION_FILE, backendLatest)) {
-              throw new Error(`could not record the backend version in ${BACKEND_VERSION_FILE}`);
-            }
+            // The pull succeeded, so the image DID change: say so, and keep
+            // backendImageChanged true — it gates the Ix#271 re-map nudge, and
+            // suppressing that would leave a new engine reading a graph written
+            // by the old one, which fails by returning empty rather than by
+            // erroring.
+            //
+            // A failed stamp is reported on its own line rather than thrown.
+            // Throwing lands in the bare catch below, which says the PULL
+            // failed and to run `ix docker restart` — a false diagnosis for a
+            // read-only IX_HOME, and one that discards the only message naming
+            // the real cause.
             backendImageChanged = true;
             console.log(`[ok] Backend image updated to ${backendLatest}`);
+            if (!writeVersionStamp(BACKEND_VERSION_FILE, backendLatest)) {
+              console.error(
+                chalk.yellow(
+                  `[!!] Could not record the version in ${BACKEND_VERSION_FILE}; the update notice will keep firing.`
+                )
+              );
+            }
           } catch {
             console.error("[!!] Could not pull latest backend image. Run: ix docker restart");
           }
