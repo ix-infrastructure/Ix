@@ -53,8 +53,14 @@ export const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+
 
 async function fetchLatestRelease(repo: string): Promise<string | null> {
   try {
+    // Bounded, because this is now awaited on a command the user is watching:
+    // `ix docker start` stamps the version it pulled. Undici's default
+    // headersTimeout is 300s, so a proxy or captive portal that accepts the
+    // connection and never answers would stall the command for five minutes
+    // with nothing printed. Every other fetch in this codebase bounds itself.
     const resp = await fetch(
-      `https://api.github.com/repos/${GITHUB_ORG}/${repo}/releases/latest`
+      `https://api.github.com/repos/${GITHUB_ORG}/${repo}/releases/latest`,
+      { signal: AbortSignal.timeout(10_000) }
     );
     if (!resp.ok) return null;
     const data = (await resp.json()) as { tag_name?: string };
@@ -340,28 +346,59 @@ function getTrackedVersion(versionFile: string): string {
 }
 
 /**
- * Record the version a component was just installed at.
+ * Whether to tell the user their backend is behind.
  *
- * `mkdirSync` because IX_HOME may not exist yet — a stamp that silently fails to
- * write leaves the tracked version behind for ever, and the notice it drives
- * says "update available" on every command with no way for the user to see why.
+ * The two branches of `checkForUpdate` — cached and freshly fetched — each made
+ * this decision inline, so a change to one silently did not apply to the other.
+ * Pure, so the thing the user actually sees is testable without a clock, a
+ * cache file or a network.
  *
- * A falsy version is refused rather than written. Not knowing which release we
- * are on is not the same as being on none of them, and the only safe direction
- * for this file to be wrong is *behind*: a stamp that reads old costs a wrong
- * nag, while one that reads new hides a genuinely stale component and stops
- * `ix upgrade` from ever fetching it.
- *
- * Best effort by construction: this is bookkeeping attached to an operation the
- * user asked for, and it must never be the reason that operation reports failure.
+ * The tracked version is the whole input on purpose. It is written wherever the
+ * image is installed or pulled, so it is the record of what is running; nothing
+ * else available locally improves on it, and the one thing that looks like it
+ * would — comparing the container against `docker image inspect ...:latest` —
+ * is registry-blind and reports a months-old image as current.
  */
-export function writeVersionStamp(versionFile: string, version: string | null | undefined): void {
-  if (!version) return;
+export function backendUpdateAvailable(
+  backendLatest: string | undefined,
+  trackedVersion: string,
+): boolean {
+  return !!backendLatest && isNewer(backendLatest, trackedVersion);
+}
+
+/**
+ * Record the backend release in its stamp file. Returns whether it was written.
+ *
+ * `mkdirSync` because IX_HOME may not exist yet — a stamp that fails to write
+ * leaves the tracked version behind for ever, and the notice it drives says
+ * "update available" on every command with no way for the user to see why.
+ *
+ * A falsy version is refused rather than written: not knowing which release we
+ * are on is not the same as being on none of them. Being wrong *behind* costs a
+ * nag, while being wrong *ahead* hides a genuinely stale backend and stops
+ * `ix upgrade` from ever fetching it — so where there is a choice, this errs
+ * behind. (It is not always a choice: the GHCR `:latest` tag and the
+ * `ix-memory-layer-dist` release are separate publishing surfaces with nothing
+ * correlating them, so a release cut between the two can be recorded ahead of
+ * the image actually pulled. `ix upgrade` has always had that race; correcting
+ * it needs the backend to report its own version.)
+ *
+ * The write does not throw — callers differ on whether a failure should be
+ * fatal, so they decide from the return value rather than from an exception.
+ * Not a general component-stamp writer: the compass stamp is written with a
+ * trailing newline that `parseCompassStamp` depends on.
+ */
+export function writeVersionStamp(
+  versionFile: string,
+  version: string | null | undefined,
+): boolean {
+  if (!version) return false;
   try {
     mkdirSync(dirname(versionFile), { recursive: true });
     writeFileSync(versionFile, version);
+    return true;
   } catch {
-    /* best effort */
+    return false;
   }
 }
 
@@ -396,10 +433,11 @@ export function composeTracksLatestBackend(composeText: string): boolean {
 /**
  * Record the backend release after something has pulled `:latest`.
  *
- * `.backend-version` was written by `ix upgrade` and by nothing else, so anyone
- * who took a new image through `ix docker start` — which pulls on every start —
- * kept a file naming an older release while running the current one, and was
- * told to upgrade on every command for ever.
+ * `.backend-version` is written at install time (install.sh, install.ps1) and by
+ * `ix upgrade` — but not by `ix docker start`, which pulls `:latest` on every
+ * cold start. So anyone who took a newer image that way kept a file naming the
+ * release they installed while running a later one, and was told to upgrade on
+ * every command for ever.
  *
  * The fix belongs at the write, not at the read. Having just pulled `:latest`,
  * the running image IS the current release, so the release is simply what to
@@ -408,13 +446,23 @@ export function composeTracksLatestBackend(composeText: string): boolean {
  * a registry, so a container matching the local `:latest` proves only that
  * nothing has been pulled since, which is equally true of a months-old image.
  *
- * If the release cannot be fetched the stamp is left alone: the user keeps a
+ * Prefers the version cache `checkForUpdate` already maintains: `main.ts` fires
+ * that unawaited on this very command, so fetching again races it for the same
+ * tag against a 60/hour unauthenticated rate limit. An hour of staleness here
+ * only ever errs behind.
+ *
+ * If the release cannot be established the stamp is left alone: the user keeps a
  * notice they may not need, which is the failure worth having.
  */
 export async function stampBackendVersionAfterPull(composeFile: string): Promise<void> {
   try {
     if (!composeTracksLatestBackend(readFileSync(composeFile, "utf-8"))) return;
-    writeVersionStamp(BACKEND_VERSION_FILE, await fetchLatestRelease(MEMORY_LAYER_DIST_REPO));
+    const cached = readCache();
+    const latest =
+      cached && Date.now() - cached.checkedAt < 3600_000 && cached.backendLatest
+        ? cached.backendLatest
+        : await fetchLatestRelease(MEMORY_LAYER_DIST_REPO);
+    writeVersionStamp(BACKEND_VERSION_FILE, latest);
   } catch {
     /* offline, rate-limited, unreadable compose: the tracked version stands */
   }
@@ -1104,9 +1152,10 @@ export async function checkForUpdate(): Promise<void> {
   if (cache && Date.now() - cache.checkedAt < 3600_000) {
     const hasCliUpdate = isNewer(cache.latest, current);
     const hasCompassUpdate = shouldOfferCompassUpgrade(cache.compassLatest);
-    const backendCurrent = getTrackedVersion(BACKEND_VERSION_FILE);
-    const hasBackendUpdate =
-      cache.backendLatest && isNewer(cache.backendLatest, backendCurrent);
+    const hasBackendUpdate = backendUpdateAvailable(
+      cache.backendLatest,
+      getTrackedVersion(BACKEND_VERSION_FILE),
+    );
     if (hasCliUpdate || hasCompassUpdate || hasBackendUpdate) {
       printUpdateNotice(current, cache.latest, !!hasCompassUpdate, !!hasBackendUpdate);
     }
@@ -1122,9 +1171,10 @@ export async function checkForUpdate(): Promise<void> {
     writeCache(latest, compassLatest ?? undefined, backendLatest ?? undefined);
     const hasCliUpdate = isNewer(latest, current);
     const hasCompassUpdate = shouldOfferCompassUpgrade(compassLatest ?? undefined);
-    const backendCurrent = getTrackedVersion(BACKEND_VERSION_FILE);
-    const hasBackendUpdate =
-      backendLatest && isNewer(backendLatest, backendCurrent);
+    const hasBackendUpdate = backendUpdateAvailable(
+      backendLatest ?? undefined,
+      getTrackedVersion(BACKEND_VERSION_FILE),
+    );
     if (hasCliUpdate || hasCompassUpdate || hasBackendUpdate) {
       printUpdateNotice(current, latest, !!hasCompassUpdate, !!hasBackendUpdate);
     }
@@ -1415,7 +1465,14 @@ export function registerUpgradeCommand(program: Command): void {
               ["pull", "ghcr.io/ix-infrastructure/ix-memory-layer:latest"],
               { stdio: "inherit", timeout: 120000 }
             );
-            writeVersionStamp(BACKEND_VERSION_FILE, backendLatest);
+            // A failed stamp has to surface here, as it did when this was a bare
+            // writeFileSync: on a read-only or permission-denied IX_HOME the
+            // image is pulled but the file never moves, so reporting success
+            // would re-pull on every run and keep nagging with nothing to
+            // explain it.
+            if (!writeVersionStamp(BACKEND_VERSION_FILE, backendLatest)) {
+              throw new Error(`could not record the backend version in ${BACKEND_VERSION_FILE}`);
+            }
             backendImageChanged = true;
             console.log(`[ok] Backend image updated to ${backendLatest}`);
           } catch {

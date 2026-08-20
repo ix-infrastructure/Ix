@@ -4,14 +4,47 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { composeTracksLatestBackend, writeVersionStamp } from "../commands/upgrade.js";
+import {
+  backendUpdateAvailable,
+  composeTracksLatestBackend,
+  stampBackendVersionAfterPull,
+  writeVersionStamp,
+} from "../commands/upgrade.js";
+
+/**
+ * What the user actually sees. Both branches of `checkForUpdate` made this
+ * decision inline, so a change to one did not reach the other; it is one pure
+ * function now, and this is the only coverage of the notice itself.
+ */
+describe("backendUpdateAvailable", () => {
+  it("offers an upgrade when the release is ahead of the tracked version", () => {
+    expect(backendUpdateAvailable("1.0.16", "1.0.13")).toBe(true);
+  });
+
+  it("says nothing when the tracked version is current or ahead", () => {
+    expect(backendUpdateAvailable("1.0.16", "1.0.16")).toBe(false);
+    expect(backendUpdateAvailable("1.0.16", "1.0.17")).toBe(false);
+  });
+
+  it("says nothing when no release is known", () => {
+    // A failed or rate-limited fetch must not be read as "you are behind".
+    expect(backendUpdateAvailable(undefined, "1.0.13")).toBe(false);
+    expect(backendUpdateAvailable("", "1.0.13")).toBe(false);
+  });
+
+  it("offers the upgrade on a fresh install, where nothing is tracked", () => {
+    // getTrackedVersion returns 0.0.0 when the file is absent or empty.
+    expect(backendUpdateAvailable("1.0.16", "0.0.0")).toBe(true);
+  });
+});
 
 /**
  * `.backend-version` drives the "Backend update available" notice on every
- * command. It was written by `ix upgrade` and by nothing else, so a backend
- * taken through `ix docker start` — which pulls `:latest` every time — left the
- * file naming an older release while running the current one, and nagged for
- * ever.
+ * command. It is written at install time (install.sh, install.ps1) and by
+ * `ix upgrade` — but it was not written by `ix docker start`, which pulls
+ * `:latest` on every cold start, so a backend taken through that path left the
+ * file naming the release that was installed while running a later one, and
+ * nagged for ever.
  *
  * The stamp is now written wherever a pull happens, which puts the weight on
  * this function: it runs attached to an operation the user actually asked for,
@@ -28,9 +61,9 @@ describe("writeVersionStamp", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it("writes the version", () => {
+  it("writes the version and reports that it did", () => {
     const file = join(home, ".backend-version");
-    writeVersionStamp(file, "1.0.16");
+    expect(writeVersionStamp(file, "1.0.16")).toBe(true);
     expect(readFileSync(file, "utf-8")).toBe("1.0.16");
   });
 
@@ -63,13 +96,20 @@ describe("writeVersionStamp", () => {
     expect(existsSync(file)).toBe(false);
   });
 
-  it("does not throw when the path cannot be written", () => {
-    // Bookkeeping attached to a command the user asked for must never be the
-    // reason that command reports failure. A directory where the file should be
-    // is the portable way to make the write fail.
+  it("reports a failed write instead of throwing", () => {
+    // It must not throw: the docker-start caller has already brought containers
+    // up by the time this runs. But it must not claim success either — the
+    // `ix upgrade` caller turns a false into the error the user sees, which is
+    // what stops it printing "Backend image updated" over a file that never
+    // moved on a read-only IX_HOME. A directory where the file should be is the
+    // portable way to make the write fail.
     const file = join(home, "blocked");
     mkdirSync(file, { recursive: true });
-    expect(() => writeVersionStamp(file, "1.0.16")).not.toThrow();
+    let result: boolean | undefined;
+    expect(() => {
+      result = writeVersionStamp(file, "1.0.16");
+    }).not.toThrow();
+    expect(result).toBe(false);
   });
 });
 
@@ -143,6 +183,16 @@ describe("composeTracksLatestBackend", () => {
     ).toBe(false);
   });
 
+  it("returns quietly, and stamps nothing, when the compose cannot be read", () => {
+    // Reachable: the compose read is the one call in stampBackendVersionAfterPull
+    // that can throw. It must not escape into `ix docker start`, which has
+    // already brought the containers up by the time this runs. No network is
+    // reached either — the read fails before the fetch.
+    return expect(
+      stampBackendVersionAfterPull(join(tmpdir(), "ix-no-such-compose-file.yml")),
+    ).resolves.toBeUndefined();
+  });
+
   it("refuses a compose that names no image at all", () => {
     expect(composeTracksLatestBackend("services:\n  memory-layer:\n    build: .")).toBe(false);
   });
@@ -158,12 +208,55 @@ describe("the stamp is wired where it is true", () => {
   const dockerSource = readFileSync(new URL("../commands/docker.ts", import.meta.url), "utf-8");
   const upgradeSource = readFileSync(new URL("../commands/upgrade.ts", import.meta.url), "utf-8");
 
-  it("ix docker start stamps AFTER the pull, not before", () => {
-    const pull = dockerSource.indexOf('"--pull", "always"');
-    const stamp = dockerSource.indexOf("await stampBackendVersionAfterPull(composeFile)");
+  /**
+   * Sliced to the `start` action's own body. Comparing offsets across the whole
+   * file would also accept the call sitting in `docker restart`, `docker logs`
+   * or the compose `up` FAILURE branch — all of which are defined after the
+   * pull, and none of which pulled anything.
+   */
+  const startFrom = dockerSource.indexOf('.command("start")');
+  const startTo = dockerSource.indexOf('.command("stop")', Math.max(startFrom, 0));
+  const startAction = dockerSource.slice(startFrom, startTo);
+
+  it("slices the start action, so the assertions below mean what they say", () => {
+    // Guards the two tests that follow: if these anchors ever stop matching,
+    // `slice(-1, -1)` is "" and every indexOf below would be -1.
+    expect(startFrom).toBeGreaterThan(-1);
+    expect(startTo).toBeGreaterThan(startFrom);
+    expect(startAction).toContain('"--pull", "always"');
+  });
+
+  it("stamps AFTER the pull, not before", () => {
+    const pull = startAction.indexOf('"--pull", "always"');
+    const stamp = startAction.indexOf("await stampBackendVersionAfterPull(composeFile)");
     expect(pull).toBeGreaterThan(-1);
     expect(stamp).toBeGreaterThan(-1);
     expect(stamp).toBeGreaterThan(pull);
+  });
+
+  it("stamps on the success path, not from inside the failure branch", () => {
+    // The compose `up` catch ends in process.exit(1). A stamp reached from
+    // there would record a release for a start that never happened, and
+    // "after the pull" alone does not exclude it.
+    const failure = startAction.indexOf('"[error] Failed to start Docker containers."');
+    expect(failure).toBeGreaterThan(-1);
+    const exitsFailure = startAction.indexOf("process.exit(1)", failure);
+    const stamp = startAction.indexOf("await stampBackendVersionAfterPull(composeFile)");
+    expect(exitsFailure).toBeGreaterThan(-1);
+    expect(stamp).toBeGreaterThan(exitsFailure);
+  });
+
+  it("bounds the release fetch, which is now awaited on a command", () => {
+    // ix docker start awaits this. Undici's default headersTimeout is 300s, so
+    // an unbounded fetch behind a captive portal or a proxy that accepts the
+    // connection and never answers stalls the command for five minutes with
+    // nothing printed. Not observable without a hanging server, so it is pinned
+    // on the source.
+    const from = upgradeSource.indexOf("async function fetchLatestRelease");
+    expect(from).toBeGreaterThan(-1);
+    const fn = upgradeSource.slice(from, upgradeSource.indexOf("\n}", from));
+    expect(fn).toContain("await fetch(");
+    expect(fn).toMatch(/signal:\s*AbortSignal\.timeout\(/);
   });
 
   it("stampBackendVersionAfterPull checks the compose before fetching or writing", () => {
