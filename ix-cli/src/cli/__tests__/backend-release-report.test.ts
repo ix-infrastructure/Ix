@@ -494,7 +494,10 @@ describe("health is fetched in exactly one place", () => {
     .map((f) => f.file.slice(SRC.length + 1).replace(/\\/g, "/"));
 
   it("finds the health callers at all", () => {
-    // Guards the assertion below: an empty list would satisfy any comparison.
+    // NOT a vacuity guard — the assertion below is an exact toEqual against a
+    // one-element literal, which rejects [] on its own. This exists only so a
+    // broken `walk` fails saying "found nothing" instead of producing a deep
+    // -equal diff that reads like the chokepoint moved.
     expect(callers.length).toBeGreaterThan(0);
   });
 
@@ -504,7 +507,7 @@ describe("health is fetched in exactly one place", () => {
   // READ THIS BEFORE TRUSTING IT. Three rounds of review have established what
   // this does and does not catch, and the honest summary is narrow:
   //
-  //   CAUGHT: a new file that names the path. A second INLINE use of the path
+  //   CAUGHT: a new file that names the path INLINE. A second inline use of it
   //   inside a listed file. Removing a listed use (so the list cannot go stale
   //   silently, which is the whole reason it is here and not in a comment).
   //
