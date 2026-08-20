@@ -9,9 +9,13 @@ import {
   type BackendContainer,
 } from "../backend-status.js";
 import type { IxClient } from "../../client/api.js";
+import { isNewer } from "../commands/upgrade.js";
 
+// `endpoint` matters now: checkBackendSchema records through the shared health
+// fetch, and the recorder is gated on the endpoint being local. A remote one
+// keeps these unit tests from touching any stamp file at all.
 function fakeClient(health: () => Promise<any>): IxClient {
-  return { health } as unknown as IxClient;
+  return { endpoint: "http://schema-spec.invalid:8090", health } as unknown as IxClient;
 }
 
 function container(overrides: Partial<BackendContainer>): BackendContainer {
@@ -28,24 +32,28 @@ function container(overrides: Partial<BackendContainer>): BackendContainer {
 
 describe("checkBackendSchema", () => {
   it("matches when the backend reports the expected version", async () => {
-    const s = await checkBackendSchema(fakeClient(async () => ({ status: "ok", schema_version: CLIENT_EXPECTED_SCHEMA_VERSION })));
+    const s = await checkBackendSchema(fakeClient(async () => ({ status: "ok", schema_version: CLIENT_EXPECTED_SCHEMA_VERSION })), null, isNewer);
     expect(s).toEqual({ reachable: true, serverVersion: CLIENT_EXPECTED_SCHEMA_VERSION, expected: CLIENT_EXPECTED_SCHEMA_VERSION, matches: true });
   });
 
   it("flags a mismatch when the persisted graph predates the engine", async () => {
-    const s = await checkBackendSchema(fakeClient(async () => ({ status: "ok", schema_version: CLIENT_EXPECTED_SCHEMA_VERSION - 1 })));
+    const s = await checkBackendSchema(fakeClient(async () => ({ status: "ok", schema_version: CLIENT_EXPECTED_SCHEMA_VERSION - 1 })), null, isNewer);
     expect(s.matches).toBe(false);
     expect(s.serverVersion).toBe(CLIENT_EXPECTED_SCHEMA_VERSION - 1);
   });
 
   it("does not flag when the backend reports no schema version (can't prove stale)", async () => {
-    const s = await checkBackendSchema(fakeClient(async () => ({ status: "ok" })));
+    const s = await checkBackendSchema(fakeClient(async () => ({ status: "ok" })), null, isNewer);
     expect(s.matches).toBe(true);
     expect(s.serverVersion).toBeNull();
   });
 
   it("reports unreachable (and does not flag) when health throws", async () => {
-    const s = await checkBackendSchema(fakeClient(async () => { throw new Error("ECONNREFUSED"); }));
+    const s = await checkBackendSchema(
+      fakeClient(async () => { throw new Error("ECONNREFUSED"); }),
+      null,
+      isNewer,
+    );
     expect(s).toEqual({ reachable: false, serverVersion: null, expected: CLIENT_EXPECTED_SCHEMA_VERSION, matches: true });
   });
 });

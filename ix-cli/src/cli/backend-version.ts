@@ -137,7 +137,8 @@ export function isLocalEndpoint(endpoint: string): boolean {
     const host = new URL(endpoint).hostname.toLowerCase().replace(/\.$/, "");
     return (
       host === "localhost" ||
-      host.startsWith("127.") || // all of 127.0.0.0/8 is loopback
+      /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) || // 127.0.0.0/8, as an ADDRESS
+      // ...not a prefix: `127.0.0.1.evil.com` is a remote name that starts "127."
       host === "0.0.0.0" || // what client/api.ts and errors.ts already accept
       host === "[::1]" // new URL() always brackets IPv6, so bare "::1" is unreachable
     );
@@ -162,8 +163,11 @@ export async function fetchBackendHealth(
   // From the client the request actually went to. Taking it as a second
   // argument reintroduced exactly the "a call site can get it wrong" mistake
   // this module exists to make impossible.
+  // `health?.` because a 200 whose body is literally `null` parses to null, and
+  // status.ts / ingest.ts do not catch — they would exit on a stack trace rather
+  // than report an unhealthy backend.
   if (isLocalEndpoint(client.endpoint)) {
-    recordBackendRelease(health.release_version, knownLatest, isNewer);
+    recordBackendRelease(health?.release_version, knownLatest, isNewer);
   }
   return health;
 }

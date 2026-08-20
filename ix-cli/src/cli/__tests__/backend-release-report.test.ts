@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import type { IxClient } from "../../client/api.js";
 import { isNewer } from "../commands/upgrade.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -258,7 +259,7 @@ describe("fetchBackendHealth records what it read", () => {
 
   /** Only what fetchBackendHealth touches: the endpoint and health(). */
   const fakeClient = (endpoint: string, health: unknown) =>
-    ({ endpoint, health: async () => health }) as never;
+    ({ endpoint, health: async () => health }) as unknown as IxClient;
 
   it("records the release for a local backend", async () => {
     writeFileSync(stamp(), "1.0.13");
@@ -269,6 +270,32 @@ describe("fetchBackendHealth records what it read", () => {
       isNewer,
     );
     expect(got).toMatchObject({ status: "ok" }); // still returns the response
+    expect(tracked()).toBe("1.0.16");
+  });
+
+  it("applies the ceiling through readBackendHealth, the path commands take", async () => {
+    // The JOIN, not the pieces. backendCeiling() is pinned on its own and
+    // fetchBackendHealth's use of knownLatest is pinned on its own — but
+    // swapping `backendCeiling()` for `null` in readBackendHealth left the whole
+    // suite green, and with a null ceiling the stamp can never move forward
+    // again, which is the original bug back.
+    writeFileSync(stamp(), "1.0.13");
+    writeFileSync(
+      join(home, ".version-check.json"),
+      JSON.stringify({ latest: "0.9.3", backendLatest: "1.0.16", checkedAt: Date.now() }),
+    );
+    const { readBackendHealth } = await import("../commands/upgrade.js");
+
+    // Above the ceiling -> refused.
+    await readBackendHealth(
+      fakeClient("http://localhost:8090", { status: "ok", release_version: "99.0.0" }),
+    );
+    expect(tracked()).toBe("1.0.13");
+
+    // At the ceiling -> taken, which is only possible if the ceiling was read.
+    await readBackendHealth(
+      fakeClient("http://localhost:8090", { status: "ok", release_version: "1.0.16" }),
+    );
     expect(tracked()).toBe("1.0.16");
   });
 
@@ -327,7 +354,15 @@ describe("isLocalEndpoint", () => {
     // different deployment's release into the file that governs the LOCAL
     // docker image notice.
     const { isLocalEndpoint } = await import("../backend-version.js");
-    for (const e of ["http://staging:8090", "https://ix.example.com", "http://10.0.0.5:8090"]) {
+    for (const e of [
+      "http://staging:8090",
+      "https://ix.example.com",
+      "http://10.0.0.5:8090",
+      // Remote NAMES that merely start "127." — a prefix match on the hostname
+      // made these local, which is the opposite of what this function is for.
+      "http://127.0.0.1.evil.com:8090",
+      "http://127.example.com:8090",
+    ]) {
       expect(isLocalEndpoint(e)).toBe(false);
     }
   });
@@ -360,7 +395,14 @@ describe("health is fetched in exactly one place", () => {
     // Comments stripped first: this codebase names functions in call syntax in
     // prose constantly, and a doc comment mentioning client.health() would fail
     // CI with a message pointing at the wrong problem.
-    .map((f) => ({ ...f, src: f.src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "") }))
+    //
+    // Only comments that START a line. A blanket `//` strip is string-blind:
+    // the `//` inside `http://localhost:8090` — the most common literal in this
+    // file family — swallowed the rest of that line, so a real `.health()` call
+    // sharing a line with a URL became invisible to the guard. Verified. Block
+    // comments are left alone for the same reason: a `**/*.ts` glob literal ate
+    // from the string to the next `*/` and dropped the chokepoint itself.
+    .map((f) => ({ ...f, src: f.src.replace(/^\s*(\/\/|\*|\/\*).*$/gm, "") }))
     .filter((f) => /\.health\s*\(\s*\)/.test(f.src))
     .map((f) => f.file.slice(SRC.length + 1).replace(/\\/g, "/"));
 
@@ -369,7 +411,7 @@ describe("health is fetched in exactly one place", () => {
     expect(callers.length).toBeGreaterThan(0);
   });
 
-  it("has only backend-version.ts and backend-status.ts calling .health()", () => {
+  it("has only backend-version.ts calling .health()", () => {
     // Exactly one, across the WHOLE src tree — not just src/cli, which left
     // src/mcp (it already exposes an ix_health tool) and src/client invisible.
     // backend-status.ts used to be exempted on a cycle that does not exist:
