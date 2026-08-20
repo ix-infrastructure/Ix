@@ -467,7 +467,10 @@ describe("health is fetched in exactly one place", () => {
     readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
       if (e.name === "__tests__" || e.name === "node_modules") return [];
       const full = join(dir, e.name);
-      return e.isDirectory() ? walk(full) : full.endsWith(".ts") ? [full] : [];
+      // Every module extension, not just .ts: src/ happens to be all .ts today,
+      // so a future .mts or .js under it would be invisible to BOTH guards
+      // below and neither would report anything missing.
+      return e.isDirectory() ? walk(full) : /\.(m|c)?(t|j)s$/.test(e.name) ? [full] : [];
     });
 
   // Any receiver, not just one literally named `client`: a renamed local would
@@ -494,34 +497,43 @@ describe("health is fetched in exactly one place", () => {
   });
 
   // The `.health()` search above cannot see a raw `fetch(`${e}/v1/health`)`, so
-  // pin who may name the path at all. An allowlist, but an EXACT one: a new
-  // reader fails it, and so does removing a listed use, which is what stops it
-  // quietly becoming the stale list-in-a-comment this guard exists to replace.
+  // pin who may name the path at all, and how many times.
   //
-  // COUNTS, not just filenames. A file-granular check makes the allowlisted
-  // files blind spots: adding a body-reading `fetch(HEALTH_URL).json()` to
-  // docker.ts left the list identical and the whole suite green. Verified.
+  // READ THIS BEFORE TRUSTING IT. Three rounds of review have established what
+  // this does and does not catch, and the honest summary is narrow:
   //
-  // Comment handling is stricter here than for `.health()` above, because a
-  // path is named in prose far more readily than a call is:
+  //   CAUGHT: a new file that names the path. A second INLINE use of the path
+  //   inside a listed file. Removing a listed use (so the list cannot go stale
+  //   silently, which is the whole reason it is here and not in a comment).
   //
-  // - trailing `//` is stripped, but ONLY where not preceded by `:`. A blanket
-  //   strip is the string-blind trap documented below — `const HEALTH_URL =
-  //   "http://localhost:8090/v1/health"` truncates at `http:`, the file drops
-  //   off the list, and this guard silently disarms itself.
-  // - block comments are stripped only when the `/*` STARTS a line, i.e. doc
-  //   comments. That covers a continuation line with no leading `*` (which
-  //   otherwise fails CI with a message pointing at the wrong problem) without
-  //   reintroducing the mid-line `**/*.ts` glob problem, since a glob lives
-  //   inside a string, never at line start.
+  //   NOT CAUGHT: a new reader inside a listed file that reuses the existing
+  //   constant — `fetch(HEALTH_URL).json()` added to docker.ts counts zero new
+  //   literals and passes. Nor a path assembled from fragments
+  //   (`"/v1" + "/health"`). Both verified. The three listed files are
+  //   therefore TRUSTED, not checked; what stops a body read there is that all
+  //   three use `curl` with stdio ignored, and review of any change to them.
+  //
+  // Comment handling: line-start block comments and line-start `//` are
+  // stripped. Trailing `//` is deliberately NOT, and that is a considered
+  // trade. A `(^|[^:])//` rule was tried and silently erased three real
+  // spellings — `` `${proto}//${host}/v1/health` ``, `"//localhost:8090/..."`,
+  // and a doubled-slash template — because the `//` sat after `}` or `"`.
+  // A guard that quietly stops seeing real calls is far worse than one that
+  // trips on prose: a false positive is a confusing red CI, a false negative is
+  // no guard at all. So prose naming the path in a trailing comment WILL fail
+  // this test. That is intended; move it to a line-start comment.
+  //
+  // Known false positive, unfixed: a block comment containing a `**/` glob ends
+  // the strip early, because `**/` CONTAINS `*/` — position has nothing to do
+  // with it — leaving the rest of the comment visible. Same for a block comment
+  // opened mid-line. Both fail red rather than silently, so they are left.
   const pathCounts = Object.fromEntries(
     walk(SRC)
       .map((f) => ({
         file: f,
         src: readFileSync(f, "utf-8")
           .replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, "")
-          .replace(/^\s*(\/\/|\*|\/\*).*$/gm, "")
-          .replace(/(^|[^:])\/\/.*$/gm, "$1"),
+          .replace(/^\s*(\/\/|\*|\/\*).*$/gm, ""),
       }))
       .map((f) => ({ ...f, n: (f.src.match(/v1\/health/g) ?? []).length }))
       .filter((f) => f.n > 0)
@@ -536,8 +548,7 @@ describe("health is fetched in exactly one place", () => {
     expect(pathCounts).toEqual({
       // The two readiness polls. Both `curl -sf` with stdio ignored, so they
       // discard the response: there is no body to record and they are correctly
-      // outside the chokepoint. Counted, so a second use in either file — the
-      // one that might read a body — has to come past this test.
+      // outside the chokepoint.
       "cli/commands/docker.ts": 1,
       "cli/commands/upgrade.ts": 1,
       // The one real request. Everything that reads a body reaches it through
