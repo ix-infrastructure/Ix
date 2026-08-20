@@ -20,8 +20,16 @@ const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
 /** The release the backend is believed to be running. */
 export const BACKEND_VERSION_FILE = join(IX_HOME, ".backend-version");
 
-/** Same shape the release feed is validated against in upgrade.ts. */
-const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+/**
+ * The one definition of a valid version string, imported by upgrade.ts too.
+ *
+ * Copied rather than shared once already, and this exact pattern has shipped
+ * broken: written as a single `(?:[-+]...)?` group whose class omitted `+`, it
+ * rejected the valid tag `0.9.0-rc.1+abc1234` and `ix upgrade` exited 1 with
+ * "Could not reach GitHub" against a perfectly reachable GitHub. Two copies mean
+ * the next correction lands in one of them.
+ */
+export const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 /** Longer than any plausible tag; bounds a value the container controls. */
 const MAX_VERSION_LENGTH = 64;
@@ -125,8 +133,14 @@ export function recordBackendRelease(
  */
 export function isLocalEndpoint(endpoint: string): boolean {
   try {
-    const host = new URL(endpoint).hostname.toLowerCase();
-    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+    // A trailing dot is the fully-qualified form and resolvers accept it.
+    const host = new URL(endpoint).hostname.toLowerCase().replace(/\.$/, "");
+    return (
+      host === "localhost" ||
+      host.startsWith("127.") || // all of 127.0.0.0/8 is loopback
+      host === "0.0.0.0" || // what client/api.ts and errors.ts already accept
+      host === "[::1]" // new URL() always brackets IPv6, so bare "::1" is unreachable
+    );
   } catch {
     return false;
   }
@@ -141,12 +155,14 @@ export function isLocalEndpoint(endpoint: string): boolean {
  */
 export async function fetchBackendHealth(
   client: IxClient,
-  endpoint: string,
   knownLatest: string | null | undefined,
   isNewer: (a: string, b: string) => boolean,
 ): Promise<HealthResponse> {
   const health = await client.health();
-  if (isLocalEndpoint(endpoint)) {
+  // From the client the request actually went to. Taking it as a second
+  // argument reintroduced exactly the "a call site can get it wrong" mistake
+  // this module exists to make impossible.
+  if (isLocalEndpoint(client.endpoint)) {
     recordBackendRelease(health.release_version, knownLatest, isNewer);
   }
   return health;

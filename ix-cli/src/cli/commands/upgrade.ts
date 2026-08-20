@@ -10,12 +10,13 @@ import { canRenderProgress } from "../stderr.js";
 import type { IxClient } from "../../client/api.js";
 import {
   BACKEND_VERSION_FILE,
+  VERSION_RE,
   fetchBackendHealth,
   getTrackedVersion,
   writeVersionStamp,
 } from "../backend-version.js";
 
-export { BACKEND_VERSION_FILE, recordBackendRelease, writeVersionStamp } from "../backend-version.js";
+export { BACKEND_VERSION_FILE, VERSION_RE, recordBackendRelease, writeVersionStamp } from "../backend-version.js";
 
 /**
  * Fetch health and record what the backend says it is running.
@@ -25,8 +26,16 @@ export { BACKEND_VERSION_FILE, recordBackendRelease, writeVersionStamp } from ".
  * without recording, which is the mistake a grep-based guard could only detect
  * after the fact.
  */
-export async function readBackendHealth(client: IxClient, endpoint: string) {
-  return fetchBackendHealth(client, endpoint, readCache()?.backendLatest ?? null, isNewer);
+/** The newest backend release the CLI knows of; the ceiling a container may claim. */
+export function backendCeiling(): string | null {
+  return readCache()?.backendLatest ?? null;
+}
+
+export async function readBackendHealth(client: IxClient) {
+  // backendLatest, NOT latest: `latest` is the CLI's own release series, so a
+  // ceiling taken from it would refuse every legitimate container report for
+  // ever — silently reinstating the bug this exists to fix.
+  return fetchBackendHealth(client, backendCeiling(), isNewer);
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -69,7 +78,6 @@ function getCurrentVersion(): string {
 // — `0.9.0-rc.1+abc1234`, valid semver — failed the test. fetchLatestRelease
 // then returned null and `ix upgrade` reported "Could not reach GitHub to check
 // for updates" and exited 1 against a perfectly reachable GitHub.
-export const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 async function fetchLatestRelease(
   repo: string,

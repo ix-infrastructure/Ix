@@ -13,7 +13,7 @@ import {
   checkBackendSchema,
   isNonStandardBackend,
 } from "../backend-status.js";
-import { readBackendHealth } from "./upgrade.js";
+import { backendCeiling, isNewer, readBackendHealth } from "./upgrade.js";
 
 interface CheckResult {
   ok: boolean;
@@ -127,7 +127,7 @@ export function registerDoctorCommand(program: Command): void {
             try {
               // Records what the backend says it is running; see
                // backend-version.ts. Free — this response is already needed.
-              const h = await readBackendHealth(client, endpoint);
+              const h = await readBackendHealth(client);
               return { ok: h.status === "ok", detail: `${endpoint} → ${h.status}` };
             } catch (e: any) {
               return { ok: false, detail: e.message ?? "unreachable" };
@@ -210,7 +210,7 @@ export function registerDoctorCommand(program: Command): void {
           // Ix#271: a graph written by an older engine fails scoped reads silently.
           name: "Graph schema matches engine",
           run: async () => {
-            const s = await checkBackendSchema(client);
+            const s = await checkBackendSchema(client, backendCeiling(), isNewer);
             if (!s.reachable) return { ok: true, detail: "backend unreachable (skipped)" };
             if (s.serverVersion === null) return { ok: true, detail: "backend does not report a schema version" };
             if (s.matches) return { ok: true, detail: `schema v${s.serverVersion}` };

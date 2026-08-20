@@ -25,7 +25,9 @@ export class IxClient {
   // per-request timeouts (5-30 min each), the whole operation aborts and the
   // process exits instead of grinding for hours and stacking with re-launches.
   constructor(
-    private endpoint: string = "http://localhost:8090",
+    // readonly so callers can ask which endpoint a response came FROM, rather
+    // than being handed a second string that is only equal by inspection.
+    public readonly endpoint: string = "http://localhost:8090",
     private deadlineSignal?: AbortSignal,
   ) {}
 

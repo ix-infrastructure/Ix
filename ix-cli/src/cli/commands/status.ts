@@ -51,7 +51,7 @@ export function registerStatusCommand(program: Command): void {
     .action(async (opts: { format: string; root?: string }) => {
       const client = new IxClient(getEndpoint());
       try {
-        const health = await readBackendHealth(client, getEndpoint());
+        const health = await readBackendHealth(client);
         const root = resolveWorkspaceRoot(opts.root);
 
         // Detect stale files

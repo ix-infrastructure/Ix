@@ -131,7 +131,7 @@ export async function ensureBackendAvailable(): Promise<void> {
     // Through readBackendHealth so this probe records the release the backend
     // reports, like every other health fetch. `ix init` never reaches the
     // ingest path, so without this it would never record at all.
-    await readBackendHealth(client, endpoint);
+    await readBackendHealth(client);
   } catch {
     try {
       execFileSync("ix", ["docker", "start"], { stdio: "inherit", timeout: 120000 });

@@ -133,7 +133,9 @@ describe("recordBackendRelease", () => {
     // release pipeline. Absent must leave whatever was tracked alone.
     writeFileSync(stamp(), "1.0.13");
     const { recordBackendRelease } = await load();
-    for (const nothing of [undefined, null, "", "   "]) {
+    // 1016 and {} are what a backend can actually send: HealthResponse types
+    // the field, but nothing validates the JSON at runtime.
+    for (const nothing of [undefined, null, "", "   ", 1016 as any, {} as any]) {
       expect(recordBackendRelease(nothing, FEED, isNewer)).toBe(false);
       expect(tracked()).toBe("1.0.13");
     }
@@ -187,10 +189,134 @@ describe("recordBackendRelease", () => {
   });
 });
 
+/**
+ * The ceiling comes from the BACKEND release feed, not the CLI's own.
+ *
+ * One word apart, and the two are different version series — so taking `latest`
+ * would make the ceiling the CLI's version (0.9.x), refuse every legitimate
+ * container report for ever, and silently reinstate the bug this exists to fix.
+ */
+describe("backendCeiling", () => {
+  let home: string;
+  let priorHome: string | undefined;
+
+  beforeEach(() => {
+    priorHome = process.env.IX_HOME;
+    home = mkdtempSync(join(tmpdir(), "ix-ceiling-"));
+    process.env.IX_HOME = home;
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.resetModules();
+    if (priorHome === undefined) delete process.env.IX_HOME;
+    else process.env.IX_HOME = priorHome;
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  it("reads the backend release, not the CLI release", async () => {
+    writeFileSync(
+      join(home, ".version-check.json"),
+      // Deliberately different series, the way they are in reality.
+      JSON.stringify({ latest: "0.9.3", backendLatest: "1.0.16", checkedAt: Date.now() }),
+    );
+    const { backendCeiling } = await import("../commands/upgrade.js");
+    expect(backendCeiling()).toBe("1.0.16");
+  });
+
+  it("is null when nothing is cached yet", async () => {
+    const { backendCeiling } = await import("../commands/upgrade.js");
+    expect(backendCeiling()).toBeNull();
+  });
+});
+
+/**
+ * The wiring, not the helpers. Every other test here calls recordBackendRelease
+ * or isLocalEndpoint directly with hand-built arguments — so gutting the one
+ * line in fetchBackendHealth that connects them left the whole suite green.
+ */
+describe("fetchBackendHealth records what it read", () => {
+  let home: string;
+  let priorHome: string | undefined;
+
+  beforeEach(() => {
+    priorHome = process.env.IX_HOME;
+    home = mkdtempSync(join(tmpdir(), "ix-fetch-health-"));
+    process.env.IX_HOME = home;
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.resetModules();
+    if (priorHome === undefined) delete process.env.IX_HOME;
+    else process.env.IX_HOME = priorHome;
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  const stamp = () => join(home, ".backend-version");
+  const tracked = () => (existsSync(stamp()) ? readFileSync(stamp(), "utf-8") : null);
+
+  /** Only what fetchBackendHealth touches: the endpoint and health(). */
+  const fakeClient = (endpoint: string, health: unknown) =>
+    ({ endpoint, health: async () => health }) as never;
+
+  it("records the release for a local backend", async () => {
+    writeFileSync(stamp(), "1.0.13");
+    const { fetchBackendHealth } = await import("../backend-version.js");
+    const got = await fetchBackendHealth(
+      fakeClient("http://localhost:8090", { status: "ok", release_version: "1.0.16" }),
+      "1.0.16",
+      isNewer,
+    );
+    expect(got).toMatchObject({ status: "ok" }); // still returns the response
+    expect(tracked()).toBe("1.0.16");
+  });
+
+  it("does NOT record for a remote endpoint", async () => {
+    writeFileSync(stamp(), "1.0.13");
+    const { fetchBackendHealth } = await import("../backend-version.js");
+    await fetchBackendHealth(
+      fakeClient("http://staging:8090", { status: "ok", release_version: "1.0.16" }),
+      "1.0.16",
+      isNewer,
+    );
+    expect(tracked()).toBe("1.0.13");
+  });
+
+  it("records nothing when the backend omits the field", async () => {
+    writeFileSync(stamp(), "1.0.13");
+    const { fetchBackendHealth } = await import("../backend-version.js");
+    await fetchBackendHealth(
+      fakeClient("http://localhost:8090", { status: "ok" }),
+      "1.0.16",
+      isNewer,
+    );
+    expect(tracked()).toBe("1.0.13");
+  });
+
+  it("still refuses a claim above the ceiling, through this path too", async () => {
+    writeFileSync(stamp(), "1.0.13");
+    const { fetchBackendHealth } = await import("../backend-version.js");
+    await fetchBackendHealth(
+      fakeClient("http://localhost:8090", { status: "ok", release_version: "99.0.0" }),
+      "1.0.16",
+      isNewer,
+    );
+    expect(tracked()).toBe("1.0.13");
+  });
+});
+
 describe("isLocalEndpoint", () => {
   it("accepts the local backend the notice is about", async () => {
     const { isLocalEndpoint } = await import("../backend-version.js");
-    for (const e of ["http://localhost:8090", "http://127.0.0.1:8090", "http://[::1]:8090"]) {
+    for (const e of [
+      "http://localhost:8090",
+      "http://127.0.0.1:8090",
+      "http://[::1]:8090",
+      "http://127.0.0.2:8090", // all of 127.0.0.0/8 is loopback
+      "http://0.0.0.0:8090", // what client/api.ts and errors.ts already accept
+      "http://localhost.:8090", // the fully-qualified form resolvers accept
+    ]) {
       expect(isLocalEndpoint(e)).toBe(true);
     }
   });
@@ -218,7 +344,7 @@ describe("isLocalEndpoint", () => {
  * exactly one such function — the property that makes the design work.
  */
 describe("health is fetched in exactly one place", () => {
-  const SRC = join(HERE, "..");
+  const SRC = join(HERE, "..", "..");
 
   const walk = (dir: string): string[] =>
     readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
@@ -231,6 +357,10 @@ describe("health is fetched in exactly one place", () => {
   // otherwise drop the file out of the search entirely.
   const callers = walk(SRC)
     .map((f) => ({ file: f, src: readFileSync(f, "utf-8") }))
+    // Comments stripped first: this codebase names functions in call syntax in
+    // prose constantly, and a doc comment mentioning client.health() would fail
+    // CI with a message pointing at the wrong problem.
+    .map((f) => ({ ...f, src: f.src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "") }))
     .filter((f) => /\.health\s*\(\s*\)/.test(f.src))
     .map((f) => f.file.slice(SRC.length + 1).replace(/\\/g, "/"));
 
@@ -240,10 +370,11 @@ describe("health is fetched in exactly one place", () => {
   });
 
   it("has only backend-version.ts and backend-status.ts calling .health()", () => {
-    // backend-version.ts is the recording chokepoint. backend-status.ts's
-    // checkBackendSchema is called only by `ix doctor`, which records through
-    // its own reachable check; it cannot import the chokepoint because
-    // upgrade.ts imports IT. Everything else must go through readBackendHealth.
-    expect(callers.sort()).toEqual(["backend-status.ts", "backend-version.ts"]);
+    // Exactly one, across the WHOLE src tree — not just src/cli, which left
+    // src/mcp (it already exposes an ix_health tool) and src/client invisible.
+    // backend-status.ts used to be exempted on a cycle that does not exist:
+    // backend-version.ts imports only node builtins and two erased type
+    // imports, so it now goes through the chokepoint like everything else.
+    expect(callers.sort()).toEqual(["cli/backend-version.ts"]);
   });
 });

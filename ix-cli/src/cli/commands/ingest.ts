@@ -941,7 +941,7 @@ export async function ingestFiles(
   // absolute→relative source_uri migration, or folding workspace_id into ids).
   // CLIENT_EXPECTED_SCHEMA_VERSION is shared with doctor/upgrade (backend-status).
   try {
-    const health = await readBackendHealth(client, getEndpoint());
+    const health = await readBackendHealth(client);
     const serverVersion = (health as any)?.schema_version;
     if (typeof serverVersion === 'number' && serverVersion !== CLIENT_EXPECTED_SCHEMA_VERSION) {
       process.stderr.write(
