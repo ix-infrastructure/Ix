@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { MockInstance } from "vitest";
 import {
   chmodSync,
   existsSync,
@@ -21,6 +22,102 @@ import {
   stampDisagreesWithPull,
   writeVersionStamp,
 } from "../commands/upgrade.js";
+
+/**
+ * Can a 0444 file actually refuse a write here?
+ *
+ * Two ways it cannot: root bypasses the mode, and some filesystems drop it
+ * entirely (a WSL /mnt/c drvfs mount without metadata, CIFS, exFAT). Only the
+ * first is a property of the process; the second has to be measured. So this
+ * measures — on its OWN throwaway file, never on a fixture, which is what
+ * made the runtime probe this replaces unsound: that one wrote to the stamp
+ * under test to find out, and swallowed the PendingError that `ctx.skip`
+ * throws, so under root it reported "refused" for a write that had succeeded.
+ *
+ * Deliberately not `platform !== "win32" && getuid() !== 0` as in
+ * mcp-install.test.ts: that file needs a READ to fail where a write would
+ * not, which is POSIX-only. A write refusal is not — Node maps 0444 to
+ * FILE_ATTRIBUTE_READONLY and `writeFileSync` throws EPERM on Windows, so
+ * skipping there would drop the whole gate on windows-2022 for nothing.
+ */
+const modeProbe = (() => {
+  // mkdtemp, not a name built from the pid: a predictable path in the shared
+  // temp dir is one an attacker can pre-create as a symlink, and CodeQL flags
+  // it (js/insecure-temporary-file). It also gives each vitest worker and each
+  // parallel CI job its own directory, so the probes cannot collide.
+  const code = (err: unknown) => (err as NodeJS.ErrnoException)?.code ?? "unknown";
+  let dir: string | undefined;
+  let probe: string | undefined;
+  let blocked = false;
+  let why = "";
+  try {
+    dir = mkdtempSync(join(tmpdir(), "ix-mode-probe-"));
+    probe = join(dir, "probe");
+    writeFileSync(probe, "x");
+    try {
+      chmodSync(probe, 0o444);
+    } catch (err) {
+      // Distinct from an unusable temp dir: the directory is fine, chmod is
+      // what is missing (ENOSYS on some FUSE/9p/noacl mounts). Saying "could
+      // not probe the temp dir" here sends the reader after disk space.
+      throw Object.assign(new Error(`chmod is unavailable here (${code(err)})`), {
+        alreadyDescribed: true,
+      });
+    }
+    // ATTEMPT THE WRITE. Reading `mode & 0o200` only says the bit was
+    // recorded, which it is for root too — root records 0444 and then
+    // bypasses it, so a bits-only check reports "blocked" for a write that
+    // will succeed, and the gate tests run and fail instead of skipping.
+    // Writing is the only thing that answers the question actually asked.
+    // Safe here and nowhere else: this file is the probe's own, not a fixture.
+    try {
+      writeFileSync(probe, "y");
+      why = "0444 did not refuse a write (running as root, or a filesystem that drops modes)";
+    } catch (err) {
+      // Only a PERMISSION refusal means the mode bit bit. ENOSPC or EMFILE
+      // between the two writes is a transient failure of the probe, and
+      // reading it as "blocked" would let the gate tests run against a
+      // writable stamp — the same misclassification the bits-only version
+      // made. (EACCES on POSIX, EPERM on Windows.)
+      if (code(err) === "EACCES" || code(err) === "EPERM") blocked = true;
+      else why = `probe write failed for an unrelated reason (${code(err)})`;
+    }
+  } catch (err) {
+    // Could not measure at all — a full or unwritable TMPDIR, EMFILE under a
+    // parallel job. Distinct from "measured, and the mode does not bite".
+    why = (err as { alreadyDescribed?: boolean })?.alreadyDescribed
+      ? (err as Error).message
+      : `could not probe the temp dir (${code(err)})`;
+  } finally {
+    if (probe) {
+      try {
+        chmodSync(probe, 0o644);
+      } catch {
+        /* best effort: the rm below clears the read-only bit itself */
+      }
+    }
+    if (dir) {
+      try {
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      } catch {
+        // Never let cleanup of the probe fail COLLECTION: this runs in a
+        // describe body, so a throw here would take every test in the file
+        // down, including everything unrelated to file modes.
+      }
+    }
+  }
+  return { blocked, why };
+})();
+
+const modeBlocksWrite = modeProbe.blocked;
+
+if (!modeBlocksWrite) {
+  // stderr directly, not console.warn: vitest's default reporter prints
+  // console output from a passing file nowhere at all — measured — so the
+  // warning would be silent on exactly the runs it exists for. A raw stderr
+  // write is not intercepted and does show up.
+  process.stderr.write(`[stamp gate skipped] ${modeProbe.why}\n`);
+}
 
 /**
  * What the user actually sees. Both branches of `checkForUpdate` made this
@@ -418,73 +515,6 @@ describe("stampBackendVersionAfterPull, isolated", () => {
     expectStampFailure(warn);
   });
 
-  /**
-   * Can a 0444 file actually refuse a write here?
-   *
-   * Two ways it cannot: root bypasses the mode, and some filesystems drop it
-   * entirely (a WSL /mnt/c drvfs mount without metadata, CIFS, exFAT). Only the
-   * first is a property of the process; the second has to be measured. So this
-   * measures — on its OWN throwaway file, never on a fixture, which is what
-   * made the runtime probe this replaces unsound: that one wrote to the stamp
-   * under test to find out, and swallowed the PendingError that `ctx.skip`
-   * throws, so under root it reported "refused" for a write that had succeeded.
-   *
-   * Deliberately not `platform !== "win32" && getuid() !== 0` as in
-   * mcp-install.test.ts: that file needs a READ to fail where a write would
-   * not, which is POSIX-only. A write refusal is not — Node maps 0444 to
-   * FILE_ATTRIBUTE_READONLY and `writeFileSync` throws EPERM on Windows, so
-   * skipping there would drop the whole gate on windows-2022 for nothing.
-   */
-  const modeProbe = (() => {
-    // mkdtemp, not a name built from the pid: a predictable path in the shared
-    // temp dir is one an attacker can pre-create as a symlink, and CodeQL flags
-    // it (js/insecure-temporary-file). It also gives each vitest worker and each
-    // parallel CI job its own directory, so the probes cannot collide.
-    let dir: string | undefined;
-    let blocked = false;
-    let why = "";
-    try {
-      dir = mkdtempSync(join(tmpdir(), "ix-mode-probe-"));
-      const probe = join(dir, "probe");
-      writeFileSync(probe, "x");
-      chmodSync(probe, 0o444);
-      // ATTEMPT THE WRITE. Reading `mode & 0o200` only says the bit was
-      // recorded, which it is for root too — root records 0444 and then
-      // bypasses it, so a bits-only check reports "blocked" for a write that
-      // will succeed, and the gate tests run and fail instead of skipping.
-      // Writing is the only thing that answers the question actually asked.
-      // Safe to do here and nowhere else: this file is the probe's own, not a
-      // fixture under test.
-      try {
-        writeFileSync(probe, "y");
-        why = "0444 did not refuse a write (running as root, or a filesystem that drops modes)";
-      } catch {
-        blocked = true;
-      }
-    } catch (err) {
-      // Could not measure at all — a full or unwritable TMPDIR, EMFILE under a
-      // parallel job. Distinct from "measured, and the mode does not bite".
-      why = `could not probe the temp dir (${(err as NodeJS.ErrnoException)?.code ?? "unknown"})`;
-    } finally {
-      if (dir) {
-        try {
-          chmodSync(join(dir, "probe"), 0o644);
-        } catch {
-          /* best effort: the rm below clears the read-only bit itself */
-        }
-        try {
-          rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
-        } catch {
-          // Never let cleanup of the probe fail COLLECTION: this runs in the
-          // describe body, so a throw here would take all 38 tests in the file
-          // down, including everything unrelated to file modes.
-        }
-      }
-    }
-    return { blocked, why };
-  })();
-
-  const modeBlocksWrite = modeProbe.blocked;
 
   /**
    * A stamp that is READABLE but not writable — the case the gate's comment
@@ -498,28 +528,17 @@ describe("stampBackendVersionAfterPull, isolated", () => {
     chmodSync(stampPath(), 0o444);
   };
 
-  /** The wording of the one message both failure paths print. */
-  const expectStampFailure = (warn: { mock: { calls: unknown[][] } }) => {
+  /**
+   * The one message both failure paths print. Asserts the call COUNT too: only
+   * `calls[0]` is inspected, so without it a run where console.error fired twice
+   * — the real message plus an unrelated regression — would still pass.
+   */
+  const expectStampFailure = (warn: MockInstance) => {
+    expect(warn).toHaveBeenCalledTimes(1);
     const said = String(warn.mock.calls[0]?.[0]);
     expect(said).toContain(".backend-version"); // which file, the actionable half
     expect(said).toContain("backend update notices will be wrong"); // and why it matters
   };
-
-  it("can exercise the mode gate on CI", () => {
-    // The two gate tests below skip when the mode does not bite, and a skip is
-    // invisible: vitest's default reporter prints collection-time console output
-    // only when something in the file FAILS, so a warning here would be seen on
-    // exactly the runs that do not need it. This fails instead — on CI, where
-    // the runners are non-root and the filesystem honours modes, the gate must
-    // actually run. Locally it only reports, since a dev box may legitimately
-    // be root in a container or on a mode-dropping mount.
-    if (!process.env.CI) {
-      if (!modeBlocksWrite) console.warn(`[stamp gate skipped] ${modeProbe.why}`);
-      return;
-    }
-    expect(modeProbe.why).toBe("");
-    expect(modeBlocksWrite).toBe(true);
-  });
 
   it.skipIf(!modeBlocksWrite)(
     "stays quiet when the stamp cannot be written but already records what we pulled",
@@ -543,23 +562,30 @@ describe("stampBackendVersionAfterPull, isolated", () => {
   it.skipIf(!modeBlocksWrite)(
     "stays quiet when the stamp spells the pulled release differently",
     async () => {
-      // Build metadata does not participate in precedence, so this stamp and
-      // `1.0.16` are the same release and nothing is wrong. Reachable: the feed's
-      // tag_name is stamped with only a leading `v` stripped, so a release tagged
-      // `v1.0.16+build77` produces exactly this file.
+      // Build metadata does not participate in precedence, so these are the
+      // same release and nothing is wrong. Run in the direction that is
+      // directly reachable: the feed's tag_name is stamped with only a leading
+      // `v` stripped, so a release tagged `v1.0.16+build77` arrives spelled that
+      // way against a stamp holding the plain `1.0.16`. (The predicate is
+      // symmetric, so this exercises the same comparison either way round — but
+      // a fixture that does not follow from its own comment is how a correct
+      // test gets deleted in a later cleanup, which already happened to this one.)
       //
       // This is the wiring pin, not a duplicate of the unit test above: the unit
       // test proves the predicate, this proves the CALL SITE still routes through
       // it. A textual `!==` at the warn site passes every other test in this file.
-      unwritableStamp("1.0.16+build77");
-      const fetchMock = feedReturns("v1.0.16");
+      unwritableStamp("1.0.16");
+      const fetchMock = feedReturns("v1.0.16+build77");
       const warn = vi.spyOn(console, "error").mockImplementation(() => {});
       const mod = await load();
       await mod.stampBackendVersionAfterPull(tracksLatest());
       // Positive controls: a silent early return upstream satisfies
       // `not.toHaveBeenCalled` just as well as the gate deciding to stay quiet.
+      // The CONTENTS discriminate here, unlike in the sibling above where the
+      // stamp and the pulled release are the same string: if the write had
+      // landed this would read "1.0.16+build77".
       expect(fetchMock).toHaveBeenCalled();
-      expect(statSync(stampPath()).mode & 0o200).toBe(0);
+      expect(readFileSync(stampPath(), "utf-8")).toBe("1.0.16");
       expect(warn).not.toHaveBeenCalled();
     },
   );
@@ -574,12 +600,39 @@ describe("stampBackendVersionAfterPull, isolated", () => {
       await mod.stampBackendVersionAfterPull(tracksLatest());
       expect(fetchMock).toHaveBeenCalled();
       expect(readFileSync(stampPath(), "utf-8")).toBe("1.0.17"); // still unwritten
-      expect(warn).toHaveBeenCalledTimes(1);
-      // Which message: counting calls cannot tell this apart from any other
-      // console.error reached by a regression.
+      // Which message, and how many: counting calls alone cannot tell this
+      // apart from any other console.error reached by a regression.
       expectStampFailure(warn);
     },
   );
+});
+
+/**
+ * The gate tests above skip when a 0444 file does not refuse a write, and a skip
+ * is easy to miss. On CI — non-root host runners, filesystems that honour modes
+ * — the gate MUST be exercisable, so this fails there rather than letting the
+ * coverage evaporate quietly. Locally it does not: a dev box may legitimately be
+ * root in a container or on a mount that drops modes, and the describe above
+ * writes the reason to stderr for that case.
+ *
+ * Its own describe, deliberately: the isolated describe's beforeEach mkdtemps
+ * the very TMPDIR whose unusability `why` would be reporting, so it would throw
+ * first and the diagnostic would never be seen.
+ */
+describe("the mode gate is exercisable where it has to be", () => {
+  // `CI=false` is a widely used way of saying "not CI" (react-scripts, Netlify),
+  // and a bare truthiness check reads it as CI.
+  const onCI = !!process.env.CI && process.env.CI !== "false";
+
+  it.skipIf(!onCI)("can exercise the mode gate on CI", () => {
+    expect(
+      modeProbe.why,
+      "the stamp gate could not be exercised on CI, so the AHEAD-stamp warning " +
+        "and the quiet-when-agreeing case are untested here. If this leg now runs " +
+        "as root or in a container, run it unprivileged or move the gate elsewhere.",
+    ).toBe("");
+    expect(modeProbe.blocked).toBe(true);
+  });
 });
 
 /**
