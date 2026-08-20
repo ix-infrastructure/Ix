@@ -16,7 +16,11 @@ import {
   writeVersionStamp,
 } from "../backend-version.js";
 
-export { BACKEND_VERSION_FILE, VERSION_RE, recordBackendRelease, writeVersionStamp } from "../backend-version.js";
+// Re-exported for the existing importers of this module (tests and call sites
+// that predate backend-version.ts). recordBackendRelease is deliberately NOT
+// among them: it is reached only through fetchBackendHealth, and re-exporting
+// it here would advertise a second way in.
+export { BACKEND_VERSION_FILE, VERSION_RE, writeVersionStamp } from "../backend-version.js";
 
 /**
  * Fetch health and record what the backend says it is running.

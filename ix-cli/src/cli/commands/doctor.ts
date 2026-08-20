@@ -126,7 +126,7 @@ export function registerDoctorCommand(program: Command): void {
           run: async () => {
             try {
               // Records what the backend says it is running; see
-               // backend-version.ts. Free — this response is already needed.
+              // backend-version.ts. Free — this response is already needed.
               const h = await readBackendHealth(client);
               return { ok: h.status === "ok", detail: `${endpoint} → ${h.status}` };
             } catch (e: any) {

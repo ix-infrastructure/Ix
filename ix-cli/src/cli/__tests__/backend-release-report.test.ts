@@ -113,9 +113,14 @@ describe("recordBackendRelease", () => {
   it("ignores a corrupt ceiling rather than trusting it", async () => {
     // readCache only checks backendLatest is a string. A garbage ceiling must
     // fall back to the no-ceiling rule, not admit anything.
+    //
+    // "99999" and not "not-a-version": splitVersion parses the latter to major
+    // 0, so isNewer("99.0.0", "not-a-version") is true with or WITHOUT the
+    // shape check and the test passed for the wrong reason. A garbage ceiling
+    // that parses to a large major is the one that needs the guard.
     writeFileSync(stamp(), "1.0.13");
     const { recordBackendRelease } = await load();
-    expect(recordBackendRelease("99.0.0", "not-a-version", isNewer)).toBe(false);
+    expect(recordBackendRelease("99.0.0", "99999", isNewer)).toBe(false);
     expect(tracked()).toBe("1.0.13");
   });
 
@@ -331,6 +336,96 @@ describe("fetchBackendHealth records what it read", () => {
     );
     expect(tracked()).toBe("1.0.13");
   });
+
+  it("does not throw when a 200 carries a literally null body", async () => {
+    // A reachable backend answering 200 with `null` parses to null. If this
+    // bookkeeping threw, every caller catches (status.ts:53, ingest.ts:943) —
+    // and would report "backend not reachable" for a backend that answered.
+    // That wrong diagnosis would be produced by the recording step itself.
+    // None of the other fakes here return a non-object, so `health?.` was
+    // unpinned: dropping the `?` left all 25 tests green.
+    writeFileSync(stamp(), "1.0.13");
+    const { fetchBackendHealth } = await import("../backend-version.js");
+    const got = await fetchBackendHealth(
+      fakeClient("http://localhost:8090", null),
+      "1.0.16",
+      isNewer,
+    );
+    expect(got).toBeNull();
+    expect(tracked()).toBe("1.0.13");
+  });
+});
+
+/**
+ * The bounds are required parameters so that a CALL SITE cannot omit them. That
+ * says nothing about the callee: `checkBackendSchema` could accept both and
+ * quietly forward `null`, and every one of its own tests would still pass —
+ * backend-status.test.ts deliberately uses a remote endpoint, so the recorder
+ * never runs there at all. Mutating its forwarding call to pass `null` survived
+ * the entire src/cli/__tests__ suite before this block existed.
+ */
+describe("checkBackendSchema forwards its bounds rather than dropping them", () => {
+  let home: string;
+  let priorHome: string | undefined;
+
+  beforeEach(() => {
+    priorHome = process.env.IX_HOME;
+    home = mkdtempSync(join(tmpdir(), "ix-schema-bounds-"));
+    process.env.IX_HOME = home;
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.resetModules();
+    if (priorHome === undefined) delete process.env.IX_HOME;
+    else process.env.IX_HOME = priorHome;
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  const stamp = () => join(home, ".backend-version");
+  const tracked = () => (existsSync(stamp()) ? readFileSync(stamp(), "utf-8") : null);
+  const localClient = (health: unknown) =>
+    ({ endpoint: "http://localhost:8090", health: async () => health }) as unknown as IxClient;
+
+  it("passes the ceiling through, so a claim above it is still refused", async () => {
+    writeFileSync(stamp(), "1.0.13");
+    const { checkBackendSchema } = await import("../backend-status.js");
+    await checkBackendSchema(
+      localClient({ status: "ok", schema_version: 3, release_version: "99.0.0" }),
+      "1.0.16",
+      isNewer,
+    );
+    // Dropped ceiling => no ceiling => compared against the stamp instead, and
+    // 99.0.0 is newer than 1.0.13, so it would still be refused. The ceiling
+    // only shows itself when the stamp is ALSO ahead — see the next case.
+    expect(tracked()).toBe("1.0.13");
+  });
+
+  it("passes the ceiling through even when the stamp is already ahead", async () => {
+    // This is the case that separates "forwarded the ceiling" from "forwarded
+    // null": with the stamp at 99.9.9, the no-ceiling rule would ACCEPT 5.0.0
+    // as a correction downward. Only a real ceiling of 1.0.16 refuses it.
+    writeFileSync(stamp(), "99.9.9");
+    const { checkBackendSchema } = await import("../backend-status.js");
+    await checkBackendSchema(
+      localClient({ status: "ok", schema_version: 3, release_version: "5.0.0" }),
+      "1.0.16",
+      isNewer,
+    );
+    expect(tracked()).toBe("99.9.9");
+  });
+
+  it("still records a legitimate release through this path", async () => {
+    // ...and the block above is not passing merely because nothing records.
+    writeFileSync(stamp(), "1.0.13");
+    const { checkBackendSchema } = await import("../backend-status.js");
+    await checkBackendSchema(
+      localClient({ status: "ok", schema_version: 3, release_version: "1.0.16" }),
+      "1.0.16",
+      isNewer,
+    );
+    expect(tracked()).toBe("1.0.16");
+  });
 });
 
 describe("isLocalEndpoint", () => {
@@ -409,6 +504,33 @@ describe("health is fetched in exactly one place", () => {
   it("finds the health callers at all", () => {
     // Guards the assertion below: an empty list would satisfy any comparison.
     expect(callers.length).toBeGreaterThan(0);
+  });
+
+  // The `.health()` search above cannot see a raw `fetch(`${e}/v1/health`)`, so
+  // pin who may name the path at all. An allowlist, but an EXACT one: a new
+  // reader fails it, and so does removing a listed use, which is what stops it
+  // quietly becoming the stale list-in-a-comment this guard exists to replace.
+  const pathUsers = walk(SRC)
+    .map((f) => ({ file: f, src: readFileSync(f, "utf-8").replace(/^\s*(\/\/|\*|\/\*).*$/gm, "") }))
+    .filter((f) => /v1\/health/.test(f.src))
+    .map((f) => f.file.slice(SRC.length + 1).replace(/\\/g, "/"))
+    .sort();
+
+  it("finds the health-path users at all", () => {
+    expect(pathUsers.length).toBeGreaterThan(0);
+  });
+
+  it("has only the readiness polls and the client naming /v1/health", () => {
+    expect(pathUsers).toEqual([
+      // The two readiness polls. Both `curl -sf` with stdio ignored: they
+      // discard the response, so there is no body to record and they are
+      // correctly outside the chokepoint.
+      "cli/commands/docker.ts",
+      "cli/commands/upgrade.ts",
+      // The one real request. Everything that reads a body reaches it through
+      // IxClient.health(), which the assertion below routes through this module.
+      "client/api.ts",
+    ]);
   });
 
   it("has only backend-version.ts calling .health()", () => {

@@ -100,6 +100,18 @@ export function writeVersionStamp(
  *   release can never reach that machine. When no release is known yet, only
  *   corrections that do not move the stamp forward are accepted, which still
  *   repairs a stamp stuck ahead and defers the rest until the cache exists.
+ *
+ * What the ceiling does NOT stop, stated plainly: a container that reports
+ * *exactly* the ceiling is accepted, and a compromised one has outbound network
+ * and can simply read the public release feed to learn that number rather than
+ * guess it. It then reaches the same silenced state by looking the answer up.
+ * This is a capability the feature introduces — before it, the stamp was
+ * written only by our own install/pull paths, so a container could not
+ * influence it at all. It is accepted deliberately: the alternative is to
+ * distrust the only component that actually knows what it is running, and the
+ * fail-safe direction (a container under-reporting, causing an unnecessary
+ * pull) is the one that stays open. `ix doctor`'s digest comparison remains the
+ * check that does not ask the container what it is.
  */
 export function recordBackendRelease(
   reported: string | null | undefined,
@@ -150,9 +162,13 @@ export function isLocalEndpoint(endpoint: string): boolean {
 /**
  * Fetch `/v1/health` AND record the release it reports.
  *
- * The single place either happens. Every command that wants health goes through
- * here, so "a new call site forgot to record" is not a mistake that can be made
- * — which is worth more than the grep-based drift guard it replaces.
+ * The single place either happens. Every command that READS a health body goes
+ * through here, so "a new call site forgot to record" is not a mistake that can
+ * be made — which is worth more than the grep-based drift guard it replaces.
+ *
+ * Precisely: reads of the body. docker.ts and upgrade.ts also hit /v1/health via
+ * `curl -sf` with stdio ignored, purely as a readiness poll; they discard the
+ * response, so there is nothing there to record.
  */
 export async function fetchBackendHealth(
   client: IxClient,
@@ -164,8 +180,10 @@ export async function fetchBackendHealth(
   // argument reintroduced exactly the "a call site can get it wrong" mistake
   // this module exists to make impossible.
   // `health?.` because a 200 whose body is literally `null` parses to null, and
-  // status.ts / ingest.ts do not catch — they would exit on a stack trace rather
-  // than report an unhealthy backend.
+  // this bookkeeping must never be what turns a reachable-but-odd backend into a
+  // thrown error. Callers do catch (status.ts:53, ingest.ts:943), but they would
+  // report "backend not reachable" for a backend that answered 200 — a wrong
+  // diagnosis produced by the recording step, not by the backend.
   if (isLocalEndpoint(client.endpoint)) {
     recordBackendRelease(health?.release_version, knownLatest, isNewer);
   }
