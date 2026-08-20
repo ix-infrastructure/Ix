@@ -72,6 +72,14 @@ describe("stampDisagreesWithPull", () => {
     expect(backendUpdateAvailable("1.0.16", "1.0.17")).toBe(false); // they differ
   });
 
+  it("fires on a PRE-RELEASE stamp against the GA release of the same triple", () => {
+    // The divergence that is actually reachable, and the one a numeric-triple
+    // comparison would swallow: the notice fires here, so the warning that
+    // explains it has to as well.
+    expect(stampDisagreesWithPull("1.0.16-rc1", "1.0.16")).toBe(true);
+    expect(backendUpdateAvailable("1.0.16", "1.0.16-rc1")).toBe(true); // both agree
+  });
+
   it("is quiet when the same release is spelled differently", () => {
     // Compared by precedence, not as text: build metadata and leading zeros do
     // not make a different release, and warning on them would fire on every
@@ -102,7 +110,9 @@ describe("writeVersionStamp", () => {
   });
 
   afterEach(() => {
-    // maxRetries for the same Windows EBUSY the isolated describe guards below.
+    // maxRetries: this describe writes stamp files and a directory into `home`
+    // immediately before tearing it down, which is the shape that trips EBUSY
+    // on Windows.
     rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
@@ -411,20 +421,50 @@ describe("stampBackendVersionAfterPull, isolated", () => {
   });
 
   /**
+   * Can a 0444 file actually refuse a write here?
+   *
+   * Two ways it cannot: root bypasses the mode, and some filesystems drop it
+   * entirely (a WSL /mnt/c drvfs mount without metadata, CIFS, exFAT). Only the
+   * first is a property of the process; the second has to be measured. So this
+   * measures — on its OWN throwaway file, never on a fixture, which is what
+   * made the runtime probe this replaces unsound: that one wrote to the stamp
+   * under test to find out, and swallowed the PendingError that `ctx.skip`
+   * throws, so under root it reported "refused" for a write that had succeeded.
+   *
+   * Deliberately not `platform !== "win32" && getuid() !== 0` as in
+   * mcp-install.test.ts: that file needs a READ to fail where a write would
+   * not, which is POSIX-only. A write refusal is not — Node maps 0444 to
+   * FILE_ATTRIBUTE_READONLY and `writeFileSync` throws EPERM on Windows, so
+   * skipping there would drop the whole gate on windows-2022 for nothing.
+   */
+  const modeBlocksWrite = (() => {
+    const probe = join(tmpdir(), `ix-mode-probe-${process.pid}`);
+    try {
+      writeFileSync(probe, "x");
+      chmodSync(probe, 0o444);
+      const blocked = (statSync(probe).mode & 0o200) === 0;
+      chmodSync(probe, 0o644);
+      return blocked;
+    } catch {
+      return false;
+    } finally {
+      rmSync(probe, { force: true });
+    }
+  })();
+
+  if (!modeBlocksWrite) {
+    // Loud, because a silent skip here reads exactly like the platform skips
+    // and the gate is the whole reason this PR has a separate predicate.
+    console.warn("[upgrade-backend-stamp] 0444 does not refuse writes here; gate tests skipped");
+  }
+
+  /**
    * A stamp that is READABLE but not writable — the case the gate's comment
    * actually describes ("a root-owned stamp already holding what we just
    * pulled"). The directory trick cannot produce it: a directory always reads
    * as 0.0.0, which forces the feed to return "0.0.0" to make the two agree,
    * and no release is ever 0.0.0.
-   *
-   * Not POSIX-only: Node maps 0444 to FILE_ATTRIBUTE_READONLY and the write
-   * fails EPERM on Windows too, which mcp-install.test.ts also records. Root is
-   * the only caller that bypasses the mode — checked at collection, the way
-   * that file does it, rather than by probing at runtime. A probe would have to
-   * write to find out, which corrupts the fixture it is testing.
    */
-  const modeBlocksWrite = typeof process.getuid !== "function" || process.getuid() !== 0;
-
   const unwritableStamp = (contents: string) => {
     writeFileSync(stampPath(), contents);
     chmodSync(stampPath(), 0o444);
@@ -450,27 +490,6 @@ describe("stampBackendVersionAfterPull, isolated", () => {
   );
 
   it.skipIf(!modeBlocksWrite)(
-    "stays quiet when the stamp spells the pulled release differently",
-    async () => {
-      // Build metadata does not participate in precedence, so this stamp and
-      // `1.0.16` are the same release: nothing is wrong, and a textual
-      // comparison would warn on every cold start that notices will be wrong.
-      unwritableStamp("1.0.16+build77");
-      feedReturns("v1.0.16");
-      const warn = vi.spyOn(console, "error").mockImplementation(() => {});
-      const mod = await load();
-      await mod.stampBackendVersionAfterPull(tracksLatest());
-      expect(warn).not.toHaveBeenCalled();
-    },
-  );
-
-  /**
-   * The case that separates the gate from `backendUpdateAvailable`, and the
-   * only one where the two disagree: the stamp is AHEAD of what we pulled.
-   * `backendUpdateAvailable` is false there, so an is-newer gate says nothing
-   * while the file is wrong and can no longer be corrected.
-   */
-  it.skipIf(!modeBlocksWrite)(
     "warns when the stamp is stuck AHEAD of the release, where an is-newer gate would not",
     async () => {
       unwritableStamp("1.0.17");
@@ -481,6 +500,11 @@ describe("stampBackendVersionAfterPull, isolated", () => {
       expect(fetchMock).toHaveBeenCalled();
       expect(readFileSync(stampPath(), "utf-8")).toBe("1.0.17"); // still unwritten
       expect(warn).toHaveBeenCalledTimes(1);
+      // Which message: counting calls cannot tell this apart from any other
+      // console.error reached by a regression.
+      const said = String(warn.mock.calls[0]?.[0]);
+      expect(said).toContain(".backend-version");
+      expect(said).toContain("backend update notices will be wrong");
     },
   );
 });

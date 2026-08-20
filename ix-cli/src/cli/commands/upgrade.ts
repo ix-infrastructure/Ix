@@ -380,13 +380,17 @@ export function backendUpdateAvailable(
  * command; a stamp stuck AHEAD makes it stay silent through the next release
  * the user should have been told about. Both are wrong and neither is fixable
  * without the write, so the sentence has to cover both.
+ *
+ * Takes no file: both callers can only ever be about the backend stamp, and the
+ * sentence says "backend update notices". A parameter would make it look reusable
+ * for the compass stamp, which it is not.
  */
-function stampFailureMessage(versionFile: string): string {
+function stampFailureMessage(): string {
   // States the consequence, not a cause: the write's errno is swallowed, so
   // "until it is writable" would be a guess — and a wrong one for the case the
   // tests actually reproduce, a directory sitting where the file belongs, which
   // no permission change fixes.
-  return `[!!] Could not record the version in ${versionFile}; until it can be written, backend update notices will be wrong.`;
+  return `[!!] Could not record the version in ${BACKEND_VERSION_FILE}; until it can be written, backend update notices will be wrong.`;
 }
 
 /**
@@ -398,11 +402,18 @@ function stampFailureMessage(versionFile: string): string {
  * separately — and an ahead stamp is equally wrong and equally uncorrectable
  * once the write has failed.
  *
- * Compared by PRECEDENCE, not as text. `VERSION_RE` admits build metadata and
- * leading zeros, and `splitVersion` ignores both — so `1.0.16+abc` and `1.0.16`
- * are the same release, and a textual `!==` would warn that update notices are
- * wrong when they are not, on every cold start. Neither being newer than the
- * other is the only definition that covers the ahead case and this one at once.
+ * Compared by PRECEDENCE, not as text, and precedence is what the notice this
+ * warns about uses. The reachable divergence is a PRE-RELEASE: a stamp left at
+ * `1.0.16-rc1` by an earlier pull disagrees with a pulled `1.0.16`, and it must
+ * keep disagreeing — `backendUpdateAvailable` says an upgrade is available, so
+ * the notice really will fire. A comparison that only looked at the numeric
+ * triple would call those equal and swallow the one warning that explains it.
+ *
+ * Build metadata and leading zeros go the other way: `VERSION_RE` admits both
+ * and `splitVersion` ignores both, so `1.0.16+abc` and `1.0.16` are one release
+ * and must NOT warn. No writer of this file can currently produce that spelling
+ * — all three strip only a leading `v` — so it is defence rather than a live
+ * case, but it is what a textual `!==` would get wrong.
  *
  * Symmetric, so the argument order carries no meaning and a swapped call cannot
  * change the answer; it reads (tracked, pulled) to match its name. Named and
@@ -527,7 +538,7 @@ export async function stampBackendVersionAfterPull(composeFile: string): Promise
       // corrected here, and the notice this warns about is computed from the
       // CACHED release, which can be up to an hour out of step with `latest`.
       if (stampDisagreesWithPull(getTrackedVersion(BACKEND_VERSION_FILE), latest)) {
-        console.error(chalk.yellow(stampFailureMessage(BACKEND_VERSION_FILE)));
+        console.error(chalk.yellow(stampFailureMessage()));
       }
     }
   } catch {
@@ -1550,7 +1561,7 @@ export function registerUpgradeCommand(program: Command): void {
             backendImageChanged = true;
             console.log(`[ok] Backend image updated to ${backendLatest}`);
             if (!writeVersionStamp(BACKEND_VERSION_FILE, backendLatest)) {
-              console.error(chalk.yellow(stampFailureMessage(BACKEND_VERSION_FILE)));
+              console.error(chalk.yellow(stampFailureMessage()));
             }
           } catch {
             console.error("[!!] Could not pull latest backend image. Run: ix docker restart");
