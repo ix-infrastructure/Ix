@@ -134,6 +134,14 @@ export interface BackendSchemaStatus {
   serverVersion: number | null;
   expected: number;
   matches: boolean;
+  /**
+   * The release the backend says it is, or null when it does not say.
+   *
+   * Carried out rather than acted on here: recording it belongs to upgrade.ts,
+   * which owns the stamp file, and this module cannot import that one without
+   * a cycle.
+   */
+  releaseVersion: string | null;
 }
 
 /** Read the backend's reported schema_version and compare to what we expect. */
@@ -145,8 +153,10 @@ export async function checkBackendSchema(client: IxClient): Promise<BackendSchem
     // No reported version (older backend) is treated as a match: we can't prove
     // staleness, and the ingest path already forces a re-ingest when it can.
     const matches = serverVersion === null || serverVersion === expected;
-    return { reachable: true, serverVersion, expected, matches };
+    const releaseVersion =
+      typeof health.release_version === "string" ? health.release_version : null;
+    return { reachable: true, serverVersion, expected, matches, releaseVersion };
   } catch {
-    return { reachable: false, serverVersion: null, expected, matches: true };
+    return { reachable: false, serverVersion: null, expected, matches: true, releaseVersion: null };
   }
 }

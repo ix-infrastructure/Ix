@@ -18,6 +18,7 @@ import { loadIngestionModules } from './ingestion-loader.js';
 import { ensureWorkspaceIdState } from '../bootstrap.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
+import { recordBackendRelease } from './upgrade.js';
 import { SUPPORTED_EXTENSIONS } from '../supported-extensions.js';
 import { canRenderProgress } from '../stderr.js';
 import { createTypeScriptModuleResolver } from '../ts-module-resolution.js';
@@ -941,6 +942,9 @@ export async function ingestFiles(
   // CLIENT_EXPECTED_SCHEMA_VERSION is shared with doctor/upgrade (backend-status).
   try {
     const health = await client.health();
+    // Free: this response is already in hand. Corrects the stamp the update
+    // notice reads, without a request or a command of its own.
+    recordBackendRelease((health as any)?.release_version);
     const serverVersion = (health as any)?.schema_version;
     if (typeof serverVersion === 'number' && serverVersion !== CLIENT_EXPECTED_SCHEMA_VERSION) {
       process.stderr.write(

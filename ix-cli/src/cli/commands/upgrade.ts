@@ -351,6 +351,36 @@ function getTrackedVersion(versionFile: string): string {
 }
 
 /**
+ * Record what the backend says it is.
+ *
+ * `.backend-version` was a record of what the CLI last installed, which is only
+ * the same thing as what is RUNNING while nothing else moves the image. Pull
+ * through docker compose, or through `ix docker start` after the tag moved, and
+ * the file names an older release than the container — so the notice fires on
+ * every command for ever. Ix#466 fixed the paths that run our code; this fixes
+ * the rest, because the container is asked directly.
+ *
+ * Called wherever the CLI already has a health response, so it costs no extra
+ * request and needs no new command: the stamp self-corrects the next time
+ * anything touches the backend, in BOTH directions — a stamp stuck ahead is
+ * repaired too, which no amount of local inspection could do.
+ *
+ * Validated with the same VERSION_RE the release feed is: the field is a
+ * container env var the operator can set to anything, and writing arbitrary
+ * text into the file the notice compares would be worse than not writing.
+ * Older backends omit it entirely and arrive here as undefined.
+ *
+ * Silent and best-effort. It is bookkeeping attached to a command the user
+ * actually ran, and a read-only IX_HOME must not make `ix status` fail; the
+ * paths that can act on a failure already report it.
+ */
+export function recordBackendRelease(reported: string | null | undefined): void {
+  if (!reported || !VERSION_RE.test(reported)) return;
+  if (reported === getTrackedVersion(BACKEND_VERSION_FILE)) return; // already agrees
+  writeVersionStamp(BACKEND_VERSION_FILE, reported);
+}
+
+/**
  * Whether to tell the user their backend is behind.
  *
  * The two branches of `checkForUpdate` — cached and freshly fetched — each made

@@ -154,6 +154,14 @@ export interface HealthResponse {
   // differs from this, it forces a clean re-ingest (e.g. absolute→relative
   // source_uri migration changes every node ID).
   schema_version?: number;
+  // The published release the running container was built as, when it knows.
+  // Absent from any backend older than Ix-memory#157, and from any image not
+  // built by the release pipeline — both mean "fall back to what you tracked".
+  // This is the container's own claim, not proof: it is an env var, so
+  // `docker run -e` overrides it. It is the right answer to "what do you think
+  // you are" and the wrong one to "what are you really", which is what
+  // checkBackendImage's digest comparison is for.
+  release_version?: string;
 }
 
 export interface PatchSource {

@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import { renderSection, renderKeyValue, renderWarning, renderNote, renderSuccess } from "../ui.js";
 import { IxClient } from "../../client/api.js";
+import { recordBackendRelease } from "./upgrade.js";
 import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
 import { detectStaleFiles } from "../stale.js";
 import { llmError, llmLine, printLlmLines } from "../llm.js";
@@ -51,6 +52,7 @@ export function registerStatusCommand(program: Command): void {
       const client = new IxClient(getEndpoint());
       try {
         const health = await client.health();
+        recordBackendRelease(health.release_version);
         const root = resolveWorkspaceRoot(opts.root);
 
         // Detect stale files
