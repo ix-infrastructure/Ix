@@ -5,7 +5,7 @@ import { basename, dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { homedir } from "os";
 import chalk from "chalk";
-import { BACKEND_IMAGE, checkBackendImage, isNonStandardBackend, type BackendImageStatus } from "../backend-status.js";
+import { BACKEND_IMAGE, checkBackendImage, isNonStandardBackend } from "../backend-status.js";
 import { canRenderProgress } from "../stderr.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -336,6 +336,58 @@ function getTrackedVersion(versionFile: string): string {
     return readFileSync(versionFile, "utf-8").trim() || "0.0.0";
   } catch {
     return "0.0.0";
+  }
+}
+
+/**
+ * Record the version a component was just installed at.
+ *
+ * `mkdirSync` because IX_HOME may not exist yet — a stamp that silently fails to
+ * write leaves the tracked version behind for ever, and the notice it drives
+ * says "update available" on every command with no way for the user to see why.
+ *
+ * A falsy version is refused rather than written. Not knowing which release we
+ * are on is not the same as being on none of them, and the only safe direction
+ * for this file to be wrong is *behind*: a stamp that reads old costs a wrong
+ * nag, while one that reads new hides a genuinely stale component and stops
+ * `ix upgrade` from ever fetching it.
+ *
+ * Best effort by construction: this is bookkeeping attached to an operation the
+ * user asked for, and it must never be the reason that operation reports failure.
+ */
+export function writeVersionStamp(versionFile: string, version: string | null | undefined): void {
+  if (!version) return;
+  try {
+    mkdirSync(dirname(versionFile), { recursive: true });
+    writeFileSync(versionFile, version);
+  } catch {
+    /* best effort */
+  }
+}
+
+/**
+ * Record the backend release after something has pulled `:latest`.
+ *
+ * `.backend-version` was written by `ix upgrade` and by nothing else, so anyone
+ * who took a new image through `ix docker start` — which pulls on every start —
+ * kept a file naming an older release while running the current one, and was
+ * told to upgrade on every command for ever.
+ *
+ * The fix belongs at the write, not at the read. Having just pulled `:latest`,
+ * the running image IS the current release, so the release is simply what to
+ * record; nothing has to be inferred about it afterwards. Inferring it is what
+ * cannot be done safely here — `docker image inspect ...:latest` never contacts
+ * a registry, so a container matching the local `:latest` proves only that
+ * nothing has been pulled since, which is equally true of a months-old image.
+ *
+ * If the release cannot be fetched the stamp is left alone: the user keeps a
+ * notice they may not need, which is the failure worth having.
+ */
+export async function stampBackendVersionAfterPull(): Promise<void> {
+  try {
+    writeVersionStamp(BACKEND_VERSION_FILE, await fetchLatestRelease(MEMORY_LAYER_DIST_REPO));
+  } catch {
+    /* offline, rate-limited, whatever: the tracked version stands */
   }
 }
 
@@ -1013,65 +1065,6 @@ function detectPlatform(): string {
 }
 
 /**
- * Whether to tell the user their backend is behind.
- *
- * Pure, so the decision can be tested without a docker daemon. The tracked
- * version alone is not evidence: `.backend-version` is written by `ix upgrade`
- * and by nothing else, so anyone who pulled the image through docker compose,
- * or through `ix docker start` after the tag moved, keeps a file that says an
- * old version while running the current one — and is told to upgrade on every
- * command, for ever.
- *
- * `ix doctor` already knows better. `checkBackendImage` compares the *running
- * container's* image id against `:latest` ("Ix#270: trust the running
- * container, not the version stamp"), and `ok` means they are the same image.
- * That is proof the file is stale, and the only state that is: with docker
- * unavailable, no container running, or `:latest` never pulled, the question is
- * open and the tracked version stays the answer.
- */
-export function shouldOfferBackendUpgrade(
-  backendLatest: string | undefined,
-  trackedVersion: string,
-  runningImage: BackendImageStatus["kind"],
-): boolean {
-  if (!backendLatest || !isNewer(backendLatest, trackedVersion)) return false;
-  return runningImage !== "ok";
-}
-
-/**
- * The same decision, with the IO around it.
- *
- * The docker calls happen only once the tracked version has already said
- * "behind" — so a correct tracker costs nothing, and an incorrect one costs
- * three `docker inspect` calls once. Once, because finding the container
- * already on `:latest` repairs the file it disagreed with: the running image
- * *is* the latest release, so that is the version to record.
- */
-function backendUpdatePending(backendLatest: string | undefined): boolean {
-  const tracked = getTrackedVersion(BACKEND_VERSION_FILE);
-  if (!backendLatest || !isNewer(backendLatest, tracked)) return false;
-
-  let kind: BackendImageStatus["kind"];
-  try {
-    kind = checkBackendImage().kind;
-  } catch {
-    // Never let a docker probe decide whether the command the user actually
-    // ran gets to finish. Unknown means the tracked version stands.
-    return true;
-  }
-
-  if (kind === "ok") {
-    try {
-      writeFileSync(BACKEND_VERSION_FILE, backendLatest);
-    } catch {
-      /* best effort: the notice is suppressed either way */
-    }
-    return false;
-  }
-  return shouldOfferBackendUpgrade(backendLatest, tracked, kind);
-}
-
-/**
  * Check for updates (non-blocking, cached for 1 hour).
  * Call this from other commands to notify users.
  */
@@ -1082,7 +1075,9 @@ export async function checkForUpdate(): Promise<void> {
   if (cache && Date.now() - cache.checkedAt < 3600_000) {
     const hasCliUpdate = isNewer(cache.latest, current);
     const hasCompassUpdate = shouldOfferCompassUpgrade(cache.compassLatest);
-    const hasBackendUpdate = backendUpdatePending(cache.backendLatest);
+    const backendCurrent = getTrackedVersion(BACKEND_VERSION_FILE);
+    const hasBackendUpdate =
+      cache.backendLatest && isNewer(cache.backendLatest, backendCurrent);
     if (hasCliUpdate || hasCompassUpdate || hasBackendUpdate) {
       printUpdateNotice(current, cache.latest, !!hasCompassUpdate, !!hasBackendUpdate);
     }
@@ -1098,7 +1093,9 @@ export async function checkForUpdate(): Promise<void> {
     writeCache(latest, compassLatest ?? undefined, backendLatest ?? undefined);
     const hasCliUpdate = isNewer(latest, current);
     const hasCompassUpdate = shouldOfferCompassUpgrade(compassLatest ?? undefined);
-    const hasBackendUpdate = backendUpdatePending(backendLatest ?? undefined);
+    const backendCurrent = getTrackedVersion(BACKEND_VERSION_FILE);
+    const hasBackendUpdate =
+      backendLatest && isNewer(backendLatest, backendCurrent);
     if (hasCliUpdate || hasCompassUpdate || hasBackendUpdate) {
       printUpdateNotice(current, latest, !!hasCompassUpdate, !!hasBackendUpdate);
     }
@@ -1389,8 +1386,7 @@ export function registerUpgradeCommand(program: Command): void {
               ["pull", "ghcr.io/ix-infrastructure/ix-memory-layer:latest"],
               { stdio: "inherit", timeout: 120000 }
             );
-            mkdirSync(IX_HOME, { recursive: true });
-            writeFileSync(BACKEND_VERSION_FILE, backendLatest);
+            writeVersionStamp(BACKEND_VERSION_FILE, backendLatest);
             backendImageChanged = true;
             console.log(`[ok] Backend image updated to ${backendLatest}`);
           } catch {
