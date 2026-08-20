@@ -411,9 +411,11 @@ function stampFailureMessage(): string {
  *
  * Build metadata and leading zeros go the other way: `VERSION_RE` admits both
  * and `splitVersion` ignores both, so `1.0.16+abc` and `1.0.16` are one release
- * and must NOT warn. No writer of this file can currently produce that spelling
- * — all three strip only a leading `v` — so it is defence rather than a live
- * case, but it is what a textual `!==` would get wrong.
+ * and must NOT warn. That one is reachable too, by the same route: all three
+ * writers stamp the feed's `tag_name` with only a leading `v` stripped, so a
+ * release tagged `v1.0.16+build77` lands in this file verbatim — and VERSION_RE
+ * admits it deliberately, after a tag carrying both a pre-release and build
+ * metadata once broke `ix upgrade` outright.
  *
  * Symmetric, so the argument order carries no meaning and a swapped call cannot
  * change the answer; it reads (tracked, pulled) to match its name. Named and
