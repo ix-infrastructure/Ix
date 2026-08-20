@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -71,8 +72,13 @@ describe("stampDisagreesWithPull", () => {
     expect(backendUpdateAvailable("1.0.16", "1.0.17")).toBe(false); // they differ
   });
 
-  it("fires on a fresh install, where nothing is tracked", () => {
-    expect(stampDisagreesWithPull("0.0.0", "1.0.16")).toBe(true);
+  it("is quiet when the same release is spelled differently", () => {
+    // Compared by precedence, not as text: build metadata and leading zeros do
+    // not make a different release, and warning on them would fire on every
+    // cold start with nothing wrong.
+    expect(stampDisagreesWithPull("1.0.16+build77", "1.0.16")).toBe(false);
+    expect(stampDisagreesWithPull("1.0.16", "1.0.16+build77")).toBe(false);
+    expect(stampDisagreesWithPull("01.0.16", "1.0.16")).toBe(false);
   });
 });
 
@@ -96,7 +102,8 @@ describe("writeVersionStamp", () => {
   });
 
   afterEach(() => {
-    rmSync(home, { recursive: true, force: true });
+    // maxRetries for the same Windows EBUSY the isolated describe guards below.
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("writes the version and reports that it did", () => {
@@ -285,9 +292,6 @@ describe("stampBackendVersionAfterPull, isolated", () => {
   /**
    * The release feed, stubbed — no test in here reaches the network. Each
    * returns the mock so a test can assert the request was (or was not) made.
-   * Declared above the first test that calls them: they are `const`, and only
-   * the fact that Vitest evaluates this whole body before running any test
-   * keeps a call from above them out of the temporal dead zone.
    */
   const feedReturns = (tag: string) => {
     const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ tag_name: tag }) }));
@@ -328,6 +332,9 @@ describe("stampBackendVersionAfterPull, isolated", () => {
   });
 
   it("stamps nothing when the compose does not track :latest", async () => {
+    // Stubbed so a regression in the guard is caught here rather than quietly
+    // reaching the network — which is what made this test pass offline with the
+    // guard deleted, and vacuous exactly where CI is sandboxed.
     const fetchMock = feedReturns("v1.0.16");
     const compose = join(home, "docker-compose.yml");
     writeFileSync(compose, "services:\n  memory-layer:\n    image: ix-memory-layer:dev\n");
@@ -398,47 +405,62 @@ describe("stampBackendVersionAfterPull, isolated", () => {
     await mod.stampBackendVersionAfterPull(tracksLatest());
     expect(fetchMock).toHaveBeenCalled();
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0]?.[0])).toContain("backend update notices will be wrong");
+    const said = String(warn.mock.calls[0]?.[0]);
+    expect(said).toContain(".backend-version"); // which file, the actionable half
+    expect(said).toContain("backend update notices will be wrong"); // and why it matters
   });
 
   /**
-   * A stamp that is READABLE but not writable — the case the comment on the
-   * gate actually describes ("a root-owned stamp already holding what we just
+   * A stamp that is READABLE but not writable — the case the gate's comment
+   * actually describes ("a root-owned stamp already holding what we just
    * pulled"). The directory trick cannot produce it: a directory always reads
    * as 0.0.0, which forces the feed to return "0.0.0" to make the two agree,
-   * and no real release is ever 0.0.0. POSIX only; Windows largely ignores
-   * chmod.
+   * and no release is ever 0.0.0.
+   *
+   * Not POSIX-only: Node maps 0444 to FILE_ATTRIBUTE_READONLY and the write
+   * fails EPERM on Windows too, which mcp-install.test.ts also records. Root is
+   * the only caller that bypasses the mode — checked at collection, the way
+   * that file does it, rather than by probing at runtime. A probe would have to
+   * write to find out, which corrupts the fixture it is testing.
    */
-  const readableButUnwritableStamp = (contents: string, ctx: { skip: (r: string) => void }) => {
+  const modeBlocksWrite = typeof process.getuid !== "function" || process.getuid() !== 0;
+
+  const unwritableStamp = (contents: string) => {
     writeFileSync(stampPath(), contents);
     chmodSync(stampPath(), 0o444);
-    try {
-      writeFileSync(stampPath(), "probe");
-      chmodSync(stampPath(), 0o644);
-      // Running as root, where the mode is bypassed. Skip loudly rather than
-      // let the test assert nothing.
-      ctx.skip("stamp file is writable despite 0444 (running as root?)");
-      return false;
-    } catch {
-      return true; // the write is refused, which is the point
-    }
   };
 
-  it.skipIf(process.platform === "win32")(
+  it.skipIf(!modeBlocksWrite)(
     "stays quiet when the stamp cannot be written but already records what we pulled",
-    async (ctx) => {
+    async () => {
       // Warning here would be noise on every cold start with nothing wrong.
-      if (!readableButUnwritableStamp("1.0.16", ctx)) return;
+      unwritableStamp("1.0.16");
       const fetchMock = feedReturns("v1.0.16");
       const warn = vi.spyOn(console, "error").mockImplementation(() => {});
       const mod = await load();
       await mod.stampBackendVersionAfterPull(tracksLatest());
       // Positive controls: a silent early return upstream satisfies
       // `not.toHaveBeenCalled` just as well as the gate deciding to stay quiet.
+      // The mode, not the contents — the file reads "1.0.16" whether the write
+      // failed or succeeded, so asserting the contents proves nothing here.
       expect(fetchMock).toHaveBeenCalled();
-      expect(readFileSync(stampPath(), "utf-8")).toBe("1.0.16"); // the write did fail
+      expect(statSync(stampPath()).mode & 0o200).toBe(0);
       expect(warn).not.toHaveBeenCalled();
-      chmodSync(stampPath(), 0o644);
+    },
+  );
+
+  it.skipIf(!modeBlocksWrite)(
+    "stays quiet when the stamp spells the pulled release differently",
+    async () => {
+      // Build metadata does not participate in precedence, so this stamp and
+      // `1.0.16` are the same release: nothing is wrong, and a textual
+      // comparison would warn on every cold start that notices will be wrong.
+      unwritableStamp("1.0.16+build77");
+      feedReturns("v1.0.16");
+      const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+      const mod = await load();
+      await mod.stampBackendVersionAfterPull(tracksLatest());
+      expect(warn).not.toHaveBeenCalled();
     },
   );
 
@@ -448,10 +470,10 @@ describe("stampBackendVersionAfterPull, isolated", () => {
    * `backendUpdateAvailable` is false there, so an is-newer gate says nothing
    * while the file is wrong and can no longer be corrected.
    */
-  it.skipIf(process.platform === "win32")(
+  it.skipIf(!modeBlocksWrite)(
     "warns when the stamp is stuck AHEAD of the release, where an is-newer gate would not",
-    async (ctx) => {
-      if (!readableButUnwritableStamp("1.0.17", ctx)) return;
+    async () => {
+      unwritableStamp("1.0.17");
       const fetchMock = feedReturns("v1.0.16");
       const warn = vi.spyOn(console, "error").mockImplementation(() => {});
       const mod = await load();
@@ -459,7 +481,6 @@ describe("stampBackendVersionAfterPull, isolated", () => {
       expect(fetchMock).toHaveBeenCalled();
       expect(readFileSync(stampPath(), "utf-8")).toBe("1.0.17"); // still unwritten
       expect(warn).toHaveBeenCalledTimes(1);
-      chmodSync(stampPath(), 0o644);
     },
   );
 });

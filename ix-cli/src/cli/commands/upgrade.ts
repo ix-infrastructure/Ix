@@ -382,7 +382,11 @@ export function backendUpdateAvailable(
  * without the write, so the sentence has to cover both.
  */
 function stampFailureMessage(versionFile: string): string {
-  return `[!!] Could not record the version in ${versionFile}; backend update notices will be wrong until it is writable.`;
+  // States the consequence, not a cause: the write's errno is swallowed, so
+  // "until it is writable" would be a guess — and a wrong one for the case the
+  // tests actually reproduce, a directory sitting where the file belongs, which
+  // no permission change fixes.
+  return `[!!] Could not record the version in ${versionFile}; until it can be written, backend update notices will be wrong.`;
 }
 
 /**
@@ -394,13 +398,19 @@ function stampFailureMessage(versionFile: string): string {
  * separately — and an ahead stamp is equally wrong and equally uncorrectable
  * once the write has failed.
  *
- * A plain textual comparison, because that is the question: the file either
- * records what was pulled or it does not. Named and exported rather than
- * inlined so it is testable and so its divergence from the notice predicate is
- * visible rather than accidental.
+ * Compared by PRECEDENCE, not as text. `VERSION_RE` admits build metadata and
+ * leading zeros, and `splitVersion` ignores both — so `1.0.16+abc` and `1.0.16`
+ * are the same release, and a textual `!==` would warn that update notices are
+ * wrong when they are not, on every cold start. Neither being newer than the
+ * other is the only definition that covers the ahead case and this one at once.
+ *
+ * Symmetric, so the argument order carries no meaning and a swapped call cannot
+ * change the answer; it reads (tracked, pulled) to match its name. Named and
+ * exported rather than inlined so it is testable and so its divergence from the
+ * notice predicate is visible rather than accidental.
  */
 export function stampDisagreesWithPull(trackedVersion: string, pulled: string): boolean {
-  return trackedVersion !== pulled;
+  return isNewer(trackedVersion, pulled) || isNewer(pulled, trackedVersion);
 }
 
 /**
