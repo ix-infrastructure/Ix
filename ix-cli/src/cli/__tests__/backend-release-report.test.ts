@@ -467,9 +467,11 @@ describe("health is fetched in exactly one place", () => {
     readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
       if (e.name === "__tests__" || e.name === "node_modules") return [];
       const full = join(dir, e.name);
-      // Every module extension, not just .ts: src/ happens to be all .ts today,
-      // so a future .mts or .js under it would be invisible to BOTH guards
-      // below and neither would report anything missing.
+      // .ts .js .mts .cts .mjs .cjs — not just .ts. src/ happens to be all .ts
+      // today, so a future .mts or .js under it would be invisible to BOTH
+      // guards below and neither would report anything missing. Not .tsx/.jsx:
+      // there is no JSX in this CLI, and adding some would be the point at
+      // which to revisit this.
       return e.isDirectory() ? walk(full) : /\.(m|c)?(t|j)s$/.test(e.name) ? [full] : [];
     });
 
@@ -509,24 +511,31 @@ describe("health is fetched in exactly one place", () => {
   //   NOT CAUGHT: a new reader inside a listed file that reuses the existing
   //   constant — `fetch(HEALTH_URL).json()` added to docker.ts counts zero new
   //   literals and passes. Nor a path assembled from fragments
-  //   (`"/v1" + "/health"`). Both verified. The three listed files are
-  //   therefore TRUSTED, not checked; what stops a body read there is that all
-  //   three use `curl` with stdio ignored, and review of any change to them.
+  //   (`"/v1" + "/health"`). Both verified. So the three listed files are
+  //   checked against INLINE uses and trusted against INDIRECTION.
   //
-  // Comment handling: line-start block comments and line-start `//` are
-  // stripped. Trailing `//` is deliberately NOT, and that is a considered
-  // trade. A `(^|[^:])//` rule was tried and silently erased three real
-  // spellings — `` `${proto}//${host}/v1/health` ``, `"//localhost:8090/..."`,
-  // and a doubled-slash template — because the `//` sat after `}` or `"`.
-  // A guard that quietly stops seeing real calls is far worse than one that
-  // trips on prose: a false positive is a confusing red CI, a false negative is
-  // no guard at all. So prose naming the path in a trailing comment WILL fail
-  // this test. That is intended; move it to a line-start comment.
+  // What actually stops a body read in the two readiness-poll files is that
+  // both use `curl` with stdio ignored and discard the response. That is not
+  // true of the third: `client/api.ts` is the one place that DOES read a health
+  // body, via `get()` → `resp.json()`, and it is listed precisely because
+  // everything legitimate goes through it.
   //
-  // Known false positive, unfixed: a block comment containing a `**/` glob ends
-  // the strip early, because `**/` CONTAINS `*/` — position has nothing to do
-  // with it — leaving the rest of the comment visible. Same for a block comment
-  // opened mid-line. Both fail red rather than silently, so they are left.
+  // Comment handling: line-start block comments, line-start `//`, and line-start
+  // `*` (doc-continuation lines) are stripped. Trailing `//` is deliberately NOT,
+  // and that is a considered trade. A `(^|[^:])//` rule was tried and silently
+  // erased three real spellings — `` `${proto}//${host}/v1/health` ``,
+  // `"//localhost:8090/..."`, and a doubled-slash template — because the `//`
+  // sat after `}` or `"`. A guard that quietly stops seeing real calls is far
+  // worse than one that trips on prose: a false positive is a confusing red CI,
+  // a false negative is no guard at all. So prose naming the path in a trailing
+  // comment WILL fail this test. That is intended; move it to a line-start one.
+  //
+  // Known false positives, unfixed, both failing red rather than silently:
+  // a block comment containing a `**/` glob ends the strip early, because `**/`
+  // CONTAINS `*/` — position has nothing to do with it. That only surfaces when
+  // the block's continuation lines do NOT begin with `*`, since the line-start
+  // `*` rule strips those anyway, so ordinary JSDoc is unaffected. A block
+  // comment opened mid-line is never stripped at all.
   const pathCounts = Object.fromEntries(
     walk(SRC)
       .map((f) => ({
@@ -551,8 +560,11 @@ describe("health is fetched in exactly one place", () => {
       // outside the chokepoint.
       "cli/commands/docker.ts": 1,
       "cli/commands/upgrade.ts": 1,
-      // The one real request. Everything that reads a body reaches it through
-      // IxClient.health(), which the assertion below routes through this module.
+      // The one real request, and the one place a health body is read. As the
+      // code stands today everything reaches it through IxClient.health(),
+      // which the assertion below routes through this module — but that is a
+      // fact about the current tree, not something this guard enforces: a body
+      // read added to a listed file is documented above as not caught.
       "client/api.ts": 1,
     });
   });
