@@ -214,9 +214,7 @@ describe("stampBackendVersionAfterPull, isolated", () => {
     if (priorHome === undefined) delete process.env.IX_HOME;
     else process.env.IX_HOME = priorHome;
     rmSync(home, { recursive: true, force: true });
-    // Symmetric with beforeEach: otherwise the registry keeps an upgrade.js
-    // whose IX_HOME points at the directory just deleted.
-    vi.resetModules();
+    vi.unstubAllGlobals();
   });
 
   /** Re-imported so IX_HOME above is the one the module reads. */
@@ -232,7 +230,59 @@ describe("stampBackendVersionAfterPull, isolated", () => {
     expect(existsSync(join(home, ".backend-version"))).toBe(false);
   });
 
+  /** A compose the guard accepts, so the fetch-and-write path is reached. */
+  const tracksLatest = () => {
+    const compose = join(home, "docker-compose.yml");
+    writeFileSync(
+      compose,
+      "services:\n  memory-layer:\n    image: ghcr.io/ix-infrastructure/ix-memory-layer:latest\n",
+    );
+    return compose;
+  };
+
+  /** The release feed, stubbed — no test here reaches the network. */
+  const feedReturns = (tag: string) =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, json: async () => ({ tag_name: tag }) })),
+    );
+
+  it("records the release it just pulled", async () => {
+    // The behaviour this whole change exists to add. Without it, gutting the
+    // write entirely leaves every other test in this file green.
+    feedReturns("v1.0.16");
+    const mod = await load();
+    await mod.stampBackendVersionAfterPull(tracksLatest());
+    expect(readFileSync(join(home, ".backend-version"), "utf-8")).toBe("1.0.16");
+  });
+
+  it("overwrites a stamp that had got ahead of the real release", async () => {
+    // Self-heal in the other direction. The GHCR tag and the release feed are
+    // published separately, so the file can legitimately read high; a
+    // never-go-backwards rule would pin it there and silence the notice for
+    // good.
+    writeFileSync(join(home, ".backend-version"), "1.0.17");
+    feedReturns("v1.0.16");
+    const mod = await load();
+    await mod.stampBackendVersionAfterPull(tracksLatest());
+    expect(readFileSync(join(home, ".backend-version"), "utf-8")).toBe("1.0.16");
+  });
+
+  it("leaves the stamp alone when the release cannot be fetched", async () => {
+    // Offline or rate-limited. Erring behind costs a nag; erring ahead hides a
+    // stale backend, so this must not write.
+    writeFileSync(join(home, ".backend-version"), "1.0.13");
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, json: async () => ({}) })));
+    const mod = await load();
+    await mod.stampBackendVersionAfterPull(tracksLatest());
+    expect(readFileSync(join(home, ".backend-version"), "utf-8")).toBe("1.0.13");
+  });
+
   it("stamps nothing when the compose does not track :latest", async () => {
+    // Stubbed so a regression in the guard is caught here rather than quietly
+    // reaching the network — which is also what made this test pass offline
+    // with the guard deleted.
+    feedReturns("v1.0.16");
     const compose = join(home, "docker-compose.yml");
     writeFileSync(compose, "services:\n  memory-layer:\n    image: ix-memory-layer:dev\n");
     const mod = await load();

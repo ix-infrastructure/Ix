@@ -372,6 +372,15 @@ export function backendUpdateAvailable(
 }
 
 /**
+ * One wording for one condition, used by both callers that branch on
+ * `writeVersionStamp` returning false. Two literals for the same failure is how
+ * they drift.
+ */
+function stampFailureMessage(versionFile: string): string {
+  return `[!!] Could not record the version in ${versionFile}; the update notice will keep firing.`;
+}
+
+/**
  * Record the backend release in its stamp file. Returns whether it was written.
  *
  * `mkdirSync` because IX_HOME may not exist yet — a stamp that fails to write
@@ -472,18 +481,22 @@ export async function stampBackendVersionAfterPull(composeFile: string): Promise
     // are already up, so a proxy that accepts and never answers must not hold
     // the command open for the generous default the upgrade path wants.
     const latest = await fetchLatestRelease(MEMORY_LAYER_DIST_REPO, 10_000);
-    if (!writeVersionStamp(BACKEND_VERSION_FILE, latest) && latest) {
-      // Must not fail the start, but the user is about to be told to upgrade on
-      // every command, so say why — with the same consequence the upgrade path
-      // names, since it is the same failure.
-      console.error(
-        chalk.yellow(
-          `[!!] Could not record the version in ${BACKEND_VERSION_FILE}; the update notice will keep firing.`
-        )
-      );
+    // `latest` first: it decides whether there is anything to write at all, so
+    // it reads in the order it applies and does not lean on the writer's own
+    // falsy check to make a null call a no-op.
+    if (latest && !writeVersionStamp(BACKEND_VERSION_FILE, latest)) {
+      // Must not fail the start. Only worth saying when the notice really is
+      // about to fire — a root-owned stamp already holding the current release
+      // fails to write on every cold start while nothing is behind, and warning
+      // there would be a promise of a nag that never comes.
+      if (backendUpdateAvailable(latest, getTrackedVersion(BACKEND_VERSION_FILE))) {
+        console.error(chalk.yellow(stampFailureMessage(BACKEND_VERSION_FILE)));
+      }
     }
   } catch {
-    /* offline, rate-limited, unreadable compose: the tracked version stands */
+    // Only the compose read reaches here: fetchLatestRelease and
+    // writeVersionStamp both swallow their own failures, so offline and
+    // rate-limited arrive as `latest === null` on the normal path above.
   }
 }
 
@@ -1498,11 +1511,7 @@ export function registerUpgradeCommand(program: Command): void {
             backendImageChanged = true;
             console.log(`[ok] Backend image updated to ${backendLatest}`);
             if (!writeVersionStamp(BACKEND_VERSION_FILE, backendLatest)) {
-              console.error(
-                chalk.yellow(
-                  `[!!] Could not record the version in ${BACKEND_VERSION_FILE}; the update notice will keep firing.`
-                )
-              );
+              console.error(chalk.yellow(stampFailureMessage(BACKEND_VERSION_FILE)));
             }
           } catch {
             console.error("[!!] Could not pull latest backend image. Run: ix docker restart");
