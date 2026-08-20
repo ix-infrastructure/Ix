@@ -387,24 +387,11 @@ describe("checkBackendSchema forwards its bounds rather than dropping them", () 
   const localClient = (health: unknown) =>
     ({ endpoint: "http://localhost:8090", health: async () => health }) as unknown as IxClient;
 
-  it("passes the ceiling through, so a claim above it is still refused", async () => {
-    writeFileSync(stamp(), "1.0.13");
-    const { checkBackendSchema } = await import("../backend-status.js");
-    await checkBackendSchema(
-      localClient({ status: "ok", schema_version: 3, release_version: "99.0.0" }),
-      "1.0.16",
-      isNewer,
-    );
-    // Dropped ceiling => no ceiling => compared against the stamp instead, and
-    // 99.0.0 is newer than 1.0.13, so it would still be refused. The ceiling
-    // only shows itself when the stamp is ALSO ahead — see the next case.
-    expect(tracked()).toBe("1.0.13");
-  });
-
   it("passes the ceiling through even when the stamp is already ahead", async () => {
-    // This is the case that separates "forwarded the ceiling" from "forwarded
-    // null": with the stamp at 99.9.9, the no-ceiling rule would ACCEPT 5.0.0
-    // as a correction downward. Only a real ceiling of 1.0.16 refuses it.
+    // With the stamp at 99.9.9 the no-ceiling rule would ACCEPT 5.0.0 as a
+    // correction downward, so only a real ceiling of 1.0.16 refuses it. What
+    // this case uniquely catches is a WRONG non-null ceiling: forwarding a
+    // permissive "99.0.0" kills it while the recording case below stays green.
     writeFileSync(stamp(), "99.9.9");
     const { checkBackendSchema } = await import("../backend-status.js");
     await checkBackendSchema(
@@ -510,27 +497,53 @@ describe("health is fetched in exactly one place", () => {
   // pin who may name the path at all. An allowlist, but an EXACT one: a new
   // reader fails it, and so does removing a listed use, which is what stops it
   // quietly becoming the stale list-in-a-comment this guard exists to replace.
-  const pathUsers = walk(SRC)
-    .map((f) => ({ file: f, src: readFileSync(f, "utf-8").replace(/^\s*(\/\/|\*|\/\*).*$/gm, "") }))
-    .filter((f) => /v1\/health/.test(f.src))
-    .map((f) => f.file.slice(SRC.length + 1).replace(/\\/g, "/"))
-    .sort();
+  //
+  // COUNTS, not just filenames. A file-granular check makes the allowlisted
+  // files blind spots: adding a body-reading `fetch(HEALTH_URL).json()` to
+  // docker.ts left the list identical and the whole suite green. Verified.
+  //
+  // Comment handling is stricter here than for `.health()` above, because a
+  // path is named in prose far more readily than a call is:
+  //
+  // - trailing `//` is stripped, but ONLY where not preceded by `:`. A blanket
+  //   strip is the string-blind trap documented below — `const HEALTH_URL =
+  //   "http://localhost:8090/v1/health"` truncates at `http:`, the file drops
+  //   off the list, and this guard silently disarms itself.
+  // - block comments are stripped only when the `/*` STARTS a line, i.e. doc
+  //   comments. That covers a continuation line with no leading `*` (which
+  //   otherwise fails CI with a message pointing at the wrong problem) without
+  //   reintroducing the mid-line `**/*.ts` glob problem, since a glob lives
+  //   inside a string, never at line start.
+  const pathCounts = Object.fromEntries(
+    walk(SRC)
+      .map((f) => ({
+        file: f,
+        src: readFileSync(f, "utf-8")
+          .replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, "")
+          .replace(/^\s*(\/\/|\*|\/\*).*$/gm, "")
+          .replace(/(^|[^:])\/\/.*$/gm, "$1"),
+      }))
+      .map((f) => ({ ...f, n: (f.src.match(/v1\/health/g) ?? []).length }))
+      .filter((f) => f.n > 0)
+      .map((f) => [f.file.slice(SRC.length + 1).replace(/\\/g, "/"), f.n]),
+  );
 
   it("finds the health-path users at all", () => {
-    expect(pathUsers.length).toBeGreaterThan(0);
+    expect(Object.keys(pathCounts).length).toBeGreaterThan(0);
   });
 
   it("has only the readiness polls and the client naming /v1/health", () => {
-    expect(pathUsers).toEqual([
-      // The two readiness polls. Both `curl -sf` with stdio ignored: they
-      // discard the response, so there is no body to record and they are
-      // correctly outside the chokepoint.
-      "cli/commands/docker.ts",
-      "cli/commands/upgrade.ts",
+    expect(pathCounts).toEqual({
+      // The two readiness polls. Both `curl -sf` with stdio ignored, so they
+      // discard the response: there is no body to record and they are correctly
+      // outside the chokepoint. Counted, so a second use in either file — the
+      // one that might read a body — has to come past this test.
+      "cli/commands/docker.ts": 1,
+      "cli/commands/upgrade.ts": 1,
       // The one real request. Everything that reads a body reaches it through
       // IxClient.health(), which the assertion below routes through this module.
-      "client/api.ts",
-    ]);
+      "client/api.ts": 1,
+    });
   });
 
   it("has only backend-version.ts calling .health()", () => {

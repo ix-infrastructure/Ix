@@ -179,11 +179,12 @@ export async function fetchBackendHealth(
   // From the client the request actually went to. Taking it as a second
   // argument reintroduced exactly the "a call site can get it wrong" mistake
   // this module exists to make impossible.
-  // `health?.` because a 200 whose body is literally `null` parses to null, and
-  // this bookkeeping must never be what turns a reachable-but-odd backend into a
-  // thrown error. Callers do catch (status.ts:53, ingest.ts:943), but they would
-  // report "backend not reachable" for a backend that answered 200 — a wrong
-  // diagnosis produced by the recording step, not by the backend.
+  // `health?.` because a 200 whose body is literally `null` parses to null.
+  // The contract of this function is "return whatever the backend sent"; adding
+  // a throw of its own would be this bookkeeping changing the outcome of a
+  // request that succeeded. Nothing more is claimed: status.ts dereferences
+  // health.status unguarded moments later, so on a null body it fails either
+  // way — the `?.` keeps the failure the caller's, not ours.
   if (isLocalEndpoint(client.endpoint)) {
     recordBackendRelease(health?.release_version, knownLatest, isNewer);
   }
