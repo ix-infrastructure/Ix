@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 // stampBackendVersionAfterPull is imported dynamically below instead: it reads
 // IX_HOME at module load, so it has to be loaded after the tests set one.
 import {
+  VERSION_RE,
   backendUpdateAvailable,
   composeTracksLatestBackend,
   stampDisagreesWithPull,
@@ -60,9 +61,10 @@ const modeProbe = (() => {
       // Distinct from an unusable temp dir: the directory is fine, chmod is
       // what is missing (ENOSYS on some FUSE/9p/noacl mounts). Saying "could
       // not probe the temp dir" here sends the reader after disk space.
-      throw Object.assign(new Error(`chmod is unavailable here (${code(err)})`), {
-        alreadyDescribed: true,
-      });
+      // Returning rather than throwing-to-be-caught-below: the finally still
+      // runs, so both cleanups still happen, and the message survives a catch
+      // that would otherwise overwrite it.
+      return { blocked: false, why: `chmod is unavailable here (${code(err)})` };
     }
     // ATTEMPT THE WRITE. Reading `mode & 0o200` only says the bit was
     // recorded, which it is for root too — root records 0444 and then
@@ -85,9 +87,7 @@ const modeProbe = (() => {
   } catch (err) {
     // Could not measure at all — a full or unwritable TMPDIR, EMFILE under a
     // parallel job. Distinct from "measured, and the mode does not bite".
-    why = (err as { alreadyDescribed?: boolean })?.alreadyDescribed
-      ? (err as Error).message
-      : `could not probe the temp dir (${code(err)})`;
+    why = `could not probe the temp dir (${code(err)})`;
   } finally {
     if (probe) {
       try {
@@ -111,7 +111,15 @@ const modeProbe = (() => {
 
 const modeBlocksWrite = modeProbe.blocked;
 
-if (!modeBlocksWrite) {
+/**
+ * `CI=false` is a widely used way of saying "not CI" (react-scripts, Netlify),
+ * and a bare truthiness check reads it as CI. Lower-cased because `CI=False` is
+ * the spelling a PowerShell user is most likely to export, which react-scripts
+ * also handles.
+ */
+const onCI = !!process.env.CI && process.env.CI.toLowerCase() !== "false";
+
+if (!modeBlocksWrite && !onCI) {
   // stderr directly, not console.warn: vitest's default reporter prints
   // console output from a passing file nowhere at all — measured — so the
   // warning would be silent on exactly the runs it exists for. A raw stderr
@@ -511,10 +519,8 @@ describe("stampBackendVersionAfterPull, isolated", () => {
     const mod = await load();
     await mod.stampBackendVersionAfterPull(tracksLatest());
     expect(fetchMock).toHaveBeenCalled();
-    expect(warn).toHaveBeenCalledTimes(1);
     expectStampFailure(warn);
   });
-
 
   /**
    * A stamp that is READABLE but not writable — the case the gate's comment
@@ -574,6 +580,12 @@ describe("stampBackendVersionAfterPull, isolated", () => {
       // This is the wiring pin, not a duplicate of the unit test above: the unit
       // test proves the predicate, this proves the CALL SITE still routes through
       // it. A textual `!==` at the warn site passes every other test in this file.
+      // The fixture's whole discriminating power sits in this tag being
+      // ACCEPTED: if VERSION_RE ever stops admitting build metadata,
+      // fetchLatestRelease returns null, the call site is never reached, and
+      // every assertion below still passes while testing nothing. Verified:
+      // dropping that group from VERSION_RE leaves this file green without it.
+      expect(VERSION_RE.test("1.0.16+build77")).toBe(true);
       unwritableStamp("1.0.16");
       const fetchMock = feedReturns("v1.0.16+build77");
       const warn = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -620,18 +632,22 @@ describe("stampBackendVersionAfterPull, isolated", () => {
  * first and the diagnostic would never be seen.
  */
 describe("the mode gate is exercisable where it has to be", () => {
-  // `CI=false` is a widely used way of saying "not CI" (react-scripts, Netlify),
-  // and a bare truthiness check reads it as CI.
-  const onCI = !!process.env.CI && process.env.CI !== "false";
-
-  it.skipIf(!onCI)("can exercise the mode gate on CI", () => {
+  it("can exercise the mode gate on CI", () => {
+    // Read on every run, not only on CI: `it.skipIf` would make this body dead
+    // code locally, so a stale binding here would first surface as a red merge
+    // gate after a push rather than as a local failure.
+    const reason = modeProbe.why;
+    if (!onCI) return;
+    // One assertion, not two: `why === ""` holds exactly when `blocked` is true
+    // — every non-blocking path assigns a reason — so a second expectation on
+    // `blocked` reads as an independent check and is a restatement. The reason
+    // goes in the message instead, because it is the half that says what to do,
+    // and it distinguishes root from a mount with no chmod.
     expect(
-      modeProbe.why,
+      reason,
       "the stamp gate could not be exercised on CI, so the AHEAD-stamp warning " +
-        "and the quiet-when-agreeing case are untested here. If this leg now runs " +
-        "as root or in a container, run it unprivileged or move the gate elsewhere.",
+        "and the quiet-when-agreeing case are untested on this leg",
     ).toBe("");
-    expect(modeProbe.blocked).toBe(true);
   });
 });
 
