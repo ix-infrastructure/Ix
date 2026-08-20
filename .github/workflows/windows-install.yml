@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Windows installer smoke test
+# Windows install and upgrade smoke tests
 #
 # Every Windows install bug this project has shipped got through because
 # nothing ever ran `install.ps1`. The release job packages the CLI on a Windows
@@ -20,11 +20,18 @@
 # produced the artifact, where a failure is attached to the release that caused
 # it.
 #
+# Two jobs, and the split is real. `install` runs install.ps1 and checks the
+# tree it leaves. `upgrade` installs the PREVIOUS stable and runs `ix upgrade`
+# against the release under test, because re-laying that tree is a second
+# mechanism with its own shipped bug and the installer cannot exercise it. It
+# is skipped on prereleases -- see the note above the job for why that is the
+# only honest thing it can do.
+#
 # `IX_SKIP_BACKEND=1` is what makes it possible at all: the runner has no Linux
 # Docker, and `Write-Err` exits, so without the skip the run dies at the Docker
 # check having never unpacked the CLI — the part that keeps breaking.
 # ─────────────────────────────────────────────────────────────────────────────
-name: Windows install
+name: Windows install and upgrade
 
 on:
   pull_request:
@@ -118,8 +125,15 @@ jobs:
           # the session happens to have the right PATH is not a working install.
           $shim = Join-Path $env:IX_HOME 'bin\ix.cmd'
           if (-not (Test-Path -LiteralPath $shim)) { throw "no launcher at $shim" }
-          $out = & $shim --version 2>&1 | Out-String
-          if ($LASTEXITCODE -ne 0) { throw "ix --version exited $LASTEXITCODE`n$out" }
+          # stdout only. The same merge in the upgrade job made its version
+          # assertion unfailable -- printUpdateNotice writes
+          # "Update available: <current> -> <latest>" to stderr, so the wanted
+          # version can appear in merged output while the CLI is on another one.
+          # It cannot fire on a first install of the newest release, which is why
+          # this has been passing honestly; that is a property of the fixture,
+          # not of the check.
+          $out = & $shim --version 2>$null | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "ix --version exited $LASTEXITCODE" }
           Write-Host $out.Trim()
 
           # Assert *which* release we just installed, when one was named.
@@ -136,8 +150,8 @@ jobs:
           # included, and it is right that it cannot tell the difference.
           if ($env:IX_VERSION) {
             $want = $env:IX_VERSION -replace '^v', ''
-            if ($out -notmatch [regex]::Escape($want)) {
-              throw "installed $($out.Trim()) but the release under test is $want"
+            if ($out.Trim() -ne $want) {
+              throw "installed '$($out.Trim())' but the release under test is $want"
             }
             Write-Host "verified against release $want"
           }
@@ -177,8 +191,9 @@ jobs:
                     Where-Object { $_.Name -match '^ix-.*-windows-amd64$' }
           if ($nested) { throw "re-install re-nested the tree under $($nested.Name)" }
 
-          $out = & (Join-Path $env:IX_HOME 'bin\ix.cmd') --version 2>&1 | Out-String
-          if ($LASTEXITCODE -ne 0) { throw "ix --version broken after re-install`n$out" }
+          # stdout only, as above.
+          $out = & (Join-Path $env:IX_HOME 'bin\ix.cmd') --version 2>$null | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "ix --version broken after re-install" }
           Write-Host "after re-install: $($out.Trim())"
 
       # Leaving scratch behind is how #349 was found: the installer used to work
@@ -189,4 +204,234 @@ jobs:
           $leftovers = Get-ChildItem -LiteralPath $env:IX_HOME -Filter '.cli-*' -Force -ErrorAction SilentlyContinue
           if ($leftovers) {
             throw "installer scratch left in IX_HOME: $(($leftovers | Select-Object -ExpandProperty Name) -join ', ')"
+          }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # `ix upgrade` on Windows — the one path nothing has ever run
+  #
+  # install.ps1 lays the tree out FLAT: $IX_HOME\cli\{cli,compass,core-ingestion,ix}.
+  # `ix upgrade` re-lays that tree, and it once re-nested it — it resolved
+  # `stagedRoot` to find the CLI entry point and then swapped in the *outer*
+  # `stagingDir`, so the first upgrade of a flat install produced
+  # `cli\ix-<version>-windows-amd64\...`. `findCompassDist` and `COMPASS_DIR`
+  # read `$IX_HOME\cli\compass` and nothing else, so the symptom is `ix view`
+  # exiting with "Compass UI not found". Fixed in #346; verified once, by hand,
+  # and never since.
+  #
+  # It was recorded as untestable before a GA existed, on the grounds that
+  # `ix upgrade` resolves /releases/latest, which excludes prereleases — so from
+  # an RC it correctly declines and never touches the layout. That reasoning
+  # holds for upgrading FROM a prerelease. It does not hold for upgrading from an
+  # older STABLE, which is also what every real user does. Hence this job.
+  #
+  # Stable releases only, and that is the whole design. `ix upgrade` has no
+  # version flag; it goes wherever /releases/latest points. The only run in which
+  # it can land on the release under test is the one that just made that release
+  # latest. On a prerelease run it would install an old stable and upgrade it to
+  # the CURRENT stable — exercising neither the new artifact nor any code that
+  # can still be changed. A skipped job says that; a green one would not.
+  #
+  # It follows that this cannot gate a PR either. The code performing the swap is
+  # the INSTALLED release's `upgrade.ts`, never the branch's — so a PR editing
+  # upgrade.ts is testing its change one release from now, whatever this job
+  # does. That is a property of self-replacement, not a gap to paper over: the
+  # honest question is "does the upgrade users are about to run survive", and it
+  # is asked here, on the run that publishes the release they will run it against.
+  # ───────────────────────────────────────────────────────────────────────────
+  upgrade:
+    name: ix upgrade on Windows
+    if: ${{ inputs.version != '' && !contains(inputs.version, '-') }}
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      # Whatever stable shipped before this one, resolved rather than pinned: a
+      # hardcoded baseline rots into "upgrade from a release nobody is on any
+      # more" one release after it is written, and the failure mode is a green
+      # tick.
+      - name: Resolve the previous stable release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RELEASE_UNDER_TEST: ${{ inputs.version }}
+        run: |
+          $under = $env:RELEASE_UNDER_TEST -replace '^v', ''
+
+          # Filtered here rather than with --exclude-pre-releases so drafts go
+          # too, and so this does not depend on which gh the runner image ships.
+          $json = gh release list --repo $env:REPO --limit 30 --json tagName,isPrerelease,isDraft
+          if ($LASTEXITCODE -ne 0) { throw "gh release list exited $LASTEXITCODE" }
+
+          # Newest first, which is the order gh returns and the order a user
+          # experiences: the baseline is what they could most recently have
+          # installed, not the highest semver.
+          # Joined: gh is free to pretty-print, and ConvertFrom-Json wants one
+          # string rather than the line array PowerShell would capture.
+          $baseline = ($json -join "`n") | ConvertFrom-Json |
+            Where-Object { -not $_.isPrerelease -and -not $_.isDraft } |
+            ForEach-Object { $_.tagName -replace '^v', '' } |
+            Where-Object { $_ -ne $under } |
+            Select-Object -First 1
+
+          if (-not $baseline) {
+            throw "no earlier stable release to upgrade from (release under test: $under)"
+          }
+          Write-Host "baseline $baseline  ->  release under test $under"
+          "BASELINE=$baseline" >> $env:GITHUB_ENV
+          "UNDER_TEST=$under" >> $env:GITHUB_ENV
+
+      # A path with a space, for the same reason the install job uses one: #349
+      # was a profile at `C:\Users\Win 10`, and the upgrade path writes far more
+      # scratch than the installer does.
+      - name: Install the baseline
+        shell: pwsh
+        env:
+          IX_SKIP_BACKEND: "1"
+        run: |
+          $env:IX_HOME = Join-Path $env:RUNNER_TEMP 'ix home'
+          $env:IX_VERSION = $env:BASELINE
+          & .\scripts\install\install.ps1
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 exited $LASTEXITCODE" }
+          "IX_HOME=$env:IX_HOME" >> $env:GITHUB_ENV
+
+      # Asserted BEFORE upgrading. Without this a nested tree afterwards is
+      # ambiguous — the installer and the upgrade have both re-nested this
+      # directory in the past, and only one of them is under test here.
+      - name: Baseline layout is flat
+        shell: pwsh
+        run: |
+          # Actions runs pwsh with $ErrorActionPreference='Stop', under which a
+          # native command's stderr merged into the pipeline by 2>&1 can surface
+          # as a terminating NativeCommandError. The CLI writes to stderr on
+          # purpose here: printUpdateNotice() goes to stderr and fires on
+          # ORDINARY commands, `ix --version` included, as soon as
+          # .version-check.json knows a newer component exists. That is
+          # guaranteed after the upgrade step below -- this runner has no Linux
+          # Docker, so the backend image is never pulled and "Backend update
+          # available" fires for ever after. It must not be read as the command
+          # failing; the exit code is the verdict. Repeated in every step that
+          # runs the CLI, because the preference is per-step.
+          $ErrorActionPreference = 'Continue'
+          $cli = Join-Path $env:IX_HOME 'cli'
+          $nested = Get-ChildItem -LiteralPath $cli -Directory |
+                    Where-Object { $_.Name -match '^ix-.*-windows-amd64$' }
+          if ($nested) { throw "the INSTALL nested the tree under $($nested.Name); nothing about upgrade is proven by this run" }
+
+          $shim = Join-Path $env:IX_HOME 'bin\ix.cmd'
+          # stdout ONLY, and compared for equality. Merging stderr here would be
+          # a test that cannot fail: printUpdateNotice writes
+          # "Update available: <current> -> <latest>" to stderr, so the version
+          # being asserted appears in the output whether or not the CLI is
+          # actually on it. `--version` puts the version, and nothing else, on
+          # stdout.
+          $v = (& $shim --version 2>$null | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "baseline ix --version exited $LASTEXITCODE" }
+          if ($v -ne $env:BASELINE) {
+            throw "asked for baseline $env:BASELINE but installed '$v'"
+          }
+          Write-Host "baseline installed flat, reporting $v"
+
+      - name: Upgrade
+        shell: pwsh
+        run: |
+          # stderr is expected and merged deliberately here -- unlike the version
+          # checks, this step WANTS the whole transcript, because the diagnoses
+          # below read it. `ix upgrade` reports a failed backend image pull on
+          # stderr, which is the expected outcome on a runner with no Linux
+          # Docker. See "Baseline layout is flat" for the preference.
+          $ErrorActionPreference = 'Continue'
+          $shim = Join-Path $env:IX_HOME 'bin\ix.cmd'
+          $out = & $shim upgrade 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+
+          # `ix upgrade` resolves three GitHub releases through the UNAUTHENTICATED
+          # api.github.com, which is 60/hour per IP and shared across the runner
+          # pool. A 403 there returns null and the CLI exits 1 saying it could not
+          # reach GitHub — true, but it reads as an outage. Name the likely cause
+          # so the next person does not go looking for one.
+          if ($out -match 'Could not reach GitHub') {
+            throw "ix upgrade could not resolve a release. On a shared runner this is usually the unauthenticated api.github.com rate limit (60/hr per IP), not GitHub being down. Re-run before investigating."
+          }
+          if ($code -ne 0) { throw "ix upgrade exited $code" }
+
+          # An upgrade that declined proves nothing about re-laying the tree, and
+          # every assertion below would pass against the untouched baseline. That
+          # is the silent green this job exists to avoid.
+          if ($out -match 'CLI already on the latest version') {
+            throw "ix upgrade declined: it resolved /releases/latest as $env:BASELINE, so v$env:UNDER_TEST is not the latest release. Check make_latest in release.yml."
+          }
+
+      - name: Upgrade did not re-nest the tree
+        shell: pwsh
+        run: |
+          $cli = Join-Path $env:IX_HOME 'cli'
+          $names = (Get-ChildItem -LiteralPath $cli -Name) -join ', '
+          Write-Host "cli\ contains: $names"
+
+          # THE bug. `ix view` reads $IX_HOME\cli\compass and nothing else.
+          $nested = Get-ChildItem -LiteralPath $cli -Directory |
+                    Where-Object { $_.Name -match '^ix-.*-windows-amd64$' }
+          if ($nested) { throw "upgrade re-nested the install under $($nested.Name) — 'ix view' would exit with 'Compass UI not found'" }
+
+          foreach ($entry in 'cli', 'compass', 'core-ingestion', 'ix.cmd') {
+            if (-not (Test-Path -LiteralPath (Join-Path $cli $entry))) {
+              throw "upgrade lost $entry from $cli (found: $names)"
+            }
+          }
+
+      - name: Upgraded CLI is the release under test
+        shell: pwsh
+        run: |
+          # stderr is expected here -- see "Baseline layout is flat".
+          $ErrorActionPreference = 'Continue'
+          # Through the shim by absolute path: refreshLaunchers rewrites this file
+          # during the swap, and a shim left pointing into the pre-upgrade tree is
+          # its own shipped bug (the flat form is `%~dp0..\cli\ix.cmd`).
+          $shim = Join-Path $env:IX_HOME 'bin\ix.cmd'
+          if (-not (Test-Path -LiteralPath $shim)) { throw "upgrade removed the launcher at $shim" }
+          # stdout ONLY, and equality -- see the baseline step. This is the
+          # assertion that proves the swap happened, and merging stderr would
+          # have made it unfailable: with the CLI still on the baseline, the
+          # notice reads "Update available: <baseline> -> <under test>" and
+          # contains the very string being looked for.
+          $v = (& $shim --version 2>$null | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "ix --version exited $LASTEXITCODE after upgrade" }
+          if ($v -ne $env:UNDER_TEST) {
+            throw "upgraded to '$v', expected the release under test $env:UNDER_TEST"
+          }
+          Write-Host "upgraded $env:BASELINE -> $v"
+
+      - name: Compass survived the upgrade
+        shell: pwsh
+        run: |
+          $compass = Join-Path $env:IX_HOME 'cli\compass'
+          if (-not (Test-Path -LiteralPath (Join-Path $compass 'index.html'))) {
+            throw "no compass bundle after upgrade — 'ix view' would exit with 'Compass UI not found'"
+          }
+          # An unstamped bundle reads as 0.0.0, which is how a *later* upgrade
+          # came to replace a current Compass with an older dist build.
+          $stamp = Join-Path $compass '.version'
+          if (-not (Test-Path -LiteralPath $stamp)) { throw "compass has no .version stamp after upgrade" }
+          $v = (Get-Content -LiteralPath $stamp -Raw).Trim()
+          if (-not $v) { throw "compass .version is empty after upgrade" }
+          Write-Host "compass: $v"
+
+      # The upgrade stages a download, a new tree and a backup of the old one,
+      # all under IX_HOME since #349 moved them out of TEMP. Leaving any of it
+      # behind is multi-MB per upgrade and hides an interrupted swap.
+      - name: No scratch left behind
+        shell: pwsh
+        run: |
+          $leftovers = Get-ChildItem -LiteralPath $env:IX_HOME -Force -ErrorAction SilentlyContinue |
+                       Where-Object { $_.Name -match '^\.(cli|compass)-(download|staging|backup)-' }
+          if ($leftovers) {
+            throw "upgrade scratch left in IX_HOME: $(($leftovers | Select-Object -ExpandProperty Name) -join ', ')"
           }
