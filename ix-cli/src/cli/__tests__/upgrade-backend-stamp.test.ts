@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import {
   backendUpdateAvailable,
   composeTracksLatestBackend,
+  stampDisagreesWithPull,
   writeVersionStamp,
 } from "../commands/upgrade.js";
 
@@ -36,6 +45,34 @@ describe("backendUpdateAvailable", () => {
   it("offers the upgrade on a fresh install, where nothing is tracked", () => {
     // getTrackedVersion returns 0.0.0 when the file is absent or empty.
     expect(backendUpdateAvailable("1.0.16", "0.0.0")).toBe(true);
+  });
+});
+
+/**
+ * The gate on the stamp-failure warning, which is deliberately NOT the notice
+ * predicate above — and this is where the two are shown to differ, so the
+ * divergence is a decision on the record rather than an accident.
+ */
+describe("stampDisagreesWithPull", () => {
+  it("is quiet when the stamp records exactly what was pulled", () => {
+    expect(stampDisagreesWithPull("1.0.16", "1.0.16")).toBe(false);
+  });
+
+  it("fires when the stamp is behind", () => {
+    expect(stampDisagreesWithPull("1.0.13", "1.0.16")).toBe(true);
+    expect(backendUpdateAvailable("1.0.16", "1.0.13")).toBe(true); // both agree
+  });
+
+  it("fires when the stamp is AHEAD, where the notice predicate is silent", () => {
+    // The whole reason this is a separate predicate. An ahead stamp is wrong
+    // and, once the write has failed, uncorrectable — but there is no upgrade
+    // to offer, so backendUpdateAvailable says nothing.
+    expect(stampDisagreesWithPull("1.0.17", "1.0.16")).toBe(true);
+    expect(backendUpdateAvailable("1.0.16", "1.0.17")).toBe(false); // they differ
+  });
+
+  it("fires on a fresh install, where nothing is tracked", () => {
+    expect(stampDisagreesWithPull("0.0.0", "1.0.16")).toBe(true);
   });
 });
 
@@ -218,33 +255,22 @@ describe("stampBackendVersionAfterPull, isolated", () => {
     // beforeEach is describe-scoped: without it the NEXT behavioural describe
     // added to this file inherits this one's module instance, still bound to
     // the IX_HOME about to be deleted, and writes into a resurrected directory.
+    // restoreAllMocks because vi.spyOn on an ALREADY-spied method hands back
+    // the existing mock, so without it a later test's `warn` still carries the
+    // earlier test's calls.
     vi.unstubAllGlobals();
     vi.resetModules();
-    // vi.spyOn on an ALREADY-spied method hands back the existing mock, so
-    // without this a later test's `warn` still carries the earlier test's
-    // calls — which is how the console assertions below first went red.
     vi.restoreAllMocks();
     if (priorHome === undefined) delete process.env.IX_HOME;
     else process.env.IX_HOME = priorHome;
-    rmSync(home, { recursive: true, force: true });
+    // maxRetries for the same Windows EBUSY the ordering above works around:
+    // moving the unstub earlier stops it leaking, but a throw here still fails
+    // a test that passed.
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   /** Re-imported so IX_HOME above is the one the module reads. */
   const load = () => import("../commands/upgrade.js");
-
-  it("stamps nothing, and reaches no network, when the compose cannot be read", async () => {
-    // The compose read is the one call in here that can throw, and it must not
-    // escape into `ix docker start`, which has already brought containers up.
-    const fetchMock = feedReturns("v1.0.16");
-    const mod = await load();
-    await expect(
-      mod.stampBackendVersionAfterPull(join(home, "no-such-compose.yml")),
-    ).resolves.toBeUndefined();
-    expect(existsSync(join(home, ".backend-version"))).toBe(false);
-    // The half the name claims and nothing used to check: hoisting the fetch
-    // above the compose guard passes every other assertion here.
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
 
   /** A compose the guard accepts, so the fetch-and-write path is reached. */
   const tracksLatest = () => {
@@ -259,6 +285,9 @@ describe("stampBackendVersionAfterPull, isolated", () => {
   /**
    * The release feed, stubbed — no test in here reaches the network. Each
    * returns the mock so a test can assert the request was (or was not) made.
+   * Declared above the first test that calls them: they are `const`, and only
+   * the fact that Vitest evaluates this whole body before running any test
+   * keeps a call from above them out of the temporal dead zone.
    */
   const feedReturns = (tag: string) => {
     const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ tag_name: tag }) }));
@@ -282,13 +311,40 @@ describe("stampBackendVersionAfterPull, isolated", () => {
     return fetchMock;
   };
 
+  const stampPath = () => join(home, ".backend-version");
+
+  it("stamps nothing, and reaches no network, when the compose cannot be read", async () => {
+    // The compose read is the one call in here that can throw, and it must not
+    // escape into `ix docker start`, which has already brought containers up.
+    const fetchMock = feedReturns("v1.0.16");
+    const mod = await load();
+    await expect(
+      mod.stampBackendVersionAfterPull(join(home, "no-such-compose.yml")),
+    ).resolves.toBeUndefined();
+    expect(existsSync(stampPath())).toBe(false);
+    // The half the name claims and nothing used to check: hoisting the fetch
+    // above the compose guard passes every other assertion here.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("stamps nothing when the compose does not track :latest", async () => {
+    const fetchMock = feedReturns("v1.0.16");
+    const compose = join(home, "docker-compose.yml");
+    writeFileSync(compose, "services:\n  memory-layer:\n    image: ix-memory-layer:dev\n");
+    const mod = await load();
+    await mod.stampBackendVersionAfterPull(compose);
+    expect(existsSync(stampPath())).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("records the release it just pulled", async () => {
     // The behaviour this whole change exists to add. Without it, gutting the
     // write entirely leaves every other test in this file green.
-    feedReturns("v1.0.16");
+    const fetchMock = feedReturns("v1.0.16");
     const mod = await load();
     await mod.stampBackendVersionAfterPull(tracksLatest());
-    expect(readFileSync(join(home, ".backend-version"), "utf-8")).toBe("1.0.16");
+    expect(fetchMock).toHaveBeenCalled();
+    expect(readFileSync(stampPath(), "utf-8")).toBe("1.0.16");
   });
 
   it("overwrites a stamp that had got ahead of the real release", async () => {
@@ -296,73 +352,116 @@ describe("stampBackendVersionAfterPull, isolated", () => {
     // published separately, so the file can legitimately read high; a
     // never-go-backwards rule would pin it there and silence the notice for
     // good.
-    writeFileSync(join(home, ".backend-version"), "1.0.17");
+    writeFileSync(stampPath(), "1.0.17");
     feedReturns("v1.0.16");
     const mod = await load();
     await mod.stampBackendVersionAfterPull(tracksLatest());
-    expect(readFileSync(join(home, ".backend-version"), "utf-8")).toBe("1.0.16");
+    expect(readFileSync(stampPath(), "utf-8")).toBe("1.0.16");
   });
 
-  it("leaves the stamp alone when the release cannot be fetched", async () => {
-    // Offline or rate-limited. Erring behind costs a nag; erring ahead hides a
-    // stale backend, so this must not write.
-    writeFileSync(join(home, ".backend-version"), "1.0.13");
-    feedRefuses();
+  it("leaves the stamp alone, and says nothing, when the feed refuses", async () => {
+    writeFileSync(stampPath(), "1.0.13");
+    const fetchMock = feedRefuses();
+    const warn = vi.spyOn(console, "error").mockImplementation(() => {});
     const mod = await load();
     await mod.stampBackendVersionAfterPull(tracksLatest());
-    expect(readFileSync(join(home, ".backend-version"), "utf-8")).toBe("1.0.13");
-  });
-
-  it("stamps nothing when the compose does not track :latest", async () => {
-    // Stubbed so a regression in the guard is caught here rather than quietly
-    // reaching the network — which is also what made this test pass offline
-    // with the guard deleted.
-    const fetchMock = feedReturns("v1.0.16");
-    const compose = join(home, "docker-compose.yml");
-    writeFileSync(compose, "services:\n  memory-layer:\n    image: ix-memory-layer:dev\n");
-    const mod = await load();
-    await mod.stampBackendVersionAfterPull(compose);
-    expect(existsSync(join(home, ".backend-version"))).toBe(false);
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("leaves the stamp alone when the feed is unreachable", async () => {
-    // Offline REJECTS; it does not answer with `ok: false`. That throw is
-    // caught inside fetchLatestRelease, and no test reached that path — so a
-    // narrowing of its catch would escape into the outer one here, whose
-    // comment says it cannot.
-    writeFileSync(join(home, ".backend-version"), "1.0.13");
-    const fetchMock = feedUnreachable();
-    const mod = await load();
-    await expect(mod.stampBackendVersionAfterPull(tracksLatest())).resolves.toBeUndefined();
     expect(fetchMock).toHaveBeenCalled();
-    expect(readFileSync(join(home, ".backend-version"), "utf-8")).toBe("1.0.13");
-  });
-
-  it("says why when the stamp cannot be written and the file is wrong", async () => {
-    // The user is about to be nagged on every command; this is the only thing
-    // that explains it. A directory where the file belongs makes the write fail
-    // portably, and makes getTrackedVersion read 0.0.0.
-    mkdirSync(join(home, ".backend-version"), { recursive: true });
-    feedReturns("v1.0.16");
-    const warn = vi.spyOn(console, "error").mockImplementation(() => {});
-    const mod = await load();
-    await mod.stampBackendVersionAfterPull(tracksLatest());
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0]?.[0])).toContain(".backend-version");
-  });
-
-  it("stays quiet when the stamp cannot be written but already matches", async () => {
-    // Same unwritable stamp, but nothing is out of date: tracked reads 0.0.0
-    // and the feed says 0.0.0, so warning would promise a nag that never comes.
-    mkdirSync(join(home, ".backend-version"), { recursive: true });
-    feedReturns("v0.0.0");
-    const warn = vi.spyOn(console, "error").mockImplementation(() => {});
-    const mod = await load();
-    await mod.stampBackendVersionAfterPull(tracksLatest());
+    expect(readFileSync(stampPath(), "utf-8")).toBe("1.0.13");
+    // `latest &&` is the only thing stopping a warning here: the gate compares
+    // strings, and a tracked version never equals null.
     expect(warn).not.toHaveBeenCalled();
   });
 
+  it("leaves the stamp alone, and says nothing, when the feed is unreachable", async () => {
+    // Offline REJECTS; it does not answer with `ok: false`. Both converge on
+    // `latest === null` here — this covers the offline shape, it does NOT prove
+    // where the rejection is caught, since fetchLatestRelease's own catch and
+    // the outer catch are observationally identical from out here.
+    writeFileSync(stampPath(), "1.0.13");
+    const fetchMock = feedUnreachable();
+    const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await load();
+    await expect(mod.stampBackendVersionAfterPull(tracksLatest())).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalled();
+    expect(readFileSync(stampPath(), "utf-8")).toBe("1.0.13");
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("says why when the stamp cannot be written and the file is wrong", async () => {
+    // The user's backend notices are about to be wrong and this is the only
+    // thing that explains it. A directory where the file belongs makes the
+    // write fail portably, and makes getTrackedVersion read 0.0.0.
+    mkdirSync(stampPath(), { recursive: true });
+    const fetchMock = feedReturns("v1.0.16");
+    const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await load();
+    await mod.stampBackendVersionAfterPull(tracksLatest());
+    expect(fetchMock).toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain("backend update notices will be wrong");
+  });
+
+  /**
+   * A stamp that is READABLE but not writable — the case the comment on the
+   * gate actually describes ("a root-owned stamp already holding what we just
+   * pulled"). The directory trick cannot produce it: a directory always reads
+   * as 0.0.0, which forces the feed to return "0.0.0" to make the two agree,
+   * and no real release is ever 0.0.0. POSIX only; Windows largely ignores
+   * chmod.
+   */
+  const readableButUnwritableStamp = (contents: string, ctx: { skip: (r: string) => void }) => {
+    writeFileSync(stampPath(), contents);
+    chmodSync(stampPath(), 0o444);
+    try {
+      writeFileSync(stampPath(), "probe");
+      chmodSync(stampPath(), 0o644);
+      // Running as root, where the mode is bypassed. Skip loudly rather than
+      // let the test assert nothing.
+      ctx.skip("stamp file is writable despite 0444 (running as root?)");
+      return false;
+    } catch {
+      return true; // the write is refused, which is the point
+    }
+  };
+
+  it.skipIf(process.platform === "win32")(
+    "stays quiet when the stamp cannot be written but already records what we pulled",
+    async (ctx) => {
+      // Warning here would be noise on every cold start with nothing wrong.
+      if (!readableButUnwritableStamp("1.0.16", ctx)) return;
+      const fetchMock = feedReturns("v1.0.16");
+      const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+      const mod = await load();
+      await mod.stampBackendVersionAfterPull(tracksLatest());
+      // Positive controls: a silent early return upstream satisfies
+      // `not.toHaveBeenCalled` just as well as the gate deciding to stay quiet.
+      expect(fetchMock).toHaveBeenCalled();
+      expect(readFileSync(stampPath(), "utf-8")).toBe("1.0.16"); // the write did fail
+      expect(warn).not.toHaveBeenCalled();
+      chmodSync(stampPath(), 0o644);
+    },
+  );
+
+  /**
+   * The case that separates the gate from `backendUpdateAvailable`, and the
+   * only one where the two disagree: the stamp is AHEAD of what we pulled.
+   * `backendUpdateAvailable` is false there, so an is-newer gate says nothing
+   * while the file is wrong and can no longer be corrected.
+   */
+  it.skipIf(process.platform === "win32")(
+    "warns when the stamp is stuck AHEAD of the release, where an is-newer gate would not",
+    async (ctx) => {
+      if (!readableButUnwritableStamp("1.0.17", ctx)) return;
+      const fetchMock = feedReturns("v1.0.16");
+      const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+      const mod = await load();
+      await mod.stampBackendVersionAfterPull(tracksLatest());
+      expect(fetchMock).toHaveBeenCalled();
+      expect(readFileSync(stampPath(), "utf-8")).toBe("1.0.17"); // still unwritten
+      expect(warn).toHaveBeenCalledTimes(1);
+      chmodSync(stampPath(), 0o644);
+    },
+  );
 });
 
 /**

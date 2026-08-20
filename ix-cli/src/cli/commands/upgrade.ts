@@ -375,9 +375,32 @@ export function backendUpdateAvailable(
  * One wording for one condition, used by both callers that branch on
  * `writeVersionStamp` returning false. Two literals for the same failure is how
  * they drift.
+ *
+ * It does not promise a nag. A stamp stuck BEHIND makes the notice fire on every
+ * command; a stamp stuck AHEAD makes it stay silent through the next release
+ * the user should have been told about. Both are wrong and neither is fixable
+ * without the write, so the sentence has to cover both.
  */
 function stampFailureMessage(versionFile: string): string {
-  return `[!!] Could not record the version in ${versionFile}; the update notice will keep firing.`;
+  return `[!!] Could not record the version in ${versionFile}; backend update notices will be wrong until it is writable.`;
+}
+
+/**
+ * Whether the stamp disagrees with the release we just pulled.
+ *
+ * Deliberately NOT `backendUpdateAvailable`. That answers "is there an upgrade
+ * to offer", which is silent when the stamp is stuck AHEAD — a state this module
+ * documents as reachable, since the GHCR tag and the release feed are published
+ * separately — and an ahead stamp is equally wrong and equally uncorrectable
+ * once the write has failed.
+ *
+ * A plain textual comparison, because that is the question: the file either
+ * records what was pulled or it does not. Named and exported rather than
+ * inlined so it is testable and so its divergence from the notice predicate is
+ * visible rather than accidental.
+ */
+export function stampDisagreesWithPull(trackedVersion: string, pulled: string): boolean {
+  return trackedVersion !== pulled;
 }
 
 /**
@@ -493,7 +516,7 @@ export async function stampBackendVersionAfterPull(composeFile: string): Promise
       // fetched": a stamp stuck AHEAD is also wrong and also cannot be
       // corrected here, and the notice this warns about is computed from the
       // CACHED release, which can be up to an hour out of step with `latest`.
-      if (getTrackedVersion(BACKEND_VERSION_FILE) !== latest) {
+      if (stampDisagreesWithPull(getTrackedVersion(BACKEND_VERSION_FILE), latest)) {
         console.error(chalk.yellow(stampFailureMessage(BACKEND_VERSION_FILE)));
       }
     }
