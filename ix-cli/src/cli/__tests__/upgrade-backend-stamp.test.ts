@@ -438,17 +438,24 @@ describe("stampBackendVersionAfterPull, isolated", () => {
    * skipping there would drop the whole gate on windows-2022 for nothing.
    */
   const modeBlocksWrite = (() => {
-    const probe = join(tmpdir(), `ix-mode-probe-${process.pid}`);
+    // mkdtemp, not a name built from the pid: a predictable path in the shared
+    // temp dir is one an attacker can pre-create as a symlink, and CodeQL flags
+    // it (js/insecure-temporary-file). It also gives each vitest worker and each
+    // parallel CI job its own directory, so the probes cannot collide.
+    let dir: string | undefined;
     try {
+      dir = mkdtempSync(join(tmpdir(), "ix-mode-probe-"));
+      const probe = join(dir, "probe");
       writeFileSync(probe, "x");
       chmodSync(probe, 0o444);
       const blocked = (statSync(probe).mode & 0o200) === 0;
-      chmodSync(probe, 0o644);
+      chmodSync(probe, 0o644); // so the rm below cannot be the thing that fails
       return blocked;
     } catch {
+      // Cannot establish that the mode bites, so do not pretend it does.
       return false;
     } finally {
-      rmSync(probe, { force: true });
+      if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   })();
 
