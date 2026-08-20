@@ -13,7 +13,7 @@ import {
   checkBackendSchema,
   isNonStandardBackend,
 } from "../backend-status.js";
-import { recordBackendRelease } from "./upgrade.js";
+import { readBackendHealth } from "./upgrade.js";
 
 interface CheckResult {
   ok: boolean;
@@ -125,7 +125,9 @@ export function registerDoctorCommand(program: Command): void {
           name: "Server reachable",
           run: async () => {
             try {
-              const h = await client.health();
+              // Records what the backend says it is running; see
+               // backend-version.ts. Free — this response is already needed.
+              const h = await readBackendHealth(client, endpoint);
               return { ok: h.status === "ok", detail: `${endpoint} → ${h.status}` };
             } catch (e: any) {
               return { ok: false, detail: e.message ?? "unreachable" };
@@ -209,9 +211,6 @@ export function registerDoctorCommand(program: Command): void {
           name: "Graph schema matches engine",
           run: async () => {
             const s = await checkBackendSchema(client);
-            // Free: the health response is already in hand. Corrects the stamp
-            // the update notice reads, without a request or a command of its own.
-            recordBackendRelease(s.releaseVersion);
             if (!s.reachable) return { ok: true, detail: "backend unreachable (skipped)" };
             if (s.serverVersion === null) return { ok: true, detail: "backend does not report a schema version" };
             if (s.matches) return { ok: true, detail: `schema v${s.serverVersion}` };

@@ -6,6 +6,7 @@ import chalk from "chalk";
 import { IxClient } from "../client/api.js";
 import { getEndpoint, loadConfig, saveConfig, findWorkspaceForCwd, getDefaultWorkspace, type WorkspaceConfig } from "./config.js";
 import { workspaceIdForPath } from "./system.js";
+import { readBackendHealth } from "./commands/upgrade.js";
 
 export interface BootstrapResult {
   createdConfig: boolean;
@@ -124,9 +125,13 @@ export function resolveWorkspaceId(cwd = process.cwd()): string | undefined {
  * Ensure the backend is reachable. If not, auto-start via ix docker start.
  */
 export async function ensureBackendAvailable(): Promise<void> {
-  const client = new IxClient(getEndpoint());
+  const endpoint = getEndpoint();
+  const client = new IxClient(endpoint);
   try {
-    await client.health();
+    // Through readBackendHealth so this probe records the release the backend
+    // reports, like every other health fetch. `ix init` never reaches the
+    // ingest path, so without this it would never record at all.
+    await readBackendHealth(client, endpoint);
   } catch {
     try {
       execFileSync("ix", ["docker", "start"], { stdio: "inherit", timeout: 120000 });

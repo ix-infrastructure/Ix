@@ -7,6 +7,27 @@ import { homedir } from "os";
 import chalk from "chalk";
 import { BACKEND_IMAGE, checkBackendImage, isNonStandardBackend } from "../backend-status.js";
 import { canRenderProgress } from "../stderr.js";
+import type { IxClient } from "../../client/api.js";
+import {
+  BACKEND_VERSION_FILE,
+  fetchBackendHealth,
+  getTrackedVersion,
+  writeVersionStamp,
+} from "../backend-version.js";
+
+export { BACKEND_VERSION_FILE, recordBackendRelease, writeVersionStamp } from "../backend-version.js";
+
+/**
+ * Fetch health and record what the backend says it is running.
+ *
+ * The one entry point commands use, so the cache lookup and the version
+ * comparison live in exactly one place — and so no call site can fetch health
+ * without recording, which is the mistake a grep-based guard could only detect
+ * after the fact.
+ */
+export async function readBackendHealth(client: IxClient, endpoint: string) {
+  return fetchBackendHealth(client, endpoint, readCache()?.backendLatest ?? null, isNewer);
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -19,7 +40,6 @@ const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
 const VERSION_CACHE = join(IX_HOME, ".version-check.json");
 const COMPASS_DIR = join(IX_HOME, "cli", "compass");
 const COMPASS_VERSION_FILE = join(COMPASS_DIR, ".version");
-const BACKEND_VERSION_FILE = join(IX_HOME, ".backend-version");
 
 interface VersionCache {
   latest: string;
@@ -341,44 +361,7 @@ function shouldOfferCompassUpgrade(compassLatest: string | undefined): boolean {
   return shouldOfferCompassUpgradeFor(compassLatest, installedCompass());
 }
 
-function getTrackedVersion(versionFile: string): string {
-  try {
-    if (!existsSync(versionFile)) return "0.0.0";
-    return readFileSync(versionFile, "utf-8").trim() || "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
-}
 
-/**
- * Record what the backend says it is.
- *
- * `.backend-version` was a record of what the CLI last installed, which is only
- * the same thing as what is RUNNING while nothing else moves the image. Pull
- * through docker compose, or through `ix docker start` after the tag moved, and
- * the file names an older release than the container — so the notice fires on
- * every command for ever. Ix#466 fixed the paths that run our code; this fixes
- * the rest, because the container is asked directly.
- *
- * Called wherever the CLI already has a health response, so it costs no extra
- * request and needs no new command: the stamp self-corrects the next time
- * anything touches the backend, in BOTH directions — a stamp stuck ahead is
- * repaired too, which no amount of local inspection could do.
- *
- * Validated with the same VERSION_RE the release feed is: the field is a
- * container env var the operator can set to anything, and writing arbitrary
- * text into the file the notice compares would be worse than not writing.
- * Older backends omit it entirely and arrive here as undefined.
- *
- * Silent and best-effort. It is bookkeeping attached to a command the user
- * actually ran, and a read-only IX_HOME must not make `ix status` fail; the
- * paths that can act on a failure already report it.
- */
-export function recordBackendRelease(reported: string | null | undefined): void {
-  if (!reported || !VERSION_RE.test(reported)) return;
-  if (reported === getTrackedVersion(BACKEND_VERSION_FILE)) return; // already agrees
-  writeVersionStamp(BACKEND_VERSION_FILE, reported);
-}
 
 /**
  * Whether to tell the user their backend is behind.
@@ -456,41 +439,6 @@ export function stampDisagreesWithPull(trackedVersion: string, pulled: string): 
   return isNewer(trackedVersion, pulled) || isNewer(pulled, trackedVersion);
 }
 
-/**
- * Record the backend release in its stamp file. Returns whether it was written.
- *
- * `mkdirSync` because IX_HOME may not exist yet — a stamp that fails to write
- * leaves the tracked version behind for ever, and the notice it drives says
- * "update available" on every command with no way for the user to see why.
- *
- * A falsy version is refused rather than written: not knowing which release we
- * are on is not the same as being on none of them. Being wrong *behind* costs a
- * nag, while being wrong *ahead* hides a genuinely stale backend and stops
- * `ix upgrade` from ever fetching it — so where there is a choice, this errs
- * behind. (It is not always a choice: the GHCR `:latest` tag and the
- * `ix-memory-layer-dist` release are separate publishing surfaces with nothing
- * correlating them, so a release cut between the two can be recorded ahead of
- * the image actually pulled. `ix upgrade` has always had that race; correcting
- * it needs the backend to report its own version.)
- *
- * The write does not throw — callers differ on whether a failure should be
- * fatal, so they decide from the return value rather than from an exception.
- * Not a general component-stamp writer: the compass stamp is written with a
- * trailing newline that `parseCompassStamp` depends on.
- */
-export function writeVersionStamp(
-  versionFile: string,
-  version: string | null | undefined,
-): boolean {
-  if (!version) return false;
-  try {
-    mkdirSync(dirname(versionFile), { recursive: true });
-    writeFileSync(versionFile, version);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Whether this compose file runs the backend from the moving `:latest` tag.
