@@ -366,6 +366,34 @@ export function writeVersionStamp(versionFile: string, version: string | null | 
 }
 
 /**
+ * Whether this compose file runs the backend from the moving `:latest` tag.
+ *
+ * The premise of stamping after a pull is that `--pull always` fetched the
+ * current release — which holds only if the file being started actually tracks
+ * `:latest`. `ix docker start` falls back to any `docker-compose.yml` in the
+ * working directory, so it may well not: a compose that pins `:1.0.13`, pins a
+ * digest, or points at a locally-built image pulls something that is not the
+ * latest release, and stamping it would put a version in the file that the
+ * running container does not have.
+ *
+ * That is the one way this file must never be wrong, so the check is on the
+ * image reference itself rather than on which path the compose came from — a
+ * user is free to edit the copy under IX_HOME, and it is what the file *says*
+ * that decides what gets pulled.
+ */
+export function composeTracksLatestBackend(composeText: string): boolean {
+  // Compared as a whole string rather than matched as a pattern: BACKEND_IMAGE
+  // is interpolated, and its dots are regex wildcards, so a pattern here would
+  // also accept `ghcrXio/...` and anything else that happened to line up.
+  const wanted = `${BACKEND_IMAGE}:latest`;
+  return composeText.split(/\r?\n/).some((line) => {
+    const declared = /^\s*image:\s*(.+?)\s*$/.exec(line);
+    if (!declared) return false;
+    return declared[1].replace(/^["']|["']$/g, "") === wanted;
+  });
+}
+
+/**
  * Record the backend release after something has pulled `:latest`.
  *
  * `.backend-version` was written by `ix upgrade` and by nothing else, so anyone
@@ -383,11 +411,12 @@ export function writeVersionStamp(versionFile: string, version: string | null | 
  * If the release cannot be fetched the stamp is left alone: the user keeps a
  * notice they may not need, which is the failure worth having.
  */
-export async function stampBackendVersionAfterPull(): Promise<void> {
+export async function stampBackendVersionAfterPull(composeFile: string): Promise<void> {
   try {
+    if (!composeTracksLatestBackend(readFileSync(composeFile, "utf-8"))) return;
     writeVersionStamp(BACKEND_VERSION_FILE, await fetchLatestRelease(MEMORY_LAYER_DIST_REPO));
   } catch {
-    /* offline, rate-limited, whatever: the tracked version stands */
+    /* offline, rate-limited, unreadable compose: the tracked version stands */
   }
 }
 

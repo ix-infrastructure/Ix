@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { writeVersionStamp } from "../commands/upgrade.js";
+import { composeTracksLatestBackend, writeVersionStamp } from "../commands/upgrade.js";
 
 /**
  * `.backend-version` drives the "Backend update available" notice on every
@@ -73,27 +74,113 @@ describe("writeVersionStamp", () => {
 });
 
 /**
- * The stamp only helps if the pull path actually calls it, and that call cannot
- * be exercised here — it sits behind `docker compose up`. This is a drift guard
- * on the wiring: it fails if the call is removed, and if it is moved to before
- * the pull it is meant to record.
+ * Stamping after a pull is only sound if the compose that was started actually
+ * tracks `:latest`. `ix docker start` falls back to ANY docker-compose.yml in
+ * the working directory, so this is what stops the stamp claiming a release for
+ * a container running a pinned tag, a digest, or a local build.
  */
-describe("ix docker start records the version it pulled", () => {
-  const source = readFileSync(
-    new URL("../commands/docker.ts", import.meta.url),
-    "utf-8",
-  );
+describe("composeTracksLatestBackend", () => {
+  const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
 
-  it("calls the stamp helper", () => {
-    expect(source).toContain("stampBackendVersionAfterPull()");
+  it("accepts the compose file this project actually ships", () => {
+    // A drift guard. If the shipped compose ever pins a version instead of
+    // tracking :latest, stamping after a pull stops being true — and it would
+    // stop silently, since the stamp simply never gets written.
+    const shipped = readFileSync(join(REPO_ROOT, "docker-compose.standalone.yml"), "utf-8");
+    expect(composeTracksLatestBackend(shipped)).toBe(true);
   });
 
-  it("calls it AFTER the pull, not before", () => {
-    const pull = source.indexOf('"--pull", "always"');
-    const stamp = source.indexOf("await stampBackendVersionAfterPull()");
-    // Both must exist, or `-1 < n` would quietly satisfy the ordering.
+  it("accepts a quoted image reference", () => {
+    expect(
+      composeTracksLatestBackend('    image: "ghcr.io/ix-infrastructure/ix-memory-layer:latest"'),
+    ).toBe(true);
+  });
+
+  it("refuses a pinned version tag", () => {
+    expect(
+      composeTracksLatestBackend("    image: ghcr.io/ix-infrastructure/ix-memory-layer:1.0.13"),
+    ).toBe(false);
+  });
+
+  it("refuses a pinned digest", () => {
+    expect(
+      composeTracksLatestBackend(
+        "    image: ghcr.io/ix-infrastructure/ix-memory-layer@sha256:944f76887832",
+      ),
+    ).toBe(false);
+  });
+
+  it("refuses a locally built or third-party image", () => {
+    expect(composeTracksLatestBackend("    image: ix-memory-layer:dev")).toBe(false);
+    expect(composeTracksLatestBackend("    image: arangodb:3.12")).toBe(false);
+  });
+
+  it("refuses a near-miss registry name", () => {
+    // The dots in the image name are not wildcards: this is compared, not
+    // matched. A pattern would accept this.
+    expect(
+      composeTracksLatestBackend("    image: ghcrXio/ix-infrastructure/ix-memory-layer:latest"),
+    ).toBe(false);
+  });
+
+  it("refuses a tag that merely starts with latest", () => {
+    // `:latest-debug` is a different image that a substring test would accept.
+    expect(
+      composeTracksLatestBackend(
+        "    image: ghcr.io/ix-infrastructure/ix-memory-layer:latest-debug",
+      ),
+    ).toBe(false);
+  });
+
+  it("refuses the image republished under another registry", () => {
+    // Contains the wanted reference in full, so only comparing the WHOLE value
+    // rejects it — and it is a different image, pulled from somewhere we have
+    // made no claim about.
+    expect(
+      composeTracksLatestBackend(
+        "    image: mirror.internal/ghcr.io/ix-infrastructure/ix-memory-layer:latest",
+      ),
+    ).toBe(false);
+  });
+
+  it("refuses a compose that names no image at all", () => {
+    expect(composeTracksLatestBackend("services:\n  memory-layer:\n    build: .")).toBe(false);
+  });
+});
+
+/**
+ * The two orderings that make the stamp safe cannot be exercised here — one
+ * sits behind `docker compose up`, the other behind a network fetch — so they
+ * are pinned as drift guards on the source. Both assert their landmarks exist
+ * before comparing positions, so neither can pass on a `-1`.
+ */
+describe("the stamp is wired where it is true", () => {
+  const dockerSource = readFileSync(new URL("../commands/docker.ts", import.meta.url), "utf-8");
+  const upgradeSource = readFileSync(new URL("../commands/upgrade.ts", import.meta.url), "utf-8");
+
+  it("ix docker start stamps AFTER the pull, not before", () => {
+    const pull = dockerSource.indexOf('"--pull", "always"');
+    const stamp = dockerSource.indexOf("await stampBackendVersionAfterPull(composeFile)");
     expect(pull).toBeGreaterThan(-1);
     expect(stamp).toBeGreaterThan(-1);
     expect(stamp).toBeGreaterThan(pull);
+  });
+
+  it("stampBackendVersionAfterPull checks the compose before fetching or writing", () => {
+    const from = upgradeSource.indexOf("export async function stampBackendVersionAfterPull");
+    expect(from).toBeGreaterThan(-1);
+    const fn = upgradeSource.slice(from);
+    const body = fn.slice(0, fn.indexOf("\n}"));
+
+    const guard = body.indexOf("composeTracksLatestBackend(");
+    const fetched = body.indexOf("fetchLatestRelease(");
+    const written = body.indexOf("writeVersionStamp(");
+    expect(guard).toBeGreaterThan(-1);
+    expect(fetched).toBeGreaterThan(-1);
+    expect(written).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(fetched);
+    expect(guard).toBeLessThan(written);
+    // ...and it must return on the guard, not merely evaluate it.
+    expect(body).toMatch(/if \(!composeTracksLatestBackend\(.*\)\) return;/);
   });
 });

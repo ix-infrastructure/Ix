@@ -145,14 +145,17 @@ export function registerDockerCommand(program: Command): void {
         process.exit(1);
       }
 
-      // `--pull always` just fetched `:latest`, so the container is now running
-      // the current backend release — record it. Without this the tracked
-      // version only ever moves when `ix upgrade` runs, so starting the backend
-      // any other way leaves a file naming an older release and the update
-      // notice fires on every command for ever. Awaited so the stamp is on disk
-      // before the command returns, and it cannot fail the start: the helper
-      // swallows its own errors and leaves the old value in place.
-      await stampBackendVersionAfterPull();
+      // `--pull always` just fetched the images this compose names, so if it
+      // tracks `:latest` the container is now running the current backend
+      // release — record it. Without this the tracked version only ever moves
+      // when `ix upgrade` runs, so starting the backend any other way leaves a
+      // file naming an older release and the update notice fires on every
+      // command for ever. The compose file is passed because it decides whether
+      // that premise holds at all: this falls back to any docker-compose.yml in
+      // the working directory, which may pin a tag, a digest, or a local build.
+      // Awaited so the stamp is on disk before the command returns, and it
+      // cannot fail the start: the helper swallows its own errors.
+      await stampBackendVersionAfterPull(composeFile);
 
       console.log("Waiting for services to become healthy...");
       for (let i = 0; i < 30; i++) {
