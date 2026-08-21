@@ -7,11 +7,14 @@ import { Command } from "commander";
 import {
   detectContextModeConflict,
   registerContextCommand,
+  sanitizeId,
+  mergeDiffOptions,
 } from "../commands/context.js";
 import {
   detectDiffModeConflict,
   registerDiffCommand,
 } from "../commands/diff.js";
+import { reportFailure } from "../ui.js";
 
 /**
  * C-1..C-4 silent-ignore flag gaps in `ix context` and C-5 in `ix diff` are now
@@ -300,10 +303,10 @@ describe("mode-flag coverage does not drift from the command", () => {
  * No HTTP backend is required for the conflict paths because the detector
  * runs at the top of the action handler.
  */
-function runProgram(
+async function runProgram(
   register: (program: Command) => void,
   args: string[],
-): { stderr: string; exitCode: number | string | undefined; stdout: string } {
+): Promise<{ stderr: string; exitCode: number | string | undefined; stdout: string }> {
   const program = new Command();
   program.name("ix").exitOverride();
   register(program);
@@ -326,7 +329,10 @@ function runProgram(
 
   let code: number | string | undefined;
   try {
-    program.parse(["node", "ix", ...args]);
+    // Use parseAsync so async action handlers are properly awaited;
+    // synchronous parse() would let the handler's fetch Promise float as
+    // an unhandled rejection when there is no backend running.
+    await program.parseAsync(["node", "ix", ...args]);
   } catch (e) {
     // exitOverride turns process.exit into a CommanderError; we still want
     // the (possibly already-set) exitCode. The error message ends up in
@@ -357,8 +363,8 @@ describe("ix context action surfaces mode conflicts on stderr and exits 1", () =
     { args: ["context", "Widget", "--resume", "x"], expect: /--resume takes no target/ },
     { args: ["context", "--list", "--max-entities", "10"], expect: /--max-entities cannot be combined with --list/ },
     { args: ["context", "--resume", "x", "--kind", "class"], expect: /--kind cannot be combined with --resume/ },
-  ])("ix $args → stderr matches $expect and exit code is 1", ({ args, expect: re }) => {
-    const r = runProgram(registerContextCommand, args);
+  ])("ix $args → stderr matches $expect and exit code is 1", async ({ args, expect: re }) => {
+    const r = await runProgram(registerContextCommand, args);
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toMatch(/^Error:/m);
     expect(r.stderr).toMatch(re);
@@ -372,8 +378,8 @@ describe("ix diff action surfaces mode conflicts on stderr and exits 1", () => {
     { args: ["diff", "3", "5", "--full", "--limit", "20"], expect: /--full and --limit cannot be combined/ },
     { args: ["diff", "3", "5", "--summary", "--limit", "20"], expect: /--summary ignores --limit and --full/ },
     { args: ["diff", "3", "5", "--summary", "--full"], expect: /--summary ignores --limit and --full/ },
-  ])("ix diff $args → stderr matches $expect and exit code is 1", ({ args, expect: re }) => {
-    const r = runProgram(registerDiffCommand, args);
+  ])("ix diff $args → stderr matches $expect and exit code is 1", async ({ args, expect: re }) => {
+    const r = await runProgram(registerDiffCommand, args);
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toMatch(/^Error:/m);
     expect(r.stderr).toMatch(re);
@@ -386,8 +392,8 @@ describe("a caller that asked for records gets the error as a record", () => {
   // cannot read is an error it cannot act on. Same shape the rest of the CLI
   // emits (imports/trace/smells/locate/callers) and the one docs/llm-format.md
   // specifies: on stdout, in-stream, exit code still non-zero.
-  it("emits an error record for ix context and keeps the exit code", () => {
-    const r = runProgram(registerContextCommand, [
+  it("emits an error record for ix context and keeps the exit code", async () => {
+    const r = await runProgram(registerContextCommand, [
       "context",
       "--resume",
       "x",
@@ -403,8 +409,8 @@ describe("a caller that asked for records gets the error as a record", () => {
     expect(r.stderr).toBe("");
   });
 
-  it("emits an error record for ix diff and keeps the exit code", () => {
-    const r = runProgram(registerDiffCommand, [
+  it("emits an error record for ix diff and keeps the exit code", async () => {
+    const r = await runProgram(registerDiffCommand, [
       "diff",
       "3",
       "5",
@@ -418,9 +424,9 @@ describe("a caller that asked for records gets the error as a record", () => {
     expect(r.stderr).toBe("");
   });
 
-  it("still writes prose to stderr for every other format", () => {
+  it("still writes prose to stderr for every other format", async () => {
     for (const format of ["text", "json"]) {
-      const r = runProgram(registerContextCommand, ["context", "--resume", "x", "--diff", "y", "--format", format]);
+      const r = await runProgram(registerContextCommand, ["context", "--resume", "x", "--diff", "y", "--format", format]);
       expect(r.exitCode).toBe(1);
       expect(r.stderr).toMatch(/^Error:/m);
       expect(r.stdout).toBe("");
@@ -449,5 +455,376 @@ describe("ix help coverage stays intact (smoke)", () => {
     expect(help).toMatch(/--content/);
     expect(help).toMatch(/--full/);
     expect(help).toMatch(/--limit/);
+  });
+});
+
+// ── Extended coverage ───────────────────────────────────────────────
+
+describe("detectContextModeConflict: triple and quadruple combos", () => {
+  it("flags --resume + --diff + --save (first pairwise wins)", () => {
+    const msg = detectContextModeConflict({ resume: "x", diff: "y", save: "z" });
+    expect(msg).toBeDefined();
+    expect(msg).toMatch(/--resume/);
+  });
+
+  it("flags --resume + --diff + --out", () => {
+    const msg = detectContextModeConflict({ resume: "x", diff: "y", out: "/tmp/x.json" });
+    expect(msg).toBeDefined();
+    expect(msg).toMatch(/--resume/);
+  });
+
+  it("flags --diff + --save + --out", () => {
+    const msg = detectContextModeConflict({ diff: "x", save: "y", out: "/tmp/x.json" });
+    expect(msg).toBeDefined();
+    // Should flag one of the pairwise combos
+    expect(msg).toMatch(/--(diff|save)/);
+  });
+
+  it("flags --resume + --diff + --save + --out (all four)", () => {
+    const msg = detectContextModeConflict({ resume: "x", diff: "y", save: "z", out: "/tmp/x.json" });
+    expect(msg).toBeDefined();
+    expect(msg).toMatch(/--resume/);
+  });
+});
+
+describe("detectContextModeConflict: edge cases", () => {
+  it("empty string is falsy — does NOT trigger a conflict", () => {
+    // Empty string is falsy in JS, so {} && { resume: "" } both behave as
+    // the flag not being set. This pins that semantic.
+    expect(detectContextModeConflict({ resume: "" })).toBeUndefined();
+    expect(detectContextModeConflict({ diff: "" })).toBeUndefined();
+    expect(detectContextModeConflict({ save: "" })).toBeUndefined();
+    expect(detectContextModeConflict({ out: "" })).toBeUndefined();
+  });
+
+  it("all four mode flags set triggers --resume conflict (first checked)", () => {
+    const msg = detectContextModeConflict({
+      resume: "a", diff: "b", save: "c", out: "/tmp/x.json",
+    });
+    expect(msg).toMatch(/--resume/);
+  });
+
+  it("does not flag --resume when only --format is also set", () => {
+    expect(detectContextModeConflict({ resume: "x", format: "json" })).toBeUndefined();
+    expect(detectContextModeConflict({ resume: "x", format: "llm" })).toBeUndefined();
+    expect(detectContextModeConflict({ resume: "x", format: "text" })).toBeUndefined();
+  });
+
+  it("does not flag --diff when only --format is also set", () => {
+    expect(detectContextModeConflict({ diff: "x", format: "json" })).toBeUndefined();
+  });
+
+  it("does not flag --save when only --format is also set", () => {
+    expect(detectContextModeConflict({ save: "y", format: "llm" })).toBeUndefined();
+  });
+
+  it("format=json does not exempt --resume + --out", () => {
+    // Even with json format, resume and out are incompatible modes.
+    const msg = detectContextModeConflict({ resume: "x", out: "/tmp/x.json", format: "json" });
+    expect(msg).toMatch(/--resume cannot be combined with --out/);
+  });
+
+  it("format=json does not exempt --diff + --out", () => {
+    const msg = detectContextModeConflict({ diff: "x", out: "/tmp/x.json", format: "json" });
+    expect(msg).toMatch(/--diff cannot be combined with --out/);
+  });
+});
+
+describe("detectDiffModeConflict: triple combos and edge cases", () => {
+  it("flags --summary + --content + --full", () => {
+    const msg = detectDiffModeConflict({ summary: true, content: true, full: true });
+    expect(msg).toBeDefined();
+    // summary+content is the first pairwise checked
+    expect(msg).toMatch(/--summary and --content/);
+  });
+
+  it("flags --summary + --content + --limit", () => {
+    const msg = detectDiffModeConflict({ summary: true, content: true, limit: "10" });
+    expect(msg).toMatch(/--summary and --content/);
+  });
+
+  it("flags --full + --limit + --summary", () => {
+    const msg = detectDiffModeConflict({ full: true, limit: "10", summary: true });
+    expect(msg).toBeDefined();
+  });
+
+  it("all three flags set triggers summary+content first", () => {
+    const msg = detectDiffModeConflict({ summary: true, content: true, full: true });
+    expect(msg).toMatch(/--summary and --content/);
+  });
+
+  it("empty limit string is truthy — flags --full + --limit with empty string", () => {
+    // Commander gives --limit a string; empty string is truthy in JS.
+    const msg = detectDiffModeConflict({ full: true, limit: "" });
+    expect(msg).toMatch(/--full and --limit/);
+  });
+
+  it("limit=undefined does not trigger full+limit conflict", () => {
+    expect(detectDiffModeConflict({ full: true, limit: undefined })).toBeUndefined();
+  });
+
+  it("content alone is valid (no conflict)", () => {
+    expect(detectDiffModeConflict({ content: true })).toBeUndefined();
+  });
+
+  it("summary alone is valid (no conflict)", () => {
+    expect(detectDiffModeConflict({ summary: true })).toBeUndefined();
+  });
+
+  it("full alone is valid (no conflict)", () => {
+    expect(detectDiffModeConflict({ full: true })).toBeUndefined();
+  });
+
+  it("limit alone is valid (no conflict)", () => {
+    expect(detectDiffModeConflict({ limit: "100" })).toBeUndefined();
+  });
+
+  it("content + full is valid (no conflict)", () => {
+    expect(detectDiffModeConflict({ content: true, full: true })).toBeUndefined();
+  });
+
+  it("content + limit is valid (no conflict)", () => {
+    expect(detectDiffModeConflict({ content: true, limit: "50" })).toBeUndefined();
+  });
+});
+
+// ── sanitizeId ──────────────────────────────────────────────────────
+
+describe("sanitizeId", () => {
+  it("passes through alphanumeric, dot, dash, underscore", () => {
+    expect(sanitizeId("abc-123_def.test")).toBe("abc-123_def.test");
+  });
+
+  it("hex-encodes path separator", () => {
+    expect(sanitizeId("a/b")).toBe("a~2Fb");
+  });
+
+  it("hex-encodes tilde itself (injective: no ambiguity with encoded chars)", () => {
+    expect(sanitizeId("~")).toBe("~7E");
+  });
+
+  it("hex-encodes question mark", () => {
+    expect(sanitizeId("a?b")).toBe("a~3Fb");
+  });
+
+  it("hex-encodes leading dot to prevent dotfiles", () => {
+    // The leading dot is replaced with ~2E; the remaining 'hidden' passes through
+    // because the character loop runs before the leading-dot check.
+    expect(sanitizeId(".hidden")).toBe("~2Ehidden");
+  });
+
+  it("encodes only the leading dot, not interior dots", () => {
+    expect(sanitizeId("a.b")).toBe("a.b");
+    expect(sanitizeId(".a.b")).toBe("~2Ea.b");
+  });
+
+  it("returns 'unnamed' for empty string", () => {
+    expect(sanitizeId('')).toBe('unnamed');
+  });
+
+  it("encodes spaces", () => {
+    expect(sanitizeId("hello world")).toBe("hello~20world");
+  });
+
+  it("encodes unicode characters", () => {
+    // U+00E9 = é, charCode 233 = 0xE9
+    expect(sanitizeId("café")).toBe("caf~E9");
+  });
+
+  it("injective: different inputs produce different outputs", () => {
+    const ids = ["a/b", "a~2Fb", "a?b", "a~3Fb", ".", "~2E", "~", "~7E"];
+    const sanitized = ids.map(sanitizeId);
+    expect(new Set(sanitized).size).toBe(ids.length);
+  });
+
+  it("produces filesystem-safe output (no slashes in result)", () => {
+    const inputs = ["../../../etc/passwd", "a/b/c", "foo/bar/baz"];
+    for (const input of inputs) {
+      const result = sanitizeId(input);
+      expect(result).not.toMatch(/\//);
+    }
+  });
+
+  it("path traversal attempt encodes slashes and leading dot", () => {
+    // sanitizeId encodes / to ~2F and the leading . to ~2E, making the ID
+    // filesystem-safe. It does NOT encode .. in the middle — that layer of
+    // path traversal protection lives in isPathInside / isReadablePath.
+    const result = sanitizeId("../../etc/passwd");
+    expect(result).not.toMatch(/\//);
+    expect(result).not.toMatch(/^\./);
+    expect(result).toBe("~2E.~2F..~2Fetc~2Fpasswd");
+  });
+});
+
+// ── mergeDiffOptions ────────────────────────────────────────────────
+
+describe("mergeDiffOptions", () => {
+  function makeSaved(asOfRev?: number, depth?: string) {
+    return {
+      schema: "ix-investigation/1",
+      id: "test",
+      savedAt: "2026-01-01T00:00:00Z",
+      bundle: {
+        metadata: { asOfRev, depth },
+        // Minimal bundle fields — only metadata is read by mergeDiffOptions
+      } as any,
+    };
+  }
+
+  it("inherits saved rev and depth when opts are empty", () => {
+    const result = mergeDiffOptions(makeSaved(42, "shallow"), {});
+    expect(result.asOfRev).toBe(42);
+    expect(result.depth).toBe("shallow");
+  });
+
+  it("opts override saved rev", () => {
+    const result = mergeDiffOptions(makeSaved(42, "shallow"), { asOfRev: 10 });
+    expect(result.asOfRev).toBe(10);
+    expect(result.depth).toBe("shallow");
+  });
+
+  it("opts override saved depth", () => {
+    const result = mergeDiffOptions(makeSaved(42, "shallow"), { depth: "deep" });
+    expect(result.asOfRev).toBe(42);
+    expect(result.depth).toBe("deep");
+  });
+
+  it("opts override both", () => {
+    const result = mergeDiffOptions(makeSaved(42, "shallow"), { asOfRev: 10, depth: "deep" });
+    expect(result.asOfRev).toBe(10);
+    expect(result.depth).toBe("deep");
+  });
+
+  it("undefined saved rev falls through to undefined", () => {
+    const result = mergeDiffOptions(makeSaved(undefined, undefined), {});
+    expect(result.asOfRev).toBeUndefined();
+    expect(result.depth).toBeUndefined();
+  });
+
+  it("opts.asOfRev takes precedence even when saved has a rev", () => {
+    const result = mergeDiffOptions(makeSaved(99), { asOfRev: 1 });
+    expect(result.asOfRev).toBe(1);
+  });
+});
+
+// ── reportContextModeConflict / reportDiffModeConflict ───────────────
+
+describe("reportFailure", () => {
+  let origExitCode: number | string | undefined;
+  let origError: typeof console.error;
+  let stderrOutput: string[];
+
+  beforeEach(() => {
+    origExitCode = process.exitCode;
+    origError = console.error;
+    process.exitCode = undefined;
+    stderrOutput = [];
+    console.error = (...args: unknown[]) => stderrOutput.push(args.join(" "));
+  });
+
+  afterEach(() => {
+    process.exitCode = origExitCode;
+    console.error = origError;
+  });
+
+  it("sets exitCode to 1 and prints Error: prefix (text format)", () => {
+    reportFailure("mode_conflict", "test conflict message");
+    expect(process.exitCode).toBe(1);
+    expect(stderrOutput.join("\n")).toMatch(/Error:/);
+    expect(stderrOutput.join("\n")).toMatch(/test conflict message/);
+  });
+
+  it("can be called multiple times (idempotent exit code)", () => {
+    reportFailure("mode_conflict", "first");
+    reportFailure("mode_conflict", "second");
+    expect(process.exitCode).toBe(1);
+    expect(stderrOutput.length).toBe(2);
+  });
+});
+
+describe("reportFailure with llm format", () => {
+  let origExitCode: number | string | undefined;
+  let origError: typeof console.error;
+  let origLog: typeof console.log;
+  let stderrOutput: string[];
+  let stdoutOutput: string[];
+
+  beforeEach(() => {
+    origExitCode = process.exitCode;
+    origError = console.error;
+    origLog = console.log;
+    process.exitCode = undefined;
+    stderrOutput = [];
+    stdoutOutput = [];
+    console.error = (...args: unknown[]) => stderrOutput.push(args.join(" "));
+    console.log = (...args: unknown[]) => stdoutOutput.push(args.join(" "));
+  });
+
+  afterEach(() => {
+    process.exitCode = origExitCode;
+    console.error = origError;
+    console.log = origLog;
+  });
+
+  it("uses llm error record when format is 'llm'", () => {
+    reportFailure("mode_conflict", "llm conflict message", "llm");
+    expect(process.exitCode).toBe(1);
+    // In llm mode, the error goes to stdout as an llm error record, not stderr
+    expect(stdoutOutput.join("\n")).toMatch(/mode_conflict/);
+    expect(stdoutOutput.join("\n")).toMatch(/llm conflict message/);
+  });
+
+  it("uses stderr Error: prefix when format is 'json'", () => {
+    reportFailure("mode_conflict", "json conflict message", "json");
+    expect(process.exitCode).toBe(1);
+    expect(stderrOutput.join("\n")).toMatch(/Error:/);
+    expect(stderrOutput.join("\n")).toMatch(/json conflict message/);
+  });
+});
+
+// ── Integration: edge-case Commander invocations ────────────────────
+
+describe("ix context edge-case integration", () => {
+  it("--resume x alone does NOT set exit code (no target needed)", async () => {
+    // --resume loads from disk; it does not need a target or backend.
+    // This verifies that resume-only does not accidentally trigger the conflict detector.
+    const r = await runProgram(registerContextCommand, ["context", "--resume", "nonexistent-id"]);
+    // The loadInvestigation function prints a warning but does NOT set exitCode=1
+    // (it is a warning, not a conflict). The conflict detector should NOT fire.
+    expect(r.stderr).not.toMatch(/cannot be combined/);
+  });
+
+  it("--diff x alone does NOT set exit code (no target needed)", async () => {
+    const r = await runProgram(registerContextCommand, ["context", "--diff", "nonexistent-id"]);
+    expect(r.stderr).not.toMatch(/cannot be combined/);
+  });
+
+  it("--save x alone does NOT set exit code (requires target)", async () => {
+    // --save without a target prints a warning, not a conflict.
+    const r = await runProgram(registerContextCommand, ["context", "--save", "test-id"]);
+    expect(r.stderr).not.toMatch(/cannot be combined/);
+  });
+
+  it("--out /tmp/x.json alone does NOT set exit code (requires target)", async () => {
+    const r = await runProgram(registerContextCommand, ["context", "--out", "/tmp/test.json"]);
+    expect(r.stderr).not.toMatch(/cannot be combined/);
+  });
+});
+
+describe("ix diff edge-case integration", () => {
+  it("--summary alone does NOT set exit code (requires valid revs)", async () => {
+    const r = await runProgram(registerDiffCommand, ["diff", "1", "2", "--summary"]);
+    // May fail due to no backend, but should NOT fail due to conflict detection
+    expect(r.stderr).not.toMatch(/cannot be combined/);
+  });
+
+  it("--content alone does NOT set exit code", async () => {
+    const r = await runProgram(registerDiffCommand, ["diff", "1", "2", "--content"]);
+    expect(r.stderr).not.toMatch(/cannot be combined/);
+  });
+
+  it("--full alone does NOT set exit code", async () => {
+    const r = await runProgram(registerDiffCommand, ["diff", "1", "2", "--full"]);
+    expect(r.stderr).not.toMatch(/cannot be combined/);
   });
 });

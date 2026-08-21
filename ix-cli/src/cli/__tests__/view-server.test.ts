@@ -340,10 +340,14 @@ describe("view server (/__ix/remap)", () => {
     expect(await res.text()).toContain("fake compass");
   });
 
-  it("does not treat GET /__ix/remap as the endpoint (SPA fallback)", async () => {
+  it("does not treat GET /__ix/remap as the endpoint (returns 404, not SPA HTML)", async () => {
     const res = await fetch(`http://127.0.0.1:${port}/__ix/remap`);
-    expect(res.status).toBe(200);
-    expect(await res.text()).toContain("fake compass");
+    // With the /__ix/* 404 handler (#473), GET /__ix/remap returns 404 JSON
+    // instead of falling through to SPA HTML. This is correct: the remap
+    // endpoint is POST-only, and unmatched /__ix/* routes must not serve HTML.
+    expect(res.status).toBe(404);
+    const json = await res.json();
+    expect(json.ok).toBe(false);
   });
 
   it("answers 504 when the backend accepts and never replies", async () => {
