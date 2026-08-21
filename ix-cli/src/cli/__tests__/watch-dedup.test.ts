@@ -98,12 +98,20 @@ describe("canonical watch refresh", () => {
 
   it("starts both the tsx source CLI and a normal built CLI child", () => {
     const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+    // Read, never hardcode. The literal that used to sit here made every
+    // `chore(release)` bump fail this test, which is about whether the child
+    // STARTS -- the number it prints is incidental. The same value seeds
+    // .version-check.json so the update notice cannot appear on stdout and be
+    // mistaken for the version.
+    const version = JSON.parse(
+      fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"),
+    ).version as string;
     const tempRoot = fs.mkdtempSync(path.join(packageRoot, ".watch-child-runtime-"));
     const ixHome = path.join(tempRoot, "ix-home");
     fs.mkdirSync(ixHome);
     fs.writeFileSync(
       path.join(ixHome, ".version-check.json"),
-      JSON.stringify({ latest: "0.9.3", checkedAt: Date.now() }),
+      JSON.stringify({ latest: version, checkedAt: Date.now() }),
     );
     const env = { ...process.env, IX_HOME: ixHome, NO_COLOR: "1" };
 
@@ -115,7 +123,7 @@ describe("canonical watch refresh", () => {
         { cwd: packageRoot, env, encoding: "utf8" },
       );
       expect(source.status, source.stderr).toBe(0);
-      expect(source.stdout.trim()).toBe("0.9.3");
+      expect(source.stdout.trim()).toBe(version);
       expect(source.stderr).not.toContain("Debugger listening");
 
       const outDir = path.join(tempRoot, "dist");
