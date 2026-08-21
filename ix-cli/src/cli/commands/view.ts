@@ -500,6 +500,17 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Unknown /__ix/* routes — return 404 with JSON, not SPA HTML.
+  // Without this, /__ix/read, /__ix/explain, /__ix/inventory and /__ix/help
+  // fall through to the static handler, which serves index.html. The client
+  // tries to JSON.parse the HTML, gets an error, catches it silently, and
+  // the user sees nothing. A 404 makes the failure detectable. (#473)
+  if (pathname.startsWith("/__ix/")) {
+    res.writeHead(404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    res.end(JSON.stringify({ ok: false, error: "not found: " + pathname }));
+    return;
+  }
+
   // Serve static files.
   let filePath = path.resolve(path.join(DIST, pathname === "/" ? "index.html" : pathname));
 
