@@ -1286,6 +1286,30 @@ function printUpdateNotice(
   console.error("");
 }
 
+/**
+ * How `ix upgrade` signs off.
+ *
+ * `--check` answers exactly one question — is there anything to install? — and
+ * the closing line was `[ok] ix is up to date` unconditionally, so it answered
+ * it wrong for every user who was behind. It printed two lines under
+ * `New CLI version available: 0.10.0` and contradicted it (#476). GA moving
+ * /releases/latest is what made that the common case rather than a rare one.
+ *
+ * An install run keeps the flat line, and that is not an oversight: by the time
+ * it prints, every branch that added to `outstanding` has already acted on it,
+ * so there the list says what was found and handled, not what is left. Reusing
+ * it there would report the work that just succeeded as still pending.
+ */
+export function closingStatus(
+  check: boolean | undefined,
+  outstanding: readonly string[],
+): { upToDate: true } | { upToDate: false; summary: string } {
+  if (check && outstanding.length > 0) {
+    return { upToDate: false, summary: outstanding.join(", ") };
+  }
+  return { upToDate: true };
+}
+
 export function registerUpgradeCommand(program: Command): void {
   program
     .command("upgrade")
@@ -1325,10 +1349,16 @@ export function registerUpgradeCommand(program: Command): void {
       if (!opts.check) sweepUpgradeOrphans(IX_HOME, join(IX_HOME, "cli"));
 
       // ── CLI upgrade ──────────────────────────────────────────────────
+      // What is still outstanding when the command ends. Only meaningful under
+      // --check: an install pass acts on each of these as it goes, so there the
+      // list describes what was found, not what is left. See the closing line.
+      const outstanding: string[] = [];
+
       const cliUpToDate = !isNewer(latest, current);
       if (cliUpToDate) {
         console.log(`[ok] CLI already on the latest version (${current})`);
       } else {
+        outstanding.push(`CLI ${current} → ${latest}`);
         console.log(`New CLI version available: ${chalk.green(latest)}`);
 
         if (!opts.check) {
@@ -1527,6 +1557,7 @@ export function registerUpgradeCommand(program: Command): void {
       const backendCurrent = getTrackedVersion(BACKEND_VERSION_FILE);
       let backendImageChanged = false;
       if (backendLatest && backendUpdateAvailable(backendLatest, backendCurrent)) {
+        outstanding.push(`backend ${backendCurrent === "0.0.0" ? "none" : backendCurrent} → ${backendLatest}`);
         console.log(
           `Backend update available: ${backendCurrent === "0.0.0" ? "none" : backendCurrent} → ${chalk.green(backendLatest)}`
         );
@@ -1623,6 +1654,9 @@ export function registerUpgradeCommand(program: Command): void {
       // ── Compass upgrade ──────────────────────────────────────────────
       const compassCurrent = getInstalledCompassVersion();
       if (shouldOfferCompassUpgrade(compassLatest ?? undefined)) {
+        outstanding.push(
+          `Compass ${compassCurrent === "0.0.0" ? "none" : compassCurrent} → ${compassLatest}`
+        );
         console.log(
           `Compass update available: ${compassCurrent === "0.0.0" ? "none" : compassCurrent} → ${chalk.green(compassLatest)}`
         );
@@ -1716,6 +1750,12 @@ export function registerUpgradeCommand(program: Command): void {
       writeCache(latest, compassLatest ?? undefined, backendLatest ?? undefined);
 
       console.log("");
-      console.log("[ok] ix is up to date");
+      const closing = closingStatus(opts.check, outstanding);
+      if (closing.upToDate) {
+        console.log("[ok] ix is up to date");
+      } else {
+        console.log(chalk.yellow(`[!!] Update available: ${closing.summary}`));
+        console.log(chalk.dim("  Run: ix upgrade"));
+      }
     });
 }
