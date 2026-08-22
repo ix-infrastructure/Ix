@@ -52,13 +52,7 @@ export interface BackendContainer {
   composeConfigFiles: string | null;
 }
 
-/** Inspect the container currently publishing the backend port, if any. */
-export function inspectBackendContainer(): BackendContainer | null {
-  const ids = docker(["ps", "--filter", `publish=${BACKEND_PORT}`, "--format", "{{.ID}}"]);
-  if (!ids) return null;
-  const containerId = ids.split("\n")[0]?.trim();
-  if (!containerId) return null;
-
+function inspectContainer(containerId: string): BackendContainer | null {
   // A unique separator keeps Go-template parsing robust against odd image refs.
   const SEP = "|::|";
   const fmt =
@@ -88,6 +82,51 @@ export function inspectBackendContainer(): BackendContainer | null {
     composeProject: project || null,
     composeConfigFiles: configFiles || null,
   };
+}
+
+function containerIds(output: string | null): string[] {
+  return output?.split("\n").map((id) => id.trim()).filter(Boolean) ?? [];
+}
+
+function isReleasedBackendRef(imageRef: string): boolean {
+  return imageRef === BACKEND_IMAGE ||
+    imageRef.startsWith(`${BACKEND_IMAGE}:`) ||
+    imageRef.startsWith(`${BACKEND_IMAGE}@`);
+}
+
+/** Inspect the backend reached through the container publishing its port. */
+export function inspectBackendContainer(): BackendContainer | null {
+  const publisherIds = containerIds(
+    docker(["ps", "--filter", `publish=${BACKEND_PORT}`, "--format", "{{.ID}}"]),
+  );
+  if (publisherIds.length === 0) return null;
+
+  const publishers = publisherIds
+    .map((id) => inspectContainer(id))
+    .filter((container): container is BackendContainer => container !== null);
+  const directBackend = publishers.find((container) => isReleasedBackendRef(container.imageRef));
+  if (directBackend) return directBackend;
+
+  // A hardened compose may publish 8090 through nginx while the memory layer
+  // stays on an internal network. Follow the publisher's compose project to
+  // the service whose role is the backend instead of comparing nginx to GHCR.
+  for (const publisher of publishers) {
+    if (!publisher.composeProject) continue;
+    const backendIds = containerIds(docker([
+      "ps",
+      "--filter", `label=com.docker.compose.project=${publisher.composeProject}`,
+      "--filter", "label=com.docker.compose.service=memory-layer",
+      "--format", "{{.ID}}",
+    ]));
+    for (const id of backendIds) {
+      const backend = inspectContainer(id);
+      if (backend) return backend;
+    }
+  }
+
+  // Preserve local-development detection for a directly-published backend
+  // whose image does not use the released repository name.
+  return publishers[0] ?? null;
 }
 
 export type BackendImageStatus =
