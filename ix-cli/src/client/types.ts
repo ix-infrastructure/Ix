@@ -100,6 +100,22 @@ export interface GraphEdge {
   deletedRev?: number;
 }
 
+export interface NodeSummary {
+  id: string;
+  kind: string;
+  name: string;
+  rev: number;
+  sourceUri?: string | null;
+}
+
+export interface EdgeSummary {
+  id: string;
+  src: string;
+  dst: string;
+  predicate: string;
+  rev: number;
+}
+
 export interface ContextMetadata {
   query: string;
   seedEntities: string[];
@@ -116,6 +132,8 @@ export interface StructuredContext {
   intents: IntentReport[];
   nodes: GraphNode[];
   edges: GraphEdge[];
+  nodeSummaries?: NodeSummary[];
+  edgeSummaries?: EdgeSummary[];
   metadata: ContextMetadata;
 }
 

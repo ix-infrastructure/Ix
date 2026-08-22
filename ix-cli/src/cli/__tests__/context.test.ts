@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import type {
   ConflictReport,
   DecisionReport,
+  EdgeSummary,
   GraphEdge,
   GraphNode,
   IntentReport,
+  NodeSummary,
   ScoredClaim,
 } from "../../client/types.js";
 import type { EntityFacts } from "../explain/facts.js";
@@ -58,6 +60,8 @@ function makeContext(overrides: Partial<{
   intents: IntentReport[];
   nodes: GraphNode[];
   edges: GraphEdge[];
+  nodeSummaries: NodeSummary[];
+  edgeSummaries: EdgeSummary[];
 }> = {}) {
   return {
     claims: overrides.claims ?? [makeClaim("renders to DOM", 0.9)],
@@ -83,6 +87,8 @@ function makeContext(overrides: Partial<{
       ([
         { id: "edge-1", src: "entity-1", dst: "entity-2", predicate: "calls", attrs: {}, createdRev: 3 },
       ] as GraphEdge[]),
+    nodeSummaries: overrides.nodeSummaries,
+    edgeSummaries: overrides.edgeSummaries,
     metadata: { query: "Widget", seedEntities: ["entity-1"], hopsExpanded: 1, asOfRev: 3 },
   };
 }
@@ -136,6 +142,35 @@ describe("ix context bundle", () => {
     expect(bundle.truncation.relationshipsTruncated).toBe(1);
     expect(bundle.evidence.length).toBeLessThanOrEqual(2);
     expect(bundle.truncation.evidenceTruncated).toBeGreaterThanOrEqual(0);
+  });
+
+  it("builds entities and relationships from compact graph summaries", () => {
+    const bundle = buildBundle({
+      ...input(),
+      context: makeContext({
+        nodes: [],
+        edges: [],
+        nodeSummaries: [
+          { id: "entity-1", kind: "class", name: "Widget", rev: 3, sourceUri: "src/widget.ts" },
+          { id: "entity-2", kind: "method", name: "render", rev: 3, sourceUri: "src/widget.ts" },
+          { id: "entity-3", kind: "method", name: "mount", rev: 3, sourceUri: "src/widget.ts" },
+        ],
+        edgeSummaries: [
+          { id: "edge-1", src: "entity-1", dst: "entity-2", predicate: "calls", rev: 3 },
+          { id: "edge-2", src: "entity-1", dst: "entity-3", predicate: "calls", rev: 3 },
+        ],
+      }),
+    });
+
+    expect(bundle.entities).toEqual([
+      { id: "entity-1", name: "Widget", kind: "class", stale: false },
+      { id: "entity-3", name: "mount", kind: "method", path: "src/widget.ts", stale: false },
+      { id: "entity-2", name: "render", kind: "method", path: "src/widget.ts", stale: false },
+    ]);
+    expect(bundle.relationships).toEqual([
+      { src: "entity-1", dst: "entity-2", predicate: "calls" },
+      { src: "entity-1", dst: "entity-3", predicate: "calls" },
+    ]);
   });
 
   it("asks about each entity's own staleness instead of copying the target's", () => {

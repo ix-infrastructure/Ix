@@ -148,6 +148,27 @@ describe("ix context --as-of-rev validation", () => {
   });
 });
 
+describe("ix context --depth validation", () => {
+  beforeEach(() => {
+    resolveFileOrEntity.mockReset().mockResolvedValue(undefined);
+  });
+
+  it.each(["2", "wide", "standard-ish"])("rejects unsupported depth %j before resolving", async (depth) => {
+    const result = await runContext(["--depth", depth]);
+
+    expect(result.error?.exitCode).toBe(1);
+    expect(result.stderr).toContain("must be one of: compact, standard, full, shallow, deep");
+    expect(resolveFileOrEntity).not.toHaveBeenCalled();
+  });
+
+  it.each(["compact", "standard", "full", "shallow", "deep", "FULL"])("accepts depth %j", async (depth) => {
+    const result = await runContext(["--depth", depth]);
+
+    expect(result.error).toBeUndefined();
+    expect(resolveFileOrEntity).toHaveBeenCalledOnce();
+  });
+});
+
 describe("ix context refusals reach the caller that asked for records", () => {
   beforeEach(() => {
     resolveFileOrEntity.mockReset().mockResolvedValue(undefined);

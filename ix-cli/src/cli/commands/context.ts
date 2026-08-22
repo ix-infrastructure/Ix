@@ -1,4 +1,4 @@
-import type { Command } from "commander";
+import { InvalidArgumentError, type Command } from "commander";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -13,7 +13,6 @@ import { IxClient } from "../../client/api.js";
 import type {
   ConflictReport,
   DecisionReport,
-  GraphNode,
   IntentReport,
   StructuredContext,
 } from "../../client/types.js";
@@ -120,6 +119,16 @@ interface ContextOptions extends Partial<BudgetSnapshot> {
   format: string;
 }
 
+const CONTEXT_DEPTHS = ["compact", "standard", "full", "shallow", "deep"] as const;
+
+function parseContextDepthOption(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (!(CONTEXT_DEPTHS as readonly string[]).includes(normalized)) {
+    throw new InvalidArgumentError(`must be one of: ${CONTEXT_DEPTHS.join(", ")}`);
+  }
+  return normalized;
+}
+
 /** Stable evidence kinds, ordered by relevance tier (lower is more relevant). */
 type EvidenceKind =
   | "target"
@@ -197,7 +206,11 @@ export function registerContextCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Prefer symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--depth <depth>", "Context-graph expansion depth")
+    .option(
+      "--depth <depth>",
+      `Context-graph expansion depth (${CONTEXT_DEPTHS.join("|")})`,
+      parseContextDepthOption,
+    )
     .option("--as-of-rev <n>", "Historical context as of a graph revision", parseRevisionOption)
     // No Commander default on the --max-* flags, so `parseRequestedBudgets`
     // can tell an absent flag from one set to the default value. The defaults
@@ -1289,20 +1302,37 @@ export function buildBundle(input: BuildInput): ContextBundle {
       stale,
     },
   ];
-  for (const node of orderedNodes(context.nodes)) {
+  // Compact and standard backend responses omit the full graph arrays and
+  // carry the same graph as summaries. Falling back here keeps the default
+  // context mode from collapsing to a target-only bundle.
+  const contextNodes = context.nodes.length > 0
+    ? context.nodes.map((node) => ({
+        id: node.id,
+        name: node.name,
+        kind: node.kind,
+        path: node.provenance?.sourceUri,
+      }))
+    : (context.nodeSummaries ?? []).map((node) => ({
+        id: node.id,
+        name: node.name,
+        kind: node.kind,
+        path: node.sourceUri ?? undefined,
+      }));
+  for (const node of orderedNodes(contextNodes)) {
     if (seen.has(node.id)) continue;
     seen.add(node.id);
     entities.push({
       id: node.id,
       name: node.name,
       kind: node.kind,
-      path: node.provenance?.sourceUri,
+      path: node.path,
       stale: false, // replaced below, for the entities that survive the budget
     });
   }
 
   // Relationships: graph edges, ordered deterministically.
-  const relationships = [...context.edges]
+  const contextEdges = context.edges.length > 0 ? context.edges : (context.edgeSummaries ?? []);
+  const relationships = [...contextEdges]
     .sort((a, b) => cmp(a.src, b.src) || cmp(a.dst, b.dst) || cmp(a.predicate, b.predicate))
     .map((edge) => ({ src: edge.src, dst: edge.dst, predicate: edge.predicate }));
 
@@ -1590,7 +1620,7 @@ export function renderBundle(bundle: ContextBundle, format: string): void {
   console.log();
 }
 
-function orderedNodes(nodes: GraphNode[]): GraphNode[] {
+function orderedNodes<T extends { id: string; kind: string; name: string }>(nodes: T[]): T[] {
   return [...nodes].sort((a, b) => cmp(a.kind, b.kind) || cmp(a.name, b.name) || cmp(a.id, b.id));
 }
 
