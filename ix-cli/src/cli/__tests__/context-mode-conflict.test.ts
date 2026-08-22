@@ -26,7 +26,7 @@ import { reportFailure } from "../ui.js";
  *
  * REVIEW ITEMS APPLIED (KageBinary review of PR #472):
  * 1. Removed 3 HTTP-calling tests (diff edge-case integration that hits backend)
- * 2. Injectivity test uses astral chars — will FAIL until #478 is fixed
+ * 2. Injectivity test uses astral chars, and this PR fixes #478 so it passes
  * 3. Removed byte-identical duplicate tests
  * 4. Assert full message text in precedence tests (not partial /--resume/)
  * 5. Fixed empty string truthiness comment ("" is falsy, not truthy)
@@ -684,34 +684,35 @@ describe("sanitizeId", () => {
   });
 
   /**
-   * INJECTIVITY TEST — WILL FAIL until #478 is fixed.
+   * The regression test for #478, which this PR fixes.
    *
-   * sanitizeId uses `for (const ch of id)` which iterates CODE POINTS,
-   * but `charCodeAt(0)` reads only the leading SURROGATE. Every astral
-   * character collapses onto its lead surrogate:
+   * The old loop was `for (const ch of id)` — which iterates CODE POINTS —
+   * paired with `ch.charCodeAt(0)`, which reads only a code point's leading
+   * SURROGATE. Every astral character therefore collapsed onto its lead
+   * surrogate and two different ids named the same file:
    *
-   *   😀 -> ~D83D     😁 -> ~D83D     collide: true
-   *   𝕏 -> ~D835      𝕀 -> ~D835      collide: true
+   *   😀 -> ~D83D     😁 -> ~D83D     collide
+   *   𝕏 -> ~D835      𝕀 -> ~D835      collide
    *
-   * The fix (Issue #478) is to iterate UTF-16 code units with a for loop.
-   * This test intentionally FAILS to prevent false confidence in injectivity.
-   * It MUST include astral characters — ASCII-only fixtures certify nothing.
+   * That is a silent overwrite in `ix context --save`, not a cosmetic naming
+   * issue: the second save replaces the first investigation on disk.
+   *
+   * The fix iterates UTF-16 code units, so both surrogates are encoded. Astral
+   * fixtures are the whole point of this test — an ASCII-only or BMP-only
+   * fixture passes against the broken function and certifies nothing. Reverting
+   * `sanitizeId` to the `for...of` form must turn this red.
    */
   it("injective: different inputs produce different outputs", () => {
-    // BMP inputs — these encode correctly
     const bmpIds = ["a/b", "a~2Fb", "a?b", "a~3Fb", ".", "~2E", "~", "~7E"];
-    // Astral inputs — these COLLIDE due to #478 (surrogate pair truncation)
+    // Astral: distinct code points that share a lead surrogate (#478).
     const astralIds = ["\u{1F600}", "\u{1F601}"]; // 😀 vs 😁
 
-    // BMP should be injective
     const bmpSanitized = bmpIds.map(sanitizeId);
     expect(new Set(bmpSanitized).size).toBe(bmpIds.length);
 
-    // Astral pairs will collide until #478 is fixed — this test SHOULD FAIL.
-    // When the test fails, that's correct: it proves the function is not injective
-    // for astral characters. The fix must iterate UTF-16 code units.
-    // Astral characters must produce different sanitized IDs.
-    // Until #478 is fixed, they will collide — this test correctly FAILS.
+    // Both surrogates encoded, so the trailing one still separates them.
+    expect(sanitizeId(astralIds[0])).toBe("~D83D~DE00");
+    expect(sanitizeId(astralIds[1])).toBe("~D83D~DE01");
     expect(sanitizeId(astralIds[0])).not.toBe(sanitizeId(astralIds[1]));
   });
 
