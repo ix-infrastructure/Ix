@@ -10,7 +10,7 @@ import { ParsePool } from './parse-pool.js';
 import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
 import type { GraphPatchPayload } from '../../client/types.js';
-import { getEndpoint, resolveWorkspaceRoot } from '../config.js';
+import { getEndpoint, resolveWorkspaceRoot, clearStitchScopeCache } from '../config.js';
 import { isRev, loadIngestBaseline, saveIngestBaseline } from '../ingest-baseline.js';
 import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
@@ -1942,6 +1942,11 @@ export async function ingestFiles(
         if (provides.length > 0 || stitchConsumes.length > 0 || stitchExports.length > 0 || symbolConsumes.length > 0) {
           const res = await client.stitch({ workspaceId, provides, consumes: stitchConsumes, exports: stitchExports, symbolConsumes });
           if (debug) process.stderr.write(`  [stitch] provides=${provides.length} consumes=${stitchConsumes.length} exports=${stitchExports.length} symConsumes=${symbolConsumes.length} -> ${res.stitched} edges\n`);
+          // This call is the one thing that can change whether the workspace
+          // belongs to a system, and reads cache that answer on disk. Drop it
+          // here so the next read asks again rather than scoping to the
+          // pre-stitch workspace for as long as the file survives.
+          clearStitchScopeCache(workspaceId);
         }
       } catch (err) {
         if (debug) process.stderr.write(`  [stitch skipped] ${err}\n`);

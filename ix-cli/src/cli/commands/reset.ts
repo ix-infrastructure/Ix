@@ -2,8 +2,21 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { spawnSync } from "child_process";
 import { IxClient } from "../../client/api.js";
-import { getEndpoint, clearIngestMtimeCache } from "../config.js";
+import { getEndpoint, clearIngestMtimeCache, clearStitchScopeCache } from "../config.js";
 import { canRenderProgress } from "../stderr.js";
+import { resolveWorkspaceId } from "../bootstrap.js";
+
+/**
+ * Drop this workspace's cached "am I stitched into a system?" answer.
+ *
+ * A reset wipes the graph, so the stitch records go with it and any cached
+ * system id is now a lie. Best-effort and silent: an unresolvable workspace
+ * simply has nothing cached to clear.
+ */
+function clearStitchScopeCacheForCwd(): void {
+  const ws = resolveWorkspaceId(process.cwd());
+  if (ws) clearStitchScopeCache(ws);
+}
 
 export function registerResetCommand(program: Command): void {
   program
@@ -56,12 +69,14 @@ export function registerResetCommand(program: Command): void {
           stopSpinner();
           // Clear the mtime cache so the next ix map re-ingests all files
           clearIngestMtimeCache(process.cwd());
+          clearStitchScopeCacheForCwd();
           console.log(chalk.green("✓") + " Code graph wiped. Planning artifacts preserved.");
           console.log(chalk.dim("  Run `ix map` to rebuild the code graph."));
         } else {
           await client.reset();
           stopSpinner();
           clearIngestMtimeCache(process.cwd());
+          clearStitchScopeCacheForCwd();
           console.log(chalk.green("✓") + " Graph wiped.");
         }
       } catch (err: any) {

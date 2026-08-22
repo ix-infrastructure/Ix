@@ -5,6 +5,7 @@ import { stderr } from "./stderr.js";
 import { applyRoleFilter } from "./role-filter.js";
 import { detectSystem } from "./system.js";
 import { resolveWorkspaceId } from "./bootstrap.js";
+import { readStitchScope, writeStitchScope } from "./config.js";
 
 /**
  * The read scope for the current working directory: a co-ingested multi-repo system
@@ -59,7 +60,21 @@ export async function ensureReadScope(client: Pick<IxClient, "workspaceSystem">)
   const ws = resolveWorkspaceId(cwd);
   let systemId: string | undefined;
   if (ws) {
-    try { systemId = (await client.workspaceSystem(ws)).systemId ?? undefined; } catch { /* best-effort */ }
+    // Disk first. This lookup is ~1.5 s on a large graph and its answer changes
+    // only when the workspace is mapped or ingested — both of which clear the
+    // file — so asking the backend once per process was paying it on every
+    // single `ix` invocation. `null` is a cached answer too: "not stitched" is
+    // the common case and the one worth not re-asking.
+    const cached = readStitchScope(ws);
+    if (cached) {
+      systemId = cached.systemId ?? undefined;
+    } else {
+      try {
+        const answer = (await client.workspaceSystem(ws)).systemId ?? null;
+        writeStitchScope(ws, answer);
+        systemId = answer ?? undefined;
+      } catch { /* best-effort: leave the scope at workspace level, cache nothing */ }
+    }
   }
   _scopeCache = { cwd, workspaceId: systemId ? undefined : ws, systemId, stitchChecked: true };
 }
