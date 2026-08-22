@@ -120,6 +120,15 @@ export function registerDoctorCommand(program: Command): void {
       const endpoint = getEndpoint();
       const client = new IxClient(endpoint);
 
+      // "Graph has nodes" and "Graph has edges" are two questions about one
+      // response. They were two `client.stats()` calls, run back to back by the
+      // sequential loop below — and `/v1/stats` is 3-4 s on a large graph, so
+      // the second one was most of what `ix doctor` spent. Memoized rather than
+      // hoisted so a run that never reaches those checks still never asks, and
+      // so a failure is still reported per check rather than aborting both.
+      let statsOnce: Promise<any> | undefined;
+      const sharedStats = (): Promise<any> => (statsOnce ??= client.stats());
+
       const checks: Check[] = [
         {
           name: "Server reachable",
@@ -138,7 +147,7 @@ export function registerDoctorCommand(program: Command): void {
           name: "Graph has nodes",
           run: async () => {
             try {
-              const s = await client.stats();
+              const s = await sharedStats();
               const total = s.nodes?.total ?? 0;
               return { ok: total > 0, detail: `${total} nodes` };
             } catch (e: any) {
@@ -150,7 +159,7 @@ export function registerDoctorCommand(program: Command): void {
           name: "Graph has edges",
           run: async () => {
             try {
-              const s = await client.stats();
+              const s = await sharedStats();
               const total = s.edges?.total ?? 0;
               return { ok: total > 0, detail: `${total} edges` };
             } catch (e: any) {
