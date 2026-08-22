@@ -553,7 +553,14 @@ async function runFormatted(
   argv: IxArgv,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<CallToolResult> {
-  return runCommand(runIx, tool, toArgv(argv, "llm"), timeoutMs);
+  const result = await runCommand(runIx, tool, toArgv(argv, "llm"), timeoutMs);
+  if (result.isError) return result;
+
+  const first = result.content[0];
+  // Only the leading record governs status. `ix_read` may contain error-like
+  // source lines after its successful `content` record.
+  const semanticError = first?.type === "text" && first.text.startsWith("error code=");
+  return semanticError ? { ...result, isError: true } : result;
 }
 
 async function runJson(

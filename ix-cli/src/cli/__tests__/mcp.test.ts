@@ -108,7 +108,41 @@ describe("ix mcp", () => {
     });
 
     expect(calls).toEqual([["locate", "--format=llm", "--", "Widget"]]);
+    expect(result.isError).toBeFalsy();
     expect(result.content).toEqual([{ type: "text", text: "match name=Widget" }]);
+  });
+
+  it("marks a structured LLM error as an MCP error when the CLI exits successfully", async () => {
+    const error = 'error code=unknown_target message="No graph entity found for \\"Missing\\"."';
+    const client = await connect(async () => ({
+      ok: true,
+      stdout: error,
+      stderr: 'No entity found matching "Missing".',
+    }));
+
+    const result = await client.callTool({
+      name: "ix_locate",
+      arguments: { symbol: "Missing" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual([{ type: "text", text: error }]);
+  });
+
+  it("keeps error-like source lines after a successful LLM record as data", async () => {
+    const output = [
+      "content target=fixture.ts lines=1",
+      'error code=source_text message="This is source, not a tool error."',
+    ].join("\n");
+    const client = await connect(async () => ({ ok: true, stdout: output, stderr: "" }));
+
+    const result = await client.callTool({
+      name: "ix_read",
+      arguments: { symbol: "fixture.ts" },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toEqual([{ type: "text", text: output }]);
   });
 
   it("forwards ix_context target and bounded budgets as the CLI contract", async () => {
