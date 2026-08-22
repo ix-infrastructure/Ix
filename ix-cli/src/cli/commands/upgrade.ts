@@ -481,6 +481,20 @@ export function composeTracksLatestBackend(composeText: string): boolean {
 }
 
 /**
+ * Whether `ix upgrade` may manage the backend without replacing the user's
+ * compose file. A missing file keeps the existing pull-only behavior. An
+ * existing file is safe only when it follows the released `:latest` image;
+ * unreadable files fail closed so a user-managed choice is never overwritten.
+ */
+function backendComposeAllowsUpgrade(composeFile: string): boolean {
+  try {
+    return composeTracksLatestBackend(readFileSync(composeFile, "utf-8"));
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT";
+  }
+}
+
+/**
  * Record the backend release after something has pulled `:latest`.
  *
  * `.backend-version` is written at install time (install.sh, install.ps1) and by
@@ -1525,13 +1539,28 @@ export function registerUpgradeCommand(program: Command): void {
 
       // ── Backend (memory-layer) upgrade ───────────────────────────────
       const backendCurrent = getTrackedVersion(BACKEND_VERSION_FILE);
+      const backendComposeFile = join(IX_HOME, "backend", "docker-compose.yml");
       let backendImageChanged = false;
-      if (backendLatest && backendUpdateAvailable(backendLatest, backendCurrent)) {
+      const backendUpgradeNeeded = !!backendLatest && backendUpdateAvailable(backendLatest, backendCurrent);
+      const backendUpgradeSkipped = !opts.check && !backendComposeAllowsUpgrade(backendComposeFile);
+
+      if (backendUpgradeNeeded) {
         console.log(
           `Backend update available: ${backendCurrent === "0.0.0" ? "none" : backendCurrent} → ${chalk.green(backendLatest)}`
         );
+      }
 
-        if (!opts.check) {
+      if (backendUpgradeSkipped) {
+        console.log(
+          chalk.yellow(
+            `[!!] Backend not upgraded: ${backendComposeFile} does not track ${BACKEND_IMAGE}:latest.`
+          )
+        );
+        console.log(chalk.dim("     Left the compose file and backend version stamp unchanged."));
+      }
+
+      if (backendUpgradeNeeded) {
+        if (!opts.check && !backendUpgradeSkipped) {
           console.log("Pulling latest backend image...");
           try {
             execFileSync(
@@ -1566,11 +1595,10 @@ export function registerUpgradeCommand(program: Command): void {
               timeout: 3000,
             });
             console.log("Restarting backend...");
-            const composeFile = join(IX_HOME, "backend", "docker-compose.yml");
-            if (existsSync(composeFile)) {
+            if (existsSync(backendComposeFile)) {
               execFileSync(
                 "docker",
-                ["compose", "-f", composeFile, "up", "-d", "--pull", "always"],
+                ["compose", "-f", backendComposeFile, "up", "-d", "--pull", "always"],
                 { stdio: "inherit" }
               );
               console.log("[ok] Backend restarted with latest image");
@@ -1579,9 +1607,9 @@ export function registerUpgradeCommand(program: Command): void {
             // Backend not running, that's fine
           }
         }
-      } else if (backendLatest) {
+      } else if (backendLatest && !backendUpgradeSkipped) {
         console.log(`[ok] Backend already on the latest version (${backendCurrent})`);
-      } else {
+      } else if (!backendLatest) {
         console.log("[--] Could not check backend version");
       }
 
@@ -1589,7 +1617,7 @@ export function registerUpgradeCommand(program: Command): void {
       // The version stamp above only reflects what was last pulled, not what is
       // actually running. Inspect the live container so a stale local/dev image
       // is surfaced even when the stamp reads current.
-      if (!opts.check) {
+      if (!opts.check && !backendUpgradeSkipped) {
         const imageStatus = checkBackendImage();
         if (imageStatus.kind === "local-build") {
           console.log(
@@ -1716,6 +1744,10 @@ export function registerUpgradeCommand(program: Command): void {
       writeCache(latest, compassLatest ?? undefined, backendLatest ?? undefined);
 
       console.log("");
-      console.log("[ok] ix is up to date");
+      if (backendUpgradeSkipped) {
+        console.log("[!!] ix upgrade finished with the backend unchanged");
+      } else {
+        console.log("[ok] ix is up to date");
+      }
     });
 }
