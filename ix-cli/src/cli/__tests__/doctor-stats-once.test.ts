@@ -14,9 +14,20 @@ vi.mock("../../client/api.js", () => ({
   },
 }));
 
-vi.mock("../backend-version.js", async (orig) => ({
-  ...(await orig<typeof import("../backend-version.js")>()),
-  fetchBackendHealth: async () => ({ status: "ok", schema_version: 3 }),
+// Doctor also inspects the live container and probes the schema. Both are
+// mocked, not merely pointed somewhere harmless: an unmocked `docker inspect`
+// or socket connect is slow-and-variable rather than fast-and-failing, which is
+// how this test timed out at 5s on the Windows runner while passing on Linux.
+vi.mock("../backend-status.js", async (orig) => ({
+  ...(await orig<typeof import("../backend-status.js")>()),
+  checkBackendImage: () => ({ kind: "docker-unavailable" as const }),
+  checkBackendSchema: async () => ({ ok: true as const }),
+  isNonStandardBackend: () => false,
+}));
+
+vi.mock("../commands/upgrade.js", async (orig) => ({
+  ...(await orig<typeof import("../commands/upgrade.js")>()),
+  readBackendHealth: async () => ({ status: "ok", schema_version: 3 }),
 }));
 
 let savedEndpoint: string | undefined;
@@ -24,10 +35,8 @@ let savedEndpoint: string | undefined;
 beforeEach(() => {
   vi.resetModules();
   statsCalls.n = 0;
-  // Doctor runs checks this test does not mock (the live-container inspection,
-  // the schema probe). Point them at a closed port so they fail fast and
-  // locally instead of reaching whatever backend happens to be up: a test that
-  // silently depends on a running backend is green on CI and red on a dev box.
+  // Belt and braces with the mocks above: nothing in this test may depend on a
+  // backend being reachable, or on how quickly a given OS refuses a connection.
   savedEndpoint = process.env.IX_ENDPOINT;
   process.env.IX_ENDPOINT = "http://127.0.0.1:9";
 });
