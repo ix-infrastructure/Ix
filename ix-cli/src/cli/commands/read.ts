@@ -11,23 +11,6 @@ import { relativePath } from "../format.js";
 import { llmLine, printLlmLines } from "../llm.js";
 import { parsePickOption } from "../options.js";
 
-/** Common file extensions that signal the target is file-like, not a symbol name. */
-const FILE_EXTENSIONS = new Set([
-  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
-  ".scala", ".sc", ".java", ".py", ".rb", ".go", ".rs",
-  ".md", ".mdx", ".rst", ".txt",
-  ".json", ".yaml", ".yml", ".toml", ".ini", ".conf",
-  ".sql", ".graphql", ".gql", ".sh", ".bash",
-  ".html", ".css", ".scss", ".less",
-]);
-
-function looksFileLike(target: string): boolean {
-  if (target.includes("/") || target.includes("\\")) return true;
-  const ext = path.extname(target).toLowerCase();
-  if (ext && FILE_EXTENSIONS.has(ext)) return true;
-  return false;
-}
-
 export interface ReadResult {
   targetType: "file" | "file-range" | "filename-match" | "symbol";
   path: string;
@@ -242,7 +225,7 @@ Examples:
       // read should prefer resolving to a real file before trying symbol match.
       // e.g. "ix read Node" should find Node.scala before trying symbol resolution.
       {
-        const filenameMatches = await tryFilenameMatch(client, rawTarget);
+        const filenameMatches = await tryFilenameMatch(client, rawTarget, root);
         if (filenameMatches.length === 1) {
           const matchPath = filenameMatches[0].path;
           if (matchPath && fs.existsSync(matchPath)) {
@@ -351,10 +334,32 @@ Examples:
  */
 async function tryFilenameMatch(
   client: IxClient,
-  target: string
+  target: string,
+  root: string
 ): Promise<Array<{ name: string; path: string }>> {
   const basename = path.basename(target);
   const hasExtension = path.extname(basename) !== "";
+
+  // Strategy 0: the workspace itself. `read` can only display a file that
+  // exists locally — every graph result below is re-checked with `existsSync`
+  // and dropped when it is missing — so disk is the authority here, not a cache
+  // of the backend. It answers in milliseconds against seconds, and reaching it
+  // before `ensureReadScope` also skips that call's scope lookup, which is its
+  // own ~1.5 s on a large graph.
+  const local = findLocalBasenameMatches(root, basename);
+  if (local.paths.length > 0) {
+    return local.paths.map(p => ({ name: path.basename(p), path: p }));
+  }
+
+  // An extension-less target with no local file of that basename is not a
+  // filename in this workspace, and the graph cannot say otherwise: `ix map`'s
+  // IGNORE_DIRS is a strict superset of the walk's, so every file the graph
+  // holds for this workspace is a file the walk visited. Asking the backend
+  // anyway costs ~8 s of `kind: file` search that returns empty every time.
+  // Targets that DO carry an extension still go to the graph, which is what
+  // answers `ix read Node.scala` for a file that is ingested but not checked out.
+  if (!hasExtension && local.exhaustive) return [];
+
   // Scope to the active workspace / co-ingest system / Path-2 stitched system.
   await ensureReadScope(client);
   const scope = activeReadScope();
@@ -363,10 +368,20 @@ async function tryFilenameMatch(
   let nodes = await client.search(basename, { limit: 20, kind: "file", ...scope });
 
   // Strategy 2: If bare name (no extension), also search with common extensions
-  // to avoid being crowded out by unrelated results. Fire the per-extension searches
-  // CONCURRENTLY — sequentially they were ~9 round trips that hung `ix read <symbol>`
-  // on large backends. Results are merged in extension-priority order (a .scala hit
-  // still ranks before a .ts hit), and the downstream filter/sort picks the winner.
+  // to avoid being crowded out by unrelated results — a bare `upgrade` search
+  // is a substring match, and on a large graph the file actually called
+  // `upgrade.ts` does not survive the backend's LIMIT.
+  //
+  // Gated on `local.exhaustive`, and that gate is the whole point. These nine
+  // searches are fired concurrently, and nine concurrent unindexed scans do not
+  // cost what one costs: measured on a 1.16M-node graph they take ~54 s EACH
+  // rather than ~10 s, because they contend for the same collection. For a
+  // symbol like `registerUpgradeCommand` all nine return empty, and `ix read`
+  // spent 60-80 s before reaching the symbol lookup that answers it.
+  //
+  // When the walk above completed, "no local file has this basename" is proven,
+  // and a graph hit could not be displayed anyway. Only when the walk ran out
+  // of budget is the question still open, and then the fallback still runs.
   if (!hasExtension && !filterMatches(nodes, basename).length) {
     const extensions = [".scala", ".ts", ".tsx", ".py", ".rs", ".go", ".java", ".js", ".md"];
     const perExt = await Promise.all(
@@ -388,6 +403,67 @@ async function tryFilenameMatch(
     seen.add(m.path);
     return true;
   });
+}
+
+/** Directories a workspace walk must not descend into. Mirrors stale.ts. */
+const WALK_IGNORE_DIRS = new Set([
+  "node_modules", ".git", "dist", "build", "target", ".next",
+  ".cache", "__pycache__", ".ix", ".claude",
+]);
+
+/** How many directory entries a single basename lookup will look at. */
+const WALK_ENTRY_BUDGET = 40_000;
+
+interface LocalMatches {
+  paths: string[];
+  /** False when the budget ran out, i.e. "no match" is not a proven answer. */
+  exhaustive: boolean;
+}
+
+/**
+ * Find files in the workspace whose basename matches `target`, on disk.
+ *
+ * `read` can only ever *display* a file that exists locally — the graph branch
+ * below re-checks `existsSync` on whatever path the backend hands back and
+ * falls through when it is missing. So the filesystem is not a shortcut here,
+ * it is the authority, and it answers in milliseconds where the graph takes
+ * seconds.
+ *
+ * Returns `exhaustive: false` if the entry budget ran out. A negative answer is
+ * only trustworthy when the whole workspace was walked, and the caller uses
+ * that distinction to decide whether it may skip the backend fallback.
+ */
+function findLocalBasenameMatches(root: string, target: string, limit = 25): LocalMatches {
+  const wanted = path.basename(target);
+  const wantedNoExt = wanted.replace(/\.[^.]+$/, "");
+  const paths: string[] = [];
+  const stack = [root];
+  let budget = WALK_ENTRY_BUDGET;
+
+  while (stack.length > 0 && paths.length < limit) {
+    const current = stack.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue; // unreadable directory is not an error for a lookup
+    }
+    for (const entry of entries) {
+      if (--budget <= 0) return { paths, exhaustive: false };
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith(".") || WALK_IGNORE_DIRS.has(entry.name)) continue;
+        stack.push(path.join(current, entry.name));
+        continue;
+      }
+      if (!entry.isFile()) continue; // symlinks are not followed
+      const nameNoExt = entry.name.replace(/\.[^.]+$/, "");
+      if (entry.name === wanted || nameNoExt === wanted || nameNoExt === wantedNoExt) {
+        paths.push(path.join(current, entry.name));
+        if (paths.length >= limit) return { paths, exhaustive: true };
+      }
+    }
+  }
+  return { paths, exhaustive: stack.length === 0 };
 }
 
 /** Filter nodes to those whose filename actually matches the target basename. */
