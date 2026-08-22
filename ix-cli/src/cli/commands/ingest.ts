@@ -552,6 +552,52 @@ async function retryOnConflict<T>(fn: () => Promise<T>, maxRetries: number): Pro
   }
 }
 
+const PAYLOAD_TOO_LARGE_PATTERNS = [
+  'payload too large',
+  'request entity too large',
+  'content too large',
+  'request body too large',
+];
+
+export function isPayloadTooLargeError(err: unknown): boolean {
+  const responseError = err as { status?: unknown; statusCode?: unknown } | null;
+  if (responseError?.status === 413 || responseError?.statusCode === 413) return true;
+
+  const message = String(err).toLowerCase();
+  if (/^(?:error:\s*)?413(?:\b|:)/.test(message)) return true;
+  return PAYLOAD_TOO_LARGE_PATTERNS.some(pattern => message.includes(pattern));
+}
+
+export async function commitBulkWithPayloadSplit<T, R>(
+  items: T[],
+  handlers: {
+    commitBulk: (batch: T[]) => Promise<R>;
+    onBulkCommitted: (batch: T[], result: R) => void;
+    commitIndividually: (batch: T[], error: unknown) => Promise<void>;
+    onSplit?: (batch: T[], error: unknown) => void;
+  },
+): Promise<void> {
+  if (items.length === 0) return;
+
+  let result: R;
+  try {
+    result = await handlers.commitBulk(items);
+  } catch (err) {
+    if (!isPayloadTooLargeError(err) || items.length === 1) {
+      await handlers.commitIndividually(items, err);
+      return;
+    }
+
+    handlers.onSplit?.(items, err);
+    const midpoint = Math.ceil(items.length / 2);
+    await commitBulkWithPayloadSplit(items.slice(0, midpoint), handlers);
+    await commitBulkWithPayloadSplit(items.slice(midpoint), handlers);
+    return;
+  }
+
+  handlers.onBulkCommitted(items, result);
+}
+
 /**
  * Advance the running max revision, ignoring anything that is not a revision.
  *
@@ -1313,11 +1359,18 @@ export async function ingestFiles(
 
       const runChunk = async (ci: number): Promise<void> => {
         const chunk = chunks[ci];
-        const startFile = chunk[0].fileNumber;
         const endFile = chunk[chunk.length - 1].fileNumber;
-        const endingPath = nodePath.basename(chunk[chunk.length - 1].filePath);
-        const patches = chunk.map(item => item.patch);
-        const commitIndividually = async (): Promise<void> => {
+        const commitIndividually = async (
+          items: PreparedPatch[],
+          bulkError?: unknown,
+        ): Promise<void> => {
+          if (debug && bulkError !== undefined) {
+            const first = items[0];
+            const last = items[items.length - 1];
+            process.stderr.write(
+              `\n  [bulk failed, falling back to per-file] files ${first.fileNumber}-${last.fileNumber} (${items.length} patches): ${bulkError}\n`
+            );
+          }
           // Chain this chunk's fallback work onto the shared tail so that only one
           // per-file loop runs at a time. This prevents concurrent commitPatch
           // transactions from racing on revisions.current (write-write conflict).
@@ -1326,7 +1379,7 @@ export async function ingestFiles(
           fallbackTail = new Promise<void>(r => { resolveThis = r; });
           await prev;
           try {
-            for (const item of chunk) {
+            for (const item of items) {
               try {
                 const commitStart = performance.now();
                 const result = await retryOnConflict(() => client.commitPatch(item.patch), COMMIT_CONFLICT_RETRIES);
@@ -1355,29 +1408,43 @@ export async function ingestFiles(
           }
         };
 
-        const hasDeletion = patches.some(patchRequiresPerFileCommit);
+        const hasDeletion = chunk.some(item => patchRequiresPerFileCommit(item.patch));
 
         if (hasDeletion) {
-          await commitIndividually();
+          await commitIndividually(chunk);
         } else {
-          try {
-            setCurrentWork(`commit ${startFile}-${endFile} of ${totalFiles} ending ${endingPath}`);
-            const commitStart = performance.now();
-            const result = await retryOnConflict(() => client.commitPatchBulk(patches), COMMIT_CONFLICT_RETRIES);
-            const chunkMs = Math.round(performance.now() - commitStart);
-            commitMsPerChunk[ci] = chunkMs;
-            timings.bulkCommitMs += chunkMs;
-            latestRev = advanceRev(latestRev, result.rev);
-            patchesApplied += patches.length;
-            for (const item of chunk) opts?.onCommitted?.(item, result.rev);
-          } catch (err) {
-            if (debug) {
-              process.stderr.write(
-                `\n  [bulk failed, falling back to per-file] files ${startFile}-${endFile} (${patches.length} patches): ${err}\n`
+          await commitBulkWithPayloadSplit(chunk, {
+            commitBulk: async items => {
+              const first = items[0];
+              const last = items[items.length - 1];
+              setCurrentWork(
+                `commit ${first.fileNumber}-${last.fileNumber} of ${totalFiles} ending ${nodePath.basename(last.filePath)}`
               );
-            }
-            await commitIndividually();
-          }
+              const commitStart = performance.now();
+              const result = await retryOnConflict(
+                () => client.commitPatchBulk(items.map(item => item.patch)),
+                COMMIT_CONFLICT_RETRIES,
+              );
+              const chunkMs = Math.round(performance.now() - commitStart);
+              commitMsPerChunk[ci] += chunkMs;
+              timings.bulkCommitMs += chunkMs;
+              return result;
+            },
+            onBulkCommitted: (items, result) => {
+              latestRev = advanceRev(latestRev, result.rev);
+              patchesApplied += items.length;
+              for (const item of items) opts?.onCommitted?.(item, result.rev);
+            },
+            commitIndividually,
+            onSplit: (items, err) => {
+              if (!debug) return;
+              const first = items[0];
+              const last = items[items.length - 1];
+              process.stderr.write(
+                `\n  [bulk payload too large, splitting] files ${first.fileNumber}-${last.fileNumber} (${items.length} patches): ${err}\n`
+              );
+            },
+          });
         }
 
         if (opts?.updateProgress) {
