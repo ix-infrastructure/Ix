@@ -884,18 +884,42 @@ describe("ix context investigation state", () => {
       expect(loadInvestigation(only.id)?.bundle.target.name).toBe("Widget");
     });
 
-    it("lists an id that --resume can take back even when it cannot be decoded", () => {
-      // `sanitizeId` writes two hex digits below U+0100 and three or four above
-      // it, so `~7528` is either one CJK code unit or `~752` followed by a
-      // literal `8` and nothing in the string says which. Guessing produced a
-      // mangled id that loaded nothing; the round-trip check refuses to guess
-      // and shows the stored name, and `loadInvestigation` accepts that form.
+    it("lists a non-Latin-1 id as the characters the user typed", () => {
+      // Above U+0100 the escape carries its `u` width marker, so `~u7528` is
+      // one code unit and cannot also be read as `~752` plus a literal `8`.
+      // That is what lets the round-trip check accept the decode instead of
+      // falling back to showing the stored name.
       saveInvestigation("用户", bundleWith([makeClaim("renders to DOM", 0.9)]));
+      expect(readdirSync(investigationsDir())).toEqual(["~u7528~u6237.json"]);
+
+      const [only] = listInvestigations().saved;
+      expect(only.id).toBe("用户");
+      // Both the listed id and the stored form reach the same file.
+      expect(loadInvestigation(only.id)?.bundle.target.name).toBe("Widget");
+      expect(loadInvestigation("~u7528~u6237")?.bundle.target.name).toBe("Widget");
+    });
+
+    it("shows a pre-marker stored id verbatim rather than guessing at it", () => {
+      // Written by a CLI that emitted a bare `~HHHH`, which is genuinely
+      // ambiguous — `~7528` is either one CJK code unit or `~752` followed by a
+      // literal `8`, and nothing in the string says which. The round-trip check
+      // refuses to guess, shows the stored name, and `loadInvestigation`
+      // accepts that form so the listed id still loads.
+      const dir = investigationsDir();
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, "~7528~6237.json"),
+        JSON.stringify({
+          schema: "ix-investigation/1",
+          id: "~7528~6237",
+          savedAt: "2026-01-01T00:00:00.000Z",
+          bundle: bundleWith([makeClaim("renders to DOM", 0.9)]),
+        }),
+      );
+
       const [only] = listInvestigations().saved;
       expect(only.id).toBe("~7528~6237");
       expect(loadInvestigation(only.id)?.bundle.target.name).toBe("Widget");
-      // …and the id the user actually typed still reaches the same file.
-      expect(loadInvestigation("用户")?.bundle.target.name).toBe("Widget");
     });
 
     it("keeps an id that is literally spelled like an encoding on its own file", () => {

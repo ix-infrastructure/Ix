@@ -526,11 +526,12 @@ function investigationPath(id: string): string {
  * Encode an investigation id into a filesystem-safe file name, injectively.
  *
  * `[A-Za-z0-9._-]` passes through unchanged; every other UTF-16 code unit —
- * including the escape marker `~` itself — is hex-encoded as `~HH`. Two
- * different logical ids can therefore never map to the same file, and a raw
- * `~` in user input cannot be confused with an encoding: `a/b`, `a?b`, and
- * `a~2Fb` all land in distinct, single-segment files under the investigation
- * directory instead of silently colliding or escaping it.
+ * including the escape marker `~` itself — is hex-encoded, as `~HH` below
+ * U+0100 and `~uHHHH` at or above it. Two different logical ids can therefore
+ * never map to the same file, and a raw `~` in user input cannot be confused
+ * with an encoding: `a/b`, `a?b`, and `a~2Fb` all land in distinct,
+ * single-segment files under the investigation directory instead of silently
+ * colliding or escaping it.
  *
  * A leading `.` is encoded too, so no id can produce a dotfile. `.` is otherwise
  * an ordinary character here, and encoding it only in first position keeps the
@@ -538,8 +539,32 @@ function investigationPath(id: string): string {
  */
 export function sanitizeId(id: string): string {
   let out = "";
-  for (const ch of id) {
-    out += /[A-Za-z0-9._-]/.test(ch) ? ch : `~${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`;
+  // Iterate UTF-16 code units, not code points. `for...of` walks code points
+  // while `charCodeAt(0)` reads only the leading surrogate, so every astral
+  // character encoded as just its high surrogate and they all collided (#478).
+  for (let i = 0; i < id.length; i++) {
+    const ch = id[i];
+    if (/[A-Za-z0-9._-]/.test(ch)) {
+      out += ch;
+      continue;
+    }
+    const code = id.charCodeAt(i);
+    // Two escape widths, and the `u` is what keeps them apart. A bare
+    // `~HHHH` would be ambiguous: `~D83D` reads equally well as one code unit
+    // or as `~D8` followed by the literal characters `3D`, and hex digits pass
+    // through unencoded, so both readings are producible. That is not
+    // hypothetical — it is how U+1F600 collided with the ordinary string
+    // `Ø3DÞ00`, which is the same overwrite bug #478 was about, one layer down.
+    //
+    // `u` cannot be confused with the narrow form because it is not a hex
+    // digit, and a literal `~` in the input is itself encoded (`~7E`), so the
+    // character after an escape marker is never user data.
+    //
+    // The narrow form is kept for everything below U+0100 so that every id
+    // already on disk keeps the name it was saved under.
+    out += code < 0x100
+      ? `~${code.toString(16).toUpperCase().padStart(2, "0")}`
+      : `~u${code.toString(16).toUpperCase().padStart(4, "0")}`;
   }
   if (out.startsWith(".")) out = `~2E${out.slice(1)}`;
   return out || "unnamed";
@@ -555,18 +580,19 @@ export function sanitizeId(id: string): string {
  * saved as `widget/auth` was listed as `widget~2Fauth`, and resuming that
  * looked for `widget~7E2Fauth`, which does not exist.
  *
- * The escape is not fixed-width, and that is why this decodes and then
- * re-encodes rather than trusting the decode. `toString(16)` gives two hex
- * digits below U+0100 and three or four above it, so `~7528` is either one CJK
- * code unit or `~752` followed by a literal `8`, and nothing in the string says
- * which. Two hex digits is the case every Latin-1 id takes; anything else fails
- * the re-encode and the stored id is returned untouched, which is honest rather
- * than a guess. `loadInvestigation` accepts that form too, so a listed id loads
- * either way — the display is the nicety, the load is the contract.
+ * Decodes both escape widths and then re-encodes to check itself, rather than
+ * trusting the decode. The check is not ceremony: ids written before the
+ * `~uHHHH` form existed still carry bare `~HHHH`, which decodes to a different
+ * string than it was saved from, and the re-encode is what catches that and
+ * returns the stored id untouched instead of showing a plausible wrong answer.
+ * `loadInvestigation` accepts the stored form too, so a listed id loads either
+ * way — the display is the nicety, the load is the contract.
  */
 export function displayId(stored: string): string {
-  const decoded = stored.replace(/~([0-9A-Fa-f]{2})/g, (_m, hex: string) =>
-    String.fromCharCode(parseInt(hex, 16)),
+  const decoded = stored.replace(
+    /~u([0-9A-Fa-f]{4})|~([0-9A-Fa-f]{2})/g,
+    (_m, wide: string | undefined, narrow: string | undefined) =>
+      String.fromCharCode(parseInt(wide ?? narrow ?? "", 16)),
   );
   return sanitizeId(decoded) === stored ? decoded : stored;
 }
