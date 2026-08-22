@@ -13,7 +13,6 @@ import { IxClient } from "../../client/api.js";
 import type {
   ConflictReport,
   DecisionReport,
-  GraphNode,
   IntentReport,
   StructuredContext,
 } from "../../client/types.js";
@@ -120,6 +119,37 @@ interface ContextOptions extends Partial<BudgetSnapshot> {
   format: string;
 }
 
+const CONTEXT_DEPTHS = ["compact", "standard", "full", "shallow", "deep"] as const;
+
+/**
+ * The depth vocabulary the backend understands, and what to do about anything
+ * else.
+ *
+ * `ContextService` normalizes `shallow`->`compact` and `deep`->`full`, then
+ * picks its limits with a `case _` that lands every unrecognized value on the
+ * `standard` tier. So `--depth 2` was never an error: it silently ran a
+ * standard-depth query, and scripts have been passing values like it.
+ *
+ * Rejecting those outright would be a breaking change in a patch release, for
+ * a flag whose wrong values were previously harmless. So this warns and does
+ * exactly what the backend already did with them — the typo still gets
+ * surfaced, on stderr so `--format json` and `--format llm` stay parseable,
+ * but nobody's pipeline starts exiting 1 on upgrade.
+ *
+ * Deliberately not an `InvalidArgumentError`, unlike `--pick` and `--as-of-rev`
+ * next to it: those reject values that have no defined meaning, whereas this
+ * one has a defined meaning and it is `standard`.
+ */
+export function parseContextDepthOption(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if ((CONTEXT_DEPTHS as readonly string[]).includes(normalized)) return normalized;
+
+  renderWarningErr(
+    `--depth ${value} is not one of ${CONTEXT_DEPTHS.join(", ")}; using standard.`
+  );
+  return "standard";
+}
+
 /** Stable evidence kinds, ordered by relevance tier (lower is more relevant). */
 type EvidenceKind =
   | "target"
@@ -197,7 +227,11 @@ export function registerContextCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Prefer symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--depth <depth>", "Context-graph expansion depth")
+    .option(
+      "--depth <depth>",
+      `Context-graph expansion depth (${CONTEXT_DEPTHS.join("|")})`,
+      parseContextDepthOption,
+    )
     .option("--as-of-rev <n>", "Historical context as of a graph revision", parseRevisionOption)
     // No Commander default on the --max-* flags, so `parseRequestedBudgets`
     // can tell an absent flag from one set to the default value. The defaults
@@ -1289,20 +1323,37 @@ export function buildBundle(input: BuildInput): ContextBundle {
       stale,
     },
   ];
-  for (const node of orderedNodes(context.nodes)) {
+  // Compact and standard backend responses omit the full graph arrays and
+  // carry the same graph as summaries. Falling back here keeps the default
+  // context mode from collapsing to a target-only bundle.
+  const contextNodes = context.nodes.length > 0
+    ? context.nodes.map((node) => ({
+        id: node.id,
+        name: node.name,
+        kind: node.kind,
+        path: node.provenance?.sourceUri,
+      }))
+    : (context.nodeSummaries ?? []).map((node) => ({
+        id: node.id,
+        name: node.name,
+        kind: node.kind,
+        path: node.sourceUri ?? undefined,
+      }));
+  for (const node of orderedNodes(contextNodes)) {
     if (seen.has(node.id)) continue;
     seen.add(node.id);
     entities.push({
       id: node.id,
       name: node.name,
       kind: node.kind,
-      path: node.provenance?.sourceUri,
+      path: node.path,
       stale: false, // replaced below, for the entities that survive the budget
     });
   }
 
   // Relationships: graph edges, ordered deterministically.
-  const relationships = [...context.edges]
+  const contextEdges = context.edges.length > 0 ? context.edges : (context.edgeSummaries ?? []);
+  const relationships = [...contextEdges]
     .sort((a, b) => cmp(a.src, b.src) || cmp(a.dst, b.dst) || cmp(a.predicate, b.predicate))
     .map((edge) => ({ src: edge.src, dst: edge.dst, predicate: edge.predicate }));
 
@@ -1590,7 +1641,7 @@ export function renderBundle(bundle: ContextBundle, format: string): void {
   console.log();
 }
 
-function orderedNodes(nodes: GraphNode[]): GraphNode[] {
+function orderedNodes<T extends { id: string; kind: string; name: string }>(nodes: T[]): T[] {
   return [...nodes].sort((a, b) => cmp(a.kind, b.kind) || cmp(a.name, b.name) || cmp(a.id, b.id));
 }
 
