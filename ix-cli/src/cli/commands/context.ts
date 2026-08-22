@@ -1,4 +1,4 @@
-import { InvalidArgumentError, type Command } from "commander";
+import type { Command } from "commander";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -121,12 +121,33 @@ interface ContextOptions extends Partial<BudgetSnapshot> {
 
 const CONTEXT_DEPTHS = ["compact", "standard", "full", "shallow", "deep"] as const;
 
-function parseContextDepthOption(value: string): string {
+/**
+ * The depth vocabulary the backend understands, and what to do about anything
+ * else.
+ *
+ * `ContextService` normalizes `shallow`->`compact` and `deep`->`full`, then
+ * picks its limits with a `case _` that lands every unrecognized value on the
+ * `standard` tier. So `--depth 2` was never an error: it silently ran a
+ * standard-depth query, and scripts have been passing values like it.
+ *
+ * Rejecting those outright would be a breaking change in a patch release, for
+ * a flag whose wrong values were previously harmless. So this warns and does
+ * exactly what the backend already did with them — the typo still gets
+ * surfaced, on stderr so `--format json` and `--format llm` stay parseable,
+ * but nobody's pipeline starts exiting 1 on upgrade.
+ *
+ * Deliberately not an `InvalidArgumentError`, unlike `--pick` and `--as-of-rev`
+ * next to it: those reject values that have no defined meaning, whereas this
+ * one has a defined meaning and it is `standard`.
+ */
+export function parseContextDepthOption(value: string): string {
   const normalized = value.trim().toLowerCase();
-  if (!(CONTEXT_DEPTHS as readonly string[]).includes(normalized)) {
-    throw new InvalidArgumentError(`must be one of: ${CONTEXT_DEPTHS.join(", ")}`);
-  }
-  return normalized;
+  if ((CONTEXT_DEPTHS as readonly string[]).includes(normalized)) return normalized;
+
+  renderWarningErr(
+    `--depth ${value} is not one of ${CONTEXT_DEPTHS.join(", ")}; using standard.`
+  );
+  return "standard";
 }
 
 /** Stable evidence kinds, ordered by relevance tier (lower is more relevant). */

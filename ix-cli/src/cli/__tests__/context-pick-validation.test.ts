@@ -8,7 +8,7 @@ vi.mock("../resolve.js", async (importOriginal) => ({
   resolveFileOrEntity,
 }));
 
-import { registerContextCommand } from "../commands/context.js";
+import { parseContextDepthOption, registerContextCommand } from "../commands/context.js";
 
 async function runContext(args: string[]): Promise<{ error?: CommanderError; stderr: string }> {
   const stderr: string[] = [];
@@ -153,19 +153,65 @@ describe("ix context --depth validation", () => {
     resolveFileOrEntity.mockReset().mockResolvedValue(undefined);
   });
 
-  it.each(["2", "wide", "standard-ish"])("rejects unsupported depth %j before resolving", async (depth) => {
-    const result = await runContext(["--depth", depth]);
-
-    expect(result.error?.exitCode).toBe(1);
-    expect(result.stderr).toContain("must be one of: compact, standard, full, shallow, deep");
-    expect(resolveFileOrEntity).not.toHaveBeenCalled();
-  });
-
   it.each(["compact", "standard", "full", "shallow", "deep", "FULL"])("accepts depth %j", async (depth) => {
     const result = await runContext(["--depth", depth]);
 
     expect(result.error).toBeUndefined();
     expect(resolveFileOrEntity).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["compact", "compact"],
+    ["FULL", "full"],
+    ["  Deep  ", "deep"],
+  ])("normalizes a known depth %j to %j", (input, expected) => {
+    expect(parseContextDepthOption(input)).toBe(expected);
+  });
+
+  /**
+   * An unrecognized depth must NOT exit 1.
+   *
+   * The backend's limit selection ends in a `case _` that lands every
+   * unrecognized value on the standard tier, so `--depth 2` has always run a
+   * standard-depth query rather than failing. Anything already passing one is
+   * a working pipeline, and turning it into a non-zero exit inside a patch
+   * release breaks it on upgrade for no gain.
+   */
+  it.each(["2", "wide", "standard-ish"])("falls back to standard for %j instead of exiting", (depth) => {
+    const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(parseContextDepthOption(depth)).toBe("standard");
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0].join(" ")).toContain(`--depth ${depth}`);
+      expect(warn.mock.calls[0].join(" ")).toContain("using standard");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.each(["2", "wide"])("still resolves the target after an unknown depth %j", async (depth) => {
+    const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await runContext(["--depth", depth]);
+
+      expect(result.error).toBeUndefined();
+      expect(resolveFileOrEntity).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("warns on stderr, never stdout, so --format json stays parseable", () => {
+    const out = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      parseContextDepthOption("nonsense");
+      expect(warn).toHaveBeenCalledOnce();
+      expect(out).not.toHaveBeenCalled();
+    } finally {
+      out.mockRestore();
+      warn.mockRestore();
+    }
   });
 });
 
