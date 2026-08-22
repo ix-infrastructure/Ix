@@ -61,6 +61,7 @@ describe("workspace-scoped staleness", () => {
     moveMtimeForward(fileA);
     const beforeB = detectStaleFiles(rootA);
     expect(beforeB).toEqual({
+      mapCompleted: true,
       lastIngestAt: ingestedA.toISOString(),
       currentRev: 11,
       staleFiles: 1,
@@ -110,6 +111,7 @@ describe("workspace-scoped staleness", () => {
     writeSource(root, "new.js", "export const value = 1;\n");
 
     expect(detectStaleFiles(root)).toEqual({
+      mapCompleted: false,
       lastIngestAt: null,
       currentRev: 0,
       staleFiles: 0,
@@ -145,6 +147,7 @@ describe("workspace-scoped staleness", () => {
     fs.unlinkSync(filePath);
 
     expect(detectStaleFiles(root)).toEqual({
+      mapCompleted: true,
       lastIngestAt: ingestedAt.toISOString(),
       currentRev: 14,
       staleFiles: 1,

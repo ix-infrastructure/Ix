@@ -137,6 +137,7 @@ describe("read --format llm", () => {
 describe("status --format llm", () => {
   it("answers 'can I trust the graph' in one field", () => {
     const lines = renderStatusLlm("ok", "http://localhost:8090", {
+      mapCompleted: true,
       currentRev: 11, lastIngestAt: "2026-08-09T12:00:00.000Z",
       staleFiles: 2, sampleChangedFiles: ["src/a.ts", "src/b.ts"],
     });
@@ -150,11 +151,22 @@ describe("status --format llm", () => {
 
   it("says stale=false rather than omitting it when the graph is current", () => {
     const lines = renderStatusLlm("ok", "http://localhost:8090", {
+      mapCompleted: true,
       currentRev: 11, lastIngestAt: null, staleFiles: 0, sampleChangedFiles: [],
     });
 
     expect(lines[0]).toContain("stale=false");
     expect(lines[0]).toContain("stale_files=0");
+  });
+
+  it("does not call a workspace current before any map completed", () => {
+    const lines = renderStatusLlm("ok", "http://localhost:8090", {
+      mapCompleted: false,
+      currentRev: 0, lastIngestAt: null, staleFiles: 0, sampleChangedFiles: [],
+    });
+
+    expect(lines[0]).toContain("map_complete=false");
+    expect(lines[0]).toContain("stale=true");
   });
 
   it("omits the staleness fields entirely when there is no baseline to read", () => {

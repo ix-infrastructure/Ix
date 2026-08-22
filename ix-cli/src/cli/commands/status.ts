@@ -7,6 +7,7 @@ import { detectStaleFiles } from "../stale.js";
 import { llmError, llmLine, printLlmLines } from "../llm.js";
 
 interface StatusStaleInfo {
+  mapCompleted: boolean;
   currentRev: number;
   lastIngestAt: string | null;
   staleFiles: number;
@@ -31,10 +32,11 @@ export function renderStatusLlm(
   const lines = [llmLine("status", [
     ["backend", backend],
     ["endpoint", endpoint],
+    ["map_complete", staleInfo ? String(staleInfo.mapCompleted) : null],
     ["rev", staleInfo ? String(staleInfo.currentRev) : null],
     ["last_ingest_at", staleInfo?.lastIngestAt ?? null],
     ["stale_files", staleInfo ? String(staleInfo.staleFiles) : null],
-    ["stale", staleInfo ? (staleInfo.staleFiles > 0 ? "true" : "false") : null],
+    ["stale", staleInfo ? (!staleInfo.mapCompleted || staleInfo.staleFiles > 0 ? "true" : "false") : null],
   ])];
   for (const f of staleInfo?.sampleChangedFiles ?? []) {
     lines.push(llmLine("changed", [["path", f]]));
@@ -67,6 +69,7 @@ export function registerStatusCommand(program: Command): void {
         } else if (opts.format === "json") {
           const result: any = {
             backend: health.status,
+            mapCompleted: staleInfo?.mapCompleted ?? null,
             currentRev: staleInfo?.currentRev ?? null,
             lastIngestAt: staleInfo?.lastIngestAt ?? null,
             staleFiles: staleInfo?.staleFiles ?? 0,
@@ -83,7 +86,10 @@ export function registerStatusCommand(program: Command): void {
               const ago = timeSince(staleInfo.lastIngestAt);
               renderKeyValue("Last ingest", ago);
             }
-            if (staleInfo.staleFiles > 0) {
+            if (!staleInfo.mapCompleted) {
+              renderWarning("No completed map is recorded for this workspace.");
+              renderNote("Run ix map to build a trustworthy graph.");
+            } else if (staleInfo.staleFiles > 0) {
               renderWarning(`${staleInfo.staleFiles} file(s) changed since last ingest:`);
               for (const f of staleInfo.sampleChangedFiles) {
                 console.log(`    ${f}`);

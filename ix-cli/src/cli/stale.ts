@@ -5,6 +5,7 @@ import { loadIngestBaseline } from "./ingest-baseline.js";
 import { SUPPORTED_EXTENSIONS } from "./supported-extensions.js";
 
 export interface StaleInfo {
+  mapCompleted: boolean;
   lastIngestAt: string | null;
   currentRev: number;
   staleFiles: number;
@@ -89,7 +90,13 @@ export function detectStaleFiles(
   const workspaceRoot = path.resolve(root);
   const baseline = loadIngestBaseline(workspaceRoot);
   if (!baseline) {
-    return { lastIngestAt: null, currentRev: 0, staleFiles: 0, sampleChangedFiles: [] };
+    return {
+      mapCompleted: false,
+      lastIngestAt: null,
+      currentRev: 0,
+      staleFiles: 0,
+      sampleChangedFiles: [],
+    };
   }
 
   const files = collectFiles(workspaceRoot);
@@ -121,6 +128,7 @@ export function detectStaleFiles(
   }
 
   return {
+    mapCompleted: true,
     lastIngestAt: baseline.lastIngestAt,
     currentRev: baseline.currentRev,
     staleFiles: changedFiles.length,
