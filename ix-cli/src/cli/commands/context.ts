@@ -538,8 +538,13 @@ function investigationPath(id: string): string {
  */
 export function sanitizeId(id: string): string {
   let out = "";
-  for (const ch of id) {
-    out += /[A-Za-z0-9._-]/.test(ch) ? ch : `~${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`;
+  // Iterate UTF-16 code units (not code points) so astral characters are
+  // encoded as both their high and low surrogates, making the mapping injective.
+  // for...of iterates code points but charCodeAt(0) only reads the leading
+  // surrogate, causing all astral chars to collide (Issue #478).
+  for (let i = 0; i < id.length; i++) {
+    const ch = id[i];
+    out += /[A-Za-z0-9._-]/.test(ch) ? ch : `~${id.charCodeAt(i).toString(16).toUpperCase().padStart(2, "0")}`;
   }
   if (out.startsWith(".")) out = `~2E${out.slice(1)}`;
   return out || "unnamed";
