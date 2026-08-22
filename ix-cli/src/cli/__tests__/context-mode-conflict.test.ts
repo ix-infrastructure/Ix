@@ -6,6 +6,7 @@ import { Command } from "commander";
 
 import {
   detectContextModeConflict,
+  displayId,
   registerContextCommand,
   sanitizeId,
   mergeDiffOptions,
@@ -710,10 +711,71 @@ describe("sanitizeId", () => {
     const bmpSanitized = bmpIds.map(sanitizeId);
     expect(new Set(bmpSanitized).size).toBe(bmpIds.length);
 
-    // Both surrogates encoded, so the trailing one still separates them.
-    expect(sanitizeId(astralIds[0])).toBe("~D83D~DE00");
-    expect(sanitizeId(astralIds[1])).toBe("~D83D~DE01");
+    // Both surrogates encoded, and the `u` marks them as one code unit each.
+    expect(sanitizeId(astralIds[0])).toBe("~uD83D~uDE00");
+    expect(sanitizeId(astralIds[1])).toBe("~uD83D~uDE01");
     expect(sanitizeId(astralIds[0])).not.toBe(sanitizeId(astralIds[1]));
+  });
+
+  /**
+   * The collision that survived the first fix, and the reason the escape
+   * carries a width marker at all.
+   *
+   * Encoding an astral code unit as a bare `~HHHH` is ambiguous, because hex
+   * digits pass through unencoded: `~D83D` reads equally well as one code unit
+   * or as `~D8` — which is `Ø` — followed by the literal characters `3D`.
+   * Both readings are producible from real input, so U+1F600 and the ordinary
+   * string `Ø3DÞ00` sanitized to the same file name and the second
+   * `ix context --save` silently overwrote the first. That is the same
+   * overwrite bug #478 named, one layer down.
+   *
+   * A fixture of astral characters alone cannot catch this — 😀 and 😁 differ
+   * from each other under both schemes. It needs the Latin-1 partner.
+   */
+  it.each([
+    ["\u{1F600}", "\u00D83D\u00DE00"],
+    ["\u{1F601}", "\u00D83D\u00DE01"],
+    ["\u{1D54F}", "\u00D835\u00DDDD4F"],
+  ])("does not collide %j with its Latin-1 lookalike %j", (astral, latin1) => {
+    expect(sanitizeId(astral)).not.toBe(sanitizeId(latin1));
+  });
+
+  it("is injective across a corpus that mixes both escape widths", () => {
+    const ids = [
+      "a/b", "a~2Fb", "a?b", "a~3Fb", ".", "~2E", "~", "~7E", "caf\u00E9",
+      "\u{1F600}", "\u{1F601}", "\u{1D54F}", "\u{1D540}",
+      "\u00D83D\u00DE00", "\u00D83D\u00DE01", "\u00D835\u00DD4F",
+      "\u65E5", "e5", "\u00D8", "D8", "\u00DE", "DE",
+    ];
+    expect(new Set(ids.map(sanitizeId)).size).toBe(ids.length);
+  });
+
+  /**
+   * Every id already on disk keeps the name it was saved under. The narrow
+   * `~HH` form is unchanged below U+0100, which is every name the released
+   * CLI could produce without hitting the collision above.
+   */
+  it.each([
+    ["a/b", "a~2Fb"],
+    ["a?b", "a~3Fb"],
+    ["caf\u00E9", "caf~E9"],
+    ["~", "~7E"],
+    [".hidden", "~2Ehidden"],
+    ["a~2Fb", "a~7E2Fb"],
+  ])("keeps the existing on-disk name for %j", (id, stored) => {
+    expect(sanitizeId(id)).toBe(stored);
+  });
+
+  it("round-trips an astral id back to the character for --list", () => {
+    const stored = sanitizeId("\u{1F600}");
+    expect(displayId(stored)).toBe("\u{1F600}");
+  });
+
+  it("returns a pre-marker stored id untouched rather than guessing", () => {
+    // Written by the released CLI before `~uHHHH` existed. Decoding it yields
+    // the Latin-1 reading, which is not what it was saved from, so the
+    // re-encode check must reject the guess and hand back the stored form.
+    expect(displayId("~D83D~DE00")).toBe("\u00D83D\u00DE00");
   });
 
   it("produces filesystem-safe output (no slashes in result)", () => {
