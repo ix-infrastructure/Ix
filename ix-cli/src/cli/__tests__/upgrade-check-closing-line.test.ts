@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -46,6 +46,16 @@ describe("ix upgrade --check output", () => {
   let logs: string[];
 
   beforeEach(() => {
+    // upgrade.ts binds IX_HOME and VERSION_CACHE as module-level consts at load
+    // time, so `await import` below only picks up this temp home if the module
+    // is not already in the registry. Running this file alone it is not, and the
+    // test passed; in a full-suite run another file has already imported it and
+    // the writeCache at the end of the command lands in the developer's REAL
+    // ~/.ix, seeding latest: "99.0.0" for CLI, compass and backend. The test
+    // still passes, so nothing catches it, and CI never sees it because a runner
+    // has a throwaway home. What the developer sees afterwards is `ix` insisting
+    // on an upgrade to a version that does not exist.
+    vi.resetModules();
     home = mkdtempSync(join(tmpdir(), "ix-upgrade-check-"));
     process.env.IX_HOME = home;
     logs = [];
@@ -77,6 +87,15 @@ describe("ix upgrade --check output", () => {
     await program.parseAsync(["node", "ix", "upgrade", "--check"]);
     return logs.join("\n");
   }
+
+  it("writes its version cache under the temp IX_HOME, not the real one", async () => {
+    await runCheck("v99.0.0");
+    // The bug this file caused, stated as an assertion: the command must have
+    // written its cache into the throwaway home. Checking the temp side rather
+    // than the developer's real ~/.ix keeps the test hermetic on a machine that
+    // legitimately has one.
+    expect(existsSync(join(home, ".version-check.json"))).toBe(true);
+  });
 
   it("does not claim to be up to date when it just announced a new version", async () => {
     const out = await runCheck("v99.0.0");
