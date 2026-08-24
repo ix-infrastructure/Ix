@@ -1457,8 +1457,28 @@ export function buildBundle(input: BuildInput): ContextBundle {
   );
   bundle.truncation.entitiesTruncated = entities.length - entityLimit;
 
-  const relLimit = Math.min(relationships.length, budgets.maxRelationships);
-  bundle.relationships = relationships.slice(0, relLimit);
+  // Relationships are budgeted against the entities that SURVIVED, not against
+  // the full list. The two budgets used to be applied independently, so an edge
+  // could be kept while one or both of its endpoints were cut: measured on a
+  // real target at `--max-entities 10`, 59 of 74 relationships referenced an
+  // entity no longer in the bundle, 13 of them at both ends -- and
+  // `relationshipsTruncated` reported 0, because nothing had exceeded the
+  // relationship budget. The renderer prints those as bare UUIDs, so the damage
+  // was invisible.
+  //
+  // The backend already guarantees this on its side (`trimSlice` keeps an edge
+  // only when both endpoints survive); this stops the CLI from undoing it.
+  // Dropping the dangling edge rather than pulling its endpoint back in keeps
+  // `--max-entities` meaning exactly what it says.
+  const keptEntityIds = new Set(bundle.entities.map((e) => e.id));
+  const connected = relationships.filter(
+    (r) => keptEntityIds.has(r.src) && keptEntityIds.has(r.dst),
+  );
+  const relLimit = Math.min(connected.length, budgets.maxRelationships);
+  bundle.relationships = connected.slice(0, relLimit);
+  // Count everything the caller does not get back, whichever budget cost it --
+  // the entity cut and the relationship cut both drop relationships, and
+  // reporting only the second is what made an 80%-dangling bundle look clean.
   bundle.truncation.relationshipsTruncated = relationships.length - relLimit;
 
   // Evidence is ordered by relevance, so keep the highest-priority prefix and
