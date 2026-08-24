@@ -121,6 +121,7 @@ Kartr aggregates your knowledge from every source you already use:
 One memory, built from all of it, that your agents can reason over.
 
 Agents that remember.
+Agents that take initiative.
 Agents that carry context across sources and sessions.
 Agents that get more useful the longer you use them.
 
