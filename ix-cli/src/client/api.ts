@@ -47,6 +47,32 @@ export class IxClient {
     return this.post("/v1/context", { query: question, ...opts });
   }
 
+  /**
+   * Context centred on a node we have already resolved.
+   *
+   * `query()` sends a NAME and makes the backend re-derive seeds by string
+   * search. That is the single most expensive call the CLI makes — measured at
+   * 10.6 s against 0.06 s for this form on the same graph — and it is not just
+   * slow, it can centre the bundle on a different node: `README.md` resolved to
+   * one id and came back seeded on `mcp/node_modules/serve-static/README.md`,
+   * with the resolved id in neither the seeds nor the returned nodes.
+   *
+   * The id is already in hand by the time this is called, so send it. `depth` is
+   * passed through rather than pinned to `full`, so `--depth` still means what it
+   * says: compact and standard return the summarized graph (which `buildBundle`
+   * reads), full returns whole nodes plus claims.
+   */
+  async contextForNode(
+    nodeId: string,
+    opts?: { asOfRev?: number; depth?: string; hops?: number }
+  ): Promise<StructuredContext> {
+    const { hops = 1, ...rest } = opts ?? {};
+    return this.post("/v1/context", {
+      slices: [{ type: "nodes", nodeIds: [nodeId], expand: true, hops }],
+      ...rest,
+    });
+  }
+
   async ingest(path: string, recursive?: boolean, force?: boolean): Promise<IngestResult> {
     const resp = await fetch(`${this.endpoint}/v1/ingest`, {
       method: "POST",

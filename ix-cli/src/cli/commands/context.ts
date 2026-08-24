@@ -314,7 +314,12 @@ export function registerContextCommand(program: Command): void {
 
       const [facts, context, provenance] = await Promise.all([
         collectFacts(client, resolved.id, resolved.name, resolved.kind),
-        client.query(resolved.name, {
+        // By id, not by name. Seeding by name makes the backend re-run the
+        // search the resolver just did, and it can land on a different node of
+        // the same name. Both call sites in this file must use it: converting
+        // only one makes `--diff` compare a by-id bundle against a by-name one
+        // and report the whole graph as changed.
+        client.contextForNode(resolved.id, {
           asOfRev,
           depth: opts.depth,
         }),
@@ -407,7 +412,7 @@ async function buildFreshBundle(
   const asOfRev = opts.asOfRev;
   const [facts, context, provenance] = await Promise.all([
     collectFacts(client, resolved.id, resolved.name, resolved.kind),
-    client.query(resolved.name, { asOfRev, depth: opts.depth }),
+    client.contextForNode(resolved.id, { asOfRev, depth: opts.depth }),
     client.provenance(resolved.id),
   ]);
 
