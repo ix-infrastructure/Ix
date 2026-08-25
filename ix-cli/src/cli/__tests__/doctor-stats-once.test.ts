@@ -1,9 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
 
+type FakeWorkspace = { workspace_id: string; workspace_name: string; root_path: string; default: boolean };
+
+// The workspace cwd belongs to, and an unrelated one that happens to be the
+// registered default. Keeping both named makes it visible in the assertions
+// which repo a count was taken from.
+const CURRENT: FakeWorkspace =
+  { workspace_id: "workspace-current", workspace_name: "current-repo", root_path: "/repos/current", default: false };
+const OTHER: FakeWorkspace =
+  { workspace_id: "workspace-other", workspace_name: "other-repo", root_path: "/repos/other", default: true };
+
 const statsCalls: Array<{ workspaceId?: string; systemId?: string } | undefined> = [];
 const scope = {
-  workspaceId: "workspace-current" as string | undefined,
+  matched: undefined as FakeWorkspace | undefined,
+  fallback: undefined as FakeWorkspace | undefined,
   systemId: undefined as string | undefined,
 };
 
@@ -14,10 +25,11 @@ vi.mock("../../client/api.js", () => ({
       // Both ids undefined is the unscoped call, not a match on a scope that
       // happens to be unset — compare only ids that are actually present, or
       // `undefined === undefined` silently answers with the workspace figure.
-      const scoped =
-        (opts?.workspaceId !== undefined && opts.workspaceId === scope.workspaceId) ||
-        (opts?.systemId !== undefined && opts.systemId === scope.systemId);
-      if (scoped) return { nodes: { total: 3457 }, edges: { total: 10365 } };
+      if (opts?.systemId !== undefined) return { nodes: { total: 3457 }, edges: { total: 10365 } };
+      if (opts?.workspaceId === CURRENT.workspace_id) return { nodes: { total: 3457 }, edges: { total: 10365 } };
+      // Deliberately distinct so a count sourced from the wrong workspace cannot
+      // coincide with the right one's.
+      if (opts?.workspaceId === OTHER.workspace_id) return { nodes: { total: 7717 }, edges: { total: 16983 } };
       return { nodes: { total: 22969 }, edges: { total: 10365 } };
     }
     async conflicts() { return []; }
@@ -25,9 +37,14 @@ vi.mock("../../client/api.js", () => ({
   },
 }));
 
-vi.mock("../bootstrap.js", async (orig) => ({
-  ...(await orig<typeof import("../bootstrap.js")>()),
-  resolveWorkspaceId: () => scope.workspaceId,
+// Mocked at the config layer, not at `resolveWorkspaceId`. Stubbing that helper
+// is what let #518 through: it returns one id for both "cwd matched this
+// workspace" and "cwd matched nothing, so here is the default", so a test that
+// replaces it can never exercise the difference.
+vi.mock("../config.js", async (orig) => ({
+  ...(await orig<typeof import("../config.js")>()),
+  findWorkspaceForCwd: () => scope.matched,
+  getDefaultWorkspace: () => scope.fallback,
 }));
 
 vi.mock("../resolve.js", async (orig) => ({
@@ -56,7 +73,8 @@ let savedEndpoint: string | undefined;
 beforeEach(() => {
   vi.resetModules();
   statsCalls.length = 0;
-  scope.workspaceId = "workspace-current";
+  scope.matched = CURRENT;
+  scope.fallback = undefined;
   scope.systemId = undefined;
   // Belt and braces with the mocks above: nothing in this test may depend on a
   // backend being reachable, or on how quickly a given OS refuses a connection.
@@ -102,7 +120,13 @@ describe("ix doctor", () => {
     const lines = await runDoctor();
 
     expect(statsCalls).toEqual([{ workspaceId: "workspace-current", systemId: undefined }]);
-    expect(lines).toContain('check name="Graph has nodes" status=ok detail="3457 nodes in this workspace"');
+    expect(lines).toContain(`check name="Graph has nodes" status=ok detail="3457 nodes in workspace 'current-repo'"`);
+  });
+
+  it("names the workspace cwd resolved to", async () => {
+    const lines = await runDoctor();
+
+    expect(lines).toContain(`check name="Workspace for this directory" status=ok detail="workspace 'current-repo'"`);
   });
 
   it("uses the active system scope for a co-ingested workspace", async () => {
@@ -117,10 +141,45 @@ describe("ix doctor", () => {
   it("says the count is unscoped when no workspace is registered", async () => {
     // A count of everything is not wrong here, but it is the one case where
     // naming a scope would be — there is no active workspace to name.
-    scope.workspaceId = undefined;
+    scope.matched = undefined;
+    scope.fallback = undefined;
 
     const lines = await runDoctor();
 
     expect(lines).toContain('check name="Graph has nodes" status=ok detail="22969 nodes in all workspaces"');
+    expect(lines).toContain(
+      'check name="Workspace for this directory" status=warn detail="none registered yet — run `ix map`"',
+    );
+  });
+
+  describe("a directory no workspace is registered for (#518)", () => {
+    // cwd matches nothing, and an unrelated repo holds `default: true`.
+    beforeEach(() => {
+      scope.matched = undefined;
+      scope.fallback = OTHER;
+    });
+
+    it("does not report the run as healthy", async () => {
+      const lines = await runDoctor();
+
+      // The whole of #518: this said healthy=true, so "All checks passed" is
+      // what a reader acted on.
+      expect(lines[0]).toContain("healthy=false");
+      expect(lines).toContain(
+        'check name="Workspace for this directory" status=fail detail="no workspace registered for ' +
+          `${process.cwd()} — reads here answer from workspace 'other-repo' instead. ` +
+          'Run `ix map` in this directory."',
+      );
+    });
+
+    it("attributes the counts to the workspace they came from, not to this directory", async () => {
+      const lines = await runDoctor();
+
+      expect(lines).toContain(`check name="Graph has nodes" status=ok detail="7717 nodes in workspace 'other-repo'"`);
+      expect(lines).toContain(`check name="Graph has edges" status=ok detail="16983 edges in workspace 'other-repo'"`);
+      // The deictic phrasing is the misleading part — it must not survive for a
+      // directory that resolved to someone else's graph.
+      expect(lines.join("\n")).not.toContain("in this workspace");
+    });
   });
 });

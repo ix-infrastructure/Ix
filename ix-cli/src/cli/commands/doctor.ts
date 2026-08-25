@@ -2,8 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { renderSection, renderSuccess, renderError } from "../ui.js";
 import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
-import { resolveWorkspaceId } from "../bootstrap.js";
+import { findWorkspaceForCwd, getDefaultWorkspace, getEndpoint } from "../config.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { llmLine, printLlmLines } from "../llm.js";
 import { existsSync, readFileSync } from "node:fs";
@@ -132,8 +131,19 @@ export function registerDoctorCommand(program: Command): void {
       // less self-evident: "0 nodes" against a backend holding thousands reads
       // as a broken install until it says whose nodes it counted. The scope
       // travels with the count so the check explains itself.
-      let statsOnce: Promise<{ stats: any; scope: string }> | undefined;
-      const sharedStats = (): Promise<{ stats: any; scope: string }> => (statsOnce ??= (async () => {
+      // Resolved here rather than through `resolveWorkspaceId()`, which answers a
+      // directory that matches no workspace by substituting whichever one carries
+      // `default: true`. That collapses two states doctor has to tell apart — cwd
+      // matched THIS workspace, and cwd matched nothing so here is an unrelated
+      // one — into a single id. Reporting the second as "this workspace" is how a
+      // never-ingested directory passed every check while quoting another repo's
+      // graph (#518). Local, so it still answers when the backend is unreachable.
+      const cwd = process.cwd();
+      const matchedWorkspace = findWorkspaceForCwd(cwd);
+      const substitutedWorkspace = matchedWorkspace ? undefined : getDefaultWorkspace();
+
+      let statsOnce: Promise<{ stats: any; scope: string; systemId?: string }> | undefined;
+      const sharedStats = (): Promise<{ stats: any; scope: string; systemId?: string }> => (statsOnce ??= (async () => {
         // Scoped the same way `ix stats` scopes, because doctor disagreeing with
         // stats about the size of the graph is the whole of #510. Not a
         // tombstone fix: /v1/stats filters `deleted_rev == null` in every one of
@@ -142,12 +152,19 @@ export function registerDoctorCommand(program: Command): void {
         // some other workspace on the same backend, which is how a freshly
         // reset workspace still looked like a 17k-node graph.
         const systemId = await resolveReadSystemId(client);
-        const workspaceId = systemId ? undefined : resolveWorkspaceId();
-        const stats = await client.stats({ workspaceId, systemId });
-        // Undefined on both means no workspace is registered yet, and the
-        // request really was unscoped — say that rather than name a scope.
-        const scope = systemId ? "this system" : workspaceId ? "this workspace" : "all workspaces";
-        return { stats, scope };
+        const workspace = systemId ? undefined : (matchedWorkspace ?? substitutedWorkspace);
+        const stats = await client.stats({ workspaceId: workspace?.workspace_id, systemId });
+        // Named, not deictic. "this workspace" is only true when cwd actually
+        // matched one, and the case where it has not is exactly the case where
+        // the reader most needs to know whose count they are being shown.
+        // No workspace at all means the request really was unscoped — say that
+        // rather than name a scope.
+        const scope = systemId
+          ? "this system"
+          : workspace
+            ? `workspace '${workspace.workspace_name}'`
+            : "all workspaces";
+        return { stats, scope, systemId };
       })());
 
       const checks: Check[] = [
@@ -162,6 +179,38 @@ export function registerDoctorCommand(program: Command): void {
             } catch (e: any) {
               return { ok: false, detail: e.message ?? "unreachable" };
             }
+          },
+        },
+        {
+          name: "Workspace for this directory",
+          run: async () => {
+            // A system scope supersedes the per-directory workspace, so ask what
+            // the read path resolved to before judging cwd. Best-effort: if the
+            // backend is unreachable the local answer below is still the right
+            // one, and "Server reachable" already reports the outage.
+            let systemScoped = false;
+            try {
+              systemScoped = Boolean((await sharedStats()).systemId);
+            } catch { /* fall through to the local answer */ }
+
+            if (systemScoped) return { ok: true, detail: "scoped to the active system" };
+            if (matchedWorkspace) return { ok: true, detail: `workspace '${matchedWorkspace.workspace_name}'` };
+            if (substitutedWorkspace) {
+              return {
+                ok: false,
+                detail:
+                  `no workspace registered for ${cwd} — reads here answer from ` +
+                  `workspace '${substitutedWorkspace.workspace_name}' instead. ` +
+                  "Run `ix map` in this directory.",
+              };
+            }
+            // Nothing registered anywhere: honest and self-explanatory, and the
+            // graph checks below already fail on the empty count. Warn rather
+            // than fail so a fresh install reports one problem, not three.
+            // `{ ok: false, warn: true }` is the shape a warning takes — `warn`
+            // is read on the not-ok branch, so `ok: true` here would render as a
+            // clean pass and say nothing.
+            return { ok: false, warn: true, detail: "none registered yet — run `ix map`" };
           },
         },
         {
