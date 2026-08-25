@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   commitBulkWithPayloadSplit,
   isAbortError,
+  isBulkPartiallyCommittedError,
   isPayloadTooLargeError,
   isRetryableCommitConflict,
+  parseBulkCommittedPatchIds,
 } from '../commands/ingest.js';
 
 describe('isAbortError', () => {
@@ -115,5 +117,127 @@ describe('commitBulkWithPayloadSplit', () => {
 
     expect(commitIndividually).toHaveBeenCalledOnce();
     expect(commitIndividually).toHaveBeenCalledWith([1, 2, 3], error);
+  });
+});
+
+// The body the server actually sends, as the client stringifies it:
+// `throw new Error(`${status}: ${text}`)`.
+const partialBody = (ids: string[], expected: number) =>
+  new Error(
+    `409: ${JSON.stringify({
+      error: 'conflict',
+      message: `bulk request is partially committed (${ids.length}/${expected} patch IDs)`,
+      committed_patch_ids: ids,
+      committed_count: ids.length,
+      expected_count: expected,
+    })}`
+  );
+
+const item = (id: string) => ({ patch: { patchId: id } });
+
+describe('partly-committed bulk groups', () => {
+  it('recognises the 409 and reads the ids that landed', () => {
+    const err = partialBody(['p1', 'p2'], 5);
+    expect(isBulkPartiallyCommittedError(err)).toBe(true);
+    expect(parseBulkCommittedPatchIds(err)).toEqual(new Set(['p1', 'p2']));
+  });
+
+  it('does not mistake an ordinary conflict for a partial commit', () => {
+    expect(isBulkPartiallyCommittedError(new Error('409: {"error":"conflict"}'))).toBe(false);
+  });
+
+  // Undefined must mean "fall back", never "nothing landed" — an empty set
+  // would re-send patches the server already has and fail the same way.
+  it('returns undefined when the backend does not name the ids', () => {
+    const old = new Error('409: {"error":"conflict","message":"bulk request is partially committed (6/498 patch IDs)"}');
+    expect(isBulkPartiallyCommittedError(old)).toBe(true);
+    expect(parseBulkCommittedPatchIds(old)).toBeUndefined();
+  });
+
+  it('returns undefined for a body it cannot trust', () => {
+    expect(parseBulkCommittedPatchIds(new Error('409: not json at all'))).toBeUndefined();
+    expect(parseBulkCommittedPatchIds(new Error('409: {"committed_patch_ids":"p1"}'))).toBeUndefined();
+    expect(parseBulkCommittedPatchIds(new Error('409: {"committed_patch_ids":["p1",7]}'))).toBeUndefined();
+  });
+
+  it('replays what landed and re-bulks only what is missing', async () => {
+    const items = ['p1', 'p2', 'p3', 'p4', 'p5'].map(item);
+    const bulkCalls: string[][] = [];
+    const committed: string[] = [];
+    const commitIndividually = vi.fn(async () => {});
+
+    await commitBulkWithPayloadSplit(items, {
+      commitBulk: async batch => {
+        bulkCalls.push(batch.map(b => b.patch.patchId));
+        if (batch.length === items.length) throw partialBody(['p1', 'p2'], items.length);
+        return batch.length;
+      },
+      onBulkCommitted: batch => committed.push(...batch.map(b => b.patch.patchId)),
+      commitIndividually,
+      patchIdOf: b => b.patch.patchId,
+    });
+
+    // The retry carries only the three that did not land, which is a different
+    // id set and therefore a different bulk group on the server.
+    expect(bulkCalls).toEqual([
+      ['p1', 'p2', 'p3', 'p4', 'p5'],
+      ['p3', 'p4', 'p5'],
+    ]);
+    expect(committed).toEqual(['p3', 'p4', 'p5']);
+    // The two that landed are replayed individually — idempotent no-ops that
+    // return their original revision, so counters and baseline stay right.
+    expect(commitIndividually).toHaveBeenCalledOnce();
+    expect(commitIndividually.mock.calls[0][0].map((b: { patch: { patchId: string } }) => b.patch.patchId))
+      .toEqual(['p1', 'p2']);
+    // No bulk error passed for the replay: it is not a failure being reported.
+    expect(commitIndividually.mock.calls[0][1]).toBeUndefined();
+  });
+
+  it('falls back whole when the backend named no ids', async () => {
+    const items = ['p1', 'p2'].map(item);
+    const error = new Error('409: {"error":"conflict","message":"bulk request is partially committed (1/2 patch IDs)"}');
+    const commitIndividually = vi.fn(async () => {});
+
+    await commitBulkWithPayloadSplit(items, {
+      commitBulk: async () => { throw error; },
+      onBulkCommitted: vi.fn(),
+      commitIndividually,
+      patchIdOf: b => b.patch.patchId,
+    });
+
+    expect(commitIndividually).toHaveBeenCalledOnce();
+    expect(commitIndividually).toHaveBeenCalledWith(items, error);
+  });
+
+  // Guards the recursion: re-bulking a set identical to the one just rejected
+  // would land on the same group and repeat this call forever.
+  it('falls back whole when every id is claimed as landed', async () => {
+    const items = ['p1', 'p2'].map(item);
+    const error = partialBody(['p1', 'p2'], 2);
+    const commitIndividually = vi.fn(async () => {});
+    const commitBulk = vi.fn(async () => { throw error; });
+
+    await commitBulkWithPayloadSplit(items, {
+      commitBulk,
+      onBulkCommitted: vi.fn(),
+      commitIndividually,
+      patchIdOf: b => b.patch.patchId,
+    });
+
+    expect(commitBulk).toHaveBeenCalledOnce();
+    expect(commitIndividually).toHaveBeenCalledWith(items, error);
+  });
+
+  it('keeps the old whole-batch fallback when the caller cannot identify patches', async () => {
+    const error = partialBody(['p1'], 2);
+    const commitIndividually = vi.fn(async () => {});
+
+    await commitBulkWithPayloadSplit([1, 2], {
+      commitBulk: async () => { throw error; },
+      onBulkCommitted: vi.fn(),
+      commitIndividually,
+    });
+
+    expect(commitIndividually).toHaveBeenCalledWith([1, 2], error);
   });
 });

@@ -515,11 +515,58 @@ const COMMIT_CONFLICT_RETRY_PATTERNS = [
   'timeout waiting to lock key',
   'error: 1200',
   // Transport-level failures (k8s ingress reset, socket drop under load).
-  // Safe to retry because the server never received / committed the payload.
+  //
+  // These are retried because the request usually never reached the server --
+  // but "usually" is the whole of Ix#495. A bulk commit is chunked and writes
+  // its idempotency keys as each chunk lands, so a socket that drops after the
+  // server started work leaves part of the group committed. Retrying then
+  // re-sends a set the server has partly seen, and because the bulk group id is
+  // a hash of the patch ids, the retry reproduces the same group and is refused
+  // with a 409 that no further retry can clear.
+  //
+  // The retry stays (it is right far more often than not); what changed is that
+  // the resulting 409 is now recoverable — see isBulkPartiallyCommittedError.
   'fetch failed',
   'econnreset',
   'econnrefused',
 ];
+
+/**
+ * A bulk commit the server accepted only in part.
+ *
+ * Re-sending the same patches cannot fix this: the group id is derived from the
+ * patch ids, so an identical retry lands on the identical rejected group. The
+ * way through is to commit only what is missing, which the backend tells us by
+ * naming the ids that landed (`committed_patch_ids`).
+ *
+ * Matched on the message because the client throws `${status}: ${body}`, so the
+ * JSON body is the tail of the error string.
+ */
+export function isBulkPartiallyCommittedError(err: unknown): boolean {
+  return String(err).toLowerCase().includes('partially committed');
+}
+
+/**
+ * The patch ids the server says already landed, or undefined when it did not
+ * say — a backend older than this field, or a body we cannot parse. Undefined
+ * means "fall back", never "nothing landed": treating an unparseable body as an
+ * empty set would re-send patches that are already committed.
+ */
+export function parseBulkCommittedPatchIds(err: unknown): Set<string> | undefined {
+  const text = String(err);
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end <= start) return undefined;
+  try {
+    const body = JSON.parse(text.slice(start, end + 1)) as { committed_patch_ids?: unknown };
+    const ids = body.committed_patch_ids;
+    if (!Array.isArray(ids)) return undefined;
+    const parsed = ids.filter((id): id is string => typeof id === 'string');
+    return parsed.length === ids.length ? new Set(parsed) : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 // An abort from the shared wall-clock deadline (or a per-request timeout) must
 // NOT be retried — the whole point of the deadline is to stop work. Retrying
@@ -575,6 +622,9 @@ export async function commitBulkWithPayloadSplit<T, R>(
     onBulkCommitted: (batch: T[], result: R) => void;
     commitIndividually: (batch: T[], error: unknown) => Promise<void>;
     onSplit?: (batch: T[], error: unknown) => void;
+    /** Patch id of an item, so a partly-committed group can be resumed. */
+    patchIdOf?: (item: T) => string | undefined;
+    onPartialBulk?: (landed: T[], missing: T[], error: unknown) => void;
   },
 ): Promise<void> {
   if (items.length === 0) return;
@@ -583,15 +633,37 @@ export async function commitBulkWithPayloadSplit<T, R>(
   try {
     result = await handlers.commitBulk(items);
   } catch (err) {
-    if (!isPayloadTooLargeError(err) || items.length === 1) {
-      await handlers.commitIndividually(items, err);
+    if (isPayloadTooLargeError(err) && items.length > 1) {
+      handlers.onSplit?.(items, err);
+      const midpoint = Math.ceil(items.length / 2);
+      await commitBulkWithPayloadSplit(items.slice(0, midpoint), handlers);
+      await commitBulkWithPayloadSplit(items.slice(midpoint), handlers);
       return;
     }
 
-    handlers.onSplit?.(items, err);
-    const midpoint = Math.ceil(items.length / 2);
-    await commitBulkWithPayloadSplit(items.slice(0, midpoint), handlers);
-    await commitBulkWithPayloadSplit(items.slice(midpoint), handlers);
+    // Part of this group landed. Split it by what the server says it already
+    // has: replay the landed ones individually (idempotent no-ops that return
+    // their original revision, so the counters and the mtime baseline stay
+    // truthful) and re-bulk the rest, which is a different id set and so a
+    // different group. Without this the whole batch degrades to the per-file
+    // path, which is serialized — hundreds of sequential commits, the several
+    // minutes reported in Ix#495.
+    const landedIds = isBulkPartiallyCommittedError(err) ? parseBulkCommittedPatchIds(err) : undefined;
+    if (landedIds !== undefined && handlers.patchIdOf) {
+      const idOf = handlers.patchIdOf;
+      const landed = items.filter(item => { const id = idOf(item); return id !== undefined && landedIds.has(id); });
+      const missing = items.filter(item => { const id = idOf(item); return id === undefined || !landedIds.has(id); });
+      // Only worth it when the split is real. If nothing (or everything) is
+      // claimed as landed, re-bulking `missing` would repeat this exact call.
+      if (landed.length > 0 && missing.length > 0) {
+        handlers.onPartialBulk?.(landed, missing, err);
+        await handlers.commitIndividually(landed, undefined);
+        await commitBulkWithPayloadSplit(missing, handlers);
+        return;
+      }
+    }
+
+    await handlers.commitIndividually(items, err);
     return;
   }
 
@@ -1389,6 +1461,13 @@ export async function ingestFiles(
           try {
             for (const item of items) {
               try {
+                // Move the label per file. It used to be set once, before the
+                // bulk attempt, and never again -- so a fallback of several
+                // hundred serialized commits sat on `commit 1-498 of 498` with
+                // only the elapsed timer moving, which reads as a hang (Ix#495).
+                setCurrentWork(
+                  `commit ${item.fileNumber} of ${totalFiles} ${nodePath.basename(item.filePath)} (per-file)`
+                );
                 const commitStart = performance.now();
                 const result = await retryOnConflict(() => client.commitPatch(item.patch), COMMIT_CONFLICT_RETRIES);
                 const chunkMs = Math.round(performance.now() - commitStart);
@@ -1444,6 +1523,13 @@ export async function ingestFiles(
               for (const item of items) opts?.onCommitted?.(item, result.rev);
             },
             commitIndividually,
+            patchIdOf: item => item.patch.patchId,
+            onPartialBulk: (landed, missing, err) => {
+              if (!debug) return;
+              process.stderr.write(
+                `\n  [bulk partly committed, resuming] ${landed.length} already landed, re-sending ${missing.length}: ${err}\n`
+              );
+            },
             onSplit: (items, err) => {
               if (!debug) return;
               const first = items[0];
