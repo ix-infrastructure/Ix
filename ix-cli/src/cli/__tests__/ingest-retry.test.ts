@@ -164,7 +164,8 @@ describe('partly-committed bulk groups', () => {
     const items = ['p1', 'p2', 'p3', 'p4', 'p5'].map(item);
     const bulkCalls: string[][] = [];
     const committed: string[] = [];
-    const commitIndividually = vi.fn(async () => {});
+    const commitIndividually =
+      vi.fn(async (_batch: ReturnType<typeof item>[], _error: unknown) => {});
 
     await commitBulkWithPayloadSplit(items, {
       commitBulk: async batch => {
@@ -187,10 +188,10 @@ describe('partly-committed bulk groups', () => {
     // The two that landed are replayed individually — idempotent no-ops that
     // return their original revision, so counters and baseline stay right.
     expect(commitIndividually).toHaveBeenCalledOnce();
-    expect(commitIndividually.mock.calls[0][0].map((b: { patch: { patchId: string } }) => b.patch.patchId))
-      .toEqual(['p1', 'p2']);
+    const [replayed, replayError] = commitIndividually.mock.calls[0];
+    expect(replayed.map(b => b.patch.patchId)).toEqual(['p1', 'p2']);
     // No bulk error passed for the replay: it is not a failure being reported.
-    expect(commitIndividually.mock.calls[0][1]).toBeUndefined();
+    expect(replayError).toBeUndefined();
   });
 
   it('falls back whole when the backend named no ids', async () => {
