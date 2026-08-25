@@ -6,6 +6,16 @@ import {
   isRetryableCommitConflict,
 } from '../commands/ingest.js';
 
+// Verbatim from a backend that refused a bulk save of a >1,000-file repo (Ix#516).
+// A bulk commit runs as one exclusive Arango transaction, and Arango caps that at
+// 512MB; the driver error is relayed by ErrorHandler's catch-all arm, so it reaches
+// the CLI as a 500 body rather than the 413 the proxy limits produce.
+const ARANGO_TRANSACTION_LIMIT_ERROR = new Error(
+  '500: {"error":"internal_error","message":"Response: 500, Error: 32 - AQL: ' +
+    'Maximal transaction size limit of 536870912 bytes is reached ' +
+    '[node #5: InsertNode] (while executing)"}',
+);
+
 describe('isAbortError', () => {
   it('detects AbortError and TimeoutError by name', () => {
     const abort = Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
@@ -56,6 +66,10 @@ describe('isPayloadTooLargeError', () => {
     expect(isPayloadTooLargeError(error)).toBe(true);
   });
 
+  it("recognises Arango's transaction size ceiling, which arrives as a 500", () => {
+    expect(isPayloadTooLargeError(ARANGO_TRANSACTION_LIMIT_ERROR)).toBe(true);
+  });
+
   it('does not mistake an unrelated error for a payload limit', () => {
     expect(isPayloadTooLargeError(new Error('500: internal server error'))).toBe(false);
     expect(isPayloadTooLargeError(new Error('patch 413 failed validation'))).toBe(false);
@@ -101,6 +115,34 @@ describe('commitBulkWithPayloadSplit', () => {
 
     expect(commitIndividually).toHaveBeenCalledOnce();
     expect(commitIndividually).toHaveBeenCalledWith([1], error);
+  });
+
+  it('bisects an over-limit Arango transaction instead of degrading to per-file', async () => {
+    // The regression behind Ix#516: this error was unrecognised, so a whole chunk
+    // took the per-file path — 1,000 patches committed one at a time, serialized
+    // behind the fallback mutex, with the progress bar parked on the last chunk
+    // boundary. Splitting the group puts each half in its own transaction instead.
+    const bulkCalls: number[][] = [];
+    const committed: number[] = [];
+    const commitIndividually = vi.fn(async () => {});
+
+    await commitBulkWithPayloadSplit([1, 2, 3, 4], {
+      commitBulk: async batch => {
+        bulkCalls.push([...batch]);
+        if (batch.length > 2) throw ARANGO_TRANSACTION_LIMIT_ERROR;
+        return batch.length;
+      },
+      onBulkCommitted: batch => committed.push(...batch),
+      commitIndividually,
+    });
+
+    expect(bulkCalls).toEqual([
+      [1, 2, 3, 4],
+      [1, 2],
+      [3, 4],
+    ]);
+    expect(committed).toEqual([1, 2, 3, 4]);
+    expect(commitIndividually).not.toHaveBeenCalled();
   });
 
   it('keeps the existing per-file fallback for non-payload bulk failures', async () => {

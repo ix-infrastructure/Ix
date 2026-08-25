@@ -552,11 +552,23 @@ async function retryOnConflict<T>(fn: () => Promise<T>, maxRetries: number): Pro
   }
 }
 
+// Every entry here means the same thing operationally: this batch was refused for
+// being too big to apply as one unit, so committing fewer patches per request can
+// still succeed. That is what makes bisecting the right recovery.
 const PAYLOAD_TOO_LARGE_PATTERNS = [
+  // A proxy / ingress refused the request body before the backend saw it.
   'payload too large',
   'request entity too large',
   'content too large',
   'request body too large',
+  // The backend accepted the body, then ArangoDB refused the write: a bulk commit
+  // runs as ONE exclusive transaction, and Arango caps a transaction at 512MB by
+  // default (error 32, surfaced as a 500 — not a 413):
+  //   "AQL: Maximal transaction size limit of 536870912 bytes is reached"
+  // Bisecting splits the group across two transactions, so each half fits.
+  // Without this, a big-repo save fell through to the per-file path and a single
+  // 1,000-file chunk became 1,000 serialized commits — Ix#516.
+  'maximal transaction size',
 ];
 
 export function isPayloadTooLargeError(err: unknown): boolean {
