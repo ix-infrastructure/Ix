@@ -250,13 +250,23 @@ jobs:
         working-directory: ix-cli
         run: |
           set -euo pipefail
-          IX="node dist/cli/main.js"
+          # Absolute, because doctor is run from the mapped directory below.
+          IX="node $PWD/dist/cli/main.js"
+          FIXTURE="$PWD/test/fixtures/sample_project"
           echo "::group::status"; $IX status; echo "::endgroup::"
-          echo "::group::map fixture"; $IX map test/fixtures/sample_project --silent; echo "::endgroup::"
+          echo "::group::map fixture"; $IX map "$FIXTURE" --silent; echo "::endgroup::"
           echo "::group::search"; $IX search BillingService --format json | tee search.json; echo "::endgroup::"
           node -e "const r=require('./search.json');const n=(r.results||r).length||0;if(!n){console.error('no search results after map');process.exit(1)}console.log('search returned',n,'results')"
-          echo "::group::doctor"; $IX doctor --format json | tee doctor.json; echo "::endgroup::"
+          # From the directory the fixture was mapped into. doctor answers for
+          # its own cwd (#518), and `ix-cli` is not a registered workspace — a
+          # healthy result there would mean doctor was quoting some other graph.
+          echo "::group::doctor"; (cd "$FIXTURE" && $IX doctor --format json) | tee doctor.json; echo "::endgroup::"
           node -e "const d=require('./doctor.json');if(!d.healthy){console.error('doctor not healthy');process.exit(1)}"
+          # The converse, and the regression guard for #518: in a directory no
+          # workspace covers, doctor must say so instead of passing every check
+          # against whichever workspace happens to be the default.
+          echo "::group::doctor (unmapped cwd)"; (cd "$RUNNER_TEMP" && $IX doctor --format json) | tee doctor-unmapped.json; echo "::endgroup::"
+          node -e "const d=require('./doctor-unmapped.json');const c=(d.checks||[]).find(c=>c.name==='Workspace for this directory');if(!c){console.error('no workspace check in doctor output');process.exit(1)}if(c.ok||d.healthy){console.error('doctor reported healthy in a directory with no workspace');process.exit(1)}console.log('unmapped cwd reported:',c.detail)"
 
       - name: Backend logs on failure
         if: failure()

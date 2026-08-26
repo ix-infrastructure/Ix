@@ -165,9 +165,15 @@ describe("ix doctor", () => {
       // The whole of #518: this said healthy=true, so "All checks passed" is
       // what a reader acted on.
       expect(lines[0]).toContain("healthy=false");
+      // cwd reaches the assertion through the llm format's quoting, which
+      // escapes `\`. A Windows path therefore renders as `D:\\a\\Ix`, not as the
+      // raw `process.cwd()` — escape it here rather than compare against the
+      // unescaped string, which passes on POSIX and fails on Windows for a
+      // reason that has nothing to do with the check under test.
+      const cwd = process.cwd().replace(/\\/g, "\\\\");
       expect(lines).toContain(
         'check name="Workspace for this directory" status=fail detail="no workspace registered for ' +
-          `${process.cwd()} — reads here answer from workspace 'other-repo' instead. ` +
+          `${cwd} — reads here answer from workspace 'other-repo' instead. ` +
           'Run `ix map` in this directory."',
       );
     });
