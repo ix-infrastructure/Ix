@@ -5,7 +5,8 @@ import * as path from "node:path";
 
 import { persistIngestBaselineIfClean } from "../commands/ingest.js";
 import { persistCompletedMapBaseline } from "../commands/map.js";
-import { loadMapBaseline } from "../map-baseline.js";
+import { loadMapBaseline, saveMapBaseline } from "../map-baseline.js";
+import { ingestMtimeCachePath } from "../config.js";
 import { hasCompletedMapBaseline } from "../stale.js";
 
 let home: string;
@@ -119,4 +120,62 @@ describe("architecture map baseline", () => {
       expect(loadMapBaseline(root)).toBeNull();
     },
   );
+});
+
+/**
+ * Every workspace that existed before the marker did has a clean ingest
+ * baseline and no marker, and the CLI that wrote it reported that state as
+ * map-complete. Reversing the answer on upgrade would fail `ix doctor` on all
+ * of them at once, so a baseline with no `tracksMapBaseline` is grandfathered
+ * until the next ingest rewrites it.
+ */
+describe("upgrade from a baseline written before the map marker", () => {
+  function writeLegacyBaseline(root: string, filePath: string, currentRev: number): void {
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(filePath, "export const value = 1;\n");
+    fs.mkdirSync(path.dirname(ingestMtimeCachePath(root)), { recursive: true });
+    // The exact shape 0.10.4 wrote: no `tracksMapBaseline`.
+    fs.writeFileSync(ingestMtimeCachePath(root), JSON.stringify({
+      root,
+      files: { [filePath]: fs.statSync(filePath).mtimeMs },
+      deletedFiles: {},
+      currentRev,
+      lastIngestAt: "2026-01-01T00:00:00.000Z",
+    }));
+  }
+
+  it("reports an existing workspace as mapped rather than failing it on upgrade", () => {
+    const root = path.join(home, "legacy");
+    writeLegacyBaseline(root, path.join(root, "index.ts"), 7);
+
+    expect(loadMapBaseline(root)).toBeNull();
+    expect(hasCompletedMapBaseline(root)).toBe(true);
+  });
+
+  it("stops grandfathering once an ingest rewrites the baseline", () => {
+    const root = path.join(home, "upgraded");
+    const filePath = path.join(root, "index.ts");
+    writeLegacyBaseline(root, filePath, 7);
+    expect(hasCompletedMapBaseline(root)).toBe(true);
+
+    // A 0.10.5 ingest — the map that follows it is the one that must record
+    // completion, and until it does the workspace is honestly incomplete.
+    persistIngestBaselineIfClean(
+      root,
+      new Map([[filePath, fs.statSync(filePath).mtimeMs]]),
+      8,
+      0,
+      0,
+    );
+
+    expect(hasCompletedMapBaseline(root)).toBe(false);
+  });
+
+  it("does not grandfather past a marker that is behind the source revision", () => {
+    const root = path.join(home, "stale-marker");
+    writeLegacyBaseline(root, path.join(root, "index.ts"), 9);
+    saveMapBaseline(root, 4);
+
+    expect(hasCompletedMapBaseline(root)).toBe(false);
+  });
 });

@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { resolveWorkspaceRoot } from "./config.js";
 import { loadIngestBaseline } from "./ingest-baseline.js";
-import { hasCurrentMapBaseline } from "./map-baseline.js";
+import { hasCompletedMapFor } from "./map-baseline.js";
 import { SUPPORTED_EXTENSIONS } from "./supported-extensions.js";
 
 export interface StaleInfo {
@@ -132,7 +132,7 @@ export function detectStaleFiles(
 
   return {
     graphCompleted: true,
-    mapCompleted: hasCurrentMapBaseline(workspaceRoot, baseline.currentRev),
+    mapCompleted: hasCompletedMapFor(workspaceRoot, baseline),
     lastIngestAt: baseline.lastIngestAt,
     currentRev: baseline.currentRev,
     staleFiles: changedFiles.length,
@@ -152,7 +152,7 @@ export function hasCompletedMapBaseline(root?: string): boolean {
   try {
     const workspaceRoot = path.resolve(root ?? resolveWorkspaceRoot());
     const baseline = loadIngestBaseline(workspaceRoot);
-    return baseline !== null && hasCurrentMapBaseline(workspaceRoot, baseline.currentRev);
+    return baseline !== null && hasCompletedMapFor(workspaceRoot, baseline);
   } catch {
     return false;
   }

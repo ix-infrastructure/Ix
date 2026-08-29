@@ -298,6 +298,7 @@ describe("workspace-scoped staleness", () => {
       deletedFiles,
       currentRev: 15,
       lastIngestAt: completedAt.toISOString(),
+      tracksMapBaseline: true,
     });
   });
 

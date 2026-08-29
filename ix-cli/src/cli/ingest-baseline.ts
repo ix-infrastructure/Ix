@@ -8,6 +8,7 @@ interface SerializedIngestBaseline {
   deletedFiles?: Record<string, string[]>;
   currentRev?: number;
   lastIngestAt?: string;
+  tracksMapBaseline?: boolean;
 }
 
 export interface IngestBaseline {
@@ -15,6 +16,18 @@ export interface IngestBaseline {
   deletedFiles: Map<string, string[]>;
   currentRev: number;
   lastIngestAt: string;
+  /**
+   * Whether this baseline was written by a CLI that also maintains the
+   * architecture-map marker.
+   *
+   * Absent on every baseline written before that marker existed, which is what
+   * makes it usable as an upgrade signal: such a workspace has a clean source
+   * ingest and no marker, and the CLI that produced it *reported that state as
+   * map-complete*. Treating it as incomplete on the first run after an upgrade
+   * would fail `ix doctor` on every existing workspace at once, for a claim
+   * nothing has actually re-evaluated. See `hasCompletedMapFor`.
+   */
+  tracksMapBaseline: boolean;
 }
 
 /**
@@ -55,7 +68,13 @@ export function loadIngestBaseline(projectRoot: string): IngestBaseline | null {
       : fs.statSync(cachePath).mtime.toISOString();
     const currentRev = isRev(data.currentRev) ? data.currentRev : 0;
 
-    return { files, deletedFiles, currentRev, lastIngestAt };
+    return {
+      files,
+      deletedFiles,
+      currentRev,
+      lastIngestAt,
+      tracksMapBaseline: data.tracksMapBaseline === true,
+    };
   } catch {
     return null;
   }
@@ -85,6 +104,10 @@ export function saveIngestBaseline(
       deletedFiles: Object.fromEntries(deletedFiles),
       currentRev: rev,
       lastIngestAt: now.toISOString(),
+      // Written unconditionally from here on, so its absence dates a baseline
+      // to before the map marker existed. The first ingest after an upgrade
+      // sets it, which is what ends the grandfathering for this workspace.
+      tracksMapBaseline: true,
     };
     fs.mkdirSync(path.dirname(ingestMtimeCachePath(projectRoot)), { recursive: true });
     fs.writeFileSync(ingestMtimeCachePath(projectRoot), JSON.stringify(data));
