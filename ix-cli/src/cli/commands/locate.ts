@@ -219,7 +219,7 @@ function humanizeBreadcrumb(nodes: Array<{ name: string; kind: string }>): strin
 export function renderLocateLlm(output: LocateOutput, symbol: string): string[] {
   const t = output.resolvedTarget;
   if (!t) {
-    return [llmError("unknown_target", `No graph entity found for "${symbol}".`)];
+    return [llmError("unresolved_target", `No graph entity found for "${symbol}".`)];
   }
   const lines = [llmLine("locate", [
     ["target", t.name],

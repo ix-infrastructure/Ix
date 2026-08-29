@@ -78,11 +78,11 @@ describe("llmLine", () => {
 
 describe("llmError", () => {
   it("renders a uniform error record", () => {
-    const line = llmError("unknown_target", "No entity named 'Foo' found", [
+    const line = llmError("unresolved_target", "No entity named 'Foo' found", [
       ["suggestions", "Bar,Baz"],
     ]);
     expect(line).toBe(
-      'error code=unknown_target message="No entity named \'Foo\' found" suggestions=Bar,Baz'
+      'error code=unresolved_target message="No entity named \'Foo\' found" suggestions=Bar,Baz'
     );
   });
 });

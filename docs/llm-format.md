@@ -25,7 +25,11 @@ so consumers can pass the flag unconditionally without a per-command lookup.
   backslash-escaped and newline / carriage-return / tab are encoded as `\n` /
   `\r` / `\t`, so a record never spans more than one line.
 - **Errors:** a uniform `error code=<slug> message="..."` line in the same
-  format as data lines; the process still exits non-zero.
+  format as data lines; the process still exits non-zero. A target that does
+  not exist is always `unresolved_target`, whichever command was asked —
+  `context`, `explain`, `read`, `locate`, `subsystems`, `trace`. (The backend
+  spells the same condition `unknown_target` in its own JSON bodies; that is a
+  wire detail and is translated on the way out, so a consumer never sees both.)
 
 ## Hierarchies
 
@@ -170,7 +174,7 @@ when that was.
 Error line:
 
 ```
-error code=unknown_target message="No entity named 'IngestionService' found" suggestions=Ingestion,Service
+error code=unresolved_target message="No entity named 'IngestionService' found" suggestions=Ingestion,Service
 ```
 
 ## Status
@@ -197,9 +201,21 @@ Two deliberate exceptions remain:
   one-record-per-line invariant is relaxed, and the count is what lets a
   consumer relax it safely.
 - **`status` is not smaller** — it is within a byte or two of `json`, because
-  the payload is a handful of scalars either way. It is in Tier 5 for the
-  explicit `stale=true|false` field, which is the question the command gets
-  called to answer and which `text` only implied through a warning line.
+  the payload is a handful of scalars either way. It is in Tier 5 for its
+  explicit boolean fields, which are the questions the command gets called to
+  answer and which `text` only implied through warning lines:
+
+  ```
+  status backend=ok endpoint=http://localhost:8090 graph_complete=true map_complete=false rev=2467 last_ingest_at=2026-08-29T01:38:43.341Z stale_files=0 stale=false
+  ```
+
+  `graph_complete` and `map_complete` are two different questions and a
+  workspace can sit at `true`/`false`. The source graph is ingested and current
+  — search, `read`, `context` and `explain` all answer from it — while no
+  architecture hierarchy has been recorded for that revision, so `map`,
+  `subsystems` and region-scoped views may be empty or stale. `stale` follows
+  `graph_complete`, not `map_complete`: it is a claim about files having
+  changed, and a missing hierarchy does not make a file out of date.
 
 Still routing to `text`: `diff --content` (verbatim hunks) and `ingest`, a
 hidden implementation-detail command whose output is a completion summary.

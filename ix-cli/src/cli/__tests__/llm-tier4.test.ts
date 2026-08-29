@@ -56,6 +56,6 @@ describe("renderLocateLlm", () => {
 
   it("emits a structured error when nothing resolves", () => {
     const lines = renderLocateLlm({ resolvedTarget: null, resolutionMode: "none", systemPath: null, diagnostics: ["No graph entity found."] } as any, "foo");
-    expect(lines).toEqual(['error code=unknown_target message="No graph entity found for \\"foo\\"."']);
+    expect(lines).toEqual(['error code=unresolved_target message="No graph entity found for \\"foo\\"."']);
   });
 });

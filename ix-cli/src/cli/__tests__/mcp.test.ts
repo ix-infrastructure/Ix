@@ -113,7 +113,7 @@ describe("ix mcp", () => {
   });
 
   it("marks a structured LLM error as an MCP error when the CLI exits successfully", async () => {
-    const error = 'error code=unknown_target message="No graph entity found for \\"Missing\\"."';
+    const error = 'error code=unresolved_target message="No graph entity found for \\"Missing\\"."';
     const client = await connect(async () => ({
       ok: true,
       stdout: error,

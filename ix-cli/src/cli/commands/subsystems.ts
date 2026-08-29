@@ -30,6 +30,14 @@ interface AmbiguousSubsystemResult {
   }>;
 }
 
+/**
+ * The backend's own error body for a region name it could not resolve — see
+ * `SubsystemRoutes.scala`. `unknown_target` is its spelling and stays as it is
+ * here: this type and the guard below describe a wire response, not anything
+ * this CLI chose. What we emit for it is `unresolved_target`, the one slug
+ * every command uses for "that target does not exist", so an agent routing on
+ * the code has one branch rather than two.
+ */
 interface UnknownSubsystemTargetResult {
   error: "unknown_target";
   target_query: string;
@@ -361,7 +369,7 @@ export function renderSubsystemErrorLlm(body: unknown): string {
     ]);
   }
   if (isUnknownSubsystemTargetResult(body)) {
-    return llmError("unknown_target", body.message, [
+    return llmError("unresolved_target", body.message, [
       ["suggestions", (body.suggestions ?? []).join(",") || undefined],
     ]);
   }

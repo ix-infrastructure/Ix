@@ -114,9 +114,9 @@ describe("renderSubsystemErrorLlm", () => {
     const line = renderSubsystemErrorLlm({ error: "ambiguous_target", target_query: "Auth", candidates: [{ pick: 1, label: "Auth", level: 2, label_kind: "subsystem", file_count: 4 }, { pick: 2, label: "AuthZ", level: 2, label_kind: "subsystem", file_count: 2 }] });
     expect(line).toBe('error code=ambiguous_target message="Multiple regions matched \\"Auth\\"." candidates=1:Auth,2:AuthZ');
   });
-  it("renders unknown_target with suggestions", () => {
+  it("renders the backend's unknown_target body as an unresolved_target record", () => {
     const line = renderSubsystemErrorLlm({ error: "unknown_target", target_query: "Foo", message: "No region named Foo.", suggestions: ["Bar", "Baz"] });
-    expect(line).toBe('error code=unknown_target message="No region named Foo." suggestions=Bar,Baz');
+    expect(line).toBe('error code=unresolved_target message="No region named Foo." suggestions=Bar,Baz');
   });
 });
 
