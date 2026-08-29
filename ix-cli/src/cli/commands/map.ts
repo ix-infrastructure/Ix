@@ -218,13 +218,26 @@ export function invalidateBaselineForIncompleteCompletedMap(
   return message;
 }
 
-/** Persist hierarchy completion only when a non-empty map was actually produced. */
+/**
+ * Persist hierarchy completion only when a non-empty map was actually produced.
+ *
+ * "Non-empty" is the whole result, deliberately not the region count alone. A
+ * single-file workspace maps `1 files · 0s/0ss/0m regions` and that is
+ * finished, not partial — there is no hierarchy to build over one file, and no
+ * later `ix map` will produce one. Refusing to record it leaves `ix status`
+ * reading map_complete=false and `ix doctor` unhealthy for ever, with the
+ * suggested fix being the command that just ran.
+ *
+ * The regionless-with-real-source case is already rejected upstream by
+ * `describeRegionlessCompletedMap`, which returns before this is reached, and
+ * which knows the discovered-file count this function does not.
+ */
 export function persistCompletedMapBaseline(
   result: Pick<MapResult, "file_count" | "region_count" | "regions" | "outcome">,
   projectRoot: string,
 ): boolean {
   if (result.outcome && !COMPLETED_MAP_OUTCOMES.has(result.outcome)) return false;
-  if (result.region_count === 0 && result.regions.length === 0) return false;
+  if (result.file_count === 0 && result.region_count === 0 && result.regions.length === 0) return false;
   const sourceBaseline = loadIngestBaseline(projectRoot);
   if (!sourceBaseline) return false;
   return saveMapBaseline(projectRoot, sourceBaseline.currentRev);
