@@ -66,6 +66,20 @@ export function registerLocateCommand(program: Command): void {
           diagnostics: ["No graph entity found."],
         };
         outputLocate(output, symbol, opts.format);
+        // #539: a machine caller could not tell this from a successful command
+        // that intentionally returned nothing. `context`, `explain`, `read`,
+        // `trace` and `subsystems` all exit 1 here (#526, #532); locate was the
+        // odd one out, and its llm output even emitted an `error` record while
+        // exiting 0.
+        //
+        // The body is deliberately left as it is rather than replaced with
+        // `reportUnresolvedTarget`'s `{error, message}` shape: shipped plugins
+        // read `diagnostics` from it, and #539's whole point is that the exit
+        // code should become informative without the payload going away.
+        //
+        // Ambiguity is a different condition and keeps its own path above --
+        // it resolved to several candidates, which is an answer, not a miss.
+        process.exitCode = 1;
         return;
       }
 

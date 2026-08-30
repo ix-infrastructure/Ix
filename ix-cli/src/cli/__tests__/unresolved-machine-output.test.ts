@@ -52,4 +52,31 @@ describe("unresolved targets in machine formats", () => {
       message: 'No entity found matching "DefinitelyMissing".',
     });
   });
+
+  // locate joins the same contract (#539) but deliberately keeps its own body
+  // rather than adopting reportUnresolvedTarget's `{error, message}` shape:
+  // shipped plugins read `diagnostics` off it, and the point of #539 is that
+  // the exit code becomes informative without the payload going away.
+  it("returns a non-zero status from ix locate while keeping its result body", async () => {
+    const { registerLocateCommand } = await import("../commands/locate.js");
+    const result = await run(registerLocateCommand, ["locate", "DefinitelyMissing", "--format", "json"]);
+
+    expect(process.exitCode).toBe(1);
+    expect(JSON.parse(result.stdout)).toEqual({
+      resolvedTarget: null,
+      resolutionMode: "none",
+      systemPath: null,
+      diagnostics: ["No graph entity found."],
+    });
+  });
+
+  it("emits an llm error record and a non-zero status from ix locate", async () => {
+    const { registerLocateCommand } = await import("../commands/locate.js");
+    const result = await run(registerLocateCommand, ["locate", "DefinitelyMissing", "--format", "llm"]);
+
+    expect(process.exitCode).toBe(1);
+    // This record was already being emitted -- while exiting 0, which is the
+    // contradiction #539 opens with.
+    expect(result.stdout).toContain("unresolved_target");
+  });
 });
