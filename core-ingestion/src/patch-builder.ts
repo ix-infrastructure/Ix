@@ -632,44 +632,96 @@ export function buildPatchWithResolution(
     const key = `${relationship.srcName}:${relationship.predicate}:${relationship.dstName}`;
     relationshipShapeCounts.set(key, (relationshipShapeCounts.get(key) ?? 0) + 1);
   }
+  /**
+   * Where a relationship's destination lands, without emitting anything.
+   *
+   * Pure so the collision pre-pass below can ask the same question the emission
+   * loop does. `externalPkg` is non-null exactly when the answer is an external
+   * node the loop still has to mint, which keeps op order identical to before.
+   */
+  const resolveDst = (r: (typeof relationships)[number], dstKey: string): {
+    dstNodeId: string;
+    externalPkg: { pkgName: string; funcName: string } | null;
+  } => {
+    const baseKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
+    const salted = r.phpCallKind ? `${baseKey}:${r.phpCallKind}` : baseKey;
+    const matched = edgeResolution.has(salted) ? salted : baseKey;
+
+    if (edgeResolution.has(matched)) {
+      // Cross-file resolved — use the defining file's nodeId, in the dst repo's
+      // workspace namespace (matters only for cross-repo edges in a co-ingest).
+      const { dstFilePath, dstQualifiedKey } = edgeResolution.get(matched)!;
+      return { dstNodeId: dstNodeIdInRepo(dstFilePath, dstQualifiedKey), externalPkg: null };
+    }
+    if (r.predicate === 'CALLS' && dstKey.includes('::') && !allQKeys2.has(dstKey)) {
+      const sep = dstKey.indexOf('::');
+      const pkgName = dstKey.slice(0, sep);
+      const funcName = dstKey.slice(sep + 2);
+      return {
+        dstNodeId: nodeId(`external://${pkgName}`, dstKey),
+        externalPkg: { pkgName, funcName },
+      };
+    }
+    return { dstNodeId: nodeId(idPath, dstKey), externalPkg: null };
+  };
+
+  const relationshipDstKey = (r: (typeof relationships)[number]): string =>
+    r.predicate === 'CONTAINS' ? resolveKey(r.dstName, r.srcName) : resolveKey(r.dstName);
+
+  const edgeIdTuple = (srcKey: string, edgeDstKey: string, predicate: string): string =>
+    `${srcKey}\x00${edgeDstKey}\x00${predicate}`;
+
+  /**
+   * Edge ids fold the *unresolved* destination key, but an edge's identity is
+   * its resolved `(src, dst, predicate)`. So when one destination key resolves
+   * two ways inside a single file — one call site matched by `edgeResolution`,
+   * another falling through to the local node — both edges are real and
+   * distinct, yet they mint the same id. `deduplicateUpsertEdges` then sees one
+   * id carrying two endpoints and throws, and the caller drops the whole file
+   * (#554: 48 files on an ordinary npm dependency tree).
+   *
+   * Rather than fold the resolved id into every edge — which would rewrite the
+   * id of every edge in every graph — salt only the tuples that genuinely
+   * collide. Ids outside a collision group stay byte-identical to previous
+   * versions, so no re-ingest is needed.
+   */
+  const collidingIdTuples = new Set<string>();
+  {
+    const dstsByTuple = new Map<string, Set<string>>();
+    for (const r of relationships) {
+      const srcKey = resolveKey(r.srcName);
+      const dstKey = relationshipDstKey(r);
+      const baseKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
+      const edgeDstKey = r.phpCallKind && (relationshipShapeCounts.get(baseKey) ?? 0) > 1
+        ? `${dstKey}:${r.phpCallKind}`
+        : dstKey;
+      const tuple = edgeIdTuple(srcKey, edgeDstKey, r.predicate);
+      let seen = dstsByTuple.get(tuple);
+      if (!seen) { seen = new Set<string>(); dstsByTuple.set(tuple, seen); }
+      seen.add(resolveDst(r, dstKey).dstNodeId);
+    }
+    for (const [tuple, dsts] of dstsByTuple) {
+      if (dsts.size > 1) collidingIdTuples.add(tuple);
+    }
+  }
+
   for (const r of relationships) {
     const srcKey = resolveKey(r.srcName);
     const dstKey = r.predicate === 'CONTAINS'
       ? resolveKey(r.dstName, r.srcName)
       : resolveKey(r.dstName);
 
-    let dstNodeId: string;
     const baseResolutionKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
-    const resolutionKey = r.phpCallKind
-      ? `${baseResolutionKey}:${r.phpCallKind}`
-      : baseResolutionKey;
-    const matchedResolutionKey = edgeResolution.has(resolutionKey)
-      ? resolutionKey
-      : baseResolutionKey;
-
-    if (edgeResolution.has(matchedResolutionKey)) {
-      // Cross-file resolved — use the defining file's nodeId, in the dst repo's
-      // workspace namespace (matters only for cross-repo edges in a co-ingest).
-      const { dstFilePath, dstQualifiedKey } = edgeResolution.get(matchedResolutionKey)!;
-      dstNodeId = dstNodeIdInRepo(dstFilePath, dstQualifiedKey);
-    } else if (r.predicate === 'CALLS' && dstKey.includes('::') && !allQKeys2.has(dstKey)) {
-      const sep = dstKey.indexOf('::');
-      const pkgName = dstKey.slice(0, sep);
-      const funcName = dstKey.slice(sep + 2);
-      const extPath = `external://${pkgName}`;
-      dstNodeId = nodeId(extPath, dstKey);
-      if (!seenExternalNodes2.has(dstNodeId)) {
-        seenExternalNodes2.add(dstNodeId);
-        ops.push({
-          type: 'UpsertNode',
-          id: dstNodeId,
-          kind: 'function',
-          name: funcName,
-          attrs: { package: pkgName, external: true, language: result.language },
-        });
-      }
-    } else {
-      dstNodeId = nodeId(idPath, dstKey);
+    const { dstNodeId, externalPkg } = resolveDst(r, dstKey);
+    if (externalPkg && !seenExternalNodes2.has(dstNodeId)) {
+      seenExternalNodes2.add(dstNodeId);
+      ops.push({
+        type: 'UpsertNode',
+        id: dstNodeId,
+        kind: 'function',
+        name: externalPkg.funcName,
+        attrs: { package: externalPkg.pkgName, external: true, language: result.language },
+      });
     }
 
     const edgeDstKey = r.phpCallKind && (relationshipShapeCounts.get(baseResolutionKey) ?? 0) > 1
@@ -683,9 +735,14 @@ export function buildPatchWithResolution(
     const edgeIdentity = `${nodeId(idPath, srcKey)}\x00${dstNodeId}\x00${r.predicate}`;
     if (emittedEdgeIdentities.has(edgeIdentity)) continue;
     emittedEdgeIdentities.add(edgeIdentity);
+    // Only a colliding tuple is salted, so every other edge keeps the id it
+    // had before this change.
+    const idDstKey = collidingIdTuples.has(edgeIdTuple(srcKey, edgeDstKey, r.predicate))
+      ? `${edgeDstKey}\x00${dstNodeId}`
+      : edgeDstKey;
     ops.push({
       type: 'UpsertEdge',
-      id: edgeId(idPath, srcKey, edgeDstKey, r.predicate),
+      id: edgeId(idPath, srcKey, idDstKey, r.predicate),
       src: nodeId(idPath, srcKey),
       dst: dstNodeId,
       predicate: r.predicate,
