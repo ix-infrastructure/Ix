@@ -205,6 +205,16 @@ jobs:
         working-directory: ix-cli
         run: npm run smoke
 
+      # core-ingestion has its own 358-test suite and nothing ran it until #557,
+      # by which point 6 tests had been failing for months -- three of them since
+      # #120 extracted the directory their fixtures lived in. The package is
+      # already installed and built by the ix-cli build step above, so gating it
+      # here costs one step rather than a whole job, and picks up the matrix's
+      # OS/node spread for free (the tree-sitter grammars are native).
+      - name: core-ingestion tests
+        working-directory: core-ingestion
+        run: npm test
+
       - name: Upload coverage
         if: ${{ matrix.coverage }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

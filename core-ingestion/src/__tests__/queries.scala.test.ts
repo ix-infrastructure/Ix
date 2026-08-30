@@ -22,8 +22,11 @@ describe('Scala queries', () => {
     expect(result!.entities.map(entity => entity.name)).toContain('bar');
     expect(result!.entities.map(entity => entity.name)).toContain('baz');
     expect(result!.entities.map(entity => entity.name)).not.toContain('local');
+    // Attributed to the val that holds the reference, not its enclosing class --
+    // matching the `Foo.baz` CALLS expectation directly below, which this one
+    // used to contradict by expecting the coarser `Foo` (#557).
     expect(result!.relationships).toContainEqual({
-      srcName: 'Foo',
+      srcName: 'Foo.baz',
       dstName: 'NodeKind',
       predicate: 'REFERENCES',
     });
