@@ -6,6 +6,7 @@ import { Command } from 'commander';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   applyRequestedMapCoalesceExitCode,
+  describeDroppedFiles,
   describeEmptyCompletedMap,
   describeRegionlessCompletedMap,
   invalidateBaselineForIncompleteCompletedMap,
@@ -277,5 +278,45 @@ describe('describeRegionlessCompletedMap', () => {
 
     expect(message).toContain('produced 0 regions while mapping 1 of 2');
     expect(invalidate).toHaveBeenCalledWith('/workspace/mixed');
+  });
+});
+
+describe('describeDroppedFiles', () => {
+  it('stays silent on a clean ingest', () => {
+    expect(describeDroppedFiles({ parseErrors: 0, commitErrors: 0 })).toBeUndefined();
+  });
+
+  it('stays silent when there was no local ingest', () => {
+    expect(describeDroppedFiles(undefined)).toBeUndefined();
+  });
+
+  it('reports files that failed to build a patch', () => {
+    const message = describeDroppedFiles({ parseErrors: 48, commitErrors: 0 });
+
+    expect(message).toContain('Map is incomplete');
+    expect(message).toContain('48 files failed to build a patch');
+    expect(message).toContain('absent from the graph');
+    expect(message).not.toContain('failed to commit');
+  });
+
+  it('reports commit failures', () => {
+    const message = describeDroppedFiles({ parseErrors: 0, commitErrors: 3 });
+
+    expect(message).toContain('3 patches failed to commit');
+    expect(message).not.toContain('failed to build a patch');
+  });
+
+  it('reports both causes together', () => {
+    const message = describeDroppedFiles({ parseErrors: 2, commitErrors: 5 });
+
+    expect(message).toContain('2 files failed to build a patch');
+    expect(message).toContain('5 patches failed to commit');
+  });
+
+  it('singularises a lone failure of each kind', () => {
+    expect(describeDroppedFiles({ parseErrors: 1, commitErrors: 0 }))
+      .toContain('1 file failed to build a patch');
+    expect(describeDroppedFiles({ parseErrors: 0, commitErrors: 1 }))
+      .toContain('1 patch failed to commit');
   });
 });

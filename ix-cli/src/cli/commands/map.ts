@@ -196,6 +196,40 @@ export function describeRegionlessCompletedMap(
 }
 
 /**
+ * Report files the local ingest could not turn into a patch.
+ *
+ * `ingestFiles` counts these into `parseErrors` and writes a `[patch build
+ * error]` line per file, but `ix map` runs it in a silent/machine format on
+ * every path that matters, so the count is the only surviving signal — and
+ * until #554 nothing read it. Both completed-map sanity checks above
+ * deliberately bail out when `parseErrors > 0`, which left a partial map as
+ * the one failure mode `ix map` never mentioned.
+ *
+ * Exported for tests; returns the message rather than writing it so the
+ * formatting is assertable without capturing stderr.
+ */
+export function describeDroppedFiles(
+  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors"> | undefined,
+): string | undefined {
+  if (!ingest) return undefined;
+  const parse = ingest.parseErrors;
+  const commit = ingest.commitErrors;
+  if (parse <= 0 && commit <= 0) return undefined;
+
+  const parts: string[] = [];
+  if (parse > 0) parts.push(`${parse} ${parse === 1 ? "file" : "files"} failed to build a patch`);
+  if (commit > 0) parts.push(`${commit} ${commit === 1 ? "patch" : "patches"} failed to commit`);
+  return `Map is incomplete: ${parts.join(" and ")}. Those files are absent from the graph; re-run with 'ix ingest' to see the per-file errors.`;
+}
+
+function emitDroppedFileWarning(
+  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors"> | undefined,
+): void {
+  const message = describeDroppedFiles(ingest);
+  if (message) process.stderr.write(chalk.yellow(`  ${message}\n`));
+}
+
+/**
  * A completed map with no usable hierarchy invalidates the architecture
  * completion baseline. Keeping it would make `ix status` report
  * mapCompleted=true for a hierarchy that does not exist. The next run may
@@ -469,6 +503,13 @@ Examples:
       }
       persistCompletedMapBaseline(result, cwd);
 
+      // stderr, so it reaches a human on the text path and never contaminates
+      // the JSON/llm payload on stdout. The exit code deliberately stays 0:
+      // plugins read this command's JSON through runners that discard stdout on
+      // a non-zero exit, so failing here would hide the very diagnostics the
+      // caller needs (the #539 lesson).
+      emitDroppedFileWarning(localIngest);
+
       if (silent) {
         const systems    = result.regions.filter(r => r.label_kind === "system").length;
         const subsystems = result.regions.filter(r => r.label_kind === "subsystem").length;
@@ -501,6 +542,12 @@ Examples:
           levels: result.levels,
           map_rev: result.map_rev,
           outcome: result.outcome,
+          // Always present so a consumer can branch on them without a key check.
+          // A dropped file is silent otherwise: the backend still answers with a
+          // completed outcome, so `outcome` alone cannot distinguish a whole map
+          // from one missing every file that failed to build a patch (#554).
+          parse_errors: localIngest?.parseErrors ?? 0,
+          commit_errors: localIngest?.commitErrors ?? 0,
           regions: regions.map((r: any) => ({
             label: r.label,
             level: r.level,
