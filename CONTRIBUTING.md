@@ -95,6 +95,51 @@ Breaking changes: use `feat!:` or `fix!:` prefix.
 - Follow existing Ix command voice and terminology
 - Match output patterns of existing commands
 
+### Exit codes
+
+Making a command exit non-zero is a **breaking change to every plugin and MCP
+client**, even when the payload it prints is an improvement. Both consumers
+throw stdout away on a failed run:
+
+- **Plugins** run `ix` through wrappers that treat a non-zero exit as an error
+  and discard the output — bun's `` $`…` `` throws, and the shell hooks branch on
+  `||` under `set -euo pipefail`.
+- **`ix mcp`** prefers stderr over stdout when the exit is non-zero
+  (`runCommand` in `ix-cli/src/mcp/server.ts`), so a structured record written
+  to stdout is replaced by whatever prose happened to reach stderr — usually
+  the resolver's human guidance.
+
+The failure mode is counter-intuitive: you add `{"error": "...", "message": "..."}`
+so machine callers can tell a refusal from an empty result, set the exit code
+to match, and the exit code is what stops anyone from ever seeing the payload.
+
+**Before adding a non-zero exit to an existing command, check whether anything
+calls it programmatically:**
+
+```bash
+# from a directory holding checkouts of the plugin repos
+grep -rnE '\$`ix <command>|runIx\(\["<command>"|\$\(ix <command>' . | grep -v '\.md:'
+```
+
+Those three forms cover every call site today — bun shell, the TypeScript
+`runIx` helper, and shell command substitution. They are literal on purpose:
+no plugin builds the command name from a variable, so a literal search is
+exhaustive. Re-check that assumption if the grep comes back empty for a command
+you expected to find.
+
+Matches in `.md` files or agent prompt strings are prose telling a model to run
+the command — those are fine, the model sees stdout either way. Matches in
+`.ts`, `.sh` or `.py` are runners, and those break.
+
+If a runner consumes it, the plugin change has to land **first**, in its own
+repo, and the Ix change follows. Say so in the PR body and open it as a draft
+until the dependency is merged.
+
+Applies to: `ix-claude-plugin`, `ix-codex-plugin`, `ix-cursor-plugin`,
+`ix-gemini-plugin`, `ix-openclaw-plugin`, `ix-opencode-plugin`. Five of the six
+carry runners today, so "no plugin calls this" is a claim to verify, not
+assume.
+
 ## Security Checks
 
 PRs and pushes to `main` run automated security checks:
