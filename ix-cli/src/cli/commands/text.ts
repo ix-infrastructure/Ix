@@ -32,7 +32,16 @@ export function registerTextCommand(program: Command): void {
           }
         }
 
-        rgArgs.push(term, searchPath);
+        // `--` first. `term` reaches this argv verbatim from the caller, and
+        // through `ix mcp` the caller is a model choosing the string, so
+        // without the separator ripgrep parses any term beginning with `-` as
+        // one of its own flags. `ix text --path=. --format=json -- --files`
+        // ran rg's `--files` instead of searching for that literal, and a flag
+        // that swallows the path argument -- `--pre=<cmd>`, `--file=<path>` --
+        // leaves rg with no path to search, so it reads stdin and never
+        // returns. `ix mcp` serialises its runs, so one such call blocks every
+        // other tool until the timeout and leaves the child process behind.
+        rgArgs.push("--", term, searchPath);
 
         const { stdout } = await execFileAsync("rg", rgArgs, { maxBuffer: 10 * 1024 * 1024 });
 
