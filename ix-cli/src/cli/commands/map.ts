@@ -205,6 +205,13 @@ export function describeRegionlessCompletedMap(
  * deliberately bail out when `parseErrors > 0`, which left a partial map as
  * the one failure mode `ix map` never mentioned.
  *
+ * Deliberately not phrased as "the map is incomplete": the same run goes on to
+ * persist a completed map baseline, so `ix doctor` answers "Completed map for
+ * this workspace" right after this line prints. That is correct — a file the
+ * parser cannot handle is normal and must not turn doctor red for ever (#530,
+ * #536) — so the warning states what is missing rather than contradicting the
+ * health signal beside it.
+ *
  * Exported for tests; returns the message rather than writing it so the
  * formatting is assertable without capturing stderr.
  */
@@ -219,7 +226,7 @@ export function describeDroppedFiles(
   const parts: string[] = [];
   if (parse > 0) parts.push(`${parse} ${parse === 1 ? "file" : "files"} failed to build a patch`);
   if (commit > 0) parts.push(`${commit} ${commit === 1 ? "patch" : "patches"} failed to commit`);
-  return `Map is incomplete: ${parts.join(" and ")}. Those files are absent from the graph; re-run with 'ix ingest' to see the per-file errors.`;
+  return `${parts.join(" and ")} — those files are absent from the graph. Re-run with 'ix ingest' to see the per-file errors.`;
 }
 
 function emitDroppedFileWarning(
@@ -561,7 +568,7 @@ Examples:
         return;
       }
       if (opts.format === "llm") {
-        renderMapLlm(result, regions);
+        renderMapLlm(result, regions, localIngest);
         return;
       }
       renderMapText(result, cwd, opts);
@@ -569,13 +576,24 @@ Examples:
 }
 
 /** Flat one-record-per-line region listing with explicit parent= for the llm format. */
-export function renderMapLlm(result: MapResult, regions: MapRegion[]): void {
+export function renderMapLlm(
+  result: MapResult,
+  regions: MapRegion[],
+  ingest?: Pick<IngestFilesSummary, "parseErrors" | "commitErrors">,
+): void {
   console.log(llmLine("map", [
     ["files", result.file_count],
     ["regions", regions.length],
     ["levels", result.levels],
     ["rev", result.map_rev],
     ["outcome", result.outcome],
+    // The same signal the json payload carries as parse_errors/commit_errors.
+    // Agents are told to pass --format llm unconditionally, so leaving it out
+    // of this record hid the dropped files from the one consumer #554 is about.
+    // Emitted only when non-zero, per the format's rule that zeros carrying no
+    // signal are dropped (docs/llm-format.md); a clean ingest says nothing.
+    ["parse_errors", ingest?.parseErrors ? ingest.parseErrors : undefined],
+    ["commit_errors", ingest?.commitErrors ? ingest.commitErrors : undefined],
   ]));
   for (const r of regions) {
     console.log(llmLine("region", [

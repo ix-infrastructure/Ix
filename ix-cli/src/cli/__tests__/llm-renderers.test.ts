@@ -64,6 +64,22 @@ describe("renderMapLlm", () => {
     const noCross = captureLog(() => renderMapLlm(result, [region({ id: "y", label: "Y", crosscut_score: 0.005 })]));
     expect(noCross[1]).not.toContain("crosscut=");
   });
+
+  it("carries dropped-file counts, and only when non-zero (#554)", () => {
+    const result: MapResult = { file_count: 1, region_count: 1, levels: 1, map_rev: 1, outcome: "ok", regions: [], hierarchy: [] };
+
+    const dropped = captureLog(() => renderMapLlm(result, [], { parseErrors: 48, commitErrors: 3 }));
+    expect(dropped[0]).toBe("map files=1 regions=0 levels=1 rev=1 outcome=ok parse_errors=48 commit_errors=3");
+
+    // A clean ingest carries no signal, so the fields are dropped -- as is
+    // every other zero in this format.
+    const clean = captureLog(() => renderMapLlm(result, [], { parseErrors: 0, commitErrors: 0 }));
+    expect(clean[0]).toBe("map files=1 regions=0 levels=1 rev=1 outcome=ok");
+
+    // `ix subsystems` renders the same record with no local ingest to report.
+    const noIngest = captureLog(() => renderMapLlm(result, []));
+    expect(noIngest[0]).toBe("map files=1 regions=0 levels=1 rev=1 outcome=ok");
+  });
 });
 
 describe("renderSubsystemScoreLlm", () => {

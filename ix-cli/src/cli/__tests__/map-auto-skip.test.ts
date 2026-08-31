@@ -293,7 +293,9 @@ describe('describeDroppedFiles', () => {
   it('reports files that failed to build a patch', () => {
     const message = describeDroppedFiles({ parseErrors: 48, commitErrors: 0 });
 
-    expect(message).toContain('Map is incomplete');
+    // Not "the map is incomplete": persistCompletedMapBaseline runs either way,
+    // so doctor answers "Completed map for this workspace" beside this line.
+    expect(message).not.toContain('incomplete');
     expect(message).toContain('48 files failed to build a patch');
     expect(message).toContain('absent from the graph');
     expect(message).not.toContain('failed to commit');
