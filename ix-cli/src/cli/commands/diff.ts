@@ -11,7 +11,7 @@ import { getEndpoint } from "../config.js";
 import { resolveFileOrEntity, resolveEntityFull, printResolved, looksFileLike, type ResolvedEntity } from "../resolve.js";
 import { formatDiff, relativePath } from "../format.js";
 import { llmLine, llmError } from "../llm.js";
-import { reportFailure } from "../ui.js";
+import { reportFailure, unresolvedTargetMessage, unresolvedTargetRecord } from "../ui.js";
 import { parsePickOption } from "../options.js";
 
 /**
@@ -511,20 +511,20 @@ export function registerDiffCommand(program: Command): void {
               console.log(JSON.stringify(fullResult.result, null, 2));
               return;
             } else {
-              console.log(JSON.stringify({ error: `No entity found matching "${target}".` }, null, 2));
+              console.log(JSON.stringify(unresolvedTargetRecord(target), null, 2));
               return;
             }
           } else {
             resolved = await resolveFileOrEntity(client, target, resolveOpts);
             if (!resolved) {
-              console.log(JSON.stringify({ error: `No entity found matching "${target}".` }, null, 2));
+              console.log(JSON.stringify(unresolvedTargetRecord(target), null, 2));
               return;
             }
           }
         } else {
           resolved = await resolveFileOrEntity(client, target, resolveOpts);
           if (!resolved) {
-            if (opts.format === "llm") console.log(llmError("unresolved_target", `No entity resolved for "${target}".`));
+            if (opts.format === "llm") console.log(llmError("unresolved_target", unresolvedTargetMessage(target)));
             return;
           }
           if (opts.format === "text") printResolved(resolved);

@@ -133,10 +133,27 @@ export function reportFailure(code: string, message: string, format?: string): v
 }
 
 /** Report a resolver miss without corrupting machine-readable stdout. */
+/**
+ * The one message for a target that does not exist.
+ *
+ * Split out from `reportUnresolvedTarget` so a command can emit the shared
+ * record *without* the exit code. `ix diff` needs exactly that: its payload is
+ * wrong today and can be fixed now, while the exit-code half is queued behind
+ * the plugin work (CONTRIBUTING -> CLI Standards -> Exit codes).
+ */
+export function unresolvedTargetMessage(target: string): string {
+  return `No entity found matching "${target}".`;
+}
+
+/** The `--format json` record for a target that does not exist. */
+export function unresolvedTargetRecord(target: string): { error: string; message: string } {
+  return { error: "unresolved_target", message: unresolvedTargetMessage(target) };
+}
+
 export function reportUnresolvedTarget(target: string, format?: string): void {
-  const message = `No entity found matching "${target}".`;
+  const message = unresolvedTargetMessage(target);
   if (format === "json") {
-    console.log(JSON.stringify({ error: "unresolved_target", message }, null, 2));
+    console.log(JSON.stringify(unresolvedTargetRecord(target), null, 2));
   } else if (format === "llm") {
     console.log(llmError("unresolved_target", message));
   }
