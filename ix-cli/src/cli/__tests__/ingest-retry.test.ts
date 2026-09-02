@@ -160,6 +160,66 @@ describe('commitBulkWithPayloadSplit', () => {
     expect(commitIndividually).toHaveBeenCalledOnce();
     expect(commitIndividually).toHaveBeenCalledWith([1, 2, 3], error);
   });
+
+  // Ix#560. The per-file fallback is right for a bulk that failed for a reason
+  // specific to the GROUP; it is exactly wrong when the backend is refusing
+  // every write, because it becomes one doomed request per patch, serialized,
+  // against the backend that is the reason. `beforeFallback` lets the caller
+  // say which case this is.
+  it('abandons the per-file fallback when the caller says the backend is refusing everything', async () => {
+    const error = new Error('500: transaction begin timeout');
+    const commitIndividually = vi.fn(async () => {});
+    const onAbandoned = vi.fn();
+
+    await commitBulkWithPayloadSplit([1, 2, 3], {
+      commitBulk: async () => { throw error; },
+      onBulkCommitted: vi.fn(),
+      commitIndividually,
+      beforeFallback: () => 'abandon',
+      onAbandoned,
+    });
+
+    expect(commitIndividually).not.toHaveBeenCalled();
+    expect(onAbandoned).toHaveBeenCalledWith([1, 2, 3], error);
+  });
+
+  it('still fans out when the caller says to', async () => {
+    const error = new Error('500: internal server error');
+    const commitIndividually = vi.fn(async () => {});
+    const beforeFallback = vi.fn(() => 'fanout' as const);
+
+    await commitBulkWithPayloadSplit([1, 2, 3], {
+      commitBulk: async () => { throw error; },
+      onBulkCommitted: vi.fn(),
+      commitIndividually,
+      beforeFallback,
+    });
+
+    expect(beforeFallback).toHaveBeenCalledWith([1, 2, 3], error);
+    expect(commitIndividually).toHaveBeenCalledWith([1, 2, 3], error);
+  });
+
+  it('does not consult beforeFallback for a payload split, which is real progress', async () => {
+    // A bisect is a DIFFERENT, smaller request that can succeed. Counting it as
+    // a backend failure would trip the cutoff on the one recovery path that
+    // works, and a >1,000-file repo would stop mid-save (Ix#516).
+    const beforeFallback = vi.fn(() => 'abandon' as const);
+    const committed: number[][] = [];
+
+    await commitBulkWithPayloadSplit([1, 2, 3, 4], {
+      commitBulk: async (batch) => {
+        if (batch.length > 2) throw new Error('413: payload too large');
+        committed.push(batch);
+        return 'ok';
+      },
+      onBulkCommitted: vi.fn(),
+      commitIndividually: vi.fn(async () => {}),
+      beforeFallback,
+    });
+
+    expect(beforeFallback).not.toHaveBeenCalled();
+    expect(committed).toEqual([[1, 2], [3, 4]]);
+  });
 });
 
 // The body the server actually sends, as the client stringifies it:

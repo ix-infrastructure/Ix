@@ -18,6 +18,7 @@ import { loadIngestionModules } from './ingestion-loader.js';
 import { ensureWorkspaceIdState } from '../bootstrap.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
+import { createCommitBreaker, describeCommitCutoff } from '../commit-breaker.js';
 import { readBackendHealth } from './upgrade.js';
 import { SUPPORTED_EXTENSIONS } from '../supported-extensions.js';
 import { canRenderProgress } from '../stderr.js';
@@ -655,6 +656,21 @@ export async function commitBulkWithPayloadSplit<T, R>(
     /** Patch id of an item, so a partly-committed group can be resumed. */
     patchIdOf?: (item: T) => string | undefined;
     onPartialBulk?: (landed: T[], missing: T[], error: unknown) => void;
+    /**
+     * Consulted once, immediately before the per-file fallback (Ix#560).
+     *
+     * The fallback exists for a bulk that failed for a reason specific to
+     * the GROUP -- too large, partly applied -- where sending the patches
+     * separately is a different request that can succeed. When the backend
+     * itself is refusing writes, none of that holds: the fan-out is one
+     * doomed request per patch, serialized, against the very backend that
+     * is the reason. This lets the caller say so.
+     *
+     * Default when absent is `"fanout"`, i.e. the behaviour that shipped.
+     */
+    beforeFallback?: (batch: T[], error: unknown) => "fanout" | "abandon";
+    /** The fallback was abandoned; `batch` was never sent. */
+    onAbandoned?: (batch: T[], error: unknown) => void;
   },
 ): Promise<void> {
   if (items.length === 0) return;
@@ -693,6 +709,10 @@ export async function commitBulkWithPayloadSplit<T, R>(
       }
     }
 
+    if (handlers.beforeFallback?.(items, err) === "abandon") {
+      handlers.onAbandoned?.(items, err);
+      return;
+    }
     await handlers.commitIndividually(items, err);
     return;
   }
@@ -1230,6 +1250,9 @@ export async function ingestFiles(
   let commitErrors = 0;
   let stitchErrors = 0;
   let stitchError: unknown;
+  // Ix#560: a backend refusing every commit gets one failed request per
+  // patch out of the per-file fallback. Stop after a streak instead.
+  const commitBreaker = createCommitBreaker();
   let tooLarge = 0;
   let minifiedLikely = 0;
   let outsideRoot = 0;
@@ -1527,6 +1550,13 @@ export async function ingestFiles(
           await prev;
           try {
             for (const item of items) {
+              // The backend has refused every commit in this run; the next
+              // request differs from the last N in nothing but its payload.
+              if (commitBreaker.tripped()) {
+                commitErrors++;
+                commitBreaker.recordSkipped();
+                continue;
+              }
               try {
                 // Move the label per file. It used to be set once, before the
                 // bulk attempt, and never again -- so a fallback of several
@@ -1542,6 +1572,7 @@ export async function ingestFiles(
                 timings.fallbackCommitMs += chunkMs;
                 latestRev = advanceRev(latestRev, result.rev);
                 patchesApplied++;
+                commitBreaker.recordSuccess();
                 opts?.onCommitted?.(item, result.rev);
               } catch (commitErr) {
                 // Counted apart from parseErrors: a patch that parsed fine and
@@ -1550,6 +1581,7 @@ export async function ingestFiles(
                 // read. Reporting it as a parse error hid that distinction in
                 // both the summary and the JSON contract.
                 commitErrors++;
+                commitBreaker.recordFailure(commitErr);
                 if (debug) {
                   const errMsg = String(commitErr);
                   const truncated = errMsg.length > 200 ? errMsg.slice(0, 200) + '…' : errMsg;
@@ -1563,6 +1595,15 @@ export async function ingestFiles(
         };
 
         const hasDeletion = chunk.some(item => patchRequiresPerFileCommit(item.patch));
+
+        // Tripped between chunks: the remaining workers would each send one
+        // more bulk and then fan it out. Abandon the chunk unsent.
+        if (commitBreaker.tripped()) {
+          commitErrors += chunk.length;
+          commitBreaker.recordSkipped(chunk.length);
+          if (opts?.updateProgress) progressCurrent = Math.max(progressCurrent, endFile);
+          return;
+        }
 
         if (hasDeletion) {
           await commitIndividually(chunk);
@@ -1587,9 +1628,23 @@ export async function ingestFiles(
             onBulkCommitted: (items, result) => {
               latestRev = advanceRev(latestRev, result.rev);
               patchesApplied += items.length;
+              commitBreaker.recordSuccess();
               for (const item of items) opts?.onCommitted?.(item, result.rev);
             },
             commitIndividually,
+            // The bulk that is about to be fanned out failed for the same
+            // reason the per-file attempts would. Count it once, then let
+            // the streak decide whether fanning out is worth anything. A
+            // payload-too-large or partly-committed bulk never reaches here
+            // -- those are recovered by splitting, which is real progress.
+            beforeFallback: (_items, err) => {
+              commitBreaker.recordFailure(err);
+              return commitBreaker.tripped() ? "abandon" : "fanout";
+            },
+            onAbandoned: items => {
+              commitErrors += items.length;
+              commitBreaker.recordSkipped(items.length);
+            },
             patchIdOf: item => item.patch.patchId,
             onPartialBulk: (landed, missing, err) => {
               if (!debug) return;
@@ -2233,6 +2288,11 @@ export async function ingestFiles(
     commitErrors,
     stitchErrors,
   };
+  if (commitBreaker.tripped()) {
+    // Before the stitch line and before the commit report: this is the
+    // cause, and everything else printed about this run is its consequence.
+    process.stderr.write(`${describeCommitCutoff(commitBreaker, client.endpoint)}\n`);
+  }
   if (stitchErrors > 0) {
     process.stderr.write(`  ${describeStitchFailure(stitchError)}\n`);
     process.exitCode = 1;
