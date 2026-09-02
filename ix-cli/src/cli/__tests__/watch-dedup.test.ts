@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
+import { isLiveScratch } from "../commands/upgrade.js";
 import {
   WatchRefreshScheduler,
   canonicalMapInvocation,
@@ -89,21 +90,37 @@ function childBuildCacheRoot(packageRoot: string): string {
  */
 const CHILD_BUILD_PREFIX = "ix-watch-child-runtime-";
 
-/** Owner pid encoded in a sweep candidate, or null if it is not one of ours. */
-function childBuildOwnerPid(entry: string): number | null {
-  if (!entry.startsWith(CHILD_BUILD_PREFIX)) return null;
-  const pid = Number.parseInt(entry.slice(CHILD_BUILD_PREFIX.length), 10);
-  return Number.isInteger(pid) && pid > 0 ? pid : null;
-}
-
-/** Is a process still running? signal 0 is an existence check, not a signal. */
-function pidAlive(pid: number): boolean {
+/**
+ * Reclaim what interrupted runs left behind, in both places they left it.
+ *
+ * Liveness is `isLiveScratch`, the convention `ix upgrade` already uses for
+ * its own scratch dirs, rather than a second one written here -- including
+ * the part that matters most: **anything unparseable is dead**. A name with
+ * no pid is either legacy debris or from a checkout before the pid was added,
+ * and treating it as live would leave it on disk forever. A hand-rolled
+ * `parseInt` got this exactly backwards, and worse: `parseInt("4abcde")` is 4,
+ * which is a live kernel process on both Windows and Linux.
+ *
+ * `legacyRoot` is the package root, where the pre-#567 test wrote its build
+ * directly. `.gitignore` now hides those, so nothing else would ever surface
+ * them again -- which is a reason to collect them here, not a reason to stop
+ * looking.
+ */
+function sweepChildBuilds(dir: string, prefix: string): void {
+  let entries: string[];
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    // EPERM means it exists but belongs to another user -- alive.
-    return (err as NodeJS.ErrnoException)?.code === "EPERM";
+    entries = fs.readdirSync(dir);
+  } catch {
+    return; // no such directory: nothing was ever left there
+  }
+  for (const entry of entries) {
+    if (!entry.startsWith(prefix) || isLiveScratch(entry)) continue;
+    try {
+      fs.rmSync(path.join(dir, entry), { recursive: true, force: true });
+    } catch {
+      // Someone else got there first, or the OS still has it open. Leaving
+      // one stale build behind is not worth failing a passing test over.
+    }
   }
 }
 
@@ -121,14 +138,44 @@ describe("canonical watch refresh", () => {
       cwd: packageRoot,
       encoding: "utf8",
     });
-    if (inWorkTree.status === 0 && inWorkTree.stdout.trim() === "true") {
-      const checkIgnore = (target: string): number | null =>
-        spawnSync("git", ["check-ignore", "--quiet", "--no-index", target], {
+    const repoRoot = path.resolve(packageRoot, "..");
+    const topLevel = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: packageRoot,
+      encoding: "utf8",
+    });
+    // `--is-inside-work-tree` is true for an ENCLOSING repo too, which is the
+    // "unpacked source archive" case the fallback below exists for. Asking
+    // whether the toplevel is this repo is what actually distinguishes them --
+    // otherwise the enclosing repo's conventional `node_modules/` rule fails
+    // the probe with a message blaming Ix's .gitignore.
+    const inThisRepo =
+      inWorkTree.status === 0 &&
+      inWorkTree.stdout.trim() === "true" &&
+      topLevel.status === 0 &&
+      fs.existsSync(topLevel.stdout.trim()) &&
+      fs.realpathSync(topLevel.stdout.trim()) === fs.realpathSync(repoRoot);
+
+    if (inThisRepo) {
+      // -v, not --quiet: the exit code alone also counts a rule from the
+      // user's global core.excludesFile or .git/info/exclude. A contributor
+      // whose personal ignore file says `node_modules` (no slash -- a common
+      // spelling) could then restore the directory-only rule here, make
+      // ix-cli/node_modules committable again, and still see this pass. The
+      // source has to be this repo's own .gitignore.
+      const explain = (target: string): string =>
+        spawnSync("git", ["check-ignore", "-v", "--no-index", target], {
           cwd: packageRoot,
           encoding: "utf8",
-        }).status;
+        }).stdout.trim();
+      // git -v prints `<source>:<line>:<pattern>\t<pathname>`. Splitting the
+      // source off on the first ":" yields "C" for a Windows path -- which
+      // happens to differ from ".gitignore" and so still fails the assertion,
+      // but by luck rather than by meaning. Anchor on the ":<line>:" instead.
+      const sourceOf = (out: string): string =>
+        /^(.+):\d+:/.exec(out.split("\t")[0] ?? "")?.[1] ?? "";
 
-      expect(checkIgnore(cacheRoot), `git does not ignore ${cacheRoot}`).toBe(0);
+      expect(sourceOf(explain(cacheRoot)), `git does not ignore ${cacheRoot} via this repo's .gitignore`)
+        .toBe(".gitignore");
 
       // And pin the rule that ignores it, not just today's outcome. `cacheRoot`
       // is a real directory, so the old `node_modules/` rule matched it too and
@@ -139,9 +186,9 @@ describe("canonical watch refresh", () => {
       const nonDirectory = path.join(packageRoot, "__ix_ignore_probe__", "node_modules");
       expect(fs.existsSync(nonDirectory), "probe path must not exist").toBe(false);
       expect(
-        checkIgnore(nonDirectory),
+        sourceOf(explain(nonDirectory)),
         "the node_modules ignore rule is directory-only again; a symlink or file named node_modules is committable (Ix#545)",
-      ).toBe(0);
+      ).toBe(".gitignore");
     } else {
       expect(path.relative(packageRoot, cacheRoot).split(path.sep)[0]).toBe("node_modules");
     }
@@ -217,20 +264,10 @@ describe("canonical watch refresh", () => {
     // bounding: release.yml copies ix-cli/node_modules wholesale into the
     // release tarball, so anything sitting here at packaging time would ship.
     //
-    // Only directories whose owning process is gone. `force` swallows ENOENT
-    // but not the EPERM Windows raises on a tree another process has open, and
-    // a live run robbed of its build mid-test is the failure mode this whole
-    // file is about -- so a concurrent runner's tree is left strictly alone.
-    for (const stale of fs.readdirSync(cacheRoot)) {
-      const owner = childBuildOwnerPid(stale);
-      if (owner === null || owner === process.pid || pidAlive(owner)) continue;
-      try {
-        fs.rmSync(path.join(cacheRoot, stale), { recursive: true, force: true });
-      } catch {
-        // Someone else got there first, or the OS still has it open. Leaving
-        // one stale build behind is not worth failing a passing test over.
-      }
-    }
+    // Only trees whose owning process is gone: a live run robbed of its build
+    // mid-test is the failure mode this whole file is about.
+    sweepChildBuilds(cacheRoot, CHILD_BUILD_PREFIX);
+    sweepChildBuilds(packageRoot, ".watch-child-runtime-");
     const tempRoot = fs.mkdtempSync(path.join(cacheRoot, `${CHILD_BUILD_PREFIX}${process.pid}-`));
     const ixHome = path.join(tempRoot, "ix-home");
     fs.mkdirSync(ixHome);
