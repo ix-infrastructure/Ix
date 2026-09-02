@@ -77,6 +77,9 @@ function childBuildCacheRoot(packageRoot: string): string {
   return path.join(packageRoot, "node_modules", ".cache");
 }
 
+/** mkdtemp prefix for the throwaway child build, and the sweep's match. */
+const CHILD_BUILD_PREFIX = "ix-watch-child-runtime-";
+
 describe("canonical watch refresh", () => {
   it("builds the child CLI somewhere git cannot see, so an interrupted run leaves nothing behind", () => {
     const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -166,7 +169,17 @@ describe("canonical watch refresh", () => {
     // `git status` and nothing that can be committed by accident.
     const cacheRoot = childBuildCacheRoot(packageRoot);
     fs.mkdirSync(cacheRoot, { recursive: true });
-    const tempRoot = fs.mkdtempSync(path.join(cacheRoot, "ix-watch-child-runtime-"));
+    // Sweep what a killed run left behind. Moving out of the package root cost
+    // the one signal that debris exists -- `git status` no longer shows it, and
+    // nothing under node_modules is pruned until the next `npm ci`. Worth
+    // bounding: release.yml copies ix-cli/node_modules wholesale into the
+    // release tarball, so anything sitting here at packaging time would ship.
+    for (const stale of fs.readdirSync(cacheRoot)) {
+      if (stale.startsWith(CHILD_BUILD_PREFIX)) {
+        fs.rmSync(path.join(cacheRoot, stale), { recursive: true, force: true });
+      }
+    }
+    const tempRoot = fs.mkdtempSync(path.join(cacheRoot, CHILD_BUILD_PREFIX));
     const ixHome = path.join(tempRoot, "ix-home");
     fs.mkdirSync(ixHome);
     fs.writeFileSync(
@@ -187,26 +200,44 @@ describe("canonical watch refresh", () => {
       expect(source.stderr).not.toContain("Debugger listening");
 
       const outDir = path.join(tempRoot, "dist");
+      // Compile the CLI entry's own module graph, not `src`.
+      //
+      // This test asks whether the built child STARTS, so a file the child
+      // never loads is not its business -- but `tsconfig.build.json` inherits
+      // `"include": ["src"]`, which compiles every .ts file in the working
+      // tree, *including untracked ones*. `git stash` without `-u` leaves
+      // untracked files behind, so a WIP module still sitting in `src` failed
+      // this one test out of 1500+ (nothing else shells out to tsc -- vitest
+      // transforms with esbuild, which does not type-check) in the worktree it
+      // was left in, while a fresh worktree at the same commit passed. That is
+      // the exact shape reported in Ix#567.
+      //
+      // `files` + `include: []` narrows the program to main.ts and whatever it
+      // imports, which is precisely what the child needs to run. `--noCheck`
+      // (TypeScript >= 5.6) covers the remaining case of a semantic error in a
+      // file that IS in that graph, e.g. mid-edit. Syntax errors still fail the
+      // emit, correctly -- those genuinely break the child. The package as a
+      // whole is still type-checked by `npm run build`, `npm run typecheck` and
+      // CI; none of that is this test's job.
+      const buildConfig = path.join(tempRoot, "tsconfig.child.json");
+      fs.writeFileSync(
+        buildConfig,
+        JSON.stringify({
+          extends: path.join(packageRoot, "tsconfig.build.json"),
+          include: [],
+          files: [path.join(packageRoot, "src/cli/main.ts")],
+        }),
+      );
       const build = spawnSync(
         process.execPath,
         [
           path.join(packageRoot, "node_modules/typescript/bin/tsc"),
           "-p",
-          path.join(packageRoot, "tsconfig.build.json"),
+          buildConfig,
           "--outDir",
           outDir,
           "--declaration",
           "false",
-          // Transpile-only. This test asks whether the built child STARTS, so a
-          // type error anywhere in `src` is not its business -- but tsc exits 2
-          // on one and the build assertion below fails, blaming this test for
-          // an unrelated defect. That is not hypothetical: `git stash` leaves
-          // untracked files behind, so a WIP module still sitting in `src`
-          // failed this one test out of 1500+ (nothing else shells out to tsc)
-          // in the worktree it was left in, while a fresh worktree at the same
-          // commit passed -- the exact shape reported in Ix#567. `npm run
-          // build`, `npm run typecheck` and CI type-check the package; this
-          // test only needs the emit.
           "--noCheck",
         ],
         { cwd: packageRoot, env, encoding: "utf8" },
