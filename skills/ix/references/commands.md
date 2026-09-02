@@ -3,6 +3,10 @@
 Use bounded, composable CLI commands — never broad queries. Run every command
 with the `ix` prefix from the repo root of the mapped workspace.
 
+This file routes a goal to a command. For the complete flag surface of any
+command — every option, its accepted values and its default — see
+[flags.md](flags.md).
+
 ## High-Level Workflow Commands (prefer first)
 
 These aggregate multiple graph operations into single bounded responses.

@@ -11,7 +11,7 @@ backend is NOT in this repo — it is the released Docker image running at
 |---|---|
 | `ix-cli/` | The `@ix/cli` TypeScript package — command routing (`src/cli/`), registration hub (`src/cli/register/oss.ts`), HTTP client (`src/client/api.ts`), response types (`src/client/types.ts`) |
 | `core-ingestion/` | Tree-sitter parser/classifier (26 languages) |
-| `skills/ix/` | The agent skill this project ships: `SKILL.md`, `references/` (commands, output-formats, troubleshooting), `scripts/` (bootstrap.sh/ps1) |
+| `skills/ix/` | The agent skill this project ships: `SKILL.md`, `references/` (commands, flags, output-formats, troubleshooting), `scripts/` (bootstrap.sh/ps1) |
 | `docs/` | `api/` (HTTP API reference + OpenAPI spec), `llm-format.md`, `prerequisites.md` |
 | `scripts/` | `bootstrap.sh` (first-run), `install-skill.sh` (deploy skill to `~/.claude/skills` + `~/.agents/skills`) |
 

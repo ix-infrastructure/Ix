@@ -60,7 +60,7 @@ Map → Explain → Trace → Impact
 1. Start with high-level commands for one-shot answers: `ix overview`, `ix impact`, `ix rank`.
 2. Drill down with primitives — `ix search`, `ix callers`, `ix callees`, `ix contains`, `ix imports`, `ix imported-by`, `ix depends` — reusing exact entity IDs from prior JSON output.
 3. Prefer `--format llm` when reading output yourself (token-minimal); use `--format json` when chaining commands or extracting a field. See references/output-formats.md.
-4. For the full command surface, decomposition recipes, and best practices, load references/commands.md.
+4. For the full command surface, decomposition recipes, and best practices, load references/commands.md; for a command's complete flag list, load references/flags.md.
 5. If the backend is unreachable or a command fails, load references/troubleshooting.md.
 
 ## Rules
@@ -74,6 +74,7 @@ Map → Explain → Trace → Impact
 ## References
 
 - **references/commands.md** — full command routing tables, decomposition recipes, best practices, and the do-not-use list. Load before running any command beyond the core four above.
+- **references/flags.md** — every flag the CLI registers, per command, with values and defaults. Load when a command needs shaping beyond the examples in commands.md, or to check whether a flag exists before guessing.
 - **references/output-formats.md** — `--format llm|json|text` rules, commands that do not implement `llm`, and Pro-gated commands. Load when formatting output or when a "requires Ix Pro" error appears.
 - **references/troubleshooting.md** — prerequisites, backend health checks, `ix doctor`, and environment flags. Load when a command fails or the backend is unreachable.
 
