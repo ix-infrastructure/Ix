@@ -43,13 +43,6 @@ import { acquireLockAt, namedLockPath, type LockHandle } from "./single-flight.j
 
 const DEFAULT_COOLDOWN_MS = 15 * 60 * 1000;
 const DEFAULT_SLOW_FAILURE_MS = 20 * 1000;
-/**
- * Below this, a request cannot have reached the backend and come back.
- * Generous by an order of magnitude — the local memory layer answers a stitch
- * in tens of milliseconds — because the only thing it has to separate is a
- * real round trip from an abort that rejected before the socket was used.
- */
-const REACHED_BACKEND_MS = 5;
 /** Budget for waiting out a stitch that is merely in flight. */
 const DEFAULT_WAIT_MS = 30 * 1000;
 /** Poll interval while waiting. Short: a healthy stitch is over in ~30ms. */
@@ -146,8 +139,6 @@ export interface StitchOutcome {
   ok: boolean;
   /** Wall-clock the client spent on the request. Ignored when `ok`. */
   elapsedMs: number;
-  /** True for an AbortError/TimeoutError — the client hung up, the server did not. */
-  aborted?: boolean;
   /** HTTP status the backend answered with, when it answered at all. */
   status?: number | null;
 }
@@ -173,12 +164,15 @@ export function failureMayStillBeRunning(outcome: StitchOutcome, slowMs = stitch
   const status = outcome.status;
   if (typeof status === "number" && status >= 400 && status < 500 && status !== 408) return false;
 
-  // An abort is the client's own timeout firing, so the request was open.
-  // Except when it was not: `AbortSignal.any` rejects immediately if the
-  // run deadline fires between the caller sampling it and fetch checking it,
-  // and no request that reached a backend returns in single-digit ms.
-  if (outcome.aborted) return outcome.elapsedMs >= REACHED_BACKEND_MS;
-
+  // Everything else is the clock, and the clock is enough. An abort used to
+  // get its own arm, on the reasoning that the client hanging up proves the
+  // request was open -- but every abort that reached the backend ALSO passes
+  // the elapsed test (the client's own timeout is 2 minutes, the run deadline
+  // fires mid-flight), so the arm added nothing and cost a false cooldown
+  // whenever an abort fired before the request left: a run deadline expiring
+  // during `JSON.stringify` of a megabyte-scale payload is tens of
+  // milliseconds, well past any floor small enough to be safe.
+  //
   // 0 disables the elapsed rule; see stitchSlowFailureMs.
   return slowMs > 0 && outcome.elapsedMs >= slowMs;
 }
@@ -209,7 +203,32 @@ function formatMs(ms: number): string {
  * to (a crash, a kill) leaves the lock behind, which the shared staleness rule
  * clears, so a lost settle costs a delay and never a permanent wedge.
  */
-export function admitStitch(endpoint: string, now = Date.now()): StitchAdmission {
+/** Expiry of a cooldown record under the CURRENT setting. See admitStitch. */
+function coolingUntil(cooldown: Cooldown): number {
+  return Math.min(cooldown.until, cooldown.at + stitchCooldownMs());
+}
+
+function refuseForCooldown(cooldown: Cooldown, now: number): StitchAdmission {
+  return {
+    admitted: false,
+    rule: "cooling",
+    reason:
+      `the last stitch was cut off after ${formatMs(cooldown.elapsedMs)} and may still be ` +
+      `running on the backend; next attempt in ${formatMs(coolingUntil(cooldown) - now)} ` +
+      `(IX_STITCH_COOLDOWN_MS=0 disables)`,
+  };
+}
+
+export function admitStitch(
+  endpoint: string,
+  now = Date.now(),
+  /**
+   * Test-only. Runs in the window between the cooldown read and the lock
+   * acquisition -- which is precisely the window the SECOND cooldown read below
+   * exists to close, and the only way to exercise it without a real race.
+   */
+  betweenReadAndLock?: () => void,
+): StitchAdmission {
   const cooldown = readCooldown(endpoint);
   // Re-derive the expiry from the CURRENT setting rather than trusting the
   // one stamped into the record. The refusal below tells the user that
@@ -222,18 +241,9 @@ export function admitStitch(endpoint: string, now = Date.now()): StitchAdmission
   // the past, so a configured 0 makes `until` expire immediately. An explicit
   // `configured > 0` arm here changes no outcome, and a guard that cannot fail
   // reads as protection that is not there.
-  const until = cooldown === null ? 0 : Math.min(cooldown.until, cooldown.at + stitchCooldownMs());
-  if (cooldown && until > now) {
-    return {
-      admitted: false,
-      rule: "cooling",
-      reason:
-        `the last stitch was cut off after ${formatMs(cooldown.elapsedMs)} and may still be ` +
-        `running on the backend; next attempt in ${formatMs(until - now)} ` +
-        `(IX_STITCH_COOLDOWN_MS=0 disables)`,
-    };
-  }
+  if (cooldown !== null && coolingUntil(cooldown) > now) return refuseForCooldown(cooldown, now);
 
+  betweenReadAndLock?.();
   const lock: LockHandle | null = acquireLockAt(namedLockPath("stitch", stitchKey(endpoint)), `ix stitch ${endpoint}`);
   if (!lock) {
     return {
@@ -241,6 +251,17 @@ export function admitStitch(endpoint: string, now = Date.now()): StitchAdmission
       rule: "in-flight",
       reason: `another ix map is already stitching ${endpoint}`,
     };
+  }
+
+  // Re-read the cooldown now that the lock is ours. The first read happened
+  // before acquisition, and the holder writes its cooldown and THEN releases
+  // -- so a waiter that arrived in between saw no cooldown, then took a lock
+  // the holder had just dropped, and sent the second stitch this guard exists
+  // to prevent. Cheap: one stat on a path we have already computed.
+  const settled = readCooldown(endpoint);
+  if (settled !== null && coolingUntil(settled) > now) {
+    lock.release();
+    return refuseForCooldown(settled, now);
   }
 
   return admittedWith(lock, endpoint);

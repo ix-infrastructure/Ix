@@ -67,8 +67,14 @@ describe("failureMayStillBeRunning", () => {
     expect(failureMayStillBeRunning({ ok: false, elapsedMs: 60_000 }, 20_000)).toBe(true);
   });
 
-  it("is true for an abort regardless of elapsed, because the request was still open", () => {
-    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 5, aborted: true }, 20_000)).toBe(true);
+  it("needs no separate rule for an abort: the clock already covers it", () => {
+    // An abort that reached the backend always passes the elapsed test anyway --
+    // the client's own timeout is 2 minutes, and a run deadline fires mid-flight.
+    // A dedicated arm added nothing and cost a false cooldown when the abort
+    // fired BEFORE the request left, which a deadline expiring during
+    // JSON.stringify of a megabyte payload does in tens of milliseconds.
+    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 40 }, 20_000)).toBe(false);
+    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 120_000 }, 20_000)).toBe(true);
   });
 });
 
@@ -144,11 +150,6 @@ describe("admitStitch cooldown", () => {
 
     expect(existsSync(cooldownPathForTest(ENDPOINT))).toBe(false);
     expect(admitStitch(ENDPOINT).admitted).toBe(true);
-  });
-
-  it("cools down after a client-side abort even though it returned instantly", () => {
-    stitchOnce({ ok: false, elapsedMs: 5, aborted: true });
-    expect(admitStitch(ENDPOINT).admitted).toBe(false);
   });
 
   it("clears a cooldown once a stitch succeeds", () => {
@@ -273,14 +274,6 @@ describe("failureMayStillBeRunning: what the backend told us beats the clock", (
     expect(failureMayStillBeRunning({ ok: false, elapsedMs: 60_000, status: null }, 20_000)).toBe(true);
   });
 
-  it("does not cool down on an abort that returned before the socket was used", () => {
-    // AbortSignal.any rejects synchronously if the run deadline fires between
-    // the caller sampling it and fetch checking it. Nothing reached a backend
-    // and came back in under a millisecond.
-    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 0, aborted: true }, 20_000)).toBe(false);
-    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 900, aborted: true }, 20_000)).toBe(true);
-  });
-
   it("treats IX_STITCH_SLOW_FAILURE_MS=0 as off, not as 'everything is slow'", () => {
     // The literal reading of 0 for a threshold is the opposite of off, and 0 is
     // what a user reaches for because the sibling knob prints
@@ -288,8 +281,8 @@ describe("failureMayStillBeRunning: what the backend told us beats the clock", (
     // instant 404 from an older backend gets a 15-minute cooldown.
     expect(failureMayStillBeRunning({ ok: false, elapsedMs: 40 }, 0)).toBe(false);
     expect(failureMayStillBeRunning({ ok: false, elapsedMs: 60_000 }, 0)).toBe(false);
-    // An abort is not an elapsed judgement, so it still counts.
-    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 60_000, aborted: true }, 0)).toBe(true);
+    // Nothing survives 0 now that the elapsed rule is the only rule.
+    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 60_000, status: 500 }, 0)).toBe(false);
   });
 });
 
@@ -380,5 +373,36 @@ describe("round 3: the refusal names its rule, and the clock is not the only wit
     const second = await admitStitchWaiting(ENDPOINT, 30_000, sleep, live);
     expect(second.admitted).toBe(true);
     if (second.admitted) second.settle({ ok: true, elapsedMs: 30 });
+  });
+});
+
+describe("round 4: the cooldown is re-read after the lock is taken", () => {
+  it("does not admit a waiter whose cooldown read went stale while it waited", () => {
+    // The first read happens BEFORE acquisition, and a holder writes its
+    // cooldown and THEN releases. A waiter that read "no cooldown" and then
+    // acquired the lock the holder had just dropped would send the second
+    // concurrent stitch this guard exists to prevent. Only the interleaving
+    // shows it, so the seam puts the settle in exactly that window.
+    const holder = admitStitch(ENDPOINT);
+    expect(holder.admitted).toBe(true);
+    expect(existsSync(cooldownPathForTest(ENDPOINT)), "waiter must read no cooldown first").toBe(false);
+
+    const waiter = admitStitch(ENDPOINT, Date.now(), () => {
+      if (holder.admitted) holder.settle({ ok: false, elapsedMs: 62_000 });
+    });
+
+    expect(waiter.admitted).toBe(false);
+    if (!waiter.admitted) expect(waiter.rule).toBe("cooling");
+  });
+
+  it("leaves no lock behind when it refuses on the second read", () => {
+    const holder = admitStitch(ENDPOINT);
+    expect(holder.admitted).toBe(true);
+
+    admitStitch(ENDPOINT, Date.now(), () => {
+      if (holder.admitted) holder.settle({ ok: false, elapsedMs: 62_000 });
+    });
+
+    expect(readdirSync(lockDir).filter(f => f.endsWith(".lock"))).toEqual([]);
   });
 });

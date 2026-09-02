@@ -599,7 +599,8 @@ export function isAbortError(err: unknown): boolean {
 }
 
 /**
- * Did an aborted stitch actually reach the backend? (Ix#568)
+ * UNUSED as of review round 4 of Ix#568, kept only if a caller needs it again.
+ * Did an aborted stitch actually reach the backend?
  *
  * The stitch guard cools down after an abort on the premise that the client
  * hung up on a request that was open, so the join outlives it. That premise
@@ -2266,8 +2267,6 @@ export async function ingestFiles(
             stitchSkippedRule = admission.rule;
             if (debug) process.stderr.write(`  [stitch not started] ${admission.reason}\n`);
           } else {
-            // Sampled BEFORE the request -- see stitchAbortReachedBackend.
-            const deadlineAlreadySpent = opts.deadlineSignal?.aborted === true;
             const stitchStart = performance.now();
             let res;
             try {
@@ -2278,7 +2277,6 @@ export async function ingestFiles(
               admission.settle({
                 ok: false,
                 elapsedMs: performance.now() - stitchStart,
-                aborted: stitchAbortReachedBackend(err, deadlineAlreadySpent),
                 // A 4xx means the backend refused it rather than ran it, and
                 // elapsed cannot tell the difference: it covers the upload,
                 // and a megabyte-scale stitch payload can spend 25s there

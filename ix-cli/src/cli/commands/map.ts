@@ -216,7 +216,7 @@ export function describeRegionlessCompletedMap(
  * formatting is assertable without capturing stderr.
  */
 export function describeDroppedFiles(
-  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors"> | undefined,
+  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors" | "stitchSkipped"> | undefined,
 ): string | undefined {
   if (!ingest) return undefined;
   const parse = ingest.parseErrors;
@@ -230,7 +230,7 @@ export function describeDroppedFiles(
 }
 
 function emitDroppedFileWarning(
-  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors"> | undefined,
+  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors" | "stitchSkipped"> | undefined,
 ): void {
   const message = describeDroppedFiles(ingest);
   if (message) process.stderr.write(chalk.yellow(`  ${message}\n`));
@@ -572,7 +572,10 @@ Examples:
           // Ix#568. The whole reason this is reported at all is hooks that run
           // `ix map` and read the machine output; leaving it only in
           // `ix ingest --format json` puts it where those hooks never look.
-          stitch_skipped: localIngest?.stitchSkipped,
+          // `?? null`, not left undefined: JSON.stringify drops an undefined
+          // value, so a consumer could not tell the field apart from an older
+          // CLI that never emitted it. Its siblings are always present too.
+          stitch_skipped: localIngest?.stitchSkipped ?? null,
           regions: regions.map((r: any) => ({
             label: r.label,
             level: r.level,
@@ -597,7 +600,7 @@ Examples:
 export function renderMapLlm(
   result: MapResult,
   regions: MapRegion[],
-  ingest?: Pick<IngestFilesSummary, "parseErrors" | "commitErrors">,
+  ingest?: Pick<IngestFilesSummary, "parseErrors" | "commitErrors" | "stitchSkipped">,
 ): void {
   console.log(llmLine("map", [
     ["files", result.file_count],
@@ -612,6 +615,10 @@ export function renderMapLlm(
     // signal are dropped (docs/llm-format.md); a clean ingest says nothing.
     ["parse_errors", ingest?.parseErrors ? ingest.parseErrors : undefined],
     ["commit_errors", ingest?.commitErrors ? ingest.commitErrors : undefined],
+    // Ix#568. `--format llm` and `--silent` are what the hooks this field was
+    // added for actually read; shipping it only in `--format json` put it
+    // where they never look.
+    ["stitch_skipped", ingest?.stitchSkipped],
   ]));
   for (const r of regions) {
     console.log(llmLine("region", [

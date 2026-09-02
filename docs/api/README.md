@@ -240,10 +240,9 @@ retried exactly as before. Nor does **any 4xx**, however long it took to arrive
 spend tens of seconds there before a 413 comes back; a refused request is
 decisive evidence that no join started — with **408** as the exception, since a
 proxy reporting that *it* gave up waiting says nothing about whether the backend
-did, and that is the whole bug. An abort raised by a run deadline that
-had *already* expired sets no cooldown either — `fetch` rejects on an
-already-aborted signal without contacting the backend, so there is no join to
-wait for.
+did, and that is the whole bug. An abort has no rule of its own: one that reached
+the backend passes the elapsed test anyway, and one raised before the request
+left (a run deadline expiring during serialization) correctly does not.
 
 Both the lock and the cooldown are keyed on a normalised endpoint, so
 `http://localhost:8090`, `http://localhost:8090/` and `http://127.0.0.1:8090`
@@ -256,7 +255,7 @@ already on disk, so setting it to `0` releases an active one rather than only
 affecting the next.
 
 A skipped stitch is reported as `stitchSkipped` in `ix ingest --format json`,
-as `stitch_skipped` in `ix map --format json`, and in the ingest summary, so an
+as `stitch_skipped` in `ix map --format json` and `--format llm`, and in the ingest summary, so an
 automated consumer can tell it apart from a clean run. It is not an error: it does not set a non-zero exit code and does
 not count towards `stitchErrors`, and the previous registration stands — the
 same position a stitch that *failed* already left the graph in. `ix map` prints
@@ -271,7 +270,7 @@ data to send, having only parsed what changed. A run that re-ingests every file
 | Variable | Default | Effect |
 |---|---|---|
 | `IX_STITCH_COOLDOWN_MS` | `900000` | How long to hold off after a cut-off stitch. `0` disables the cooldown. |
-| `IX_STITCH_SLOW_FAILURE_MS` | `20000` | Failures at or past this wall-clock are treated as "the backend may still be working". `0` turns the elapsed rule **off** (only an abort cools down) — it does not mean "everything is slow". |
+| `IX_STITCH_SLOW_FAILURE_MS` | `20000` | Failures at or past this wall-clock are treated as "the backend may still be working". `0` turns the rule **off** — it does not mean "everything is slow". |
 | `IX_STITCH_WAIT_MS` | `30000` | How long to wait for an in-flight stitch before skipping. `0` sheds immediately. |
 | `IX_LOCK_DIR` | `~/.ix/locks` | Where the stitch lock and cooldown record live (shared with the map lock). |
 

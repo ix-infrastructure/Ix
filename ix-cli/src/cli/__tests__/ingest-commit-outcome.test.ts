@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { describeCommitOutcome, describeStitchFailure, ingestCompletedCleanly, isStitchUnsupported } from "../commands/ingest.js";
+import { describeCommitOutcome, describeStitchFailure, describeStitchSkipped, ingestCompletedCleanly, isStitchUnsupported } from "../commands/ingest.js";
 
 describe("describeCommitOutcome", () => {
   it("says nothing when every patch committed", () => {
@@ -120,6 +120,36 @@ describe("describeStitchFailure", () => {
   it("does not read a three-digit run elsewhere in the message as a status", () => {
     expect(describeStitchFailure(new Error("connect ECONNREFUSED 127.0.0.1:8090")))
       .toContain("backend request failed");
+  });
+});
+
+describe("describeStitchSkipped", () => {
+  // The remedy is conditioned on the RULE, and nothing tested that -- so the
+  // round-3 fix could have been reverted silently.
+  const cooling = "the last stitch was cut off after 62s and may still be running";
+  const contended = "another ix map is already stitching http://localhost:8090";
+
+  it("is a Note, not a failure, and says the source patches landed", () => {
+    const msg = describeStitchSkipped(cooling, "cooling");
+    expect(msg.startsWith("Note:")).toBe(true);
+    expect(msg).not.toContain("Warning");
+    expect(msg).toContain("Source patches were committed");
+    expect(msg).toContain(cooling);
+  });
+
+  it("waits out the cooldown before suggesting a forced re-ingest", () => {
+    const msg = describeStitchSkipped(cooling, "cooling");
+    expect(msg).toContain("Once the cooldown expires");
+    expect(msg).toContain("ix ingest <root> --force");
+  });
+
+  it("does not tell a contended run that the other map covers it", () => {
+    // `ix map` single-flights per WORKSPACE, so the other run is registering its
+    // own, not this one. Saying "no action is needed" was wrong.
+    const msg = describeStitchSkipped(contended, "in-flight");
+    expect(msg).toContain("registers its own workspace, not this one");
+    expect(msg).toContain("ix ingest <root> --force");
+    expect(msg).not.toContain("Once the cooldown expires");
   });
 });
 
