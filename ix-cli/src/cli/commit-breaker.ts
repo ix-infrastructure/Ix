@@ -128,7 +128,7 @@ export function describeCommitCutoff(
   // does not match IX_COMMIT_FAILURE_LIMIT.
   return [
     `Error: Stopped committing after ${breaker.limit} consecutive failures against ${endpoint}.`,
-    `  The backend accepted none of them, so ${breaker.skipped()} further ${breaker.skipped() === 1 ? "patch was" : "patches were"} not sent —`,
+    `  It refused ${breaker.limit} in a row, so ${breaker.skipped()} further ${breaker.skipped() === 1 ? "patch was" : "patches were"} not sent —`,
     `  they would have failed the same way and added load to a backend that is already the reason.`,
     `  Last error: ${trimmed}`,
     `  ${state} Re-run \`ix map\` once the backend is healthy; if \`ix doctor\` passes,`,

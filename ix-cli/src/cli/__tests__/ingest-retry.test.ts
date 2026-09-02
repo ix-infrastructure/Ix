@@ -3,7 +3,6 @@ import {
   commitBulkWithPayloadSplit,
   commitFailureIndictsBackend,
   isAbortError,
-  isCommitLockConflict,
   isBulkPartiallyCommittedError,
   isPayloadTooLargeError,
   isRetryableCommitConflict,
@@ -104,21 +103,22 @@ describe('commitFailureIndictsBackend', () => {
     expect(commitFailureIndictsBackend(new Error('500: nope'), true)).toBe(false);
   });
 
-  it('does not count a lock conflict, which proves the backend is serving someone else', () => {
-    // The serialized per-file fallback is the designated recovery for these.
-    // Five in a row is plausible when two `ix map` runs overlap, and latching
-    // there would abandon the rest of the repo and blame ArangoDB.
+  it('counts a lock conflict that has already exhausted its retries', () => {
+    // An earlier revision excluded these, to protect two overlapping `ix map`
+    // runs. It was an over-correction twice over: `timeout waiting to lock key`
+    // and `error: 1200` are what a RocksDB-backed ArangoDB emits under the very
+    // saturation this cutoff is for, and because those patterns are ALSO in the
+    // retry list, excluding them multiplied every doomed patch by retryOnConflict
+    // instead of stopping it. By the time an error reaches this function, six
+    // backed-off attempts have already been spent on it.
     for (const msg of ['write-write conflict', 'timeout waiting to lock key', 'Error: 1200 bad']) {
-      expect(commitFailureIndictsBackend(new Error(msg), false), msg).toBe(false);
+      expect(isRetryableCommitConflict(new Error(msg)), msg).toBe(true);
+      expect(commitFailureIndictsBackend(new Error(msg), false), msg).toBe(true);
     }
   });
 
-  it('still counts a transport failure, which shares the retry list but not the meaning', () => {
-    // `fetch failed` / ECONNRESET mean the backend is not reachable. They are
-    // retryable AND they indict it, so splitting the two lists matters.
+  it('counts a transport failure too', () => {
     for (const msg of ['fetch failed', 'read ECONNRESET', 'connect ECONNREFUSED 127.0.0.1:8090']) {
-      expect(isRetryableCommitConflict(new Error(msg)), msg).toBe(true);
-      expect(isCommitLockConflict(new Error(msg)), msg).toBe(false);
       expect(commitFailureIndictsBackend(new Error(msg), false), msg).toBe(true);
     }
   });

@@ -529,11 +529,8 @@ export function planDeletedFileRecovery(
   return { previousDeletedFiles, nextDeletedFiles, recreatedPaths, forceReingestPaths };
 }
 
-/**
- * Another writer got there first. The backend is WORKING -- that is what makes
- * a conflict possible -- so these must never count towards the run-wide commit
- * cutoff, and the serialized per-file fallback is their designated recovery.
- */
+/** Lock contention, as opposed to the transport failures below. Kept separate
+  * only so each group's reason for being retryable stays readable. */
 const COMMIT_LOCK_CONFLICT_PATTERNS = [
   'write-write conflict',
   'timeout waiting to lock key',
@@ -613,15 +610,6 @@ export function isRetryableCommitConflict(err: unknown): boolean {
   return COMMIT_CONFLICT_RETRY_PATTERNS.some(pattern => message.includes(pattern));
 }
 
-/** A lock conflict specifically, as opposed to the transport failures that
-  * share the retry list. Derived from the same constant so the two cannot
-  * drift apart. */
-export function isCommitLockConflict(err: unknown): boolean {
-  if (isAbortError(err)) return false;
-  const message = String(err).toLowerCase();
-  return COMMIT_LOCK_CONFLICT_PATTERNS.some(pattern => message.includes(pattern));
-}
-
 /**
  * Does this commit failure say anything about the BACKEND? (Ix#560)
  *
@@ -637,13 +625,23 @@ export function isCommitLockConflict(err: unknown): boolean {
  *     HANGS produces nothing else. Excluding those made the cutoff inert in
  *     exactly the saturation shape it exists for -- a stalled ArangoDB is not
  *     obliged to answer 500, and when it does not, the timeout IS the signal.
- *   - a lock conflict, which proves the backend is serving someone else.
  *   - payload-too-large, which is about this patch and not the server; five
  *     oversized generated files in a row must not stop the whole repo.
+ *
+ * A lock conflict is NOT excluded, though an earlier revision excluded it.
+ * `timeout waiting to lock key` and `error: 1200` are what a RocksDB-backed
+ * ArangoDB emits under exactly the sustained write contention this cutoff is
+ * for, so excluding them made it inert in a real saturation mode -- and, worse,
+ * those same patterns are in the RETRY list, so every doomed patch was being
+ * multiplied by `retryOnConflict` instead of stopped.
+ *
+ * The worry that motivated the exclusion -- two overlapping `ix map` runs
+ * contending -- is already answered upstream of here: by the time an error
+ * reaches this function, `retryOnConflict` has spent six backed-off attempts
+ * on it. A conflict that survives all six is not transient contention.
  */
 export function commitFailureIndictsBackend(err: unknown, runDeadlineExpired: boolean): boolean {
   if (runDeadlineExpired) return false;
-  if (isCommitLockConflict(err)) return false;
   if (isPayloadTooLargeError(err)) return false;
   return true;
 }
@@ -1344,6 +1342,16 @@ export async function ingestFiles(
    * refine a patch that is no longer going to be sent.
    */
   const reconcileWorthDoing = (): boolean => !commitBreaker.tripped();
+  /**
+   * The deletion phase runs after the file phase, so on a saturated backend the
+   * breaker is already latched before it starts -- every read it makes is for a
+   * patch the chunk guard is about to abandon. Guarding only the two patch-build
+   * loops and not this one is the omission that makes a guard read as complete
+   * when it is not.
+   */
+  const reconcileRemovedEntitiesIfWorthIt: typeof reconcileRemovedEntities = async (
+    c, patch, candidates, ...rest
+  ) => (reconcileWorthDoing() ? reconcileRemovedEntities(c, patch, candidates, ...rest) : patch);
   /**
    * The RUN deadline, captured here because `commitPreparedPatches` shadows
    * `opts` with its own. Not `isAbortError`: a per-request AbortSignal.timeout
@@ -2201,7 +2209,7 @@ export async function ingestFiles(
             [],
             fileMultiRepo(relFilePath),
           );
-          patch = await reconcileRemovedEntities(
+          patch = await reconcileRemovedEntitiesIfWorthIt(
             client,
             patch,
             sourcePatchIdCandidates(relFilePath, previousHash, fileWorkspace),
