@@ -18,6 +18,7 @@ import { loadIngestionModules } from './ingestion-loader.js';
 import { ensureWorkspaceIdState } from '../bootstrap.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
+import { admitStitch } from '../stitch-guard.js';
 import { readBackendHealth } from './upgrade.js';
 import { SUPPORTED_EXTENSIONS } from '../supported-extensions.js';
 import { canRenderProgress } from '../stderr.js';
@@ -849,6 +850,19 @@ export function describeStitchFailure(error: unknown): string {
 }
 
 /**
+ * Ix#568: the stitch was never sent, and why.
+ *
+ * Deliberately not phrased as a failure. Nothing broke, the previous
+ * registration still stands, and the next map that is admitted re-registers
+ * -- the same position a partial incremental map already leaves the graph in.
+ * Saying only that cross-repo relationships may be incomplete, with no reason,
+ * is what would make this look like a regression.
+ */
+export function describeStitchSkipped(reason: string): string {
+  return `Note: Cross-workspace stitch not started — ${reason}. Source patches were committed; cross-repository edges are unchanged since the last successful stitch.`;
+}
+
+/**
  * Decide how loudly a run should complain about patches that failed to commit.
  *
  * Split out of `ingestFiles` so the rule is testable without a backend: the
@@ -1230,6 +1244,11 @@ export async function ingestFiles(
   let commitErrors = 0;
   let stitchErrors = 0;
   let stitchError: unknown;
+  // Set when the stitch was refused before it was ever sent (Ix#568).
+  // Distinct from stitchError: nothing failed, so it must not count as a
+  // stitch error or move the exit code -- but the user is about to be told
+  // cross-repo edges may be incomplete and is owed the reason.
+  let stitchSkipped: string | undefined;
   let tooLarge = 0;
   let minifiedLikely = 0;
   let outsideRoot = 0;
@@ -2168,13 +2187,34 @@ export async function ingestFiles(
           symbolConsumes.push({ symbol, callerNodeId, pkg });
         }
         if (provides.length > 0 || stitchConsumes.length > 0 || stitchExports.length > 0 || symbolConsumes.length > 0) {
-          const res = await client.stitch({ workspaceId, provides, consumes: stitchConsumes, exports: stitchExports, symbolConsumes });
-          if (debug) process.stderr.write(`  [stitch] provides=${provides.length} consumes=${stitchConsumes.length} exports=${stitchExports.length} symConsumes=${symbolConsumes.length} -> ${res.stitched} edges\n`);
-          // This call is the one thing that can change whether the workspace
-          // belongs to a system, and reads cache that answer on disk. Drop it
-          // here so the next read asks again rather than scoping to the
-          // pre-stitch workspace for as long as the file survives.
-          clearStitchScopeCache(workspaceId);
+          // Ix#568: ask before stitching. The join is cross-workspace and
+          // outlives the HTTP call that starts it, so `ix map`'s per-workspace
+          // lock does not bound it -- see stitch-guard.ts. A refusal is not a
+          // failure: the previous registration stands and the next admitted map
+          // re-registers, exactly as a partial incremental map already leaves it.
+          const admission = admitStitch(client.endpoint);
+          if (!admission.admitted) {
+            stitchSkipped = admission.reason;
+            if (debug) process.stderr.write(`  [stitch not started] ${admission.reason}\n`);
+          } else {
+            const stitchStart = performance.now();
+            let res;
+            try {
+              res = await client.stitch({ workspaceId, provides, consumes: stitchConsumes, exports: stitchExports, symbolConsumes });
+            } catch (err) {
+              // Settle before rethrowing, so the shared catch below still sees
+              // the original error and the lock is never held past the request.
+              admission.settle({ ok: false, elapsedMs: performance.now() - stitchStart, aborted: isAbortError(err) });
+              throw err;
+            }
+            admission.settle({ ok: true, elapsedMs: performance.now() - stitchStart });
+            if (debug) process.stderr.write(`  [stitch] provides=${provides.length} consumes=${stitchConsumes.length} exports=${stitchExports.length} symConsumes=${symbolConsumes.length} -> ${res.stitched} edges\n`);
+            // This call is the one thing that can change whether the workspace
+            // belongs to a system, and reads cache that answer on disk. Drop it
+            // here so the next read asks again rather than scoping to the
+            // pre-stitch workspace for as long as the file survives.
+            clearStitchScopeCache(workspaceId);
+          }
         }
       } catch (err) {
         // Unsupported is not failed: an older backend answers 404 here, and
@@ -2236,6 +2276,12 @@ export async function ingestFiles(
   if (stitchErrors > 0) {
     process.stderr.write(`  ${describeStitchFailure(stitchError)}\n`);
     process.exitCode = 1;
+  } else if (stitchSkipped !== undefined) {
+    // Not an error and not an exit code: nothing failed and nothing is
+    // missing that the next admitted map will not re-register. But the
+    // sentence a user gets otherwise -- cross-repo relationships may be
+    // incomplete -- reads as an unexplained regression without the reason.
+    process.stderr.write(`  ${describeStitchSkipped(stitchSkipped)}\n`);
   }
   if (commitReport.kind === "warn") {
     process.stderr.write(`  ${commitReport.message}\n`);
