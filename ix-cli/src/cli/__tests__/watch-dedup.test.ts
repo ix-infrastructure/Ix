@@ -197,6 +197,17 @@ describe("canonical watch refresh", () => {
           outDir,
           "--declaration",
           "false",
+          // Transpile-only. This test asks whether the built child STARTS, so a
+          // type error anywhere in `src` is not its business -- but tsc exits 2
+          // on one and the build assertion below fails, blaming this test for
+          // an unrelated defect. That is not hypothetical: `git stash` leaves
+          // untracked files behind, so a WIP module still sitting in `src`
+          // failed this one test out of 1500+ (nothing else shells out to tsc)
+          // in the worktree it was left in, while a fresh worktree at the same
+          // commit passed -- the exact shape reported in Ix#567. `npm run
+          // build`, `npm run typecheck` and CI type-check the package; this
+          // test only needs the emit.
+          "--noCheck",
         ],
         { cwd: packageRoot, env, encoding: "utf8" },
       );
