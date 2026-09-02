@@ -65,6 +65,43 @@ These aggregate multiple graph operations into single bounded responses.
 | Start backend | `ix docker start` | `ix docker start` |
 | Graph statistics | `ix stats` | `ix stats --format json` |
 
+## Session Metrics
+
+| Goal | Command | Example |
+|---|---|---|
+| Token savings so far | `ix savings` | `ix savings --format llm` |
+| Per-command breakdown | `ix savings --detail` | `ix savings --detail --format llm` |
+| Clear lifetime totals | `ix savings reset` | `ix savings reset` |
+
+`ix savings` reports how many tokens the graph saved against a naive
+read-the-files baseline, in two scopes — `session` (this shell's commands) and
+`lifetime` (every command against this backend). Each scope carries the command
+count, `tokens_saved`, the `naive_tokens` / `actual_tokens` it was derived
+from, and money and water estimates.
+
+| Flag | Value | Default | Effect |
+|---|---|---|---|
+| `--detail` | — | off | Add one record per command type, within each scope |
+| `--model <model>` | `opus\|sonnet\|haiku\|gpt-4o` | `opus` | Pricing table for `money_saved` only — token and water figures do not change |
+| `--format <fmt>` | `text\|json\|llm` | `text` | See references/output-formats.md |
+
+`ix savings reset` clears the **lifetime** totals (`DELETE /v1/savings`). It
+takes no flags and does not prompt.
+
+`--format llm` emits one `savings` header record and one `scope` record per
+scope; `--detail` adds `command` records that name their scope:
+
+```
+savings model="Claude Opus ($15/MTok in, $75/MTok out)"
+scope name=session commands=726 tokens_saved=832739 naive_tokens=1099164 actual_tokens=266425 money_saved=27.48 water_saved_ml=1665.478
+scope name=lifetime commands=4820 tokens_saved=6142880 naive_tokens=8003104 actual_tokens=1860224 money_saved=202.71 water_saved_ml=12285.76
+command scope=session name=callers count=329 tokens_saved=334995
+command scope=session name=entity count=308 tokens_saved=423741
+```
+
+Reading a graph command's savings needs the backend up: the numbers come from
+`GET /v1/savings`, not from a local file.
+
 ## Decomposition Recipes
 
 **"How does ingestion work?"**
