@@ -269,6 +269,15 @@ describe("canonical watch refresh", () => {
     sweepChildBuilds(cacheRoot, CHILD_BUILD_PREFIX);
     sweepChildBuilds(packageRoot, ".watch-child-runtime-");
     const tempRoot = fs.mkdtempSync(path.join(cacheRoot, `${CHILD_BUILD_PREFIX}${process.pid}-`));
+    // Restore the ESM scope that node_modules costs us. Node's package-scope
+    // walk-up STOPS at the first `node_modules/package.json`, so it never
+    // reaches ix-cli/package.json and never sees its `"type": "module"` -- the
+    // emitted ESM then dies with `Cannot use import statement outside a module`.
+    // Not hypothetical for the versions this package supports: `engines` allows
+    // node >=22.0.0 and module-syntax detection was only unflagged in 22.7.0, so
+    // this fails on 22.0-22.6 while CI (pinned to 22-latest and 24) stays green.
+    // That is the environment-dependent single-test failure Ix#567 is about.
+    fs.writeFileSync(path.join(tempRoot, "package.json"), JSON.stringify({ type: "module" }));
     const ixHome = path.join(tempRoot, "ix-home");
     fs.mkdirSync(ixHome);
     fs.writeFileSync(
