@@ -529,10 +529,19 @@ export function planDeletedFileRecovery(
   return { previousDeletedFiles, nextDeletedFiles, recreatedPaths, forceReingestPaths };
 }
 
-const COMMIT_CONFLICT_RETRY_PATTERNS = [
+/**
+ * Another writer got there first. The backend is WORKING -- that is what makes
+ * a conflict possible -- so these must never count towards the run-wide commit
+ * cutoff, and the serialized per-file fallback is their designated recovery.
+ */
+const COMMIT_LOCK_CONFLICT_PATTERNS = [
   'write-write conflict',
   'timeout waiting to lock key',
   'error: 1200',
+];
+
+const COMMIT_CONFLICT_RETRY_PATTERNS = [
+  ...COMMIT_LOCK_CONFLICT_PATTERNS,
   // Transport-level failures (k8s ingress reset, socket drop under load).
   //
   // These are retried because the request usually never reached the server --
@@ -602,6 +611,41 @@ export function isRetryableCommitConflict(err: unknown): boolean {
   if (isAbortError(err)) return false;
   const message = String(err).toLowerCase();
   return COMMIT_CONFLICT_RETRY_PATTERNS.some(pattern => message.includes(pattern));
+}
+
+/** A lock conflict specifically, as opposed to the transport failures that
+  * share the retry list. Derived from the same constant so the two cannot
+  * drift apart. */
+export function isCommitLockConflict(err: unknown): boolean {
+  if (isAbortError(err)) return false;
+  const message = String(err).toLowerCase();
+  return COMMIT_LOCK_CONFLICT_PATTERNS.some(pattern => message.includes(pattern));
+}
+
+/**
+ * Does this commit failure say anything about the BACKEND? (Ix#560)
+ *
+ * Only failures that indict the backend may feed the run-wide cutoff, because
+ * the cutoff abandons every remaining patch in the run.
+ *
+ * Excluded, and each for its own reason:
+ *
+ *   - the run's own deadline. That is our wall clock, not the backend's
+ *     answer, and `describeCommitOutcome` has a whole branch to keep them
+ *     apart. Note this is the DEADLINE, not `isAbortError`: a per-request
+ *     `AbortSignal.timeout` also raises TimeoutError, and a backend that
+ *     HANGS produces nothing else. Excluding those made the cutoff inert in
+ *     exactly the saturation shape it exists for -- a stalled ArangoDB is not
+ *     obliged to answer 500, and when it does not, the timeout IS the signal.
+ *   - a lock conflict, which proves the backend is serving someone else.
+ *   - payload-too-large, which is about this patch and not the server; five
+ *     oversized generated files in a row must not stop the whole repo.
+ */
+export function commitFailureIndictsBackend(err: unknown, runDeadlineExpired: boolean): boolean {
+  if (runDeadlineExpired) return false;
+  if (isCommitLockConflict(err)) return false;
+  if (isPayloadTooLargeError(err)) return false;
+  return true;
 }
 
 async function retryOnConflict<T>(fn: () => Promise<T>, maxRetries: number): Promise<T> {
@@ -708,8 +752,18 @@ export async function commitBulkWithPayloadSplit<T, R>(
       const idOf = handlers.patchIdOf;
       const landed = items.filter(item => { const id = idOf(item); return id !== undefined && landedIds.has(id); });
       const missing = items.filter(item => { const id = idOf(item); return id === undefined || !landedIds.has(id); });
-      // Only worth it when the split is real. If nothing (or everything) is
-      // claimed as landed, re-bulking `missing` would repeat this exact call.
+      // The server says it already holds every one of them. Re-bulking would
+      // repeat this exact call, so this still falls through to the per-file
+      // path -- but flagged as a replay, because that is what it is. Without the
+      // flag, a tripped breaker counts patches the server has CONFIRMED as
+      // commit errors, the same over-reporting `replay` exists to prevent on
+      // the sibling branch (Ix#560).
+      if (landed.length === items.length && items.length > 0) {
+        await handlers.commitIndividually(items, err, { replay: true });
+        return;
+      }
+      // Only worth it when the split is real. If nothing is claimed as landed,
+      // re-bulking `missing` would repeat this exact call.
       if (landed.length > 0 && missing.length > 0) {
         handlers.onPartialBulk?.(landed, missing, err);
         // `replay: true` -- the server has confirmed it already holds these.
@@ -1280,6 +1334,22 @@ export async function ingestFiles(
   // Ix#560: a backend refusing every commit gets one failed request per
   // patch out of the per-file fallback. Stop after a streak instead.
   const commitBreaker = createCommitBreaker();
+  /**
+   * Ix#560. The cutoff gates WRITES, but the pipeline in front of them keeps
+   * going: `reconcileRemovedEntities` issues per-file reads for every changed
+   * file with a previous hash. On a large repo that walks the whole tree making
+   * round trips to the backend the run has just declared it gave up on -- still
+   * adding load, and eating most of the wall clock the cutoff was meant to save.
+   * Once the breaker has tripped, skip the reconcile: its only purpose is to
+   * refine a patch that is no longer going to be sent.
+   */
+  const reconcileWorthDoing = (): boolean => !commitBreaker.tripped();
+  /**
+   * The RUN deadline, captured here because `commitPreparedPatches` shadows
+   * `opts` with its own. Not `isAbortError`: a per-request AbortSignal.timeout
+   * raises TimeoutError too, and that is a saturation signal, not our clock.
+   */
+  const runDeadlineExpired = (): boolean => opts.deadlineSignal?.aborted === true;
   let tooLarge = 0;
   let minifiedLikely = 0;
   let outsideRoot = 0;
@@ -1577,18 +1647,23 @@ export async function ingestFiles(
           fallbackTail = new Promise<void>(r => { resolveThis = r; });
           await prev;
           try {
-            for (const item of items) {
+            for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+              const item = items[itemIndex];
               // The backend has refused every commit in this run; the next
               // request differs from the last N in nothing but its payload.
               if (commitBreaker.tripped()) {
                 if (fallbackOpts?.replay === true) {
                   // A replay re-sends patches the server has CONFIRMED it
-                  // holds. Counting them as errors would over-report failure
-                  // for writes that landed -- but sending up to 1,000 of them
-                  // one at a time to a backend we have given up on is the very
-                  // fan-out this cutoff exists to stop. Do neither: leave them
-                  // out of both counters. They really are in the graph, and the
-                  // next run re-sends them as the idempotent no-ops they are.
+                  // holds. Sending up to 1,000 of them one at a time to a
+                  // backend we have given up on is the fan-out this cutoff
+                  // exists to stop -- but they are still IN THE GRAPH, so
+                  // dropping them from the counters would make the cutoff
+                  // report `The graph is unchanged` for a run that changed it,
+                  // and understate the total it is counting against. Count
+                  // them as applied, which is what they are, and stop sending.
+                  // The mtime baseline is not marked for them, so the next run
+                  // re-sends them as the idempotent no-ops they are.
+                  patchesApplied += items.length - itemIndex;
                   break;
                 }
                 commitErrors++;
@@ -1619,12 +1694,9 @@ export async function ingestFiles(
                 // read. Reporting it as a parse error hid that distinction in
                 // both the summary and the JSON contract.
                 commitErrors++;
-                // An abort is the run's own wall clock, not the backend's
-                // answer -- `describeCommitOutcome` has a whole branch to keep
-                // those apart. Counting it here would latch the breaker on a
-                // run that merely exhausted IX_MAP_DEADLINE_MS and then tell
-                // the user to go and investigate ArangoDB.
-                if (!isAbortError(commitErr)) commitBreaker.recordFailure(commitErr);
+                if (commitFailureIndictsBackend(commitErr, runDeadlineExpired())) {
+                  commitBreaker.recordFailure(commitErr);
+                }
                 if (debug) {
                   const errMsg = String(commitErr);
                   const truncated = errMsg.length > 200 ? errMsg.slice(0, 200) + '…' : errMsg;
@@ -1753,7 +1825,7 @@ export async function ingestFiles(
           try {
             const fileWorkspace = fileWorkspaceId(p.filePath);
             let patch = buildPatchFn!(p, hash, fileWorkspace, batchEdgesByFile.get(p.filePath) ?? emptyEdges, previousHash, fileMultiRepo(p.filePath));
-            if (previousHash) {
+            if (previousHash && reconcileWorthDoing()) {
               patch = await reconcileRemovedEntities(
                 client,
                 patch,
@@ -1832,7 +1904,7 @@ export async function ingestFiles(
           try {
             const fileWorkspace = fileWorkspaceId(p.filePath);
             let patch = buildPatchFn!(p, hash, fileWorkspace, edgesByFile.get(p.filePath) ?? emptyEdges, previousHash, fileMultiRepo(p.filePath));
-            if (previousHash) {
+            if (previousHash && reconcileWorthDoing()) {
               patch = await reconcileRemovedEntities(
                 client,
                 patch,

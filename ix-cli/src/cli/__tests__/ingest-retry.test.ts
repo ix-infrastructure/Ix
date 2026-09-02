@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   commitBulkWithPayloadSplit,
+  commitFailureIndictsBackend,
   isAbortError,
+  isCommitLockConflict,
   isBulkPartiallyCommittedError,
   isPayloadTooLargeError,
   isRetryableCommitConflict,
@@ -75,6 +77,63 @@ describe('isPayloadTooLargeError', () => {
   it('does not mistake an unrelated error for a payload limit', () => {
     expect(isPayloadTooLargeError(new Error('500: internal server error'))).toBe(false);
     expect(isPayloadTooLargeError(new Error('patch 413 failed validation'))).toBe(false);
+  });
+});
+
+describe('commitFailureIndictsBackend', () => {
+  // Only failures that say something about the BACKEND may feed the run-wide
+  // cutoff, because the cutoff abandons every remaining patch in the run.
+
+  it('counts a per-request timeout — a backend that HANGS produces nothing else', () => {
+    // The bug this test exists for: `isAbortError` is true for TimeoutError,
+    // and IxClient builds every commit signal from AbortSignal.timeout(5min).
+    // Excluding aborts therefore made the cutoff inert against a stalled
+    // ArangoDB, which is the saturation shape it was written for. A backend is
+    // not obliged to answer 500; when it does not, the timeout IS the signal.
+    const timeout = Object.assign(new Error('The operation was aborted due to timeout'), {
+      name: 'TimeoutError',
+    });
+    expect(isAbortError(timeout)).toBe(true);
+    expect(commitFailureIndictsBackend(timeout, false)).toBe(true);
+  });
+
+  it('does not count the run deadline, which is our clock and not the backend', () => {
+    const aborted = Object.assign(new Error('aborted'), { name: 'AbortError' });
+    expect(commitFailureIndictsBackend(aborted, true)).toBe(false);
+    // Anything at all, once the budget is gone.
+    expect(commitFailureIndictsBackend(new Error('500: nope'), true)).toBe(false);
+  });
+
+  it('does not count a lock conflict, which proves the backend is serving someone else', () => {
+    // The serialized per-file fallback is the designated recovery for these.
+    // Five in a row is plausible when two `ix map` runs overlap, and latching
+    // there would abandon the rest of the repo and blame ArangoDB.
+    for (const msg of ['write-write conflict', 'timeout waiting to lock key', 'Error: 1200 bad']) {
+      expect(commitFailureIndictsBackend(new Error(msg), false), msg).toBe(false);
+    }
+  });
+
+  it('still counts a transport failure, which shares the retry list but not the meaning', () => {
+    // `fetch failed` / ECONNRESET mean the backend is not reachable. They are
+    // retryable AND they indict it, so splitting the two lists matters.
+    for (const msg of ['fetch failed', 'read ECONNRESET', 'connect ECONNREFUSED 127.0.0.1:8090']) {
+      expect(isRetryableCommitConflict(new Error(msg)), msg).toBe(true);
+      expect(isCommitLockConflict(new Error(msg)), msg).toBe(false);
+      expect(commitFailureIndictsBackend(new Error(msg), false), msg).toBe(true);
+    }
+  });
+
+  it('does not count payload-too-large, which is about the patch and not the server', () => {
+    // Five oversized generated files in a row must not stop the whole repo.
+    expect(commitFailureIndictsBackend(new Error('413: payload too large'), false)).toBe(false);
+    expect(commitFailureIndictsBackend(ARANGO_TRANSACTION_LIMIT_ERROR, false)).toBe(false);
+  });
+
+  it('counts an ordinary backend rejection, including one that says "aborted"', () => {
+    // `isAbortError` matches "aborted" anywhere in the text, so this 500 used to
+    // be excluded from the cutoff along with the real aborts.
+    expect(commitFailureIndictsBackend(new Error('500: internal server error'), false)).toBe(true);
+    expect(commitFailureIndictsBackend(new Error('500: {"error":"AQL: transaction aborted"}'), false)).toBe(true);
   });
 });
 
@@ -386,7 +445,9 @@ describe('partly-committed bulk groups', () => {
     });
 
     expect(commitBulk).toHaveBeenCalledOnce();
-    expect(commitIndividually).toHaveBeenCalledWith(items, error);
+    // Flagged as a replay: the server has CONFIRMED it holds all of them, so a
+    // tripped commit cutoff must not count them as failures (Ix#560).
+    expect(commitIndividually).toHaveBeenCalledWith(items, error, { replay: true });
   });
 
   it('keeps the old whole-batch fallback when the caller cannot identify patches', async () => {
