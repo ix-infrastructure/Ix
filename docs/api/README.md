@@ -238,7 +238,9 @@ be running, so a backend that answers 404 (no `/v1/stitch`) or 400 keeps being
 retried exactly as before. Nor does **any 4xx**, however long it took to arrive
 — elapsed covers the request upload, and a megabyte-scale stitch payload can
 spend tens of seconds there before a 413 comes back; a refused request is
-decisive evidence that no join started. An abort raised by a run deadline that
+decisive evidence that no join started — with **408** as the exception, since a
+proxy reporting that *it* gave up waiting says nothing about whether the backend
+did, and that is the whole bug. An abort raised by a run deadline that
 had *already* expired sets no cooldown either — `fetch` rejects on an
 already-aborted signal without contacting the backend, so there is no join to
 wait for.
@@ -253,9 +255,9 @@ each hold their own "single-flight" lock and stitch simultaneously.
 already on disk, so setting it to `0` releases an active one rather than only
 affecting the next.
 
-A skipped stitch is reported as `stitchSkipped` in the `--format json` body and
-in the ingest summary, so an automated consumer can tell it apart from a clean
-run. It is not an error: it does not set a non-zero exit code and does
+A skipped stitch is reported as `stitchSkipped` in `ix ingest --format json`,
+as `stitch_skipped` in `ix map --format json`, and in the ingest summary, so an
+automated consumer can tell it apart from a clean run. It is not an error: it does not set a non-zero exit code and does
 not count towards `stitchErrors`, and the previous registration stands — the
 same position a stitch that *failed* already left the graph in. `ix map` prints
 the reason.

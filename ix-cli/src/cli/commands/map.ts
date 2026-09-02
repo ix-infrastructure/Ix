@@ -569,6 +569,10 @@ Examples:
           // from one missing every file that failed to build a patch (#554).
           parse_errors: localIngest?.parseErrors ?? 0,
           commit_errors: localIngest?.commitErrors ?? 0,
+          // Ix#568. The whole reason this is reported at all is hooks that run
+          // `ix map` and read the machine output; leaving it only in
+          // `ix ingest --format json` puts it where those hooks never look.
+          stitch_skipped: localIngest?.stitchSkipped,
           regions: regions.map((r: any) => ({
             label: r.label,
             level: r.level,

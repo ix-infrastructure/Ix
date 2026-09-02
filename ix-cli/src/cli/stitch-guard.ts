@@ -166,8 +166,12 @@ export function failureMayStillBeRunning(outcome: StitchOutcome, slowMs = stitch
   // (provides + consumes + exports + symbolConsumes) is megabytes, so a 413
   // or a 400 can arrive well past the slow threshold. Cooling down there
   // would hold off 15 minutes for a query that never ran, and say so.
+  //
+  // 408 and 504 are the exceptions, and they are the whole bug: a proxy
+  // reporting that IT gave up waiting says nothing about whether the backend
+  // did. Those fall through to the elapsed rule, which is what catches them.
   const status = outcome.status;
-  if (typeof status === "number" && status >= 400 && status < 500) return false;
+  if (typeof status === "number" && status >= 400 && status < 500 && status !== 408) return false;
 
   // An abort is the client's own timeout firing, so the request was open.
   // Except when it was not: `AbortSignal.any` rejects immediately if the
@@ -179,9 +183,12 @@ export function failureMayStillBeRunning(outcome: StitchOutcome, slowMs = stitch
   return slowMs > 0 && outcome.elapsedMs >= slowMs;
 }
 
+/** Which rule refused. Callers branch on this, never on the prose. */
+export type StitchRefusal = "in-flight" | "cooling";
+
 export type StitchAdmission =
   | { admitted: true; settle: (outcome: StitchOutcome) => void }
-  | { admitted: false; reason: string };
+  | { admitted: false; rule: StitchRefusal; reason: string };
 
 function formatMs(ms: number): string {
   // Seconds up to two minutes: the numbers that matter here are request
@@ -219,6 +226,7 @@ export function admitStitch(endpoint: string, now = Date.now()): StitchAdmission
   if (cooldown && until > now) {
     return {
       admitted: false,
+      rule: "cooling",
       reason:
         `the last stitch was cut off after ${formatMs(cooldown.elapsedMs)} and may still be ` +
         `running on the backend; next attempt in ${formatMs(until - now)} ` +
@@ -230,6 +238,7 @@ export function admitStitch(endpoint: string, now = Date.now()): StitchAdmission
   if (!lock) {
     return {
       admitted: false,
+      rule: "in-flight",
       reason: `another ix map is already stitching ${endpoint}`,
     };
   }
@@ -262,14 +271,20 @@ export async function admitStitchWaiting(
   endpoint: string,
   waitMs = stitchWaitMs(),
   sleep: (ms: number) => Promise<void> = ms => new Promise(r => setTimeout(r, ms)),
+  /**
+   * The run's own wall-clock budget. Waiting past it is pure delay: every
+   * request after it is aborted before it leaves, so the stitch this is
+   * queueing for cannot be sent even if the lock frees.
+   */
+  runDeadline?: { readonly aborted: boolean },
 ): Promise<StitchAdmission> {
   const deadline = Date.now() + waitMs;
   for (;;) {
     const admission = admitStitch(endpoint);
     // Only contention is worth waiting out. A cooldown means the backend may
     // still be running the last one, and outlasting THAT is the whole point.
-    if (admission.admitted || !admission.reason.startsWith("another ix map")) return admission;
-    if (Date.now() >= deadline) return admission;
+    if (admission.admitted || admission.rule !== "in-flight") return admission;
+    if (Date.now() >= deadline || runDeadline?.aborted === true) return admission;
     await sleep(Math.min(POLL_MS, Math.max(0, deadline - Date.now())));
   }
 }

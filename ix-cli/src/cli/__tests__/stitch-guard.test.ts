@@ -331,3 +331,54 @@ describe("admitStitchWaiting", () => {
     expect(slept, "waited on a cooldown").toBe(0);
   });
 });
+
+describe("round 3: the refusal names its rule, and the clock is not the only witness", () => {
+  it("labels each refusal so callers never have to read the prose", () => {
+    const holder = admitStitch(ENDPOINT);
+    expect(holder.admitted).toBe(true);
+    const contended = admitStitch(ENDPOINT);
+    expect(contended.admitted).toBe(false);
+    if (!contended.admitted) expect(contended.rule).toBe("in-flight");
+    if (holder.admitted) holder.settle({ ok: false, elapsedMs: 62_000 });
+
+    const cooling = admitStitch(ENDPOINT);
+    expect(cooling.admitted).toBe(false);
+    if (!cooling.admitted) expect(cooling.rule).toBe("cooling");
+  });
+
+  it("treats a proxy 408 as a timeout, not as a refusal", () => {
+    // A 4xx normally proves the backend never ran the join. 408 is the one that
+    // says the opposite: something gave up WAITING, which is this whole bug.
+    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 60_000, status: 408 }, 20_000)).toBe(true);
+    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 60_000, status: 413 }, 20_000)).toBe(false);
+  });
+
+  it("stops waiting when the run deadline has already fired", async () => {
+    const holder = admitStitch(ENDPOINT);
+    expect(holder.admitted).toBe(true);
+
+    let slept = 0;
+    const spent = { aborted: true };
+    const result = await admitStitchWaiting(ENDPOINT, 30_000, async (ms) => { slept += ms; }, spent);
+
+    expect(result.admitted).toBe(false);
+    expect(slept, "slept past a budget that had already run out").toBe(0);
+    if (holder.admitted) holder.settle({ ok: true, elapsedMs: 5 });
+  });
+
+  it("still waits while the run deadline is live", async () => {
+    const holder = admitStitch(ENDPOINT);
+    expect(holder.admitted).toBe(true);
+    const live = { aborted: false };
+
+    let slept = 0;
+    const sleep = async (ms: number): Promise<void> => {
+      slept += ms;
+      if (slept >= 500 && holder.admitted) holder.settle({ ok: true, elapsedMs: 30 });
+    };
+
+    const second = await admitStitchWaiting(ENDPOINT, 30_000, sleep, live);
+    expect(second.admitted).toBe(true);
+    if (second.admitted) second.settle({ ok: true, elapsedMs: 30 });
+  });
+});

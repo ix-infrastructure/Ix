@@ -18,7 +18,7 @@ import { loadIngestionModules } from './ingestion-loader.js';
 import { ensureWorkspaceIdState } from '../bootstrap.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
-import { admitStitchWaiting } from '../stitch-guard.js';
+import { admitStitchWaiting, type StitchRefusal } from '../stitch-guard.js';
 import { readBackendHealth } from './upgrade.js';
 import { SUPPORTED_EXTENSIONS } from '../supported-extensions.js';
 import { canRenderProgress } from '../stderr.js';
@@ -619,7 +619,15 @@ export function isAbortError(err: unknown): boolean {
  * apart.
  */
 export function stitchAbortReachedBackend(err: unknown, deadlineAlreadySpent: boolean): boolean {
-  return isAbortError(err) && !deadlineAlreadySpent;
+  // Deliberately NOT isAbortError: that falls back to matching "aborted"
+  // anywhere in the stringified error, which is right for the retry decision
+  // it was written for and wrong here. A backend answering
+  // `500 {"error":"AQL: transaction aborted"}` in 20ms would be read as a
+  // client abort and given a 15-minute cooldown, straight past the
+  // fast-failure carve-out. Only a real AbortSignal rejection counts.
+  const name = (err as { name?: string } | null)?.name;
+  const isSignalAbort = name === "AbortError" || name === "TimeoutError";
+  return isSignalAbort && !deadlineAlreadySpent;
 }
 
 export function isRetryableCommitConflict(err: unknown): boolean {
@@ -899,17 +907,19 @@ export function describeStitchFailure(error: unknown): string {
  * the ways back in: a fresh map, `--force`, or a post-reset re-map. What the
  * cooldown changes is only how often this path is taken, not where it leads.
  */
-export function describeStitchSkipped(reason: string): string {
-  // The remedy depends on which rule refused. Telling someone to force a
-  // re-ingest while ANOTHER map is registering right now invites the second
-  // concurrent cross-workspace join this guard exists to prevent; and while a
-  // cooldown is running, that forced run would be refused too.
-  const contended = reason.startsWith("another ix map");
-  const remedy = contended
-    ? "That run is registering now, so no action is needed."
-    : "Once the cooldown expires and the backend is healthy, re-register with a run that re-ingests " +
-      "every file (`ix ingest <root> --force`) — an incremental map that skips unchanged files does not " +
-      "re-attempt the stitch.";
+export function describeStitchSkipped(reason: string, rule?: StitchRefusal): string {
+  // The remedy follows the RULE, never the prose. `ix map` single-flights per
+  // workspace, so contention here is always between DIFFERENT workspaces --
+  // the other run is registering its own, not this one. This workspace's
+  // registration really is missed, and an incremental map will not retry it,
+  // so the same forced re-ingest applies; what differs is when it is useful.
+  const remedy =
+    rule === "in-flight"
+      ? "That run registers its own workspace, not this one, so re-register this one with a run " +
+        "that re-ingests every file (`ix ingest <root> --force`) once the other map has finished."
+      : "Once the cooldown expires and the backend is healthy, re-register with a run that re-ingests " +
+        "every file (`ix ingest <root> --force`) — an incremental map that skips unchanged files does not " +
+        "re-attempt the stitch.";
   return `Note: Cross-workspace stitch not started — ${reason}. Source patches were committed; cross-repository edges are unchanged since the last successful stitch. ${remedy}`;
 }
 
@@ -1300,6 +1310,7 @@ export async function ingestFiles(
   // stitch error or move the exit code -- but the user is about to be told
   // cross-repo edges may be incomplete and is owed the reason.
   let stitchSkipped: string | undefined;
+  let stitchSkippedRule: StitchRefusal | undefined;
   let tooLarge = 0;
   let minifiedLikely = 0;
   let outsideRoot = 0;
@@ -2241,11 +2252,18 @@ export async function ingestFiles(
           // Ix#568: ask before stitching. The join is cross-workspace and
           // outlives the HTTP call that starts it, so `ix map`'s per-workspace
           // lock does not bound it -- see stitch-guard.ts. A refusal is not a
-          // failure: the previous registration stands and the next admitted map
-          // re-registers, exactly as a partial incremental map already leaves it.
-          const admission = await admitStitchWaiting(client.endpoint);
+          // failure: the previous registration stands, exactly as it does after
+          // a stitch that FAILED. It is not picked up by the next map either --
+          // see describeStitchSkipped for what actually re-registers.
+          const admission = await admitStitchWaiting(
+            client.endpoint,
+            undefined,
+            undefined,
+            opts.deadlineSignal,
+          );
           if (!admission.admitted) {
             stitchSkipped = admission.reason;
+            stitchSkippedRule = admission.rule;
             if (debug) process.stderr.write(`  [stitch not started] ${admission.reason}\n`);
           } else {
             // Sampled BEFORE the request -- see stitchAbortReachedBackend.
@@ -2340,11 +2358,11 @@ export async function ingestFiles(
     process.stderr.write(`  ${describeStitchFailure(stitchError)}\n`);
     process.exitCode = 1;
   } else if (stitchSkipped !== undefined) {
-    // Not an error and not an exit code: nothing failed and nothing is
-    // missing that the next admitted map will not re-register. But the
-    // sentence a user gets otherwise -- cross-repo relationships may be
-    // incomplete -- reads as an unexplained regression without the reason.
-    process.stderr.write(`  ${describeStitchSkipped(stitchSkipped)}\n`);
+    // Not an error and not an exit code: nothing failed, and the graph is
+    // exactly where a failed stitch would have left it. But the sentence a
+    // user gets otherwise -- cross-repo relationships may be incomplete --
+    // reads as an unexplained regression without the reason.
+    process.stderr.write(`  ${describeStitchSkipped(stitchSkipped, stitchSkippedRule)}\n`);
   }
   if (commitReport.kind === "warn") {
     process.stderr.write(`  ${commitReport.message}\n`);
