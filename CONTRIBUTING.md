@@ -152,7 +152,26 @@ All checks fail on CRITICAL or HIGH severity findings. If a check fails on your 
 
 ## Backend Development
 
-The Scala backend (memory-layer) lives in a [separate private repo](https://github.com/ix-infrastructure/ix-memory-layer). For backend changes, clone that repo directly.
+The Scala memory-layer backend is developed in a separate, **private** repository
+(`ix-infrastructure/Ix-memory`). Its source is not publicly accessible, so cloning
+it is a maintainer-only step. Note that `ix-memory-layer` — the name used in the
+PR template, the release notes and `docker-compose.standalone.yml` — is the
+published *artifact*, not a repository you can clone.
+
+**You do not need the backend source to work on this repository.** Everything in
+the `ix` CLI is developed against the published backend image, which is public and
+pullable anonymously. `./scripts/backend.sh up` in [Local Setup](#local-setup)
+starts it (`ghcr.io/ix-infrastructure/ix-memory-layer:latest` plus ArangoDB, on
+`127.0.0.1:8090` and `:8529`); see [docs/prerequisites.md](docs/prerequisites.md)
+for what it installs and which ports it opens.
+
+If a change you want needs the backend itself — a new endpoint, a different
+response shape, a query that is too slow — open an issue here describing the CLI
+behaviour you need and what the backend would have to do. A maintainer will carry
+it across. Please do not open a PR against this repository that assumes an
+endpoint the released backend does not serve. `ix doctor` reports the running
+graph schema version, and `curl -s localhost:8090/v1/health` returns both that
+and the backend's release version — that release is what to write against.
 
 ## OSS vs Pro Boundary
 
