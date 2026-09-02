@@ -38,6 +38,7 @@ again.
 | `Compass UI not found` on `ix view` | Run `ix upgrade` to fetch Compass. Re-running the installer wipes the Compass assets, so bootstrap auto-restores them with `ix upgrade`; skip with `IX_SKIP_COMPASS=1` |
 | Compass shows "Compass not connected to a codebase" | The scoped workspace has no graph — run `ix map .` from the repo root, then reload the tab |
 | Slow or stale results | Re-run `ix map --silent` to refresh the graph |
+| `Stopped committing after N consecutive failures` | The backend accepted no writes at all, so `ix map` gave up rather than sending one doomed request per file. `ix doctor` can still pass here — it asks whether the backend is reachable and the graph consistent, and an ArangoDB too busy to begin a transaction is both. Check the database (`docker stats`, `GET /_db/<db>/_api/query/current`) and re-map once it is idle. |
 
 ## Environment flags
 
@@ -45,6 +46,9 @@ again.
 - `IX_SKIP_INSTALL=1` — skip the CLI install step in bootstrap.
 - `IX_SKIP_BACKEND=1` — skip starting/waiting for the backend in bootstrap.
 - `IX_SKIP_MAP=1` — skip `ix map` in bootstrap.
+- `IX_COMMIT_FAILURE_LIMIT=N` — consecutive failed commits before `ix map`
+  stops sending more (default 5). `0` sends every patch regardless, which is
+  the pre-#560 behaviour.
 
 ## Re-mapping
 
