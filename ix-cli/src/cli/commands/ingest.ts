@@ -913,9 +913,27 @@ export type CommitOutcome =
   | { kind: "fatal"; message: string };
 
 /** Minimal local-ingest facts needed by commands that continue after ingestion. */
+/**
+ * The wire value the backend sends for a commit it short-circuited because it
+ * had already recorded the patch id — `CommitStatus.Idempotent.toString` in
+ * `PatchCommitRoutes` / `BulkPatchCommitRoutes`.
+ */
+const COMMIT_STATUS_IDEMPOTENT = 'Idempotent';
+
 export interface IngestFilesSummary {
   filesDiscovered: number;
   patchesApplied: number;
+  /**
+   * How many of `patchesApplied` the backend answered `Idempotent` — it had
+   * already recorded that patch id, so the commit wrote nothing.
+   *
+   * Normally uninteresting: `--full` re-submits every file, so an unchanged
+   * repo legitimately deduplicates everything against a graph that is already
+   * correct. It matters only when the graph turns out to be EMPTY afterwards,
+   * because then the deduplication is the reason nothing was written rather
+   * than a sign that nothing needed to be (#527).
+   */
+  idempotentPatches: number;
   parseErrors: number;
   commitErrors: number;
   stitchErrors: number;
@@ -1568,6 +1586,7 @@ export async function ingestFiles(
   let filesDiscovered = 0;
   let filesChanged = 0;
   let patchesApplied = 0;
+  let idempotentPatches = 0;
   let filesSkipped = 0;
   /**
    * Files skipped because we ASSUMED THEY WERE UNCHANGED. (Ix#568)
@@ -2108,6 +2127,7 @@ export async function ingestFiles(
                 patchesApplied++;
                 patchesTheBackendTook++;
                 commitBreaker.recordSuccess();
+                if (result.status === COMMIT_STATUS_IDEMPOTENT) idempotentPatches++;
                 opts?.onCommitted?.(item, result.rev);
               } catch (commitErr) {
                 // Counted apart from parseErrors: a patch that parsed fine and
@@ -2255,6 +2275,13 @@ export async function ingestFiles(
             patchesApplied += chunk.length;
             patchesTheBackendTook += chunk.length;
             commitBreaker.recordSuccess();
+            // The cutoff drain is a third commit site, added after this counter
+            // was written (Ix#571). It is a plain bulk commit carrying a status,
+            // so it counts like the other one -- a run whose held patches were
+            // all placed here and all deduplicated would otherwise report
+            // `idempotentPatches: 0` and fall back to the language hypothesis
+            // this change exists to retire.
+            if (result.status === COMMIT_STATUS_IDEMPOTENT) idempotentPatches += chunk.length;
             for (const item of chunk) opts?.onCommitted?.(item, result.rev);
             if (debug) process.stderr.write(`  [cutoff] bulk placed ${chunk.length} of ${items.length} held
 `);
@@ -2417,6 +2444,9 @@ export async function ingestFiles(
               patchesApplied += items.length;
               patchesTheBackendTook += items.length;
               commitBreaker.recordSuccess();
+              // One status covers the whole bulk: the backend commits the chunk
+              // as a unit, so `Idempotent` means every patch in it was a replay.
+              if (result.status === COMMIT_STATUS_IDEMPOTENT) idempotentPatches += items.length;
               for (const item of items) opts?.onCommitted?.(item, result.rev);
             },
             commitIndividually,
@@ -3328,6 +3358,7 @@ export async function ingestFiles(
   const summary: IngestFilesSummary = {
     filesDiscovered,
     patchesApplied,
+    idempotentPatches,
     // `+ crashedParses()`, as the baseline and delete guards already do. Files
     // lost to a dead parse pool raise `filesSkippedUnparsed`, never
     // `parseErrors`, so without this everything downstream read the run as
@@ -3409,6 +3440,7 @@ export async function ingestFiles(
       filesChanged,
       patchesApplied,
       filesSkipped,
+      idempotentPatches,
       entitiesParsed,
       latestRev,
       // `unchanged` is the files we ASSUMED unchanged, not every skip. It used
