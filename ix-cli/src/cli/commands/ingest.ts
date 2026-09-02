@@ -18,7 +18,7 @@ import { loadIngestionModules } from './ingestion-loader.js';
 import { ensureWorkspaceIdState } from '../bootstrap.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
-import { admitStitch } from '../stitch-guard.js';
+import { admitStitchWaiting } from '../stitch-guard.js';
 import { readBackendHealth } from './upgrade.js';
 import { SUPPORTED_EXTENSIONS } from '../supported-extensions.js';
 import { canRenderProgress } from '../stderr.js';
@@ -837,6 +837,16 @@ export interface IngestFilesSummary {
   parseErrors: number;
   commitErrors: number;
   stitchErrors: number;
+  /**
+   * Why the cross-workspace stitch was not attempted, if it was not (Ix#568).
+   *
+   * A skip is not an error and deliberately does not move the exit code -- but
+   * CLAUDE.md RULE 5 has hooks running `ix map --silent` and reading the exit
+   * code, so without a field here an automated consumer sees a wholly
+   * successful map for up to 15 minutes while cross-repo edges are stale, and
+   * the only signal is an English sentence on stderr.
+   */
+  stitchSkipped?: string;
 }
 
 /**
@@ -890,7 +900,17 @@ export function describeStitchFailure(error: unknown): string {
  * cooldown changes is only how often this path is taken, not where it leads.
  */
 export function describeStitchSkipped(reason: string): string {
-  return `Note: Cross-workspace stitch not started — ${reason}. Source patches were committed; cross-repository edges are unchanged since the last successful stitch. Once the backend is healthy, re-register with a run that re-ingests every file (\`ix ingest <root> --force\`) — an incremental map that skips unchanged files does not re-attempt the stitch.`;
+  // The remedy depends on which rule refused. Telling someone to force a
+  // re-ingest while ANOTHER map is registering right now invites the second
+  // concurrent cross-workspace join this guard exists to prevent; and while a
+  // cooldown is running, that forced run would be refused too.
+  const contended = reason.startsWith("another ix map");
+  const remedy = contended
+    ? "That run is registering now, so no action is needed."
+    : "Once the cooldown expires and the backend is healthy, re-register with a run that re-ingests " +
+      "every file (`ix ingest <root> --force`) — an incremental map that skips unchanged files does not " +
+      "re-attempt the stitch.";
+  return `Note: Cross-workspace stitch not started — ${reason}. Source patches were committed; cross-repository edges are unchanged since the last successful stitch. ${remedy}`;
 }
 
 /**
@@ -2223,7 +2243,7 @@ export async function ingestFiles(
           // lock does not bound it -- see stitch-guard.ts. A refusal is not a
           // failure: the previous registration stands and the next admitted map
           // re-registers, exactly as a partial incremental map already leaves it.
-          const admission = admitStitch(client.endpoint);
+          const admission = await admitStitchWaiting(client.endpoint);
           if (!admission.admitted) {
             stitchSkipped = admission.reason;
             if (debug) process.stderr.write(`  [stitch not started] ${admission.reason}\n`);
@@ -2241,6 +2261,11 @@ export async function ingestFiles(
                 ok: false,
                 elapsedMs: performance.now() - stitchStart,
                 aborted: stitchAbortReachedBackend(err, deadlineAlreadySpent),
+                // A 4xx means the backend refused it rather than ran it, and
+                // elapsed cannot tell the difference: it covers the upload,
+                // and a megabyte-scale stitch payload can spend 25s there
+                // before a 413 comes back.
+                status: stitchFailureStatus(err),
               });
               throw err;
             }
@@ -2309,6 +2334,7 @@ export async function ingestFiles(
     parseErrors,
     commitErrors,
     stitchErrors,
+    stitchSkipped,
   };
   if (stitchErrors > 0) {
     process.stderr.write(`  ${describeStitchFailure(stitchError)}\n`);
@@ -2347,6 +2373,11 @@ export async function ingestFiles(
       skipReasons: { unchanged: filesSkipped, emptyFile: 0, parseError: parseErrors, tooLarge, minifiedLikely, outsideRoot },
       commitErrors,
       stitchErrors,
+      // Ix#568. Present only when the stitch was refused before it was sent, so
+      // a consumer reading this body can tell "cross-repo edges are current"
+      // from "cross-repo edges are as stale as the last successful stitch" --
+      // a distinction the exit code deliberately does not make.
+      stitchSkipped,
       elapsedSeconds: parseFloat(elapsed),
       timings: {
         ...timings,

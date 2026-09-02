@@ -43,6 +43,17 @@ import { acquireLockAt, namedLockPath, type LockHandle } from "./single-flight.j
 
 const DEFAULT_COOLDOWN_MS = 15 * 60 * 1000;
 const DEFAULT_SLOW_FAILURE_MS = 20 * 1000;
+/**
+ * Below this, a request cannot have reached the backend and come back.
+ * Generous by an order of magnitude — the local memory layer answers a stitch
+ * in tens of milliseconds — because the only thing it has to separate is a
+ * real round trip from an abort that rejected before the socket was used.
+ */
+const REACHED_BACKEND_MS = 5;
+/** Budget for waiting out a stitch that is merely in flight. */
+const DEFAULT_WAIT_MS = 30 * 1000;
+/** Poll interval while waiting. Short: a healthy stitch is over in ~30ms. */
+const POLL_MS = 250;
 
 function positiveEnvMs(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -58,7 +69,17 @@ export function stitchCooldownMs(): number {
   return positiveEnvMs("IX_STITCH_COOLDOWN_MS", DEFAULT_COOLDOWN_MS);
 }
 
-/** A failure at or past this wall-clock is treated as "the server is still working". */
+/**
+ * A failure at or past this wall-clock is treated as "the server is still
+ * working". 0 turns the elapsed rule OFF; only an abort cools down.
+ *
+ * Read that sentence twice, because the literal reading of 0 for a threshold
+ * is the opposite: `elapsedMs >= 0` is true of every failure, so 0 would cool
+ * down on the instant 404 from an older backend -- exactly the deployment the
+ * fast-failure carve-out exists to leave alone. And 0 is what someone reaches
+ * for, because the sibling knob prints "IX_STITCH_COOLDOWN_MS=0 disables" in
+ * the refusal message. Off means off in both.
+ */
 export function stitchSlowFailureMs(): number {
   return positiveEnvMs("IX_STITCH_SLOW_FAILURE_MS", DEFAULT_SLOW_FAILURE_MS);
 }
@@ -74,10 +95,13 @@ export function stitchSlowFailureMs(): number {
  * exists to prevent -- an `ix mcp` server launched with an IP and a shell
  * `ix map` reading the config both stitching at once.
  *
- * Loopback spellings are folded together deliberately. They are not the same
- * host in general, but a stitch is only ever issued against the local memory
- * layer, and the cost of folding two that really were distinct is one skipped
- * stitch -- against the cost of not folding them, which is the bug.
+ * Loopback spellings are folded together deliberately. `localhost`,
+ * `127.0.0.1` and `::1` are not the same host in general -- and the endpoint
+ * is not always local either; `IxClient.isLocalEndpoint` exists precisely
+ * because a remote backend is supported. The folding is justified by its cost,
+ * not by a claim about deployments: two loopback spellings that really did
+ * name different backends cost one deferred stitch, while not folding them
+ * costs the concurrency this guard exists to prevent.
  */
 export function stitchKey(endpoint: string): string {
   try {
@@ -124,6 +148,8 @@ export interface StitchOutcome {
   elapsedMs: number;
   /** True for an AbortError/TimeoutError — the client hung up, the server did not. */
   aborted?: boolean;
+  /** HTTP status the backend answered with, when it answered at all. */
+  status?: number | null;
 }
 
 /**
@@ -133,10 +159,24 @@ export interface StitchOutcome {
  */
 export function failureMayStillBeRunning(outcome: StitchOutcome, slowMs = stitchSlowFailureMs()): boolean {
   if (outcome.ok) return false;
-  // An abort is the client's own timeout firing. By construction the request
-  // was still open, so the backend never finished it — regardless of elapsed.
-  if (outcome.aborted) return true;
-  return outcome.elapsedMs >= slowMs;
+
+  // A 4xx is the backend REFUSING the request, not working on it. That is
+  // decisive whatever the clock says, and the clock can say a lot: elapsed
+  // covers the upload too, and on a large monorepo the stitch payload
+  // (provides + consumes + exports + symbolConsumes) is megabytes, so a 413
+  // or a 400 can arrive well past the slow threshold. Cooling down there
+  // would hold off 15 minutes for a query that never ran, and say so.
+  const status = outcome.status;
+  if (typeof status === "number" && status >= 400 && status < 500) return false;
+
+  // An abort is the client's own timeout firing, so the request was open.
+  // Except when it was not: `AbortSignal.any` rejects immediately if the
+  // run deadline fires between the caller sampling it and fetch checking it,
+  // and no request that reached a backend returns in single-digit ms.
+  if (outcome.aborted) return outcome.elapsedMs >= REACHED_BACKEND_MS;
+
+  // 0 disables the elapsed rule; see stitchSlowFailureMs.
+  return slowMs > 0 && outcome.elapsedMs >= slowMs;
 }
 
 export type StitchAdmission =
@@ -193,6 +233,48 @@ export function admitStitch(endpoint: string, now = Date.now()): StitchAdmission
       reason: `another ix map is already stitching ${endpoint}`,
     };
   }
+
+  return admittedWith(lock, endpoint);
+}
+
+/** How long to wait for the in-flight stitch to finish before shedding. */
+export function stitchWaitMs(): number {
+  return positiveEnvMs("IX_STITCH_WAIT_MS", DEFAULT_WAIT_MS);
+}
+
+/**
+ * [[admitStitch]], but waits out a stitch that is merely in flight.
+ *
+ * Shedding on contention is right when the backend is struggling and wrong
+ * when it is not. On a healthy backend the stitch takes tens of milliseconds,
+ * and two `ix map` runs for two workspaces overlapping by that much is
+ * ordinary in a multi-repo setup with a per-repo hook. Dropping one there
+ * loses that workspace's registration until somebody re-ingests every file,
+ * because the stitch block is gated on `filesSkipped === 0` and an
+ * incremental map never reaches it.
+ *
+ * So wait, briefly. A healthy holder is gone long before the budget; an
+ * unhealthy one is still holding when it runs out, which is the case worth
+ * shedding. The cooldown — which is what actually stops the Ix#568 pile-up —
+ * is checked first and never waited on.
+ */
+export async function admitStitchWaiting(
+  endpoint: string,
+  waitMs = stitchWaitMs(),
+  sleep: (ms: number) => Promise<void> = ms => new Promise(r => setTimeout(r, ms)),
+): Promise<StitchAdmission> {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const admission = admitStitch(endpoint);
+    // Only contention is worth waiting out. A cooldown means the backend may
+    // still be running the last one, and outlasting THAT is the whole point.
+    if (admission.admitted || !admission.reason.startsWith("another ix map")) return admission;
+    if (Date.now() >= deadline) return admission;
+    await sleep(Math.min(POLL_MS, Math.max(0, deadline - Date.now())));
+  }
+}
+
+function admittedWith(lock: LockHandle, endpoint: string): StitchAdmission {
 
   return {
     admitted: true,

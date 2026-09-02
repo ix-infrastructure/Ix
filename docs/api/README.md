@@ -230,13 +230,16 @@ does not issue this call unconditionally:
 
 | Rule | Behaviour |
 |---|---|
-| One at a time **per backend endpoint** | A second `ix map` — including one for a *different* workspace — skips its stitch while another is in flight. `ix map`'s own lock is per workspace and does not bound a cross-workspace join. |
+| One at a time **per backend endpoint** | A second `ix map` — including one for a *different* workspace — waits up to `IX_STITCH_WAIT_MS` (default 30s) for the in-flight stitch, then skips. `ix map`'s own lock is per workspace and does not bound a cross-workspace join. |
 | Cooldown after a cut-off stitch | If a stitch fails after `IX_STITCH_SLOW_FAILURE_MS` (default 20s), or is aborted by the client's own timeout, no further stitch is sent to that endpoint for `IX_STITCH_COOLDOWN_MS` (default 15 min). |
 
 A failure *faster* than the slow threshold sets no cooldown: nothing can still
 be running, so a backend that answers 404 (no `/v1/stitch`) or 400 keeps being
-retried exactly as before. An abort raised by a run deadline that had *already*
-expired before the request sets no cooldown either — `fetch` rejects on an
+retried exactly as before. Nor does **any 4xx**, however long it took to arrive
+— elapsed covers the request upload, and a megabyte-scale stitch payload can
+spend tens of seconds there before a 413 comes back; a refused request is
+decisive evidence that no join started. An abort raised by a run deadline that
+had *already* expired sets no cooldown either — `fetch` rejects on an
 already-aborted signal without contacting the backend, so there is no join to
 wait for.
 
@@ -250,7 +253,9 @@ each hold their own "single-flight" lock and stitch simultaneously.
 already on disk, so setting it to `0` releases an active one rather than only
 affecting the next.
 
-A skipped stitch is not an error. It does not set a non-zero exit code and does
+A skipped stitch is reported as `stitchSkipped` in the `--format json` body and
+in the ingest summary, so an automated consumer can tell it apart from a clean
+run. It is not an error: it does not set a non-zero exit code and does
 not count towards `stitchErrors`, and the previous registration stands — the
 same position a stitch that *failed* already left the graph in. `ix map` prints
 the reason.
@@ -264,7 +269,8 @@ data to send, having only parsed what changed. A run that re-ingests every file
 | Variable | Default | Effect |
 |---|---|---|
 | `IX_STITCH_COOLDOWN_MS` | `900000` | How long to hold off after a cut-off stitch. `0` disables the cooldown. |
-| `IX_STITCH_SLOW_FAILURE_MS` | `20000` | Failures at or past this wall-clock are treated as "the backend may still be working". |
+| `IX_STITCH_SLOW_FAILURE_MS` | `20000` | Failures at or past this wall-clock are treated as "the backend may still be working". `0` turns the elapsed rule **off** (only an abort cools down) — it does not mean "everything is slow". |
+| `IX_STITCH_WAIT_MS` | `30000` | How long to wait for an in-flight stitch before skipping. `0` sheds immediately. |
 | `IX_LOCK_DIR` | `~/.ix/locks` | Where the stitch lock and cooldown record live (shared with the map lock). |
 
 This bounds the client. Cancelling the server-side query when the client hangs

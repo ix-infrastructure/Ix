@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import {
   admitStitch,
+  admitStitchWaiting,
   cooldownPathForTest,
   failureMayStillBeRunning,
   stitchKey,
@@ -254,5 +255,79 @@ describe("settle never replaces the caller's error", () => {
     process.env.IX_LOCK_DIR = join(blocker, "locks");
 
     if (a.admitted) expect(() => a.settle({ ok: false, elapsedMs: 62_000 })).not.toThrow();
+  });
+});
+
+describe("failureMayStillBeRunning: what the backend told us beats the clock", () => {
+  it("does not cool down on a 4xx, however long it took to arrive", () => {
+    // elapsed covers the UPLOAD too. On a large monorepo the stitch payload is
+    // megabytes, so a 413 can come back well past the slow threshold -- and a
+    // refused request is decisive evidence that no join started.
+    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 25_000, status: 413 }, 20_000)).toBe(false);
+    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 25_000, status: 400 }, 20_000)).toBe(false);
+    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 25_000, status: 404 }, 20_000)).toBe(false);
+  });
+
+  it("still cools down on a slow 5xx, which is the reported case", () => {
+    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 60_000, status: 500 }, 20_000)).toBe(true);
+    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 60_000, status: null }, 20_000)).toBe(true);
+  });
+
+  it("does not cool down on an abort that returned before the socket was used", () => {
+    // AbortSignal.any rejects synchronously if the run deadline fires between
+    // the caller sampling it and fetch checking it. Nothing reached a backend
+    // and came back in under a millisecond.
+    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 0, aborted: true }, 20_000)).toBe(false);
+    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 900, aborted: true }, 20_000)).toBe(true);
+  });
+
+  it("treats IX_STITCH_SLOW_FAILURE_MS=0 as off, not as 'everything is slow'", () => {
+    // The literal reading of 0 for a threshold is the opposite of off, and 0 is
+    // what a user reaches for because the sibling knob prints
+    // "IX_STITCH_COOLDOWN_MS=0 disables". Off has to mean off in both, or the
+    // instant 404 from an older backend gets a 15-minute cooldown.
+    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 40 }, 0)).toBe(false);
+    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 60_000 }, 0)).toBe(false);
+    // An abort is not an elapsed judgement, so it still counts.
+    expect(failureMayStillBeRunning({ ok: false, elapsedMs: 60_000, aborted: true }, 0)).toBe(true);
+  });
+});
+
+describe("admitStitchWaiting", () => {
+  it("waits out a stitch that is merely in flight rather than shedding it", async () => {
+    // On a healthy backend a stitch is over in tens of milliseconds, and two
+    // maps overlapping by that much is ordinary. Shedding there loses that
+    // workspace's registration until somebody re-ingests every file.
+    const holder = admitStitch(ENDPOINT);
+    expect(holder.admitted).toBe(true);
+
+    let slept = 0;
+    const sleep = async (ms: number): Promise<void> => {
+      slept += ms;
+      if (slept >= 500 && holder.admitted) holder.settle({ ok: true, elapsedMs: 30 });
+    };
+
+    const second = await admitStitchWaiting(ENDPOINT, 30_000, sleep);
+    expect(second.admitted, "should have waited for the holder to finish").toBe(true);
+    if (second.admitted) second.settle({ ok: true, elapsedMs: 30 });
+  });
+
+  it("gives up once the budget is spent, so an unhealthy backend still sheds", async () => {
+    const holder = admitStitch(ENDPOINT);
+    expect(holder.admitted).toBe(true);
+
+    const second = await admitStitchWaiting(ENDPOINT, 1_000, async () => {});
+    expect(second.admitted).toBe(false);
+    if (!second.admitted) expect(second.reason).toContain("already stitching");
+  });
+
+  it("never waits on a cooldown — outlasting the last stitch is the point", async () => {
+    stitchOnce({ ok: false, elapsedMs: 62_000 });
+
+    let slept = 0;
+    const result = await admitStitchWaiting(ENDPOINT, 30_000, async (ms) => { slept += ms; });
+
+    expect(result.admitted).toBe(false);
+    expect(slept, "waited on a cooldown").toBe(0);
   });
 });
