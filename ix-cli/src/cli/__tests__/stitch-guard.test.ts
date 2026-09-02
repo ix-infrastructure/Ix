@@ -7,6 +7,7 @@ import {
   admitStitch,
   cooldownPathForTest,
   failureMayStillBeRunning,
+  stitchKey,
 } from "../stitch-guard.js";
 import { namedLockPath } from "../single-flight.js";
 
@@ -86,7 +87,11 @@ describe("admitStitch single-flight", () => {
   it("does not let one backend's in-flight stitch block another backend", () => {
     const first = admitStitch(ENDPOINT);
     expect(first.admitted).toBe(true);
-    expect(admitStitch(OTHER).admitted).toBe(true);
+    const other = admitStitch(OTHER);
+    expect(other.admitted).toBe(true);
+
+    if (first.admitted) first.settle({ ok: true, elapsedMs: 1 });
+    if (other.admitted) other.settle({ ok: true, elapsedMs: 1 });
   });
 
   it("keys the lock on the endpoint text, not on the directory the command runs in", () => {
@@ -180,5 +185,74 @@ describe("admitStitch cooldown", () => {
     process.env.IX_STITCH_SLOW_FAILURE_MS = "100";
     stitchOnce({ ok: false, elapsedMs: 500 });
     expect(admitStitch(ENDPOINT).admitted).toBe(false);
+  });
+});
+
+describe("stitchKey", () => {
+  // One backend reaches admitStitch spelled however the process that called it
+  // was configured: IX_ENDPOINT in an `ix mcp` unit, the config file in a shell.
+  // Hashing the raw string gave each spelling its own lock, which permits
+  // exactly the concurrency the guard exists to prevent.
+  it("folds the spellings of one local backend together", () => {
+    const canonical = stitchKey("http://localhost:8090");
+    expect(stitchKey("http://localhost:8090/")).toBe(canonical);
+    expect(stitchKey("http://127.0.0.1:8090")).toBe(canonical);
+    expect(stitchKey("HTTP://LOCALHOST:8090")).toBe(canonical);
+  });
+
+  it("keeps genuinely different backends apart", () => {
+    expect(stitchKey("http://localhost:8090")).not.toBe(stitchKey("http://localhost:9090"));
+    expect(stitchKey("http://localhost:8090")).not.toBe(stitchKey("http://ix.example:8090"));
+    expect(stitchKey("http://localhost:8090/a")).not.toBe(stitchKey("http://localhost:8090/b"));
+  });
+
+  it("passes through something that is not a URL rather than refusing to guard", () => {
+    expect(stitchKey("not a url")).toBe("not a url");
+  });
+
+  it("gives two spellings of one backend one lock", () => {
+    const first = admitStitch("http://localhost:8090");
+    expect(first.admitted).toBe(true);
+    expect(admitStitch("http://127.0.0.1:8090/").admitted).toBe(false);
+
+    if (first.admitted) first.settle({ ok: true, elapsedMs: 1 });
+  });
+});
+
+describe("changing IX_STITCH_COOLDOWN_MS applies to a cooldown already on disk", () => {
+  // The refusal message tells the user IX_STITCH_COOLDOWN_MS=0 disables this.
+  // If that only took effect prospectively, the instruction printed to someone
+  // blocked for 15 minutes would do nothing, and their only escape would be
+  // deleting a state file whose name they cannot compute.
+  it("0 releases an active cooldown", () => {
+    stitchOnce({ ok: false, elapsedMs: 62_000 });
+    expect(admitStitch(ENDPOINT).admitted).toBe(false);
+
+    process.env.IX_STITCH_COOLDOWN_MS = "0";
+    expect(admitStitch(ENDPOINT).admitted).toBe(true);
+  });
+
+  it("a lower value shortens an active cooldown", () => {
+    stitchOnce({ ok: false, elapsedMs: 62_000 });  // default 15m
+    process.env.IX_STITCH_COOLDOWN_MS = "1000";
+    expect(admitStitch(ENDPOINT, Date.now() + 5_000).admitted).toBe(true);
+  });
+});
+
+describe("settle never replaces the caller's error", () => {
+  it("swallows a failure to write the cooldown record", () => {
+    const a = admitStitch(ENDPOINT);
+    expect(a.admitted).toBe(true);
+
+    // Make the cooldown write fail: put the lock dir underneath a regular file,
+    // so mkdirSync -p cannot create it (ENOTDIR). settle() runs inside
+    // `catch (err) { settle(...); throw err; }`, so anything thrown here would
+    // unwind INSTEAD of the stitch error -- losing the HTTP status
+    // isStitchUnsupported reads, and describing the wrong failure to the user.
+    const blocker = join(lockDir, "a-file-not-a-directory");
+    writeFileSync(blocker, "");
+    process.env.IX_LOCK_DIR = join(blocker, "locks");
+
+    if (a.admitted) expect(() => a.settle({ ok: false, elapsedMs: 62_000 })).not.toThrow();
   });
 });

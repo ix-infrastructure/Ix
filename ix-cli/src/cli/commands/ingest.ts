@@ -598,6 +598,30 @@ export function isAbortError(err: unknown): boolean {
   return String(err).toLowerCase().includes("aborted");
 }
 
+/**
+ * Did an aborted stitch actually reach the backend? (Ix#568)
+ *
+ * The stitch guard cools down after an abort on the premise that the client
+ * hung up on a request that was open, so the join outlives it. That premise
+ * has one exception. `IxClient.post` combines the per-request timeout with the
+ * run's shared deadline via `AbortSignal.any`, and a deadline that is ALREADY
+ * aborted makes fetch reject without contacting the backend at all. The stitch
+ * is the last thing an ingest does, so that is exactly where an exhausted
+ * budget lands.
+ *
+ * Reading that as `cut off mid-join` would write a 15-minute cooldown for a
+ * query the backend never received, and then tell the user the last stitch
+ * `was cut off after 0s and may still be running`.
+ *
+ * `deadlineAlreadySpent` must be sampled BEFORE the request. A deadline that
+ * fires DURING a long stitch is a genuine mid-flight abort, and by then the
+ * signal is aborted too -- so a check made afterwards cannot tell the two
+ * apart.
+ */
+export function stitchAbortReachedBackend(err: unknown, deadlineAlreadySpent: boolean): boolean {
+  return isAbortError(err) && !deadlineAlreadySpent;
+}
+
 export function isRetryableCommitConflict(err: unknown): boolean {
   if (isAbortError(err)) return false;
   const message = String(err).toLowerCase();
@@ -852,14 +876,21 @@ export function describeStitchFailure(error: unknown): string {
 /**
  * Ix#568: the stitch was never sent, and why.
  *
- * Deliberately not phrased as a failure. Nothing broke, the previous
- * registration still stands, and the next map that is admitted re-registers
- * -- the same position a partial incremental map already leaves the graph in.
- * Saying only that cross-repo relationships may be incomplete, with no reason,
- * is what would make this look like a regression.
+ * Deliberately not phrased as a failure. Nothing broke and the previous
+ * registration still stands -- the same position a stitch that FAILED already
+ * left the graph in. Saying only that cross-repo relationships may be
+ * incomplete, with no reason, is what would make this look like a regression.
+ *
+ * It does not promise that the next map re-registers, because that is not
+ * reliably true and predates this guard: the stitch block is gated on
+ * `filesSkipped === 0`, so an incremental map that skips any mtime-unchanged
+ * file never reaches it -- and by then it has no registration data to send
+ * either, since it only parsed what changed. Its own comment already names
+ * the ways back in: a fresh map, `--force`, or a post-reset re-map. What the
+ * cooldown changes is only how often this path is taken, not where it leads.
  */
 export function describeStitchSkipped(reason: string): string {
-  return `Note: Cross-workspace stitch not started — ${reason}. Source patches were committed; cross-repository edges are unchanged since the last successful stitch.`;
+  return `Note: Cross-workspace stitch not started — ${reason}. Source patches were committed; cross-repository edges are unchanged since the last successful stitch. Once the backend is healthy, re-register with a run that re-ingests every file (\`ix ingest <root> --force\`) — an incremental map that skips unchanged files does not re-attempt the stitch.`;
 }
 
 /**
@@ -2197,6 +2228,8 @@ export async function ingestFiles(
             stitchSkipped = admission.reason;
             if (debug) process.stderr.write(`  [stitch not started] ${admission.reason}\n`);
           } else {
+            // Sampled BEFORE the request -- see stitchAbortReachedBackend.
+            const deadlineAlreadySpent = opts.deadlineSignal?.aborted === true;
             const stitchStart = performance.now();
             let res;
             try {
@@ -2204,7 +2237,11 @@ export async function ingestFiles(
             } catch (err) {
               // Settle before rethrowing, so the shared catch below still sees
               // the original error and the lock is never held past the request.
-              admission.settle({ ok: false, elapsedMs: performance.now() - stitchStart, aborted: isAbortError(err) });
+              admission.settle({
+                ok: false,
+                elapsedMs: performance.now() - stitchStart,
+                aborted: stitchAbortReachedBackend(err, deadlineAlreadySpent),
+              });
               throw err;
             }
             admission.settle({ ok: true, elapsedMs: performance.now() - stitchStart });

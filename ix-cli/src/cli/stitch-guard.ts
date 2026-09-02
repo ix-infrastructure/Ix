@@ -63,9 +63,40 @@ export function stitchSlowFailureMs(): number {
   return positiveEnvMs("IX_STITCH_SLOW_FAILURE_MS", DEFAULT_SLOW_FAILURE_MS);
 }
 
+/**
+ * One key per backend, however the endpoint was spelled.
+ *
+ * `getEndpoint()` returns `IX_ENDPOINT` or the config file verbatim, so the
+ * same backend reaches this function as `http://localhost:8090`,
+ * `http://localhost:8090/` and `http://127.0.0.1:8090` depending on which of
+ * those a given process was started with. Hashing the raw string gives each
+ * spelling its own lock, and the guard then permits exactly the concurrency it
+ * exists to prevent -- an `ix mcp` server launched with an IP and a shell
+ * `ix map` reading the config both stitching at once.
+ *
+ * Loopback spellings are folded together deliberately. They are not the same
+ * host in general, but a stitch is only ever issued against the local memory
+ * layer, and the cost of folding two that really were distinct is one skipped
+ * stitch -- against the cost of not folding them, which is the bug.
+ */
+export function stitchKey(endpoint: string): string {
+  try {
+    const u = new URL(endpoint);
+    const host = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(u.hostname.toLowerCase())
+      ? "localhost"
+      : u.hostname.toLowerCase();
+    const path = u.pathname.replace(/\/+$/, "");
+    return `${u.protocol.toLowerCase()}//${host}:${u.port}${path}`;
+  } catch {
+    // Not a URL. Nothing to normalise, and refusing to guard is worse than
+    // guarding on the raw text.
+    return endpoint;
+  }
+}
+
 /** Cooldown record. Sits beside the lock so IX_LOCK_DIR redirects both. */
 function cooldownPath(endpoint: string): string {
-  return namedLockPath("stitch", endpoint).replace(/\.lock$/, ".cooldown");
+  return namedLockPath("stitch", stitchKey(endpoint)).replace(/\.lock$/, ".cooldown");
 }
 
 interface Cooldown {
@@ -133,17 +164,29 @@ function formatMs(ms: number): string {
  */
 export function admitStitch(endpoint: string, now = Date.now()): StitchAdmission {
   const cooldown = readCooldown(endpoint);
-  if (cooldown && cooldown.until > now) {
+  // Re-derive the expiry from the CURRENT setting rather than trusting the
+  // one stamped into the record. The refusal below tells the user that
+  // IX_STITCH_COOLDOWN_MS=0 disables the cooldown, and that has to be true
+  // for the cooldown they are looking at -- otherwise the only escape from a
+  // 15-minute block is deleting a state file whose name they cannot compute.
+  // Clamping (rather than only special-casing 0) means lowering the value
+  // shortens an active cooldown too, which is the same expectation.
+  // The clamp alone covers 0: `at` is when the failure was recorded, always in
+  // the past, so a configured 0 makes `until` expire immediately. An explicit
+  // `configured > 0` arm here changes no outcome, and a guard that cannot fail
+  // reads as protection that is not there.
+  const until = cooldown === null ? 0 : Math.min(cooldown.until, cooldown.at + stitchCooldownMs());
+  if (cooldown && until > now) {
     return {
       admitted: false,
       reason:
         `the last stitch was cut off after ${formatMs(cooldown.elapsedMs)} and may still be ` +
-        `running on the backend; next attempt in ${formatMs(cooldown.until - now)} ` +
+        `running on the backend; next attempt in ${formatMs(until - now)} ` +
         `(IX_STITCH_COOLDOWN_MS=0 disables)`,
     };
   }
 
-  const lock: LockHandle | null = acquireLockAt(namedLockPath("stitch", endpoint), `ix stitch ${endpoint}`);
+  const lock: LockHandle | null = acquireLockAt(namedLockPath("stitch", stitchKey(endpoint)), `ix stitch ${endpoint}`);
   if (!lock) {
     return {
       admitted: false,
@@ -159,8 +202,17 @@ export function admitStitch(endpoint: string, now = Date.now()): StitchAdmission
           const ms = stitchCooldownMs();
           if (ms > 0) {
             const record: Cooldown = { until: Date.now() + ms, elapsedMs: outcome.elapsedMs, at: Date.now() };
-            try { mkdirSync(dirname(cooldownPath(endpoint)), { recursive: true }); } catch { /* best effort */ }
-            writeFileSync(cooldownPath(endpoint), JSON.stringify(record), { mode: 0o600 });
+            try {
+              mkdirSync(dirname(cooldownPath(endpoint)), { recursive: true });
+              writeFileSync(cooldownPath(endpoint), JSON.stringify(record), { mode: 0o600 });
+            } catch {
+              // An unwritable lock dir or a full disk must not become the
+              // error the caller reports. settle() runs inside `catch (err) {
+              // settle(...); throw err; }`, so anything thrown here would
+              // unwind INSTEAD of the stitch failure -- losing the status
+              // isStitchUnsupported needs and describing the wrong problem.
+              // Losing a cooldown costs one extra stitch.
+            }
           }
         } else {
           // A clean result, or a failure fast enough that nothing can be

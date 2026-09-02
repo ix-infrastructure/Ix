@@ -235,11 +235,31 @@ does not issue this call unconditionally:
 
 A failure *faster* than the slow threshold sets no cooldown: nothing can still
 be running, so a backend that answers 404 (no `/v1/stitch`) or 400 keeps being
-retried exactly as before.
+retried exactly as before. An abort raised by a run deadline that had *already*
+expired before the request sets no cooldown either — `fetch` rejects on an
+already-aborted signal without contacting the backend, so there is no join to
+wait for.
+
+Both the lock and the cooldown are keyed on a normalised endpoint, so
+`http://localhost:8090`, `http://localhost:8090/` and `http://127.0.0.1:8090`
+are one backend rather than three. Without that, an `ix mcp` server started with
+`IX_ENDPOINT` set to an IP and a shell `ix map` reading the config file would
+each hold their own "single-flight" lock and stitch simultaneously.
+
+`IX_STITCH_COOLDOWN_MS` is re-read on every attempt and applied to cooldowns
+already on disk, so setting it to `0` releases an active one rather than only
+affecting the next.
 
 A skipped stitch is not an error. It does not set a non-zero exit code and does
-not count towards `stitchErrors`; the previous registration stands and the next
-admitted map re-registers. `ix map` prints the reason.
+not count towards `stitchErrors`, and the previous registration stands — the
+same position a stitch that *failed* already left the graph in. `ix map` prints
+the reason.
+
+Note that re-registration is not automatic on the next map, and was not before
+this change: the stitch is gated on `filesSkipped === 0`, so an incremental map
+that skips any mtime-unchanged file neither reaches it nor has the registration
+data to send, having only parsed what changed. A run that re-ingests every file
+(`ix ingest <root> --force`, a post-reset re-map) is what picks it back up.
 
 | Variable | Default | Effect |
 |---|---|---|
