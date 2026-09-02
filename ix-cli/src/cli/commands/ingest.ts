@@ -651,29 +651,38 @@ export async function commitBulkWithPayloadSplit<T, R>(
   handlers: {
     commitBulk: (batch: T[]) => Promise<R>;
     onBulkCommitted: (batch: T[], result: R) => void;
-    commitIndividually: (batch: T[], error: unknown) => Promise<void>;
+    commitIndividually: (batch: T[], error: unknown, opts?: { replay?: boolean }) => Promise<void>;
     onSplit?: (batch: T[], error: unknown) => void;
     /** Patch id of an item, so a partly-committed group can be resumed. */
     patchIdOf?: (item: T) => string | undefined;
     onPartialBulk?: (landed: T[], missing: T[], error: unknown) => void;
     /**
-     * Consulted once, immediately before the per-file fallback (Ix#560).
+     * Has the caller given up on the backend? (Ix#560)
      *
-     * The fallback exists for a bulk that failed for a reason specific to
-     * the GROUP -- too large, partly applied -- where sending the patches
-     * separately is a different request that can succeed. When the backend
-     * itself is refusing writes, none of that holds: the fan-out is one
-     * doomed request per patch, serialized, against the very backend that
-     * is the reason. This lets the caller say so.
+     * Consulted before the first request of every group -- including each half
+     * of a payload split, which recurses through here -- and again before the
+     * per-file fallback. The fallback exists for a bulk that failed for a
+     * reason specific to the GROUP (too large, partly applied), where sending
+     * the patches separately is a different request that can succeed. When the
+     * backend itself is refusing writes, none of that holds: the fan-out is one
+     * doomed request per patch, serialized, against the very backend that is
+     * the reason.
      *
-     * Default when absent is `"fanout"`, i.e. the behaviour that shipped.
+     * Absent, nothing is ever abandoned: the behaviour that shipped.
      */
-    beforeFallback?: (batch: T[], error: unknown) => "fanout" | "abandon";
-    /** The fallback was abandoned; `batch` was never sent. */
-    onAbandoned?: (batch: T[], error: unknown) => void;
+    shouldStop?: () => boolean;
+    /** `batch` was abandoned unsent. `error` is absent when none was seen. */
+    onAbandoned?: (batch: T[], error?: unknown) => void;
   },
 ): Promise<void> {
   if (items.length === 0) return;
+  // Before the first request, so each half of a payload split is checked too:
+  // the recursion re-enters here, and a breaker that tripped while the first
+  // half was in the fallback must stop the second half being sent.
+  if (handlers.shouldStop?.()) {
+    handlers.onAbandoned?.(items);
+    return;
+  }
 
   let result: R;
   try {
@@ -703,13 +712,17 @@ export async function commitBulkWithPayloadSplit<T, R>(
       // claimed as landed, re-bulking `missing` would repeat this exact call.
       if (landed.length > 0 && missing.length > 0) {
         handlers.onPartialBulk?.(landed, missing, err);
-        await handlers.commitIndividually(landed, undefined);
+        // `replay: true` -- the server has confirmed it already holds these.
+        // Re-sending them is bookkeeping, not a write the breaker should
+        // refuse: skipping them would count patches that DID land as commit
+        // errors and drop them from patchesApplied (Ix#495).
+        await handlers.commitIndividually(landed, undefined, { replay: true });
         await commitBulkWithPayloadSplit(missing, handlers);
         return;
       }
     }
 
-    if (handlers.beforeFallback?.(items, err) === "abandon") {
+    if (handlers.shouldStop?.()) {
       handlers.onAbandoned?.(items, err);
       return;
     }
@@ -1533,6 +1546,7 @@ export async function ingestFiles(
         const commitIndividually = async (
           items: PreparedPatch[],
           bulkError?: unknown,
+          fallbackOpts?: { replay?: boolean },
         ): Promise<void> => {
           if (debug && bulkError !== undefined) {
             const first = items[0];
@@ -1552,7 +1566,8 @@ export async function ingestFiles(
             for (const item of items) {
               // The backend has refused every commit in this run; the next
               // request differs from the last N in nothing but its payload.
-              if (commitBreaker.tripped()) {
+              // A replay is exempt -- see the `replay: true` call site.
+              if (commitBreaker.tripped() && fallbackOpts?.replay !== true) {
                 commitErrors++;
                 commitBreaker.recordSkipped();
                 continue;
@@ -1632,15 +1647,7 @@ export async function ingestFiles(
               for (const item of items) opts?.onCommitted?.(item, result.rev);
             },
             commitIndividually,
-            // The bulk that is about to be fanned out failed for the same
-            // reason the per-file attempts would. Count it once, then let
-            // the streak decide whether fanning out is worth anything. A
-            // payload-too-large or partly-committed bulk never reaches here
-            // -- those are recovered by splitting, which is real progress.
-            beforeFallback: (_items, err) => {
-              commitBreaker.recordFailure(err);
-              return commitBreaker.tripped() ? "abandon" : "fanout";
-            },
+            shouldStop: () => commitBreaker.tripped(),
             onAbandoned: items => {
               commitErrors += items.length;
               commitBreaker.recordSkipped(items.length);
@@ -2288,9 +2295,15 @@ export async function ingestFiles(
     commitErrors,
     stitchErrors,
   };
-  if (commitBreaker.tripped()) {
-    // Before the stitch line and before the commit report: this is the
-    // cause, and everything else printed about this run is its consequence.
+  if (commitBreaker.skipped() > 0) {
+    // Gated on what was actually abandoned, not on the flag. A patch that was
+    // never sent produces no `[commit error]` line even under --verbose, so
+    // without this the run reports N commit errors, exits 1, and points the
+    // user at a diagnostic that has nothing to show them -- which is the
+    // unexplained failure this change exists to remove.
+    //
+    // Before the stitch line and before the commit report: this is the cause,
+    // and everything else printed about this run is its consequence.
     process.stderr.write(`${describeCommitCutoff(commitBreaker, client.endpoint)}\n`);
   }
   if (stitchErrors > 0) {

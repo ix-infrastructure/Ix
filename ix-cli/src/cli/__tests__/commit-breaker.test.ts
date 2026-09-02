@@ -63,10 +63,19 @@ describe("createCommitBreaker", () => {
     expect(b.tripped()).toBe(false);
   });
 
-  it("stays tripped once tripped", () => {
-    const b = createCommitBreaker(1);
+  it("stays tripped once tripped, even after a later success", () => {
+    // Latching, not a view of the current streak. Other code has already acted
+    // on the decision: a chunk that split on a 413 can have its first half
+    // abandoned and counted as errors, and then its second half succeed --
+    // leaving a run that abandoned patches but claims it never gave up.
+    const b = createCommitBreaker(2);
     b.recordFailure(new Error("a"));
+    b.recordFailure(new Error("b"));
     expect(b.tripped()).toBe(true);
+
+    b.recordSuccess();
+    expect(b.tripped()).toBe(true);
+    expect(b.consecutiveFailures()).toBe(0);
   });
 
   it("counts the patches abandoned because it was already tripped", () => {
@@ -86,6 +95,11 @@ describe("describeCommitCutoff", () => {
     b.recordSkipped(17);
 
     const msg = describeCommitCutoff(b, "http://localhost:8090");
+    // The configured limit, not the live streak: requests already in flight when
+    // the breaker tripped keep landing and keep incrementing it, so the streak
+    // is whatever the race produced and does not match IX_COMMIT_FAILURE_LIMIT.
+    b.recordFailure(new Error("a straggler that landed after the decision"));
+    expect(describeCommitCutoff(b, "e")).toContain("2 consecutive failures");
     expect(msg).toContain("2 consecutive failures");
     expect(msg).toContain("http://localhost:8090");
     expect(msg).toContain("17 further patches were not sent");

@@ -48,7 +48,17 @@ export function commitFailureLimit(raw = process.env.IX_COMMIT_FAILURE_LIMIT): n
 export interface CommitBreaker {
   /** Consecutive failures required to trip. 0 means this breaker never trips. */
   readonly limit: number;
-  /** True once the run has given up on the backend. */
+  /**
+   * True once the run has given up on the backend. Latching: a later success
+   * does NOT un-trip it.
+   *
+   * Without the latch the flag tracks the current streak instead of the
+   * decision, and the decision is what other code has already acted on. A
+   * chunk that split on a 413 can have its first half abandoned and counted
+   * as errors, then its second half succeed and clear the streak -- leaving a
+   * run that abandoned patches, reported them as commit errors, and finishes
+   * claiming it never gave up.
+   */
   tripped(): boolean;
   /** A commit landed. The backend is accepting writes, so the streak is over. */
   recordSuccess(): void;
@@ -66,14 +76,19 @@ export interface CommitBreaker {
 
 export function createCommitBreaker(limit = commitFailureLimit()): CommitBreaker {
   let consecutive = 0;
+  let latched = false;
   let skippedCount = 0;
   let last: unknown;
 
   return {
     limit,
-    tripped: () => limit > 0 && consecutive >= limit,
+    tripped: () => latched,
     recordSuccess: () => { consecutive = 0; },
-    recordFailure: (error) => { consecutive++; last = error; },
+    recordFailure: (error) => {
+      consecutive++;
+      last = error;
+      if (limit > 0 && consecutive >= limit) latched = true;
+    },
     skipped: () => skippedCount,
     recordSkipped: (n = 1) => { skippedCount += n; },
     lastError: () => last,
@@ -95,8 +110,12 @@ export function createCommitBreaker(limit = commitFailureLimit()): CommitBreaker
 export function describeCommitCutoff(breaker: CommitBreaker, endpoint: string): string {
   const detail = String(breaker.lastError() ?? "unknown error");
   const trimmed = detail.length > 300 ? `${detail.slice(0, 300)}…` : detail;
+  // The configured limit, not the live streak. Requests already in flight when
+  // the breaker tripped keep landing and keep incrementing, so the streak is
+  // whatever the race happened to produce -- a number that is not the rule and
+  // does not match IX_COMMIT_FAILURE_LIMIT.
   return [
-    `Error: Stopped committing after ${breaker.consecutiveFailures()} consecutive failures against ${endpoint}.`,
+    `Error: Stopped committing after ${breaker.limit} consecutive failures against ${endpoint}.`,
     `  The backend accepted none of them, so ${breaker.skipped()} further ${breaker.skipped() === 1 ? "patch was" : "patches were"} not sent —`,
     `  they would have failed the same way and added load to a backend that is already the reason.`,
     `  Last error: ${trimmed}`,

@@ -166,16 +166,17 @@ describe('commitBulkWithPayloadSplit', () => {
   // every write, because it becomes one doomed request per patch, serialized,
   // against the backend that is the reason. `beforeFallback` lets the caller
   // say which case this is.
-  it('abandons the per-file fallback when the caller says the backend is refusing everything', async () => {
+  it('abandons the per-file fallback when the caller has given up on the backend', async () => {
     const error = new Error('500: transaction begin timeout');
     const commitIndividually = vi.fn(async () => {});
     const onAbandoned = vi.fn();
+    let stop = false;
 
     await commitBulkWithPayloadSplit([1, 2, 3], {
-      commitBulk: async () => { throw error; },
+      commitBulk: async () => { stop = true; throw error; },
       onBulkCommitted: vi.fn(),
       commitIndividually,
-      beforeFallback: () => 'abandon',
+      shouldStop: () => stop,
       onAbandoned,
     });
 
@@ -183,27 +184,65 @@ describe('commitBulkWithPayloadSplit', () => {
     expect(onAbandoned).toHaveBeenCalledWith([1, 2, 3], error);
   });
 
-  it('still fans out when the caller says to', async () => {
+  it('still fans out while the caller has not given up', async () => {
     const error = new Error('500: internal server error');
     const commitIndividually = vi.fn(async () => {});
-    const beforeFallback = vi.fn(() => 'fanout' as const);
 
     await commitBulkWithPayloadSplit([1, 2, 3], {
       commitBulk: async () => { throw error; },
       onBulkCommitted: vi.fn(),
       commitIndividually,
-      beforeFallback,
+      shouldStop: () => false,
     });
 
-    expect(beforeFallback).toHaveBeenCalledWith([1, 2, 3], error);
     expect(commitIndividually).toHaveBeenCalledWith([1, 2, 3], error);
   });
 
-  it('does not consult beforeFallback for a payload split, which is real progress', async () => {
-    // A bisect is a DIFFERENT, smaller request that can succeed. Counting it as
-    // a backend failure would trip the cutoff on the one recovery path that
-    // works, and a >1,000-file repo would stop mid-save (Ix#516).
-    const beforeFallback = vi.fn(() => 'abandon' as const);
+  it('sends nothing at all once the caller has given up', async () => {
+    const commitBulk = vi.fn(async () => 'ok');
+    const onAbandoned = vi.fn();
+
+    await commitBulkWithPayloadSplit([1, 2, 3], {
+      commitBulk,
+      onBulkCommitted: vi.fn(),
+      commitIndividually: vi.fn(async () => {}),
+      shouldStop: () => true,
+      onAbandoned,
+    });
+
+    expect(commitBulk).not.toHaveBeenCalled();
+    expect(onAbandoned).toHaveBeenCalledWith([1, 2, 3]);
+  });
+
+  it('checks again between the halves of a payload split', async () => {
+    // The split recurses through this function, so the entry check covers it.
+    // Without that, a breaker that tripped while the first half was in its
+    // fallback would still let the second half issue a real bulk commit.
+    let stop = false;
+    const sent: number[][] = [];
+    const onAbandoned = vi.fn();
+
+    await commitBulkWithPayloadSplit([1, 2, 3, 4], {
+      commitBulk: async (batch) => {
+        if (batch.length > 2) throw new Error('413: payload too large');
+        sent.push(batch);
+        stop = true;               // the first half is what gives up
+        throw new Error('500: transaction begin timeout');
+      },
+      onBulkCommitted: vi.fn(),
+      commitIndividually: vi.fn(async () => {}),
+      shouldStop: () => stop,
+      onAbandoned,
+    });
+
+    expect(sent).toEqual([[1, 2]]);              // the second half never sent
+    expect(onAbandoned).toHaveBeenCalledWith([3, 4]);
+  });
+
+  it('bisects a payload-too-large group without consulting shouldStop again mid-split', async () => {
+    // A bisect is a DIFFERENT, smaller request that can succeed. It is not a
+    // backend failure, and nothing about it should stop the run: a >1,000-file
+    // repo relies on it (Ix#516).
     const committed: number[][] = [];
 
     await commitBulkWithPayloadSplit([1, 2, 3, 4], {
@@ -214,10 +253,9 @@ describe('commitBulkWithPayloadSplit', () => {
       },
       onBulkCommitted: vi.fn(),
       commitIndividually: vi.fn(async () => {}),
-      beforeFallback,
+      shouldStop: () => false,
     });
 
-    expect(beforeFallback).not.toHaveBeenCalled();
     expect(committed).toEqual([[1, 2], [3, 4]]);
   });
 });
@@ -260,6 +298,26 @@ describe('partly-committed bulk groups', () => {
     expect(parseBulkCommittedPatchIds(new Error('409: not json at all'))).toBeUndefined();
     expect(parseBulkCommittedPatchIds(new Error('409: {"committed_patch_ids":"p1"}'))).toBeUndefined();
     expect(parseBulkCommittedPatchIds(new Error('409: {"committed_patch_ids":["p1",7]}'))).toBeUndefined();
+  });
+
+  it('marks the landed replay as a replay, so a caller that has given up still sends it', async () => {
+    // Those patches are CONFIRMED landed. Skipping them would count writes the
+    // server already has as commit errors and drop them from patchesApplied.
+    const commitIndividually = vi.fn(async () => {});
+    const items = [item('a'), item('b')];
+
+    await commitBulkWithPayloadSplit(items, {
+      commitBulk: async (batch) => {
+        if (batch.length === 2) throw partialBody(['a'], 2);
+        return 'ok';
+      },
+      onBulkCommitted: vi.fn(),
+      commitIndividually,
+      patchIdOf: (i) => i.patch.patchId,
+      shouldStop: () => false,
+    });
+
+    expect(commitIndividually).toHaveBeenCalledWith([items[0]], undefined, { replay: true });
   });
 
   it('replays what landed and re-bulks only what is missing', async () => {
