@@ -14,9 +14,13 @@ target/
 *.jar
 .DS_Store
 .worktrees/
-node_modules/
-ix-cli/node_modules/*
-core-ingestion/node_modules/*
+# No trailing slash, deliberately: `node_modules/` matches directories only, so
+# it did not cover a *symlink* named node_modules -- which is how an absolute
+# symlink into a contributor's home directory came to be committed at
+# ix-cli/node_modules in #545 and stayed tracked until #567. Without the slash
+# the rule matches the entry whatever its type, at any depth, which also makes
+# the two package-specific lines that used to sit here redundant.
+node_modules
 core-ingestion/dist/
 ix-cli/dist/
 ix-cli/coverage/
