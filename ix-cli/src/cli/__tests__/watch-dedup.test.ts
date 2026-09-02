@@ -63,7 +63,45 @@ describe("WatchRefreshScheduler", () => {
   });
 });
 
+/**
+ * Where the child-CLI test builds its throwaway `dist`.
+ *
+ * Two constraints pull in opposite directions and only this location satisfies
+ * both -- see the long note at the call site.
+ *   1. It must have the package's dependencies on its ESM resolution path, so
+ *      it has to sit under `packageRoot`.
+ *   2. Git must not be able to see it, because cleanup is a `finally` that a
+ *      killed runner never reaches (Ix#567).
+ */
+function childBuildCacheRoot(packageRoot: string): string {
+  return path.join(packageRoot, "node_modules", ".cache");
+}
+
 describe("canonical watch refresh", () => {
+  it("builds the child CLI somewhere git cannot see, so an interrupted run leaves nothing behind", () => {
+    const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+    const cacheRoot = childBuildCacheRoot(packageRoot);
+
+    // Assert the property that matters -- "git ignores it" -- by asking git,
+    // not by matching .gitignore text. Outside a work tree (an installed
+    // tarball, a downloaded source archive) there is no git answer to get, so
+    // fall back to the structural half of the same claim: the build lives
+    // inside node_modules, which every checkout of this repo ignores.
+    const inWorkTree = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], {
+      cwd: packageRoot,
+      encoding: "utf8",
+    });
+    if (inWorkTree.status === 0 && inWorkTree.stdout.trim() === "true") {
+      const ignored = spawnSync("git", ["check-ignore", "--quiet", "--no-index", cacheRoot], {
+        cwd: packageRoot,
+        encoding: "utf8",
+      });
+      expect(ignored.status, `git does not ignore ${cacheRoot}`).toBe(0);
+    } else {
+      expect(path.relative(packageRoot, cacheRoot).split(path.sep)[0]).toBe("node_modules");
+    }
+  });
+
   it("keeps TypeScript runtime loaders without copying debugger flags", () => {
     expect(
       childCliArgs(
@@ -106,7 +144,29 @@ describe("canonical watch refresh", () => {
     const version = JSON.parse(
       fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"),
     ).version as string;
-    const tempRoot = fs.mkdtempSync(path.join(packageRoot, ".watch-child-runtime-"));
+    // Build into node_modules/.cache, not the package root and not os.tmpdir().
+    //
+    // Cleanup is the `finally` below, which does not run when the runner is
+    // killed (Ctrl-C, CI timeout). Directly under packageRoot that left a
+    // complete `dist` build as an *untracked directory in the working tree*,
+    // which `git status` showed and an unlucky `git add -A` would have
+    // committed (Ix#567).
+    //
+    // os.tmpdir() is not the answer, even though packageRoot is passed as `cwd`
+    // to every spawnSync: `cwd` has no bearing on ESM bare-specifier
+    // resolution, which walks up from the *module's own* path. A build under
+    // the OS tmpdir dies with
+    //   ERR_MODULE_NOT_FOUND: Cannot find package 'commander'
+    // because no node_modules exists above it. The built child has to sit
+    // somewhere with the package's dependencies on its resolution path.
+    //
+    // node_modules/.cache is both: node walks ..../.cache/<tmp>/dist/cli up to
+    // packageRoot and finds packageRoot/node_modules, and git never sees it --
+    // node_modules is ignored, so an interrupted run leaves nothing in
+    // `git status` and nothing that can be committed by accident.
+    const cacheRoot = childBuildCacheRoot(packageRoot);
+    fs.mkdirSync(cacheRoot, { recursive: true });
+    const tempRoot = fs.mkdtempSync(path.join(cacheRoot, "ix-watch-child-runtime-"));
     const ixHome = path.join(tempRoot, "ix-home");
     fs.mkdirSync(ixHome);
     fs.writeFileSync(

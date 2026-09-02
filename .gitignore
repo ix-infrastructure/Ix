@@ -24,6 +24,12 @@ node_modules
 core-ingestion/dist/
 ix-cli/dist/
 ix-cli/coverage/
+
+# watch-dedup.test.ts used to build a throwaway CLI into
+# ix-cli/.watch-child-runtime-*; it now builds inside node_modules/.cache,
+# which the rule above already covers. Kept so a directory left behind by an
+# interrupted run on a pre-#567 checkout does not surface as untracked work.
+ix-cli/.watch-child-runtime-*
 .vscode/
 .mcp.json
 
