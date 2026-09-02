@@ -223,6 +223,34 @@ cross-repo `IMPORTS` edges.
 
 **Response** — `{ stitched: number, systemId: string | null, edges: [{ src, dst, name }] }`.
 
+**Client-side admission control (Ix#568).** The join behind this endpoint runs
+server-side for as long as it needs to, and outlives the HTTP call that started
+it — a proxy answering 500 at ~60s does not stop the query. The CLI therefore
+does not issue this call unconditionally:
+
+| Rule | Behaviour |
+|---|---|
+| One at a time **per backend endpoint** | A second `ix map` — including one for a *different* workspace — skips its stitch while another is in flight. `ix map`'s own lock is per workspace and does not bound a cross-workspace join. |
+| Cooldown after a cut-off stitch | If a stitch fails after `IX_STITCH_SLOW_FAILURE_MS` (default 20s), or is aborted by the client's own timeout, no further stitch is sent to that endpoint for `IX_STITCH_COOLDOWN_MS` (default 15 min). |
+
+A failure *faster* than the slow threshold sets no cooldown: nothing can still
+be running, so a backend that answers 404 (no `/v1/stitch`) or 400 keeps being
+retried exactly as before.
+
+A skipped stitch is not an error. It does not set a non-zero exit code and does
+not count towards `stitchErrors`; the previous registration stands and the next
+admitted map re-registers. `ix map` prints the reason.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `IX_STITCH_COOLDOWN_MS` | `900000` | How long to hold off after a cut-off stitch. `0` disables the cooldown. |
+| `IX_STITCH_SLOW_FAILURE_MS` | `20000` | Failures at or past this wall-clock are treated as "the backend may still be working". |
+| `IX_LOCK_DIR` | `~/.ix/locks` | Where the stitch lock and cooldown record live (shared with the map lock). |
+
+This bounds the client. Cancelling the server-side query when the client hangs
+up, and making the join indexed rather than a full scan, are backend concerns
+and are not addressed here.
+
 #### GET `/v1/stitch/system/{workspaceId}`
 
 Return the `system_id` a workspace currently belongs to (null for a singleton).
