@@ -77,8 +77,35 @@ function childBuildCacheRoot(packageRoot: string): string {
   return path.join(packageRoot, "node_modules", ".cache");
 }
 
-/** mkdtemp prefix for the throwaway child build, and the sweep's match. */
+/**
+ * mkdtemp prefix for the throwaway child build.
+ *
+ * The pid is in the name so the sweep below can tell a directory abandoned by
+ * a dead run from one a LIVE run is building into right now. Two runners in
+ * one checkout is ordinary -- vitest in watch mode in one terminal, `npm test`
+ * in another -- and a sweep that deleted the other's tree between its emit and
+ * its child spawn would manufacture exactly the intermittent single-test
+ * failure this file exists to stop producing.
+ */
 const CHILD_BUILD_PREFIX = "ix-watch-child-runtime-";
+
+/** Owner pid encoded in a sweep candidate, or null if it is not one of ours. */
+function childBuildOwnerPid(entry: string): number | null {
+  if (!entry.startsWith(CHILD_BUILD_PREFIX)) return null;
+  const pid = Number.parseInt(entry.slice(CHILD_BUILD_PREFIX.length), 10);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+/** Is a process still running? signal 0 is an existence check, not a signal. */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM means it exists but belongs to another user -- alive.
+    return (err as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
 
 describe("canonical watch refresh", () => {
   it("builds the child CLI somewhere git cannot see, so an interrupted run leaves nothing behind", () => {
@@ -95,11 +122,26 @@ describe("canonical watch refresh", () => {
       encoding: "utf8",
     });
     if (inWorkTree.status === 0 && inWorkTree.stdout.trim() === "true") {
-      const ignored = spawnSync("git", ["check-ignore", "--quiet", "--no-index", cacheRoot], {
-        cwd: packageRoot,
-        encoding: "utf8",
-      });
-      expect(ignored.status, `git does not ignore ${cacheRoot}`).toBe(0);
+      const checkIgnore = (target: string): number | null =>
+        spawnSync("git", ["check-ignore", "--quiet", "--no-index", target], {
+          cwd: packageRoot,
+          encoding: "utf8",
+        }).status;
+
+      expect(checkIgnore(cacheRoot), `git does not ignore ${cacheRoot}`).toBe(0);
+
+      // And pin the rule that ignores it, not just today's outcome. `cacheRoot`
+      // is a real directory, so the old `node_modules/` rule matched it too and
+      // this test would stay green if that rule came back -- taking the
+      // committable `ix-cli/node_modules` symlink of #545 with it. A path that
+      // does not exist is not a directory as far as git is concerned, so only a
+      // rule without the trailing slash matches it.
+      const nonDirectory = path.join(packageRoot, "__ix_ignore_probe__", "node_modules");
+      expect(fs.existsSync(nonDirectory), "probe path must not exist").toBe(false);
+      expect(
+        checkIgnore(nonDirectory),
+        "the node_modules ignore rule is directory-only again; a symlink or file named node_modules is committable (Ix#545)",
+      ).toBe(0);
     } else {
       expect(path.relative(packageRoot, cacheRoot).split(path.sep)[0]).toBe("node_modules");
     }
@@ -174,12 +216,22 @@ describe("canonical watch refresh", () => {
     // nothing under node_modules is pruned until the next `npm ci`. Worth
     // bounding: release.yml copies ix-cli/node_modules wholesale into the
     // release tarball, so anything sitting here at packaging time would ship.
+    //
+    // Only directories whose owning process is gone. `force` swallows ENOENT
+    // but not the EPERM Windows raises on a tree another process has open, and
+    // a live run robbed of its build mid-test is the failure mode this whole
+    // file is about -- so a concurrent runner's tree is left strictly alone.
     for (const stale of fs.readdirSync(cacheRoot)) {
-      if (stale.startsWith(CHILD_BUILD_PREFIX)) {
+      const owner = childBuildOwnerPid(stale);
+      if (owner === null || owner === process.pid || pidAlive(owner)) continue;
+      try {
         fs.rmSync(path.join(cacheRoot, stale), { recursive: true, force: true });
+      } catch {
+        // Someone else got there first, or the OS still has it open. Leaving
+        // one stale build behind is not worth failing a passing test over.
       }
     }
-    const tempRoot = fs.mkdtempSync(path.join(cacheRoot, CHILD_BUILD_PREFIX));
+    const tempRoot = fs.mkdtempSync(path.join(cacheRoot, `${CHILD_BUILD_PREFIX}${process.pid}-`));
     const ixHome = path.join(tempRoot, "ix-home");
     fs.mkdirSync(ixHome);
     fs.writeFileSync(
