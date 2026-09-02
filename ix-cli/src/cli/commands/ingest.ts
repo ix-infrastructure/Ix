@@ -905,10 +905,24 @@ export function describeCommitOutcome(
    */
   debugFlag: string = "--debug",
   /** True when the run was cut short by the map deadline rather than rejected. */
-  deadlineHit: boolean = false
+  deadlineHit: boolean = false,
+  /** Patches abandoned unsent by the commit cutoff (Ix#560). */
+  cutoffSkipped: number = 0
 ): CommitOutcome {
   if (commitErrors <= 0) return { kind: "ok" };
   const attempted = commitErrors + patchesApplied;
+
+  if (cutoffSkipped > 0) {
+    // The cutoff has already printed the endpoint, the streak and the error.
+    // Repeating the standard advice here would send the reader to a flag that
+    // shows nothing: a patch that was never sent produces no per-file line.
+    return {
+      kind: patchesApplied === 0 ? "fatal" : "warn",
+      message:
+        `Ingest stopped early: ${commitErrors} of ${attempted} file patches are missing from the graph, ` +
+        `${cutoffSkipped} of them never sent. See the cutoff above for why; ${debugFlag} will not add to it.`,
+    };
+  }
 
   if (deadlineHit) {
     // Distinguishable because the two need opposite responses: a rejected
@@ -1566,8 +1580,17 @@ export async function ingestFiles(
             for (const item of items) {
               // The backend has refused every commit in this run; the next
               // request differs from the last N in nothing but its payload.
-              // A replay is exempt -- see the `replay: true` call site.
-              if (commitBreaker.tripped() && fallbackOpts?.replay !== true) {
+              if (commitBreaker.tripped()) {
+                if (fallbackOpts?.replay === true) {
+                  // A replay re-sends patches the server has CONFIRMED it
+                  // holds. Counting them as errors would over-report failure
+                  // for writes that landed -- but sending up to 1,000 of them
+                  // one at a time to a backend we have given up on is the very
+                  // fan-out this cutoff exists to stop. Do neither: leave them
+                  // out of both counters. They really are in the graph, and the
+                  // next run re-sends them as the idempotent no-ops they are.
+                  break;
+                }
                 commitErrors++;
                 commitBreaker.recordSkipped();
                 continue;
@@ -1596,7 +1619,12 @@ export async function ingestFiles(
                 // read. Reporting it as a parse error hid that distinction in
                 // both the summary and the JSON contract.
                 commitErrors++;
-                commitBreaker.recordFailure(commitErr);
+                // An abort is the run's own wall clock, not the backend's
+                // answer -- `describeCommitOutcome` has a whole branch to keep
+                // those apart. Counting it here would latch the breaker on a
+                // run that merely exhausted IX_MAP_DEADLINE_MS and then tell
+                // the user to go and investigate ArangoDB.
+                if (!isAbortError(commitErr)) commitBreaker.recordFailure(commitErr);
                 if (debug) {
                   const errMsg = String(commitErr);
                   const truncated = errMsg.length > 200 ? errMsg.slice(0, 200) + '…' : errMsg;
@@ -2286,7 +2314,8 @@ export async function ingestFiles(
     patchesApplied,
     // ix map has no --debug and never passes one; --verbose is its equivalent.
     opts.mapMode === true ? "--verbose" : "--debug",
-    opts.deadlineSignal?.aborted === true
+    opts.deadlineSignal?.aborted === true,
+    commitBreaker.skipped()
   );
   const summary: IngestFilesSummary = {
     filesDiscovered,
@@ -2304,7 +2333,7 @@ export async function ingestFiles(
     //
     // Before the stitch line and before the commit report: this is the cause,
     // and everything else printed about this run is its consequence.
-    process.stderr.write(`${describeCommitCutoff(commitBreaker, client.endpoint)}\n`);
+    process.stderr.write(`${describeCommitCutoff(commitBreaker, client.endpoint, patchesApplied)}\n`);
   }
   if (stitchErrors > 0) {
     process.stderr.write(`  ${describeStitchFailure(stitchError)}\n`);

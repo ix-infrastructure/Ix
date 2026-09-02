@@ -107,6 +107,20 @@ describe("describeCommitCutoff", () => {
     expect(msg).toContain("IX_COMMIT_FAILURE_LIMIT=0");
   });
 
+  it("does not claim the graph is unchanged when patches landed before it stopped", () => {
+    // A backend can start refusing part-way through a large ingest. Saying "the
+    // graph is unchanged" then contradicts the summary printed right beneath.
+    const b = createCommitBreaker(1);
+    b.recordFailure(new Error("x"));
+    b.recordSkipped(3);
+
+    expect(describeCommitCutoff(b, "e", 0)).toContain("The graph is unchanged.");
+
+    const partial = describeCommitCutoff(b, "e", 40);
+    expect(partial).not.toContain("The graph is unchanged");
+    expect(partial).toContain("40 patches landed before it stopped");
+  });
+
   it("says 'patch was' for one and 'patches were' for many", () => {
     const one = createCommitBreaker(1);
     one.recordFailure(new Error("x"));

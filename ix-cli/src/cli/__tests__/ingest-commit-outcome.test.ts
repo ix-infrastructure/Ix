@@ -107,6 +107,34 @@ describe("ingestCompletedCleanly", () => {
   });
 });
 
+describe("describeCommitOutcome with a commit cutoff", () => {
+  it("points at the cutoff instead of a flag that would show nothing", () => {
+    // The cutoff has already printed the endpoint, the streak and the error. A
+    // patch that was never sent produces no per-file line, so the usual advice
+    // sends the reader to --verbose for output that does not exist.
+    const out = describeCommitOutcome(20, 0, "--verbose", false, 15);
+    expect(out.kind).toBe("fatal");
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("15 of them never sent");
+    expect(out.message).toContain("See the cutoff above");
+    expect(out.message).not.toContain("to see why");
+  });
+
+  it("warns rather than fails when some patches landed first", () => {
+    const out = describeCommitOutcome(15, 40, "--verbose", false, 15);
+    expect(out.kind).toBe("warn");
+  });
+
+  it("leaves the ordinary messages alone when nothing was cut off", () => {
+    const none = describeCommitOutcome(3, 0, "--verbose", false, 0);
+    const some = describeCommitOutcome(3, 10, "--verbose", false, 0);
+    expect(none.kind).toBe("fatal");
+    expect(some.kind).toBe("warn");
+    if (none.kind !== "ok") expect(none.message).toContain("Ingest committed nothing");
+    if (some.kind !== "ok") expect(some.message).toContain("Re-run 'ix map' to retry");
+  });
+});
+
 describe("describeStitchFailure", () => {
   it("reports incomplete cross-repository relationships without dumping an HTML response", () => {
     const message = describeStitchFailure(new Error("504: <html>\nlarge proxy response"));

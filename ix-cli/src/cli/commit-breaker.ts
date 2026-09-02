@@ -107,9 +107,21 @@ export function createCommitBreaker(limit = commitFailureLimit()): CommitBreaker
  * per file behind --debug, is the difference between "Ix is broken" and "the
  * database is saturated".
  */
-export function describeCommitCutoff(breaker: CommitBreaker, endpoint: string): string {
+export function describeCommitCutoff(
+  breaker: CommitBreaker,
+  endpoint: string,
+  /** Patches that DID land before the run gave up. */
+  patchesApplied = 0,
+): string {
   const detail = String(breaker.lastError() ?? "unknown error");
   const trimmed = detail.length > 300 ? `${detail.slice(0, 300)}…` : detail;
+  // A backend can start refusing part-way through a large ingest, so "the
+  // graph is unchanged" is only true when nothing landed. Saying it anyway
+  // contradicts the summary printed directly beneath this.
+  const state =
+    patchesApplied === 0
+      ? "The graph is unchanged."
+      : `${patchesApplied} ${patchesApplied === 1 ? "patch" : "patches"} landed before it stopped; the rest are missing from the graph.`;
   // The configured limit, not the live streak. Requests already in flight when
   // the breaker tripped keep landing and keep incrementing, so the streak is
   // whatever the race happened to produce -- a number that is not the rule and
@@ -119,7 +131,7 @@ export function describeCommitCutoff(breaker: CommitBreaker, endpoint: string): 
     `  The backend accepted none of them, so ${breaker.skipped()} further ${breaker.skipped() === 1 ? "patch was" : "patches were"} not sent —`,
     `  they would have failed the same way and added load to a backend that is already the reason.`,
     `  Last error: ${trimmed}`,
-    `  The graph is unchanged. Re-run \`ix map\` once the backend is healthy; if \`ix doctor\` passes,`,
+    `  ${state} Re-run \`ix map\` once the backend is healthy; if \`ix doctor\` passes,`,
     `  check the database itself (an ArangoDB that cannot begin a transaction is reachable and consistent).`,
     `  Set IX_COMMIT_FAILURE_LIMIT=0 to send every patch regardless.`,
   ].join("\n");
