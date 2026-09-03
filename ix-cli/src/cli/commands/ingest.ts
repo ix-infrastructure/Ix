@@ -1412,6 +1412,16 @@ export async function ingestFiles(
    */
   let backendIndictingFailures = 0;
   /**
+   * Commit errors raised by the COMMIT loop, as opposed to `commitErrors` --
+   * which also counts a deleted file whose patch could not be BUILT.
+   *
+   * The banner is gated on this. A run whose only failure is a patch-build
+   * error, on which the breaker had separately tripped and recovered, otherwise
+   * printed "Commits against <endpoint> kept failing" and pointed at a cutoff
+   * that had nothing to do with the one thing that actually went wrong.
+   */
+  let commitLoopErrors = 0;
+  /**
    * The RUN deadline, captured here because `commitPreparedPatches` shadows
    * `opts` with its own. Not `isAbortError`: a per-request AbortSignal.timeout
    * raises TimeoutError too, and that is a saturation signal, not our clock.
@@ -1877,6 +1887,7 @@ export async function ingestFiles(
                   if (indicts) commitBreaker.recordFailure(commitErr);
                 } else {
                   commitErrors++;
+                  commitLoopErrors++;
                   if (indicts) commitBreaker.recordFailure(commitErr);
                 }
                 if (debug) {
@@ -1951,12 +1962,14 @@ export async function ingestFiles(
         // `onCommitted` would persist `durableDeletedFiles` and save the
         // baseline, recording stale nodes as reconciled and never retrying.
         //
-        // And the size cap, because this probe does no payload splitting: the
-        // held set is normally one chunk, but `flushAll` hands
-        // `commitPreparedPatches` the whole repo, and one bulk that size is the
-        // Ix#516 shape -- over the proxy's body limit or Arango's transaction
-        // cap -- which would fail and drop everything to the serialized
-        // per-file path the probe exists to avoid.
+        // And the size cap, because this probe does no payload splitting. Every
+        // live call path bounds the held set at `PARSE_STREAM_CHUNK` (500), so
+        // the cap does not bind today -- `flushAll`, which would have handed
+        // `commitPreparedPatches` the whole repo, is defined and never called,
+        // here or on main. It stays because it is one comparison and the
+        // failure it prevents is the Ix#516 shape: one bulk past the proxy's
+        // body limit or Arango's transaction cap, failing and dropping
+        // everything to the serialized path this probe exists to avoid.
         // PARTITIONED, not skipped wholesale. `reconcileRemovedEntities`
         // prepends a delete op to any re-mapped file that lost an entity, so an
         // ordinary incremental map's held set almost always contains one --
@@ -1992,6 +2005,14 @@ export async function ingestFiles(
             const ms = Math.round(performance.now() - bulkStart);
             recordDrainMs(ms);
             timings.bulkCommitMs += ms;
+            // Keep the quoted error current, for the same reason `onAbandoned`
+            // does: this is a request the backend answered, and the passes
+            // below may be stopped by the run deadline without recording
+            // anything, leaving the banner quoting a failure from an earlier
+            // batch. Not `recordFailure` -- one bulk is one request, not N.
+            if (commitFailureIndictsBackend(bulkErr, runDeadlineExpired())) {
+              commitBreaker.noteError(bulkErr);
+            }
             if (debug) process.stderr.write(`  [cutoff] bulk probe failed, falling back to passes: ${bulkErr}
 `);
           }
@@ -2026,11 +2047,12 @@ export async function ingestFiles(
             unreached: deferredByCutoff.splice(0, deferredByCutoff.length),
           };
         }, !backendIsKnownAlive);
-        // A loop, not a spread. `flushAll` hands `commitPreparedPatches` every
-        // parsed file in the repo, so `leftover` is bounded only by the repo
-        // size, and spreading an array past V8's argument limit throws a
-        // RangeError from inside the commit phase -- an uncaught throw that
-        // loses the whole batch's error accounting.
+        // A loop, not a spread. Every live call path bounds this at
+        // `PARSE_STREAM_CHUNK` (500) -- `flushAll` is defined and never called
+        // -- so the argument limit is not reachable today; the loop costs
+        // nothing and removes the question, because spreading an array past
+        // V8's limit throws RangeError from inside the commit phase, an
+        // uncaught throw that loses the whole batch's error accounting.
         for (const item of leftover) deferredByCutoff.push(item);
       };
 
@@ -2170,15 +2192,19 @@ export async function ingestFiles(
         // Held back again, or held back after the retry was already spent.
         if (deferredByCutoff.length > 0) {
           commitErrors += deferredByCutoff.length;
-          // Only when the CUTOFF is what stopped them. Past the deadline the
-          // drain above never ran -- it is gated on the same clock -- so these
-          // are the deadline's, and attributing them to the backend puts "N
-          // were not sent, sending them would have added load to a backend that
-          // is already the reason they fail" directly above "Ingest ran out of
-          // time: raise IX_MAP_DEADLINE_MS". That is the contradiction the
-          // `deferredByDeadline` split removed on the other path; this one
-          // reached the same place by a different route.
-          if (!runDeadlineExpired()) commitBreaker.recordSkipped(deferredByCutoff.length);
+          commitLoopErrors += deferredByCutoff.length;
+          // Counted as the cutoff's even when the deadline has since fired.
+          // Everything on this list was held by `perFileAction` BEFORE the
+          // clock ran out -- the deadline check sits above the hold branch and
+          // diverts to `deferredByDeadline` once it has -- so they are the
+          // cutoff's patches, and suppressing the count reported "0 of them
+          // were withheld by this cutoff" while the deadline message claimed
+          // all of them. That is the same misattribution the
+          // `deferredByDeadline` split exists to prevent, pointing the other
+          // way. The contradiction it was guarding against is handled where it
+          // belongs: `describeCommitCutoff` drops the "would have added load"
+          // framing when `deadlineHit`, and names the split instead.
+          commitBreaker.recordSkipped(deferredByCutoff.length);
           deferredByCutoff.length = 0;
         }
       }
@@ -2187,6 +2213,7 @@ export async function ingestFiles(
       // deadline branch of `describeCommitOutcome` is what reports these.
       if (deferredByDeadline.length > 0) {
         commitErrors += deferredByDeadline.length;
+        commitLoopErrors += deferredByDeadline.length;
         deferredByDeadline.length = 0;
       }
 
@@ -2807,7 +2834,7 @@ export async function ingestFiles(
   // classified `{ kind: "ok" }` and exit 0, while this printed
   // `Error: Commits against <endpoint> kept failing` and claimed the graph was
   // only partly updated. Nothing was lost there, so there is nothing to say.
-  if (commitBreaker.everTripped() && commitErrors > 0) {
+  if (commitBreaker.everTripped() && commitLoopErrors > 0) {
     // Gated on the cutoff having FIRED, not on what was left unsent. A patch
     // that was never sent produces no `[commit error]` line even under
     // --verbose, so this has to print for those -- but gating on them alone
