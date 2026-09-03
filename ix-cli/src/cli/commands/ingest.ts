@@ -2159,6 +2159,23 @@ export async function ingestFiles(
 
     const committed = performance.now();
 
+    // Persist mtime cache so next run can skip unchanged files quickly.
+    // Only save when no parse errors (avoid poisoning cache on partial failures).
+    // commitErrors counts here too, and must: it used to be folded into
+    // parseErrors, so splitting the counters without naming it in each of these
+    // three guards would start caching mtimes for files whose patches never
+    // landed. The next run would skip them as unchanged and they would stay
+    // missing from the graph until a --force.
+    persistIngestBaselineIfClean(
+      projectRoot,
+      currentMtimes,
+      latestRev,
+      parseErrors,
+      commitErrors,
+      undefined,
+      nextDeletedFiles,
+    );
+
     // Migration cleanup (Ix#225 gap 2): the re-ingest under the new path-based id has
     // committed, so delete the OLD id's now-orphaned nodes/edges/patches. Best-effort —
     // a failure here is non-fatal (orphans are harmless dead storage, cleanable later).
@@ -2280,38 +2297,6 @@ export async function ingestFiles(
         }
         if (debug) process.stderr.write(`  [stitch skipped] ${err}\n`);
       }
-    }
-
-    // Persist mtime cache so next run can skip unchanged files quickly.
-    // Only save when no parse errors (avoid poisoning cache on partial failures).
-    // commitErrors counts here too, and must: it used to be folded into
-    // parseErrors, so splitting the counters without naming it in each of these
-    // three guards would start caching mtimes for files whose patches never
-    // landed. The next run would skip them as unchanged and they would stay
-    // missing from the graph until a --force.
-    //
-    // Ix#568: and not when the guard REFUSED the stitch. This used to run before
-    // the stitch block, which was harmless while every run attempted one. It is
-    // not harmless now: writing the baseline makes the next map skip unchanged
-    // files, so `filesSkipped > 0`, so it never re-enters the stitch block --
-    // it prints nothing, exits 0, and the workspace's cross-repo edges stay
-    // absent until somebody runs `ix ingest <root> --force`. Holding the
-    // baseline back costs one re-parse and lets the next map register properly
-    // as soon as the cooldown clears.
-    if (stitchSkipped === undefined) {
-      persistIngestBaselineIfClean(
-        projectRoot,
-        currentMtimes,
-        latestRev,
-        parseErrors,
-        commitErrors,
-        undefined,
-        nextDeletedFiles,
-      );
-    } else if (debug) {
-      process.stderr.write(
-        `  [baseline held] the stitch was not sent, so the next map re-ingests and can register\n`,
-      );
     }
   } finally {
     if (pool) {
