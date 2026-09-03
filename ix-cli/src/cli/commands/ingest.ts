@@ -1911,8 +1911,8 @@ export async function ingestFiles(
        * commit errors -- makes the next run repeat the same order, stop at the
        * same point, and drop the same patches forever.
        */
-      /** Re-send the held set; returns how many it could not place. */
-      const commitIndividuallyAfterCutoff = async (items: PreparedPatch[]): Promise<number> => {
+      /** Re-send the held set. What it cannot place is left on `deferredByCutoff`. */
+      const commitIndividuallyAfterCutoff = async (items: PreparedPatch[]): Promise<void> => {
         if (debug) {
           process.stderr.write(
             `\n  [cutoff] re-sending ${items.length} held-back patches with a fresh streak\n`,
@@ -1946,7 +1946,7 @@ export async function ingestFiles(
             commitBreaker.recordSuccess();
             for (const item of items) opts?.onCommitted?.(item, result.rev);
             if (debug) process.stderr.write(`  [cutoff] one bulk placed all ${items.length}\n`);
-            return 0;
+            return;
           } catch (bulkErr) {
             if (debug) process.stderr.write(`  [cutoff] bulk retry failed, falling back to passes: ${bulkErr}\n`);
           }
@@ -1976,7 +1976,6 @@ export async function ingestFiles(
           };
         });
         deferredByCutoff.push(...leftover);
-        return leftover.length;
       };
 
       const runChunk = async (ci: number): Promise<void> => {
@@ -2087,7 +2086,7 @@ export async function ingestFiles(
           const held = deferredByCutoff.splice(0, deferredByCutoff.length);
           const tookBefore = patchesTheBackendTook;
           const indictedBefore = backendIndictingFailures;
-          const stranded = await commitIndividuallyAfterCutoff(held);
+          await commitIndividuallyAfterCutoff(held);
           // A miss means the backend took nothing AND said something that
           // indicts it. Both halves are load-bearing, and each was wrong on its
           // own in an earlier revision:
