@@ -1986,6 +1986,15 @@ function stripProtoNoise(source: string): string {
   return out;
 }
 
+// Statement keywords that can begin a line shaped like a field declaration.
+// `option deprecated = 1;` in particular matches PROTO_FIELD_RE exactly, and
+// without this would emit a REFERENCES edge to a node called "option".
+const PROTO_STATEMENT_KEYWORDS = new Set([
+  'option', 'reserved', 'extensions', 'extend', 'import', 'package', 'syntax',
+  'oneof', 'rpc', 'returns', 'message', 'enum', 'service', 'group', 'public',
+  'weak', 'stream',
+]);
+
 const PROTO_DEF_RE = /^\s*(message|enum|service)\s+([A-Za-z_]\w*)/;
 const PROTO_RPC_RE =
   /^\s*rpc\s+([A-Za-z_]\w*)\s*\(\s*(?:stream\s+)?([\w.]+)\s*\)\s*returns\s*\(\s*(?:stream\s+)?([\w.]+)\s*\)/;
@@ -2084,7 +2093,9 @@ function parseProtoFile(filePath: string, source: string): FileParseResult {
       addReference(rpc[1], rpc[3]);
     } else if (enclosing && enclosing.kind === 'message' && !PROTO_DEF_RE.test(line)) {
       const field = PROTO_FIELD_RE.exec(line);
-      if (field) addReference(enclosing.name, field[2] ?? field[1]);
+      if (field && !PROTO_STATEMENT_KEYWORDS.has(field[1])) {
+        addReference(enclosing.name, field[2] ?? field[1]);
+      }
     }
 
     const def = PROTO_DEF_RE.exec(line);

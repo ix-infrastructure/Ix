@@ -142,4 +142,19 @@ import public "shared/common.proto";
     const result = parse('message Truncated {\n  string a = 1;\n');
     expect(result.entities.map((entity) => entity.name)).toContain('Truncated');
   });
+
+  it('does not mistake a statement keyword for a field type', () => {
+    // `option deprecated = 1;` matches the field shape exactly — type `option`,
+    // name `deprecated`, tag `1` — and emitted a REFERENCES edge to a node
+    // called "option" until statement keywords were excluded.
+    const source = `message M {
+  option deprecated = 1;
+  reserved 2, 15;
+  extensions 100 to 199;
+  Attr attr = 3;
+}
+`;
+    expect(rels(source, 'REFERENCES')).toEqual(['M->Attr']);
+  });
+
 });
