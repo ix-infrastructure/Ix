@@ -289,6 +289,15 @@ apart from a clean run. It is not an error: it does not set a non-zero exit code
 and does not count towards `stitchErrors`, and the previous registration stands —
 the same position a stitch that *failed* already left the graph in.
 
+The wait happens **inside** `ix map`'s per-workspace lock, which the run holds
+until it exits. So while one map is waiting out another repo's stitch — up to
+`IX_STITCH_WAIT_MS`, 30s by default — any further `ix map` fired for that same
+workspace (an auto-map hook, for instance) finds the lock held, coalesces, and
+exits 0. Edits made in that window get no graph refresh and nothing says so.
+That is a new source of staleness, bounded by `IX_STITCH_WAIT_MS`; set it to `0`
+to shed on contention immediately instead, at the cost of losing that map's
+cross-repo registration.
+
 Both the lock and the cooldown are keyed on the **endpoint**, not on the
 workspace, because the join they bound is cross-workspace. That is the point of
 the guard, and it is also its cost: one transient failure while mapping repo A
@@ -321,7 +330,7 @@ count rather than every skip, and `skipReasons.emptyFile`, previously hardcoded 
 |---|---|---|
 | `IX_STITCH_COOLDOWN_MS` | `900000` | How long to hold off after a stitch that did not prove it stopped, measured from when the attempt ended. `0` disables the cooldown; single-flight stays. Values under ~2 min are not honoured after a killed process — see above. |
 | `IX_STITCH_WAIT_MS` | `30000` | How long to wait for an in-flight stitch before skipping. `0` sheds immediately. |
-| `IX_LOCK_DIR` | `~/.ix/locks` | Where the stitch lock and cooldown record live (shared with the map lock). |
+| `IX_LOCK_DIR` | `~/.ix/locks` | Where the stitch lock and cooldown record live (shared with the map lock). `ix reset` clears the cooldown, so the full re-ingest that follows one is not refused by it. |
 | `IX_MAP_LOCK_MAX_MS` | `1200000` | Shared with the map lock: how old a held lock must be before it is presumed abandoned and stolen. Lowering it to a few seconds so a wedged `ix map` self-heals faster also lets a second process steal the stitch lock from an in-flight stitch. The cooldown normally catches that on the next read, so it only matters together with `IX_STITCH_COOLDOWN_MS=0` — which is the one case where "single-flight stays" stops being true. |
 
 This bounds the client. Cancelling the server-side query when the client hangs

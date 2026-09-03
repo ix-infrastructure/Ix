@@ -894,17 +894,24 @@ export function describeStitchSkipped(
   // `filesSkipped > 0` and never enters the stitch block at all -- it prints
   // nothing and exits 0, and the user reads that as fixed while cross-repo edges
   // stay frozen. Only a run that re-ingests every file gets back in.
+  // Every branch names `--force`, because nothing else re-registers this
+  // workspace. A skipped stitch does NOT stop the run persisting its mtime
+  // baseline -- `persistIngestBaselineIfClean` gates on parse and commit errors
+  // only -- so an ordinary re-run is incremental, skips unchanged files, and
+  // never enters the stitch block. "Re-run once that finishes" and "raise
+  // IX_MAP_DEADLINE_MS" were both promises this code cannot keep: the re-run
+  // prints nothing, exits 0, and the cross-repo edges stay exactly as stale.
+  //
+  // The hedge that used to justify withholding `--force` from the in-flight
+  // branch is still right, and now lives in the wording rather than in the
+  // omission: the other run may well be registering this same workspace, in
+  // which case the force is unnecessary -- but it is the only thing that
+  // recovers the case where it was not.
   const recover =
     rule === "deadline"
-      ? " Raise IX_MAP_DEADLINE_MS or map a smaller path."
+      ? " Raise IX_MAP_DEADLINE_MS or map a smaller path, then re-register with `ix ingest <root> --force`."
       : rule === "in-flight"
-        // Deliberately not `--force` here. The verbose form hedges for a
-        // reason: the other run may be registering this same workspace, and
-        // only `ix map` takes the per-workspace lock, so two `ix ingest` runs
-        // on one repo reach this too. Telling almost every user -- --verbose is
-        // off by default -- to force a full monorepo re-ingest for a stitch
-        // another process is finishing a second later is the wrong default.
-        ? " Re-run once that finishes."
+        ? " Re-run once that finishes; if the cross-repo edges still look stale, `ix ingest <root> --force`."
         : " Recover with `ix ingest <root> --force` once it clears.";
   const head = `Note: Cross-workspace stitch not started — ${reason}.${recover}`;
   if (!verbose) return head;
@@ -920,7 +927,9 @@ export function describeStitchSkipped(
         "registered; re-run once it has finished, or force a full re-ingest " +
         "(`ix ingest <root> --force`) if the cross-repo edges still look stale."
       : rule === "deadline"
-        ? "Nothing was sent, so nothing is running: raise IX_MAP_DEADLINE_MS or map a smaller path."
+        ? "Nothing was sent, so nothing is running -- but nothing was registered either, and a longer " +
+          "budget does not fix that on its own: the next map is incremental and never reaches the stitch " +
+          "block. Raise IX_MAP_DEADLINE_MS or map a smaller path, then `ix ingest <root> --force`."
         : "Once the cooldown expires and the backend is healthy, re-register with a run that re-ingests " +
           "every file (`ix ingest <root> --force`) — an incremental map that skips unchanged files does not " +
           "re-attempt the stitch.";
@@ -2086,15 +2095,32 @@ export async function ingestFiles(
             let bytes!: Buffer;
             try {
               const st = await fh.stat();
-              // Counted by the stat loop above, which walks the same `filePaths`
-              // unconditionally -- so incrementing here counted every empty or
-              // oversized file TWICE. Invisible until `skipReasons.emptyFile`
-              // stopped being hardcoded to 0 and reported 2 for a repo with one
-              // empty `__init__.py`. The check itself stays: it is the fstat on
-              // the handle we are about to read, which is what makes the size
-              // cap TOCTOU-free (CodeQL js/file-system-race).
-              if (st.size === 0) return;
-              if (st.size > MAX_FILE_BYTES) return;
+              // The stat loop above walks the same `filePaths` unconditionally,
+              // so a file it already rejected is counted there and must not be
+              // counted again here -- incrementing unconditionally counted every
+              // empty or oversized file TWICE, invisible until
+              // `skipReasons.emptyFile` stopped being hardcoded to 0 and
+              // reported 2 for a repo with one empty `__init__.py`.
+              //
+              // `currentMtimes` is exactly that record: the stat loop `continue`s
+              // before writing it for a file it rejected, so a path still in the
+              // map is one the loop PASSED. Reaching here for such a file means
+              // it changed between the two stats -- truncated, or grown past the
+              // cap -- and it must be counted, or it vanishes from the graph,
+              // from `filesSkipped` and from every `skipReasons` bucket at once.
+              //
+              // The check itself is not optional either way: it is the fstat on
+              // the handle we are about to read, which is what makes the size cap
+              // TOCTOU-free (CodeQL js/file-system-race).
+              const countedByStatLoop = !currentMtimes.has(absFilePath);
+              if (st.size === 0) {
+                if (!countedByStatLoop) { filesSkipped++; filesSkippedAsEmpty++; }
+                return;
+              }
+              if (st.size > MAX_FILE_BYTES) {
+                if (!countedByStatLoop) tooLarge++;
+                return;
+              }
               bytes = await fh.readFile();
             } finally {
               await fh.close();

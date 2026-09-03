@@ -373,8 +373,8 @@ export function admitStitch(endpoint: string, now = Date.now()): StitchAdmission
  * and two `ix map` runs for two workspaces overlapping by that much is
  * ordinary in a multi-repo setup with a per-repo hook. Dropping one there
  * loses that workspace's registration until somebody re-ingests every file,
- * because the stitch block is gated on `filesSkipped === 0` and an
- * incremental map never reaches it.
+ * because the stitch block is gated on nothing having been skipped as
+ * unchanged (nor left unparsed), and an incremental map never reaches it.
  *
  * So wait, briefly. A healthy holder is gone long before the budget; an
  * unhealthy one is still holding when it runs out, which is the case worth
@@ -427,6 +427,25 @@ export async function admitStitchWaiting(
     if (Date.now() >= deadline) return admission;
     await sleep(Math.min(POLL_MS, Math.max(0, deadline - Date.now())));
   }
+}
+
+/**
+ * Drop the cooldown for an endpoint, so the next stitch is admitted.
+ *
+ * For `ix reset`, and only for it. A reset wipes the registration on the
+ * backend, and the full re-ingest that follows is the one run that can put it
+ * back -- so a live cooldown refusing exactly that run leaves the workspace
+ * unregistered with no automatic retry, while this file's own comments promise
+ * that "a post-reset re-map re-registers". The reset also removes whatever
+ * graph the outstanding join was building, so there is nothing left to protect.
+ *
+ * Best-effort: a cooldown that cannot be removed costs one skipped stitch, and
+ * failing `ix reset` over it would be worse.
+ */
+export function clearStitchCooldown(endpoint: string): void {
+  try {
+    rmSync(cooldownPath(endpoint), { force: true });
+  } catch { /* best effort */ }
 }
 
 // ── Test-only surface ──────────────────────────────────────────────────────

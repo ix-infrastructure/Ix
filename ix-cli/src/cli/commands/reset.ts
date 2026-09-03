@@ -5,6 +5,7 @@ import { IxClient } from "../../client/api.js";
 import { getEndpoint, clearIngestMtimeCache, clearStitchScopeCache } from "../config.js";
 import { canRenderProgress } from "../stderr.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
+import { clearStitchCooldown } from "../stitch-guard.js";
 
 /**
  * Drop this workspace's cached "am I stitched into a system?" answer.
@@ -70,6 +71,13 @@ export function registerResetCommand(program: Command): void {
           // Clear the mtime cache so the next ix map re-ingests all files
           clearIngestMtimeCache(process.cwd());
           clearStitchScopeCacheForCwd();
+          // Ix#568: and the stitch cooldown. The re-ingest below is the one
+          // run that can re-register this workspace, and a live cooldown
+          // would refuse exactly it -- leaving the workspace unregistered
+          // with nothing to retry, since an incremental map never reaches
+          // the stitch block. The graph the outstanding join was building
+          // has just been wiped, so there is nothing left to protect.
+          clearStitchCooldown(getEndpoint());
           console.log(chalk.green("✓") + " Code graph wiped. Planning artifacts preserved.");
           console.log(chalk.dim("  Run `ix map` to rebuild the code graph."));
         } else {
@@ -77,6 +85,13 @@ export function registerResetCommand(program: Command): void {
           stopSpinner();
           clearIngestMtimeCache(process.cwd());
           clearStitchScopeCacheForCwd();
+          // Ix#568: and the stitch cooldown. The re-ingest below is the one
+          // run that can re-register this workspace, and a live cooldown
+          // would refuse exactly it -- leaving the workspace unregistered
+          // with nothing to retry, since an incremental map never reaches
+          // the stitch block. The graph the outstanding join was building
+          // has just been wiped, so there is nothing left to protect.
+          clearStitchCooldown(getEndpoint());
           console.log(chalk.green("✓") + " Graph wiped.");
         }
       } catch (err: any) {

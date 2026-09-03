@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   admitStitch,
   admitStitchWaiting,
+  clearStitchCooldown,
   connectionNeverEstablished,
   cooldownPathForTest,
   outcomeProvesNothingRunning,
@@ -427,6 +428,34 @@ describe("the cooldown runs from the end of the attempt, not its start", () => {
     if (a.admitted) a.settle({ ok: false, elapsedMs: 60_000, status: 500 });
 
     expect(admitted(ENDPOINT, Date.now() + 5_000)).toBe(true);
+  });
+});
+
+describe("clearStitchCooldown, which is what `ix reset` calls", () => {
+  it("releases an active cooldown so the re-ingest after a reset is admitted", () => {
+    // A reset wipes the registration on the backend, and the full re-ingest
+    // that follows is the ONE run that can put it back -- an incremental map
+    // never reaches the stitch block. A live cooldown refusing exactly that run
+    // leaves the workspace unregistered with nothing to retry, while this
+    // file's own comments promise a post-reset re-map re-registers.
+    stitchOnce({ ok: false, elapsedMs: 62_000, status: 500 });
+    expect(admitStitch(ENDPOINT).admitted).toBe(false);
+
+    clearStitchCooldown(ENDPOINT);
+
+    expect(existsSync(cooldownPathForTest(ENDPOINT))).toBe(false);
+    expect(admitted(ENDPOINT)).toBe(true);
+  });
+
+  it("leaves another backend's cooldown alone", () => {
+    stitchOnce({ ok: false, elapsedMs: 62_000, status: 500 });
+    clearStitchCooldown(OTHER);
+    expect(admitStitch(ENDPOINT).admitted).toBe(false);
+  });
+
+  it("is a no-op when there is no cooldown, rather than throwing", () => {
+    expect(() => clearStitchCooldown(ENDPOINT)).not.toThrow();
+    expect(admitted(ENDPOINT)).toBe(true);
   });
 });
 

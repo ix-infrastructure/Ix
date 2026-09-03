@@ -147,19 +147,28 @@ describe("describeStitchSkipped", () => {
     expect(msg).not.toContain("Source patches were committed");
   });
 
-  it("does not tell a contended run to force a full re-ingest", () => {
-    // --verbose is off by default, so this is the advice almost everyone sees.
-    // The other run may be registering this same workspace and finishing a
-    // second later; a forced monorepo re-ingest is not the answer to that.
+  it("offers the plain re-run FIRST on contention, but still names --force", () => {
+    // --verbose is off by default, so this is the advice almost everyone sees,
+    // and it has to be both true and proportionate. The other run may be
+    // registering this same workspace and finishing a second later, so a forced
+    // monorepo re-ingest is the wrong thing to lead with -- but a plain re-run
+    // ALONE was a promise this code cannot keep: a skipped stitch does not stop
+    // the run persisting its mtime baseline, so the re-run is incremental and
+    // never reaches the stitch block. It prints nothing and exits 0.
     const msg = describeStitchSkipped(contended, "in-flight");
     expect(msg).toContain("Re-run once that finishes");
-    expect(msg).not.toContain("--force");
+    expect(msg).toContain("--force");
+    expect(msg.indexOf("Re-run")).toBeLessThan(msg.indexOf("--force"));
   });
 
-  it("gives the deadline rule its own remedy, since nothing was sent", () => {
+  it("names --force on the deadline rule too, since a longer budget alone does not register", () => {
     const msg = describeStitchSkipped("the map ran out of time", "deadline");
     expect(msg).toContain("IX_MAP_DEADLINE_MS");
-    expect(msg).not.toContain("--force");
+    expect(msg).toContain("--force");
+
+    const verbose = describeStitchSkipped("the map ran out of time", "deadline", true);
+    expect(verbose).toContain("nothing was registered either");
+    expect(verbose).toContain("--force");
   });
 
   it("gives the remedy under --verbose, and picks it by RULE", () => {
