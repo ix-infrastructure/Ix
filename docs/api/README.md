@@ -231,18 +231,28 @@ does not issue this call unconditionally:
 | Rule | Behaviour |
 |---|---|
 | One at a time **per backend endpoint** | A second `ix map` — including one for a *different* workspace — waits up to `IX_STITCH_WAIT_MS` (default 30s) for the in-flight stitch, then skips. `ix map`'s own lock is per workspace and does not bound a cross-workspace join. |
-| Cooldown after a cut-off stitch | If a stitch fails after `IX_STITCH_SLOW_FAILURE_MS` (default 20s), or is aborted by the client's own timeout, no further stitch is sent to that endpoint for `IX_STITCH_COOLDOWN_MS` (default 15 min). |
+| A cooldown written when a stitch **starts** | It is removed only on proof that nothing is running. Until then, no further stitch is sent to that endpoint for `IX_STITCH_COOLDOWN_MS` (default 15 min). |
 
-A failure *faster* than the slow threshold sets no cooldown: nothing can still
-be running, so a backend that answers 404 (no `/v1/stitch`) or 400 keeps being
-retried exactly as before. Nor does **any 4xx**, however long it took to arrive
-— elapsed covers the request upload, and a megabyte-scale stitch payload can
-spend tens of seconds there before a 413 comes back; a refused request is
-decisive evidence that no join started — with **408** as the exception, since a
-proxy reporting that *it* gave up waiting says nothing about whether the backend
-did, and that is the whole bug. An abort has no rule of its own: one that reached
-the backend passes the elapsed test anyway, and one raised before the request
-left (a run deadline expiring during serialization) correctly does not.
+The second rule is the one that stops the pile-up, and it is written the
+opposite way round from the obvious design. Rather than inspecting the failure
+and deciding whether it looked like a timeout, the marker goes down before the
+request and comes back up only on **proof** that the backend did not run the
+join. There are exactly two such proofs:
+
+* the stitch succeeded;
+* the backend answered **4xx**, which is it refusing the request rather than
+  executing it — with **408** excluded, since a proxy reporting that *it* gave
+  up waiting says nothing about whether the backend did.
+
+Everything else — a 5xx, a timeout, an abort, a transport error, or the process
+being killed before it could report anything — leaves the marker in place. That
+last case is why the marker is written up front: a hook whose timeout is shorter
+than the stitch takes the CLI down mid-request, and nothing it *would* have done
+on the way out can be relied on.
+
+The cost is that a stitch failing for an unclassified reason cools down when it
+need not have. That errs toward skipping one stitch rather than stacking joins
+on a database that is already the reason.
 
 Both the lock and the cooldown are keyed on a normalised endpoint, so
 `http://localhost:8090`, `http://localhost:8090/` and `http://127.0.0.1:8090`
@@ -254,12 +264,12 @@ each hold their own "single-flight" lock and stitch simultaneously.
 already on disk, so setting it to `0` releases an active one rather than only
 affecting the next.
 
-A skipped stitch is reported as `stitchSkipped` in `ix ingest --format json`,
-as `stitch_skipped` in `ix map --format json` and `--format llm`, and in the ingest summary, so an
-automated consumer can tell it apart from a clean run. It is not an error: it does not set a non-zero exit code and does
-not count towards `stitchErrors`, and the previous registration stands — the
-same position a stitch that *failed* already left the graph in. `ix map` prints
-the reason.
+A skipped stitch is reported as `stitchSkipped` in `ix ingest --format json`, as
+`stitch_skipped` in `ix map --format json` and `--format llm`, and as a
+`stitch_skipped` token on `ix map --silent`, so an automated consumer can tell it
+apart from a clean run. It is not an error: it does not set a non-zero exit code
+and does not count towards `stitchErrors`, and the previous registration stands —
+the same position a stitch that *failed* already left the graph in.
 
 Note that re-registration is not automatic on the next map, and was not before
 this change: the stitch is gated on `filesSkipped === 0`, so an incremental map
@@ -269,8 +279,7 @@ data to send, having only parsed what changed. A run that re-ingests every file
 
 | Variable | Default | Effect |
 |---|---|---|
-| `IX_STITCH_COOLDOWN_MS` | `900000` | How long to hold off after a cut-off stitch. `0` disables the cooldown. |
-| `IX_STITCH_SLOW_FAILURE_MS` | `20000` | Failures at or past this wall-clock are treated as "the backend may still be working". `0` turns the rule **off** — it does not mean "everything is slow". |
+| `IX_STITCH_COOLDOWN_MS` | `900000` | How long to hold off after a stitch that did not prove it stopped. `0` disables the cooldown; single-flight stays. |
 | `IX_STITCH_WAIT_MS` | `30000` | How long to wait for an in-flight stitch before skipping. `0` sheds immediately. |
 | `IX_LOCK_DIR` | `~/.ix/locks` | Where the stitch lock and cooldown record live (shared with the map lock). |
 

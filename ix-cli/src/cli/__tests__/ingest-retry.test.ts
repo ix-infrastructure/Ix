@@ -5,7 +5,6 @@ import {
   isBulkPartiallyCommittedError,
   isPayloadTooLargeError,
   isRetryableCommitConflict,
-  stitchAbortReachedBackend,
   parseBulkCommittedPatchIds,
 } from '../commands/ingest.js';
 
@@ -34,37 +33,6 @@ describe('isAbortError', () => {
   it('is false for ordinary errors', () => {
     expect(isAbortError(new Error('500: internal error'))).toBe(false);
     expect(isAbortError('write-write conflict')).toBe(false);
-  });
-});
-
-describe('stitchAbortReachedBackend', () => {
-  const abort = Object.assign(new Error('aborted'), { name: 'AbortError' });
-
-  it('does not read a backend error whose BODY says "aborted" as a client abort', () => {
-    // isAbortError falls back to matching "aborted" anywhere in the stringified
-    // error, which is right for the retry decision it was written for. Here it
-    // would give a 20ms `500 {"error":"AQL: transaction aborted"}` a 15-minute
-    // cooldown and report it as "cut off after 0s and may still be running".
-    const backendSaidAborted = new Error('500: {"error":"AQL: transaction aborted"}');
-    expect(isAbortError(backendSaidAborted)).toBe(true);
-    expect(stitchAbortReachedBackend(backendSaidAborted, false)).toBe(false);
-  });
-
-  it('is true for an abort while the deadline was still live: the request was open', () => {
-    expect(stitchAbortReachedBackend(abort, false)).toBe(true);
-  });
-
-  it('is false when the run deadline was already spent before the request', () => {
-    // fetch rejects synchronously on an already-aborted signal, so the backend
-    // never saw the query. Treating it as "cut off mid-join" would cool the
-    // stitch down for 15 minutes and report it was cut off after 0s.
-    expect(stitchAbortReachedBackend(abort, true)).toBe(false);
-  });
-
-  it('is false for an ordinary error either way', () => {
-    const err = new Error('500: internal server error');
-    expect(stitchAbortReachedBackend(err, false)).toBe(false);
-    expect(stitchAbortReachedBackend(err, true)).toBe(false);
   });
 });
 

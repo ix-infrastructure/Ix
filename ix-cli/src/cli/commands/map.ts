@@ -216,7 +216,7 @@ export function describeRegionlessCompletedMap(
  * formatting is assertable without capturing stderr.
  */
 export function describeDroppedFiles(
-  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors" | "stitchSkipped"> | undefined,
+  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors"> | undefined,
 ): string | undefined {
   if (!ingest) return undefined;
   const parse = ingest.parseErrors;
@@ -230,7 +230,7 @@ export function describeDroppedFiles(
 }
 
 function emitDroppedFileWarning(
-  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors" | "stitchSkipped"> | undefined,
+  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors"> | undefined,
 ): void {
   const message = describeDroppedFiles(ingest);
   if (message) process.stderr.write(chalk.yellow(`  ${message}\n`));
@@ -535,8 +535,14 @@ Examples:
         const systems    = result.regions.filter(r => r.label_kind === "system").length;
         const subsystems = result.regions.filter(r => r.label_kind === "subsystem").length;
         const modules    = result.regions.filter(r => r.label_kind === "module").length;
+        // Ix#568: `--silent` returns before both format branches AND wins over
+        // `--format llm`, so it is the one output the hooks this field exists
+        // for actually see. A skipped stitch deliberately does not move the exit
+        // code -- without a token here an automated consumer cannot tell a clean
+        // map from one whose cross-repo edges are up to 15 minutes stale.
+        const stitch = localIngest?.stitchSkipped === undefined ? "" : " · stitch_skipped";
         process.stderr.write(
-          `map: ${result.file_count} files · ${systems}s/${subsystems}ss/${modules}m regions · ${mapMs}ms\n`
+          `map: ${result.file_count} files · ${systems}s/${subsystems}ss/${modules}m regions · ${mapMs}ms${stitch}\n`
         );
         return;
       }

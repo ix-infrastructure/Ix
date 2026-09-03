@@ -598,39 +598,6 @@ export function isAbortError(err: unknown): boolean {
   return String(err).toLowerCase().includes("aborted");
 }
 
-/**
- * UNUSED as of review round 4 of Ix#568, kept only if a caller needs it again.
- * Did an aborted stitch actually reach the backend?
- *
- * The stitch guard cools down after an abort on the premise that the client
- * hung up on a request that was open, so the join outlives it. That premise
- * has one exception. `IxClient.post` combines the per-request timeout with the
- * run's shared deadline via `AbortSignal.any`, and a deadline that is ALREADY
- * aborted makes fetch reject without contacting the backend at all. The stitch
- * is the last thing an ingest does, so that is exactly where an exhausted
- * budget lands.
- *
- * Reading that as `cut off mid-join` would write a 15-minute cooldown for a
- * query the backend never received, and then tell the user the last stitch
- * `was cut off after 0s and may still be running`.
- *
- * `deadlineAlreadySpent` must be sampled BEFORE the request. A deadline that
- * fires DURING a long stitch is a genuine mid-flight abort, and by then the
- * signal is aborted too -- so a check made afterwards cannot tell the two
- * apart.
- */
-export function stitchAbortReachedBackend(err: unknown, deadlineAlreadySpent: boolean): boolean {
-  // Deliberately NOT isAbortError: that falls back to matching "aborted"
-  // anywhere in the stringified error, which is right for the retry decision
-  // it was written for and wrong here. A backend answering
-  // `500 {"error":"AQL: transaction aborted"}` in 20ms would be read as a
-  // client abort and given a 15-minute cooldown, straight past the
-  // fast-failure carve-out. Only a real AbortSignal rejection counts.
-  const name = (err as { name?: string } | null)?.name;
-  const isSignalAbort = name === "AbortError" || name === "TimeoutError";
-  return isSignalAbort && !deadlineAlreadySpent;
-}
-
 export function isRetryableCommitConflict(err: unknown): boolean {
   if (isAbortError(err)) return false;
   const message = String(err).toLowerCase();
@@ -2277,10 +2244,10 @@ export async function ingestFiles(
               admission.settle({
                 ok: false,
                 elapsedMs: performance.now() - stitchStart,
-                // A 4xx means the backend refused it rather than ran it, and
-                // elapsed cannot tell the difference: it covers the upload,
-                // and a megabyte-scale stitch payload can spend 25s there
-                // before a 413 comes back.
+                // The only thing that clears the marker is proof the backend
+                // refused the request rather than ran it, and a status is the
+                // only such proof available. Everything else -- a 5xx, a
+                // timeout, an abort, a transport error -- leaves it in place.
                 status: stitchFailureStatus(err),
               });
               throw err;

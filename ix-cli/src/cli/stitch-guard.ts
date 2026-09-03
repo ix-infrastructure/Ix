@@ -24,25 +24,41 @@ import { acquireLockAt, namedLockPath, type LockHandle } from "./single-flight.j
 //     stitch queries, every one started after the previous had already answered
 //     500 — i.e. while its server-side join was still running.
 //
-// Two rules, both enforced from the client because the cancel and the indexed
-// join that would fix this properly live in the backend:
+// ── The rule ───────────────────────────────────────────────────────────────
 //
-//   1. One stitch at a time per backend endpoint (not per workspace).
-//   2. After a stitch whose failure means the server may still be working, do
-//      not start another until a cooldown expires.
+// The cooldown marker is written when a stitch STARTS, and removed only on
+// proof that nothing is running: a clean answer, or a refusal the backend
+// issued without doing the work.
 //
-// Rule 2 is the one that actually stops the pile-up, and its classification is
-// deliberately NOT a match on the error text. Message shapes vary with whatever
-// proxy is in front of the backend, and a classifier built from guessed strings
-// is inert in exactly the deployments it was written for. What is measurable is
-// how long the client waited: a stitch that failed FAST failed before the
-// backend committed to the query (404 from an old backend, a 400, a refused
-// connection) and nothing is running; a stitch that failed only after tens of
-// seconds was cut off mid-join, and the join outlives the answer.
+// This is deliberately the opposite way round from the obvious design, which
+// inspects the FAILURE and writes a cooldown when it looks like a timeout.
+// Four review rounds of that classifier each broke the previous round's rule,
+// because it has to answer "did the backend start the join?" from an error, and
+// the evidence for that keeps not being there:
+//
+//   * the message is whatever proxy sits in front (a 500 here, a 504 with an
+//     HTML body in #528), so text matching is inert in the deployment it was
+//     written for;
+//   * elapsed time cannot tell a slow join from a slow UPLOAD, and the stitch
+//     payload is megabytes on a large monorepo;
+//   * "the client aborted" cannot tell a mid-flight hang-up from a run deadline
+//     that fired before the request was even serialized;
+//   * and none of it survives the process being killed, which is the ordinary
+//     end of a hook that timed out.
+//
+// Writing the marker up front needs none of those answers. Every way a stitch
+// can end without a definite refusal — a timeout, an abort, a deadline, SIGTERM,
+// a power cut — leaves the marker exactly where it was written, because leaving
+// it is the default rather than something the dying process must still do.
+//
+// The cost is that a stitch which failed for an unclassified reason cools down
+// when it need not have. That errs toward skipping one stitch rather than
+// stacking joins on a database that is already the reason, which is the safe
+// direction here: a skipped stitch leaves the previous registration in place,
+// and #568 is a report of 10–16 concurrent copies at 800–1200% CPU.
 // ---------------------------------------------------------------------------
 
 const DEFAULT_COOLDOWN_MS = 15 * 60 * 1000;
-const DEFAULT_SLOW_FAILURE_MS = 20 * 1000;
 /** Budget for waiting out a stitch that is merely in flight. */
 const DEFAULT_WAIT_MS = 30 * 1000;
 /** Poll interval while waiting. Short: a healthy stitch is over in ~30ms. */
@@ -62,19 +78,9 @@ export function stitchCooldownMs(): number {
   return positiveEnvMs("IX_STITCH_COOLDOWN_MS", DEFAULT_COOLDOWN_MS);
 }
 
-/**
- * A failure at or past this wall-clock is treated as "the server is still
- * working". 0 turns the elapsed rule OFF; only an abort cools down.
- *
- * Read that sentence twice, because the literal reading of 0 for a threshold
- * is the opposite: `elapsedMs >= 0` is true of every failure, so 0 would cool
- * down on the instant 404 from an older backend -- exactly the deployment the
- * fast-failure carve-out exists to leave alone. And 0 is what someone reaches
- * for, because the sibling knob prints "IX_STITCH_COOLDOWN_MS=0 disables" in
- * the refusal message. Off means off in both.
- */
-export function stitchSlowFailureMs(): number {
-  return positiveEnvMs("IX_STITCH_SLOW_FAILURE_MS", DEFAULT_SLOW_FAILURE_MS);
+/** How long to wait for the in-flight stitch to finish before shedding. */
+export function stitchWaitMs(): number {
+  return positiveEnvMs("IX_STITCH_WAIT_MS", DEFAULT_WAIT_MS);
 }
 
 /**
@@ -85,11 +91,11 @@ export function stitchSlowFailureMs(): number {
  * `http://localhost:8090/` and `http://127.0.0.1:8090` depending on which of
  * those a given process was started with. Hashing the raw string gives each
  * spelling its own lock, and the guard then permits exactly the concurrency it
- * exists to prevent -- an `ix mcp` server launched with an IP and a shell
+ * exists to prevent — an `ix mcp` server launched with an IP and a shell
  * `ix map` reading the config both stitching at once.
  *
  * Loopback spellings are folded together deliberately. `localhost`,
- * `127.0.0.1` and `::1` are not the same host in general -- and the endpoint
+ * `127.0.0.1` and `::1` are not the same host in general — and the endpoint
  * is not always local either; `IxClient.isLocalEndpoint` exists precisely
  * because a remote backend is supported. The folding is justified by its cost,
  * not by a claim about deployments: two loopback spellings that really did
@@ -117,15 +123,16 @@ function cooldownPath(endpoint: string): string {
 }
 
 interface Cooldown {
-  until: number;   // epoch ms
-  elapsedMs: number; // how long the failing stitch ran before the client gave up
-  at: number;      // epoch ms the failure was recorded
+  /** Epoch ms the stitch started. The cooldown is measured from here. */
+  at: number;
+  /** Set when the attempt reported back without clearing. Message only. */
+  elapsedMs?: number;
 }
 
 function readCooldown(endpoint: string): Cooldown | null {
   try {
     const parsed = JSON.parse(readFileSync(cooldownPath(endpoint), "utf-8")) as Cooldown;
-    return typeof parsed?.until === "number" ? parsed : null;
+    return typeof parsed?.at === "number" ? parsed : null;
   } catch {
     // Missing, unreadable, or corrupt: no cooldown. Failing open here is right
     // — a lost cooldown costs one extra stitch, and refusing to stitch because
@@ -137,44 +144,30 @@ function readCooldown(endpoint: string): Cooldown | null {
 /** How the stitch attempt ended, as the guard needs to see it. */
 export interface StitchOutcome {
   ok: boolean;
-  /** Wall-clock the client spent on the request. Ignored when `ok`. */
+  /** Wall-clock the client spent. Message only — never part of the decision. */
   elapsedMs: number;
   /** HTTP status the backend answered with, when it answered at all. */
   status?: number | null;
 }
 
 /**
- * Should a failure with this shape hold off the next stitch?
+ * Did this outcome PROVE that no join is running?
  *
- * Exported for tests and because the rule is the substance of this module.
+ * Two proofs are available, and both are positive facts rather than inferences
+ * drawn from the shape of a failure:
+ *
+ *   - the stitch succeeded, so the backend is done with it;
+ *   - the backend answered 4xx, which is it refusing the request rather than
+ *     executing it. 408 is excluded: a proxy reporting that IT gave up waiting
+ *     says nothing about whether the backend did, and that is this whole bug.
+ *
+ * Anything else — a 5xx, a timeout, an abort, a transport error, or the process
+ * being killed before it could say anything — leaves the marker in place.
  */
-export function failureMayStillBeRunning(outcome: StitchOutcome, slowMs = stitchSlowFailureMs()): boolean {
-  if (outcome.ok) return false;
-
-  // A 4xx is the backend REFUSING the request, not working on it. That is
-  // decisive whatever the clock says, and the clock can say a lot: elapsed
-  // covers the upload too, and on a large monorepo the stitch payload
-  // (provides + consumes + exports + symbolConsumes) is megabytes, so a 413
-  // or a 400 can arrive well past the slow threshold. Cooling down there
-  // would hold off 15 minutes for a query that never ran, and say so.
-  //
-  // 408 and 504 are the exceptions, and they are the whole bug: a proxy
-  // reporting that IT gave up waiting says nothing about whether the backend
-  // did. Those fall through to the elapsed rule, which is what catches them.
+export function outcomeProvesNothingRunning(outcome: StitchOutcome): boolean {
+  if (outcome.ok) return true;
   const status = outcome.status;
-  if (typeof status === "number" && status >= 400 && status < 500 && status !== 408) return false;
-
-  // Everything else is the clock, and the clock is enough. An abort used to
-  // get its own arm, on the reasoning that the client hanging up proves the
-  // request was open -- but every abort that reached the backend ALSO passes
-  // the elapsed test (the client's own timeout is 2 minutes, the run deadline
-  // fires mid-flight), so the arm added nothing and cost a false cooldown
-  // whenever an abort fired before the request left: a run deadline expiring
-  // during `JSON.stringify` of a megabyte-scale payload is tens of
-  // milliseconds, well past any floor small enough to be safe.
-  //
-  // 0 disables the elapsed rule; see stitchSlowFailureMs.
-  return slowMs > 0 && outcome.elapsedMs >= slowMs;
+  return typeof status === "number" && status >= 400 && status < 500 && status !== 408;
 }
 
 /** Which rule refused. Callers branch on this, never on the prose. */
@@ -192,58 +185,74 @@ function formatMs(ms: number): string {
 }
 
 /**
- * Ask permission to POST /v1/stitch against `endpoint`.
+ * Expiry of a cooldown under the CURRENT setting.
  *
- * Returns `{ admitted: false, reason }` when another process is stitching this
- * backend, or when the previous stitch is presumed still running server-side.
- * `reason` is written for a user who has just been told their cross-repo edges
- * are incomplete and needs to know why nothing was even attempted.
- *
- * On `{ admitted: true }` the caller MUST call `settle` exactly once. Failing
- * to (a crash, a kill) leaves the lock behind, which the shared staleness rule
- * clears, so a lost settle costs a delay and never a permanent wedge.
+ * Re-derived rather than stamped into the record, so that lowering
+ * IX_STITCH_COOLDOWN_MS — or setting it to 0, which the refusal message tells
+ * the user disables this — takes effect on the cooldown they are looking at.
+ * Otherwise the only escape from a 15-minute block is deleting a state file
+ * whose name they cannot compute.
  */
-/** Expiry of a cooldown record under the CURRENT setting. See admitStitch. */
 function coolingUntil(cooldown: Cooldown): number {
-  return Math.min(cooldown.until, cooldown.at + stitchCooldownMs());
+  return cooldown.at + stitchCooldownMs();
 }
 
 function refuseForCooldown(cooldown: Cooldown, now: number): StitchAdmission {
+  // No elapsed means the attempt never reported back at all -- killed, crashed,
+  // or still running in another process right now. Worth saying differently:
+  // the reader's next question is different in each case.
+  const how =
+    cooldown.elapsedMs === undefined
+      ? "a stitch was started and never reported back"
+      : `the last stitch was cut off after ${formatMs(cooldown.elapsedMs)}`;
   return {
     admitted: false,
     rule: "cooling",
     reason:
-      `the last stitch was cut off after ${formatMs(cooldown.elapsedMs)} and may still be ` +
-      `running on the backend; next attempt in ${formatMs(coolingUntil(cooldown) - now)} ` +
+      `${how} and may still be running on the backend; ` +
+      `next attempt in ${formatMs(coolingUntil(cooldown) - now)} ` +
       `(IX_STITCH_COOLDOWN_MS=0 disables)`,
   };
 }
 
-export function admitStitch(
-  endpoint: string,
-  now = Date.now(),
-  /**
-   * Test-only. Runs in the window between the cooldown read and the lock
-   * acquisition -- which is precisely the window the SECOND cooldown read below
-   * exists to close, and the only way to exercise it without a real race.
-   */
-  betweenReadAndLock?: () => void,
-): StitchAdmission {
-  const cooldown = readCooldown(endpoint);
-  // Re-derive the expiry from the CURRENT setting rather than trusting the
-  // one stamped into the record. The refusal below tells the user that
-  // IX_STITCH_COOLDOWN_MS=0 disables the cooldown, and that has to be true
-  // for the cooldown they are looking at -- otherwise the only escape from a
-  // 15-minute block is deleting a state file whose name they cannot compute.
-  // Clamping (rather than only special-casing 0) means lowering the value
-  // shortens an active cooldown too, which is the same expectation.
-  // The clamp alone covers 0: `at` is when the failure was recorded, always in
-  // the past, so a configured 0 makes `until` expire immediately. An explicit
-  // `configured > 0` arm here changes no outcome, and a guard that cannot fail
-  // reads as protection that is not there.
-  if (cooldown !== null && coolingUntil(cooldown) > now) return refuseForCooldown(cooldown, now);
+function writeCooldown(endpoint: string, record: Cooldown): void {
+  try {
+    mkdirSync(dirname(cooldownPath(endpoint)), { recursive: true });
+    writeFileSync(cooldownPath(endpoint), JSON.stringify(record), { mode: 0o600 });
+  } catch (err) {
+    // An unwritable lock dir is the one way this guard goes silently inert, so
+    // say so rather than leaving the user to wonder why it never engages. Never
+    // rethrow: settle() runs inside a catch that must unwind with the ORIGINAL
+    // stitch error, not with this one.
+    process.stderr.write(
+      `  Warning: could not record the cross-workspace stitch cooldown (${err}). ` +
+        `The guard against stacking stitch queries (Ix#568) is not active.\n`,
+    );
+  }
+}
 
-  betweenReadAndLock?.();
+/**
+ * Ask permission to POST /v1/stitch against `endpoint`.
+ *
+ * On `{ admitted: true }` the cooldown marker is ALREADY on disk — see the note
+ * at the top of this file. The caller should call `settle` when the attempt
+ * ends; NOT calling it (a crash, a kill, a hook timeout) is a supported outcome
+ * and leaves the marker in place, which is the conservative answer.
+ */
+export function admitStitch(endpoint: string, now = Date.now()): StitchAdmission {
+  // The lock FIRST, and the cooldown only while holding it.
+  //
+  // Order matters, and not for the reason it first appears. Because the marker
+  // is written at the START of an attempt, a marker on disk means either "an
+  // attempt is running right now" or "an attempt ended without proving it
+  // stopped" -- and those want opposite answers: the first should be WAITED
+  // for (a healthy stitch is over in milliseconds, and shedding it loses that
+  // workspace's registration), the second refused outright.
+  //
+  // The lock is exactly that distinction, so it is the thing to ask first. It
+  // also means the cooldown is only ever read while holding the lock, which
+  // removes the stale-read race a read-then-lock order has: no window exists in
+  // which a holder can write a marker between our read and our acquisition.
   const lock: LockHandle | null = acquireLockAt(namedLockPath("stitch", stitchKey(endpoint)), `ix stitch ${endpoint}`);
   if (!lock) {
     return {
@@ -253,23 +262,37 @@ export function admitStitch(
     };
   }
 
-  // Re-read the cooldown now that the lock is ours. The first read happened
-  // before acquisition, and the holder writes its cooldown and THEN releases
-  // -- so a waiter that arrived in between saw no cooldown, then took a lock
-  // the holder had just dropped, and sent the second stitch this guard exists
-  // to prevent. Cheap: one stat on a path we have already computed.
-  const settled = readCooldown(endpoint);
-  if (settled !== null && coolingUntil(settled) > now) {
+  const cooldown = readCooldown(endpoint);
+  if (cooldown !== null && coolingUntil(cooldown) > now) {
     lock.release();
-    return refuseForCooldown(settled, now);
+    return refuseForCooldown(cooldown, now);
   }
 
-  return admittedWith(lock, endpoint);
-}
+  // The marker goes down BEFORE the caller sends. Everything after this point
+  // is about REMOVING it, never about deciding whether to write it.
+  writeCooldown(endpoint, { at: now });
 
-/** How long to wait for the in-flight stitch to finish before shedding. */
-export function stitchWaitMs(): number {
-  return positiveEnvMs("IX_STITCH_WAIT_MS", DEFAULT_WAIT_MS);
+  let alreadySettled = false;
+  return {
+    admitted: true,
+    settle: (outcome) => {
+      if (alreadySettled) return;
+      alreadySettled = true;
+      try {
+        if (outcomeProvesNothingRunning(outcome)) {
+          try { rmSync(cooldownPath(endpoint), { force: true }); } catch { /* best effort */ }
+        } else {
+          // Keep the marker, and stamp how long the attempt ran so the refusal
+          // can say. The clock is message data only; it decides nothing.
+          writeCooldown(endpoint, { at: now, elapsedMs: Math.round(outcome.elapsedMs) });
+        }
+      } finally {
+        // Always, even if the state write threw: holding the lock past the
+        // request would block every later stitch until it aged out.
+        lock.release();
+      }
+    },
+  };
 }
 
 /**
@@ -308,42 +331,6 @@ export async function admitStitchWaiting(
     if (Date.now() >= deadline || runDeadline?.aborted === true) return admission;
     await sleep(Math.min(POLL_MS, Math.max(0, deadline - Date.now())));
   }
-}
-
-function admittedWith(lock: LockHandle, endpoint: string): StitchAdmission {
-
-  return {
-    admitted: true,
-    settle: (outcome) => {
-      try {
-        if (failureMayStillBeRunning(outcome)) {
-          const ms = stitchCooldownMs();
-          if (ms > 0) {
-            const record: Cooldown = { until: Date.now() + ms, elapsedMs: outcome.elapsedMs, at: Date.now() };
-            try {
-              mkdirSync(dirname(cooldownPath(endpoint)), { recursive: true });
-              writeFileSync(cooldownPath(endpoint), JSON.stringify(record), { mode: 0o600 });
-            } catch {
-              // An unwritable lock dir or a full disk must not become the
-              // error the caller reports. settle() runs inside `catch (err) {
-              // settle(...); throw err; }`, so anything thrown here would
-              // unwind INSTEAD of the stitch failure -- losing the status
-              // isStitchUnsupported needs and describing the wrong problem.
-              // Losing a cooldown costs one extra stitch.
-            }
-          }
-        } else {
-          // A clean result, or a failure fast enough that nothing can be
-          // running, clears any cooldown a previous run left.
-          try { rmSync(cooldownPath(endpoint), { force: true }); } catch { /* best effort */ }
-        }
-      } finally {
-        // Always, even if writing the cooldown threw: holding the lock past the
-        // request would block every later stitch until it aged out.
-        lock.release();
-      }
-    },
-  };
 }
 
 // ── Test-only surface ──────────────────────────────────────────────────────
