@@ -1896,9 +1896,13 @@ export async function ingestFiles(
        * failure budget in play `perFileAction` ignores the streak entirely, so
        * saying "the breaker is active, so this stays bounded" -- as this
        * comment used to -- described a mechanism that does not run. What each
-       * pass carries is `failureBudget` doomed requests, and `drainInPasses`
-       * caps the number of passes, so the whole drain is bounded by their
-       * product.
+       * pass carries is `failureBudget` doomed requests. There is deliberately
+       * NO pass cap -- one would hand back committable patches unsent, a real
+       * loss where this is only slowness -- so the bound is the HELD-SET SIZE:
+       * a pass only attempts items no earlier pass reached, so the drain sends
+       * at most one request per held patch, which is what `main` sends anyway.
+       * A dead backend is stopped after `2 x budget`; one that accepts a little
+       * and refuses the rest is not stopped at all and pays the full size.
        *
        * The streak is still RESET per pass, for a different reason: five
        * adjacent patches the backend rejects on their own merits are
@@ -1932,7 +1936,26 @@ export async function ingestFiles(
         // No payload splitting or partial-409 handling here: this is a cheap
         // probe, and everything it does not place falls through to the passes
         // below, which handle every one of those cases already.
-        if (items.length > 1) {
+        // ...but never for a set containing a DELETION, and never for one too
+        // big to send as a single request.
+        //
+        // `runChunk` puts any patch with a DeleteNode/DeleteEdge op in its own
+        // single-item chunk and commits it through `client.commitPatch`, and
+        // `ingest-reconcile.test.ts` pins that routing -- the bulk endpoint is
+        // not trusted to apply delete ops. A deletion reaches the held set
+        // through the ordinary hold branch, so without this check the probe
+        // would post it to the bulk endpoint anyway; on a silent success
+        // `onCommitted` would persist `durableDeletedFiles` and save the
+        // baseline, recording stale nodes as reconciled and never retrying.
+        //
+        // And the size cap, because this probe does no payload splitting: the
+        // held set is normally one chunk, but `flushAll` hands
+        // `commitPreparedPatches` the whole repo, and one bulk that size is the
+        // Ix#516 shape -- over the proxy's body limit or Arango's transaction
+        // cap -- which would fail and drop everything to the serialized
+        // per-file path the probe exists to avoid.
+        const holdsADeletion = items.some(item => patchRequiresPerFileCommit(item.patch));
+        if (items.length > 1 && items.length <= COMMIT_HTTP_MAX_FILES && !holdsADeletion) {
           try {
             const bulkStart = performance.now();
             const result = await retryOnConflict(
@@ -2074,11 +2097,12 @@ export async function ingestFiles(
       // held-back set gets a real attempt rather than being written off.
       //
       // `drainInPasses` is what decides when to stop -- a pass that REACHED
-      // THE END, or the pass cap, and what the last pass could not reach is
-      // left for the next run, which re-ingests it anyway because the mtime
-      // baseline is not written on a run with commit errors. (A pass that
-      // placed nothing is deliberately NOT a stopping condition; its own doc
-      // says why.) The gate below is a coarser judgement across BATCHES, so
+      // THE END, or two passes that between them placed nothing at all -- and
+      // what the last pass could not reach is left for the next run, which
+      // re-ingests it anyway because the mtime baseline is not written on a run
+      // with commit errors. (A single pass that placed nothing is deliberately
+      // NOT a stopping condition, and there is no pass cap; its own doc says
+      // why for both.) The gate below is a coarser judgement across BATCHES, so
       // that a genuinely dead backend is not re-probed once per batch for the
       // length of the run.
       if (deferredByCutoff.length > 0) {
