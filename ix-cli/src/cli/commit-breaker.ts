@@ -339,14 +339,12 @@ export function describeCommitCutoff(
     patchesApplied === 0
       ? "The graph is unchanged."
       : `${patchesApplied} other ${patchesApplied === 1 ? "patch" : "patches"} did land, so the graph is partly updated.`;
-  // The configured limit, not the live streak. Requests already in flight when
-  // the breaker tripped keep landing and keep incrementing, so the streak is
-  // whatever the race happened to produce -- a number that is not the rule and
-  // does not match IX_COMMIT_FAILURE_LIMIT.
-  // "failures", not "consecutive failures": the fan-out stops on a streak but
-  // the end-of-run retry stops on a total budget, and this banner prints for
-  // both. Claiming a run of N in a row that the run may never have seen is a
-  // misstatement on the one line whose whole job is saying what the backend did.
+  // No failure count in this message at all, deliberately, and neither
+  // `breaker.limit` nor the live streak is read here. The fan-out stops on a
+  // streak, the drain on a per-pass budget, and the batch gate on two empty
+  // drains -- this banner prints for all three, so any single number it named
+  // would be wrong for two of them. Earlier revisions named one and had to
+  // keep re-explaining which; saying "kept failing" is true of every path.
   // "Commits kept failing", not "Stopped committing": this prints whenever the
   // run gave up at any point, and the drain may since have placed every patch
   // it held. Claiming it stopped would then be false on the one line whose job

@@ -1751,7 +1751,20 @@ export async function ingestFiles(
           try {
             for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
               const item = items[itemIndex];
+              const isReplay = fallbackOpts?.replay === true;
               if (runDeadlineExpired()) {
+                // A replay first: these patches are confirmed landed by the
+                // server's own 409 body, so the clock stops the BOOKKEEPING and
+                // not a write. Holding them would push up to a thousand
+                // confirmed-committed patches into the commit-error count,
+                // report the graph as missing files it holds, and suppress the
+                // mtime baseline over them -- the exact over-reporting the
+                // `replay` flag exists to prevent, reintroduced by putting this
+                // deadline check above it.
+                if (isReplay) {
+                  patchesApplied += items.length - itemIndex;
+                  break;
+                }
                 // Every request from here is rejected by `fetch` on an already
                 // aborted signal, so the fan-out is pure waste -- and it is not
                 // otherwise stopped, because `commitFailureIndictsBackend`
@@ -1775,7 +1788,6 @@ export async function ingestFiles(
                 for (let k = itemIndex; k < items.length; k++) deferredByDeadline.push(items[k]);
                 break;
               }
-              const isReplay = fallbackOpts?.replay === true;
               const action = perFileAction({
                 replay: isReplay,
                 tripped: commitBreaker.tripped(),
@@ -2025,7 +2037,15 @@ export async function ingestFiles(
         // Held back again, or held back after the retry was already spent.
         if (deferredByCutoff.length > 0) {
           commitErrors += deferredByCutoff.length;
-          commitBreaker.recordSkipped(deferredByCutoff.length);
+          // Only when the CUTOFF is what stopped them. Past the deadline the
+          // drain above never ran -- it is gated on the same clock -- so these
+          // are the deadline's, and attributing them to the backend puts "N
+          // were not sent, sending them would have added load to a backend that
+          // is already the reason they fail" directly above "Ingest ran out of
+          // time: raise IX_MAP_DEADLINE_MS". That is the contradiction the
+          // `deferredByDeadline` split removed on the other path; this one
+          // reached the same place by a different route.
+          if (!runDeadlineExpired()) commitBreaker.recordSkipped(deferredByCutoff.length);
           deferredByCutoff.length = 0;
         }
       }
@@ -2647,7 +2667,14 @@ export async function ingestFiles(
     commitErrors,
     stitchErrors,
   };
-  if (commitBreaker.everTripped()) {
+  // `commitErrors > 0` as well as the trip. Replay failures feed the breaker
+  // -- they must, or nothing bounds a thousand-patch replay -- but they never
+  // become commit errors, because the server's 409 already confirmed those
+  // patches. So a run can trip, place everything, persist the baseline, be
+  // classified `{ kind: "ok" }` and exit 0, while this printed
+  // `Error: Commits against <endpoint> kept failing` and claimed the graph was
+  // only partly updated. Nothing was lost there, so there is nothing to say.
+  if (commitBreaker.everTripped() && commitErrors > 0) {
     // Gated on the cutoff having FIRED, not on what was left unsent. A patch
     // that was never sent produces no `[commit error]` line even under
     // --verbose, so this has to print for those -- but gating on them alone
