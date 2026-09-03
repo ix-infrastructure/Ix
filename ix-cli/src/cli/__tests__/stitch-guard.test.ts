@@ -375,7 +375,14 @@ describe("connectionNeverEstablished", () => {
     // walking only `.cause` answered false for the single commonest way this
     // fires, and a backend that was merely down took the full 15-minute
     // cooldown for a request that never left the machine.
-    const err = await failureOf("http://localhost:8099/v1/stitch");
+    // Bound and closed, like the sibling test: a hardcoded port turns this red
+    // with a message about the classifier if anything happens to be listening.
+    const probe = net.createServer();
+    await new Promise<void>(resolve => probe.listen(0, "127.0.0.1", resolve));
+    const port = (probe.address() as net.AddressInfo).port;
+    await new Promise<void>(resolve => probe.close(() => resolve()));
+
+    const err = await failureOf(`http://localhost:${port}/v1/stitch`);
     // The predicate is the claim on every platform.
     expect(connectionNeverEstablished(err)).toBe(true);
     // The aggregate shape only appears where localhost is dual-stack, which is

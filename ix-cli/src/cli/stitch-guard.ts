@@ -297,8 +297,17 @@ export function outcomeProvesNothingRunning(outcome: StitchOutcome): boolean {
   return status >= 400 && status < 500 && status !== 408;
 }
 
-/** Which rule refused. Callers branch on this, never on the prose. */
-export type StitchRefusal = "in-flight" | "cooling" | "deadline";
+/**
+ * Which rule refused. Callers branch on this, never on the prose.
+ *
+ * `incomplete` is not one of this guard's rules -- it is `ix ingest`'s own
+ * completeness gate, reported through the same field because a machine consumer
+ * asking "are the cross-repo edges current?" needs the same answer for it. It
+ * is by far the commonest reason a stitch does not happen (every incremental
+ * map), and leaving it unreported meant the field said "current" for the case
+ * it was added to describe.
+ */
+export type StitchRefusal = "in-flight" | "cooling" | "deadline" | "incomplete";
 
 export type StitchAdmission =
   | { admitted: true; settle: (outcome: StitchOutcome) => void }
@@ -419,10 +428,18 @@ export function admitStitch(endpoint: string, now = Date.now()): StitchAdmission
             // for the full cooldown with "a stitch was started and never
             // reported back". `writeCooldown` warns on the mirror-image
             // failure, which merely fails open.
+            // The wording follows the PROOF, because this branch runs for all
+            // four of them: a success, a 4xx, a 2xx with an unreadable body, and
+            // a connection that never opened. Saying "the stitch succeeded"
+            // after an ECONNREFUSED would be plainly false on the one line the
+            // reader has to act on.
+            const what = outcome.ok
+              ? "the cross-workspace stitch succeeded"
+              : "the cross-workspace stitch did not start a query on the backend";
             process.stderr.write(
-              `  Warning: the cross-workspace stitch succeeded but its cooldown marker ` +
-                `could not be removed (${err}). Further stitches to this backend will be ` +
-                `refused until it ages out; delete ${cooldownPath(endpoint)} to clear it.
+              `  Warning: ${what}, but its cooldown marker could not be removed ` +
+                `(${err}). Further stitches to this backend will be refused until it ` +
+                `ages out; delete ${cooldownPath(endpoint)} to clear it.
 `,
             );
           }

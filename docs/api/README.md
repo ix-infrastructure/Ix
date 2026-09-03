@@ -296,12 +296,22 @@ re-stamps, so a cooldown shorter than the attempt it is protecting is expired
 when the next map looks at it. Values below the two-minute request cap are
 therefore only reliable on the paths that report back.
 
-A skipped stitch is reported as `stitchSkipped` in `ix ingest --format json`, as
+A stitch that does not happen is reported as `stitchSkipped` in
+`ix ingest --format json`, as
 `stitch_skipped` in `ix map --format json` and `--format llm`, and as a
 `stitch_skipped` token on `ix map --silent`, so an automated consumer can tell it
 apart from a clean run. It is not an error: it does not set a non-zero exit code
 and does not count towards `stitchErrors`, and the previous registration stands —
 the same position a stitch that *failed* already left the graph in.
+
+The rule is machine-readable: `in-flight`, `cooling` and `deadline` are the
+guard's, and **`incomplete`** is `ix ingest`'s own completeness gate — an
+incremental map that did not re-parse every file has no complete registration to
+send. That last one is by far the commonest, and it is reported for the same
+reason as the others: a consumer asking "are the cross-repo edges current?" gets
+the wrong answer if the field is absent whenever the stitch was never attempted.
+It is deliberately the one rule that prints no human Note, because it would then
+appear on every incremental map.
 
 The wait happens **inside** `ix map`'s per-workspace lock, which the run holds
 until it exits. So while one map is waiting out another repo's stitch — up to
