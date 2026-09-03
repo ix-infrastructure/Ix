@@ -293,10 +293,10 @@ Set `IX_DEBUG=1` to get full stack traces on any error.
 
 ## Supported Languages
 
-Ix parses and extracts symbols, calls, and imports across 26 languages, and recognizes several more config and data formats.
+Ix parses and extracts symbols, calls, and imports across 27 languages, and recognizes several more config and data formats.
 
 **Languages:**
-JavaScript, TypeScript, Python, Java, C, C++, C#, Go, Ruby, Rust, PHP, Kotlin, Swift, Scala, R, SAS, Elixir, Haskell, Zig, Lua, Bash, HTML, XML, CSS, HCL / Terraform, Makefile
+JavaScript, TypeScript, Python, Java, C, C++, C#, Go, Ruby, Rust, PHP, Kotlin, Swift, Scala, R, SAS, Elixir, Haskell, Zig, Lua, Bash, PowerShell, HTML, XML, CSS, HCL / Terraform, Makefile
 
 **Also recognized:**
 YAML, JSON, TOML, SQL, Dockerfile, Markdown

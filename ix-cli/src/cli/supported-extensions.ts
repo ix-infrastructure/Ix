@@ -23,6 +23,7 @@ export const SUPPORTED_EXTENSIONS = new Set<string>([
   ".mk", ".makefile",
   ".lua",
   ".sh", ".bash", ".zsh", ".ksh",
+  ".ps1", ".psm1", ".psd1",
   ".hs", ".lhs",
   ".zig",
   ".html", ".htm", ".xhtml",

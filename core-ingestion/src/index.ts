@@ -115,6 +115,10 @@ const SAS = await tryImportGrammar('tree-sitter-sas');
 // progress bar draws on. Pointing straight at the file skips that resolution.
 const Lua = await tryImportGrammar('@tree-sitter-grammars/tree-sitter-lua/bindings/node/index.js');
 const Css = await tryImportGrammar('tree-sitter-css/bindings/node/index.js');
+// tree-sitter-powershell is the same shape: ESM bindings with top-level await,
+// a directory `main` and no `"exports"`, so it needs the async helper and the
+// explicit file path for the same two reasons Lua and CSS do.
+const PowerShell = await tryImportGrammar('tree-sitter-powershell/bindings/node/index.js');
 
 import { SupportedLanguages, languageFromPath } from './languages.js';
 import { LANGUAGE_QUERIES } from './queries.js';
@@ -257,6 +261,7 @@ const GRAMMAR_MAP: Partial<Record<SupportedLanguages, any>> = {
   ...(Zig ? { [SupportedLanguages.Zig]: Zig } : {}),
   ...(Html ? { [SupportedLanguages.HTML]: Html } : {}),
   ...(Xml ? { [SupportedLanguages.XML]: Xml } : {}),
+  ...(PowerShell ? { [SupportedLanguages.PowerShell]: PowerShell } : {}),
   ...(Hcl ? { [SupportedLanguages.HCL]: Hcl } : {}),
   ...(Css ? { [SupportedLanguages.CSS]: Css } : {}),
 };

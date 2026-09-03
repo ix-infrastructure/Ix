@@ -25,6 +25,7 @@
     "tree-sitter-java": "^0.23.5",
     "tree-sitter-javascript": "^0.25.0",
     "tree-sitter-php": "^0.24.2",
+    "tree-sitter-powershell": "^0.26.4",
     "tree-sitter-python": "^0.25.0",
     "tree-sitter-ruby": "^0.23.1",
     "tree-sitter-rust": "^0.24.0",
