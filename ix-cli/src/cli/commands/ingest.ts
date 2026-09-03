@@ -896,7 +896,15 @@ export function describeStitchSkipped(
   const recover =
     rule === "deadline"
       ? " Raise IX_MAP_DEADLINE_MS or map a smaller path."
-      : " Recover with `ix ingest <root> --force` once it clears.";
+      : rule === "in-flight"
+        // Deliberately not `--force` here. The verbose form hedges for a
+        // reason: the other run may be registering this same workspace, and
+        // only `ix map` takes the per-workspace lock, so two `ix ingest` runs
+        // on one repo reach this too. Telling almost every user -- --verbose is
+        // off by default -- to force a full monorepo re-ingest for a stitch
+        // another process is finishing a second later is the wrong default.
+        ? " Re-run once that finishes."
+        : " Recover with `ix ingest <root> --force` once it clears.";
   const head = `Note: Cross-workspace stitch not started — ${reason}.${recover}`;
   if (!verbose) return head;
 

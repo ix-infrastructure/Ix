@@ -147,6 +147,15 @@ describe("describeStitchSkipped", () => {
     expect(msg).not.toContain("Source patches were committed");
   });
 
+  it("does not tell a contended run to force a full re-ingest", () => {
+    // --verbose is off by default, so this is the advice almost everyone sees.
+    // The other run may be registering this same workspace and finishing a
+    // second later; a forced monorepo re-ingest is not the answer to that.
+    const msg = describeStitchSkipped(contended, "in-flight");
+    expect(msg).toContain("Re-run once that finishes");
+    expect(msg).not.toContain("--force");
+  });
+
   it("gives the deadline rule its own remedy, since nothing was sent", () => {
     const msg = describeStitchSkipped("the map ran out of time", "deadline");
     expect(msg).toContain("IX_MAP_DEADLINE_MS");
