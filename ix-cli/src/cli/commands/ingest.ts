@@ -1866,10 +1866,14 @@ export async function ingestFiles(
                 // generated files exhaust the drain would strand hundreds of
                 // perfectly committable patches on a healthy backend.
                 const indicts = commitFailureIndictsBackend(commitErr, runDeadlineExpired());
-                if (indicts) {
-                  budgetLeft--;
-                  backendIndictingFailures++;
-                }
+                if (indicts) budgetLeft--;
+                // ...but a REPLAY never indicts the backend, whatever the error
+                // looks like: the server's own 409 confirmed those patches
+                // landed, so a failure re-sending one says nothing about its
+                // willingness to write. This counter is the drain gate's
+                // evidence, and its own doc says exactly that twenty lines
+                // below; counting replays here contradicted it.
+                if (indicts && !isReplay) backendIndictingFailures++;
                 if (isReplay) {
                   // Confirmed landed by the server's own 409 body. A failed
                   // re-send loses no write, so counting it as a commit error
@@ -2008,14 +2012,8 @@ export async function ingestFiles(
             const ms = Math.round(performance.now() - bulkStart);
             recordDrainMs(ms);
             timings.bulkCommitMs += ms;
-            // Keep the quoted error current, for the same reason `onAbandoned`
-            // does: this is a request the backend answered, and the passes
-            // below may be stopped by the run deadline without recording
-            // anything. Not `recordFailure` -- one bulk is one request, not N.
-            if (commitFailureIndictsBackend(bulkErr, runDeadlineExpired())) {
-              commitBreaker.noteError(bulkErr);
-            }
             let unconfirmed = chunk;
+            let confirmedAny = false;
             if (isBulkPartiallyCommittedError(bulkErr)) {
               const landedIds = parseBulkCommittedPatchIds(bulkErr);
               if (landedIds !== undefined) {
@@ -2023,6 +2021,7 @@ export async function ingestFiles(
                 if (landed.length > 0) {
                   patchesApplied += landed.length;
                   patchesTheBackendTook += landed.length;
+                  confirmedAny = true;
                   if (debug) {
                     process.stderr.write(
                       `  [cutoff] bulk partly committed: ${landed.length} of ${chunk.length} already landed
@@ -2033,11 +2032,33 @@ export async function ingestFiles(
                 unconfirmed = chunk.filter(item => !landedIds.has(item.patch.patchId));
               }
             }
-            // One failure ends the probing: the rest goes to the passes, which
-            // is where a backend that is actually refusing belongs.
+            // Keep the quoted error current, for the same reason `onAbandoned`
+            // does -- but NOT for a 409 that confirmed patches. That answer says
+            // the backend is taking writes, and the banner's `Last error:` is
+            // what the message and the troubleshooting row both tell the user
+            // distinguishes a saturated database from a rejected patch. A 409
+            // says neither, and quoting it would replace the TimeoutError that
+            // actually caused the cutoff. Not `recordFailure` either -- one bulk
+            // is one request, not N.
+            if (!confirmedAny && commitFailureIndictsBackend(bulkErr, runDeadlineExpired())) {
+              commitBreaker.noteError(bulkErr);
+            }
             for (const item of unconfirmed) stillToSend.push(item);
-            for (const item of rest) stillToSend.push(item);
-            probeQueue = [];
+            if (confirmedAny) {
+              // Positive proof the backend is taking writes, so KEEP PROBING.
+              // Treating it as a failure sent the remaining chunks to the
+              // passes, which have no bulk path -- 400 held patches going out
+              // as 400 serialized commits behind the global mutex, which is the
+              // Ix#495 amplification this probe exists to prevent, on the
+              // recovery path it exists to serve.
+              commitBreaker.recordSuccess();
+              probeQueue = rest;
+            } else {
+              // One real failure ends the probing: the rest goes to the passes,
+              // which is where a backend that is actually refusing belongs.
+              for (const item of rest) stillToSend.push(item);
+              probeQueue = [];
+            }
           }
         }
         for (const item of probeQueue) stillToSend.push(item);
@@ -2857,13 +2878,6 @@ export async function ingestFiles(
     commitErrors,
     stitchErrors,
   };
-  // `commitErrors > 0` as well as the trip. Replay failures feed the breaker
-  // -- they must, or nothing bounds a thousand-patch replay -- but they never
-  // become commit errors, because the server's 409 already confirmed those
-  // patches. So a run can trip, place everything, persist the baseline, be
-  // classified `{ kind: "ok" }` and exit 0, while this printed
-  // `Error: Commits against <endpoint> kept failing` and claimed the graph was
-  // only partly updated. Nothing was lost there, so there is nothing to say.
   // `everTripped()` alone, and it is not a weakening: `recordFailure` has one
   // call site, in the per-file catch immediately after `commitErrors++`, so a
   // trip already implies a real commit failure. A `commitLoopErrors` counter
