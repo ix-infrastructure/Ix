@@ -1406,6 +1406,12 @@ export async function ingestFiles(
    */
   let patchesTheBackendTook = 0;
   /**
+   * Commit failures that said something about the BACKEND rather than about one
+   * patch. Counted so the drain gate can tell "refused everything because the
+   * backend is down" from "refused everything because every patch was too big".
+   */
+  let backendIndictingFailures = 0;
+  /**
    * The RUN deadline, captured here because `commitPreparedPatches` shadows
    * `opts` with its own. Not `isAbortError`: a per-request AbortSignal.timeout
    * raises TimeoutError too, and that is a saturation signal, not our clock.
@@ -1843,7 +1849,11 @@ export async function ingestFiles(
                 // about that one patch, and letting a handful of oversized
                 // generated files exhaust the drain would strand hundreds of
                 // perfectly committable patches on a healthy backend.
-                if (commitFailureIndictsBackend(commitErr, runDeadlineExpired())) budgetLeft--;
+                const indicts = commitFailureIndictsBackend(commitErr, runDeadlineExpired());
+                if (indicts) {
+                  budgetLeft--;
+                  backendIndictingFailures++;
+                }
                 if (isReplay) {
                   // Confirmed landed by the server's own 409 body. A failed
                   // re-send loses no write, so counting it as a commit error
@@ -1862,14 +1872,10 @@ export async function ingestFiles(
                   // "count-applied" and the loop stops. `perFileAction` alone
                   // could not: it only rescues a breaker that was ALREADY
                   // tripped on entry.
-                  if (commitFailureIndictsBackend(commitErr, runDeadlineExpired())) {
-                    commitBreaker.recordFailure(commitErr);
-                  }
+                  if (indicts) commitBreaker.recordFailure(commitErr);
                 } else {
                   commitErrors++;
-                  if (commitFailureIndictsBackend(commitErr, runDeadlineExpired())) {
-                    commitBreaker.recordFailure(commitErr);
-                  }
+                  if (indicts) commitBreaker.recordFailure(commitErr);
                 }
                 if (debug) {
                   const errMsg = String(commitErr);
@@ -1911,6 +1917,39 @@ export async function ingestFiles(
           process.stderr.write(
             `\n  [cutoff] re-sending ${items.length} held-back patches with a fresh streak\n`,
           );
+        }
+
+        // One bulk first, because the held set is usually not the problem.
+        //
+        // `onAbandoned` hands over whole CHUNKS, not just the tail the fan-out
+        // reached, so on a backend that recovers by the end of the batch this
+        // would otherwise serialize thousands of single-patch commits where one
+        // request per chunk would do -- the Ix#495 shape, on the recovery path
+        // this design exists to serve. A backend that is still refusing costs
+        // one extra doomed request for the attempt, which is the same price the
+        // per-chunk bulk already pays and is deliberately never skipped.
+        //
+        // No payload splitting or partial-409 handling here: this is a cheap
+        // probe, and everything it does not place falls through to the passes
+        // below, which handle every one of those cases already.
+        if (items.length > 1) {
+          try {
+            const bulkStart = performance.now();
+            const result = await retryOnConflict(
+              () => client.commitPatchBulk(items.map(item => item.patch)),
+              COMMIT_CONFLICT_RETRIES,
+            );
+            recordDrainMs(Math.round(performance.now() - bulkStart));
+            latestRev = advanceRev(latestRev, result.rev);
+            patchesApplied += items.length;
+            patchesTheBackendTook += items.length;
+            commitBreaker.recordSuccess();
+            for (const item of items) opts?.onCommitted?.(item, result.rev);
+            if (debug) process.stderr.write(`  [cutoff] one bulk placed all ${items.length}\n`);
+            return 0;
+          } catch (bulkErr) {
+            if (debug) process.stderr.write(`  [cutoff] bulk retry failed, falling back to passes: ${bulkErr}\n`);
+          }
         }
         // A budget, not the breaker's streak: the held set can begin with the
         // tail of a poison cluster -- the fan-out stopped inside it, so the
@@ -2047,19 +2086,30 @@ export async function ingestFiles(
         if (!runDeadlineExpired() && drainGate.shouldDrain(patchesTheBackendTook)) {
           const held = deferredByCutoff.splice(0, deferredByCutoff.length);
           const tookBefore = patchesTheBackendTook;
+          const indictedBefore = backendIndictingFailures;
           const stranded = await commitIndividuallyAfterCutoff(held);
-          // A miss means the backend took nothing AND the drain gave up with
-          // work left. A drain that attempted everything and had it all
-          // refused for per-patch reasons is not evidence the backend is dead:
-          // `commitFailureIndictsBackend` excludes payload-too-large, so a held
-          // set of oversized generated files reaches the end of its pass having
-          // placed nothing, and counting that as a miss twice closed the gate
-          // on a backend that never refused a write.
+          // A miss means the backend took nothing AND said something that
+          // indicts it. Both halves are load-bearing, and each was wrong on its
+          // own in an earlier revision:
+          //
+          //   - taking nothing alone is not it. `commitFailureIndictsBackend`
+          //     excludes payload-too-large, so a held set of oversized generated
+          //     files is attempted in full and refused in full without the
+          //     backend being at fault; two such batches closed the gate on a
+          //     backend that never refused a write.
+          //   - "nothing was stranded" alone is not it either, which is subtler.
+          //     A held set no larger than one pass's budget -- a trip near the
+          //     end of a chunk, or the deletion path where each deletion is its
+          //     own one-patch chunk -- is attempted in full and refused in full
+          //     by a DEAD backend, and reporting that as progress meant the gate
+          //     could never close and every batch re-probed, which is the whole
+          //     thing the gate exists to stop.
           //
           // Whether the drain ended tripped says nothing useful either: one
           // that commits hundreds and then meets the tail of a bad cluster ends
           // tripped too.
-          drainGate.record(patchesTheBackendTook > tookBefore || stranded === 0, patchesTheBackendTook);
+          const backendMisbehaved = backendIndictingFailures > indictedBefore;
+          drainGate.record(patchesTheBackendTook > tookBefore || !backendMisbehaved, patchesTheBackendTook);
         }
         // Held back again, or held back after the retry was already spent.
         if (deferredByCutoff.length > 0) {

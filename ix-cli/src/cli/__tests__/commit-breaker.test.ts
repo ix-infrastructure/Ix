@@ -382,6 +382,27 @@ describe("drainInPasses", () => {
     expect(d.placed.filter(x => !bad.has(x))).toHaveLength(250);
   });
 
+  it("keeps going while the backend takes anything, at no more cost than main", async () => {
+    // The trade-off, pinned so it is a decision rather than a surprise. A
+    // backend that accepts one write and refuses the other 994 is never stopped
+    // by the drain: each pass eats `budget` of the refusing patches, so it runs
+    // ~199 passes. That is not a regression -- `main` sends one request per
+    // patch for all 995 and has no cutoff at all -- and the alternative, a cap
+    // on failures, hands back committable patches unsent, which is a real loss
+    // where this is only slowness.
+    const held = range("p", 995);
+    const bad = new Set(held.slice(1));
+    const d = driver(bad);
+
+    await drainInPasses(held, d.attempt);
+
+    expect(d.placed).toEqual([held[0]]);
+    // Never more than one request per held patch.
+    expect(d.sent.length).toBeLessThanOrEqual(held.length);
+    // And no patch is attempted twice.
+    expect(new Set(d.sent).size).toBe(d.sent.length);
+  });
+
   it("does not call the backend at all for an empty held set", async () => {
     const d = driver(new Set());
     expect(await drainInPasses([], d.attempt)).toEqual([]);

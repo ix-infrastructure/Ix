@@ -283,10 +283,21 @@ export interface DrainPass<T> {
  * 294. Termination does not need a cap, because a pass that continues has
  * attempted at least `budget` items, so `unreached` strictly shrinks.
  *
- * The cost of no cap is bounded by the same argument: every pass after the
- * first either ends the walk or placed something, so the doomed requests are
- * `2 x budget` on a dead backend and the successful ones are the patches
- * themselves -- exactly what `main` would have sent, and no more.
+ * The cost has two shapes, and the second one is the price of the guarantee.
+ * A backend that accepts NOTHING is stopped after `2 x budget` doomed requests.
+ * A backend that accepts something and then refuses the rest is not stopped at
+ * all: each pass eats `budget` of the refusing patches, so a 995-patch held set
+ * where one write lands and 994 are refused runs ~199 passes and sends all 995
+ * requests.
+ *
+ * That is deliberate, and it is not a regression -- 995 requests is exactly
+ * what `main` sends for 995 patches, one per patch, with no cutoff at all. The
+ * total is bounded by the held-set size in every case, because a pass only ever
+ * attempts items no earlier pass reached. What the cutoff buys on that backend
+ * is the FAN-OUT stopping after `limit`, and `createDrainGate` stopping the
+ * drain repeating once per batch. Bounding it further is not available: any cap
+ * on failures hands back committable patches unsent, which is a real loss where
+ * this is only slowness.
  */
 export async function drainInPasses<T>(
   held: readonly T[],
