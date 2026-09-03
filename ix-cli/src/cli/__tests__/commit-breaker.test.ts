@@ -30,10 +30,16 @@ describe("commitFailureLimit", () => {
     expect(commitFailureLimit("0.5")).toBe(5);
   });
 
-  it("reads a value parseInt would have truncated", () => {
-    // "1e3" is 1000, and parseInt made it 1 -- a cutoff that trips on the very
-    // first failure. Number() reads what was written.
-    expect(commitFailureLimit("1e3")).toBe(1000);
+  it("falls back on the shapes parseInt and Number each got wrong", () => {
+    // parseInt read "1e3" as 1 -- a cutoff tripping on the very first failure --
+    // and Number reads it as 1000. Neither is what someone typing it meant, and
+    // guessing is worse than the documented default. Same for the values Number
+    // quietly coerces to 0, which would DISABLE the cutoff: the opposite of a
+    // conservative fallback.
+    expect(commitFailureLimit("1e3")).toBe(5);
+    expect(commitFailureLimit("0x10")).toBe(5);
+    expect(commitFailureLimit("  ")).toBe(5);
+    expect(commitFailureLimit(" 3 ")).toBe(5);
   });
 });
 
@@ -93,6 +99,56 @@ describe("createCommitBreaker", () => {
     b.recordSkipped(17);
     b.recordSkipped();
     expect(b.skipped()).toBe(18);
+  });
+});
+
+describe("reset, which is what the end-of-run retry runs on", () => {
+  it("un-latches and clears the streak", () => {
+    const b = createCommitBreaker(2);
+    b.recordFailure(new Error("a"));
+    b.recordFailure(new Error("b"));
+    expect(b.tripped()).toBe(true);
+
+    b.reset();
+    expect(b.tripped()).toBe(false);
+    expect(b.consecutiveFailures()).toBe(0);
+  });
+
+  it("keeps skipped() cumulative, because the report spans the whole run", () => {
+    const b = createCommitBreaker(1);
+    b.recordFailure(new Error("a"));
+    b.recordSkipped(7);
+    b.reset();
+    b.recordSkipped(3);
+    expect(b.skipped()).toBe(10);
+  });
+
+  it("re-trips after the same number of failures, so the retry stays bounded", () => {
+    // This is why the retry is not a bypass: a backend that really is refusing
+    // everything gets N more attempts, not one per held-back patch.
+    const b = createCommitBreaker(3);
+    for (const m of ["a", "b", "c"]) b.recordFailure(new Error(m));
+    b.reset();
+
+    b.recordFailure(new Error("d"));
+    b.recordFailure(new Error("e"));
+    expect(b.tripped()).toBe(false);
+    b.recordFailure(new Error("f"));
+    expect(b.tripped()).toBe(true);
+  });
+
+  it("lets a success during the retry keep it un-tripped", () => {
+    // The false-trip case: the held-back patches are fine, so they commit and
+    // the streak never rebuilds.
+    const b = createCommitBreaker(2);
+    b.recordFailure(new Error("a"));
+    b.recordFailure(new Error("b"));
+    b.reset();
+
+    b.recordFailure(new Error("c"));
+    b.recordSuccess();
+    b.recordFailure(new Error("d"));
+    expect(b.tripped()).toBe(false);
   });
 });
 

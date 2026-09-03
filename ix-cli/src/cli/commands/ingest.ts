@@ -718,14 +718,13 @@ export async function commitBulkWithPayloadSplit<T, R>(
   },
 ): Promise<void> {
   if (items.length === 0) return;
-  // Before the first request, so each half of a payload split is checked too:
-  // the recursion re-enters here, and a breaker that tripped while the first
-  // half was in the fallback must stop the second half being sent.
-  if (handlers.shouldStop?.()) {
-    handlers.onAbandoned?.(items);
-    return;
-  }
 
+  // Deliberately NO cutoff check before the bulk. One request per group is
+  // not the amplification -- the per-file fallback is, at one request per
+  // patch -- and sending it is the only way a backend that has recovered
+  // mid-run can prove it and let the rest of the ingest through. Skipping it
+  // was also strictly worse than useless: the group went to the deferred set
+  // and came back as N SERIALIZED per-file commits instead of one bulk.
   let result: R;
   try {
     result = await handlers.commitBulk(items);
@@ -1333,6 +1332,16 @@ export async function ingestFiles(
   // patch out of the per-file fallback. Stop after a streak instead.
   const commitBreaker = createCommitBreaker();
   /**
+   * Has the held-back retry already been spent and failed this run?
+   *
+   * `commitPreparedPatches` runs once per 500-file batch, so a per-call retry
+   * would pay the breaker's limit again in every batch -- ~200 doomed
+   * serialized commits on a 20,000-file repo rather than the handful this is
+   * supposed to cost. The retry exists to distinguish a dead backend from a
+   * few bad patches, and one run only needs to ask that once.
+   */
+  let cutoffRetrySpent = false;
+  /**
    * Ix#560. The cutoff gates WRITES, but the pipeline in front of them keeps
    * going: `reconcileRemovedEntities` issues per-file reads for every changed
    * file with a previous hash. On a large repo that walks the whole tree making
@@ -1341,17 +1350,6 @@ export async function ingestFiles(
    * Once the breaker has tripped, skip the reconcile: its only purpose is to
    * refine a patch that is no longer going to be sent.
    */
-  const reconcileWorthDoing = (): boolean => !commitBreaker.tripped();
-  /**
-   * The deletion phase runs after the file phase, so on a saturated backend the
-   * breaker is already latched before it starts -- every read it makes is for a
-   * patch the chunk guard is about to abandon. Guarding only the two patch-build
-   * loops and not this one is the omission that makes a guard read as complete
-   * when it is not.
-   */
-  const reconcileRemovedEntitiesIfWorthIt: typeof reconcileRemovedEntities = async (
-    c, patch, candidates, ...rest
-  ) => (reconcileWorthDoing() ? reconcileRemovedEntities(c, patch, candidates, ...rest) : patch);
   /**
    * The RUN deadline, captured here because `commitPreparedPatches` shadows
    * `opts` with its own. Not `isAbortError`: a per-request AbortSignal.timeout
@@ -1844,10 +1842,15 @@ export async function ingestFiles(
       // landed, they are left for the next run, which re-ingests them anyway
       // because the mtime baseline is not written on a run with commit errors.
       if (deferredByCutoff.length > 0) {
-        const held = deferredByCutoff.splice(0, deferredByCutoff.length);
-        await commitIndividuallyAfterCutoff(held);
-        // Held back AGAIN, by a breaker that had a fresh streak to judge on.
-        // These are the real errors.
+        if (!cutoffRetrySpent) {
+          const held = deferredByCutoff.splice(0, deferredByCutoff.length);
+          await commitIndividuallyAfterCutoff(held);
+          // If the retry ended with the breaker tripped again, the backend
+          // answered the question: it is not the patches. Do not ask once per
+          // batch for the rest of the run.
+          cutoffRetrySpent = commitBreaker.tripped();
+        }
+        // Held back again, or held back after the retry was already spent.
         if (deferredByCutoff.length > 0) {
           commitErrors += deferredByCutoff.length;
           commitBreaker.recordSkipped(deferredByCutoff.length);
@@ -1893,7 +1896,7 @@ export async function ingestFiles(
           try {
             const fileWorkspace = fileWorkspaceId(p.filePath);
             let patch = buildPatchFn!(p, hash, fileWorkspace, batchEdgesByFile.get(p.filePath) ?? emptyEdges, previousHash, fileMultiRepo(p.filePath));
-            if (previousHash && reconcileWorthDoing()) {
+            if (previousHash) {
               patch = await reconcileRemovedEntities(
                 client,
                 patch,
@@ -1972,7 +1975,7 @@ export async function ingestFiles(
           try {
             const fileWorkspace = fileWorkspaceId(p.filePath);
             let patch = buildPatchFn!(p, hash, fileWorkspace, edgesByFile.get(p.filePath) ?? emptyEdges, previousHash, fileMultiRepo(p.filePath));
-            if (previousHash && reconcileWorthDoing()) {
+            if (previousHash) {
               patch = await reconcileRemovedEntities(
                 client,
                 patch,
@@ -2269,7 +2272,7 @@ export async function ingestFiles(
             [],
             fileMultiRepo(relFilePath),
           );
-          patch = await reconcileRemovedEntitiesIfWorthIt(
+          patch = await reconcileRemovedEntities(
             client,
             patch,
             sourcePatchIdCandidates(relFilePath, previousHash, fileWorkspace),

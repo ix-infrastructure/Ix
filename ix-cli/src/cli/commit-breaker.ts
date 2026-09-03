@@ -29,10 +29,12 @@
 // accepting one: nothing about sending the next request differs from the last N.
 //
 // What the cutoff does NOT do is abandon work permanently. Patches it holds
-// back are retried once at the end of the run if the backend has meanwhile
-// accepted anything at all -- because five adjacent patches that the backend
-// rejects on their own merits look exactly like a dead backend until a later
-// chunk commits. Without that, the mtime baseline (never written on a run with
+// back are re-sent once per run through the same per-file loop, with the
+// breaker ACTIVE but its streak RESET -- because five adjacent patches the
+// backend rejects on their own merits look exactly like a dead backend until
+// the next patch commits, and only a fresh streak can tell them apart. A
+// backend that really is refusing everything trips again after N, so the retry
+// stays bounded. Without it, the mtime baseline (never written on a run with
 // commit errors) guarantees the next `ix map` re-ingests in the same order,
 // trips at the same point, and drops the same patches forever.
 //
@@ -46,13 +48,15 @@ const DEFAULT_LIMIT = 5;
 /** Consecutive failed commits before a run stops trying. 0 disables the cutoff. */
 export function commitFailureLimit(raw = process.env.IX_COMMIT_FAILURE_LIMIT): number {
   if (raw === undefined || raw === "") return DEFAULT_LIMIT;
-  // Number(), not parseInt(): parseInt stops at the first non-digit, so it read
-  // "0.5" as 0 -- silently DISABLING the cutoff -- and "1e3" as 1, tripping on
-  // the very first failure. Neither is what the caller asked for, and neither
-  // fell back to the documented default. 0 stays meaningful (never trip), so
-  // only a negative or non-integer value falls back.
+  // Matched, not coerced. `parseInt` stopped at the first non-digit, reading
+  // "0.5" as 0 -- silently DISABLING the cutoff, the opposite of a
+  // conservative fallback -- and "1e3" as 1, tripping on the very first
+  // failure. `Number` fixes those but accepts its own surprises: whitespace
+  // coerces to 0 (disabling it again) and "0x10" to 16. A plain-decimal match
+  // accepts exactly what the docs describe and falls back on everything else.
+  if (!/^\d+$/.test(raw.trim()) || raw.trim() !== raw) return DEFAULT_LIMIT;
   const n = Number(raw);
-  return Number.isInteger(n) && n >= 0 ? n : DEFAULT_LIMIT;
+  return Number.isSafeInteger(n) ? n : DEFAULT_LIMIT;
 }
 
 export interface CommitBreaker {

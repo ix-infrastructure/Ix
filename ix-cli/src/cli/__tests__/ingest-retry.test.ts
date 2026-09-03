@@ -257,29 +257,52 @@ describe('commitBulkWithPayloadSplit', () => {
     expect(commitIndividually).toHaveBeenCalledWith([1, 2, 3], error);
   });
 
-  it('sends nothing at all once the caller has given up', async () => {
-    const commitBulk = vi.fn(async () => 'ok');
+  it('still sends the BULK once the caller has given up, and only skips the fan-out', async () => {
+    // One request per group is not the amplification -- the fan-out is, at one
+    // per patch -- and it is the only way a backend that recovered mid-run can
+    // prove it. Skipping it was also strictly worse: the group came back as N
+    // serialized per-file commits via the retry instead of one bulk.
+    const commitBulk = vi.fn(async () => { throw new Error('500: still refusing'); });
+    const commitIndividually = vi.fn(async () => {});
     const onAbandoned = vi.fn();
 
     await commitBulkWithPayloadSplit([1, 2, 3], {
       commitBulk,
       onBulkCommitted: vi.fn(),
-      commitIndividually: vi.fn(async () => {}),
+      commitIndividually,
       shouldStop: () => true,
       onAbandoned,
     });
 
-    expect(commitBulk).not.toHaveBeenCalled();
-    expect(onAbandoned).toHaveBeenCalledWith([1, 2, 3]);
+    expect(commitBulk).toHaveBeenCalledOnce();
+    expect(commitIndividually).not.toHaveBeenCalled();
+    expect(onAbandoned).toHaveBeenCalled();
   });
 
-  it('checks again between the halves of a payload split', async () => {
-    // The split recurses through this function, so the entry check covers it.
-    // Without that, a breaker that tripped while the first half was in its
-    // fallback would still let the second half issue a real bulk commit.
+  it('lets a recovered backend commit the group even after the caller gave up', async () => {
+    // The reason the bulk is still sent: `shouldStop` says the RUN gave up, and
+    // this is how that decision gets revisited.
+    const commitBulk = vi.fn(async () => 'ok');
+    const onBulkCommitted = vi.fn();
+
+    await commitBulkWithPayloadSplit([1, 2, 3], {
+      commitBulk,
+      onBulkCommitted,
+      commitIndividually: vi.fn(async () => {}),
+      shouldStop: () => true,
+    });
+
+    expect(commitBulk).toHaveBeenCalledOnce();
+    expect(onBulkCommitted).toHaveBeenCalledOnce();
+  });
+
+  it('sends both halves of a payload split even after the caller gives up', async () => {
+    // Two bulk requests, not two fan-outs. Skipping the second half sent it to
+    // the retry as N serialized per-file commits, which is the amplification
+    // this cutoff exists to stop -- and denied a recovered backend the chance
+    // to commit it in one request.
     let stop = false;
     const sent: number[][] = [];
-    const onAbandoned = vi.fn();
 
     await commitBulkWithPayloadSplit([1, 2, 3, 4], {
       commitBulk: async (batch) => {
@@ -291,11 +314,10 @@ describe('commitBulkWithPayloadSplit', () => {
       onBulkCommitted: vi.fn(),
       commitIndividually: vi.fn(async () => {}),
       shouldStop: () => stop,
-      onAbandoned,
+      onAbandoned: vi.fn(),
     });
 
-    expect(sent).toEqual([[1, 2]]);              // the second half never sent
-    expect(onAbandoned).toHaveBeenCalledWith([3, 4]);
+    expect(sent).toEqual([[1, 2], [3, 4]]);
   });
 
   it('bisects a payload-too-large group without consulting shouldStop again mid-split', async () => {
