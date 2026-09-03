@@ -153,6 +153,7 @@ describe("describeCommitOutcome with a commit cutoff", () => {
     // sends the remaining seven, and none of them are "never sent".
     const out = describeCommitOutcome(12, 0, "--debug", false, 0, true);
     expect(out.kind).toBe("fatal");
+    if (out.kind === "ok") throw new Error("expected a message");
     expect(out.message).toContain("See the cutoff above for why");
     expect(out.message).not.toContain("to see why.");
     expect(out.message).not.toContain("never sent");
@@ -160,6 +161,7 @@ describe("describeCommitOutcome with a commit cutoff", () => {
 
   it("still names the unsent count when there is one", () => {
     const out = describeCommitOutcome(12, 0, "--debug", false, 3, true);
+    if (out.kind === "ok") throw new Error("expected a message");
     expect(out.message).toContain("3 of them never sent");
   });
 
