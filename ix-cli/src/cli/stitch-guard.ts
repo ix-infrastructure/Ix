@@ -359,9 +359,17 @@ function refuseForCooldown(cooldown: Cooldown, now: number): StitchAdmission {
   return {
     admitted: false,
     rule: "cooling",
+    // "stitches allowed again in", not "next attempt in". Nothing attempts one
+    // automatically: the stitch block is gated on nothing having been skipped
+    // as unchanged, this run has already persisted its mtime baseline, and the
+    // next map is incremental and never reaches it. Rounds 8, 10 and 12 each
+    // removed that same promise from a remedy string -- and this one matters
+    // more than those did, because it is what lands verbatim in
+    // `stitch_skipped` on the json and llm surfaces, where no remedy follows it.
     reason:
       `${how} and may still be running on the backend; ` +
-      `next attempt in ${formatMs(coolingUntil(cooldown) - now)} ` +
+      `stitches allowed again in ${formatMs(coolingUntil(cooldown) - now)}, ` +
+      `and \`ix ingest <root> --force\` is what re-registers ` +
       `(IX_STITCH_COOLDOWN_MS=0 disables)`,
   };
 }

@@ -393,7 +393,7 @@ async function loadStoredPatchEntities(
       if (entities) return entities;
       throw new Error(`Patch ${patchId} has no entity manifest`);
     } catch (err) {
-      if (!String(err).includes('404:')) throw err;
+      if (!isNotFoundError(err)) throw err;
     }
   }
   throw new Error('Previous source patch was not found');
@@ -462,7 +462,7 @@ export async function reconcileRemovedEntities(
         }
       }
     } catch (err) {
-      if (!String(err).includes('404:')) throw err;
+      if (!isNotFoundError(err)) throw err;
       // Already absent. Emitting the delete anyway keeps the patch a complete
       // statement of intent and costs nothing.
       removedNodeIds.push(nodeId);
@@ -855,6 +855,22 @@ function stitchFailureStatus(error: unknown): number | null {
 export function isStitchUnsupported(error: unknown): boolean {
   const status = stitchFailureStatus(error);
   return status === 404 || status === 501;
+}
+
+/**
+ * Is this "the backend does not have it", as opposed to any other failure?
+ *
+ * Anchored, the way `stitchFailureStatus` is. A bare
+ * `String(err).includes('404:')` was safe only while an unparseable body
+ * surfaced as V8's `SyntaxError`, which quotes about ten characters of input.
+ * `IxClient` now reports it as `"${status}: response body is not JSON: ..."`
+ * with a 200-character preview -- so a gateway answering 200 with an HTML error
+ * page whose title is `404: Not Found` matched, the error was swallowed as
+ * "absent", and `reconcileRemovedEntities` emitted a DeleteNode for a node that
+ * exists. That is the #528 proxy shape this file already cites twice.
+ */
+function isNotFoundError(error: unknown): boolean {
+  return /^(?:Error:\s*)?404:/.test(String(error));
 }
 
 /**
@@ -2385,7 +2401,19 @@ export async function ingestFiles(
     // Migration cleanup (Ix#225 gap 2): the re-ingest under the new path-based id has
     // committed, so delete the OLD id's now-orphaned nodes/edges/patches. Best-effort —
     // a failure here is non-fatal (orphans are harmless dead storage, cleanable later).
-    if (workspaceMigrated && previousWorkspaceId && ingestCompletedCleanly(parseErrors, commitErrors)) {
+    // `+ crashedParses()`, exactly as the baseline guard below. This one
+    // DELETES the old workspace's graph, so it must be at least as strict: a
+    // run whose parse pool died resolves every later file as null without
+    // raising `parseErrors`, so both guards saw a clean run while the new
+    // workspace held a half-populated graph -- and this one would drop the
+    // complete old one permanently. The two adjacent guards must not disagree
+    // about whether the run was clean, and the destructive one certainly must
+    // not be the laxer of the pair.
+    if (
+      workspaceMigrated &&
+      previousWorkspaceId &&
+      ingestCompletedCleanly(parseErrors + crashedParses(), commitErrors)
+    ) {
       try {
         await client.deleteWorkspace(previousWorkspaceId);
         if (debug) process.stderr.write(`  Cleaned up pre-migration nodes under ${previousWorkspaceId}.\n`);

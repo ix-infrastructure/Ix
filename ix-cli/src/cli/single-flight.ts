@@ -49,6 +49,12 @@ export interface LockHandle {
 function lockMaxMs(): number {
   const raw = process.env.IX_MAP_LOCK_MAX_MS;
   if (!raw) return DEFAULT_LOCK_MAX_MS;
+  // Matched, not parsed. `Number.parseInt` reads any prefix, so an operator
+  // following the env table and writing `20m` got TWENTY MILLISECONDS: every
+  // held lock reads as abandoned on the next process's first look, and
+  // single-flight goes inert for the map lock and the stitch lock alike. The
+  // stitch cooldown backstops one of those; the map lock has nothing.
+  if (!/^\d+$/.test(raw)) return DEFAULT_LOCK_MAX_MS;
   const n = Number.parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_LOCK_MAX_MS;
 }

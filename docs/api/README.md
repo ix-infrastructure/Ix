@@ -299,7 +299,7 @@ therefore only reliable on the paths that report back.
 A stitch that does not happen is reported as `stitchSkipped` in
 `ix ingest --format json`, as
 `stitch_skipped` in `ix map --format json` and `--format llm`, and as a
-`stitch_skipped` token on `ix map --silent`, so an automated consumer can tell it
+`stitch_skipped_rule=<rule>` token on `ix map --silent`, so an automated consumer can tell it
 apart from a clean run. It is not an error: it does not set a non-zero exit code
 and does not count towards `stitchErrors`, and the previous registration stands —
 the same position a stitch that *failed* already left the graph in.
@@ -730,14 +730,7 @@ interface IngestResult {
   filesSkipped?: number;
   entitiesCreated: number;
   latestRev: number;
-  skipReasons?: {
-    unchanged: number;          // skipped as mtime-/hash-unchanged, not every skip
-    emptyFile: number;
-    parseError: number;         // parse-stage failures, including non-skips
-    tooLarge: number;
-    minifiedLikely?: number;
-    unparsed?: number;          // the parse pool returned nothing for these
-  };
+  skipReasons?: { unchanged: number; emptyFile: number; parseError: number; tooLarge: number; minifiedLikely?: number };
 }
 ```
 
