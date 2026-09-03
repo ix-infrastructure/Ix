@@ -30,4 +30,4 @@ jobs:
           exit-code: 1
           scanners: vuln,misconfig
 
-  # Docker image scanning is handled in the private ix-memory-layer repo
+  # Docker image scanning is handled in the private Ix-memory repo

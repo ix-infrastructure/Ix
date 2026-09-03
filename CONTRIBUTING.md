@@ -155,15 +155,18 @@ All checks fail on CRITICAL or HIGH severity findings. If a check fails on your 
 The Scala memory-layer backend is developed in a separate, **private** repository
 (`ix-infrastructure/Ix-memory`). Its source is not publicly accessible, so cloning
 it is a maintainer-only step. Note that `ix-memory-layer` — the name used in the
-PR template, the release notes and `docker-compose.standalone.yml` — is the
-published *artifact*, not a repository you can clone.
+release notes, `docker-compose.standalone.yml` and the image path in
+`.github/workflows/` — is the published *artifact*, not a repository you can
+clone.
 
 **You do not need the backend source to work on this repository.** Everything in
 the `ix` CLI is developed against the published backend image, which is public and
 pullable anonymously. `./scripts/backend.sh up` in [Local Setup](#local-setup)
 starts it (`ghcr.io/ix-infrastructure/ix-memory-layer:latest` plus ArangoDB, on
-`127.0.0.1:8090` and `:8529`); see [docs/prerequisites.md](docs/prerequisites.md)
-for what it installs and which ports it opens.
+`127.0.0.1:8090` and `:8529`). It installs nothing itself — it runs
+`docker compose -f docker-compose.standalone.yml` against an already-installed
+Docker. What the `curl | sh` *installer* puts on the machine is a separate list:
+[docs/prerequisites.md](docs/prerequisites.md).
 
 If a change you want needs the backend itself — a new endpoint, a different
 response shape, a query that is too slow — open an issue here describing the CLI

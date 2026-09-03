@@ -17,7 +17,7 @@ name: Release
 #   and linux-arm64. Each platform must build its own native binding.
 #
 # Note: The Scala backend (memory-layer) is built and released separately
-# from the private ix-memory-layer repo. Docker images are pushed to
+# from the private Ix-memory repo. Docker images are pushed to
 # ghcr.io/ix-infrastructure/ix-memory-layer from that repo.
 # ─────────────────────────────────────────────────────────────────────────────
 
