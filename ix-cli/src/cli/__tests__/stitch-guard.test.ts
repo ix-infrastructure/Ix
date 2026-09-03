@@ -6,7 +6,6 @@ import { join } from "node:path";
 import {
   admitStitch,
   admitStitchWaiting,
-  answeredOkWithUnparseableBody,
   clearStitchCooldown,
   connectionNeverEstablished,
   cooldownPathForTest,
@@ -15,6 +14,7 @@ import {
 } from "../stitch-guard.js";
 import * as net from "node:net";
 import { createServer } from "node:http";
+import { IxClient } from "../../client/api.js";
 import { namedLockPath } from "../single-flight.js";
 
 const ENDPOINT = "http://localhost:8090";
@@ -464,13 +464,15 @@ describe("connectionNeverEstablished", () => {
   });
 });
 
-describe("answeredOkWithUnparseableBody", () => {
-  it("is true for a 2xx whose body is not JSON — the join finished", async () => {
-    // `IxClient.post` throws "${status}: ${text}" for every non-2xx and only
-    // reaches `resp.json()` after `resp.ok`, so a SyntaxError here can only
-    // mean the request SUCCEEDED and something rewrote the body -- the #528
-    // proxy shape. Without this the endpoint was blocked for fifteen minutes,
-    // for every workspace, over a stitch that provably completed.
+describe("a 2xx that still failed", () => {
+  it("is proof, because the request completed however unreadable the body", async () => {
+    // `IxClient` reports an unparseable body as "${status}: response body is
+    // not JSON: ...", so this is a fact about what the server said. Keying it
+    // on the SyntaxError's name instead -- which an earlier revision did --
+    // would have accepted a PROXY answering 200 with an HTML page on its own
+    // timeout, cleared the marker, and let the next map stack a second join
+    // onto the one still running. That is the #568 failure, from the one arm
+    // that could have caused it.
     const server = createServer((_req, res) => {
       res.writeHead(200, { "Content-Type": "text/html" });
       res.end("<html>proxy says hi</html>");
@@ -478,31 +480,33 @@ describe("answeredOkWithUnparseableBody", () => {
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as net.AddressInfo).port;
     try {
+      const client = new IxClient(`http://127.0.0.1:${port}`, undefined);
       let caught: unknown;
       try {
-        await (await fetch(`http://127.0.0.1:${port}/v1/stitch`, { method: "POST", body: "{}" })).json();
+        await client.stitch({ workspaceId: "w", provides: [], consumes: [], exports: [], symbolConsumes: [] } as never);
       } catch (err) {
         caught = err;
       }
-      expect((caught as { name?: string }).name).toBe("SyntaxError");
-      expect(answeredOkWithUnparseableBody(caught)).toBe(true);
+      // The status is IN the message, which is the whole point.
+      expect(String(caught)).toContain("200: response body is not JSON");
+      expect(outcomeProvesNothingRunning({ ok: false, elapsedMs: 5, status: 200 })).toBe(true);
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()));
     }
   });
 
-  it("is false for the errors that actually mean a join may be running", async () => {
-    expect(answeredOkWithUnparseableBody(new Error("500: gateway timeout"))).toBe(false);
-    expect(answeredOkWithUnparseableBody(Object.assign(new Error("x"), { name: "TimeoutError" }))).toBe(false);
-    expect(answeredOkWithUnparseableBody(new TypeError("fetch failed"))).toBe(false);
-  });
-
   it("clears the marker, so a rewritten 200 does not block the endpoint", () => {
     const a = admitStitch(ENDPOINT);
     expect(a.admitted).toBe(true);
-    if (a.admitted) a.settle({ ok: false, elapsedMs: 40, status: null, answeredOk: true });
+    if (a.admitted) a.settle({ ok: false, elapsedMs: 40, status: 200 });
     expect(existsSync(cooldownPathForTest(ENDPOINT))).toBe(false);
     expect(admitted(ENDPOINT)).toBe(true);
+  });
+
+  it("still keeps the marker for the failures that mean a join may be running", () => {
+    expect(outcomeProvesNothingRunning({ ok: false, elapsedMs: 5, status: 500 })).toBe(false);
+    expect(outcomeProvesNothingRunning({ ok: false, elapsedMs: 5, status: 408 })).toBe(false);
+    expect(outcomeProvesNothingRunning({ ok: false, elapsedMs: 5, status: null })).toBe(false);
   });
 });
 

@@ -1042,12 +1042,25 @@ components:
         latestRev: { type: integer }
         skipReasons:
           type: object
+          description: >-
+            unchanged, emptyFile, minifiedLikely and unparsed are the buckets
+            that are subsets of filesSkipped; parseError and tooLarge are
+            counted separately.
           properties:
-            unchanged: { type: integer }
+            unchanged:
+              type: integer
+              description: Skipped as mtime- or hash-unchanged, not every skip.
             emptyFile: { type: integer }
-            parseError: { type: integer }
+            parseError:
+              type: integer
+              description: >-
+                Parse-stage failures, including stat, read and patch-build
+                errors that are not skips.
             tooLarge: { type: integer }
             minifiedLikely: { type: integer }
+            unparsed:
+              type: integer
+              description: Files the parse pool returned nothing for.
     NodeCreationResult:
       type: object
       properties:

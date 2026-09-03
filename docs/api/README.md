@@ -330,11 +330,17 @@ has the registration data to send, having only parsed what changed. A run that
 re-ingests every file (`ix ingest <root> --force`, a post-reset re-map) is what
 picks it back up.
 
-The gate counts only files skipped **as unchanged**. It used to be the whole
-`filesSkipped` total, which also counts zero-byte files, ones that look minified
-and ones the parser returned nothing for — none of which have anything to
-contribute to the registration, so their absence does not make the collected set
-partial. Counting them meant a single empty `__init__.py` disqualified a repo from
+The gate counts files skipped **as unchanged**, plus parses lost to a **crashed
+worker**. It used to be the whole `filesSkipped` total, which also counts
+zero-byte files, ones that look minified, and ones the parser simply returned
+nothing for — none of which have anything to contribute to the registration, so
+their absence does not make the collected set partial. That last class matters:
+fourteen tree-sitter grammars are optional dependencies, and a file whose grammar
+did not build (`tree-sitter-sas` has no win32 prebuild) comes back unparsed on
+*every* run, `--force` included, so counting it blocked stitching permanently for
+any repo containing one. A crashed parse worker is different — it lost a file we
+would have indexed — and `ParsePool.crashedTasks()` is what the gate reads for
+it. Counting them meant a single empty `__init__.py` disqualified a repo from
 stitching permanently, `--force` included: the run printed nothing, exited 0, and
 left the cross-repo edges stale, while the message above advertised `--force` as
 the way to fix it. `skipReasons.unchanged` in `--format json` is now that narrower

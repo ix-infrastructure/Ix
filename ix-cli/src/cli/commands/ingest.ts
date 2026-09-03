@@ -18,12 +18,7 @@ import { loadIngestionModules } from './ingestion-loader.js';
 import { ensureWorkspaceIdState } from '../bootstrap.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
-import {
-  admitStitchWaiting,
-  answeredOkWithUnparseableBody,
-  connectionNeverEstablished,
-  type StitchRefusal,
-} from '../stitch-guard.js';
+import { admitStitchWaiting, connectionNeverEstablished, type StitchRefusal } from '../stitch-guard.js';
 import { readBackendHealth } from './upgrade.js';
 import { SUPPORTED_EXTENSIONS } from '../supported-extensions.js';
 import { canRenderProgress } from '../stderr.js';
@@ -1246,6 +1241,12 @@ export async function ingestFiles(
     '../../../../core-ingestion/dist/parse-worker.js',
   );
   let pool: ParsePool | null = null;
+  /**
+   * In-flight parses lost to a crashed worker, read where the pool is still in
+   * scope. A function rather than a read at the use site because control-flow
+   * narrowing makes `pool` `never` down there.
+   */
+  const crashedParses = (): number => (pool === null ? 0 : pool.crashedTasks());
   const ensureParsePool = (): ParsePool => {
     if (pool) return pool;
     pool = new ParsePool(workerPath, Math.max(1, os.cpus().length - 1));
@@ -1350,13 +1351,21 @@ export async function ingestFiles(
   /**
    * Files the parse pool returned nothing for.
    *
-   * These belong with `filesSkippedAsUnchanged` in the stitch gate and NOT with
-   * the empty and minified skips, because unlike those they are not a property
-   * of the file: `ParsePool` resolves `null` both for a reported parse failure
-   * and for the in-flight task of a worker that CRASHED, and neither increments
-   * `parseErrors`. So a `--force` run where one worker OOMs would otherwise
-   * stitch a registration missing that file's exports over the complete one --
-   * a transient crash silently shrinking the cross-repo graph.
+   * Reported, but NOT part of the stitch gate -- `ParsePool.crashedTasks()` is.
+   * `parse()` resolves `null` for two different things and only one of them
+   * makes the run incomplete:
+   *
+   *   - `parseFile` returned null, which is deterministic and means the file
+   *     has nothing to give. The dominant cause is an unavailable optional
+   *     grammar -- fourteen are optionalDependencies loaded through a try/catch,
+   *     and `tree-sitter-sas` has no win32 prebuild at all -- and those
+   *     extensions are still in SUPPORTED_EXTENSIONS, so the files are
+   *     discovered, read, dispatched and come back null on EVERY run. Gating on
+   *     this count blocked stitching permanently for any repo containing one,
+   *     `--force` included, since forcing does not change a parse result. That
+   *     is the empty-`__init__.py` bug again with a different file class.
+   *   - a worker CRASHED with the task in flight, which is transient and did
+   *     lose a file we would have indexed. That one belongs in the gate.
    *
    * Reported as `skipReasons.unparsed`, its own bucket: `parseError` counts
    * every parse-stage failure including stat, read and patch-build errors, most
@@ -1500,11 +1509,24 @@ export async function ingestFiles(
 
     // Stat all files and partition into mtime-clean (skip) and mtime-changed (need hash check).
     const mtimeChangedPaths: string[] = [];
+    /**
+     * Paths this loop has already accounted for as a skip.
+     *
+     * Recorded explicitly rather than inferred from `currentMtimes`. The loop
+     * leaves a path out of that map in three cases -- empty, oversized, and
+     * `statSync` THREW -- and only the first two are counted here. So a file
+     * that errored on the first stat and then read as size 0 on the second (a
+     * transient lock, an antivirus scan, a file recreated underneath us) was
+     * treated as already counted and landed in no bucket at all: absent from
+     * the graph, from `filesSkipped` and from every `skipReasons` entry, which
+     * is precisely what the check that reads this exists to prevent.
+     */
+    const accountedByStatLoop = new Set<string>();
     for (const filePath of filePaths) {
       try {
         const st = fs.statSync(filePath);
-        if (st.size === 0) { filesSkipped++; filesSkippedAsEmpty++; progressCurrent++; continue; }
-        if (st.size > MAX_FILE_BYTES) { tooLarge++; progressCurrent++; continue; }
+        if (st.size === 0) { filesSkipped++; filesSkippedAsEmpty++; accountedByStatLoop.add(filePath); progressCurrent++; continue; }
+        if (st.size > MAX_FILE_BYTES) { tooLarge++; accountedByStatLoop.add(filePath); progressCurrent++; continue; }
         const mtime = st.mtimeMs;
         currentMtimes.set(filePath, mtime);
         if (!opts.force && !forceReingestPaths.has(filePath) && mtimeCache.get(filePath) === mtime) {
@@ -2108,17 +2130,20 @@ export async function ingestFiles(
               // `skipReasons.emptyFile` stopped being hardcoded to 0 and
               // reported 2 for a repo with one empty `__init__.py`.
               //
-              // `currentMtimes` is exactly that record: the stat loop `continue`s
-              // before writing it for a file it rejected, so a path still in the
-              // map is one the loop PASSED. Reaching here for such a file means
-              // it changed between the two stats -- truncated, or grown past the
-              // cap -- and it must be counted, or it vanishes from the graph,
-              // from `filesSkipped` and from every `skipReasons` bucket at once.
+              // `accountedByStatLoop` is exactly that record. It is a set the
+              // loop writes deliberately, not `currentMtimes` read backwards:
+              // that map also omits files whose `statSync` THREW, which the loop
+              // counts as a parse error and not as a skip, so inferring from it
+              // treated those as already counted. Reaching here for a file the
+              // loop passed means it changed between the two stats -- truncated,
+              // or grown past the cap -- and it must be counted, or it vanishes
+              // from the graph, from `filesSkipped` and from every `skipReasons`
+              // bucket at once.
               //
               // The check itself is not optional either way: it is the fstat on
               // the handle we are about to read, which is what makes the size cap
               // TOCTOU-free (CodeQL js/file-system-race).
-              const countedByStatLoop = !currentMtimes.has(absFilePath);
+              const countedByStatLoop = accountedByStatLoop.has(absFilePath);
               if (st.size === 0) {
                 if (!countedByStatLoop) { filesSkipped++; filesSkippedAsEmpty++; }
                 return;
@@ -2297,11 +2322,13 @@ export async function ingestFiles(
     // declarations. The broad total also includes empty and minified-looking
     // files, which contribute nothing under any run, so one empty `__init__.py`
     // used to disqualify a repo from ever stitching, with or without `--force`.
-    // A file the parser returned nothing for is NOT in that category and is
-    // counted here: a crashed pool worker resolves its in-flight task as null
-    // without raising `parseErrors`, and stitching then would overwrite a
-    // complete registration with one missing that file's exports.
-    const registrationIsComplete = filesSkippedAsUnchanged === 0 && filesSkippedUnparsed === 0;
+    // A CRASHED parse worker is in that category and is counted here: it
+    // resolves its in-flight task as null without raising `parseErrors`, and
+    // stitching then would overwrite a complete registration with one missing
+    // that file's exports. A file `parseFile` simply returned null for is not --
+    // that is deterministic, usually an unavailable optional grammar, and
+    // gating on it blocked stitching forever for any repo containing one.
+    const registrationIsComplete = filesSkippedAsUnchanged === 0 && crashedParses() === 0;
     if (stitchEnabled && registrationIsComplete && stitchFiles.length > 0 && ingestCompletedCleanly(parseErrors, commitErrors)) {
       try {
         const entry = pickEntryFile(stitchFiles);
@@ -2382,7 +2409,6 @@ export async function ingestFiles(
                 // socket dropped after the request went out -- leaves it.
                 status: stitchFailureStatus(err),
                 neverConnected: connectionNeverEstablished(err),
-                answeredOk: answeredOkWithUnparseableBody(err),
               });
               throw err;
             }

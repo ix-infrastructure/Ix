@@ -558,7 +558,7 @@ export class IxClient {
       const text = await resp.text();
       throw new Error(`${resp.status}: ${text}`);
     }
-    return resp.json() as Promise<T>;
+    return parseOrThrowWithStatus<T>(resp);
   }
 
   private async get<T>(path: string): Promise<T> {
@@ -569,6 +569,28 @@ export class IxClient {
       const text = await resp.text();
       throw new Error(`${resp.status}: ${text}`);
     }
-    return resp.json() as Promise<T>;
+    return parseOrThrowWithStatus<T>(resp);
+  }
+}
+
+/**
+ * Read a 2xx body as JSON, keeping the status in the error if it will not parse.
+ *
+ * A bare `resp.json()` rejects with a `SyntaxError` that says nothing about
+ * what the server answered, so a caller could only infer "it must have been a
+ * 2xx, because a non-2xx would have thrown above" -- an inference this codebase
+ * has no business making, since the whole premise of Ix#528 and Ix#568 is that
+ * whatever proxy sits in front spells things the way it likes, up to and
+ * including a 200 with an HTML error page. Stating the status turns that
+ * inference into a fact the error carries, and it matches the `${status}: ...`
+ * shape every other failure here already uses.
+ */
+async function parseOrThrowWithStatus<T>(resp: Response): Promise<T> {
+  const text = await resp.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    const preview = text.length > 200 ? `${text.slice(0, 200)}…` : text;
+    throw new Error(`${resp.status}: response body is not JSON: ${preview}`);
   }
 }
