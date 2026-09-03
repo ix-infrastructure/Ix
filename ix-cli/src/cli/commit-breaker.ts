@@ -56,7 +56,12 @@ export function commitFailureLimit(raw = process.env.IX_COMMIT_FAILURE_LIMIT): n
   // accepts exactly what the docs describe and falls back on everything else.
   if (!/^\d+$/.test(raw.trim()) || raw.trim() !== raw) return DEFAULT_LIMIT;
   const n = Number(raw);
-  return Number.isSafeInteger(n) ? n : DEFAULT_LIMIT;
+  // A plain-decimal value too large to be exact is still an unambiguous
+  // instruction: "effectively never trip". Falling back to the default gave
+  // them the TIGHTEST cutoff instead -- the opposite of what they asked for,
+  // and the one direction where guessing wrong loses writes.
+  if (!Number.isSafeInteger(n)) return Number.MAX_SAFE_INTEGER;
+  return n;
 }
 
 export interface CommitBreaker {
@@ -224,50 +229,77 @@ export function perFileAction(state: {
   return "send";
 }
 
+/** Failures one drain pass absorbs before it gives up and hands back the rest. */
+export function drainFailureBudget(limit = commitFailureLimit()): number {
+  return Math.max(1, limit);
+}
+
+/** What one pass of the drain achieved. */
+export interface DrainPass<T> {
+  /** Did the backend accept at least one patch during this pass? */
+  placed: boolean;
+  /** Items the pass never attempted, in the order it would have taken them. */
+  unreached: T[];
+}
+
 /**
  * Walk a held-back set, changing direction each time the budget stops it.
  *
- * A single bounded pass cannot avoid stranding good patches. `attempt` stops
- * after a fixed number of failures, so any run of failures longer than that
- * budget ends the pass wherever it happens to be and leaves everything past it
- * unattempted -- and unattempted means reported as a commit error, which
- * suppresses the mtime baseline, which makes the next `ix map` re-ingest in the
- * same order and reproduce the same outcome. Those patches never land.
+ * The guarantee: **a patch is only ever handed back unsent once two passes in
+ * opposite directions have each placed nothing.** Everything else is attempted.
  *
- * Reversing helps with ONE cluster of bad patches and only one: the fan-out
- * stopped inside a cluster, so walking from the far end puts the good patches
- * first. With two clusters the reversed walk meets the second one and strands
- * everything behind it exactly as before.
+ * Two rules get there, and each exists because the other one alone is wrong.
  *
- * Changing direction on each stop fixes that, because the region a pass could
- * not reach is approached from its other end next time. Two clusters need two
- * passes, three need three, and `maxPasses` bounds the doomed requests at
- * roughly `maxPasses x budget`.
+ * A pass stops after `budget` indicting failures, so it can end anywhere and
+ * hand back everything past that point -- and handed back means reported as a
+ * commit error, which suppresses the mtime baseline, which makes the next
+ * `ix map` repeat the same order and strand the same patches forever. So the
+ * next pass approaches the region it could not reach from the OTHER end, which
+ * is what stops one cluster of bad patches from hiding the good ones behind it.
  *
- * What ends it is a pass that REACHED THE END, or the pass cap. Note what is
- * deliberately NOT a stopping condition: a pass that placed nothing. An earlier
- * revision treated that as proof the backend was dead, and it is not -- a pass
- * that spent its whole budget inside a leading cluster of bad patches has
- * produced no evidence at all about the region it never reached. With
- * `[good x 400, bad x 15]` and a budget of 10, the reversed first pass met the
- * bad patches immediately, placed nothing, and stranded all 400 good ones
- * unsent. Only reaching the end is evidence about the whole set.
+ * What ends it is the drain having placed NOTHING AT ALL after trying both
+ * directions. Nothing weaker survives:
  *
- * That is why `maxPasses` is the bound that matters and why the per-pass budget
- * is the breaker's limit rather than twice it: a genuinely dead backend now
- * always costs `maxPasses x budget` doomed requests, so the product is the
- * number to keep small. `createDrainGate` stops this repeating per batch.
+ *   - "a pass placed nothing" is not evidence. A pass that spent its whole
+ *     budget inside a leading cluster has said nothing about the region it
+ *     never reached, and treating it as proof stranded 400 committable patches.
+ *   - "two passes in a row placed nothing" is not evidence either, which is
+ *     less obvious. Held `[b x 5, g x 400, b x 10, h x 485]` at a budget of 5:
+ *     the first pass places 485 and stops inside the second cluster, the next
+ *     two each spend their whole budget on a cluster now sitting at the start
+ *     of their direction, and the 400 good patches between them are handed back
+ *     unsent -- on a backend that had just accepted 485 writes.
+ *
+ * One patch landing anywhere in the drain settles the only question being
+ * asked. After that the failures are about the patches, and every remaining
+ * one deserves its turn.
+ *
+ * What this deliberately does NOT have is a pass cap. A cap sounds like the
+ * safe choice and is the opposite: it bounds the walk at `passes x budget`
+ * failing patches -- 15 at the shipped numbers -- and hands back every
+ * committable patch beyond that unsent, which is a net loss against `main` on a
+ * backend that is accepting writes. Measured on the earlier capped version: a
+ * 1,000-patch held set with 20 scattered bad patches placed 686 and stranded
+ * 294. Termination does not need a cap, because a pass that continues has
+ * attempted at least `budget` items, so `unreached` strictly shrinks.
+ *
+ * The cost of no cap is bounded by the same argument: every pass after the
+ * first either ends the walk or placed something, so the doomed requests are
+ * `2 x budget` on a dead backend and the successful ones are the patches
+ * themselves -- exactly what `main` would have sent, and no more.
  */
 export async function drainInPasses<T>(
   held: readonly T[],
-  attempt: (items: T[]) => Promise<T[]>,
-  maxPasses = 3,
+  attempt: (items: T[]) => Promise<DrainPass<T>>,
 ): Promise<T[]> {
   let pending = [...held].reverse();
+  let placedAnything = false;
   for (let pass = 1; pending.length > 0; pass++) {
-    const unreached = await attempt(pending);
+    const { placed, unreached } = await attempt(pending);
     if (unreached.length === 0) return [];
-    if (pass >= maxPasses) return unreached;
+    placedAnything ||= placed;
+    // Both directions tried, nothing accepted: the backend, not the patches.
+    if (!placedAnything && pass >= 2) return unreached;
     pending = [...unreached].reverse();
   }
   return [];
@@ -380,13 +412,23 @@ export function describeCommitCutoff(
   // run gave up at any point, and the drain may since have placed every patch
   // it held. Claiming it stopped would then be false on the one line whose job
   // is saying what happened.
+  const n = breaker.skipped();
   const unsent =
-    breaker.skipped() === 0 || deadlineHit
+    n === 0
       ? []
-      : [
-          `  ${breaker.skipped()} ${breaker.skipped() === 1 ? "patch was" : "patches were"} not sent — sending them one at a`,
-          `  time would have added load to a backend that is already the reason they fail.`,
-        ];
+      : deadlineHit
+        // The deadline branch of `describeCommitOutcome` reports the whole
+        // commit-error total as abandoned by the clock, and it is printed right
+        // after this. Saying "sending them would have added load to a backend
+        // that is already the reason they fail" beside it is two answers to one
+        // question -- but dropping the line entirely handed the cutoff's share
+        // to the clock and pointed the reader at IX_MAP_DEADLINE_MS for patches
+        // deliberately withheld from a refusing backend. Name the split.
+        ? [`  ${n} of them ${n === 1 ? "was" : "were"} withheld by this cutoff before the run ran out of time.`]
+        : [
+            `  ${n} ${n === 1 ? "patch was" : "patches were"} not sent — sending them one at a`,
+            `  time would have added load to a backend that is already the reason they fail.`,
+          ];
   return [
     `Error: Commits against ${endpoint} kept failing, so ix stopped fanning out one request per patch.`,
     ...unsent,

@@ -22,6 +22,7 @@ import {
   createCommitBreaker,
   createDrainGate,
   describeCommitCutoff,
+  drainFailureBudget,
   drainInPasses,
   perFileAction,
 } from '../commit-breaker.js';
@@ -1904,7 +1905,8 @@ export async function ingestFiles(
        * commit errors -- makes the next run repeat the same order, stop at the
        * same point, and drop the same patches forever.
        */
-      const commitIndividuallyAfterCutoff = async (items: PreparedPatch[]): Promise<void> => {
+      /** Re-send the held set; returns how many it could not place. */
+      const commitIndividuallyAfterCutoff = async (items: PreparedPatch[]): Promise<number> => {
         if (debug) {
           process.stderr.write(
             `\n  [cutoff] re-sending ${items.length} held-back patches with a fresh streak\n`,
@@ -1917,20 +1919,25 @@ export async function ingestFiles(
         //
         // The budget is the limit itself, not twice it. Twice was chosen to
         // walk out of a cluster in ONE pass; `drainInPasses` walks out of it by
-        // changing direction instead, and since a genuinely dead backend now
-        // always costs `maxPasses x budget` doomed requests, the budget is the
-        // half of that product worth keeping small.
+        // changing direction instead. `drainFailureBudget` is shared with the
+        // tests, which previously asserted the stranding guarantee at a budget
+        // the CLI never runs at and so could not see it fail.
         const leftover = await drainInPasses(items, async pending => {
           commitBreaker.reset();
+          const tookBefore = patchesTheBackendTook;
           await commitItemsSerially(pending, recordDrainMs, undefined, {
-            failureBudget: Math.max(1, commitBreaker.limit),
+            failureBudget: drainFailureBudget(commitBreaker.limit),
           });
           // Whatever the budget did not reach was pushed straight back onto the
           // held list by the per-file loop; take it back out so the next pass
           // owns it and the caller does not see it twice.
-          return deferredByCutoff.splice(0, deferredByCutoff.length);
+          return {
+            placed: patchesTheBackendTook > tookBefore,
+            unreached: deferredByCutoff.splice(0, deferredByCutoff.length),
+          };
         });
         deferredByCutoff.push(...leftover);
+        return leftover.length;
       };
 
       const runChunk = async (ci: number): Promise<void> => {
@@ -2040,12 +2047,19 @@ export async function ingestFiles(
         if (!runDeadlineExpired() && drainGate.shouldDrain(patchesTheBackendTook)) {
           const held = deferredByCutoff.splice(0, deferredByCutoff.length);
           const tookBefore = patchesTheBackendTook;
-          await commitIndividuallyAfterCutoff(held);
-          // Placing NOTHING is the only evidence that means "the backend".
-          // Whether the drain ended tripped says nothing useful: one that
-          // commits hundreds and then meets the tail of a bad cluster ends
+          const stranded = await commitIndividuallyAfterCutoff(held);
+          // A miss means the backend took nothing AND the drain gave up with
+          // work left. A drain that attempted everything and had it all
+          // refused for per-patch reasons is not evidence the backend is dead:
+          // `commitFailureIndictsBackend` excludes payload-too-large, so a held
+          // set of oversized generated files reaches the end of its pass having
+          // placed nothing, and counting that as a miss twice closed the gate
+          // on a backend that never refused a write.
+          //
+          // Whether the drain ended tripped says nothing useful either: one
+          // that commits hundreds and then meets the tail of a bad cluster ends
           // tripped too.
-          drainGate.record(patchesTheBackendTook > tookBefore, patchesTheBackendTook);
+          drainGate.record(patchesTheBackendTook > tookBefore || stranded === 0, patchesTheBackendTook);
         }
         // Held back again, or held back after the retry was already spent.
         if (deferredByCutoff.length > 0) {

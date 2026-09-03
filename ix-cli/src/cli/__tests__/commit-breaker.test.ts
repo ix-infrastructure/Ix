@@ -4,6 +4,7 @@ import {
   createCommitBreaker,
   createDrainGate,
   describeCommitCutoff,
+  drainFailureBudget,
   drainInPasses,
   perFileAction,
 } from "../commit-breaker.js";
@@ -23,6 +24,13 @@ describe("commitFailureLimit", () => {
     // IX_COMMIT_FAILURE_LIMIT=0 silently keep the cutoff, so a user who needs
     // every patch attempted has no way to say so.
     expect(commitFailureLimit("0")).toBe(0);
+  });
+
+  it("reads an absurdly large value as 'never trip', not as the default", () => {
+    // It matches /^\d+$/ and the intent is unmistakable. Falling back gave them
+    // the TIGHTEST cutoff instead -- the one direction where guessing wrong
+    // loses writes.
+    expect(commitFailureLimit("99999999999999999999")).toBe(Number.MAX_SAFE_INTEGER);
   });
 
   it("falls back on a value that is not a non-negative integer", () => {
@@ -254,25 +262,31 @@ describe("perFileAction", () => {
 
 describe("drainInPasses", () => {
   /**
-   * A driver that stands in for the per-file loop: `bad` is the set of items
-   * the backend refuses, `budget` is how many refusals a pass absorbs before it
-   * gives up and hands back everything it did not reach.
+   * A driver standing in for the per-file loop.
+   *
+   * The budget defaults to `drainFailureBudget()` -- the number `ingest.ts`
+   * actually passes -- and every test below uses it. An earlier version of this
+   * file hardcoded 10 while the CLI ran at 5, so the stranding guarantee was
+   * asserted only in a regime that does not exist and a review found it failing
+   * in the one that does.
    */
-  function driver(bad: ReadonlySet<string>, budget: number) {
+  function driver(bad: ReadonlySet<string>, budget = drainFailureBudget()) {
     const sent: string[] = [];
     const placed: string[] = [];
-    const attempt = async (items: string[]): Promise<string[]> => {
+    const attempt = async (items: string[]) => {
       let left = budget;
+      let placedHere = 0;
       for (let i = 0; i < items.length; i++) {
         sent.push(items[i]);
         if (bad.has(items[i])) {
           left--;
-          if (left <= 0) return items.slice(i + 1);
+          if (left <= 0) return { placed: placedHere > 0, unreached: items.slice(i + 1) };
         } else {
           placed.push(items[i]);
+          placedHere++;
         }
       }
-      return [];
+      return { placed: placedHere > 0, unreached: [] };
     };
     return { attempt, sent, placed };
   }
@@ -280,129 +294,98 @@ describe("drainInPasses", () => {
   const range = (prefix: string, n: number): string[] =>
     Array.from({ length: n }, (_, i) => `${prefix}${i + 1}`);
 
+  it("uses the budget the CLI passes", () => {
+    // The whole point of sharing this: a test that picks its own budget can
+    // pass while the shipped configuration loses writes.
+    expect(drainFailureBudget(commitFailureLimit())).toBe(5);
+    expect(drainFailureBudget(0)).toBe(1);
+  });
+
   it("walks the whole set from the far end when nothing fails", async () => {
-    const d = driver(new Set(), 10);
+    const d = driver(new Set());
     expect(await drainInPasses(["a", "b", "c"], d.attempt)).toEqual([]);
     // Reversed: the fan-out stopped INSIDE whatever run of bad patches tripped
     // it, so the rest of that run is the first thing in the held set.
     expect(d.sent).toEqual(["c", "b", "a"]);
   });
 
-  it("bounds a dead backend at maxPasses x budget doomed requests", async () => {
-    // The amplification #560 is about. Every pass stops on its budget and none
-    // of them reaches the end, so the pass cap is what ends it.
+  it("stops a dead backend after two passes, one per direction", async () => {
+    // The amplification #560 is about. Neither direction places anything, and
+    // that pair is the only evidence here that means "the backend".
     const held = range("p", 500);
-    const d = driver(new Set(held), 10);
-    const leftover = await drainInPasses(held, d.attempt, 3);
+    const d = driver(new Set(held));
+    const leftover = await drainInPasses(held, d.attempt);
 
-    expect(d.sent).toHaveLength(30);
-    expect(leftover).toHaveLength(470);
+    expect(d.sent).toHaveLength(2 * drainFailureBudget());
+    expect(leftover).toHaveLength(500 - 2 * drainFailureBudget());
   });
 
   it("does not treat a pass that placed nothing as proof, when it stopped EARLY", async () => {
-    // The revision before this one did, and it is the same mistake in a new
-    // place: a pass that spent its whole budget inside a LEADING cluster has
-    // produced no evidence at all about the region it never reached.
-    //
     // Held [g1..g400, b1..b15] reverses to [b15..b1, g400..g1], so the first
-    // pass meets the bad patches immediately, places nothing, and -- under the
-    // old rule -- returned there, reporting all 400 committable patches as
-    // errors without sending one. The mtime baseline is not written on a run
-    // with commit errors, so the next `ix map` reproduced it exactly, forever.
+    // pass meets the bad patches immediately and places nothing. Stopping there
+    // reported all 400 committable patches as errors without sending one, and
+    // since the mtime baseline is not written on a run with commit errors the
+    // next `ix map` reproduced it exactly, forever.
     const held = [...range("g", 400), ...range("b", 15)];
-    const d = driver(new Set(range("b", 15)), 10);
+    const d = driver(new Set(range("b", 15)));
 
     expect(await drainInPasses(held, d.attempt)).toEqual([]);
     expect(d.placed).toHaveLength(400);
   });
 
   it("strands nothing when the bad patches form TWO clusters", async () => {
-    // The case a single bounded pass cannot do, in either direction. Held:
-    // [b1..b5, g1..g400, b6..b15, g401..g885]. Reversed, the pass commits
-    // g885..g401, spends its whole budget on b15..b6, and leaves g400..g1
-    // unattempted -- 400 committable patches reported as errors and, because
-    // the mtime baseline is not written on a run with commit errors, re-tried
-    // in the same order and stranded again on every later run.
     const bad = [...range("b", 15)];
-    const held = [
-      ...bad.slice(0, 5),
-      ...range("g", 400),
-      ...bad.slice(5),
-      ...range("h", 485),
-    ];
-    const d = driver(new Set(bad), 10);
-
-    const leftover = await drainInPasses(held, d.attempt);
-
-    expect(leftover).toEqual([]);
-    // Every good patch was placed -- that is the whole claim.
-    expect(d.placed).toHaveLength(885);
-    expect(new Set(d.placed)).toEqual(new Set([...range("g", 400), ...range("h", 485)]));
-  });
-
-  it("changes direction, so a cluster LONGER than the budget cannot strand the rest", async () => {
-    // This is what the flip is for, and the previous test does not need it:
-    // there the pass stopped with good patches next in line, so walking on in
-    // the same direction reached them anyway.
-    //
-    // A cluster longer than one budget is different. The pass spends all 10 of
-    // its budget inside it and hands back a remainder that STARTS with the rest
-    // of the same cluster, so a second pass in the same direction spends the
-    // next 10 in the same place, places nothing, and quits -- stranding the 400
-    // good patches sitting behind it.
-    const held = [...range("g", 400), ...range("B", 25), ...range("h", 485)];
-    const d = driver(new Set(range("B", 25)), 10);
+    const held = [...bad.slice(0, 5), ...range("g", 400), ...bad.slice(5), ...range("h", 485)];
+    const d = driver(new Set(bad));
 
     expect(await drainInPasses(held, d.attempt)).toEqual([]);
     expect(d.placed).toHaveLength(885);
   });
 
-  it("caps the passes, so a pathological set cannot walk forever", async () => {
-    // Alternating clusters give a fresh stop on every pass. The cap is what
-    // keeps the doomed requests at roughly maxPasses x budget.
-    const bad = new Set(range("b", 60));
-    const held = Array.from({ length: 120 }, (_, i) => (i % 2 === 0 ? `b${i / 2 + 1}` : `g${i}`));
-    const d = driver(bad, 4);
+  it("strands nothing for a cluster LONGER than the budget", async () => {
+    const held = [...range("g", 400), ...range("B", 25), ...range("h", 485)];
+    const d = driver(new Set(range("B", 25)));
 
-    await drainInPasses(held, d.attempt, 3);
+    expect(await drainInPasses(held, d.attempt)).toEqual([]);
+    expect(d.placed).toHaveLength(885);
+  });
 
-    expect(d.sent.length).toBeLessThanOrEqual(3 * held.length);
-    // Three passes were taken, not two and not four.
-    expect(d.sent.filter(x => x === held[held.length - 1])).toHaveLength(1);
+  it("strands nothing with FAR more bad patches than any pass cap would allow", async () => {
+    // The case a pass cap could not survive, and the reason there is no longer
+    // one. Capped at three passes of five, the walk could get past at most 15
+    // failing patches; a 1,000-patch held set with 20 scattered bad ones placed
+    // 686 and handed back 294 committable patches unsent -- a net loss against
+    // `main`, which fans out and commits all 980.
+    const bad = new Set(range("b", 20));
+    const held = Array.from({ length: 1000 }, (_, i) =>
+      i % 50 === 49 ? `b${Math.floor(i / 50) + 1}` : `g${i}`,
+    );
+    const d = driver(bad);
+
+    const leftover = await drainInPasses(held, d.attempt);
+
+    expect(leftover).toEqual([]);
+    expect(d.placed.filter(x => !bad.has(x))).toHaveLength(980);
+    // And it costs no more requests than `main` would have sent.
+    expect(d.sent.length).toBeLessThanOrEqual(held.length);
+  });
+
+  it("strands nothing when clusters alternate with the budget the whole way", async () => {
+    const bad = new Set(range("b", 24));
+    const held = [
+      ...Array.from({ length: 4 }, (_, k) => [...range("g", 50).map(x => `${x}_${k}`), ...range("b", 6).map((_, i) => `b${k * 6 + i + 1}`)]).flat(),
+      ...range("z", 50),
+    ];
+    const d = driver(bad);
+
+    expect(await drainInPasses(held, d.attempt)).toEqual([]);
+    expect(d.placed.filter(x => !bad.has(x))).toHaveLength(250);
   });
 
   it("does not call the backend at all for an empty held set", async () => {
-    const d = driver(new Set(), 10);
+    const d = driver(new Set());
     expect(await drainInPasses([], d.attempt)).toEqual([]);
     expect(d.sent).toEqual([]);
-  });
-});
-
-describe("noteError", () => {
-  it("updates the quoted error without touching the streak", () => {
-    // A bulk abandoned while the breaker is already tripped is the only thing
-    // a later batch does on a dead backend -- the per-file loop it would
-    // otherwise reach is exactly what the trip skips. Without this the banner
-    // quotes batch 1's error for the whole run: five timeouts, then nineteen
-    // batches rejected with "Invalid message body", and the user is still told
-    // the database is busy. One bulk is one request, though, not N, so it must
-    // not advance the streak.
-    const b = createCommitBreaker(5);
-    b.recordFailure(new Error("TimeoutError"));
-    expect(b.consecutiveFailures()).toBe(1);
-
-    b.noteError(new Error("500: Invalid message body"));
-
-    expect(String(b.lastError())).toContain("Invalid message body");
-    expect(b.consecutiveFailures()).toBe(1);
-    expect(b.tripped()).toBe(false);
-  });
-
-  it("cannot trip the breaker on its own, however many times it is called", () => {
-    const b = createCommitBreaker(2);
-    for (let i = 0; i < 50; i++) b.noteError(new Error("x"));
-    expect(b.tripped()).toBe(false);
-    expect(b.everTripped()).toBe(false);
   });
 });
 
@@ -546,8 +529,13 @@ describe("describeCommitCutoff", () => {
     b.recordSkipped(400);
 
     const msg = describeCommitCutoff(b, "e", 0, true);
-    expect(msg).not.toContain("not sent");
+    expect(msg).not.toContain("added load");
     expect(msg).toContain("transaction begin timeout");
+    // But it still NAMES the count. Dropping the line entirely handed the
+    // cutoff's 400 to the clock, and the deadline message that prints next
+    // points at IX_MAP_DEADLINE_MS -- the wrong fix for patches deliberately
+    // withheld from a refusing backend.
+    expect(msg).toContain("400 of them were withheld by this cutoff");
     expect(describeCommitCutoff(b, "e", 0, false)).toContain("400 patches were not sent");
   });
 
