@@ -245,11 +245,17 @@ join:
   up waiting says nothing about whether the backend did;
 * the backend answered **501**, which is how this codebase already spells "no
   `/v1/stitch` here" (`isStitchUnsupported` accepts 404 or 501);
-* the connection was never established (`ECONNREFUSED`, `ENOTFOUND`,
-  `EAI_AGAIN`), so no bytes reached the backend. Deliberately narrower than "a
-  transport error": a socket dropped *after* the request went out
-  (`UND_ERR_SOCKET`) is the ambiguous case — an upstream that restarted killed
-  its join, a proxy that hung up did not — and keeps the marker.
+* the connection was never established, so no bytes reached the backend.
+  Decided by the **syscall** Node stamps on the underlying error — `connect` or
+  `getaddrinfo` — with a small errno set (`ECONNREFUSED`, `ENOTFOUND`,
+  `ENETUNREACH`, `EHOSTUNREACH`, `EAI_AGAIN`) and undici's
+  `UND_ERR_CONNECT_TIMEOUT` alongside it, and a walk into `AggregateError.errors`
+  because a multi-address host like `localhost` — the default endpoint — reports
+  a refusal that way. Deliberately narrower than "a transport error": a socket
+  dropped *after* the request went out (`UND_ERR_SOCKET`) is the ambiguous case
+  — an upstream that restarted killed its join, a proxy that hung up did not —
+  and keeps the marker. A read/write `ETIMEDOUT` is excluded for the same
+  reason; a connect-phase one is caught by the syscall.
 
 Everything else — a 5xx, a timeout, an abort, a socket dropped mid-flight, or
 the process being killed before it could report anything — leaves the marker in

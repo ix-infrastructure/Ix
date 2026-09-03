@@ -195,16 +195,47 @@ function readCooldown(endpoint: string): Cooldown | null {
  * happens after the request went out, so it is exactly the ambiguous case this
  * guard exists for -- an upstream that restarted killed its join, a proxy that
  * dropped the connection did not, and both spell the same code.
+ *
+ * The walk descends into `AggregateError.errors` as well as `.cause`, and the
+ * errno set is kept alongside the syscall rule rather than replaced by it. That
+ * is not belt and braces: a multi-address host -- which `localhost` is, and it
+ * is this CLI's DEFAULT endpoint -- fails happy-eyeballs with
+ *
+ *   AggregateError { code: "ECONNREFUSED", syscall: undefined, cause: undefined,
+ *                    errors: [ {ECONNREFUSED, connect}, {ECONNREFUSED, connect} ] }
+ *
+ * so a syscall-only rule that walks only `.cause` answers false for the single
+ * most common way this fires. Verified by execution: `http://localhost:8099`
+ * takes that shape, `http://127.0.0.1:8099` and `http://[::1]:8099` do not.
+ * Tests that used a literal IP could not see the difference.
  */
 export function connectionNeverEstablished(error: unknown): boolean {
-  // Walk the cause chain: undici nests, and a wrapper may add a level later.
-  for (let e: unknown = error, depth = 0; e !== null && e !== undefined && depth < 5; depth++) {
-    const { syscall, code } = e as { syscall?: unknown; code?: unknown };
+  // Codes that only ever arise before any byte is sent. `ETIMEDOUT` is
+  // deliberately absent -- it is a connect timeout OR a retransmission timeout
+  // long after the request left -- and is picked up by the syscall rule when it
+  // is the former.
+  const PRE_CONNECT = new Set([
+    "ECONNREFUSED",
+    "ENOTFOUND",
+    "ENETUNREACH",
+    "EHOSTUNREACH",
+    "EAI_AGAIN",
+    "UND_ERR_CONNECT_TIMEOUT",
+  ]);
+
+  // Depth-capped rather than cycle-tracked: undici nests two or three levels and
+  // an AggregateError adds one, so the cap is what stops a pathological chain.
+  const seen = (e: unknown, depth: number): boolean => {
+    if (e === null || e === undefined || depth > 5) return false;
+    const { syscall, code, cause, errors } = e as {
+      syscall?: unknown; code?: unknown; cause?: unknown; errors?: unknown;
+    };
     if (syscall === "connect" || syscall === "getaddrinfo") return true;
-    if (code === "UND_ERR_CONNECT_TIMEOUT") return true;
-    e = (e as { cause?: unknown }).cause;
-  }
-  return false;
+    if (typeof code === "string" && PRE_CONNECT.has(code)) return true;
+    if (Array.isArray(errors) && errors.some(inner => seen(inner, depth + 1))) return true;
+    return seen(cause, depth + 1);
+  };
+  return seen(error, 0);
 }
 
 /** How the stitch attempt ended, as the guard needs to see it. */

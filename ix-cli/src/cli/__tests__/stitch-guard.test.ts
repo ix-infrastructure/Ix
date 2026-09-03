@@ -364,6 +364,43 @@ describe("connectionNeverEstablished", () => {
     expect(connectionNeverEstablished(await failureOf(`http://127.0.0.1:${port}/v1/stitch`))).toBe(true);
   });
 
+  it("is true for a closed port on a MULTI-ADDRESS host, which localhost is", async () => {
+    // The default endpoint is `http://localhost:8090`, and localhost resolves to
+    // both ::1 and 127.0.0.1 -- so happy-eyeballs wraps the refusal in an
+    // AggregateError with the real errors under `.errors`, no `.cause`, and no
+    // `syscall` of its own. Every other test here uses a literal IP, which takes
+    // the plain-Error shape and cannot see the difference; a syscall-only rule
+    // walking only `.cause` answered false for the single commonest way this
+    // fires, and a backend that was merely down took the full 15-minute
+    // cooldown for a request that never left the machine.
+    const err = await failureOf("http://localhost:8099/v1/stitch");
+    const cause = (err as { cause?: { name?: string; syscall?: unknown } }).cause;
+    expect(cause?.name, "the shape this test exists for").toBe("AggregateError");
+    expect(cause?.syscall, "no syscall of its own — that is the trap").toBeUndefined();
+    expect(connectionNeverEstablished(err)).toBe(true);
+  });
+
+  it("reads the sub-errors when the AggregateError carries no code of its own", () => {
+    // The live localhost case above happens to set `code` on the aggregate too,
+    // because both addresses failed the same way -- so the errno set alone
+    // catches it and the descent into `.errors` is not what saves it there.
+    // This is the case where the descent IS decisive: addresses that failed
+    // DIFFERENTLY, leaving nothing at the top to key on. Both sub-errors are
+    // still connect-phase, so nothing was sent either way.
+    //
+    // Built rather than driven: producing it needs a host resolving to one
+    // unroutable and one refused address, which I could not arrange. The
+    // sub-error shape is the one observed live against localhost.
+    const aggregate = Object.assign(new AggregateError([
+      Object.assign(new Error("connect ECONNREFUSED ::1:8090"), { code: "ECONNREFUSED", syscall: "connect" }),
+      Object.assign(new Error("connect ENETUNREACH 127.0.0.1:8090"), { code: "ENETUNREACH", syscall: "connect" }),
+    ], "")); // no `code`, no `syscall`
+    const err = Object.assign(new TypeError("fetch failed"), { cause: aggregate });
+
+    expect((aggregate as { code?: unknown }).code).toBeUndefined();
+    expect(connectionNeverEstablished(err)).toBe(true);
+  });
+
   it("is true for an unroutable address — a neighbouring errno, same phase", async () => {
     // 240.0.0.1 is reserved, so the stack refuses to route to it: ENETUNREACH
     // with syscall "connect". An enumerated code list missed exactly this, and
