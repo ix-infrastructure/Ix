@@ -309,15 +309,30 @@ describe("drainInPasses", () => {
     expect(d.sent).toEqual(["c", "b", "a"]);
   });
 
-  it("stops a dead backend after two passes, one per direction", async () => {
-    // The amplification #560 is about. Neither direction places anything, and
-    // that pair is the only evidence here that means "the backend".
+  it("stops a dead backend after three passes — tail, head, middle", async () => {
+    // The amplification #560 is about. Three samples, none of them placing
+    // anything, is the bar; two only ever cover the ends.
     const held = range("p", 500);
     const d = driver(new Set(held));
     const leftover = await drainInPasses(held, d.attempt);
 
-    expect(d.sent).toHaveLength(2 * drainFailureBudget());
-    expect(leftover).toHaveLength(500 - 2 * drainFailureBudget());
+    expect(d.sent).toHaveLength(3 * drainFailureBudget());
+    expect(leftover).toHaveLength(500 - 3 * drainFailureBudget());
+  });
+
+  it("strands nothing when clusters sit at BOTH ends of the held set", async () => {
+    // Two passes can only sample the two ends, so `[b x 5, g x 400, B x 10]`
+    // defeated the previous rule outright: the tail pass walks into B, the head
+    // pass into b, neither places anything, and all 400 committable patches
+    // between them were handed back unsent -- on a healthy backend, and then
+    // repeated on every later run, since the mtime baseline is not written when
+    // a run has commit errors. The third pass starts in the middle.
+    const bad = new Set([...range("b", 5), ...range("B", 10)]);
+    const held = [...range("b", 5), ...range("g", 400), ...range("B", 10)];
+    const d = driver(bad);
+
+    expect(await drainInPasses(held, d.attempt)).toEqual([]);
+    expect(d.placed).toHaveLength(400);
   });
 
   it("does not treat a pass that placed nothing as proof, when it stopped EARLY", async () => {

@@ -257,22 +257,35 @@ export interface DrainPass<T> {
  * next pass approaches the region it could not reach from the OTHER end, which
  * is what stops one cluster of bad patches from hiding the good ones behind it.
  *
- * What ends it is the drain having placed NOTHING AT ALL after trying both
- * directions. Nothing weaker survives:
+ * What ends it is THREE passes -- tail, head, middle -- that between them place
+ * nothing at all. Each weaker rule strands committable patches, and each one
+ * shipped here before the next was found:
  *
  *   - "a pass placed nothing" is not evidence. A pass that spent its whole
  *     budget inside a leading cluster has said nothing about the region it
- *     never reached, and treating it as proof stranded 400 committable patches.
- *   - "two passes in a row placed nothing" is not evidence either, which is
- *     less obvious. Held `[b x 5, g x 400, b x 10, h x 485]` at a budget of 5:
- *     the first pass places 485 and stops inside the second cluster, the next
- *     two each spend their whole budget on a cluster now sitting at the start
- *     of their direction, and the 400 good patches between them are handed back
- *     unsent -- on a backend that had just accepted 485 writes.
+ *     never reached, and this stranded 400 committable patches.
+ *   - "two passes in a row placed nothing" is not evidence either. Held
+ *     `[b x 5, g x 400, b x 10, h x 485]`: the first pass places 485 and stops
+ *     inside the second cluster, and the next two each spend their budget on a
+ *     cluster now at the start of their direction -- 400 good patches between
+ *     them handed back on a backend that had just taken 485 writes.
+ *   - "two passes, nothing placed in the whole drain" is not evidence EITHER,
+ *     and this is the one that is genuinely hard to see. Held
+ *     `[b x 5, g x 400, B x 10]`: pass one walks from the tail into `B`, pass
+ *     two from the head into `b`, both spend their whole budget without
+ *     placing, and the 400 between are stranded. Two passes only ever sample
+ *     the two ENDS.
  *
- * One patch landing anywhere in the drain settles the only question being
- * asked. After that the failures are about the patches, and every remaining
+ * So the third pass starts in the MIDDLE. Three samples -- both ends and the
+ * centre -- all placing nothing is the bar, and one patch landing anywhere
+ * clears it: after that the failures are about the patches, and every remaining
  * one deserves its turn.
+ *
+ * The residue is stated rather than hidden: a held set with `budget` consecutive
+ * indicting failures at the head, the tail AND the midpoint still gives up with
+ * work left. That needs fifteen bad patches in three specific places, and the
+ * alternative -- never giving up -- costs the whole held set on a dead backend,
+ * which is what `main` already does and what #560 is about.
  *
  * What this deliberately does NOT have is a pass cap. A cap sounds like the
  * safe choice and is the opposite: it bounds the walk at `passes x budget`
@@ -303,15 +316,24 @@ export async function drainInPasses<T>(
   held: readonly T[],
   attempt: (items: T[]) => Promise<DrainPass<T>>,
 ): Promise<T[]> {
+  /** Start the walk at the midpoint, so a pass samples neither end. */
+  const fromTheMiddle = <U,>(items: U[]): U[] => {
+    const half = items.length >> 1;
+    return [...items.slice(half), ...items.slice(0, half)];
+  };
+
   let pending = [...held].reverse();
-  let placedAnything = false;
-  for (let pass = 1; pending.length > 0; pass++) {
+  let emptyPasses = 0;
+  while (pending.length > 0) {
     const { placed, unreached } = await attempt(pending);
     if (unreached.length === 0) return [];
-    placedAnything ||= placed;
-    // Both directions tried, nothing accepted: the backend, not the patches.
-    if (!placedAnything && pass >= 2) return unreached;
+    emptyPasses = placed ? 0 : emptyPasses + 1;
+    // Tail, head and middle have all placed nothing: the backend, not the
+    // patches. Fewer samples than that only ever cover the ends.
+    if (emptyPasses >= 3) return unreached;
     pending = [...unreached].reverse();
+    // The third attempt is the one that has to avoid both ends.
+    if (emptyPasses === 2) pending = fromTheMiddle(pending);
   }
   return [];
 }

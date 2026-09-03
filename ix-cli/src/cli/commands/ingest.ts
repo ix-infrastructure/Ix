@@ -1916,7 +1916,8 @@ export async function ingestFiles(
        * same point, and drop the same patches forever.
        */
       /** Re-send the held set. What it cannot place is left on `deferredByCutoff`. */
-      const commitIndividuallyAfterCutoff = async (items: PreparedPatch[]): Promise<void> => {
+      const commitIndividuallyAfterCutoff = async (itemsIn: PreparedPatch[]): Promise<void> => {
+        let items = itemsIn;
         if (debug) {
           process.stderr.write(
             `\n  [cutoff] re-sending ${items.length} held-back patches with a fresh streak\n`,
@@ -1954,24 +1955,43 @@ export async function ingestFiles(
         // Ix#516 shape -- over the proxy's body limit or Arango's transaction
         // cap -- which would fail and drop everything to the serialized
         // per-file path the probe exists to avoid.
-        const holdsADeletion = items.some(item => patchRequiresPerFileCommit(item.patch));
-        if (items.length > 1 && items.length <= COMMIT_HTTP_MAX_FILES && !holdsADeletion) {
+        // PARTITIONED, not skipped wholesale. `reconcileRemovedEntities`
+        // prepends a delete op to any re-mapped file that lost an entity, so an
+        // ordinary incremental map's held set almost always contains one --
+        // gating the probe all-or-nothing on that meant it never ran in the
+        // case it was written for. The deletions fall through to the passes,
+        // which commit them one at a time as their routing requires.
+        const bulkable = items.filter(item => !patchRequiresPerFileCommit(item.patch));
+        if (bulkable.length > 1 && bulkable.length <= COMMIT_HTTP_MAX_FILES) {
+          const bulkStart = performance.now();
           try {
-            const bulkStart = performance.now();
             const result = await retryOnConflict(
-              () => client.commitPatchBulk(items.map(item => item.patch)),
+              () => client.commitPatchBulk(bulkable.map(item => item.patch)),
               COMMIT_CONFLICT_RETRIES,
             );
-            recordDrainMs(Math.round(performance.now() - bulkStart));
+            const ms = Math.round(performance.now() - bulkStart);
+            recordDrainMs(ms);
+            timings.bulkCommitMs += ms;
             latestRev = advanceRev(latestRev, result.rev);
-            patchesApplied += items.length;
-            patchesTheBackendTook += items.length;
+            patchesApplied += bulkable.length;
+            patchesTheBackendTook += bulkable.length;
             commitBreaker.recordSuccess();
-            for (const item of items) opts?.onCommitted?.(item, result.rev);
-            if (debug) process.stderr.write(`  [cutoff] one bulk placed all ${items.length}\n`);
-            return;
+            for (const item of bulkable) opts?.onCommitted?.(item, result.rev);
+            if (debug) process.stderr.write(`  [cutoff] one bulk placed ${bulkable.length} of ${items.length}
+`);
+            const rest = items.filter(item => patchRequiresPerFileCommit(item.patch));
+            if (rest.length === 0) return;
+            items = rest;
           } catch (bulkErr) {
-            if (debug) process.stderr.write(`  [cutoff] bulk retry failed, falling back to passes: ${bulkErr}\n`);
+            // Record the time either way. The FAILING probe is the expensive
+            // one -- a saturated backend answers with a per-request timeout,
+            // multiplied by the conflict retries -- so dropping it hid minutes
+            // from the reported commit total on exactly the run this targets.
+            const ms = Math.round(performance.now() - bulkStart);
+            recordDrainMs(ms);
+            timings.bulkCommitMs += ms;
+            if (debug) process.stderr.write(`  [cutoff] bulk probe failed, falling back to passes: ${bulkErr}
+`);
           }
         }
         // A budget, not the breaker's streak: the held set can begin with the
@@ -1998,7 +2018,12 @@ export async function ingestFiles(
             unreached: deferredByCutoff.splice(0, deferredByCutoff.length),
           };
         });
-        deferredByCutoff.push(...leftover);
+        // A loop, not a spread. `flushAll` hands `commitPreparedPatches` every
+        // parsed file in the repo, so `leftover` is bounded only by the repo
+        // size, and spreading an array past V8's argument limit throws a
+        // RangeError from inside the commit phase -- an uncaught throw that
+        // loses the whole batch's error accounting.
+        for (const item of leftover) deferredByCutoff.push(item);
       };
 
       const runChunk = async (ci: number): Promise<void> => {
@@ -2043,7 +2068,7 @@ export async function ingestFiles(
             commitIndividually,
             shouldStop: () => commitBreaker.tripped(),
             onAbandoned: (items, err) => {
-              deferredByCutoff.push(...items);
+              for (const item of items) deferredByCutoff.push(item);
               // Keep the quoted error current. This is the only place a bulk
               // failure is seen once the breaker has tripped -- the per-file
               // loop it would otherwise reach is exactly what the trip skips --
