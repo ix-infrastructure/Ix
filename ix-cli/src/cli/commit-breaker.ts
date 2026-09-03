@@ -287,6 +287,13 @@ export interface DrainPass<T> {
  * alternative -- never giving up -- costs the whole held set on a dead backend,
  * which is what `main` already does and what #560 is about.
  *
+ * `mayGiveUp` narrows even that. Sampling is a way of GUESSING whether the
+ * backend is alive, and it is only needed while that is unknown: a caller whose
+ * batch has already had patches accepted knows the answer, passes false, and
+ * gets the no-stranding guarantee outright. The residue is then confined to a
+ * batch in which the backend accepted nothing at all -- which is very close to
+ * saying it really is dead.
+ *
  * What this deliberately does NOT have is a pass cap. A cap sounds like the
  * safe choice and is the opposite: it bounds the walk at `passes x budget`
  * failing patches -- 15 at the shipped numbers -- and hands back every
@@ -315,6 +322,22 @@ export interface DrainPass<T> {
 export async function drainInPasses<T>(
   held: readonly T[],
   attempt: (items: T[]) => Promise<DrainPass<T>>,
+  /**
+   * May this give up with work left?
+   *
+   * False when the caller already knows the backend is taking writes -- it has
+   * accepted patches earlier in this same batch -- because then the trip that
+   * produced this held set was a false positive about the BACKEND, whatever it
+   * was right about regarding the patches. Giving up there can only strand
+   * something a working backend would have taken, and no sampling rule makes
+   * that safe: the residue below is real, and this removes it for every case
+   * where the answer is already known.
+   *
+   * The cost of not giving up is one request per held patch, which is what
+   * `main` sends anyway. The cost of giving up wrongly is a patch missing from
+   * the graph on every subsequent run.
+   */
+  mayGiveUp = true,
 ): Promise<T[]> {
   /** Start the walk at the midpoint, so a pass samples neither end. */
   const fromTheMiddle = <U,>(items: U[]): U[] => {
@@ -330,7 +353,7 @@ export async function drainInPasses<T>(
     emptyPasses = placed ? 0 : emptyPasses + 1;
     // Tail, head and middle have all placed nothing: the backend, not the
     // patches. Fewer samples than that only ever cover the ends.
-    if (emptyPasses >= 3) return unreached;
+    if (mayGiveUp && emptyPasses >= 3) return unreached;
     pending = [...unreached].reverse();
     // The third attempt is the one that has to avoid both ends.
     if (emptyPasses === 2) pending = fromTheMiddle(pending);

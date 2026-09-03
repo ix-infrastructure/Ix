@@ -418,6 +418,27 @@ describe("drainInPasses", () => {
     expect(new Set(d.sent).size).toBe(d.sent.length);
   });
 
+  it("cannot give up at all when the caller knows the backend is alive", async () => {
+    // Sampling is a way of GUESSING whether the backend is taking writes, and a
+    // caller whose batch has already had patches accepted knows the answer. It
+    // passes false and gets the no-stranding guarantee outright, whatever the
+    // clusters look like -- which is what confines the three-sample residue to a
+    // batch that placed nothing at all.
+    //
+    // Driven against a backend refusing everything, because that is the case
+    // where the two differ most starkly and the numbers are exact.
+    const held = range("p", 200);
+    const dead = new Set(held);
+
+    const giving = driver(dead);
+    expect(await drainInPasses(held, giving.attempt, true)).not.toEqual([]);
+    expect(giving.sent, "three samples, then it stops").toHaveLength(3 * drainFailureBudget());
+
+    const persisting = driver(dead);
+    expect(await drainInPasses(held, persisting.attempt, false)).toEqual([]);
+    expect(persisting.sent, "every held patch attempted, none handed back").toHaveLength(200);
+  });
+
   it("does not call the backend at all for an empty held set", async () => {
     const d = driver(new Set());
     expect(await drainInPasses([], d.attempt)).toEqual([]);

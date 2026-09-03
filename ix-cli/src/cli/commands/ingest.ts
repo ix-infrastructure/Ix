@@ -1678,6 +1678,8 @@ export async function ingestFiles(
        * backend has meanwhile proved it accepts writes -- see the drain below.
        */
       const deferredByCutoff: PreparedPatch[] = [];
+      /** `patchesTheBackendTook` when this batch began -- see `backendIsKnownAlive`. */
+      const tookAtBatchStart = patchesTheBackendTook;
       /** Held by the run deadline rather than the cutoff -- see the branch below. */
       const deferredByDeadline: PreparedPatch[] = [];
 
@@ -2004,6 +2006,12 @@ export async function ingestFiles(
         // changing direction instead. `drainFailureBudget` is shared with the
         // tests, which previously asserted the stranding guarantee at a budget
         // the CLI never runs at and so could not see it fail.
+        // The give-up is only on the table while it is unknown whether the
+        // backend is taking writes. If this batch has already had patches
+        // accepted, the trip that produced this held set was a false positive
+        // about the BACKEND, and sampling could only strand something a working
+        // backend would have taken.
+        const backendIsKnownAlive = patchesTheBackendTook > tookAtBatchStart;
         const leftover = await drainInPasses(items, async pending => {
           commitBreaker.reset();
           const tookBefore = patchesTheBackendTook;
@@ -2017,7 +2025,7 @@ export async function ingestFiles(
             placed: patchesTheBackendTook > tookBefore,
             unreached: deferredByCutoff.splice(0, deferredByCutoff.length),
           };
-        });
+        }, !backendIsKnownAlive);
         // A loop, not a spread. `flushAll` hands `commitPreparedPatches` every
         // parsed file in the repo, so `leftover` is bounded only by the repo
         // size, and spreading an array past V8's argument limit throws a
