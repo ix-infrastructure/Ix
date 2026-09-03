@@ -1380,6 +1380,8 @@ export async function ingestFiles(
    * few bad patches, and one run only needs to ask that once.
    */
   let cutoffRetrySpent = false;
+  /** Consecutive drains that placed nothing. Two is the bar for giving up. */
+  let cutoffRetryMisses = 0;
   /**
    * The RUN deadline, captured here because `commitPreparedPatches` shadows
    * `opts` with its own. Not `isAbortError`: a per-request AbortSignal.timeout
@@ -1769,7 +1771,12 @@ export async function ingestFiles(
                 // tree, which is a different problem from a file we could not
                 // read. Reporting it as a parse error hid that distinction in
                 // both the summary and the JSON contract.
-                budgetLeft--;
+                // Only failures that indict the BACKEND spend the budget --
+                // the same filter the breaker uses. A payload-too-large is
+                // about that one patch, and letting a handful of oversized
+                // generated files exhaust the drain would strand hundreds of
+                // perfectly committable patches on a healthy backend.
+                if (commitFailureIndictsBackend(commitErr, runDeadlineExpired())) budgetLeft--;
                 if (isReplay) {
                   // Confirmed landed by the server's own 409 body. A failed
                   // re-send loses no write, so counting it would let the cutoff
@@ -1872,7 +1879,13 @@ export async function ingestFiles(
             },
             commitIndividually,
             shouldStop: () => commitBreaker.tripped(),
-            onAbandoned: items => { deferredByCutoff.push(...items); },
+            onAbandoned: items => {
+              // Snapshot here too. Setting it only on the per-file hold left
+              // the bulk path falling back to the run total, which is the
+              // overstatement the snapshot exists to prevent.
+              appliedAtCutoff ??= patchesApplied;
+              deferredByCutoff.push(...items);
+            },
             patchIdOf: item => item.patch.patchId,
             onPartialBulk: (landed, missing, err) => {
               if (!debug) return;
@@ -1927,7 +1940,13 @@ export async function ingestFiles(
           // so a ten-second hiccup 17 batches later had its held patches
           // counted as errors, unsent, against a backend visibly taking
           // writes. Committing nothing is the only evidence that means it.
-          cutoffRetrySpent = patchesApplied === appliedBefore;
+          // One drain placing nothing is not proof for the whole run: a
+          // few-second fast-rejecting blip achieves it, and latching then
+          // strands a later batch's held patches with no retry at all. Two
+          // in a row is the evidence worth acting on.
+          if (patchesApplied === appliedBefore) cutoffRetryMisses++;
+          else cutoffRetryMisses = 0;
+          cutoffRetrySpent = cutoffRetryMisses >= 2;
         }
         // Held back again, or held back after the retry was already spent.
         if (deferredByCutoff.length > 0) {

@@ -216,9 +216,9 @@ export function describeCommitCutoff(
   // both. Claiming a run of N in a row that the run may never have seen is a
   // misstatement on the one line whose whole job is saying what the backend did.
   return [
-    `Error: Stopped committing against ${endpoint} after ${breaker.limit} failures with nothing accepted.`,
-    `  ${breaker.skipped()} further ${breaker.skipped() === 1 ? "patch was" : "patches were"} not sent —`,
-    `  they would have failed the same way and added load to a backend that is already the reason.`,
+    `Error: Stopped committing against ${endpoint} after repeated failures.`,
+    `  ${breaker.skipped()} ${breaker.skipped() === 1 ? "patch was" : "patches were"} not sent — sending them one at a`,
+    `  time would have added load to a backend that is already the reason they fail.`,
     `  Last error: ${trimmed}`,
     `  ${state} Re-run \`ix map\` once the backend is healthy; if \`ix doctor\` passes,`,
     `  check the database itself (an ArangoDB that cannot begin a transaction is reachable and consistent).`,

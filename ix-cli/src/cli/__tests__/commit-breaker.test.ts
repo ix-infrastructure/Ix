@@ -219,14 +219,14 @@ describe("describeCommitCutoff", () => {
     // The configured limit, not the live streak: requests already in flight when
     // the breaker tripped keep landing and keep incrementing it, so the streak
     // is whatever the race produced and does not match IX_COMMIT_FAILURE_LIMIT.
+    // Deliberately no count in the headline. The fan-out stops on a streak of
+    // `limit`, the end-of-run retry on a budget of `2 * limit`, and this banner
+    // prints for both -- so any single number it names is wrong for one of them.
     b.recordFailure(new Error("a straggler that landed after the decision"));
-    expect(describeCommitCutoff(b, "e")).toContain("after 2 failures");
-    // Not "consecutive": the fan-out stops on a streak but the end-of-run retry
-    // stops on a total budget, and this banner prints for both.
     expect(msg).not.toContain("consecutive");
-    expect(msg).toContain("after 2 failures");
+    expect(msg).toContain("after repeated failures");
     expect(msg).toContain("http://localhost:8090");
-    expect(msg).toContain("17 further patches were not sent");
+    expect(msg).toContain("17 patches were not sent");
     expect(msg).toContain("transaction begin timeout");
     expect(msg).toContain("IX_COMMIT_FAILURE_LIMIT=0");
   });
@@ -249,7 +249,7 @@ describe("describeCommitCutoff", () => {
     const one = createCommitBreaker(1);
     one.recordFailure(new Error("x"));
     one.recordSkipped(1);
-    expect(describeCommitCutoff(one, "e")).toContain("1 further patch was not sent");
+    expect(describeCommitCutoff(one, "e")).toContain("1 patch was not sent");
   });
 
   it("truncates a long body rather than pasting an HTML error page into the summary", () => {
