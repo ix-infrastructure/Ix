@@ -46,6 +46,14 @@ export class ParsePool {
     const w = new Worker(this.workerPath);
     w.on('message', (msg: { ok: boolean; result: unknown }) => this.onResult(w, msg));
     w.on('error', (err) => this.onError(w, err));
+    // 'exit' as well as 'error'. A worker can go without ever emitting 'error'
+    // -- `process.exit()` inside it, or the thread killed out from under the
+    // runtime -- and then its in-flight task never resolves, the `Promise.all`
+    // over the parse batch never settles, and the ingest hangs before it can
+    // even reach `destroy()`. `onError` already covers the crash path; this
+    // covers the quiet one, and both feed `crashedTasks()` so the stitch gate
+    // sees a run that lost a file either way.
+    w.on('exit', () => this.onError(w, new Error('parse worker exited')));
     this.workers.push(w);
     this.idle.push(w);
     return w;

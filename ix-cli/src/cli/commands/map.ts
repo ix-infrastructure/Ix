@@ -540,7 +540,17 @@ Examples:
         // for actually see. A skipped stitch deliberately does not move the exit
         // code -- without a token here an automated consumer cannot tell a clean
         // map from one whose cross-repo edges are up to 15 minutes stale.
-        const stitch = localIngest?.stitchSkipped === undefined ? "" : " · stitch_skipped";
+        // Ix#568. The RULE, not just the fact -- and not for `incomplete`.
+        //
+        // `--silent` is the hook surface: one terse line per run. `incomplete`
+        // fires on nearly every incremental map, so emitting it here would put
+        // a token on almost every line and make `stitch_skipped` useless as a
+        // signal, while a consumer that actually needs to know an incremental
+        // map registered nothing has `--format json` and `--format llm`, which
+        // both carry it. What stays here is the guard refusing -- the case that
+        // means a backend is being protected from stacked joins.
+        const rule = localIngest?.stitchSkippedRule;
+        const stitch = rule === undefined || rule === "incomplete" ? "" : ` · stitch_skipped=${rule}`;
         process.stderr.write(
           `map: ${result.file_count} files · ${systems}s/${subsystems}ss/${modules}m regions · ${mapMs}ms${stitch}\n`
         );
@@ -582,6 +592,7 @@ Examples:
           // value, so a consumer could not tell the field apart from an older
           // CLI that never emitted it. Its siblings are always present too.
           stitch_skipped: localIngest?.stitchSkipped ?? null,
+          stitch_skipped_rule: localIngest?.stitchSkippedRule ?? null,
           regions: regions.map((r: any) => ({
             label: r.label,
             level: r.level,
@@ -606,7 +617,7 @@ Examples:
 export function renderMapLlm(
   result: MapResult,
   regions: MapRegion[],
-  ingest?: Pick<IngestFilesSummary, "parseErrors" | "commitErrors" | "stitchSkipped">,
+  ingest?: Pick<IngestFilesSummary, "parseErrors" | "commitErrors" | "stitchSkipped" | "stitchSkippedRule">,
 ): void {
   console.log(llmLine("map", [
     ["files", result.file_count],
@@ -625,6 +636,7 @@ export function renderMapLlm(
     // added for actually read; shipping it only in `--format json` put it
     // where they never look.
     ["stitch_skipped", ingest?.stitchSkipped],
+    ["stitch_skipped_rule", ingest?.stitchSkippedRule],
   ]));
   for (const r of regions) {
     console.log(llmLine("region", [

@@ -304,14 +304,18 @@ apart from a clean run. It is not an error: it does not set a non-zero exit code
 and does not count towards `stitchErrors`, and the previous registration stands —
 the same position a stitch that *failed* already left the graph in.
 
-The rule is machine-readable: `in-flight`, `cooling` and `deadline` are the
-guard's, and **`incomplete`** is `ix ingest`'s own completeness gate — an
-incremental map that did not re-parse every file has no complete registration to
-send. That last one is by far the commonest, and it is reported for the same
-reason as the others: a consumer asking "are the cross-repo edges current?" gets
-the wrong answer if the field is absent whenever the stitch was never attempted.
-It is deliberately the one rule that prints no human Note, because it would then
-appear on every incremental map.
+The rule is machine-readable, and carried alongside the prose as
+`stitchSkippedRule` / `stitch_skipped_rule`: `in-flight`, `cooling` and
+`deadline` are the guard's, and **`incomplete`** is `ix ingest`'s own
+completeness gate — an incremental map that did not re-parse every file has no
+complete registration to send. That last one is by far the commonest, and it is
+reported for the same reason as the others: a consumer asking "are the cross-repo
+edges current?" gets the wrong answer if the field is absent whenever the stitch
+was never attempted. Branch on the rule, never on the sentence.
+
+`incomplete` is deliberately the one rule that prints no human Note and emits no
+`--silent` token, both of which would otherwise appear on nearly every
+incremental map. `--format json` and `--format llm` carry it either way.
 
 The wait happens **inside** `ix map`'s per-workspace lock, which the run holds
 until it exits. So while one map is waiting out another repo's stitch — up to

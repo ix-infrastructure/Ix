@@ -823,6 +823,15 @@ export interface IngestFilesSummary {
    * the only signal is an English sentence on stderr.
    */
   stitchSkipped?: string;
+  /**
+   * Which rule kept the stitch from happening, for a consumer that must branch.
+   *
+   * The prose in `stitchSkipped` is for people. `incomplete` -- an incremental
+   * map with nothing complete to send -- fires on almost every run, so without
+   * this a hook watching for the #568 cooldown could only tell the two apart by
+   * substring-matching English, which `StitchRefusal`'s own doc forbids.
+   */
+  stitchSkippedRule?: StitchRefusal;
 }
 
 /**
@@ -2536,6 +2545,7 @@ export async function ingestFiles(
     commitErrors,
     stitchErrors,
     stitchSkipped,
+    stitchSkippedRule,
   };
   if (stitchErrors > 0) {
     process.stderr.write(`  ${describeStitchFailure(stitchError)}\n`);
@@ -2596,6 +2606,7 @@ export async function ingestFiles(
       // value, so a consumer could not tell the field apart from an older CLI
       // that never emitted it. `ix map --format json` does the same.
       stitchSkipped: stitchSkipped ?? null,
+      stitchSkippedRule: stitchSkippedRule ?? null,
       elapsedSeconds: parseFloat(elapsed),
       timings: {
         ...timings,

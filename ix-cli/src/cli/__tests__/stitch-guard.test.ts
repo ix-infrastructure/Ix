@@ -486,14 +486,13 @@ describe("connectionNeverEstablished", () => {
 });
 
 describe("a 2xx that still failed", () => {
-  it("is proof, because the request completed however unreadable the body", async () => {
-    // `IxClient` reports an unparseable body as "${status}: response body is
-    // not JSON: ...", so this is a fact about what the server said. Keying it
-    // on the SyntaxError's name instead -- which an earlier revision did --
-    // would have accepted a PROXY answering 200 with an HTML page on its own
-    // timeout, cleared the marker, and let the next map stack a second join
-    // onto the one still running. That is the #568 failure, from the one arm
-    // that could have caused it.
+  it("KEEPS the marker, because that is what a proxy error page looks like", async () => {
+    // Two earlier revisions cleared it here, reasoning that the request
+    // completed so the join must have. A proxy answering 200 with its own HTML
+    // error page when the upstream stalls produces exactly this shape -- the
+    // #528 pattern -- and clearing the marker then admits the next map onto a
+    // join that is still running, which is the #568 failure itself. This is the
+    // one arm that could cause it, so it is the one arm that does not fire.
     const server = createServer((_req, res) => {
       res.writeHead(200, { "Content-Type": "text/html" });
       res.end("<html>proxy says hi</html>");
@@ -508,26 +507,30 @@ describe("a 2xx that still failed", () => {
       } catch (err) {
         caught = err;
       }
-      // The status is IN the message, which is the whole point.
+      // The status is in the message, which is what makes this decidable at all.
       expect(String(caught)).toContain("200: response body is not JSON");
-      expect(outcomeProvesNothingRunning({ ok: false, elapsedMs: 5, status: 200 })).toBe(true);
+      expect(outcomeProvesNothingRunning({ ok: false, elapsedMs: 5, status: 200 })).toBe(false);
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()));
     }
   });
 
-  it("clears the marker, so a rewritten 200 does not block the endpoint", () => {
+  it("cools the endpoint down, so the next map does not stack a join", () => {
     const a = admitStitch(ENDPOINT);
     expect(a.admitted).toBe(true);
     if (a.admitted) a.settle({ ok: false, elapsedMs: 40, status: 200 });
-    expect(existsSync(cooldownPathForTest(ENDPOINT))).toBe(false);
-    expect(admitted(ENDPOINT)).toBe(true);
+    expect(existsSync(cooldownPathForTest(ENDPOINT))).toBe(true);
+    expect(admitStitch(ENDPOINT).admitted).toBe(false);
   });
 
   it("still keeps the marker for the failures that mean a join may be running", () => {
     expect(outcomeProvesNothingRunning({ ok: false, elapsedMs: 5, status: 500 })).toBe(false);
     expect(outcomeProvesNothingRunning({ ok: false, elapsedMs: 5, status: 408 })).toBe(false);
     expect(outcomeProvesNothingRunning({ ok: false, elapsedMs: 5, status: null })).toBe(false);
+  });
+
+  it("a stitch that actually returned still clears it", () => {
+    expect(outcomeProvesNothingRunning({ ok: true, elapsedMs: 5 })).toBe(true);
   });
 });
 

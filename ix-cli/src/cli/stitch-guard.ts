@@ -67,6 +67,12 @@ const POLL_MS = 250;
 function positiveEnvMs(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return fallback;
+  // Matched, not parsed. `Number.parseInt` reads any prefix it can, so an
+  // operator following the env table and writing `15m` for the cooldown got
+  // FIFTEEN MILLISECONDS -- past the `n >= 0` check, no fallback, nothing
+  // logged, and `ix map` back to stacking joins with no sign anything is wrong.
+  // `1e6` gave 1 the same way. `commitFailureLimit` learned this already.
+  if (!/^\d+$/.test(raw)) return fallback;
   const n = Number.parseInt(raw, 10);
   // 0 is meaningful (disable), so only a negative or unparseable value falls
   // back. `Number.isFinite` alone would let "" and "abc" through as NaN.
@@ -268,18 +274,20 @@ export interface StitchOutcome {
  *   - the connection was never established, so nothing was sent. See
  *     `connectionNeverEstablished` for why that is narrower than "a transport
  *     error" and why the narrowing matters;
- *   - the backend answered 2xx at all, however unreadable the body.
- *     `IxClient` reports an unparseable body as
- *     `"${status}: response body is not JSON: ..."`, so this is a fact about
- *     what came back rather than an inference from a SyntaxError's NAME -- an
- *     earlier revision did the latter, and it would also have accepted a
- *     genuine JSON bug on a path that never reached the network.
+ * A 2xx whose body would not parse is deliberately NOT on that list, though
+ * two earlier revisions put it there. The argument for it was that the request
+ * completed, so the join did -- and the argument against is stronger: a proxy
+ * answering 200 with its own HTML error page when the upstream stalls produces
+ * exactly that shape, and it is the #528 pattern. Clearing the marker there is
+ * the one way any proof arm can cause the #568 failure itself, by admitting the
+ * next map onto a join that is still running.
  *
- *     What it does NOT do is tell a real 2xx from a PROXY answering 200 with
- *     an error page of its own. Nothing here can: that same proxy answering
- *     200 with parseable JSON is `ok: true`, which has always cleared the
- *     marker and must. The exposure is identical for both, and it is the
- *     exposure every client has to a front end that lies about success.
+ * The symmetry argument does not hold either: a proxy answering 200 with
+ * PARSEABLE JSON is `ok: true` and has always cleared the marker, but a proxy
+ * error page is HTML, so the unparseable case is the LIKELY one rather than the
+ * equivalent one. The cost of excluding it is a cooldown after a stitch that
+ * really did succeed and got garbled in transit, which is the direction this
+ * whole file errs in by design.
  *
  * Anything else — another 5xx, a timeout, an abort, a socket dropped after the
  * request went out, or the process being killed before it could say anything —
@@ -290,9 +298,9 @@ export function outcomeProvesNothingRunning(outcome: StitchOutcome): boolean {
   if (outcome.neverConnected === true) return true;
   const status = outcome.status;
   if (typeof status !== "number") return false;
-  // A 2xx that still reached the catch: the request completed and something
-  // downstream made the body unreadable. The backend is done either way.
-  if (status >= 200 && status < 300) return true;
+  // Deliberately no 2xx arm -- see the note above. `ok` covers a stitch that
+  // actually returned; a 2xx reaching the catch means the body was unreadable,
+  // which is what a proxy error page looks like.
   if (status === 501) return true;
   return status >= 400 && status < 500 && status !== 408;
 }
