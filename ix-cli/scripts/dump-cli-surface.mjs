@@ -13,7 +13,7 @@
  * because that is what actually ships.
  *
  *   node scripts/dump-cli-surface.mjs            # JSON to stdout
- *   node scripts/dump-cli-surface.mjs --flags    # one long flag per line, sorted
+ *   node scripts/dump-cli-surface.mjs --flags    # one "<command>\t<flag>" pair per line, sorted
  *
  * Deliberately NOT wired into CI: what a parity gate should block on is the
  * open question in #576, and this is the inventory half either answer needs.
@@ -37,7 +37,12 @@ try {
 }
 
 const program = new Command();
-program.name("ix");
+// Mirror main.ts's root registration. `--version` / `-V` is declared on the
+// program itself (main.ts:64), not on any subcommand, so without this the one
+// place a flag can be added with no per-command file changing is also the one
+// place this inventory cannot see it.
+const pkg = createRequire(import.meta.url)("../package.json");
+program.name("ix").version(pkg.version ?? "0.0.0");
 registerOssCommands(program);
 
 const commands = [];
@@ -55,19 +60,34 @@ function walk(cmd, parentPath) {
       long: o.long,
       short: o.short,
       description: o.description,
-      default: o.defaultValue === undefined ? null : String(o.defaultValue),
+      // Commander leaves `defaultValue` undefined on a `--no-x` option and
+      // supplies `true` at parse time instead, so reporting null here renders
+      // the row as "off" — the exact opposite of what the CLI does when the
+      // flag is absent.
+      default:
+        o.negate && o.defaultValue === undefined
+          ? "true"
+          : o.defaultValue === undefined
+            ? null
+            : String(o.defaultValue),
       choices: o.argChoices ?? null,
     })),
     subcommands: (cmd.commands ?? []).map(c => c.name()),
   });
   for (const sub of cmd.commands ?? []) walk(sub, name);
 }
-for (const cmd of program.commands) walk(cmd, "");
+walk(program, "");
 
 if (process.argv.includes("--flags")) {
-  const longs = new Set();
-  for (const c of commands) for (const o of c.options) if (o.long) longs.add(o.long);
-  for (const f of [...longs].sort()) console.log(f);
+  // Pairs, not bare names. De-duplicating long names across the whole tree
+  // collapses the (command, flag) pairs this script walks into a much smaller
+  // set of names, which makes per-command drift invisible: adding `--limit` to
+  // one command, or dropping `--path` from another, leaves the output
+  // byte-identical while the reference is a row stale — the exact failure #575
+  // filed, and the one a gate built on this would have to catch.
+  const pairs = new Set();
+  for (const c of commands) for (const o of c.options) if (o.long) pairs.add(`${c.command}\t${o.long}`);
+  for (const pair of [...pairs].sort()) console.log(pair);
 } else {
   console.log(JSON.stringify(commands, null, 2));
 }

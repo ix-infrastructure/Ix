@@ -10,7 +10,7 @@ Generated from the registered command tree, not written by hand:
 ```bash
 cd ix-cli && npm run build
 node scripts/dump-cli-surface.mjs           # full JSON, one object per command
-node scripts/dump-cli-surface.mjs --flags   # just the long flags, sorted
+node scripts/dump-cli-surface.mjs --flags   # one "<command>\t<flag>" pair per line, sorted
 ```
 
 That script is the reason this file can be trusted: the previous state of the
@@ -41,14 +41,27 @@ surfaces (#575).
 - **`ix reset` is global.** `--code` narrows *what kind* of data goes, not
   which workspace — see the Gotchas section of [commands.md](commands.md)
   before running it in a shared backend.
-- **`--detailed` on `ix subsystems` requires `--list`**, and `--offset`
-  disables the auto-pagination that `--limit` otherwise drives.
+- **`--detailed` on `ix subsystems` requires `--list`**, and the reverse
+  constraint bites harder: `--limit`, `--offset`, `--regions`, `--edge-cap` and
+  `--member-file-cap` all *require* `--detailed`, so `ix subsystems --list
+  --limit 50` exits with an error rather than a shorter list. `--detailed`
+  auto-paginates on its own; `--offset` or `--regions` turns that off, and
+  `--limit` only sets the page size.
 - **`--pick <n>` is 1-based** everywhere it appears, and is how you resolve an
   ambiguous target without re-running with a longer name.
-- **`--no-recursive` and `--no-open` are negations of a default-on
-  behaviour**, so their "off" default means the positive behaviour is active.
+- **`--no-recursive` and `--no-open` negate a default-on behaviour**, so their
+  Default of `on` is the positive behaviour, and passing the flag turns it off.
 
 ## Commands
+
+### `ix` (root)
+
+Options declared on the program itself rather than on any subcommand. They work
+before a command name — `ix --version`, not `ix map --version`.
+
+| Flag | Value | Default | Effect |
+| --- | --- | --- | --- |
+| `--version` | — | off | Print the CLI version and exit (`-V`) |
 
 ### `ix callees <symbol>`
 
@@ -248,8 +261,11 @@ Explain an entity — infers role, importance, and structural context.
 Additional help topics. With no topic, prints the top-level help. `workflows`
 (or `workflow`) and `advanced` are prose topics; any other topic is looked up as
 a registered command and shows that command's help. The retired plurals `goals`
-and `bugs` forward to `goal` and `bug`, whose help documents the subcommand that
-absorbed them. An unrecognised topic exits non-zero.
+and `bugs` forward to `goal` and `bug` — but that only pays off with Ix Pro
+installed. On OSS both are `registerProStubs` placeholders carrying no
+subcommands, so `ix help bugs` prints `Usage: ix bug [options] [args...]` and
+its `-h` line, and nothing about `ix bug list`. An unrecognised topic exits
+non-zero.
 
 No flags.
 
@@ -305,7 +321,7 @@ Ingest source files or GitHub data into the knowledge graph.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--path` | `<dir>` | — | Path to ingest (alternative to positional argument) |
-| `--no-recursive` | — | off | Do not recurse into subdirectories (recursive is on by default) |
+| `--no-recursive` | — | on | Do not recurse into subdirectories (recursive is on by default) |
 | `--github` | `<owner/repo>` | — | Ingest issues, PRs, and commits from a GitHub repository |
 | `--token` | `<pat>` | — | GitHub personal access token |
 | `--since` | `<date>` | — | Only fetch items updated after this date (ISO 8601) |
@@ -600,7 +616,7 @@ Start the visualizer (default).
 
 | Flag | Value | Default | Effect |
 |---|---|---|---|
-| `--no-open` | — | off | Don't auto-open browser |
+| `--no-open` | — | on | Don't auto-open browser |
 | `--all` | — | off | Show every ingested workspace together (no workspace scoping) |
 
 #### `ix view stop`
