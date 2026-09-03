@@ -32,6 +32,7 @@ export enum SupportedLanguages {
   HCL = 'hcl',
   CSS = 'css',
   LaTeX = 'latex',
+  Proto = 'proto',
 }
 
 const EXT_MAP: Record<string, SupportedLanguages> = {
@@ -63,6 +64,7 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.yml':  SupportedLanguages.YAML,
   '.dockerfile': SupportedLanguages.Dockerfile,
   '.sql':  SupportedLanguages.SQL,
+  '.proto': SupportedLanguages.Proto,
   '.json': SupportedLanguages.JSON,
   '.toml': SupportedLanguages.TOML,
   '.md':   SupportedLanguages.Markdown,

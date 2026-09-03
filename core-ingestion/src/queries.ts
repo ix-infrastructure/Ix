@@ -1858,5 +1858,8 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   // LaTeX/TeX has no tree-sitter grammar in this stack; it is parsed by the
   // hand-rolled scanner in parseLatexFile (index.ts), like Markdown/YAML/etc.
   [SupportedLanguages.LaTeX]: '',
+  // Protocol Buffers likewise: no grammar in this stack, parsed by
+  // parseProtoFile's scanner in index.ts.
+  [SupportedLanguages.Proto]: '',
 };
  

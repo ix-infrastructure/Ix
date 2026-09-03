@@ -1938,6 +1938,201 @@ function parseSqlFile(filePath: string, source: string): FileParseResult {
 }
 
 // ---------------------------------------------------------------------------
+// Protocol Buffers
+// ---------------------------------------------------------------------------
+
+// proto3 scalar types, plus proto2 spellings. Field types outside this set name
+// another message or enum, which is the edge worth recording.
+const PROTO_SCALARS = new Set([
+  'double', 'float', 'int32', 'int64', 'uint32', 'uint64', 'sint32', 'sint64',
+  'fixed32', 'fixed64', 'sfixed32', 'sfixed64', 'bool', 'string', 'bytes',
+  'group',
+]);
+
+/** Blank comments and string bodies so braces and keywords inside them cannot
+ *  be mistaken for structure. Length and newlines are preserved so line numbers
+ *  and byte offsets stay accurate. */
+function stripProtoNoise(source: string): string {
+  let out = '';
+  let i = 0;
+  while (i < source.length) {
+    const two = source.slice(i, i + 2);
+    if (two === '//') {
+      const nl = source.indexOf('\n', i);
+      const end = nl === -1 ? source.length : nl;
+      out += ' '.repeat(end - i);
+      i = end;
+    } else if (two === '/*') {
+      const close = source.indexOf('*/', i + 2);
+      const end = close === -1 ? source.length : close + 2;
+      out += source.slice(i, end).replace(_blankNonNewline, ' ');
+      i = end;
+    } else if (source[i] === '"' || source[i] === "'") {
+      const quote = source[i];
+      let j = i + 1;
+      while (j < source.length && source[j] !== quote) {
+        if (source[j] === '\\') j += 1;
+        j += 1;
+      }
+      const end = Math.min(j + 1, source.length);
+      // Keep the quotes so `import "x.proto"` is still recognisable; blank the body.
+      out += quote + source.slice(i + 1, end - 1).replace(_blankNonNewline, ' ') + (end > i + 1 ? quote : '');
+      i = end;
+    } else {
+      out += source[i];
+      i += 1;
+    }
+  }
+  return out;
+}
+
+const PROTO_DEF_RE = /^\s*(message|enum|service)\s+([A-Za-z_]\w*)/;
+const PROTO_RPC_RE =
+  /^\s*rpc\s+([A-Za-z_]\w*)\s*\(\s*(?:stream\s+)?([\w.]+)\s*\)\s*returns\s*\(\s*(?:stream\s+)?([\w.]+)\s*\)/;
+const PROTO_IMPORT_RE = /^\s*import\s+(?:public\s+|weak\s+)?"([^"]*)"/;
+const PROTO_PACKAGE_RE = /^\s*package\s+([\w.]+)\s*;/;
+const PROTO_FIELD_RE =
+  /^\s*(?:repeated\s+|optional\s+|required\s+)?(map\s*<\s*[\w.]+\s*,\s*([\w.]+)\s*>|[\w.]+)\s+[A-Za-z_]\w*\s*=\s*\d+/;
+
+function parseProtoFile(filePath: string, source: string): FileParseResult {
+  const language = SupportedLanguages.Proto;
+  const fileName = nodePath.basename(filePath);
+  const sourceLineCount = countSourceLines(source);
+  const fileRole = classifyFileRole(filePath);
+  const entities: ParsedEntity[] = [
+    { name: fileName, kind: 'file', lineStart: 1, lineEnd: sourceLineCount, language },
+  ];
+  const chunks: ParsedChunk[] = [];
+  const relationships: ParsedRelationship[] = [];
+  const lineStarts = computeLineStarts(source);
+  const stripped = stripProtoNoise(source);
+  const lines = stripped.split(/\r?\n/);
+  const rawLines = source.split(/\r?\n/);
+
+  interface OpenDef {
+    name: string;
+    kind: 'message' | 'enum' | 'service';
+    lineStart: number;
+    depth: number;
+    container?: string;
+  }
+  const open: OpenDef[] = [];
+  let depth = 0;
+
+  const close = (def: OpenDef, lineEnd: number) => {
+    const entityKind =
+      def.kind === 'service' ? 'interface' : 'class';
+    const chunkKind = def.kind === 'service' ? 'interface' : 'class';
+    entities.push({ name: def.name, kind: entityKind, lineStart: def.lineStart, lineEnd, language });
+    const startByte = lineStarts[def.lineStart - 1] ?? 0;
+    const endByte =
+      lineEnd < rawLines.length ? (lineStarts[lineEnd] ?? source.length) - 1 : source.length;
+    chunks.push({
+      name: def.name,
+      chunkKind,
+      lineStart: def.lineStart,
+      lineEnd,
+      startByte,
+      endByte,
+      contentHash: crypto
+        .createHash('sha256')
+        .update(rawLines.slice(def.lineStart - 1, lineEnd).join('\n'))
+        .digest('hex'),
+      language,
+      ...(def.container ? { container: def.container } : {}),
+    });
+    relationships.push({
+      srcName: def.container ?? fileName,
+      dstName: def.name,
+      predicate: 'CONTAINS',
+    });
+  };
+
+  const addReference = (from: string | undefined, typeName: string) => {
+    if (!from) return;
+    const bare = typeName.replace(/^\./, '');
+    const simple = bare.includes('.') ? bare.slice(bare.lastIndexOf('.') + 1) : bare;
+    if (!simple || PROTO_SCALARS.has(bare) || simple === from) return;
+    relationships.push({ srcName: from, dstName: simple, predicate: 'REFERENCES' });
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const enclosing = open.length ? open[open.length - 1] : undefined;
+
+    const pkg = PROTO_PACKAGE_RE.exec(line);
+    if (pkg) {
+      entities.push({ name: pkg[1], kind: 'module', lineStart: i + 1, lineEnd: i + 1, language });
+      relationships.push({ srcName: fileName, dstName: pkg[1], predicate: 'CONTAINS' });
+    }
+
+    const imp = PROTO_IMPORT_RE.exec(rawLines[i] ?? '');
+    if (imp && imp[1]) {
+      relationships.push({
+        srcName: fileName,
+        dstName: nodePath.basename(imp[1]),
+        predicate: 'IMPORTS',
+        importRaw: imp[1],
+      });
+    }
+
+    const rpc = PROTO_RPC_RE.exec(line);
+    if (rpc && enclosing) {
+      entities.push({ name: rpc[1], kind: 'method', lineStart: i + 1, lineEnd: i + 1, language });
+      relationships.push({ srcName: enclosing.name, dstName: rpc[1], predicate: 'CONTAINS' });
+      addReference(rpc[1], rpc[2]);
+      addReference(rpc[1], rpc[3]);
+    } else if (enclosing && enclosing.kind === 'message' && !PROTO_DEF_RE.test(line)) {
+      const field = PROTO_FIELD_RE.exec(line);
+      if (field) addReference(enclosing.name, field[2] ?? field[1]);
+    }
+
+    const def = PROTO_DEF_RE.exec(line);
+    if (def) {
+      open.push({
+        name: def[2],
+        kind: def[1] as OpenDef['kind'],
+        lineStart: i + 1,
+        depth,
+        container: enclosing?.name,
+      });
+    }
+
+    for (const ch of line) {
+      if (ch === '{') depth += 1;
+      else if (ch === '}') {
+        depth = Math.max(0, depth - 1);
+        // A definition opened at this depth is now complete. Single-line forms
+        // (`message Empty {}`) open and close on the same line, which this
+        // handles because the push happens before the brace scan.
+        while (open.length && open[open.length - 1].depth >= depth) {
+          close(open.pop() as OpenDef, i + 1);
+        }
+      }
+    }
+  }
+
+  // Unterminated definitions (truncated or malformed file): close at EOF rather
+  // than dropping the symbols.
+  while (open.length) close(open.pop() as OpenDef, sourceLineCount);
+
+  if (chunks.length === 0) {
+    chunks.push({
+      name: null,
+      chunkKind: 'file_body',
+      lineStart: 1,
+      lineEnd: Math.max(sourceLineCount, 1),
+      startByte: 0,
+      endByte: source.length,
+      contentHash: crypto.createHash('sha256').update(source).digest('hex'),
+      language,
+    });
+  }
+
+  return { filePath, language, entities, chunks, relationships, fileRole };
+}
+
+// ---------------------------------------------------------------------------
 // Rust: cfg macro unwrapping
 // ---------------------------------------------------------------------------
 
@@ -2070,6 +2265,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
   if (language === SupportedLanguages.TOML) return parseTomlFile(filePath, source);
   if (language === SupportedLanguages.Markdown) return parseMarkdownFile(filePath, source);
   if (language === SupportedLanguages.LaTeX) return parseLatexFile(filePath, source);
+  if (language === SupportedLanguages.Proto) return parseProtoFile(filePath, source);
 
   // TypeScript TSX uses a separate grammar
   const isTsx = filePath.endsWith('.tsx');

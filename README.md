@@ -299,7 +299,7 @@ Ix parses and extracts symbols, calls, and imports across 26 languages, and reco
 JavaScript, TypeScript, Python, Java, C, C++, C#, Go, Ruby, Rust, PHP, Kotlin, Swift, Scala, R, SAS, Elixir, Haskell, Zig, Lua, Bash, HTML, XML, CSS, HCL / Terraform, Makefile
 
 **Also recognized:**
-YAML, JSON, TOML, SQL, Dockerfile, Markdown
+YAML, JSON, TOML, SQL, Protocol Buffers, Dockerfile, Markdown
 
 ## Quick Start
 
