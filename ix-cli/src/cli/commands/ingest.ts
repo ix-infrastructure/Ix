@@ -1688,8 +1688,6 @@ export async function ingestFiles(
        * backend has meanwhile proved it accepts writes -- see the drain below.
        */
       const deferredByCutoff: PreparedPatch[] = [];
-      /** `patchesTheBackendTook` when this batch began -- see `backendIsKnownAlive`. */
-      const tookAtBatchStart = patchesTheBackendTook;
       /** Held by the run deadline rather than the cutoff -- see the branch below. */
       const deferredByDeadline: PreparedPatch[] = [];
 
@@ -1944,61 +1942,50 @@ export async function ingestFiles(
         // would otherwise serialize thousands of single-patch commits where one
         // request per chunk would do -- the Ix#495 shape, on the recovery path
         // this design exists to serve. A backend that is still refusing costs
-        // one extra doomed request for the attempt, which is the same price the
-        // per-chunk bulk already pays and is deliberately never skipped.
+        // one extra doomed request, the same price the per-chunk bulk already
+        // pays and deliberately never skips.
         //
-        // No payload splitting or partial-409 handling here: this is a cheap
-        // probe, and everything it does not place falls through to the passes
-        // below, which handle every one of those cases already.
-        // ...but never for a set containing a DELETION, and never for one too
-        // big to send as a single request.
-        //
-        // `runChunk` puts any patch with a DeleteNode/DeleteEdge op in its own
-        // single-item chunk and commits it through `client.commitPatch`, and
-        // `ingest-reconcile.test.ts` pins that routing -- the bulk endpoint is
-        // not trusted to apply delete ops. A deletion reaches the held set
-        // through the ordinary hold branch, so without this check the probe
-        // would post it to the bulk endpoint anyway; on a silent success
-        // `onCommitted` would persist `durableDeletedFiles` and save the
-        // baseline, recording stale nodes as reconciled and never retrying.
-        //
-        // And the size cap, because this probe does no payload splitting. It
-        // binds: the reconcile call passes every deletion patch in the run
-        // unchunked, and while those are filtered out of `bulkable` above, the
-        // set reaching here is bounded by `PARSE_STREAM_CHUNK` (500) only on the
-        // ordinary path. (An earlier version of this comment justified the cap
-        // with `flushAll`, which is defined and never called -- true, and beside
-        // the point.) The failure it prevents is the Ix#516 shape: one bulk past
-        // the proxy's body limit or Arango's transaction cap, failing and
-        // dropping everything to the serialized path this probe exists to
-        // avoid.
-        // PARTITIONED, not skipped wholesale. `reconcileRemovedEntities`
-        // prepends a delete op to any re-mapped file that lost an entity, so an
-        // ordinary incremental map's held set almost always contains one --
-        // gating the probe all-or-nothing on that meant it never ran in the
-        // case it was written for. The deletions fall through to the passes,
+        // DELETIONS are excluded. `runChunk` routes any patch with a
+        // DeleteNode/DeleteEdge op to its own single-item `client.commitPatch`,
+        // and `ingest-reconcile.test.ts` pins that -- the bulk endpoint is not
+        // trusted to apply delete ops. They fall through to the passes below,
         // which commit them one at a time as their routing requires.
-        const bulkable = items.filter(item => !patchRequiresPerFileCommit(item.patch));
-        if (bulkable.length > 1 && bulkable.length <= COMMIT_HTTP_MAX_FILES) {
+        //
+        // CHUNKED at `COMMIT_HTTP_MAX_FILES`, not skipped above it. Skipping
+        // meant that lowering `IX_COMMIT_HTTP_MAX_FILES` -- which #560's
+        // reporters explicitly tried -- turned the probe off entirely and gave
+        // them the serialized fan-out it exists to avoid.
+        //
+        // A PARTIAL 409 is handled here rather than left to the passes, because
+        // the passes cannot: they run with a failure budget and never with
+        // `replay: true`, so re-sending a patch the server has already
+        // confirmed would be counted as a commit error -- suppressing the mtime
+        // baseline and reporting files as missing from a graph that holds them,
+        // which is the over-reporting `replay` exists to prevent (Ix#495).
+        const needsPerFile = (item: PreparedPatch): boolean => patchRequiresPerFileCommit(item.patch);
+        const stillToSend: PreparedPatch[] = items.filter(needsPerFile);
+        let probeQueue = items.filter(item => !needsPerFile(item));
+
+        while (probeQueue.length > 1) {
+          const chunk = probeQueue.slice(0, COMMIT_HTTP_MAX_FILES);
+          const rest = probeQueue.slice(chunk.length);
           const bulkStart = performance.now();
           try {
             const result = await retryOnConflict(
-              () => client.commitPatchBulk(bulkable.map(item => item.patch)),
+              () => client.commitPatchBulk(chunk.map(item => item.patch)),
               COMMIT_CONFLICT_RETRIES,
             );
             const ms = Math.round(performance.now() - bulkStart);
             recordDrainMs(ms);
             timings.bulkCommitMs += ms;
             latestRev = advanceRev(latestRev, result.rev);
-            patchesApplied += bulkable.length;
-            patchesTheBackendTook += bulkable.length;
+            patchesApplied += chunk.length;
+            patchesTheBackendTook += chunk.length;
             commitBreaker.recordSuccess();
-            for (const item of bulkable) opts?.onCommitted?.(item, result.rev);
-            if (debug) process.stderr.write(`  [cutoff] one bulk placed ${bulkable.length} of ${items.length}
+            for (const item of chunk) opts?.onCommitted?.(item, result.rev);
+            if (debug) process.stderr.write(`  [cutoff] bulk placed ${chunk.length} of ${items.length} held
 `);
-            const rest = items.filter(item => patchRequiresPerFileCommit(item.patch));
-            if (rest.length === 0) return;
-            items = rest;
+            probeQueue = rest;
           } catch (bulkErr) {
             // Record the time either way. The FAILING probe is the expensive
             // one -- a saturated backend answers with a per-request timeout,
@@ -2010,15 +1997,38 @@ export async function ingestFiles(
             // Keep the quoted error current, for the same reason `onAbandoned`
             // does: this is a request the backend answered, and the passes
             // below may be stopped by the run deadline without recording
-            // anything, leaving the banner quoting a failure from an earlier
-            // batch. Not `recordFailure` -- one bulk is one request, not N.
+            // anything. Not `recordFailure` -- one bulk is one request, not N.
             if (commitFailureIndictsBackend(bulkErr, runDeadlineExpired())) {
               commitBreaker.noteError(bulkErr);
             }
-            if (debug) process.stderr.write(`  [cutoff] bulk probe failed, falling back to passes: ${bulkErr}
-`);
+            let unconfirmed = chunk;
+            if (isBulkPartiallyCommittedError(bulkErr)) {
+              const landedIds = parseBulkCommittedPatchIds(bulkErr);
+              if (landedIds !== undefined) {
+                const landed = chunk.filter(item => landedIds.has(item.patch.patchId));
+                if (landed.length > 0) {
+                  patchesApplied += landed.length;
+                  patchesTheBackendTook += landed.length;
+                  if (debug) {
+                    process.stderr.write(
+                      `  [cutoff] bulk partly committed: ${landed.length} of ${chunk.length} already landed
+`,
+                    );
+                  }
+                }
+                unconfirmed = chunk.filter(item => !landedIds.has(item.patch.patchId));
+              }
+            }
+            // One failure ends the probing: the rest goes to the passes, which
+            // is where a backend that is actually refusing belongs.
+            for (const item of unconfirmed) stillToSend.push(item);
+            for (const item of rest) stillToSend.push(item);
+            probeQueue = [];
           }
         }
+        for (const item of probeQueue) stillToSend.push(item);
+        if (stillToSend.length === 0) return;
+        items = stillToSend;
         // A budget, not the breaker's streak: the held set can begin with the
         // tail of a poison cluster -- the fan-out stopped inside it, so the
         // rest of it is the first thing here -- and a streak would stop again
@@ -2029,12 +2039,6 @@ export async function ingestFiles(
         // changing direction instead. `drainFailureBudget` is shared with the
         // tests, which previously asserted the stranding guarantee at a budget
         // the CLI never runs at and so could not see it fail.
-        // The give-up is only on the table while it is unknown whether the
-        // backend is taking writes. If this batch has already had patches
-        // accepted, the trip that produced this held set was a false positive
-        // about the BACKEND, and sampling could only strand something a working
-        // backend would have taken.
-        const backendIsKnownAlive = patchesTheBackendTook > tookAtBatchStart;
         const leftover = await drainInPasses(items, async pending => {
           commitBreaker.reset();
           const tookBefore = patchesTheBackendTook;
@@ -2048,7 +2052,7 @@ export async function ingestFiles(
             placed: patchesTheBackendTook > tookBefore,
             unreached: deferredByCutoff.splice(0, deferredByCutoff.length),
           };
-        }, !backendIsKnownAlive);
+        });
         // A loop, not a spread. The ordinary path bounds this at
         // `PARSE_STREAM_CHUNK` (500), but the reconcile call passes every
         // deletion patch in the run unchunked, so the argument limit is not
@@ -2223,7 +2227,12 @@ export async function ingestFiles(
       // deadline branch of `describeCommitOutcome` is what reports these.
       if (deferredByDeadline.length > 0) {
         commitErrors += deferredByDeadline.length;
-        commitLoopErrors += deferredByDeadline.length;
+        // NOT `commitLoopErrors`. That counter gates the cutoff banner, and its
+        // whole job is to keep the banner off a run whose trips came from replay
+        // failures -- which deliberately never become commit errors. Feeding the
+        // clock's abandonments into it printed "Commits against <endpoint> kept
+        // failing" above "Ingest ran out of time: raise IX_MAP_DEADLINE_MS",
+        // blaming the backend for the clock's losses.
         deferredByDeadline.length = 0;
       }
 
