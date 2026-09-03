@@ -1974,7 +1974,20 @@ export async function ingestFiles(
             },
             commitIndividually,
             shouldStop: () => commitBreaker.tripped(),
-            onAbandoned: items => { deferredByCutoff.push(...items); },
+            onAbandoned: (items, err) => {
+              deferredByCutoff.push(...items);
+              // Keep the quoted error current. This is the only place a bulk
+              // failure is seen once the breaker has tripped -- the per-file
+              // loop it would otherwise reach is exactly what the trip skips --
+              // and after the first batch trips, every later batch fails here
+              // and nowhere else. Without it the banner quotes batch 1's error
+              // for the whole run, which is wrong in the case the message was
+              // written for: a backend that recovers from saturation and starts
+              // REJECTING patches instead still reads as "the database is busy".
+              if (err !== undefined && commitFailureIndictsBackend(err, runDeadlineExpired())) {
+                commitBreaker.noteError(err);
+              }
+            },
             patchIdOf: item => item.patch.patchId,
             onPartialBulk: (landed, missing, err) => {
               if (!debug) return;
@@ -2686,7 +2699,7 @@ export async function ingestFiles(
     //
     // Before the stitch line and before the commit report: this is the cause,
     // and everything else printed about this run is its consequence.
-    process.stderr.write(`${describeCommitCutoff(commitBreaker, client.endpoint, patchesApplied)}\n`);
+    process.stderr.write(`${describeCommitCutoff(commitBreaker, client.endpoint, patchesApplied, opts.deadlineSignal?.aborted === true)}\n`);
   }
   if (stitchErrors > 0) {
     process.stderr.write(`  ${describeStitchFailure(stitchError)}\n`);

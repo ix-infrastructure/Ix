@@ -378,6 +378,34 @@ describe("drainInPasses", () => {
   });
 });
 
+describe("noteError", () => {
+  it("updates the quoted error without touching the streak", () => {
+    // A bulk abandoned while the breaker is already tripped is the only thing
+    // a later batch does on a dead backend -- the per-file loop it would
+    // otherwise reach is exactly what the trip skips. Without this the banner
+    // quotes batch 1's error for the whole run: five timeouts, then nineteen
+    // batches rejected with "Invalid message body", and the user is still told
+    // the database is busy. One bulk is one request, though, not N, so it must
+    // not advance the streak.
+    const b = createCommitBreaker(5);
+    b.recordFailure(new Error("TimeoutError"));
+    expect(b.consecutiveFailures()).toBe(1);
+
+    b.noteError(new Error("500: Invalid message body"));
+
+    expect(String(b.lastError())).toContain("Invalid message body");
+    expect(b.consecutiveFailures()).toBe(1);
+    expect(b.tripped()).toBe(false);
+  });
+
+  it("cannot trip the breaker on its own, however many times it is called", () => {
+    const b = createCommitBreaker(2);
+    for (let i = 0; i < 50; i++) b.noteError(new Error("x"));
+    expect(b.tripped()).toBe(false);
+    expect(b.everTripped()).toBe(false);
+  });
+});
+
 describe("createDrainGate", () => {
   it("opens for the first held set of the run", () => {
     expect(createDrainGate().shouldDrain(0)).toBe(true);
@@ -503,6 +531,24 @@ describe("describeCommitCutoff", () => {
     expect(msg).not.toContain("Stopped committing");
     expect(msg).toContain("kept failing");
     expect(msg).toContain("transaction begin timeout");
+  });
+
+  it("drops the unsent attribution when the run also ran out of time", () => {
+    // The deadline branch of describeCommitOutcome owns what to do about the
+    // missing patches, and the two must not contradict. A cutoff that fired
+    // BEFORE the clock has already called recordSkipped, so without this the
+    // banner printed "N were not sent - sending them one at a time would have
+    // added load to a backend that is already the reason they fail" directly
+    // above "Ingest ran out of time: raise IX_MAP_DEADLINE_MS". The diagnosis
+    // is still worth printing; the attribution of the count is not.
+    const b = createCommitBreaker(1);
+    b.recordFailure(new Error("500: transaction begin timeout"));
+    b.recordSkipped(400);
+
+    const msg = describeCommitCutoff(b, "e", 0, true);
+    expect(msg).not.toContain("not sent");
+    expect(msg).toContain("transaction begin timeout");
+    expect(describeCommitCutoff(b, "e", 0, false)).toContain("400 patches were not sent");
   });
 
   it("says 'patch was' for one and 'patches were' for many", () => {

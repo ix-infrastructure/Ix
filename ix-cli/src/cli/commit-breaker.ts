@@ -84,6 +84,23 @@ export interface CommitBreaker {
   /** A commit failed in a way that sending it again cannot fix. */
   recordFailure(error: unknown): void;
   /**
+   * A failure worth QUOTING, but not worth counting.
+   *
+   * A bulk commit that fails while the breaker is already tripped is abandoned
+   * without any per-file attempt, so nothing else here ever sees it -- and
+   * that is the dominant shape of a dead-backend run, since a batch is one
+   * chunk. Without this, `lastError()` freezes at the last per-file failure
+   * and the banner keeps quoting it for the rest of the run: five
+   * `TimeoutError`s in batch 1, then nineteen batches rejected with
+   * `Invalid message body`, and the user is still told the database is busy
+   * and sent to `docker stats`. That is the misrouting the message exists to
+   * prevent, so the quote has to keep up.
+   *
+   * Deliberately not `recordFailure`: one bulk is one request, not N, and
+   * counting it would let a single abandoned bulk stand in for a streak.
+   */
+  noteError(error: unknown): void;
+  /**
    * Did the run give up on the backend at ANY point?
    *
    * Distinct from `tripped()`, which a later success clears, and from
@@ -129,6 +146,7 @@ export function createCommitBreaker(limit = commitFailureLimit()): CommitBreaker
     tripped: () => latched,
     everTripped: () => everLatched,
     recordSuccess: () => { consecutive = 0; latched = false; },
+    noteError: (error) => { last = error; },
     recordFailure: (error) => {
       consecutive++;
       last = error;
@@ -323,6 +341,19 @@ export function describeCommitCutoff(
   endpoint: string,
   /** Patches that landed anywhere in the run. */
   patchesApplied = 0,
+  /**
+   * Did the run's own wall-clock budget fire?
+   *
+   * When it did, the deadline branch of `describeCommitOutcome` owns what to do
+   * about the missing patches, and the two must not contradict each other: a
+   * cutoff that fired BEFORE the clock has already called `recordSkipped`, so
+   * this would otherwise print "N were not sent, sending them would have added
+   * load to a backend that is already the reason they fail" directly above
+   * "Ingest ran out of time: raise IX_MAP_DEADLINE_MS". The diagnosis below --
+   * what the backend actually answered -- is still worth printing; the
+   * attribution of the count is not.
+   */
+  deadlineHit = false,
 ): string {
   const detail = String(breaker.lastError() ?? "unknown error");
   const trimmed = detail.length > 300 ? `${detail.slice(0, 300)}…` : detail;
@@ -350,7 +381,7 @@ export function describeCommitCutoff(
   // it held. Claiming it stopped would then be false on the one line whose job
   // is saying what happened.
   const unsent =
-    breaker.skipped() === 0
+    breaker.skipped() === 0 || deadlineHit
       ? []
       : [
           `  ${breaker.skipped()} ${breaker.skipped() === 1 ? "patch was" : "patches were"} not sent — sending them one at a`,
