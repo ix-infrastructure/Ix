@@ -258,8 +258,8 @@ export interface StitchOutcome {
 /**
  * Did this outcome PROVE that no join is running?
  *
- * Two proofs are available, and both are positive facts rather than inferences
- * drawn from the shape of a failure:
+ * Every proof here is a positive fact rather than an inference drawn from the
+ * shape of a failure:
  *
  *   - the stitch succeeded, so the backend is done with it;
  *   - the backend answered 4xx, which is it refusing the request rather than
@@ -437,10 +437,9 @@ export function admitStitch(endpoint: string, now = Date.now()): StitchAdmission
             // reported back". `writeCooldown` warns on the mirror-image
             // failure, which merely fails open.
             // The wording follows the PROOF, because this branch runs for all
-            // four of them: a success, a 4xx, a 2xx with an unreadable body, and
-            // a connection that never opened. Saying "the stitch succeeded"
-            // after an ECONNREFUSED would be plainly false on the one line the
-            // reader has to act on.
+            // of them: a success, a 4xx, a 501, and a connection that never
+            // opened. Saying "the stitch succeeded" after an ECONNREFUSED would
+            // be plainly false on the one line the reader has to act on.
             const what = outcome.ok
               ? "the cross-workspace stitch succeeded"
               : "the cross-workspace stitch did not start a query on the backend";

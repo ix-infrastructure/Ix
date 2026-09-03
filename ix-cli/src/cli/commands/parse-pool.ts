@@ -37,6 +37,13 @@ export class ParsePool {
   }
 
   async destroy(): Promise<void> {
+    // Set FIRST. `terminate()` makes every worker emit 'exit', and the handler
+    // for that treats an exit as a crash and spawns a replacement -- so
+    // shutting the pool down span up a fresh set of threads, `this.workers = []`
+    // orphaned them, and because a worker thread refs the event loop and the
+    // CLI has no `process.exit(0)` on its success path, `ix map` printed its
+    // summary and then hung forever.
+    this.destroyed = true;
     await Promise.all(this.workers.map(w => w.terminate()));
     this.workers = [];
     this.idle = [];
@@ -53,7 +60,12 @@ export class ParsePool {
     // even reach `destroy()`. `onError` already covers the crash path; this
     // covers the quiet one, and both feed `crashedTasks()` so the stitch gate
     // sees a run that lost a file either way.
-    w.on('exit', () => this.onError(w, new Error('parse worker exited')));
+    w.on('exit', () => {
+      // Not during shutdown: `destroy()` terminates every worker on purpose,
+      // and treating that as a crash respawns the pool it is trying to close.
+      if (this.destroyed) return;
+      this.onError(w, new Error('parse worker exited'));
+    });
     this.workers.push(w);
     this.idle.push(w);
     return w;
@@ -94,6 +106,9 @@ export class ParsePool {
   }
 
   private crashed = 0;
+
+  /** True once `destroy()` has begun, so a deliberate exit is not read as a crash. */
+  private destroyed = false;
 
   private onError(w: Worker, _err: Error): void {
     const task = this.active.get(w);
