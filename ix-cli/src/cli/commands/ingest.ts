@@ -875,20 +875,35 @@ export function describeStitchFailure(error: unknown): string {
  * the ways back in: a fresh map, `--force`, or a post-reset re-map. What the
  * cooldown changes is only how often this path is taken, not where it leads.
  */
-export function describeStitchSkipped(reason: string, rule?: StitchRefusal): string {
-  // The remedy follows the RULE, never the prose. `ix map` single-flights per
-  // workspace, so contention here is always between DIFFERENT workspaces --
-  // the other run is registering its own, not this one. This workspace's
-  // registration really is missed, and an incremental map will not retry it,
-  // so the same forced re-ingest applies; what differs is when it is useful.
+export function describeStitchSkipped(
+  reason: string,
+  rule?: StitchRefusal,
+  /** Whether the caller is showing per-file detail (`--verbose` / `--debug`). */
+  verbose = false,
+): string {
+  // Short by default. A cooldown lasts 15 minutes, and under CLAUDE.md RULE 5
+  // an auto-map hook fires after every edit -- so the long form printed three
+  // sentences of unchanging advice on every map in that window. The reason is
+  // the part that changes and the part worth reading; the rest is on --verbose,
+  // and `stitchSkipped` / `stitch_skipped` carry it to machine consumers either
+  // way.
+  const head = `Note: Cross-workspace stitch not started — ${reason}.`;
+  if (!verbose) return head;
+
+  // The remedy follows the RULE, never the prose. Note the other run may be
+  // registering this SAME workspace: only `ix map` takes the per-workspace
+  // lock, so two `ix ingest` runs on one repo, or an `ix ingest` racing an
+  // `ix map`, both reach here. Hence "may be" rather than a confident
+  // instruction to force a full re-ingest nobody needs.
   const remedy =
     rule === "in-flight"
-      ? "That run registers its own workspace, not this one, so re-register this one with a run " +
-        "that re-ingests every file (`ix ingest <root> --force`) once the other map has finished."
+      ? "That run may be registering a different workspace, in which case this one was not " +
+        "registered; re-run once it has finished, or force a full re-ingest " +
+        "(`ix ingest <root> --force`) if the cross-repo edges still look stale."
       : "Once the cooldown expires and the backend is healthy, re-register with a run that re-ingests " +
         "every file (`ix ingest <root> --force`) — an incremental map that skips unchanged files does not " +
         "re-attempt the stitch.";
-  return `Note: Cross-workspace stitch not started — ${reason}. Source patches were committed; cross-repository edges are unchanged since the last successful stitch. ${remedy}`;
+  return `${head} Source patches were committed; cross-repository edges are unchanged since the last successful stitch. ${remedy}`;
 }
 
 /**
@@ -2360,7 +2375,10 @@ export async function ingestFiles(
       // a consumer reading this body can tell "cross-repo edges are current"
       // from "cross-repo edges are as stale as the last successful stitch" --
       // a distinction the exit code deliberately does not make.
-      stitchSkipped,
+      // `?? null`, not left undefined: JSON.stringify drops an undefined
+      // value, so a consumer could not tell the field apart from an older CLI
+      // that never emitted it. `ix map --format json` does the same.
+      stitchSkipped: stitchSkipped ?? null,
       elapsedSeconds: parseFloat(elapsed),
       timings: {
         ...timings,

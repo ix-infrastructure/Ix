@@ -124,32 +124,33 @@ describe("describeStitchFailure", () => {
 });
 
 describe("describeStitchSkipped", () => {
-  // The remedy is conditioned on the RULE, and nothing tested that -- so the
-  // round-3 fix could have been reverted silently.
   const cooling = "the last stitch was cut off after 62s and may still be running";
-  const contended = "another ix map is already stitching http://localhost:8090";
+  const contended = "another ix run is already stitching http://localhost:8090";
 
-  it("is a Note, not a failure, and says the source patches landed", () => {
+  it("is a Note, not a failure, and leads with the reason", () => {
     const msg = describeStitchSkipped(cooling, "cooling");
     expect(msg.startsWith("Note:")).toBe(true);
     expect(msg).not.toContain("Warning");
-    expect(msg).toContain("Source patches were committed");
     expect(msg).toContain(cooling);
   });
 
-  it("waits out the cooldown before suggesting a forced re-ingest", () => {
+  it("stays short by default, because a cooldown spans many maps", () => {
+    // 15 minutes of auto-map hooks, one Note each. The long form printed three
+    // sentences of unchanging advice every time.
     const msg = describeStitchSkipped(cooling, "cooling");
-    expect(msg).toContain("Once the cooldown expires");
-    expect(msg).toContain("ix ingest <root> --force");
+    expect(msg.length).toBeLessThan(200);
+    expect(msg).not.toContain("ix ingest <root> --force");
   });
 
-  it("does not tell a contended run that the other map covers it", () => {
-    // `ix map` single-flights per WORKSPACE, so the other run is registering its
-    // own, not this one. Saying "no action is needed" was wrong.
-    const msg = describeStitchSkipped(contended, "in-flight");
-    expect(msg).toContain("registers its own workspace, not this one");
-    expect(msg).toContain("ix ingest <root> --force");
-    expect(msg).not.toContain("Once the cooldown expires");
+  it("gives the remedy under --verbose, and picks it by RULE", () => {
+    const cool = describeStitchSkipped(cooling, "cooling", true);
+    expect(cool).toContain("Once the cooldown expires");
+    expect(cool).toContain("ix ingest <root> --force");
+    expect(cool).toContain("Source patches were committed");
+
+    const busy = describeStitchSkipped(contended, "in-flight", true);
+    expect(busy).toContain("may be registering a different workspace");
+    expect(busy).not.toContain("Once the cooldown expires");
   });
 });
 

@@ -109,6 +109,10 @@ export function stitchKey(endpoint: string): string {
       ? "localhost"
       : u.hostname.toLowerCase();
     const path = u.pathname.replace(/\/+$/, "");
+    // `u.port` is deliberately used raw. The WHATWG parser already strips a
+    // DEFAULT port, so `https://h` and `https://h:443` both give "" and key
+    // identically -- adding a defaults table here would be dead code. Verified,
+    // and pinned by a test, because it looks like an omission.
     return `${u.protocol.toLowerCase()}//${host}:${u.port}${path}`;
   } catch {
     // Not a URL. Nothing to normalise, and refusing to guard is worse than
@@ -160,14 +164,21 @@ export interface StitchOutcome {
  *   - the backend answered 4xx, which is it refusing the request rather than
  *     executing it. 408 is excluded: a proxy reporting that IT gave up waiting
  *     says nothing about whether the backend did, and that is this whole bug.
+ *   - the backend answered 501. `isStitchUnsupported` already treats 404 AND
+ *     501 as "this backend has no /v1/stitch", and the run swallows it
+ *     silently for exactly that reason -- so leaving a marker behind would
+ *     refuse every map for 15 minutes, claiming a join may still be running,
+ *     against a backend that has never had one.
  *
- * Anything else — a 5xx, a timeout, an abort, a transport error, or the process
- * being killed before it could say anything — leaves the marker in place.
+ * Anything else — another 5xx, a timeout, an abort, a transport error, or the
+ * process being killed before it could say anything — leaves the marker.
  */
 export function outcomeProvesNothingRunning(outcome: StitchOutcome): boolean {
   if (outcome.ok) return true;
   const status = outcome.status;
-  return typeof status === "number" && status >= 400 && status < 500 && status !== 408;
+  if (typeof status !== "number") return false;
+  if (status === 501) return true;
+  return status >= 400 && status < 500 && status !== 408;
 }
 
 /** Which rule refused. Callers branch on this, never on the prose. */
@@ -258,7 +269,7 @@ export function admitStitch(endpoint: string, now = Date.now()): StitchAdmission
     return {
       admitted: false,
       rule: "in-flight",
-      reason: `another ix map is already stitching ${endpoint}`,
+      reason: `another ix run is already stitching ${endpoint}`,
     };
   }
 

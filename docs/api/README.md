@@ -242,7 +242,9 @@ join. There are exactly two such proofs:
 * the stitch succeeded;
 * the backend answered **4xx**, which is it refusing the request rather than
   executing it — with **408** excluded, since a proxy reporting that *it* gave
-  up waiting says nothing about whether the backend did.
+  up waiting says nothing about whether the backend did;
+* the backend answered **501**, which is how this codebase already spells "no
+  `/v1/stitch` here" (`isStitchUnsupported` accepts 404 or 501).
 
 Everything else — a 5xx, a timeout, an abort, a transport error, or the process
 being killed before it could report anything — leaves the marker in place. That

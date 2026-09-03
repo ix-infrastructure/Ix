@@ -57,6 +57,14 @@ describe("outcomeProvesNothingRunning", () => {
     expect(outcomeProvesNothingRunning({ ok: true, elapsedMs: 90_000 })).toBe(true);
   });
 
+  it("is true for 501, which is how this codebase spells 'no /v1/stitch'", () => {
+    // isStitchUnsupported treats 404 AND 501 as "this backend has no stitch",
+    // and the run swallows that silently -- so a marker left behind would refuse
+    // every map for 15 minutes claiming a join may still be running, against a
+    // backend that has never had one.
+    expect(outcomeProvesNothingRunning({ ok: false, elapsedMs: 30, status: 501 })).toBe(true);
+  });
+
   it("is true for a 4xx: the backend refused it rather than ran it", () => {
     // Including a SLOW one. Elapsed covers the request upload, and the stitch
     // payload is megabytes on a large monorepo, so a 413 can arrive tens of
@@ -243,6 +251,17 @@ describe("stitchKey", () => {
     expect(stitchKey("http://localhost:8090/")).toBe(canonical);
     expect(stitchKey("http://127.0.0.1:8090")).toBe(canonical);
     expect(stitchKey("HTTP://LOCALHOST:8090")).toBe(canonical);
+  });
+
+  it("treats a default port and an explicit one as one backend", () => {
+    // The WHATWG URL parser strips a default port, so both spellings give
+    // port === "" and this needs no defaults table of its own. Pinned because
+    // the absence of one reads like an omission -- and because if the parser
+    // ever stopped doing it, one backend would get two locks and two cooldowns,
+    // which is exactly the concurrency stitchKey exists to prevent.
+    expect(stitchKey("https://ix.example")).toBe(stitchKey("https://ix.example:443"));
+    expect(stitchKey("http://ix.example")).toBe(stitchKey("http://ix.example:80"));
+    expect(stitchKey("http://ix.example")).not.toBe(stitchKey("https://ix.example"));
   });
 
   it("keeps genuinely different backends apart", () => {
