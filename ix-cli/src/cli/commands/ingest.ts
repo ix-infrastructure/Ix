@@ -1018,18 +1018,31 @@ export function describeCommitOutcome(
   // to the clock, and attributing all of it to the cutoff hides the number
   // that would actually change the outcome.
   if (cutoffFired) {
-    // The cutoff has already printed the endpoint and the error. Repeating the
-    // standard advice here would send the reader to a flag that shows nothing
-    // -- a patch that was never sent produces no per-file line -- and, when
-    // the drain placed everything it held, to a flag whose output the banner
-    // has already summarised.
-    const unsent =
-      cutoffSkipped > 0 ? `, ${cutoffSkipped} of them never sent` : "";
+    // Two shapes, and they want opposite advice about the debug flag.
+    //
+    // When patches were held back unsent, they produce no per-file line at all,
+    // so pointing at the flag sends the reader to output that does not exist --
+    // the cutoff banner above is the only account of them there is.
+    //
+    // When the drain placed everything it held, `cutoffSkipped` is 0 and every
+    // counted error came from a patch that WAS sent and DID emit a line. The
+    // banner names only the last error and no filenames, so telling the reader
+    // the flag adds nothing steers them away from the only per-file detail
+    // available. That is the shape the 12-file reproduction produces at the
+    // default limit: five sent failures, seven drained successfully.
+    if (cutoffSkipped === 0) {
+      return {
+        kind: patchesApplied === 0 ? "fatal" : "warn",
+        message:
+          `Ingest stopped early: ${commitErrors} of ${attempted} file patches are missing from the graph. ` +
+          `See the cutoff above for why it stopped; ${debugFlag} lists the individual failures.`,
+      };
+    }
     return {
       kind: patchesApplied === 0 ? "fatal" : "warn",
       message:
-        `Ingest stopped early: ${commitErrors} of ${attempted} file patches are missing from the graph` +
-        `${unsent}. See the cutoff above for why; ${debugFlag} will not add to it.`,
+        `Ingest stopped early: ${commitErrors} of ${attempted} file patches are missing from the graph, ` +
+        `${cutoffSkipped} of them never sent. See the cutoff above for why; ${debugFlag} will not add to it.`,
     };
   }
 
@@ -1377,15 +1390,6 @@ export async function ingestFiles(
   // patch out of the per-file fallback. Stop after a streak instead.
   const commitBreaker = createCommitBreaker();
   /**
-   * Has the held-back retry already been spent and failed this run?
-   *
-   * `commitPreparedPatches` runs once per 500-file batch, so a per-call retry
-   * would pay the breaker's limit again in every batch -- ~200 doomed
-   * serialized commits on a 20,000-file repo rather than the handful this is
-   * supposed to cost. The retry exists to distinguish a dead backend from a
-   * few bad patches, and one run only needs to ask that once.
-   */
-  /**
    * Whether a batch's held-back patches get a drain. Run-scoped: the decision
    * spans batches, and it has to be revocable -- see `createDrainGate`.
    */
@@ -1667,6 +1671,8 @@ export async function ingestFiles(
        * backend has meanwhile proved it accepts writes -- see the drain below.
        */
       const deferredByCutoff: PreparedPatch[] = [];
+      /** Held by the run deadline rather than the cutoff -- see the branch below. */
+      const deferredByDeadline: PreparedPatch[] = [];
 
       const chunks: PreparedPatch[][] = [];
       let bulkChunk: PreparedPatch[] = [];
@@ -1755,7 +1761,18 @@ export async function ingestFiles(
                 // budget both inert for the tail of the run, so a bulk failure
                 // at that point fanned out to one serialized commit per patch
                 // with nothing able to stop it.
-                for (let k = itemIndex; k < items.length; k++) deferredByCutoff.push(items[k]);
+                //
+                // A SEPARATE list from `deferredByCutoff`, deliberately. These
+                // patches were abandoned by the clock, not by the backend, and
+                // feeding them to `recordSkipped` made the cutoff banner blame
+                // the backend for them -- printing "400 patches were not sent,
+                // sending them would have added load to a backend that is
+                // already the reason they fail" directly above "Ingest ran out
+                // of time: raise IX_MAP_DEADLINE_MS". Two contradictory
+                // diagnoses, and the wrong count on the first.
+                // `describeCommitOutcome` already orders the deadline ahead of
+                // the cutoff for exactly this reason.
+                for (let k = itemIndex; k < items.length; k++) deferredByDeadline.push(items[k]);
                 break;
               }
               const isReplay = fallbackOpts?.replay === true;
@@ -1816,10 +1833,25 @@ export async function ingestFiles(
                 if (commitFailureIndictsBackend(commitErr, runDeadlineExpired())) budgetLeft--;
                 if (isReplay) {
                   // Confirmed landed by the server's own 409 body. A failed
-                  // re-send loses no write, so counting it would let the cutoff
-                  // claim "The graph is unchanged" for a run whose patches are
-                  // all in the graph.
+                  // re-send loses no write, so counting it as a commit error
+                  // would let the cutoff claim "The graph is unchanged" for a
+                  // run whose patches are all in the graph.
                   patchesApplied++;
+                  // But it IS still evidence about the backend, and without
+                  // this nothing could stop a replay. The full-landed branch of
+                  // `commitBulkWithPayloadSplit` hands the whole chunk here and
+                  // returns before its `shouldStop` check, so an un-tripped
+                  // breaker would watch up to IX_COMMIT_HTTP_MAX_FILES doomed
+                  // commits go out one at a time, serialized behind the global
+                  // fallback mutex -- blocking every other chunk's fallback --
+                  // and never advance. Recording the failure lets the streak
+                  // reach its limit, after which `perFileAction` answers
+                  // "count-applied" and the loop stops. `perFileAction` alone
+                  // could not: it only rescues a breaker that was ALREADY
+                  // tripped on entry.
+                  if (commitFailureIndictsBackend(commitErr, runDeadlineExpired())) {
+                    commitBreaker.recordFailure(commitErr);
+                  }
                 } else {
                   commitErrors++;
                   if (commitFailureIndictsBackend(commitErr, runDeadlineExpired())) {
@@ -1971,12 +2003,14 @@ export async function ingestFiles(
       // look exactly like a dead backend until a later chunk commits, so the
       // held-back set gets a real attempt rather than being written off.
       //
-      // `drainInPasses` is what decides when to stop -- a pass that placed
-      // nothing ends it, and what that pass could not reach is left for the
-      // next run, which re-ingests it anyway because the mtime baseline is not
-      // written on a run with commit errors. The flag below is a coarser
-      // version of the same judgement across BATCHES, so that a genuinely dead
-      // backend is not re-probed once per batch for the length of the run.
+      // `drainInPasses` is what decides when to stop -- a pass that REACHED
+      // THE END, or the pass cap, and what the last pass could not reach is
+      // left for the next run, which re-ingests it anyway because the mtime
+      // baseline is not written on a run with commit errors. (A pass that
+      // placed nothing is deliberately NOT a stopping condition; its own doc
+      // says why.) The gate below is a coarser judgement across BATCHES, so
+      // that a genuinely dead backend is not re-probed once per batch for the
+      // length of the run.
       if (deferredByCutoff.length > 0) {
         if (!runDeadlineExpired() && drainGate.shouldDrain(patchesTheBackendTook)) {
           const held = deferredByCutoff.splice(0, deferredByCutoff.length);
@@ -1994,6 +2028,13 @@ export async function ingestFiles(
           commitBreaker.recordSkipped(deferredByCutoff.length);
           deferredByCutoff.length = 0;
         }
+      }
+
+      // Missing from the graph either way, but attributed to the clock: the
+      // deadline branch of `describeCommitOutcome` is what reports these.
+      if (deferredByDeadline.length > 0) {
+        commitErrors += deferredByDeadline.length;
+        deferredByDeadline.length = 0;
       }
 
       return commitMsPerChunk.reduce((a, b) => a + b, 0) + drainMs;

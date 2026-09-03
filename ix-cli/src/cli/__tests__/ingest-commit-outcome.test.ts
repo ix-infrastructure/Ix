@@ -147,16 +147,21 @@ describe("describeCommitOutcome with a commit cutoff", () => {
   it("points at the cutoff even when the drain placed every held patch", () => {
     // The cutoff fired, so the banner above has already named the endpoint and
     // quoted the backend's error -- but nothing was left unsent, and gating on
-    // that count sent the reader to "Re-run with --debug to see why" directly
-    // beneath a message that had just told them why. The 12-file reproduction
-    // at the default limit lands here: five fan-out failures trip it, the drain
-    // sends the remaining seven, and none of them are "never sent".
+    // that count sent the reader to the generic "Re-run with --debug to see
+    // why" directly beneath a message that had just told them why. The 12-file
+    // reproduction at the default limit lands here: five fan-out failures trip
+    // it, the drain sends the remaining seven, none are "never sent".
     const out = describeCommitOutcome(12, 0, "--debug", false, 0, true);
     expect(out.kind).toBe("fatal");
     if (out.kind === "ok") throw new Error("expected a message");
-    expect(out.message).toContain("See the cutoff above for why");
-    expect(out.message).not.toContain("to see why.");
+    expect(out.message).toContain("See the cutoff above");
     expect(out.message).not.toContain("never sent");
+    // And it must still point AT the flag here. Every one of these errors came
+    // from a patch that was sent and did emit a per-file line, so the sibling
+    // message's "the flag will not add to it" -- true when patches were held
+    // back unsent -- would steer the reader away from the only detail there is.
+    expect(out.message).toContain("--debug lists the individual failures");
+    expect(out.message).not.toContain("will not add to it");
   });
 
   it("still names the unsent count when there is one", () => {
