@@ -308,8 +308,8 @@ export function outcomeProvesNothingRunning(outcome: StitchOutcome): boolean {
 /**
  * Which rule refused. Callers branch on this, never on the prose.
  *
- * `incomplete` and `run-errors` are not this guard's rules -- they are
- * `ix ingest`'s own gates, reported through the same field because a machine
+ * `incomplete`, `lost-parses` and `run-errors` are not this guard's rules --
+ * they are `ix ingest`'s own gates, reported through the same field because a machine
  * consumer asking "are the cross-repo edges current?" needs the same answer for
  * them. Between them they are by far the commonest reason a stitch does not
  * happen (every incremental map, and every run with a failed patch), and
@@ -321,6 +321,7 @@ export type StitchRefusal =
   | "cooling"
   | "deadline"
   | "incomplete"
+  | "lost-parses"
   | "run-errors";
 
 export type StitchAdmission =

@@ -306,8 +306,8 @@ the same position a stitch that *failed* already left the graph in.
 
 The rule is machine-readable, and carried alongside the prose as
 `stitchSkippedRule` / `stitch_skipped_rule`: `in-flight`, `cooling` and
-`deadline` are the guard's, and **`incomplete`** and **`run-errors`** are
-`ix ingest`'s own gates — an incremental map that did not re-parse every file has
+`deadline` are the guard's, and **`incomplete`**, **`lost-parses`** and
+**`run-errors`** are `ix ingest`'s own gates — an incremental map that did not re-parse every file has
 no complete registration to send, and a run with parse or commit errors would
 build one from an incomplete picture of the repo. Those two are by far the
 commonest, and they are reported for the same reason as the others: a consumer
@@ -315,9 +315,13 @@ asking "are the cross-repo edges current?" gets the wrong answer if the field is
 absent whenever the stitch was never attempted. Branch on the rule, never on the
 sentence.
 
-Both of those print no human Note and emit no `--silent` token: the first would
-appear on nearly every incremental map, and the second restates lines the run has
-already printed. `--format json` and `--format llm` carry them either way.
+`incomplete` and `run-errors` print no human Note and emit no `--silent` token:
+the first would appear on nearly every incremental map, and the second restates
+lines the run has already printed. `--format json` and `--format llm` carry them
+either way. **`lost-parses`** — a parse worker crashed, so some files went
+unparsed — *is* printed, because on a `--force` run it is the only one of the
+three that can fire, and staying quiet there would make the recovery command
+this CLI advertises exit 0 having done nothing.
 
 The wait happens **inside** `ix map`'s per-workspace lock, which the run holds
 until it exits. So while one map is waiting out another repo's stitch — up to

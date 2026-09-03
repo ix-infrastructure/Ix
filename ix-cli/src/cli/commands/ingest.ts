@@ -2396,6 +2396,16 @@ export async function ingestFiles(
       stitchSkipped =
         "this run had parse or commit errors, so its registration would be built from " +
         "an incomplete picture of the repo";
+    } else if (stitchEnabled && stitchFiles.length > 0 && crashedParses() > 0) {
+      // Its OWN rule, and one that IS printed. `incomplete` is silent because
+      // it fires on nearly every incremental map -- but on a `--force` run
+      // nothing is skipped as unchanged, so `incomplete` there could only ever
+      // mean a crashed worker, and staying silent made the recovery command
+      // this CLI advertises exit 0 having quietly done nothing.
+      stitchSkippedRule = "lost-parses";
+      stitchSkipped =
+        `a parse worker crashed and ${crashedParses()} file(s) went unparsed, so the ` +
+        "cross-workspace registration would be missing them";
     } else if (stitchEnabled && stitchFiles.length > 0 && !registrationIsComplete) {
       stitchSkippedRule = "incomplete";
       stitchSkipped =

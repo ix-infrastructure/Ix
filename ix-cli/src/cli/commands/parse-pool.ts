@@ -30,6 +30,16 @@ export class ParsePool {
   }
 
   parse(filePath: string, source: string): Promise<unknown> {
+    // A pool with no workers left cannot ever run this, so resolve it here
+    // rather than enqueue it. Draining only the queue that existed at the
+    // moment the last worker died left every LATER `parse()` waiting on a
+    // `drain()` that is a no-op with an empty idle list -- the promise never
+    // settled and the `Promise.all` over the next chunk hung the ingest, which
+    // is the same failure this file has now produced three different ways.
+    if (this.dead) {
+      this.crashed++;
+      return Promise.resolve(null);
+    }
     return new Promise((resolve) => {
       this.queue.push({ filePath, source, resolve });
       this.drain();
@@ -108,6 +118,14 @@ export class ParsePool {
   /** Replacements spawned for crashed workers. Capped -- see `onError`. */
   private respawns = 0;
 
+  /**
+   * True once the pool is out of workers AND out of replacements.
+   *
+   * Latched, because the condition is permanent: nothing spawns a worker after
+   * the cap, so every later `parse()` would queue forever.
+   */
+  private dead = false;
+
   /** Generous enough for real flakiness, small enough to stop a spawn loop. */
   private static readonly MAX_RESPAWNS = 16;
 
@@ -149,10 +167,13 @@ export class ParsePool {
       this.respawns++;
       this.spawnWorker();
     } else if (this.workers.length === 0) {
-      // Out of workers and out of replacements: nothing queued can ever be
+      // Out of workers and out of replacements. Nothing queued can ever be
       // parsed, so resolve it rather than leave `Promise.all` waiting on a pool
-      // that no longer exists. Counted as crashed, which is what it is, so the
+      // that no longer exists -- and LATCH it, because `parse()` must answer the
+      // same way for every call after this, not just for what happened to be
+      // queued at this instant. Counted as crashed, which is what it is, so the
       // stitch gate knows this run lost files.
+      this.dead = true;
       const stranded = this.queue.splice(0, this.queue.length);
       this.crashed += stranded.length;
       for (const t of stranded) t.resolve(null);
