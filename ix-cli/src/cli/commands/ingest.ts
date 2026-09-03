@@ -912,7 +912,6 @@ export type CommitOutcome =
   | { kind: "warn"; message: string }
   | { kind: "fatal"; message: string };
 
-/** Minimal local-ingest facts needed by commands that continue after ingestion. */
 /**
  * The wire value the backend sends for a commit it short-circuited because it
  * had already recorded the patch id — `CommitStatus.Idempotent.toString` in
@@ -920,6 +919,15 @@ export type CommitOutcome =
  */
 const COMMIT_STATUS_IDEMPOTENT = 'Idempotent';
 
+/**
+ * The wire value for a commit the backend refused because the optimistic
+ * base-rev check lost a race — `CommitStatus.BaseRevMismatch`. It writes
+ * nothing, exactly like `Idempotent`, but unlike `Idempotent` it means the
+ * work still needs doing.
+ */
+const COMMIT_STATUS_BASE_REV_MISMATCH = 'BaseRevMismatch';
+
+/** Minimal local-ingest facts needed by commands that continue after ingestion. */
 export interface IngestFilesSummary {
   filesDiscovered: number;
   patchesApplied: number;
@@ -927,13 +935,40 @@ export interface IngestFilesSummary {
    * How many of `patchesApplied` the backend answered `Idempotent` — it had
    * already recorded that patch id, so the commit wrote nothing.
    *
-   * Normally uninteresting: `--full` re-submits every file, so an unchanged
-   * repo legitimately deduplicates everything against a graph that is already
-   * correct. It matters only when the graph turns out to be EMPTY afterwards,
-   * because then the deduplication is the reason nothing was written rather
-   * than a sign that nothing needed to be (#527).
+   * Normally uninteresting: `ix ingest --force` re-submits every file (and a
+   * lost or blank local baseline has the same effect against a backend that
+   * still holds the patch records), so a repo whose graph is already correct
+   * legitimately deduplicates everything. Note `ix map --full` is NOT such a
+   * case — it forwards `full` to the backend map and never sets `force` on the
+   * ingest below it, so it re-submits nothing.
+   *
+   * It matters only when the graph turns out to be EMPTY afterwards, because
+   * then the deduplication is the reason nothing was written rather than a
+   * sign that nothing needed to be (#527).
    */
   idempotentPatches: number;
+  /**
+   * Files this run skipped because they were already unchanged — mtime-clean
+   * against the local baseline, or hash-clean against the backend.
+   *
+   * Load-bearing for the #527 diagnosis, not informational. `idempotentPatches`
+   * only describes the patches a run actually submitted; it says nothing about
+   * the files the run never submitted, and those are what separate a graph
+   * deleted under its own patch records from a graph that is simply fine. A run
+   * in the #527 state skips nothing here: the DB-reset guard clears the mtime
+   * cache and the hash lookup comes back empty, so every file is re-submitted
+   * and every one is answered `Idempotent`. A run that skipped even one file as
+   * unchanged has proof the backend still holds that file's source hash, and
+   * therefore its nodes.
+   *
+   * Counts only the unchanged skips — empty, oversized and minified files are
+   * skipped for reasons that carry no such proof. It is the same counter the
+   * stitch-completeness gate reads, which also means it inherits that counter's
+   * Path-B reset: a run with no baseline re-reads and re-hashes every file, so
+   * the stat loop's mtime skips did not actually happen and are subtracted
+   * back out. That is the shape a #527 run has, and it is exactly right here.
+   */
+  filesSkippedAsUnchanged: number;
   parseErrors: number;
   commitErrors: number;
   stitchErrors: number;
@@ -2124,6 +2159,12 @@ export async function ingestFiles(
                 recordMs(chunkMs);
                 timings.fallbackCommitMs += chunkMs;
                 latestRev = advanceRev(latestRev, result.rev);
+                // See onBulkCommitted: a lost base-rev race wrote nothing and
+                // must not be reported as applied.
+                if (result.status === COMMIT_STATUS_BASE_REV_MISMATCH) {
+                  commitErrors++;
+                  continue;
+                }
                 patchesApplied++;
                 patchesTheBackendTook++;
                 commitBreaker.recordSuccess();
@@ -2441,6 +2482,21 @@ export async function ingestFiles(
             },
             onBulkCommitted: (items, result) => {
               latestRev = advanceRev(latestRev, result.rev);
+              // `BaseRevMismatch` wrote nothing: the backend read the latest rev
+              // outside the transaction and it moved before the commit ran. It
+              // is a lost race, not a replay, so it must not count as applied —
+              // and it belongs in commitErrors, because that is what stops
+              // `persistIngestBaselineIfClean` caching these files as unchanged
+              // and leaving them missing from the graph until the next edit.
+              if (result.status === COMMIT_STATUS_BASE_REV_MISMATCH) {
+                commitErrors += items.length;
+                if (debug) {
+                  process.stderr.write(
+                    `\n  [commit lost the base-rev race] ${items.length} patches wrote nothing; they will be re-sent next run\n`
+                  );
+                }
+                return;
+              }
               patchesApplied += items.length;
               patchesTheBackendTook += items.length;
               commitBreaker.recordSuccess();
@@ -3359,6 +3415,7 @@ export async function ingestFiles(
     filesDiscovered,
     patchesApplied,
     idempotentPatches,
+    filesSkippedAsUnchanged,
     // `+ crashedParses()`, as the baseline and delete guards already do. Files
     // lost to a dead parse pool raise `filesSkippedUnparsed`, never
     // `parseErrors`, so without this everything downstream read the run as

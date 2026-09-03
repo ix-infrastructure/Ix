@@ -111,6 +111,7 @@ describe('describeEmptyCompletedMap', () => {
       filesDiscovered: 260,
       patchesApplied: 260,
       idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     });
@@ -126,6 +127,7 @@ describe('describeEmptyCompletedMap', () => {
       filesDiscovered: 1,
       patchesApplied: 1,
       idempotentPatches: 1,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     });
@@ -140,11 +142,34 @@ describe('describeEmptyCompletedMap', () => {
     expect(message).toContain("the next 'ix map' can reuse unchanged files");
   });
 
+  it('does not blame deduplication when the run skipped files as unchanged', () => {
+    // Joey's case on #570: a workspace on a language the backend cannot build a
+    // hierarchy for. 99 files are mtime-clean and never submitted — which is
+    // itself proof the backend still holds their source hashes, and so their
+    // nodes. The user reverts one file to content ingested earlier, its patch id
+    // matches a record that is still there, and the backend answers Idempotent.
+    // Every patch this run submitted was a replay, but the graph is intact and
+    // waiting 24 hours changes nothing.
+    const message = describeEmptyCompletedMap(emptyResult, {
+      filesDiscovered: 100,
+      patchesApplied: 1,
+      idempotentPatches: 1,
+      filesSkippedAsUnchanged: 99,
+      parseErrors: 0,
+      commitErrors: 0,
+    });
+
+    expect(message).not.toContain('deduplicated');
+    expect(message).not.toContain('expire within 24 hours');
+    expect(message).toContain('may not map this source language');
+  });
+
   it('keeps the language diagnosis when only some commits were replays', () => {
     const message = describeEmptyCompletedMap(emptyResult, {
       filesDiscovered: 10,
       patchesApplied: 10,
       idempotentPatches: 9,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     });
@@ -160,6 +185,7 @@ describe('describeEmptyCompletedMap', () => {
       filesDiscovered: 30,
       patchesApplied: 0,
       idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     });
@@ -173,6 +199,7 @@ describe('describeEmptyCompletedMap', () => {
       filesDiscovered: 0,
       patchesApplied: 0,
       idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     })).toBeUndefined();
@@ -183,6 +210,7 @@ describe('describeEmptyCompletedMap', () => {
       filesDiscovered: 12,
       patchesApplied: 12,
       idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 1,
       commitErrors: 0,
     })).toBeUndefined();
@@ -190,6 +218,7 @@ describe('describeEmptyCompletedMap', () => {
       filesDiscovered: 12,
       patchesApplied: 12,
       idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 1,
     })).toBeUndefined();
@@ -202,6 +231,7 @@ describe('describeEmptyCompletedMap', () => {
       filesDiscovered: 260,
       patchesApplied: 260,
       idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     })).toBeUndefined();
@@ -213,6 +243,7 @@ describe('describeEmptyCompletedMap', () => {
         filesDiscovered: 260,
         patchesApplied: 260,
         idempotentPatches: 0,
+        filesSkippedAsUnchanged: 0,
         parseErrors: 0,
         commitErrors: 0,
       })).toBeUndefined();
@@ -224,6 +255,7 @@ describe('describeEmptyCompletedMap', () => {
       filesDiscovered: 12,
       patchesApplied: 12,
       idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     })).toBeUndefined();
@@ -231,6 +263,7 @@ describe('describeEmptyCompletedMap', () => {
       filesDiscovered: 12,
       patchesApplied: 12,
       idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     })).toBeUndefined();
@@ -238,6 +271,7 @@ describe('describeEmptyCompletedMap', () => {
       filesDiscovered: 12,
       patchesApplied: 12,
       idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     })).toBeUndefined();
@@ -249,6 +283,7 @@ describe('describeEmptyCompletedMap', () => {
       filesDiscovered: 260,
       patchesApplied: 0,
       idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     }, '/workspace/account', invalidate);
@@ -264,6 +299,7 @@ describe('describeEmptyCompletedMap', () => {
       filesDiscovered: 260,
       patchesApplied: 0,
       idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     })).toBeDefined();
@@ -275,6 +311,7 @@ describe('describeRegionlessCompletedMap', () => {
     filesDiscovered: 200,
     patchesApplied: 200,
     idempotentPatches: 0,
+    filesSkippedAsUnchanged: 0,
     parseErrors: 0,
     commitErrors: 0,
   };
@@ -332,6 +369,7 @@ describe('describeRegionlessCompletedMap', () => {
       filesDiscovered: 2,
       patchesApplied: 2,
       idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     }, '/workspace/mixed', invalidate);

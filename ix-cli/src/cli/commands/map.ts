@@ -154,7 +154,7 @@ export function describeEmptyCompletedMap(
   ingest:
     | Pick<
         IngestFilesSummary,
-        "filesDiscovered" | "patchesApplied" | "idempotentPatches" | "parseErrors" | "commitErrors"
+        "filesDiscovered" | "patchesApplied" | "idempotentPatches" | "filesSkippedAsUnchanged" | "parseErrors" | "commitErrors"
       >
     | undefined,
 ): string | undefined {
@@ -178,7 +178,17 @@ export function describeEmptyCompletedMap(
   // idempotency keys, so the identical re-ingest was accepted as a replay and
   // committed nothing (Ix-memory#174). Those keys expire after 24h, which is
   // why waiting is a real workaround and worth saying out loud.
-  if (patches > 0 && ingest.idempotentPatches >= patches) {
+  // `filesSkippedAsUnchanged === 0` is load-bearing, not a belt-and-braces extra.
+  // `idempotentPatches >= patches` only says every patch this run *submitted*
+  // was a replay; it says nothing about the files the run never submitted, and
+  // those are what disprove the diagnosis. A workspace on a language the
+  // backend cannot build a hierarchy for skips its 99 clean files, and one
+  // reverted file whose content was ingested before commits as `Idempotent` —
+  // giving patches === 1, idempotentPatches === 1, file_count === 0 with a
+  // graph that is perfectly intact and a 24-hour wait that changes nothing.
+  // A real #527 run skips nothing: the DB-reset guard clears the mtime cache
+  // and the hash lookup comes back empty, so every file is re-submitted.
+  if (patches > 0 && ingest.idempotentPatches >= patches && ingest.filesSkippedAsUnchanged === 0) {
     return `Backend reported ${result.outcome}, but mapped 0 files after local ingest found ${files}. The backend answered every one of the ${patches} committed ${patchWord} with 'already applied', so this run wrote nothing — the graph is empty because the commits were deduplicated against patch records the backend still holds, not because the source could not be parsed. That is what a workspace whose graph was deleted without its patch records looks like; the records expire within 24 hours, or an upgraded backend clears them with the reset. ${tail}`;
   }
 
@@ -273,7 +283,7 @@ export function invalidateBaselineForIncompleteCompletedMap(
   ingest:
     | Pick<
         IngestFilesSummary,
-        "filesDiscovered" | "patchesApplied" | "idempotentPatches" | "parseErrors" | "commitErrors"
+        "filesDiscovered" | "patchesApplied" | "idempotentPatches" | "filesSkippedAsUnchanged" | "parseErrors" | "commitErrors"
       >
     | undefined,
   projectRoot: string,
