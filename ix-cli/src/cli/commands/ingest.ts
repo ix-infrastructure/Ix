@@ -1353,8 +1353,9 @@ export async function ingestFiles(
    * stitch a registration missing that file's exports over the complete one --
    * a transient crash silently shrinking the cross-repo graph.
    *
-   * Reported under `skipReasons.parseError`, which is what it is from a
-   * consumer's side: the parser gave us nothing for this file.
+   * Reported as `skipReasons.unparsed`, its own bucket: `parseError` counts
+   * every parse-stage failure including stat, read and patch-build errors, most
+   * of which are not skips, so adding to it made that number mean neither thing.
    */
   let filesSkippedUnparsed = 0;
   let parseErrors = 0;
@@ -2486,11 +2487,15 @@ export async function ingestFiles(
       // incremental no-op from a repo full of empty __init__.py. `emptyFile` was
       // hardcoded 0 for the same reason and is now the real count.
       //
-      // `parseError` carries both the files that raised a parse error and the
-      // ones the pool returned nothing for, so the buckets still reconcile with
-      // `filesSkipped` beside them. Narrowing `unchanged` without this left the
-      // pool's nulls in no bucket at all.
-      skipReasons: { unchanged: filesSkippedAsUnchanged, emptyFile: filesSkippedAsEmpty, parseError: parseErrors + filesSkippedUnparsed, tooLarge, minifiedLikely, outsideRoot },
+      // `unparsed` is its own bucket. Narrowing `unchanged` left the pool's
+      // nulls in no bucket at all, but folding them into `parseError` was
+      // worse: that counts every parse-stage failure, including stat, read and
+      // patch-build errors that were never skips, so one unstat-able file gave
+      // `filesSkipped: 0` with a bucket claiming 1. `unchanged`, `emptyFile`,
+      // `minifiedLikely` and `unparsed` are the buckets that are subsets of
+      // `filesSkipped`; `parseError` and `tooLarge` are counted separately and
+      // always were.
+      skipReasons: { unchanged: filesSkippedAsUnchanged, emptyFile: filesSkippedAsEmpty, parseError: parseErrors, unparsed: filesSkippedUnparsed, tooLarge, minifiedLikely, outsideRoot },
       commitErrors,
       stitchErrors,
       // Ix#568. Present only when the stitch was refused before it was sent, so

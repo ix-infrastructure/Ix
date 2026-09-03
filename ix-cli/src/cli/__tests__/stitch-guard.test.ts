@@ -364,6 +364,27 @@ describe("connectionNeverEstablished", () => {
     expect(connectionNeverEstablished(await failureOf(`http://127.0.0.1:${port}/v1/stitch`))).toBe(true);
   });
 
+  it("is true for an unroutable address — a neighbouring errno, same phase", async () => {
+    // 240.0.0.1 is reserved, so the stack refuses to route to it: ENETUNREACH
+    // with syscall "connect". An enumerated code list missed exactly this, and
+    // a VPN drop produces the same shape -- fifteen minutes of endpoint-wide
+    // cooldown for a request that never left the machine.
+    expect(connectionNeverEstablished(await failureOf("http://240.0.0.1:8090/v1/stitch"))).toBe(true);
+  });
+
+  it("is true for undici's connect timeout, which carries no syscall", () => {
+    // Shape observed through IxClient.stitch against a blackholed address
+    // (192.0.2.1, TEST-NET-1): ConnectTimeoutError / UND_ERR_CONNECT_TIMEOUT,
+    // syscall undefined. Pinned from the observation rather than driven live,
+    // because reproducing it costs undici's full 10s connect timeout.
+    const observed = new TypeError("fetch failed");
+    (observed as { cause?: unknown }).cause = Object.assign(
+      new Error("Connect Timeout Error (attempted address: 192.0.2.1:8090)"),
+      { name: "ConnectTimeoutError", code: "UND_ERR_CONNECT_TIMEOUT" },
+    );
+    expect(connectionNeverEstablished(observed)).toBe(true);
+  });
+
   it("is false for a blocked port, whose failure carries no code", async () => {
     // fetch rejects port 1 before it opens anything, with a bare
     // `Error: bad port`. No code means no proof, which is the safe answer.

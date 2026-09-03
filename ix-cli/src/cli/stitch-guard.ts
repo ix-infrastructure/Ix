@@ -170,26 +170,38 @@ function readCooldown(endpoint: string): Cooldown | null {
  * mid-run takes a full 15-minute endpoint-wide cooldown for a request it never
  * received.
  *
- * The codes are DERIVED, not guessed -- `IxClient` flattens HTTP errors into
- * `"NNN: ..."` strings but rethrows transport failures intact, so what arrives
- * here is Node's `TypeError: fetch failed` with the real error on `.cause`.
- * Observed through `IxClient.stitch` itself:
+ * Keyed on the SYSCALL, not on a list of codes. `IxClient` flattens HTTP errors
+ * into `"NNN: ..."` strings but rethrows transport failures intact, so what
+ * arrives is Node's `TypeError: fetch failed` with the real error on `.cause` --
+ * and Node stamps `syscall` on every libuv error, which says which phase failed
+ * far more reliably than the errno does. Observed through `IxClient.stitch`:
  *
- *   closed port      -> cause { name: "Error",       code: "ECONNREFUSED" }
- *   unresolvable DNS -> cause { name: "Error",       code: "ENOTFOUND"    }
- *   reset AFTER send -> cause { name: "SocketError", code: "UND_ERR_SOCKET" }
+ *   closed port          code ECONNREFUSED            syscall connect
+ *   unresolvable DNS     code ENOTFOUND               syscall getaddrinfo
+ *   unroutable address   code ENETUNREACH             syscall connect
+ *   blackholed address   code UND_ERR_CONNECT_TIMEOUT syscall undefined
+ *   reset AFTER send     code UND_ERR_SOCKET          syscall undefined
  *
- * The third is the one deliberately NOT accepted. "Other side closed" happens
- * after the request bytes are gone, so it is exactly the ambiguous case this
- * guard exists for: an upstream that restarted killed its join, but a proxy
- * that dropped the connection did not. Both spell UND_ERR_SOCKET, so it stays
- * on the conservative side and keeps the marker.
+ * An enumerated code list got the first two and missed the next two, which is
+ * the same harm for a neighbouring errno: a VPN drop or an unreachable host
+ * cooling the endpoint down for fifteen minutes over a request that never left.
+ * `connect` and `getaddrinfo` cover every one of those without naming them, and
+ * they extend to `EHOSTUNREACH` and a connect-phase `ETIMEDOUT` for free --
+ * while a `read`/`write` `ETIMEDOUT`, which happens after the bytes are gone,
+ * correctly does not qualify.
+ *
+ * `UND_ERR_CONNECT_TIMEOUT` is undici's own and carries no syscall, so it is
+ * named. `UND_ERR_SOCKET` is the deliberate exclusion: "other side closed"
+ * happens after the request went out, so it is exactly the ambiguous case this
+ * guard exists for -- an upstream that restarted killed its join, a proxy that
+ * dropped the connection did not, and both spell the same code.
  */
 export function connectionNeverEstablished(error: unknown): boolean {
   // Walk the cause chain: undici nests, and a wrapper may add a level later.
   for (let e: unknown = error, depth = 0; e !== null && e !== undefined && depth < 5; depth++) {
-    const code = (e as { code?: unknown }).code;
-    if (code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "EAI_AGAIN") return true;
+    const { syscall, code } = e as { syscall?: unknown; code?: unknown };
+    if (syscall === "connect" || syscall === "getaddrinfo") return true;
+    if (code === "UND_ERR_CONNECT_TIMEOUT") return true;
     e = (e as { cause?: unknown }).cause;
   }
   return false;
