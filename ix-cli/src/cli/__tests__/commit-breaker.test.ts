@@ -3,6 +3,7 @@ import {
   commitFailureLimit,
   createCommitBreaker,
   describeCommitCutoff,
+  perFileAction,
 } from "../commit-breaker.js";
 
 describe("commitFailureLimit", () => {
@@ -161,6 +162,52 @@ describe("reset, which is what the end-of-run retry runs on", () => {
   });
 });
 
+describe("perFileAction", () => {
+  // Every revision of this decision that could not be driven directly grew a
+  // defect only an end-to-end run would show. These are those defects.
+
+  it("sends when nothing says otherwise", () => {
+    expect(perFileAction({ replay: false, tripped: false })).toBe("send");
+    expect(perFileAction({ replay: false, tripped: false, budgetLeft: 3 })).toBe("send");
+  });
+
+  it("holds on a trip when the caller has no budget", () => {
+    expect(perFileAction({ replay: false, tripped: true })).toBe("hold");
+  });
+
+  it("ignores the streak when the caller gave a budget", () => {
+    // The bug this exists for: with both live, the streak trips at `limit` long
+    // before a budget of `2 * limit` can bind, so the budget was inert and the
+    // drain still stranded every good patch sitting behind a run of bad ones.
+    expect(perFileAction({ replay: false, tripped: true, budgetLeft: 3 })).toBe("send");
+  });
+
+  it("holds once the budget is spent", () => {
+    expect(perFileAction({ replay: false, tripped: false, budgetLeft: 0 })).toBe("hold");
+    expect(perFileAction({ replay: false, tripped: true, budgetLeft: 0 })).toBe("hold");
+  });
+
+  it("holds a REPLAY too once the budget is spent", () => {
+    // A 409 naming 999 landed ids would otherwise send 999 serialized doomed
+    // commits while holding the fallback mutex, so nothing else could even trip
+    // the breaker.
+    expect(perFileAction({ replay: true, tripped: false, budgetLeft: 0 })).toBe("hold");
+  });
+
+  it("stops a replay on a trip by counting it, never by holding it", () => {
+    // Those patches are confirmed landed by the server's own 409 body. Holding
+    // them would drop them from the counters and let the cutoff report "The
+    // graph is unchanged" for a run whose patches are all in the graph.
+    expect(perFileAction({ replay: true, tripped: true })).toBe("count-applied");
+  });
+
+  it("still sends a replay while nothing has given up", () => {
+    // An earlier revision folded the replay check into the tripped check and
+    // inverted it, so nothing was ever held back at all.
+    expect(perFileAction({ replay: true, tripped: false })).toBe("send");
+  });
+});
+
 describe("describeCommitCutoff", () => {
   it("names the count, the endpoint, what was not sent, and the error", () => {
     const b = createCommitBreaker(2);
@@ -173,8 +220,11 @@ describe("describeCommitCutoff", () => {
     // the breaker tripped keep landing and keep incrementing it, so the streak
     // is whatever the race produced and does not match IX_COMMIT_FAILURE_LIMIT.
     b.recordFailure(new Error("a straggler that landed after the decision"));
-    expect(describeCommitCutoff(b, "e")).toContain("2 consecutive failures");
-    expect(msg).toContain("2 consecutive failures");
+    expect(describeCommitCutoff(b, "e")).toContain("after 2 failures");
+    // Not "consecutive": the fan-out stops on a streak but the end-of-run retry
+    // stops on a total budget, and this banner prints for both.
+    expect(msg).not.toContain("consecutive");
+    expect(msg).toContain("after 2 failures");
     expect(msg).toContain("http://localhost:8090");
     expect(msg).toContain("17 further patches were not sent");
     expect(msg).toContain("transaction begin timeout");

@@ -18,7 +18,7 @@ import { loadIngestionModules } from './ingestion-loader.js';
 import { ensureWorkspaceIdState } from '../bootstrap.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
-import { createCommitBreaker, describeCommitCutoff } from '../commit-breaker.js';
+import { createCommitBreaker, describeCommitCutoff, perFileAction } from '../commit-breaker.js';
 import { readBackendHealth } from './upgrade.js';
 import { SUPPORTED_EXTENSIONS } from '../supported-extensions.js';
 import { canRenderProgress } from '../stderr.js';
@@ -977,13 +977,20 @@ export function describeCommitOutcome(
     // on a backend that answered nothing. A run that committed zero patches
     // did not run out of time doing work; it ran out of time waiting.
     if (patchesApplied === 0) {
+      // Deliberately NOT "raising the budget will not help": the deadline
+      // covers discovery, hashing and parsing too, so a large repo or a short
+      // IX_MAP_DEADLINE_MS can spend it before the first commit is even
+      // attempted -- and there raising it is exactly the fix. Both readings
+      // are live from here, so name both rather than assert the wrong one.
       return {
         kind: "fatal",
         message:
           `Ingest ran out of time without committing anything: all ${commitErrors} file patches were ` +
-          `abandoned when the map deadline fired, and the backend accepted none of them first. ` +
-          `A longer IX_MAP_DEADLINE_MS will not help — check the backend (an ArangoDB that cannot ` +
-          `begin a transaction is still reachable and still consistent, so \`ix doctor\` passes).`,
+          `abandoned when the map deadline fired, and none landed first. Either the budget ran out ` +
+          `before the commits did (raise IX_MAP_DEADLINE_MS or map a smaller path), or the backend ` +
+          `is not accepting writes — an ArangoDB that cannot begin a transaction is still reachable ` +
+          `and still consistent, so \`ix doctor\` passes. \`docker stats\` and ` +
+          `\`/_api/query/current\` tell the two apart.`,
       };
     }
     return {
@@ -1354,6 +1361,16 @@ export async function ingestFiles(
   // patch out of the per-file fallback. Stop after a streak instead.
   const commitBreaker = createCommitBreaker();
   /**
+   * `patchesApplied` at the moment the cutoff first fired.
+   *
+   * The banner says "N patches landed before it stopped", and the run total
+   * is not that number: it includes everything the drain placed afterwards
+   * and everything the later batches committed, so a run that tripped once in
+   * batch 1 and then finished normally claimed 19,500 landed "before it
+   * stopped".
+   */
+  let appliedAtCutoff: number | undefined;
+  /**
    * Has the held-back retry already been spent and failed this run?
    *
    * `commitPreparedPatches` runs once per 500-file batch, so a per-call retry
@@ -1708,34 +1725,26 @@ export async function ingestFiles(
           try {
             for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
               const item = items[itemIndex];
-              // Out of budget: hold everything left, exactly as a trip does.
-              // Applies to replays too -- a 409 naming 999 landed ids would
-              // otherwise send 999 serialized doomed commits while HOLDING the
-              // fallback mutex, so nothing else could even trip the breaker.
-              if (budgetLeft <= 0) {
+              const isReplay = fallbackOpts?.replay === true;
+              const action = perFileAction({
+                replay: isReplay,
+                tripped: commitBreaker.tripped(),
+                budgetLeft: fallbackOpts?.failureBudget === undefined ? undefined : budgetLeft,
+              });
+              if (action === "hold") {
+                appliedAtCutoff ??= patchesApplied;
                 for (let k = itemIndex; k < items.length; k++) deferredByCutoff.push(items[k]);
                 break;
               }
-              const isReplay = fallbackOpts?.replay === true;
-              if (isReplay) {
-                // A replay re-sends patches the server's 409 has CONFIRMED it
-                // holds. Sending up to 1,000 of them one at a time to a backend
-                // we have given up on is the fan-out this cutoff exists to
-                // stop -- but they are still IN THE GRAPH, so dropping them from
+              if (action === "count-applied") {
+                // Confirmed landed by the server's 409, and we have given up
+                // sending. They are still IN THE GRAPH, so dropping them from
                 // the counters would make the cutoff report "The graph is
-                // unchanged" for a run that changed it. Count them as applied,
-                // which is what they are, and stop sending. The mtime baseline
-                // is not marked for them, so the next run re-sends them as the
+                // unchanged" for a run that changed it. The mtime baseline is
+                // not marked for them, so the next run re-sends them as the
                 // idempotent no-ops they are.
-                if (commitBreaker.tripped()) {
-                  patchesApplied += items.length - itemIndex;
-                  break;
-                }
-              } else if (commitBreaker.tripped()) {
-                // Held, not counted: the drain re-sends these once with a fresh
-                // streak, and only what it fails to place becomes an error.
-                deferredByCutoff.push(item);
-                continue;
+                patchesApplied += items.length - itemIndex;
+                break;
               }
               try {
                 // Move the label per file. It used to be set once, before the
@@ -1909,11 +1918,16 @@ export async function ingestFiles(
       if (deferredByCutoff.length > 0) {
         if (!cutoffRetrySpent) {
           const held = deferredByCutoff.splice(0, deferredByCutoff.length);
+          const appliedBefore = patchesApplied;
           await commitIndividuallyAfterCutoff(held);
-          // If the retry ended with the breaker tripped again, the backend
-          // answered the question: it is not the patches. Do not ask once per
-          // batch for the rest of the run.
-          cutoffRetrySpent = commitBreaker.tripped();
+          // Spent only if the retry placed NOTHING. Whether it ended tripped
+          // says nothing useful: a drain that commits hundreds and then meets
+          // the tail of a bad cluster ends tripped too, and treating that as
+          // "the backend is dead" disabled the retry for every later batch --
+          // so a ten-second hiccup 17 batches later had its held patches
+          // counted as errors, unsent, against a backend visibly taking
+          // writes. Committing nothing is the only evidence that means it.
+          cutoffRetrySpent = patchesApplied === appliedBefore;
         }
         // Held back again, or held back after the retry was already spent.
         if (deferredByCutoff.length > 0) {
@@ -2541,7 +2555,7 @@ export async function ingestFiles(
     //
     // Before the stitch line and before the commit report: this is the cause,
     // and everything else printed about this run is its consequence.
-    process.stderr.write(`${describeCommitCutoff(commitBreaker, client.endpoint, patchesApplied)}\n`);
+    process.stderr.write(`${describeCommitCutoff(commitBreaker, client.endpoint, appliedAtCutoff ?? patchesApplied)}\n`);
   }
   if (stitchErrors > 0) {
     process.stderr.write(`  ${describeStitchFailure(stitchError)}\n`);

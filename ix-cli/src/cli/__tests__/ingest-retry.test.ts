@@ -356,36 +356,6 @@ const partialBody = (ids: string[], expected: number) =>
 
 const item = (id: string) => ({ patch: { patchId: id } });
 
-describe('the per-file failure budget', () => {
-  // A CONSECUTIVE streak cannot get past a run of bad patches: it stops inside
-  // the cluster and strands everything after it, and the mtime baseline (never
-  // written on a run with commit errors) makes the next run repeat it exactly.
-  // A budget of total failures keeps going and stops on the arithmetic.
-
-  it('walks past a cluster of failures and commits what is behind it', async () => {
-    const poison = new Set([1, 2, 3, 4, 5, 6, 7]);
-    const committed: number[] = [];
-    const commitIndividually = vi.fn(async (batch: number[]) => {
-      for (const n of batch) {
-        if (poison.has(n)) continue;
-        committed.push(n);
-      }
-    });
-
-    await commitBulkWithPayloadSplit([1, 2, 3, 4, 5, 6, 7, 8, 9], {
-      commitBulk: async () => { throw new Error('500: refused'); },
-      onBulkCommitted: vi.fn(),
-      commitIndividually,
-      shouldStop: () => false,
-    });
-
-    // The whole group reaches the per-file path; nothing is stranded by the
-    // shape of the failures within it.
-    expect(commitIndividually).toHaveBeenCalledOnce();
-    expect(committed).toEqual([8, 9]);
-  });
-});
-
 describe('partly-committed bulk groups', () => {
   it('recognises the 409 and reads the ids that landed', () => {
     const err = partialBody(['p1', 'p2'], 5);

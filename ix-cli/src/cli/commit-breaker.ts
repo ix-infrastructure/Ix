@@ -126,6 +126,61 @@ export function createCommitBreaker(limit = commitFailureLimit()): CommitBreaker
   };
 }
 
+/** What the per-file loop should do with the next patch. */
+export type PerFileAction =
+  /** Send it. */
+  | "send"
+  /** Do not send it; hold it for the end-of-run drain. */
+  | "hold"
+  /** Do not send it; it is already in the graph. Count it and stop the loop. */
+  | "count-applied";
+
+/**
+ * The whole of the per-file loop's stop/hold decision, in one place.
+ *
+ * Extracted because it lives inside `ingestFiles` otherwise, closing over a
+ * dozen locals, and every revision of it that could not be driven directly grew
+ * a defect that only a hand-built end-to-end run would show: a budget that
+ * never bound because the streak preempted it, a replay guard whose condition
+ * had been inverted, an entry check that turned a bulk into N serialized
+ * commits. Those are all decision-table bugs, and a decision table should be
+ * readable and assertable on its own.
+ *
+ * `budgetLeft` and `tripped` are two different ways of saying "stop", and which
+ * one applies is the substance:
+ *
+ *   - A caller with a BUDGET has said it wants to be bounded by the arithmetic
+ *     of total failures, not by adjacency. The drain is that caller: the set it
+ *     is re-sending begins with whatever run of bad patches stopped the fan-out,
+ *     so a streak would stop again in the same place and strand everything
+ *     behind it -- the permanent wedge, since the mtime baseline is never
+ *     written on a run with commit errors and the next run repeats the order.
+ *   - A caller with no budget uses the breaker's consecutive streak, which is
+ *     the right bound for a fan-out that has a drain behind it to catch what it
+ *     holds.
+ *
+ * A REPLAY is neither: those patches are confirmed landed by the server's own
+ * 409 body, so re-sending is bookkeeping and failing to is not a lost write.
+ */
+export function perFileAction(state: {
+  /** Is the caller re-sending patches the server has confirmed it holds? */
+  replay: boolean;
+  /** Has the run-wide breaker given up? */
+  tripped: boolean;
+  /** Failures this loop may still absorb, or undefined if it has no budget. */
+  budgetLeft?: number;
+}): PerFileAction {
+  // A spent budget stops everything, replays included: a 409 naming 999 landed
+  // ids would otherwise send 999 serialized doomed commits while HOLDING the
+  // fallback mutex, so nothing else could even trip the breaker.
+  if (state.budgetLeft !== undefined && state.budgetLeft <= 0) return "hold";
+  if (state.replay) return state.tripped ? "count-applied" : "send";
+  // Only when no budget was given -- with both live the streak always preempts,
+  // which is exactly how the budget came to be inert.
+  if (state.budgetLeft === undefined && state.tripped) return "hold";
+  return "send";
+}
+
 /**
  * What the user is told when a run stops early.
  *
@@ -156,9 +211,13 @@ export function describeCommitCutoff(
   // the breaker tripped keep landing and keep incrementing, so the streak is
   // whatever the race happened to produce -- a number that is not the rule and
   // does not match IX_COMMIT_FAILURE_LIMIT.
+  // "failures", not "consecutive failures": the fan-out stops on a streak but
+  // the end-of-run retry stops on a total budget, and this banner prints for
+  // both. Claiming a run of N in a row that the run may never have seen is a
+  // misstatement on the one line whose whole job is saying what the backend did.
   return [
-    `Error: Stopped committing after ${breaker.limit} consecutive failures against ${endpoint}.`,
-    `  It refused ${breaker.limit} in a row, so ${breaker.skipped()} further ${breaker.skipped() === 1 ? "patch was" : "patches were"} not sent —`,
+    `Error: Stopped committing against ${endpoint} after ${breaker.limit} failures with nothing accepted.`,
+    `  ${breaker.skipped()} further ${breaker.skipped() === 1 ? "patch was" : "patches were"} not sent —`,
     `  they would have failed the same way and added load to a backend that is already the reason.`,
     `  Last error: ${trimmed}`,
     `  ${state} Re-run \`ix map\` once the backend is healthy; if \`ix doctor\` passes,`,

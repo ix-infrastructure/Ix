@@ -117,7 +117,11 @@ describe("describeCommitOutcome when the deadline fired", () => {
     expect(out.kind).toBe("fatal");
     if (out.kind === "ok") throw new Error("expected a message");
     expect(out.message).toContain("without committing anything");
-    expect(out.message).toContain("will not help");
+    // Both readings are live: the deadline covers discovery, hashing and parse
+    // too, so a large repo can spend it before the first commit is attempted --
+    // and there raising it IS the fix. Name both rather than assert one.
+    expect(out.message).toContain("raise IX_MAP_DEADLINE_MS");
+    expect(out.message).toContain("not accepting writes");
     expect(out.message).toContain("ix doctor");
   });
 
