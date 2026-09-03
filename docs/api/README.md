@@ -152,9 +152,18 @@ Ingest a path into the graph. Long-running: the client allows **30 minutes**.
   "filesSkipped": 3,
   "entitiesCreated": 640,
   "latestRev": 217,
-  "skipReasons": { "unchanged": 1, "emptyFile": 1, "parseError": 1, "tooLarge": 0 }
+  "skipReasons": { "unchanged": 1, "emptyFile": 1, "parseError": 0, "unparsed": 1, "tooLarge": 0 }
 }
 ```
+
+`unchanged`, `emptyFile`, `minifiedLikely` and `unparsed` are the buckets that
+are subsets of `filesSkipped`; `parseError` and `tooLarge` are counted
+separately and always have been. `unchanged` means specifically *skipped because
+we assumed it had not changed* — an mtime- or hash-clean file — and not every
+skip; see the stitch section for why that distinction is load-bearing.
+`unparsed` counts files the parse pool returned nothing for, which is not the
+same as `parseError` (that also covers stat, read and patch-build failures, most
+of which are not skips at all).
 
 #### POST `/v1/map`
 
@@ -696,7 +705,14 @@ interface IngestResult {
   filesSkipped?: number;
   entitiesCreated: number;
   latestRev: number;
-  skipReasons?: { unchanged: number; emptyFile: number; parseError: number; tooLarge: number; minifiedLikely?: number };
+  skipReasons?: {
+    unchanged: number;          // skipped as mtime-/hash-unchanged, not every skip
+    emptyFile: number;
+    parseError: number;         // parse-stage failures, including non-skips
+    tooLarge: number;
+    minifiedLikely?: number;
+    unparsed?: number;          // the parse pool returned nothing for these
+  };
 }
 ```
 

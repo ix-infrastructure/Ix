@@ -238,6 +238,26 @@ export function connectionNeverEstablished(error: unknown): boolean {
   return seen(error, 0);
 }
 
+/**
+ * Did the backend answer 2xx and then hand back a body we could not parse?
+ *
+ * `IxClient.post` throws `"${status}: ${text}"` for every non-2xx and only
+ * reaches `resp.json()` after `resp.ok`, so a `SyntaxError` arriving from a
+ * stitch can only mean the request SUCCEEDED and something rewrote the body --
+ * the same proxy interference as #528, which returned an HTML page. The join
+ * provably finished, so the marker must go; without this the endpoint was
+ * blocked for fifteen minutes, for every workspace, over a completed stitch.
+ *
+ * Derived: a server answering `200 text/html` gives
+ * `SyntaxError: Unexpected token '<', "<html>prox"... is not valid JSON`, with
+ * no `code` and no `cause`. Nothing else on this path throws a SyntaxError --
+ * an abort during the body read is an AbortError, and `JSON.stringify` of the
+ * request body would be a TypeError.
+ */
+export function answeredOkWithUnparseableBody(error: unknown): boolean {
+  return (error as { name?: unknown } | null)?.name === "SyntaxError";
+}
+
 /** How the stitch attempt ended, as the guard needs to see it. */
 export interface StitchOutcome {
   ok: boolean;
@@ -247,6 +267,8 @@ export interface StitchOutcome {
   status?: number | null;
   /** Set when the connection was never established — see the function above. */
   neverConnected?: boolean;
+  /** Set when the backend answered 2xx and the body would not parse. */
+  answeredOk?: boolean;
 }
 
 /**
@@ -267,7 +289,10 @@ export interface StitchOutcome {
  *
  *   - the connection was never established, so nothing was sent. See
  *     `connectionNeverEstablished` for why that is narrower than "a transport
- *     error" and why the narrowing matters.
+ *     error" and why the narrowing matters;
+ *   - the backend answered 2xx and the body would not parse, so the join
+ *     finished and a proxy rewrote the answer. See
+ *     `answeredOkWithUnparseableBody`.
  *
  * Anything else — another 5xx, a timeout, an abort, a socket dropped after the
  * request went out, or the process being killed before it could say anything —
@@ -276,6 +301,7 @@ export interface StitchOutcome {
 export function outcomeProvesNothingRunning(outcome: StitchOutcome): boolean {
   if (outcome.ok) return true;
   if (outcome.neverConnected === true) return true;
+  if (outcome.answeredOk === true) return true;
   const status = outcome.status;
   if (typeof status !== "number") return false;
   if (status === 501) return true;

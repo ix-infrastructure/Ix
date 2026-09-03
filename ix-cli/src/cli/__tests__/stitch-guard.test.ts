@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   admitStitch,
   admitStitchWaiting,
+  answeredOkWithUnparseableBody,
   clearStitchCooldown,
   connectionNeverEstablished,
   cooldownPathForTest,
@@ -13,6 +14,7 @@ import {
   stitchKey,
 } from "../stitch-guard.js";
 import * as net from "node:net";
+import { createServer } from "node:http";
 import { namedLockPath } from "../single-flight.js";
 
 const ENDPOINT = "http://localhost:8090";
@@ -457,6 +459,48 @@ describe("connectionNeverEstablished", () => {
     const a = admitStitch(ENDPOINT);
     expect(a.admitted).toBe(true);
     if (a.admitted) a.settle({ ok: false, elapsedMs: 3, status: null, neverConnected: true });
+    expect(existsSync(cooldownPathForTest(ENDPOINT))).toBe(false);
+    expect(admitted(ENDPOINT)).toBe(true);
+  });
+});
+
+describe("answeredOkWithUnparseableBody", () => {
+  it("is true for a 2xx whose body is not JSON — the join finished", async () => {
+    // `IxClient.post` throws "${status}: ${text}" for every non-2xx and only
+    // reaches `resp.json()` after `resp.ok`, so a SyntaxError here can only
+    // mean the request SUCCEEDED and something rewrote the body -- the #528
+    // proxy shape. Without this the endpoint was blocked for fifteen minutes,
+    // for every workspace, over a stitch that provably completed.
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end("<html>proxy says hi</html>");
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as net.AddressInfo).port;
+    try {
+      let caught: unknown;
+      try {
+        await (await fetch(`http://127.0.0.1:${port}/v1/stitch`, { method: "POST", body: "{}" })).json();
+      } catch (err) {
+        caught = err;
+      }
+      expect((caught as { name?: string }).name).toBe("SyntaxError");
+      expect(answeredOkWithUnparseableBody(caught)).toBe(true);
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
+
+  it("is false for the errors that actually mean a join may be running", async () => {
+    expect(answeredOkWithUnparseableBody(new Error("500: gateway timeout"))).toBe(false);
+    expect(answeredOkWithUnparseableBody(Object.assign(new Error("x"), { name: "TimeoutError" }))).toBe(false);
+    expect(answeredOkWithUnparseableBody(new TypeError("fetch failed"))).toBe(false);
+  });
+
+  it("clears the marker, so a rewritten 200 does not block the endpoint", () => {
+    const a = admitStitch(ENDPOINT);
+    expect(a.admitted).toBe(true);
+    if (a.admitted) a.settle({ ok: false, elapsedMs: 40, status: null, answeredOk: true });
     expect(existsSync(cooldownPathForTest(ENDPOINT))).toBe(false);
     expect(admitted(ENDPOINT)).toBe(true);
   });

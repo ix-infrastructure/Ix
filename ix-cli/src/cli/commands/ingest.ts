@@ -18,7 +18,12 @@ import { loadIngestionModules } from './ingestion-loader.js';
 import { ensureWorkspaceIdState } from '../bootstrap.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
-import { admitStitchWaiting, connectionNeverEstablished, type StitchRefusal } from '../stitch-guard.js';
+import {
+  admitStitchWaiting,
+  answeredOkWithUnparseableBody,
+  connectionNeverEstablished,
+  type StitchRefusal,
+} from '../stitch-guard.js';
 import { readBackendHealth } from './upgrade.js';
 import { SUPPORTED_EXTENSIONS } from '../supported-extensions.js';
 import { canRenderProgress } from '../stderr.js';
@@ -2377,6 +2382,7 @@ export async function ingestFiles(
                 // socket dropped after the request went out -- leaves it.
                 status: stitchFailureStatus(err),
                 neverConnected: connectionNeverEstablished(err),
+                answeredOk: answeredOkWithUnparseableBody(err),
               });
               throw err;
             }
