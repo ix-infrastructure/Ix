@@ -701,9 +701,10 @@ export async function commitBulkWithPayloadSplit<T, R>(
     /**
      * Has the caller given up on the backend? (Ix#560)
      *
-     * Consulted before the first request of every group -- including each half
-     * of a payload split, which recurses through here -- and again before the
-     * per-file fallback. The fallback exists for a bulk that failed for a
+     * Consulted before the per-file fallback, and ONLY there. The bulk is
+     * always sent: one request per group is not the amplification, and it is
+     * how a backend that recovered mid-run gets to prove it.
+     * The fallback exists for a bulk that failed for a
      * reason specific to the GROUP (too large, partly applied), where sending
      * the patches separately is a different request that can succeed. When the
      * backend itself is refusing writes, none of that holds: the fan-out is one
@@ -963,6 +964,40 @@ export function describeCommitOutcome(
   if (commitErrors <= 0) return { kind: "ok" };
   const attempted = commitErrors + patchesApplied;
 
+  if (deadlineHit) {
+    // Distinguishable because the two need opposite responses: a rejected
+    // patch is a backend problem, a deadline is our own wall clock and the fix
+    // is a longer budget or a smaller repo. Folding both into "failed to
+    // commit" is the same information loss this change exists to undo.
+    //
+    // Unless nothing landed at all. With a 5-minute per-request timeout and a
+    // 15-minute budget a stalled backend only fits ~3 attempts in, so the
+    // cutoff's streak cannot reach its limit and the run ends on the deadline
+    // -- and telling someone to RAISE the budget then is advice to wait longer
+    // on a backend that answered nothing. A run that committed zero patches
+    // did not run out of time doing work; it ran out of time waiting.
+    if (patchesApplied === 0) {
+      return {
+        kind: "fatal",
+        message:
+          `Ingest ran out of time without committing anything: all ${commitErrors} file patches were ` +
+          `abandoned when the map deadline fired, and the backend accepted none of them first. ` +
+          `A longer IX_MAP_DEADLINE_MS will not help — check the backend (an ArangoDB that cannot ` +
+          `begin a transaction is still reachable and still consistent, so \`ix doctor\` passes).`,
+      };
+    }
+    return {
+      kind: "warn",
+      message:
+        `Ingest ran out of time: ${commitErrors} of ${attempted} file patches were abandoned when ` +
+        `the map deadline fired. The graph is missing those files. Raise IX_MAP_DEADLINE_MS or map a smaller path.`,
+    };
+  }
+
+  // After the deadline branch, deliberately: a run that tripped the cutoff on
+  // a handful of patches and THEN blew its budget on thousands lost far more
+  // to the clock, and attributing all of it to the cutoff hides the number
+  // that would actually change the outcome.
   if (cutoffSkipped > 0) {
     // The cutoff has already printed the endpoint, the streak and the error.
     // Repeating the standard advice here would send the reader to a flag that
@@ -972,19 +1007,6 @@ export function describeCommitOutcome(
       message:
         `Ingest stopped early: ${commitErrors} of ${attempted} file patches are missing from the graph, ` +
         `${cutoffSkipped} of them never sent. See the cutoff above for why; ${debugFlag} will not add to it.`,
-    };
-  }
-
-  if (deadlineHit) {
-    // Distinguishable because the two need opposite responses: a rejected
-    // patch is a backend problem, a deadline is our own wall clock and the fix
-    // is a longer budget or a smaller repo. Folding both into "failed to
-    // commit" is the same information loss this change exists to undo.
-    return {
-      kind: patchesApplied === 0 ? "fatal" : "warn",
-      message:
-        `Ingest ran out of time: ${commitErrors} of ${attempted} file patches were abandoned when ` +
-        `the map deadline fired. The graph is missing those files. Raise IX_MAP_DEADLINE_MS or map a smaller path.`,
     };
   }
 
@@ -1342,15 +1364,6 @@ export async function ingestFiles(
    */
   let cutoffRetrySpent = false;
   /**
-   * Ix#560. The cutoff gates WRITES, but the pipeline in front of them keeps
-   * going: `reconcileRemovedEntities` issues per-file reads for every changed
-   * file with a previous hash. On a large repo that walks the whole tree making
-   * round trips to the backend the run has just declared it gave up on -- still
-   * adding load, and eating most of the wall clock the cutoff was meant to save.
-   * Once the breaker has tripped, skip the reconcile: its only purpose is to
-   * refine a patch that is no longer going to be sent.
-   */
-  /**
    * The RUN deadline, captured here because `commitPreparedPatches` shadows
    * `opts` with its own. Not `isAbortError`: a per-request AbortSignal.timeout
    * raises TimeoutError too, and that is a saturation signal, not our clock.
@@ -1674,23 +1687,24 @@ export async function ingestFiles(
           try {
             for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
               const item = items[itemIndex];
-              // The backend has refused every commit in this run; the next
-              // request differs from the last N in nothing but its payload.
-              if (commitBreaker.tripped()) {
-                if (fallbackOpts?.replay === true) {
-                  // A replay re-sends patches the server has CONFIRMED it
-                  // holds. Sending up to 1,000 of them one at a time to a
-                  // backend we have given up on is the fan-out this cutoff
-                  // exists to stop -- but they are still IN THE GRAPH, so
-                  // dropping them from the counters would make the cutoff
-                  // report `The graph is unchanged` for a run that changed it,
-                  // and understate the total it is counting against. Count
-                  // them as applied, which is what they are, and stop sending.
-                  // The mtime baseline is not marked for them, so the next run
-                  // re-sends them as the idempotent no-ops they are.
+              const isReplay = fallbackOpts?.replay === true;
+              if (isReplay) {
+                // A replay re-sends patches the server's 409 has CONFIRMED it
+                // holds. Sending up to 1,000 of them one at a time to a backend
+                // we have given up on is the fan-out this cutoff exists to
+                // stop -- but they are still IN THE GRAPH, so dropping them from
+                // the counters would make the cutoff report "The graph is
+                // unchanged" for a run that changed it. Count them as applied,
+                // which is what they are, and stop sending. The mtime baseline
+                // is not marked for them, so the next run re-sends them as the
+                // idempotent no-ops they are.
+                if (commitBreaker.tripped()) {
                   patchesApplied += items.length - itemIndex;
                   break;
                 }
+              } else if (commitBreaker.tripped()) {
+                // Held, not counted: the drain re-sends these once with a fresh
+                // streak, and only what it fails to place becomes an error.
                 deferredByCutoff.push(item);
                 continue;
               }
@@ -1717,9 +1731,17 @@ export async function ingestFiles(
                 // tree, which is a different problem from a file we could not
                 // read. Reporting it as a parse error hid that distinction in
                 // both the summary and the JSON contract.
-                commitErrors++;
-                if (commitFailureIndictsBackend(commitErr, runDeadlineExpired())) {
-                  commitBreaker.recordFailure(commitErr);
+                if (isReplay) {
+                  // Confirmed landed by the server's own 409 body. A failed
+                  // re-send loses no write, so counting it would let the cutoff
+                  // claim "The graph is unchanged" for a run whose patches are
+                  // all in the graph.
+                  patchesApplied++;
+                } else {
+                  commitErrors++;
+                  if (commitFailureIndictsBackend(commitErr, runDeadlineExpired())) {
+                    commitBreaker.recordFailure(commitErr);
+                  }
                 }
                 if (debug) {
                   const errMsg = String(commitErr);

@@ -78,18 +78,27 @@ describe("createCommitBreaker", () => {
     expect(b.tripped()).toBe(false);
   });
 
-  it("stays tripped once tripped, even after a later success", () => {
-    // Latching, not a view of the current streak. Other code has already acted
-    // on the decision: a chunk that split on a 413 can have its first half
-    // abandoned and counted as errors, and then its second half succeed --
-    // leaving a run that abandoned patches but claims it never gave up.
+  it("stays tripped across further failures", () => {
+    const b = createCommitBreaker(2);
+    b.recordFailure(new Error("a"));
+    b.recordFailure(new Error("b"));
+    expect(b.tripped()).toBe(true);
+    b.recordFailure(new Error("c"));
+    expect(b.tripped()).toBe(true);
+  });
+
+  it("un-trips on a success, because that is direct evidence the backend is alive", () => {
+    // A permanent latch is the worse bug now that patches are held and re-sent
+    // rather than abandoned: after one trip, a backend that recovered completely
+    // still had every DELETION patch dropped for the rest of the run, since
+    // those never go through the bulk path that would have proved it healthy.
     const b = createCommitBreaker(2);
     b.recordFailure(new Error("a"));
     b.recordFailure(new Error("b"));
     expect(b.tripped()).toBe(true);
 
     b.recordSuccess();
-    expect(b.tripped()).toBe(true);
+    expect(b.tripped()).toBe(false);
     expect(b.consecutiveFailures()).toBe(0);
   });
 

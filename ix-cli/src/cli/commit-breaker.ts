@@ -63,18 +63,23 @@ export interface CommitBreaker {
   /** Consecutive failures required to trip. 0 means this breaker never trips. */
   readonly limit: number;
   /**
-   * True once the run has given up on the backend. Latching: a later success
-   * does NOT un-trip it.
+   * True while the run has given up on the backend.
    *
-   * Without the latch the flag tracks the current streak instead of the
-   * decision, and the decision is what other code has already acted on. A
-   * chunk that split on a 413 can have its first half abandoned and counted
-   * as errors, then its second half succeed and clear the streak -- leaving a
-   * run that abandoned patches, reported them as commit errors, and finishes
-   * claiming it never gave up.
+   * Sticky against further FAILURES -- a streak that has already tripped stays
+   * tripped -- but a single success clears it. A commit landing is direct
+   * evidence the backend accepts writes, and there is nothing left to give up
+   * about.
+   *
+   * An earlier revision latched permanently, to stop a 413 split's second half
+   * succeeding and making a run that had abandoned patches claim it never gave
+   * up. Patches are no longer abandoned on trip -- they are held and re-sent --
+   * so that contradiction is gone, and the permanent latch had become the
+   * worse bug: after one trip, a backend that recovered completely still had
+   * every deletion patch dropped for the rest of the run, because those never
+   * go through the bulk path that would have proved it healthy.
    */
   tripped(): boolean;
-  /** A commit landed. The backend is accepting writes, so the streak is over. */
+  /** A commit landed. The backend is accepting writes, so the run resumes. */
   recordSuccess(): void;
   /** A commit failed in a way that sending it again cannot fix. */
   recordFailure(error: unknown): void;
@@ -107,7 +112,7 @@ export function createCommitBreaker(limit = commitFailureLimit()): CommitBreaker
   return {
     limit,
     tripped: () => latched,
-    recordSuccess: () => { consecutive = 0; },
+    recordSuccess: () => { consecutive = 0; latched = false; },
     recordFailure: (error) => {
       consecutive++;
       last = error;

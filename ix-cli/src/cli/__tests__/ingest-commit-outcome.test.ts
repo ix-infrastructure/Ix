@@ -107,6 +107,38 @@ describe("ingestCompletedCleanly", () => {
   });
 });
 
+describe("describeCommitOutcome when the deadline fired", () => {
+  it("does not tell the user to raise the budget when NOTHING committed", () => {
+    // With a 5-minute per-request timeout and a 15-minute budget, a stalled
+    // backend fits ~3 attempts in -- the cutoff's streak cannot reach its limit,
+    // so the run ends on the deadline. "Raise IX_MAP_DEADLINE_MS" is then advice
+    // to wait longer on a backend that answered nothing.
+    const out = describeCommitOutcome(20, 0, "--verbose", true, 0);
+    expect(out.kind).toBe("fatal");
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("without committing anything");
+    expect(out.message).toContain("will not help");
+    expect(out.message).toContain("ix doctor");
+  });
+
+  it("still points at the budget when work was getting done", () => {
+    const out = describeCommitOutcome(20, 4000, "--verbose", true, 0);
+    expect(out.kind).toBe("warn");
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("Raise IX_MAP_DEADLINE_MS");
+  });
+
+  it("reports the deadline ahead of the cutoff when both happened", () => {
+    // A run that skipped a handful to the cutoff and then lost thousands to the
+    // clock lost far more to the clock; blaming the cutoff hides the number that
+    // would change the outcome.
+    const out = describeCommitOutcome(5000, 100, "--verbose", true, 7);
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("Raise IX_MAP_DEADLINE_MS");
+    expect(out.message).not.toContain("never sent");
+  });
+});
+
 describe("describeCommitOutcome with a commit cutoff", () => {
   it("points at the cutoff instead of a flag that would show nothing", () => {
     // The cutoff has already printed the endpoint, the streak and the error. A
