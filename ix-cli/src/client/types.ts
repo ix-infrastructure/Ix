@@ -155,16 +155,6 @@ export interface SkipReasons {
   parseError: number;
   tooLarge: number;
   minifiedLikely?: number;
-  /**
-   * Files the parse pool returned nothing for. (Ix#568)
-   *
-   * Its own bucket rather than folded into `parseError`, which counts every
-   * parse-stage failure including stat, read and patch-build errors -- most of
-   * which are not skips at all, so adding to it made the number mean neither
-   * thing. These ARE skips, and along with `unchanged`, `emptyFile` and
-   * `minifiedLikely` they are the buckets that are subsets of `filesSkipped`.
-   */
-  unparsed?: number;
 }
 
 export interface IngestResult {

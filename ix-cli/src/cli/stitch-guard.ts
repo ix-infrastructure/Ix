@@ -268,14 +268,18 @@ export interface StitchOutcome {
  *   - the connection was never established, so nothing was sent. See
  *     `connectionNeverEstablished` for why that is narrower than "a transport
  *     error" and why the narrowing matters;
- *   - the backend answered 2xx at all, however unreadable the body. The
- *     request completed, so the join did. `IxClient` reports an unparseable
- *     body as `"${status}: response body is not JSON: ..."` precisely so this
- *     can be a fact about what the server said rather than an inference from a
- *     SyntaxError's name -- which would have accepted a PROXY answering 200
- *     with an HTML page on its own timeout, and cleared the marker while the
- *     join it had given up on was still running. That is the #568 failure, and
- *     this is the one arm that could have caused it.
+ *   - the backend answered 2xx at all, however unreadable the body.
+ *     `IxClient` reports an unparseable body as
+ *     `"${status}: response body is not JSON: ..."`, so this is a fact about
+ *     what came back rather than an inference from a SyntaxError's NAME -- an
+ *     earlier revision did the latter, and it would also have accepted a
+ *     genuine JSON bug on a path that never reached the network.
+ *
+ *     What it does NOT do is tell a real 2xx from a PROXY answering 200 with
+ *     an error page of its own. Nothing here can: that same proxy answering
+ *     200 with parseable JSON is `ok: true`, which has always cleared the
+ *     marker and must. The exposure is identical for both, and it is the
+ *     exposure every client has to a front end that lies about success.
  *
  * Anything else — another 5xx, a timeout, an abort, a socket dropped after the
  * request went out, or the process being killed before it could say anything —
@@ -428,7 +432,7 @@ export function admitStitch(endpoint: string, now = Date.now()): StitchAdmission
  * ordinary in a multi-repo setup with a per-repo hook. Dropping one there
  * loses that workspace's registration until somebody re-ingests every file,
  * because the stitch block is gated on nothing having been skipped as
- * unchanged (nor left unparsed), and an incremental map never reaches it.
+ * mtime- or hash-unchanged, and an incremental map never reaches it.
  *
  * So wait, briefly. A healthy holder is gone long before the budget; an
  * unhealthy one is still holding when it runs out, which is the case worth

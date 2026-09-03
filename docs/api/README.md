@@ -152,18 +152,17 @@ Ingest a path into the graph. Long-running: the client allows **30 minutes**.
   "filesSkipped": 3,
   "entitiesCreated": 640,
   "latestRev": 217,
-  "skipReasons": { "unchanged": 1, "emptyFile": 1, "parseError": 0, "unparsed": 1, "tooLarge": 0 }
+  "skipReasons": { "unchanged": 1, "emptyFile": 1, "parseError": 1, "tooLarge": 0 }
 }
 ```
 
-`unchanged`, `emptyFile`, `minifiedLikely` and `unparsed` are the buckets that
-are subsets of `filesSkipped`; `parseError` and `tooLarge` are counted
-separately and always have been. `unchanged` means specifically *skipped because
-we assumed it had not changed* — an mtime- or hash-clean file — and not every
-skip; see the stitch section for why that distinction is load-bearing.
-`unparsed` counts files the parse pool returned nothing for, which is not the
-same as `parseError` (that also covers stat, read and patch-build failures, most
-of which are not skips at all).
+> The **CLI's** `ix ingest --format json` emits a different, narrower breakdown
+> under the same key: `unchanged` there counts only files skipped as *mtime- or
+> hash-unchanged*, `emptyFile` is a real count rather than a hardcoded `0`, and
+> there is an extra `unparsed` bucket for files the parse pool returned nothing
+> for. That is the client's own summary of its own run and is not this response;
+> see the stitch section below for why the narrower `unchanged` is load-bearing
+> there.
 
 #### POST `/v1/map`
 

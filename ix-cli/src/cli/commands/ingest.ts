@@ -1510,7 +1510,7 @@ export async function ingestFiles(
     // Stat all files and partition into mtime-clean (skip) and mtime-changed (need hash check).
     const mtimeChangedPaths: string[] = [];
     /**
-     * Paths this loop has already accounted for as a skip.
+     * Paths this loop has already accounted for, and under which counter.
      *
      * Recorded explicitly rather than inferred from `currentMtimes`. The loop
      * leaves a path out of that map in three cases -- empty, oversized, and
@@ -1521,12 +1521,12 @@ export async function ingestFiles(
      * the graph, from `filesSkipped` and from every `skipReasons` entry, which
      * is precisely what the check that reads this exists to prevent.
      */
-    const accountedByStatLoop = new Set<string>();
+    const accountedByStatLoop = new Map<string, 'empty' | 'tooLarge'>();
     for (const filePath of filePaths) {
       try {
         const st = fs.statSync(filePath);
-        if (st.size === 0) { filesSkipped++; filesSkippedAsEmpty++; accountedByStatLoop.add(filePath); progressCurrent++; continue; }
-        if (st.size > MAX_FILE_BYTES) { tooLarge++; accountedByStatLoop.add(filePath); progressCurrent++; continue; }
+        if (st.size === 0) { filesSkipped++; filesSkippedAsEmpty++; accountedByStatLoop.set(filePath, 'empty'); progressCurrent++; continue; }
+        if (st.size > MAX_FILE_BYTES) { tooLarge++; accountedByStatLoop.set(filePath, 'tooLarge'); progressCurrent++; continue; }
         const mtime = st.mtimeMs;
         currentMtimes.set(filePath, mtime);
         if (!opts.force && !forceReingestPaths.has(filePath) && mtimeCache.get(filePath) === mtime) {
@@ -2143,14 +2143,27 @@ export async function ingestFiles(
               // The check itself is not optional either way: it is the fstat on
               // the handle we are about to read, which is what makes the size cap
               // TOCTOU-free (CodeQL js/file-system-race).
-              const countedByStatLoop = accountedByStatLoop.has(absFilePath);
+              const countedByStatLoop = accountedByStatLoop.get(absFilePath);
               if (st.size === 0) {
-                if (!countedByStatLoop) { filesSkipped++; filesSkippedAsEmpty++; }
+                if (countedByStatLoop === undefined) { filesSkipped++; filesSkippedAsEmpty++; }
                 return;
               }
               if (st.size > MAX_FILE_BYTES) {
-                if (!countedByStatLoop) tooLarge++;
+                if (countedByStatLoop === undefined) tooLarge++;
                 return;
+              }
+              // The other direction of the same race, and it needs undoing
+              // rather than skipping: the stat loop saw this file as empty or
+              // oversized and counted it, and the fstat -- the one we are about
+              // to READ from, so the authoritative one -- says it is neither.
+              // The file is ingested, so leaving the earlier count in place
+              // reports it as skipped in the very number the docs now call the
+              // real one.
+              if (countedByStatLoop !== undefined) {
+                accountedByStatLoop.delete(absFilePath);
+                // Which counter, from the record rather than a guess.
+                if (countedByStatLoop === 'empty') { filesSkipped--; filesSkippedAsEmpty--; }
+                else tooLarge--;
               }
               bytes = await fh.readFile();
             } finally {
