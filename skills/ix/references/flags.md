@@ -243,6 +243,16 @@ Explain an entity — infers role, importance, and structural context.
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--raw` | — | off | Show raw metadata dump (legacy format) |
 
+### `ix help [topic]`
+
+Additional help topics. With no topic, prints the top-level help. `workflows`
+(or `workflow`) and `advanced` are prose topics; any other topic is looked up as
+a registered command and shows that command's help. The retired plurals `goals`
+and `bugs` forward to `goal` and `bug`, whose help documents the subcommand that
+absorbed them. An unrecognised topic exits non-zero.
+
+No flags.
+
 ### `ix history <target>`
 
 Show provenance chain for a file or entity.
