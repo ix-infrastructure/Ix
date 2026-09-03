@@ -727,12 +727,26 @@ export async function commitBulkWithPayloadSplit<T, R>(
 ): Promise<void> {
   if (items.length === 0) return;
 
-  // Deliberately NO cutoff check before the bulk. One request per group is
-  // not the amplification -- the per-file fallback is, at one request per
-  // patch -- and sending it is the only way a backend that has recovered
+  // No cutoff check before a bulk that is actually a GROUP. One request per
+  // group is not the amplification -- the per-file fallback is, at one request
+  // per patch -- and sending it is the only way a backend that has recovered
   // mid-run can prove it and let the rest of the ingest through. Skipping it
-  // was also strictly worse than useless: the group went to the deferred set
-  // and came back as N SERIALIZED per-file commits instead of one bulk.
+  // was strictly worse than useless: the group went to the deferred set and
+  // came back as N SERIALIZED per-file commits instead of one bulk.
+  //
+  // A SINGLE-patch chunk is different, and the difference is the whole issue.
+  // At `IX_COMMIT_HTTP_MAX_FILES=1` -- which #560's reporters tried, and which
+  // the header's own table measures -- every chunk is one patch, so "one
+  // request per group" IS one request per patch and the rule above halves
+  // main's cost instead of bounding it: a 10,000-file map against a dead
+  // backend still sent ~10,000 doomed bulks. The cutoff applies to those, and
+  // recovery is still provable -- the drain's gate lets one probe through every
+  // few batches for exactly this.
+  if (items.length === 1 && handlers.shouldStop?.()) {
+    handlers.onAbandoned?.(items);
+    return;
+  }
+
   let result: R;
   try {
     result = await handlers.commitBulk(items);
@@ -1412,16 +1426,6 @@ export async function ingestFiles(
    */
   let backendIndictingFailures = 0;
   /**
-   * Commit errors raised by the COMMIT loop, as opposed to `commitErrors` --
-   * which also counts a deleted file whose patch could not be BUILT.
-   *
-   * The banner is gated on this. A run whose only failure is a patch-build
-   * error, on which the breaker had separately tripped and recovered, otherwise
-   * printed "Commits against <endpoint> kept failing" and pointed at a cutoff
-   * that had nothing to do with the one thing that actually went wrong.
-   */
-  let commitLoopErrors = 0;
-  /**
    * The RUN deadline, captured here because `commitPreparedPatches` shadows
    * `opts` with its own. Not `isAbortError`: a per-request AbortSignal.timeout
    * raises TimeoutError too, and that is a saturation signal, not our clock.
@@ -1895,7 +1899,6 @@ export async function ingestFiles(
                   }
                 } else {
                   commitErrors++;
-                  commitLoopErrors++;
                   if (indicts) commitBreaker.recordFailure(commitErr);
                 }
                 if (debug) {
@@ -2217,7 +2220,6 @@ export async function ingestFiles(
         // Held back again, or held back after the retry was already spent.
         if (deferredByCutoff.length > 0) {
           commitErrors += deferredByCutoff.length;
-          commitLoopErrors += deferredByCutoff.length;
           // Counted as the cutoff's even when the deadline has since fired.
           // Everything on this list was held by `perFileAction` BEFORE the
           // clock ran out -- the deadline check sits above the hold branch and
@@ -2238,12 +2240,8 @@ export async function ingestFiles(
       // deadline branch of `describeCommitOutcome` is what reports these.
       if (deferredByDeadline.length > 0) {
         commitErrors += deferredByDeadline.length;
-        // NOT `commitLoopErrors`. That counter gates the cutoff banner, and its
-        // whole job is to keep the banner off a run whose trips came from replay
-        // failures -- which deliberately never become commit errors. Feeding the
-        // clock's abandonments into it printed "Commits against <endpoint> kept
-        // failing" above "Ingest ran out of time: raise IX_MAP_DEADLINE_MS",
-        // blaming the backend for the clock's losses.
+        // Deliberately not fed to the cutoff's own accounting: these are the
+        // clock's, and `describeCommitOutcome` reports them under the deadline.
         deferredByDeadline.length = 0;
       }
 
@@ -2848,11 +2846,9 @@ export async function ingestFiles(
     opts.mapMode === true ? "--verbose" : "--debug",
     opts.deadlineSignal?.aborted === true,
     commitBreaker.skipped(),
-    // The same expression the banner is gated on, not just `everTripped()`.
-    // Five replay failures plus one deletion-patch BUILD error trips the breaker
-    // and leaves `commitLoopErrors` at 0, so the banner stays silent -- and this
-    // said "See the cutoff above for why it stopped" with no cutoff above it.
-    commitBreaker.everTripped() && commitLoopErrors > 0
+    // The same expression the banner is gated on, so this can never say "See
+    // the cutoff above" with no cutoff above it.
+    commitBreaker.everTripped()
   );
   const summary: IngestFilesSummary = {
     filesDiscovered,
@@ -2868,7 +2864,15 @@ export async function ingestFiles(
   // classified `{ kind: "ok" }` and exit 0, while this printed
   // `Error: Commits against <endpoint> kept failing` and claimed the graph was
   // only partly updated. Nothing was lost there, so there is nothing to say.
-  if (commitBreaker.everTripped() && commitLoopErrors > 0) {
+  // `everTripped()` alone, and it is not a weakening: `recordFailure` has one
+  // call site, in the per-file catch immediately after `commitErrors++`, so a
+  // trip already implies a real commit failure. A `commitLoopErrors` counter
+  // guarded this for two rounds against a scenario that no longer exists --
+  // replay failures were moved off `recordFailure` onto a local counter, and a
+  // deletion patch that fails to BUILD never reaches the breaker at all. A dead
+  // conjunct defended by a comment describing an impossible case is the exact
+  // shape this PR has spent rounds removing.
+  if (commitBreaker.everTripped()) {
     // Gated on the cutoff having FIRED, not on what was left unsent. A patch
     // that was never sent produces no `[commit error]` line even under
     // --verbose, so this has to print for those -- but gating on them alone
