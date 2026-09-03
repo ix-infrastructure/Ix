@@ -29,14 +29,19 @@
 // accepting one: nothing about sending the next request differs from the last N.
 //
 // What the cutoff does NOT do is abandon work permanently. Patches it holds
-// back are re-sent once per run through the same per-file loop, with the
-// breaker ACTIVE but its streak RESET -- because five adjacent patches the
-// backend rejects on their own merits look exactly like a dead backend until
-// the next patch commits, and only a fresh streak can tell them apart. A
-// backend that really is refusing everything trips again after N, so the retry
-// stays bounded. Without it, the mtime baseline (never written on a run with
-// commit errors) guarantees the next `ix map` re-ingests in the same order,
-// trips at the same point, and drops the same patches forever.
+// back are re-sent through the same per-file loop, in passes that change
+// direction -- see `drainInPasses`, which owns the rule and its bound. The
+// breaker's STREAK is not that bound and never was: `perFileAction` ignores
+// `tripped` whenever a failure budget is passed, and the drain always passes
+// one. What bounds it is the budget per pass and the three-sample stopping
+// rule, and neither applies at all once the backend has proved it is alive.
+//
+// The streak is still reset per pass, for a different reason: five adjacent
+// patches the backend rejects on their own merits look exactly like a dead
+// backend until the next patch commits. Without any of this the mtime baseline
+// (never written on a run with commit errors) guarantees the next `ix map`
+// re-ingests in the same order, stops at the same point, and drops the same
+// patches forever.
 //
 // It also never skips a chunk's BULK commit. One request per chunk is not the
 // amplification -- the fan-out is, at one request per patch -- and sending it is
@@ -130,11 +135,15 @@ export interface CommitBreaker {
   /**
    * Start a fresh streak, un-latched.
    *
-   * For the end-of-run retry only. The held-back patches are re-sent with the
-   * breaker ACTIVE but with no memory of the streak that held them, so a
-   * backend that is genuinely refusing everything trips again after N and the
-   * retry stays bounded -- while patches held back by a false trip simply
-   * commit. `skipped()` is cumulative and deliberately not reset.
+   * For the drain: called once per pass, in every batch that holds patches.
+   * They are re-sent with no memory of the streak that held them, because five
+   * adjacent patches the backend rejects on their own merits look exactly like
+   * a dead backend until the next one commits.
+   *
+   * What it does NOT do is bound the drain. `perFileAction` ignores `tripped`
+   * whenever a failure budget is passed and the drain always passes one, so the
+   * bound is `drainInPasses`'s, not this. `skipped()` is cumulative and
+   * deliberately not reset.
    */
   reset(): void;
 }
@@ -245,8 +254,10 @@ export interface DrainPass<T> {
 /**
  * Walk a held-back set, changing direction each time the budget stops it.
  *
- * The guarantee: **a patch is only ever handed back unsent once two passes in
- * opposite directions have each placed nothing.** Everything else is attempted.
+ * The guarantee: **a patch is only ever handed back unsent once three passes --
+ * from the tail, the head and the middle -- have between them placed nothing at
+ * all**, and not even then if the caller passes `mayGiveUp: false`. Everything
+ * else is attempted.
  *
  * Two rules get there, and each exists because the other one alone is wrong.
  *

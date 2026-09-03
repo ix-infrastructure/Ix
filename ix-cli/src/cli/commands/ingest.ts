@@ -1962,14 +1962,16 @@ export async function ingestFiles(
         // `onCommitted` would persist `durableDeletedFiles` and save the
         // baseline, recording stale nodes as reconciled and never retrying.
         //
-        // And the size cap, because this probe does no payload splitting. Every
-        // live call path bounds the held set at `PARSE_STREAM_CHUNK` (500), so
-        // the cap does not bind today -- `flushAll`, which would have handed
-        // `commitPreparedPatches` the whole repo, is defined and never called,
-        // here or on main. It stays because it is one comparison and the
-        // failure it prevents is the Ix#516 shape: one bulk past the proxy's
-        // body limit or Arango's transaction cap, failing and dropping
-        // everything to the serialized path this probe exists to avoid.
+        // And the size cap, because this probe does no payload splitting. It
+        // binds: the reconcile call passes every deletion patch in the run
+        // unchunked, and while those are filtered out of `bulkable` above, the
+        // set reaching here is bounded by `PARSE_STREAM_CHUNK` (500) only on the
+        // ordinary path. (An earlier version of this comment justified the cap
+        // with `flushAll`, which is defined and never called -- true, and beside
+        // the point.) The failure it prevents is the Ix#516 shape: one bulk past
+        // the proxy's body limit or Arango's transaction cap, failing and
+        // dropping everything to the serialized path this probe exists to
+        // avoid.
         // PARTITIONED, not skipped wholesale. `reconcileRemovedEntities`
         // prepends a delete op to any re-mapped file that lost an entity, so an
         // ordinary incremental map's held set almost always contains one --
@@ -2047,12 +2049,13 @@ export async function ingestFiles(
             unreached: deferredByCutoff.splice(0, deferredByCutoff.length),
           };
         }, !backendIsKnownAlive);
-        // A loop, not a spread. Every live call path bounds this at
-        // `PARSE_STREAM_CHUNK` (500) -- `flushAll` is defined and never called
-        // -- so the argument limit is not reachable today; the loop costs
-        // nothing and removes the question, because spreading an array past
-        // V8's limit throws RangeError from inside the commit phase, an
-        // uncaught throw that loses the whole batch's error accounting.
+        // A loop, not a spread. The ordinary path bounds this at
+        // `PARSE_STREAM_CHUNK` (500), but the reconcile call passes every
+        // deletion patch in the run unchunked, so the argument limit is not
+        // obviously out of reach -- and spreading past it throws RangeError from
+        // inside the commit phase, an uncaught throw that loses the whole
+        // batch's error accounting. The loop costs nothing and removes the
+        // question.
         for (const item of leftover) deferredByCutoff.push(item);
       };
 
@@ -2098,7 +2101,13 @@ export async function ingestFiles(
             commitIndividually,
             shouldStop: () => commitBreaker.tripped(),
             onAbandoned: (items, err) => {
-              for (const item of items) deferredByCutoff.push(item);
+              // The clock's, if it has fired. `shouldStop` is the breaker, which
+              // does not consult the deadline, so a chunk whose bulk was aborted
+              // by the run budget arrived here and was reported as withheld by
+              // the cutoff -- the same misattribution the two lists exist to
+              // keep apart, on the one path that was not routing through them.
+              const held = runDeadlineExpired() ? deferredByDeadline : deferredByCutoff;
+              for (const item of items) held.push(item);
               // Keep the quoted error current. This is the only place a bulk
               // failure is seen once the breaker has tripped -- the per-file
               // loop it would otherwise reach is exactly what the trip skips --
@@ -2152,14 +2161,15 @@ export async function ingestFiles(
       // held-back set gets a real attempt rather than being written off.
       //
       // `drainInPasses` is what decides when to stop -- a pass that REACHED
-      // THE END, or two passes that between them placed nothing at all -- and
-      // what the last pass could not reach is left for the next run, which
-      // re-ingests it anyway because the mtime baseline is not written on a run
-      // with commit errors. (A single pass that placed nothing is deliberately
-      // NOT a stopping condition, and there is no pass cap; its own doc says
-      // why for both.) The gate below is a coarser judgement across BATCHES, so
-      // that a genuinely dead backend is not re-probed once per batch for the
-      // length of the run.
+      // THE END, or three passes (tail, head, middle) that between them placed
+      // nothing at all, and not even that once the backend has proved it is
+      // alive. What the last pass could not reach is left for the next run,
+      // which re-ingests it anyway because the mtime baseline is not written on
+      // a run with commit errors. (A single pass that placed nothing is
+      // deliberately NOT a stopping condition, and there is no pass cap; its own
+      // doc says why for both.) The gate below is a coarser judgement across
+      // BATCHES, so that a genuinely dead backend is not re-probed once per
+      // batch for the length of the run.
       if (deferredByCutoff.length > 0) {
         if (!runDeadlineExpired() && drainGate.shouldDrain(patchesTheBackendTook)) {
           const held = deferredByCutoff.splice(0, deferredByCutoff.length);
@@ -2818,7 +2828,11 @@ export async function ingestFiles(
     opts.mapMode === true ? "--verbose" : "--debug",
     opts.deadlineSignal?.aborted === true,
     commitBreaker.skipped(),
-    commitBreaker.everTripped()
+    // The same expression the banner is gated on, not just `everTripped()`.
+    // Five replay failures plus one deletion-patch BUILD error trips the breaker
+    // and leaves `commitLoopErrors` at 0, so the banner stays silent -- and this
+    // said "See the cutoff above for why it stopped" with no cutoff above it.
+    commitBreaker.everTripped() && commitLoopErrors > 0
   );
   const summary: IngestFilesSummary = {
     filesDiscovered,
