@@ -467,6 +467,25 @@ describe("createDrainGate", () => {
     expect(gate.shouldDrain(19_000)).toBe(true);
   });
 
+  it("lets one drain through periodically, because a closed gate blocks its own reopen", () => {
+    // The reopen condition is a patch landing, and with the drain off the only
+    // remaining source of that is a BULK success. A backend that recovers while
+    // its bulks keep failing for GROUP reasons -- an old memory layer answering
+    // "partially committed" with no parseable ids, or a tail of oversized files
+    // bisecting to single-item 413s -- could then never clear the gate, and
+    // every remaining patch in the run was reported as an error with nothing
+    // sent, where `main` would have committed them one at a time.
+    const gate = createDrainGate(2, 3);
+    gate.record(false, 0);
+    gate.record(false, 0);
+
+    expect(gate.shouldDrain(0)).toBe(false);
+    expect(gate.shouldDrain(0)).toBe(false);
+    expect(gate.shouldDrain(0), "the third batch gets a probe").toBe(true);
+    // ...and then it is closed again for another interval.
+    expect(gate.shouldDrain(0)).toBe(false);
+  });
+
   it("re-closes if the backend goes back to placing nothing", () => {
     const gate = createDrainGate();
     gate.record(false, 100);

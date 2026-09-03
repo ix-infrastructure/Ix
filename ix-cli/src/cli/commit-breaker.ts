@@ -34,7 +34,10 @@
 // breaker's STREAK is not that bound and never was: `perFileAction` ignores
 // `tripped` whenever a failure budget is passed, and the drain always passes
 // one. What bounds it is the budget per pass and the three-sample stopping
-// rule, and neither applies at all once the backend has proved it is alive.
+// rule. The give-up clears only from evidence inside the same drain -- a
+// pass that places something resets the counter -- and not from the backend
+// having been alive earlier in the run, which is stale by the time a trip
+// happens.
 //
 // The streak is still reset per pass, for a different reason: five adjacent
 // patches the backend rejects on their own merits look exactly like a dead
@@ -256,8 +259,7 @@ export interface DrainPass<T> {
  *
  * The guarantee: **a patch is only ever handed back unsent once three passes --
  * from the tail, the head and the middle -- have between them placed nothing at
- * all**, and not even then if the caller passes `mayGiveUp: false`. Everything
- * else is attempted.
+ * all.** Everything else is attempted.
  *
  * Two rules get there, and each exists because the other one alone is wrong.
  *
@@ -321,7 +323,8 @@ export interface DrainPass<T> {
  * attempted at least `budget` items, so `unreached` strictly shrinks.
  *
  * The cost has two shapes, and the second one is the price of the guarantee.
- * A backend that accepts NOTHING is stopped after `2 x budget` doomed requests.
+ * A backend that accepts NOTHING is stopped after `3 x budget` doomed requests
+ * -- one per sample -- which is 15 at the shipped default.
  * A backend that accepts something and then refuses the rest is not stopped at
  * all: each pass eats `budget` of the refusing patches, so a 995-patch held set
  * where one write lands and 994 are refused runs ~199 passes and sends all 995
@@ -379,7 +382,9 @@ export interface DrainGate {
  * which is the amplification #560 is about, moved rather than removed. So after
  * `missesBeforeGivingUp` drains that place NOTHING, the gate closes.
  *
- * It reopens the moment a patch lands anywhere. That direction is the one that
+ * It reopens the moment a patch lands anywhere -- and, failing that, lets one
+ * drain through every `probeEveryBatches`, because a closed gate can block the
+ * progress its own reopen condition waits for. That direction is the one that
  * matters and the one an earlier revision got wrong: closing is an INFERENCE
  * about the backend drawn from two drains, and the run keeps going afterwards.
  * A thirty-second blip in batches 3 and 4 must not disable the drain for the
@@ -392,23 +397,47 @@ export interface DrainGate {
  * produces it, and closing then strands a later batch's held patches with no
  * drain at all.
  */
-export function createDrainGate(missesBeforeGivingUp = 2): DrainGate {
+export function createDrainGate(missesBeforeGivingUp = 2, probeEveryBatches = 5): DrainGate {
   let misses = 0;
   let closed = false;
   let appliedWhenClosed = 0;
+  let batchesSinceClosed = 0;
   return {
     shouldDrain(appliedSoFar) {
-      if (closed && appliedSoFar > appliedWhenClosed) {
+      if (!closed) return true;
+      if (appliedSoFar > appliedWhenClosed) {
         closed = false;
         misses = 0;
+        return true;
       }
-      return !closed;
+      // A patch landing is the reopen condition, and a closed gate can prevent
+      // the very progress it waits for: with the drain off, held patches go
+      // straight to commit errors without a request, so the per-file and
+      // drain-probe sources of `appliedSoFar` are gone and only a BULK success
+      // is left. A backend that recovers while its bulks keep failing for GROUP
+      // reasons -- an old memory layer answering "partially committed" with no
+      // parseable ids, or a tail of oversized files bisecting to single-item
+      // 413s -- can then never clear the breaker or the gate, and every
+      // remaining patch in the run is reported as an error with nothing sent.
+      // `main` would have committed them per file.
+      //
+      // So the gate lets one drain through every `probeEveryBatches`. It is the
+      // same trade the cutoff makes everywhere else: a bounded number of
+      // requests against the possibility that the run is wrong about the
+      // backend.
+      batchesSinceClosed++;
+      if (batchesSinceClosed >= probeEveryBatches) {
+        batchesSinceClosed = 0;
+        return true;
+      }
+      return false;
     },
     record(placedAnything, appliedSoFar) {
       misses = placedAnything ? 0 : misses + 1;
       if (misses >= missesBeforeGivingUp) {
         closed = true;
         appliedWhenClosed = appliedSoFar;
+        batchesSinceClosed = 0;
       }
     },
   };

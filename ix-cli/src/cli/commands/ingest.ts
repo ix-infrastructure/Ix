@@ -1765,6 +1765,8 @@ export async function ingestFiles(
           fallbackTail = new Promise<void>(r => { resolveThis = r; });
           await prev;
           let budgetLeft = fallbackOpts?.failureBudget ?? Number.POSITIVE_INFINITY;
+          /** Failed re-sends of server-confirmed patches. Bounds the replay, locally. */
+          let replayFailures = 0;
           try {
             for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
               const item = items[itemIndex];
@@ -1870,19 +1872,27 @@ export async function ingestFiles(
                   // would let the cutoff claim "The graph is unchanged" for a
                   // run whose patches are all in the graph.
                   patchesApplied++;
-                  // But it IS still evidence about the backend, and without
-                  // this nothing could stop a replay. The full-landed branch of
+                  // It still has to STOP, though. The full-landed branch of
                   // `commitBulkWithPayloadSplit` hands the whole chunk here and
-                  // returns before its `shouldStop` check, so an un-tripped
-                  // breaker would watch up to IX_COMMIT_HTTP_MAX_FILES doomed
-                  // commits go out one at a time, serialized behind the global
-                  // fallback mutex -- blocking every other chunk's fallback --
-                  // and never advance. Recording the failure lets the streak
-                  // reach its limit, after which `perFileAction` answers
-                  // "count-applied" and the loop stops. `perFileAction` alone
-                  // could not: it only rescues a breaker that was ALREADY
-                  // tripped on entry.
-                  if (indicts) commitBreaker.recordFailure(commitErr);
+                  // returns before its `shouldStop` check, so nothing else
+                  // bounds it: an un-tripped breaker would watch up to
+                  // IX_COMMIT_HTTP_MAX_FILES doomed commits go out one at a
+                  // time behind the global fallback mutex, blocking every other
+                  // chunk's fallback.
+                  //
+                  // Bounded LOCALLY, not through the run-wide breaker. Feeding
+                  // it there was round 13's fix and it indicted the whole run
+                  // for something the CLI knows says nothing about the backend's
+                  // willingness to write: the server already confirmed these
+                  // patches landed, so a backend that answers a hard error for
+                  // re-committing one -- a legitimate idempotency
+                  // implementation -- tripped the run-wide cutoff after five
+                  // replays while perfectly healthy.
+                  replayFailures++;
+                  if (commitBreaker.limit > 0 && replayFailures >= commitBreaker.limit) {
+                    patchesApplied += items.length - itemIndex - 1;
+                    break;
+                  }
                 } else {
                   commitErrors++;
                   commitLoopErrors++;
@@ -1912,8 +1922,9 @@ export async function ingestFiles(
        * loss where this is only slowness -- so the bound is the HELD-SET SIZE:
        * a pass only attempts items no earlier pass reached, so the drain sends
        * at most one request per held patch, which is what `main` sends anyway.
-       * A dead backend is stopped after `2 x budget`; one that accepts a little
-       * and refuses the rest is not stopped at all and pays the full size.
+       * A dead backend is stopped after `3 x budget` -- one per sample; one that
+       * accepts a little and refuses the rest is not stopped at all and pays the
+       * full size.
        *
        * The streak is still RESET per pass, for a different reason: five
        * adjacent patches the backend rejects on their own merits are
