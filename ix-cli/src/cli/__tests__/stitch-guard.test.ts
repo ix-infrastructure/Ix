@@ -376,10 +376,14 @@ describe("connectionNeverEstablished", () => {
     // fires, and a backend that was merely down took the full 15-minute
     // cooldown for a request that never left the machine.
     const err = await failureOf("http://localhost:8099/v1/stitch");
-    const cause = (err as { cause?: { name?: string; syscall?: unknown } }).cause;
-    expect(cause?.name, "the shape this test exists for").toBe("AggregateError");
-    expect(cause?.syscall, "no syscall of its own — that is the trap").toBeUndefined();
+    // The predicate is the claim on every platform.
     expect(connectionNeverEstablished(err)).toBe(true);
+    // The aggregate shape only appears where localhost is dual-stack, which is
+    // not everywhere; where it does, it is the trap -- no syscall of its own.
+    // The platform-independent proof that the descent works is the
+    // mixed-code test below.
+    const cause = (err as { cause?: { name?: string; syscall?: unknown } }).cause;
+    if (cause?.name === "AggregateError") expect(cause.syscall).toBeUndefined();
   });
 
   it("reads the sub-errors when the AggregateError carries no code of its own", () => {
@@ -403,12 +407,22 @@ describe("connectionNeverEstablished", () => {
     expect(connectionNeverEstablished(err)).toBe(true);
   });
 
-  it("is true for an unroutable address — a neighbouring errno, same phase", async () => {
-    // 240.0.0.1 is reserved, so the stack refuses to route to it: ENETUNREACH
-    // with syscall "connect". An enumerated code list missed exactly this, and
-    // a VPN drop produces the same shape -- fifteen minutes of endpoint-wide
-    // cooldown for a request that never left the machine.
-    expect(connectionNeverEstablished(await failureOf("http://240.0.0.1:8090/v1/stitch"))).toBe(true);
+  it("is true for an unroutable address — a neighbouring errno, same phase", () => {
+    // A VPN drop produces this, and an enumerated code list missed it: fifteen
+    // minutes of endpoint-wide cooldown for a request that never left.
+    //
+    // Pinned, not driven. Observed live against 240.0.0.1 (reserved, so the
+    // stack refuses to route) on Windows: ENETUNREACH with syscall "connect".
+    // It cannot be driven in CI -- Windows rejects immediately, while Linux and
+    // macOS silently hang until their own connect timeout, which failed this
+    // suite on four of its five platforms.
+    const err = Object.assign(new TypeError("fetch failed"), {
+      cause: Object.assign(new Error("connect ENETUNREACH 240.0.0.1:8090"), {
+        code: "ENETUNREACH",
+        syscall: "connect",
+      }),
+    });
+    expect(connectionNeverEstablished(err)).toBe(true);
   });
 
   it("is true for undici's connect timeout, which carries no syscall", () => {
