@@ -1367,6 +1367,17 @@ export async function ingestFiles(
    *   - a worker CRASHED with the task in flight, which is transient and did
    *     lose a file we would have indexed. That one belongs in the gate.
    *
+   * A parse that THREW is in the first category, not the second, even though it
+   * sounds like the second: `parseFile` catches every exception itself and
+   * returns null (logging only under IX_PARSE_DEBUG=1), so the worker cannot
+   * tell it from a missing grammar -- and neither can this. It is also
+   * deterministic for the same bytes in every case we can observe, so gating on
+   * it would block stitching permanently for that repo, which is exactly the
+   * bug this counter was taken OUT of the gate to fix. The residue is the
+   * transient sub-case, an OOM caught by that same handler; it is narrower than
+   * the bug the alternative creates, and it is a deliberate choice rather than
+   * an oversight.
+   *
    * Reported as `skipReasons.unparsed`, its own bucket: `parseError` counts
    * every parse-stage failure including stat, read and patch-build errors, most
    * of which are not skips, so adding to it made that number mean neither thing.
@@ -2158,11 +2169,20 @@ export async function ingestFiles(
               // TOCTOU-free (CodeQL js/file-system-race).
               const countedByStatLoop = accountedByStatLoop.get(absFilePath);
               if (st.size === 0) {
+                // Re-bucket rather than just skip: the stat loop may have
+                // recorded this as `tooLarge`, and the file has since been
+                // truncated. Leaving it there reports an empty file as
+                // oversized and keeps it out of `filesSkipped` entirely.
                 if (countedByStatLoop === undefined) { filesSkipped++; filesSkippedAsEmpty++; }
+                else if (countedByStatLoop === 'tooLarge') { tooLarge--; filesSkipped++; filesSkippedAsEmpty++; }
+                accountedByStatLoop.set(absFilePath, 'empty');
                 return;
               }
               if (st.size > MAX_FILE_BYTES) {
+                // ...and the mirror image, for a file that has since grown.
                 if (countedByStatLoop === undefined) tooLarge++;
+                else if (countedByStatLoop === 'empty') { filesSkipped--; filesSkippedAsEmpty--; tooLarge++; }
+                accountedByStatLoop.set(absFilePath, 'tooLarge');
                 return;
               }
               // The other direction of the same race, and it needs undoing

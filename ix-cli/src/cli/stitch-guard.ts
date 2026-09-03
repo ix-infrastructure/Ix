@@ -407,7 +407,25 @@ export function admitStitch(endpoint: string, now = Date.now()): StitchAdmission
       alreadySettled = true;
       try {
         if (outcomeProvesNothingRunning(outcome)) {
-          try { rmSync(cooldownPath(endpoint), { force: true }); } catch { /* best effort */ }
+          try {
+            rmSync(cooldownPath(endpoint), { force: true });
+          } catch (err) {
+            // NOT silent, unlike the usual best-effort. `force: true` already
+            // swallows ENOENT, so reaching here means the file exists and could
+            // not be removed -- an EPERM or EBUSY, which Windows produces
+            // readily. This is the one failure that fails CLOSED: the
+            // start-time marker survives a stitch that provably finished, and
+            // every map against this endpoint, for every workspace, is refused
+            // for the full cooldown with "a stitch was started and never
+            // reported back". `writeCooldown` warns on the mirror-image
+            // failure, which merely fails open.
+            process.stderr.write(
+              `  Warning: the cross-workspace stitch succeeded but its cooldown marker ` +
+                `could not be removed (${err}). Further stitches to this backend will be ` +
+                `refused until it ages out; delete ${cooldownPath(endpoint)} to clear it.
+`,
+            );
+          }
         } else {
           // Keep the marker, restamped to NOW so the cooldown runs from the
           // end of the attempt rather than its start -- see `Cooldown.at`. The
