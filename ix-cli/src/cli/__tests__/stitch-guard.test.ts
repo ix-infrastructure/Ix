@@ -381,11 +381,16 @@ describe("admitStitchWaiting", () => {
     const result = await admitStitchWaiting(ENDPOINT, 30_000, async (ms) => {
       slept += ms;
       budget.aborted = true;       // the run runs out mid-wait
+      if (holder.admitted) holder.settle({ ok: true, elapsedMs: 5 });  // ...and the holder frees the lock
     }, budget);
 
+    // Admitting here would mark the backend for 15 minutes over a request that
+    // cannot leave: fetch rejects instantly on the aborted deadline, with no
+    // status, so the marker stays. The refusal must also name the real cause --
+    // reporting "in-flight" sends the user to the wrong remedy entirely.
     expect(result.admitted).toBe(false);
-    if (!result.admitted) expect(result.rule).toBe("in-flight");
+    if (!result.admitted) expect(result.rule).toBe("deadline");
+    expect(existsSync(cooldownPathForTest(ENDPOINT)), "must not mark the backend").toBe(false);
     expect(slept, "should have stopped after the first poll").toBeLessThan(1_000);
-    if (holder.admitted) holder.settle({ ok: true, elapsedMs: 5 });
   });
 });

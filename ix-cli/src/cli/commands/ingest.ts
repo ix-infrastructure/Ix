@@ -887,7 +887,17 @@ export function describeStitchSkipped(
   // the part that changes and the part worth reading; the rest is on --verbose,
   // and `stitchSkipped` / `stitch_skipped` carry it to machine consumers either
   // way.
-  const head = `Note: Cross-workspace stitch not started — ${reason}.`;
+  // The short form has to carry a real remedy, not just the reason. Waiting the
+  // cooldown out and re-running does NOT recover: `persistIngestBaselineIfClean`
+  // has already written the mtime baseline, so the next map has
+  // `filesSkipped > 0` and never enters the stitch block at all -- it prints
+  // nothing and exits 0, and the user reads that as fixed while cross-repo edges
+  // stay frozen. Only a run that re-ingests every file gets back in.
+  const recover =
+    rule === "deadline"
+      ? " Raise IX_MAP_DEADLINE_MS or map a smaller path."
+      : " Recover with `ix ingest <root> --force` once it clears.";
+  const head = `Note: Cross-workspace stitch not started — ${reason}.${recover}`;
   if (!verbose) return head;
 
   // The remedy follows the RULE, never the prose. Note the other run may be

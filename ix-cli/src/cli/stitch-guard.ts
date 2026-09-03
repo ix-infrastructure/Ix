@@ -344,22 +344,28 @@ export async function admitStitchWaiting(
   // function and flags the in-loop check as unreachable -- but the whole point
   // of that check is that the signal flips WHILE we wait.
   const deadlineFired = (): boolean => runDeadline?.aborted === true;
+  const refuseForDeadline = (): StitchAdmission => ({
+    admitted: false,
+    rule: "deadline",
+    reason: `the map ran out of time before the stitch could start`,
+  });
 
-  if (deadlineFired()) {
-    return {
-      admitted: false,
-      rule: "deadline",
-      reason: `the map ran out of time before the stitch could start`,
-    };
-  }
 
   const deadline = Date.now() + waitMs;
   for (;;) {
+    // Re-checked at the TOP of every iteration, before admitStitch. Checking it
+    // only after admission is granted is too late: the holder can release while
+    // we wait, and then we take the lock, write the marker, and `fetch` rejects
+    // instantly on the already-aborted deadline -- marking the backend for 15
+    // minutes over a request that never left. The pre-loop check alone does not
+    // cover it, because the deadline can fire DURING the wait.
+    if (deadlineFired()) return refuseForDeadline();
+
     const admission = admitStitch(endpoint);
     // Only contention is worth waiting out. A cooldown means the backend may
     // still be running the last one, and outlasting THAT is the whole point.
     if (admission.admitted || admission.rule !== "in-flight") return admission;
-    if (Date.now() >= deadline || deadlineFired()) return admission;
+    if (Date.now() >= deadline) return admission;
     await sleep(Math.min(POLL_MS, Math.max(0, deadline - Date.now())));
   }
 }

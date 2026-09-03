@@ -134,12 +134,23 @@ describe("describeStitchSkipped", () => {
     expect(msg).toContain(cooling);
   });
 
-  it("stays short by default, because a cooldown spans many maps", () => {
-    // 15 minutes of auto-map hooks, one Note each. The long form printed three
-    // sentences of unchanging advice every time.
+  it("stays short by default, but still carries a remedy that works", () => {
+    // 15 minutes of auto-map hooks, one Note each, so the long form's three
+    // sentences of unchanging advice were too much. But the reason alone is not
+    // enough either: waiting the cooldown out and re-running does NOT recover,
+    // because the mtime baseline is already written and the next map never
+    // enters the stitch block. The one thing that does has to be in the short
+    // form.
     const msg = describeStitchSkipped(cooling, "cooling");
-    expect(msg.length).toBeLessThan(200);
-    expect(msg).not.toContain("ix ingest <root> --force");
+    expect(msg.length).toBeLessThan(260);
+    expect(msg).toContain("ix ingest <root> --force");
+    expect(msg).not.toContain("Source patches were committed");
+  });
+
+  it("gives the deadline rule its own remedy, since nothing was sent", () => {
+    const msg = describeStitchSkipped("the map ran out of time", "deadline");
+    expect(msg).toContain("IX_MAP_DEADLINE_MS");
+    expect(msg).not.toContain("--force");
   });
 
   it("gives the remedy under --verbose, and picks it by RULE", () => {
