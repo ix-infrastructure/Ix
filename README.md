@@ -298,6 +298,10 @@ Ix parses and extracts symbols, calls, and imports across 26 languages, and reco
 **Languages:**
 JavaScript, TypeScript, Python, Java, C, C++, C#, Go, Ruby, Rust, PHP, Kotlin, Swift, Scala, R, SAS, Elixir, Haskell, Zig, Lua, Bash, HTML, XML, CSS, HCL / Terraform, Makefile
 
+CUDA (`.cu` / `.cuh`) is parsed with the C++ grammar; kernel-launch syntax
+(`kernel<<<grid, block>>>(args)`) is handled, so host-to-kernel calls appear in
+the graph. Python stub files (`.pyi`) are parsed as Python.
+
 **Also recognized:**
 YAML, JSON, TOML, SQL, Dockerfile, Markdown
 

@@ -42,6 +42,7 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.mjs':  SupportedLanguages.JavaScript,
   '.cjs':  SupportedLanguages.JavaScript,
   '.py':   SupportedLanguages.Python,
+  '.pyi':  SupportedLanguages.Python,
   '.java': SupportedLanguages.Java,
   '.c':    SupportedLanguages.C,
   '.h':    SupportedLanguages.C,
@@ -49,6 +50,10 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.cc':   SupportedLanguages.CPlusPlus,
   '.cxx':  SupportedLanguages.CPlusPlus,
   '.hpp':  SupportedLanguages.CPlusPlus,
+  // CUDA is C++ plus GPU qualifiers; kernel-launch syntax is neutralised at
+  // parse time (see blankCudaLaunchConfigs in index.ts).
+  '.cu':   SupportedLanguages.CPlusPlus,
+  '.cuh':  SupportedLanguages.CPlusPlus,
   '.cs':   SupportedLanguages.CSharp,
   '.go':   SupportedLanguages.Go,
   '.rb':   SupportedLanguages.Ruby,

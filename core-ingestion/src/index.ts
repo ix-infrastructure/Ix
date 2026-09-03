@@ -1989,6 +1989,29 @@ function unwrapRustCfgMacros(source: string): string {
   return parts.join('');
 }
 
+/**
+ * Blanks out CUDA kernel-launch configurations (`<<<grid, block>>>`) so that
+ * tree-sitter-cpp sees an ordinary call expression.
+ *
+ * The launch syntax is not valid C++: the grammar fails on it and, worse,
+ * recovers by dropping the whole call — so the edge from host code to the
+ * kernel it launches is lost, which is the one edge worth having in a CUDA
+ * file. Blanking the config in-place (preserving every character position and
+ * newline, as with the Rust macro unwrapper above) turns `k<<<a,b>>>(x)` into
+ * `k        (x)`, which parses cleanly and yields the call.
+ *
+ * The `(?=\s*\()` lookahead is what keeps this from firing on non-CUDA text:
+ * a launch config is always immediately followed by the argument list, so
+ * nested templates (`vector<vector<vector<int>>>`), shift operators and
+ * `"<<<HEAD>>>"` in a string literal are all left alone. Excluding `;` stops a
+ * stray `<<<` in a comment from running away to a later `>>>`.
+ */
+const _cudaLaunchConfig = /<<<[^;]*?>>>(?=\s*\()/g;
+
+function blankCudaLaunchConfigs(source: string): string {
+  return source.replace(_cudaLaunchConfig, (m) => m.replace(_blankNonNewline, ' '));
+}
+
 // ---------------------------------------------------------------------------
 // Main parse function
 // ---------------------------------------------------------------------------
@@ -2101,6 +2124,13 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
     // character positions and line numbers) so the inner items become top-level.
     if (language === SupportedLanguages.Rust) {
       parseSource = unwrapRustCfgMacros(parseSource);
+    }
+
+    // CUDA: neutralise kernel-launch configs so the host -> kernel call survives.
+    // Gated on the extension rather than the language so .cpp/.hpp parsing stays
+    // byte-identical.
+    if (filePath.endsWith('.cu') || filePath.endsWith('.cuh')) {
+      parseSource = blankCudaLaunchConfigs(parseSource);
     }
     const tree = parser.parse(parseSource, undefined, { bufferSize: parseSource.length + 1 });
     const cacheKey = isTsx ? 'tsx' as const : language;

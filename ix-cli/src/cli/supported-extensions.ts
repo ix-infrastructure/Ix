@@ -8,7 +8,8 @@
 // name in the individual commands, not here.
 export const SUPPORTED_EXTENSIONS = new Set<string>([
   ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
-  ".py", ".java", ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp",
+  ".py", ".pyi", ".java", ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp",
+  ".cu", ".cuh",
   ".cs", ".go", ".rb", ".rs", ".php", ".kt", ".kts", ".swift",
   ".scala", ".sc",
   ".yaml", ".yml",
