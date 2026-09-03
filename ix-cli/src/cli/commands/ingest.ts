@@ -869,8 +869,9 @@ export function describeStitchFailure(error: unknown): string {
  *
  * It does not promise that the next map re-registers, because that is not
  * reliably true and predates this guard: the stitch block is gated on
- * `filesSkipped === 0`, so an incremental map that skips any mtime-unchanged
- * file never reaches it -- and by then it has no registration data to send
+ * `filesSkippedAsUnchanged === 0`, so an incremental map that skips any
+ * mtime- or hash-unchanged file never reaches it -- and by then it has no
+ * registration data to send
  * either, since it only parsed what changed. Its own comment already names
  * the ways back in: a fresh map, `--force`, or a post-reset re-map. What the
  * cooldown changes is only how often this path is taken, not where it leads.
@@ -1304,6 +1305,32 @@ export async function ingestFiles(
   let filesChanged = 0;
   let patchesApplied = 0;
   let filesSkipped = 0;
+  /**
+   * Files skipped because we ASSUMED THEY WERE UNCHANGED. (Ix#568)
+   *
+   * A subset of `filesSkipped`, and the one the cross-workspace stitch cares
+   * about. The stitch registers this repo's provides/consumes, collected over
+   * the files actually parsed this run, so it must only run when that set
+   * covers the whole repo -- otherwise it overwrites a full registration with
+   * a partial one.
+   *
+   * `filesSkipped` is the wrong test for that, because it also counts files
+   * that contribute nothing under ANY run: a zero-byte file, one that looks
+   * minified, one the parser returned nothing for. The collected set is
+   * complete and correct without them -- they have no entities to contribute
+   * -- so their presence in the count was silently disqualifying repos from
+   * ever stitching. A single empty `__init__.py` was enough, `--force` or
+   * not, which made `ix ingest <root> --force` -- the remedy this command
+   * prints when it refuses a stitch -- a promise it could not keep: the run
+   * would print nothing, exit 0, and leave the cross-repo edges stale.
+   *
+   * An mtime- or hash-clean skip is different in kind: the file has content
+   * we would have indexed and we did not look at it this run, so the set
+   * really is missing it.
+   */
+  let filesSkippedAsUnchanged = 0;
+  /** Zero-byte files. Reported as `skipReasons.emptyFile`, which was hardcoded 0. */
+  let filesSkippedAsEmpty = 0;
   let parseErrors = 0;
   let commitErrors = 0;
   let stitchErrors = 0;
@@ -1444,12 +1471,13 @@ export async function ingestFiles(
     for (const filePath of filePaths) {
       try {
         const st = fs.statSync(filePath);
-        if (st.size === 0) { filesSkipped++; progressCurrent++; continue; }
+        if (st.size === 0) { filesSkipped++; filesSkippedAsEmpty++; progressCurrent++; continue; }
         if (st.size > MAX_FILE_BYTES) { tooLarge++; progressCurrent++; continue; }
         const mtime = st.mtimeMs;
         currentMtimes.set(filePath, mtime);
         if (!opts.force && !forceReingestPaths.has(filePath) && mtimeCache.get(filePath) === mtime) {
           filesSkipped++;
+          filesSkippedAsUnchanged++;
           progressCurrent++;   // mtime clean — assume unchanged
         } else {
           mtimeChangedPaths.push(filePath);
@@ -1881,6 +1909,7 @@ export async function ingestFiles(
           const hash = sha256(bytes);
           if (!forceReingestPaths.has(filePath) && knownHashes.get(filePath) === hash) {
             filesSkipped++;
+            filesSkippedAsUnchanged++;
             progressCurrent++;
             continue;
           }
@@ -2040,8 +2069,15 @@ export async function ingestFiles(
             let bytes!: Buffer;
             try {
               const st = await fh.stat();
-              if (st.size === 0) { filesSkipped++; return; }
-              if (st.size > MAX_FILE_BYTES) { tooLarge++; return; }
+              // Counted by the stat loop above, which walks the same `filePaths`
+              // unconditionally -- so incrementing here counted every empty or
+              // oversized file TWICE. Invisible until `skipReasons.emptyFile`
+              // stopped being hardcoded to 0 and reported 2 for a repo with one
+              // empty `__init__.py`. The check itself stays: it is the fstat on
+              // the handle we are about to read, which is what makes the size
+              // cap TOCTOU-free (CodeQL js/file-system-race).
+              if (st.size === 0) return;
+              if (st.size > MAX_FILE_BYTES) return;
               bytes = await fh.readFile();
             } finally {
               await fh.close();
@@ -2049,6 +2085,7 @@ export async function ingestFiles(
             const hash = sha256(bytes);
             if (!opts.force && !forceReingestPaths.has(absFilePath) && knownHashes.get(absFilePath) === hash) {
               filesSkipped++;
+              filesSkippedAsUnchanged++;
               return;
             }
             const previousHash = knownHashes.get(absFilePath);
@@ -2200,12 +2237,18 @@ export async function ingestFiles(
     // write the cross-repo IMPORTS edges to other separately-ingested repos.
     // Best-effort: a failure (or an older backend with no /v1/stitch) never fails
     // the ingest. Collection is over the files actually parsed this run, so it is
-    // only COMPLETE on a full ingest. Gating on filesSkipped === 0 means a partial
-    // incremental re-map (some files mtime-skipped) leaves the prior full
-    // registration intact rather than overwriting it with a partial set; a fresh
-    // map, `--force`, or a post-reset re-map re-registers. (Incremental registry
-    // updates that touch only changed files are a future refinement.)
-    if (stitchEnabled && filesSkipped === 0 && stitchFiles.length > 0 && ingestCompletedCleanly(parseErrors, commitErrors)) {
+    // only COMPLETE on a full ingest. Gating on filesSkippedAsUnchanged === 0
+    // means a partial incremental re-map (some files mtime- or hash-skipped)
+    // leaves the prior full registration intact rather than overwriting it with a
+    // partial set; a fresh map, `--force`, or a post-reset re-map re-registers.
+    // (Incremental registry updates that touch only changed files are a future
+    // refinement.)
+    //
+    // Ix#568: `filesSkippedAsUnchanged`, not `filesSkipped` -- see its
+    // declaration. The broader count also includes files that contribute nothing
+    // under any run, so one empty `__init__.py` used to disqualify a repo from
+    // ever stitching, with or without `--force`.
+    if (stitchEnabled && filesSkippedAsUnchanged === 0 && stitchFiles.length > 0 && ingestCompletedCleanly(parseErrors, commitErrors)) {
       try {
         const entry = pickEntryFile(stitchFiles);
         const provides = entry
@@ -2389,7 +2432,12 @@ export async function ingestFiles(
       filesSkipped,
       entitiesParsed,
       latestRev,
-      skipReasons: { unchanged: filesSkipped, emptyFile: 0, parseError: parseErrors, tooLarge, minifiedLikely, outsideRoot },
+      // `unchanged` is the files we ASSUMED unchanged, not every skip. It used
+      // to be `filesSkipped`, which also counts empty, minified-looking and
+      // unparseable files -- so a consumer reading this could not tell an
+      // incremental no-op from a repo full of empty __init__.py. `emptyFile` was
+      // hardcoded 0 for the same reason and is now the real count.
+      skipReasons: { unchanged: filesSkippedAsUnchanged, emptyFile: filesSkippedAsEmpty, parseError: parseErrors, tooLarge, minifiedLikely, outsideRoot },
       commitErrors,
       stitchErrors,
       // Ix#568. Present only when the stitch was refused before it was sent, so
@@ -2417,7 +2465,11 @@ export async function ingestFiles(
     console.log(`  processed:   ${patchesApplied} files (${elapsed}s)`);
     console.log(`  discovered:  ${filesDiscovered} files`);
     console.log(`  changed:     ${filesChanged} files`);
-    if (filesSkipped > 0) console.log(`  ${chalk.dim('skipped unchanged:')} ${filesSkipped}`);
+    // "skipped" without "unchanged": the count includes empty, minified-looking
+    // and unparseable files, none of which were assumed unchanged. Splitting the
+    // counter for the stitch gate (Ix#568) made the old label demonstrably
+    // wrong on a repo with an empty __init__.py and --force.
+    if (filesSkipped > 0) console.log(`  ${chalk.dim('skipped:')} ${filesSkipped}`);
     if (parseErrors > 0) console.log(`  ${chalk.red('parse errors:')}      ${parseErrors}`);
     if (commitErrors > 0) console.log(`  ${chalk.red('commit errors:')}     ${commitErrors}`);
     if (tooLarge > 0) console.log(`  ${chalk.dim('skipped too large:')} ${tooLarge}`);

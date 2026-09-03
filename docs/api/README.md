@@ -290,10 +290,22 @@ and does not count towards `stitchErrors`, and the previous registration stands 
 the same position a stitch that *failed* already left the graph in.
 
 Note that re-registration is not automatic on the next map, and was not before
-this change: the stitch is gated on `filesSkipped === 0`, so an incremental map
-that skips any mtime-unchanged file neither reaches it nor has the registration
-data to send, having only parsed what changed. A run that re-ingests every file
-(`ix ingest <root> --force`, a post-reset re-map) is what picks it back up.
+this change: the stitch is gated on every file having been parsed this run, so an
+incremental map that skips an mtime- or hash-unchanged file neither reaches it nor
+has the registration data to send, having only parsed what changed. A run that
+re-ingests every file (`ix ingest <root> --force`, a post-reset re-map) is what
+picks it back up.
+
+The gate counts only files skipped **as unchanged**. It used to be the whole
+`filesSkipped` total, which also counts zero-byte files, ones that look minified
+and ones the parser returned nothing for — none of which have anything to
+contribute to the registration, so their absence does not make the collected set
+partial. Counting them meant a single empty `__init__.py` disqualified a repo from
+stitching permanently, `--force` included: the run printed nothing, exited 0, and
+left the cross-repo edges stale, while the message above advertised `--force` as
+the way to fix it. `skipReasons.unchanged` in `--format json` is now that narrower
+count rather than every skip, and `skipReasons.emptyFile`, previously hardcoded to
+`0`, is the real number.
 
 | Variable | Default | Effect |
 |---|---|---|
