@@ -900,9 +900,11 @@ export function describeStitchSkipped(
       ? "That run may be registering a different workspace, in which case this one was not " +
         "registered; re-run once it has finished, or force a full re-ingest " +
         "(`ix ingest <root> --force`) if the cross-repo edges still look stale."
-      : "Once the cooldown expires and the backend is healthy, re-register with a run that re-ingests " +
-        "every file (`ix ingest <root> --force`) — an incremental map that skips unchanged files does not " +
-        "re-attempt the stitch.";
+      : rule === "deadline"
+        ? "Nothing was sent, so nothing is running: raise IX_MAP_DEADLINE_MS or map a smaller path."
+        : "Once the cooldown expires and the backend is healthy, re-register with a run that re-ingests " +
+          "every file (`ix ingest <root> --force`) — an incremental map that skips unchanged files does not " +
+          "re-attempt the stitch.";
   return `${head} Source patches were committed; cross-repository edges are unchanged since the last successful stitch. ${remedy}`;
 }
 
@@ -2342,7 +2344,7 @@ export async function ingestFiles(
     // exactly where a failed stitch would have left it. But the sentence a
     // user gets otherwise -- cross-repo relationships may be incomplete --
     // reads as an unexplained regression without the reason.
-    process.stderr.write(`  ${describeStitchSkipped(stitchSkipped, stitchSkippedRule)}\n`);
+    process.stderr.write(`  ${describeStitchSkipped(stitchSkipped, stitchSkippedRule, debug)}\n`);
   }
   if (commitReport.kind === "warn") {
     process.stderr.write(`  ${commitReport.message}\n`);

@@ -182,7 +182,7 @@ export function outcomeProvesNothingRunning(outcome: StitchOutcome): boolean {
 }
 
 /** Which rule refused. Callers branch on this, never on the prose. */
-export type StitchRefusal = "in-flight" | "cooling";
+export type StitchRefusal = "in-flight" | "cooling" | "deadline";
 
 export type StitchAdmission =
   | { admitted: true; settle: (outcome: StitchOutcome) => void }
@@ -333,13 +333,33 @@ export async function admitStitchWaiting(
    */
   runDeadline?: { readonly aborted: boolean },
 ): Promise<StitchAdmission> {
+  // Refuse outright if the run's budget is ALREADY gone. Admission writes
+  // the cooldown marker, and `fetch` rejects instantly on an aborted signal --
+  // so admitting here marks the backend as maybe-busy for 15 minutes over a
+  // request that never left the process. Worse, it repeats: the stitch is the
+  // last thing an ingest does, so a run that routinely overruns would block
+  // its own next attempt every time and never stitch again.
+  // Read through a call, not a property access: after the early return below,
+  // TypeScript narrows `runDeadline.aborted` to false for the rest of the
+  // function and flags the in-loop check as unreachable -- but the whole point
+  // of that check is that the signal flips WHILE we wait.
+  const deadlineFired = (): boolean => runDeadline?.aborted === true;
+
+  if (deadlineFired()) {
+    return {
+      admitted: false,
+      rule: "deadline",
+      reason: `the map ran out of time before the stitch could start`,
+    };
+  }
+
   const deadline = Date.now() + waitMs;
   for (;;) {
     const admission = admitStitch(endpoint);
     // Only contention is worth waiting out. A cooldown means the backend may
     // still be running the last one, and outlasting THAT is the whole point.
     if (admission.admitted || admission.rule !== "in-flight") return admission;
-    if (Date.now() >= deadline || runDeadline?.aborted === true) return admission;
+    if (Date.now() >= deadline || deadlineFired()) return admission;
     await sleep(Math.min(POLL_MS, Math.max(0, deadline - Date.now())));
   }
 }

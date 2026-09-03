@@ -237,7 +237,7 @@ The second rule is the one that stops the pile-up, and it is written the
 opposite way round from the obvious design. Rather than inspecting the failure
 and deciding whether it looked like a timeout, the marker goes down before the
 request and comes back up only on **proof** that the backend did not run the
-join. There are exactly two such proofs:
+join:
 
 * the stitch succeeded;
 * the backend answered **4xx**, which is it refusing the request rather than

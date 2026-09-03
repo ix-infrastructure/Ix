@@ -355,15 +355,37 @@ describe("admitStitchWaiting", () => {
     expect(slept, "waited on a cooldown").toBe(0);
   });
 
-  it("stops waiting when the run deadline has already fired", async () => {
-    const holder = admitStitch(ENDPOINT);
-    expect(holder.admitted).toBe(true);
-
-    let slept = 0;
-    const result = await admitStitchWaiting(ENDPOINT, 30_000, async (ms) => { slept += ms; }, { aborted: true });
+  it("refuses outright when the run deadline has ALREADY fired, without marking", async () => {
+    // Admission writes the cooldown marker and fetch then rejects instantly on
+    // the aborted signal -- so admitting here blocks the backend for 15 minutes
+    // over a request that never left the process. And it repeats: the stitch is
+    // the last thing an ingest does, so a run that routinely overruns would
+    // block its own next attempt every time and never stitch again.
+    const result = await admitStitchWaiting(ENDPOINT, 30_000, async () => {}, { aborted: true });
 
     expect(result.admitted).toBe(false);
-    expect(slept, "slept past a budget that had already run out").toBe(0);
+    if (!result.admitted) expect(result.rule).toBe("deadline");
+    expect(existsSync(cooldownPathForTest(ENDPOINT)), "must not mark the backend").toBe(false);
+    expect(readdirSync(lockDir).filter(f => f.endsWith(".lock"))).toEqual([]);
+  });
+
+  it("stops waiting when the run deadline fires WHILE it is waiting", async () => {
+    // The signal flips mid-wait, which is the case the in-loop check is for --
+    // and the reason it has to be read through a call rather than a property
+    // access TypeScript will narrow to a constant.
+    const holder = admitStitch(ENDPOINT);
+    expect(holder.admitted).toBe(true);
+    const budget = { aborted: false };
+
+    let slept = 0;
+    const result = await admitStitchWaiting(ENDPOINT, 30_000, async (ms) => {
+      slept += ms;
+      budget.aborted = true;       // the run runs out mid-wait
+    }, budget);
+
+    expect(result.admitted).toBe(false);
+    if (!result.admitted) expect(result.rule).toBe("in-flight");
+    expect(slept, "should have stopped after the first poll").toBeLessThan(1_000);
     if (holder.admitted) holder.settle({ ok: true, elapsedMs: 5 });
   });
 });
