@@ -114,6 +114,45 @@ describe("createCommitBreaker", () => {
   });
 });
 
+describe("everTripped", () => {
+  it("is false until the limit is reached", () => {
+    const b = createCommitBreaker(3);
+    b.recordFailure(new Error("x"));
+    b.recordFailure(new Error("x"));
+    expect(b.everTripped()).toBe(false);
+  });
+
+  it("stays true after a success un-trips the breaker", () => {
+    // This is the whole difference from `tripped()`. The diagnosis has to print
+    // for a run that gave up and then recovered: the 12-file reproduction at
+    // the default limit held 7 patches, the drain placed all 7, and gating on
+    // the leftovers meant the user saw the generic "all 12 failed to commit,
+    // re-run with --verbose" and no explanation of why `ix doctor` passes.
+    const b = createCommitBreaker(2);
+    b.recordFailure(new Error("x"));
+    b.recordFailure(new Error("x"));
+    expect(b.tripped()).toBe(true);
+
+    b.recordSuccess();
+    expect(b.tripped()).toBe(false);
+    expect(b.everTripped()).toBe(true);
+  });
+
+  it("survives reset, which only clears the current streak", () => {
+    const b = createCommitBreaker(1);
+    b.recordFailure(new Error("x"));
+    b.reset();
+    expect(b.tripped()).toBe(false);
+    expect(b.everTripped()).toBe(true);
+  });
+
+  it("never becomes true at limit 0", () => {
+    const b = createCommitBreaker(0);
+    for (let i = 0; i < 50; i++) b.recordFailure(new Error("x"));
+    expect(b.everTripped()).toBe(false);
+  });
+});
+
 describe("reset, which is what the end-of-run retry runs on", () => {
   it("un-latches and clears the streak", () => {
     const b = createCommitBreaker(2);
@@ -222,20 +261,18 @@ describe("drainInPasses", () => {
   function driver(bad: ReadonlySet<string>, budget: number) {
     const sent: string[] = [];
     const placed: string[] = [];
-    const attempt = async (items: string[]): Promise<{ placed: boolean; unreached: string[] }> => {
+    const attempt = async (items: string[]): Promise<string[]> => {
       let left = budget;
-      let landedHere = 0;
       for (let i = 0; i < items.length; i++) {
         sent.push(items[i]);
         if (bad.has(items[i])) {
           left--;
-          if (left <= 0) return { placed: landedHere > 0, unreached: items.slice(i + 1) };
+          if (left <= 0) return items.slice(i + 1);
         } else {
           placed.push(items[i]);
-          landedHere++;
         }
       }
-      return { placed: landedHere > 0, unreached: [] };
+      return [];
     };
     return { attempt, sent, placed };
   }
@@ -251,15 +288,32 @@ describe("drainInPasses", () => {
     expect(d.sent).toEqual(["c", "b", "a"]);
   });
 
-  it("stops after one pass when that pass places nothing", async () => {
-    // The dead-backend case, and the only evidence here that means it. The
-    // bound matters: this is the amplification #560 is about.
+  it("bounds a dead backend at maxPasses x budget doomed requests", async () => {
+    // The amplification #560 is about. Every pass stops on its budget and none
+    // of them reaches the end, so the pass cap is what ends it.
     const held = range("p", 500);
     const d = driver(new Set(held), 10);
-    const leftover = await drainInPasses(held, d.attempt);
+    const leftover = await drainInPasses(held, d.attempt, 3);
 
-    expect(d.sent).toHaveLength(10);
-    expect(leftover).toHaveLength(490);
+    expect(d.sent).toHaveLength(30);
+    expect(leftover).toHaveLength(470);
+  });
+
+  it("does not treat a pass that placed nothing as proof, when it stopped EARLY", async () => {
+    // The revision before this one did, and it is the same mistake in a new
+    // place: a pass that spent its whole budget inside a LEADING cluster has
+    // produced no evidence at all about the region it never reached.
+    //
+    // Held [g1..g400, b1..b15] reverses to [b15..b1, g400..g1], so the first
+    // pass meets the bad patches immediately, places nothing, and -- under the
+    // old rule -- returned there, reporting all 400 committable patches as
+    // errors without sending one. The mtime baseline is not written on a run
+    // with commit errors, so the next `ix map` reproduced it exactly, forever.
+    const held = [...range("g", 400), ...range("b", 15)];
+    const d = driver(new Set(range("b", 15)), 10);
+
+    expect(await drainInPasses(held, d.attempt)).toEqual([]);
+    expect(d.placed).toHaveLength(400);
   });
 
   it("strands nothing when the bad patches form TWO clusters", async () => {
@@ -312,7 +366,7 @@ describe("drainInPasses", () => {
 
     await drainInPasses(held, d.attempt, 3);
 
-    expect(d.sent.length).toBeLessThanOrEqual(3 * (4 + held.length));
+    expect(d.sent.length).toBeLessThanOrEqual(3 * held.length);
     // Three passes were taken, not two and not four.
     expect(d.sent.filter(x => x === held[held.length - 1])).toHaveLength(1);
   });
@@ -394,7 +448,7 @@ describe("describeCommitCutoff", () => {
     // prints for both -- so any single number it names is wrong for one of them.
     b.recordFailure(new Error("a straggler that landed after the decision"));
     expect(msg).not.toContain("consecutive");
-    expect(msg).toContain("after repeated failures");
+    expect(msg).toContain("kept failing");
     expect(msg).toContain("http://localhost:8090");
     expect(msg).toContain("17 patches were not sent");
     expect(msg).toContain("transaction begin timeout");
@@ -433,6 +487,22 @@ describe("describeCommitCutoff", () => {
     expect(msg).toContain("Either the database cannot keep up");
     expect(msg).toContain("rejecting these");
     expect(msg).toContain("says which");
+  });
+
+  it("drops the unsent line entirely when the drain placed everything", () => {
+    // The banner prints whenever the cutoff FIRED, and the drain may since have
+    // sent every patch it held. Saying "0 patches were not sent", or claiming
+    // the run stopped committing, would both be false on the one message whose
+    // job is saying what happened.
+    const b = createCommitBreaker(1);
+    b.recordFailure(new Error("500: transaction begin timeout"));
+
+    const msg = describeCommitCutoff(b, "http://localhost:8090", 12);
+    expect(b.skipped()).toBe(0);
+    expect(msg).not.toContain("not sent");
+    expect(msg).not.toContain("Stopped committing");
+    expect(msg).toContain("kept failing");
+    expect(msg).toContain("transaction begin timeout");
   });
 
   it("says 'patch was' for one and 'patches were' for many", () => {

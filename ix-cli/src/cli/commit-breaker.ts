@@ -83,6 +83,20 @@ export interface CommitBreaker {
   recordSuccess(): void;
   /** A commit failed in a way that sending it again cannot fix. */
   recordFailure(error: unknown): void;
+  /**
+   * Did the run give up on the backend at ANY point?
+   *
+   * Distinct from `tripped()`, which a later success clears, and from
+   * `skipped()`, which counts only what was still unsent at the end. The
+   * diagnosis is gated on this: a run whose drain eventually placed every held
+   * patch has `skipped() === 0`, and gating the banner on that meant the one
+   * message #560 asked for -- the reason `ix doctor` passes while nothing
+   * commits -- was printed only when the run ALSO lost patches. A 12-file
+   * ingest against a locked ArangoDB at the default limit hit exactly that: it
+   * held 7, the drain sent all 7, and the user got the generic "all N patches
+   * failed to commit, re-run with --verbose" and no diagnosis at all.
+   */
+  everTripped(): boolean;
   /** Patches abandoned because the breaker was already tripped. */
   skipped(): number;
   /** Count one abandoned patch. */
@@ -106,17 +120,22 @@ export interface CommitBreaker {
 export function createCommitBreaker(limit = commitFailureLimit()): CommitBreaker {
   let consecutive = 0;
   let latched = false;
+  let everLatched = false;
   let skippedCount = 0;
   let last: unknown;
 
   return {
     limit,
     tripped: () => latched,
+    everTripped: () => everLatched,
     recordSuccess: () => { consecutive = 0; latched = false; },
     recordFailure: (error) => {
       consecutive++;
       last = error;
-      if (limit > 0 && consecutive >= limit) latched = true;
+      if (limit > 0 && consecutive >= limit) {
+        latched = true;
+        everLatched = true;
+      }
     },
     skipped: () => skippedCount,
     recordSkipped: (n = 1) => { skippedCount += n; },
@@ -207,20 +226,30 @@ export function perFileAction(state: {
  * passes, three need three, and `maxPasses` bounds the doomed requests at
  * roughly `maxPasses x budget`.
  *
- * The pass that places NOTHING is the one that ends it. That is the only
- * evidence here that means "the backend, not the patches": a pass that placed
- * even one patch has proved the backend is taking writes, so the failures it
- * met are about the patches and the remainder deserves its turn.
+ * What ends it is a pass that REACHED THE END, or the pass cap. Note what is
+ * deliberately NOT a stopping condition: a pass that placed nothing. An earlier
+ * revision treated that as proof the backend was dead, and it is not -- a pass
+ * that spent its whole budget inside a leading cluster of bad patches has
+ * produced no evidence at all about the region it never reached. With
+ * `[good x 400, bad x 15]` and a budget of 10, the reversed first pass met the
+ * bad patches immediately, placed nothing, and stranded all 400 good ones
+ * unsent. Only reaching the end is evidence about the whole set.
+ *
+ * That is why `maxPasses` is the bound that matters and why the per-pass budget
+ * is the breaker's limit rather than twice it: a genuinely dead backend now
+ * always costs `maxPasses x budget` doomed requests, so the product is the
+ * number to keep small. `createDrainGate` stops this repeating per batch.
  */
 export async function drainInPasses<T>(
   held: readonly T[],
-  attempt: (items: T[]) => Promise<{ placed: boolean; unreached: T[] }>,
+  attempt: (items: T[]) => Promise<T[]>,
   maxPasses = 3,
 ): Promise<T[]> {
   let pending = [...held].reverse();
   for (let pass = 1; pending.length > 0; pass++) {
-    const { placed, unreached } = await attempt(pending);
-    if (!placed || pass >= maxPasses) return unreached;
+    const unreached = await attempt(pending);
+    if (unreached.length === 0) return [];
+    if (pass >= maxPasses) return unreached;
     pending = [...unreached].reverse();
   }
   return [];
@@ -318,10 +347,20 @@ export function describeCommitCutoff(
   // the end-of-run retry stops on a total budget, and this banner prints for
   // both. Claiming a run of N in a row that the run may never have seen is a
   // misstatement on the one line whose whole job is saying what the backend did.
+  // "Commits kept failing", not "Stopped committing": this prints whenever the
+  // run gave up at any point, and the drain may since have placed every patch
+  // it held. Claiming it stopped would then be false on the one line whose job
+  // is saying what happened.
+  const unsent =
+    breaker.skipped() === 0
+      ? []
+      : [
+          `  ${breaker.skipped()} ${breaker.skipped() === 1 ? "patch was" : "patches were"} not sent — sending them one at a`,
+          `  time would have added load to a backend that is already the reason they fail.`,
+        ];
   return [
-    `Error: Stopped committing against ${endpoint} after repeated failures.`,
-    `  ${breaker.skipped()} ${breaker.skipped() === 1 ? "patch was" : "patches were"} not sent — sending them one at a`,
-    `  time would have added load to a backend that is already the reason they fail.`,
+    `Error: Commits against ${endpoint} kept failing, so ix stopped fanning out one request per patch.`,
+    ...unsent,
     `  Last error: ${trimmed}`,
     `  ${state} Re-run \`ix map\` once it is fixed.`,
     // Two different causes produce this, and the CLI cannot tell them apart:

@@ -144,6 +144,25 @@ describe("describeCommitOutcome when the deadline fired", () => {
 });
 
 describe("describeCommitOutcome with a commit cutoff", () => {
+  it("points at the cutoff even when the drain placed every held patch", () => {
+    // The cutoff fired, so the banner above has already named the endpoint and
+    // quoted the backend's error -- but nothing was left unsent, and gating on
+    // that count sent the reader to "Re-run with --debug to see why" directly
+    // beneath a message that had just told them why. The 12-file reproduction
+    // at the default limit lands here: five fan-out failures trip it, the drain
+    // sends the remaining seven, and none of them are "never sent".
+    const out = describeCommitOutcome(12, 0, "--debug", false, 0, true);
+    expect(out.kind).toBe("fatal");
+    expect(out.message).toContain("See the cutoff above for why");
+    expect(out.message).not.toContain("to see why.");
+    expect(out.message).not.toContain("never sent");
+  });
+
+  it("still names the unsent count when there is one", () => {
+    const out = describeCommitOutcome(12, 0, "--debug", false, 3, true);
+    expect(out.message).toContain("3 of them never sent");
+  });
+
   it("points at the cutoff instead of a flag that would show nothing", () => {
     // The cutoff has already printed the endpoint, the streak and the error. A
     // patch that was never sent produces no per-file line, so the usual advice

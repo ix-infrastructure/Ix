@@ -965,7 +965,13 @@ export function describeCommitOutcome(
   /** True when the run was cut short by the map deadline rather than rejected. */
   deadlineHit: boolean = false,
   /** Patches abandoned unsent by the commit cutoff (Ix#560). */
-  cutoffSkipped: number = 0
+  cutoffSkipped: number = 0,
+  /**
+   * Did the cutoff fire at any point, whether or not it ended up losing
+   * patches? When it did, the banner above has already given the reason, and
+   * this line must not send the reader back to a flag that adds nothing.
+   */
+  cutoffFired: boolean = cutoffSkipped > 0
 ): CommitOutcome {
   if (commitErrors <= 0) return { kind: "ok" };
   const attempted = commitErrors + patchesApplied;
@@ -1011,15 +1017,19 @@ export function describeCommitOutcome(
   // a handful of patches and THEN blew its budget on thousands lost far more
   // to the clock, and attributing all of it to the cutoff hides the number
   // that would actually change the outcome.
-  if (cutoffSkipped > 0) {
-    // The cutoff has already printed the endpoint, the streak and the error.
-    // Repeating the standard advice here would send the reader to a flag that
-    // shows nothing: a patch that was never sent produces no per-file line.
+  if (cutoffFired) {
+    // The cutoff has already printed the endpoint and the error. Repeating the
+    // standard advice here would send the reader to a flag that shows nothing
+    // -- a patch that was never sent produces no per-file line -- and, when
+    // the drain placed everything it held, to a flag whose output the banner
+    // has already summarised.
+    const unsent =
+      cutoffSkipped > 0 ? `, ${cutoffSkipped} of them never sent` : "";
     return {
       kind: patchesApplied === 0 ? "fatal" : "warn",
       message:
-        `Ingest stopped early: ${commitErrors} of ${attempted} file patches are missing from the graph, ` +
-        `${cutoffSkipped} of them never sent. See the cutoff above for why; ${debugFlag} will not add to it.`,
+        `Ingest stopped early: ${commitErrors} of ${attempted} file patches are missing from the graph` +
+        `${unsent}. See the cutoff above for why; ${debugFlag} will not add to it.`,
     };
   }
 
@@ -1381,6 +1391,16 @@ export async function ingestFiles(
    */
   const drainGate = createDrainGate();
   /**
+   * Patches the BACKEND accepted, counted only where a request came back OK.
+   *
+   * Not `patchesApplied`, which the gate used to read. That counter also rises
+   * on the `count-applied` path, where up to a thousand patches are counted
+   * from a 409 body without a single request being sent -- so a full-landed
+   * replay could reopen a gate that had closed against a dead backend and
+   * restore the per-batch re-probing the gate exists to prevent.
+   */
+  let patchesTheBackendTook = 0;
+  /**
    * The RUN deadline, captured here because `commitPreparedPatches` shadows
    * `opts` with its own. Not `isAbortError`: a per-request AbortSignal.timeout
    * raises TimeoutError too, and that is a saturation signal, not our clock.
@@ -1725,6 +1745,19 @@ export async function ingestFiles(
           try {
             for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
               const item = items[itemIndex];
+              if (runDeadlineExpired()) {
+                // Every request from here is rejected by `fetch` on an already
+                // aborted signal, so the fan-out is pure waste -- and it is not
+                // otherwise stopped, because `commitFailureIndictsBackend`
+                // returns false for everything once the deadline has fired.
+                // That is right for CLASSIFYING (the deadline is our clock, not
+                // the backend's answer) and it left the cutoff and the drain
+                // budget both inert for the tail of the run, so a bulk failure
+                // at that point fanned out to one serialized commit per patch
+                // with nothing able to stop it.
+                for (let k = itemIndex; k < items.length; k++) deferredByCutoff.push(items[k]);
+                break;
+              }
               const isReplay = fallbackOpts?.replay === true;
               const action = perFileAction({
                 replay: isReplay,
@@ -1739,9 +1772,15 @@ export async function ingestFiles(
                 // Confirmed landed by the server's 409, and we have given up
                 // sending. They are still IN THE GRAPH, so dropping them from
                 // the counters would make the cutoff report "The graph is
-                // unchanged" for a run that changed it. The mtime baseline is
-                // not marked for them, so the next run re-sends them as the
-                // idempotent no-ops they are.
+                // unchanged" for a run that changed it.
+                //
+                // This branch adds no commitErrors, and `persistIngestBaseline-
+                // IfClean` is gated on the RUN-WIDE count, so on a run whose
+                // only anomaly is this the baseline IS written and the next run
+                // skips these files. That is correct here and only here --
+                // the server's own 409 confirmed they landed -- but it is the
+                // opposite of what an earlier comment claimed, so it is worth
+                // stating rather than leaving to be re-derived.
                 patchesApplied += items.length - itemIndex;
                 break;
               }
@@ -1760,6 +1799,7 @@ export async function ingestFiles(
                 timings.fallbackCommitMs += chunkMs;
                 latestRev = advanceRev(latestRev, result.rev);
                 patchesApplied++;
+                patchesTheBackendTook++;
                 commitBreaker.recordSuccess();
                 opts?.onCommitted?.(item, result.rev);
               } catch (commitErr) {
@@ -1826,26 +1866,25 @@ export async function ingestFiles(
             `\n  [cutoff] re-sending ${items.length} held-back patches with a fresh streak\n`,
           );
         }
-        // A budget, not the breaker's streak. The held set can begin with the
+        // A budget, not the breaker's streak: the held set can begin with the
         // tail of a poison cluster -- the fan-out stopped inside it, so the
         // rest of it is the first thing here -- and a streak would stop again
-        // in the same place and strand everything after. Twice the limit is
-        // enough to walk out of a cluster the fan-out already spent the limit
-        // inside, and still bounds a dead backend at 2N doomed requests per
-        // pass. `drainInPasses` owns the direction and the pass count, and its
-        // comment explains why one bounded pass in either direction is not
-        // enough.
+        // in the same place and strand everything after.
+        //
+        // The budget is the limit itself, not twice it. Twice was chosen to
+        // walk out of a cluster in ONE pass; `drainInPasses` walks out of it by
+        // changing direction instead, and since a genuinely dead backend now
+        // always costs `maxPasses x budget` doomed requests, the budget is the
+        // half of that product worth keeping small.
         const leftover = await drainInPasses(items, async pending => {
           commitBreaker.reset();
-          const appliedBefore = patchesApplied;
           await commitItemsSerially(pending, recordDrainMs, undefined, {
-            failureBudget: Math.max(1, commitBreaker.limit * 2),
+            failureBudget: Math.max(1, commitBreaker.limit),
           });
           // Whatever the budget did not reach was pushed straight back onto the
           // held list by the per-file loop; take it back out so the next pass
           // owns it and the caller does not see it twice.
-          const unreached = deferredByCutoff.splice(0, deferredByCutoff.length);
-          return { placed: patchesApplied > appliedBefore, unreached };
+          return deferredByCutoff.splice(0, deferredByCutoff.length);
         });
         deferredByCutoff.push(...leftover);
       };
@@ -1885,6 +1924,7 @@ export async function ingestFiles(
             onBulkCommitted: (items, result) => {
               latestRev = advanceRev(latestRev, result.rev);
               patchesApplied += items.length;
+              patchesTheBackendTook += items.length;
               commitBreaker.recordSuccess();
               for (const item of items) opts?.onCommitted?.(item, result.rev);
             },
@@ -1938,15 +1978,15 @@ export async function ingestFiles(
       // version of the same judgement across BATCHES, so that a genuinely dead
       // backend is not re-probed once per batch for the length of the run.
       if (deferredByCutoff.length > 0) {
-        if (drainGate.shouldDrain(patchesApplied)) {
+        if (!runDeadlineExpired() && drainGate.shouldDrain(patchesTheBackendTook)) {
           const held = deferredByCutoff.splice(0, deferredByCutoff.length);
-          const appliedBefore = patchesApplied;
+          const tookBefore = patchesTheBackendTook;
           await commitIndividuallyAfterCutoff(held);
           // Placing NOTHING is the only evidence that means "the backend".
           // Whether the drain ended tripped says nothing useful: one that
           // commits hundreds and then meets the tail of a bad cluster ends
           // tripped too.
-          drainGate.record(patchesApplied > appliedBefore, patchesApplied);
+          drainGate.record(patchesTheBackendTook > tookBefore, patchesTheBackendTook);
         }
         // Held back again, or held back after the retry was already spent.
         if (deferredByCutoff.length > 0) {
@@ -2556,7 +2596,8 @@ export async function ingestFiles(
     // ix map has no --debug and never passes one; --verbose is its equivalent.
     opts.mapMode === true ? "--verbose" : "--debug",
     opts.deadlineSignal?.aborted === true,
-    commitBreaker.skipped()
+    commitBreaker.skipped(),
+    commitBreaker.everTripped()
   );
   const summary: IngestFilesSummary = {
     filesDiscovered,
@@ -2565,11 +2606,14 @@ export async function ingestFiles(
     commitErrors,
     stitchErrors,
   };
-  if (commitBreaker.skipped() > 0) {
-    // Gated on what was actually abandoned, not on the flag. A patch that was
-    // never sent produces no `[commit error]` line even under --verbose, so
-    // without this the run reports N commit errors, exits 1, and points the
-    // user at a diagnostic that has nothing to show them -- which is the
+  if (commitBreaker.everTripped()) {
+    // Gated on the cutoff having FIRED, not on what was left unsent. A patch
+    // that was never sent produces no `[commit error]` line even under
+    // --verbose, so this has to print for those -- but gating on them alone
+    // meant a run whose drain eventually placed every held patch printed
+    // nothing at all. The 12-file reproduction at the default limit is exactly
+    // that shape: it held 7, the drain sent all 7, and the user got the generic
+    // "all 12 patches failed to commit, re-run with --verbose" -- the
     // unexplained failure this change exists to remove.
     //
     // Before the stitch line and before the commit report: this is the cause,
