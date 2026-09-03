@@ -1315,22 +1315,39 @@ export async function ingestFiles(
    * a partial one.
    *
    * `filesSkipped` is the wrong test for that, because it also counts files
-   * that contribute nothing under ANY run: a zero-byte file, one that looks
-   * minified, one the parser returned nothing for. The collected set is
-   * complete and correct without them -- they have no entities to contribute
-   * -- so their presence in the count was silently disqualifying repos from
-   * ever stitching. A single empty `__init__.py` was enough, `--force` or
-   * not, which made `ix ingest <root> --force` -- the remedy this command
-   * prints when it refuses a stitch -- a promise it could not keep: the run
-   * would print nothing, exit 0, and leave the cross-repo edges stale.
+   * that contribute nothing under ANY run: a zero-byte file and one that
+   * looks minified. Both are decided by the file's own content under a rule
+   * that does not vary between runs, so the collected set is complete and
+   * correct without them -- and their presence in the count was silently
+   * disqualifying repos from ever stitching. A single empty `__init__.py` was
+   * enough, `--force` or not, which made `ix ingest <root> --force` -- the
+   * remedy this command prints when it refuses a stitch -- a promise it could
+   * not keep: the run would print nothing, exit 0, and leave the cross-repo
+   * edges stale.
    *
    * An mtime- or hash-clean skip is different in kind: the file has content
    * we would have indexed and we did not look at it this run, so the set
-   * really is missing it.
+   * really is missing it. So is a file the parser returned nothing for --
+   * see `filesSkippedUnparsed`, which the gate reads alongside this.
    */
   let filesSkippedAsUnchanged = 0;
   /** Zero-byte files. Reported as `skipReasons.emptyFile`, which was hardcoded 0. */
   let filesSkippedAsEmpty = 0;
+  /**
+   * Files the parse pool returned nothing for.
+   *
+   * These belong with `filesSkippedAsUnchanged` in the stitch gate and NOT with
+   * the empty and minified skips, because unlike those they are not a property
+   * of the file: `ParsePool` resolves `null` both for a reported parse failure
+   * and for the in-flight task of a worker that CRASHED, and neither increments
+   * `parseErrors`. So a `--force` run where one worker OOMs would otherwise
+   * stitch a registration missing that file's exports over the complete one --
+   * a transient crash silently shrinking the cross-repo graph.
+   *
+   * Reported under `skipReasons.parseError`, which is what it is from a
+   * consumer's side: the parser gave us nothing for this file.
+   */
+  let filesSkippedUnparsed = 0;
   let parseErrors = 0;
   let commitErrors = 0;
   let stitchErrors = 0;
@@ -2000,7 +2017,7 @@ export async function ingestFiles(
           const batch: ParsedFile[] = [];
           for (let j = 0; j < chunk.length; j++) {
             const parsed = parseResults[j] as any;
-            if (!parsed) { filesSkipped++; continue; }
+            if (!parsed) { filesSkipped++; filesSkippedUnparsed++; continue; }
             entitiesParsed += parsed.entities.length;
             batch.push({ filePath: chunk[j].filePath, parsed, hash: chunk[j].hash, previousHash: chunk[j].previousHash });
           }
@@ -2113,7 +2130,7 @@ export async function ingestFiles(
           const f = fileData[j];
           if (!f) continue;
           const parsed = parseResults[j] as any;
-          if (!parsed) { filesSkipped++; continue; }
+          if (!parsed) { filesSkipped++; filesSkippedUnparsed++; continue; }
           entitiesParsed += parsed.entities.length;
           batch.push({ filePath: f.filePath, parsed, hash: f.hash, previousHash: f.previousHash });
         }
@@ -2244,11 +2261,16 @@ export async function ingestFiles(
     // (Incremental registry updates that touch only changed files are a future
     // refinement.)
     //
-    // Ix#568: `filesSkippedAsUnchanged`, not `filesSkipped` -- see its
-    // declaration. The broader count also includes files that contribute nothing
-    // under any run, so one empty `__init__.py` used to disqualify a repo from
-    // ever stitching, with or without `--force`.
-    if (stitchEnabled && filesSkippedAsUnchanged === 0 && stitchFiles.length > 0 && ingestCompletedCleanly(parseErrors, commitErrors)) {
+    // Ix#568: the two narrow counts, not `filesSkipped` -- see their
+    // declarations. The broad total also includes empty and minified-looking
+    // files, which contribute nothing under any run, so one empty `__init__.py`
+    // used to disqualify a repo from ever stitching, with or without `--force`.
+    // A file the parser returned nothing for is NOT in that category and is
+    // counted here: a crashed pool worker resolves its in-flight task as null
+    // without raising `parseErrors`, and stitching then would overwrite a
+    // complete registration with one missing that file's exports.
+    const registrationIsComplete = filesSkippedAsUnchanged === 0 && filesSkippedUnparsed === 0;
+    if (stitchEnabled && registrationIsComplete && stitchFiles.length > 0 && ingestCompletedCleanly(parseErrors, commitErrors)) {
       try {
         const entry = pickEntryFile(stitchFiles);
         const provides = entry
@@ -2437,7 +2459,12 @@ export async function ingestFiles(
       // unparseable files -- so a consumer reading this could not tell an
       // incremental no-op from a repo full of empty __init__.py. `emptyFile` was
       // hardcoded 0 for the same reason and is now the real count.
-      skipReasons: { unchanged: filesSkippedAsUnchanged, emptyFile: filesSkippedAsEmpty, parseError: parseErrors, tooLarge, minifiedLikely, outsideRoot },
+      //
+      // `parseError` carries both the files that raised a parse error and the
+      // ones the pool returned nothing for, so the buckets still reconcile with
+      // `filesSkipped` beside them. Narrowing `unchanged` without this left the
+      // pool's nulls in no bucket at all.
+      skipReasons: { unchanged: filesSkippedAsUnchanged, emptyFile: filesSkippedAsEmpty, parseError: parseErrors + filesSkippedUnparsed, tooLarge, minifiedLikely, outsideRoot },
       commitErrors,
       stitchErrors,
       // Ix#568. Present only when the stitch was refused before it was sent, so

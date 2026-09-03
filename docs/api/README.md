@@ -289,6 +289,16 @@ apart from a clean run. It is not an error: it does not set a non-zero exit code
 and does not count towards `stitchErrors`, and the previous registration stands —
 the same position a stitch that *failed* already left the graph in.
 
+Both the lock and the cooldown are keyed on the **endpoint**, not on the
+workspace, because the join they bound is cross-workspace. That is the point of
+the guard, and it is also its cost: one transient failure while mapping repo A
+refuses the stitch for repos B..E on the same backend for the whole cooldown,
+and when it expires none of them re-attempt on their own for the reason below.
+In a multi-repo setup that means every repo's cross-repo edges stay as they were
+until somebody runs a full re-ingest in each. The alternative -- keying per
+workspace -- does not bound the query at all, since the query is not per
+workspace.
+
 Note that re-registration is not automatic on the next map, and was not before
 this change: the stitch is gated on every file having been parsed this run, so an
 incremental map that skips an mtime- or hash-unchanged file neither reaches it nor
