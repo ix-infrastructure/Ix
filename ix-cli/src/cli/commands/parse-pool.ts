@@ -105,6 +105,12 @@ export class ParsePool {
     const task = this.active.get(w);
     if (!task) return;
     this.active.delete(w);
+    // A successful round trip clears the respawn budget. The cap exists to
+    // stop a worker that dies deterministically from spinning spawn -> die ->
+    // spawn; it is not meant to be a lifetime quota. As a per-run total it made
+    // ~23 transient deaths on a long run kill the pool for good, and on `main`
+    // those cost 23 files rather than the remainder of the ingest.
+    this.respawns = 0;
     task.resolve(msg.ok ? msg.result : null);
     this.idle.push(w);
     this.drain();

@@ -553,7 +553,13 @@ Examples:
         const stitch =
           rule === undefined || rule === "incomplete" || rule === "run-errors"
             ? ""
-            : ` · stitch_skipped=${rule}`;
+            // `stitch_skipped_rule`, not `stitch_skipped`. The json and llm
+            // formats put the English prose under `stitch_skipped` and the rule
+            // under `stitch_skipped_rule`, and emitting the RULE under the
+            // prose key here gave one name two value spaces: a hook matching
+            // `stitch_skipped=cooling` on this line silently stopped matching
+            // the moment it was pointed at `--format json`.
+            : ` · stitch_skipped_rule=${rule}`;
         process.stderr.write(
           `map: ${result.file_count} files · ${systems}s/${subsystems}ss/${modules}m regions · ${mapMs}ms${stitch}\n`
         );

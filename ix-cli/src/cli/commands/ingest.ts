@@ -864,7 +864,15 @@ export function isStitchUnsupported(error: unknown): boolean {
  */
 export function describeStitchFailure(error: unknown): string {
   const status = stitchFailureStatus(error);
-  const detail = status === null ? "backend request failed" : `HTTP ${status}`;
+  // A 2xx here means the request succeeded and something downstream made the
+  // body unreadable -- the #528 proxy shape -- so "HTTP 200" as the failure
+  // status is accurate and useless. Say what actually happened.
+  const detail =
+    status === null
+      ? "backend request failed"
+      : status >= 200 && status < 300
+        ? `HTTP ${status} with an unreadable body`
+        : `HTTP ${status}`;
   return `Warning: Cross-workspace stitch failed (${detail}). Source patches were committed, but cross-repository relationships may be incomplete.`;
 }
 
@@ -921,7 +929,14 @@ export function describeStitchSkipped(
       ? " Raise IX_MAP_DEADLINE_MS or map a smaller path, then re-register with `ix ingest <root> --force`."
       : rule === "in-flight"
         ? " Re-run once that finishes; if the cross-repo edges still look stale, `ix ingest <root> --force`."
-        : " Recover with `ix ingest <root> --force` once it clears.";
+        : rule === "lost-parses"
+          // Nothing "clears" here, and this rule fires ON a --force run, so the
+          // cooling remedy told the user to wait for a condition that does not
+          // exist and then re-run the command they had just run.
+          ? " Re-run `ix ingest <root> --force`; if it keeps happening, the crash is reproducible and IX_PARSE_DEBUG=1 will show it."
+          : rule === "run-errors"
+            ? " Fix the errors above and re-run `ix ingest <root> --force`."
+            : " Recover with `ix ingest <root> --force` once it clears.";
   const head = `Note: Cross-workspace stitch not started — ${reason}.${recover}`;
   if (!verbose) return head;
 
@@ -935,7 +950,16 @@ export function describeStitchSkipped(
       ? "That run may be registering a different workspace, in which case this one was not " +
         "registered; re-run once it has finished, or force a full re-ingest " +
         "(`ix ingest <root> --force`) if the cross-repo edges still look stale."
-      : rule === "deadline"
+      : rule === "lost-parses"
+        ? "A parse worker crashed, so this run never saw some files and its registration would be " +
+          "missing them. Nothing is running on the backend and nothing needs to clear: re-run " +
+          "`ix ingest <root> --force`, and if it recurs the crash is reproducible -- IX_PARSE_DEBUG=1 " +
+          "will show what the parser choked on."
+        : rule === "run-errors"
+          ? "The parse or commit errors above mean this run has an incomplete picture of the repo, so " +
+            "registering from it would overwrite a good registration with a worse one. Fix those and " +
+            "re-run `ix ingest <root> --force`."
+        : rule === "deadline"
         ? "Nothing was sent, so nothing is running -- but nothing was registered either, and a longer " +
           "budget does not fix that on its own: the next map is incremental and never reaches the stitch " +
           "block. Raise IX_MAP_DEADLINE_MS or map a smaller path, then `ix ingest <root> --force`."
@@ -2344,7 +2368,15 @@ export async function ingestFiles(
       projectRoot,
       currentMtimes,
       latestRev,
-      parseErrors,
+      // Lost parses count as parse errors HERE, whatever they are called
+      // elsewhere. A run whose worker pool died resolves every later file as
+      // null, and those increment `filesSkippedUnparsed` rather than
+      // `parseErrors` -- so without this the run wrote an mtime baseline for
+      // tens of thousands of files it never parsed or committed, exited 0, and
+      // every later incremental map skipped them as unchanged. Half the graph
+      // missing, recoverable only by `--force`, and worse than `main`, which
+      // respawns without a cap and loses one file per crash.
+      parseErrors + crashedParses(),
       commitErrors,
       undefined,
       nextDeletedFiles,
@@ -2391,12 +2423,12 @@ export async function ingestFiles(
     // Neither prints a human Note or a `--silent` token: `incomplete` would
     // appear on nearly every incremental map, and a run with errors has already
     // said so, loudly, in the lines above.
-    if (stitchEnabled && stitchFiles.length > 0 && !ingestCompletedCleanly(parseErrors, commitErrors)) {
+    if (stitchEnabled && !ingestCompletedCleanly(parseErrors, commitErrors)) {
       stitchSkippedRule = "run-errors";
       stitchSkipped =
         "this run had parse or commit errors, so its registration would be built from " +
         "an incomplete picture of the repo";
-    } else if (stitchEnabled && stitchFiles.length > 0 && crashedParses() > 0) {
+    } else if (stitchEnabled && crashedParses() > 0) {
       // Its OWN rule, and one that IS printed. `incomplete` is silent because
       // it fires on nearly every incremental map -- but on a `--force` run
       // nothing is skipped as unchanged, so `incomplete` there could only ever
@@ -2406,7 +2438,12 @@ export async function ingestFiles(
       stitchSkipped =
         `a parse worker crashed and ${crashedParses()} file(s) went unparsed, so the ` +
         "cross-workspace registration would be missing them";
-    } else if (stitchEnabled && stitchFiles.length > 0 && !registrationIsComplete) {
+    } else if (stitchEnabled && !registrationIsComplete) {
+      // `stitchFiles.length > 0` is deliberately NOT required on any of these
+      // three. A map where nothing changed parses nothing, so `stitchFiles` is
+      // empty and the field stayed unset -- reporting "the cross-repo edges are
+      // current" for the commonest map there is, while a cooldown was refusing
+      // stitches the whole time. The staleness is identical either way.
       stitchSkippedRule = "incomplete";
       stitchSkipped =
         "this map did not re-parse every file, so it has no complete cross-workspace " +
