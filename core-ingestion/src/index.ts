@@ -2000,16 +2000,66 @@ function unwrapRustCfgMacros(source: string): string {
  * newline, as with the Rust macro unwrapper above) turns `k<<<a,b>>>(x)` into
  * `k        (x)`, which parses cleanly and yields the call.
  *
- * The `(?=\s*\()` lookahead is what keeps this from firing on non-CUDA text:
- * a launch config is always immediately followed by the argument list, so
+ * Hand-scanned rather than pattern-matched. The natural regex
+ * (`/<<<[^;]*?>>>(?=\s*\()/g`) is quadratic on `<`-heavy input — a file of
+ * 16k `<` took 67ms and grew 4x per doubling — and ingest input is an
+ * arbitrary repository, so that is a denial-of-service vector, not a
+ * micro-optimisation. This scanner never revisits a character: each failed
+ * search advances the cursor past the region it just rejected.
+ *
+ * A launch config is always followed immediately by the argument list, so
+ * requiring `(` after the closing `>>>` is what keeps this off ordinary C++ —
  * nested templates (`vector<vector<vector<int>>>`), shift operators and
- * `"<<<HEAD>>>"` in a string literal are all left alone. Excluding `;` stops a
- * stray `<<<` in a comment from running away to a later `>>>`.
+ * `"<<<HEAD>>>"` in a string literal are all left alone. Stopping the search
+ * at `;` keeps a stray `<<<` in a comment from reaching a later `>>>`.
  */
-const _cudaLaunchConfig = /<<<[^;]*?>>>(?=\s*\()/g;
+const _isSpace = (ch: string) => ch === ' ' || ch === '\n' || ch === '\t' || ch === '\r';
 
 function blankCudaLaunchConfigs(source: string): string {
-  return source.replace(_cudaLaunchConfig, (m) => m.replace(_blankNonNewline, ' '));
+  if (!source.includes('<<<')) return source;
+
+  const out: string[] = [];
+  let copiedTo = 0;
+  let cursor = 0;
+
+  while (cursor < source.length) {
+    const open = source.indexOf('<<<', cursor);
+    if (open === -1) break;
+
+    // Find the closing `>>>`, giving up at `;` — a launch config never spans a
+    // statement boundary.
+    let scan = open + 3;
+    while (scan < source.length && source[scan] !== ';' && !source.startsWith('>>>', scan)) {
+      scan += 1;
+    }
+
+    if (!source.startsWith('>>>', scan)) {
+      // Hit `;` or end of file. No `<<<` inside the region just scanned can
+      // reach a closing `>>>` either, so skip the whole thing.
+      cursor = scan + 1;
+      continue;
+    }
+
+    const close = scan + 3;
+    let afterConfig = close;
+    while (afterConfig < source.length && _isSpace(source[afterConfig])) afterConfig += 1;
+
+    if (source[afterConfig] !== '(') {
+      // A `>>>` that is not a launch — e.g. closing nested templates. Resume
+      // after it; the region behind us cannot match.
+      cursor = close;
+      continue;
+    }
+
+    out.push(source.slice(copiedTo, open));
+    out.push(source.slice(open, close).replace(_blankNonNewline, ' '));
+    copiedTo = close;
+    cursor = close;
+  }
+
+  if (copiedTo === 0) return source;
+  out.push(source.slice(copiedTo));
+  return out.join('');
 }
 
 // ---------------------------------------------------------------------------

@@ -87,4 +87,25 @@ void f(std::vector<std::vector<std::vector<int>>>& v, int a, int b) {
     expect(callTargets(cu)).toEqual(callTargets(cpp));
     expect(callTargets(cu)).toEqual(expect.arrayContaining(['consume']));
   });
+
+  it('stays linear on adversarial input', () => {
+    // Ingest input is an arbitrary repository, so the blanking pass is
+    // attacker-controlled. The obvious regex (`/<<<[^;]*?>>>(?=\\s*\\()/g`)
+    // is quadratic here: 16k `<` took 67ms and grew 4x per doubling.
+    const timeFor = (n: number) => {
+      const evil = `void f() { ${'<'.repeat(n)}>>>x }`;
+      const started = performance.now();
+      parseFile('/repo/evil.cu', evil);
+      return performance.now() - started;
+    };
+
+    timeFor(1_000); // warm the parser so the comparison is not first-call cost
+
+    const small = timeFor(8_000);
+    const large = timeFor(32_000);
+
+    // 4x the input. Quadratic would be ~16x; linear scanning stays well under.
+    expect(large).toBeLessThan(Math.max(small, 1) * 8);
+  });
+
 });
