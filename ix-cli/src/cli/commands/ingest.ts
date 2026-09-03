@@ -1650,6 +1650,10 @@ export async function ingestFiles(
       flushBulkChunk();
 
       const commitMsPerChunk = new Array<number>(chunks.length).fill(0);
+      // The drain belongs to no chunk, but its time is still commit time --
+      // a no-op sink here dropped it from the reported total.
+      let drainMs = 0;
+      const recordDrainMs = (ms: number): void => { drainMs += ms; };
       let nextChunk = 0;
       // Fallback mutex: serializes per-file commits across all workers so that
       // concurrent fallback loops don't race on revisions.current (Error 1200).
@@ -1668,7 +1672,23 @@ export async function ingestFiles(
         items: PreparedPatch[],
         recordMs: (ms: number) => void,
         bulkError?: unknown,
-        fallbackOpts?: { replay?: boolean },
+        fallbackOpts?: {
+          replay?: boolean;
+          /**
+           * Total failures this loop may absorb before giving up, replacing the
+           * breaker's CONSECUTIVE streak for callers that need to get past a
+           * run of bad patches rather than stop at one.
+           *
+           * A streak cannot: N adjacent patches the backend rejects on their
+           * own merits look exactly like a dead backend for as long as the run
+           * of them lasts, so any streak of N or fewer stops inside the
+           * cluster and strands everything after it -- and the mtime baseline,
+           * never written on a run with commit errors, makes the next `ix map`
+           * repeat it exactly. A budget keeps going past the cluster and only
+           * stops when the FAILURES add up, which is the thing worth bounding.
+           */
+          failureBudget?: number;
+        },
       ): Promise<void> => {
           if (debug && bulkError !== undefined) {
             const first = items[0];
@@ -1684,9 +1704,18 @@ export async function ingestFiles(
           let resolveThis!: () => void;
           fallbackTail = new Promise<void>(r => { resolveThis = r; });
           await prev;
+          let budgetLeft = fallbackOpts?.failureBudget ?? Number.POSITIVE_INFINITY;
           try {
             for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
               const item = items[itemIndex];
+              // Out of budget: hold everything left, exactly as a trip does.
+              // Applies to replays too -- a 409 naming 999 landed ids would
+              // otherwise send 999 serialized doomed commits while HOLDING the
+              // fallback mutex, so nothing else could even trip the breaker.
+              if (budgetLeft <= 0) {
+                for (let k = itemIndex; k < items.length; k++) deferredByCutoff.push(items[k]);
+                break;
+              }
               const isReplay = fallbackOpts?.replay === true;
               if (isReplay) {
                 // A replay re-sends patches the server's 409 has CONFIRMED it
@@ -1731,6 +1760,7 @@ export async function ingestFiles(
                 // tree, which is a different problem from a file we could not
                 // read. Reporting it as a parse error hid that distinction in
                 // both the summary and the JSON contract.
+                budgetLeft--;
                 if (isReplay) {
                   // Confirmed landed by the server's own 409 body. A failed
                   // re-send loses no write, so counting it would let the cutoff
@@ -1775,9 +1805,22 @@ export async function ingestFiles(
           );
         }
         commitBreaker.reset();
-        // No chunk to attribute the time to; the loop already adds it to
-        // timings.fallbackCommitMs itself.
-        await commitItemsSerially(items, () => {});
+        // A budget, not the breaker's streak. The held set can begin with the
+        // tail of a poison cluster -- the fan-out stopped inside it, so the
+        // rest of it is the first thing here -- and a streak would stop again
+        // in the same place and strand everything after. Twice the limit is
+        // enough to walk out of a cluster the fan-out already spent the limit
+        // inside, and still bounds a dead backend at 2N doomed requests.
+        // Reversed, deliberately. The fan-out stopped INSIDE whatever run of bad
+        // patches tripped it, so the rest of that run is the first thing in the
+        // held set -- and walking it front-first spends the budget on exactly
+        // the patches that already proved they fail, stranding the good ones
+        // behind them. From the far end the good patches go first, and what the
+        // budget eventually stops on is the bad cluster itself, which is the
+        // only thing that should be stranded.
+        await commitItemsSerially([...items].reverse(), recordDrainMs, undefined, {
+          failureBudget: Math.max(1, commitBreaker.limit * 2),
+        });
       };
 
       const runChunk = async (ci: number): Promise<void> => {
@@ -1880,7 +1923,7 @@ export async function ingestFiles(
         }
       }
 
-      return commitMsPerChunk.reduce((a, b) => a + b, 0);
+      return commitMsPerChunk.reduce((a, b) => a + b, 0) + drainMs;
     };
 
     /** Resolve edges within a batch, build patches, and commit in sub-chunks. */
