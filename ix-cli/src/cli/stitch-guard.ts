@@ -308,14 +308,20 @@ export function outcomeProvesNothingRunning(outcome: StitchOutcome): boolean {
 /**
  * Which rule refused. Callers branch on this, never on the prose.
  *
- * `incomplete` is not one of this guard's rules -- it is `ix ingest`'s own
- * completeness gate, reported through the same field because a machine consumer
- * asking "are the cross-repo edges current?" needs the same answer for it. It
- * is by far the commonest reason a stitch does not happen (every incremental
- * map), and leaving it unreported meant the field said "current" for the case
+ * `incomplete` and `run-errors` are not this guard's rules -- they are
+ * `ix ingest`'s own gates, reported through the same field because a machine
+ * consumer asking "are the cross-repo edges current?" needs the same answer for
+ * them. Between them they are by far the commonest reason a stitch does not
+ * happen (every incremental map, and every run with a failed patch), and
+ * leaving them unreported meant the field said "current" for exactly the cases
  * it was added to describe.
  */
-export type StitchRefusal = "in-flight" | "cooling" | "deadline" | "incomplete";
+export type StitchRefusal =
+  | "in-flight"
+  | "cooling"
+  | "deadline"
+  | "incomplete"
+  | "run-errors";
 
 export type StitchAdmission =
   | { admitted: true; settle: (outcome: StitchOutcome) => void }

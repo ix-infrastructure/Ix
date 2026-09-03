@@ -550,7 +550,10 @@ Examples:
         // both carry it. What stays here is the guard refusing -- the case that
         // means a backend is being protected from stacked joins.
         const rule = localIngest?.stitchSkippedRule;
-        const stitch = rule === undefined || rule === "incomplete" ? "" : ` · stitch_skipped=${rule}`;
+        const stitch =
+          rule === undefined || rule === "incomplete" || rule === "run-errors"
+            ? ""
+            : ` · stitch_skipped=${rule}`;
         process.stderr.write(
           `map: ${result.file_count} files · ${systems}s/${subsystems}ss/${modules}m regions · ${mapMs}ms${stitch}\n`
         );

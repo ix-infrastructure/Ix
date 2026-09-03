@@ -2384,13 +2384,19 @@ export async function ingestFiles(
     // that is deterministic, usually an unavailable optional grammar, and
     // gating on it blocked stitching forever for any repo containing one.
     const registrationIsComplete = filesSkippedAsUnchanged === 0 && crashedParses() === 0;
-    if (stitchEnabled && !registrationIsComplete && stitchFiles.length > 0 && ingestCompletedCleanly(parseErrors, commitErrors)) {
-      // Reported, but not printed. A consumer asking "are the cross-repo edges
-      // current?" needs this answer -- it is the commonest reason a stitch does
-      // not happen, and while it went unreported `stitch_skipped: null` said
-      // "current" for exactly the case the field exists to describe. It stays
-      // out of the human Note because that Note would then appear on every
-      // incremental map, which is ordinary and not worth a line.
+    // Every way the stitch does not happen is REPORTED, not just the guard's.
+    // `stitch_skipped: null` means "the cross-repo edges are current", so every
+    // path that leaves it unset while skipping the stitch says something false
+    // -- and the two below are far commoner than any refusal the guard makes.
+    // Neither prints a human Note or a `--silent` token: `incomplete` would
+    // appear on nearly every incremental map, and a run with errors has already
+    // said so, loudly, in the lines above.
+    if (stitchEnabled && stitchFiles.length > 0 && !ingestCompletedCleanly(parseErrors, commitErrors)) {
+      stitchSkippedRule = "run-errors";
+      stitchSkipped =
+        "this run had parse or commit errors, so its registration would be built from " +
+        "an incomplete picture of the repo";
+    } else if (stitchEnabled && stitchFiles.length > 0 && !registrationIsComplete) {
       stitchSkippedRule = "incomplete";
       stitchSkipped =
         "this map did not re-parse every file, so it has no complete cross-workspace " +
@@ -2550,7 +2556,14 @@ export async function ingestFiles(
   if (stitchErrors > 0) {
     process.stderr.write(`  ${describeStitchFailure(stitchError)}\n`);
     process.exitCode = 1;
-  } else if (stitchSkipped !== undefined && stitchSkippedRule !== "incomplete") {
+  } else if (
+    stitchSkipped !== undefined &&
+    // The guard's refusals only. `incomplete` would print on nearly every
+    // incremental map, and `run-errors` restates lines the run has already
+    // printed; both are still on the machine surfaces.
+    stitchSkippedRule !== "incomplete" &&
+    stitchSkippedRule !== "run-errors"
+  ) {
     // Not an error and not an exit code: nothing failed, and the graph is
     // exactly where a failed stitch would have left it. But the sentence a
     // user gets otherwise -- cross-repo relationships may be incomplete --

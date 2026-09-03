@@ -60,12 +60,7 @@ export class ParsePool {
     // even reach `destroy()`. `onError` already covers the crash path; this
     // covers the quiet one, and both feed `crashedTasks()` so the stitch gate
     // sees a run that lost a file either way.
-    w.on('exit', () => {
-      // Not during shutdown: `destroy()` terminates every worker on purpose,
-      // and treating that as a crash respawns the pool it is trying to close.
-      if (this.destroyed) return;
-      this.onError(w, new Error('parse worker exited'));
-    });
+    w.on('exit', () => this.onError(w, new Error('parse worker exited')));
     this.workers.push(w);
     this.idle.push(w);
     return w;
@@ -110,28 +105,59 @@ export class ParsePool {
   /** True once `destroy()` has begun, so a deliberate exit is not read as a crash. */
   private destroyed = false;
 
+  /** Replacements spawned for crashed workers. Capped -- see `onError`. */
+  private respawns = 0;
+
+  /** Generous enough for real flakiness, small enough to stop a spawn loop. */
+  private static readonly MAX_RESPAWNS = 16;
+
   private onError(w: Worker, _err: Error): void {
+    // Not during shutdown. `destroy()` terminates every worker on purpose, and
+    // treating that as a crash respawns the pool it is trying to close: the
+    // replacements outlive `this.workers = []`, a worker thread refs the event
+    // loop, and the CLI prints its summary and then hangs forever. The guard
+    // lives HERE rather than on the 'exit' listener because 'error' reaches the
+    // same code: a worker that faults while `destroy()` is awaiting
+    // `terminate()` took the identical path.
+    if (this.destroyed) return;
     const task = this.active.get(w);
     if (task) {
       this.active.delete(w);
       this.crashed++;
       task.resolve(null); // isolate: failed file = null parse result
     }
-    // Replace the crashed worker
+    // Replace the crashed worker -- but not forever. A worker that dies
+    // deterministically and without an 'error' (a native module that calls
+    // `process.exit(1)` on load, say) would otherwise spin spawn -> exit ->
+    // spawn for the rest of the run. That loop is newly reachable, because
+    // before the 'exit' listener a silent death was simply ignored. Past the
+    // cap the pool runs smaller, which the queue drains through fine, and every
+    // lost task is still counted for the stitch gate.
     const idx = this.workers.indexOf(w);
-    if (idx !== -1) {
-      w.terminate().catch(() => {});
-      this.workers.splice(idx, 1);
-      // ...and out of `idle` too. A worker can emit 'error' while it is IDLE --
-      // an uncaught async throw, or ERR_WORKER_OUT_OF_MEMORY between tasks --
-      // and leaving the terminated thread in the free list means a later
-      // `drain()` pops it and posts to nothing: the task's promise never
-      // settles and the `Promise.all` over the parse batch hangs the ingest
-      // forever. It was already only splicing one of the two lists.
-      const idleIdx = this.idle.indexOf(w);
-      if (idleIdx !== -1) this.idle.splice(idleIdx, 1);
+    if (idx === -1) return;
+    w.terminate().catch(() => {});
+    this.workers.splice(idx, 1);
+    // ...and out of `idle` too, ALWAYS, cap or no cap. A worker can emit 'error'
+    // while it is IDLE -- an uncaught async throw, or ERR_WORKER_OUT_OF_MEMORY
+    // between tasks -- and leaving the terminated thread in the free list means
+    // a later `drain()` pops it and posts to nothing: the task's promise never
+    // settles and the `Promise.all` over the parse batch hangs the ingest.
+    const idleIdx = this.idle.indexOf(w);
+    if (idleIdx !== -1) this.idle.splice(idleIdx, 1);
+
+    if (this.respawns < ParsePool.MAX_RESPAWNS) {
+      this.respawns++;
       this.spawnWorker();
-      this.drain();
+    } else if (this.workers.length === 0) {
+      // Out of workers and out of replacements: nothing queued can ever be
+      // parsed, so resolve it rather than leave `Promise.all` waiting on a pool
+      // that no longer exists. Counted as crashed, which is what it is, so the
+      // stitch gate knows this run lost files.
+      const stranded = this.queue.splice(0, this.queue.length);
+      this.crashed += stranded.length;
+      for (const t of stranded) t.resolve(null);
+      return;
     }
+    this.drain();
   }
 }
