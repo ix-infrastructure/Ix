@@ -10,7 +10,7 @@ export const SUPPORTED_EXTENSIONS = new Set<string>([
   ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
   ".py", ".java", ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp",
   ".cs", ".go", ".rb", ".rs", ".php", ".kt", ".kts", ".swift",
-  ".scala", ".sc",
+  ".scala", ".sc", ".sbt",
   ".yaml", ".yml",
   ".dockerfile",
   ".sql",

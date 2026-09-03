@@ -59,6 +59,9 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.swift':SupportedLanguages.Swift,
   '.scala':SupportedLanguages.Scala,
   '.sc':   SupportedLanguages.Scala,
+  // sbt build definitions are Scala expressions; the Scala grammar parses them
+  // as-is, and they are where modules are wired to their dependencies.
+  '.sbt':  SupportedLanguages.Scala,
   '.yaml': SupportedLanguages.YAML,
   '.yml':  SupportedLanguages.YAML,
   '.dockerfile': SupportedLanguages.Dockerfile,

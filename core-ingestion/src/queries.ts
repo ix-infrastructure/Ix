@@ -1381,6 +1381,18 @@ export const SCALA_QUERIES = `
 (template_body
   (var_definition (identifier) @name) @definition.const)
 
+; ── Top-level val/var definitions (compilation-unit level) ────────────────────
+; Scala 2 forbids these, so ordinary .scala files are unaffected. They matter
+; for .sbt build definitions, where every module is a top-level
+; \`lazy val core = (project in file("core"))\`, and for Scala 3 top-level
+; definitions. Still excludes method-local bindings, which are nested inside a
+; block rather than the compilation unit.
+(compilation_unit
+  (val_definition (identifier) @name) @definition.const)
+
+(compilation_unit
+  (var_definition (identifier) @name) @definition.const)
+
 ; ── Imports: capture full declaration for dotted-path reconstruction ─────────
 ; Handles: import ix.memory.model._  (wildcard)
 ;          import ix.memory.model.{NodeKind, GraphNode}  (selective)
