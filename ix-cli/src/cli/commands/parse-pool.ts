@@ -99,6 +99,14 @@ export class ParsePool {
     if (idx !== -1) {
       w.terminate().catch(() => {});
       this.workers.splice(idx, 1);
+      // ...and out of `idle` too. A worker can emit 'error' while it is IDLE --
+      // an uncaught async throw, or ERR_WORKER_OUT_OF_MEMORY between tasks --
+      // and leaving the terminated thread in the free list means a later
+      // `drain()` pops it and posts to nothing: the task's promise never
+      // settles and the `Promise.all` over the parse batch hangs the ingest
+      // forever. It was already only splicing one of the two lists.
+      const idleIdx = this.idle.indexOf(w);
+      if (idleIdx !== -1) this.idle.splice(idleIdx, 1);
       this.spawnWorker();
       this.drain();
     }

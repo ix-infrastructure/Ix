@@ -2065,6 +2065,19 @@ export async function ingestFiles(
       }
     } else {
       // Path B: no baseline (first ingest) or --force → load modules, then stream parse + commit.
+      //
+      // Ix#568: this branch walks ALL of `filePaths`, re-reading, re-hashing and
+      // re-parsing every one, and its hash-clean short-circuit cannot fire here
+      // -- `knownHashes` is empty by construction on the non-force entry, and
+      // the check is `!opts.force` on the other. So the mtime skips the stat
+      // loop recorded did not actually happen, and leaving them counted refused
+      // the stitch on the commonest incremental shape there is: add ONE new
+      // file to a mapped repo, and `loadExistingHashes` returns nothing for it,
+      // so `knownHashes.size === 0` sends the whole repo down here -- every file
+      // parsed, registration complete -- while the gate still saw N-1 files
+      // "skipped as unchanged" and silently declined to stitch.
+      filesSkipped -= filesSkippedAsUnchanged;
+      filesSkippedAsUnchanged = 0;
       const moduleStart = performance.now();
       const [ingestion, patchBuilder] = await loadIngestionModules();
       timings.moduleLoadMs = Math.round(performance.now() - moduleStart);
