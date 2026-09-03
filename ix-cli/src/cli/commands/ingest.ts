@@ -1020,11 +1020,26 @@ export function describeCommitOutcome(
           `\`/_api/query/current\` tell the two apart.`,
       };
     }
+    // The cutoff's share is named rather than folded in. A run that withheld
+    // 200 patches from a refusing backend and then lost 3 more to the clock
+    // reported all 203 as "abandoned when the map deadline fired ... raise
+    // IX_MAP_DEADLINE_MS", which is the wrong remedy for 200 of them. The
+    // banner above already names the split; this line was the one contradicting
+    // it.
+    const clockLost = commitErrors - cutoffSkipped;
+    const share =
+      cutoffSkipped > 0
+        ? `${clockLost} of ${attempted} file patches were abandoned when the map deadline fired, and ` +
+          `${cutoffSkipped} more were withheld earlier by the commit cutoff`
+        : `${commitErrors} of ${attempted} file patches were abandoned when the map deadline fired`;
+    const remedy =
+      cutoffSkipped > 0
+        ? `The graph is missing all of them. Raise IX_MAP_DEADLINE_MS or map a smaller path for the first group; ` +
+          `see the cutoff above for the second.`
+        : `The graph is missing those files. Raise IX_MAP_DEADLINE_MS or map a smaller path.`;
     return {
       kind: "warn",
-      message:
-        `Ingest ran out of time: ${commitErrors} of ${attempted} file patches were abandoned when ` +
-        `the map deadline fired. The graph is missing those files. Raise IX_MAP_DEADLINE_MS or map a smaller path.`,
+      message: `Ingest ran out of time: ${share}. ${remedy}`,
     };
   }
 
@@ -2020,7 +2035,14 @@ export async function ingestFiles(
                 const landed = chunk.filter(item => landedIds.has(item.patch.patchId));
                 if (landed.length > 0) {
                   patchesApplied += landed.length;
-                  patchesTheBackendTook += landed.length;
+                  // NOT `patchesTheBackendTook`. That counter's whole reason for
+                  // existing is to keep 409-sourced counts from reopening a gate
+                  // closed against a dead backend -- "counted only where a
+                  // request came back OK", as its own doc says. A backend that
+                  // can read but cannot begin a write transaction answers 409
+                  // with ids it already holds, and on a re-run after a failed
+                  // ingest the patch ids are identical, so feeding those here
+                  // would reopen the gate and un-trip the breaker every batch.
                   confirmedAny = true;
                   if (debug) {
                     process.stderr.write(
@@ -2043,17 +2065,18 @@ export async function ingestFiles(
             if (!confirmedAny && commitFailureIndictsBackend(bulkErr, runDeadlineExpired())) {
               commitBreaker.noteError(bulkErr);
             }
-            for (const item of unconfirmed) stillToSend.push(item);
             if (confirmedAny) {
-              // Positive proof the backend is taking writes, so KEEP PROBING.
-              // Treating it as a failure sent the remaining chunks to the
-              // passes, which have no bulk path -- 400 held patches going out
-              // as 400 serialized commits behind the global mutex, which is the
-              // Ix#495 amplification this probe exists to prevent, on the
-              // recovery path it exists to serve.
+              // Positive proof the backend is taking writes, so KEEP PROBING --
+              // and re-bulk what it did NOT confirm rather than hand it to the
+              // passes, which have no bulk path. `commitBulkWithPayloadSplit`
+              // does exactly this with the same response: the unconfirmed set
+              // is a different group id, so one more request settles it where
+              // 497 serialized commits behind the global mutex would otherwise
+              // be the Ix#495 amplification this probe exists to prevent.
               commitBreaker.recordSuccess();
-              probeQueue = rest;
+              probeQueue = [...unconfirmed, ...rest];
             } else {
+              for (const item of unconfirmed) stillToSend.push(item);
               // One real failure ends the probing: the rest goes to the passes,
               // which is where a backend that is actually refusing belongs.
               for (const item of rest) stillToSend.push(item);

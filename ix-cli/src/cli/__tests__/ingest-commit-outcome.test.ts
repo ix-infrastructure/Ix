@@ -143,6 +143,28 @@ describe("describeCommitOutcome when the deadline fired", () => {
   });
 });
 
+describe("describeCommitOutcome when both the cutoff and the deadline fired", () => {
+  it("names the cutoff's share instead of blaming the clock for all of it", () => {
+    // 200 patches withheld from a refusing backend, then 3 more lost to the
+    // clock. Reporting all 203 as "abandoned when the map deadline fired ...
+    // raise IX_MAP_DEADLINE_MS" is the wrong remedy for 200 of them, and it
+    // contradicts the banner above, which names the split.
+    const out = describeCommitOutcome(203, 50, "--verbose", true, 200);
+    if (out.kind === "ok") throw new Error("expected a message");
+
+    expect(out.message).toContain("3 of 253 file patches were abandoned when the map deadline fired");
+    expect(out.message).toContain("200 more were withheld earlier by the commit cutoff");
+    expect(out.message).toContain("see the cutoff above");
+  });
+
+  it("keeps the plain wording when the cutoff withheld nothing", () => {
+    const out = describeCommitOutcome(3, 50, "--verbose", true, 0);
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("3 of 53 file patches were abandoned when the map deadline fired");
+    expect(out.message).not.toContain("withheld earlier");
+  });
+});
+
 describe("describeCommitOutcome with a commit cutoff", () => {
   it("points at the cutoff even when the drain placed every held patch", () => {
     // The cutoff fired, so the banner above has already named the endpoint and
