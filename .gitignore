@@ -20,10 +20,15 @@ target/
 # ix-cli/node_modules in #545 and stayed tracked until #567. Without the slash
 # the rule matches the entry whatever its type, at any depth, which also makes
 # the two package-specific lines that used to sit here redundant.
+#
+# The same applies to the build outputs below. A symlinked `dist` is how a git
+# worktree borrows a build from the main clone -- the same practice that
+# produced the node_modules symlink -- so a directory-only rule there leaves
+# exactly the defect above open under a different name.
 node_modules
-core-ingestion/dist/
-ix-cli/dist/
-ix-cli/coverage/
+core-ingestion/dist
+ix-cli/dist
+ix-cli/coverage
 
 # watch-dedup.test.ts used to build a throwaway CLI into
 # ix-cli/.watch-child-runtime-*; it now builds inside node_modules/.cache,

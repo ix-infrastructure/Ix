@@ -183,12 +183,29 @@ describe("canonical watch refresh", () => {
       // committable `ix-cli/node_modules` symlink of #545 with it. A path that
       // does not exist is not a directory as far as git is concerned, so only a
       // rule without the trailing slash matches it.
-      const nonDirectory = path.join(packageRoot, "__ix_ignore_probe__", "node_modules");
-      expect(fs.existsSync(nonDirectory), "probe path must not exist").toBe(false);
-      expect(
-        sourceOf(explain(nonDirectory)),
-        "the node_modules ignore rule is directory-only again; a symlink or file named node_modules is committable (Ix#545)",
-      ).toBe(".gitignore");
+      //
+      // Every artifact rule, not only node_modules: a symlinked `dist` is how a
+      // worktree borrows a build from the main clone, which is the same practice
+      // that produced the committed node_modules symlink. Probing one rule would
+      // let the other three regress silently, which is how they were left
+      // directory-only when node_modules was fixed.
+      const repoRootOf = (p: string): string => path.resolve(packageRoot, "..", p);
+      const probes: [string, string][] = [
+        [path.join(packageRoot, "__ix_ignore_probe__", "node_modules"), "node_modules"],
+        [repoRootOf("ix-cli/dist"), "ix-cli/dist"],
+        [repoRootOf("ix-cli/coverage"), "ix-cli/coverage"],
+        [repoRootOf("core-ingestion/dist"), "core-ingestion/dist"],
+      ];
+      for (const [probe, rule] of probes) {
+        // An existing directory matches a trailing-slash rule too, so a probe
+        // that happens to be a real build directory proves nothing. Ask about a
+        // sibling path that cannot exist instead.
+        const target = fs.existsSync(probe) ? path.join(probe, "__ix_ignore_probe__") : probe;
+        expect(
+          sourceOf(explain(target)),
+          `the '${rule}' ignore rule is directory-only again; a symlink or file with that name is committable (Ix#545)`,
+        ).toBe(".gitignore");
+      }
     } else {
       expect(path.relative(packageRoot, cacheRoot).split(path.sep)[0]).toBe("node_modules");
     }
