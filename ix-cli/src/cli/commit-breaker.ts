@@ -170,15 +170,112 @@ export function perFileAction(state: {
   /** Failures this loop may still absorb, or undefined if it has no budget. */
   budgetLeft?: number;
 }): PerFileAction {
-  // A spent budget stops everything, replays included: a 409 naming 999 landed
-  // ids would otherwise send 999 serialized doomed commits while HOLDING the
-  // fallback mutex, so nothing else could even trip the breaker.
-  if (state.budgetLeft !== undefined && state.budgetLeft <= 0) return "hold";
-  if (state.replay) return state.tripped ? "count-applied" : "send";
+  const outOfBudget = state.budgetLeft !== undefined && state.budgetLeft <= 0;
+  // A replay is decided FIRST, and is never held. Both reasons to stop want the
+  // same thing from it -- stop sending -- but a hold is not that: the caller
+  // turns everything it holds into a commit error, so holding a replay would
+  // report writes the server has already CONFIRMED as failures and suppress the
+  // mtime baseline over them. Counting stops the fan-out just as dead and says
+  // the true thing. (An earlier revision returned "hold" here; no caller passes
+  // both a replay and a budget today, so it was a latent contradiction between
+  // this table and its only consumer rather than a live bug.)
+  if (state.replay) return state.tripped || outOfBudget ? "count-applied" : "send";
+  if (outOfBudget) return "hold";
   // Only when no budget was given -- with both live the streak always preempts,
   // which is exactly how the budget came to be inert.
   if (state.budgetLeft === undefined && state.tripped) return "hold";
   return "send";
+}
+
+/**
+ * Walk a held-back set, changing direction each time the budget stops it.
+ *
+ * A single bounded pass cannot avoid stranding good patches. `attempt` stops
+ * after a fixed number of failures, so any run of failures longer than that
+ * budget ends the pass wherever it happens to be and leaves everything past it
+ * unattempted -- and unattempted means reported as a commit error, which
+ * suppresses the mtime baseline, which makes the next `ix map` re-ingest in the
+ * same order and reproduce the same outcome. Those patches never land.
+ *
+ * Reversing helps with ONE cluster of bad patches and only one: the fan-out
+ * stopped inside a cluster, so walking from the far end puts the good patches
+ * first. With two clusters the reversed walk meets the second one and strands
+ * everything behind it exactly as before.
+ *
+ * Changing direction on each stop fixes that, because the region a pass could
+ * not reach is approached from its other end next time. Two clusters need two
+ * passes, three need three, and `maxPasses` bounds the doomed requests at
+ * roughly `maxPasses x budget`.
+ *
+ * The pass that places NOTHING is the one that ends it. That is the only
+ * evidence here that means "the backend, not the patches": a pass that placed
+ * even one patch has proved the backend is taking writes, so the failures it
+ * met are about the patches and the remainder deserves its turn.
+ */
+export async function drainInPasses<T>(
+  held: readonly T[],
+  attempt: (items: T[]) => Promise<{ placed: boolean; unreached: T[] }>,
+  maxPasses = 3,
+): Promise<T[]> {
+  let pending = [...held].reverse();
+  for (let pass = 1; pending.length > 0; pass++) {
+    const { placed, unreached } = await attempt(pending);
+    if (!placed || pass >= maxPasses) return unreached;
+    pending = [...unreached].reverse();
+  }
+  return [];
+}
+
+/** Whether a batch's held-back patches are worth draining. See [[createDrainGate]]. */
+export interface DrainGate {
+  /** Is the gate open right now? Pass the run's applied count. */
+  shouldDrain(appliedSoFar: number): boolean;
+  /** Record what a drain achieved, so the gate can close on a dead backend. */
+  record(placedAnything: boolean, appliedSoFar: number): void;
+}
+
+/**
+ * The drain decision, one level up from `drainInPasses`: per BATCH, not per pass.
+ *
+ * A run has many batches, and each can hold patches back. Without a gate a
+ * genuinely dead backend is re-probed once per batch for the length of the run
+ * -- forty batches, each spending a full drain budget of doomed requests --
+ * which is the amplification #560 is about, moved rather than removed. So after
+ * `missesBeforeGivingUp` drains that place NOTHING, the gate closes.
+ *
+ * It reopens the moment a patch lands anywhere. That direction is the one that
+ * matters and the one an earlier revision got wrong: closing is an INFERENCE
+ * about the backend drawn from two drains, and the run keeps going afterwards.
+ * A thirty-second blip in batches 3 and 4 must not disable the drain for the
+ * remaining thirty-five, because a hold at batch 30 -- against a backend that
+ * has since committed nineteen thousand patches -- would then have its patches
+ * counted as errors and never sent. Anything landing after the gate closed
+ * falsifies the evidence that closed it.
+ *
+ * One miss is not enough evidence to close on: a few-second fast-rejecting blip
+ * produces it, and closing then strands a later batch's held patches with no
+ * drain at all.
+ */
+export function createDrainGate(missesBeforeGivingUp = 2): DrainGate {
+  let misses = 0;
+  let closed = false;
+  let appliedWhenClosed = 0;
+  return {
+    shouldDrain(appliedSoFar) {
+      if (closed && appliedSoFar > appliedWhenClosed) {
+        closed = false;
+        misses = 0;
+      }
+      return !closed;
+    },
+    record(placedAnything, appliedSoFar) {
+      misses = placedAnything ? 0 : misses + 1;
+      if (misses >= missesBeforeGivingUp) {
+        closed = true;
+        appliedWhenClosed = appliedSoFar;
+      }
+    },
+  };
 }
 
 /**
@@ -195,7 +292,7 @@ export function perFileAction(state: {
 export function describeCommitCutoff(
   breaker: CommitBreaker,
   endpoint: string,
-  /** Patches that DID land before the run gave up. */
+  /** Patches that landed anywhere in the run. */
   patchesApplied = 0,
 ): string {
   const detail = String(breaker.lastError() ?? "unknown error");
@@ -203,10 +300,16 @@ export function describeCommitCutoff(
   // A backend can start refusing part-way through a large ingest, so "the
   // graph is unchanged" is only true when nothing landed. Saying it anyway
   // contradicts the summary printed directly beneath this.
+  //
+  // Deliberately NOT "landed BEFORE it stopped". Since a cutoff holds patches
+  // and the run continues, there is no single moment it stopped: a run that
+  // tripped in batch 1, recovered, and committed 19,000 more would have claimed
+  // all 19,000 landed "before it stopped". Naming no order needs no snapshot to
+  // be true, which is also one less piece of run-scoped state to keep correct.
   const state =
     patchesApplied === 0
       ? "The graph is unchanged."
-      : `${patchesApplied} ${patchesApplied === 1 ? "patch" : "patches"} landed before it stopped; the rest are missing from the graph.`;
+      : `${patchesApplied} other ${patchesApplied === 1 ? "patch" : "patches"} did land, so the graph is partly updated.`;
   // The configured limit, not the live streak. Requests already in flight when
   // the breaker tripped keep landing and keep incrementing, so the streak is
   // whatever the race happened to produce -- a number that is not the rule and
@@ -220,8 +323,17 @@ export function describeCommitCutoff(
     `  ${breaker.skipped()} ${breaker.skipped() === 1 ? "patch was" : "patches were"} not sent — sending them one at a`,
     `  time would have added load to a backend that is already the reason they fail.`,
     `  Last error: ${trimmed}`,
-    `  ${state} Re-run \`ix map\` once the backend is healthy; if \`ix doctor\` passes,`,
-    `  check the database itself (an ArangoDB that cannot begin a transaction is reachable and consistent).`,
+    `  ${state} Re-run \`ix map\` once it is fixed.`,
+    // Two different causes produce this, and the CLI cannot tell them apart:
+    // the memory layer answers 500 both for a saturated ArangoDB and for a
+    // patch body it will not accept (verified against the released image).
+    // Asserting the database is the cause sends a user with a rejected patch
+    // to `docker stats` and `/_api/query/current`, which is the wrong
+    // subsystem entirely. The backend's own words are quoted above; let them
+    // say which.
+    `  Either the database cannot keep up — \`ix doctor\` still passes, since an ArangoDB that`,
+    `  cannot begin a transaction is reachable and consistent — or the backend is rejecting these`,
+    `  particular patches. The error above is the backend's own answer and says which.`,
     `  Set IX_COMMIT_FAILURE_LIMIT=0 to send every patch regardless.`,
   ].join("\n");
 }

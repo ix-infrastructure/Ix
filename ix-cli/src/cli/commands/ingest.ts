@@ -18,7 +18,13 @@ import { loadIngestionModules } from './ingestion-loader.js';
 import { ensureWorkspaceIdState } from '../bootstrap.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
-import { createCommitBreaker, describeCommitCutoff, perFileAction } from '../commit-breaker.js';
+import {
+  createCommitBreaker,
+  createDrainGate,
+  describeCommitCutoff,
+  drainInPasses,
+  perFileAction,
+} from '../commit-breaker.js';
 import { readBackendHealth } from './upgrade.js';
 import { SUPPORTED_EXTENSIONS } from '../supported-extensions.js';
 import { canRenderProgress } from '../stderr.js';
@@ -1361,16 +1367,6 @@ export async function ingestFiles(
   // patch out of the per-file fallback. Stop after a streak instead.
   const commitBreaker = createCommitBreaker();
   /**
-   * `patchesApplied` at the moment the cutoff first fired.
-   *
-   * The banner says "N patches landed before it stopped", and the run total
-   * is not that number: it includes everything the drain placed afterwards
-   * and everything the later batches committed, so a run that tripped once in
-   * batch 1 and then finished normally claimed 19,500 landed "before it
-   * stopped".
-   */
-  let appliedAtCutoff: number | undefined;
-  /**
    * Has the held-back retry already been spent and failed this run?
    *
    * `commitPreparedPatches` runs once per 500-file batch, so a per-call retry
@@ -1379,9 +1375,11 @@ export async function ingestFiles(
    * supposed to cost. The retry exists to distinguish a dead backend from a
    * few bad patches, and one run only needs to ask that once.
    */
-  let cutoffRetrySpent = false;
-  /** Consecutive drains that placed nothing. Two is the bar for giving up. */
-  let cutoffRetryMisses = 0;
+  /**
+   * Whether a batch's held-back patches get a drain. Run-scoped: the decision
+   * spans batches, and it has to be revocable -- see `createDrainGate`.
+   */
+  const drainGate = createDrainGate();
   /**
    * The RUN deadline, captured here because `commitPreparedPatches` shadows
    * `opts` with its own. Not `isAbortError`: a per-request AbortSignal.timeout
@@ -1734,7 +1732,6 @@ export async function ingestFiles(
                 budgetLeft: fallbackOpts?.failureBudget === undefined ? undefined : budgetLeft,
               });
               if (action === "hold") {
-                appliedAtCutoff ??= patchesApplied;
                 for (let k = itemIndex; k < items.length; k++) deferredByCutoff.push(items[k]);
                 break;
               }
@@ -1802,17 +1799,26 @@ export async function ingestFiles(
       };
 
       /**
-       * One pass over the patches the cutoff held back, with a fresh streak.
+       * Re-send the patches the cutoff held back, in alternating passes.
        *
-       * Not a bypass: the breaker is ACTIVE, so a backend that really is
-       * refusing everything trips again after N and this stays bounded. What
-       * it does not carry over is the streak that caused the hold -- five
+       * Not a bypass, but the bound is the BUDGET, not the breaker: with a
+       * failure budget in play `perFileAction` ignores the streak entirely, so
+       * saying "the breaker is active, so this stays bounded" -- as this
+       * comment used to -- described a mechanism that does not run. What each
+       * pass carries is `failureBudget` doomed requests, and `drainInPasses`
+       * caps the number of passes, so the whole drain is bounded by their
+       * product.
+       *
+       * The streak is still RESET per pass, for a different reason: five
        * adjacent patches the backend rejects on their own merits are
        * indistinguishable from a dead backend at the time, and the difference
-       * only shows when the next patch commits. Without this pass the mtime
-       * baseline (never written on a run with commit errors) makes the next
-       * run repeat the same order, trip at the same point, and drop the same
-       * patches forever.
+       * only shows when the next patch commits. Carrying the streak in would
+       * leave the run's banner reporting the hold that caused the drain rather
+       * than what the drain found.
+       *
+       * Without any of this the mtime baseline -- never written on a run with
+       * commit errors -- makes the next run repeat the same order, stop at the
+       * same point, and drop the same patches forever.
        */
       const commitIndividuallyAfterCutoff = async (items: PreparedPatch[]): Promise<void> => {
         if (debug) {
@@ -1820,23 +1826,28 @@ export async function ingestFiles(
             `\n  [cutoff] re-sending ${items.length} held-back patches with a fresh streak\n`,
           );
         }
-        commitBreaker.reset();
         // A budget, not the breaker's streak. The held set can begin with the
         // tail of a poison cluster -- the fan-out stopped inside it, so the
         // rest of it is the first thing here -- and a streak would stop again
         // in the same place and strand everything after. Twice the limit is
         // enough to walk out of a cluster the fan-out already spent the limit
-        // inside, and still bounds a dead backend at 2N doomed requests.
-        // Reversed, deliberately. The fan-out stopped INSIDE whatever run of bad
-        // patches tripped it, so the rest of that run is the first thing in the
-        // held set -- and walking it front-first spends the budget on exactly
-        // the patches that already proved they fail, stranding the good ones
-        // behind them. From the far end the good patches go first, and what the
-        // budget eventually stops on is the bad cluster itself, which is the
-        // only thing that should be stranded.
-        await commitItemsSerially([...items].reverse(), recordDrainMs, undefined, {
-          failureBudget: Math.max(1, commitBreaker.limit * 2),
+        // inside, and still bounds a dead backend at 2N doomed requests per
+        // pass. `drainInPasses` owns the direction and the pass count, and its
+        // comment explains why one bounded pass in either direction is not
+        // enough.
+        const leftover = await drainInPasses(items, async pending => {
+          commitBreaker.reset();
+          const appliedBefore = patchesApplied;
+          await commitItemsSerially(pending, recordDrainMs, undefined, {
+            failureBudget: Math.max(1, commitBreaker.limit * 2),
+          });
+          // Whatever the budget did not reach was pushed straight back onto the
+          // held list by the per-file loop; take it back out so the next pass
+          // owns it and the caller does not see it twice.
+          const unreached = deferredByCutoff.splice(0, deferredByCutoff.length);
+          return { placed: patchesApplied > appliedBefore, unreached };
         });
+        deferredByCutoff.push(...leftover);
       };
 
       const runChunk = async (ci: number): Promise<void> => {
@@ -1879,13 +1890,7 @@ export async function ingestFiles(
             },
             commitIndividually,
             shouldStop: () => commitBreaker.tripped(),
-            onAbandoned: items => {
-              // Snapshot here too. Setting it only on the per-file hold left
-              // the bulk path falling back to the run total, which is the
-              // overstatement the snapshot exists to prevent.
-              appliedAtCutoff ??= patchesApplied;
-              deferredByCutoff.push(...items);
-            },
+            onAbandoned: items => { deferredByCutoff.push(...items); },
             patchIdOf: item => item.patch.patchId,
             onPartialBulk: (landed, missing, err) => {
               if (!debug) return;
@@ -1922,31 +1927,26 @@ export async function ingestFiles(
       );
 
       // Nothing stays abandoned while the backend is demonstrably accepting
-      // writes. If anything landed this run, the cutoff was wrong about at
-      // least part of the run -- five adjacent patches the backend rejects on
-      // their own merits look exactly like a dead backend until a later chunk
-      // commits -- so the held-back patches get one ordinary pass. If NOTHING
-      // landed, they are left for the next run, which re-ingests them anyway
-      // because the mtime baseline is not written on a run with commit errors.
+      // writes. Five adjacent patches the backend rejects on their own merits
+      // look exactly like a dead backend until a later chunk commits, so the
+      // held-back set gets a real attempt rather than being written off.
+      //
+      // `drainInPasses` is what decides when to stop -- a pass that placed
+      // nothing ends it, and what that pass could not reach is left for the
+      // next run, which re-ingests it anyway because the mtime baseline is not
+      // written on a run with commit errors. The flag below is a coarser
+      // version of the same judgement across BATCHES, so that a genuinely dead
+      // backend is not re-probed once per batch for the length of the run.
       if (deferredByCutoff.length > 0) {
-        if (!cutoffRetrySpent) {
+        if (drainGate.shouldDrain(patchesApplied)) {
           const held = deferredByCutoff.splice(0, deferredByCutoff.length);
           const appliedBefore = patchesApplied;
           await commitIndividuallyAfterCutoff(held);
-          // Spent only if the retry placed NOTHING. Whether it ended tripped
-          // says nothing useful: a drain that commits hundreds and then meets
-          // the tail of a bad cluster ends tripped too, and treating that as
-          // "the backend is dead" disabled the retry for every later batch --
-          // so a ten-second hiccup 17 batches later had its held patches
-          // counted as errors, unsent, against a backend visibly taking
-          // writes. Committing nothing is the only evidence that means it.
-          // One drain placing nothing is not proof for the whole run: a
-          // few-second fast-rejecting blip achieves it, and latching then
-          // strands a later batch's held patches with no retry at all. Two
-          // in a row is the evidence worth acting on.
-          if (patchesApplied === appliedBefore) cutoffRetryMisses++;
-          else cutoffRetryMisses = 0;
-          cutoffRetrySpent = cutoffRetryMisses >= 2;
+          // Placing NOTHING is the only evidence that means "the backend".
+          // Whether the drain ended tripped says nothing useful: one that
+          // commits hundreds and then meets the tail of a bad cluster ends
+          // tripped too.
+          drainGate.record(patchesApplied > appliedBefore, patchesApplied);
         }
         // Held back again, or held back after the retry was already spent.
         if (deferredByCutoff.length > 0) {
@@ -2574,7 +2574,7 @@ export async function ingestFiles(
     //
     // Before the stitch line and before the commit report: this is the cause,
     // and everything else printed about this run is its consequence.
-    process.stderr.write(`${describeCommitCutoff(commitBreaker, client.endpoint, appliedAtCutoff ?? patchesApplied)}\n`);
+    process.stderr.write(`${describeCommitCutoff(commitBreaker, client.endpoint, patchesApplied)}\n`);
   }
   if (stitchErrors > 0) {
     process.stderr.write(`  ${describeStitchFailure(stitchError)}\n`);
