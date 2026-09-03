@@ -127,7 +127,23 @@ function cooldownPath(endpoint: string): string {
 }
 
 interface Cooldown {
-  /** Epoch ms the stitch started. The cooldown is measured from here. */
+  /**
+   * Epoch ms the cooldown runs from.
+   *
+   * Written as the attempt's START time, and rewritten to its END time when it
+   * reports back without proving anything stopped. Both matter:
+   *
+   *   - the start-time write is what survives a kill, and is the whole reason
+   *     the marker goes down before the request rather than after it;
+   *   - but leaving it AT the start time would make any IX_STITCH_COOLDOWN_MS
+   *     shorter than the attempt itself already expired by the time the attempt
+   *     ends. `IxClient.post` caps a request at two minutes, so every setting
+   *     under that silently bought nothing on the timeout path -- the next map
+   *     was admitted immediately and stacked a second join, which is the bug.
+   *
+   * A process that is killed keeps the start stamp, so a cooldown shorter than
+   * the attempt is still expired there; that residue is noted in docs/api.
+   */
   at: number;
   /** Set when the attempt reported back without clearing. Message only. */
   elapsedMs?: number;
@@ -145,6 +161,40 @@ function readCooldown(endpoint: string): Cooldown | null {
   }
 }
 
+/**
+ * Did the request fail before the connection was ever established?
+ *
+ * This is the one transport fact that is a positive PROOF rather than an
+ * inference about a failure: if we never connected, no bytes reached the
+ * backend, so there is no join to wait out. Without it a backend that goes down
+ * mid-run takes a full 15-minute endpoint-wide cooldown for a request it never
+ * received.
+ *
+ * The codes are DERIVED, not guessed -- `IxClient` flattens HTTP errors into
+ * `"NNN: ..."` strings but rethrows transport failures intact, so what arrives
+ * here is Node's `TypeError: fetch failed` with the real error on `.cause`.
+ * Observed through `IxClient.stitch` itself:
+ *
+ *   closed port      -> cause { name: "Error",       code: "ECONNREFUSED" }
+ *   unresolvable DNS -> cause { name: "Error",       code: "ENOTFOUND"    }
+ *   reset AFTER send -> cause { name: "SocketError", code: "UND_ERR_SOCKET" }
+ *
+ * The third is the one deliberately NOT accepted. "Other side closed" happens
+ * after the request bytes are gone, so it is exactly the ambiguous case this
+ * guard exists for: an upstream that restarted killed its join, but a proxy
+ * that dropped the connection did not. Both spell UND_ERR_SOCKET, so it stays
+ * on the conservative side and keeps the marker.
+ */
+export function connectionNeverEstablished(error: unknown): boolean {
+  // Walk the cause chain: undici nests, and a wrapper may add a level later.
+  for (let e: unknown = error, depth = 0; e !== null && e !== undefined && depth < 5; depth++) {
+    const code = (e as { code?: unknown }).code;
+    if (code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "EAI_AGAIN") return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 /** How the stitch attempt ended, as the guard needs to see it. */
 export interface StitchOutcome {
   ok: boolean;
@@ -152,6 +202,8 @@ export interface StitchOutcome {
   elapsedMs: number;
   /** HTTP status the backend answered with, when it answered at all. */
   status?: number | null;
+  /** Set when the connection was never established — see the function above. */
+  neverConnected?: boolean;
 }
 
 /**
@@ -170,11 +222,17 @@ export interface StitchOutcome {
  *     refuse every map for 15 minutes, claiming a join may still be running,
  *     against a backend that has never had one.
  *
- * Anything else — another 5xx, a timeout, an abort, a transport error, or the
- * process being killed before it could say anything — leaves the marker.
+ *   - the connection was never established, so nothing was sent. See
+ *     `connectionNeverEstablished` for why that is narrower than "a transport
+ *     error" and why the narrowing matters.
+ *
+ * Anything else — another 5xx, a timeout, an abort, a socket dropped after the
+ * request went out, or the process being killed before it could say anything —
+ * leaves the marker.
  */
 export function outcomeProvesNothingRunning(outcome: StitchOutcome): boolean {
   if (outcome.ok) return true;
+  if (outcome.neverConnected === true) return true;
   const status = outcome.status;
   if (typeof status !== "number") return false;
   if (status === 501) return true;
@@ -293,9 +351,10 @@ export function admitStitch(endpoint: string, now = Date.now()): StitchAdmission
         if (outcomeProvesNothingRunning(outcome)) {
           try { rmSync(cooldownPath(endpoint), { force: true }); } catch { /* best effort */ }
         } else {
-          // Keep the marker, and stamp how long the attempt ran so the refusal
-          // can say. The clock is message data only; it decides nothing.
-          writeCooldown(endpoint, { at: now, elapsedMs: Math.round(outcome.elapsedMs) });
+          // Keep the marker, restamped to NOW so the cooldown runs from the
+          // end of the attempt rather than its start -- see `Cooldown.at`. The
+          // elapsed figure is message data only; it decides nothing.
+          writeCooldown(endpoint, { at: Date.now(), elapsedMs: Math.round(outcome.elapsedMs) });
         }
       } finally {
         // Always, even if the state write threw: holding the lock past the

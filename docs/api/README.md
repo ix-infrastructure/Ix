@@ -244,10 +244,16 @@ join:
   executing it — with **408** excluded, since a proxy reporting that *it* gave
   up waiting says nothing about whether the backend did;
 * the backend answered **501**, which is how this codebase already spells "no
-  `/v1/stitch` here" (`isStitchUnsupported` accepts 404 or 501).
+  `/v1/stitch` here" (`isStitchUnsupported` accepts 404 or 501);
+* the connection was never established (`ECONNREFUSED`, `ENOTFOUND`,
+  `EAI_AGAIN`), so no bytes reached the backend. Deliberately narrower than "a
+  transport error": a socket dropped *after* the request went out
+  (`UND_ERR_SOCKET`) is the ambiguous case — an upstream that restarted killed
+  its join, a proxy that hung up did not — and keeps the marker.
 
-Everything else — a 5xx, a timeout, an abort, a transport error, or the process
-being killed before it could report anything — leaves the marker in place. That
+Everything else — a 5xx, a timeout, an abort, a socket dropped mid-flight, or
+the process being killed before it could report anything — leaves the marker in
+place. That
 last case is why the marker is written up front: a hook whose timeout is shorter
 than the stitch takes the CLI down mid-request, and nothing it *would* have done
 on the way out can be relied on.
@@ -266,6 +272,16 @@ each hold their own "single-flight" lock and stitch simultaneously.
 already on disk, so setting it to `0` releases an active one rather than only
 affecting the next.
 
+The cooldown is stamped at the stitch's **start** and re-stamped to its **end**
+when the attempt reports back without proving anything stopped. The re-stamp is
+what makes short values mean anything: `IxClient` caps a request at two minutes,
+so a cooldown measured only from the start would already have expired by the
+time a timing-out stitch returned, and the next map would be admitted straight
+into a second join. One residue remains — a process that is *killed* never
+re-stamps, so a cooldown shorter than the attempt it is protecting is expired
+when the next map looks at it. Values below the two-minute request cap are
+therefore only reliable on the paths that report back.
+
 A skipped stitch is reported as `stitchSkipped` in `ix ingest --format json`, as
 `stitch_skipped` in `ix map --format json` and `--format llm`, and as a
 `stitch_skipped` token on `ix map --silent`, so an automated consumer can tell it
@@ -281,7 +297,7 @@ data to send, having only parsed what changed. A run that re-ingests every file
 
 | Variable | Default | Effect |
 |---|---|---|
-| `IX_STITCH_COOLDOWN_MS` | `900000` | How long to hold off after a stitch that did not prove it stopped. `0` disables the cooldown; single-flight stays. |
+| `IX_STITCH_COOLDOWN_MS` | `900000` | How long to hold off after a stitch that did not prove it stopped, measured from when the attempt ended. `0` disables the cooldown; single-flight stays. Values under ~2 min are not honoured after a killed process — see above. |
 | `IX_STITCH_WAIT_MS` | `30000` | How long to wait for an in-flight stitch before skipping. `0` sheds immediately. |
 | `IX_LOCK_DIR` | `~/.ix/locks` | Where the stitch lock and cooldown record live (shared with the map lock). |
 | `IX_MAP_LOCK_MAX_MS` | `1200000` | Shared with the map lock: how old a held lock must be before it is presumed abandoned and stolen. Lowering it to a few seconds so a wedged `ix map` self-heals faster also lets a second process steal the stitch lock from an in-flight stitch. The cooldown normally catches that on the next read, so it only matters together with `IX_STITCH_COOLDOWN_MS=0` — which is the one case where "single-flight stays" stops being true. |

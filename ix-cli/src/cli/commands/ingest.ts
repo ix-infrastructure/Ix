@@ -18,7 +18,7 @@ import { loadIngestionModules } from './ingestion-loader.js';
 import { ensureWorkspaceIdState } from '../bootstrap.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
-import { admitStitchWaiting, type StitchRefusal } from '../stitch-guard.js';
+import { admitStitchWaiting, connectionNeverEstablished, type StitchRefusal } from '../stitch-guard.js';
 import { readBackendHealth } from './upgrade.js';
 import { SUPPORTED_EXTENSIONS } from '../supported-extensions.js';
 import { canRenderProgress } from '../stderr.js';
@@ -2279,11 +2279,12 @@ export async function ingestFiles(
               admission.settle({
                 ok: false,
                 elapsedMs: performance.now() - stitchStart,
-                // The only thing that clears the marker is proof the backend
-                // refused the request rather than ran it, and a status is the
-                // only such proof available. Everything else -- a 5xx, a
-                // timeout, an abort, a transport error -- leaves it in place.
+                // Two proofs that the backend is not running a join, and only
+                // two: it answered and refused (a status), or we never reached
+                // it at all. Everything else -- a 5xx, a timeout, an abort, a
+                // socket dropped after the request went out -- leaves it.
                 status: stitchFailureStatus(err),
+                neverConnected: connectionNeverEstablished(err),
               });
               throw err;
             }

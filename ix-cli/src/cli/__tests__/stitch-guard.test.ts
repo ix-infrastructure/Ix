@@ -6,10 +6,12 @@ import { join } from "node:path";
 import {
   admitStitch,
   admitStitchWaiting,
+  connectionNeverEstablished,
   cooldownPathForTest,
   outcomeProvesNothingRunning,
   stitchKey,
 } from "../stitch-guard.js";
+import * as net from "node:net";
 import { namedLockPath } from "../single-flight.js";
 
 const ENDPOINT = "http://localhost:8090";
@@ -39,6 +41,24 @@ afterEach(() => {
   restore("IX_STITCH_COOLDOWN_MS", savedCooldown);
   rmSync(lockDir, { recursive: true, force: true });
 });
+
+/**
+ * Was the admission granted? Releases it either way.
+ *
+ * Every GRANTED admission holds a real lock handle, and single-flight arms
+ * `exit`, `SIGINT` and `SIGTERM` listeners on each one. An assertion that reads
+ * `.admitted` inline and drops the handle leaks all three, and enough of them
+ * made this file print MaxListenersExceededWarning three times -- noise that
+ * would hide a real listener leak the next time one appears.
+ *
+ * Settling as a clean success is the right release for these: every call below
+ * is a terminal assertion, so clearing the marker changes nothing later read.
+ */
+function admitted(endpoint: string, now?: number): boolean {
+  const a = now === undefined ? admitStitch(endpoint) : admitStitch(endpoint, now);
+  if (a.admitted) a.settle({ ok: true, elapsedMs: 1 });
+  return a.admitted;
+}
 
 /** Take an admission and settle it, asserting it was granted. */
 function stitchOnce(outcome: { ok: boolean; elapsedMs: number; status?: number | null }): void {
@@ -132,13 +152,13 @@ describe("the cooldown is written when the stitch starts", () => {
   it("is cleared by a success", () => {
     stitchOnce({ ok: true, elapsedMs: 300 });
     expect(existsSync(cooldownPathForTest(ENDPOINT))).toBe(false);
-    expect(admitStitch(ENDPOINT).admitted).toBe(true);
+    expect(admitted(ENDPOINT)).toBe(true);
   });
 
   it("is cleared by a 4xx, so an older backend with no /v1/stitch keeps working", () => {
     stitchOnce({ ok: false, elapsedMs: 40, status: 404 });
     expect(existsSync(cooldownPathForTest(ENDPOINT))).toBe(false);
-    expect(admitStitch(ENDPOINT).admitted).toBe(true);
+    expect(admitted(ENDPOINT)).toBe(true);
   });
 
   it("is kept by a 500, and says how long the attempt ran", () => {
@@ -158,7 +178,7 @@ describe("the cooldown is written when the stitch starts", () => {
     // stays. The old rules had to distinguish this from a mid-flight abort and
     // got it wrong in both directions across rounds 2, 3 and 4.
     stitchOnce({ ok: false, elapsedMs: 0, status: null });
-    expect(admitStitch(ENDPOINT).admitted).toBe(false);
+    expect(admitted(ENDPOINT)).toBe(false);
   });
 });
 
@@ -167,8 +187,8 @@ describe("cooldown expiry", () => {
     process.env.IX_STITCH_COOLDOWN_MS = "1000";
     stitchOnce({ ok: false, elapsedMs: 62_000, status: 500 });
 
-    expect(admitStitch(ENDPOINT, Date.now() + 500).admitted).toBe(false);
-    expect(admitStitch(ENDPOINT, Date.now() + 5_000).admitted).toBe(true);
+    expect(admitted(ENDPOINT, Date.now() + 500)).toBe(false);
+    expect(admitted(ENDPOINT, Date.now() + 5_000)).toBe(true);
   });
 
   it("applies a changed IX_STITCH_COOLDOWN_MS to a cooldown already on disk", () => {
@@ -176,26 +196,26 @@ describe("cooldown expiry", () => {
     // of the cooldown they are looking at -- otherwise the only escape is
     // deleting a state file whose name they cannot compute.
     stitchOnce({ ok: false, elapsedMs: 62_000, status: 500 });
-    expect(admitStitch(ENDPOINT).admitted).toBe(false);
+    expect(admitted(ENDPOINT)).toBe(false);
 
     process.env.IX_STITCH_COOLDOWN_MS = "0";
-    expect(admitStitch(ENDPOINT).admitted).toBe(true);
+    expect(admitted(ENDPOINT)).toBe(true);
   });
 
   it("a lower value shortens an active cooldown", () => {
     stitchOnce({ ok: false, elapsedMs: 62_000, status: 500 });
     process.env.IX_STITCH_COOLDOWN_MS = "1000";
-    expect(admitStitch(ENDPOINT, Date.now() + 5_000).admitted).toBe(true);
+    expect(admitted(ENDPOINT, Date.now() + 5_000)).toBe(true);
   });
 
   it("scopes the cooldown to one backend", () => {
     stitchOnce({ ok: false, elapsedMs: 62_000, status: 500 });
-    expect(admitStitch(OTHER).admitted).toBe(true);
+    expect(admitted(OTHER)).toBe(true);
   });
 
   it("fails open on an unreadable cooldown record rather than refusing forever", () => {
     writeFileSync(cooldownPathForTest(ENDPOINT), "{not json");
-    expect(admitStitch(ENDPOINT).admitted).toBe(true);
+    expect(admitted(ENDPOINT)).toBe(true);
   });
 });
 
@@ -209,7 +229,7 @@ describe("admitStitch single-flight", () => {
     if (!second.admitted) expect(second.rule).toBe("in-flight");
 
     if (first.admitted) first.settle({ ok: true, elapsedMs: 10 });
-    expect(admitStitch(ENDPOINT).admitted).toBe(true);
+    expect(admitted(ENDPOINT)).toBe(true);
   });
 
   it("does not let one backend's in-flight stitch block another backend", () => {
@@ -277,7 +297,7 @@ describe("stitchKey", () => {
   it("gives two spellings of one backend one lock", () => {
     const first = admitStitch("http://localhost:8090");
     expect(first.admitted).toBe(true);
-    expect(admitStitch("http://127.0.0.1:8090/").admitted).toBe(false);
+    expect(admitted("http://127.0.0.1:8090/")).toBe(false);
 
     if (first.admitted) first.settle({ ok: true, elapsedMs: 1 });
   });
@@ -314,6 +334,99 @@ describe("the cooldown is read while holding the lock, not before it", () => {
     const afterFlight = admitStitch(ENDPOINT);
     expect(afterFlight.admitted).toBe(false);
     if (!afterFlight.admitted) expect(afterFlight.rule).toBe("cooling");
+  });
+});
+
+describe("connectionNeverEstablished", () => {
+  // Driven with errors Node actually produced, never hand-built ones: a
+  // classifier keyed on a shape nobody verified is the failure mode this
+  // codebase keeps hitting, and it looks identical to a working one.
+
+  async function failureOf(url: string): Promise<unknown> {
+    try {
+      await fetch(url, { method: "POST", body: "{}" });
+      return new Error("expected the request to fail");
+    } catch (err) {
+      return err;
+    }
+  }
+
+  it("is true for a port nothing is listening on — nothing was sent", async () => {
+    // Bound and closed, so the port is real and free. A hardcoded low port is
+    // not an option: fetch refuses the WHATWG "bad port" list outright, and
+    // that failure has no code at all — which this correctly reads as no proof.
+    const probe = net.createServer();
+    await new Promise<void>(resolve => probe.listen(0, "127.0.0.1", resolve));
+    const port = (probe.address() as net.AddressInfo).port;
+    await new Promise<void>(resolve => probe.close(() => resolve()));
+
+    expect(connectionNeverEstablished(await failureOf(`http://127.0.0.1:${port}/v1/stitch`))).toBe(true);
+  });
+
+  it("is false for a blocked port, whose failure carries no code", async () => {
+    // fetch rejects port 1 before it opens anything, with a bare
+    // `Error: bad port`. No code means no proof, which is the safe answer.
+    expect(connectionNeverEstablished(await failureOf("http://127.0.0.1:1/v1/stitch"))).toBe(false);
+  });
+
+  it("is true for a host that does not resolve", async () => {
+    expect(
+      connectionNeverEstablished(await failureOf("http://ix-568-no-such-host.invalid/v1/stitch")),
+    ).toBe(true);
+  });
+
+  it("is FALSE for a socket dropped after the request went out", async () => {
+    // The ambiguous case, and the reason this is narrower than "a transport
+    // error". Once the bytes are gone, a reset means either an upstream that
+    // restarted (its join died with it) or a proxy that hung up (the join is
+    // still running). Both spell UND_ERR_SOCKET, so the marker stays.
+    const server = net.createServer(sock => {
+      sock.once("data", () => setTimeout(() => sock.destroy(), 10));
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as net.AddressInfo).port;
+    try {
+      const err = await failureOf(`http://127.0.0.1:${port}/v1/stitch`);
+      expect(String(err)).toContain("fetch failed");
+      expect(connectionNeverEstablished(err)).toBe(false);
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
+
+  it("clears the marker, so a backend that went down mid-run is not blamed for 15 minutes", () => {
+    const a = admitStitch(ENDPOINT);
+    expect(a.admitted).toBe(true);
+    if (a.admitted) a.settle({ ok: false, elapsedMs: 3, status: null, neverConnected: true });
+    expect(existsSync(cooldownPathForTest(ENDPOINT))).toBe(false);
+    expect(admitted(ENDPOINT)).toBe(true);
+  });
+});
+
+describe("the cooldown runs from the end of the attempt, not its start", () => {
+  it("does not expire mid-attempt when IX_STITCH_COOLDOWN_MS is shorter than the request", () => {
+    // IxClient.post caps a request at two minutes, so before the restamp EVERY
+    // setting under that bought nothing on the timeout path: the marker was
+    // stamped at the start, the attempt outlived it, and the next map was
+    // admitted immediately and stacked a second join.
+    process.env.IX_STITCH_COOLDOWN_MS = "1000";
+    const startedLongAgo = Date.now() - 60_000;
+
+    const a = admitStitch(ENDPOINT, startedLongAgo);
+    expect(a.admitted).toBe(true);
+    if (a.admitted) a.settle({ ok: false, elapsedMs: 60_000, status: 500 });
+
+    const next = admitStitch(ENDPOINT);
+    expect(next.admitted, "a 1s cooldown must still be live the instant a 60s attempt ends").toBe(false);
+    if (!next.admitted) expect(next.reason).toContain("60s");
+  });
+
+  it("still expires on schedule once the attempt has ended", () => {
+    process.env.IX_STITCH_COOLDOWN_MS = "1000";
+    const a = admitStitch(ENDPOINT, Date.now() - 60_000);
+    if (a.admitted) a.settle({ ok: false, elapsedMs: 60_000, status: 500 });
+
+    expect(admitted(ENDPOINT, Date.now() + 5_000)).toBe(true);
   });
 });
 
