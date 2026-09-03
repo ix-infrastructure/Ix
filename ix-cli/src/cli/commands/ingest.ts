@@ -1608,6 +1608,18 @@ export async function ingestFiles(
     ): Promise<number> => {
       if (preparedPatches.length === 0) return 0;
 
+      /**
+       * Patches the cutoff held back rather than sent (Ix#560).
+       *
+       * Held, not discarded. Abandoning them outright is what made an earlier
+       * version able to wedge a workspace permanently: the mtime baseline is
+       * not written on a run with commit errors, so the next `ix map`
+       * re-ingests in the same order, trips at the same point, and abandons the
+       * same patches forever. They get one ordinary pass at the end IF the
+       * backend has meanwhile proved it accepts writes -- see the drain below.
+       */
+      const deferredByCutoff: PreparedPatch[] = [];
+
       const chunks: PreparedPatch[][] = [];
       let bulkChunk: PreparedPatch[] = [];
       const flushBulkChunk = (): void => {
@@ -1632,14 +1644,21 @@ export async function ingestFiles(
       // concurrent fallback loops don't race on revisions.current (Error 1200).
       let fallbackTail: Promise<void> = Promise.resolve();
 
-      const runChunk = async (ci: number): Promise<void> => {
-        const chunk = chunks[ci];
-        const endFile = chunk[chunk.length - 1].fileNumber;
-        const commitIndividually = async (
-          items: PreparedPatch[],
-          bulkError?: unknown,
-          fallbackOpts?: { replay?: boolean },
-        ): Promise<void> => {
+      /**
+       * Commit `items` one at a time, serialized against every other per-file
+       * loop in this run.
+       *
+       * Hoisted out of runChunk so the end-of-run drain runs the SAME loop
+       * rather than a second copy of it -- the counters, the mutex and the
+       * breaker interaction are exactly the parts that must not drift.
+       * `recordMs` is the only thing that was chunk-scoped.
+       */
+      const commitItemsSerially = async (
+        items: PreparedPatch[],
+        recordMs: (ms: number) => void,
+        bulkError?: unknown,
+        fallbackOpts?: { replay?: boolean },
+      ): Promise<void> => {
           if (debug && bulkError !== undefined) {
             const first = items[0];
             const last = items[items.length - 1];
@@ -1674,8 +1693,7 @@ export async function ingestFiles(
                   patchesApplied += items.length - itemIndex;
                   break;
                 }
-                commitErrors++;
-                commitBreaker.recordSkipped();
+                deferredByCutoff.push(item);
                 continue;
               }
               try {
@@ -1689,7 +1707,7 @@ export async function ingestFiles(
                 const commitStart = performance.now();
                 const result = await retryOnConflict(() => client.commitPatch(item.patch), COMMIT_CONFLICT_RETRIES);
                 const chunkMs = Math.round(performance.now() - commitStart);
-                commitMsPerChunk[ci] += chunkMs;
+                recordMs(chunkMs);
                 timings.fallbackCommitMs += chunkMs;
                 latestRev = advanceRev(latestRev, result.rev);
                 patchesApplied++;
@@ -1715,18 +1733,44 @@ export async function ingestFiles(
           } finally {
             resolveThis();
           }
-        };
+      };
+
+      /**
+       * One pass over the patches the cutoff held back, with a fresh streak.
+       *
+       * Not a bypass: the breaker is ACTIVE, so a backend that really is
+       * refusing everything trips again after N and this stays bounded. What
+       * it does not carry over is the streak that caused the hold -- five
+       * adjacent patches the backend rejects on their own merits are
+       * indistinguishable from a dead backend at the time, and the difference
+       * only shows when the next patch commits. Without this pass the mtime
+       * baseline (never written on a run with commit errors) makes the next
+       * run repeat the same order, trip at the same point, and drop the same
+       * patches forever.
+       */
+      const commitIndividuallyAfterCutoff = async (items: PreparedPatch[]): Promise<void> => {
+        if (debug) {
+          process.stderr.write(
+            `\n  [cutoff] re-sending ${items.length} held-back patches with a fresh streak\n`,
+          );
+        }
+        commitBreaker.reset();
+        // No chunk to attribute the time to; the loop already adds it to
+        // timings.fallbackCommitMs itself.
+        await commitItemsSerially(items, () => {});
+      };
+
+      const runChunk = async (ci: number): Promise<void> => {
+        const chunk = chunks[ci];
+        const endFile = chunk[chunk.length - 1].fileNumber;
+        const commitIndividually = async (
+          items: PreparedPatch[],
+          bulkError?: unknown,
+          fallbackOpts?: { replay?: boolean },
+        ): Promise<void> =>
+          commitItemsSerially(items, ms => { commitMsPerChunk[ci] += ms; }, bulkError, fallbackOpts);
 
         const hasDeletion = chunk.some(item => patchRequiresPerFileCommit(item.patch));
-
-        // Tripped between chunks: the remaining workers would each send one
-        // more bulk and then fan it out. Abandon the chunk unsent.
-        if (commitBreaker.tripped()) {
-          commitErrors += chunk.length;
-          commitBreaker.recordSkipped(chunk.length);
-          if (opts?.updateProgress) progressCurrent = Math.max(progressCurrent, endFile);
-          return;
-        }
 
         if (hasDeletion) {
           await commitIndividually(chunk);
@@ -1756,10 +1800,7 @@ export async function ingestFiles(
             },
             commitIndividually,
             shouldStop: () => commitBreaker.tripped(),
-            onAbandoned: items => {
-              commitErrors += items.length;
-              commitBreaker.recordSkipped(items.length);
-            },
+            onAbandoned: items => { deferredByCutoff.push(...items); },
             patchIdOf: item => item.patch.patchId,
             onPartialBulk: (landed, missing, err) => {
               if (!debug) return;
@@ -1794,6 +1835,25 @@ export async function ingestFiles(
       await Promise.all(
         Array.from({ length: Math.min(COMMIT_CONCURRENCY, chunks.length) }, () => worker())
       );
+
+      // Nothing stays abandoned while the backend is demonstrably accepting
+      // writes. If anything landed this run, the cutoff was wrong about at
+      // least part of the run -- five adjacent patches the backend rejects on
+      // their own merits look exactly like a dead backend until a later chunk
+      // commits -- so the held-back patches get one ordinary pass. If NOTHING
+      // landed, they are left for the next run, which re-ingests them anyway
+      // because the mtime baseline is not written on a run with commit errors.
+      if (deferredByCutoff.length > 0) {
+        const held = deferredByCutoff.splice(0, deferredByCutoff.length);
+        await commitIndividuallyAfterCutoff(held);
+        // Held back AGAIN, by a breaker that had a fresh streak to judge on.
+        // These are the real errors.
+        if (deferredByCutoff.length > 0) {
+          commitErrors += deferredByCutoff.length;
+          commitBreaker.recordSkipped(deferredByCutoff.length);
+          deferredByCutoff.length = 0;
+        }
+      }
 
       return commitMsPerChunk.reduce((a, b) => a + b, 0);
     };

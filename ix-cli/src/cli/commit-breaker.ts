@@ -28,10 +28,17 @@
 // unambiguous is a backend that has refused N commits in a row without
 // accepting one: nothing about sending the next request differs from the last N.
 //
-// A false trip is cheap and self-healing. The remaining patches are counted as
-// commit errors, which is what they would have been anyway; the mtime baseline
-// is not written on a run with commit errors, so the next `ix map` retries every
-// file it did not commit.
+// What the cutoff does NOT do is abandon work permanently. Patches it holds
+// back are retried once at the end of the run if the backend has meanwhile
+// accepted anything at all -- because five adjacent patches that the backend
+// rejects on their own merits look exactly like a dead backend until a later
+// chunk commits. Without that, the mtime baseline (never written on a run with
+// commit errors) guarantees the next `ix map` re-ingests in the same order,
+// trips at the same point, and drops the same patches forever.
+//
+// It also never skips a chunk's BULK commit. One request per chunk is not the
+// amplification -- the fan-out is, at one request per patch -- and sending it is
+// what lets a backend that has recovered mid-run prove so and unstick the rest.
 // ---------------------------------------------------------------------------
 
 const DEFAULT_LIMIT = 5;
@@ -39,10 +46,13 @@ const DEFAULT_LIMIT = 5;
 /** Consecutive failed commits before a run stops trying. 0 disables the cutoff. */
 export function commitFailureLimit(raw = process.env.IX_COMMIT_FAILURE_LIMIT): number {
   if (raw === undefined || raw === "") return DEFAULT_LIMIT;
-  const n = Number.parseInt(raw, 10);
-  // 0 is meaningful (never trip), so only a negative or unparseable value falls
-  // back to the default.
-  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_LIMIT;
+  // Number(), not parseInt(): parseInt stops at the first non-digit, so it read
+  // "0.5" as 0 -- silently DISABLING the cutoff -- and "1e3" as 1, tripping on
+  // the very first failure. Neither is what the caller asked for, and neither
+  // fell back to the documented default. 0 stays meaningful (never trip), so
+  // only a negative or non-integer value falls back.
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : DEFAULT_LIMIT;
 }
 
 export interface CommitBreaker {
@@ -72,6 +82,16 @@ export interface CommitBreaker {
   lastError(): unknown;
   /** Failures in the current streak. */
   consecutiveFailures(): number;
+  /**
+   * Start a fresh streak, un-latched.
+   *
+   * For the end-of-run retry only. The held-back patches are re-sent with the
+   * breaker ACTIVE but with no memory of the streak that held them, so a
+   * backend that is genuinely refusing everything trips again after N and the
+   * retry stays bounded -- while patches held back by a false trip simply
+   * commit. `skipped()` is cumulative and deliberately not reset.
+   */
+  reset(): void;
 }
 
 export function createCommitBreaker(limit = commitFailureLimit()): CommitBreaker {
@@ -93,6 +113,7 @@ export function createCommitBreaker(limit = commitFailureLimit()): CommitBreaker
     recordSkipped: (n = 1) => { skippedCount += n; },
     lastError: () => last,
     consecutiveFailures: () => consecutive,
+    reset: () => { consecutive = 0; latched = false; },
   };
 }
 

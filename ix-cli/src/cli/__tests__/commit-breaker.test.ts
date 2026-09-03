@@ -25,6 +25,15 @@ describe("commitFailureLimit", () => {
   it("falls back on a value that is not a non-negative integer", () => {
     expect(commitFailureLimit("-1")).toBe(5);
     expect(commitFailureLimit("many")).toBe(5);
+    // parseInt stopped at the first non-digit, so "0.5" read as 0 -- silently
+    // DISABLING the cutoff, which is the opposite of a conservative fallback.
+    expect(commitFailureLimit("0.5")).toBe(5);
+  });
+
+  it("reads a value parseInt would have truncated", () => {
+    // "1e3" is 1000, and parseInt made it 1 -- a cutoff that trips on the very
+    // first failure. Number() reads what was written.
+    expect(commitFailureLimit("1e3")).toBe(1000);
   });
 });
 
