@@ -80,13 +80,27 @@ export class ParsePool {
   }
 
   /**
-   * How long a worker gets to end itself before it is terminated anyway.
+   * How long a HEALTHY worker gets to end itself before it is terminated.
    *
-   * Only ever paid by a worker that is wedged. A responsive one closes its port
-   * and emits 'exit' in about a millisecond, and this resolves on that event,
-   * so the common path does not wait.
+   * Only ever paid by one that is wedged. A responsive worker closes its port
+   * and emits 'exit' in about a millisecond, and `shutdown` resolves on that
+   * event, so the common path does not wait. Public because the test that pins
+   * the fallback has to derive its bound from this rather than restate it:
+   * tuning the grace down should not fail a test about waiting-then-returning.
    */
-  private static readonly SHUTDOWN_GRACE_MS = 2000;
+  static readonly SHUTDOWN_GRACE_MS = 2000;
+
+  /**
+   * The same, for a worker that has ALREADY faulted.
+   *
+   * Much shorter, because `onError` does not wait for it: the replacement is
+   * spawned immediately, so a long grace leaves the pool running
+   * `concurrency + 1` threads, and a faulted-then-wedged worker still refs the
+   * event loop -- `ix map` would sit there after printing its summary until the
+   * timer fired. A worker that is merely faulted and still responsive answers
+   * in about a millisecond, so this costs it nothing.
+   */
+  static readonly FAULTED_GRACE_MS = 250;
 
   /**
    * End one worker by ASKING, and terminate it only if it will not go.
@@ -111,7 +125,18 @@ export class ParsePool {
    * `destroy()` would wait on it forever, which is the CLI hang this file has
    * already produced three times.
    */
-  private static shutdown(w: Worker): Promise<void> {
+  private static shutdown(w: Worker, graceMs = ParsePool.SHUTDOWN_GRACE_MS): Promise<void> {
+    // A worker that has already gone: settle NOW, synchronously.
+    //
+    // Checked rather than inferred from a failed post. An earlier revision
+    // relied on `postMessage()` throwing once the thread was gone; it does not
+    // -- on Node 26 it is a silent no-op -- so for every worker that had
+    // already exited (`process.exit()` inside it, the respawn loop, a crash)
+    // this held a live timer and a listener for an 'exit' that had already
+    // fired and would never fire again, then terminated a corpse. `threadId`
+    // is -1 once the thread is gone, which is the only signal here that is
+    // actually true.
+    if (w.threadId === -1) return Promise.resolve();
     return new Promise<void>(resolve => {
       let settled = false;
       const done = (): void => {
@@ -124,18 +149,14 @@ export class ParsePool {
         // It would not go. Terminating a wedged worker can still crash, but a
         // hung CLI is certain and this is not, and it is bounded either way.
         w.terminate().catch(() => {}).finally(done);
-      }, ParsePool.SHUTDOWN_GRACE_MS);
+      }, graceMs);
       // `unref` so a pool that is torn down early cannot hold the process open
-      // for two seconds after everything else has finished.
+      // for the whole grace period after everything else has finished.
       timer.unref?.();
       w.once('exit', done);
-      try {
-        w.postMessage({ __shutdown: true });
-      } catch {
-        // The port is already gone -- the worker died on its own. Nothing to
-        // ask, and 'exit' has either fired or is about to.
-        done();
-      }
+      // No try/catch: the post cannot throw for a live thread, and the dead
+      // case is handled above. Wrapping it here is what disguised the bug.
+      w.postMessage({ __shutdown: true });
     });
   }
 
@@ -244,9 +265,10 @@ export class ParsePool {
     // still a live thread holding the tree-sitter addon. Fire-and-forget, as
     // the `terminate()` here always was -- the pool does not wait on a worker
     // it has already given up on, and `shutdown` kills it after the grace
-    // period if it will not go. On the 'exit' arm the thread is already gone
-    // and the post throws, which `shutdown` treats as done.
-    ParsePool.shutdown(w).catch(() => {});
+    // period if it will not go. On the 'exit' arm the thread is already gone,
+    // which `shutdown` detects from `threadId` and settles at once, so that
+    // path costs nothing and holds no timer.
+    ParsePool.shutdown(w, ParsePool.FAULTED_GRACE_MS).catch(() => {});
     this.workers.splice(idx, 1);
     // ...and out of `idle` too, ALWAYS, cap or no cap. A worker can emit 'error'
     // while it is IDLE -- an uncaught async throw, or ERR_WORKER_OUT_OF_MEMORY

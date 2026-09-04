@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -42,10 +44,20 @@ describe("ParsePool", () => {
     return path;
   }
 
+  /**
+   * Answers parses, and honours the shutdown request like the real worker.
+   *
+   * The `__shutdown` branch is not decoration. Without it this fixture ignores
+   * the request, so `destroy()` waits out the full grace and then terminates --
+   * which meant the test named "shuts down without hanging" was silently
+   * exercising the TERMINATE FALLBACK rather than the clean path it claims,
+   * and paying 2s to do it.
+   */
   const ECHO = `
     import { parentPort } from 'node:worker_threads';
-    parentPort.on('message', ({ filePath }) => {
-      parentPort.postMessage({ ok: true, result: { filePath } });
+    parentPort.on('message', (msg) => {
+      if (msg && msg.__shutdown) { parentPort.close(); return; }
+      parentPort.postMessage({ ok: true, result: { filePath: msg.filePath } });
     });
   `;
 
@@ -64,8 +76,9 @@ describe("ParsePool", () => {
   const IDLE_FAULT = `
     import { parentPort } from 'node:worker_threads';
     let served = 0;
-    parentPort.on('message', ({ filePath }) => {
-      parentPort.postMessage({ ok: true, result: { filePath } });
+    parentPort.on('message', (msg) => {
+      if (msg && msg.__shutdown) { parentPort.close(); return; }
+      parentPort.postMessage({ ok: true, result: { filePath: msg.filePath } });
       if (++served === 1) setTimeout(() => { throw new Error('idle fault'); }, 20);
     });
   `;
@@ -113,7 +126,7 @@ describe("ParsePool", () => {
 
     expect(await pool.parse("first.ts", "x")).toEqual({ filePath: "first.ts" });
     // Let the fault land while the pool is idle.
-    await new Promise(resolve => setTimeout(resolve, 120));
+    await new Promise((resolve) => setTimeout(resolve, 120));
 
     // TWO at once, deliberately. `drain()` pops the free list, so a single
     // parse takes the replacement worker that `onError` just pushed and never
@@ -137,7 +150,7 @@ describe("ParsePool", () => {
     const first = await Promise.all(
       Array.from({ length: 20 }, (_, i) => pool.parse(`f${i}.ts`, "x")),
     );
-    expect(first.every(r => r === null)).toBe(true);
+    expect(first.every((r) => r === null)).toBe(true);
 
     // The regression: these arrive after the pool is dead.
     await expect(pool.parse("later.ts", "x")).resolves.toBeNull();
@@ -216,10 +229,51 @@ describe("ParsePool", () => {
     await pool.destroy();
     const elapsed = Date.now() - started;
 
-    // It waited for the grace period rather than killing immediately...
-    expect(elapsed).toBeGreaterThanOrEqual(1500);
+    // Derived from the constant, not restated as a magic number. Tuning the
+    // grace down is a legitimate change and must not fail a test about
+    // waiting-then-returning.
+    expect(elapsed).toBeGreaterThanOrEqual(ParsePool.SHUTDOWN_GRACE_MS * 0.75);
     // ...and it did NOT wait forever. Without the timeout this never resolves
     // and the failure is a suite timeout with no explanation attached.
-    expect(elapsed).toBeLessThan(8000);
+    expect(elapsed).toBeLessThan(ParsePool.SHUTDOWN_GRACE_MS * 4);
   }, 15000);
+
+  it("shuts the REAL parse worker down through the same protocol", async () => {
+    // The one test that binds the two packages. `ix-cli` does not depend on
+    // `@ix/core-ingestion` as a package -- it loads the built worker by
+    // relative path -- so `__shutdown` is a bare literal in three unlinked
+    // places: here, `parse-pool.ts`, and `core-ingestion/src/parse-worker.ts`.
+    // Every other test in this file uses an inline fixture that hardcodes the
+    // literal itself, so renaming or dropping the handler in the real worker
+    // would leave the whole suite green while every `ix map` teardown quietly
+    // reverted to grace-then-terminate: the exact segfault this is all for.
+    const real = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "../../../../core-ingestion/dist/parse-worker.js",
+    );
+    expect(existsSync(real), `build core-ingestion first: ${real}`).toBe(true);
+
+    const pool = new ParsePool(real, 2);
+    pool.init();
+    // Parse for real, so the threads have the tree-sitter addon loaded -- an
+    // untouched worker does not, and it is the loaded-then-idle thread that
+    // crashes under `terminate()`.
+    const results = await Promise.all([
+      pool.parse("a.ts", "export function a(): number { return 1; }"),
+      pool.parse("b.ts", "export function b(): number { return 2; }"),
+    ]);
+    expect(
+      results.every((r) => r !== null),
+      "the real worker should parse these",
+    ).toBe(true);
+
+    const started = Date.now();
+    await pool.destroy();
+    const elapsed = Date.now() - started;
+
+    // Well inside the grace: it answered rather than being terminated. If the
+    // real worker stops understanding the message this becomes ~2s and fails.
+    expect(elapsed).toBeLessThan(ParsePool.SHUTDOWN_GRACE_MS / 2);
+    expect(pool.crashedTasks(), "a clean teardown is not a crash").toBe(0);
+  }, 20000);
 });
