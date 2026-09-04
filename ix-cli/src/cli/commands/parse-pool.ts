@@ -74,9 +74,69 @@ export class ParsePool {
     // is the identical hang this file has already produced three times, and one
     // line closes it.
     this.dead = true;
-    await Promise.all(this.workers.map(w => w.terminate()));
+    await Promise.all(this.workers.map(w => ParsePool.shutdown(w)));
     this.workers = [];
     this.idle = [];
+  }
+
+  /**
+   * How long a worker gets to end itself before it is terminated anyway.
+   *
+   * Only ever paid by a worker that is wedged. A responsive one closes its port
+   * and emits 'exit' in about a millisecond, and this resolves on that event,
+   * so the common path does not wait.
+   */
+  private static readonly SHUTDOWN_GRACE_MS = 2000;
+
+  /**
+   * End one worker by ASKING, and terminate it only if it will not go.
+   *
+   * `terminate()` tears a thread down from outside, and doing that to a thread
+   * that has loaded the tree-sitter native bindings segfaults the process. The
+   * thread does not have to be busy: an idle worker that has parsed a single
+   * file is enough, because the crash is in disposing an isolate that still
+   * holds the addon. Measured on Windows/Node 26, twenty pool teardowns per
+   * process, six runs each:
+   *
+   *   terminate()                        5 of 6 runs died with SIGSEGV (139)
+   *   worker closes its own port         0 of 6
+   *   worker calls process.exit(0)       0 of 6
+   *
+   * `destroy()` runs in `ingestFiles`'s outermost `finally`, so this was one
+   * `ix map` in roughly twelve exiting 139 with every patch committed and the
+   * summary already printed -- invisible unless something reads the status.
+   *
+   * The fallback matters as much as the fix: a worker stuck in a long native
+   * parse never gets round to its message loop, and without the timeout
+   * `destroy()` would wait on it forever, which is the CLI hang this file has
+   * already produced three times.
+   */
+  private static shutdown(w: Worker): Promise<void> {
+    return new Promise<void>(resolve => {
+      let settled = false;
+      const done = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        // It would not go. Terminating a wedged worker can still crash, but a
+        // hung CLI is certain and this is not, and it is bounded either way.
+        w.terminate().catch(() => {}).finally(done);
+      }, ParsePool.SHUTDOWN_GRACE_MS);
+      // `unref` so a pool that is torn down early cannot hold the process open
+      // for two seconds after everything else has finished.
+      timer.unref?.();
+      w.once('exit', done);
+      try {
+        w.postMessage({ __shutdown: true });
+      } catch {
+        // The port is already gone -- the worker died on its own. Nothing to
+        // ask, and 'exit' has either fired or is about to.
+        done();
+      }
+    });
   }
 
   private spawnWorker(): Worker {
@@ -179,7 +239,14 @@ export class ParsePool {
     // lost task is still counted for the stitch gate.
     const idx = this.workers.indexOf(w);
     if (idx === -1) return;
-    w.terminate().catch(() => {});
+    // Asked, not terminated, for the same reason `destroy()` asks: this fires
+    // on 'exit' AND on 'error', and a worker that merely emitted 'error' is
+    // still a live thread holding the tree-sitter addon. Fire-and-forget, as
+    // the `terminate()` here always was -- the pool does not wait on a worker
+    // it has already given up on, and `shutdown` kills it after the grace
+    // period if it will not go. On the 'exit' arm the thread is already gone
+    // and the post throws, which `shutdown` treats as done.
+    ParsePool.shutdown(w).catch(() => {});
     this.workers.splice(idx, 1);
     // ...and out of `idle` too, ALWAYS, cap or no cap. A worker can emit 'error'
     // while it is IDLE -- an uncaught async throw, or ERR_WORKER_OUT_OF_MEMORY

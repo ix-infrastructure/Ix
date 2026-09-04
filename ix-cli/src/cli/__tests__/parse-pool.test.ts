@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -150,4 +150,76 @@ describe("ParsePool", () => {
 
     await pool.destroy();
   });
+
+  it("asks a worker to end itself rather than terminating it", async () => {
+    // The fourth way this file has gone wrong, and the only one that was not a
+    // hang. `Worker.terminate()` tears a thread down from outside, and doing
+    // that to one that has loaded the tree-sitter native bindings segfaults the
+    // PROCESS -- an idle worker that parsed a single file is enough, because
+    // the crash is in disposing an isolate that still holds the addon. Twenty
+    // teardowns per process, six runs each, on Windows/Node 26:
+    //
+    //   terminate()                    5 of 6 runs died with SIGSEGV (139)
+    //   worker closes its own port     0 of 6
+    //
+    // `destroy()` runs in `ingestFiles`'s outermost `finally`, so this was one
+    // `ix map` in roughly twelve exiting 139 with every patch committed and the
+    // summary printed -- which is why nobody reported it.
+    //
+    // Asserted through a marker the worker writes when ASKED to go, because the
+    // crash itself is probabilistic: a test that just tore pools down would
+    // pass against the bug most of the time. This one pins the mechanism.
+    const marker = join(dir, "asked-to-go");
+    const path = worker(
+      "polite",
+      `
+      import { parentPort } from 'node:worker_threads';
+      import { writeFileSync } from 'node:fs';
+      parentPort.on('message', (msg) => {
+        if (msg && msg.__shutdown) {
+          writeFileSync(${JSON.stringify(marker)}, 'bye', 'utf8');
+          parentPort.close();
+          return;
+        }
+        parentPort.postMessage({ ok: true, result: { filePath: msg.filePath } });
+      });
+    `,
+    );
+
+    const pool = new ParsePool(path, 2);
+    pool.init();
+    // Parse first: an untouched worker has not loaded the addon, and it is the
+    // loaded-then-idle thread that crashes.
+    await Promise.all([pool.parse("a.ts", "x"), pool.parse("b.ts", "x")]);
+    await pool.destroy();
+
+    expect(existsSync(marker), "destroy() must ask, not terminate").toBe(true);
+  });
+
+  it("still terminates, and still returns, when a worker ignores the request", async () => {
+    // The fallback is as load-bearing as the fix. A worker wedged in a long
+    // native parse never reaches its message loop, and waiting on it forever is
+    // the exact CLI hang the three tests above exist for. Bounded, then killed.
+    const path = worker(
+      "stubborn",
+      `
+      import { parentPort } from 'node:worker_threads';
+      parentPort.on('message', () => { /* answers nothing, leaves nothing */ });
+      setInterval(() => {}, 1000);
+    `,
+    );
+
+    const pool = new ParsePool(path, 1);
+    pool.init();
+
+    const started = Date.now();
+    await pool.destroy();
+    const elapsed = Date.now() - started;
+
+    // It waited for the grace period rather than killing immediately...
+    expect(elapsed).toBeGreaterThanOrEqual(1500);
+    // ...and it did NOT wait forever. Without the timeout this never resolves
+    // and the failure is a suite timeout with no explanation attached.
+    expect(elapsed).toBeLessThan(8000);
+  }, 15000);
 });
