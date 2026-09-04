@@ -1075,7 +1075,7 @@ export function sweepUpgradeOrphans(ixHome: string, installDir: string): void {
  * addressable. EPERM means it exists but belongs to another user, which still
  * counts as live.
  */
-function isLiveScratch(name: string): boolean {
+export function isLiveScratch(name: string): boolean {
   const pid = Number(/-(\d+)-[^-]*$/.exec(name)?.[1]);
   if (!Number.isInteger(pid) || pid <= 0) return false;
   if (pid === process.pid) return true;

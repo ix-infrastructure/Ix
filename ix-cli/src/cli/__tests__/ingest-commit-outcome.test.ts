@@ -107,6 +107,118 @@ describe("ingestCompletedCleanly", () => {
   });
 });
 
+describe("describeCommitOutcome when the deadline fired", () => {
+  it("does not tell the user to raise the budget when NOTHING committed", () => {
+    // With a 5-minute per-request timeout and a 15-minute budget, a stalled
+    // backend fits ~3 attempts in -- the cutoff's streak cannot reach its limit,
+    // so the run ends on the deadline. "Raise IX_MAP_DEADLINE_MS" is then advice
+    // to wait longer on a backend that answered nothing.
+    const out = describeCommitOutcome(20, 0, "--verbose", true, 0);
+    expect(out.kind).toBe("fatal");
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("without committing anything");
+    // Both readings are live: the deadline covers discovery, hashing and parse
+    // too, so a large repo can spend it before the first commit is attempted --
+    // and there raising it IS the fix. Name both rather than assert one.
+    expect(out.message).toContain("raise IX_MAP_DEADLINE_MS");
+    expect(out.message).toContain("not accepting writes");
+    expect(out.message).toContain("ix doctor");
+  });
+
+  it("still points at the budget when work was getting done", () => {
+    const out = describeCommitOutcome(20, 4000, "--verbose", true, 0);
+    expect(out.kind).toBe("warn");
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("Raise IX_MAP_DEADLINE_MS");
+  });
+
+  it("reports the deadline ahead of the cutoff when both happened", () => {
+    // A run that skipped a handful to the cutoff and then lost thousands to the
+    // clock lost far more to the clock; blaming the cutoff hides the number that
+    // would change the outcome.
+    const out = describeCommitOutcome(5000, 100, "--verbose", true, 7);
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("Raise IX_MAP_DEADLINE_MS");
+    expect(out.message).not.toContain("never sent");
+  });
+});
+
+describe("describeCommitOutcome when both the cutoff and the deadline fired", () => {
+  it("names the cutoff's share instead of blaming the clock for all of it", () => {
+    // 200 patches withheld from a refusing backend, then 3 more lost to the
+    // clock. Reporting all 203 as "abandoned when the map deadline fired ...
+    // raise IX_MAP_DEADLINE_MS" is the wrong remedy for 200 of them, and it
+    // contradicts the banner above, which names the split.
+    const out = describeCommitOutcome(203, 50, "--verbose", true, 200);
+    if (out.kind === "ok") throw new Error("expected a message");
+
+    expect(out.message).toContain("3 of 253 file patches were abandoned when the map deadline fired");
+    expect(out.message).toContain("200 more were withheld earlier by the commit cutoff");
+    expect(out.message).toContain("see the cutoff above");
+  });
+
+  it("keeps the plain wording when the cutoff withheld nothing", () => {
+    const out = describeCommitOutcome(3, 50, "--verbose", true, 0);
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("3 of 53 file patches were abandoned when the map deadline fired");
+    expect(out.message).not.toContain("withheld earlier");
+  });
+});
+
+describe("describeCommitOutcome with a commit cutoff", () => {
+  it("points at the cutoff even when the drain placed every held patch", () => {
+    // The cutoff fired, so the banner above has already named the endpoint and
+    // quoted the backend's error -- but nothing was left unsent, and gating on
+    // that count sent the reader to the generic "Re-run with --debug to see
+    // why" directly beneath a message that had just told them why. The 12-file
+    // reproduction at the default limit lands here: five fan-out failures trip
+    // it, the drain sends the remaining seven, none are "never sent".
+    const out = describeCommitOutcome(12, 0, "--debug", false, 0, true);
+    expect(out.kind).toBe("fatal");
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("See the cutoff above");
+    expect(out.message).not.toContain("never sent");
+    // And it must still point AT the flag here. Every one of these errors came
+    // from a patch that was sent and did emit a per-file line, so the sibling
+    // message's "the flag will not add to it" -- true when patches were held
+    // back unsent -- would steer the reader away from the only detail there is.
+    expect(out.message).toContain("--debug lists the individual failures");
+    expect(out.message).not.toContain("will not add to it");
+  });
+
+  it("still names the unsent count when there is one", () => {
+    const out = describeCommitOutcome(12, 0, "--debug", false, 3, true);
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("3 of them never sent");
+  });
+
+  it("points at the cutoff instead of a flag that would show nothing", () => {
+    // The cutoff has already printed the endpoint, the streak and the error. A
+    // patch that was never sent produces no per-file line, so the usual advice
+    // sends the reader to --verbose for output that does not exist.
+    const out = describeCommitOutcome(20, 0, "--verbose", false, 15);
+    expect(out.kind).toBe("fatal");
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("15 of them never sent");
+    expect(out.message).toContain("See the cutoff above");
+    expect(out.message).not.toContain("to see why");
+  });
+
+  it("warns rather than fails when some patches landed first", () => {
+    const out = describeCommitOutcome(15, 40, "--verbose", false, 15);
+    expect(out.kind).toBe("warn");
+  });
+
+  it("leaves the ordinary messages alone when nothing was cut off", () => {
+    const none = describeCommitOutcome(3, 0, "--verbose", false, 0);
+    const some = describeCommitOutcome(3, 10, "--verbose", false, 0);
+    expect(none.kind).toBe("fatal");
+    expect(some.kind).toBe("warn");
+    if (none.kind !== "ok") expect(none.message).toContain("Ingest committed nothing");
+    if (some.kind !== "ok") expect(some.message).toContain("Re-run 'ix map' to retry");
+  });
+});
+
 describe("describeStitchFailure", () => {
   it("reports incomplete cross-repository relationships without dumping an HTML response", () => {
     const message = describeStitchFailure(new Error("504: <html>\nlarge proxy response"));

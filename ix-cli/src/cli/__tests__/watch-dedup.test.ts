@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
+import { isLiveScratch } from "../commands/upgrade.js";
 import {
   WatchRefreshScheduler,
   canonicalMapInvocation,
@@ -63,7 +64,153 @@ describe("WatchRefreshScheduler", () => {
   });
 });
 
+/**
+ * Where the child-CLI test builds its throwaway `dist`.
+ *
+ * Two constraints pull in opposite directions and only this location satisfies
+ * both -- see the long note at the call site.
+ *   1. It must have the package's dependencies on its ESM resolution path, so
+ *      it has to sit under `packageRoot`.
+ *   2. Git must not be able to see it, because cleanup is a `finally` that a
+ *      killed runner never reaches (Ix#567).
+ */
+function childBuildCacheRoot(packageRoot: string): string {
+  return path.join(packageRoot, "node_modules", ".cache");
+}
+
+/**
+ * mkdtemp prefix for the throwaway child build.
+ *
+ * The pid is in the name so the sweep below can tell a directory abandoned by
+ * a dead run from one a LIVE run is building into right now. Two runners in
+ * one checkout is ordinary -- vitest in watch mode in one terminal, `npm test`
+ * in another -- and a sweep that deleted the other's tree between its emit and
+ * its child spawn would manufacture exactly the intermittent single-test
+ * failure this file exists to stop producing.
+ */
+const CHILD_BUILD_PREFIX = "ix-watch-child-runtime-";
+
+/**
+ * Reclaim what interrupted runs left behind, in both places they left it.
+ *
+ * Liveness is `isLiveScratch`, the convention `ix upgrade` already uses for
+ * its own scratch dirs, rather than a second one written here -- including
+ * the part that matters most: **anything unparseable is dead**. A name with
+ * no pid is either legacy debris or from a checkout before the pid was added,
+ * and treating it as live would leave it on disk forever. A hand-rolled
+ * `parseInt` got this exactly backwards, and worse: `parseInt("4abcde")` is 4,
+ * which is a live kernel process on both Windows and Linux.
+ *
+ * `legacyRoot` is the package root, where the pre-#567 test wrote its build
+ * directly. `.gitignore` now hides those, so nothing else would ever surface
+ * them again -- which is a reason to collect them here, not a reason to stop
+ * looking.
+ */
+function sweepChildBuilds(dir: string, prefix: string): void {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return; // no such directory: nothing was ever left there
+  }
+  for (const entry of entries) {
+    if (!entry.startsWith(prefix) || isLiveScratch(entry)) continue;
+    try {
+      fs.rmSync(path.join(dir, entry), { recursive: true, force: true });
+    } catch {
+      // Someone else got there first, or the OS still has it open. Leaving
+      // one stale build behind is not worth failing a passing test over.
+    }
+  }
+}
+
 describe("canonical watch refresh", () => {
+  it("builds the child CLI somewhere git cannot see, so an interrupted run leaves nothing behind", () => {
+    const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+    const cacheRoot = childBuildCacheRoot(packageRoot);
+
+    // Assert the property that matters -- "git ignores it" -- by asking git,
+    // not by matching .gitignore text. Outside a work tree (an installed
+    // tarball, a downloaded source archive) there is no git answer to get, so
+    // fall back to the structural half of the same claim: the build lives
+    // inside node_modules, which every checkout of this repo ignores.
+    const inWorkTree = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], {
+      cwd: packageRoot,
+      encoding: "utf8",
+    });
+    const repoRoot = path.resolve(packageRoot, "..");
+    const topLevel = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: packageRoot,
+      encoding: "utf8",
+    });
+    // `--is-inside-work-tree` is true for an ENCLOSING repo too, which is the
+    // "unpacked source archive" case the fallback below exists for. Asking
+    // whether the toplevel is this repo is what actually distinguishes them --
+    // otherwise the enclosing repo's conventional `node_modules/` rule fails
+    // the probe with a message blaming Ix's .gitignore.
+    const inThisRepo =
+      inWorkTree.status === 0 &&
+      inWorkTree.stdout.trim() === "true" &&
+      topLevel.status === 0 &&
+      fs.existsSync(topLevel.stdout.trim()) &&
+      fs.realpathSync(topLevel.stdout.trim()) === fs.realpathSync(repoRoot);
+
+    if (inThisRepo) {
+      // -v, not --quiet: the exit code alone also counts a rule from the
+      // user's global core.excludesFile or .git/info/exclude. A contributor
+      // whose personal ignore file says `node_modules` (no slash -- a common
+      // spelling) could then restore the directory-only rule here, make
+      // ix-cli/node_modules committable again, and still see this pass. The
+      // source has to be this repo's own .gitignore.
+      const explain = (target: string): string =>
+        spawnSync("git", ["check-ignore", "-v", "--no-index", target], {
+          cwd: packageRoot,
+          encoding: "utf8",
+        }).stdout.trim();
+      // git -v prints `<source>:<line>:<pattern>\t<pathname>`. Splitting the
+      // source off on the first ":" yields "C" for a Windows path -- which
+      // happens to differ from ".gitignore" and so still fails the assertion,
+      // but by luck rather than by meaning. Anchor on the ":<line>:" instead.
+      const sourceOf = (out: string): string =>
+        /^(.+):\d+:/.exec(out.split("\t")[0] ?? "")?.[1] ?? "";
+
+      expect(sourceOf(explain(cacheRoot)), `git does not ignore ${cacheRoot} via this repo's .gitignore`)
+        .toBe(".gitignore");
+
+      // And pin the rule that ignores it, not just today's outcome. `cacheRoot`
+      // is a real directory, so the old `node_modules/` rule matched it too and
+      // this test would stay green if that rule came back -- taking the
+      // committable `ix-cli/node_modules` symlink of #545 with it. A path that
+      // does not exist is not a directory as far as git is concerned, so only a
+      // rule without the trailing slash matches it.
+      //
+      // Every artifact rule, not only node_modules: a symlinked `dist` is how a
+      // worktree borrows a build from the main clone, which is the same practice
+      // that produced the committed node_modules symlink. Probing one rule would
+      // let the other three regress silently, which is how they were left
+      // directory-only when node_modules was fixed.
+      const repoRootOf = (p: string): string => path.resolve(packageRoot, "..", p);
+      const probes: [string, string][] = [
+        [path.join(packageRoot, "__ix_ignore_probe__", "node_modules"), "node_modules"],
+        [repoRootOf("ix-cli/dist"), "ix-cli/dist"],
+        [repoRootOf("ix-cli/coverage"), "ix-cli/coverage"],
+        [repoRootOf("core-ingestion/dist"), "core-ingestion/dist"],
+      ];
+      for (const [probe, rule] of probes) {
+        // An existing directory matches a trailing-slash rule too, so a probe
+        // that happens to be a real build directory proves nothing. Ask about a
+        // sibling path that cannot exist instead.
+        const target = fs.existsSync(probe) ? path.join(probe, "__ix_ignore_probe__") : probe;
+        expect(
+          sourceOf(explain(target)),
+          `the '${rule}' ignore rule is directory-only again; a symlink or file with that name is committable (Ix#545)`,
+        ).toBe(".gitignore");
+      }
+    } else {
+      expect(path.relative(packageRoot, cacheRoot).split(path.sep)[0]).toBe("node_modules");
+    }
+  });
+
   it("keeps TypeScript runtime loaders without copying debugger flags", () => {
     expect(
       childCliArgs(
@@ -106,7 +253,48 @@ describe("canonical watch refresh", () => {
     const version = JSON.parse(
       fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"),
     ).version as string;
-    const tempRoot = fs.mkdtempSync(path.join(packageRoot, ".watch-child-runtime-"));
+    // Build into node_modules/.cache, not the package root and not os.tmpdir().
+    //
+    // Cleanup is the `finally` below, which does not run when the runner is
+    // killed (Ctrl-C, CI timeout). Directly under packageRoot that left a
+    // complete `dist` build as an *untracked directory in the working tree*,
+    // which `git status` showed and an unlucky `git add -A` would have
+    // committed (Ix#567).
+    //
+    // os.tmpdir() is not the answer, even though packageRoot is passed as `cwd`
+    // to every spawnSync: `cwd` has no bearing on ESM bare-specifier
+    // resolution, which walks up from the *module's own* path. A build under
+    // the OS tmpdir dies with
+    //   ERR_MODULE_NOT_FOUND: Cannot find package 'commander'
+    // because no node_modules exists above it. The built child has to sit
+    // somewhere with the package's dependencies on its resolution path.
+    //
+    // node_modules/.cache is both: node walks ..../.cache/<tmp>/dist/cli up to
+    // packageRoot and finds packageRoot/node_modules, and git never sees it --
+    // node_modules is ignored, so an interrupted run leaves nothing in
+    // `git status` and nothing that can be committed by accident.
+    const cacheRoot = childBuildCacheRoot(packageRoot);
+    fs.mkdirSync(cacheRoot, { recursive: true });
+    // Sweep what a killed run left behind. Moving out of the package root cost
+    // the one signal that debris exists -- `git status` no longer shows it, and
+    // nothing under node_modules is pruned until the next `npm ci`. Worth
+    // bounding: release.yml copies ix-cli/node_modules wholesale into the
+    // release tarball, so anything sitting here at packaging time would ship.
+    //
+    // Only trees whose owning process is gone: a live run robbed of its build
+    // mid-test is the failure mode this whole file is about.
+    sweepChildBuilds(cacheRoot, CHILD_BUILD_PREFIX);
+    sweepChildBuilds(packageRoot, ".watch-child-runtime-");
+    const tempRoot = fs.mkdtempSync(path.join(cacheRoot, `${CHILD_BUILD_PREFIX}${process.pid}-`));
+    // Restore the ESM scope that node_modules costs us. Node's package-scope
+    // walk-up STOPS at the first `node_modules/package.json`, so it never
+    // reaches ix-cli/package.json and never sees its `"type": "module"` -- the
+    // emitted ESM then dies with `Cannot use import statement outside a module`.
+    // Not hypothetical for the versions this package supports: `engines` allows
+    // node >=22.0.0 and module-syntax detection was only unflagged in 22.7.0, so
+    // this fails on 22.0-22.6 while CI (pinned to 22-latest and 24) stays green.
+    // That is the environment-dependent single-test failure Ix#567 is about.
+    fs.writeFileSync(path.join(tempRoot, "package.json"), JSON.stringify({ type: "module" }));
     const ixHome = path.join(tempRoot, "ix-home");
     fs.mkdirSync(ixHome);
     fs.writeFileSync(
@@ -127,16 +315,45 @@ describe("canonical watch refresh", () => {
       expect(source.stderr).not.toContain("Debugger listening");
 
       const outDir = path.join(tempRoot, "dist");
+      // Compile the CLI entry's own module graph, not `src`.
+      //
+      // This test asks whether the built child STARTS, so a file the child
+      // never loads is not its business -- but `tsconfig.build.json` inherits
+      // `"include": ["src"]`, which compiles every .ts file in the working
+      // tree, *including untracked ones*. `git stash` without `-u` leaves
+      // untracked files behind, so a WIP module still sitting in `src` failed
+      // this one test out of 1500+ (nothing else shells out to tsc -- vitest
+      // transforms with esbuild, which does not type-check) in the worktree it
+      // was left in, while a fresh worktree at the same commit passed. That is
+      // the exact shape reported in Ix#567.
+      //
+      // `files` + `include: []` narrows the program to main.ts and whatever it
+      // imports, which is precisely what the child needs to run. `--noCheck`
+      // (TypeScript >= 5.6) covers the remaining case of a semantic error in a
+      // file that IS in that graph, e.g. mid-edit. Syntax errors still fail the
+      // emit, correctly -- those genuinely break the child. The package as a
+      // whole is still type-checked by `npm run build`, `npm run typecheck` and
+      // CI; none of that is this test's job.
+      const buildConfig = path.join(tempRoot, "tsconfig.child.json");
+      fs.writeFileSync(
+        buildConfig,
+        JSON.stringify({
+          extends: path.join(packageRoot, "tsconfig.build.json"),
+          include: [],
+          files: [path.join(packageRoot, "src/cli/main.ts")],
+        }),
+      );
       const build = spawnSync(
         process.execPath,
         [
           path.join(packageRoot, "node_modules/typescript/bin/tsc"),
           "-p",
-          path.join(packageRoot, "tsconfig.build.json"),
+          buildConfig,
           "--outDir",
           outDir,
           "--declaration",
           "false",
+          "--noCheck",
         ],
         { cwd: packageRoot, env, encoding: "utf8" },
       );
