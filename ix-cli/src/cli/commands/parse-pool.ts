@@ -25,13 +25,18 @@ export class ParsePool {
 
   /**
    * @param graceMs How long an UNRESPONSIVE IDLE worker gets before it is
-   *   terminated. Injectable only so the tests can pin the behaviour without
-   *   spending the real grace period; `ingestFiles` uses the default.
+   *   terminated.
+   * @param maxWaitMs The ceiling on waiting for a BUSY one.
+   *
+   * Both injectable only so the tests can pin the behaviour without spending
+   * the real periods -- the ceiling test would otherwise cost ten seconds on
+   * every leg of the matrix. `ingestFiles` passes neither.
    */
   constructor(
     private workerPath: string,
     private concurrency: number,
     private graceMs: number = ParsePool.SHUTDOWN_GRACE_MS,
+    private maxWaitMs: number = ParsePool.SHUTDOWN_MAX_WAIT_MS,
   ) {}
 
   init(): void {
@@ -70,13 +75,12 @@ export class ParsePool {
   }
 
   async destroy(): Promise<void> {
-    // Set FIRST. Shutting a worker down makes it emit 'exit' -- whether it is
+    // Set FIRST. Shutting a worker down makes it emit 'exit' -- whether it was
     // asked or, in the fallback, terminated -- and the handler for that treats
-    // an exit as a crash and spawns a replacement, so
-    // shutting the pool down span up a fresh set of threads, `this.workers = []`
-    // orphaned them, and because a worker thread refs the event loop and the
-    // CLI has no `process.exit(0)` on its success path, `ix map` printed its
-    // summary and then hung forever.
+    // an exit as a crash and spawns a replacement. So closing the pool spun up
+    // a fresh set of threads, `this.workers = []` orphaned them, and because a
+    // worker thread refs the event loop and the CLI has no `process.exit(0)` on
+    // its success path, `ix map` printed its summary and then hung forever.
     this.destroyed = true;
     // ...and `dead`, so a `parse()` after teardown resolves instead of queueing
     // onto a pool with no workers left to run it. Not reachable from
@@ -84,20 +88,41 @@ export class ParsePool {
     // is the identical hang this file has already produced three times, and one
     // line closes it.
     this.dead = true;
-    // Resolve what is still QUEUED, the way the respawn-cap branch does.
-    // `destroy()` left the queue untouched, and `onResult` still calls
-    // `drain()`, so a worker finishing its last parse could be handed a queued
-    // file behind the `__shutdown` it had already been sent: the worker closes
-    // its port first, and that task's promise never settled. Worse, `onError`
-    // early-returns once `destroyed` is set, so it was not counted either --
-    // a silently lost file that `crashedTasks()` reported as zero, which is
-    // exactly the input the stitch gate and the mtime baseline trust. Empty on
-    // every path where `ingestFiles` completes; reachable when it throws with
-    // parses still queued.
+    // Resolve what is still QUEUED. `destroy()` left the queue untouched while
+    // `onResult` still calls `drain()`, so a worker finishing its last parse
+    // could be handed a queued file behind the `__shutdown` already sitting in
+    // its port: the worker closes first, and that task's promise never settled.
+    // Empty on every path where `ingestFiles` completes; reachable when it
+    // throws with parses still queued.
+    //
+    // Resolved but deliberately NOT counted as crashed. An earlier revision
+    // incremented `crashed` here and justified it as "the input the stitch gate
+    // and the mtime baseline trust" -- which is wrong: `destroy()` runs in the
+    // outermost `finally`, while the baseline, the pre-migration delete guard
+    // and both stitch gates read `crashedParses()` inside the `try`, strictly
+    // earlier. They cannot observe this. The only readers left are the summary
+    // fields, so counting it there made the printed `parseErrors` disagree with
+    // the baseline decision already taken, on the one path that reaches it --
+    // a run that is throwing anyway, where the exception is the story.
     const stranded = this.queue.splice(0, this.queue.length);
-    this.crashed += stranded.filter(t => t.counts).length;
     for (const t of stranded) t.resolve(null);
     await Promise.all(this.workers.map(w => this.shutdown(w)));
+    // ...and resolve whatever was still IN FLIGHT when the last worker went.
+    //
+    // `onError` early-returns once `destroyed` is set -- deliberately, so a
+    // deliberate teardown is not counted as a crash and does not respawn the
+    // pool it is closing -- which means the in-flight task of a worker that
+    // `shutdown` had to terminate was never settled by anything. Its promise
+    // stayed pending for the life of the process, and the `Promise.all` over
+    // the parse batch with it. Found by a test asserting the terminated
+    // worker's parse still settles: `destroy()` returned in 10s as designed and
+    // the test then hung on the task.
+    //
+    // Not counted, for the same reason the stranded queue is not: every gate
+    // that reads `crashedParses()` has already run by the time `destroy()` is
+    // called from the outermost `finally`.
+    for (const task of this.active.values()) task.resolve(null);
+    this.active.clear();
     this.workers = [];
     this.idle = [];
   }
@@ -112,9 +137,9 @@ export class ParsePool {
    * restating it: tuning the grace should not fail a test about
    * waiting-then-returning.
    *
-   * It does NOT bound teardown for a worker that is mid-parse -- see
-   * `shutdown`, which does not terminate a busy worker at all, because nothing
-   * can cut a native call short.
+   * It is not what bounds a worker that is mid-parse: that one keeps being
+   * given more time, because terminating it mid-native-call is the crash this
+   * file exists to avoid, and `SHUTDOWN_MAX_WAIT_MS` is its ceiling instead.
    */
   static readonly SHUTDOWN_GRACE_MS = 2000;
 
@@ -129,6 +154,20 @@ export class ParsePool {
    * in about a millisecond, so this costs it nothing.
    */
   static readonly FAULTED_GRACE_MS = 250;
+
+  /**
+   * The ceiling on waiting for a BUSY worker, after which it is terminated.
+   *
+   * Generous, because the common reason a worker is still busy at teardown is
+   * a genuine parse that will finish on its own, and terminating it mid-native
+   * call is the crash this file exists to avoid. Finite, because the
+   * alternative is an unbounded wait, and `destroy()` is the first statement of
+   * `ingestFiles`'s outermost `finally` -- a hang there stops the run before it
+   * can even print its summary. Only ever reached on the path where
+   * `ingestFiles` throws with parses still in flight; on every completing path
+   * the batch is awaited long before `destroy()`.
+   */
+  static readonly SHUTDOWN_MAX_WAIT_MS = 10000;
 
   /**
    * End one worker by ASKING, and terminate it only if it will not go.
@@ -200,36 +239,56 @@ export class ParsePool {
         clearTimeout(timer);
         resolve();
       };
+      // Two clocks, and every path ends at one of them.
+      //
+      // `idleSince` is when the worker was last OBSERVED idle, not the instant
+      // it left `active`. Checking `active` alone terminated a worker that had
+      // only just posted its result: the main thread deletes the entry, and the
+      // worker reaches the queued `__shutdown` and starts unwinding its isolate
+      // a moment later, so an expiry landing in that window saw an
+      // "idle, unresponsive" worker and killed it mid-teardown -- a live thread
+      // holding the addon, which is the segfault this whole change is for.
+      // Restarting the clock when it goes idle gives it a full `graceMs` of
+      // quiet before anything is concluded from the silence.
+      //
+      // `hardDeadline` bounds the busy case, and exists because the previous
+      // revision re-armed forever on the reasoning that terminating a busy
+      // worker "buys nothing, `main` had the same floor". That is true only for
+      // work inside the addon. V8's termination interrupt DOES fire at JS
+      // boundaries, so `main` killed a JS-wedged worker promptly -- measured at
+      // 2ms against `for(;;){}` -- while re-arming forever never resolves at
+      // all. And `parseFile` is thousands of lines of JS with fixpoint loops,
+      // so a JS wedge is reachable, not hypothetical. `destroy()` is the first
+      // statement of `ingestFiles`'s outermost `finally`, so that hang came
+      // before the summary was even printed: strictly worse than the exit-139
+      // it replaced. Past the deadline a busy worker is terminated anyway --
+      // the same trade the idle branch makes, because a rare crash beats a
+      // certain hang.
+      const hardDeadline = Date.now() + Math.max(graceMs, this.maxWaitMs);
+      let idleSince: number | null = this.active.has(w) ? null : Date.now();
       const arm = (): void => {
-        timer = setTimeout(() => {
-          if (this.active.has(w)) {
-            // Mid-parse, so it has simply not reached its message loop yet.
-            // Keep waiting: it will handle the queued `__shutdown` as soon as
-            // the parse returns, and terminating it now would cost the same
-            // time while risking the crash.
-            //
-            // RE-ARMED, not abandoned. An earlier revision `return`ed here,
-            // which permanently disarmed the fallback: a worker that happened
-            // to be busy at the one moment this fired, and then refused to
-            // answer once idle, could never be terminated and `destroy()`
-            // never resolved. Reproduced -- a fixture that busy-loops 400ms,
-            // replies, then ignores `__shutdown` left `destroy()` still
-            // pending at a 5s cutoff. That is the unbounded CLI hang this file
-            // already has three tests for, reintroduced while fixing
-            // something else.
-            arm();
-            return;
-          }
-          // Idle and still not answering: its event loop is wedged, and only
-          // `terminate()` will free it. That can still crash the process, but a
-          // hung CLI is certain and this is not.
-          w.terminate()
-            .catch(() => {})
-            .finally(done);
-        }, graceMs);
+        timer = setTimeout(tick, graceMs);
         // `unref` so a pool that is torn down early cannot hold the process
         // open for a grace period after everything else has finished.
         timer.unref?.();
+      };
+      const tick = (): void => {
+        const now = Date.now();
+        const busy = this.active.has(w);
+        if (busy) idleSince = null;
+        else if (idleSince === null) idleSince = now;
+
+        const quietLongEnough = idleSince !== null && now - idleSince >= graceMs;
+        if (!quietLongEnough && now < hardDeadline) {
+          arm();
+          return;
+        }
+        // Either it has been idle and silent for a full grace period, or it has
+        // used up the whole budget while busy. Only `terminate()` is left. It
+        // can still crash the process; a hang is certain and this is not.
+        w.terminate()
+          .catch(() => {})
+          .finally(done);
       };
       arm();
       w.once('exit', done);

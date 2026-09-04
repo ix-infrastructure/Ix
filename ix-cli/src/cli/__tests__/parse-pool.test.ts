@@ -275,7 +275,103 @@ describe("ParsePool", () => {
     await expect(parsing).resolves.toEqual({ filePath: "slow.ts" });
   }, 20000);
 
-  it("resolves and counts parses still queued when the pool is destroyed", async () => {
+  it("gives a worker that has just gone idle a full grace before terminating", async () => {
+    // Idleness has to be OBSERVED for a grace period, not read as an instant.
+    // The worker posts its result, the main thread deletes its `active` entry,
+    // and only then does the worker reach the queued `__shutdown` and start
+    // unwinding its isolate. An expiry landing in that window sees a worker
+    // that looks idle and unresponsive and terminates it -- while it is still a
+    // live thread holding the tree-sitter addon, which is exactly the ~8%
+    // per-teardown segfault this whole change exists to remove.
+    //
+    // The timings are chosen so the two rules give different answers, which is
+    // the only way to catch this. Grace 300ms, so ticks land at 300/600/900. A
+    // 580ms parse puts the result 20ms before a tick, and the worker then
+    // spends 150ms in its shutdown handler:
+    //
+    //   instantaneous idleness -> terminates at 600, mid-handler, no marker
+    //   observed idleness      -> first idle tick at 600 starts the clock,
+    //                             terminate would be 900; the worker finishes
+    //                             at 730 and exits on its own, marker written
+    const marker = join(dir, "unwound-cleanly");
+    const path = worker(
+      "slow-to-unwind",
+      `
+      import { parentPort } from 'node:worker_threads';
+      import { writeFileSync } from 'node:fs';
+      const spin = (ms) => { const end = Date.now() + ms; while (Date.now() < end); };
+      parentPort.on('message', (msg) => {
+        if (msg && msg.__shutdown) {
+          spin(150);                       // stands in for isolate teardown
+          writeFileSync(${JSON.stringify(marker)}, 'clean', 'utf8');
+          parentPort.close();
+          return;
+        }
+        spin(580);
+        parentPort.postMessage({ ok: true, result: { filePath: msg.filePath } });
+      });
+    `,
+    );
+
+    const pool = new ParsePool(path, 1, 300);
+    pool.init();
+    const parsing = pool.parse("slow.ts", "x");
+    await pool.destroy();
+
+    await expect(parsing).resolves.toEqual({ filePath: "slow.ts" });
+    expect(
+      existsSync(marker),
+      "a worker that just went idle must not be killed mid-teardown",
+    ).toBe(true);
+  }, 20000);
+
+  it("terminates a worker that stays busy past the hard deadline", async () => {
+    // The bound on the busy branch. Re-arming while a worker is mid-parse is
+    // right -- terminating it mid-native-call is the segfault -- but re-arming
+    // FOREVER is a hang, and `destroy()` is the first statement of
+    // `ingestFiles`'s outermost `finally`, so it stops the run before it can
+    // print anything at all.
+    //
+    // The reasoning that produced the unbounded version was that terminating a
+    // busy worker "buys nothing, `main` had the same floor". That holds only
+    // for work inside the addon. V8's termination interrupt DOES fire at JS
+    // boundaries, so `main` killed a JS-wedged worker in about 2ms -- measured
+    // -- and `parseFile` is thousands of lines of JS with fixpoint loops, so a
+    // JS wedge is reachable rather than hypothetical. This fixture is exactly
+    // that: busy forever, in JS, never reaching its message loop.
+    const path = worker(
+      "never-finishes",
+      `
+      import { parentPort } from 'node:worker_threads';
+      parentPort.on('message', () => { for (;;) {} });
+    `,
+    );
+
+    // A 500ms ceiling rather than the real 10s: what is being asserted is that
+    // a ceiling EXISTS and is honoured, which is precisely what the unbounded
+    // version lacked. Spending the production value here would add ten seconds
+    // to every leg of the matrix and prove nothing extra.
+    const pool = new ParsePool(path, 1, 100, 500);
+    pool.init();
+    const wedged = pool.parse("spin.ts", "x");
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    const started = Date.now();
+    await Promise.race([
+      pool.destroy(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("destroy() never returned")), 10000),
+      ),
+    ]);
+
+    // It returned, by terminating the worker once the deadline passed.
+    expect(Date.now() - started).toBeLessThan(9000);
+    // And the task that worker was holding still settles, so the `Promise.all`
+    // over the parse batch cannot hang either.
+    await expect(wedged).resolves.toBeNull();
+  }, 20000);
+
+  it("resolves parses still queued when the pool is destroyed", async () => {
     // `destroy()` left `this.queue` untouched while `onResult` still called
     // `drain()`, so a worker finishing its last parse could be handed a queued
     // file BEHIND the `__shutdown` already sitting in its port. It closed
@@ -307,8 +403,12 @@ describe("ParsePool", () => {
     await expect(dispatched).resolves.toEqual({ filePath: "a.ts" });
     // Settles rather than hanging forever...
     await expect(queued).resolves.toBeNull();
-    // ...and is reported as a loss, because that is what it is.
-    expect(pool.crashedTasks(), "a stranded queue entry is a lost file").toBe(1);
+    // ...and is NOT counted. Every gate that reads `crashedParses()` -- the
+    // mtime baseline, the pre-migration delete guard, both stitch gates -- runs
+    // inside `ingestFiles`'s `try`, strictly before the `finally` that calls
+    // `destroy()`. Counting here could only move the printed summary, making it
+    // disagree with the baseline decision already taken.
+    expect(pool.crashedTasks(), "too late for any gate to see it").toBe(0);
   }, 20000);
 
   it("waits for a worker that is mid-parse instead of terminating it", async () => {
@@ -378,7 +478,11 @@ describe("ParsePool", () => {
     );
     expect(existsSync(real), `build core-ingestion first: ${real}`).toBe(true);
 
-    const pool = new ParsePool(real, 2);
+    // A deliberately huge grace, so this cannot pass or fail on how fast the
+    // machine is. If the real worker still understands `__shutdown` it exits in
+    // milliseconds; if it does not, teardown waits the full 10s and misses the
+    // bound by a factor of three, on any runner.
+    const pool = new ParsePool(real, 2, 10000);
     pool.init();
     // Parse for real, so the threads have the tree-sitter addon loaded -- an
     // untouched worker does not, and it is the loaded-then-idle thread that
@@ -396,9 +500,8 @@ describe("ParsePool", () => {
     await pool.destroy();
     const elapsed = Date.now() - started;
 
-    // Well inside the grace: it answered rather than being terminated. If the
-    // real worker stops understanding the message this becomes ~2s and fails.
-    expect(elapsed).toBeLessThan(ParsePool.SHUTDOWN_GRACE_MS / 2);
+    // It answered rather than being terminated.
+    expect(elapsed).toBeLessThan(3000);
     expect(pool.crashedTasks(), "a clean teardown is not a crash").toBe(0);
   }, 20000);
 });
