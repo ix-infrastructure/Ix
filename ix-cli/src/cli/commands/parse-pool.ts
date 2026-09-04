@@ -70,8 +70,9 @@ export class ParsePool {
   }
 
   async destroy(): Promise<void> {
-    // Set FIRST. `terminate()` makes every worker emit 'exit', and the handler
-    // for that treats an exit as a crash and spawns a replacement -- so
+    // Set FIRST. Shutting a worker down makes it emit 'exit' -- whether it is
+    // asked or, in the fallback, terminated -- and the handler for that treats
+    // an exit as a crash and spawns a replacement, so
     // shutting the pool down span up a fresh set of threads, `this.workers = []`
     // orphaned them, and because a worker thread refs the event loop and the
     // CLI has no `process.exit(0)` on its success path, `ix map` printed its
@@ -83,6 +84,19 @@ export class ParsePool {
     // is the identical hang this file has already produced three times, and one
     // line closes it.
     this.dead = true;
+    // Resolve what is still QUEUED, the way the respawn-cap branch does.
+    // `destroy()` left the queue untouched, and `onResult` still calls
+    // `drain()`, so a worker finishing its last parse could be handed a queued
+    // file behind the `__shutdown` it had already been sent: the worker closes
+    // its port first, and that task's promise never settled. Worse, `onError`
+    // early-returns once `destroyed` is set, so it was not counted either --
+    // a silently lost file that `crashedTasks()` reported as zero, which is
+    // exactly the input the stitch gate and the mtime baseline trust. Empty on
+    // every path where `ingestFiles` completes; reachable when it throws with
+    // parses still queued.
+    const stranded = this.queue.splice(0, this.queue.length);
+    this.crashed += stranded.filter(t => t.counts).length;
+    for (const t of stranded) t.resolve(null);
     await Promise.all(this.workers.map(w => this.shutdown(w)));
     this.workers = [];
     this.idle = [];
@@ -152,6 +166,18 @@ export class ParsePool {
    * The consequence, stated rather than hidden: teardown is bounded by the
    * longest in-flight parse, and always was -- `main`'s bare `terminate()` had
    * the same floor. Nothing here can do better than the addon allows.
+   *
+   * One caveat, because the rule above is not universal: on the `onError`
+   * path the caller has already removed the worker's `active` entry in order
+   * to resolve its task, so the busy check cannot see it and a faulted worker
+   * is terminated unconditionally after `FAULTED_GRACE_MS`. That is deliberate
+   * rather than overlooked. A worker reaches `onError` by emitting 'error' --
+   * V8 has already unwound its JS -- or 'exit', which the `threadId` check
+   * settles without terminating anything. The residual window is a thread that
+   * emitted 'error' while still inside a native call (an OOM during a large
+   * parse), and closing it would mean tracking busy-ness separately from
+   * `active` and never terminating a faulted worker, which trades a rare crash
+   * for a hang whenever a faulted thread does not exit on its own.
    */
   private shutdown(w: Worker, graceMs = this.graceMs): Promise<void> {
     // A worker that has already gone: settle NOW, synchronously.
@@ -167,31 +193,45 @@ export class ParsePool {
     if (w.threadId === -1) return Promise.resolve();
     return new Promise<void>(resolve => {
       let settled = false;
+      let timer: ReturnType<typeof setTimeout>;
       const done = (): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         resolve();
       };
-      const timer = setTimeout(() => {
-        if (this.active.has(w)) {
-          // Mid-parse, so it has simply not reached its message loop yet. Keep
-          // waiting: it will handle the queued `__shutdown` as soon as the
-          // parse returns, and terminating it now would cost the same time
-          // while risking the crash. Deliberately leaves this promise pending
-          // on 'exit' -- see the note above about what is and is not bounded.
-          return;
-        }
-        // Idle and still not answering: its event loop is wedged, and only
-        // `terminate()` will free it. That can still crash the process, but a
-        // hung CLI is certain and this is not.
-        w.terminate()
-          .catch(() => {})
-          .finally(done);
-      }, graceMs);
-      // `unref` so a pool that is torn down early cannot hold the process open
-      // for the whole grace period after everything else has finished.
-      timer.unref?.();
+      const arm = (): void => {
+        timer = setTimeout(() => {
+          if (this.active.has(w)) {
+            // Mid-parse, so it has simply not reached its message loop yet.
+            // Keep waiting: it will handle the queued `__shutdown` as soon as
+            // the parse returns, and terminating it now would cost the same
+            // time while risking the crash.
+            //
+            // RE-ARMED, not abandoned. An earlier revision `return`ed here,
+            // which permanently disarmed the fallback: a worker that happened
+            // to be busy at the one moment this fired, and then refused to
+            // answer once idle, could never be terminated and `destroy()`
+            // never resolved. Reproduced -- a fixture that busy-loops 400ms,
+            // replies, then ignores `__shutdown` left `destroy()` still
+            // pending at a 5s cutoff. That is the unbounded CLI hang this file
+            // already has three tests for, reintroduced while fixing
+            // something else.
+            arm();
+            return;
+          }
+          // Idle and still not answering: its event loop is wedged, and only
+          // `terminate()` will free it. That can still crash the process, but a
+          // hung CLI is certain and this is not.
+          w.terminate()
+            .catch(() => {})
+            .finally(done);
+        }, graceMs);
+        // `unref` so a pool that is torn down early cannot hold the process
+        // open for a grace period after everything else has finished.
+        timer.unref?.();
+      };
+      arm();
       w.once('exit', done);
       // No try/catch: the post cannot throw for a live thread, and the dead
       // case is handled above. Wrapping it here is what disguised the bug.

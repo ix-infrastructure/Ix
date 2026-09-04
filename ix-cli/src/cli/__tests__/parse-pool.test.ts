@@ -239,6 +239,78 @@ describe("ParsePool", () => {
     expect(elapsed).toBeLessThan(ParsePool.SHUTDOWN_GRACE_MS * 4);
   }, 15000);
 
+  it("still terminates a worker that was busy when the grace expired, once it goes idle", async () => {
+    // The hang I introduced while fixing the previous finding. The busy branch
+    // `return`ed instead of re-arming, so a worker that happened to be busy at
+    // the ONE moment the timer fired permanently disarmed the fallback: it
+    // finished its parse, went idle, refused the shutdown, and nothing was left
+    // to terminate it. `destroy()` never resolved.
+    //
+    // Reproduced against the broken version at a 5s cutoff before writing this.
+    const path = worker(
+      "busy-then-stubborn",
+      `
+      import { parentPort } from 'node:worker_threads';
+      parentPort.on('message', (msg) => {
+        if (msg && msg.__shutdown) return;          // refuses, once idle
+        const end = Date.now() + 400; while (Date.now() < end);
+        parentPort.postMessage({ ok: true, result: { filePath: msg.filePath } });
+      });
+      setInterval(() => {}, 1000);                  // and stays alive
+    `,
+    );
+
+    const pool = new ParsePool(path, 1, 100);
+    pool.init();
+    const parsing = pool.parse("slow.ts", "x");
+    // Destroy while it is mid-parse, so the first expiry lands on a BUSY worker.
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    const started = Date.now();
+    await pool.destroy();
+
+    // It returned at all -- that is the regression. And it waited for the parse
+    // rather than killing it, which is the rule the previous test pins.
+    expect(Date.now() - started).toBeGreaterThan(300);
+    await expect(parsing).resolves.toEqual({ filePath: "slow.ts" });
+  }, 20000);
+
+  it("resolves and counts parses still queued when the pool is destroyed", async () => {
+    // `destroy()` left `this.queue` untouched while `onResult` still called
+    // `drain()`, so a worker finishing its last parse could be handed a queued
+    // file BEHIND the `__shutdown` already sitting in its port. It closed
+    // first, and that task's promise never settled -- and `onError`
+    // early-returns once `destroyed` is set, so it was not counted either. A
+    // silently lost file that `crashedTasks()` reported as zero, which is the
+    // number the stitch gate and the mtime baseline trust.
+    const path = worker(
+      "slowecho",
+      `
+      import { parentPort } from 'node:worker_threads';
+      parentPort.on('message', (msg) => {
+        if (msg && msg.__shutdown) { parentPort.close(); return; }
+        const end = Date.now() + 300; while (Date.now() < end);
+        parentPort.postMessage({ ok: true, result: { filePath: msg.filePath } });
+      });
+    `,
+    );
+
+    // One worker: the first parse is dispatched, the second stays queued.
+    const pool = new ParsePool(path, 1, 200);
+    pool.init();
+    const dispatched = pool.parse("a.ts", "x");
+    const queued = pool.parse("b.ts", "x");
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    await pool.destroy();
+
+    await expect(dispatched).resolves.toEqual({ filePath: "a.ts" });
+    // Settles rather than hanging forever...
+    await expect(queued).resolves.toBeNull();
+    // ...and is reported as a loss, because that is what it is.
+    expect(pool.crashedTasks(), "a stranded queue entry is a lost file").toBe(1);
+  }, 20000);
+
   it("waits for a worker that is mid-parse instead of terminating it", async () => {
     // The rule the previous test cannot check, because its fixture wedges in
     // JAVASCRIPT and `terminate()` kills that instantly. A real parse blocks
