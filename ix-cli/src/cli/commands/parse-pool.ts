@@ -24,8 +24,8 @@ export class ParsePool {
   private active = new Map<Worker, Task>();
 
   /**
-   * @param graceMs How long an UNRESPONSIVE IDLE worker gets before it is
-   *   terminated.
+   * @param graceMs How long an UNRESPONSIVE IDLE worker gets before the pool
+   *   stops waiting for it.
    * @param maxWaitMs The ceiling on waiting for a BUSY one.
    *
    * Both injectable only so the tests can pin the behaviour without spending
@@ -128,7 +128,7 @@ export class ParsePool {
   }
 
   /**
-   * How long an IDLE worker gets to answer before it is terminated.
+   * How long an IDLE worker gets to answer before the pool gives up on it.
    *
    * Only ever paid by one whose JS event loop is wedged. A responsive worker
    * closes its port and emits 'exit' in about a millisecond, and `shutdown`
@@ -137,9 +137,9 @@ export class ParsePool {
    * restating it: tuning the grace should not fail a test about
    * waiting-then-returning.
    *
-   * It is not what bounds a worker that is mid-parse: that one keeps being
-   * given more time, because terminating it mid-native-call is the crash this
-   * file exists to avoid, and `SHUTDOWN_MAX_WAIT_MS` is its ceiling instead.
+   * A worker that is mid-parse keeps being given more time instead, up to
+   * `SHUTDOWN_MAX_WAIT_MS`. Note this is checked on tick boundaries, so one
+   * that goes idle just after a tick can wait up to twice this.
    */
   static readonly SHUTDOWN_GRACE_MS = 2000;
 
@@ -148,29 +148,26 @@ export class ParsePool {
    *
    * Much shorter, because `onError` does not wait for it: the replacement is
    * spawned immediately, so a long grace leaves the pool running
-   * `concurrency + 1` threads, and a faulted-then-wedged worker still refs the
-   * event loop -- `ix map` would sit there after printing its summary until the
-   * timer fired. A worker that is merely faulted and still responsive answers
-   * in about a millisecond, so this costs it nothing.
+   * `concurrency + 1` threads. A worker that is merely faulted and still
+   * responsive answers in about a millisecond, so this costs it nothing.
    */
   static readonly FAULTED_GRACE_MS = 250;
 
   /**
-   * The ceiling on waiting for a BUSY worker, after which it is terminated.
+   * The ceiling on waiting for a BUSY worker, after which the pool lets go.
    *
    * Generous, because the common reason a worker is still busy at teardown is
-   * a genuine parse that will finish on its own, and terminating it mid-native
-   * call is the crash this file exists to avoid. Finite, because the
-   * alternative is an unbounded wait, and `destroy()` is the first statement of
-   * `ingestFiles`'s outermost `finally` -- a hang there stops the run before it
-   * can even print its summary. Only ever reached on the path where
+   * a genuine parse that will finish on its own and answer. Finite, because
+   * the alternative is an unbounded wait, and `destroy()` is the first
+   * statement of `ingestFiles`'s outermost `finally` -- a hang there stops the
+   * run before it can even print its summary. Only reached on the path where
    * `ingestFiles` throws with parses still in flight; on every completing path
    * the batch is awaited long before `destroy()`.
    */
   static readonly SHUTDOWN_MAX_WAIT_MS = 10000;
 
   /**
-   * End one worker by ASKING, and terminate it only if it will not go.
+   * End one worker by ASKING, and let go of it if it will not answer.
    *
    * `terminate()` tears a thread down from outside, and doing that to a thread
    * that has loaded the tree-sitter native bindings segfaults the process. The
@@ -192,31 +189,31 @@ export class ParsePool {
    * wedged. It does not bound teardown in general, and an earlier revision of
    * this comment claimed it did.
    *
-   * A BUSY worker is never terminated, because terminating it buys nothing.
-   * `terminate()` cannot cut short a native call: V8 raises a termination
-   * interrupt that is only checked at JS boundaries, and a tree-sitter parse
-   * does not reach one until it returns. Measured on Node 26 -- against
-   * CPU-bound native work, `terminate()` resolved after 3981ms, i.e. when the
-   * call finished on its own. So terminating a mid-parse worker would wait
-   * exactly as long as asking does, and add back the segfault this whole
-   * change exists to remove, on a thread that was about to answer anyway. The
-   * queued `__shutdown` is handled the moment the parse returns.
+   * NOTHING here terminates a worker, and that is the point. Four review
+   * rounds went into rules for when killing a thread was safe -- never while
+   * busy, only after observed idleness, unless past a deadline -- and every
+   * rule had a counterexample, because `terminate()` is simply the wrong verb
+   * for teardown. It is what segfaults. Against a worker inside a native call
+   * it does not even preempt: V8's termination interrupt is only checked at JS
+   * boundaries, so it resolves when the call returns on its own (3981ms
+   * against ~4s of CPU-bound native work, measured), making it slower AND
+   * crash-prone there. Only a JS-wedged worker dies promptly, in about 2ms.
    *
-   * The consequence, stated rather than hidden: teardown is bounded by the
-   * longest in-flight parse, and always was -- `main`'s bare `terminate()` had
-   * the same floor. Nothing here can do better than the addon allows.
+   * Teardown does not need the thread to die. It needs the pool to stop
+   * waiting on it and the thread to stop holding the process open, which is
+   * exactly `unref()`. Measured on the real parse worker, four addon-loaded
+   * threads left live and unref'd across process exit: 0 failures in 10 runs,
+   * against 5 of 6 for `terminate()`.
    *
-   * One caveat, because the rule above is not universal: on the `onError`
-   * path the caller has already removed the worker's `active` entry in order
-   * to resolve its task, so the busy check cannot see it and a faulted worker
-   * is terminated unconditionally after `FAULTED_GRACE_MS`. That is deliberate
-   * rather than overlooked. A worker reaches `onError` by emitting 'error' --
-   * V8 has already unwound its JS -- or 'exit', which the `threadId` check
-   * settles without terminating anything. The residual window is a thread that
-   * emitted 'error' while still inside a native call (an OOM during a large
-   * parse), and closing it would mean tracking busy-ness separately from
-   * `active` and never terminating a faulted worker, which trades a rare crash
-   * for a hang whenever a faulted thread does not exit on its own.
+   * So the clocks below decide WHEN to give up, never whether it is safe to
+   * kill -- and the `onError` path needs no special case either, which is what
+   * removed the caveat this comment used to carry.
+   *
+   * The cost, stated rather than hidden: a genuinely wedged worker survives
+   * until the process exits, burning a core if it is spinning. For a CLI about
+   * to exit that is nothing; for a long-lived `ix watch` it is a leaked
+   * thread. A leaked thread is recoverable and a SIGSEGV is not -- and the
+   * crash would take the watch down with it.
    */
   private shutdown(w: Worker, graceMs = this.graceMs): Promise<void> {
     // A worker that has already gone: settle NOW, synchronously.
@@ -242,29 +239,29 @@ export class ParsePool {
       // Two clocks, and every path ends at one of them.
       //
       // `idleSince` is when the worker was last OBSERVED idle, not the instant
-      // it left `active`. Checking `active` alone terminated a worker that had
+      // it left `active`. Checking `active` alone gave up on a worker that had
       // only just posted its result: the main thread deletes the entry, and the
-      // worker reaches the queued `__shutdown` and starts unwinding its isolate
-      // a moment later, so an expiry landing in that window saw an
-      // "idle, unresponsive" worker and killed it mid-teardown -- a live thread
-      // holding the addon, which is the segfault this whole change is for.
+      // worker reaches the queued `__shutdown` a moment later, so an expiry
+      // landing in that window read a busy-but-untracked worker as silent.
       // Restarting the clock when it goes idle gives it a full `graceMs` of
-      // quiet before anything is concluded from the silence.
+      // quiet before anything is concluded from the silence. Under the old
+      // `terminate()` this was a segfault; it now costs a parse result rather
+      // than the process, but abandoning a worker that was about to answer is
+      // still wrong.
       //
-      // `hardDeadline` bounds the busy case, and exists because the previous
-      // revision re-armed forever on the reasoning that terminating a busy
-      // worker "buys nothing, `main` had the same floor". That is true only for
-      // work inside the addon. V8's termination interrupt DOES fire at JS
-      // boundaries, so `main` killed a JS-wedged worker promptly -- measured at
-      // 2ms against `for(;;){}` -- while re-arming forever never resolves at
-      // all. And `parseFile` is thousands of lines of JS with fixpoint loops,
-      // so a JS wedge is reachable, not hypothetical. `destroy()` is the first
-      // statement of `ingestFiles`'s outermost `finally`, so that hang came
-      // before the summary was even printed: strictly worse than the exit-139
-      // it replaced. Past the deadline a busy worker is terminated anyway --
-      // the same trade the idle branch makes, because a rare crash beats a
-      // certain hang.
-      const hardDeadline = Date.now() + Math.max(graceMs, this.maxWaitMs);
+      // `hardDeadline` bounds the busy case, and exists because an earlier
+      // revision re-armed forever. `destroy()` is the first statement of
+      // `ingestFiles`'s outermost `finally`, so waiting on a worker that never
+      // finishes stopped the run before it could print its summary at all --
+      // strictly worse than the exit-139 it replaced. Past the deadline the
+      // pool lets go, which costs nothing now that letting go is `unref()`
+      // rather than a kill.
+      // The ceiling as given. `Math.max(graceMs, maxWaitMs)` meant a ceiling
+      // could never be shorter than the grace -- `new ParsePool(p, 1, 2000,
+      // 500)` silently got 2000ms, not 500ms. It is still only CHECKED on tick
+      // boundaries, so the effective ceiling rounds up to the next multiple of
+      // `graceMs`; that is why the tests bound loosely rather than exactly.
+      const hardDeadline = Date.now() + this.maxWaitMs;
       let idleSince: number | null = this.active.has(w) ? null : Date.now();
       const arm = (): void => {
         timer = setTimeout(tick, graceMs);
@@ -283,12 +280,27 @@ export class ParsePool {
           arm();
           return;
         }
-        // Either it has been idle and silent for a full grace period, or it has
-        // used up the whole budget while busy. Only `terminate()` is left. It
-        // can still crash the process; a hang is certain and this is not.
-        w.terminate()
-          .catch(() => {})
-          .finally(done);
+        // Given up on: stop waiting for it, and stop it holding the process
+        // open. NOT terminated.
+        //
+        // `terminate()` was the wrong verb for this whole branch. It is what
+        // segfaults -- that is the bug this file exists to fix -- and against a
+        // worker inside a native call it does not even preempt: it resolves
+        // when the call returns (4457ms against ~4.5s of work, measured), so it
+        // was strictly slower AND crash-prone there. `unref()` gives the only
+        // thing teardown actually needs: the thread stops keeping the event
+        // loop alive, so the CLI exits, and nobody disposes an isolate that
+        // still holds the addon. Measured on the real parse worker, four
+        // addon-loaded threads left live and unref'd across process exit: 0
+        // failures in 10 runs, against 5 of 6 for `terminate()`.
+        //
+        // The cost, stated: a wedged worker survives until the process exits,
+        // burning a core if it is spinning. For a CLI that is about to exit
+        // anyway that is nothing; for a long-lived `ix watch` it is a leaked
+        // thread. A leaked thread is recoverable and a SIGSEGV is not -- and
+        // the crash would take the watch down with it.
+        w.unref();
+        done();
       };
       arm();
       w.once('exit', done);
@@ -375,13 +387,13 @@ export class ParsePool {
   private static readonly MAX_RESPAWNS = 16;
 
   private onError(w: Worker, _err: Error): void {
-    // Not during shutdown. `destroy()` terminates every worker on purpose, and
+    // Not during shutdown. `destroy()` ends every worker on purpose, and
     // treating that as a crash respawns the pool it is trying to close: the
     // replacements outlive `this.workers = []`, a worker thread refs the event
     // loop, and the CLI prints its summary and then hangs forever. The guard
     // lives HERE rather than on the 'exit' listener because 'error' reaches the
-    // same code: a worker that faults while `destroy()` is awaiting
-    // `terminate()` took the identical path.
+    // same code: a worker that faults while `destroy()` is waiting on it takes
+    // the identical path.
     if (this.destroyed) return;
     const task = this.active.get(w);
     if (task) {
@@ -402,8 +414,7 @@ export class ParsePool {
     // on 'exit' AND on 'error', and a worker that merely emitted 'error' is
     // still a live thread holding the tree-sitter addon. Fire-and-forget, as
     // the `terminate()` here always was -- the pool does not wait on a worker
-    // it has already given up on, and `shutdown` kills it after the grace
-    // period if it will not go. On the 'exit' arm the thread is already gone,
+    // it has already replaced. On the 'exit' arm the thread is already gone,
     // which `shutdown` detects from `threadId` and settles at once, so that
     // path costs nothing and holds no timer.
     this.shutdown(w, ParsePool.FAULTED_GRACE_MS).catch(() => {});

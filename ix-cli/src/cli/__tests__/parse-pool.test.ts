@@ -48,10 +48,10 @@ describe("ParsePool", () => {
    * Answers parses, and honours the shutdown request like the real worker.
    *
    * The `__shutdown` branch is not decoration. Without it this fixture ignores
-   * the request, so `destroy()` waits out the full grace and then terminates --
-   * which meant the test named "shuts down without hanging" was silently
-   * exercising the TERMINATE FALLBACK rather than the clean path it claims,
-   * and paying 2s to do it.
+   * the request, so `destroy()` waits out the full grace and then gives up on
+   * the worker -- which meant the test named "shuts down without hanging" was
+   * silently exercising the FALLBACK rather than the clean path it claims, and
+   * paying 2s to do it.
    */
   const ECHO = `
     import { parentPort } from 'node:worker_threads';
@@ -92,8 +92,8 @@ describe("ParsePool", () => {
     expect(results).toEqual([{ filePath: "a.ts" }, { filePath: "b.ts" }]);
     expect(pool.crashedTasks()).toBe(0);
 
-    // The hang: `destroy()` terminates every worker, each emits 'exit', and an
-    // exit handler that respawns hands back a pool of live threads that nothing
+    // The hang: shutting a worker down makes it emit 'exit', and an exit
+    // handler that respawns hands back a pool of live threads that nothing
     // owns. If that happens this test still passes -- the process is what hangs
     // -- so `crashedTasks()` is asserted as the observable proxy: a deliberate
     // teardown must not be recorded as a crash.
@@ -209,11 +209,11 @@ describe("ParsePool", () => {
     expect(existsSync(marker), "destroy() must ask, not terminate").toBe(true);
   });
 
-  it("still terminates, and still returns, when an IDLE worker ignores the request", async () => {
+  it("returns, rather than waiting forever, when an IDLE worker ignores the request", async () => {
     // The fallback, for the case it is actually for: a worker sitting in its
-    // event loop that simply will not answer. Only `terminate()` frees that,
-    // and waiting on it forever is the CLI hang the three tests above exist
-    // for. The busy case is the NEXT test, and is deliberately different.
+    // event loop that simply will not answer. Waiting on it forever is the CLI
+    // hang the three tests above exist for, so the pool stops waiting and
+    // unrefs it. The busy case is a later test, and is deliberately different.
     const path = worker(
       "stubborn",
       `
@@ -239,7 +239,7 @@ describe("ParsePool", () => {
     expect(elapsed).toBeLessThan(ParsePool.SHUTDOWN_GRACE_MS * 4);
   }, 15000);
 
-  it("still terminates a worker that was busy when the grace expired, once it goes idle", async () => {
+  it("still gives up on a worker that was busy when the grace expired, once it goes idle", async () => {
     // The hang I introduced while fixing the previous finding. The busy branch
     // `return`ed instead of re-arming, so a worker that happened to be busy at
     // the ONE moment the timer fired permanently disarmed the fallback: it
@@ -275,23 +275,24 @@ describe("ParsePool", () => {
     await expect(parsing).resolves.toEqual({ filePath: "slow.ts" });
   }, 20000);
 
-  it("gives a worker that has just gone idle a full grace before terminating", async () => {
+  it("gives a worker that has just gone idle a full grace before giving up", async () => {
     // Idleness has to be OBSERVED for a grace period, not read as an instant.
     // The worker posts its result, the main thread deletes its `active` entry,
     // and only then does the worker reach the queued `__shutdown` and start
     // unwinding its isolate. An expiry landing in that window sees a worker
-    // that looks idle and unresponsive and terminates it -- while it is still a
-    // live thread holding the tree-sitter addon, which is exactly the ~8%
-    // per-teardown segfault this whole change exists to remove.
+    // that looks idle and unresponsive and abandons it -- one that was about to
+    // answer. Under the old `terminate()` this was the ~8% per-teardown
+    // segfault itself; the pool unrefs now, so the cost is a lost parse result
+    // rather than the process, and it is still wrong.
     //
     // The timings are chosen so the two rules give different answers, which is
     // the only way to catch this. Grace 300ms, so ticks land at 300/600/900. A
     // 580ms parse puts the result 20ms before a tick, and the worker then
     // spends 150ms in its shutdown handler:
     //
-    //   instantaneous idleness -> terminates at 600, mid-handler, no marker
-    //   observed idleness      -> first idle tick at 600 starts the clock,
-    //                             terminate would be 900; the worker finishes
+    //   instantaneous idleness -> abandons at 600, mid-handler, no marker
+    //   observed idleness      -> first idle tick at 600 starts the clock, so
+    //                             giving up would be 900; the worker finishes
     //                             at 730 and exits on its own, marker written
     const marker = join(dir, "unwound-cleanly");
     const path = worker(
@@ -325,25 +326,28 @@ describe("ParsePool", () => {
     ).toBe(true);
   }, 20000);
 
-  it("terminates a worker that stays busy past the hard deadline", async () => {
-    // The bound on the busy branch. Re-arming while a worker is mid-parse is
-    // right -- terminating it mid-native-call is the segfault -- but re-arming
-    // FOREVER is a hang, and `destroy()` is the first statement of
-    // `ingestFiles`'s outermost `finally`, so it stops the run before it can
-    // print anything at all.
+  it("gives up on a worker that stays busy past the hard deadline", async () => {
+    // The bound on the busy branch. Waiting while a worker is mid-parse is
+    // right -- it is about to answer -- but waiting FOREVER is a hang, and
+    // `destroy()` is the first statement of `ingestFiles`'s outermost
+    // `finally`, so it stops the run before it can print anything at all.
     //
-    // The reasoning that produced the unbounded version was that terminating a
-    // busy worker "buys nothing, `main` had the same floor". That holds only
-    // for work inside the addon. V8's termination interrupt DOES fire at JS
-    // boundaries, so `main` killed a JS-wedged worker in about 2ms -- measured
-    // -- and `parseFile` is thousands of lines of JS with fixpoint loops, so a
-    // JS wedge is reachable rather than hypothetical. This fixture is exactly
-    // that: busy forever, in JS, never reaching its message loop.
+    // An earlier revision did wait forever, reasoning that killing a busy
+    // worker "buys nothing". True, but the conclusion did not follow: the pool
+    // does not have to kill it to stop waiting on it. This fixture is a worker
+    // that never reaches its message loop, and the assertion is simply that
+    // `destroy()` still returns.
     const path = worker(
       "never-finishes",
       `
       import { parentPort } from 'node:worker_threads';
-      parentPort.on('message', () => { for (;;) {} });
+      parentPort.on('message', () => {
+        // Busy well past the ceiling, then gone. Bounded on purpose: the pool
+        // unrefs rather than terminates now, so an endless loop here would burn
+        // a core for the rest of the file.
+        const end = Date.now() + 5000; while (Date.now() < end);
+        process.exit(0);
+      });
     `,
     );
 
@@ -364,8 +368,9 @@ describe("ParsePool", () => {
       ),
     ]);
 
-    // It returned, by terminating the worker once the deadline passed.
-    expect(Date.now() - started).toBeLessThan(9000);
+    // It returned, by letting go of the worker once the deadline passed --
+    // long before that 5s spin finishes, which is the point.
+    expect(Date.now() - started).toBeLessThan(3000);
     // And the task that worker was holding still settles, so the `Promise.all`
     // over the parse batch cannot hang either.
     await expect(wedged).resolves.toBeNull();
@@ -442,7 +447,13 @@ describe("ParsePool", () => {
     `,
     );
 
-    const pool = new ParsePool(path, 1, 200);
+    // An explicit, huge ceiling. Without it this test rides the production 10s
+    // `SHUTDOWN_MAX_WAIT_MS`, and the ~1.5s KDF only has to be 6.5x slower --
+    // an instrumented coverage leg, a loaded macos-14 runner -- for the pool to
+    // give up first and the marker never to be written. It would then fail as
+    // "a busy worker must be asked", reading as a real regression rather than a
+    // timing miss.
+    const pool = new ParsePool(path, 1, 200, 120000);
     pool.init();
 
     // Do NOT await: destroy() has to run while the parse is still in flight.
