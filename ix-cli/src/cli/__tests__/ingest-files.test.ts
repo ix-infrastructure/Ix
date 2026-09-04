@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -43,6 +43,8 @@ import { ingestFiles } from "../commands/ingest.js";
 /** A backend that answers the endpoints an ingest touches, and records them. */
 class FakeBackend {
   readonly requests: Array<{ path: string; patches: number }> = [];
+  /** Paths this fake does not implement. Asserted empty after every test. */
+  readonly unknownPaths: string[] = [];
 
   private server: Server | undefined;
   private rev = 0;
@@ -51,8 +53,6 @@ class FakeBackend {
   poison: string[] = [];
   /** Fail every commit, the Ix#560 shape. */
   refuseEverything = false;
-  /** Milliseconds to sit on each commit before answering. */
-  commitDelayMs = 0;
   /** Refuse re-sends of patches a 409 already confirmed. */
   refuseReplays = false;
   /** Fired after `abortAfterCommits` commit requests, if set. */
@@ -69,15 +69,15 @@ class FakeBackend {
   stitchStatus = 200;
 
   get stitchCount(): number {
-    return this.requests.filter(r => r.path === "/v1/stitch").length;
+    return this.requests.filter((r) => r.path === "/v1/stitch").length;
   }
 
   get bulkCount(): number {
-    return this.requests.filter(r => r.path === "/v1/patches/bulk").length;
+    return this.requests.filter((r) => r.path === "/v1/patches/bulk").length;
   }
 
   get singleCount(): number {
-    return this.requests.filter(r => r.path === "/v1/patch").length;
+    return this.requests.filter((r) => r.path === "/v1/patch").length;
   }
 
   get commitCount(): number {
@@ -96,12 +96,19 @@ class FakeBackend {
       req.on("data", (c: Buffer) => chunks.push(c));
       req.on("end", () => this.route(req.url ?? "/", Buffer.concat(chunks).toString("utf8"), res));
     });
-    await new Promise<void>(resolve => this.server!.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve, reject) => {
+      // Without the `error` listener a failed bind -- EACCES under a
+      // restrictive sandbox, EADDRNOTAVAIL where loopback is unusual -- never
+      // settles this promise, and surfaces as a beforeEach hook timeout plus an
+      // unhandled 'error' event rather than as the bind error it is.
+      this.server!.once("error", reject);
+      this.server!.listen(0, "127.0.0.1", resolve);
+    });
     return `http://127.0.0.1:${(this.server!.address() as AddressInfo).port}`;
   }
 
   async stop(): Promise<void> {
-    if (this.server) await new Promise<void>(resolve => this.server!.close(() => resolve()));
+    if (this.server) await new Promise<void>((resolve) => this.server!.close(() => resolve()));
   }
 
   private route(url: string, body: string, res: ServerResponse): void {
@@ -128,17 +135,24 @@ class FakeBackend {
         return send(500, { error: "500: already committed" });
       }
       if (path === "/v1/patches/bulk" && this.bulk409AllLanded) {
-        const ids = patches.map(p => p.patchId).filter(Boolean);
+        const ids = patches.map((p) => p.patchId).filter(Boolean);
         return send(409, { error: "bulk group partially committed", committed_patch_ids: ids });
       }
-      const refused = this.refuseEverything || this.poison.some(p => body.includes(p));
-      const answer = (): void => {
-        if (refused) return send(500, { error: "500: transaction begin timeout" });
-        this.rev += patches.length || 1;
-        send(200, path === "/v1/patches/bulk" ? { rev: this.rev, applied: patches.length } : { rev: this.rev });
-      };
-      if (this.commitDelayMs > 0) setTimeout(answer, this.commitDelayMs);
-      else answer();
+      const refused = this.refuseEverything || this.poison.some((p) => body.includes(p));
+      // Answered synchronously. A `commitDelayMs` knob lived here and no test
+      // ever set it -- the deadline test fires off request COUNT instead, which
+      // is what makes it deterministic. Reviving it needs care rather than a
+      // one-liner: `stop()` resolves on `server.close()` without cancelling a
+      // pending timer, so a deferred response outlives the test that armed it
+      // and fires against a closed server.
+      if (refused) return send(500, { error: "500: transaction begin timeout" });
+      this.rev += patches.length || 1;
+      send(
+        200,
+        path === "/v1/patches/bulk"
+          ? { rev: this.rev, applied: patches.length }
+          : { rev: this.rev },
+      );
       return;
     }
 
@@ -147,10 +161,19 @@ class FakeBackend {
     if (path.startsWith("/v1/stitch/system/")) return send(200, { systemId: null });
     if (path === "/v1/stitch") {
       this.requests.push({ path, patches: 0 });
-      if (this.stitchStatus !== 200) return send(this.stitchStatus, { error: "AQL: query timed out" });
+      if (this.stitchStatus !== 200)
+        return send(this.stitchStatus, { error: "AQL: query timed out" });
       return send(200, { stitched: 0, systemId: null, edges: [] });
     }
-    return send(200, {});
+    // 404, not `200 {}`. A fake that answers every unrecognised path with a
+    // cheerful empty body cannot fail: product code that starts calling a new
+    // endpoint -- or mistypes an existing one -- gets a success here where the
+    // real backend would 404, and the harness stays green while measuring a
+    // request the backend never served. The path is recorded as well as
+    // refused, so the afterEach names it rather than leaving a stray 404 to be
+    // explained.
+    this.unknownPaths.push(path);
+    return send(404, { error: `404: no such endpoint ${path}` });
   }
 }
 
@@ -177,20 +200,45 @@ describe("ingestFiles against a fake backend", () => {
     mkdirSync(join(repo, "src"), { recursive: true });
     for (let i = 0; i < count; i++) {
       const name = `m${String(i).padStart(3, "0")}.ts`;
-      writeFileSync(join(repo, "src", name), `export function f${i}(): number { return ${i}; }\n`, "utf8");
+      writeFileSync(
+        join(repo, "src", name),
+        `export function f${i}(): number { return ${i}; }\n`,
+        "utf8",
+      );
     }
     execFileSync("git", ["init", "-q"], { cwd: repo, stdio: "ignore" });
     execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
   }
 
   /** The order discovery will actually walk — asserted, never assumed. */
+  // The same flags `tryGitLsFiles` passes, not a bare `ls-files`. The two
+  // agree only while `fixture()` stages everything; one unstaged file or a
+  // `.gitignore` and this would validate a list discovery does not use. The
+  // both-ends fixture is the only one that reproduces the drain's
+  // first-empty-pass bug, so a premise check that quietly stopped matching
+  // would retire that case with nothing going red.
   function discoveryOrder(): string[] {
-    return execFileSync("git", ["ls-files"], { cwd: repo, encoding: "utf8" }).split("\n").filter(Boolean);
+    return execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard"], {
+      cwd: repo,
+      encoding: "utf8",
+    })
+      .split("\n")
+      .filter(Boolean);
   }
 
   beforeEach(async () => {
-    home = mkdtempSync(join(tmpdir(), "ix-ingest-home-"));
-    repo = mkdtempSync(join(tmpdir(), "ix-ingest-repo-"));
+    // realpath'd, because discovery canonicalises and the workspace root does
+    // not. `discoverIngestFilePaths` runs `realpathSync.native` over every file
+    // it finds while `workspaceRoot` stays exactly the string handed in, so the
+    // moment the two disagree `toWorkspaceRelative` gives up and emits an
+    // ESCAPING path. On the two macos-14 legs `os.tmpdir()` is `/var/folders/...`
+    // for a real `/private/var/folders/...`, so every fixture's source_uri and
+    // patch id there was `../../../private/var/...` rather than `src/m000.ts` --
+    // a materially different payload on a third of the matrix, and a trap for
+    // the first assertion that ever touches a uri. Windows junctions do it too.
+    // `ingest-discovery.test.ts:105` already carries this fix and its reason.
+    home = realpathSync(mkdtempSync(join(tmpdir(), "ix-ingest-home-")));
+    repo = realpathSync(mkdtempSync(join(tmpdir(), "ix-ingest-repo-")));
     backend = new FakeBackend();
     const endpoint = await backend.start();
 
@@ -225,6 +273,10 @@ describe("ingestFiles against a fake backend", () => {
   });
 
   afterEach(async () => {
+    // Every request the run made was one this fake actually implements. If the
+    // ingest path grows an endpoint, this fails once with its name, rather than
+    // ten tests passing against a fake that agreed with everything.
+    expect(backend.unknownPaths, "endpoints the fake does not implement").toEqual([]);
     await backend.stop();
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) delete process.env[k];
@@ -310,8 +362,18 @@ describe("ingestFiles against a fake backend", () => {
     // on a run with commit errors, the next map reproduces it exactly.
     fixture(30);
     backend.poison = [
-      "m000.ts", "m001.ts", "m002.ts", "m003.ts", "m004.ts", "m005.ts",
-      "m024.ts", "m025.ts", "m026.ts", "m027.ts", "m028.ts", "m029.ts",
+      "m000.ts",
+      "m001.ts",
+      "m002.ts",
+      "m003.ts",
+      "m004.ts",
+      "m005.ts",
+      "m024.ts",
+      "m025.ts",
+      "m026.ts",
+      "m027.ts",
+      "m028.ts",
+      "m029.ts",
     ];
     // The premise, checked rather than assumed: poison first and last.
     const order = discoveryOrder();
@@ -324,7 +386,7 @@ describe("ingestFiles against a fake backend", () => {
     expect(summary.patchesApplied, "every file between the clusters").toBe(18);
   });
 
-  it("bounds a bulk 409 that names every patch as already landed", async () => {
+  it("pins the unbounded replay of a 409 that names every patch as landed", async () => {
     // Those patches are confirmed in the graph by the server's own body, so
     // re-sending them is bookkeeping -- but nothing bounded it: the full-landed
     // branch returns before its shouldStop check, so the whole chunk went out
