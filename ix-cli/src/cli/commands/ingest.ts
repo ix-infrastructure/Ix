@@ -2451,12 +2451,12 @@ export async function ingestFiles(
     // Neither prints a human Note or a `--silent` token: `incomplete` would
     // appear on nearly every incremental map, and a run with errors has already
     // said so, loudly, in the lines above.
-    if (stitchEnabled && !ingestCompletedCleanly(parseErrors, commitErrors)) {
-      stitchSkippedRule = "run-errors";
-      stitchSkipped =
-        "this run had parse or commit errors, so its registration would be built from " +
-        "an incomplete picture of the repo";
-    } else if (stitchEnabled && crashedParses() > 0) {
+    // `lost-parses` FIRST. It is the only one of the three that prints, and a
+    // dead pool also raises `parseErrors`, so testing `run-errors` first meant a
+    // `--force` run with one patch-build failure and four thousand lost files
+    // reported the one and said nothing about the rest -- suppressing the very
+    // Note this rule was added to show.
+    if (stitchEnabled && crashedParses() > 0) {
       // Its OWN rule, and one that IS printed. `incomplete` is silent because
       // it fires on nearly every incremental map -- but on a `--force` run
       // nothing is skipped as unchanged, so `incomplete` there could only ever
@@ -2466,6 +2466,11 @@ export async function ingestFiles(
       stitchSkipped =
         `a parse worker crashed and ${crashedParses()} file(s) went unparsed, so the ` +
         "cross-workspace registration would be missing them";
+    } else if (stitchEnabled && !ingestCompletedCleanly(parseErrors, commitErrors)) {
+      stitchSkippedRule = "run-errors";
+      stitchSkipped =
+        "this run had parse or commit errors, so its registration would be built from " +
+        "an incomplete picture of the repo";
     } else if (stitchEnabled && !registrationIsComplete) {
       // `stitchFiles.length > 0` is deliberately NOT required on any of these
       // three. A map where nothing changed parses nothing, so `stitchFiles` is
@@ -2622,7 +2627,15 @@ export async function ingestFiles(
   const summary: IngestFilesSummary = {
     filesDiscovered,
     patchesApplied,
-    parseErrors,
+    // `+ crashedParses()`, as the baseline and delete guards already do. Files
+    // lost to a dead parse pool raise `filesSkippedUnparsed`, never
+    // `parseErrors`, so without this everything downstream read the run as
+    // clean: `describeDroppedFiles` stayed silent, and the completed-map checks
+    // blamed the backend "after a clean local ingest" and cleared the map
+    // baseline. On a co-ingest workspace the `lost-parses` channel is off too
+    // (`stitchEnabled` is false there), so the run exited 0 with no signal
+    // anywhere at all.
+    parseErrors: parseErrors + crashedParses(),
     commitErrors,
     stitchErrors,
     stitchSkipped,
