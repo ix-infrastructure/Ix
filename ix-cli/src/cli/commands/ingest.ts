@@ -538,14 +538,14 @@ export function planDeletedFileRecovery(
 
 /** Lock contention, as opposed to the transport failures below. Kept separate
   * only so each group's reason for being retryable stays readable. */
-const COMMIT_LOCK_CONFLICT_PATTERNS = [
+const COMMIT_CONFLICT_RETRY_PATTERNS = [
+  // ArangoDB lock conflicts. These were briefly split into their own constant
+  // so `commitFailureIndictsBackend` could exclude them; that exclusion was
+  // reverted in round 3 -- it made the cutoff inert in a real saturation mode --
+  // and the split had no consumer left, so it is inlined.
   'write-write conflict',
   'timeout waiting to lock key',
   'error: 1200',
-];
-
-const COMMIT_CONFLICT_RETRY_PATTERNS = [
-  ...COMMIT_LOCK_CONFLICT_PATTERNS,
   // Transport-level failures (k8s ingress reset, socket drop under load).
   //
   // These are retried because the request usually never reached the server --
@@ -1009,11 +1009,20 @@ export function describeCommitOutcome(
       // IX_MAP_DEADLINE_MS can spend it before the first commit is even
       // attempted -- and there raising it is exactly the fix. Both readings
       // are live from here, so name both rather than assert the wrong one.
+      // The cutoff's share is named here too. This is the LIKELIEST shape for a
+      // dead backend, not a corner: nothing lands, so telling the user all N
+      // were abandoned by the clock -- and to lengthen the budget -- is the
+      // wrong remedy for the ones deliberately never sent, and contradicts the
+      // banner directly above, which has just named the split.
+      const withheld =
+        cutoffSkipped > 0
+          ? `${commitErrors - cutoffSkipped} file patches were abandoned when the map deadline fired and ` +
+            `${cutoffSkipped} more were withheld by the commit cutoff, and none landed first`
+          : `all ${commitErrors} file patches were abandoned when the map deadline fired, and none landed first`;
       return {
         kind: "fatal",
         message:
-          `Ingest ran out of time without committing anything: all ${commitErrors} file patches were ` +
-          `abandoned when the map deadline fired, and none landed first. Either the budget ran out ` +
+          `Ingest ran out of time without committing anything: ${withheld}. Either the budget ran out ` +
           `before the commits did (raise IX_MAP_DEADLINE_MS or map a smaller path), or the backend ` +
           `is not accepting writes — an ArangoDB that cannot begin a transaction is still reachable ` +
           `and still consistent, so \`ix doctor\` passes. \`docker stats\` and ` +
@@ -2035,6 +2044,17 @@ export async function ingestFiles(
                 const landed = chunk.filter(item => landedIds.has(item.patch.patchId));
                 if (landed.length > 0) {
                   patchesApplied += landed.length;
+                  // ...and through `onCommitted`, like every other "these
+                  // landed" path. The deletion batch is the one caller that
+                  // supplies it, and it uses it to write `durableDeletedFiles`:
+                  // a deletion patch whose reconcile found nothing to remove
+                  // carries no delete op, so it rides the bulk path, can be held
+                  // by the cutoff, and can be 409-confirmed here -- counted
+                  // applied but never recorded in the deleted-files baseline.
+                  // `latestRev` rather than a rev of its own: the server holds
+                  // these already, so their rev is at or below it, and
+                  // `saveIngestBaseline` floors what it stores anyway.
+                  for (const item of landed) opts?.onCommitted?.(item, latestRev);
                   // NOT `patchesTheBackendTook`. That counter's whole reason for
                   // existing is to keep 409-sourced counts from reopening a gate
                   // closed against a dead backend -- "counted only where a
@@ -2073,7 +2093,15 @@ export async function ingestFiles(
               // is a different group id, so one more request settles it where
               // 497 serialized commits behind the global mutex would otherwise
               // be the Ix#495 amplification this probe exists to prevent.
-              commitBreaker.recordSuccess();
+              //
+              // Deliberately NOT `recordSuccess()`. A 409 naming ids the server
+              // already holds is not evidence it can take a NEW write -- that is
+              // the same reasoning that keeps those ids out of
+              // `patchesTheBackendTook` twenty lines above, and calling both
+              // would have made the two contradict each other. A backend that
+              // can read but cannot begin a write transaction answers exactly
+              // this way on a re-run, and un-tripping the run-wide cutoff there
+              // hands the next batch's failing bulk back to the fan-out.
               probeQueue = [...unconfirmed, ...rest];
             } else {
               for (const item of unconfirmed) stillToSend.push(item);
