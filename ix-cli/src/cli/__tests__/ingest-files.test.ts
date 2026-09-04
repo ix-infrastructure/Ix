@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 
 import { ingestFiles } from "../commands/ingest.js";
 
@@ -52,6 +53,16 @@ class FakeBackend {
   refuseEverything = false;
   /** Milliseconds to sit on each commit before answering. */
   commitDelayMs = 0;
+  /** Refuse re-sends of patches a 409 already confirmed. */
+  refuseReplays = false;
+  /** Fired after `abortAfterCommits` commit requests, if set. */
+  abortAfterCommits: number | undefined;
+  private readonly aborter = new AbortController();
+
+  /** A run deadline that fires at a known POINT IN THE COMMIT SEQUENCE. */
+  get deadlineSignal(): AbortSignal {
+    return this.aborter.signal;
+  }
   /** Answer a bulk with 409 naming every patch as already committed. */
   bulk409AllLanded = false;
   /** Status for POST /v1/stitch. */
@@ -75,9 +86,15 @@ class FakeBackend {
 
   async start(): Promise<string> {
     this.server = createServer((req, res) => {
-      let body = "";
-      req.on("data", c => (body += c));
-      req.on("end", () => this.route(req.url ?? "/", body, res));
+      // Collect and concat, rather than `body += chunk`. Appending a Buffer to
+      // a string decodes each TCP chunk on its own, so a multi-byte character
+      // split across a chunk boundary is corrupted -- and a bulk body for
+      // thirty patches is comfortably big enough to be split. Latent while the
+      // fixtures are ASCII; the first non-ASCII one would make `JSON.parse`
+      // throw and silently route the request down a different branch.
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => this.route(req.url ?? "/", Buffer.concat(chunks).toString("utf8"), res));
     });
     await new Promise<void>(resolve => this.server!.listen(0, "127.0.0.1", resolve));
     return `http://127.0.0.1:${(this.server!.address() as AddressInfo).port}`;
@@ -103,7 +120,13 @@ class FakeBackend {
         /* a body we cannot read is still a request */
       }
       this.requests.push({ path, patches: patches.length });
+      if (this.abortAfterCommits !== undefined && this.commitCount >= this.abortAfterCommits) {
+        this.aborter.abort();
+      }
 
+      if (path === "/v1/patch" && this.refuseReplays) {
+        return send(500, { error: "500: already committed" });
+      }
       if (path === "/v1/patches/bulk" && this.bulk409AllLanded) {
         const ids = patches.map(p => p.patchId).filter(Boolean);
         return send(409, { error: "bulk group partially committed", committed_patch_ids: ids });
@@ -137,13 +160,32 @@ describe("ingestFiles against a fake backend", () => {
   let backend: FakeBackend;
   const saved: Record<string, string | undefined> = {};
 
-  /** Write `count` trivially-parseable TypeScript files. */
+  /**
+   * Write `count` trivially-parseable TypeScript files, in a KNOWN order.
+   *
+   * The `git init` + `git add` is load-bearing, not decoration. Discovery
+   * prefers `git ls-files`, which sorts; with no repo it falls back to
+   * `walkFiles`, which yields raw `readdirSync` order -- lexicographic on NTFS,
+   * hash order on ext4 and APFS. The fixtures below are named for WHERE the
+   * poison sits, and off Windows they would have quietly degenerated into the
+   * scattered case on two of the five CI legs. The both-ends shape is the only
+   * one that reproduces the drain's first-empty-pass bug, so losing it there
+   * would have left that mutation uncaught precisely where nobody runs the
+   * suite by hand.
+   */
   function fixture(count: number): void {
     mkdirSync(join(repo, "src"), { recursive: true });
     for (let i = 0; i < count; i++) {
       const name = `m${String(i).padStart(3, "0")}.ts`;
       writeFileSync(join(repo, "src", name), `export function f${i}(): number { return ${i}; }\n`, "utf8");
     }
+    execFileSync("git", ["init", "-q"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+  }
+
+  /** The order discovery will actually walk — asserted, never assumed. */
+  function discoveryOrder(): string[] {
+    return execFileSync("git", ["ls-files"], { cwd: repo, encoding: "utf8" }).split("\n").filter(Boolean);
   }
 
   beforeEach(async () => {
@@ -155,8 +197,26 @@ describe("ingestFiles against a fake backend", () => {
     // HOME *and* USERPROFILE: `os.homedir()` reads the latter on Windows, so
     // redirecting only HOME leaves the run writing its mtime cache and
     // baselines into the developer's real ~/.ix.
-    for (const k of ["HOME", "USERPROFILE", "IX_ENDPOINT", "IX_LOCK_DIR", "IX_COMMIT_FAILURE_LIMIT"]) {
+    // Saved AND cleared. Recording them was not enough: every one of these is
+    // read straight from the environment, so a developer who has exported
+    // `IX_COMMIT_FAILURE_LIMIT=0` -- the value the CLI's own failure banner
+    // tells users to set -- turns the cutoff off and makes the bounded-request
+    // assertions meaningless, and `IX_COMMIT_HTTP_MAX_FILES=1` breaks the
+    // one-bulk assertion outright.
+    for (const k of [
+      "HOME",
+      "USERPROFILE",
+      "IX_ENDPOINT",
+      "IX_LOCK_DIR",
+      "IX_COMMIT_FAILURE_LIMIT",
+      "IX_COMMIT_HTTP_MAX_FILES",
+      "IX_COMMIT_CONCURRENCY",
+      "IX_STITCH_COOLDOWN_MS",
+      "IX_STITCH_WAIT_MS",
+      "IX_MAP_DEADLINE_MS",
+    ]) {
       saved[k] = process.env[k];
+      delete process.env[k];
     }
     process.env.HOME = home;
     process.env.USERPROFILE = home;
@@ -229,6 +289,7 @@ describe("ingestFiles against a fake backend", () => {
     // from a single empty pass.
     fixture(30);
     backend.poison = ["m000.ts", "m001.ts", "m002.ts", "m003.ts", "m004.ts", "m005.ts"];
+    expect(discoveryOrder()[0], "the poison must actually come first").toContain("m000.ts");
 
     const summary = await run();
 
@@ -252,6 +313,10 @@ describe("ingestFiles against a fake backend", () => {
       "m000.ts", "m001.ts", "m002.ts", "m003.ts", "m004.ts", "m005.ts",
       "m024.ts", "m025.ts", "m026.ts", "m027.ts", "m028.ts", "m029.ts",
     ];
+    // The premise, checked rather than assumed: poison first and last.
+    const order = discoveryOrder();
+    expect(order[0]).toContain("m000.ts");
+    expect(order[order.length - 1]).toContain("m029.ts");
 
     const summary = await run();
 
@@ -274,13 +339,34 @@ describe("ingestFiles against a fake backend", () => {
 
     // PINNED, not endorsed. On a HEALTHY backend the replay re-sends all 30 one
     // at a time even though the 409 body already named them as landed -- the
-    // Ix#495 shape, and provably unnecessary work. The bound added for Ix#560
-    // only engages when the replays FAIL, which is the case that could run away
-    // unstopped. Skipping them outright needs a revision for `onCommitted`,
-    // which the 409 does not carry, so it is left as a known residue rather
-    // than guessed at. This number failing is the signal that someone changed
-    // it deliberately.
+    // Ix#495 shape, and provably unnecessary work. Skipping them outright needs
+    // a revision for `onCommitted` that the 409 does not carry, so it is left
+    // as a known residue rather than guessed at. This number failing is the
+    // signal that someone changed it deliberately.
     expect(backend.singleCount, "known residue: one re-send per confirmed patch").toBe(30);
+  });
+
+  it("bounds the replay, and counts it applied, when the re-sends fail too", async () => {
+    // The case that could actually run away, and the one the previous test
+    // cannot distinguish: there the healthy backend accepts every re-send, so
+    // `patchesApplied` reaches 30 whether or not the 409's ids are credited.
+    // Here every re-send is refused.
+    //
+    // Two things have to hold. The patches are still APPLIED -- the server's
+    // own 409 said it holds them, so counting a failed re-send as a commit
+    // error would report writes the graph has as missing and suppress the mtime
+    // baseline over them. And the replay has to STOP: the full-landed branch
+    // returns before its `shouldStop` check, so nothing else bounds it, and it
+    // would otherwise send all 30 one at a time behind the global mutex.
+    fixture(30);
+    backend.bulk409AllLanded = true;
+    backend.refuseReplays = true;
+
+    const summary = await run();
+
+    expect(summary.commitErrors, "confirmed landed, so not errors").toBe(0);
+    expect(summary.patchesApplied).toBe(30);
+    expect(backend.singleCount, "bounded by the failure limit, not one per patch").toBeLessThan(15);
   });
 
   it("refuses a second stitch to a backend still running the last one (Ix#568)", async () => {
@@ -323,11 +409,18 @@ describe("ingestFiles against a fake backend", () => {
     // The cutoff and the run deadline both abandon patches, and three separate
     // review rounds found them attributed to each other -- the run telling the
     // user to raise IX_MAP_DEADLINE_MS for patches the cutoff had deliberately
-    // withheld from a refusing backend, or the reverse. They are tracked in
-    // separate lists precisely so this message can be right.
+    // withheld, or the reverse. They are tracked in separate lists precisely so
+    // this message can be right.
+    //
+    // The deadline is fired by the BACKEND, after a known number of commit
+    // requests, rather than by a wall-clock timeout. A timeout here measured
+    // discovery and parsing, not the commit phase -- on this machine the first
+    // commit did not land for ~700ms, so a 420ms budget never reached the code
+    // under test at all, and on a faster machine the same test would have
+    // asserted the opposite branch.
     fixture(30);
     backend.refuseEverything = true;
-    backend.commitDelayMs = 40;
+    backend.abortAfterCommits = 3;
 
     const message = await (async () => {
       try {
@@ -336,10 +429,7 @@ describe("ingestFiles against a fake backend", () => {
           force: true,
           suppressOutput: true,
           printSummary: false,
-          // Long enough for the cutoff to trip FIRST -- a bulk plus five
-          // per-file failures at 40ms each -- so the run has losses of both
-          // kinds and the message has to keep them apart.
-          deadlineSignal: AbortSignal.timeout(420),
+          deadlineSignal: backend.deadlineSignal,
         });
         return "";
       } catch (err) {
@@ -347,20 +437,16 @@ describe("ingestFiles against a fake backend", () => {
       }
     })();
 
+    // Exactly three requests reached the backend, so the abort landed where it
+    // was aimed and the rest were stopped before they left.
+    expect(backend.commitCount).toBe(3);
     // The clock's losses are reported as the clock's, and every patch is
     // accounted for. An earlier revision reported them as the cutoff's --
     // "sending them one at a time would have added load to a backend that is
     // already the reason they fail" -- for patches the cutoff never touched.
     expect(message).toContain("ran out of time");
     expect(message).toContain("30 file patches");
-    // Here the clock diverted everything before the cutoff could withhold any,
-    // so the split clause must NOT appear: a zero share is not mentioned rather
-    // than mentioned as zero. The non-zero split is pinned by the unit tests in
-    // ingest-commit-outcome.test.ts, which can construct it directly.
-    expect(message).not.toContain("withheld by the commit cutoff");
     expect(message).not.toContain("added load");
-
-
   });
 
   it("commits a healthy repo in one bulk, with no per-file fan-out", async () => {
