@@ -23,7 +23,16 @@ export class ParsePool {
   private queue: Task[] = [];
   private active = new Map<Worker, Task>();
 
-  constructor(private workerPath: string, private concurrency: number) {}
+  /**
+   * @param graceMs How long an UNRESPONSIVE IDLE worker gets before it is
+   *   terminated. Injectable only so the tests can pin the behaviour without
+   *   spending the real grace period; `ingestFiles` uses the default.
+   */
+  constructor(
+    private workerPath: string,
+    private concurrency: number,
+    private graceMs: number = ParsePool.SHUTDOWN_GRACE_MS,
+  ) {}
 
   init(): void {
     for (let i = 0; i < this.concurrency; i++) {
@@ -74,19 +83,24 @@ export class ParsePool {
     // is the identical hang this file has already produced three times, and one
     // line closes it.
     this.dead = true;
-    await Promise.all(this.workers.map(w => ParsePool.shutdown(w)));
+    await Promise.all(this.workers.map(w => this.shutdown(w)));
     this.workers = [];
     this.idle = [];
   }
 
   /**
-   * How long a HEALTHY worker gets to end itself before it is terminated.
+   * How long an IDLE worker gets to answer before it is terminated.
    *
-   * Only ever paid by one that is wedged. A responsive worker closes its port
-   * and emits 'exit' in about a millisecond, and `shutdown` resolves on that
-   * event, so the common path does not wait. Public because the test that pins
-   * the fallback has to derive its bound from this rather than restate it:
-   * tuning the grace down should not fail a test about waiting-then-returning.
+   * Only ever paid by one whose JS event loop is wedged. A responsive worker
+   * closes its port and emits 'exit' in about a millisecond, and `shutdown`
+   * resolves on that event, so the common path does not wait. Public because
+   * the test that pins the fallback derives its bound from this rather than
+   * restating it: tuning the grace should not fail a test about
+   * waiting-then-returning.
+   *
+   * It does NOT bound teardown for a worker that is mid-parse -- see
+   * `shutdown`, which does not terminate a busy worker at all, because nothing
+   * can cut a native call short.
    */
   static readonly SHUTDOWN_GRACE_MS = 2000;
 
@@ -120,12 +134,26 @@ export class ParsePool {
    * `ix map` in roughly twelve exiting 139 with every patch committed and the
    * summary already printed -- invisible unless something reads the status.
    *
-   * The fallback matters as much as the fix: a worker stuck in a long native
-   * parse never gets round to its message loop, and without the timeout
-   * `destroy()` would wait on it forever, which is the CLI hang this file has
-   * already produced three times.
+   * What the grace period bounds, precisely: the wait for a reply from a
+   * worker that is IDLE and does not answer -- one whose JS event loop is
+   * wedged. It does not bound teardown in general, and an earlier revision of
+   * this comment claimed it did.
+   *
+   * A BUSY worker is never terminated, because terminating it buys nothing.
+   * `terminate()` cannot cut short a native call: V8 raises a termination
+   * interrupt that is only checked at JS boundaries, and a tree-sitter parse
+   * does not reach one until it returns. Measured on Node 26 -- against
+   * CPU-bound native work, `terminate()` resolved after 3981ms, i.e. when the
+   * call finished on its own. So terminating a mid-parse worker would wait
+   * exactly as long as asking does, and add back the segfault this whole
+   * change exists to remove, on a thread that was about to answer anyway. The
+   * queued `__shutdown` is handled the moment the parse returns.
+   *
+   * The consequence, stated rather than hidden: teardown is bounded by the
+   * longest in-flight parse, and always was -- `main`'s bare `terminate()` had
+   * the same floor. Nothing here can do better than the addon allows.
    */
-  private static shutdown(w: Worker, graceMs = ParsePool.SHUTDOWN_GRACE_MS): Promise<void> {
+  private shutdown(w: Worker, graceMs = this.graceMs): Promise<void> {
     // A worker that has already gone: settle NOW, synchronously.
     //
     // Checked rather than inferred from a failed post. An earlier revision
@@ -146,9 +174,20 @@ export class ParsePool {
         resolve();
       };
       const timer = setTimeout(() => {
-        // It would not go. Terminating a wedged worker can still crash, but a
-        // hung CLI is certain and this is not, and it is bounded either way.
-        w.terminate().catch(() => {}).finally(done);
+        if (this.active.has(w)) {
+          // Mid-parse, so it has simply not reached its message loop yet. Keep
+          // waiting: it will handle the queued `__shutdown` as soon as the
+          // parse returns, and terminating it now would cost the same time
+          // while risking the crash. Deliberately leaves this promise pending
+          // on 'exit' -- see the note above about what is and is not bounded.
+          return;
+        }
+        // Idle and still not answering: its event loop is wedged, and only
+        // `terminate()` will free it. That can still crash the process, but a
+        // hung CLI is certain and this is not.
+        w.terminate()
+          .catch(() => {})
+          .finally(done);
       }, graceMs);
       // `unref` so a pool that is torn down early cannot hold the process open
       // for the whole grace period after everything else has finished.
@@ -268,7 +307,7 @@ export class ParsePool {
     // period if it will not go. On the 'exit' arm the thread is already gone,
     // which `shutdown` detects from `threadId` and settles at once, so that
     // path costs nothing and holds no timer.
-    ParsePool.shutdown(w, ParsePool.FAULTED_GRACE_MS).catch(() => {});
+    this.shutdown(w, ParsePool.FAULTED_GRACE_MS).catch(() => {});
     this.workers.splice(idx, 1);
     // ...and out of `idle` too, ALWAYS, cap or no cap. A worker can emit 'error'
     // while it is IDLE -- an uncaught async throw, or ERR_WORKER_OUT_OF_MEMORY

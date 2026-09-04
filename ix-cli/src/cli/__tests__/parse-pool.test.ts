@@ -209,10 +209,11 @@ describe("ParsePool", () => {
     expect(existsSync(marker), "destroy() must ask, not terminate").toBe(true);
   });
 
-  it("still terminates, and still returns, when a worker ignores the request", async () => {
-    // The fallback is as load-bearing as the fix. A worker wedged in a long
-    // native parse never reaches its message loop, and waiting on it forever is
-    // the exact CLI hang the three tests above exist for. Bounded, then killed.
+  it("still terminates, and still returns, when an IDLE worker ignores the request", async () => {
+    // The fallback, for the case it is actually for: a worker sitting in its
+    // event loop that simply will not answer. Only `terminate()` frees that,
+    // and waiting on it forever is the CLI hang the three tests above exist
+    // for. The busy case is the NEXT test, and is deliberately different.
     const path = worker(
       "stubborn",
       `
@@ -237,6 +238,58 @@ describe("ParsePool", () => {
     // and the failure is a suite timeout with no explanation attached.
     expect(elapsed).toBeLessThan(ParsePool.SHUTDOWN_GRACE_MS * 4);
   }, 15000);
+
+  it("waits for a worker that is mid-parse instead of terminating it", async () => {
+    // The rule the previous test cannot check, because its fixture wedges in
+    // JAVASCRIPT and `terminate()` kills that instantly. A real parse blocks
+    // inside the addon, where a V8 termination interrupt has no JS boundary to
+    // fire at, so `terminate()` waits for the call to return anyway -- measured
+    // at 3981ms against 4s of CPU-bound native work on Node 26. Terminating a
+    // busy worker therefore costs exactly as much as asking does and adds back
+    // the segfault, on a thread that was about to answer.
+    //
+    // `pbkdf2Sync` stands in for a long parse: same shape, no tree-sitter
+    // needed. The grace is 200ms and the work is ~1.3s, so the margin holds
+    // even on a machine several times faster than this one.
+    const marker = join(dir, "finished-its-parse");
+    const path = worker(
+      "busy",
+      `
+      import { parentPort } from 'node:worker_threads';
+      import { writeFileSync } from 'node:fs';
+      import { pbkdf2Sync } from 'node:crypto';
+      parentPort.on('message', (msg) => {
+        if (msg && msg.__shutdown) {
+          writeFileSync(${JSON.stringify(marker)}, 'graceful', 'utf8');
+          parentPort.close();
+          return;
+        }
+        pbkdf2Sync('p', 's', 4000000, 64, 'sha512');
+        parentPort.postMessage({ ok: true, result: { filePath: msg.filePath } });
+      });
+    `,
+    );
+
+    const pool = new ParsePool(path, 1, 200);
+    pool.init();
+
+    // Do NOT await: destroy() has to run while the parse is still in flight.
+    const parsing = pool.parse("slow.ts", "x");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    const started = Date.now();
+    await pool.destroy();
+    const elapsed = Date.now() - started;
+
+    // It outlasted the grace rather than terminating at it...
+    expect(elapsed).toBeGreaterThan(250);
+    // ...the parse it was in the middle of still returned its result...
+    await expect(parsing).resolves.toEqual({ filePath: "slow.ts" });
+    // ...and the worker went by ANSWERING, which is the whole point: under the
+    // old rule it was terminated mid-native-call, which is the segfault.
+    expect(existsSync(marker), "a busy worker must be asked, never terminated").toBe(true);
+    expect(pool.crashedTasks(), "waiting for a parse is not a crash").toBe(0);
+  }, 20000);
 
   it("shuts the REAL parse worker down through the same protocol", async () => {
     // The one test that binds the two packages. `ix-cli` does not depend on
