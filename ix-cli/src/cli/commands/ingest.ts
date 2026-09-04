@@ -1526,7 +1526,12 @@ export async function ingestFiles(
     for (let i = 0; i < targets.length; i += PRESCAN_PARSE_CHUNK) {
       const chunk = targets.slice(i, i + PRESCAN_PARSE_CHUNK);
       const parsed = await Promise.all(
-        chunk.map(fp => ensureParsePool().parse(fp, relSources.get(fp)!).catch(() => null)),
+        // `false`: this prescan is best-effort by construction -- the caller
+        // drops nulls, and every file here is read and parsed again by the
+        // streaming loop below. A loss here is not a file the RUN lost, and
+        // counting it as one refused the stitch and withheld the baseline over
+        // files that were all present.
+        chunk.map(fp => ensureParsePool().parse(fp, relSources.get(fp)!, false).catch(() => null)),
       );
       for (let j = 0; j < chunk.length; j++) {
         if (parsed[j]) preParsed.set(chunk[j], parsed[j]);
@@ -3364,6 +3369,12 @@ export async function ingestFiles(
     process.exitCode = 1;
   } else if (
     stitchSkipped !== undefined &&
+    // Not on `--silent`. `ix map` always passes `suppressOutput`, and that
+    // surface is deliberately one terse line per run -- which is the stated
+    // reason `incomplete` is filtered out of its token. A ~250-character Note
+    // on every map for the whole 15-minute cooldown is the repetition the short
+    // form exists to avoid; the token still carries the rule.
+    opts.suppressOutput !== true &&
     // The guard's refusals only. `incomplete` would print on nearly every
     // incremental map, and `run-errors` restates lines the run has already
     // printed; both are still on the machine surfaces.
@@ -3414,7 +3425,7 @@ export async function ingestFiles(
       // `minifiedLikely` and `unparsed` are the buckets that are subsets of
       // `filesSkipped`; `parseError` and `tooLarge` are counted separately and
       // always were.
-      skipReasons: { unchanged: filesSkippedAsUnchanged, emptyFile: filesSkippedAsEmpty, parseError: parseErrors, unparsed: filesSkippedUnparsed, tooLarge, minifiedLikely, outsideRoot },
+      skipReasons: { unchanged: filesSkippedAsUnchanged, emptyFile: filesSkippedAsEmpty, parseError: parseErrors + crashedParses(), unparsed: filesSkippedUnparsed, tooLarge, minifiedLikely, outsideRoot },
       commitErrors,
       stitchErrors,
       // Ix#568. Present only when the stitch was refused before it was sent, so
@@ -3448,7 +3459,13 @@ export async function ingestFiles(
     // counter for the stitch gate (Ix#568) made the old label demonstrably
     // wrong on a repo with an empty __init__.py and --force.
     if (filesSkipped > 0) console.log(`  ${chalk.dim('skipped:')} ${filesSkipped}`);
-    if (parseErrors > 0) console.log(`  ${chalk.red('parse errors:')}      ${parseErrors}`);
+    // `+ crashedParses()`, matching the summary field. On a co-ingest workspace
+    // `stitchEnabled` is false, so the `lost-parses` Note never fires and
+    // `describeDroppedFiles` is only wired into `ix map` -- which left
+    // `ix ingest` on such a workspace printing "skipped: 4000", no parse-error
+    // line at all, and exiting 0 after losing its whole parse pool.
+    const parseErrorsShown = parseErrors + crashedParses();
+    if (parseErrorsShown > 0) console.log(`  ${chalk.red('parse errors:')}      ${parseErrorsShown}`);
     if (commitErrors > 0) console.log(`  ${chalk.red('commit errors:')}     ${commitErrors}`);
     if (tooLarge > 0) console.log(`  ${chalk.dim('skipped too large:')} ${tooLarge}`);
     if (minifiedLikely > 0) console.log(`  ${chalk.dim('skipped minified:')} ${minifiedLikely}`);

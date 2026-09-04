@@ -13,6 +13,8 @@ type Task = {
   filePath: string;
   source: string;
   resolve: (result: unknown) => void;
+  /** Does losing this one mean the RUN lost a file? See `parse`. */
+  counts: boolean;
 };
 
 export class ParsePool {
@@ -29,7 +31,19 @@ export class ParsePool {
     }
   }
 
-  parse(filePath: string, source: string): Promise<unknown> {
+  /**
+   * @param countLoss Whether losing this task means the run lost a file.
+   *
+   * False for the index prescan, which dispatches through this same pool and
+   * whose caller drops nulls on the floor: those files are read and parsed
+   * again in the streaming loop and land in the graph regardless. Counting them
+   * made one transient prescan crash report `lost-parses`, refuse the stitch,
+   * withhold the mtime baseline (so every later map re-read the whole repo) and
+   * skip the post-migration delete -- for files that were all present. And
+   * because most extensions are prescanned AND parsed, a dead pool could count
+   * the same file twice and report more losses than the run discovered files.
+   */
+  parse(filePath: string, source: string, countLoss = true): Promise<unknown> {
     // A pool with no workers left cannot ever run this, so resolve it here
     // rather than enqueue it. Draining only the queue that existed at the
     // moment the last worker died left every LATER `parse()` waiting on a
@@ -37,11 +51,11 @@ export class ParsePool {
     // settled and the `Promise.all` over the next chunk hung the ingest, which
     // is the same failure this file has now produced three different ways.
     if (this.dead) {
-      this.crashed++;
+      if (countLoss) this.crashed++;
       return Promise.resolve(null);
     }
     return new Promise((resolve) => {
-      this.queue.push({ filePath, source, resolve });
+      this.queue.push({ filePath, source, resolve, counts: countLoss });
       this.drain();
     });
   }
@@ -54,6 +68,12 @@ export class ParsePool {
     // CLI has no `process.exit(0)` on its success path, `ix map` printed its
     // summary and then hung forever.
     this.destroyed = true;
+    // ...and `dead`, so a `parse()` after teardown resolves instead of queueing
+    // onto a pool with no workers left to run it. Not reachable from
+    // `ingestFiles` today -- `destroy()` is in the outermost `finally` -- but it
+    // is the identical hang this file has already produced three times, and one
+    // line closes it.
+    this.dead = true;
     await Promise.all(this.workers.map(w => w.terminate()));
     this.workers = [];
     this.idle = [];
@@ -147,7 +167,7 @@ export class ParsePool {
     const task = this.active.get(w);
     if (task) {
       this.active.delete(w);
-      this.crashed++;
+      if (task.counts) this.crashed++;
       task.resolve(null); // isolate: failed file = null parse result
     }
     // Replace the crashed worker -- but not forever. A worker that dies
@@ -181,7 +201,7 @@ export class ParsePool {
       // stitch gate knows this run lost files.
       this.dead = true;
       const stranded = this.queue.splice(0, this.queue.length);
-      this.crashed += stranded.length;
+      this.crashed += stranded.filter(t => t.counts).length;
       for (const t of stranded) t.resolve(null);
       return;
     }
