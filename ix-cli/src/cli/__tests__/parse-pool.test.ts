@@ -342,10 +342,10 @@ describe("ParsePool", () => {
       `
       import { parentPort } from 'node:worker_threads';
       parentPort.on('message', () => {
-        // Busy well past the ceiling, then gone. Bounded on purpose: the pool
-        // unrefs rather than terminates now, so an endless loop here would burn
-        // a core for the rest of the file.
-        const end = Date.now() + 5000; while (Date.now() < end);
+        // Busy well past the 500ms ceiling, then gone. Bounded on purpose, and
+        // kept short: the pool unrefs rather than terminates now, so this burns
+        // a core until it returns, overlapping the tests that follow.
+        const end = Date.now() + 2000; while (Date.now() < end);
         process.exit(0);
       });
     `,
@@ -374,6 +374,42 @@ describe("ParsePool", () => {
     // And the task that worker was holding still settles, so the `Promise.all`
     // over the parse batch cannot hang either.
     await expect(wedged).resolves.toBeNull();
+  }, 20000);
+
+  it("survives an abandoned worker that throws after the pool let go", async () => {
+    // Letting go means the thread is still ALIVE, so its listeners matter.
+    // Dropping them all -- which is the obvious way to stop an abandoned worker
+    // pinning the whole `ParsePool` object graph -- leaves a live Worker with
+    // no 'error' listener, and an unhandled 'error' event is a process-level
+    // crash. A wedged parse that eventually throws would take an `ix mcp`
+    // server down with it.
+    //
+    // So the give-up path drops the pool's listeners and attaches a no-op
+    // 'error' handler that closes over nothing. Measured both ways with a
+    // worker that throws 900ms after being abandoned: without the handler 3 of
+    // 3 runs died, with it 0 of 3.
+    //
+    // The assertion below is not what guards this: survival is. Measured, so
+    // that the next reader does not have to guess at the failure shape -- with
+    // the handler removed the run exits 1 with an "Unhandled Errors: late boom"
+    // section while still printing "Tests 13 passed". Reading the Tests line
+    // alone would call that green.
+    const path = worker(
+      "late-thrower",
+      `
+      import { parentPort } from 'node:worker_threads';
+      parentPort.on('message', () => { /* never answers */ });
+      setTimeout(() => { throw new Error('late boom from an abandoned worker'); }, 400);
+    `,
+    );
+
+    const pool = new ParsePool(path, 1, 100, 300);
+    pool.init();
+    await pool.destroy();
+
+    // Outlive the throw, which lands after the pool has already let go.
+    await new Promise(resolve => setTimeout(resolve, 700));
+    expect(pool.crashedTasks(), "nothing was dispatched to it").toBe(0);
   }, 20000);
 
   it("resolves parses still queued when the pool is destroyed", async () => {
@@ -448,7 +484,9 @@ describe("ParsePool", () => {
     );
 
     // An explicit, huge ceiling. Without it this test rides the production 10s
-    // `SHUTDOWN_MAX_WAIT_MS`, and the ~1.5s KDF only has to be 6.5x slower --
+    // `SHUTDOWN_MAX_WAIT_MS`, and the KDF -- ~1.5s alone, measured at 2.5s when
+    // an abandoned fixture from an earlier test is still spinning -- only has
+    // to be a few times slower again --
     // an instrumented coverage leg, a loaded macos-14 runner -- for the pool to
     // give up first and the marker never to be written. It would then fail as
     // "a busy worker must be asked", reading as a real regression rather than a
