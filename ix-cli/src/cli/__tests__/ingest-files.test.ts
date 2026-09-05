@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -147,11 +147,20 @@ class FakeBackend {
       // and fires against a closed server.
       if (refused) return send(500, { error: "500: transaction begin timeout" });
       this.rev += patches.length || 1;
+      // `status` included, because `PatchCommitResult` declares it required and
+      // the ingest path branches on it. Serving 200s without it left
+      // `result.status` undefined everywhere, so this fake could never produce
+      // an `Idempotent` or `BaseRevMismatch` answer -- the two branches that
+      // decide whether a patch lands in `patchesApplied` or `commitErrors`, and
+      // so whether the mtime baseline is written at all. A regression that
+      // flipped the applied test from "not BaseRevMismatch" to `=== "Ok"` would
+      // have counted zero patches applied against the real backend while every
+      // test here stayed green.
       send(
         200,
         path === "/v1/patches/bulk"
-          ? { rev: this.rev, applied: patches.length }
-          : { rev: this.rev },
+          ? { rev: this.rev, applied: patches.length, status: "Ok" }
+          : { rev: this.rev, status: "Ok" },
       );
       return;
     }
@@ -178,6 +187,17 @@ class FakeBackend {
 }
 
 describe("ingestFiles against a fake backend", () => {
+  // Every test here runs a REAL ingest -- discovery, a worker-thread parse
+  // pool, and an HTTP round trip per commit -- against 30 files. On an idle
+  // machine each takes about a second, comfortably inside vitest's 5s default,
+  // which is why this file went in without an explicit timeout. Under the full
+  // suite's parallelism that is not true: measured on `main`, the Ix#560 case
+  // exceeded 5s and failed in 1 of 4 full `ix-cli` runs here, and in 3 of 3
+  // when the heavier repo-root suite was running. A timeout that fires only
+  // under load reads as a real regression on whichever CI leg was busiest, so
+  // it is set from the work these tests actually do rather than inherited.
+  vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
   let home: string;
   let repo: string;
   let backend: FakeBackend;
@@ -273,17 +293,29 @@ describe("ingestFiles against a fake backend", () => {
   });
 
   afterEach(async () => {
-    // Every request the run made was one this fake actually implements. If the
-    // ingest path grows an endpoint, this fails once with its name, rather than
-    // ten tests passing against a fake that agreed with everything.
-    expect(backend.unknownPaths, "endpoints the fake does not implement").toEqual([]);
-    await backend.stop();
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
+    try {
+      // Every request the run made was one this fake actually implements. If
+      // the ingest path grows an endpoint, this fails once with its name,
+      // rather than ten tests passing against a fake that agreed with
+      // everything.
+      expect(backend.unknownPaths, "endpoints the fake does not implement").toEqual([]);
+    } finally {
+      // In a `finally`, because the assertion above threw straight past all of
+      // this -- in exactly the case it exists for. The server stayed listening
+      // (an open handle that can stop the vitest worker exiting, turning one
+      // named failure into a job timeout), both temp trees leaked, and
+      // `HOME`/`USERPROFILE`/`IX_ENDPOINT` stayed pointed at the fixture. Worse,
+      // `saved` is shared across the describe, so the next `beforeEach`
+      // snapshotted those polluted values and the file's final restore wrote
+      // the fixture `HOME` back into the process.
+      await backend.stop();
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      rmSync(home, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
     }
-    rmSync(home, { recursive: true, force: true });
-    rmSync(repo, { recursive: true, force: true });
   });
 
   const run = () =>
