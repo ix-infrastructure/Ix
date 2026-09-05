@@ -76,11 +76,11 @@ export class ParsePool {
 
   async destroy(): Promise<void> {
     // Set FIRST. A worker that answers `__shutdown` emits 'exit', and the
-    // handler for that treats
-    // an exit as a crash and spawns a replacement. So closing the pool spun up
-    // a fresh set of threads, `this.workers = []` orphaned them, and because a
-    // worker thread refs the event loop and the CLI has no `process.exit(0)` on
-    // its success path, `ix map` printed its summary and then hung forever.
+    // handler for that treats an exit as a crash and spawns a replacement. So
+    // closing the pool spun up a fresh set of threads, `this.workers = []`
+    // orphaned them, and because a worker thread refs the event loop and the
+    // CLI has no `process.exit(0)` on its success path, `ix map` printed its
+    // summary and then hung forever.
     this.destroyed = true;
     // ...and `dead`, so a `parse()` after teardown resolves instead of queueing
     // onto a pool with no workers left to run it. Not reachable from
@@ -311,6 +311,22 @@ export class ParsePool {
         // until the process exits. Nothing for the CLI, and `ix watch` runs
         // each map as a child process, but the MCP in-process runner can
         // accumulate them.
+        //
+        // So let go of the OBJECT GRAPH too, not just the thread. Every
+        // listener `spawnWorker` attached is a closure over `this`, and
+        // `destroy()` only drops the pool's reference to the worker -- the
+        // worker still referenced the pool, so one abandoned thread pinned its
+        // whole `ParsePool`, its `Worker[]`, its `active` map and every
+        // remaining `Task` closure for the life of the process. In a long-lived
+        // `ix mcp` that is the bigger of the two leaks.
+        w.removeAllListeners('message');
+        w.removeAllListeners('exit');
+        w.removeAllListeners('error');
+        // ...but never leave a live Worker with NO 'error' listener. An
+        // unhandled 'error' event is a process-level crash, and this thread is
+        // still running -- a wedged parse that eventually throws would take the
+        // MCP server down. This handler deliberately closes over nothing.
+        w.on('error', () => {});
         w.unref();
         done();
       };
