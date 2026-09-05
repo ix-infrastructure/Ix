@@ -9,6 +9,15 @@
  */
 import { Worker } from 'node:worker_threads';
 
+/**
+ * The 'error' listener left on a worker the pool has let go of.
+ *
+ * Module level on purpose. See `shutdown`: a handler defined inside that
+ * method would capture its scope and keep the whole pool alive, defeating the
+ * listener removal it accompanies.
+ */
+const SWALLOW_ERROR = (): void => {};
+
 type Task = {
   filePath: string;
   source: string;
@@ -325,8 +334,17 @@ export class ParsePool {
         // ...but never leave a live Worker with NO 'error' listener. An
         // unhandled 'error' event is a process-level crash, and this thread is
         // still running -- a wedged parse that eventually throws would take the
-        // MCP server down. This handler deliberately closes over nothing.
-        w.on('error', () => {});
+        // MCP server down.
+        //
+        // `SWALLOW_ERROR` rather than an inline `() => {}`, and that is the
+        // whole point rather than a style preference. A function literal
+        // written HERE closes over this scope -- `this`, `w`, the task
+        // closures -- whether or not it names any of them, so attaching one
+        // would have re-pinned the exact object graph the three lines above
+        // just released, and the removals would have bought nothing.
+        // Confirmed with `--expose-gc` and a `WeakRef` on the pool: inline
+        // handler, POOL STILL RETAINED; hoisted, POOL COLLECTED.
+        w.on('error', SWALLOW_ERROR);
         w.unref();
         done();
       };

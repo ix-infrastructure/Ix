@@ -368,9 +368,14 @@ describe("ParsePool", () => {
       ),
     ]);
 
-    // It returned, by letting go of the worker once the deadline passed --
-    // long before that 5s spin finishes, which is the point.
-    expect(Date.now() - started).toBeLessThan(3000);
+    // It returned by letting go once the 500ms ceiling passed, WELL before the
+    // 2s spin finishes -- and the margin is the whole gate. An earlier revision
+    // paired a 3000ms bound with this shortened fixture, which quietly made the
+    // test vacuous: with the deadline removed, `destroy()` simply waits out the
+    // spin and returns at ~2.05s, still under 3000. Measured pass time here is
+    // ~600ms, so this bound separates "let go at the ceiling" from "waited for
+    // the worker" instead of accepting both.
+    expect(Date.now() - started).toBeLessThan(1500);
     // And the task that worker was holding still settles, so the `Promise.all`
     // over the parse batch cannot hang either.
     await expect(wedged).resolves.toBeNull();
