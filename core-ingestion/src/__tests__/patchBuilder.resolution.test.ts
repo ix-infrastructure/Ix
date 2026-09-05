@@ -473,3 +473,80 @@ function handler($obj): void { handle(); $obj->handle(); }
     expect(claims).toHaveLength(1);
   });
 });
+
+describe('colliding edge ids (#554)', () => {
+  // `resolveKey` collapses an ambiguous or unknown name to the bare name, so two
+  // distinct caller names can share one `srcKey` — while `edgeResolution` is
+  // keyed on the RAW name, so each caller still resolves its callee separately.
+  // The edge id folds the unresolved `dstKey`, so both edges mint the same id
+  // while carrying different `dst`. Before the fix `deduplicateUpsertEdges`
+  // threw on that and the caller dropped the whole file.
+  const sourceFile = '/repo/app.ts';
+
+  function buildCollidingPatch() {
+    const result = fileResult(
+      sourceFile,
+      SupportedLanguages.TypeScript,
+      [entity('run', SupportedLanguages.TypeScript, 'function', 'A')],
+      [
+        { srcName: 'run', dstName: 'helper', predicate: 'CALLS' },
+        { srcName: 'A.run', dstName: 'helper', predicate: 'CALLS' },
+      ],
+    );
+
+    // Only the 'run' spelling resolves cross-file; 'A.run' falls through to the
+    // local node. Same src, same predicate, two different destinations.
+    const resolvedEdges: ResolvedEdge[] = [
+      {
+        srcFilePath: sourceFile,
+        srcName: 'run',
+        dstFilePath: '/repo/helpers.ts',
+        dstName: 'helper',
+        dstQualifiedKey: 'helper',
+        predicate: 'CALLS',
+        confidence: 0.9,
+      },
+    ];
+
+    return buildPatchWithResolution(result, 'test-hash', '', resolvedEdges);
+  }
+
+  it('does not throw when one source key carries two resolved destinations', () => {
+    expect(() => buildCollidingPatch()).not.toThrow();
+  });
+
+  it('commits both edges under distinct ids', () => {
+    const callEdges = buildCollidingPatch().ops
+      .filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS');
+
+    expect(callEdges).toHaveLength(2);
+
+    // Same source, genuinely different destinations.
+    expect(new Set(callEdges.map((e: any) => e.src)).size).toBe(1);
+    expect(new Set(callEdges.map((e: any) => e.dst)).size).toBe(2);
+    expect(callEdges).toContainEqual(expect.objectContaining({
+      dst: nodeId('/repo/helpers.ts', 'helper'),
+    }));
+    expect(callEdges).toContainEqual(expect.objectContaining({
+      dst: nodeId(sourceFile, 'helper'),
+    }));
+
+    // The point of the fix: one id each, so neither is dropped.
+    expect(new Set(callEdges.map((e: any) => e.id)).size).toBe(2);
+  });
+
+  it('leaves ids of non-colliding edges unsalted', () => {
+    // A file with no collision must keep byte-identical ids, so the fix needs no
+    // graph migration.
+    const result = fileResult(
+      '/repo/plain.ts',
+      SupportedLanguages.TypeScript,
+      [entity('alpha', SupportedLanguages.TypeScript)],
+      [{ srcName: 'alpha', dstName: 'beta', predicate: 'CALLS' }],
+    );
+    const edge: any = buildPatchWithResolution(result, 'test-hash', '', []).ops
+      .find((op: any) => op.type === 'UpsertEdge' && op.predicate === 'CALLS');
+
+    expect(edge.id).toBe(deterministicId('/repo/plain.ts:alpha:beta:CALLS'));
+  });
+});

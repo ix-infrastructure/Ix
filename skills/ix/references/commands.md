@@ -3,6 +3,10 @@
 Use bounded, composable CLI commands — never broad queries. Run every command
 with the `ix` prefix from the repo root of the mapped workspace.
 
+This file routes a goal to a command. For the complete flag surface of any
+command — every option, its accepted values and its default — see
+[flags.md](flags.md).
+
 ## High-Level Workflow Commands (prefer first)
 
 These aggregate multiple graph operations into single bounded responses.
@@ -64,6 +68,55 @@ These aggregate multiple graph operations into single bounded responses.
 | System doctor | `ix doctor` | `ix doctor` |
 | Start backend | `ix docker start` | `ix docker start` |
 | Graph statistics | `ix stats` | `ix stats --format json` |
+
+## Session Metrics
+
+| Goal | Command | Example |
+|---|---|---|
+| Token savings so far | `ix savings` | `ix savings --format llm` |
+| Per-command breakdown | `ix savings --detail` | `ix savings --detail --format llm` |
+| Clear lifetime totals | `ix savings reset` | `ix savings reset` |
+
+`ix savings` reports how many tokens the graph saved against a naive
+read-the-files baseline, in two scopes. Neither is per-terminal: the CLI sends a
+bare `GET /v1/savings` with no session id, so the backend has nothing to
+attribute a count to one shell with. `session` is an in-memory counter the
+backend process has accumulated since it started, **shared by every client that
+talks to it**; `lifetime` is the persisted total. So a fresh shell against a
+backend that has been up all day reads that day's traffic from every other
+shell as its "session". Each scope carries the command count, `tokens_saved`,
+the `naive_tokens` / `actual_tokens` it was derived from, and money and water
+estimates.
+
+| Flag | Value | Default | Effect |
+|---|---|---|---|
+| `--detail` | — | off | Add one record per command type, within each scope |
+| `--model <model>` | `opus\|sonnet\|haiku\|gpt-4o` | `opus` | Pricing table for `money_saved` only — token and water figures do not change |
+| `--format <fmt>` | `text\|json\|llm` | `text` | See output-formats.md |
+
+`ix savings reset` clears **both** scopes (`DELETE /v1/savings`, which runs
+`session.set(empty) *> store.resetSavings`). It takes no flags, does not prompt,
+and cannot be undone — there is no way to zero one scope and keep the other,
+despite the CLI's own "Reset lifetime savings totals" description.
+
+`--format llm` emits one `savings` header record and one `scope` record per
+scope; `--detail` adds `command` records that name their scope:
+
+```
+savings model="Claude Opus ($15/MTok in, $75/MTok out)"
+scope name=session commands=726 tokens_saved=832739 naive_tokens=1099164 actual_tokens=266425 money_saved=27.48 water_saved_ml=1665.478
+command scope=session name=callers count=329 tokens_saved=334995
+command scope=session name=entity count=308 tokens_saved=423741
+scope name=lifetime commands=4820 tokens_saved=6142880 naive_tokens=8003104 actual_tokens=1860224 money_saved=202.72 water_saved_ml=12285.76
+command scope=lifetime name=callers count=2104 tokens_saved=2210488
+```
+
+`command` records are emitted inside the scope loop, so each scope's breakdown
+follows its own `scope` record rather than being grouped at the end. (Truncated
+above: a real run emits one `command` record per entry in each breakdown.)
+
+Reading a graph command's savings needs the backend up: the numbers come from
+`GET /v1/savings`, not from a local file.
 
 ## Decomposition Recipes
 

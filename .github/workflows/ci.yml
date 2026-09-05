@@ -205,6 +205,16 @@ jobs:
         working-directory: ix-cli
         run: npm run smoke
 
+      # core-ingestion has its own 358-test suite and nothing ran it until #557,
+      # by which point 6 tests had been failing for months -- three of them since
+      # #120 extracted the directory their fixtures lived in. The package is
+      # already installed and built by the ix-cli build step above, so gating it
+      # here costs one step rather than a whole job, and picks up the matrix's
+      # OS/node spread for free (the tree-sitter grammars are native).
+      - name: core-ingestion tests
+        working-directory: core-ingestion
+        run: npm test
+
       - name: Upload coverage
         if: ${{ matrix.coverage }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -265,21 +275,315 @@ jobs:
           # The converse, and the regression guard for #518: in a directory no
           # workspace covers, doctor must say so instead of passing every check
           # against whichever workspace happens to be the default.
-          echo "::group::doctor (unmapped cwd)"; (cd "$RUNNER_TEMP" && $IX doctor --format json) | tee doctor-unmapped.json; echo "::endgroup::"
+          echo "::group::doctor (unmapped cwd)"
+          set +e
+          (cd "$RUNNER_TEMP" && $IX doctor --format json) | tee doctor-unmapped.json
+          doctor_exit=${PIPESTATUS[0]}
+          set -e
+          if [ "$doctor_exit" -ne 1 ]; then echo "expected doctor to exit 1 for an unmapped cwd, got $doctor_exit"; exit 1; fi
+          echo "::endgroup::"
           node -e "const d=require('./doctor-unmapped.json');const c=(d.checks||[]).find(c=>c.name==='Workspace for this directory');if(!c){console.error('no workspace check in doctor output');process.exit(1)}if(c.ok||d.healthy){console.error('doctor reported healthy in a directory with no workspace');process.exit(1)}console.log('unmapped cwd reported:',c.detail)"
 
       - name: Backend logs on failure
         if: failure()
         run: docker compose -f docker-compose.standalone.yml logs --tail 200
 
+  # ── API-reference parity gate ────────────────────────────────────────────
+  # docs/api/openapi.yaml claims to be generated from the client source; this
+  # gate enforces it across four surfaces: endpoint parity (client calls vs
+  # openapi paths), openapi.yaml validity + $ref integrity, the schema contract
+  # (every schema must exist in types.ts or the explicit allowlist), and the
+  # README Endpoints by Area section. A client call pattern the gate cannot
+  # classify fails loudly rather than passing silently. The gate parses yaml
+  # with the `yaml` package, so ix-cli deps are installed first.
+  api-parity:
+    name: API-reference parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: ix-cli/package-lock.json
+      - name: Install (ix-cli)
+        working-directory: ix-cli
+        run: npm ci --silent
+      - name: docs/api vs client surface
+        working-directory: ix-cli
+        run: node scripts/check-api-parity.mjs
+
+  # ── Harness installer smoke ─────────────────────────────────────────────
+  # Keep this in a clean container and feed both surfaces the same tiny fixture.
+  # The real machine's PATH and home directory must not decide this test: if the
+  # fixture disappears or the helper stops consuming toolscan output, the
+  # positive/negative assertions below fail instead of silently passing.
+  #
+  # The fake claude lives at $HOME/.local/bin — deliberately NOT on PATH — and
+  # only the fake toolscan knows it, so this job exercises the seam's motivating
+  # case: presence decided by toolscan, and the off-PATH CLI invoked through
+  # the absolute path toolscan reported. If that threading regressed, inspect
+  # would ENOENT and the CLI would report a false conflict instead of
+  # would-register.
+  harness-install-smoke:
+    name: Harness install smoke
+    runs-on: ubuntu-latest
+    container: node:22-bookworm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Ix CLI dependencies
+        working-directory: ix-cli
+        run: npm ci --silent
+      - name: Build Ix CLI
+        working-directory: ix-cli
+        run: npm run build
+      - name: Exercise the skills table and shell installer
+        shell: bash
+        env:
+          HOME: /tmp/ix-harness-home
+          HARNESS_HOME: /tmp/ix-harness-home
+        run: |
+          set -euo pipefail
+          # This job runs in a container, where the github.workspace context
+          # resolves to the HOST path (/home/runner/work/...) that does not
+          # exist inside the container. Resolve fixtures against the step cwd
+          # (the checkout root) so the path is right on host and container.
+          FIXTURE="$PWD/.github/fixtures/harness-smoke"
+          test -f "$FIXTURE/claude" || { echo "fixture missing: $FIXTURE"; ls -la .github/fixtures/harness-smoke/ || true; exit 1; }
+          rm -rf "$HOME"
+          mkdir -p "$HOME/.local/bin"
+          # Installed off PATH, exactly where toolscan's extra roots matter.
+          cp "$FIXTURE/claude" "$HOME/.local/bin/claude"
+          chmod +x "$HOME/.local/bin/claude"
+          export TOOLSCAN_PATH="$FIXTURE/toolscan.mjs"
+
+          rows=$(node ix-cli/scripts/skill-harnesses.mjs --probe)
+          printf '%s\n' "$rows"
+          grep -Fq 'claude|Claude Code|claude|~/.claude|~/.claude/skills|1|toolscan' <<<"$rows"
+          grep -Fq 'codex|Codex CLI|codex|~/.codex|~/.codex/skills|0|none' <<<"$rows"
+          grep -Fq 'agents|Agents (agents.md)||~/.agents|~/.agents/skills|0|none' <<<"$rows"
+          grep -Fq 'cursor|Cursor|cursor|~/.cursor|~/.cursor/skills-cursor|0|none' <<<"$rows"
+          # Harnesses without a skills convention must not be install targets.
+          ! grep -Fq 'openclaw' <<<"$rows"
+          ! grep -Fq 'gemini' <<<"$rows"
+
+          install_out=$(bash scripts/install-skill.sh --dry-run)
+          printf '%s\n' "$install_out"
+          grep -Fq 'would install: /tmp/ix-harness-home/.claude/skills/ix' <<<"$install_out"
+          test ! -e "$HOME/.claude/skills/ix"
+
+          shell_json=$(bash scripts/install-skill.sh --dry-run --json)
+          printf '%s\n' "$shell_json"
+          node -e '
+            const r = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+            const byId = new Map(r.hosts.map((h) => [h.id, h]));
+            const claude = byId.get("claude");
+            if (claude?.action !== "would-install") throw new Error("claude not would-install in shell report");
+            if (claude?.detectedVia !== "toolscan") throw new Error("claude detection source not toolscan in shell report");
+            if (!claude?.dest.endsWith("/.claude/skills/ix")) throw new Error("claude dest wrong: " + claude?.dest);
+            for (const id of ["codex", "agents", "cursor"]) {
+              const h = byId.get(id);
+              if (h?.action !== "skip") throw new Error(id + " not skipped in shell report");
+              if (h?.detectedVia !== "none") throw new Error(id + " detection source not none in shell report");
+            }
+          ' <<<"$shell_json"
+      - name: Exercise ix mcp install dry-run against the off-PATH fixture
+        shell: bash
+        env:
+          HOME: /tmp/ix-harness-home
+        working-directory: ix-cli
+        run: |
+          set -euo pipefail
+          # Same container-path rationale as the step above: derive the fixture
+          # from the step cwd (this step runs in ix-cli) instead of the
+          # host-resolved github.workspace context.
+          FIXTURE="$(cd .. && pwd)/.github/fixtures/harness-smoke"
+          export TOOLSCAN_PATH="$FIXTURE/toolscan.mjs"
+          test -f "$TOOLSCAN_PATH" || { echo "toolscan fixture missing: $TOOLSCAN_PATH"; exit 1; }
+          # --host restricts the registry the same way the old env fixture did;
+          # an unknown id fails loudly, so a renamed host cannot pass silently.
+          node dist/cli/main.js mcp install --host claude codex openclaw --dry-run --format json | tee /tmp/mcp-install.json
+          node -e '
+            const r = require("/tmp/mcp-install.json");
+            const byId = new Map(r.hosts.map((h) => [h.id, h]));
+            // claude is NOT on PATH here — only the fake toolscan names it, and
+            // inspect must run the absolute path toolscan reported. A would-
+            // register proves the threading; a conflict would mean the seam
+            // regressed to PATH-only execution.
+            if (byId.get("claude")?.outcome !== "would-register")
+              throw new Error("claude was not detected: " + JSON.stringify(byId.get("claude")));
+            if (byId.get("claude")?.detectedVia !== "toolscan")
+              throw new Error("claude was not detected via toolscan: " + byId.get("claude")?.detectedVia);
+            if (byId.get("codex")?.outcome !== "not-installed") throw new Error("codex was detected unexpectedly");
+            if (byId.get("codex")?.detectedVia !== "none") throw new Error("codex detection source not reported");
+            if (byId.get("openclaw")?.outcome !== "not-installed") throw new Error("openclaw was detected unexpectedly");
+            if (byId.get("openclaw")?.detectedVia !== "none") throw new Error("openclaw detection source not reported");
+          '
+
+  # Windows twin of the harness smoke: the Linux job runs in a clean container,
+  # but the Windows branches of this surface — the `where` probe, the cmd-shim
+  # execution path (hosts.ts run/quoteForCmd), and install-skill.sh under Git
+  # Bash — are never executed there. This leg runs the same two batteries on a
+  # real windows-2022 runner. The fake claude is the .cmd twin (shebang scripts
+  # cannot be spawned by CreateProcess) and toolscan.mjs reports the platform
+  # twin's path; everything else is byte-for-byte the Linux assertions. No
+  # container (Linux-only), no mktemp: the hermetic HOME derives from
+  # runner.temp, the platform temp API.
+  harness-install-smoke-windows:
+    name: Harness install smoke (Windows)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: ix-cli/package-lock.json
+      - name: Install Ix CLI dependencies
+        working-directory: ix-cli
+        run: npm ci --silent
+      - name: Build Ix CLI
+        working-directory: ix-cli
+        run: npm run build
+      - name: Exercise the skills table and shell installer (Git Bash)
+        shell: bash
+        env:
+          HOME: ${{ runner.temp }}/ix-harness-home
+          HARNESS_HOME: ${{ runner.temp }}/ix-harness-home
+        run: |
+          set -euo pipefail
+          FIXTURE="$PWD/.github/fixtures/harness-smoke"
+          test -f "$FIXTURE/claude.cmd" || { echo "fixture missing: $FIXTURE"; ls -la .github/fixtures/harness-smoke/ || true; exit 1; }
+          rm -rf "$HOME"
+          mkdir -p "$HOME/.local/bin"
+          # Installed off PATH, exactly where toolscan's extra roots matter.
+          cp "$FIXTURE/claude.cmd" "$HOME/.local/bin/claude.cmd"
+          export TOOLSCAN_PATH="$FIXTURE/toolscan.mjs"
+
+          rows=$(node ix-cli/scripts/skill-harnesses.mjs --probe)
+          printf '%s\n' "$rows"
+          grep -Fq 'claude|Claude Code|claude|~/.claude|~/.claude/skills|1|toolscan' <<<"$rows"
+          grep -Fq 'codex|Codex CLI|codex|~/.codex|~/.codex/skills|0|none' <<<"$rows"
+          grep -Fq 'agents|Agents (agents.md)||~/.agents|~/.agents/skills|0|none' <<<"$rows"
+          grep -Fq 'cursor|Cursor|cursor|~/.cursor|~/.cursor/skills-cursor|0|none' <<<"$rows"
+          # Harnesses without a skills convention must not be install targets.
+          ! grep -Fq 'openclaw' <<<"$rows"
+          ! grep -Fq 'gemini' <<<"$rows"
+
+          install_out=$(bash scripts/install-skill.sh --dry-run)
+          printf '%s\n' "$install_out"
+          dest="$HOME/.claude/skills/ix"
+          grep -Fq "would install: $dest" <<<"$install_out"
+          test ! -e "$dest"
+
+          shell_json=$(bash scripts/install-skill.sh --dry-run --json)
+          printf '%s\n' "$shell_json"
+          node -e '
+            const r = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+            const byId = new Map(r.hosts.map((h) => [h.id, h]));
+            const claude = byId.get("claude");
+            if (claude?.action !== "would-install") throw new Error("claude not would-install in shell report");
+            if (claude?.detectedVia !== "toolscan") throw new Error("claude detection source not toolscan in shell report");
+            if (!claude?.dest.endsWith("/.claude/skills/ix")) throw new Error("claude dest wrong: " + claude?.dest);
+            for (const id of ["codex", "agents", "cursor"]) {
+              const h = byId.get(id);
+              if (h?.action !== "skip") throw new Error(id + " not skipped in shell report");
+              if (h?.detectedVia !== "none") throw new Error(id + " detection source not none in shell report");
+            }
+          ' <<<"$shell_json"
+      - name: Exercise ix mcp install dry-run against the off-PATH fixture (Git Bash)
+        shell: bash
+        env:
+          HOME: ${{ runner.temp }}/ix-harness-home
+        working-directory: ix-cli
+        run: |
+          set -euo pipefail
+          FIXTURE="$(cd .. && pwd)/.github/fixtures/harness-smoke"
+          export TOOLSCAN_PATH="$FIXTURE/toolscan.mjs"
+          test -f "$TOOLSCAN_PATH" || { echo "toolscan fixture missing: $TOOLSCAN_PATH"; exit 1; }
+          # --host restricts the registry the same way the old env fixture did;
+          # an unknown id fails loudly, so a renamed host cannot pass silently.
+          node dist/cli/main.js mcp install --host claude codex openclaw --dry-run --format json | tee "$HOME/mcp-install.json"
+          MCP_INSTALL_JSON="$HOME/mcp-install.json" node -e '
+            const r = require(process.env.MCP_INSTALL_JSON);
+            const byId = new Map(r.hosts.map((h) => [h.id, h]));
+            // claude is NOT on PATH here — only the fake toolscan names it, and
+            // inspect must run the absolute path toolscan reported through the
+            // cmd shim. A would-register proves the threading; a conflict would
+            // mean the seam regressed to PATH-only execution.
+            if (byId.get("claude")?.outcome !== "would-register")
+              throw new Error("claude was not detected: " + JSON.stringify(byId.get("claude")));
+            if (byId.get("claude")?.detectedVia !== "toolscan")
+              throw new Error("claude was not detected via toolscan: " + byId.get("claude")?.detectedVia);
+            if (byId.get("codex")?.outcome !== "not-installed") throw new Error("codex was detected unexpectedly");
+            if (byId.get("codex")?.detectedVia !== "none") throw new Error("codex detection source not reported");
+            if (byId.get("openclaw")?.outcome !== "not-installed") throw new Error("openclaw was detected unexpectedly");
+            if (byId.get("openclaw")?.detectedVia !== "none") throw new Error("openclaw detection source not reported");
+          '
+
   # ── Aggregate gate ───────────────────────────────────────────────────────
+  # ── Link gate ────────────────────────────────────────────────────────────
+  # Probes every external URL in the repo's markdown and fails on 404/410, so
+  # a link that stops resolving cannot merge. Zero dependencies (Node fetch),
+  # so no npm ci — runs in seconds. The allowlist is self-cleaning: an entry
+  # that no longer appears in any scanned file fails the gate, so an allowed
+  # dead link forces its own removal once the fixing PR merges.
+  links:
+    name: Dead-link check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - name: Check markdown links
+        run: node ix-cli/scripts/check-links.mjs
+
   # One stable required-status-check context. Branch protection requires only
   # this job, so the matrix can be reshaped without orphaning required checks.
   # Fails if any upstream job failed OR was skipped/cancelled.
+  # ── Flag-reference parity gate (#576) ───────────────────────────────────
+  # The flag reference (skills/ix/references/flags.md, #578) must stay in step
+  # with the *registered* commander tree: a registered flag without a doc row,
+  # or a doc row for a flag the CLI no longer registers, fails this job with
+  # the flag named. It reads the built CLI (dist/), never a regex over source —
+  # the same surface dump-cli-surface.mjs inventories. Inactive (green) while
+  # flags.md is absent, so it activates exactly when the reference ships and is
+  # strict from then on.
+  doc-parity:
+    name: Flag-reference parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: ix-cli/package-lock.json
+      - name: Install (ix-cli)
+        working-directory: ix-cli
+        run: npm ci --silent
+      - name: Build (the gate reads dist/, what ships)
+        working-directory: ix-cli
+        run: npm run build
+      - name: Registered flags vs flag reference
+        working-directory: ix-cli
+        run: node scripts/check-doc-parity.mjs
+
   ci-success:
     name: CI Passed
     if: always()
-    needs: [static, test, e2e]
+    needs: [static, test, e2e, api-parity, doc-parity, links, harness-install-smoke, harness-install-smoke-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all required jobs succeeded
@@ -287,6 +591,16 @@ jobs:
           echo "static=${{ needs.static.result }}"
           echo "test=${{ needs.test.result }}"
           echo "e2e=${{ needs.e2e.result }}"
+          echo "api-parity=${{ needs.api-parity.result }}"
+          echo "doc-parity=${{ needs.doc-parity.result }}"
+          echo "links=${{ needs.links.result }}"
+          echo "harness-install-smoke=${{ needs.harness-install-smoke.result }}"
+          echo "harness-install-smoke-windows=${{ needs.harness-install-smoke-windows.result }}"
           [ "${{ needs.static.result }}" = "success" ] \
             && [ "${{ needs.test.result }}" = "success" ] \
-            && [ "${{ needs.e2e.result }}" = "success" ]
+            && [ "${{ needs.e2e.result }}" = "success" ] \
+            && [ "${{ needs.api-parity.result }}" = "success" ] \
+            && [ "${{ needs.doc-parity.result }}" = "success" ] \
+            && [ "${{ needs.links.result }}" = "success" ] \
+            && [ "${{ needs.harness-install-smoke.result }}" = "success" ] \
+            && [ "${{ needs.harness-install-smoke-windows.result }}" = "success" ]

@@ -125,8 +125,8 @@ describe("depends input validation", () => {
     expect(dependsContent).toContain('"--format <fmt>"');
   });
 
-  it("uses resolveFileOrEntity with resolveOpts", () => {
-    expect(dependsContent).toContain("resolveFileOrEntity(client, symbol, resolveOpts)");
+  it("uses resolveFileOrReport with resolveOpts", () => {
+    expect(dependsContent).toContain("resolveFileOrReport(client, symbol, resolveOpts, opts.format)");
   });
 
   it("traverses edges in reverse via predicate map", () => {

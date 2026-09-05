@@ -25,6 +25,7 @@
     "tree-sitter-java": "^0.23.5",
     "tree-sitter-javascript": "^0.25.0",
     "tree-sitter-php": "^0.24.2",
+    "tree-sitter-powershell": "^0.26.4",
     "tree-sitter-python": "^0.25.0",
     "tree-sitter-ruby": "^0.23.1",
     "tree-sitter-rust": "^0.24.0",
@@ -50,7 +51,7 @@
   "devDependencies": {
     "@emnapi/core": "1.11.3",
     "@emnapi/runtime": "1.11.3",
-    "@types/node": "^26.2.0",
+    "@types/node": "^26.4.0",
     "fast-check": "^4.9.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"

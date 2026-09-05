@@ -18,6 +18,15 @@ import { loadIngestionModules } from './ingestion-loader.js';
 import { ensureWorkspaceIdState } from '../bootstrap.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
+import { admitStitchWaiting, connectionNeverEstablished, type StitchRefusal } from '../stitch-guard.js';
+import {
+  createCommitBreaker,
+  createDrainGate,
+  describeCommitCutoff,
+  drainFailureBudget,
+  drainInPasses,
+  perFileAction,
+} from '../commit-breaker.js';
 import { readBackendHealth } from './upgrade.js';
 import { SUPPORTED_EXTENSIONS } from '../supported-extensions.js';
 import { canRenderProgress } from '../stderr.js';
@@ -392,7 +401,7 @@ async function loadStoredPatchEntities(
       if (entities) return entities;
       throw new Error(`Patch ${patchId} has no entity manifest`);
     } catch (err) {
-      if (!String(err).includes('404:')) throw err;
+      if (!isNotFoundError(err)) throw err;
     }
   }
   throw new Error('Previous source patch was not found');
@@ -461,7 +470,7 @@ export async function reconcileRemovedEntities(
         }
       }
     } catch (err) {
-      if (!String(err).includes('404:')) throw err;
+      if (!isNotFoundError(err)) throw err;
       // Already absent. Emitting the delete anyway keeps the patch a complete
       // statement of intent and costs nothing.
       removedNodeIds.push(nodeId);
@@ -528,7 +537,13 @@ export function planDeletedFileRecovery(
   return { previousDeletedFiles, nextDeletedFiles, recreatedPaths, forceReingestPaths };
 }
 
+/** Lock contention, as opposed to the transport failures below. Kept separate
+  * only so each group's reason for being retryable stays readable. */
 const COMMIT_CONFLICT_RETRY_PATTERNS = [
+  // ArangoDB lock conflicts. These were briefly split into their own constant
+  // so `commitFailureIndictsBackend` could exclude them; that exclusion was
+  // reverted in round 3 -- it made the cutoff inert in a real saturation mode --
+  // and the split had no consumer left, so it is inlined.
   'write-write conflict',
   'timeout waiting to lock key',
   'error: 1200',
@@ -603,6 +618,42 @@ export function isRetryableCommitConflict(err: unknown): boolean {
   return COMMIT_CONFLICT_RETRY_PATTERNS.some(pattern => message.includes(pattern));
 }
 
+/**
+ * Does this commit failure say anything about the BACKEND? (Ix#560)
+ *
+ * Only failures that indict the backend may feed the run-wide cutoff, because
+ * the cutoff abandons every remaining patch in the run.
+ *
+ * Excluded, and each for its own reason:
+ *
+ *   - the run's own deadline. That is our wall clock, not the backend's
+ *     answer, and `describeCommitOutcome` has a whole branch to keep them
+ *     apart. Note this is the DEADLINE, not `isAbortError`: a per-request
+ *     `AbortSignal.timeout` also raises TimeoutError, and a backend that
+ *     HANGS produces nothing else. Excluding those made the cutoff inert in
+ *     exactly the saturation shape it exists for -- a stalled ArangoDB is not
+ *     obliged to answer 500, and when it does not, the timeout IS the signal.
+ *   - payload-too-large, which is about this patch and not the server; five
+ *     oversized generated files in a row must not stop the whole repo.
+ *
+ * A lock conflict is NOT excluded, though an earlier revision excluded it.
+ * `timeout waiting to lock key` and `error: 1200` are what a RocksDB-backed
+ * ArangoDB emits under exactly the sustained write contention this cutoff is
+ * for, so excluding them made it inert in a real saturation mode -- and, worse,
+ * those same patterns are in the RETRY list, so every doomed patch was being
+ * multiplied by `retryOnConflict` instead of stopped.
+ *
+ * The worry that motivated the exclusion -- two overlapping `ix map` runs
+ * contending -- is already answered upstream of here: by the time an error
+ * reaches this function, `retryOnConflict` has spent six backed-off attempts
+ * on it. A conflict that survives all six is not transient contention.
+ */
+export function commitFailureIndictsBackend(err: unknown, runDeadlineExpired: boolean): boolean {
+  if (runDeadlineExpired) return false;
+  if (isPayloadTooLargeError(err)) return false;
+  return true;
+}
+
 async function retryOnConflict<T>(fn: () => Promise<T>, maxRetries: number): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -650,14 +701,52 @@ export async function commitBulkWithPayloadSplit<T, R>(
   handlers: {
     commitBulk: (batch: T[]) => Promise<R>;
     onBulkCommitted: (batch: T[], result: R) => void;
-    commitIndividually: (batch: T[], error: unknown) => Promise<void>;
+    commitIndividually: (batch: T[], error: unknown, opts?: { replay?: boolean }) => Promise<void>;
     onSplit?: (batch: T[], error: unknown) => void;
     /** Patch id of an item, so a partly-committed group can be resumed. */
     patchIdOf?: (item: T) => string | undefined;
     onPartialBulk?: (landed: T[], missing: T[], error: unknown) => void;
+    /**
+     * Has the caller given up on the backend? (Ix#560)
+     *
+     * Consulted before the per-file fallback, and ONLY there. The bulk is
+     * always sent: one request per group is not the amplification, and it is
+     * how a backend that recovered mid-run gets to prove it.
+     * The fallback exists for a bulk that failed for a
+     * reason specific to the GROUP (too large, partly applied), where sending
+     * the patches separately is a different request that can succeed. When the
+     * backend itself is refusing writes, none of that holds: the fan-out is one
+     * doomed request per patch, serialized, against the very backend that is
+     * the reason.
+     *
+     * Absent, nothing is ever abandoned: the behaviour that shipped.
+     */
+    shouldStop?: () => boolean;
+    /** `batch` was abandoned unsent. `error` is absent when none was seen. */
+    onAbandoned?: (batch: T[], error?: unknown) => void;
   },
 ): Promise<void> {
   if (items.length === 0) return;
+
+  // No cutoff check before a bulk that is actually a GROUP. One request per
+  // group is not the amplification -- the per-file fallback is, at one request
+  // per patch -- and sending it is the only way a backend that has recovered
+  // mid-run can prove it and let the rest of the ingest through. Skipping it
+  // was strictly worse than useless: the group went to the deferred set and
+  // came back as N SERIALIZED per-file commits instead of one bulk.
+  //
+  // A SINGLE-patch chunk is different, and the difference is the whole issue.
+  // At `IX_COMMIT_HTTP_MAX_FILES=1` -- which #560's reporters tried, and which
+  // the header's own table measures -- every chunk is one patch, so "one
+  // request per group" IS one request per patch and the rule above halves
+  // main's cost instead of bounding it: a 10,000-file map against a dead
+  // backend still sent ~10,000 doomed bulks. The cutoff applies to those, and
+  // recovery is still provable -- the drain's gate lets one probe through every
+  // few batches for exactly this.
+  if (items.length === 1 && handlers.shouldStop?.()) {
+    handlers.onAbandoned?.(items);
+    return;
+  }
 
   let result: R;
   try {
@@ -683,16 +772,34 @@ export async function commitBulkWithPayloadSplit<T, R>(
       const idOf = handlers.patchIdOf;
       const landed = items.filter(item => { const id = idOf(item); return id !== undefined && landedIds.has(id); });
       const missing = items.filter(item => { const id = idOf(item); return id === undefined || !landedIds.has(id); });
-      // Only worth it when the split is real. If nothing (or everything) is
-      // claimed as landed, re-bulking `missing` would repeat this exact call.
+      // The server says it already holds every one of them. Re-bulking would
+      // repeat this exact call, so this still falls through to the per-file
+      // path -- but flagged as a replay, because that is what it is. Without the
+      // flag, a tripped breaker counts patches the server has CONFIRMED as
+      // commit errors, the same over-reporting `replay` exists to prevent on
+      // the sibling branch (Ix#560).
+      if (landed.length === items.length && items.length > 0) {
+        await handlers.commitIndividually(items, err, { replay: true });
+        return;
+      }
+      // Only worth it when the split is real. If nothing is claimed as landed,
+      // re-bulking `missing` would repeat this exact call.
       if (landed.length > 0 && missing.length > 0) {
         handlers.onPartialBulk?.(landed, missing, err);
-        await handlers.commitIndividually(landed, undefined);
+        // `replay: true` -- the server has confirmed it already holds these.
+        // Re-sending them is bookkeeping, not a write the breaker should
+        // refuse: skipping them would count patches that DID land as commit
+        // errors and drop them from patchesApplied (Ix#495).
+        await handlers.commitIndividually(landed, undefined, { replay: true });
         await commitBulkWithPayloadSplit(missing, handlers);
         return;
       }
     }
 
+    if (handlers.shouldStop?.()) {
+      handlers.onAbandoned?.(items, err);
+      return;
+    }
     await handlers.commitIndividually(items, err);
     return;
   }
@@ -805,13 +912,85 @@ export type CommitOutcome =
   | { kind: "warn"; message: string }
   | { kind: "fatal"; message: string };
 
+/**
+ * The wire value the backend sends for a commit it short-circuited because it
+ * had already recorded the patch id — `CommitStatus.Idempotent.toString` in
+ * `PatchCommitRoutes` / `BulkPatchCommitRoutes`.
+ */
+const COMMIT_STATUS_IDEMPOTENT = 'Idempotent';
+
+/**
+ * The wire value for a commit the backend refused because the optimistic
+ * base-rev check lost a race — `CommitStatus.BaseRevMismatch`. It writes
+ * nothing, exactly like `Idempotent`, but unlike `Idempotent` it means the
+ * work still needs doing.
+ */
+const COMMIT_STATUS_BASE_REV_MISMATCH = 'BaseRevMismatch';
+
 /** Minimal local-ingest facts needed by commands that continue after ingestion. */
 export interface IngestFilesSummary {
   filesDiscovered: number;
   patchesApplied: number;
+  /**
+   * How many of `patchesApplied` the backend answered `Idempotent` — it had
+   * already recorded that patch id, so the commit wrote nothing.
+   *
+   * Normally uninteresting: `ix ingest --force` re-submits every file (and a
+   * lost or blank local baseline has the same effect against a backend that
+   * still holds the patch records), so a repo whose graph is already correct
+   * legitimately deduplicates everything. Note `ix map --full` is NOT such a
+   * case — it forwards `full` to the backend map and never sets `force` on the
+   * ingest below it, so it re-submits nothing.
+   *
+   * It matters only when the graph turns out to be EMPTY afterwards, because
+   * then the deduplication is the reason nothing was written rather than a
+   * sign that nothing needed to be (#527).
+   */
+  idempotentPatches: number;
+  /**
+   * Files this run skipped because they were already unchanged — mtime-clean
+   * against the local baseline, or hash-clean against the backend.
+   *
+   * Load-bearing for the #527 diagnosis, not informational. `idempotentPatches`
+   * only describes the patches a run actually submitted; it says nothing about
+   * the files the run never submitted, and those are what separate a graph
+   * deleted under its own patch records from a graph that is simply fine. A run
+   * in the #527 state skips nothing here: the DB-reset guard clears the mtime
+   * cache and the hash lookup comes back empty, so every file is re-submitted
+   * and every one is answered `Idempotent`. A run that skipped even one file as
+   * unchanged has proof the backend still holds that file's source hash, and
+   * therefore its nodes.
+   *
+   * Counts only the unchanged skips — empty, oversized and minified files are
+   * skipped for reasons that carry no such proof. It is the same counter the
+   * stitch-completeness gate reads, which also means it inherits that counter's
+   * Path-B reset: a run with no baseline re-reads and re-hashes every file, so
+   * the stat loop's mtime skips did not actually happen and are subtracted
+   * back out. That is the shape a #527 run has, and it is exactly right here.
+   */
+  filesSkippedAsUnchanged: number;
   parseErrors: number;
   commitErrors: number;
   stitchErrors: number;
+  /**
+   * Why the cross-workspace stitch was not attempted, if it was not (Ix#568).
+   *
+   * A skip is not an error and deliberately does not move the exit code -- but
+   * CLAUDE.md RULE 5 has hooks running `ix map --silent` and reading the exit
+   * code, so without a field here an automated consumer sees a wholly
+   * successful map for up to 15 minutes while cross-repo edges are stale, and
+   * the only signal is an English sentence on stderr.
+   */
+  stitchSkipped?: string;
+  /**
+   * Which rule kept the stitch from happening, for a consumer that must branch.
+   *
+   * The prose in `stitchSkipped` is for people. `incomplete` -- an incremental
+   * map with nothing complete to send -- fires on almost every run, so without
+   * this a hook watching for the #568 cooldown could only tell the two apart by
+   * substring-matching English, which `StitchRefusal`'s own doc forbids.
+   */
+  stitchSkippedRule?: StitchRefusal;
 }
 
 /**
@@ -838,14 +1017,131 @@ export function isStitchUnsupported(error: unknown): boolean {
 }
 
 /**
+ * Is this "the backend does not have it", as opposed to any other failure?
+ *
+ * Anchored, the way `stitchFailureStatus` is. A bare
+ * `String(err).includes('404:')` was safe only while an unparseable body
+ * surfaced as V8's `SyntaxError`, which quotes about ten characters of input.
+ * `IxClient` now reports it as `"${status}: response body is not JSON: ..."`
+ * with a 200-character preview -- so a gateway answering 200 with an HTML error
+ * page whose title is `404: Not Found` matched, the error was swallowed as
+ * "absent", and `reconcileRemovedEntities` emitted a DeleteNode for a node that
+ * exists. That is the #528 proxy shape this file already cites twice.
+ */
+function isNotFoundError(error: unknown): boolean {
+  return /^(?:Error:\s*)?404:/.test(String(error));
+}
+
+/**
  * Ix#528: describe the failure without echoing the response body. The observed
  * case is a proxy 504 whose body is a full HTML error page, and pasting that
  * into a map summary buries the one line that matters.
  */
 export function describeStitchFailure(error: unknown): string {
   const status = stitchFailureStatus(error);
-  const detail = status === null ? "backend request failed" : `HTTP ${status}`;
+  // A 2xx here means the request succeeded and something downstream made the
+  // body unreadable -- the #528 proxy shape -- so "HTTP 200" as the failure
+  // status is accurate and useless. Say what actually happened.
+  const detail =
+    status === null
+      ? "backend request failed"
+      : status >= 200 && status < 300
+        ? `HTTP ${status} with an unreadable body`
+        : `HTTP ${status}`;
   return `Warning: Cross-workspace stitch failed (${detail}). Source patches were committed, but cross-repository relationships may be incomplete.`;
+}
+
+/**
+ * Ix#568: the stitch was never sent, and why.
+ *
+ * Deliberately not phrased as a failure. Nothing broke and the previous
+ * registration still stands -- the same position a stitch that FAILED already
+ * left the graph in. Saying only that cross-repo relationships may be
+ * incomplete, with no reason, is what would make this look like a regression.
+ *
+ * It does not promise that the next map re-registers, because that is not
+ * reliably true and predates this guard: the stitch block is gated on
+ * `filesSkippedAsUnchanged === 0`, so an incremental map that skips any
+ * mtime- or hash-unchanged file never reaches it -- and by then it has no
+ * registration data to send
+ * either, since it only parsed what changed. Its own comment already names
+ * the ways back in: a fresh map, `--force`, or a post-reset re-map. What the
+ * cooldown changes is only how often this path is taken, not where it leads.
+ */
+export function describeStitchSkipped(
+  reason: string,
+  rule?: StitchRefusal,
+  /** Whether the caller is showing per-file detail (`--verbose` / `--debug`). */
+  verbose = false,
+): string {
+  // Short by default. A cooldown lasts 15 minutes, and under CLAUDE.md RULE 5
+  // an auto-map hook fires after every edit -- so the long form printed three
+  // sentences of unchanging advice on every map in that window. The reason is
+  // the part that changes and the part worth reading; the rest is on --verbose,
+  // and `stitchSkipped` / `stitch_skipped` carry it to machine consumers either
+  // way.
+  // The short form has to carry a real remedy, not just the reason. Waiting the
+  // cooldown out and re-running does NOT recover: `persistIngestBaselineIfClean`
+  // has already written the mtime baseline, so the next map has
+  // `filesSkipped > 0` and never enters the stitch block at all -- it prints
+  // nothing and exits 0, and the user reads that as fixed while cross-repo edges
+  // stay frozen. Only a run that re-ingests every file gets back in.
+  // Every branch names `--force`, because nothing else re-registers this
+  // workspace. A skipped stitch does NOT stop the run persisting its mtime
+  // baseline -- `persistIngestBaselineIfClean` gates on parse and commit errors
+  // only -- so an ordinary re-run is incremental, skips unchanged files, and
+  // never enters the stitch block. "Re-run once that finishes" and "raise
+  // IX_MAP_DEADLINE_MS" were both promises this code cannot keep: the re-run
+  // prints nothing, exits 0, and the cross-repo edges stay exactly as stale.
+  //
+  // The hedge that used to justify withholding `--force` from the in-flight
+  // branch is still right, and now lives in the wording rather than in the
+  // omission: the other run may well be registering this same workspace, in
+  // which case the force is unnecessary -- but it is the only thing that
+  // recovers the case where it was not.
+  const recover =
+    rule === "deadline"
+      ? " Raise IX_MAP_DEADLINE_MS or map a smaller path, then re-register with `ix ingest <root> --force`."
+      : rule === "in-flight"
+        ? " Re-run once that finishes; if the cross-repo edges still look stale, `ix ingest <root> --force`."
+        : rule === "lost-parses"
+          // Nothing "clears" here, and this rule fires ON a --force run, so the
+          // cooling remedy told the user to wait for a condition that does not
+          // exist and then re-run the command they had just run.
+          ? " Re-run `ix ingest <root> --force`; if it keeps happening, the crash is reproducible and IX_PARSE_DEBUG=1 will show it."
+          : rule === "run-errors"
+            ? " Fix the errors above and re-run `ix ingest <root> --force`."
+            : " Recover with `ix ingest <root> --force` once it clears.";
+  const head = `Note: Cross-workspace stitch not started — ${reason}.${recover}`;
+  if (!verbose) return head;
+
+  // The remedy follows the RULE, never the prose. Note the other run may be
+  // registering this SAME workspace: only `ix map` takes the per-workspace
+  // lock, so two `ix ingest` runs on one repo, or an `ix ingest` racing an
+  // `ix map`, both reach here. Hence "may be" rather than a confident
+  // instruction to force a full re-ingest nobody needs.
+  const remedy =
+    rule === "in-flight"
+      ? "That run may be registering a different workspace, in which case this one was not " +
+        "registered; re-run once it has finished, or force a full re-ingest " +
+        "(`ix ingest <root> --force`) if the cross-repo edges still look stale."
+      : rule === "lost-parses"
+        ? "A parse worker crashed, so this run never saw some files and its registration would be " +
+          "missing them. Nothing is running on the backend and nothing needs to clear: re-run " +
+          "`ix ingest <root> --force`, and if it recurs the crash is reproducible -- IX_PARSE_DEBUG=1 " +
+          "will show what the parser choked on."
+        : rule === "run-errors"
+          ? "The parse or commit errors above mean this run has an incomplete picture of the repo, so " +
+            "registering from it would overwrite a good registration with a worse one. Fix those and " +
+            "re-run `ix ingest <root> --force`."
+        : rule === "deadline"
+        ? "Nothing was sent, so nothing is running -- but nothing was registered either, and a longer " +
+          "budget does not fix that on its own: the next map is incremental and never reaches the stitch " +
+          "block. Raise IX_MAP_DEADLINE_MS or map a smaller path, then `ix ingest <root> --force`."
+        : "Once the cooldown expires and the backend is healthy, re-register with a run that re-ingests " +
+          "every file (`ix ingest <root> --force`) — an incremental map that skips unchanged files does not " +
+          "re-attempt the stitch.";
+  return `${head} Source patches were committed; cross-repository edges are unchanged since the last successful stitch. ${remedy}`;
 }
 
 /**
@@ -872,7 +1168,15 @@ export function describeCommitOutcome(
    */
   debugFlag: string = "--debug",
   /** True when the run was cut short by the map deadline rather than rejected. */
-  deadlineHit: boolean = false
+  deadlineHit: boolean = false,
+  /** Patches abandoned unsent by the commit cutoff (Ix#560). */
+  cutoffSkipped: number = 0,
+  /**
+   * Did the cutoff fire at any point, whether or not it ended up losing
+   * patches? When it did, the banner above has already given the reason, and
+   * this line must not send the reader back to a flag that adds nothing.
+   */
+  cutoffFired: boolean = cutoffSkipped > 0
 ): CommitOutcome {
   if (commitErrors <= 0) return { kind: "ok" };
   const attempted = commitErrors + patchesApplied;
@@ -882,11 +1186,92 @@ export function describeCommitOutcome(
     // patch is a backend problem, a deadline is our own wall clock and the fix
     // is a longer budget or a smaller repo. Folding both into "failed to
     // commit" is the same information loss this change exists to undo.
+    //
+    // Unless nothing landed at all. With a 5-minute per-request timeout and a
+    // 15-minute budget a stalled backend only fits ~3 attempts in, so the
+    // cutoff's streak cannot reach its limit and the run ends on the deadline
+    // -- and telling someone to RAISE the budget then is advice to wait longer
+    // on a backend that answered nothing. A run that committed zero patches
+    // did not run out of time doing work; it ran out of time waiting.
+    if (patchesApplied === 0) {
+      // Deliberately NOT "raising the budget will not help": the deadline
+      // covers discovery, hashing and parsing too, so a large repo or a short
+      // IX_MAP_DEADLINE_MS can spend it before the first commit is even
+      // attempted -- and there raising it is exactly the fix. Both readings
+      // are live from here, so name both rather than assert the wrong one.
+      // The cutoff's share is named here too. This is the LIKELIEST shape for a
+      // dead backend, not a corner: nothing lands, so telling the user all N
+      // were abandoned by the clock -- and to lengthen the budget -- is the
+      // wrong remedy for the ones deliberately never sent, and contradicts the
+      // banner directly above, which has just named the split.
+      const withheld =
+        cutoffSkipped > 0
+          ? `${commitErrors - cutoffSkipped} file patches were abandoned when the map deadline fired and ` +
+            `${cutoffSkipped} more were withheld by the commit cutoff, and none landed first`
+          : `all ${commitErrors} file patches were abandoned when the map deadline fired, and none landed first`;
+      return {
+        kind: "fatal",
+        message:
+          `Ingest ran out of time without committing anything: ${withheld}. Either the budget ran out ` +
+          `before the commits did (raise IX_MAP_DEADLINE_MS or map a smaller path), or the backend ` +
+          `is not accepting writes — an ArangoDB that cannot begin a transaction is still reachable ` +
+          `and still consistent, so \`ix doctor\` passes. \`docker stats\` and ` +
+          `\`/_api/query/current\` tell the two apart.`,
+      };
+    }
+    // The cutoff's share is named rather than folded in. A run that withheld
+    // 200 patches from a refusing backend and then lost 3 more to the clock
+    // reported all 203 as "abandoned when the map deadline fired ... raise
+    // IX_MAP_DEADLINE_MS", which is the wrong remedy for 200 of them. The
+    // banner above already names the split; this line was the one contradicting
+    // it.
+    const clockLost = commitErrors - cutoffSkipped;
+    const share =
+      cutoffSkipped > 0
+        ? `${clockLost} of ${attempted} file patches were abandoned when the map deadline fired, and ` +
+          `${cutoffSkipped} more were withheld earlier by the commit cutoff`
+        : `${commitErrors} of ${attempted} file patches were abandoned when the map deadline fired`;
+    const remedy =
+      cutoffSkipped > 0
+        ? `The graph is missing all of them. Raise IX_MAP_DEADLINE_MS or map a smaller path for the first group; ` +
+          `see the cutoff above for the second.`
+        : `The graph is missing those files. Raise IX_MAP_DEADLINE_MS or map a smaller path.`;
+    return {
+      kind: "warn",
+      message: `Ingest ran out of time: ${share}. ${remedy}`,
+    };
+  }
+
+  // After the deadline branch, deliberately: a run that tripped the cutoff on
+  // a handful of patches and THEN blew its budget on thousands lost far more
+  // to the clock, and attributing all of it to the cutoff hides the number
+  // that would actually change the outcome.
+  if (cutoffFired) {
+    // Two shapes, and they want opposite advice about the debug flag.
+    //
+    // When patches were held back unsent, they produce no per-file line at all,
+    // so pointing at the flag sends the reader to output that does not exist --
+    // the cutoff banner above is the only account of them there is.
+    //
+    // When the drain placed everything it held, `cutoffSkipped` is 0 and every
+    // counted error came from a patch that WAS sent and DID emit a line. The
+    // banner names only the last error and no filenames, so telling the reader
+    // the flag adds nothing steers them away from the only per-file detail
+    // available. That is the shape the 12-file reproduction produces at the
+    // default limit: five sent failures, seven drained successfully.
+    if (cutoffSkipped === 0) {
+      return {
+        kind: patchesApplied === 0 ? "fatal" : "warn",
+        message:
+          `Ingest stopped early: ${commitErrors} of ${attempted} file patches are missing from the graph. ` +
+          `See the cutoff above for why it stopped; ${debugFlag} lists the individual failures.`,
+      };
+    }
     return {
       kind: patchesApplied === 0 ? "fatal" : "warn",
       message:
-        `Ingest ran out of time: ${commitErrors} of ${attempted} file patches were abandoned when ` +
-        `the map deadline fired. The graph is missing those files. Raise IX_MAP_DEADLINE_MS or map a smaller path.`,
+        `Ingest stopped early: ${commitErrors} of ${attempted} file patches are missing from the graph, ` +
+        `${cutoffSkipped} of them never sent. See the cutoff above for why; ${debugFlag} will not add to it.`,
     };
   }
 
@@ -1153,6 +1538,12 @@ export async function ingestFiles(
     '../../../../core-ingestion/dist/parse-worker.js',
   );
   let pool: ParsePool | null = null;
+  /**
+   * In-flight parses lost to a crashed worker, read where the pool is still in
+   * scope. A function rather than a read at the use site because control-flow
+   * narrowing makes `pool` `never` down there.
+   */
+  const crashedParses = (): number => (pool === null ? 0 : pool.crashedTasks());
   const ensureParsePool = (): ParsePool => {
     if (pool) return pool;
     pool = new ParsePool(workerPath, Math.max(1, os.cpus().length - 1));
@@ -1188,7 +1579,12 @@ export async function ingestFiles(
     for (let i = 0; i < targets.length; i += PRESCAN_PARSE_CHUNK) {
       const chunk = targets.slice(i, i + PRESCAN_PARSE_CHUNK);
       const parsed = await Promise.all(
-        chunk.map(fp => ensureParsePool().parse(fp, relSources.get(fp)!).catch(() => null)),
+        // `false`: this prescan is best-effort by construction -- the caller
+        // drops nulls, and every file here is read and parsed again by the
+        // streaming loop below. A loss here is not a file the RUN lost, and
+        // counting it as one refused the stitch and withheld the baseline over
+        // files that were all present.
+        chunk.map(fp => ensureParsePool().parse(fp, relSources.get(fp)!, false).catch(() => null)),
       );
       for (let j = 0; j < chunk.length; j++) {
         if (parsed[j]) preParsed.set(chunk[j], parsed[j]);
@@ -1225,11 +1621,111 @@ export async function ingestFiles(
   let filesDiscovered = 0;
   let filesChanged = 0;
   let patchesApplied = 0;
+  let idempotentPatches = 0;
   let filesSkipped = 0;
+  /**
+   * Files skipped because we ASSUMED THEY WERE UNCHANGED. (Ix#568)
+   *
+   * A subset of `filesSkipped`, and the one the cross-workspace stitch cares
+   * about. The stitch registers this repo's provides/consumes, collected over
+   * the files actually parsed this run, so it must only run when that set
+   * covers the whole repo -- otherwise it overwrites a full registration with
+   * a partial one.
+   *
+   * `filesSkipped` is the wrong test for that, because it also counts files
+   * that contribute nothing under ANY run: a zero-byte file and one that
+   * looks minified. Both are decided by the file's own content under a rule
+   * that does not vary between runs, so the collected set is complete and
+   * correct without them -- and their presence in the count was silently
+   * disqualifying repos from ever stitching. A single empty `__init__.py` was
+   * enough, `--force` or not, which made `ix ingest <root> --force` -- the
+   * remedy this command prints when it refuses a stitch -- a promise it could
+   * not keep: the run would print nothing, exit 0, and leave the cross-repo
+   * edges stale.
+   *
+   * An mtime- or hash-clean skip is different in kind: the file has content
+   * we would have indexed and we did not look at it this run, so the set
+   * really is missing it. So is a file the parser returned nothing for --
+   * see `filesSkippedUnparsed`, which the gate reads alongside this.
+   */
+  let filesSkippedAsUnchanged = 0;
+  /** Zero-byte files. Reported as `skipReasons.emptyFile`, which was hardcoded 0. */
+  let filesSkippedAsEmpty = 0;
+  /**
+   * Files the parse pool returned nothing for.
+   *
+   * Reported, but NOT part of the stitch gate -- `ParsePool.crashedTasks()` is.
+   * `parse()` resolves `null` for two different things and only one of them
+   * makes the run incomplete:
+   *
+   *   - `parseFile` returned null, which is deterministic and means the file
+   *     has nothing to give. The dominant cause is an unavailable optional
+   *     grammar -- fourteen are optionalDependencies loaded through a try/catch,
+   *     and `tree-sitter-sas` has no win32 prebuild at all -- and those
+   *     extensions are still in SUPPORTED_EXTENSIONS, so the files are
+   *     discovered, read, dispatched and come back null on EVERY run. Gating on
+   *     this count blocked stitching permanently for any repo containing one,
+   *     `--force` included, since forcing does not change a parse result. That
+   *     is the empty-`__init__.py` bug again with a different file class.
+   *   - a worker CRASHED with the task in flight, which is transient and did
+   *     lose a file we would have indexed. That one belongs in the gate.
+   *
+   * A parse that THREW is in the first category, not the second, even though it
+   * sounds like the second: `parseFile` catches every exception itself and
+   * returns null (logging only under IX_PARSE_DEBUG=1), so the worker cannot
+   * tell it from a missing grammar -- and neither can this. It is also
+   * deterministic for the same bytes in every case we can observe, so gating on
+   * it would block stitching permanently for that repo, which is exactly the
+   * bug this counter was taken OUT of the gate to fix. The residue is the
+   * transient sub-case, an OOM caught by that same handler; it is narrower than
+   * the bug the alternative creates, and it is a deliberate choice rather than
+   * an oversight.
+   *
+   * Reported as `skipReasons.unparsed`, its own bucket: `parseError` counts
+   * every parse-stage failure including stat, read and patch-build errors, most
+   * of which are not skips, so adding to it made that number mean neither thing.
+   */
+  let filesSkippedUnparsed = 0;
   let parseErrors = 0;
   let commitErrors = 0;
   let stitchErrors = 0;
   let stitchError: unknown;
+  // Set when the stitch was refused before it was ever sent (Ix#568).
+  // Distinct from stitchError: nothing failed, so it must not count as a
+  // stitch error or move the exit code -- but the user is about to be told
+  // cross-repo edges may be incomplete and is owed the reason.
+  let stitchSkipped: string | undefined;
+  let stitchSkippedRule: StitchRefusal | undefined;
+  // Ix#560: a backend refusing every commit gets one failed request per
+  // patch out of the per-file fallback. Stop after a streak instead.
+  const commitBreaker = createCommitBreaker();
+  /**
+   * Whether a batch's held-back patches get a drain. Run-scoped: the decision
+   * spans batches, and it has to be revocable -- see `createDrainGate`.
+   */
+  const drainGate = createDrainGate();
+  /**
+   * Patches the BACKEND accepted, counted only where a request came back OK.
+   *
+   * Not `patchesApplied`, which the gate used to read. That counter also rises
+   * on the `count-applied` path, where up to a thousand patches are counted
+   * from a 409 body without a single request being sent -- so a full-landed
+   * replay could reopen a gate that had closed against a dead backend and
+   * restore the per-batch re-probing the gate exists to prevent.
+   */
+  let patchesTheBackendTook = 0;
+  /**
+   * Commit failures that said something about the BACKEND rather than about one
+   * patch. Counted so the drain gate can tell "refused everything because the
+   * backend is down" from "refused everything because every patch was too big".
+   */
+  let backendIndictingFailures = 0;
+  /**
+   * The RUN deadline, captured here because `commitPreparedPatches` shadows
+   * `opts` with its own. Not `isAbortError`: a per-request AbortSignal.timeout
+   * raises TimeoutError too, and that is a saturation signal, not our clock.
+   */
+  const runDeadlineExpired = (): boolean => opts.deadlineSignal?.aborted === true;
   let tooLarge = 0;
   let minifiedLikely = 0;
   let outsideRoot = 0;
@@ -1357,15 +1853,29 @@ export async function ingestFiles(
 
     // Stat all files and partition into mtime-clean (skip) and mtime-changed (need hash check).
     const mtimeChangedPaths: string[] = [];
+    /**
+     * Paths this loop has already accounted for, and under which counter.
+     *
+     * Recorded explicitly rather than inferred from `currentMtimes`. The loop
+     * leaves a path out of that map in three cases -- empty, oversized, and
+     * `statSync` THREW -- and only the first two are counted here. So a file
+     * that errored on the first stat and then read as size 0 on the second (a
+     * transient lock, an antivirus scan, a file recreated underneath us) was
+     * treated as already counted and landed in no bucket at all: absent from
+     * the graph, from `filesSkipped` and from every `skipReasons` entry, which
+     * is precisely what the check that reads this exists to prevent.
+     */
+    const accountedByStatLoop = new Map<string, 'empty' | 'tooLarge'>();
     for (const filePath of filePaths) {
       try {
         const st = fs.statSync(filePath);
-        if (st.size === 0) { filesSkipped++; progressCurrent++; continue; }
-        if (st.size > MAX_FILE_BYTES) { tooLarge++; progressCurrent++; continue; }
+        if (st.size === 0) { filesSkipped++; filesSkippedAsEmpty++; accountedByStatLoop.set(filePath, 'empty'); progressCurrent++; continue; }
+        if (st.size > MAX_FILE_BYTES) { tooLarge++; accountedByStatLoop.set(filePath, 'tooLarge'); progressCurrent++; continue; }
         const mtime = st.mtimeMs;
         currentMtimes.set(filePath, mtime);
         if (!opts.force && !forceReingestPaths.has(filePath) && mtimeCache.get(filePath) === mtime) {
           filesSkipped++;
+          filesSkippedAsUnchanged++;
           progressCurrent++;   // mtime clean — assume unchanged
         } else {
           mtimeChangedPaths.push(filePath);
@@ -1480,6 +1990,20 @@ export async function ingestFiles(
     ): Promise<number> => {
       if (preparedPatches.length === 0) return 0;
 
+      /**
+       * Patches the cutoff held back rather than sent (Ix#560).
+       *
+       * Held, not discarded. Abandoning them outright is what made an earlier
+       * version able to wedge a workspace permanently: the mtime baseline is
+       * not written on a run with commit errors, so the next `ix map`
+       * re-ingests in the same order, trips at the same point, and abandons the
+       * same patches forever. They get one ordinary pass at the end IF the
+       * backend has meanwhile proved it accepts writes -- see the drain below.
+       */
+      const deferredByCutoff: PreparedPatch[] = [];
+      /** Held by the run deadline rather than the cutoff -- see the branch below. */
+      const deferredByDeadline: PreparedPatch[] = [];
+
       const chunks: PreparedPatch[][] = [];
       let bulkChunk: PreparedPatch[] = [];
       const flushBulkChunk = (): void => {
@@ -1499,18 +2023,46 @@ export async function ingestFiles(
       flushBulkChunk();
 
       const commitMsPerChunk = new Array<number>(chunks.length).fill(0);
+      // The drain belongs to no chunk, but its time is still commit time --
+      // a no-op sink here dropped it from the reported total.
+      let drainMs = 0;
+      const recordDrainMs = (ms: number): void => { drainMs += ms; };
       let nextChunk = 0;
       // Fallback mutex: serializes per-file commits across all workers so that
       // concurrent fallback loops don't race on revisions.current (Error 1200).
       let fallbackTail: Promise<void> = Promise.resolve();
 
-      const runChunk = async (ci: number): Promise<void> => {
-        const chunk = chunks[ci];
-        const endFile = chunk[chunk.length - 1].fileNumber;
-        const commitIndividually = async (
-          items: PreparedPatch[],
-          bulkError?: unknown,
-        ): Promise<void> => {
+      /**
+       * Commit `items` one at a time, serialized against every other per-file
+       * loop in this run.
+       *
+       * Hoisted out of runChunk so the end-of-run drain runs the SAME loop
+       * rather than a second copy of it -- the counters, the mutex and the
+       * breaker interaction are exactly the parts that must not drift.
+       * `recordMs` is the only thing that was chunk-scoped.
+       */
+      const commitItemsSerially = async (
+        items: PreparedPatch[],
+        recordMs: (ms: number) => void,
+        bulkError?: unknown,
+        fallbackOpts?: {
+          replay?: boolean;
+          /**
+           * Total failures this loop may absorb before giving up, replacing the
+           * breaker's CONSECUTIVE streak for callers that need to get past a
+           * run of bad patches rather than stop at one.
+           *
+           * A streak cannot: N adjacent patches the backend rejects on their
+           * own merits look exactly like a dead backend for as long as the run
+           * of them lasts, so any streak of N or fewer stops inside the
+           * cluster and strands everything after it -- and the mtime baseline,
+           * never written on a run with commit errors, makes the next `ix map`
+           * repeat it exactly. A budget keeps going past the cluster and only
+           * stops when the FAILURES add up, which is the thing worth bounding.
+           */
+          failureBudget?: number;
+        },
+      ): Promise<void> => {
           if (debug && bulkError !== undefined) {
             const first = items[0];
             const last = items[items.length - 1];
@@ -1525,8 +2077,74 @@ export async function ingestFiles(
           let resolveThis!: () => void;
           fallbackTail = new Promise<void>(r => { resolveThis = r; });
           await prev;
+          let budgetLeft = fallbackOpts?.failureBudget ?? Number.POSITIVE_INFINITY;
+          /** Failed re-sends of server-confirmed patches. Bounds the replay, locally. */
+          let replayFailures = 0;
           try {
-            for (const item of items) {
+            for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+              const item = items[itemIndex];
+              const isReplay = fallbackOpts?.replay === true;
+              if (runDeadlineExpired()) {
+                // A replay first: these patches are confirmed landed by the
+                // server's own 409 body, so the clock stops the BOOKKEEPING and
+                // not a write. Holding them would push up to a thousand
+                // confirmed-committed patches into the commit-error count,
+                // report the graph as missing files it holds, and suppress the
+                // mtime baseline over them -- the exact over-reporting the
+                // `replay` flag exists to prevent, reintroduced by putting this
+                // deadline check above it.
+                if (isReplay) {
+                  patchesApplied += items.length - itemIndex;
+                  break;
+                }
+                // Every request from here is rejected by `fetch` on an already
+                // aborted signal, so the fan-out is pure waste -- and it is not
+                // otherwise stopped, because `commitFailureIndictsBackend`
+                // returns false for everything once the deadline has fired.
+                // That is right for CLASSIFYING (the deadline is our clock, not
+                // the backend's answer) and it left the cutoff and the drain
+                // budget both inert for the tail of the run, so a bulk failure
+                // at that point fanned out to one serialized commit per patch
+                // with nothing able to stop it.
+                //
+                // A SEPARATE list from `deferredByCutoff`, deliberately. These
+                // patches were abandoned by the clock, not by the backend, and
+                // feeding them to `recordSkipped` made the cutoff banner blame
+                // the backend for them -- printing "400 patches were not sent,
+                // sending them would have added load to a backend that is
+                // already the reason they fail" directly above "Ingest ran out
+                // of time: raise IX_MAP_DEADLINE_MS". Two contradictory
+                // diagnoses, and the wrong count on the first.
+                // `describeCommitOutcome` already orders the deadline ahead of
+                // the cutoff for exactly this reason.
+                for (let k = itemIndex; k < items.length; k++) deferredByDeadline.push(items[k]);
+                break;
+              }
+              const action = perFileAction({
+                replay: isReplay,
+                tripped: commitBreaker.tripped(),
+                budgetLeft: fallbackOpts?.failureBudget === undefined ? undefined : budgetLeft,
+              });
+              if (action === "hold") {
+                for (let k = itemIndex; k < items.length; k++) deferredByCutoff.push(items[k]);
+                break;
+              }
+              if (action === "count-applied") {
+                // Confirmed landed by the server's 409, and we have given up
+                // sending. They are still IN THE GRAPH, so dropping them from
+                // the counters would make the cutoff report "The graph is
+                // unchanged" for a run that changed it.
+                //
+                // This branch adds no commitErrors, and `persistIngestBaseline-
+                // IfClean` is gated on the RUN-WIDE count, so on a run whose
+                // only anomaly is this the baseline IS written and the next run
+                // skips these files. That is correct here and only here --
+                // the server's own 409 confirmed they landed -- but it is the
+                // opposite of what an earlier comment claimed, so it is worth
+                // stating rather than leaving to be re-derived.
+                patchesApplied += items.length - itemIndex;
+                break;
+              }
               try {
                 // Move the label per file. It used to be set once, before the
                 // bulk attempt, and never again -- so a fallback of several
@@ -1538,10 +2156,19 @@ export async function ingestFiles(
                 const commitStart = performance.now();
                 const result = await retryOnConflict(() => client.commitPatch(item.patch), COMMIT_CONFLICT_RETRIES);
                 const chunkMs = Math.round(performance.now() - commitStart);
-                commitMsPerChunk[ci] += chunkMs;
+                recordMs(chunkMs);
                 timings.fallbackCommitMs += chunkMs;
                 latestRev = advanceRev(latestRev, result.rev);
+                // See onBulkCommitted: a lost base-rev race wrote nothing and
+                // must not be reported as applied.
+                if (result.status === COMMIT_STATUS_BASE_REV_MISMATCH) {
+                  commitErrors++;
+                  continue;
+                }
                 patchesApplied++;
+                patchesTheBackendTook++;
+                commitBreaker.recordSuccess();
+                if (result.status === COMMIT_STATUS_IDEMPOTENT) idempotentPatches++;
                 opts?.onCommitted?.(item, result.rev);
               } catch (commitErr) {
                 // Counted apart from parseErrors: a patch that parsed fine and
@@ -1549,7 +2176,51 @@ export async function ingestFiles(
                 // tree, which is a different problem from a file we could not
                 // read. Reporting it as a parse error hid that distinction in
                 // both the summary and the JSON contract.
-                commitErrors++;
+                // Only failures that indict the BACKEND spend the budget --
+                // the same filter the breaker uses. A payload-too-large is
+                // about that one patch, and letting a handful of oversized
+                // generated files exhaust the drain would strand hundreds of
+                // perfectly committable patches on a healthy backend.
+                const indicts = commitFailureIndictsBackend(commitErr, runDeadlineExpired());
+                if (indicts) budgetLeft--;
+                // ...but a REPLAY never indicts the backend, whatever the error
+                // looks like: the server's own 409 confirmed those patches
+                // landed, so a failure re-sending one says nothing about its
+                // willingness to write. This counter is the drain gate's
+                // evidence, and its own doc says exactly that twenty lines
+                // below; counting replays here contradicted it.
+                if (indicts && !isReplay) backendIndictingFailures++;
+                if (isReplay) {
+                  // Confirmed landed by the server's own 409 body. A failed
+                  // re-send loses no write, so counting it as a commit error
+                  // would let the cutoff claim "The graph is unchanged" for a
+                  // run whose patches are all in the graph.
+                  patchesApplied++;
+                  // It still has to STOP, though. The full-landed branch of
+                  // `commitBulkWithPayloadSplit` hands the whole chunk here and
+                  // returns before its `shouldStop` check, so nothing else
+                  // bounds it: an un-tripped breaker would watch up to
+                  // IX_COMMIT_HTTP_MAX_FILES doomed commits go out one at a
+                  // time behind the global fallback mutex, blocking every other
+                  // chunk's fallback.
+                  //
+                  // Bounded LOCALLY, not through the run-wide breaker. Feeding
+                  // it there was round 13's fix and it indicted the whole run
+                  // for something the CLI knows says nothing about the backend's
+                  // willingness to write: the server already confirmed these
+                  // patches landed, so a backend that answers a hard error for
+                  // re-committing one -- a legitimate idempotency
+                  // implementation -- tripped the run-wide cutoff after five
+                  // replays while perfectly healthy.
+                  replayFailures++;
+                  if (commitBreaker.limit > 0 && replayFailures >= commitBreaker.limit) {
+                    patchesApplied += items.length - itemIndex - 1;
+                    break;
+                  }
+                } else {
+                  commitErrors++;
+                  if (indicts) commitBreaker.recordFailure(commitErr);
+                }
                 if (debug) {
                   const errMsg = String(commitErr);
                   const truncated = errMsg.length > 200 ? errMsg.slice(0, 200) + '…' : errMsg;
@@ -1560,7 +2231,232 @@ export async function ingestFiles(
           } finally {
             resolveThis();
           }
-        };
+      };
+
+      /**
+       * Re-send the patches the cutoff held back, in alternating passes.
+       *
+       * Not a bypass, but the bound is the BUDGET, not the breaker: with a
+       * failure budget in play `perFileAction` ignores the streak entirely, so
+       * saying "the breaker is active, so this stays bounded" -- as this
+       * comment used to -- described a mechanism that does not run. What each
+       * pass carries is `failureBudget` doomed requests. There is deliberately
+       * NO pass cap -- one would hand back committable patches unsent, a real
+       * loss where this is only slowness -- so the bound is the HELD-SET SIZE:
+       * a pass only attempts items no earlier pass reached, so the drain sends
+       * at most one request per held patch, which is what `main` sends anyway.
+       * A dead backend is stopped after `3 x budget` -- one per sample; one that
+       * accepts a little and refuses the rest is not stopped at all and pays the
+       * full size.
+       *
+       * The streak is still RESET per pass, for a different reason: five
+       * adjacent patches the backend rejects on their own merits are
+       * indistinguishable from a dead backend at the time, and the difference
+       * only shows when the next patch commits. Carrying the streak in would
+       * leave the run's banner reporting the hold that caused the drain rather
+       * than what the drain found.
+       *
+       * Without any of this the mtime baseline -- never written on a run with
+       * commit errors -- makes the next run repeat the same order, stop at the
+       * same point, and drop the same patches forever.
+       */
+      /** Re-send the held set. What it cannot place is left on `deferredByCutoff`. */
+      const commitIndividuallyAfterCutoff = async (itemsIn: PreparedPatch[]): Promise<void> => {
+        let items = itemsIn;
+        if (debug) {
+          process.stderr.write(
+            `\n  [cutoff] re-sending ${items.length} held-back patches with a fresh streak\n`,
+          );
+        }
+
+        // One bulk first, because the held set is usually not the problem.
+        //
+        // `onAbandoned` hands over whole CHUNKS, not just the tail the fan-out
+        // reached, so on a backend that recovers by the end of the batch this
+        // would otherwise serialize thousands of single-patch commits where one
+        // request per chunk would do -- the Ix#495 shape, on the recovery path
+        // this design exists to serve. A backend that is still refusing costs
+        // one extra doomed request, the same price the per-chunk bulk already
+        // pays and deliberately never skips.
+        //
+        // DELETIONS are excluded. `runChunk` routes any patch with a
+        // DeleteNode/DeleteEdge op to its own single-item `client.commitPatch`,
+        // and `ingest-reconcile.test.ts` pins that -- the bulk endpoint is not
+        // trusted to apply delete ops. They fall through to the passes below,
+        // which commit them one at a time as their routing requires.
+        //
+        // CHUNKED at `COMMIT_HTTP_MAX_FILES`, not skipped above it. Skipping
+        // meant that lowering `IX_COMMIT_HTTP_MAX_FILES` -- which #560's
+        // reporters explicitly tried -- turned the probe off entirely and gave
+        // them the serialized fan-out it exists to avoid.
+        //
+        // A PARTIAL 409 is handled here rather than left to the passes, because
+        // the passes cannot: they run with a failure budget and never with
+        // `replay: true`, so re-sending a patch the server has already
+        // confirmed would be counted as a commit error -- suppressing the mtime
+        // baseline and reporting files as missing from a graph that holds them,
+        // which is the over-reporting `replay` exists to prevent (Ix#495).
+        const needsPerFile = (item: PreparedPatch): boolean => patchRequiresPerFileCommit(item.patch);
+        const stillToSend: PreparedPatch[] = items.filter(needsPerFile);
+        let probeQueue = items.filter(item => !needsPerFile(item));
+
+        while (probeQueue.length > 1) {
+          const chunk = probeQueue.slice(0, COMMIT_HTTP_MAX_FILES);
+          const rest = probeQueue.slice(chunk.length);
+          const bulkStart = performance.now();
+          try {
+            const result = await retryOnConflict(
+              () => client.commitPatchBulk(chunk.map(item => item.patch)),
+              COMMIT_CONFLICT_RETRIES,
+            );
+            const ms = Math.round(performance.now() - bulkStart);
+            recordDrainMs(ms);
+            timings.bulkCommitMs += ms;
+            latestRev = advanceRev(latestRev, result.rev);
+            patchesApplied += chunk.length;
+            patchesTheBackendTook += chunk.length;
+            commitBreaker.recordSuccess();
+            // The cutoff drain is a third commit site, added after this counter
+            // was written (Ix#571). It is a plain bulk commit carrying a status,
+            // so it counts like the other one -- a run whose held patches were
+            // all placed here and all deduplicated would otherwise report
+            // `idempotentPatches: 0` and fall back to the language hypothesis
+            // this change exists to retire.
+            if (result.status === COMMIT_STATUS_IDEMPOTENT) idempotentPatches += chunk.length;
+            for (const item of chunk) opts?.onCommitted?.(item, result.rev);
+            if (debug) process.stderr.write(`  [cutoff] bulk placed ${chunk.length} of ${items.length} held
+`);
+            probeQueue = rest;
+          } catch (bulkErr) {
+            // Record the time either way. The FAILING probe is the expensive
+            // one -- a saturated backend answers with a per-request timeout,
+            // multiplied by the conflict retries -- so dropping it hid minutes
+            // from the reported commit total on exactly the run this targets.
+            const ms = Math.round(performance.now() - bulkStart);
+            recordDrainMs(ms);
+            timings.bulkCommitMs += ms;
+            let unconfirmed = chunk;
+            let confirmedAny = false;
+            if (isBulkPartiallyCommittedError(bulkErr)) {
+              const landedIds = parseBulkCommittedPatchIds(bulkErr);
+              if (landedIds !== undefined) {
+                const landed = chunk.filter(item => landedIds.has(item.patch.patchId));
+                if (landed.length > 0) {
+                  patchesApplied += landed.length;
+                  // ...and through `onCommitted`, like every other "these
+                  // landed" path. The deletion batch is the one caller that
+                  // supplies it, and it uses it to write `durableDeletedFiles`:
+                  // a deletion patch whose reconcile found nothing to remove
+                  // carries no delete op, so it rides the bulk path, can be held
+                  // by the cutoff, and can be 409-confirmed here -- counted
+                  // applied but never recorded in the deleted-files baseline.
+                  // `latestRev` rather than a rev of its own: the server holds
+                  // these already, so their rev is at or below it, and
+                  // `saveIngestBaseline` floors what it stores anyway.
+                  for (const item of landed) opts?.onCommitted?.(item, latestRev);
+                  // NOT `patchesTheBackendTook`. That counter's whole reason for
+                  // existing is to keep 409-sourced counts from reopening a gate
+                  // closed against a dead backend -- "counted only where a
+                  // request came back OK", as its own doc says. A backend that
+                  // can read but cannot begin a write transaction answers 409
+                  // with ids it already holds, and on a re-run after a failed
+                  // ingest the patch ids are identical, so feeding those here
+                  // would reopen the gate and un-trip the breaker every batch.
+                  confirmedAny = true;
+                  if (debug) {
+                    process.stderr.write(
+                      `  [cutoff] bulk partly committed: ${landed.length} of ${chunk.length} already landed
+`,
+                    );
+                  }
+                }
+                unconfirmed = chunk.filter(item => !landedIds.has(item.patch.patchId));
+              }
+            }
+            // Keep the quoted error current, for the same reason `onAbandoned`
+            // does -- but NOT for a 409 that confirmed patches. That answer says
+            // the backend is taking writes, and the banner's `Last error:` is
+            // what the message and the troubleshooting row both tell the user
+            // distinguishes a saturated database from a rejected patch. A 409
+            // says neither, and quoting it would replace the TimeoutError that
+            // actually caused the cutoff. Not `recordFailure` either -- one bulk
+            // is one request, not N.
+            if (!confirmedAny && commitFailureIndictsBackend(bulkErr, runDeadlineExpired())) {
+              commitBreaker.noteError(bulkErr);
+            }
+            if (confirmedAny) {
+              // Positive proof the backend is taking writes, so KEEP PROBING --
+              // and re-bulk what it did NOT confirm rather than hand it to the
+              // passes, which have no bulk path. `commitBulkWithPayloadSplit`
+              // does exactly this with the same response: the unconfirmed set
+              // is a different group id, so one more request settles it where
+              // 497 serialized commits behind the global mutex would otherwise
+              // be the Ix#495 amplification this probe exists to prevent.
+              //
+              // Deliberately NOT `recordSuccess()`. A 409 naming ids the server
+              // already holds is not evidence it can take a NEW write -- that is
+              // the same reasoning that keeps those ids out of
+              // `patchesTheBackendTook` twenty lines above, and calling both
+              // would have made the two contradict each other. A backend that
+              // can read but cannot begin a write transaction answers exactly
+              // this way on a re-run, and un-tripping the run-wide cutoff there
+              // hands the next batch's failing bulk back to the fan-out.
+              probeQueue = [...unconfirmed, ...rest];
+            } else {
+              for (const item of unconfirmed) stillToSend.push(item);
+              // One real failure ends the probing: the rest goes to the passes,
+              // which is where a backend that is actually refusing belongs.
+              for (const item of rest) stillToSend.push(item);
+              probeQueue = [];
+            }
+          }
+        }
+        for (const item of probeQueue) stillToSend.push(item);
+        if (stillToSend.length === 0) return;
+        items = stillToSend;
+        // A budget, not the breaker's streak: the held set can begin with the
+        // tail of a poison cluster -- the fan-out stopped inside it, so the
+        // rest of it is the first thing here -- and a streak would stop again
+        // in the same place and strand everything after.
+        //
+        // The budget is the limit itself, not twice it. Twice was chosen to
+        // walk out of a cluster in ONE pass; `drainInPasses` walks out of it by
+        // changing direction instead. `drainFailureBudget` is shared with the
+        // tests, which previously asserted the stranding guarantee at a budget
+        // the CLI never runs at and so could not see it fail.
+        const leftover = await drainInPasses(items, async pending => {
+          commitBreaker.reset();
+          const tookBefore = patchesTheBackendTook;
+          await commitItemsSerially(pending, recordDrainMs, undefined, {
+            failureBudget: drainFailureBudget(commitBreaker.limit),
+          });
+          // Whatever the budget did not reach was pushed straight back onto the
+          // held list by the per-file loop; take it back out so the next pass
+          // owns it and the caller does not see it twice.
+          return {
+            placed: patchesTheBackendTook > tookBefore,
+            unreached: deferredByCutoff.splice(0, deferredByCutoff.length),
+          };
+        });
+        // A loop, not a spread. The ordinary path bounds this at
+        // `PARSE_STREAM_CHUNK` (500), but the reconcile call passes every
+        // deletion patch in the run unchunked, so the argument limit is not
+        // obviously out of reach -- and spreading past it throws RangeError from
+        // inside the commit phase, an uncaught throw that loses the whole
+        // batch's error accounting. The loop costs nothing and removes the
+        // question.
+        for (const item of leftover) deferredByCutoff.push(item);
+      };
+
+      const runChunk = async (ci: number): Promise<void> => {
+        const chunk = chunks[ci];
+        const endFile = chunk[chunk.length - 1].fileNumber;
+        const commitIndividually = async (
+          items: PreparedPatch[],
+          bulkError?: unknown,
+          fallbackOpts?: { replay?: boolean },
+        ): Promise<void> =>
+          commitItemsSerially(items, ms => { commitMsPerChunk[ci] += ms; }, bulkError, fallbackOpts);
 
         const hasDeletion = chunk.some(item => patchRequiresPerFileCommit(item.patch));
 
@@ -1586,10 +2482,51 @@ export async function ingestFiles(
             },
             onBulkCommitted: (items, result) => {
               latestRev = advanceRev(latestRev, result.rev);
+              // `BaseRevMismatch` wrote nothing: the backend read the latest rev
+              // outside the transaction and it moved before the commit ran. It
+              // is a lost race, not a replay, so it must not count as applied —
+              // and it belongs in commitErrors, because that is what stops
+              // `persistIngestBaselineIfClean` caching these files as unchanged
+              // and leaving them missing from the graph until the next edit.
+              if (result.status === COMMIT_STATUS_BASE_REV_MISMATCH) {
+                commitErrors += items.length;
+                if (debug) {
+                  process.stderr.write(
+                    `\n  [commit lost the base-rev race] ${items.length} patches wrote nothing; they will be re-sent next run\n`
+                  );
+                }
+                return;
+              }
               patchesApplied += items.length;
+              patchesTheBackendTook += items.length;
+              commitBreaker.recordSuccess();
+              // One status covers the whole bulk: the backend commits the chunk
+              // as a unit, so `Idempotent` means every patch in it was a replay.
+              if (result.status === COMMIT_STATUS_IDEMPOTENT) idempotentPatches += items.length;
               for (const item of items) opts?.onCommitted?.(item, result.rev);
             },
             commitIndividually,
+            shouldStop: () => commitBreaker.tripped(),
+            onAbandoned: (items, err) => {
+              // The clock's, if it has fired. `shouldStop` is the breaker, which
+              // does not consult the deadline, so a chunk whose bulk was aborted
+              // by the run budget arrived here and was reported as withheld by
+              // the cutoff -- the same misattribution the two lists exist to
+              // keep apart, on the one path that was not routing through them.
+              const held = runDeadlineExpired() ? deferredByDeadline : deferredByCutoff;
+              for (const item of items) held.push(item);
+              // Keep the quoted error current. This is the only place a bulk
+              // failure is seen once the breaker has tripped -- the per-file
+              // loop it would otherwise reach is exactly what the trip skips --
+              // and after the first batch trips, every later batch fails here
+              // and nowhere else. Without it the banner quotes batch 1's error
+              // for the whole run, which is wrong in the case the message was
+              // written for: a backend that recovers from saturation and starts
+              // REJECTING patches instead still reads as "the database is busy".
+              if (err !== undefined && commitFailureIndictsBackend(err, runDeadlineExpired())) {
+                commitBreaker.noteError(err);
+              }
+            },
             patchIdOf: item => item.patch.patchId,
             onPartialBulk: (landed, missing, err) => {
               if (!debug) return;
@@ -1625,7 +2562,79 @@ export async function ingestFiles(
         Array.from({ length: Math.min(COMMIT_CONCURRENCY, chunks.length) }, () => worker())
       );
 
-      return commitMsPerChunk.reduce((a, b) => a + b, 0);
+      // Nothing stays abandoned while the backend is demonstrably accepting
+      // writes. Five adjacent patches the backend rejects on their own merits
+      // look exactly like a dead backend until a later chunk commits, so the
+      // held-back set gets a real attempt rather than being written off.
+      //
+      // `drainInPasses` is what decides when to stop -- a pass that REACHED
+      // THE END, or three passes (tail, head, middle) that between them placed
+      // nothing at all, and not even that once the backend has proved it is
+      // alive. What the last pass could not reach is left for the next run,
+      // which re-ingests it anyway because the mtime baseline is not written on
+      // a run with commit errors. (A single pass that placed nothing is
+      // deliberately NOT a stopping condition, and there is no pass cap; its own
+      // doc says why for both.) The gate below is a coarser judgement across
+      // BATCHES, so that a genuinely dead backend is not re-probed once per
+      // batch for the length of the run.
+      if (deferredByCutoff.length > 0) {
+        if (!runDeadlineExpired() && drainGate.shouldDrain(patchesTheBackendTook)) {
+          const held = deferredByCutoff.splice(0, deferredByCutoff.length);
+          const tookBefore = patchesTheBackendTook;
+          const indictedBefore = backendIndictingFailures;
+          await commitIndividuallyAfterCutoff(held);
+          // A miss means the backend took nothing AND said something that
+          // indicts it. Both halves are load-bearing, and each was wrong on its
+          // own in an earlier revision:
+          //
+          //   - taking nothing alone is not it. `commitFailureIndictsBackend`
+          //     excludes payload-too-large, so a held set of oversized generated
+          //     files is attempted in full and refused in full without the
+          //     backend being at fault; two such batches closed the gate on a
+          //     backend that never refused a write.
+          //   - "nothing was stranded" alone is not it either, which is subtler.
+          //     A held set no larger than one pass's budget -- a trip near the
+          //     end of a chunk, or the deletion path where each deletion is its
+          //     own one-patch chunk -- is attempted in full and refused in full
+          //     by a DEAD backend, and reporting that as progress meant the gate
+          //     could never close and every batch re-probed, which is the whole
+          //     thing the gate exists to stop.
+          //
+          // Whether the drain ended tripped says nothing useful either: one
+          // that commits hundreds and then meets the tail of a bad cluster ends
+          // tripped too.
+          const backendMisbehaved = backendIndictingFailures > indictedBefore;
+          drainGate.record(patchesTheBackendTook > tookBefore || !backendMisbehaved, patchesTheBackendTook);
+        }
+        // Held back again, or held back after the retry was already spent.
+        if (deferredByCutoff.length > 0) {
+          commitErrors += deferredByCutoff.length;
+          // Counted as the cutoff's even when the deadline has since fired.
+          // Everything on this list was held by `perFileAction` BEFORE the
+          // clock ran out -- the deadline check sits above the hold branch and
+          // diverts to `deferredByDeadline` once it has -- so they are the
+          // cutoff's patches, and suppressing the count reported "0 of them
+          // were withheld by this cutoff" while the deadline message claimed
+          // all of them. That is the same misattribution the
+          // `deferredByDeadline` split exists to prevent, pointing the other
+          // way. The contradiction it was guarding against is handled where it
+          // belongs: `describeCommitCutoff` drops the "would have added load"
+          // framing when `deadlineHit`, and names the split instead.
+          commitBreaker.recordSkipped(deferredByCutoff.length);
+          deferredByCutoff.length = 0;
+        }
+      }
+
+      // Missing from the graph either way, but attributed to the clock: the
+      // deadline branch of `describeCommitOutcome` is what reports these.
+      if (deferredByDeadline.length > 0) {
+        commitErrors += deferredByDeadline.length;
+        // Deliberately not fed to the cutoff's own accounting: these are the
+        // clock's, and `describeCommitOutcome` reports them under the deadline.
+        deferredByDeadline.length = 0;
+      }
+
+      return commitMsPerChunk.reduce((a, b) => a + b, 0) + drainMs;
     };
 
     /** Resolve edges within a batch, build patches, and commit in sub-chunks. */
@@ -1797,6 +2806,7 @@ export async function ingestFiles(
           const hash = sha256(bytes);
           if (!forceReingestPaths.has(filePath) && knownHashes.get(filePath) === hash) {
             filesSkipped++;
+            filesSkippedAsUnchanged++;
             progressCurrent++;
             continue;
           }
@@ -1887,7 +2897,7 @@ export async function ingestFiles(
           const batch: ParsedFile[] = [];
           for (let j = 0; j < chunk.length; j++) {
             const parsed = parseResults[j] as any;
-            if (!parsed) { filesSkipped++; continue; }
+            if (!parsed) { filesSkipped++; filesSkippedUnparsed++; continue; }
             entitiesParsed += parsed.entities.length;
             batch.push({ filePath: chunk[j].filePath, parsed, hash: chunk[j].hash, previousHash: chunk[j].previousHash });
           }
@@ -1898,6 +2908,19 @@ export async function ingestFiles(
       }
     } else {
       // Path B: no baseline (first ingest) or --force → load modules, then stream parse + commit.
+      //
+      // Ix#568: this branch walks ALL of `filePaths`, re-reading, re-hashing and
+      // re-parsing every one, and its hash-clean short-circuit cannot fire here
+      // -- `knownHashes` is empty by construction on the non-force entry, and
+      // the check is `!opts.force` on the other. So the mtime skips the stat
+      // loop recorded did not actually happen, and leaving them counted refused
+      // the stitch on the commonest incremental shape there is: add ONE new
+      // file to a mapped repo, and `loadExistingHashes` returns nothing for it,
+      // so `knownHashes.size === 0` sends the whole repo down here -- every file
+      // parsed, registration complete -- while the gate still saw N-1 files
+      // "skipped as unchanged" and silently declined to stitch.
+      filesSkipped -= filesSkippedAsUnchanged;
+      filesSkippedAsUnchanged = 0;
       const moduleStart = performance.now();
       const [ingestion, patchBuilder] = await loadIngestionModules();
       timings.moduleLoadMs = Math.round(performance.now() - moduleStart);
@@ -1956,8 +2979,57 @@ export async function ingestFiles(
             let bytes!: Buffer;
             try {
               const st = await fh.stat();
-              if (st.size === 0) { filesSkipped++; return; }
-              if (st.size > MAX_FILE_BYTES) { tooLarge++; return; }
+              // The stat loop above walks the same `filePaths` unconditionally,
+              // so a file it already rejected is counted there and must not be
+              // counted again here -- incrementing unconditionally counted every
+              // empty or oversized file TWICE, invisible until
+              // `skipReasons.emptyFile` stopped being hardcoded to 0 and
+              // reported 2 for a repo with one empty `__init__.py`.
+              //
+              // `accountedByStatLoop` is exactly that record. It is a set the
+              // loop writes deliberately, not `currentMtimes` read backwards:
+              // that map also omits files whose `statSync` THREW, which the loop
+              // counts as a parse error and not as a skip, so inferring from it
+              // treated those as already counted. Reaching here for a file the
+              // loop passed means it changed between the two stats -- truncated,
+              // or grown past the cap -- and it must be counted, or it vanishes
+              // from the graph, from `filesSkipped` and from every `skipReasons`
+              // bucket at once.
+              //
+              // The check itself is not optional either way: it is the fstat on
+              // the handle we are about to read, which is what makes the size cap
+              // TOCTOU-free (CodeQL js/file-system-race).
+              const countedByStatLoop = accountedByStatLoop.get(absFilePath);
+              if (st.size === 0) {
+                // Re-bucket rather than just skip: the stat loop may have
+                // recorded this as `tooLarge`, and the file has since been
+                // truncated. Leaving it there reports an empty file as
+                // oversized and keeps it out of `filesSkipped` entirely.
+                if (countedByStatLoop === undefined) { filesSkipped++; filesSkippedAsEmpty++; }
+                else if (countedByStatLoop === 'tooLarge') { tooLarge--; filesSkipped++; filesSkippedAsEmpty++; }
+                accountedByStatLoop.set(absFilePath, 'empty');
+                return;
+              }
+              if (st.size > MAX_FILE_BYTES) {
+                // ...and the mirror image, for a file that has since grown.
+                if (countedByStatLoop === undefined) tooLarge++;
+                else if (countedByStatLoop === 'empty') { filesSkipped--; filesSkippedAsEmpty--; tooLarge++; }
+                accountedByStatLoop.set(absFilePath, 'tooLarge');
+                return;
+              }
+              // The other direction of the same race, and it needs undoing
+              // rather than skipping: the stat loop saw this file as empty or
+              // oversized and counted it, and the fstat -- the one we are about
+              // to READ from, so the authoritative one -- says it is neither.
+              // The file is ingested, so leaving the earlier count in place
+              // reports it as skipped in the very number the docs now call the
+              // real one.
+              if (countedByStatLoop !== undefined) {
+                accountedByStatLoop.delete(absFilePath);
+                // Which counter, from the record rather than a guess.
+                if (countedByStatLoop === 'empty') { filesSkipped--; filesSkippedAsEmpty--; }
+                else tooLarge--;
+              }
               bytes = await fh.readFile();
             } finally {
               await fh.close();
@@ -1965,6 +3037,7 @@ export async function ingestFiles(
             const hash = sha256(bytes);
             if (!opts.force && !forceReingestPaths.has(absFilePath) && knownHashes.get(absFilePath) === hash) {
               filesSkipped++;
+              filesSkippedAsUnchanged++;
               return;
             }
             const previousHash = knownHashes.get(absFilePath);
@@ -1992,7 +3065,7 @@ export async function ingestFiles(
           const f = fileData[j];
           if (!f) continue;
           const parsed = parseResults[j] as any;
-          if (!parsed) { filesSkipped++; continue; }
+          if (!parsed) { filesSkipped++; filesSkippedUnparsed++; continue; }
           entitiesParsed += parsed.entities.length;
           batch.push({ filePath: f.filePath, parsed, hash: f.hash, previousHash: f.previousHash });
         }
@@ -2094,7 +3167,15 @@ export async function ingestFiles(
       projectRoot,
       currentMtimes,
       latestRev,
-      parseErrors,
+      // Lost parses count as parse errors HERE, whatever they are called
+      // elsewhere. A run whose worker pool died resolves every later file as
+      // null, and those increment `filesSkippedUnparsed` rather than
+      // `parseErrors` -- so without this the run wrote an mtime baseline for
+      // tens of thousands of files it never parsed or committed, exited 0, and
+      // every later incremental map skipped them as unchanged. Half the graph
+      // missing, recoverable only by `--force`, and worse than `main`, which
+      // respawns without a cap and loses one file per crash.
+      parseErrors + crashedParses(),
       commitErrors,
       undefined,
       nextDeletedFiles,
@@ -2103,7 +3184,19 @@ export async function ingestFiles(
     // Migration cleanup (Ix#225 gap 2): the re-ingest under the new path-based id has
     // committed, so delete the OLD id's now-orphaned nodes/edges/patches. Best-effort —
     // a failure here is non-fatal (orphans are harmless dead storage, cleanable later).
-    if (workspaceMigrated && previousWorkspaceId && ingestCompletedCleanly(parseErrors, commitErrors)) {
+    // `+ crashedParses()`, exactly as the baseline guard below. This one
+    // DELETES the old workspace's graph, so it must be at least as strict: a
+    // run whose parse pool died resolves every later file as null without
+    // raising `parseErrors`, so both guards saw a clean run while the new
+    // workspace held a half-populated graph -- and this one would drop the
+    // complete old one permanently. The two adjacent guards must not disagree
+    // about whether the run was clean, and the destructive one certainly must
+    // not be the laxer of the pair.
+    if (
+      workspaceMigrated &&
+      previousWorkspaceId &&
+      ingestCompletedCleanly(parseErrors + crashedParses(), commitErrors)
+    ) {
       try {
         await client.deleteWorkspace(previousWorkspaceId);
         if (debug) process.stderr.write(`  Cleaned up pre-migration nodes under ${previousWorkspaceId}.\n`);
@@ -2116,12 +3209,63 @@ export async function ingestFiles(
     // write the cross-repo IMPORTS edges to other separately-ingested repos.
     // Best-effort: a failure (or an older backend with no /v1/stitch) never fails
     // the ingest. Collection is over the files actually parsed this run, so it is
-    // only COMPLETE on a full ingest. Gating on filesSkipped === 0 means a partial
-    // incremental re-map (some files mtime-skipped) leaves the prior full
-    // registration intact rather than overwriting it with a partial set; a fresh
-    // map, `--force`, or a post-reset re-map re-registers. (Incremental registry
-    // updates that touch only changed files are a future refinement.)
-    if (stitchEnabled && filesSkipped === 0 && stitchFiles.length > 0 && ingestCompletedCleanly(parseErrors, commitErrors)) {
+    // only COMPLETE on a full ingest. Gating on filesSkippedAsUnchanged === 0
+    // means a partial incremental re-map (some files mtime- or hash-skipped)
+    // leaves the prior full registration intact rather than overwriting it with a
+    // partial set; a fresh map, `--force`, or a post-reset re-map re-registers.
+    // (Incremental registry updates that touch only changed files are a future
+    // refinement.)
+    //
+    // Ix#568: the two narrow counts, not `filesSkipped` -- see their
+    // declarations. The broad total also includes empty and minified-looking
+    // files, which contribute nothing under any run, so one empty `__init__.py`
+    // used to disqualify a repo from ever stitching, with or without `--force`.
+    // A CRASHED parse worker is in that category and is counted here: it
+    // resolves its in-flight task as null without raising `parseErrors`, and
+    // stitching then would overwrite a complete registration with one missing
+    // that file's exports. A file `parseFile` simply returned null for is not --
+    // that is deterministic, usually an unavailable optional grammar, and
+    // gating on it blocked stitching forever for any repo containing one.
+    const registrationIsComplete = filesSkippedAsUnchanged === 0 && crashedParses() === 0;
+    // Every way the stitch does not happen is REPORTED, not just the guard's.
+    // `stitch_skipped: null` means "the cross-repo edges are current", so every
+    // path that leaves it unset while skipping the stitch says something false
+    // -- and the two below are far commoner than any refusal the guard makes.
+    // Neither prints a human Note or a `--silent` token: `incomplete` would
+    // appear on nearly every incremental map, and a run with errors has already
+    // said so, loudly, in the lines above.
+    // `lost-parses` FIRST. It is the only one of the three that prints, and a
+    // dead pool also raises `parseErrors`, so testing `run-errors` first meant a
+    // `--force` run with one patch-build failure and four thousand lost files
+    // reported the one and said nothing about the rest -- suppressing the very
+    // Note this rule was added to show.
+    if (stitchEnabled && crashedParses() > 0) {
+      // Its OWN rule, and one that IS printed. `incomplete` is silent because
+      // it fires on nearly every incremental map -- but on a `--force` run
+      // nothing is skipped as unchanged, so `incomplete` there could only ever
+      // mean a crashed worker, and staying silent made the recovery command
+      // this CLI advertises exit 0 having quietly done nothing.
+      stitchSkippedRule = "lost-parses";
+      stitchSkipped =
+        `a parse worker crashed and ${crashedParses()} file(s) went unparsed, so the ` +
+        "cross-workspace registration would be missing them";
+    } else if (stitchEnabled && !ingestCompletedCleanly(parseErrors, commitErrors)) {
+      stitchSkippedRule = "run-errors";
+      stitchSkipped =
+        "this run had parse or commit errors, so its registration would be built from " +
+        "an incomplete picture of the repo";
+    } else if (stitchEnabled && !registrationIsComplete) {
+      // `stitchFiles.length > 0` is deliberately NOT required on any of these
+      // three. A map where nothing changed parses nothing, so `stitchFiles` is
+      // empty and the field stayed unset -- reporting "the cross-repo edges are
+      // current" for the commonest map there is, while a cooldown was refusing
+      // stitches the whole time. The staleness is identical either way.
+      stitchSkippedRule = "incomplete";
+      stitchSkipped =
+        "this map did not re-parse every file, so it has no complete cross-workspace " +
+        "registration to send";
+    }
+    if (stitchEnabled && registrationIsComplete && stitchFiles.length > 0 && ingestCompletedCleanly(parseErrors, commitErrors)) {
       try {
         const entry = pickEntryFile(stitchFiles);
         const provides = entry
@@ -2168,13 +3312,50 @@ export async function ingestFiles(
           symbolConsumes.push({ symbol, callerNodeId, pkg });
         }
         if (provides.length > 0 || stitchConsumes.length > 0 || stitchExports.length > 0 || symbolConsumes.length > 0) {
-          const res = await client.stitch({ workspaceId, provides, consumes: stitchConsumes, exports: stitchExports, symbolConsumes });
-          if (debug) process.stderr.write(`  [stitch] provides=${provides.length} consumes=${stitchConsumes.length} exports=${stitchExports.length} symConsumes=${symbolConsumes.length} -> ${res.stitched} edges\n`);
-          // This call is the one thing that can change whether the workspace
-          // belongs to a system, and reads cache that answer on disk. Drop it
-          // here so the next read asks again rather than scoping to the
-          // pre-stitch workspace for as long as the file survives.
-          clearStitchScopeCache(workspaceId);
+          // Ix#568: ask before stitching. The join is cross-workspace and
+          // outlives the HTTP call that starts it, so `ix map`'s per-workspace
+          // lock does not bound it -- see stitch-guard.ts. A refusal is not a
+          // failure: the previous registration stands, exactly as it does after
+          // a stitch that FAILED. It is not picked up by the next map either --
+          // see describeStitchSkipped for what actually re-registers.
+          const admission = await admitStitchWaiting(
+            client.endpoint,
+            undefined,
+            undefined,
+            opts.deadlineSignal,
+          );
+          if (!admission.admitted) {
+            stitchSkipped = admission.reason;
+            stitchSkippedRule = admission.rule;
+            if (debug) process.stderr.write(`  [stitch not started] ${admission.reason}\n`);
+          } else {
+            const stitchStart = performance.now();
+            let res;
+            try {
+              res = await client.stitch({ workspaceId, provides, consumes: stitchConsumes, exports: stitchExports, symbolConsumes });
+            } catch (err) {
+              // Settle before rethrowing, so the shared catch below still sees
+              // the original error and the lock is never held past the request.
+              admission.settle({
+                ok: false,
+                elapsedMs: performance.now() - stitchStart,
+                // Two proofs that the backend is not running a join, and only
+                // two: it answered and refused (a status), or we never reached
+                // it at all. Everything else -- a 5xx, a timeout, an abort, a
+                // socket dropped after the request went out -- leaves it.
+                status: stitchFailureStatus(err),
+                neverConnected: connectionNeverEstablished(err),
+              });
+              throw err;
+            }
+            admission.settle({ ok: true, elapsedMs: performance.now() - stitchStart });
+            if (debug) process.stderr.write(`  [stitch] provides=${provides.length} consumes=${stitchConsumes.length} exports=${stitchExports.length} symConsumes=${symbolConsumes.length} -> ${res.stitched} edges\n`);
+            // This call is the one thing that can change whether the workspace
+            // belongs to a system, and reads cache that answer on disk. Drop it
+            // here so the next read asks again rather than scoping to the
+            // pre-stitch workspace for as long as the file survives.
+            clearStitchScopeCache(workspaceId);
+          }
         }
       } catch (err) {
         // Unsupported is not failed: an older backend answers 404 here, and
@@ -2224,18 +3405,75 @@ export async function ingestFiles(
     patchesApplied,
     // ix map has no --debug and never passes one; --verbose is its equivalent.
     opts.mapMode === true ? "--verbose" : "--debug",
-    opts.deadlineSignal?.aborted === true
+    opts.deadlineSignal?.aborted === true,
+    commitBreaker.skipped(),
+    // The same expression the banner is gated on, so this can never say "See
+    // the cutoff above" with no cutoff above it.
+    commitBreaker.everTripped()
   );
   const summary: IngestFilesSummary = {
     filesDiscovered,
     patchesApplied,
-    parseErrors,
+    idempotentPatches,
+    filesSkippedAsUnchanged,
+    // `+ crashedParses()`, as the baseline and delete guards already do. Files
+    // lost to a dead parse pool raise `filesSkippedUnparsed`, never
+    // `parseErrors`, so without this everything downstream read the run as
+    // clean: `describeDroppedFiles` stayed silent, and the completed-map checks
+    // blamed the backend "after a clean local ingest" and cleared the map
+    // baseline. On a co-ingest workspace the `lost-parses` channel is off too
+    // (`stitchEnabled` is false there), so the run exited 0 with no signal
+    // anywhere at all.
+    parseErrors: parseErrors + crashedParses(),
     commitErrors,
     stitchErrors,
+    stitchSkipped,
+    stitchSkippedRule,
   };
+  // `everTripped()` alone, and it is not a weakening: `recordFailure` has one
+  // call site, in the per-file catch immediately after `commitErrors++`, so a
+  // trip already implies a real commit failure. A `commitLoopErrors` counter
+  // guarded this for two rounds against a scenario that no longer exists --
+  // replay failures were moved off `recordFailure` onto a local counter, and a
+  // deletion patch that fails to BUILD never reaches the breaker at all. A dead
+  // conjunct defended by a comment describing an impossible case is the exact
+  // shape this PR has spent rounds removing.
+  if (commitBreaker.everTripped()) {
+    // Gated on the cutoff having FIRED, not on what was left unsent. A patch
+    // that was never sent produces no `[commit error]` line even under
+    // --verbose, so this has to print for those -- but gating on them alone
+    // meant a run whose drain eventually placed every held patch printed
+    // nothing at all. The 12-file reproduction at the default limit is exactly
+    // that shape: it held 7, the drain sent all 7, and the user got the generic
+    // "all 12 patches failed to commit, re-run with --verbose" -- the
+    // unexplained failure this change exists to remove.
+    //
+    // Before the stitch line and before the commit report: this is the cause,
+    // and everything else printed about this run is its consequence.
+    process.stderr.write(`${describeCommitCutoff(commitBreaker, client.endpoint, patchesApplied, opts.deadlineSignal?.aborted === true)}\n`);
+  }
   if (stitchErrors > 0) {
     process.stderr.write(`  ${describeStitchFailure(stitchError)}\n`);
     process.exitCode = 1;
+  } else if (
+    stitchSkipped !== undefined &&
+    // Not on `--silent`. `ix map` always passes `suppressOutput`, and that
+    // surface is deliberately one terse line per run -- which is the stated
+    // reason `incomplete` is filtered out of its token. A ~250-character Note
+    // on every map for the whole 15-minute cooldown is the repetition the short
+    // form exists to avoid; the token still carries the rule.
+    opts.suppressOutput !== true &&
+    // The guard's refusals only. `incomplete` would print on nearly every
+    // incremental map, and `run-errors` restates lines the run has already
+    // printed; both are still on the machine surfaces.
+    stitchSkippedRule !== "incomplete" &&
+    stitchSkippedRule !== "run-errors"
+  ) {
+    // Not an error and not an exit code: nothing failed, and the graph is
+    // exactly where a failed stitch would have left it. But the sentence a
+    // user gets otherwise -- cross-repo relationships may be incomplete --
+    // reads as an unexplained regression without the reason.
+    process.stderr.write(`  ${describeStitchSkipped(stitchSkipped, stitchSkippedRule, debug)}\n`);
   }
   if (commitReport.kind === "warn") {
     process.stderr.write(`  ${commitReport.message}\n`);
@@ -2259,11 +3497,35 @@ export async function ingestFiles(
       filesChanged,
       patchesApplied,
       filesSkipped,
+      idempotentPatches,
       entitiesParsed,
       latestRev,
-      skipReasons: { unchanged: filesSkipped, emptyFile: 0, parseError: parseErrors, tooLarge, minifiedLikely, outsideRoot },
+      // `unchanged` is the files we ASSUMED unchanged, not every skip. It used
+      // to be `filesSkipped`, which also counts empty, minified-looking and
+      // unparseable files -- so a consumer reading this could not tell an
+      // incremental no-op from a repo full of empty __init__.py. `emptyFile` was
+      // hardcoded 0 for the same reason and is now the real count.
+      //
+      // `unparsed` is its own bucket. Narrowing `unchanged` left the pool's
+      // nulls in no bucket at all, but folding them into `parseError` was
+      // worse: that counts every parse-stage failure, including stat, read and
+      // patch-build errors that were never skips, so one unstat-able file gave
+      // `filesSkipped: 0` with a bucket claiming 1. `unchanged`, `emptyFile`,
+      // `minifiedLikely` and `unparsed` are the buckets that are subsets of
+      // `filesSkipped`; `parseError` and `tooLarge` are counted separately and
+      // always were.
+      skipReasons: { unchanged: filesSkippedAsUnchanged, emptyFile: filesSkippedAsEmpty, parseError: parseErrors + crashedParses(), unparsed: filesSkippedUnparsed, tooLarge, minifiedLikely, outsideRoot },
       commitErrors,
       stitchErrors,
+      // Ix#568. Present only when the stitch was refused before it was sent, so
+      // a consumer reading this body can tell "cross-repo edges are current"
+      // from "cross-repo edges are as stale as the last successful stitch" --
+      // a distinction the exit code deliberately does not make.
+      // `?? null`, not left undefined: JSON.stringify drops an undefined
+      // value, so a consumer could not tell the field apart from an older CLI
+      // that never emitted it. `ix map --format json` does the same.
+      stitchSkipped: stitchSkipped ?? null,
+      stitchSkippedRule: stitchSkippedRule ?? null,
       elapsedSeconds: parseFloat(elapsed),
       timings: {
         ...timings,
@@ -2281,8 +3543,18 @@ export async function ingestFiles(
     console.log(`  processed:   ${patchesApplied} files (${elapsed}s)`);
     console.log(`  discovered:  ${filesDiscovered} files`);
     console.log(`  changed:     ${filesChanged} files`);
-    if (filesSkipped > 0) console.log(`  ${chalk.dim('skipped unchanged:')} ${filesSkipped}`);
-    if (parseErrors > 0) console.log(`  ${chalk.red('parse errors:')}      ${parseErrors}`);
+    // "skipped" without "unchanged": the count includes empty, minified-looking
+    // and unparseable files, none of which were assumed unchanged. Splitting the
+    // counter for the stitch gate (Ix#568) made the old label demonstrably
+    // wrong on a repo with an empty __init__.py and --force.
+    if (filesSkipped > 0) console.log(`  ${chalk.dim('skipped:')} ${filesSkipped}`);
+    // `+ crashedParses()`, matching the summary field. On a co-ingest workspace
+    // `stitchEnabled` is false, so the `lost-parses` Note never fires and
+    // `describeDroppedFiles` is only wired into `ix map` -- which left
+    // `ix ingest` on such a workspace printing "skipped: 4000", no parse-error
+    // line at all, and exiting 0 after losing its whole parse pool.
+    const parseErrorsShown = parseErrors + crashedParses();
+    if (parseErrorsShown > 0) console.log(`  ${chalk.red('parse errors:')}      ${parseErrorsShown}`);
     if (commitErrors > 0) console.log(`  ${chalk.red('commit errors:')}     ${commitErrors}`);
     if (tooLarge > 0) console.log(`  ${chalk.dim('skipped too large:')} ${tooLarge}`);
     if (minifiedLikely > 0) console.log(`  ${chalk.dim('skipped minified:')} ${minifiedLikely}`);

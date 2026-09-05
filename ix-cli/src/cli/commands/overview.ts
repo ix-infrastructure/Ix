@@ -1,11 +1,11 @@
 import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
-import { resolveFileOrEntity, printResolved } from "../resolve.js";
+import { resolveFileOrReport, printResolved } from "../resolve.js";
 import { getEffectiveSystemPath, getSystemPath, hasMapData } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
 import { relativePath } from "../format.js";
-import { llmLine, llmError, type LlmValue } from "../llm.js";
+import { llmLine, type LlmValue } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { renderSection, renderKeyValue, renderNote, renderBreadcrumb } from "../ui.js";
 
@@ -56,12 +56,8 @@ Examples:
     .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; format: string }) => {
       const client = new IxClient(getEndpoint());
       const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
-      const target = await resolveFileOrEntity(client, symbol, resolveOpts);
-      if (!target) {
-        // Resolver printed human guidance to stderr; add a structured record for llm.
-        if (opts.format === "llm") console.log(llmError("unresolved_target", `No entity resolved for "${symbol}".`));
-        return;
-      }
+      const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
+      if (!target) return;
 
       if (opts.format === "text") printResolved(target);
 

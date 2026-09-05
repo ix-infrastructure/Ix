@@ -20,9 +20,9 @@ import { getEndpoint } from "../config.js";
 import { collectFacts, type EntityFacts } from "../explain/facts.js";
 import { llmLine, printLlmLines } from "../llm.js";
 import { parseBudgetOption, parsePickOption, parseRevisionOption } from "../options.js";
-import { resolveFileOrEntity } from "../resolve.js";
+import { resolveFileOrReport } from "../resolve.js";
 import { createStaleProbe, hasCompletedSourceGraphBaseline } from "../stale.js";
-import { renderNote, renderSection, renderWarning, renderWarningErr, reportFailure, reportUnresolvedTarget } from "../ui.js";
+import { renderNote, renderSection, renderWarning, renderWarningErr, reportFailure } from "../ui.js";
 
 /** The four `--max-*` knobs that bound a bundle. */
 interface BudgetSnapshot {
@@ -283,6 +283,7 @@ export function registerContextCommand(program: Command): void {
           target ?? saved.bundle.target.name,
           { ...opts, ...mergeDiffOptions(saved, opts) },
           saved.bundle.budgets,
+          opts.format,
         );
         if (!fresh) return;
         renderInvestigationDiff(saved, fresh, opts.format, requestedBudgets);
@@ -302,15 +303,12 @@ export function registerContextCommand(program: Command): void {
 
       const client = new IxClient(getEndpoint());
 
-      const resolved = await resolveFileOrEntity(client, target, {
+      const resolved = await resolveFileOrReport(client, target, {
         kind: opts.kind,
         path: opts.path,
         pick: opts.pick,
-      });
-      if (!resolved) {
-        reportUnresolvedTarget(target, opts.format);
-        return;
-      }
+      }, opts.format);
+      if (!resolved) return;
 
       const budgets = clampBudgets(opts);
       const asOfRev = opts.asOfRev;
@@ -404,13 +402,14 @@ async function buildFreshBundle(
   target: string,
   opts: { kind?: string; path?: string; pick?: number; depth?: string; asOfRev?: number },
   budgets: BudgetSnapshot,
+  format: string,
 ): Promise<ContextBundle | undefined> {
   const client = new IxClient(getEndpoint());
-  const resolved = await resolveFileOrEntity(client, target, {
+  const resolved = await resolveFileOrReport(client, target, {
     kind: opts.kind,
     path: opts.path,
     pick: opts.pick,
-  });
+  }, format);
   if (!resolved) return undefined;
 
   const asOfRev = opts.asOfRev;

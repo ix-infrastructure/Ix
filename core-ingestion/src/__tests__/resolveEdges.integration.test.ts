@@ -6,7 +6,11 @@ import { describe, expect, it } from 'vitest';
 import { parseFile, resolveEdges } from '../index.js';
 
 const repoRoot = path.resolve(import.meta.dirname, '../../..');
-const scalaRoot = path.join(repoRoot, 'memory-layer/src/main/scala');
+// Frozen in-repo fixtures. This walked `memory-layer/` until #557 -- a
+// directory #120 extracted to a separate private repo in April 2026, so the
+// test threw ENOENT on every checkout from then on. The backend is not public,
+// so the fixtures are synthetic rather than a copy of it.
+const scalaRoot = path.join(repoRoot, 'core-ingestion/test-fixtures/scala-repo/src/main/scala');
 
 function walkScalaFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {

@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, existsSync, rmSync, chmodSync, renameSync,
 import { isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { parse, stringify } from "yaml";
 import { IxClient } from "../client/api.js";
 
@@ -223,6 +223,22 @@ export function isPathInside(root: string, candidate: string): boolean {
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
+export function canonicalWorkspacePath(input: string): string {
+  const resolved = resolvePath(input);
+  try { return realpathSync.native(resolved); }
+  catch { return resolved; }
+}
+
+/**
+ * Is a path contained by one specific root after resolving symlinks on both
+ * sides? This is stricter than `isReadablePath`, which deliberately allows all
+ * registered workspace roots for cross-workspace reads.
+ */
+export function isPathInsideResolvedRoot(root: string, candidate: string): boolean {
+  const real = (p: string) => { try { return realpathSync(p); } catch { return resolvePath(p); } };
+  return isPathInside(root, candidate) && isPathInside(real(root), real(candidate));
+}
+
 /**
  * The roots a read command may open a file from: the workspace this invocation
  * resolves to, plus every workspace the user has registered with `ix init`.
@@ -248,10 +264,8 @@ export function readableRoots(explicitRoot?: string): string[] {
  * path stands in, which is the same answer for everything that is not a link.
  */
 export function isReadablePath(candidate: string, explicitRoot?: string): boolean {
-  const real = (p: string) => { try { return realpathSync(p); } catch { return resolvePath(p); } };
-  const realCandidate = real(candidate);
   return readableRoots(explicitRoot).some(
-    root => isPathInside(root, candidate) && isPathInside(real(root), realCandidate),
+    root => isPathInsideResolvedRoot(root, candidate),
   );
 }
 
@@ -259,9 +273,11 @@ export function selectWorkspaceForCwd(
   workspaces: WorkspaceConfig[],
   cwd: string,
 ): WorkspaceConfig | undefined {
+  const canonicalCwd = canonicalWorkspacePath(cwd);
   return workspaces
-    .filter(workspace => isPathInside(workspace.root_path, cwd))
-    .sort((a, b) => b.root_path.length - a.root_path.length)[0];
+    .map(workspace => ({ workspace, root: canonicalWorkspacePath(workspace.root_path) }))
+    .filter(({ root }) => isPathInside(root, canonicalCwd))
+    .sort((a, b) => b.root.length - a.root.length)[0]?.workspace;
 }
 
 export function findWorkspaceForCwd(cwd: string): WorkspaceConfig | undefined {
@@ -301,11 +317,10 @@ export function absoluteFromSourceUri(sourceUri: string, explicitRoot?: string):
   return resolvePath(root, normalized);
 }
 
-export function resolveWorkspaceRoot(explicitRoot?: string): string {
+export function resolveWorkspaceRoot(explicitRoot?: string, cwd = process.cwd()): string {
   // 1. Explicit --root
   if (explicitRoot) return explicitRoot;
   // 2. Nearest initialized workspace containing cwd
-  const cwd = process.cwd();
   const nearest = findWorkspaceForCwd(cwd);
   if (nearest) return nearest.root_path;
   // 3. Named workspace from `ix config set workspace <name>`
@@ -318,9 +333,25 @@ export function resolveWorkspaceRoot(explicitRoot?: string): string {
   const defaultWs = getDefaultWorkspace();
   if (defaultWs) return defaultWs.root_path;
   // 5. Git root
-  try {
-    return execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
-  } catch {}
+  const gitRoot = gitRootFor(cwd);
+  if (gitRoot) return gitRoot;
   // 6. cwd fallback
   return cwd;
+}
+
+/**
+ * The git top-level containing `cwd`, or undefined outside a repository.
+ *
+ * stderr is discarded: outside a repo git writes "fatal: not a git repository"
+ * to it, and this is a probe, not a failure the user needs to see.
+ */
+export function gitRootFor(cwd: string): string | undefined {
+  try {
+    const out = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return out || undefined;
+  } catch { return undefined; }
 }

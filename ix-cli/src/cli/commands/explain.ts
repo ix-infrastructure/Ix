@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { formatExplain, relativePath, type ExplainResult, type EntityRef, type Diagnostic } from "../format.js";
-import { resolveFileOrEntity, isRawId } from "../resolve.js";
+import { resolveFileOrReport, isRawId } from "../resolve.js";
 import { isFileStale } from "../stale.js";
 import { collectFacts } from "../explain/facts.js";
 import { inferRole } from "../explain/role-inference.js";
@@ -11,7 +11,7 @@ import { renderExplanation } from "../explain/render.js";
 import { renderExplainLlm, renderExplainRawLlm } from "../explain/llm.js";
 import { printLlmLines } from "../llm.js";
 import { parsePickOption } from "../options.js";
-import { renderSection, renderWarning, renderNote, reportUnresolvedTarget } from "../ui.js";
+import { renderSection, renderWarning, renderNote } from "../ui.js";
 
 export function registerExplainCommand(program: Command): void {
   program
@@ -26,11 +26,8 @@ export function registerExplainCommand(program: Command): void {
     .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; format: string; raw?: boolean }) => {
       const client = new IxClient(getEndpoint());
       const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
-      const target = await resolveFileOrEntity(client, symbol, resolveOpts);
-      if (!target) {
-        reportUnresolvedTarget(symbol, opts.format);
-        return;
-      }
+      const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
+      if (!target) return;
 
       if (opts.raw) {
         await rawExplain(client, target, opts.format);

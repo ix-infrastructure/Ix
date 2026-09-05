@@ -2,11 +2,18 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
-import { resolveFileOrEntity, isRawId, activeReadScope, ensureReadScope } from "../resolve.js";
+import { resolveFileOrEntityFull, resolveFileOrReport, isRawId, activeReadScope, ensureReadScope } from "../resolve.js";
 import type { ResolvedEntity } from "../resolve.js";
-import { renderSection, renderKeyValue, renderResolvedHeader, colorizeKind } from "../ui.js";
+import {
+  renderSection,
+  renderKeyValue,
+  renderResolvedHeader,
+  colorizeKind,
+  reportResolutionFailure,
+  reportUnresolvedTarget,
+} from "../ui.js";
 import { compactTreeNode, relativePath } from "../format.js";
-import { llmLine, llmError, type LlmValue } from "../llm.js";
+import { llmLine, type LlmValue } from "../llm.js";
 import { parsePickOption } from "../options.js";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -458,14 +465,22 @@ export function registerTraceCommand(program: Command): void {
             ...resolveOpts,
             path: undefined,
           };
-          const [fromTarget, toTarget] = await Promise.all([
-            resolveFileOrEntity(client, symbol, resolveOpts),
-            resolveFileOrEntity(client, opts.to, toResolveOpts),
+          const [fromResult, toResult] = await Promise.all([
+            resolveFileOrEntityFull(client, symbol, resolveOpts),
+            resolveFileOrEntityFull(client, opts.to, toResolveOpts),
           ]);
-          if (!fromTarget || !toTarget) {
-            if (opts.format === "llm") console.log(llmError("unresolved_target", `Could not resolve ${!fromTarget ? symbol : opts.to}.`));
+          if (!fromResult.resolved || !toResult.resolved) {
+            if (!fromResult.resolved && !toResult.resolved && !fromResult.ambiguous && !toResult.ambiguous) {
+              reportUnresolvedTarget([symbol, opts.to], opts.format);
+            } else if (!fromResult.resolved) {
+              reportResolutionFailure(symbol, fromResult, opts.format, resolveOpts);
+            } else if (!toResult.resolved) {
+              reportResolutionFailure(opts.to, toResult, opts.format, toResolveOpts);
+            }
             return;
           }
+          const fromTarget = fromResult.entity;
+          const toTarget = toResult.entity;
 
           const relKind = opts.kind ?? "mixed";
           const predicates = kindToPredicates(opts.kind);
@@ -539,11 +554,8 @@ export function registerTraceCommand(program: Command): void {
         }
 
         // ── Directional mode ────────────────────────────────────────
-        const resolvedTarget = await resolveFileOrEntity(client, symbol, resolveOpts);
-        if (!resolvedTarget) {
-          if (opts.format === "llm") console.log(llmError("unresolved_target", `No entity resolved for "${symbol}".`));
-          return;
-        }
+        const resolvedTarget = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
+        if (!resolvedTarget) return;
         let target: ResolvedEntity = resolvedTarget;
 
         const predicates = kindToPredicates(opts.kind);

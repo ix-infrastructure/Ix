@@ -369,6 +369,7 @@ export function registerDoctorCommand(program: Command): void {
 
       const hasFailure = results.some((r) => !r.ok && !r.warn);
       const hasWarning = results.some((r) => r.warn);
+      if (hasFailure) process.exitCode = 1;
 
       if (opts.format === "llm") {
         printLlmLines(renderDoctorLlm(results, hasFailure, hasWarning));

@@ -101,9 +101,13 @@ fn run(s: impl Sink) {
     );
 
     expect(result).not.toBeNull();
-    // Parameters are not inside a struct/class range, so the src falls back to the file name.
+    // Attributed to the enclosing function, not the file. The parser falls back
+    // to the file name only at file scope -- queries.go.test.ts asserts the same
+    // rule for Go type references inside `use()`. This expectation used to read
+    // `impl_trait.rs`, describing an older file-level fallback, and went stale
+    // unnoticed because nothing ran this suite (#557).
     expect(result!.relationships).toContainEqual({
-      srcName: 'impl_trait.rs',
+      srcName: 'run',
       dstName: 'Sink',
       predicate: 'REFERENCES',
     });

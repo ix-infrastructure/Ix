@@ -6,6 +6,7 @@ import { applyRoleFilter } from "./role-filter.js";
 import { detectSystem } from "./system.js";
 import { resolveWorkspaceId } from "./bootstrap.js";
 import { readStitchScope, writeStitchScope } from "./config.js";
+import { reportAmbiguousTarget, reportResolutionFailure } from "./ui.js";
 
 /**
  * The read scope for the current working directory: a co-ingested multi-repo system
@@ -214,7 +215,7 @@ export async function resolveEntity(
   const result = await resolveEntityFull(client, symbol, preferredKinds, opts);
   if (result.resolved) return result.entity;
   if (result.ambiguous) {
-    printAmbiguous(symbol, result.result, opts);
+    reportAmbiguousTarget(symbol, result.result, "text", opts);
   }
   return null;
 }
@@ -423,8 +424,18 @@ export function applyPick(
   const idx = opts.pick - 1; // convert 1-based to 0-based
 
   if (idx < 0 || idx >= candidates.length) {
-    stderr(`--pick ${opts.pick} is out of range (1-${candidates.length}).`);
-    return { resolved: false, ambiguous: false };
+    const message = `--pick ${opts.pick} is out of range (1-${candidates.length}).`;
+    stderr(message);
+    return {
+      ...result,
+      result: {
+        ...result.result,
+        diagnostics: [
+          { code: "pick_out_of_range", message },
+          ...(result.result.diagnostics ?? []),
+        ],
+      },
+    };
   }
 
   const picked = candidates[idx];
@@ -485,16 +496,7 @@ function buildAmbiguous(nodes: any[], scores?: number[]): AmbiguousResult {
 }
 
 export function printAmbiguous(symbol: string, result: AmbiguousResult, opts?: { kind?: string; path?: string }): void {
-  stderr(`Ambiguous symbol "${symbol}":`);
-  for (let i = 0; i < result.candidates.length; i++) {
-    const c = result.candidates[i];
-    const shortPath = c.path ? ` in ${c.path}` : "";
-    stderr(`  ${i + 1}. ${chalk.cyan((c.kind ?? "").padEnd(10))} ${chalk.dim(c.id.slice(0, 8))}  ${c.name}${chalk.dim(shortPath)}`);
-  }
-  const hints: string[] = ["--pick <n>"];
-  if (!opts?.kind) hints.push("--kind");
-  if (!opts?.path) hints.push("--path");
-  stderr(chalk.dim(`\nUse ${hints.join(" or ")} to disambiguate.`));
+  reportAmbiguousTarget(symbol, result, "text", opts);
 }
 
 /**
@@ -570,27 +572,30 @@ export function looksFileLike(target: string): boolean {
  *   2. File-like input → search graph for matching file entity
  *   3. Symbol name → use scored resolver
  *
- * Returns { id, name, kind } or null if not found.
+ * Keeps ambiguity distinct from a genuine miss so machine callers can act on it.
  */
-export async function resolveFileOrEntity(
+export async function resolveFileOrEntityFull(
   client: IxClient,
   target: string,
   opts?: { kind?: string; path?: string; pick?: number; includeTests?: boolean; testsOnly?: boolean }
-): Promise<ResolvedEntity | null> {
+): Promise<ResolveResult> {
   // 1. Raw UUID
   if (isRawId(target)) {
     try {
       const details = await client.entity(target);
       const n = details.node as any;
       return {
-        id: target,
-        kind: n.kind || "unknown",
-        name: n.name || target,
-        resolutionMode: "exact",
+        resolved: true,
+        entity: {
+          id: target,
+          kind: n.kind || "unknown",
+          name: n.name || target,
+          resolutionMode: "exact",
+        },
       };
     } catch {
       stderr(`Entity not found: ${target}`);
-      return null;
+      return { resolved: false, ambiguous: false };
     }
   }
 
@@ -601,10 +606,13 @@ export async function resolveFileOrEntity(
       const details = await client.entity(fullId);
       const n = details.node as any;
       return {
-        id: fullId,
-        kind: n.kind || "unknown",
-        name: n.name || target,
-        resolutionMode: "exact",
+        resolved: true,
+        entity: {
+          id: fullId,
+          kind: n.kind || "unknown",
+          name: n.name || target,
+          resolutionMode: "exact",
+        },
       };
     } catch {
       // Not a valid entity prefix — fall through to normal resolution
@@ -614,7 +622,7 @@ export async function resolveFileOrEntity(
   // 2. File-like input → try graph file search
   if (looksFileLike(target)) {
     const fileEntity = await tryFileGraphMatch(client, target, opts);
-    if (fileEntity) return fileEntity;
+    if (fileEntity) return { resolved: true, entity: fileEntity };
     // Fall through to symbol resolution
   }
 
@@ -657,18 +665,44 @@ export async function resolveFileOrEntity(
       path: pathHint,        // always use the class-derived hint, not opts?.path
       searchLimit: 50,
     };
-    const entity = await resolveEntity(client, scoped.methodName, ['method', 'function'], scopedOpts);
-    if (entity) {
+    const result = await resolveEntityFull(client, scoped.methodName, ['method', 'function'], scopedOpts);
+    if (result.resolved) {
       // Rewrite the display name to show the full scoped form
-      return { ...entity, name: `${scoped.className}::${scoped.methodName}` };
+      return {
+        ...result,
+        entity: { ...result.entity, name: `${scoped.className}::${scoped.methodName}` },
+      };
     }
     // Not found — return null (don't fall through to a literal "Foo::Bar" search)
-    return null;
+    return result;
   }
 
   // 3. Symbol resolution (handles all entity kinds)
   const allKinds = ["file", "class", "object", "trait", "interface", "module", "method", "function"];
-  return resolveEntity(client, target, allKinds, opts);
+  return resolveEntityFull(client, target, allKinds, opts);
+}
+
+export async function resolveFileOrEntity(
+  client: IxClient,
+  target: string,
+  opts?: { kind?: string; path?: string; pick?: number; includeTests?: boolean; testsOnly?: boolean },
+): Promise<ResolvedEntity | null> {
+  const result = await resolveFileOrEntityFull(client, target, opts);
+  if (result.resolved) return result.entity;
+  if (result.ambiguous) reportAmbiguousTarget(target, result.result, "text", opts);
+  return null;
+}
+
+export async function resolveFileOrReport(
+  client: IxClient,
+  target: string,
+  opts: { kind?: string; path?: string; pick?: number; includeTests?: boolean; testsOnly?: boolean } | undefined,
+  format: string,
+): Promise<ResolvedEntity | null> {
+  const result = await resolveFileOrEntityFull(client, target, opts);
+  if (result.resolved) return result.entity;
+  reportResolutionFailure(target, result, format, opts);
+  return null;
 }
 
 /**

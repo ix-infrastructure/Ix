@@ -60,7 +60,7 @@ Map → Explain → Trace → Impact
 1. Start with high-level commands for one-shot answers: `ix overview`, `ix impact`, `ix rank`.
 2. Drill down with primitives — `ix search`, `ix callers`, `ix callees`, `ix contains`, `ix imports`, `ix imported-by`, `ix depends` — reusing exact entity IDs from prior JSON output.
 3. Prefer `--format llm` when reading output yourself (token-minimal); use `--format json` when chaining commands or extracting a field. See references/output-formats.md.
-4. For the full command surface, decomposition recipes, and best practices, load references/commands.md.
+4. For the full command surface, decomposition recipes, and best practices, load references/commands.md; for a command's complete flag list, load references/flags.md.
 5. If the backend is unreachable or a command fails, load references/troubleshooting.md.
 
 ## Rules
@@ -71,9 +71,42 @@ Map → Explain → Trace → Impact
 4. Immediately after modifying code, run `ix map --silent` to re-ingest.
 5. When Ix reports low confidence, mention the uncertainty to the user, suggest re-running `ix map`, and never present low-confidence data as established fact.
 
+## Harness install seam
+
+The skill installer (`scripts/install-skill.sh`) reads an explicit, small harness table from `ix-cli/scripts/skill-harnesses.mjs` — claude, agents, codex and cursor only. Each entry's skills directory is verified against what that harness actually reads (Cursor uses `~/.cursor/skills-cursor`, not `~/.cursor/skills`); gemini, opencode, openclaw and vscode have no skills convention, so they are deliberately not install targets. Adding a harness is a one-line edit in that table, after checking where the harness really looks. `ix mcp install` uses the separate MCP host registry (`ix-cli/src/mcp/hosts.ts`) — a different table answering a different question.
+
+When `TOOLSCAN_PATH` is set, both surfaces consult its discovery output so a harness CLI installed outside `PATH` can still be found — and `ix mcp install` executes the absolute path toolscan reports, so the off-PATH harness is inspected and registered through the binary toolscan found. Toolscan is optional and additive: if it is unset or fails, the embedded `PATH` and config-directory probes remain authoritative. `TOOLSCAN_PATH` is opt-in: neither surface ever looks `toolscan` up on `PATH` (the CLI executes whatever `TOOLSCAN_PATH` names, so only set it to a binary you trust).
+
+The probe battery has two environment seams:
+
+| Seam | Used by | Default |
+|---|---|---|
+| `TOOLSCAN_PATH` | `skill-harnesses.mjs --probe`, `ix mcp install` | Unset — no toolscan, embedded probes decide |
+| `HARNESS_HOME` | `skill-harnesses.mjs --probe` | `os.homedir()`; `install-skill.sh` uses the shell's `$HOME` |
+
+For a hermetic probe with no real user configuration:
+
+```bash
+HARNESS_HOME="$(mktemp -d)" \
+  node ix-cli/scripts/skill-harnesses.mjs --probe
+```
+
+To drive the same probe with a local or npm-installed toolscan bundle:
+
+```bash
+TOOLSCAN_PATH=/path/to/toolscan/dist/toolscan.mjs \
+  HARNESS_HOME="$(mktemp -d)" \
+  node ix-cli/scripts/skill-harnesses.mjs --probe
+```
+
+`--probe` emits `id|label|bin|config-dir|skill-dir|present|detectedVia`, where `present` is `1` or `0` and `detectedVia` names the probe that decided (`toolscan` | `path` | `config-dir` | `none`). `scripts/install-skill.sh --dry-run --json` emits the same per-harness view as machine-readable JSON: one object per host with `action` (`would-install` | `would-refuse` | `installed` | `refused` | `skip`), `dest`, and `detectedVia` — so CI can assert *how* a harness was found, not just that it was. A `would-refuse` in the preview exits 1, matching the real run's conflict exit, so scripts can rely on the two agreeing.
+
+The install report's `--format json|llm` output carries `detectedVia` per host (`toolscan` | `path` | `config-dir` | `none`), so a consumer can see which probe decided presence — a host toolscan found reads `toolscan` even when its CLI also happens to be on PATH, and a host found by the PATH probe reads `path` rather than being misattributed to its config directory.
+
 ## References
 
 - **references/commands.md** — full command routing tables, decomposition recipes, best practices, and the do-not-use list. Load before running any command beyond the core four above.
+- **references/flags.md** — every flag the CLI registers, per command, with values and defaults. Load when a command needs shaping beyond the examples in commands.md, or to check whether a flag exists before guessing.
 - **references/output-formats.md** — `--format llm|json|text` rules, commands that do not implement `llm`, and Pro-gated commands. Load when formatting output or when a "requires Ix Pro" error appears.
 - **references/troubleshooting.md** — prerequisites, backend health checks, `ix doctor`, and environment flags. Load when a command fails or the backend is unreachable.
 

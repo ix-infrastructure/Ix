@@ -21,10 +21,37 @@ type LanguagesModule = {
   languageFromPath: (filePath: string) => string | null;
 };
 
-const importModule = new Function(
+const importViaFunction = new Function(
   "specifier",
   "return import(specifier);"
 ) as (specifier: string) => Promise<any>;
+
+/**
+ * Load a built `core-ingestion` module by absolute file URL.
+ *
+ * The `new Function` indirection is the primary path and stays first: it keeps
+ * a specifier pointing four levels outside this package away from anything that
+ * would try to resolve or bundle it.
+ *
+ * It cannot run everywhere, though. A host that evaluates this module inside a
+ * `vm` context with no `importModuleDynamically` hook -- vitest's vite-node,
+ * notably -- throws `A dynamic import callback was not specified` from the
+ * indirection itself, not from the module being loaded. That made `ingestFiles`
+ * impossible to drive from a test, which is why the commit path had integration
+ * coverage of exactly none while two PRs reworked it.
+ *
+ * So: fall back to a direct `import()`, and only for that one failure. A
+ * genuine module-not-found still propagates, rather than being retried and
+ * reported twice.
+ */
+const importModule = async (specifier: string): Promise<any> => {
+  try {
+    return await importViaFunction(specifier);
+  } catch (err) {
+    if (!/dynamic import callback/i.test(String(err))) throw err;
+    return await import(specifier);
+  }
+};
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 

@@ -5,6 +5,7 @@ import { IxClient } from "../../client/api.js";
 import { getEndpoint, clearIngestMtimeCache, clearStitchScopeCache } from "../config.js";
 import { canRenderProgress } from "../stderr.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
+import { clearStitchCooldown } from "../stitch-guard.js";
 
 /**
  * Drop this workspace's cached "am I stitched into a system?" answer.
@@ -70,6 +71,19 @@ export function registerResetCommand(program: Command): void {
           // Clear the mtime cache so the next ix map re-ingests all files
           clearIngestMtimeCache(process.cwd());
           clearStitchScopeCacheForCwd();
+          // Ix#568: and the stitch cooldown. The re-ingest below is the one
+          // run that can re-register this workspace, and a live cooldown would
+          // refuse exactly it -- leaving the workspace unregistered with
+          // nothing to retry, since an incremental map never reaches the stitch
+          // block.
+          //
+          // This IS a trade, not a free clear, and the trade is worth stating:
+          // wiping the graph does not stop a runaway AQL join -- that is the
+          // whole premise of #568, the query outlives everything -- so clearing
+          // the marker here can put a second cross-workspace join onto one that
+          // is still running. One extra join against a workspace that would
+          // otherwise stay unregistered with no way back.
+          clearStitchCooldown(getEndpoint());
           console.log(chalk.green("✓") + " Code graph wiped. Planning artifacts preserved.");
           console.log(chalk.dim("  Run `ix map` to rebuild the code graph."));
         } else {
@@ -77,6 +91,19 @@ export function registerResetCommand(program: Command): void {
           stopSpinner();
           clearIngestMtimeCache(process.cwd());
           clearStitchScopeCacheForCwd();
+          // Ix#568: and the stitch cooldown. The re-ingest below is the one
+          // run that can re-register this workspace, and a live cooldown would
+          // refuse exactly it -- leaving the workspace unregistered with
+          // nothing to retry, since an incremental map never reaches the stitch
+          // block.
+          //
+          // This IS a trade, not a free clear, and the trade is worth stating:
+          // wiping the graph does not stop a runaway AQL join -- that is the
+          // whole premise of #568, the query outlives everything -- so clearing
+          // the marker here can put a second cross-workspace join onto one that
+          // is still running. One extra join against a workspace that would
+          // otherwise stay unregistered with no way back.
+          clearStitchCooldown(getEndpoint());
           console.log(chalk.green("✓") + " Graph wiped.");
         }
       } catch (err: any) {

@@ -522,17 +522,18 @@ paths:
                 $ref: "#/components/schemas/NodeCreationResult"
 
   /v1/decisions:
-    get:
+    post:
       tags: [planning]
       summary: List decisions
       operationId: listDecisions
-      parameters:
-        - name: limit
-          in: query
-          schema: { type: integer }
-        - name: topic
-          in: query
-          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                limit: { type: integer }
+                topic: { type: string }
       responses:
         "200":
           description: Decisions
@@ -977,6 +978,7 @@ components:
       properties:
         status: { type: string }
         schema_version: { type: integer, description: On-disk graph format version }
+        release_version: { type: string, description: Backend release semver }
     CapabilitiesResponse:
       type: object
       properties:

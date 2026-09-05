@@ -2,9 +2,9 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
-import { resolveFileOrEntity, printResolved, isRawId } from "../resolve.js";
+import { resolveFileOrReport, printResolved, isRawId } from "../resolve.js";
 import { compactTreeNode, relativePath } from "../format.js";
-import { llmLine, llmError } from "../llm.js";
+import { llmLine } from "../llm.js";
 import { parsePickOption } from "../options.js";
 
 // ── Tree types ──────────────────────────────────────────────────────
@@ -214,11 +214,8 @@ export function registerDependsCommand(program: Command): void {
         includeTests: opts.includeTests,
         testsOnly: opts.testsOnly,
       };
-      const target = await resolveFileOrEntity(client, symbol, resolveOpts);
-      if (!target) {
-        if (opts.format === "llm") console.log(llmError("unresolved_target", `No entity resolved for "${symbol}".`));
-        return;
-      }
+      const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
+      if (!target) return;
 
       const maxDepth = opts.depth ? parseInt(opts.depth, 10) : DEFAULT_MAX_DEPTH;
       const maxNodes = opts.cap ? parseInt(opts.cap, 10) : MAX_NODES;

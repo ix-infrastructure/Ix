@@ -8,7 +8,7 @@ import { resolveEntityFull, activeReadScope, ensureReadScope } from "../resolve.
 import { stderr } from "../stderr.js";
 import { isFileStale } from "../stale.js";
 import { relativePath } from "../format.js";
-import { llmLine, printLlmLines } from "../llm.js";
+import { llmError, llmLine, printLlmLines } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { reportUnresolvedTarget } from "../ui.js";
 
@@ -44,16 +44,35 @@ function checkStale(filePath: string): boolean {
  * backend involved. That matters most through `ix mcp`, where the caller is an
  * agent and the target is a string it chose.
  *
- * Returns true when the read may proceed. On refusal it prints the reason and
- * the roots that WOULD have been allowed, because "denied" with no boundary is
- * indistinguishable from a broken install.
+ * Returns true when the read may proceed. On refusal it reports a structured
+ * machine error, or prints the reason and allowed roots for text output.
  */
-function guardReadable(absPath: string, explicitRoot: string | undefined, what: string): boolean {
+function guardReadable(absPath: string, explicitRoot: string | undefined, what: string, format: string): boolean {
   if (isReadablePath(absPath, explicitRoot)) return true;
-  stderr(chalk.red(`Refusing to read ${what} outside the workspace: ${absPath}`));
-  for (const root of readableRoots(explicitRoot)) stderr(chalk.dim(`  allowed root: ${root}`));
-  stderr(chalk.dim("  Use --root to read from a different workspace, or ix init to register one."));
+  const message = `Refusing to read ${what} outside the workspace: ${absPath}`;
+  if (format === "json") {
+    console.log(JSON.stringify({ error: "path_outside_workspace", message }, null, 2));
+  } else if (format === "llm") {
+    console.log(llmError("path_outside_workspace", message));
+  } else {
+    stderr(chalk.red(message));
+    for (const root of readableRoots(explicitRoot)) stderr(chalk.dim(`  allowed root: ${root}`));
+    stderr(chalk.dim("  Use --root to read from a different workspace, or ix init to register one."));
+  }
+  process.exitCode = 1;
   return false;
+}
+
+function reportInvalidLineRange(target: string, format: string): void {
+  const message = `Invalid line range in "${target}". Line numbers must start at 1 and the end must not precede the start.`;
+  if (format === "json") {
+    console.log(JSON.stringify({ error: "invalid_line_range", message }, null, 2));
+  } else if (format === "llm") {
+    console.log(llmError("invalid_line_range", message));
+  } else {
+    stderr(chalk.red(message));
+  }
+  process.exitCode = 1;
 }
 
 function readFileRange(filePath: string, start?: number, end?: number): { content: string; lineStart: number; lineEnd: number } {
@@ -203,11 +222,15 @@ Examples:
       const rawTarget = lineRangeMatch ? lineRangeMatch[1] : target;
       const rangeStart = lineRangeMatch ? parseInt(lineRangeMatch[2], 10) : undefined;
       const rangeEnd = lineRangeMatch ? parseInt(lineRangeMatch[3], 10) : undefined;
+      if (rangeStart !== undefined && rangeEnd !== undefined && (rangeStart < 1 || rangeEnd < rangeStart)) {
+        reportInvalidLineRange(target, opts.format);
+        return;
+      }
 
       // --- Step 2: Try exact file path ---
       const resolvedPath = path.isAbsolute(rawTarget) ? rawTarget : path.resolve(root, rawTarget);
       if (fs.existsSync(resolvedPath) && fs.statSync(resolvedPath).isFile()) {
-        if (!guardReadable(resolvedPath, opts.root, "file")) return;
+        if (!guardReadable(resolvedPath, opts.root, "file", opts.format)) return;
         const stale = checkStale(resolvedPath);
         const { content, lineStart, lineEnd } = readFileRange(resolvedPath, rangeStart, rangeEnd);
         const result: ReadResult = {
@@ -232,7 +255,7 @@ Examples:
           if (matchPath && fs.existsSync(matchPath)) {
             // The path came back from the graph rather than the caller, so this
             // guard is what stops a backend from naming a file off the disk.
-            if (!guardReadable(matchPath, opts.root, "graph file match")) return;
+            if (!guardReadable(matchPath, opts.root, "graph file match", opts.format)) return;
             const stale = checkStale(matchPath);
             const { content, lineStart, lineEnd } = readFileRange(matchPath, rangeStart, rangeEnd);
             const result: ReadResult = {
@@ -272,7 +295,7 @@ Examples:
         if (absSourceUri && fs.existsSync(absSourceUri)) {
           // absoluteFromSourceUri passes an already-absolute source_uri through
           // untouched, so a graph row can still point anywhere on the disk.
-          if (!guardReadable(absSourceUri, opts.root, "symbol source")) return;
+          if (!guardReadable(absSourceUri, opts.root, "symbol source", opts.format)) return;
           const lineStart = node.attrs?.lineStart ?? node.attrs?.line_start ?? 1;
           const lineEnd = node.attrs?.lineEnd ?? node.attrs?.line_end;
           const fileContent = fs.readFileSync(absSourceUri, "utf-8");

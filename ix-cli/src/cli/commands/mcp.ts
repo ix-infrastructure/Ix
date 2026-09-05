@@ -39,6 +39,7 @@ function hostFields(host: HostReport): Array<[string, LlmValue]> {
     ["host", host.id],
     ["outcome", host.outcome],
     ["installed", host.installed],
+    ["detectedVia", host.detectedVia],
     ["registration", host.registration],
     ["note", host.note],
   ];

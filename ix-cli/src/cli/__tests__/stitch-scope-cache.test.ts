@@ -5,18 +5,33 @@ import { join } from "node:path";
 
 let home: string;
 let savedHome: string | undefined;
+let savedUserProfile: string | undefined;
 
 beforeEach(() => {
   vi.resetModules();
   home = mkdtempSync(join(tmpdir(), "ix-stitch-scope-"));
   savedHome = process.env.HOME;
+  // USERPROFILE as well as HOME. `config.ts` reaches the cache through
+  // `os.homedir()`, which on Windows reads USERPROFILE and ignores HOME -- so
+  // this redirect was inert there, and these tests wrote into the developer's
+  // REAL ~/.ix. That made the file self-poisoning rather than merely untidy:
+  // the "asks the backend on a miss" case recorded ws-fresh in the real home
+  // on its first run and then found it cached on every run after, so the file
+  // passed once per machine and failed forever. CI never saw it because each
+  // job starts on a clean home.
+  savedUserProfile = process.env.USERPROFILE;
   process.env.HOME = home;
+  process.env.USERPROFILE = home;
   mkdirSync(join(home, ".ix"), { recursive: true });
 });
 
 afterEach(() => {
-  if (savedHome === undefined) delete process.env.HOME;
-  else process.env.HOME = savedHome;
+  const restore = (k: string, v: string | undefined): void => {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  };
+  restore("HOME", savedHome);
+  restore("USERPROFILE", savedUserProfile);
   rmSync(home, { recursive: true, force: true });
   vi.restoreAllMocks();
 });

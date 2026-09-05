@@ -19,17 +19,27 @@ function snapshotParse(relativePath: string) {
   expect(result).toMatchSnapshot();
 }
 
+// Every file snapshotted here is a frozen fixture, deliberately.
+//
+// These three used to read live paths: two from `memory-layer/`, which #120
+// extracted to a separate private repo in April 2026 (so they threw ENOENT for
+// everyone from then on), and one from ix-cli/src/cli/commands/doctor.ts, a
+// source file under active development whose every edit broke the snapshot.
+// A snapshot test needs an input that only changes when someone means to
+// change it. See #557.
+const SCALA_FIXTURES = 'core-ingestion/test-fixtures/scala-repo/src/main/scala/ix/sample';
+
 describe('parseFile snapshots', () => {
   it('snapshots Node.scala', () => {
-    snapshotParse('memory-layer/src/main/scala/ix/memory/model/Node.scala');
+    snapshotParse(`${SCALA_FIXTURES}/model/Node.scala`);
   });
 
   it('snapshots Identifiers.scala', () => {
-    snapshotParse('memory-layer/src/main/scala/ix/memory/model/Identifiers.scala');
+    snapshotParse(`${SCALA_FIXTURES}/model/Identifiers.scala`);
   });
 
-  it('snapshots doctor.ts', () => {
-    snapshotParse('ix-cli/src/cli/commands/doctor.ts');
+  it('snapshots a TypeScript command module', () => {
+    snapshotParse('core-ingestion/test-fixtures/typescript/sample-command.ts');
   });
 });
 

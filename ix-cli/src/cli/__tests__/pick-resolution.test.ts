@@ -70,23 +70,35 @@ describe("applyPick", () => {
     }
   });
 
-  it("returns not-found for pick=0 (out of range)", () => {
+  it("keeps ambiguity and adds a diagnostic for pick=0", () => {
     const result = makeAmbiguousResult(3);
     const picked = applyPick(result, { pick: 0 });
     expect(picked).not.toBeNull();
     expect(picked!.resolved).toBe(false);
     if (!picked!.resolved) {
-      expect(picked!.ambiguous).toBe(false);
+      expect(picked!.ambiguous).toBe(true);
+      if (picked!.ambiguous) {
+        expect(picked!.result.diagnostics?.[0]).toEqual({
+          code: "pick_out_of_range",
+          message: "--pick 0 is out of range (1-3).",
+        });
+      }
     }
   });
 
-  it("returns not-found for pick > candidates.length", () => {
+  it("keeps ambiguity and adds a diagnostic for pick > candidates.length", () => {
     const result = makeAmbiguousResult(3);
     const picked = applyPick(result, { pick: 10 });
     expect(picked).not.toBeNull();
     expect(picked!.resolved).toBe(false);
     if (!picked!.resolved) {
-      expect(picked!.ambiguous).toBe(false);
+      expect(picked!.ambiguous).toBe(true);
+      if (picked!.ambiguous) {
+        expect(picked!.result.diagnostics?.[0]).toEqual({
+          code: "pick_out_of_range",
+          message: "--pick 10 is out of range (1-3).",
+        });
+      }
     }
   });
 

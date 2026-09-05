@@ -8,6 +8,7 @@
 import chalk from "chalk";
 
 import { llmError } from "./llm.js";
+import type { AmbiguousResult, ResolveResult } from "./resolve.js";
 
 // ── Brand palette ─────────────────────────────────────────────────────────────
 //
@@ -133,12 +134,84 @@ export function reportFailure(code: string, message: string, format?: string): v
 }
 
 /** Report a resolver miss without corrupting machine-readable stdout. */
-export function reportUnresolvedTarget(target: string, format?: string): void {
-  const message = `No entity found matching "${target}".`;
+/**
+ * The one message for a target that does not exist.
+ *
+ * Split out from `reportUnresolvedTarget` so a command can emit the shared
+ * record *without* the exit code. `ix diff` needs exactly that: its payload is
+ * wrong today and can be fixed now, while the exit-code half is queued behind
+ * the plugin work (CONTRIBUTING -> CLI Standards -> Exit codes).
+ */
+export function unresolvedTargetMessage(target: string | string[]): string {
+  if (Array.isArray(target)) {
+    return `No entities found matching ${target.map((value) => `"${value}"`).join(" or ")}.`;
+  }
+  return `No entity found matching "${target}".`;
+}
+
+/** The `--format json` record for a target that does not exist. */
+export function unresolvedTargetRecord(target: string | string[]): { error: string; message: string; targets?: string[] } {
+  return {
+    error: "unresolved_target",
+    message: unresolvedTargetMessage(target),
+    ...(Array.isArray(target) ? { targets: target } : {}),
+  };
+}
+
+export function reportUnresolvedTarget(target: string | string[], format?: string): void {
+  const message = unresolvedTargetMessage(target);
   if (format === "json") {
-    console.log(JSON.stringify({ error: "unresolved_target", message }, null, 2));
+    console.log(JSON.stringify(unresolvedTargetRecord(target), null, 2));
   } else if (format === "llm") {
     console.log(llmError("unresolved_target", message));
   }
+  process.exitCode = 1;
+}
+
+export function reportAmbiguousTarget(
+  target: string,
+  result: AmbiguousResult,
+  format?: string,
+  opts?: { kind?: string; path?: string },
+): void {
+  const message = `Ambiguous symbol "${target}".`;
+  if (format === "json") {
+    console.log(JSON.stringify({
+      error: "ambiguous_target",
+      message,
+      candidates: result.candidates,
+      diagnostics: result.diagnostics ?? [],
+    }, null, 2));
+    return;
+  }
+  if (format === "llm") {
+    console.log(llmError("ambiguous_target", message, [
+      ["candidates", result.candidates.map((candidate, index) => `${index + 1}:${candidate.name}`).join(",")],
+    ]));
+    return;
+  }
+
+  console.error(`Ambiguous symbol "${target}":`);
+  for (let index = 0; index < result.candidates.length; index += 1) {
+    const candidate = result.candidates[index];
+    const shortPath = candidate.path ? ` in ${candidate.path}` : "";
+    console.error(
+      `  ${index + 1}. ${chalk.cyan((candidate.kind ?? "").padEnd(10))} ${chalk.dim(candidate.id.slice(0, 8))}  ${candidate.name}${chalk.dim(shortPath)}`,
+    );
+  }
+  const hints = ["--pick <n>"];
+  if (!opts?.kind) hints.push("--kind");
+  if (!opts?.path) hints.push("--path");
+  console.error(chalk.dim(`\nUse ${hints.join(" or ")} to disambiguate.`));
+}
+
+export function reportResolutionFailure(
+  target: string,
+  result: Exclude<ResolveResult, { resolved: true }>,
+  format?: string,
+  opts?: { kind?: string; path?: string },
+): void {
+  if (result.ambiguous) reportAmbiguousTarget(target, result.result, format, opts);
+  else reportUnresolvedTarget(target, format);
   process.exitCode = 1;
 }

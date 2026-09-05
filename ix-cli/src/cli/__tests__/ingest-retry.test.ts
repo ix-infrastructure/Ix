@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   commitBulkWithPayloadSplit,
+  commitFailureIndictsBackend,
   isAbortError,
   isBulkPartiallyCommittedError,
   isPayloadTooLargeError,
@@ -75,6 +76,64 @@ describe('isPayloadTooLargeError', () => {
   it('does not mistake an unrelated error for a payload limit', () => {
     expect(isPayloadTooLargeError(new Error('500: internal server error'))).toBe(false);
     expect(isPayloadTooLargeError(new Error('patch 413 failed validation'))).toBe(false);
+  });
+});
+
+describe('commitFailureIndictsBackend', () => {
+  // Only failures that say something about the BACKEND may feed the run-wide
+  // cutoff, because the cutoff abandons every remaining patch in the run.
+
+  it('counts a per-request timeout — a backend that HANGS produces nothing else', () => {
+    // The bug this test exists for: `isAbortError` is true for TimeoutError,
+    // and IxClient builds every commit signal from AbortSignal.timeout(5min).
+    // Excluding aborts therefore made the cutoff inert against a stalled
+    // ArangoDB, which is the saturation shape it was written for. A backend is
+    // not obliged to answer 500; when it does not, the timeout IS the signal.
+    const timeout = Object.assign(new Error('The operation was aborted due to timeout'), {
+      name: 'TimeoutError',
+    });
+    expect(isAbortError(timeout)).toBe(true);
+    expect(commitFailureIndictsBackend(timeout, false)).toBe(true);
+  });
+
+  it('does not count the run deadline, which is our clock and not the backend', () => {
+    const aborted = Object.assign(new Error('aborted'), { name: 'AbortError' });
+    expect(commitFailureIndictsBackend(aborted, true)).toBe(false);
+    // Anything at all, once the budget is gone.
+    expect(commitFailureIndictsBackend(new Error('500: nope'), true)).toBe(false);
+  });
+
+  it('counts a lock conflict that has already exhausted its retries', () => {
+    // An earlier revision excluded these, to protect two overlapping `ix map`
+    // runs. It was an over-correction twice over: `timeout waiting to lock key`
+    // and `error: 1200` are what a RocksDB-backed ArangoDB emits under the very
+    // saturation this cutoff is for, and because those patterns are ALSO in the
+    // retry list, excluding them multiplied every doomed patch by retryOnConflict
+    // instead of stopping it. By the time an error reaches this function, six
+    // backed-off attempts have already been spent on it.
+    for (const msg of ['write-write conflict', 'timeout waiting to lock key', 'Error: 1200 bad']) {
+      expect(isRetryableCommitConflict(new Error(msg)), msg).toBe(true);
+      expect(commitFailureIndictsBackend(new Error(msg), false), msg).toBe(true);
+    }
+  });
+
+  it('counts a transport failure too', () => {
+    for (const msg of ['fetch failed', 'read ECONNRESET', 'connect ECONNREFUSED 127.0.0.1:8090']) {
+      expect(commitFailureIndictsBackend(new Error(msg), false), msg).toBe(true);
+    }
+  });
+
+  it('does not count payload-too-large, which is about the patch and not the server', () => {
+    // Five oversized generated files in a row must not stop the whole repo.
+    expect(commitFailureIndictsBackend(new Error('413: payload too large'), false)).toBe(false);
+    expect(commitFailureIndictsBackend(ARANGO_TRANSACTION_LIMIT_ERROR, false)).toBe(false);
+  });
+
+  it('counts an ordinary backend rejection, including one that says "aborted"', () => {
+    // `isAbortError` matches "aborted" anywhere in the text, so this 500 used to
+    // be excluded from the cutoff along with the real aborts.
+    expect(commitFailureIndictsBackend(new Error('500: internal server error'), false)).toBe(true);
+    expect(commitFailureIndictsBackend(new Error('500: {"error":"AQL: transaction aborted"}'), false)).toBe(true);
   });
 });
 
@@ -160,6 +219,126 @@ describe('commitBulkWithPayloadSplit', () => {
     expect(commitIndividually).toHaveBeenCalledOnce();
     expect(commitIndividually).toHaveBeenCalledWith([1, 2, 3], error);
   });
+
+  // Ix#560. The per-file fallback is right for a bulk that failed for a reason
+  // specific to the GROUP; it is exactly wrong when the backend is refusing
+  // every write, because it becomes one doomed request per patch, serialized,
+  // against the backend that is the reason. `beforeFallback` lets the caller
+  // say which case this is.
+  it('abandons the per-file fallback when the caller has given up on the backend', async () => {
+    const error = new Error('500: transaction begin timeout');
+    const commitIndividually = vi.fn(async () => {});
+    const onAbandoned = vi.fn();
+    let stop = false;
+
+    await commitBulkWithPayloadSplit([1, 2, 3], {
+      commitBulk: async () => { stop = true; throw error; },
+      onBulkCommitted: vi.fn(),
+      commitIndividually,
+      shouldStop: () => stop,
+      onAbandoned,
+    });
+
+    expect(commitIndividually).not.toHaveBeenCalled();
+    expect(onAbandoned).toHaveBeenCalledWith([1, 2, 3], error);
+  });
+
+  it('still fans out while the caller has not given up', async () => {
+    const error = new Error('500: internal server error');
+    const commitIndividually = vi.fn(async () => {});
+
+    await commitBulkWithPayloadSplit([1, 2, 3], {
+      commitBulk: async () => { throw error; },
+      onBulkCommitted: vi.fn(),
+      commitIndividually,
+      shouldStop: () => false,
+    });
+
+    expect(commitIndividually).toHaveBeenCalledWith([1, 2, 3], error);
+  });
+
+  it('still sends the BULK once the caller has given up, and only skips the fan-out', async () => {
+    // One request per group is not the amplification -- the fan-out is, at one
+    // per patch -- and it is the only way a backend that recovered mid-run can
+    // prove it. Skipping it was also strictly worse: the group came back as N
+    // serialized per-file commits via the retry instead of one bulk.
+    const commitBulk = vi.fn(async () => { throw new Error('500: still refusing'); });
+    const commitIndividually = vi.fn(async () => {});
+    const onAbandoned = vi.fn();
+
+    await commitBulkWithPayloadSplit([1, 2, 3], {
+      commitBulk,
+      onBulkCommitted: vi.fn(),
+      commitIndividually,
+      shouldStop: () => true,
+      onAbandoned,
+    });
+
+    expect(commitBulk).toHaveBeenCalledOnce();
+    expect(commitIndividually).not.toHaveBeenCalled();
+    expect(onAbandoned).toHaveBeenCalled();
+  });
+
+  it('lets a recovered backend commit the group even after the caller gave up', async () => {
+    // The reason the bulk is still sent: `shouldStop` says the RUN gave up, and
+    // this is how that decision gets revisited.
+    const commitBulk = vi.fn(async () => 'ok');
+    const onBulkCommitted = vi.fn();
+
+    await commitBulkWithPayloadSplit([1, 2, 3], {
+      commitBulk,
+      onBulkCommitted,
+      commitIndividually: vi.fn(async () => {}),
+      shouldStop: () => true,
+    });
+
+    expect(commitBulk).toHaveBeenCalledOnce();
+    expect(onBulkCommitted).toHaveBeenCalledOnce();
+  });
+
+  it('sends both halves of a payload split even after the caller gives up', async () => {
+    // Two bulk requests, not two fan-outs. Skipping the second half sent it to
+    // the retry as N serialized per-file commits, which is the amplification
+    // this cutoff exists to stop -- and denied a recovered backend the chance
+    // to commit it in one request.
+    let stop = false;
+    const sent: number[][] = [];
+
+    await commitBulkWithPayloadSplit([1, 2, 3, 4], {
+      commitBulk: async (batch) => {
+        if (batch.length > 2) throw new Error('413: payload too large');
+        sent.push(batch);
+        stop = true;               // the first half is what gives up
+        throw new Error('500: transaction begin timeout');
+      },
+      onBulkCommitted: vi.fn(),
+      commitIndividually: vi.fn(async () => {}),
+      shouldStop: () => stop,
+      onAbandoned: vi.fn(),
+    });
+
+    expect(sent).toEqual([[1, 2], [3, 4]]);
+  });
+
+  it('bisects a payload-too-large group without consulting shouldStop again mid-split', async () => {
+    // A bisect is a DIFFERENT, smaller request that can succeed. It is not a
+    // backend failure, and nothing about it should stop the run: a >1,000-file
+    // repo relies on it (Ix#516).
+    const committed: number[][] = [];
+
+    await commitBulkWithPayloadSplit([1, 2, 3, 4], {
+      commitBulk: async (batch) => {
+        if (batch.length > 2) throw new Error('413: payload too large');
+        committed.push(batch);
+        return 'ok';
+      },
+      onBulkCommitted: vi.fn(),
+      commitIndividually: vi.fn(async () => {}),
+      shouldStop: () => false,
+    });
+
+    expect(committed).toEqual([[1, 2], [3, 4]]);
+  });
 });
 
 // The body the server actually sends, as the client stringifies it:
@@ -200,6 +379,26 @@ describe('partly-committed bulk groups', () => {
     expect(parseBulkCommittedPatchIds(new Error('409: not json at all'))).toBeUndefined();
     expect(parseBulkCommittedPatchIds(new Error('409: {"committed_patch_ids":"p1"}'))).toBeUndefined();
     expect(parseBulkCommittedPatchIds(new Error('409: {"committed_patch_ids":["p1",7]}'))).toBeUndefined();
+  });
+
+  it('marks the landed replay as a replay, so a caller that has given up still sends it', async () => {
+    // Those patches are CONFIRMED landed. Skipping them would count writes the
+    // server already has as commit errors and drop them from patchesApplied.
+    const commitIndividually = vi.fn(async () => {});
+    const items = [item('a'), item('b')];
+
+    await commitBulkWithPayloadSplit(items, {
+      commitBulk: async (batch) => {
+        if (batch.length === 2) throw partialBody(['a'], 2);
+        return 'ok';
+      },
+      onBulkCommitted: vi.fn(),
+      commitIndividually,
+      patchIdOf: (i) => i.patch.patchId,
+      shouldStop: () => false,
+    });
+
+    expect(commitIndividually).toHaveBeenCalledWith([items[0]], undefined, { replay: true });
   });
 
   it('replays what landed and re-bulks only what is missing', async () => {
@@ -268,7 +467,9 @@ describe('partly-committed bulk groups', () => {
     });
 
     expect(commitBulk).toHaveBeenCalledOnce();
-    expect(commitIndividually).toHaveBeenCalledWith(items, error);
+    // Flagged as a replay: the server has CONFIRMED it holds all of them, so a
+    // tripped commit cutoff must not count them as failures (Ix#560).
+    expect(commitIndividually).toHaveBeenCalledWith(items, error, { replay: true });
   });
 
   it('keeps the old whole-batch fallback when the caller cannot identify patches', async () => {

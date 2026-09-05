@@ -3,9 +3,13 @@
 The Ix backend exposes a JSON-over-HTTP API on **`http://localhost:8090`** (the
 local Docker memory-layer). The `ix` CLI and the Compass visualizer are its two
 primary clients. This reference is generated from the client source
-(`ix-cli/src/client/api.ts`), the visualizer server template
-(`ix-cli/src/cli/commands/view.js`), and the shared client types
-(`ix-cli/src/client/types.ts`).
+(`ix-cli/src/client/api.ts`) and the shared client types
+(`ix-cli/src/client/types.ts`). The visualizer proxy
+(`ix-cli/src/cli/commands/view.ts`) forwards every `/v1/*` request to the
+backend and defines no endpoints of its own. A committed parity gate
+(`ix-cli/scripts/check-api-parity.mjs`, wired into CI) enforces that the
+OpenAPI paths/methods match the client surface, so the reference cannot drift
+from what the CLI actually calls.
 
 ## Table of Contents
 
@@ -81,7 +85,7 @@ curl -s -X POST http://localhost:8090/v1/context \
 
 | Method | Path | Client | Purpose |
 |---|---|---|---|
-| GET | `/v1/health` | `health()` | Liveness, status, `schema_version` |
+| GET | `/v1/health` | `health()` | Liveness, status, `schema_version`, `release_version` |
 | GET | `/v1/capabilities` | `capabilities()` | Pro feature flags |
 | POST | `/v1/context` | `query()` | Structured-context QA |
 
@@ -91,14 +95,17 @@ curl -s -X POST http://localhost:8090/v1/context \
 
 #### GET `/v1/health`
 
-Liveness probe. Returns `{"status": "ok", "schema_version": 3}`. A client whose
-expected schema version differs forces a clean re-ingest (e.g. after the
-absolute→relative `source_uri` migration).
+Liveness probe. Returns `{"status": "ok", "schema_version": 3, "release_version": "1.0.28"}`.
+A client whose expected schema version differs forces a clean re-ingest (e.g. after the
+absolute→relative `source_uri` migration). `release_version` is the semver the running
+container was built as, when it knows — the container's own claim, not proof (it is an
+env var, so `docker run -e` can override it); clients fall back to the release they
+tracked when the field is absent.
 
 **Response**
 
 ```json
-{ "status": "ok", "schema_version": 3 }
+{ "status": "ok", "schema_version": 3, "release_version": "1.0.28" }
 ```
 
 #### GET `/v1/capabilities`
@@ -155,6 +162,14 @@ Ingest a path into the graph. Long-running: the client allows **30 minutes**.
   "skipReasons": { "unchanged": 1, "emptyFile": 1, "parseError": 1, "tooLarge": 0 }
 }
 ```
+
+> The **CLI's** `ix ingest --format json` emits a different, narrower breakdown
+> under the same key: `unchanged` there counts only files skipped as *mtime- or
+> hash-unchanged*, `emptyFile` is a real count rather than a hardcoded `0`, and
+> there is an extra `unparsed` bucket for files the parse pool returned nothing
+> for. That is the client's own summary of its own run and is not this response;
+> see the stitch section below for why the narrower `unchanged` is load-bearing
+> there.
 
 #### POST `/v1/map`
 
@@ -222,6 +237,152 @@ cross-repo `IMPORTS` edges.
 | `symbolConsumes` | array | optional — `{ symbol, callerNodeId, pkg? }` |
 
 **Response** — `{ stitched: number, systemId: string | null, edges: [{ src, dst, name }] }`.
+
+**Client-side admission control (Ix#568).** The join behind this endpoint runs
+server-side for as long as it needs to, and outlives the HTTP call that started
+it — a proxy answering 500 at ~60s does not stop the query. The CLI therefore
+does not issue this call unconditionally:
+
+| Rule | Behaviour |
+|---|---|
+| One at a time **per backend endpoint** | A second `ix map` — including one for a *different* workspace — waits up to `IX_STITCH_WAIT_MS` (default 30s) for the in-flight stitch, then skips. `ix map`'s own lock is per workspace and does not bound a cross-workspace join. |
+| A cooldown written when a stitch **starts** | It is removed only on proof that nothing is running. Until then, no further stitch is sent to that endpoint for `IX_STITCH_COOLDOWN_MS` (default 15 min). |
+
+The second rule is the one that stops the pile-up, and it is written the
+opposite way round from the obvious design. Rather than inspecting the failure
+and deciding whether it looked like a timeout, the marker goes down before the
+request and comes back up only on **proof** that the backend did not run the
+join:
+
+* the stitch succeeded;
+* the backend answered **4xx**, which is it refusing the request rather than
+  executing it — with **408** excluded, since a proxy reporting that *it* gave
+  up waiting says nothing about whether the backend did;
+* the backend answered **501**, which is how this codebase already spells "no
+  `/v1/stitch` here" (`isStitchUnsupported` accepts 404 or 501);
+* the connection was never established, so no bytes reached the backend.
+  Decided by the **syscall** Node stamps on the underlying error — `connect` or
+  `getaddrinfo` — with a small errno set (`ECONNREFUSED`, `ENOTFOUND`,
+  `ENETUNREACH`, `EHOSTUNREACH`, `EAI_AGAIN`) and undici's
+  `UND_ERR_CONNECT_TIMEOUT` alongside it, and a walk into `AggregateError.errors`
+  because a multi-address host like `localhost` — the default endpoint — reports
+  a refusal that way. Deliberately narrower than "a transport error": a socket
+  dropped *after* the request went out (`UND_ERR_SOCKET`) is the ambiguous case
+  — an upstream that restarted killed its join, a proxy that hung up did not —
+  and keeps the marker. A read/write `ETIMEDOUT` is excluded for the same
+  reason; a connect-phase one is caught by the syscall.
+
+Everything else — a 5xx, a timeout, an abort, a socket dropped mid-flight, or
+the process being killed before it could report anything — leaves the marker in
+place. That
+last case is why the marker is written up front: a hook whose timeout is shorter
+than the stitch takes the CLI down mid-request, and nothing it *would* have done
+on the way out can be relied on.
+
+The cost is that a stitch failing for an unclassified reason cools down when it
+need not have. That errs toward skipping one stitch rather than stacking joins
+on a database that is already the reason.
+
+Both the lock and the cooldown are keyed on a normalised endpoint, so
+`http://localhost:8090`, `http://localhost:8090/` and `http://127.0.0.1:8090`
+are one backend rather than three. Without that, an `ix mcp` server started with
+`IX_ENDPOINT` set to an IP and a shell `ix map` reading the config file would
+each hold their own "single-flight" lock and stitch simultaneously.
+
+`IX_STITCH_COOLDOWN_MS` is re-read on every attempt and applied to cooldowns
+already on disk, so setting it to `0` releases an active one rather than only
+affecting the next.
+
+The cooldown is stamped at the stitch's **start** and re-stamped to its **end**
+when the attempt reports back without proving anything stopped. The re-stamp is
+what makes short values mean anything: `IxClient` caps a request at two minutes,
+so a cooldown measured only from the start would already have expired by the
+time a timing-out stitch returned, and the next map would be admitted straight
+into a second join. One residue remains — a process that is *killed* never
+re-stamps, so a cooldown shorter than the attempt it is protecting is expired
+when the next map looks at it. Values below the two-minute request cap are
+therefore only reliable on the paths that report back.
+
+A stitch that does not happen is reported as `stitchSkipped` in
+`ix ingest --format json`, as
+`stitch_skipped` in `ix map --format json` and `--format llm`, and as a
+`stitch_skipped_rule=<rule>` token on `ix map --silent`, so an automated consumer can tell it
+apart from a clean run. It is not an error: it does not set a non-zero exit code
+and does not count towards `stitchErrors`, and the previous registration stands —
+the same position a stitch that *failed* already left the graph in.
+
+The rule is machine-readable, and carried alongside the prose as
+`stitchSkippedRule` / `stitch_skipped_rule`: `in-flight`, `cooling` and
+`deadline` are the guard's, and **`incomplete`**, **`lost-parses`** and
+**`run-errors`** are `ix ingest`'s own gates — an incremental map that did not re-parse every file has
+no complete registration to send, and a run with parse or commit errors would
+build one from an incomplete picture of the repo. Those two are by far the
+commonest, and they are reported for the same reason as the others: a consumer
+asking "are the cross-repo edges current?" gets the wrong answer if the field is
+absent whenever the stitch was never attempted. Branch on the rule, never on the
+sentence.
+
+`incomplete` and `run-errors` print no human Note and emit no `--silent` token:
+the first would appear on nearly every incremental map, and the second restates
+lines the run has already printed. `--format json` and `--format llm` carry them
+either way. **`lost-parses`** — a parse worker crashed, so some files went
+unparsed — *is* printed, because on a `--force` run it is the only one of the
+three that can fire, and staying quiet there would make the recovery command
+this CLI advertises exit 0 having done nothing.
+
+The wait happens **inside** `ix map`'s per-workspace lock, which the run holds
+until it exits. So while one map is waiting out another repo's stitch — up to
+`IX_STITCH_WAIT_MS`, 30s by default — any further `ix map` fired for that same
+workspace (an auto-map hook, for instance) finds the lock held, coalesces, and
+exits 0. Edits made in that window get no graph refresh and nothing says so.
+That is a new source of staleness, bounded by `IX_STITCH_WAIT_MS`; set it to `0`
+to shed on contention immediately instead, at the cost of losing that map's
+cross-repo registration.
+
+Both the lock and the cooldown are keyed on the **endpoint**, not on the
+workspace, because the join they bound is cross-workspace. That is the point of
+the guard, and it is also its cost: one transient failure while mapping repo A
+refuses the stitch for repos B..E on the same backend for the whole cooldown,
+and when it expires none of them re-attempt on their own for the reason below.
+In a multi-repo setup that means every repo's cross-repo edges stay as they were
+until somebody runs a full re-ingest in each. The alternative -- keying per
+workspace -- does not bound the query at all, since the query is not per
+workspace.
+
+Note that re-registration is not automatic on the next map, and was not before
+this change: the stitch is gated on every file having been parsed this run, so an
+incremental map that skips an mtime- or hash-unchanged file neither reaches it nor
+has the registration data to send, having only parsed what changed. A run that
+re-ingests every file (`ix ingest <root> --force`, a post-reset re-map) is what
+picks it back up.
+
+The gate counts files skipped **as unchanged**, plus parses lost to a **crashed
+worker**. It used to be the whole `filesSkipped` total, which also counts
+zero-byte files, ones that look minified, and ones the parser simply returned
+nothing for — none of which have anything to contribute to the registration, so
+their absence does not make the collected set partial. That last class matters:
+fourteen tree-sitter grammars are optional dependencies, and a file whose grammar
+did not build (`tree-sitter-sas` has no win32 prebuild) comes back unparsed on
+*every* run, `--force` included, so counting it blocked stitching permanently for
+any repo containing one. A crashed parse worker is different — it lost a file we
+would have indexed — and `ParsePool.crashedTasks()` is what the gate reads for
+it. Counting them meant a single empty `__init__.py` disqualified a repo from
+stitching permanently, `--force` included: the run printed nothing, exited 0, and
+left the cross-repo edges stale, while the message above advertised `--force` as
+the way to fix it. `skipReasons.unchanged` in `--format json` is now that narrower
+count rather than every skip, and `skipReasons.emptyFile`, previously hardcoded to
+`0`, is the real number.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `IX_STITCH_COOLDOWN_MS` | `900000` | How long to hold off after a stitch that did not prove it stopped, measured from when the attempt ended. `0` disables the cooldown; single-flight stays. Values under ~2 min are not honoured after a killed process — see above. |
+| `IX_STITCH_WAIT_MS` | `30000` | How long to wait for an in-flight stitch before skipping. `0` sheds immediately. |
+| `IX_LOCK_DIR` | `~/.ix/locks` | Where the stitch lock and cooldown record live (shared with the map lock). `ix reset` clears the cooldown, so the full re-ingest that follows one is not refused by it. |
+| `IX_MAP_LOCK_MAX_MS` | `1200000` | Shared with the map lock: how old a held lock must be before it is presumed abandoned and stolen. Lowering it to a few seconds so a wedged `ix map` self-heals faster also lets a second process steal the stitch lock from an in-flight stitch. The cooldown normally catches that on the next read, so it only matters together with `IX_STITCH_COOLDOWN_MS=0` — which is the one case where "single-flight stays" stops being true. |
+
+This bounds the client. Cancelling the server-side query when the client hangs
+up, and making the join indexed rather than a full scan, are backend concerns
+and are not addressed here.
 
 #### GET `/v1/stitch/system/{workspaceId}`
 
@@ -342,9 +503,9 @@ Record a decision.
 
 **Response** — `{ status, nodeId, rev }`.
 
-#### GET `/v1/decisions`
+#### POST `/v1/decisions`
 
-List decisions. **Query**: `limit`, `topic`. **Response** — array of `GraphNode`.
+List decisions. **Body**: `limit`, `topic`. **Response** — array of `GraphNode`.
 
 ### Patches & Provenance
 
@@ -610,7 +771,7 @@ interface PatchCommitResult { status: string; rev: number; }
 ### HealthResponse
 
 ```ts
-interface HealthResponse { status: string; schema_version?: number; }
+interface HealthResponse { status: string; schema_version?: number; release_version?: string; }
 ```
 
 ### CapabilitiesResponse

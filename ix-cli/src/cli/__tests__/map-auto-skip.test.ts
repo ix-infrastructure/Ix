@@ -6,6 +6,7 @@ import { Command } from 'commander';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   applyRequestedMapCoalesceExitCode,
+  describeDroppedFiles,
   describeEmptyCompletedMap,
   describeRegionlessCompletedMap,
   invalidateBaselineForIncompleteCompletedMap,
@@ -109,6 +110,8 @@ describe('describeEmptyCompletedMap', () => {
     const message = describeEmptyCompletedMap(emptyResult, {
       filesDiscovered: 260,
       patchesApplied: 260,
+      idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     });
@@ -119,10 +122,84 @@ describe('describeEmptyCompletedMap', () => {
     expect(message).toContain("the next 'ix map' can reuse unchanged files");
   });
 
+  it('blames deduplication, not the language, when every commit was a replay (#527)', () => {
+    const message = describeEmptyCompletedMap(emptyResult, {
+      filesDiscovered: 1,
+      patchesApplied: 1,
+      idempotentPatches: 1,
+      filesSkippedAsUnchanged: 0,
+      parseErrors: 0,
+      commitErrors: 0,
+    });
+
+    expect(message).toContain("answered every one of the 1 committed patch with 'already applied'");
+    expect(message).toContain('this run wrote nothing');
+    expect(message).toContain('expire within 24 hours');
+    // The old diagnosis is actively wrong here: the source parsed fine, and
+    // nothing about it reached the backend's graph to be mapped.
+    expect(message).not.toContain('may not map this source language');
+    expect(message).not.toContain('The source graph was ingested');
+    expect(message).toContain("the next 'ix map' can reuse unchanged files");
+  });
+
+  it('does not blame deduplication when the run skipped files as unchanged', () => {
+    // Joey's case on #570: a workspace on a language the backend cannot build a
+    // hierarchy for. 99 files are mtime-clean and never submitted — which is
+    // itself proof the backend still holds their source hashes, and so their
+    // nodes. The user reverts one file to content ingested earlier, its patch id
+    // matches a record that is still there, and the backend answers Idempotent.
+    // Every patch this run submitted was a replay, but the graph is intact and
+    // waiting 24 hours changes nothing.
+    const message = describeEmptyCompletedMap(emptyResult, {
+      filesDiscovered: 100,
+      patchesApplied: 1,
+      idempotentPatches: 1,
+      filesSkippedAsUnchanged: 99,
+      parseErrors: 0,
+      commitErrors: 0,
+    });
+
+    expect(message).not.toContain('deduplicated');
+    expect(message).not.toContain('expire within 24 hours');
+    expect(message).toContain('may not map this source language');
+  });
+
+  it('keeps the language diagnosis when only some commits were replays', () => {
+    const message = describeEmptyCompletedMap(emptyResult, {
+      filesDiscovered: 10,
+      patchesApplied: 10,
+      idempotentPatches: 9,
+      filesSkippedAsUnchanged: 0,
+      parseErrors: 0,
+      commitErrors: 0,
+    });
+
+    expect(message).toContain('may not map this source language');
+    expect(message).not.toContain("already applied");
+  });
+
+  it('does not claim deduplication when nothing was committed at all', () => {
+    // patchesApplied 0 with files discovered is the hash-skip path, not a
+    // replay; `idempotentPatches >= patchesApplied` is trivially true there.
+    const message = describeEmptyCompletedMap(emptyResult, {
+      filesDiscovered: 30,
+      patchesApplied: 0,
+      idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
+      parseErrors: 0,
+      commitErrors: 0,
+    });
+
+    expect(message).toContain('may not map this source language');
+    expect(message).not.toContain("already applied");
+  });
+
   it('does not reject an actually empty workspace', () => {
     expect(describeEmptyCompletedMap(emptyResult, {
       filesDiscovered: 0,
       patchesApplied: 0,
+      idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     })).toBeUndefined();
@@ -132,12 +209,16 @@ describe('describeEmptyCompletedMap', () => {
     expect(describeEmptyCompletedMap(emptyResult, {
       filesDiscovered: 12,
       patchesApplied: 12,
+      idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 1,
       commitErrors: 0,
     })).toBeUndefined();
     expect(describeEmptyCompletedMap(emptyResult, {
       filesDiscovered: 12,
       patchesApplied: 12,
+      idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 1,
     })).toBeUndefined();
@@ -149,6 +230,8 @@ describe('describeEmptyCompletedMap', () => {
     expect(describeEmptyCompletedMap({ ...emptyResult, outcome: 'ok' }, {
       filesDiscovered: 260,
       patchesApplied: 260,
+      idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     })).toBeUndefined();
@@ -159,6 +242,8 @@ describe('describeEmptyCompletedMap', () => {
       expect(describeEmptyCompletedMap({ ...emptyResult, outcome }, {
         filesDiscovered: 260,
         patchesApplied: 260,
+        idempotentPatches: 0,
+        filesSkippedAsUnchanged: 0,
         parseErrors: 0,
         commitErrors: 0,
       })).toBeUndefined();
@@ -169,18 +254,24 @@ describe('describeEmptyCompletedMap', () => {
     expect(describeEmptyCompletedMap({ ...emptyResult, outcome: 'local_map_not_recommended' }, {
       filesDiscovered: 12,
       patchesApplied: 12,
+      idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     })).toBeUndefined();
     expect(describeEmptyCompletedMap({ ...emptyResult, file_count: 12 }, {
       filesDiscovered: 12,
       patchesApplied: 12,
+      idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     })).toBeUndefined();
     expect(describeEmptyCompletedMap({ ...emptyResult, region_count: 1 }, {
       filesDiscovered: 12,
       patchesApplied: 12,
+      idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     })).toBeUndefined();
@@ -191,6 +282,8 @@ describe('describeEmptyCompletedMap', () => {
     const message = invalidateBaselineForIncompleteCompletedMap(emptyResult, {
       filesDiscovered: 260,
       patchesApplied: 0,
+      idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     }, '/workspace/account', invalidate);
@@ -205,6 +298,8 @@ describe('describeEmptyCompletedMap', () => {
     expect(describeEmptyCompletedMap({ ...emptyResult, outcome: 'coupling_unchanged' }, {
       filesDiscovered: 260,
       patchesApplied: 0,
+      idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     })).toBeDefined();
@@ -215,6 +310,8 @@ describe('describeRegionlessCompletedMap', () => {
   const cleanIngest = {
     filesDiscovered: 200,
     patchesApplied: 200,
+    idempotentPatches: 0,
+    filesSkippedAsUnchanged: 0,
     parseErrors: 0,
     commitErrors: 0,
   };
@@ -271,11 +368,55 @@ describe('describeRegionlessCompletedMap', () => {
     }, {
       filesDiscovered: 2,
       patchesApplied: 2,
+      idempotentPatches: 0,
+      filesSkippedAsUnchanged: 0,
       parseErrors: 0,
       commitErrors: 0,
     }, '/workspace/mixed', invalidate);
 
     expect(message).toContain('produced 0 regions while mapping 1 of 2');
     expect(invalidate).toHaveBeenCalledWith('/workspace/mixed');
+  });
+});
+
+describe('describeDroppedFiles', () => {
+  it('stays silent on a clean ingest', () => {
+    expect(describeDroppedFiles({ parseErrors: 0, commitErrors: 0 })).toBeUndefined();
+  });
+
+  it('stays silent when there was no local ingest', () => {
+    expect(describeDroppedFiles(undefined)).toBeUndefined();
+  });
+
+  it('reports files that failed to build a patch', () => {
+    const message = describeDroppedFiles({ parseErrors: 48, commitErrors: 0 });
+
+    // Not "the map is incomplete": persistCompletedMapBaseline runs either way,
+    // so doctor answers "Completed map for this workspace" beside this line.
+    expect(message).not.toContain('incomplete');
+    expect(message).toContain('48 files failed to build a patch');
+    expect(message).toContain('absent from the graph');
+    expect(message).not.toContain('failed to commit');
+  });
+
+  it('reports commit failures', () => {
+    const message = describeDroppedFiles({ parseErrors: 0, commitErrors: 3 });
+
+    expect(message).toContain('3 patches failed to commit');
+    expect(message).not.toContain('failed to build a patch');
+  });
+
+  it('reports both causes together', () => {
+    const message = describeDroppedFiles({ parseErrors: 2, commitErrors: 5 });
+
+    expect(message).toContain('2 files failed to build a patch');
+    expect(message).toContain('5 patches failed to commit');
+  });
+
+  it('singularises a lone failure of each kind', () => {
+    expect(describeDroppedFiles({ parseErrors: 1, commitErrors: 0 }))
+      .toContain('1 file failed to build a patch');
+    expect(describeDroppedFiles({ parseErrors: 0, commitErrors: 1 }))
+      .toContain('1 patch failed to commit');
   });
 });

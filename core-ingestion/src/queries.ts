@@ -1381,6 +1381,18 @@ export const SCALA_QUERIES = `
 (template_body
   (var_definition (identifier) @name) @definition.const)
 
+; ── Top-level val/var definitions (compilation-unit level) ────────────────────
+; Scala 2 forbids these, so ordinary .scala files are unaffected. They matter
+; for .sbt build definitions, where every module is a top-level
+; \`lazy val core = (project in file("core"))\`, and for Scala 3 top-level
+; definitions. Still excludes method-local bindings, which are nested inside a
+; block rather than the compilation unit.
+(compilation_unit
+  (val_definition (identifier) @name) @definition.const)
+
+(compilation_unit
+  (var_definition (identifier) @name) @definition.const)
+
 ; ── Imports: capture full declaration for dotted-path reconstruction ─────────
 ; Handles: import ix.memory.model._  (wildcard)
 ;          import ix.memory.model.{NodeKind, GraphNode}  (selective)
@@ -1774,6 +1786,45 @@ export const HASKELL_QUERIES = `
 // Bash / shell. Functions (both `foo() {}` and `function foo {}`), command
 // invocations as calls (system commands dangle at resolution; calls to defined
 // functions resolve), and `source FILE` / `. FILE` as imports.
+// PowerShell. `function`, `filter` and `workflow` all parse as
+// function_statement, so one pattern covers the three. Imports cover the three
+// ways a script pulls in code: Import-Module, `using module`/`using namespace`,
+// and dot-sourcing (`. ./common.ps1`), which is how most scripts actually share
+// helpers.
+//
+// Class properties are deliberately not captured: the `variable` node keeps its
+// `$` sigil, so `$Root` would never join to the `.Root` that references it, and
+// there is no name-normalisation hook to strip it. Better absent than wrong.
+export const POWERSHELL_QUERIES = `
+(function_statement (function_name) @name) @definition.function
+
+(class_statement (simple_name) @name) @definition.class
+
+(class_method_definition (simple_name) @name) @definition.method
+
+(enum_statement (simple_name) @name) @definition.enum
+
+(command (command_name) @call.name) @call
+
+(command
+  (command_name) @_cmd
+  (command_elements . (command_argument_sep) . (generic_token) @import.source)
+  (#eq? @_cmd "Import-Module")) @import
+
+(command
+  (command_name) @_using
+  (command_elements
+    (generic_token) @_scope
+    (generic_token) @import.source)
+  (#eq? @_using "using")
+  (#match? @_scope "^(module|namespace)$")) @import
+
+(command
+  (command_invokation_operator) @_op
+  (command_name_expr) @import.source
+  (#eq? @_op ".")) @import
+`;
+
 export const BASH_QUERIES = `
 (function_definition name: (word) @name) @definition.function
 
@@ -1849,6 +1900,7 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.Makefile]: MAKEFILE_QUERIES,
   [SupportedLanguages.Lua]: LUA_QUERIES,
   [SupportedLanguages.Bash]: BASH_QUERIES,
+  [SupportedLanguages.PowerShell]: POWERSHELL_QUERIES,
   [SupportedLanguages.Haskell]: HASKELL_QUERIES,
   [SupportedLanguages.Zig]: ZIG_QUERIES,
   [SupportedLanguages.HTML]: HTML_QUERIES,
@@ -1858,5 +1910,8 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   // LaTeX/TeX has no tree-sitter grammar in this stack; it is parsed by the
   // hand-rolled scanner in parseLatexFile (index.ts), like Markdown/YAML/etc.
   [SupportedLanguages.LaTeX]: '',
+  // Protocol Buffers likewise: no grammar in this stack, parsed by
+  // parseProtoFile's scanner in index.ts.
+  [SupportedLanguages.Proto]: '',
 };
  

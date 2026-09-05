@@ -17,7 +17,7 @@ name: Release
 #   and linux-arm64. Each platform must build its own native binding.
 #
 # Note: The Scala backend (memory-layer) is built and released separately
-# from the private ix-memory-layer repo. Docker images are pushed to
+# from the private Ix-memory repo. Docker images are pushed to
 # ghcr.io/ix-infrastructure/ix-memory-layer from that repo.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -377,7 +377,7 @@ jobs:
           fi
 
       - name: Generate SBOM (${{ matrix.target }})
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           path: ix-cli
           format: spdx-json

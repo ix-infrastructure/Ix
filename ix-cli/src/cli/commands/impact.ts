@@ -3,11 +3,11 @@ import chalk from "chalk";
 import { renderSection, renderKeyValue, renderNote, renderResolvedHeader, colorizeKind } from "../ui.js";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
-import { resolveFileOrEntity, printResolved } from "../resolve.js";
+import { resolveFileOrReport, printResolved } from "../resolve.js";
 import { bucketByHierarchy, getSystemPath, formatSystemPath, hasMapData, type SystemPath } from "../hierarchy.js";
 import { inferRiskSemantics, humanizeLabel, type ImpactFacts, type RiskSemantics } from "../impact/risk-semantics.js";
 import { stripNulls } from "../format.js";
-import { llmLine, llmError } from "../llm.js";
+import { llmLine } from "../llm.js";
 import { parsePickOption } from "../options.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "object", "trait", "interface"]);
@@ -35,13 +35,8 @@ export function registerImpactCommand(program: Command): void {
         const depth = Math.min(Math.max(parseInt(opts.depth, 10) || 1, 1), 3);
 
         const resolveOpts = { kind: opts.kind, pick: opts.pick };
-        const target = await resolveFileOrEntity(client, symbol, resolveOpts);
-        if (!target) {
-          // The resolver already printed human guidance to stderr; for llm
-          // consumers emit a structured error record on stdout as well.
-          if (opts.format === "llm") console.log(llmError("unresolved_target", `No entity resolved for "${symbol}".`));
-          return;
-        }
+        const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
+        if (!target) return;
 
         if (opts.format === "text") printResolved(target);
 

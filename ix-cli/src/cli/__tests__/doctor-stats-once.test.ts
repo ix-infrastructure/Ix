@@ -97,6 +97,7 @@ vi.mock("../commands/upgrade.js", async (orig) => ({
 }));
 
 let savedEndpoint: string | undefined;
+let savedExitCode: number | string | undefined;
 
 beforeEach(() => {
   vi.resetModules();
@@ -111,11 +112,14 @@ beforeEach(() => {
   // backend being reachable, or on how quickly a given OS refuses a connection.
   savedEndpoint = process.env.IX_ENDPOINT;
   process.env.IX_ENDPOINT = "http://127.0.0.1:9";
+  savedExitCode = process.exitCode;
+  process.exitCode = undefined;
 });
 
 afterEach(() => {
   if (savedEndpoint === undefined) delete process.env.IX_ENDPOINT;
   else process.env.IX_ENDPOINT = savedEndpoint;
+  process.exitCode = savedExitCode;
 });
 
 async function runDoctor(): Promise<string[]> {
@@ -176,6 +180,7 @@ describe("ix doctor", () => {
     const lines = await runDoctor();
 
     expect(lines[0]).toContain("healthy=false");
+    expect(process.exitCode).toBe(1);
     expect(lines).toContain(
       'check name="Completed map for this workspace" status=fail detail="no completed map baseline — the graph may be partial. Run `ix map`."',
     );
@@ -204,6 +209,7 @@ describe("ix doctor", () => {
     const lines = await runDoctor();
 
     expect(lines[0]).toContain("healthy=true");
+    expect(process.exitCode).toBeUndefined();
     expect(lines).toContain(
       'check name="Completed map for this workspace" status=warn ' +
       'detail="no local baseline — expected for a cloud-ingested workspace"',
@@ -246,6 +252,7 @@ describe("ix doctor", () => {
       // The whole of #518: this said healthy=true, so "All checks passed" is
       // what a reader acted on.
       expect(lines[0]).toContain("healthy=false");
+      expect(process.exitCode).toBe(1);
       // cwd reaches the assertion through the llm format's quoting, which
       // escapes `\`. A Windows path therefore renders as `D:\\a\\Ix`, not as the
       // raw `process.cwd()` — escape it here rather than compare against the

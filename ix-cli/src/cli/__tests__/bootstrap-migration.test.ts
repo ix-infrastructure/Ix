@@ -86,25 +86,45 @@ function readWorkspaceId(rootPath: string): string | undefined {
 }
 
 describe("workspace_id migration (Ix#225 gap 2)", () => {
+  it.skipIf(process.platform === "win32")("normalizes an equivalent registered root instead of duplicating it", () => {
+    const root = nodePath.join(home, "repoLinked");
+    const linked = nodePath.join(home, "repoAlias");
+    fs.mkdirSync(root, { recursive: true });
+    fs.symlinkSync(root, linked, "dir");
+    const canonicalRoot = fs.realpathSync.native(root);
+    const pathId = workspaceIdForPath(canonicalRoot);
+    writeConfig([{ workspace_id: pathId, workspace_name: "repoLinked", root_path: linked, default: true }]);
+
+    const state = ensureWorkspaceIdState(root);
+    const config = parse(fs.readFileSync(nodePath.join(home, ".ix", "config.yaml"), "utf8")) as {
+      workspaces: { root_path: string }[];
+    };
+
+    expect(state.migrated).toBe(false);
+    expect(config.workspaces).toHaveLength(1);
+    expect(config.workspaces[0].root_path).toBe(canonicalRoot);
+  });
+
   it("re-keys a legacy random workspace_id to the path-based id and reports migrated", () => {
     const root = nodePath.join(home, "repoOne");
     fs.mkdirSync(root, { recursive: true });
     writeConfig([{ workspace_id: "rand0001", workspace_name: "repoOne", root_path: root, default: true }]);
 
-    const pathId = workspaceIdForPath(root);
+    const canonicalRoot = fs.realpathSync.native(root);
+    const pathId = workspaceIdForPath(canonicalRoot);
     expect(pathId).not.toBe("rand0001");
 
     const state = ensureWorkspaceIdState(root);
     expect(state.workspaceId).toBe(pathId);
     expect(state.migrated).toBe(true);
     expect(state.previousWorkspaceId).toBe("rand0001"); // captured for orphan cleanup
-    expect(readWorkspaceId(root)).toBe(pathId); // persisted
+    expect(readWorkspaceId(canonicalRoot)).toBe(pathId); // persisted
   });
 
   it("does NOT migrate (or churn) a workspace already on the path-based id", () => {
     const root = nodePath.join(home, "repoTwo");
     fs.mkdirSync(root, { recursive: true });
-    const pathId = workspaceIdForPath(root);
+    const pathId = workspaceIdForPath(fs.realpathSync.native(root));
     writeConfig([{ workspace_id: pathId, workspace_name: "repoTwo", root_path: root, default: true }]);
 
     const state = ensureWorkspaceIdState(root);
@@ -118,7 +138,7 @@ describe("workspace_id migration (Ix#225 gap 2)", () => {
     writeConfig([]); // no workspaces yet
 
     const state = ensureWorkspaceIdState(root);
-    expect(state.workspaceId).toBe(workspaceIdForPath(root));
+    expect(state.workspaceId).toBe(workspaceIdForPath(fs.realpathSync.native(root)));
     expect(state.migrated).toBe(false);
   });
 });

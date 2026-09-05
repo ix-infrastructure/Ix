@@ -198,8 +198,8 @@ describe("diff.ts resolver flags", () => {
     expect(diffContent).toContain('"--path <path>"');
   });
 
-  it("passes resolver opts to resolveFileOrEntity", () => {
-    expect(diffContent).toContain("resolveFileOrEntity(client, target, resolveOpts)");
+  it("passes resolver opts to resolveFileOrReport", () => {
+    expect(diffContent).toContain("resolveFileOrReport(client, target, resolveOpts, opts.format)");
   });
 
   it("parses --pick as a positive integer", () => {
@@ -212,8 +212,7 @@ describe("diff.ts resolver flags", () => {
   });
 
   it("outputs structured JSON for ambiguous targets", () => {
-    expect(diffContent).toContain("resolveEntityFull");
-    expect(diffContent).toContain("fullResult.ambiguous");
+    expect(diffContent).toContain("resolveFileOrReport");
   });
 });
 

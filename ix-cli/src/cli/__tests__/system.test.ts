@@ -164,6 +164,22 @@ describe("git-aware system detection (no flags, monorepo vs separate repos)", ()
     expect(d).toBeTruthy();
     expect(d!.members.sort()).toEqual(["proj-a", "proj-b"]);
   });
+
+  it("ignores a stray DIRECTORY named like a workspace marker (WORKSPACE/ is not a Bazel root)", () => {
+    // An ancestor whose only "marker" is a directory named WORKSPACE (an app's
+    // data folder, not a Bazel WORKSPACE file) must not veto system detection
+    // for the independent clones collected beneath it.
+    const wsroot = nodePath.join(base, "wsdir");
+    fs.mkdirSync(nodePath.join(wsroot, "WORKSPACE"), { recursive: true });
+    fs.writeFileSync(nodePath.join(wsroot, "WORKSPACE", "default"), "x");
+    mk(nodePath.join("wsdir", "collection", "repo-a", ".git"));
+    mk(nodePath.join("wsdir", "collection", "repo-b", ".git"));
+    wf(nodePath.join("wsdir", "collection", "repo-a", "package.json"), '{"name":"repo-a"}');
+    wf(nodePath.join("wsdir", "collection", "repo-b", "package.json"), '{"name":"repo-b"}');
+    const d = detectSystem(nodePath.join(wsroot, "collection"));
+    expect(d).toBeTruthy();
+    expect(d!.members.sort()).toEqual(["repo-a", "repo-b"]);
+  });
 });
 
 describe("workspace_id convergence (solo vs co-ingest)", () => {

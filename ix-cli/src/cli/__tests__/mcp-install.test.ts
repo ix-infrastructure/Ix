@@ -36,19 +36,28 @@ function tempDir(): string {
 function fakeHost(
   id: string,
   registration: Registration,
-  options: { installed?: boolean; fails?: boolean; detectInstalled?: () => Promise<boolean> } = {},
-): McpHost & { registerCalls: number } {
+  options: {
+    installed?: boolean;
+    fails?: boolean;
+    detectInstalled?: () => Promise<boolean>;
+    bin?: string;
+  } = {},
+): McpHost & { registerCalls: number; inspectBins: Array<string | undefined>; registerBins: Array<string | undefined> } {
   const host = {
     id,
     label: id,
-    bin: options.installed === false ? "definitely-not-a-real-binary-xyz" : "node",
+    bin: options.bin ?? (options.installed === false ? "definitely-not-a-real-binary-xyz" : "node"),
     target: `${id}-config`,
     registerCalls: 0,
+    inspectBins: [] as Array<string | undefined>,
+    registerBins: [] as Array<string | undefined>,
     ...(options.detectInstalled ? { detectInstalled: options.detectInstalled } : {}),
-    async inspect() {
+    async inspect(execBin?: string) {
+      host.inspectBins.push(execBin);
       return { registration };
     },
-    async register() {
+    async register(execBin?: string) {
+      host.registerBins.push(execBin);
       host.registerCalls += 1;
       if (options.fails) throw new Error("host CLI said no");
     },
@@ -63,7 +72,7 @@ describe("ix mcp install", () => {
     const report = await runInstall({ hosts: [host] });
 
     expect(host.registerCalls).toBe(1);
-    expect(report.hosts[0]).toMatchObject({ outcome: "registered", installed: true });
+    expect(report.hosts[0]).toMatchObject({ outcome: "registered", installed: true, detectedVia: "path" });
     expect(report.registered).toBe(1);
   });
 
@@ -123,6 +132,116 @@ describe("ix mcp install", () => {
     expect(report.hosts[0]).toMatchObject({ outcome: "not-installed", installed: false });
   });
 
+  it("runs the off-PATH CLI through the absolute path toolscan found", async () => {
+    // The bin is deliberately not on PATH; only the toolscan seam names it —
+    // and the seam must *execute* the discovered path, or inspect reads an
+    // unreadable registration (conflict) and register fails (ENOENT). That is
+    // the case this feature exists for.
+    const resolved = "/opt/off-path/bin/definitely-not-a-real-binary-xyz";
+    const host = fakeHost("found", "none", { installed: false });
+
+    const report = await runInstall({
+      hosts: [host],
+      discover: async () => ({
+        source: "toolscan",
+        names: new Set(["definitely-not-a-real-binary-xyz"]),
+        paths: new Map([["definitely-not-a-real-binary-xyz", resolved]]),
+      }),
+    });
+
+    expect(host.inspectBins).toEqual([resolved]);
+    expect(host.registerBins).toEqual([resolved]);
+    expect(host.registerCalls).toBe(1);
+    expect(report.hosts[0]).toMatchObject({ outcome: "registered", installed: true, detectedVia: "toolscan" });
+  });
+
+  it("falls back to the bare bin when toolscan found no path", async () => {
+    // Discovery may name a bin without reporting a path for it; execution must
+    // then go through normal PATH resolution rather than a stale override.
+    const host = fakeHost("found", "none");
+
+    await runInstall({
+      hosts: [host],
+      discover: async () => ({
+        source: "toolscan",
+        names: new Set(["node"]),
+        paths: new Map(),
+      }),
+    });
+
+    expect(host.inspectBins).toEqual([undefined]);
+    expect(host.registerBins).toEqual([undefined]);
+  });
+
+  it("degrades a name-only toolscan entry to the embedded probes when the bin is off PATH", async () => {
+    // KageBinary #591 round-2 finding: a toolscan entry that names a bin but
+    // carries no path would flip presence on the name alone, then fall through
+    // to a bare-name PATH exec that cannot find an off-PATH CLI — a clean
+    // `not-installed` became a false `conflict`. The presence verdict must
+    // require the path toolscan reported, degrading to the embedded probes.
+    const host = fakeHost("absent", "none", { installed: false });
+
+    const report = await runInstall({
+      hosts: [host],
+      discover: async () => ({
+        source: "toolscan",
+        names: new Set(["definitely-not-a-real-binary-xyz"]),
+        paths: new Map(),
+      }),
+    });
+
+    expect(host.inspectBins).toEqual([]);
+    expect(host.registerCalls).toBe(0);
+    expect(report.hosts[0]).toMatchObject({
+      outcome: "not-installed",
+      installed: false,
+      detectedVia: "none",
+    });
+  });
+
+  it("falls back to the embedded probe when toolscan did not find the CLI", async () => {
+    // toolscan ran but only found `node`; the fake bin is not on PATH either.
+    const host = fakeHost("absent", "none", { installed: false });
+
+    const report = await runInstall({
+      hosts: [host],
+      discover: async () => ({ source: "toolscan", names: new Set(["node"]), paths: new Map() }),
+    });
+
+    // The seam is additive evidence only — a toolscan miss must not flip a
+    // genuinely absent host to installed.
+    expect(host.registerCalls).toBe(0);
+    expect(report.hosts[0]).toMatchObject({ outcome: "not-installed", installed: false, detectedVia: "none" });
+  });
+
+  it("keeps the config-dir probe for hosts toolscan does not name", async () => {
+    // cursor-like: no CLI on PATH and toolscan did not find it, but the config
+    // dir exists — the host must still read as installed.
+    const host = fakeHost("cursor", "none", {
+      bin: "definitely-not-a-real-binary-xyz",
+      detectInstalled: async () => true,
+    });
+
+    const report = await runInstall({
+      hosts: [host],
+      discover: async () => ({ source: "toolscan", names: new Set(["claude"]), paths: new Map() }),
+    });
+
+    expect(host.registerCalls).toBe(1);
+    expect(report.hosts[0]).toMatchObject({ outcome: "registered", installed: true, detectedVia: "config-dir" });
+  });
+
+  it("reports a host whose CLI is on PATH as detected on PATH, not via its config dir", async () => {
+    // cursor/vscode/opencode's combined check is on-PATH-or-config-dir; a host
+    // found by the PATH half of it must not be mislabelled `config-dir`.
+    const host = fakeHost("cursor", "none", { detectInstalled: async () => true });
+
+    const report = await runInstall({ hosts: [host] });
+
+    expect(host.registerCalls).toBe(1);
+    expect(report.hosts[0]).toMatchObject({ outcome: "registered", installed: true, detectedVia: "path" });
+  });
+
   it("reports a failing host without aborting the rest", async () => {
     const hosts = [fakeHost("broken", "none", { fails: true }), fakeHost("fine", "none")];
 
@@ -173,10 +292,11 @@ describe("ix mcp install", () => {
 
     const report = await runInstall({ hosts: [host] });
 
-    expect(report.hosts[0]).toMatchObject({ outcome: "registered", installed: true });
+    expect(report.hosts[0]).toMatchObject({ outcome: "registered", installed: true, detectedVia: "config-dir" });
     expect(host.registerCalls).toBe(1);
   });
 });
+
 
 describe("ix mcp doctor", () => {
   it("separates a free name from one held by someone else", async () => {

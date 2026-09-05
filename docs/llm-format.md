@@ -25,11 +25,15 @@ so consumers can pass the flag unconditionally without a per-command lookup.
   backslash-escaped and newline / carriage-return / tab are encoded as `\n` /
   `\r` / `\t`, so a record never spans more than one line.
 - **Errors:** a uniform `error code=<slug> message="..."` line in the same
-  format as data lines; the process still exits non-zero. A target that does
-  not exist is always `unresolved_target`, whichever command was asked —
-  `context`, `explain`, `read`, `locate`, `subsystems`, `trace`. (The backend
-  spells the same condition `unknown_target` in its own JSON bodies; that is a
-  wire detail and is translated on the way out, so a consumer never sees both.)
+  format as data lines; the process still exits non-zero. A graph target that
+  does not exist is always `unresolved_target`. `locate` is the remaining
+  exit-status exception tracked in #539.
+  An ambiguous graph target is instead `ambiguous_target`, includes numbered
+  candidates, and exits non-zero because the requested graph operation could
+  not choose a target. (The
+  backend spells a missing target `unknown_target` in its own JSON bodies; that
+  is a wire detail and is translated on the way out, so a consumer never sees
+  both.)
 
 ## Hierarchies
 
@@ -170,6 +174,28 @@ shapes are, and a consumer routing on the kind should not have to guess which
 of two field sets it is holding. `saved_at` is on it because the `context`
 record that follows says whether the snapshot was fresh when it was taken, not
 when that was.
+
+`ix savings --detail`:
+
+```
+savings model="Claude Opus ($15/MTok in, $75/MTok out)"
+scope name=session commands=726 tokens_saved=832739 naive_tokens=1099164 actual_tokens=266425 money_saved=27.48 water_saved_ml=1665.478
+command scope=session name=callers count=329 tokens_saved=334995
+scope name=lifetime commands=4820 tokens_saved=6142880 naive_tokens=8003104 actual_tokens=1860224 money_saved=202.72 water_saved_ml=12285.76
+command scope=lifetime name=callers count=2104 tokens_saved=2210488
+```
+
+(Truncated: one `command` record is shown per scope, and a real run emits one
+per entry in that scope's breakdown.)
+
+The two `scope` records are always emitted; `command` records appear only under
+`--detail` and carry their own `scope=` because both scopes are broken down in
+one stream. They are emitted inside the scope loop, so they follow their own
+`scope` record rather than being grouped at the end — a parser reading the
+stream in order sees session's breakdown before the lifetime `scope` line.
+
+`money_saved` is the only field `--model` moves — the token and water figures
+are model-independent.
 
 Error line:
 

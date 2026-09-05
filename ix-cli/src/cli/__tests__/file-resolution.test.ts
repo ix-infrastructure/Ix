@@ -37,10 +37,10 @@ describe("file-first resolution helper", () => {
   });
 
   it("resolveFileOrEntity tries file graph match before symbol resolution", () => {
-    // The function should check looksFileLike first, then fall through to resolveEntity
+    // The function should check looksFileLike first, then fall through to structured symbol resolution
     expect(resolveContent).toContain("looksFileLike(target)");
     expect(resolveContent).toContain("tryFileGraphMatch(client, target,");
-    expect(resolveContent).toContain("resolveEntity(client, target,");
+    expect(resolveContent).toContain("resolveEntityFull(client, target,");
   });
 
   it("tryFileGraphMatch scores exact path matches higher than basename matches", () => {
@@ -51,8 +51,8 @@ describe("file-first resolution helper", () => {
 });
 
 describe("history command uses file-first resolution", () => {
-  it("imports resolveFileOrEntity", () => {
-    expect(historyContent).toContain("resolveFileOrEntity");
+  it("imports resolveFileOrReport", () => {
+    expect(historyContent).toContain("resolveFileOrReport");
   });
 
   it("accepts a target argument, not entityId", () => {
@@ -69,8 +69,8 @@ describe("diff command supports scoped target", () => {
     expect(diffContent).toContain('command("diff <fromRev> <toRev> [target]")');
   });
 
-  it("uses resolveFileOrEntity for target resolution", () => {
-    expect(diffContent).toContain("resolveFileOrEntity");
+  it("uses resolveFileOrReport for target resolution", () => {
+    expect(diffContent).toContain("resolveFileOrReport");
   });
 
   it("passes resolved entity ID to diff API", () => {
@@ -96,8 +96,9 @@ describe("diff command supports scoped target", () => {
 
 describe("all graph commands use resolveFileOrEntity consistently", () => {
   for (const cmd of COMMANDS_USING_FILE_RESOLUTION) {
-    it(`${cmd} imports resolveFileOrEntity`, () => {
-      expect(commandContents[cmd]).toContain("resolveFileOrEntity");
+    it(`${cmd} uses file-first resolution`, () => {
+      const helper = cmd === "locate" ? "resolveFileOrEntity" : "resolveFileOrReport";
+      expect(commandContents[cmd]).toContain(helper);
     });
   }
 });
@@ -107,8 +108,8 @@ describe("--pick support", () => {
     expect(resolveContent).toContain("export function applyPick");
   });
 
-  it("resolve.ts printAmbiguous outputs numbered candidates", () => {
-    expect(resolveContent).toContain("${i + 1}.");
+  it("resolve.ts delegates ambiguity output to the shared reporter", () => {
+    expect(resolveContent).toContain("reportAmbiguousTarget(symbol, result, \"text\", opts)");
   });
 
   it("overview.ts declares --path option", () => {

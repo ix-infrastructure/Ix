@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { describeCommitOutcome, describeStitchFailure, ingestCompletedCleanly, isStitchUnsupported } from "../commands/ingest.js";
+import { describeCommitOutcome, describeStitchFailure, describeStitchSkipped, ingestCompletedCleanly, isStitchUnsupported } from "../commands/ingest.js";
 
 describe("describeCommitOutcome", () => {
   it("says nothing when every patch committed", () => {
@@ -107,6 +107,118 @@ describe("ingestCompletedCleanly", () => {
   });
 });
 
+describe("describeCommitOutcome when the deadline fired", () => {
+  it("does not tell the user to raise the budget when NOTHING committed", () => {
+    // With a 5-minute per-request timeout and a 15-minute budget, a stalled
+    // backend fits ~3 attempts in -- the cutoff's streak cannot reach its limit,
+    // so the run ends on the deadline. "Raise IX_MAP_DEADLINE_MS" is then advice
+    // to wait longer on a backend that answered nothing.
+    const out = describeCommitOutcome(20, 0, "--verbose", true, 0);
+    expect(out.kind).toBe("fatal");
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("without committing anything");
+    // Both readings are live: the deadline covers discovery, hashing and parse
+    // too, so a large repo can spend it before the first commit is attempted --
+    // and there raising it IS the fix. Name both rather than assert one.
+    expect(out.message).toContain("raise IX_MAP_DEADLINE_MS");
+    expect(out.message).toContain("not accepting writes");
+    expect(out.message).toContain("ix doctor");
+  });
+
+  it("still points at the budget when work was getting done", () => {
+    const out = describeCommitOutcome(20, 4000, "--verbose", true, 0);
+    expect(out.kind).toBe("warn");
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("Raise IX_MAP_DEADLINE_MS");
+  });
+
+  it("reports the deadline ahead of the cutoff when both happened", () => {
+    // A run that skipped a handful to the cutoff and then lost thousands to the
+    // clock lost far more to the clock; blaming the cutoff hides the number that
+    // would change the outcome.
+    const out = describeCommitOutcome(5000, 100, "--verbose", true, 7);
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("Raise IX_MAP_DEADLINE_MS");
+    expect(out.message).not.toContain("never sent");
+  });
+});
+
+describe("describeCommitOutcome when both the cutoff and the deadline fired", () => {
+  it("names the cutoff's share instead of blaming the clock for all of it", () => {
+    // 200 patches withheld from a refusing backend, then 3 more lost to the
+    // clock. Reporting all 203 as "abandoned when the map deadline fired ...
+    // raise IX_MAP_DEADLINE_MS" is the wrong remedy for 200 of them, and it
+    // contradicts the banner above, which names the split.
+    const out = describeCommitOutcome(203, 50, "--verbose", true, 200);
+    if (out.kind === "ok") throw new Error("expected a message");
+
+    expect(out.message).toContain("3 of 253 file patches were abandoned when the map deadline fired");
+    expect(out.message).toContain("200 more were withheld earlier by the commit cutoff");
+    expect(out.message).toContain("see the cutoff above");
+  });
+
+  it("keeps the plain wording when the cutoff withheld nothing", () => {
+    const out = describeCommitOutcome(3, 50, "--verbose", true, 0);
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("3 of 53 file patches were abandoned when the map deadline fired");
+    expect(out.message).not.toContain("withheld earlier");
+  });
+});
+
+describe("describeCommitOutcome with a commit cutoff", () => {
+  it("points at the cutoff even when the drain placed every held patch", () => {
+    // The cutoff fired, so the banner above has already named the endpoint and
+    // quoted the backend's error -- but nothing was left unsent, and gating on
+    // that count sent the reader to the generic "Re-run with --debug to see
+    // why" directly beneath a message that had just told them why. The 12-file
+    // reproduction at the default limit lands here: five fan-out failures trip
+    // it, the drain sends the remaining seven, none are "never sent".
+    const out = describeCommitOutcome(12, 0, "--debug", false, 0, true);
+    expect(out.kind).toBe("fatal");
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("See the cutoff above");
+    expect(out.message).not.toContain("never sent");
+    // And it must still point AT the flag here. Every one of these errors came
+    // from a patch that was sent and did emit a per-file line, so the sibling
+    // message's "the flag will not add to it" -- true when patches were held
+    // back unsent -- would steer the reader away from the only detail there is.
+    expect(out.message).toContain("--debug lists the individual failures");
+    expect(out.message).not.toContain("will not add to it");
+  });
+
+  it("still names the unsent count when there is one", () => {
+    const out = describeCommitOutcome(12, 0, "--debug", false, 3, true);
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("3 of them never sent");
+  });
+
+  it("points at the cutoff instead of a flag that would show nothing", () => {
+    // The cutoff has already printed the endpoint, the streak and the error. A
+    // patch that was never sent produces no per-file line, so the usual advice
+    // sends the reader to --verbose for output that does not exist.
+    const out = describeCommitOutcome(20, 0, "--verbose", false, 15);
+    expect(out.kind).toBe("fatal");
+    if (out.kind === "ok") throw new Error("expected a message");
+    expect(out.message).toContain("15 of them never sent");
+    expect(out.message).toContain("See the cutoff above");
+    expect(out.message).not.toContain("to see why");
+  });
+
+  it("warns rather than fails when some patches landed first", () => {
+    const out = describeCommitOutcome(15, 40, "--verbose", false, 15);
+    expect(out.kind).toBe("warn");
+  });
+
+  it("leaves the ordinary messages alone when nothing was cut off", () => {
+    const none = describeCommitOutcome(3, 0, "--verbose", false, 0);
+    const some = describeCommitOutcome(3, 10, "--verbose", false, 0);
+    expect(none.kind).toBe("fatal");
+    expect(some.kind).toBe("warn");
+    if (none.kind !== "ok") expect(none.message).toContain("Ingest committed nothing");
+    if (some.kind !== "ok") expect(some.message).toContain("Re-run 'ix map' to retry");
+  });
+});
+
 describe("describeStitchFailure", () => {
   it("reports incomplete cross-repository relationships without dumping an HTML response", () => {
     const message = describeStitchFailure(new Error("504: <html>\nlarge proxy response"));
@@ -120,6 +232,66 @@ describe("describeStitchFailure", () => {
   it("does not read a three-digit run elsewhere in the message as a status", () => {
     expect(describeStitchFailure(new Error("connect ECONNREFUSED 127.0.0.1:8090")))
       .toContain("backend request failed");
+  });
+});
+
+describe("describeStitchSkipped", () => {
+  const cooling = "the last stitch was cut off after 62s and may still be running";
+  const contended = "another ix run is already stitching http://localhost:8090";
+
+  it("is a Note, not a failure, and leads with the reason", () => {
+    const msg = describeStitchSkipped(cooling, "cooling");
+    expect(msg.startsWith("Note:")).toBe(true);
+    expect(msg).not.toContain("Warning");
+    expect(msg).toContain(cooling);
+  });
+
+  it("stays short by default, but still carries a remedy that works", () => {
+    // 15 minutes of auto-map hooks, one Note each, so the long form's three
+    // sentences of unchanging advice were too much. But the reason alone is not
+    // enough either: waiting the cooldown out and re-running does NOT recover,
+    // because the mtime baseline is already written and the next map never
+    // enters the stitch block. The one thing that does has to be in the short
+    // form.
+    const msg = describeStitchSkipped(cooling, "cooling");
+    expect(msg.length).toBeLessThan(260);
+    expect(msg).toContain("ix ingest <root> --force");
+    expect(msg).not.toContain("Source patches were committed");
+  });
+
+  it("offers the plain re-run FIRST on contention, but still names --force", () => {
+    // --verbose is off by default, so this is the advice almost everyone sees,
+    // and it has to be both true and proportionate. The other run may be
+    // registering this same workspace and finishing a second later, so a forced
+    // monorepo re-ingest is the wrong thing to lead with -- but a plain re-run
+    // ALONE was a promise this code cannot keep: a skipped stitch does not stop
+    // the run persisting its mtime baseline, so the re-run is incremental and
+    // never reaches the stitch block. It prints nothing and exits 0.
+    const msg = describeStitchSkipped(contended, "in-flight");
+    expect(msg).toContain("Re-run once that finishes");
+    expect(msg).toContain("--force");
+    expect(msg.indexOf("Re-run")).toBeLessThan(msg.indexOf("--force"));
+  });
+
+  it("names --force on the deadline rule too, since a longer budget alone does not register", () => {
+    const msg = describeStitchSkipped("the map ran out of time", "deadline");
+    expect(msg).toContain("IX_MAP_DEADLINE_MS");
+    expect(msg).toContain("--force");
+
+    const verbose = describeStitchSkipped("the map ran out of time", "deadline", true);
+    expect(verbose).toContain("nothing was registered either");
+    expect(verbose).toContain("--force");
+  });
+
+  it("gives the remedy under --verbose, and picks it by RULE", () => {
+    const cool = describeStitchSkipped(cooling, "cooling", true);
+    expect(cool).toContain("Once the cooldown expires");
+    expect(cool).toContain("ix ingest <root> --force");
+    expect(cool).toContain("Source patches were committed");
+
+    const busy = describeStitchSkipped(contended, "in-flight", true);
+    expect(busy).toContain("may be registering a different workspace");
+    expect(busy).not.toContain("Once the cooldown expires");
   });
 });
 

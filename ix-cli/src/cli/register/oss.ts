@@ -37,6 +37,7 @@ import { registerSavingsCommand } from "../commands/savings.js";
 import { registerPatchesCommand } from "../commands/patches.js";
 import { registerMcpCommand } from "../commands/mcp.js";
 import { registerContextCommand } from "../commands/context.js";
+import { validateCliOptions } from "../options.js";
 
 const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "briefing", desc: "Session-resume briefing" },
@@ -64,6 +65,37 @@ const ADVANCED_COMMANDS = [
   // init is deprecated; ingest is now an implementation detail
   "init", "ingest",
 ];
+
+const DEFAULT_FORMAT_CHOICES = ["text", "json", "llm"];
+const OPTION_CHOICES: Record<string, Record<string, string[]>> = {
+  query: { depth: ["shallow", "standard", "deep"], format: ["text", "json"] },
+  map: { format: [...DEFAULT_FORMAT_CHOICES, "silent"], sort: ["importance", "confidence", "size", "alpha"] },
+  subsystems: { sort: ["importance", "confidence", "size", "alpha"] },
+  savings: { model: ["opus", "sonnet", "haiku", "gpt-4o"] },
+  context: { depth: ["compact", "standard", "full", "shallow", "deep"] },
+};
+
+/**
+ * Every command this file registered, so the preAction hook below can tell an
+ * OSS option from a Pro one. Pro commands are registered later, against the
+ * same root program, from a package this repo cannot see -- so their option
+ * domains are not ours to infer.
+ */
+const ossCommands = new WeakSet<Command>();
+
+function configureOssOptionChoices(root: Command): void {
+  const visit = (command: Command): void => {
+    ossCommands.add(command);
+    const commandChoices = OPTION_CHOICES[command.name()] ?? {};
+    for (const option of command.options) {
+      const choices = commandChoices[option.attributeName()]
+        ?? (option.long === "--format" ? DEFAULT_FORMAT_CHOICES : undefined);
+      if (choices) option.choices(choices);
+    }
+    for (const child of command.commands) visit(child);
+  };
+  visit(root);
+}
 
 export function registerOssCommands(program: Command): void {
   registerQueryCommand(program);
@@ -104,6 +136,18 @@ export function registerOssCommands(program: Command): void {
   registerPatchesCommand(program);
   registerMcpCommand(program);
   registerContextCommand(program);
+
+  configureOssOptionChoices(program);
+
+  program.hook("preAction", (_thisCommand, actionCommand) => {
+    // OSS commands only. The rules below read an option's *shape* -- `<n>`
+    // means a non-negative integer, `--min-confidence` means 0..1 -- which is
+    // a claim about commands whose declarations live in this repo. A Pro
+    // command declaring `--threshold <n>` for a float would be rejected by a
+    // rule its author never opted into, and no test here could catch it.
+    if (!ossCommands.has(actionCommand)) return;
+    validateCliOptions(actionCommand);
+  });
 
   // Hide advanced commands from default help
   const advancedSet = new Set(ADVANCED_COMMANDS);

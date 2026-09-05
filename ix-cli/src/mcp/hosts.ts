@@ -49,10 +49,22 @@ export interface McpHost {
    * editor sitting right there and wrote nothing.
    */
   detectInstalled?(): Promise<boolean>;
-  /** Read-only look at what holds {@link SERVER_NAME} today. */
-  inspect(): Promise<Pick<HostStatus, "registration" | "detail">>;
-  /** Register `ix mcp`. Only called once inspect reports it is safe. */
-  register(): Promise<void>;
+  /**
+   * Read-only look at what holds {@link SERVER_NAME} today.
+   *
+   * `execBin` overrides the CLI to invoke: the caller may have discovered an
+   * absolute path out-of-band (toolscan's scan of the install roots beyond
+   * PATH). Without it, a host whose CLI is *not* on PATH reads as an unreadable
+   * registration — `unknown` — which `install` reports as a conflict and
+   * `--force` then turns into a failed registration, so the seam's own
+   * motivating case fails. Config-file hosts ignore it (they never shell out).
+   */
+  inspect(execBin?: string): Promise<Pick<HostStatus, "registration" | "detail">>;
+  /**
+   * Register `ix mcp`. Only called once inspect reports it is safe.
+   * `execBin` has the same meaning as in {@link McpHost.inspect}.
+   */
+  register(execBin?: string): Promise<void>;
   /** Where the registration lands, shown in the report. */
   target: string;
 }
@@ -411,13 +423,16 @@ function cliHost(spec: {
     label: spec.label,
     bin: spec.bin,
     target: spec.target,
-    async inspect() {
+    async inspect(execBin?: string) {
+      // execBin is the caller's absolute path (toolscan's discovery); falling
+      // back to the bare name keeps PATH resolution for the embedded probes.
+      const bin = execBin ?? spec.bin;
       if (spec.showArgs) {
-        const shown = await run(spec.bin, spec.showArgs);
+        const shown = await run(bin, spec.showArgs);
         return classifyShown(`${shown.stdout}\n${shown.stderr}`, shown.ok);
       }
 
-      const result = await run(spec.bin, spec.listArgs);
+      const result = await run(bin, spec.listArgs);
       // A host that cannot answer is treated as occupied rather than empty:
       // guessing "none" here is the one wrong guess that overwrites something.
       if (!result.ok && !result.stdout.includes(SERVER_NAME)) {
@@ -425,13 +440,14 @@ function cliHost(spec: {
       }
       return classifyListing(`${result.stdout}\n${result.stderr}`);
     },
-    async register() {
+    async register(execBin?: string) {
+      const bin = execBin ?? spec.bin;
       const launcher = await resolveLauncher();
       if (spec.windowsFallback && platform() === "win32") {
         spec.windowsFallback(launcher);
         return;
       }
-      const result = await run(spec.bin, spec.addArgs(launcher));
+      const result = await run(bin, spec.addArgs(launcher));
       if (!result.ok) {
         throw new Error(firstLine(result.stderr) || firstLine(result.stdout) || "registration failed");
       }
@@ -634,10 +650,11 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       target: vsCodeUserConfig(),
       detectInstalled: fileHostInstalled("code", vsCodeUserConfig()),
       // No list subcommand, so the user-profile file is the only read path.
-      async inspect() {
+      // Config-file hosts never shell out, so they ignore the exec-bin override.
+      async inspect(_execBin?: string) {
         return inspectJsonFile(vsCodeUserConfig(), "servers");
       },
-      async register() {
+      async register(_execBin?: string) {
         const ix = await resolveLauncher();
         // Written rather than handed to `code --add-mcp`, so the write lands in
         // the same file `inspect` reads. Shelling out needed `code` on PATH —
@@ -655,10 +672,10 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       bin: "cursor",
       target: cursorConfigPath(),
       detectInstalled: fileHostInstalled("cursor", cursorConfigPath()),
-      async inspect() {
+      async inspect(_execBin?: string) {
         return inspectJsonFile(cursorConfigPath(), "mcpServers");
       },
-      async register() {
+      async register(_execBin?: string) {
         const ix = await resolveLauncher();
         writeJson(cursorConfigPath(), (config) => {
           const servers = (config.mcpServers ??= {}) as Record<string, unknown>;
@@ -672,10 +689,10 @@ export function createHosts(writeJson: (path: string, mutate: (config: Record<st
       bin: "opencode",
       target: opencodeConfigPath(),
       detectInstalled: fileHostInstalled("opencode", opencodeConfigPath()),
-      async inspect() {
+      async inspect(_execBin?: string) {
         return inspectJsonFile(opencodeConfigPath(), "mcp");
       },
-      async register() {
+      async register(_execBin?: string) {
         const ix = await resolveLauncher();
         writeJson(opencodeConfigPath(), (config) => {
           const servers = (config.mcp ??= {}) as Record<string, unknown>;

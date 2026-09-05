@@ -623,6 +623,9 @@ async function runCommand(
 ): Promise<CallToolResult> {
   const result = await runIx(args, timeoutMs);
   if (!result.ok) {
+    const machineError = machineErrorOutput(result.stdout);
+    if (machineError) return textResult(machineError, true);
+
     const detail =
       result.stderr.trim() ||
       result.stdout.trim() ||
@@ -716,6 +719,15 @@ function parseJsonOutput(output: string): unknown {
       // A startup notice can contain punctuation before the actual JSON body.
     }
   }
+  return null;
+}
+
+function machineErrorOutput(output: string): string | null {
+  const text = output.trim();
+  if (text.startsWith("error code=")) return text;
+
+  const parsed = parseJsonOutput(text);
+  if (isRecord(parsed) && typeof parsed.error === "string") return text;
   return null;
 }
 

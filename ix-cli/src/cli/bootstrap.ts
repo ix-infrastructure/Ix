@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import chalk from "chalk";
 import { IxClient } from "../client/api.js";
-import { getEndpoint, loadConfig, saveConfig, findWorkspaceForCwd, getDefaultWorkspace, type WorkspaceConfig } from "./config.js";
+import { canonicalWorkspacePath, getEndpoint, loadConfig, saveConfig, findWorkspaceForCwd, getDefaultWorkspace, type WorkspaceConfig } from "./config.js";
 import { workspaceIdForPath } from "./system.js";
 import { readBackendHealth } from "./commands/upgrade.js";
 
@@ -48,11 +48,13 @@ interface WorkspaceState { ws: WorkspaceConfig; created: boolean; migrated: bool
  * Returns the workspace name. Does nothing if already registered.
  */
 function getOrCreateWorkspace(cwd: string): WorkspaceState {
-  const rootPath = resolve(cwd);
+  const rootPath = canonicalWorkspacePath(resolve(cwd));
   const config = loadConfig();
   const pathId = workspaceIdForPath(rootPath);
-  const existing = (config.workspaces ?? []).find(w => w.root_path === rootPath);
+  const existing = (config.workspaces ?? []).find(w => canonicalWorkspacePath(w.root_path) === rootPath);
   if (existing) {
+    const pathChanged = existing.root_path !== rootPath;
+    existing.root_path = rootPath;
     // Migrate a legacy random workspace_id to the path-based id (Ix#225 gap 2) so
     // an already-registered repo converges with co-ingest. This changes the
     // workspace_id that node identity folds, so the next map must re-ingest under
@@ -64,6 +66,7 @@ function getOrCreateWorkspace(cwd: string): WorkspaceState {
       migratedRootsThisRun.set(rootPath, previousWorkspaceId);
       return { ws: existing, created: false, migrated: true, previousWorkspaceId };
     }
+    if (pathChanged) saveConfig(config);
     const previousWorkspaceId = migratedRootsThisRun.get(rootPath);
     return { ws: existing, created: false, migrated: previousWorkspaceId !== undefined, previousWorkspaceId };
   }

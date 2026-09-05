@@ -129,6 +129,59 @@ describe("ix mcp", () => {
     expect(result.content).toEqual([{ type: "text", text: error }]);
   });
 
+  it("preserves a structured LLM error when the CLI exits non-zero", async () => {
+    const error = 'error code=unresolved_target message="No graph entity found for \\"Missing\\"."';
+    const client = await connect(async () => ({
+      ok: false,
+      stdout: error,
+      stderr: 'No entity found matching "Missing".',
+    }));
+
+    const result = await client.callTool({
+      name: "ix_impact",
+      arguments: { target: "Missing" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual([{ type: "text", text: error }]);
+  });
+
+  it("does not mistake arbitrary stdout from a failed command for a machine error", async () => {
+    const client = await connect(async () => ({
+      ok: false,
+      stdout: "partial output",
+      stderr: "backend unavailable",
+    }));
+
+    const result = await client.callTool({
+      name: "ix_impact",
+      arguments: { target: "Missing" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual([{
+      type: "text",
+      text: JSON.stringify({ error: "backend unavailable", tool: "ix_impact" }),
+    }]);
+  });
+
+  it("preserves a structured JSON error when the CLI exits non-zero", async () => {
+    const error = JSON.stringify({ error: "invalid_map_path", message: "Path is outside the workspace." });
+    const client = await connect(async () => ({
+      ok: false,
+      stdout: error,
+      stderr: "Path is outside the workspace.",
+    }));
+
+    const result = await client.callTool({
+      name: "ix_map",
+      arguments: { file: "../outside.ts" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual([{ type: "text", text: error }]);
+  });
+
   it("keeps error-like source lines after a successful LLM record as data", async () => {
     const output = [
       "content target=fixture.ts lines=1",
@@ -255,15 +308,10 @@ describe("ix mcp", () => {
     const result = await client.callTool({ name: "ix_health", arguments: {} });
 
     expect(result.isError).toBe(true);
-    expect(result.content).toEqual([
-      {
-        type: "text",
-        text: JSON.stringify({
-          error: "error code=backend_unreachable message=offline",
-          tool: "ix_health",
-        }),
-      },
-    ]);
+    expect(result.content).toEqual([{
+      type: "text",
+      text: "error code=backend_unreachable message=offline",
+    }]);
   });
 
   it("keeps the existing ix_map file argument contract", async () => {

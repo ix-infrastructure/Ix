@@ -1,11 +1,11 @@
 import { Command, type CommanderError } from "commander";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const resolveFileOrEntity = vi.hoisted(() => vi.fn());
+const resolveFileOrReport = vi.hoisted(() => vi.fn());
 
 vi.mock("../resolve.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../resolve.js")>()),
-  resolveFileOrEntity,
+  resolveFileOrReport,
 }));
 
 import { parseContextDepthOption, registerContextCommand } from "../commands/context.js";
@@ -28,7 +28,7 @@ async function runContext(args: string[]): Promise<{ error?: CommanderError; std
 
 describe("ix context --pick validation", () => {
   beforeEach(() => {
-    resolveFileOrEntity.mockReset().mockResolvedValue(undefined);
+    resolveFileOrReport.mockReset().mockResolvedValue(undefined);
   });
 
   it.each(["nope", "1nope"])("rejects the complete value %j before resolving", async (pick) => {
@@ -38,7 +38,7 @@ describe("ix context --pick validation", () => {
     expect(result.stderr).toContain("argument '" + pick + "' is invalid");
     expect(result.stderr).toContain("must be a positive integer");
     expect(result.stderr).not.toContain("TypeError");
-    expect(resolveFileOrEntity).not.toHaveBeenCalled();
+    expect(resolveFileOrReport).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -55,8 +55,8 @@ describe("ix context --pick validation", () => {
     ]);
 
     expect(result.error).toBeUndefined();
-    expect(resolveFileOrEntity).toHaveBeenCalledOnce();
-    expect(resolveFileOrEntity.mock.calls[0]?.[2]).toEqual({
+    expect(resolveFileOrReport).toHaveBeenCalledOnce();
+    expect(resolveFileOrReport.mock.calls[0]?.[2]).toEqual({
       kind: "function",
       path: "src/main.ts",
       pick: expectedPick,
@@ -75,7 +75,7 @@ describe("ix context --pick validation", () => {
  */
 describe("ix context --max-* validation", () => {
   beforeEach(() => {
-    resolveFileOrEntity.mockReset().mockResolvedValue(undefined);
+    resolveFileOrReport.mockReset().mockResolvedValue(undefined);
   });
 
   it.each(["10abc", "0x10", "1e3", "-5", "0", "3.5", "", "  "])(
@@ -85,7 +85,7 @@ describe("ix context --max-* validation", () => {
 
       expect(result.error?.exitCode).toBe(1);
       expect(result.stderr).toContain("must be a positive integer");
-      expect(resolveFileOrEntity).not.toHaveBeenCalled();
+      expect(resolveFileOrReport).not.toHaveBeenCalled();
     },
   );
 
@@ -133,14 +133,14 @@ describe("ix context --max-* validation", () => {
  */
 describe("ix context --as-of-rev validation", () => {
   beforeEach(() => {
-    resolveFileOrEntity.mockReset().mockResolvedValue(undefined);
+    resolveFileOrReport.mockReset().mockResolvedValue(undefined);
   });
 
   it.each(["abc", "3.9", "10abc", "-1", "0"])("rejects %j rather than sending it", async (value) => {
     const result = await runContext(["--as-of-rev", value]);
     expect(result.error?.exitCode).toBe(1);
     expect(result.stderr).toContain("must be a positive integer");
-    expect(resolveFileOrEntity).not.toHaveBeenCalled();
+    expect(resolveFileOrReport).not.toHaveBeenCalled();
   });
 
   it("accepts a revision", async () => {
@@ -150,14 +150,14 @@ describe("ix context --as-of-rev validation", () => {
 
 describe("ix context --depth validation", () => {
   beforeEach(() => {
-    resolveFileOrEntity.mockReset().mockResolvedValue(undefined);
+    resolveFileOrReport.mockReset().mockResolvedValue(undefined);
   });
 
   it.each(["compact", "standard", "full", "shallow", "deep", "FULL"])("accepts depth %j", async (depth) => {
     const result = await runContext(["--depth", depth]);
 
     expect(result.error).toBeUndefined();
-    expect(resolveFileOrEntity).toHaveBeenCalledOnce();
+    expect(resolveFileOrReport).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -195,7 +195,7 @@ describe("ix context --depth validation", () => {
       const result = await runContext(["--depth", depth]);
 
       expect(result.error).toBeUndefined();
-      expect(resolveFileOrEntity).toHaveBeenCalledOnce();
+      expect(resolveFileOrReport).toHaveBeenCalledOnce();
     } finally {
       warn.mockRestore();
     }
@@ -217,7 +217,7 @@ describe("ix context --depth validation", () => {
 
 describe("ix context refusals reach the caller that asked for records", () => {
   beforeEach(() => {
-    resolveFileOrEntity.mockReset().mockResolvedValue(undefined);
+    resolveFileOrReport.mockReset().mockResolvedValue(undefined);
   });
 
   it("answers a missing target with a record and a non-zero status", async () => {

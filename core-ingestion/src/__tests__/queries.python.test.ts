@@ -177,4 +177,28 @@ def list_items():
       predicate: 'CALLS',
     });
   });
+
+  it('extracts signatures from a .pyi stub', () => {
+    // Stubs are the only place a compiled extension's API exists in Python, so
+    // without them a call into a native op dead-ends at the import.
+    const result = parseFile(
+      '/repo/torch_ext/_C.pyi',
+      `from typing import overload
+
+import torch
+
+def fused_attn(q: torch.Tensor, k: torch.Tensor, scale: float = 1.0) -> torch.Tensor: ...
+
+class KernelHandle:
+    device: int
+    def launch(self, n: int) -> None: ...
+`,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.entities.map((entity) => entity.name)).toEqual(
+      expect.arrayContaining(['fused_attn', 'KernelHandle', 'launch']),
+    );
+  });
+
 });

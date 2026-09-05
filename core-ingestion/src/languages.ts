@@ -25,6 +25,7 @@ export enum SupportedLanguages {
   Makefile = 'makefile',
   Lua = 'lua',
   Bash = 'bash',
+  PowerShell = 'powershell',
   Haskell = 'haskell',
   Zig = 'zig',
   HTML = 'html',
@@ -32,6 +33,7 @@ export enum SupportedLanguages {
   HCL = 'hcl',
   CSS = 'css',
   LaTeX = 'latex',
+  Proto = 'proto',
 }
 
 const EXT_MAP: Record<string, SupportedLanguages> = {
@@ -42,6 +44,7 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.mjs':  SupportedLanguages.JavaScript,
   '.cjs':  SupportedLanguages.JavaScript,
   '.py':   SupportedLanguages.Python,
+  '.pyi':  SupportedLanguages.Python,
   '.java': SupportedLanguages.Java,
   '.c':    SupportedLanguages.C,
   '.h':    SupportedLanguages.C,
@@ -49,6 +52,10 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.cc':   SupportedLanguages.CPlusPlus,
   '.cxx':  SupportedLanguages.CPlusPlus,
   '.hpp':  SupportedLanguages.CPlusPlus,
+  // CUDA is C++ plus GPU qualifiers; kernel-launch syntax is neutralised at
+  // parse time (see blankCudaLaunchConfigs in index.ts).
+  '.cu':   SupportedLanguages.CPlusPlus,
+  '.cuh':  SupportedLanguages.CPlusPlus,
   '.cs':   SupportedLanguages.CSharp,
   '.go':   SupportedLanguages.Go,
   '.rb':   SupportedLanguages.Ruby,
@@ -59,10 +66,14 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.swift':SupportedLanguages.Swift,
   '.scala':SupportedLanguages.Scala,
   '.sc':   SupportedLanguages.Scala,
+  // sbt build definitions are Scala expressions; the Scala grammar parses them
+  // as-is, and they are where modules are wired to their dependencies.
+  '.sbt':  SupportedLanguages.Scala,
   '.yaml': SupportedLanguages.YAML,
   '.yml':  SupportedLanguages.YAML,
   '.dockerfile': SupportedLanguages.Dockerfile,
   '.sql':  SupportedLanguages.SQL,
+  '.proto': SupportedLanguages.Proto,
   '.json': SupportedLanguages.JSON,
   '.toml': SupportedLanguages.TOML,
   '.md':   SupportedLanguages.Markdown,
@@ -78,6 +89,9 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.bash': SupportedLanguages.Bash,
   '.zsh':  SupportedLanguages.Bash,
   '.ksh':  SupportedLanguages.Bash,
+  '.ps1':  SupportedLanguages.PowerShell,
+  '.psm1': SupportedLanguages.PowerShell,
+  '.psd1': SupportedLanguages.PowerShell,
   '.hs':   SupportedLanguages.Haskell,
   '.lhs':  SupportedLanguages.Haskell,
   '.zig':  SupportedLanguages.Zig,

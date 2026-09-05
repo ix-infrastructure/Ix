@@ -8,9 +8,9 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 
 import { getEndpoint } from "../config.js";
-import { resolveFileOrEntity, resolveEntityFull, printResolved, looksFileLike, type ResolvedEntity } from "../resolve.js";
+import { resolveFileOrReport, printResolved, type ResolvedEntity } from "../resolve.js";
 import { formatDiff, relativePath } from "../format.js";
-import { llmLine, llmError } from "../llm.js";
+import { llmLine } from "../llm.js";
 import { reportFailure } from "../ui.js";
 import { parsePickOption } from "../options.js";
 
@@ -499,36 +499,9 @@ export function registerDiffCommand(program: Command): void {
       let entityId: string | undefined = opts.entity;
       let resolved: ResolvedEntity | null = null;
       if (target && !entityId) {
-        if (opts.format === "json") {
-          // Use full resolver for structured JSON ambiguity output
-          const allKinds = ["file", "class", "object", "trait", "interface", "module", "function", "method"];
-          const isFile = looksFileLike(target);
-          if (!isFile) {
-            const fullResult = await resolveEntityFull(client, target, allKinds, resolveOpts);
-            if (fullResult.resolved) {
-              resolved = fullResult.entity;
-            } else if (fullResult.ambiguous) {
-              console.log(JSON.stringify(fullResult.result, null, 2));
-              return;
-            } else {
-              console.log(JSON.stringify({ error: `No entity found matching "${target}".` }, null, 2));
-              return;
-            }
-          } else {
-            resolved = await resolveFileOrEntity(client, target, resolveOpts);
-            if (!resolved) {
-              console.log(JSON.stringify({ error: `No entity found matching "${target}".` }, null, 2));
-              return;
-            }
-          }
-        } else {
-          resolved = await resolveFileOrEntity(client, target, resolveOpts);
-          if (!resolved) {
-            if (opts.format === "llm") console.log(llmError("unresolved_target", `No entity resolved for "${target}".`));
-            return;
-          }
-          if (opts.format === "text") printResolved(resolved);
-        }
+        resolved = await resolveFileOrReport(client, target, resolveOpts, opts.format);
+        if (!resolved) return;
+        if (opts.format === "text") printResolved(resolved);
         entityId = resolved.id;
       }
 

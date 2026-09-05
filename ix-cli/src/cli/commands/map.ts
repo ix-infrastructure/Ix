@@ -1,4 +1,3 @@
-import { resolve } from "node:path";
 import { type Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
@@ -14,6 +13,7 @@ import { acquireMapLock } from "../single-flight.js";
 import { canRenderProgress } from "../stderr.js";
 import { loadIngestBaseline } from "../ingest-baseline.js";
 import { saveMapBaseline } from "../map-baseline.js";
+import { resolveMapRoot } from "../map-root.js";
 
 // Hard wall-clock budget for a single `ix map`. Past this, the shared deadline
 // signal aborts every in-flight request and the command exits, so a single
@@ -151,7 +151,12 @@ const COMPLETED_MAP_OUTCOMES = new Set([
  */
 export function describeEmptyCompletedMap(
   result: Pick<MapResult, "file_count" | "region_count" | "regions" | "outcome">,
-  ingest: Pick<IngestFilesSummary, "filesDiscovered" | "patchesApplied" | "parseErrors" | "commitErrors"> | undefined,
+  ingest:
+    | Pick<
+        IngestFilesSummary,
+        "filesDiscovered" | "patchesApplied" | "idempotentPatches" | "filesSkippedAsUnchanged" | "parseErrors" | "commitErrors"
+      >
+    | undefined,
 ): string | undefined {
   if (!ingest || ingest.filesDiscovered <= 0 || ingest.parseErrors > 0 || ingest.commitErrors > 0) {
     return undefined;
@@ -161,7 +166,33 @@ export function describeEmptyCompletedMap(
 
   const sourceFiles = ingest.filesDiscovered;
   const patches = ingest.patchesApplied;
-  return `Backend reported ${result.outcome}, but mapped 0 files after local ingest found ${sourceFiles} supported source ${sourceFiles === 1 ? "file" : "files"} (${patches} ${patches === 1 ? "patch" : "patches"} committed). The source graph was ingested, but no architecture hierarchy was created. The active backend may not map this source language yet. The source ingest baseline was preserved, so the next 'ix map' can reuse unchanged files.`;
+  const files = `${sourceFiles} supported source ${sourceFiles === 1 ? "file" : "files"}`;
+  const patchWord = patches === 1 ? "patch" : "patches";
+  const tail = "The source ingest baseline was preserved, so the next 'ix map' can reuse unchanged files.";
+
+  // The backend deduplicated every commit, so this run wrote nothing at all —
+  // and the two sentences below are then both false: nothing was ingested, and
+  // the language had no chance to be the reason (#527). The observed cause is a
+  // graph deleted out from under the backend's own patch records: a scoped
+  // reset used to remove a workspace's nodes and patches while leaving its
+  // idempotency keys, so the identical re-ingest was accepted as a replay and
+  // committed nothing (Ix-memory#174). Those keys expire after 24h, which is
+  // why waiting is a real workaround and worth saying out loud.
+  // `filesSkippedAsUnchanged === 0` is load-bearing, not a belt-and-braces extra.
+  // `idempotentPatches >= patches` only says every patch this run *submitted*
+  // was a replay; it says nothing about the files the run never submitted, and
+  // those are what disprove the diagnosis. A workspace on a language the
+  // backend cannot build a hierarchy for skips its 99 clean files, and one
+  // reverted file whose content was ingested before commits as `Idempotent` —
+  // giving patches === 1, idempotentPatches === 1, file_count === 0 with a
+  // graph that is perfectly intact and a 24-hour wait that changes nothing.
+  // A real #527 run skips nothing: the DB-reset guard clears the mtime cache
+  // and the hash lookup comes back empty, so every file is re-submitted.
+  if (patches > 0 && ingest.idempotentPatches >= patches && ingest.filesSkippedAsUnchanged === 0) {
+    return `Backend reported ${result.outcome}, but mapped 0 files after local ingest found ${files}. The backend answered every one of the ${patches} committed ${patchWord} with 'already applied', so this run wrote nothing — the graph is empty because the commits were deduplicated against patch records the backend still holds, not because the source could not be parsed. That is what a workspace whose graph was deleted without its patch records looks like; the records expire within 24 hours, or an upgraded backend clears them with the reset. ${tail}`;
+  }
+
+  return `Backend reported ${result.outcome}, but mapped 0 files after local ingest found ${files} (${patches} ${patchWord} committed). The source graph was ingested, but no architecture hierarchy was created. The active backend may not map this source language yet. ${tail}`;
 }
 
 /**
@@ -196,6 +227,47 @@ export function describeRegionlessCompletedMap(
 }
 
 /**
+ * Report files the local ingest could not turn into a patch.
+ *
+ * `ingestFiles` counts these into `parseErrors` and writes a `[patch build
+ * error]` line per file, but `ix map` runs it in a silent/machine format on
+ * every path that matters, so the count is the only surviving signal — and
+ * until #554 nothing read it. Both completed-map sanity checks above
+ * deliberately bail out when `parseErrors > 0`, which left a partial map as
+ * the one failure mode `ix map` never mentioned.
+ *
+ * Deliberately not phrased as "the map is incomplete": the same run goes on to
+ * persist a completed map baseline, so `ix doctor` answers "Completed map for
+ * this workspace" right after this line prints. That is correct — a file the
+ * parser cannot handle is normal and must not turn doctor red for ever (#530,
+ * #536) — so the warning states what is missing rather than contradicting the
+ * health signal beside it.
+ *
+ * Exported for tests; returns the message rather than writing it so the
+ * formatting is assertable without capturing stderr.
+ */
+export function describeDroppedFiles(
+  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors"> | undefined,
+): string | undefined {
+  if (!ingest) return undefined;
+  const parse = ingest.parseErrors;
+  const commit = ingest.commitErrors;
+  if (parse <= 0 && commit <= 0) return undefined;
+
+  const parts: string[] = [];
+  if (parse > 0) parts.push(`${parse} ${parse === 1 ? "file" : "files"} failed to build a patch`);
+  if (commit > 0) parts.push(`${commit} ${commit === 1 ? "patch" : "patches"} failed to commit`);
+  return `${parts.join(" and ")} — those files are absent from the graph. Re-run with 'ix ingest' to see the per-file errors.`;
+}
+
+function emitDroppedFileWarning(
+  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors"> | undefined,
+): void {
+  const message = describeDroppedFiles(ingest);
+  if (message) process.stderr.write(chalk.yellow(`  ${message}\n`));
+}
+
+/**
  * A completed map with no usable hierarchy invalidates the architecture
  * completion baseline. Keeping it would make `ix status` report
  * mapCompleted=true for a hierarchy that does not exist. The next run may
@@ -208,7 +280,12 @@ export function describeRegionlessCompletedMap(
  */
 export function invalidateBaselineForIncompleteCompletedMap(
   result: Pick<MapResult, "file_count" | "region_count" | "regions" | "outcome">,
-  ingest: Pick<IngestFilesSummary, "filesDiscovered" | "patchesApplied" | "parseErrors" | "commitErrors"> | undefined,
+  ingest:
+    | Pick<
+        IngestFilesSummary,
+        "filesDiscovered" | "patchesApplied" | "idempotentPatches" | "filesSkippedAsUnchanged" | "parseErrors" | "commitErrors"
+      >
+    | undefined,
   projectRoot: string,
   invalidate: (root: string) => void = clearMapBaseline,
 ): string | undefined {
@@ -259,7 +336,7 @@ export function registerMapCommand(program: Command): void {
   program
     .command("map [path]")
     .description("Map the architectural hierarchy of a codebase")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .option("--format <fmt>", "Output format (text|json|llm|silent)", "text")
     .option("--level <n>", "Show only regions at this level (1=finest, higher=coarser)")
     .option("--min-confidence <n>", "Only show regions above this confidence threshold (0-1)", "0")
     .option("--max-items <n>", "Max items to show per section in text output (default: 10)", "10")
@@ -305,7 +382,21 @@ Examples:
   ix map . --full --verbose`
     )
     .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; verbose?: boolean; silent?: boolean }) => {
-      const cwd = pathArg ? resolve(pathArg) : process.cwd();
+      let cwd: string;
+      try {
+        cwd = resolveMapRoot(pathArg);
+      } catch (err: any) {
+        const message = err?.message ?? "Invalid map path";
+        if (opts.format === "json") {
+          console.log(JSON.stringify({ error: "invalid_map_path", message }, null, 2));
+        } else if (opts.format === "llm") {
+          console.log(llmError("invalid_map_path", message));
+        } else {
+          console.error(chalk.red("Error:"), message);
+        }
+        process.exitCode = 1;
+        return;
+      }
 
       const silent = opts.silent === true || opts.format === "silent";
 
@@ -469,12 +560,44 @@ Examples:
       }
       persistCompletedMapBaseline(result, cwd);
 
+      // stderr, so it reaches a human on the text path and never contaminates
+      // the JSON/llm payload on stdout. The exit code deliberately stays 0:
+      // plugins read this command's JSON through runners that discard stdout on
+      // a non-zero exit, so failing here would hide the very diagnostics the
+      // caller needs (the #539 lesson).
+      emitDroppedFileWarning(localIngest);
+
       if (silent) {
         const systems    = result.regions.filter(r => r.label_kind === "system").length;
         const subsystems = result.regions.filter(r => r.label_kind === "subsystem").length;
         const modules    = result.regions.filter(r => r.label_kind === "module").length;
+        // Ix#568: `--silent` returns before both format branches AND wins over
+        // `--format llm`, so it is the one output the hooks this field exists
+        // for actually see. A skipped stitch deliberately does not move the exit
+        // code -- without a token here an automated consumer cannot tell a clean
+        // map from one whose cross-repo edges are up to 15 minutes stale.
+        // Ix#568. The RULE, not just the fact -- and not for `incomplete`.
+        //
+        // `--silent` is the hook surface: one terse line per run. `incomplete`
+        // fires on nearly every incremental map, so emitting it here would put
+        // a token on almost every line and make `stitch_skipped` useless as a
+        // signal, while a consumer that actually needs to know an incremental
+        // map registered nothing has `--format json` and `--format llm`, which
+        // both carry it. What stays here is the guard refusing -- the case that
+        // means a backend is being protected from stacked joins.
+        const rule = localIngest?.stitchSkippedRule;
+        const stitch =
+          rule === undefined || rule === "incomplete" || rule === "run-errors"
+            ? ""
+            // `stitch_skipped_rule`, not `stitch_skipped`. The json and llm
+            // formats put the English prose under `stitch_skipped` and the rule
+            // under `stitch_skipped_rule`, and emitting the RULE under the
+            // prose key here gave one name two value spaces: a hook matching
+            // `stitch_skipped=cooling` on this line silently stopped matching
+            // the moment it was pointed at `--format json`.
+            : ` · stitch_skipped_rule=${rule}`;
         process.stderr.write(
-          `map: ${result.file_count} files · ${systems}s/${subsystems}ss/${modules}m regions · ${mapMs}ms\n`
+          `map: ${result.file_count} files · ${systems}s/${subsystems}ss/${modules}m regions · ${mapMs}ms${stitch}\n`
         );
         return;
       }
@@ -501,6 +624,20 @@ Examples:
           levels: result.levels,
           map_rev: result.map_rev,
           outcome: result.outcome,
+          // Always present so a consumer can branch on them without a key check.
+          // A dropped file is silent otherwise: the backend still answers with a
+          // completed outcome, so `outcome` alone cannot distinguish a whole map
+          // from one missing every file that failed to build a patch (#554).
+          parse_errors: localIngest?.parseErrors ?? 0,
+          commit_errors: localIngest?.commitErrors ?? 0,
+          // Ix#568. The whole reason this is reported at all is hooks that run
+          // `ix map` and read the machine output; leaving it only in
+          // `ix ingest --format json` puts it where those hooks never look.
+          // `?? null`, not left undefined: JSON.stringify drops an undefined
+          // value, so a consumer could not tell the field apart from an older
+          // CLI that never emitted it. Its siblings are always present too.
+          stitch_skipped: localIngest?.stitchSkipped ?? null,
+          stitch_skipped_rule: localIngest?.stitchSkippedRule ?? null,
           regions: regions.map((r: any) => ({
             label: r.label,
             level: r.level,
@@ -514,7 +651,7 @@ Examples:
         return;
       }
       if (opts.format === "llm") {
-        renderMapLlm(result, regions);
+        renderMapLlm(result, regions, localIngest);
         return;
       }
       renderMapText(result, cwd, opts);
@@ -522,13 +659,29 @@ Examples:
 }
 
 /** Flat one-record-per-line region listing with explicit parent= for the llm format. */
-export function renderMapLlm(result: MapResult, regions: MapRegion[]): void {
+export function renderMapLlm(
+  result: MapResult,
+  regions: MapRegion[],
+  ingest?: Pick<IngestFilesSummary, "parseErrors" | "commitErrors" | "stitchSkipped" | "stitchSkippedRule">,
+): void {
   console.log(llmLine("map", [
     ["files", result.file_count],
     ["regions", regions.length],
     ["levels", result.levels],
     ["rev", result.map_rev],
     ["outcome", result.outcome],
+    // The same signal the json payload carries as parse_errors/commit_errors.
+    // Agents are told to pass --format llm unconditionally, so leaving it out
+    // of this record hid the dropped files from the one consumer #554 is about.
+    // Emitted only when non-zero, per the format's rule that zeros carrying no
+    // signal are dropped (docs/llm-format.md); a clean ingest says nothing.
+    ["parse_errors", ingest?.parseErrors ? ingest.parseErrors : undefined],
+    ["commit_errors", ingest?.commitErrors ? ingest.commitErrors : undefined],
+    // Ix#568. `--format llm` and `--silent` are what the hooks this field was
+    // added for actually read; shipping it only in `--format json` put it
+    // where they never look.
+    ["stitch_skipped", ingest?.stitchSkipped],
+    ["stitch_skipped_rule", ingest?.stitchSkippedRule],
   ]));
   for (const r of regions) {
     console.log(llmLine("region", [

@@ -56,7 +56,23 @@ export function registerLocateCommand(program: Command): void {
 
       if (!target) {
         if (ambiguous) {
-          // Ambiguity already printed — stop cleanly
+          // Printed above, in whichever format was asked for -- and exits 1,
+          // like every other resolution failure.
+          //
+          // This was exit 0 in the first draft of #539, reasoned as "it
+          // resolved to several candidates, which is an answer, not a miss".
+          // #547 settled it the other way for the eight graph commands, and
+          // being the one command that disagrees is worse than either rule:
+          // `ix overview Duplicate` and `ix locate Duplicate` would report the
+          // same condition with different statuses.
+          //
+          // It is also the same contradiction #539 opens with, one level up.
+          // The llm branch above already prints `error code=ambiguous_target`,
+          // and the json branch a record whose `resolvedTarget` is null -- a
+          // machine caller that trusts the exit code is told the command
+          // succeeded while being handed an error record. A `--pick <n>` that
+          // is out of range lands here too, and that is a plain bad argument.
+          process.exitCode = 1;
           return;
         }
         const output: LocateOutput = {
@@ -77,8 +93,8 @@ export function registerLocateCommand(program: Command): void {
         // read `diagnostics` from it, and #539's whole point is that the exit
         // code should become informative without the payload going away.
         //
-        // Ambiguity is a different condition and keeps its own path above --
-        // it resolved to several candidates, which is an answer, not a miss.
+        // Ambiguity keeps its own path above -- a different message and a
+        // different record -- but the same exit code, per #547.
         process.exitCode = 1;
         return;
       }

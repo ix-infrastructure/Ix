@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+
+if (process.argv[2] === "mcp" && process.argv[3] === "list") {
+  process.stdout.write("configured servers:\n");
+  process.exit(0);
+}
+
+process.stderr.write("unsupported fixture invocation\n");
+process.exit(2);
