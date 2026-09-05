@@ -42,7 +42,9 @@ cd ix-cli && npm test
 1. Create a branch from `main`
 2. Make your changes
 3. Run tests locally
-4. Open a PR using the pull request template
+4. Open a PR using the pull request template — work-in-progress opens as a draft;
+   GitHub requests code owners at mark-ready, not at draft-open, and a ready-open
+   auto-request cannot be removed once a PR is a draft (see #608)
 5. Ensure CI passes before merge
 
 ## Branch Naming
