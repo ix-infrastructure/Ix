@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import chalk from "chalk";
 import { IxClient } from "../client/api.js";
+import { renderBanner } from "./banner.js";
 import { canonicalWorkspacePath, getEndpoint, loadConfig, saveConfig, findWorkspaceForCwd, getDefaultWorkspace, type WorkspaceConfig } from "./config.js";
 import { workspaceIdForPath } from "./system.js";
 import { readBackendHealth } from "./commands/upgrade.js";
@@ -153,7 +154,12 @@ export async function ensureBackendAvailable(): Promise<void> {
  */
 export function emitSetupNotice(createdConfig: boolean, registered: boolean, name: string): void {
   if (!createdConfig && !registered) return;
-  console.error(chalk.bold("Ix\n"));
+  // The logo banner (rendered from assets/logo.png at print time) when the
+  // terminal can show it; the plain text heading otherwise. Both stderr only —
+  // stdout stays clean for --format json|llm consumers.
+  const banner = renderBanner();
+  if (banner) console.error(banner);
+  else console.error(chalk.bold("Ix\n"));
   if (createdConfig) console.error(chalk.dim(`Created default config.`));
   if (registered)    console.error(chalk.dim(`Registered workspace "${name}".`));
   console.error();
