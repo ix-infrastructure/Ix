@@ -22,10 +22,21 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  *
  * Closing the port from INSIDE lets the thread unwind its own event loop and
  * dispose its isolate in order. Measured 0 crashes in the same experiment.
- * `ParsePool.destroy` still falls back to `terminate()` if a worker does not
- * answer, so a wedged thread cannot hang the CLI.
+ *
+ * The teardown contract, precisely, because the pool's half of it changed and
+ * this is the only place the worker states it: `ParsePool` never terminates a
+ * worker. If one does not answer, the pool stops waiting and `unref()`s it, so
+ * the CLI can exit while the thread is still alive. Nothing reclaims a wedged
+ * thread before the process ends -- do not write code here that relies on
+ * being killed, and do not "restore" a `terminate()` fallback in the pool,
+ * which is the segfault itself.
+ *
+ * Not exported: `ix-cli` does not depend on this package and inlines the
+ * literal, and this module throws at load outside a worker thread, so an
+ * importer could not use the type anyway. The binding between the two is the
+ * test that runs `ParsePool` against this built file.
  */
-export type ShutdownMessage = { __shutdown: true };
+type ShutdownMessage = { __shutdown: true };
 
 type ParseMessage = { filePath: string; source: string };
 

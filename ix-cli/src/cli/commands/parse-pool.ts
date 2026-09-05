@@ -75,8 +75,8 @@ export class ParsePool {
   }
 
   async destroy(): Promise<void> {
-    // Set FIRST. Shutting a worker down makes it emit 'exit' -- whether it was
-    // asked or, in the fallback, terminated -- and the handler for that treats
+    // Set FIRST. A worker that answers `__shutdown` emits 'exit', and the
+    // handler for that treats
     // an exit as a crash and spawns a replacement. So closing the pool spun up
     // a fresh set of threads, `this.workers = []` orphaned them, and because a
     // worker thread refs the event loop and the CLI has no `process.exit(0)` on
@@ -112,11 +112,11 @@ export class ParsePool {
     // `onError` early-returns once `destroyed` is set -- deliberately, so a
     // deliberate teardown is not counted as a crash and does not respawn the
     // pool it is closing -- which means the in-flight task of a worker that
-    // `shutdown` had to terminate was never settled by anything. Its promise
-    // stayed pending for the life of the process, and the `Promise.all` over
-    // the parse batch with it. Found by a test asserting the terminated
-    // worker's parse still settles: `destroy()` returned in 10s as designed and
-    // the test then hung on the task.
+    // `shutdown` gave up on was never settled by anything. Its promise stayed
+    // pending for the life of the process, and the `Promise.all` over the parse
+    // batch with it. Found by a test asserting that such a worker's parse still
+    // settles: `destroy()` returned on schedule and the test then hung on the
+    // task.
     //
     // Not counted, for the same reason the stranded queue is not: every gate
     // that reads `crashedParses()` has already run by the time `destroy()` is
@@ -146,10 +146,13 @@ export class ParsePool {
   /**
    * The same, for a worker that has ALREADY faulted.
    *
-   * Much shorter, because `onError` does not wait for it: the replacement is
-   * spawned immediately, so a long grace leaves the pool running
-   * `concurrency + 1` threads. A worker that is merely faulted and still
-   * responsive answers in about a millisecond, so this costs it nothing.
+   * Shorter than the ordinary grace, though what it buys is now modest and
+   * worth stating exactly: since nothing is terminated, the faulted thread
+   * survives regardless of this value. All it controls is how long the pool
+   * holds a timer and an 'exit' listener for a worker it has already replaced.
+   * An earlier revision justified it as keeping the pool from running
+   * `concurrency + 1` threads, which was true only while the fallback killed
+   * things. Do not tune it on that reasoning.
    */
   static readonly FAULTED_GRACE_MS = 250;
 
@@ -210,10 +213,20 @@ export class ParsePool {
    * removed the caveat this comment used to carry.
    *
    * The cost, stated rather than hidden: a genuinely wedged worker survives
-   * until the process exits, burning a core if it is spinning. For a CLI about
-   * to exit that is nothing; for a long-lived `ix watch` it is a leaked
-   * thread. A leaked thread is recoverable and a SIGSEGV is not -- and the
-   * crash would take the watch down with it.
+   * until the process exits, burning a core if it is spinning. For `ix map` or
+   * `ix ingest` that is nothing -- the process is about to end -- and `ix
+   * watch` is safe too, because it runs each map as a CHILD PROCESS
+   * (`watch.ts`), so every pool dies with its own process.
+   *
+   * The consumer that does hold the leak is the MCP server's in-process
+   * runner: `createInProcessRunner` in `src/mcp/runner.ts` is the default
+   * (`IX_MCP_SUBPROCESS=1` opts out), so repeated `ix_map` calls against a repo
+   * with a wedging grammar would accumulate unref'd, still-spinning threads for
+   * the life of the server. An earlier version of this comment named `ix watch`
+   * and missed that one, which is exactly backwards. It is still the right
+   * trade -- a leaked thread is recoverable, a SIGSEGV is not, and the crash
+   * would take the whole server down -- but that is where to look if threads
+   * ever accumulate.
    */
   private shutdown(w: Worker, graceMs = this.graceMs): Promise<void> {
     // A worker that has already gone: settle NOW, synchronously.
@@ -294,11 +307,10 @@ export class ParsePool {
         // addon-loaded threads left live and unref'd across process exit: 0
         // failures in 10 runs, against 5 of 6 for `terminate()`.
         //
-        // The cost, stated: a wedged worker survives until the process exits,
-        // burning a core if it is spinning. For a CLI that is about to exit
-        // anyway that is nothing; for a long-lived `ix watch` it is a leaked
-        // thread. A leaked thread is recoverable and a SIGSEGV is not -- and
-        // the crash would take the watch down with it.
+        // The cost is written up on `shutdown` above: a wedged worker survives
+        // until the process exits. Nothing for the CLI, and `ix watch` runs
+        // each map as a child process, but the MCP in-process runner can
+        // accumulate them.
         w.unref();
         done();
       };
@@ -410,13 +422,17 @@ export class ParsePool {
     // lost task is still counted for the stitch gate.
     const idx = this.workers.indexOf(w);
     if (idx === -1) return;
-    // Asked, not terminated, for the same reason `destroy()` asks: this fires
-    // on 'exit' AND on 'error', and a worker that merely emitted 'error' is
-    // still a live thread holding the tree-sitter addon. Fire-and-forget, as
-    // the `terminate()` here always was -- the pool does not wait on a worker
-    // it has already replaced. On the 'exit' arm the thread is already gone,
-    // which `shutdown` detects from `threadId` and settles at once, so that
-    // path costs nothing and holds no timer.
+    // Asked rather than killed, for the same reason `destroy()` asks, and
+    // fire-and-forget as the `terminate()` here always was.
+    //
+    // Defensive, and measured to be so: a worker that emits 'error' is already
+    // being torn down by V8, 'exit' follows immediately, and it never processes
+    // a `__shutdown` posted from this handler -- a probe printed the 'error'
+    // event with `threadId=1`, then 'exit' with `threadId=-1`, and the worker's
+    // message handler never ran. So on both arms this settles via 'exit' or the
+    // `threadId` fast path, and the post is a no-op. Kept because it costs
+    // nothing and is correct if a worker ever does survive an 'error'; do not
+    // read it as evidence that a faulted thread can still answer.
     this.shutdown(w, ParsePool.FAULTED_GRACE_MS).catch(() => {});
     this.workers.splice(idx, 1);
     // ...and out of `idle` too, ALWAYS, cap or no cap. A worker can emit 'error'
