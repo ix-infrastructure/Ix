@@ -17,6 +17,7 @@ export function registerImpactCommand(program: Command): void {
     .command("impact <target>")
     .description("System risk analysis — what behavior is at risk if this changes")
     .option("--kind <kind>", "Filter target entity by kind")
+    .option("--path <path>", "Filter target entity by file path (substring match)")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--depth <n>", "Expansion depth for callers/importers (default 1, max 3)", "1")
     .option("--limit <n>", "Max top-impacted members to show", "10")
@@ -28,13 +29,13 @@ export function registerImpactCommand(program: Command): void {
     .action(
       async (
         symbol: string,
-        opts: { kind?: string; pick?: number; depth: string; limit: string; format: string }
+        opts: { kind?: string; path?: string; pick?: number; depth: string; limit: string; format: string }
       ) => {
         const client = new IxClient(getEndpoint());
         const limit = parseInt(opts.limit, 10);
         const depth = Math.min(Math.max(parseInt(opts.depth, 10) || 1, 1), 3);
 
-        const resolveOpts = { kind: opts.kind, pick: opts.pick };
+        const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
         const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
         if (!target) return;
 

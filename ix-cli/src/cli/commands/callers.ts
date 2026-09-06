@@ -17,14 +17,15 @@ export function registerCallersCommand(program: Command): void {
     .command("callers <symbol>")
     .description("Show methods/functions that call the given symbol (cross-file)")
     .option("--kind <kind>", "Filter target entity by kind")
+    .option("--path <path>", "Filter target entity by file path (substring match)")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--limit <n>", "Max results to show", "50")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", "\nExamples:\n  ix callers verify_token\n  ix callers processPayment --format json\n  ix callers parse --kind method --limit 20")
-    .action(async (symbol: string, opts: { kind?: string; pick?: number; limit: string; format: string }) => {
+    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; limit: string; format: string }) => {
       const client = new IxClient(getEndpoint());
       const limit = parseInt(opts.limit, 10);
-      const resolveOpts = { kind: opts.kind, pick: opts.pick };
+      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
       const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
       if (!target) return;
       if (opts.format === "text") printResolved(target);
@@ -120,14 +121,15 @@ export function registerCallersCommand(program: Command): void {
     .command("callees <symbol>")
     .description("Show methods/functions called by the given symbol (cross-file)")
     .option("--kind <kind>", "Filter target entity by kind")
+    .option("--path <path>", "Filter target entity by file path (substring match)")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--limit <n>", "Max results to show", "50")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", "\nExamples:\n  ix callees processPayment\n  ix callees parse --format json")
-    .action(async (symbol: string, opts: { kind?: string; pick?: number; limit: string; format: string }) => {
+    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; limit: string; format: string }) => {
       const client = new IxClient(getEndpoint());
       const calleeLimit = parseInt(opts.limit, 10);
-      const resolveOpts = { kind: opts.kind, pick: opts.pick };
+      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
       const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
       if (!target) return;
       if (opts.format === "text") printResolved(target);
