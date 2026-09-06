@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { describeCommitOutcome, describeStitchFailure, describeStitchSkipped, ingestCompletedCleanly, isStitchUnsupported } from "../commands/ingest.js";
+import { describeCommitOutcome, describeStitchFailure, describeStitchSkipped, ingestCompletedCleanly, isStitchUnsupported, shouldPrintStitchSkipped } from "../commands/ingest.js";
 
 describe("describeCommitOutcome", () => {
   it("says nothing when every patch committed", () => {
@@ -235,9 +235,64 @@ describe("describeStitchFailure", () => {
   });
 });
 
+describe("shouldPrintStitchSkipped", () => {
+  // Ix#620. `run-errors` computed a message and then never printed it, on the
+  // grounds that the run had "already said so". It had not: the line it
+  // deferred to reports that the graph is missing THOSE FILES and says to
+  // re-run `ix map` -- while what was actually withheld is the whole
+  // workspace's cross-workspace registration, and a plain re-run is
+  // incremental, lands on the silent `incomplete` branch, and never recovers
+  // it. Measured: one commit error in 2,067 patches cost a 2,066-file
+  // workspace every cross-repo edge it had, on a run that exited 0.
+  it("prints for run-errors", () => {
+    expect(shouldPrintStitchSkipped("run-errors", false)).toBe(true);
+  });
+
+  // The other half of the rule, and the reason this is not just "print
+  // everything": `incomplete` fires on nearly every incremental map, so it is
+  // the steady state rather than an event.
+  it("stays silent for incomplete", () => {
+    expect(shouldPrintStitchSkipped("incomplete", false)).toBe(false);
+  });
+
+  it("prints for every other refusal", () => {
+    for (const rule of ["lost-parses", "run-errors", "cooling", "in-flight", "deadline"] as const) {
+      expect(shouldPrintStitchSkipped(rule, false), rule).toBe(true);
+    }
+  });
+
+  // `ix map` passes suppressOutput and is deliberately one terse line per run.
+  // The machine token still carries the rule, so nothing is lost by staying
+  // quiet here -- including for the rule this issue made loud.
+  it("never prints under --silent, not even for run-errors", () => {
+    for (const rule of ["run-errors", "lost-parses", "incomplete", "deadline"] as const) {
+      expect(shouldPrintStitchSkipped(rule, true), rule).toBe(false);
+    }
+  });
+});
+
 describe("describeStitchSkipped", () => {
   const cooling = "the last stitch was cut off after 62s and may still be running";
   const contended = "another ix run is already stitching http://localhost:8090";
+
+  // Ix#620. `run-errors` was the one rule that computed a message and then
+  // never printed it, on the grounds that the run had "already said so". The
+  // line it was deferring to says the graph is missing THOSE FILES and tells
+  // the user to re-run `ix map` — neither of which is true of the stitch: the
+  // whole workspace's registration is withheld, and a plain re-run is
+  // incremental, lands on the silent `incomplete` branch, and never recovers
+  // it. So the text has to name the consequence and name `--force`.
+  it("names the registration and the only remedy that recovers it (run-errors)", () => {
+    const msg = describeStitchSkipped(
+      "this run had parse or commit errors, so its registration would be built from an incomplete picture of the repo",
+      "run-errors",
+    );
+    expect(msg.startsWith("Note:")).toBe(true);
+    // Not "those files" — the thing withheld is the cross-workspace registration.
+    expect(msg).toContain("Cross-workspace stitch not started");
+    // `ix map` alone does NOT get back in; only a forced re-ingest does.
+    expect(msg).toContain("--force");
+  });
 
   it("is a Note, not a failure, and leads with the reason", () => {
     const msg = describeStitchSkipped(cooling, "cooling");

@@ -1068,6 +1068,48 @@ export function describeStitchFailure(error: unknown): string {
  * the ways back in: a fresh map, `--force`, or a post-reset re-map. What the
  * cooldown changes is only how often this path is taken, not where it leads.
  */
+/**
+ * Does a skipped stitch get a human Note, or only the machine surfaces?
+ *
+ * Extracted so the rule is pinned by a test rather than by reading a
+ * conditional buried in `ingestFiles` (Ix#620). Every rule is always on
+ * `stitchSkipped` / `stitch_skipped`; this decides stderr only.
+ */
+export function shouldPrintStitchSkipped(
+  rule: StitchRefusal | undefined,
+  suppressOutput: boolean,
+): boolean {
+  // Never on `--silent`. `ix map` always passes `suppressOutput`, and that
+  // surface is deliberately one terse line per run; the machine token still
+  // carries the rule, so nothing is lost.
+  if (suppressOutput) return false;
+
+  // `incomplete` is the one silent rule, and stays that way: it fires on nearly
+  // every incremental map, so what it reports is the ordinary steady state
+  // rather than an event worth a ~250-character Note on every save.
+  //
+  // `run-errors` PRINTS (Ix#620). It was suppressed on the grounds that it
+  // "restates lines the run has already printed", and that is false in both
+  // halves. What the run actually prints is
+  //
+  //   Warning: 1 of 2067 file patches failed to commit; the graph is missing
+  //   those files. Re-run 'ix map' to retry, or --debug to see why.
+  //
+  // which is about THOSE FILES. It never says the whole workspace's
+  // cross-workspace registration was withheld -- one file versus every
+  // cross-repo edge the workspace has. And the remedy it offers is the wrong
+  // one here: a plain `ix map` re-run is incremental, so
+  // `filesSkippedAsUnchanged > 0` lands it on `incomplete`, which is silent --
+  // the user re-runs, sees a clean exit, and the registration stays frozen.
+  // Only `--force` gets back in, which is what the `run-errors` text says.
+  //
+  // Noise is not the objection either. Unlike `incomplete`, this can only fire
+  // on a run that already had errors. Measured on a 2,066-file ingest: one
+  // commit error out of 2,067 patches silently cost the largest workspace in
+  // the graph its entire cross-repo registration, on a run that exited 0.
+  return rule !== "incomplete";
+}
+
 export function describeStitchSkipped(
   reason: string,
   rule?: StitchRefusal,
@@ -3457,17 +3499,7 @@ export async function ingestFiles(
     process.exitCode = 1;
   } else if (
     stitchSkipped !== undefined &&
-    // Not on `--silent`. `ix map` always passes `suppressOutput`, and that
-    // surface is deliberately one terse line per run -- which is the stated
-    // reason `incomplete` is filtered out of its token. A ~250-character Note
-    // on every map for the whole 15-minute cooldown is the repetition the short
-    // form exists to avoid; the token still carries the rule.
-    opts.suppressOutput !== true &&
-    // The guard's refusals only. `incomplete` would print on nearly every
-    // incremental map, and `run-errors` restates lines the run has already
-    // printed; both are still on the machine surfaces.
-    stitchSkippedRule !== "incomplete" &&
-    stitchSkippedRule !== "run-errors"
+    shouldPrintStitchSkipped(stitchSkippedRule, opts.suppressOutput === true)
   ) {
     // Not an error and not an exit code: nothing failed, and the graph is
     // exactly where a failed stitch would have left it. But the sentence a
