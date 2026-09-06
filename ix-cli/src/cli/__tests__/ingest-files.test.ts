@@ -308,13 +308,22 @@ describe("ingestFiles against a fake backend", () => {
       // `saved` is shared across the describe, so the next `beforeEach`
       // snapshotted those polluted values and the file's final restore wrote
       // the fixture `HOME` back into the process.
-      await backend.stop();
+      // And the steps do not share fate. Env first, because it is the one that
+      // leaks OUT of this file: a `stop()` that rejects or outruns the hook
+      // timeout would otherwise skip it and leave the whole process pointed at
+      // a deleted fixture home. `backend` is optional-chained because a
+      // `beforeEach` that throws in `mkdtempSync` leaves it unassigned, and a
+      // TypeError here would bury that failure.
       for (const [k, v] of Object.entries(saved)) {
         if (v === undefined) delete process.env[k];
         else process.env[k] = v;
       }
-      rmSync(home, { recursive: true, force: true });
-      rmSync(repo, { recursive: true, force: true });
+      try {
+        await backend?.stop();
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+        rmSync(repo, { recursive: true, force: true });
+      }
     }
   });
 
