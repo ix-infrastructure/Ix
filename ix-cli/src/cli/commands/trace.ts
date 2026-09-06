@@ -229,7 +229,10 @@ export async function findPath(
   toId: string,
   predicates: string[],
   maxDepth: number = 10,
+  maxNodes: number = Infinity,
 ): Promise<PathNode[] | null> {
+  if (maxNodes < 1) return null;
+  if (fromId === toId) return [{ id: fromId, name: "", kind: "" }];
   const nodeMap = new Map<string, { name: string; kind: string }>();
 
   const queue: Array<{ id: string; path: string[] }> = [{ id: fromId, path: [fromId] }];
@@ -238,7 +241,7 @@ export async function findPath(
   while (queue.length > 0) {
     const entry = queue.shift()!;
     const { id, path } = entry;
-    if (path.length >= maxDepth) continue;
+    if (path.length - 1 >= maxDepth) continue;
 
     const [outResult, inResult] = await Promise.all([
       client.expand(id, { direction: "out", predicates, hops: 1 }),
@@ -246,6 +249,9 @@ export async function findPath(
     ]);
 
     for (const n of [...outResult.nodes, ...inResult.nodes]) {
+      if (visited.has(n.id)) continue;
+      if (visited.size >= maxNodes) return null;
+      visited.add(n.id);
       const name = n.name || n.attrs?.name || n.id.slice(0, 8);
       if (!nodeMap.has(n.id)) {
         nodeMap.set(n.id, { name, kind: n.kind ?? "unknown" });
@@ -260,8 +266,6 @@ export async function findPath(
         });
       }
 
-      if (visited.has(n.id)) continue;
-      visited.add(n.id);
       queue.push({ id: n.id, path: [...path, n.id] });
     }
   }
@@ -355,13 +359,14 @@ const finiteDepth = (d: number): LlmValue => (Number.isFinite(d) ? d : undefined
 export function renderTracePathLlm(
   from: { name: string; kind: string }, to: { name: string; kind: string },
   relKind: string, pathNodes: PathNode[],
+  noPathMessage?: string,
 ): string[] {
   const lines = [llmLine("trace", [
     ["mode", "path"], ["from", from.name], ["to", to.name], ["kind", relKind],
     ["length", pathNodes.length > 0 ? pathNodes.length : undefined],
   ])];
   if (pathNodes.length === 0) {
-    lines.push(llmLine("diagnostic", [["code", "no_path"], ["message", `No route found from ${from.name} to ${to.name}.`]]));
+    lines.push(llmLine("diagnostic", [["code", "no_path"], ["message", noPathMessage ?? `No route found from ${from.name} to ${to.name}.`]]));
     return lines;
   }
   for (const n of pathNodes) lines.push(llmLine("step", [["name", n.name], ["kind", n.kind]]));
@@ -413,8 +418,8 @@ export function registerTraceCommand(program: Command): void {
     .option("--upstream", "Show who calls/imports this (same as depends)")
     .option("--downstream", "Show what this calls/imports (outward flow)")
     .option("--kind <kind>", "Relationship kind: calls|imports|depends|contains")
-    .option("--depth <n>", "Cap traversal depth")
-    .option("--cap <n>", "Cap number of nodes visited, per direction")
+    .option("--depth <n>", "Cap traversal depth in edges (also applies to --to)")
+    .option("--cap <n>", "Cap nodes visited per direction, or across the --to search (including the source)")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--path <path>", "Prefer symbols from files matching this path substring")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
@@ -485,7 +490,9 @@ export function registerTraceCommand(program: Command): void {
           const relKind = opts.kind ?? "mixed";
           const predicates = kindToPredicates(opts.kind);
 
-          const rawPath = await findPath(client, fromTarget.id, toTarget.id, predicates, maxDepth + 7);
+          const rawPath = await findPath(client, fromTarget.id, toTarget.id, predicates, maxDepth, maxNodes);
+          const bounded = Number.isFinite(maxDepth) || Number.isFinite(maxNodes);
+          const noPathMessage = `No route found from ${fromTarget.name} to ${toTarget.name}${bounded ? " within the requested search limits" : ""}.`;
 
           // Fill in the from-node name (was left blank above)
           const pathNodes: PathNode[] = rawPath
@@ -511,7 +518,7 @@ export function registerTraceCommand(program: Command): void {
               output.diagnostics = [
                 {
                   code: "no_path",
-                  message: `No route found from ${fromTarget.name} to ${toTarget.name}.`,
+                  message: noPathMessage,
                 },
               ];
             }
@@ -521,7 +528,7 @@ export function registerTraceCommand(program: Command): void {
 
           // ── llm output ─────────────────────────────────────────
           if (opts.format === "llm") {
-            for (const line of renderTracePathLlm(fromTarget, toTarget, relKind, pathNodes)) console.log(line);
+            for (const line of renderTracePathLlm(fromTarget, toTarget, relKind, pathNodes, noPathMessage)) console.log(line);
             return;
           }
 
@@ -533,7 +540,7 @@ export function registerTraceCommand(program: Command): void {
           renderKeyValue("Kind", cap(relKind));
 
           if (pathNodes.length === 0) {
-            console.log(`\nNo route found from ${chalk.bold(fromTarget.name)} to ${chalk.bold(toTarget.name)}.`);
+            console.log(`\n${noPathMessage}`);
             return;
           }
 

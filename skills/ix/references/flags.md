@@ -584,8 +584,8 @@ Follow how it connects.
 | `--upstream` | — | off | Show who calls/imports this (same as depends) |
 | `--downstream` | — | off | Show what this calls/imports (outward flow) |
 | `--kind` | `<kind>` | — | Relationship kind: calls\|imports\|depends\|contains |
-| `--depth` | `<n>` | — | Cap traversal depth |
-| `--cap` | `<n>` | — | Cap number of nodes visited, per direction |
+| `--depth` | `<n>` | — | Cap traversal depth in edges (also applies to `--to`) |
+| `--cap` | `<n>` | — | Cap nodes visited per direction, or across the `--to` search (including the source) |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--path` | `<path>` | — | Prefer symbols from files matching this path substring |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
