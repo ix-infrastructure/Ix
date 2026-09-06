@@ -173,7 +173,7 @@ export function registerRankCommand(program: Command): void {
 
         // 1. Fetch all entities of the given kind
         await ensureReadScope(client); // fold in a Path-2 stitched system (Ix#225 Half B)
-        const allNodes = await client.listByKind(opts.kind, { limit: 2000, ...activeReadScope() });
+        const allNodes = await client.listByKind(opts.kind, { limit: 2000, scope: opts.path || undefined, ...activeReadScope() });
 
         if (allNodes.length === 0) {
           if (opts.format === "llm") {
