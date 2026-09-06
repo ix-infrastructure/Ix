@@ -44,22 +44,43 @@ const importViaFunction = new Function(
  * genuine module-not-found still propagates, rather than being retried and
  * reported twice.
  */
+/**
+ * Is this "this host cannot do dynamic import", as opposed to any other error?
+ *
+ * Exported for its test. The shapes it has to accept are not guessable, which
+ * is why that test derives them from a real failure rather than writing plausible
+ * ones by hand.
+ */
+export function isVmDynamicImportUnavailable(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return (
+    (typeof code === "string" && code.startsWith("ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING")) ||
+    /dynamic import callback/i.test(String(err))
+  );
+}
+
 const importModule = async (specifier: string): Promise<any> => {
   try {
     return await importViaFunction(specifier);
   } catch (err) {
-    // Matched on `code`, not on the message. Node raises
-    // ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING and ..._FLAG here, and the
-    // previous test was a substring of the English text -- reword that upstream
-    // and this guard silently stops matching: the harness goes red with the
-    // original vm error and a real vm-hosted consumer regresses to unloadable,
-    // with nothing pointing at the guard. The message check is kept only as a
-    // fallback for an error that arrives without a code.
-    const code = (err as NodeJS.ErrnoException | null)?.code;
-    const isVmCallbackMissing = code
-      ? code.startsWith("ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING")
-      : /dynamic import callback/i.test(String(err));
-    if (!isVmCallbackMissing) throw err;
+    // EITHER signal, never one excluding the other. Node raises
+    // ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING (and a ..._FLAG variant) with a
+    // matching message, and the code is the stabler of the two -- but an
+    // earlier revision wrote this as a ternary, so the message test became
+    // reachable only when `code` was absent. That is NARROWER than the plain
+    // message match it replaced, and it breaks on the host this fallback exists
+    // for: Vite's module runner rethrows the vm failure with its own
+    // `code: 'ERR_LOAD_URL'` while preserving the message, so the wrapped error
+    // has a code, fails the prefix test, never reaches the message test, and
+    // `ingestFiles` becomes unloadable under vite-node.
+    //
+    // `typeof code === "string"` because `code` is only typed as a string.
+    // Numeric codes are common in the wild (libuv, zlib, OpenSSL), and
+    // `.startsWith` on one throws a TypeError from inside this catch --
+    // replacing the real load failure with an unrelated type error and
+    // discarding the original, which is the exact failure the rest of this
+    // block exists to prevent.
+    if (!isVmDynamicImportUnavailable(err)) throw err;
     try {
       // The ignore pragmas are load-bearing, not decoration. A bare
       // `import(variable)` is exactly the static-analysis surface the
