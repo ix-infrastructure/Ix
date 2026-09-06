@@ -30,6 +30,21 @@ class Ix < Formula
       # Install the compiled CLI and its dependencies
       libexec.install "dist", "node_modules", "package.json"
 
+      # ...and the banner inputs, which are part of the CLI, not extras.
+      # `banner.js` resolves them as join(dirname(import.meta.url), "..", "..")
+      # -- i.e. libexec -- so without these the setup notice silently falls back
+      # to the plain text heading on every Homebrew install. Silently is the
+      # problem: renderBanner() is absent-safe by design and returns null rather
+      # than failing, so a missing input looks exactly like success.
+      #
+      # Ix#605 shipped this for the npm tarball and the release staging and
+      # missed Homebrew, which is a third delivery path with its own layout.
+      # Copied file-by-file rather than as whole directories: ix-cli/scripts/
+      # also holds the CI parity checkers and the core-ingestion build script,
+      # none of which belong in an installed prefix.
+      (libexec/"scripts").install "scripts/render-logo.mjs", "scripts/render-logo.d.mts"
+      (libexec/"assets").install "assets/logo.png"
+
       # Create a wrapper script that invokes node with the correct path
       (bin/"ix").write <<~EOS
         #!/bin/bash
