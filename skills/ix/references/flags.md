@@ -70,7 +70,7 @@ Show methods/functions called by the given symbol (cross-file).
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
-| `--path` | `<path>` | — | Filter target entity by file path (substring match) |
+| `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
@@ -82,7 +82,7 @@ Show methods/functions that call the given symbol (cross-file).
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
-| `--path` | `<path>` | — | Filter target entity by file path (substring match) |
+| `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
@@ -128,7 +128,7 @@ Show members contained by the given entity (class, module, file).
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
-| `--path` | `<path>` | — | Filter target entity by file path (substring match) |
+| `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
@@ -289,7 +289,7 @@ System risk analysis — what behavior is at risk if this changes.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
-| `--path` | `<path>` | — | Filter target entity by file path (substring match) |
+| `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--depth` | `<n>` | `1` | Expansion depth for callers/importers (default 1, max 3) |
 | `--limit` | `<n>` | `10` | Max top-impacted members to show |
@@ -302,7 +302,7 @@ Show what imports the given entity.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
-| `--path` | `<path>` | — | Filter target entity by file path (substring match) |
+| `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
@@ -314,7 +314,7 @@ Show what the given entity imports.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
-| `--path` | `<path>` | — | Filter target entity by file path (substring match) |
+| `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |

@@ -17,7 +17,7 @@ export function registerImpactCommand(program: Command): void {
     .command("impact <target>")
     .description("System risk analysis — what behavior is at risk if this changes")
     .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Filter target entity by file path (substring match)")
+    .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--depth <n>", "Expansion depth for callers/importers (default 1, max 3)", "1")
     .option("--limit <n>", "Max top-impacted members to show", "10")
