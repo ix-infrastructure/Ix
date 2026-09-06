@@ -289,6 +289,22 @@ jobs:
           # would silently print the plain-text heading instead of the banner —
           # the exact failure mode that shipped once because both files lived at
           # the repo root, outside every packaged layout.
+          # THE CLI ITSELF. Restored after v0.10.7 shipped without it: the banner
+          # change rewrote this block and dropped the line, so every tarball for
+          # every platform contained a `cli/` holding only `scripts/` and
+          # `assets/` -- no dist, no node_modules, no package.json. Nothing in
+          # the pipeline noticed. `release:` went green on all four platforms
+          # and the only job that failed was the Windows install check, whose
+          # message named a missing module path rather than an empty payload.
+          cp -rL ix-cli/dist ix-cli/node_modules ix-cli/package.json "$STAGING/cli/"
+          # ...and assert it, because the banner inputs below were guarded and
+          # the CLI they exist to decorate was not. A staging block is edited by
+          # people adding things to it; the guard has to cover what is already
+          # there, or the next edit removes it just as quietly as this one did.
+          test -f "$STAGING/cli/dist/cli/main.js" \
+            || { echo "::error::cli/dist/cli/main.js missing from staging — the tarball would contain no CLI at all"; exit 1; }
+          test -f "$STAGING/cli/package.json" && test -d "$STAGING/cli/node_modules" \
+            || { echo "::error::cli/package.json or cli/node_modules missing from staging — the CLI would not start"; exit 1; }
           cp -rL ix-cli/scripts/render-logo.mjs ix-cli/scripts/render-logo.d.mts "$STAGING/cli/scripts/"
           cp -rL ix-cli/assets/logo.png "$STAGING/cli/assets/"
           test -f "$STAGING/cli/scripts/render-logo.mjs" && test -f "$STAGING/cli/assets/logo.png" \
