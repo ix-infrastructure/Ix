@@ -191,7 +191,7 @@ export function registerDependsCommand(program: Command): void {
     .command("depends <symbol>")
     .description("Show upstream dependents of the given entity (full tree by default)")
     .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Prefer symbols from files matching this path substring")
+    .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--depth <n>", "Cap traversal depth")
     .option("--cap <n>", "Cap number of nodes visited")

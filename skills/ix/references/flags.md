@@ -138,7 +138,7 @@ Build a bounded, deterministic context bundle for a symbol, file, or entity (or 
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
-| `--path` | `<path>` | — | Prefer symbols from files matching this path substring |
+| `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--depth` | `compact\|standard\|full\|shallow\|deep` | — | Context-graph expansion depth (compact\|standard\|full\|shallow\|deep) |
 | `--as-of-rev` | `<n>` | — | Historical context as of a graph revision |
@@ -160,7 +160,7 @@ Show upstream dependents of the given entity (full tree by default).
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
-| `--path` | `<path>` | — | Prefer symbols from files matching this path substring |
+| `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--depth` | `<n>` | — | Cap traversal depth |
 | `--cap` | `<n>` | — | Cap number of nodes visited |
@@ -181,7 +181,7 @@ Show diff between two revisions, optionally scoped to a file or entity.
 | `--full` | — | off | Return all changes (no limit) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--kind` | `<kind>` | — | Filter target entity by kind |
-| `--path` | `<path>` | — | Prefer symbols from files matching this path substring |
+| `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 
 ### `ix docker`
@@ -251,7 +251,7 @@ Explain an entity — infers role, importance, and structural context.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
-| `--path` | `<path>` | — | Prefer symbols from files matching this path substring |
+| `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--raw` | — | off | Show raw metadata dump (legacy format) |
@@ -276,7 +276,7 @@ Show provenance chain for a file or entity.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
-| `--path` | `<path>` | — | Prefer symbols from files matching this path substring |
+| `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 
@@ -356,7 +356,7 @@ Resolve a symbol to its position in the codebase and system hierarchy.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
-| `--path` | `<path>` | — | Prefer results from files matching this path substring |
+| `--path` | `<path>` | — | Restrict to results from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 
@@ -413,7 +413,7 @@ Structural summary — what a target contains or what surrounds it.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
-| `--path` | `<path>` | — | Prefer symbols from files matching this path substring |
+| `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 
@@ -459,7 +459,7 @@ Read raw file content, line ranges, or symbol source code.
 |---|---|---|---|
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--kind` | `<kind>` | — | Filter symbol by kind |
-| `--path` | `<path>` | — | Prefer symbols from files matching this path substring |
+| `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--root` | `<dir>` | — | Workspace root directory |
 
@@ -587,7 +587,7 @@ Follow how it connects.
 | `--depth` | `<n>` | — | Cap traversal depth |
 | `--cap` | `<n>` | — | Cap number of nodes visited, per direction |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
-| `--path` | `<path>` | — | Prefer symbols from files matching this path substring |
+| `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--include-tests` | — | off | Include test and fixture entities |
 | `--tests-only` | — | off | Show only test and fixture entities |

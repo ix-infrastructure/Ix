@@ -225,7 +225,7 @@ export function registerContextCommand(program: Command): void {
       "Build a bounded, deterministic context bundle for a symbol, file, or entity (or resume/diff a saved investigation without a target)",
     )
     .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Prefer symbols from files matching this path substring")
+    .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option(
       "--depth <depth>",

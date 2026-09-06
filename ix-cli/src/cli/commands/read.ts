@@ -196,7 +196,7 @@ export function registerReadCommand(program: Command): void {
     .description("Read raw file content, line ranges, or symbol source code")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--kind <kind>", "Filter symbol by kind")
-    .option("--path <path>", "Prefer symbols from files matching this path substring")
+    .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--root <dir>", "Workspace root directory")
     .addHelpText("after", `\nResolution order:

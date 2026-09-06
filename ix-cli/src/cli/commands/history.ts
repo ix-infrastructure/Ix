@@ -28,7 +28,7 @@ export function registerHistoryCommand(program: Command): void {
     .command("history <target>")
     .description("Show provenance chain for a file or entity")
     .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Prefer symbols from files matching this path substring")
+    .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", `\nExamples:

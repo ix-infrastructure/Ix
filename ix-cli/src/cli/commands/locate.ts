@@ -36,7 +36,7 @@ export function registerLocateCommand(program: Command): void {
     .command("locate <symbol>")
     .description("Resolve a symbol to its position in the codebase and system hierarchy")
     .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Prefer results from files matching this path substring")
+    .option("--path <path>", "Restrict to results from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", `\nExamples:

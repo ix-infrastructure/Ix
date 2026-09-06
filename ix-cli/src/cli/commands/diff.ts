@@ -469,7 +469,7 @@ export function registerDiffCommand(program: Command): void {
     .option("--full", "Return all changes (no limit)")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Prefer symbols from files matching this path substring")
+    .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .addHelpText("after", `\nExamples:
   ix diff 3 5

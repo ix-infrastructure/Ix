@@ -18,7 +18,7 @@ export function registerExplainCommand(program: Command): void {
     .command("explain <symbol>")
     .description("Explain an entity — infers role, importance, and structural context")
     .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Prefer symbols from files matching this path substring")
+    .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--raw", "Show raw metadata dump (legacy format)")
