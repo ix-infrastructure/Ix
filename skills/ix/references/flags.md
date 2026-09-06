@@ -302,6 +302,7 @@ Show what imports the given entity.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
+| `--path` | `<path>` | — | Filter target entity by file path (substring match) |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
@@ -313,6 +314,7 @@ Show what the given entity imports.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
+| `--path` | `<path>` | — | Filter target entity by file path (substring match) |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |

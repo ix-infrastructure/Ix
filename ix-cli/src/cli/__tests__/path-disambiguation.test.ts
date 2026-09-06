@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
 import { registerCallersCommand } from "../commands/callers.js";
 import { registerImpactCommand } from "../commands/impact.js";
+import { registerImportsCommand } from "../commands/imports.js";
 
 const { search, expand } = vi.hoisted(() => ({ search: vi.fn(), expand: vi.fn() }));
 
@@ -29,13 +30,14 @@ async function run(command: string, args: string[]) {
   const program = new Command().name("ix").exitOverride();
   registerCallersCommand(program);
   registerImpactCommand(program);
+  registerImportsCommand(program);
   const output: string[] = [];
   vi.spyOn(console, "log").mockImplementation((...parts) => { output.push(parts.join(" ")); });
   await program.parseAsync([command, "Duplicate", ...args, "--format", "json"], { from: "user" });
   return JSON.parse(output.join("\n"));
 }
 
-describe.each(["impact", "callers", "callees"])("%s path disambiguation", (command) => {
+describe.each(["impact", "callers", "callees", "imports", "imported-by"])("%s path disambiguation", (command) => {
   let savedExitCode: typeof process.exitCode;
 
   beforeEach(() => {
