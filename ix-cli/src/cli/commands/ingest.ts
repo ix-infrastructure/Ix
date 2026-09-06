@@ -2355,6 +2355,27 @@ export async function ingestFiles(
             recordDrainMs(ms);
             timings.bulkCommitMs += ms;
             latestRev = advanceRev(latestRev, result.rev);
+            // Same base-rev guard the other two commit sites carry, and for the
+            // same reason. This one was written without it: `BaseRevMismatch`
+            // means the backend read the latest rev outside the transaction and
+            // it moved before the commit ran, so NOTHING was written. Counting
+            // that chunk as applied left `commitErrors` at zero, which is the
+            // condition `persistIngestBaselineIfClean` requires -- so the run
+            // wrote an mtime baseline for files the graph never received, and
+            // every later incremental map skipped them as unchanged. Recoverable
+            // only by `--force`, and silent until someone noticed the symbols
+            // missing. `onBulkCommitted` and the per-file path both guard it;
+            // the drain added for Ix#571 is the odd one out.
+            if (result.status === COMMIT_STATUS_BASE_REV_MISMATCH) {
+              commitErrors += chunk.length;
+              if (debug) {
+                process.stderr.write(
+                  `\n  [cutoff] bulk lost the base-rev race; ${chunk.length} patches wrote nothing and will be re-sent next run\n`
+                );
+              }
+              probeQueue = rest;
+              continue;
+            }
             patchesApplied += chunk.length;
             patchesTheBackendTook += chunk.length;
             commitBreaker.recordSuccess();

@@ -42,7 +42,7 @@ import { ingestFiles } from "../commands/ingest.js";
 
 /** A backend that answers the endpoints an ingest touches, and records them. */
 class FakeBackend {
-  readonly requests: Array<{ path: string; patches: number }> = [];
+  readonly requests: Array<{ path: string; patches: number; code?: number }> = [];
   /** Paths this fake does not implement. Asserted empty after every test. */
   readonly unknownPaths: string[] = [];
 
@@ -55,6 +55,38 @@ class FakeBackend {
   refuseEverything = false;
   /** Refuse re-sends of patches a 409 already confirmed. */
   refuseReplays = false;
+  /**
+   * Answer the CUTOFF DRAIN's bulk with `BaseRevMismatch`, and nothing else.
+   *
+   * A 200 that wrote nothing: the backend read the latest rev outside the
+   * transaction and it moved before the commit ran. Without a knob the harness
+   * could only ever serve "Ok", so every `status` branch in the three commit
+   * sites was unreachable from any test.
+   *
+   * Aimed at the drain specifically, by shape rather than by counting
+   * requests. The drain is the only bulk that happens AFTER the per-file
+   * fan-out, so "a bulk with at least one single behind it" names it exactly,
+   * and stays right if the number of requests before it ever changes.
+   */
+  mismatchOnDrainBulk = false;
+  /**
+   * Refuse the opening bulk and every per-file send, but ACCEPT the drain.
+   *
+   * The only shape that reaches an accepted cutoff drain, and it took three
+   * tries to find because each failed one looked plausible. Poisoning files
+   * does not work: the cutoff holds the patches that FAILED as well as the
+   * untried ones, so the drain carries the poison and is refused. Refusing by
+   * request count does not work either: the cutoff trips on the fifth failure
+   * and the drain follows immediately, so any threshold high enough to produce
+   * five failures is still in force when the drain arrives. Both were measured
+   * at zero accepted bulks in the whole run, via `acceptedBulks()`.
+   *
+   * Refusing by KIND separates them: the opening bulk (no singles behind it)
+   * and every single are refused, which trips the cutoff; the drain is the only
+   * bulk with singles behind it, and it is answered 200 -- so the code that
+   * reads its status is finally reached.
+   */
+  refuseUntilDrain = false;
   /** Fired after `abortAfterCommits` commit requests, if set. */
   abortAfterCommits: number | undefined;
   private readonly aborter = new AbortController();
@@ -68,8 +100,18 @@ class FakeBackend {
   /** Status for POST /v1/stitch. */
   stitchStatus = 200;
 
+  /** Forget every request so far, so a second run can be measured on its own. */
+  resetRequests(): void {
+    this.requests.splice(0, this.requests.length);
+  }
+
   get stitchCount(): number {
     return this.requests.filter((r) => r.path === "/v1/stitch").length;
+  }
+
+  /** Bulk commits that the backend ACCEPTED, in order. */
+  acceptedBulks(): number {
+    return this.requests.filter(r => r.path === "/v1/patches/bulk" && r.code === 200).length;
   }
 
   get bulkCount(): number {
@@ -114,6 +156,13 @@ class FakeBackend {
   private route(url: string, body: string, res: ServerResponse): void {
     const path = new URL(url, "http://x").pathname;
     const send = (code: number, payload: unknown): void => {
+      // Stamp the answer onto the request that produced it. Whether a bulk was
+      // ACCEPTED or refused is the difference between two completely different
+      // code paths in `ingestFiles`, and a test that assumes the wrong one is
+      // measuring nothing -- which is exactly how the drain test below first
+      // went wrong.
+      const last = this.requests[this.requests.length - 1];
+      if (last !== undefined && last.code === undefined) last.code = code;
       res.writeHead(code, { "Content-Type": "application/json" });
       res.end(JSON.stringify(payload));
     };
@@ -138,7 +187,23 @@ class FakeBackend {
         const ids = patches.map((p) => p.patchId).filter(Boolean);
         return send(409, { error: "bulk group partially committed", committed_patch_ids: ids });
       }
-      const refused = this.refuseEverything || this.poison.some((p) => body.includes(p));
+      // Ahead of the poison check, deliberately. The drain carries the patches
+      // the cutoff held back, which for any fixture that trips the cutoff
+      // includes the poisoned ones -- so the poison branch answered 500 and the
+      // drain never reached the success path at all. A first attempt at this
+      // set the status further down and measured nothing, because no bulk in
+      // the test ever got there.
+      const isDrainBulk = path === "/v1/patches/bulk" && this.singleCount > 0;
+      if (this.mismatchOnDrainBulk && isDrainBulk) {
+        // A 200 that wrote NOTHING: the backend read the latest rev outside the
+        // transaction and it moved before the commit ran. `applied: 0` and the
+        // rev deliberately left where it was, because nothing landed.
+        return send(200, { rev: this.rev, applied: 0, status: "BaseRevMismatch" });
+      }
+      const refused =
+        this.refuseEverything ||
+        (this.refuseUntilDrain && !isDrainBulk) ||
+        this.poison.some((p) => body.includes(p));
       // Answered synchronously. A `commitDelayMs` knob lived here and no test
       // ever set it -- the deadline test fires off request COUNT instead, which
       // is what makes it deterministic. Reviving it needs care rather than a
@@ -550,6 +615,49 @@ describe("ingestFiles against a fake backend", () => {
     expect(message).toContain("ran out of time");
     expect(message).toContain("30 file patches");
     expect(message).not.toContain("added load");
+  });
+
+  it("counts a lost base-rev race as an error on the CUTOFF DRAIN too", async () => {
+    // A backend can answer 200 and still have written nothing: `BaseRevMismatch`
+    // means it read the latest rev outside the transaction and the rev moved
+    // before the commit ran. `onBulkCommitted` and the per-file path both guard
+    // that; the cutoff drain added for Ix#571 did not, and counted the whole
+    // chunk as applied.
+    //
+    // Why that is worse than a wrong number: `commitErrors` staying at zero is
+    // exactly the condition `persistIngestBaselineIfClean` requires, so the run
+    // writes an mtime baseline for files the graph never received and every
+    // later incremental map skips them as unchanged. Silent, and recoverable
+    // only with `--force`.
+    //
+    // Reaching an ACCEPTED drain took three tries, each of which measured the
+    // wrong thing until `acceptedBulks()` was added to check the premise --
+    // see `refuseUntilDrain`. The sequence this produces is:
+    //
+    //   BULK:30 => 500     the opening bulk, refused
+    //   one:1   => 500     x5, refused, which trips the cutoff
+    //   BULK:25 => 200     the drain, ACCEPTED -- the request under test
+    fixture(30);
+    backend.refuseUntilDrain = true;
+
+    const clean = await run();
+    // The premise, checked rather than assumed: a drain bulk was accepted, and
+    // it is what placed the patches.
+    expect(backend.acceptedBulks(), "the drain bulk must be ACCEPTED").toBe(1);
+    expect(clean.patchesApplied, "the drain placed the held patches").toBe(25);
+
+    // Same fixture, same refusals, same `--force` re-ingest. The ONLY thing
+    // that changes is the status the accepted drain answers with.
+    backend.resetRequests();
+    backend.mismatchOnDrainBulk = true;
+    const message = await runFatal();
+
+    // Nothing landed, so the run must say so and end fatally. Without the
+    // guard the 25 patches the backend declined to write are counted as
+    // applied, the run reports the same 5 errors as the clean case, exits 0 --
+    // and `runFatal` fails with "expected the ingest to end fatally", which is
+    // this test's real assertion.
+    expect(message).toContain("30 of 30");
   });
 
   it("commits a healthy repo in one bulk, with no per-file fan-out", async () => {
