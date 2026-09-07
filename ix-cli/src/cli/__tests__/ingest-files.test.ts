@@ -350,18 +350,28 @@ describe("ingestFiles against a fake backend", () => {
     // a materially different payload on a third of the matrix, and a trap for
     // the first assertion that ever touches a uri. Windows junctions do it too.
     // `ingest-discovery.test.ts:105` already carries this fix and its reason.
-    // Cleared FIRST, and the fake built before anything that can throw.
+    // THIS is what makes the teardown correct. The guards down there are the
+    // decorative half, and an earlier version of this comment had it backwards.
     //
-    // These are describe-scoped and `afterEach` never reset them, so from the
-    // second test onward they held the PREVIOUS test's values -- which made the
-    // three guards in the teardown decorative in exactly the scenario their
-    // comments name. A `beforeEach` that threw inside `mkdtempSync` left
-    // `backend !== undefined` passing against the previous test's
-    // already-stopped fake, `stop()` closing an already-closed server, and both
-    // `rmSync` calls pointed at already-deleted paths, while the directory this
-    // test had just created leaked. Resetting here is what makes the guards
-    // discriminate; the alternative was `string | undefined` and a non-null
-    // assertion at forty use sites.
+    // All three are describe-scoped and `afterEach` never reset them, so from
+    // the second test onward they held the PREVIOUS test's values. A
+    // `beforeEach` that throws inside `mkdtempSync` then left the teardown
+    // asserting against the previous test's already-stopped fake and calling
+    // `rmSync` on its already-deleted paths, while the directory this test had
+    // just created leaked -- and `rmSync` of a stale path is a silent no-op
+    // under `force: true`, so nothing went red. Clearing here is the only
+    // reason each test's teardown sees its own state.
+    //
+    // `""` rather than `undefined`, because typing these as `string |
+    // undefined` costs a non-null assertion at forty use sites for no extra
+    // safety -- and `rmSync("")` is a no-op on Node 26, checked, where
+    // `rmSync(undefined)` throws ERR_INVALID_ARG_TYPE.
+    //
+    // The fake is constructed HERE, before anything that can throw, and that
+    // position is load-bearing: `backend` has no sentinel, so a statement
+    // inserted above it that can throw would leave it holding the previous
+    // test's fake and the teardown would assert against the wrong object and
+    // pass vacuously. Keep it first.
     home = "";
     repo = "";
     backend = new FakeBackend();
@@ -405,11 +415,12 @@ describe("ingestFiles against a fake backend", () => {
       // the ingest path grows an endpoint, this fails once with its name,
       // rather than ten tests passing against a fake that agreed with
       // everything.
-      // Guarded, because this is the line that runs FIRST. An earlier revision
-      // optional-chained `backend?.stop()` in the `finally` below for the case
-      // where `beforeEach` throws before assigning it -- but this dereference
-      // comes first, so it threw the TypeError and the guard down there could
-      // never help.
+      // The guard is cheap insurance, not the mechanism -- `backend` is assigned
+      // unconditionally in `beforeEach` before anything that can throw, so this
+      // is never false today. It stays because the cost is a line and the
+      // failure it would catch (a throw introduced above the assignment) is
+      // silent: the assertion would run against the previous test's fake and
+      // pass.
       if (backend !== undefined) {
         expect(backend.unknownPaths, "endpoints the fake does not implement").toEqual([]);
       }
@@ -438,12 +449,12 @@ describe("ingestFiles against a fake backend", () => {
       try {
         await backend?.stop();
       } finally {
-        // Guarded like `backend`, for the same scenario. `force: true`
-        // suppresses ENOENT, not the argument-type check: `rmSync(undefined,
-        // ...)` throws ERR_INVALID_ARG_TYPE, so a first `beforeEach` failing
-        // inside `mkdtempSync` would raise a second, unrelated error here and
-        // skip the `repo` removal entirely -- leaking the tree in exactly the
-        // case cleanup exists for.
+        // Explicit rather than load-bearing: the `""` reset in `beforeEach` is
+        // what makes these correct, and `rmSync("")` is a silent no-op anyway.
+        // They say "only remove what this test created" out loud, so the reset
+        // above cannot be mistaken for redundant and deleted -- which would put
+        // a stale path here, no-op under `force: true`, and leak the directory
+        // the failed `beforeEach` had just made, with nothing red.
         if (home) rmSync(home, { recursive: true, force: true });
         if (repo) rmSync(repo, { recursive: true, force: true });
       }

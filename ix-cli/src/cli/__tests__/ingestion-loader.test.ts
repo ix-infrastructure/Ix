@@ -82,7 +82,13 @@ describe("isVmDynamicImportUnavailable", () => {
     const reworded = new Error("the wording of this error changed upstream");
     (reworded as NodeJS.ErrnoException).code = (original as NodeJS.ErrnoException).code;
 
-    expect(reworded.message).not.toMatch(/dynamic import callback/i);
+    // `String(reworded)`, which is what the predicate inspects -- not
+    // `.message`, which is what an earlier version checked. They differ by the
+    // error's name prefix, so a fixture that ever carried the phrase in its
+    // NAME would satisfy the message clause while this assertion still passed,
+    // and this test would go green without the code clause -- silently
+    // reopening the gap it exists to close.
+    expect(String(reworded)).not.toMatch(/dynamic import callback/i);
     expect(isVmDynamicImportUnavailable(reworded)).toBe(true);
   });
 
