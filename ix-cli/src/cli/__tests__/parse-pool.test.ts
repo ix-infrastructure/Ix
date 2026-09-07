@@ -175,11 +175,14 @@ describe("ParsePool", () => {
     //   terminate()                    5 of 6 runs died with SIGSEGV (139)
     //   worker closes its own port     0 of 6
     //
-    // Twenty teardowns per process there. Measured per-consumer, because that
-    // rate does not carry over to a one-shot CLI run: one pool per process
-    // segfaulted 1-3 of 15, twenty pools 7 of 10, and a real `ix ingest` of 300
-    // files 0 of 60. The exposure is the MCP in-process runner and this suite,
-    // not `ix map` -- see `parse-pool.ts`.
+    // Twenty teardowns per process there, in a minimal harness. One teardown in
+    // that same harness is 5 of 40, but a real `ix ingest` is 0 of 60 -- which
+    // does not follow from it, and is unexplained. See `parse-pool.ts`.
+    //
+    // Note this file is NOT the exposed one: of the pools below only the
+    // real-worker test loads the addon, and an un-addon'd worker is not the
+    // crashing case. `ingest-files.test.ts` is where it showed up, driving 14
+    // real ingests per process.
     //
     // Asserted through a marker the worker writes when ASKED to go, because the
     // crash itself is probabilistic: a test that just tore pools down would
