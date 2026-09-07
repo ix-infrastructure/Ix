@@ -194,10 +194,11 @@ export class ParsePool {
    * Not every grammar -- 15 of the 27 go
    * through null-returning helpers and can be absent -- but the core and the
    * twelve static ones are always there, which is the PRECONDITION the crash
-   * needs. Whether it is also sufficient is unknown: spawn-then-destroy was
-   * observed not to crash, but with too small a sample to establish either
-   * safety or insufficiency -- the inference is symmetric, and reading it
-   * either way is the over-claim this comment exists to avoid.
+   * needs, and it is NOT sufficient on its own: spawn-then-destroy went 0 of
+   * 120 teardowns, a 0.04% outcome under the parsed rate. But that only bounds
+   * the undispatched rate at 2.5% (95%) -- lower than parsed, nowhere near
+   * zero -- so "less dangerous" is not "safe", and the mechanism is still
+   * unisolated. That is what the prohibition rests on.
    *
    * One experiment did find that workers which had parsed crashed while
    * spawn-then-destroy did not, and it is tempting to read a safe fast path
@@ -239,9 +240,10 @@ export class ParsePool {
    * waiting on it and the thread to stop holding the process open, which is
    * exactly `unref()`. Measured on the real parse worker, four addon-loaded
    * threads left live and unref'd across process exit: 0 failures in 10 runs,
-   * where `terminate()` at the SAME exposure -- one teardown -- would be
-   * expected to fail well under half the time. The table above is twenty
-   * teardowns per process and is not the comparison for this arm.
+   * -- though that arm is four isolates in one teardown, so on its own it
+   * carries little: terminating four would be expected to fail about 1% of
+   * runs. The table above is twenty teardowns of a 21-worker pool and is not
+   * the comparison for it.
    *
    * So the clocks below decide WHEN to give up, never whether it is safe to
    * kill -- and the `onError` path needs no special case either, which is what

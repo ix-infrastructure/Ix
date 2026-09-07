@@ -82,20 +82,29 @@ data. This remains an open confound.
 **The addon is held from module evaluation, not from the first parse.**
 `core-ingestion/src/index.ts` resolves grammars at module scope and
 `parse-worker.ts` imports it statically, so a worker reaches that state on its
-own, without being dispatched. It is not literally "from spawn": `index.ts` has
-top-level `await`, so there is a brief window after `new Worker()` in which the
-thread holds nothing — reachable, since `init()` spawns eagerly and a throw
-during discovery can reach `destroy()` with no dispatch at all. Once evaluated,
-a worker holds the core
+own, without being dispatched. Undispatched workers at teardown are ordinary,
+not exotic: `init()` spawns `concurrency` of them up front, so any batch
+smaller than the pool leaves some that never received a task. (The addon-free
+window is narrower than "before the first parse" — it is only between
+`new Worker()` and the completion of the module's dependency-graph evaluation,
+which ESM finishes before `index.ts`'s body and its top-level `await`s begin.
+A worker suspended at one of those awaits already holds the core and all twelve
+static grammars.) Once evaluated, a worker holds the core
 plus the **twelve statically imported** grammars — not "13 required", because
 `tree-sitter-powershell` is a required dependency that nonetheless loads
 through a null-returning helper. That is the precondition the crash needs, so
 an undispatched worker is **not known to be safe to terminate**. Workers that
-had parsed were the ones observed to crash and spawn-then-destroy was not — 6
-runs of twenty teardowns each, 0 crashes — but the mechanism was never
-isolated. Under the fitted rate that null result would be a 0.04% outcome,
-which is why it cannot simply be dismissed either; nobody has separated "no
-parse" from the other things that differ.
+had parsed were the ones observed to crash; spawn-then-destroy was not, over
+**6 runs of twenty teardowns each — 0 of 120**. That is not a small sample:
+under the fitted 6.3% it is a 0.04% outcome, so it rejects "holding the addon
+is on its own enough" at p = 4e-4. Parsing, or something that travels with it,
+does matter.
+
+What it does NOT do is make an undispatched worker safe to terminate. Zero of
+120 puts the 95% upper bound at **2.5% per teardown** — lower than the parsed
+rate, and a long way from zero. That is the whole basis of the rule: not that
+undispatched workers crash at the same rate, but that nobody has shown they do
+not crash at all, and nobody has isolated the mechanism.
 
 **The strongest evidence against the harness rate transferring.**
 `core-ingestion`'s own suite runs `vitest run --pool threads`, and 36 of its 38
@@ -106,18 +115,19 @@ spawned and torn down having run none. Either way tinypool tears those threads
 down with `terminate()`, which is the exposed shape.
 
 Measured: **0 segfault signatures in 10 local runs**, and the `core-ingestion
-tests` CI step passes on all five matrix legs. Do not read that as
-reassurance — read it as a problem for the model. If the 6.3% harness rate
-applied here, then at even ~10 addon-loaded teardowns per run `P(0 crashes in
-10 runs)` is 1.5e-3, and at one teardown per test file it is ~1e-11. So either
-this is not the same shape as the harness, or holding the addon is nowhere
-near sufficient for the crash.
+tests` CI step passes on all five matrix legs. That is consistent with
+everything else here, and it is worth showing the conversion, because getting
+it wrong once made this section claim a falsification it does not support.
 
-That matters beyond bookkeeping: the "do not add a `terminate()` fast path"
-rule leans on the addon being the thing that makes termination dangerous. The
-rule still stands — the precondition is real and nobody has isolated what else
-is needed — but it stands on "not known to be safe", not on a rate anyone can
-quote for it.
+The 6.3% is per POOL teardown, and a pool disposes 21 isolates. The
+per-isolate hazard is therefore `1-(1-h)^21 = 0.063`, i.e. **h = 0.31%**.
+Tinypool terminates threads one at a time, so ~10 addon-loaded threads in a run
+is ~3% per run and `P(0 in 10 runs) = 0.73`; even at one per test file it is
+0.33. Nothing to explain.
+
+Mixing the two units — applying a per-pool rate to individual isolates — is the
+easiest error in this document to make, and the reason every rate here says
+which it is.
 
 ## Superseded figures
 
