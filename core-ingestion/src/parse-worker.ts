@@ -35,10 +35,21 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * them as "the" rate -- in either direction -- is picking a number to suit an
  * argument. Two earlier versions of this comment did exactly that.
  *
- * The ingests really did parse, so 0 of 60 is not a silently broken addon:
- * `unparsed: 0` is the field that would catch it (a worker whose bindings fail
- * to load resolves null and lands in `filesSkippedUnparsed`, never in
- * `parseErrors`), and the graph held 300 classes and 300 functions.
+ * The ingests really did parse, so 0 of 60 is not a silently broken addon.
+ * Both counters that could hide one read zero, and they catch different things:
+ *
+ *   - `parseError: 0`. The `tree-sitter` import in `index.ts` is STATIC, so a
+ *     worker whose bindings failed would throw during module evaluation, never
+ *     reach `parseFile`, and die -- which `ParsePool` counts as a crashed parse
+ *     and `ingestFiles` folds into the reported figure
+ *     (`parseErrors + crashedParses()`). A bindings failure shows up here.
+ *   - `unparsed: 0`. That covers the quieter case, a parse that returns null
+ *     because an optional grammar is absent.
+ *
+ * The graph also held 300 classes and 300 functions. An earlier revision of
+ * this comment said a bindings failure would land in `filesSkippedUnparsed`
+ * and "never in `parseErrors`" -- that is the null-returning grammar case, not
+ * this one, and it had the counter backwards.
  *
  * What is established: the crash is real, reproducible, and it reached the
  * suite. `ingest-files.test.ts` drives 14 real ingests per vitest process and

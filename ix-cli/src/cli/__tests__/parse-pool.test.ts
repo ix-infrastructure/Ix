@@ -179,10 +179,10 @@ describe("ParsePool", () => {
     // on `shutdown` in `parse-pool.ts`. Short version: no per-command impact is
     // claimed, because the per-teardown estimates disagree (4.3-12.5%).
     //
-    // This file has exactly ONE addon-loaded teardown per process -- of the
-    // pools below only the real-worker test loads the bindings, and an
-    // un-addon'd worker is not the crashing case. So it is exposed once, not
-    // thirteen times and not zero. `ingest-files.test.ts`, with 14 real ingests
+    // This file has exactly ONE addon-loaded teardown per process: of the 13
+    // pools in it -- four above this line, nine below -- only the real-worker
+    // test loads the bindings, and an un-addon'd worker is not the crashing
+    // case. So it is exposed once, not thirteen times and not zero. `ingest-files.test.ts`, with 14 real ingests
     // per process, is where this actually showed up.
     //
     // Asserted through a marker the worker writes when ASKED to go, because the
@@ -287,9 +287,10 @@ describe("ParsePool", () => {
     // and only then does the worker reach the queued `__shutdown` and start
     // unwinding its isolate. An expiry landing in that window sees a worker
     // that looks idle and unresponsive and abandons it -- one that was about to
-    // answer. Under the old `terminate()` this was the ~8% per-teardown
-    // segfault itself; the pool unrefs now, so the cost is a lost parse result
-    // rather than the process, and it is still wrong.
+    // answer. Under the old `terminate()` this was the segfault itself; the
+    // pool unrefs now, so the cost is a lost parse result rather than the
+    // process, and it is still wrong. (No rate quoted on purpose -- the
+    // per-teardown estimates disagree; see the note at the top of this file.)
     //
     // The timings are chosen so the two rules give different answers, which is
     // the only way to catch this. Grace 300ms, so ticks land at 300/600/900. A
