@@ -192,19 +192,27 @@ export class ParsePool {
    *   worker closes its own port         0 of 6
    *   worker calls process.exit(0)       0 of 6
    *
-   * That row is twenty teardowns per process in a minimal harness, and the
-   * rate behind it is not pinned down: across variants the implied per-teardown
-   * figure ranged 4.3% to 12.5%, which is too wide to turn into a per-command
-   * impact. A real `ix ingest` of 300 files was 0 of 60, and at the low end of
-   * that range zero in 60 is unremarkable (~7%), so it does not establish that
-   * the CLI is exempt either. No blast-radius claim is made here on purpose --
-   * two earlier versions of this comment made one in each direction and both
-   * were wrong.
+   * That row is twenty teardowns per process in a minimal harness. The full
+   * set, pre-fix build, pool of 21:
    *
-   * The crash is real and it reached the suite: `ingest-files.test.ts` drives
-   * 14 real ingests per vitest process and produced it as an intermittent
-   * "Worker exited unexpectedly". That is the reason this file does not
-   * terminate anything.
+   *   minimal harness, ONE teardown then exit   5 of 40
+   *   minimal harness, twenty teardowns         5 of 6, 7 of 10, 7 of 12
+   *   a real `ix ingest` of 300 files           0 of 60
+   *
+   * Like with like -- both single teardowns -- 5 of 40 against 0 of 60 is a
+   * real difference (Fisher exact p = 0.009), so a real ingest does behave
+   * differently from the harness. Why is not established, and it is NOT
+   * teardown count, since both are one. Do not rely on it.
+   *
+   * The twenty-teardown runs imply 8.6%, 5.8% and 4.3% per teardown against the
+   * single-teardown 12.5%; they disagree, so no per-command impact is claimed
+   * here. Two earlier revisions claimed one in each direction by quoting
+   * whichever estimate suited, and both were wrong.
+   *
+   * What is solid: the crash is real and it reached the suite --
+   * `ingest-files.test.ts` drives 14 real ingests per vitest process and
+   * produced it as an intermittent "Worker exited unexpectedly". That is why
+   * nothing in this file terminates a worker.
    *
    * What the grace period bounds, precisely: the wait for a reply from a
    * worker that is IDLE and does not answer -- one whose JS event loop is

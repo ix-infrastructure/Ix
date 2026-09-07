@@ -17,27 +17,35 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * process -- the parses need not even be in flight, an idle worker that has
  * parsed once is enough.
  *
- * How often, honestly: not established. Across harness variants the implied
- * per-teardown rate ranged 4.3% to 12.5% (20-teardown runs gave 5 of 6, 7 of
- * 10 and 7 of 12; single-teardown runs 5 of 40), and those do not agree with
- * each other. A real `ix ingest` of 300 files was 0 of 60 -- but at the low end
- * of that range the chance of seeing zero in 60 is about 7%, so that result
- * does NOT show the CLI is exempt, and no per-command figure is claimed here.
- * (Those ingests did parse: entitiesParsed 1200, parseError 0, so the addon was
- * genuinely loaded rather than silently failing.)
+ * How often: no per-command figure is claimed, because the runs do not pin
+ * one. Measured on the pre-fix build, Windows / Node 26, pool of 21:
  *
- * What IS established: the crash is real and reproducible, and it reached the
- * suite -- `ingest-files.test.ts` drives 14 real ingests per vitest process and
+ *   minimal harness, ONE teardown then exit     5 of 40
+ *   minimal harness, twenty teardowns           5 of 6, 7 of 10, 7 of 12
+ *   a real `ix ingest` of 300 files             0 of 60
+ *
+ * Two things the numbers do say. Comparing like with like -- both single
+ * teardowns -- 5 of 40 against 0 of 60 is a real difference (Fisher exact
+ * p = 0.009), so a real ingest is not simply the harness with a CLI around it.
+ * WHY is not established, and it is not teardown count, because both are one.
+ * Do not rely on the difference.
+ *
+ * And the twenty-teardown runs imply 8.6%, 5.8% and 4.3% per teardown, against
+ * 12.5% from the single-teardown runs. Those disagree, so quoting any one of
+ * them as "the" rate -- in either direction -- is picking a number to suit an
+ * argument. Two earlier versions of this comment did exactly that.
+ *
+ * The ingests really did parse, so 0 of 60 is not a silently broken addon:
+ * `unparsed: 0` is the field that would catch it (a worker whose bindings fail
+ * to load resolves null and lands in `filesSkippedUnparsed`, never in
+ * `parseErrors`), and the graph held 300 classes and 300 functions.
+ *
+ * What is established: the crash is real, reproducible, and it reached the
+ * suite. `ingest-files.test.ts` drives 14 real ingests per vitest process and
  * produced it as an intermittent "Worker exited unexpectedly". The MCP server's
  * in-process runner (`createInProcessRunner`, the default unless
- * IX_MCP_SUBPROCESS=1) builds pools the same way; not measured.
- *
- * An earlier version of this comment put the CLI at "one `ix map` in twelve".
- * The arithmetic was sound -- 5 of 6 over 20 teardowns is 8.6% each -- but it
- * was never run end to end. A later version then claimed the CLI provably
- * escapes, which over-read 0 of 60 against a rate the experiments never pinned
- * down. Both were the same mistake in different directions: stating an impact
- * the measurements do not support.
+ * IX_MCP_SUBPROCESS=1) has that same many-pools-in-one-process shape, which is
+ * why it is named here; it was not measured.
  *
  * Closing the port from INSIDE lets the thread unwind its own event loop and
  * dispose its isolate in order. Measured 0 crashes in the same experiment.

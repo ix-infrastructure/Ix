@@ -175,15 +175,15 @@ describe("ParsePool", () => {
     //   terminate()                    5 of 6 runs died with SIGSEGV (139)
     //   worker closes its own port     0 of 6
     //
-    // Twenty teardowns per process there, in a minimal harness. The
-    // per-teardown rate is not pinned down (4.3-12.5% across variants) and a
-    // real `ix ingest` was 0 of 60, which the low end does not exclude -- so no
-    // per-command impact is claimed; see `parse-pool.ts`.
+    // The rest of the measurements, and what they do and do not support, are
+    // on `shutdown` in `parse-pool.ts`. Short version: no per-command impact is
+    // claimed, because the per-teardown estimates disagree (4.3-12.5%).
     //
-    // This file has exactly ONE addon-loaded teardown per process: of the pools
-    // below only the real-worker test loads the bindings, and an un-addon'd
-    // worker is not the crashing case. `ingest-files.test.ts`, with 14 real
-    // ingests per process, is where it actually showed up.
+    // This file has exactly ONE addon-loaded teardown per process -- of the
+    // pools below only the real-worker test loads the bindings, and an
+    // un-addon'd worker is not the crashing case. So it is exposed once, not
+    // thirteen times and not zero. `ingest-files.test.ts`, with 14 real ingests
+    // per process, is where this actually showed up.
     //
     // Asserted through a marker the worker writes when ASKED to go, because the
     // crash itself is probabilistic: a test that just tore pools down would
