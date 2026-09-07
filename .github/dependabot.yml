@@ -20,6 +20,18 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
+      # vitest 4 -> 5 is the same category, and it does not merely break: the
+      # lockfile Dependabot generates for it CANNOT BE INSTALLED here. ix-cli
+      # has no `.npmrc`, so `npm ci` resolves peers strictly and dies:
+      #   ERESOLVE: peer vitest@"5.0.0" from @vitest/coverage-v8@5.0.0
+      #   peer overridden vite@">=7.3.2 <8.0.0" (was "^6.4.0 || ^7.0.0 || ^8.0.0")
+      # Every job in the workflow failed on that single `npm ci`, which reads as
+      # fourteen unrelated breakages rather than one bad bump. Capped with its
+      # coverage provider, which pins vitest exactly and so must move with it.
+      - dependency-name: "vitest"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@vitest/coverage-v8"
+        update-types: ["version-update:semver-major"]
     groups:
       dev-dependencies:
         dependency-type: development
@@ -37,6 +49,17 @@ updates:
       # deliberate migration validated by the tsc build plus the vitest suite over
       # the tree-sitter grammars, not an auto-bump. Minor/patch still flow.
       - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      # vitest 4 -> 5, capped for the same reason as in /ix-cli but failing a
+      # WORSE way here. This directory sets `legacy-peer-deps=true`, so npm does
+      # not refuse the bad resolution -- it installs a tree with `vite` simply
+      # missing (91 packages against main's 140, zero `vite` entries in the
+      # lock). `npm ci` then reports success and vitest cannot start at all:
+      #   Startup Error: Cannot find package 'vite' imported from
+      #   core-ingestion/node_modules/vitest/dist/...
+      # The strict directory fails loudly at install; this one fails quietly and
+      # only at the point of running the suite.
+      - dependency-name: "vitest"
         update-types: ["version-update:semver-major"]
     groups:
       dev-dependencies:
