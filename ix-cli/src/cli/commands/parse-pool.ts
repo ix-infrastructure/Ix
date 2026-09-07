@@ -192,7 +192,9 @@ export class ParsePool {
    * resolves grammars at module scope, so a worker holds them from spawn
    * rather than from its first parse. Not every grammar -- 15 of the 27 go
    * through null-returning helpers and can be absent -- but the core and the
-   * twelve static ones are always there, which is all the crash needs.
+   * twelve static ones are always there, which is the PRECONDITION the crash
+   * needs. Necessary, not sufficient: spawn-then-destroy was observed not to
+   * crash, so holding the addon is not on its own enough.
    *
    * One experiment did find that workers which had parsed crashed while
    * spawn-then-destroy did not, and it is tempting to read a safe fast path
@@ -208,11 +210,11 @@ export class ParsePool {
    *   worker calls process.exit(0)       0 of 6
    *
    * Per-consumer rates, the populations behind them and the statistics are in
-   * the DESCRIPTION of PR #650, which is the single current record -- not in
-   * this file's history, which still carries #598's retracted figures and, in
-   * the squashed body, every superseded value next to its correction. They do
-   * not change the rule, and keeping them consistent across three files proved
-   * to be its own source of errors.
+   * `docs/parse-pool-teardown.md` -- versioned, and not this file's history, which
+   * still carries #598's retracted figures and, in the squashed body, every
+   * superseded value next to its correction. They do not change the rule, and
+   * keeping them consistent across three files proved to be its own source of
+   * errors.
    *
    * What the grace period bounds, precisely: the wait for a reply from a
    * worker that is IDLE and does not answer -- one whose JS event loop is

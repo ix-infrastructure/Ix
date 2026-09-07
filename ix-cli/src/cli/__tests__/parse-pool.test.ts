@@ -171,11 +171,13 @@ describe("ParsePool", () => {
     // PROCESS -- an idle worker that parsed a single file is enough, because
     // the crash is in disposing an isolate that still holds the addon. The
     // comparison that settles it is on `ParsePool.shutdown` in
-    // `../commands/parse-pool.ts`; rates and populations are in the
-    // description of PR #650, not restated here. What matters
-    // for this file: of its thirteen pools only ONE loads the addon -- the
-    // real-worker test near the bottom -- because the other twelve fixtures
-    // are inline `.mjs` that never import `core-ingestion`. And on the shipped build the
+    // `../commands/parse-pool.ts`; rates and populations are in
+    // `docs/parse-pool-teardown.md`, not restated here. What matters
+    // for this file: only the real-worker test near the bottom loads the
+    // addon. Every other pool here is built on an inline `.mjs` fixture that
+    // never imports `core-ingestion`, so its teardowns cannot crash. Stated
+    // without counts on purpose -- a census in a comment goes stale the first
+    // time a test is added, with the suite still green. And on the shipped build the
     // exposure is zero everywhere, since nothing terminates a worker any more.
     //
     // Asserted through a marker the worker writes when ASKED to go, because the
@@ -544,11 +546,11 @@ describe("ParsePool", () => {
     // Parse for real, because having PARSED is what was observed to arm the
     // crash. Not because parsing loads the addon: `index.ts` resolves
     // 27 grammars plus the core at module scope -- twelve by static import, the
-    // rest eagerly through helpers, four of them by top-level `await` -- so
-    // these threads hold up to 28 addons from spawn (14 of the 27 grammars are
-    // optional; `tree-sitter-powershell` is required but loads through the
-    // same tolerant helper and can be absent too, so the guaranteed floor is
-    // the core plus the twelve STATIC grammars -- never zero).
+    // rest eagerly through helpers -- so these threads hold those grammars
+    // from spawn. Many are optional and some required ones also load through
+    // null-returning helpers, so the guaranteed floor is the core plus the
+    // statically imported grammars; the exact tally is in
+    // `docs/parse-pool-teardown.md` rather than here.
     //
     // Workers that had parsed were the ones observed to crash under
     // `terminate()`, and spawn-then-destroy was not -- but the mechanism was

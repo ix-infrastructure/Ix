@@ -26,22 +26,22 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * this file imports it statically. A worker that has parsed nothing still
  * holds the core and the twelve statically imported grammars. That is the
  * precondition the crash needs, so an undispatched worker is not known to be
- * safe to terminate -- not that it fails at the same rate, which was never
- * measured. `parse-pool.test.ts`
+ * safe to terminate. Workers that had parsed were the ones observed to crash
+ * and spawn-then-destroy was not, but the mechanism was never isolated and the
+ * rate for an undispatched worker was never measured. `parse-pool.test.ts`
  * used to say the opposite -- "an untouched worker has not loaded the addon"
  * -- which is what made a `terminate()` fast path for undispatched workers
  * look safe. That is the claim being retracted; it was never in this file.
  *
- * Rates, populations and the reasoning are in the DESCRIPTION of PR #650,
- * which is the single current record. Do not reconstruct them from this
- * file's history: `main` squash-merges, so the log here also carries #598,
- * whose figures this work retracts, and the squash body concatenates every
- * superseded value beside its correction with nothing marking which is which.
+ * Rates, populations and the reasoning are in `docs/parse-pool-teardown.md`, which is
+ * versioned and travels with a clone. Do not reconstruct them from this file's
+ * history: `main` squash-merges, so the log here also carries #598, whose
+ * figures this work retracts, and the squashed body concatenates every
+ * superseded value beside its correction.
  *
- * They are deliberately not restated here either. Keeping a statistical
- * write-up consistent across three source files produced more defects over
- * successive reviews than it prevented, and none of it changes what this code
- * must do.
+ * They are deliberately not restated here. Keeping a statistical write-up
+ * consistent across three source files produced more defects over successive
+ * reviews than it prevented, and none of it changes what this code must do.
  *
  * Closing the port from INSIDE lets the thread unwind its own event loop and
  * dispose its isolate in order, and did not crash once where terminating
