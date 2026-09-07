@@ -176,9 +176,9 @@ describe("ParsePool", () => {
     //   worker closes its own port     0 of 6
     //
     // The rest of the measurements are on `shutdown` in `parse-pool.ts`. Short
-    // version: the harness runs fit ~6.3% per teardown, and a real `ix ingest`
-    // was 0 of 60, which does not fit that rate for reasons nobody has
-    // established.
+    // version: the minimal harness fits ~6.3% per teardown, real ingests about
+    // 0.27%, and the CLI's 0 of 60 is what the latter predicts. The harness
+    // overstates real exposure by roughly twenty times.
     //
     // Only ONE pool in this file loads the addon -- the real-worker test near
     // the bottom. Every other fixture here is an inline .mjs that never imports
@@ -554,8 +554,10 @@ describe("ParsePool", () => {
     // Parse for real, because having PARSED is what was observed to arm the
     // crash. Not because parsing loads the addon: `index.ts` imports
     // tree-sitter and its grammars statically, so these threads hold it from
-    // spawn. It is the parsed-then-idle thread that crashed under
-    // `terminate()`; spawn-then-destroy with no parse did not.
+    // spawn. It is the parsed-then-idle thread that was observed to crash
+    // under `terminate()`, while spawn-then-destroy with no parse was not --
+    // which is a statement about what ARMS it, not a licence to terminate
+    // never-dispatched workers. They hold the addon too.
     const results = await Promise.all([
       pool.parse("a.ts", "export function a(): number { return 1; }"),
       pool.parse("b.ts", "export function b(): number { return 2; }"),

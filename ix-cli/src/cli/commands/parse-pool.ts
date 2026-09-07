@@ -192,30 +192,29 @@ export class ParsePool {
    *   worker closes its own port         0 of 6
    *   worker calls process.exit(0)       0 of 6
    *
-   * That row is twenty teardowns per process in a minimal harness. The full
-   * set, pre-fix build, pool of 21:
+   * Those six runs are part of a MINIMAL HARNESS arm; there is a second
+   * population that behaves very differently. Pre-fix build:
    *
-   *   minimal harness, twenty teardowns   19 of 28 runs crashed
-   *   minimal harness, ONE teardown       5 of 40
-   *   a real `ix ingest` of 300 files     0 of 60
+   *   minimal harness (pool of 21, nothing else in the process)
+   *     twenty teardowns per process   19 of 28 runs crashed
+   *     one teardown then exit          5 of 40
+   *     -> both fit 6.3% per teardown, 95% CI 4.1-9.3%
    *
-   * The two harness arms agree: 5 of 40 is not evidence against the
-   * twenty-teardown arm (P = 0.07), and fitting both gives 6.3% per teardown,
-   * 95% CI 4.1-9.3%.
+   *   real ingests
+   *     `ingest-files.test.ts`          2 of 75 vitest processes, ~10 each
+   *     -> about 0.27% per teardown (1.9% on a loaded machine)
+   *     a real `ix ingest` of 300 files 0 of 60
+   *     -> at 0.27%, P(zero in 60) = 0.85, so this is expected, not an anomaly
    *
-   * The real ingest does not fit it. 0 of 60 against the pooled rate has
-   * probability 0.033, and like-for-like at a single teardown, 5 of 40 vs 0 of
-   * 60 is Fisher exact p = 0.009. So an ingest behaves differently from the
-   * harness; WHY is unestablished, and it is NOT teardown count, since both are
-   * one. Do not rely on it.
+   * The harness overstates real exposure by roughly twenty times. Size nothing
+   * from it, and note the rate is per teardown of a 21-worker pool -- exposure
+   * depends on how many addon-loaded isolates are disposed.
    *
    * The user-visible signature is exit 139 after a successful ingest -- patches
    * committed, summary printed, non-zero `$?`.
    *
-   * What is solid: the crash is real and it reached the suite --
-   * `ingest-files.test.ts` drives 14 real ingests per vitest process and
-   * produced it as an intermittent "Worker exited unexpectedly". That is why
-   * nothing in this file terminates a worker.
+   * What is solid: the crash is real, and real ingests do hit it -- rarely.
+   * That is why nothing in this file terminates a worker.
    *
    * What the grace period bounds, precisely: the wait for a reply from a
    * worker that is IDLE and does not answer -- one whose JS event loop is

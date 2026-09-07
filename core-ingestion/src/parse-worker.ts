@@ -22,53 +22,51 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * for anything that reads it. If you are here because a clean `ix map` exited
  * 139, this is it.
  *
- * How often, measured on the pre-fix build (Windows / Node 26, pool of 21):
+ * How often, measured on the pre-fix build (Windows / Node 26). Two populations,
+ * and they differ by more than an order of magnitude:
  *
- *   minimal harness, twenty teardowns per process   19 of 28 runs crashed
- *   minimal harness, ONE teardown then exit          5 of 40
- *   a real `ix ingest` of 300 files                  0 of 60
+ *   MINIMAL HARNESS (pool of 21, nothing else in the process)
+ *     twenty teardowns per process        19 of 28 runs crashed
+ *     one teardown then exit               5 of 40
+ *     -> fitting both: 6.3% per teardown, 95% CI 4.1-9.3%
  *
- * The two arms agree once the sample sizes are taken seriously: the
- * single-teardown arm's point estimate is 12.5%, but P(>=5 of 40 | p=0.055) is
- * 0.07, so it is not evidence against the twenty-teardown arm. Fitting both
- * together gives a per-teardown rate of 6.3%, 95% CI 4.1-9.3% (the
- * twenty-teardown arm alone gives 5.5%, CI 3.4-8.5%). One rate, not the four
- * contradictory ones an earlier revision claimed in order to argue that no rate
- * could be quoted at all.
+ *   REAL INGESTS
+ *     `ingest-files.test.ts` in vitest     2 of 75 processes, ~10 ingests each
+ *     -> about 0.27% per teardown (1.9% when the machine was loaded)
+ *     a real `ix ingest` of 300 files      0 of 60
+ *     -> at 0.27% the chance of zero in 60 is 0.85; entirely expected
  *
- * The real ingest is the outlier. Against the pooled rate, 0 of 60 has
- * probability 0.033, and compared like with like -- harness and ingest both at
- * a single teardown -- 5 of 40 against 0 of 60 gives Fisher exact p = 0.009. It
- * really does behave differently, WHY is not established, and it is not
- * teardown count, because both are one. Do not rely on the difference.
+ * So the harness overstates real exposure by roughly twenty times, and the CLI
+ * result is not the anomaly it looks like on its own -- it agrees with the
+ * vitest figure. Do not size anything from the harness rate.
+ *
+ * Two earlier revisions of this comment got this wrong in opposite directions:
+ * one read 0 of 60 as proving the CLI exempt, the other quoted the harness rate
+ * as though it applied to a real run. What reconciles every dataset is simply
+ * that real ingests crash rarely rather than never. WHY they differ from the
+ * harness is not established.
  *
  * Those ingests genuinely parsed, so 0 of 60 is not a silently broken addon.
  * A bindings failure would move BOTH counters and both read zero: the workers
- * die at module evaluation, which raises the reported `parseError`
- * (`parseErrors + crashedParses()`), and their tasks resolve null, which raises
- * `unparsed`. Be precise about which counter: the RAW `parseErrors` variable
- * and `filesSkippedUnparsed` are disjoint, which is exactly what
- * `ingest.ts:3482` says and why the summary adds `+ crashedParses()`. It is the
- * REPORTED `parseError` field that a dead pool moves, so it is that field which
- * rules a bindings failure out. What `unparsed` catches ALONE is the quieter
- * case of a healthy worker returning null because an optional grammar is
- * absent. The graph also held 300 classes
- * and 300 functions.
+ * die at module evaluation, which raises the REPORTED `parseError` (the
+ * `+ crashedParses()` fold in `skipReasons.parseError`), and their tasks resolve
+ * null, which raises `unparsed`. Be precise about which counter -- the raw
+ * `parseErrors` variable and `filesSkippedUnparsed` ARE disjoint, which is what
+ * `ingest.ts` says next to that fold and why the fold exists. What `unparsed`
+ * catches ALONE is a healthy worker returning null for a missing optional
+ * grammar. The graph also held 300 classes and 300 functions.
  *
- * What is established: the crash is real, reproducible, and it reached the
- * suite. `ingest-files.test.ts` drives 14 real ingests per vitest process and
- * produced it as an intermittent "Worker exited unexpectedly". The MCP server's
- * in-process runner (`createInProcessRunner`, the default unless
- * IX_MCP_SUBPROCESS=1) has that same many-pools-in-one-process shape, which is
- * why it is named; it was not measured.
+ * The rate is per teardown of a 21-worker pool (`os.cpus().length - 1` on the
+ * machine that measured it). Exposure plainly depends on how many addon-loaded
+ * isolates are disposed, so do not carry 6.3% to a pool of a different size.
  *
  * Note the addon is loaded at SPAWN, not at first parse: the `tree-sitter`
  * import and its twelve grammars are static in `index.ts`, and this file
- * statically imports that. Every spawned worker holds it. Parsing still seems
- * to be what arms the crash -- spawn-then-destroy without any parse did not
- * reproduce it in 6 runs of TWENTY teardowns each, where the fitted rate
- * predicts a crash in all but ~0.1% of such runs -- but do not treat a
- * never-dispatched worker as addon-free.
+ * statically imports that, so every spawned REAL worker holds it. Parsing still
+ * seems to be what arms the crash -- spawn-then-destroy with no parse did not
+ * reproduce it in 6 runs of twenty teardowns, where the fitted rate predicts a
+ * crash in all but 0.04% of runs -- but that is an observation about arming,
+ * not a licence to treat a never-dispatched worker as safe to terminate.
  *
  * Closing the port from INSIDE lets the thread unwind its own event loop and
  * dispose its isolate in order. Measured 0 crashes in the same experiment.
