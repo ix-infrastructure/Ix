@@ -189,8 +189,12 @@ export class ParsePool {
    *
    * DO NOT add a `terminate()` fast path for workers that have never been
    * dispatched. They hold the addon too: `core-ingestion/index.ts` resolves
-   * every grammar at module scope, so a worker holds them from spawn rather
-   * than from its first parse. Having parsed did correlate with the crash in
+   * grammars at module scope, so a worker holds them from spawn rather than
+   * from its first parse. Not every grammar -- 15 of the 27 go through
+   * null-returning helpers and can be absent -- but the core and the twelve
+   * static ones are always there, which is all the crash needs.
+   *
+   * Having parsed did correlate with the crash in
    * one experiment, but that experiment is confounded and `parse-worker.ts`
    * retracts the inference -- see there. This is the file where such a fast
    * path would be written, which is why the warning lives here and not only

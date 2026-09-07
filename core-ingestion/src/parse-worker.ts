@@ -29,19 +29,27 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  *     twenty teardowns per process        19 of 28 runs crashed
  *     one teardown then exit               5 of 40
  *     -> fitting both: 6.3% per teardown, 95% CI 4.1-9.3%. Pooling is
- *        licensed by the consistency check, which belongs here and not only
- *        in the PR: P(>=5 of 40 | p=0.055) = 0.07, so the single-teardown
- *        arm's own point estimate of 12.5% is sampling noise against the
- *        other arm rather than a second rate -- which is why it falls
- *        outside the interval just quoted.
+ *        licensed by a consistency check, which belongs here and not only in
+ *        the PR. The question is whether the one-teardown arm contradicts the
+ *        twenty-teardown one, so the test uses THAT arm's own rate, 5.5%
+ *        (19 of 28 over 20 teardowns), not the pooled 6.3%:
+ *        P(>=5 of 40 | p=0.055) = 0.07. It does not contradict it, so the
+ *        one-teardown arm's 12.5% is sampling noise rather than a second
+ *        rate -- which is why 12.5% falls outside the pooled interval and
+ *        pooling is still the right call.
  *
  *   REAL INGESTS (`ingest-files.test.ts` under vitest, ~9.5 ingests per
  *   process at the time; it drives 14 today)
  *     idle machine                         2 of 75 processes  -> 0.28%/teardown
  *     loaded machine                       9 of 50 processes  -> 2.1%/teardown
- *     a real `ix ingest` of 300 files      0 of 60
+ *     a real `ix ingest` of 300 files      0 of 60   (ONE teardown per
+ *                                                    process, not 9.5 -- this
+ *                                                    row is outside the header
+ *                                                    above)
  *     -> P(zero in 60) is 0.84 at the idle rate and 0.29 at the loaded one, so
- *        the CLI result is unremarkable under either
+ *        the CLI result is unremarkable under either. Those two figures assume
+ *        the one teardown; carrying 9.5 into this row gives a very different
+ *        and wrong answer.
  *
  * PLAN AGAINST THE LOADED RATE. CI is the loaded case, and the two differ by
  * 7.3x. Today's exposure for that file, multiplying the per-teardown rate back
@@ -124,8 +132,11 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * `--omit=optional` install holds only the 13 required grammars. But the
  * guaranteed floor is lower still: `tree-sitter-powershell` is a required
  * dependency that nonetheless loads through the optional-tolerant helper, so
- * it is null wherever it has no prebuild -- and it is simply absent from this
- * checkout. What a spawned worker is ALWAYS holding is the core plus the
+ * ANY failure to load leaves it null rather than raising. It is in fact absent
+ * from this checkout -- a partial install, not a platform gap: the lockfile
+ * pins 0.26.4 with no os/cpu restriction and an install script. The point is
+ * structural either way: a tolerant helper means "required" does not imply
+ * "present". What a spawned worker is ALWAYS holding is the core plus the
  * twelve STATIC grammars. That is the number the conclusion needs, and it is
  * never zero. Parsing still
  * seems to be what arms the crash -- spawn-then-destroy with no parse did not
@@ -139,7 +150,9 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * ever asked and message-handler timing is beside the point. What does matter
  * is that four grammar loads are TOP-LEVEL `await`: a worker spawned and
  * destroyed in the same breath may still have been mid-evaluation, holding
- * fewer addons -- or none -- when it was terminated. So "no parse" and "not
+ * FEWER addons when it was terminated -- though not none, since the static
+ * graph and the eleven synchronous loads all complete before control reaches
+ * the first `await`, so even a suspended worker holds about two dozen. So "no parse" and "not
  * fully loaded" are not separated. Treat "parsing arms it" as unproven, and
  * certainly not as a licence to terminate a never-dispatched worker.
  *

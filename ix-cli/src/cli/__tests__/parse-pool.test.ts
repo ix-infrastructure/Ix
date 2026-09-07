@@ -178,8 +178,11 @@ describe("ParsePool", () => {
     // The rest of the measurements are on `shutdown` in `parse-pool.ts`. Short
     // version, all of it measured on the PRE-FIX build: the minimal harness
     // fits ~6.3% per teardown; real ingests 0.28% idle and 2.1% loaded. Plan
-    // against the loaded figure -- for `ingest-files.test.ts` that was ~25% of
-    // processes rather than ~4%, and CI is the loaded case.
+    // against the loaded figure -- for `ingest-files.test.ts` that would be
+    // ~25% of processes today rather than ~4%, and CI is the loaded case.
+    // (What was MEASURED on that file is 9 of 50 loaded and 2 of 75 idle, at
+    // ~9.5 ingests each; 25% and 4% are those rates rolled up over today's
+    // 14.)
     //
     // On the SHIPPED build all of those are zero, here and everywhere, because
     // nothing terminates a worker any more. The numbers describe what the bug
@@ -575,7 +578,7 @@ describe("ParsePool", () => {
     //
     // Parse here because the real run does; do not
     // read it as a licence to terminate never-dispatched workers, which hold
-    // the core and the required grammars too.
+    // the core and the static grammars too.
     const results = await Promise.all([
       pool.parse("a.ts", "export function a(): number { return 1; }"),
       pool.parse("b.ts", "export function b(): number { return 2; }"),
