@@ -31,13 +31,15 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  *     -> fitting both: 6.3% per teardown, 95% CI 4.1-9.3%
  *
  *   REAL INGESTS
- *     `ingest-files.test.ts` in vitest     2 of 75 processes, ~10 ingests each
- *     -> about 0.27% per teardown (1.9% when the machine was loaded)
+ *     `ingest-files.test.ts` in vitest     2 of 75 processes
+ *     -> the file drove 9-10 ingests per process when that was measured, so
+ *        about 0.3% per teardown (1.9% when the machine was loaded). It drives
+ *        14 today: redo the division, do not reuse the 0.3%.
  *     a real `ix ingest` of 300 files      0 of 60
- *     -> at 0.27% the chance of zero in 60 is 0.85; entirely expected
+ *     -> at 0.3% the chance of zero in 60 is 0.84; entirely expected
  *
- * So the harness overstates real exposure by roughly twenty times, and the CLI
- * result is not the anomaly it looks like on its own -- it agrees with the
+ * So the harness overstates real exposure by more than twenty times, and the
+ * CLI result is not the anomaly it looks like on its own -- it agrees with the
  * vitest figure. Do not size anything from the harness rate.
  *
  * Two earlier revisions of this comment got this wrong in opposite directions:
@@ -53,8 +55,11 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * null, which raises `unparsed`. Be precise about which counter -- the raw
  * `parseErrors` variable and `filesSkippedUnparsed` ARE disjoint, which is what
  * `ingest.ts` says next to that fold and why the fold exists. What `unparsed`
- * catches ALONE is a healthy worker returning null for a missing optional
- * grammar. The graph also held 300 classes and 300 functions.
+ * catches ALONE is a live worker returning null -- a missing optional grammar,
+ * or a parse that THREW, which `parseFile` catches internally and reports the
+ * same way, so neither the worker nor the counter can tell them apart (see the
+ * note on `skipReasons.unparsed` in `ingest.ts`). The graph also held 300
+ * classes and 300 functions.
  *
  * The rate is per teardown of a 21-worker pool (`os.cpus().length - 1` on the
  * machine that measured it). Exposure plainly depends on how many addon-loaded
@@ -64,8 +69,9 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * import and its twelve grammars are static in `index.ts`, and this file
  * statically imports that, so every spawned REAL worker holds it. Parsing still
  * seems to be what arms the crash -- spawn-then-destroy with no parse did not
- * reproduce it in 6 runs of twenty teardowns, where the fitted rate predicts a
- * crash in all but 0.04% of runs -- but that is an observation about arming,
+ * reproduce it in 6 runs of twenty teardowns, an outcome the fitted rate makes
+ * a 0.04% event ACROSS the six (per single run it predicts 27% clean, so one
+ * clean run would mean nothing) -- but that is an observation about arming,
  * not a licence to treat a never-dispatched worker as safe to terminate.
  *
  * Closing the port from INSIDE lets the thread unwind its own event loop and

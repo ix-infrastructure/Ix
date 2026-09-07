@@ -177,8 +177,8 @@ describe("ParsePool", () => {
     //
     // The rest of the measurements are on `shutdown` in `parse-pool.ts`. Short
     // version: the minimal harness fits ~6.3% per teardown, real ingests about
-    // 0.27%, and the CLI's 0 of 60 is what the latter predicts. The harness
-    // overstates real exposure by roughly twenty times.
+    // 0.3%, and the CLI's 0 of 60 is what the latter predicts. The harness
+    // overstates real exposure by more than twenty times.
     //
     // Only ONE pool in this file loads the addon -- the real-worker test near
     // the bottom. Every other fixture here is an inline .mjs that never imports
