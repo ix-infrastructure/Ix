@@ -557,15 +557,18 @@ describe("ParsePool", () => {
     // Parse for real, because having PARSED is what was observed to arm the
     // crash. Not because parsing loads the addon: `index.ts` resolves
     // 27 grammars plus the core at module scope -- twelve by static import, the
-    // rest eagerly through helpers -- so these threads hold all 28 addons from
-    // spawn. The parsed-then-idle thread is what was observed to crash under
+    // rest eagerly through helpers -- so these threads hold up to 28 addons
+    // from spawn (14 of the grammars are optional and may be absent; the core
+    // and the required dozen never are).
+    //
+    // The parsed-then-idle thread is what was observed to crash under
     // `terminate()` while spawn-then-destroy was not -- but that inference is
     // CONFOUNDED and `parse-worker.ts` retracts it: four grammars load through
     // top-level `await`, so a just-spawned worker is still evaluating and has
     // not registered its message handler, and "no parse" cannot be separated
     // from "not fully loaded". Parse here because the real run does; do not
     // read it as a licence to terminate never-dispatched workers, which hold
-    // the addons too.
+    // the core and the required grammars too.
     const results = await Promise.all([
       pool.parse("a.ts", "export function a(): number { return 1; }"),
       pool.parse("b.ts", "export function b(): number { return 2; }"),

@@ -42,7 +42,12 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * 7.3x. Today's exposure for that file, multiplying the per-teardown rate back
  * up over its 14 ingests, is 3.9% of processes when idle and 25% when loaded --
  * quoting the idle number as "the" number understates a CI leg by 6.5x (the
- * 7.3x above is the per-teardown ratio; these are per-process). The per-teardown rate is the portable quantity; the per-process counts
+ * 7.3x above is the per-teardown ratio; these are per-process). The loaded
+ * figure rests on 9 of 50 processes, so its 95% interval is wide: 12%-43% once
+ * rolled up. Wide, and still an order above the idle case -- Fisher exact on
+ * 2/75 against 9/50 is p = 0.006.
+ *
+ * The per-teardown rate is the portable quantity; the per-process counts
  * are the ones tied to ~9.5, so multiply back up rather than re-dividing 2 of
  * 75 by 14.
  *
@@ -50,15 +55,20 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * idle rate but only 3.1x the loaded one. What remains unexplained is that 3.1x,
  * not the 22x an earlier revision of this comment made much of.
  *
- * One variable is NOT controlled, and it is worth being exact about WHICH
- * comparison it threatens. Parses per worker: the harness parsed 30 files over
- * a 21-worker pool and so did the vitest fixture (~1.4 each), but the
- * `ix ingest` measurement was 300 files over the same pool (~14 each). So it
- * cannot explain the harness-versus-real gap -- those two agree -- but it does
- * sit between the two REAL-ingest datasets, which is the pair the 0-of-60
- * argument rests on. If exposure grows with parses per worker, and the "having
- * parsed arms it" observation below makes that plausible, then 0 of 60 is more
- * surprising than the probabilities above suggest.
+ * Parses per worker is NOT controlled anywhere, and counting it properly turns
+ * it from a threat into a second argument. `ingestFiles` parses a `.ts` file
+ * TWICE -- once in the index prescan and once in the streaming loop, both on
+ * this pool -- so a 30-file ingest dispatches ~60 tasks, not 30. Over a
+ * 21-worker pool that is ~2.9 per worker for the vitest fixture and ~28.6 for
+ * the 300-file `ix ingest`, against ~1.4 for the harness, which does no
+ * prescan.
+ *
+ * So the harness parses the LEAST per worker and crashes the most, by 22x. If
+ * exposure grew with parses per worker the ordering would be the other way
+ * round, which makes it an unlikely explanation for the gap rather than an
+ * uncontrolled one. It is still uncontrolled between the two real-ingest
+ * datasets (2.9 against 28.6), and there the same reasoning applies: the CLI
+ * parses ten times more per worker and crashed zero times in 60.
  *
  * So the harness overstates real exposure -- 22x against an idle machine, 3.1x
  * against a loaded one -- and the CLI result is not the anomaly it looks like
@@ -91,9 +101,14 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * Note the addon is loaded at SPAWN, not at first parse: `index.ts` pulls in
  * `tree-sitter` and twelve grammars by static import, ELEVEN more optional ones
  * eagerly through `tryLoadGrammar` at module scope, and four more through
- * top-level `await` -- 27 grammars plus the core, so 28 native addons, all
- * resolved before this file's body runs and held by every spawned REAL
- * worker. Parsing still
+ * top-level `await` -- 27 grammars plus the core, so up to 28 native addons,
+ * all resolved before this file's body runs and held by every spawned REAL
+ * worker. Up to, because 14 of the 27 are optional dependencies that load
+ * through helpers returning null when absent: the Windows machine these
+ * numbers came from has no `tree-sitter-sas` prebuild, and an
+ * `--omit=optional` install holds only the 13 required grammars. The floor is
+ * what matters for the conclusion -- a spawned worker always holds the core
+ * and a dozen-odd grammars, never zero. Parsing still
  * seems to be what arms the crash -- spawn-then-destroy with no parse did not
  * reproduce it in 6 runs of twenty teardowns, an outcome the fitted rate makes
  * a 0.04% event ACROSS the six (per single run it predicts 27% clean, so one
