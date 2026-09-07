@@ -24,17 +24,17 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * NEVER-DISPATCHED WORKERS ARE NOT EXEMPT. The addon is held from module
  * EVALUATION, not from the first parse: `index.ts` resolves its grammars at
  * module scope and this file imports it statically, so a worker reaches that
- * state on its own without being dispatched. The addon-free window is only
- * between `new Worker()` and the end of dependency-graph evaluation, which
- * ESM completes before `index.ts`'s body runs -- so a worker suspended at one
- * of that file's top-level `await`s ALREADY holds the core and the twelve
- * static grammars, and is not safe to terminate either. A worker that has parsed nothing still
- * holds the core and the twelve statically imported grammars. That is the
- * precondition the crash needs, so an undispatched worker is not known to be
- * safe to terminate. Workers that had parsed were the ones observed to crash
- * and spawn-then-destroy was not, over 120 teardowns -- which bounds the
- * undispatched rate at 2.5% (95%), lower than the parsed rate but not zero,
- * and leaves the mechanism unisolated. `parse-pool.test.ts`
+ * state on its own without being dispatched. `tree-sitter` and the twelve
+ * grammars are `index.ts`'s own static imports, near the top of its dependency
+ * graph, so the isolate holds them within moments of `new Worker()` -- long
+ * before that file's body or its top-level `await`s run. A worker that has
+ * parsed nothing, or that is still suspended at one of those awaits, holds
+ * them all the same. That is the precondition the crash needs, so an
+ * undispatched worker is not known to be safe to terminate.
+ *
+ * Whether it is as dangerous as a parsed one has never been measured: the one
+ * arm that looked -- spawn-then-destroy, 0 of 120 -- tore its workers down
+ * before they had loaded anything, so it measured a different population. `parse-pool.test.ts`
  * used to say the opposite -- "an untouched worker has not loaded the addon"
  * -- which is what made a `terminate()` fast path for undispatched workers
  * look safe. That is the claim being retracted; it was never in this file.

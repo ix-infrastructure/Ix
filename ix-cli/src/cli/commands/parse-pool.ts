@@ -194,17 +194,12 @@ export class ParsePool {
    * Not every grammar -- 15 of the 27 go
    * through null-returning helpers and can be absent -- but the core and the
    * twelve static ones are always there, which is the PRECONDITION the crash
-   * needs, and it is NOT sufficient on its own: spawn-then-destroy went 0 of
-   * 120 teardowns, a 0.04% outcome under the parsed rate. But that only bounds
-   * the undispatched rate at 2.5% (95%) -- lower than parsed, nowhere near
-   * zero -- so "less dangerous" is not "safe", and the mechanism is still
-   * unisolated. That is what the prohibition rests on.
-   *
-   * One experiment did find that workers which had parsed crashed while
-   * spawn-then-destroy did not, and it is tempting to read a safe fast path
-   * out of that. Do not: the mechanism was never isolated, and the addon is
-   * held either way. This is the file where such a path would be written,
-   * which is why the warning is here and not only in the tests.
+   * needs. Whether it is also sufficient has never been measured: the one
+   * experiment that looked -- spawn-then-destroy, 0 of 120 -- tore its workers
+   * down before they had loaded anything, so it measured a different
+   * population and says nothing about undispatched workers. This is the file
+   * where a fast path would be written, which is why the warning is here and
+   * not only in the tests.
    *
    * The comparison that settles the verb, on Windows/Node 26, twenty pool
    * teardowns per process, six runs each:
@@ -239,7 +234,7 @@ export class ParsePool {
    * Teardown does not need the thread to die. It needs the pool to stop
    * waiting on it and the thread to stop holding the process open, which is
    * exactly `unref()`. Measured on the real parse worker, four addon-loaded
-   * threads left live and unref'd across process exit: 0 failures in 10 runs,
+   * threads left live and unref'd across process exit: 0 failures in 10 runs
    * -- though that arm is four isolates in one teardown, so on its own it
    * carries little: terminating four would be expected to fail about 1% of
    * runs. The table above is twenty teardowns of a 21-worker pool and is not

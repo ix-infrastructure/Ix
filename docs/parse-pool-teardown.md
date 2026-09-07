@@ -85,29 +85,32 @@ data. This remains an open confound.
 own, without being dispatched. Undispatched workers at teardown are ordinary,
 not exotic: `init()` spawns `concurrency` of them up front, so any batch
 smaller than the pool leaves some that never received a task. (The addon-free
-window is narrower than "before the first parse" — it is only between
-`new Worker()` and the completion of the module's dependency-graph evaluation,
-which ESM finishes before `index.ts`'s body and its top-level `await`s begin.
-A worker suspended at one of those awaits already holds the core and all twelve
-static grammars.) Once evaluated, a worker holds the core
+window is much narrower than "before the first parse": `tree-sitter` and the
+twelve grammars are `index.ts`'s own static imports, near the top of its
+dependency graph, so the isolate holds them within moments of `new Worker()`
+and long before `index.ts`'s body — let alone its top-level `await`s — runs. A
+worker suspended at one of those awaits already holds all twelve.) Once evaluated, a worker holds the core
 plus the **twelve statically imported** grammars — not "13 required", because
 `tree-sitter-powershell` is a required dependency that nonetheless loads
 through a null-returning helper. That is the precondition the crash needs, so
 an undispatched worker is **not known to be safe to terminate**. Workers that
-had parsed were the ones observed to crash; spawn-then-destroy was not, over
-**6 runs of twenty teardowns each — 0 of 120**. That is not a small sample:
-under the fitted 6.3% it is a 0.04% outcome, so it rejects "holding the addon
-is on its own enough" at p = 4e-4. Parsing, or something that travels with it,
-does matter.
+had parsed were the ones observed to crash, and a spawn-then-destroy arm went
+0 of 120 teardowns. **Do not use that arm.** Its harness calls `pool.init()`
+and then `await pool.destroy()` with nothing in between — no wait for an ack or
+an `'online'` event — so it tore the workers down inside the addon-free window
+described above. It measured threads that had not finished loading, which is a
+different population from "evaluated but never dispatched", and it therefore
+says nothing about whether parsing matters. Earlier revisions of this document
+read a `p = 4e-4` rejection and a 2.5% upper bound out of it; both are
+withdrawn.
 
-What it does NOT do is make an undispatched worker safe to terminate. Zero of
-120 puts the 95% upper bound at **2.5% per teardown** — lower than the parsed
-rate, and a long way from zero. That is the whole basis of the rule: not that
-undispatched workers crash at the same rate, but that nobody has shown they do
-not crash at all, and nobody has isolated the mechanism.
+So there is **no measurement** distinguishing an evaluated-but-undispatched
+worker from a parsed one. The rule rests on the mechanism instead: such a
+worker holds the addon, which is the precondition the crash needs, and nothing
+has shown it is safe to terminate.
 
-**The strongest evidence against the harness rate transferring.**
-`core-ingestion`'s own suite runs `vitest run --pool threads`, and 36 of its 38
+**A consistency check on another consumer that terminates addon-loaded
+threads.** `core-ingestion`'s own suite runs `vitest run --pool threads`, and 36 of its 38
 test files import `./index.js`. The mechanism differs from the parse worker's:
 vitest's worker entry does not import `core-ingestion`, so a thread picks the
 addon up when it *evaluates* such a test file, not at spawn — a thread can be
