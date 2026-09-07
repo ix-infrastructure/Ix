@@ -34,8 +34,9 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * undispatched worker is not known to be safe to terminate.
  *
  * Whether it is as dangerous as a parsed one has never been measured: the one
- * arm that looked -- spawn-then-destroy, 0 of 120 -- tore its workers down
- * before they had loaded anything, so it measured a different population.
+ * arm that looked -- spawn-then-destroy, 0 of 120 -- destroyed its pool with
+ * no wait for an ack or an `'online'` event, so it tore threads down before
+ * they had finished loading: a different population.
  *
  * `parse-pool.test.ts` used to say the opposite -- "an untouched worker has
  * not loaded the addon" -- which is what made a `terminate()` fast path for

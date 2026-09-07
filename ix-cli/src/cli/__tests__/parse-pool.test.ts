@@ -177,11 +177,15 @@ describe("ParsePool", () => {
     // addon; pools built on the inline `.mjs` fixtures never import
     // `core-ingestion`, so their teardowns cannot crash. Deliberately no
     // tally: a count here goes stale the first time a test is added, with the
-    // suite still green. And on the shipped build the
-    // exposure through `ParsePool` is zero, since nothing here terminates a
-    // worker any more. Not zero in the repo, though: `core-ingestion`'s own
-    // suite runs on vitest's threads pool, which terminates threads that have
-    // loaded the addon -- the doc covers that consumer.
+    // suite still green. And on the shipped build nothing here calls
+    // `terminate()` at all, which is the exposure this PR removes -- but do
+    // not read that as zero. A worker that will not answer `__shutdown` is
+    // left alive and `unref()`'d, and its isolate is still disposed when the
+    // process exits; that path is measured only as four addon-loaded threads,
+    // 0 failures in 10 runs, which at the per-isolate hazard is the expected
+    // result either way. Nor is the repo clear: `core-ingestion`'s own suite
+    // runs on vitest's threads pool, which does terminate threads that have
+    // loaded the addon. The doc covers both.
     //
     // Asserted through a marker the worker writes when ASKED to go, because the
     // crash itself is probabilistic: a test that just tore pools down would
@@ -550,9 +554,10 @@ describe("ParsePool", () => {
     // Parse for real, because having PARSED is what was observed to arm the
     // crash. Not because parsing loads the addon: `index.ts` resolves
     // 27 grammars plus the core at module scope -- twelve by static import, the
-    // rest eagerly through helpers -- so these threads hold those grammars
-    // once their module evaluation completes. Many are optional, and exactly
-    // one required grammar (`tree-sitter-powershell`) also loads through a
+    // rest eagerly through helpers -- so these threads hold the core and the
+    // twelve within moments of spawn, well before that module finishes
+    // evaluating, and the rest by the time it does. Many are optional, and
+    // exactly one required grammar (`tree-sitter-powershell`) loads through a
     // null-returning helper, so the guaranteed floor is the core plus the
     // statically imported grammars; the exact tally is in
     // `docs/parse-pool-teardown.md` rather than here.

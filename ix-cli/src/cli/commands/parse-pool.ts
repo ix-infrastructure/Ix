@@ -189,20 +189,24 @@ export class ParsePool {
    *
    * DO NOT add a `terminate()` fast path for workers that have never been
    * dispatched. They hold the addon too: `core-ingestion/src/index.ts`
-   * resolves grammars at module scope, so a worker holds them from spawn
-   * once its module evaluation completes, which it reaches on its own without
-   * ever being dispatched. (Not literally at spawn: there is a narrow
-   * addon-free window before that evaluation, which is why the one experiment
-   * appearing to exonerate undispatched workers is rejected -- see the doc.)
-   * Not every grammar -- 15 of the 27 go
-   * through null-returning helpers and can be absent -- but the core and the
-   * twelve static ones are always there, which is the PRECONDITION the crash
-   * needs. Whether it is also sufficient has never been measured: the one
-   * experiment that looked -- spawn-then-destroy, 0 of 120 -- tore its workers
-   * down before they had loaded anything, so it measured a different
-   * population and says nothing about undispatched workers. This is the file
-   * where a fast path would be written, which is why the warning is here and
-   * not only in the tests.
+   * resolves grammars at module scope, and `tree-sitter` plus the twelve
+   * static grammars sit near the top of its dependency graph -- so a worker
+   * holds them within moments of `new Worker()`, without ever being
+   * dispatched, and long before `index.ts`'s own body or its top-level
+   * `await`s run. Note which end that pins: the addon-free window CLOSES when
+   * those static imports evaluate, not when evaluation finishes. A worker
+   * suspended at one of those awaits already holds all twelve, and is not
+   * safe to terminate.
+   *
+   * Not every grammar -- 15 of the 27 go through null-returning helpers and
+   * can be absent -- but the core and the twelve static ones are always
+   * there, which is the PRECONDITION the crash needs. Whether it is also
+   * sufficient has never been measured: the one experiment that looked --
+   * spawn-then-destroy, 0 of 120 -- destroyed its pool with no wait for an
+   * ack or an `'online'` event, so it tore threads down inside that window,
+   * before they had finished loading. Different population; it says nothing
+   * about undispatched workers. This is the file where a fast path would be
+   * written, which is why the warning is here and not only in the tests.
    *
    * The comparison that settles the verb, on Windows/Node 26, twenty pool
    * teardowns per process, six runs each:
@@ -213,11 +217,10 @@ export class ParsePool {
    *
    * Per-consumer rates, the populations behind them and the statistics are in
    * `docs/parse-pool-teardown.md` -- versioned, and not this file's history,
-   * which
-   * still carries #598's retracted figures and, in the squashed body, every
-   * superseded value next to its correction. They do not change the rule, and
-   * keeping them consistent across three files proved to be its own source of
-   * errors.
+   * which still carries #598's retracted figures and, in the squashed body,
+   * every superseded value next to its correction. They do not change the
+   * rule, and keeping them consistent across three files proved to be its own
+   * source of errors.
    *
    * What the grace period bounds, precisely: the wait for a reply from a
    * worker that is IDLE and does not answer -- one whose JS event loop is
@@ -336,8 +339,9 @@ export class ParsePool {
         // segfaults -- that is the bug this file exists to fix -- and against a
         // worker inside a native call it does not even preempt: it resolves
         // only when the call returns, so it was strictly slower AND
-        // crash-prone there (the timings are on `shutdown` above). `unref()` gives the only
-        // thing teardown actually needs: the thread stops keeping the event
+        // crash-prone there (the timings are on `shutdown` above). `unref()`
+        // gives the only thing teardown needs: the thread stops keeping the
+        // event
         // loop alive, so the CLI exits, and nobody disposes an isolate that
         // still holds the addon. Measured on the real parse worker, four
         // addon-loaded threads left live and unref'd across process exit: 0

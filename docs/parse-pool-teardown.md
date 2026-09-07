@@ -49,16 +49,19 @@ is one teardown disposing all 21 of the pool's isolates, not one isolate. The
 per-isolate hazard is 0.31%; see the vitest section for why the difference
 matters. Pooling is
 licensed by asking whether the one-teardown arm contradicts the twenty-teardown
-arm's own rate (5.5%): `P(≥5 of 40 | p=0.055) = 0.067` — a failure to reject,
-borderline, not a demonstration of agreement.
+arm's own rate (5.5%): `P(≥5 of 40 | p=0.055) = 0.067` — a failure to
+reject, borderline, not a demonstration of agreement.
 
 **Real ingests** — `ingest-files.test.ts` under vitest, ~9.5 ingests per
 process at the time of measuring (it drives 14 today):
 
-| configuration | result | per teardown |
+| configuration | result | per POOL teardown |
 |---|---|---|
 | idle machine | 2 of 75 processes | 0.28% |
 | loaded machine | 9 of 50 processes | 2.1% |
+
+(Per pool, as everywhere else here — not per isolate. 0.28% sits next to the
+0.31% per-ISOLATE hazard derived below, and they are not the same quantity.)
 
 Fisher exact on 2/75 vs 9/50 is **p = 0.007** two-sided (0.004 one-sided), so
 load matters. A real `ix ingest` of 300 files was **0 of 60** — that is *one*
@@ -91,16 +94,18 @@ smaller than the pool leaves some that never received a task. (The addon-free
 window is much narrower than "before the first parse": `tree-sitter` and the
 twelve grammars are `index.ts`'s own static imports, near the top of its
 dependency graph, so the isolate holds them within moments of `new Worker()`
-and long before `index.ts`'s body — let alone its top-level `await`s — runs. A
-worker suspended at one of those awaits already holds all twelve.) Once evaluated, a worker holds the core
+and long before `index.ts`'s body — let alone its top-level `await`s —
+runs. A worker suspended at one of those awaits already holds all twelve.) Once
+evaluated, a worker holds the core
 plus the **twelve statically imported** grammars — not "13 required", because
 `tree-sitter-powershell` is a required dependency that nonetheless loads
 through a null-returning helper. That is the precondition the crash needs, so
 an undispatched worker is **not known to be safe to terminate**. Workers that
 had parsed were the ones observed to crash, and a spawn-then-destroy arm went
 0 of 120 teardowns. **Do not use that arm.** Its harness calls `pool.init()`
-and then `await pool.destroy()` with nothing in between — no wait for an ack or
-an `'online'` event — so it tore the workers down inside the addon-free window
+and then `await pool.destroy()` with nothing in between — no wait for an ack
+or an `'online'` event — so it tore the workers down inside the addon-free
+window
 described above. It measured threads that had not finished loading, which is a
 different population from "evaluated but never dispatched", and it therefore
 says nothing about whether parsing matters. Earlier revisions of this document
@@ -113,17 +118,23 @@ worker holds the addon, which is the precondition the crash needs, and nothing
 has shown it is safe to terminate.
 
 **A consistency check on another consumer that terminates addon-loaded
-threads.** `core-ingestion`'s own suite runs `vitest run --pool threads`, and 36 of its 38
-test files import `./index.js`. The mechanism differs from the parse worker's:
-vitest's worker entry does not import `core-ingestion`, so a thread picks the
+threads.** `core-ingestion`'s own suite runs `vitest run --pool threads`, and
+36 of its 38 test files import `./index.js`. The mechanism differs from the
+parse worker's: vitest's worker entry does not import `core-ingestion`, so a
+thread picks the
 addon up when it *evaluates* such a test file, not at spawn — a thread can be
 spawned and torn down having run none. Either way tinypool tears those threads
 down with `terminate()`, which is the exposed shape.
 
-Measured: **0 segfault signatures in 10 local runs**, and the `core-ingestion
-tests` CI step passes on all five matrix legs. That is consistent with
-everything else here, and it is worth showing the conversion, because getting
-it wrong once made this section claim a falsification it does not support.
+Measured: **0 segfault signatures in 10 local runs.** The `core-ingestion
+tests` CI step also passes on all five matrix legs, but do not weigh that
+equally: CI runs Node 22 and 24 where everything here was measured on Node 26,
+and its 3–4 vCPU runners give far fewer concurrent threads than the bracket
+below. The 10 local runs are the measurement; CI is a weaker corroboration.
+
+Either way the result is consistent with everything else here, and it is worth
+showing the conversion, because getting it wrong once made this section claim a
+falsification it does not support.
 
 The 6.3% is per POOL teardown, and a pool disposes 21 isolates. The
 per-isolate hazard is therefore `1-(1-h)^21 = 0.063`, i.e. **h = 0.31%**.
@@ -140,9 +151,9 @@ files import the index. Across that whole bracket the result is unremarkable:
 
 Nothing to explain at any of them.
 
-Mixing the two units — applying a per-pool rate to individual isolates — is the
-easiest error in this document to make, and the reason every rate here says
-which it is.
+Mixing the two units — applying a per-pool rate to individual isolates — is
+the easiest error in this document to make, and the reason every rate here
+says which it is.
 
 ## Superseded figures
 
