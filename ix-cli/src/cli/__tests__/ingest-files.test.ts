@@ -159,10 +159,26 @@ class FakeBackend {
     // temp trees leak anyway. The teardown can only be made safe if this cannot
     // hang, so the fix belongs here rather than in another `try`.
     server.closeAllConnections?.();
-    await Promise.race([
-      new Promise<void>((resolve) => server.close(() => resolve())),
-      new Promise<void>((resolve) => setTimeout(resolve, 2000).unref?.()),
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const closed = await Promise.race([
+      new Promise<boolean>((resolve) => server.close(() => resolve(true))),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), 2000);
+        timer.unref?.();
+      }),
     ]);
+    clearTimeout(timer);
+    if (!closed) {
+      // Say so. Trading a hang for a leak is the right call, but a silent leak
+      // is the condition the teardown exists to prevent -- an open handle that
+      // keeps the vitest worker from exiting -- and it would surface only as a
+      // mysteriously slow file, with every later `afterEach` eating 2s too.
+      // A future socket regression should read as a message, not as flakiness.
+      process.stderr.write(
+        "FakeBackend.stop: server did not close within 2s; leaving it open rather than hanging the hook" +
+          String.fromCharCode(10),
+      );
+    }
   }
 
   private route(url: string, body: string, res: ServerResponse): void {
@@ -334,9 +350,23 @@ describe("ingestFiles against a fake backend", () => {
     // a materially different payload on a third of the matrix, and a trap for
     // the first assertion that ever touches a uri. Windows junctions do it too.
     // `ingest-discovery.test.ts:105` already carries this fix and its reason.
+    // Cleared FIRST, and the fake built before anything that can throw.
+    //
+    // These are describe-scoped and `afterEach` never reset them, so from the
+    // second test onward they held the PREVIOUS test's values -- which made the
+    // three guards in the teardown decorative in exactly the scenario their
+    // comments name. A `beforeEach` that threw inside `mkdtempSync` left
+    // `backend !== undefined` passing against the previous test's
+    // already-stopped fake, `stop()` closing an already-closed server, and both
+    // `rmSync` calls pointed at already-deleted paths, while the directory this
+    // test had just created leaked. Resetting here is what makes the guards
+    // discriminate; the alternative was `string | undefined` and a non-null
+    // assertion at forty use sites.
+    home = "";
+    repo = "";
+    backend = new FakeBackend();
     home = realpathSync(mkdtempSync(join(tmpdir(), "ix-ingest-home-")));
     repo = realpathSync(mkdtempSync(join(tmpdir(), "ix-ingest-repo-")));
-    backend = new FakeBackend();
     const endpoint = await backend.start();
 
     // HOME *and* USERPROFILE: `os.homedir()` reads the latter on Windows, so

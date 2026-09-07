@@ -69,6 +69,16 @@ describe("isVmDynamicImportUnavailable", () => {
     // message replaced.
     const original = (await realVmFailure()) as Error;
     expect(original, "expected the vm indirection to fail under vite-node").not.toBeNull();
+    // The premise, asserted rather than assumed -- every other test here does
+    // the same. Without it, the day vite-node wraps this failure under its
+    // own code (which is precisely why test 2 exists) or Node renames it, this
+    // fails as a bare `expected false to be true` pointing at the predicate,
+    // when what changed is the input.
+    expect(
+      String((original as NodeJS.ErrnoException).code),
+      "the real vm failure still carries the vm code",
+    ).toMatch(/^ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING/);
+
     const reworded = new Error("the wording of this error changed upstream");
     (reworded as NodeJS.ErrnoException).code = (original as NodeJS.ErrnoException).code;
 
