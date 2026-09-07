@@ -207,11 +207,16 @@ export class ParsePool {
    *     -> P(zero in 60) is 0.84 at the idle rate, 0.29 at the loaded one:
    *        unremarkable under either, so not an anomaly
    *
-   * The harness overstates real exposure by more than twenty times, and WHY
-   * the two populations differ is not established -- it is not pool size, which
-   * is 21 in both (`os.cpus().length - 1` on the machine that measured it), and
-   * not teardown count. Size nothing from the harness rate. Both rates are per
-   * teardown of a 21-worker pool, so neither carries to a pool of another size.
+   * PLAN AGAINST THE LOADED RATE -- CI is the loaded case. Multiplying back up
+   * over that file's 14 ingests gives 3.9% of processes when idle and 25% when
+   * loaded; the idle figure understates a CI leg sevenfold.
+   *
+   * Load also explains most of the harness/real gap: the harness is 22x the
+   * idle rate but only 3.1x the loaded one, and it is that 3.1x which is
+   * unexplained. It is not pool size -- 21 in both -- nor teardown count. Both
+   * rates are per teardown of a 21-worker pool, so neither carries to another
+   * size, and parses per worker differs between the two populations (~1.4
+   * against ~14) without having been controlled.
    *
    * The user-visible signature is exit 139 after a successful ingest -- patches
    * committed, summary printed, non-zero `$?`.

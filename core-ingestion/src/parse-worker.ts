@@ -38,14 +38,30 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  *     -> P(zero in 60) is 0.84 at the idle rate and 0.29 at the loaded one, so
  *        the CLI result is unremarkable under either
  *
- * The PER-TEARDOWN rate is the portable number; the per-process counts are the
- * ones tied to ~9.5. To get today's exposure for that file, multiply back up --
- * 1-(1-0.0028)^14, about 3.9% of processes -- rather than re-dividing 2 of 75
- * by 14, which would understate it.
+ * PLAN AGAINST THE LOADED RATE. CI is the loaded case, and the two differ by
+ * 7.3x. Today's exposure for that file, multiplying the per-teardown rate back
+ * up over its 14 ingests, is 3.9% of processes when idle and 25% when loaded --
+ * quoting the idle number as "the" number understates a CI leg by about seven
+ * times. The per-teardown rate is the portable quantity; the per-process counts
+ * are the ones tied to ~9.5, so multiply back up rather than re-dividing 2 of
+ * 75 by 14.
  *
- * So the harness overstates real exposure by more than twenty times, and the
- * CLI result is not the anomaly it looks like on its own -- it agrees with the
- * vitest figure. Do not size anything from the harness rate.
+ * Load also accounts for most of the harness/real gap: the harness is 22x the
+ * idle rate but only 3.1x the loaded one. What remains unexplained is that 3.1x,
+ * not the 22x an earlier revision of this comment made much of.
+ *
+ * One variable that is NOT controlled between these populations: parses per
+ * worker. The vitest fixture is 30 files over a 21-worker pool (~1.4 each); the
+ * `ix ingest` measurement was 300 files over the same pool (~14 each). If
+ * exposure grows with parses per worker -- which the "having parsed arms it"
+ * observation below makes plausible -- then 0 of 60 is more surprising than the
+ * probabilities above suggest, and those probabilities are the floor of the
+ * argument rather than the whole of it.
+ *
+ * So the harness overstates real exposure -- 22x against an idle machine, 3.1x
+ * against a loaded one -- and the CLI result is not the anomaly it looks like
+ * on its own: it agrees with the vitest figure. Do not size anything from the
+ * harness rate.
  *
  * Two earlier revisions of this comment got this wrong in opposite directions:
  * one read 0 of 60 as proving the CLI exempt, the other quoted the harness rate
@@ -70,14 +86,24 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * machine that measured it). Exposure plainly depends on how many addon-loaded
  * isolates are disposed, so do not carry 6.3% to a pool of a different size.
  *
- * Note the addon is loaded at SPAWN, not at first parse: the `tree-sitter`
- * import and its twelve grammars are static in `index.ts`, and this file
- * statically imports that, so every spawned REAL worker holds it. Parsing still
+ * Note the addon is loaded at SPAWN, not at first parse: `index.ts` pulls in
+ * `tree-sitter` and twelve grammars by static import, ELEVEN more optional ones
+ * eagerly through `tryLoadGrammar` at module scope, and four more through
+ * top-level `await` -- about 27 native addons, all resolved before this file's
+ * body runs, so every spawned REAL worker holds them. Parsing still
  * seems to be what arms the crash -- spawn-then-destroy with no parse did not
  * reproduce it in 6 runs of twenty teardowns, an outcome the fitted rate makes
  * a 0.04% event ACROSS the six (per single run it predicts 27% clean, so one
- * clean run would mean nothing) -- but that is an observation about arming,
- * not a licence to treat a never-dispatched worker as safe to terminate.
+ * clean run would mean nothing).
+ *
+ * That experiment is confounded, though, and the inference is weaker than it
+ * looks: four of those grammar loads are TOP-LEVEL `await`, so a worker's
+ * module evaluation is still suspended for a moment after spawn and its
+ * `message` handler is not yet registered. A worker destroyed in that window
+ * could not answer `__shutdown` and may not have finished loading either, so
+ * "no parse" and "not fully loaded" are not separated. Treat "parsing arms it"
+ * as unproven, and certainly not as a licence to terminate a never-dispatched
+ * worker.
  *
  * Closing the port from INSIDE lets the thread unwind its own event loop and
  * dispose its isolate in order. Measured 0 crashes in the same experiment.

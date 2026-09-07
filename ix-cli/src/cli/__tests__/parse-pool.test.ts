@@ -176,9 +176,10 @@ describe("ParsePool", () => {
     //   worker closes its own port     0 of 6
     //
     // The rest of the measurements are on `shutdown` in `parse-pool.ts`. Short
-    // version: the minimal harness fits ~6.3% per teardown, real ingests about
-    // 0.3%, and the CLI's 0 of 60 is what the latter predicts. The harness
-    // overstates real exposure by more than twenty times.
+    // version: the minimal harness fits ~6.3% per teardown; real ingests are
+    // 0.28% on an idle machine and 2.1% on a loaded one. Plan against the
+    // loaded figure -- for this suite that is ~25% of processes rather than
+    // ~4%, and CI is the loaded case.
     //
     // Only ONE pool in this file loads the addon -- the real-worker test near
     // the bottom. Every other fixture here is an inline .mjs that never imports
@@ -553,8 +554,9 @@ describe("ParsePool", () => {
     const pool = new ParsePool(real, 2, 10000);
     pool.init();
     // Parse for real, because having PARSED is what was observed to arm the
-    // crash. Not because parsing loads the addon: `index.ts` imports
-    // tree-sitter and its grammars statically, so these threads hold it from
+    // crash. Not because parsing loads the addon: `index.ts` resolves
+    // tree-sitter and ~27 grammars at module scope -- twelve by static import,
+    // the rest eagerly through helpers -- so these threads hold them from
     // spawn. It is the parsed-then-idle thread that was observed to crash
     // under `terminate()`, while spawn-then-destroy with no parse was not --
     // which is a statement about what ARMS it, not a licence to terminate
