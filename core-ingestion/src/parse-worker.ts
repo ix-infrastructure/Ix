@@ -15,10 +15,22 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * `Worker.terminate()` tears a thread down from the outside, and doing that to
  * a thread that has loaded the tree-sitter native bindings SEGFAULTS the whole
  * process -- the parses need not even be in flight, an idle worker that has
- * parsed once is enough. Measured on Windows/Node 26 at ~8% per teardown, and
- * the pool terminates every worker at the end of every run, so roughly one
- * `ix map` in twelve exited 139 after a completely successful ingest: patches
- * committed, summary printed, non-zero status for anything reading `$?`.
+ * parsed once is enough.
+ *
+ * Who this actually hit, measured against the pre-fix build rather than
+ * inferred from the per-teardown rate (Windows / Node 26, pool of 21):
+ *
+ *   one pool per process, then exit        1-3 of 15 segfaulted
+ *   twenty pools in one process            7 of 10
+ *   a real `ix ingest` of 300 files        0 of 60
+ *
+ * So the risk scales with teardowns PER PROCESS, and the consumers exposed to
+ * it are the ones that build many pools in a single process: the MCP server's
+ * in-process runner (`createInProcessRunner`, the default unless
+ * IX_MCP_SUBPROCESS=1) and the vitest suite, where this first showed up as an
+ * intermittent "Worker exited unexpectedly". A one-shot `ix map` / `ix ingest`
+ * did NOT reproduce it in 60 runs -- an earlier version of this comment claimed
+ * one in twelve of them exited 139, which the end-to-end run does not support.
  *
  * Closing the port from INSIDE lets the thread unwind its own event loop and
  * dispose its isolate in order. Measured 0 crashes in the same experiment.

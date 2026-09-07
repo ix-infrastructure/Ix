@@ -192,9 +192,19 @@ export class ParsePool {
    *   worker closes its own port         0 of 6
    *   worker calls process.exit(0)       0 of 6
    *
-   * `destroy()` runs in `ingestFiles`'s outermost `finally`, so this was one
-   * `ix map` in roughly twelve exiting 139 with every patch committed and the
-   * summary already printed -- invisible unless something reads the status.
+   * That experiment tore down twenty pools per process. Measured per-consumer
+   * against the pre-fix build, because the per-teardown rate does not carry
+   * over to a one-shot CLI run:
+   *
+   *   one pool per process, then exit    1-3 of 15 segfaulted
+   *   twenty pools in one process        7 of 10
+   *   a real `ix ingest` of 300 files    0 of 60
+   *
+   * So the exposure is proportional to teardowns per process. The MCP server's
+   * in-process runner and the test suite build many; `ix map` builds one and
+   * did not reproduce it in 60 runs. An earlier version of this comment said
+   * one `ix map` in twelve exited 139, which the end-to-end run does not
+   * support -- it was the 20-teardown rate applied to a 1-teardown case.
    *
    * What the grace period bounds, precisely: the wait for a reply from a
    * worker that is IDLE and does not answer -- one whose JS event loop is

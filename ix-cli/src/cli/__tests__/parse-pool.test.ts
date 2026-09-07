@@ -175,9 +175,11 @@ describe("ParsePool", () => {
     //   terminate()                    5 of 6 runs died with SIGSEGV (139)
     //   worker closes its own port     0 of 6
     //
-    // `destroy()` runs in `ingestFiles`'s outermost `finally`, so this was one
-    // `ix map` in roughly twelve exiting 139 with every patch committed and the
-    // summary printed -- which is why nobody reported it.
+    // Twenty teardowns per process there. Measured per-consumer, because that
+    // rate does not carry over to a one-shot CLI run: one pool per process
+    // segfaulted 1-3 of 15, twenty pools 7 of 10, and a real `ix ingest` of 300
+    // files 0 of 60. The exposure is the MCP in-process runner and this suite,
+    // not `ix map` -- see `parse-pool.ts`.
     //
     // Asserted through a marker the worker writes when ASKED to go, because the
     // crash itself is probabilistic: a test that just tore pools down would
