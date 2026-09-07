@@ -136,7 +136,11 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * from this checkout -- a partial install, not a platform gap: the lockfile
  * pins 0.26.4 with no os/cpu restriction and an install script. The point is
  * structural either way: a tolerant helper means "required" does not imply
- * "present". What a spawned worker is ALWAYS holding is the core plus the
+ * "present". It does load in CI, though -- the `core-ingestion tests` step
+ * runs the suite that covers this grammar and passes on all five matrix legs,
+ * Windows included -- so the subpath import in `index.ts` resolves and
+ * PowerShell parsing is not silently null. Checked, because a tolerant helper
+ * would hide it if it were. What a spawned worker is ALWAYS holding is the core plus the
  * twelve STATIC grammars. That is the number the conclusion needs, and it is
  * never zero. Parsing still
  * seems to be what arms the crash -- spawn-then-destroy with no parse did not
