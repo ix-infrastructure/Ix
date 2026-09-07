@@ -170,11 +170,12 @@ describe("ParsePool", () => {
     // that to one that has loaded the tree-sitter native bindings segfaults the
     // PROCESS -- an idle worker that parsed a single file is enough, because
     // the crash is in disposing an isolate that still holds the addon. The
-    // comparison that settles it is in `ParsePool.shutdown`; rates and
-    // populations are in PR #650, not restated here. What matters
-    // for this file: only ONE pool below loads the addon -- the real-worker
-    // test near the bottom -- because the other twelve fixtures are inline
-    // `.mjs` that never import `core-ingestion`. And on the shipped build the
+    // comparison that settles it is on `ParsePool.shutdown` in
+    // `../commands/parse-pool.ts`; rates and populations are in the
+    // description of PR #650, not restated here. What matters
+    // for this file: of its thirteen pools only ONE loads the addon -- the
+    // real-worker test near the bottom -- because the other twelve fixtures
+    // are inline `.mjs` that never import `core-ingestion`. And on the shipped build the
     // exposure is zero everywhere, since nothing terminates a worker any more.
     //
     // Asserted through a marker the worker writes when ASKED to go, because the
@@ -550,10 +551,9 @@ describe("ParsePool", () => {
     // the core plus the twelve STATIC grammars -- never zero).
     //
     // Workers that had parsed were the ones observed to crash under
-    // `terminate()`, and spawn-then-destroy was not -- but that was never
-    // isolated from how far module evaluation had got, so it does not
-    // establish that an undispatched worker is safe to terminate. It is not:
-    // it holds the core and the static grammars from spawn. Parse here
+    // `terminate()`, and spawn-then-destroy was not -- but the mechanism was
+    // never isolated, and the addon is held either way, so that does not
+    // establish an undispatched worker is safe to terminate. Parse here
     // because the real run does.
     const results = await Promise.all([
       pool.parse("a.ts", "export function a(): number { return 1; }"),

@@ -24,21 +24,29 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * NEVER-DISPATCHED WORKERS ARE NOT EXEMPT. The addon is held from SPAWN, not
  * from the first parse: `index.ts` resolves its grammars at module scope and
  * this file imports it statically. A worker that has parsed nothing still
- * holds the core and the twelve statically imported grammars, so terminating
- * it can crash exactly as terminating a busy one can. `parse-pool.test.ts`
+ * holds the core and the twelve statically imported grammars. That is the
+ * precondition the crash needs, so an undispatched worker is not known to be
+ * safe to terminate -- not that it fails at the same rate, which was never
+ * measured. `parse-pool.test.ts`
  * used to say the opposite -- "an untouched worker has not loaded the addon"
  * -- which is what made a `terminate()` fast path for undispatched workers
  * look safe. That is the claim being retracted; it was never in this file.
  *
- * Rates, populations, and the reasoning behind them are in PR #650 and the
- * commits on this file. They are deliberately NOT restated here: keeping a
- * statistical write-up consistent across three source files generated more
- * defects over successive reviews than it prevented, and none of it changes
- * what this code must do.
+ * Rates, populations and the reasoning are in the DESCRIPTION of PR #650,
+ * which is the single current record. Do not reconstruct them from this
+ * file's history: `main` squash-merges, so the log here also carries #598,
+ * whose figures this work retracts, and the squash body concatenates every
+ * superseded value beside its correction with nothing marking which is which.
+ *
+ * They are deliberately not restated here either. Keeping a statistical
+ * write-up consistent across three source files produced more defects over
+ * successive reviews than it prevented, and none of it changes what this code
+ * must do.
  *
  * Closing the port from INSIDE lets the thread unwind its own event loop and
  * dispose its isolate in order, and did not crash once where terminating
- * crashed most runs -- the comparison is in `ParsePool.shutdown`.
+ * crashed most runs -- the comparison is on `ParsePool.shutdown`, in
+ * `ix-cli/src/cli/commands/parse-pool.ts`.
  *
  * The teardown contract, precisely, because the pool's half of it changed and
  * this is the only place the worker states it: `ParsePool` never terminates a

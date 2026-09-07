@@ -208,9 +208,11 @@ export class ParsePool {
    *   worker calls process.exit(0)       0 of 6
    *
    * Per-consumer rates, the populations behind them and the statistics are in
-   * PR #650 and this file's history, not here. They do not change the rule,
-   * and keeping them consistent across three files proved to be its own source
-   * of errors.
+   * the DESCRIPTION of PR #650, which is the single current record -- not in
+   * this file's history, which still carries #598's retracted figures and, in
+   * the squashed body, every superseded value next to its correction. They do
+   * not change the rule, and keeping them consistent across three files proved
+   * to be its own source of errors.
    *
    * What the grace period bounds, precisely: the wait for a reply from a
    * worker that is IDLE and does not answer -- one whose JS event loop is
