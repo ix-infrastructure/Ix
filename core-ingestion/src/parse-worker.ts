@@ -30,13 +30,18 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  *     one teardown then exit               5 of 40
  *     -> fitting both: 6.3% per teardown, 95% CI 4.1-9.3%
  *
- *   REAL INGESTS
- *     `ingest-files.test.ts` in vitest     2 of 75 processes
- *     -> the file drove 9-10 ingests per process when that was measured, so
- *        about 0.3% per teardown (1.9% when the machine was loaded). It drives
- *        14 today: redo the division, do not reuse the 0.3%.
+ *   REAL INGESTS (`ingest-files.test.ts` under vitest, ~9.5 ingests per
+ *   process at the time; it drives 14 today)
+ *     idle machine                         2 of 75 processes  -> 0.28%/teardown
+ *     loaded machine                       9 of 50 processes  -> 2.1%/teardown
  *     a real `ix ingest` of 300 files      0 of 60
- *     -> at 0.3% the chance of zero in 60 is 0.84; entirely expected
+ *     -> P(zero in 60) is 0.84 at the idle rate and 0.29 at the loaded one, so
+ *        the CLI result is unremarkable under either
+ *
+ * The PER-TEARDOWN rate is the portable number; the per-process counts are the
+ * ones tied to ~9.5. To get today's exposure for that file, multiply back up --
+ * 1-(1-0.0028)^14, about 3.9% of processes -- rather than re-dividing 2 of 75
+ * by 14, which would understate it.
  *
  * So the harness overstates real exposure by more than twenty times, and the
  * CLI result is not the anomaly it looks like on its own -- it agrees with the

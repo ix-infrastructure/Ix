@@ -200,17 +200,18 @@ export class ParsePool {
    *     one teardown then exit          5 of 40
    *     -> both fit 6.3% per teardown, 95% CI 4.1-9.3%
    *
-   *   real ingests
-   *     `ingest-files.test.ts`          2 of 75 vitest processes
-   *     -> 9-10 ingests per process when measured, so ~0.3% per teardown (1.9%
-   *        on a loaded machine). That file drives 14 today; redo the division
-   *        rather than reusing 0.3%.
+   *   real ingests (`ingest-files.test.ts`, ~9.5 ingests per process then)
+   *     idle machine                  2 of 75 processes -> 0.28% per teardown
+   *     loaded machine                9 of 50 processes -> 2.1% per teardown
    *     a real `ix ingest` of 300 files 0 of 60
-   *     -> at 0.3%, P(zero in 60) = 0.84, so this is expected, not an anomaly
+   *     -> P(zero in 60) is 0.84 at the idle rate, 0.29 at the loaded one:
+   *        unremarkable under either, so not an anomaly
    *
-   * The harness overstates real exposure by more than twenty times. Size
-   * nothing from it, and note the rate is per teardown of a 21-worker pool --
-   * exposure depends on how many addon-loaded isolates are disposed.
+   * The harness overstates real exposure by more than twenty times, and WHY
+   * the two populations differ is not established -- it is not pool size, which
+   * is 21 in both (`os.cpus().length - 1` on the machine that measured it), and
+   * not teardown count. Size nothing from the harness rate. Both rates are per
+   * teardown of a 21-worker pool, so neither carries to a pool of another size.
    *
    * The user-visible signature is exit 139 after a successful ingest -- patches
    * committed, summary printed, non-zero `$?`.

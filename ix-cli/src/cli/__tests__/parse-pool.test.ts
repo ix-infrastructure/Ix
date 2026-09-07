@@ -185,8 +185,9 @@ describe("ParsePool", () => {
     // `core-ingestion`, so those teardowns cannot crash. That one pool runs at
     // concurrency 2, so the file's exposure is a single teardown of two
     // addon-loaded threads, not the 21-thread pool the measured rate is quoted
-    // for -- exposed, but not comparably. `ingest-files.test.ts`, with 14 real
-    // ingests per process, is where this actually showed up.
+    // for -- exposed, but not comparably. `ingest-files.test.ts` is where this
+    // actually showed up; it drove ~9.5 real ingests per process when those
+    // crashes were seen, and 14 today.
     //
     // Asserted through a marker the worker writes when ASKED to go, because the
     // crash itself is probabilistic: a test that just tore pools down would
