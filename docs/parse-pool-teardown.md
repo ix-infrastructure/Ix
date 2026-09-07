@@ -44,7 +44,10 @@ pools of 2–3.
 | twenty teardowns per process | 19 of 28 runs crashed |
 | one teardown then exit | 5 of 40 |
 
-Both arms fit one rate: **6.3% per teardown, 95% CI 4.1–9.3%**. Pooling is
+Both arms fit one rate: **6.3% per POOL teardown, 95% CI 4.1–9.3%** — that
+is one teardown disposing all 21 of the pool's isolates, not one isolate. The
+per-isolate hazard is 0.31%; see the vitest section for why the difference
+matters. Pooling is
 licensed by asking whether the one-teardown arm contradicts the twenty-teardown
 arm's own rate (5.5%): `P(≥5 of 40 | p=0.055) = 0.067` — a failure to reject,
 borderline, not a demonstration of agreement.
@@ -124,9 +127,18 @@ it wrong once made this section claim a falsification it does not support.
 
 The 6.3% is per POOL teardown, and a pool disposes 21 isolates. The
 per-isolate hazard is therefore `1-(1-h)^21 = 0.063`, i.e. **h = 0.31%**.
-Tinypool terminates threads one at a time, so ~10 addon-loaded threads in a run
-is ~3% per run and `P(0 in 10 runs) = 0.73`; even at one per test file it is
-0.33. Nothing to explain.
+Tinypool terminates threads one at a time, and the number of addon-loaded
+threads per run is not something this was measured against — vitest sizes its
+pool to available parallelism, which was 21 on this machine, and 36 of the 38
+files import the index. Across that whole bracket the result is unremarkable:
+
+| addon-loaded threads per run | P(0 crashes in 10 runs) |
+|---|---|
+| 10 | 0.73 |
+| 21 (this machine's parallelism) | 0.52 |
+| 36 (one per importing file) | 0.33 |
+
+Nothing to explain at any of them.
 
 Mixing the two units — applying a per-pool rate to individual isolates — is the
 easiest error in this document to make, and the reason every rate here says

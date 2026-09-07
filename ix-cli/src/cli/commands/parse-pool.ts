@@ -190,7 +190,10 @@ export class ParsePool {
    * DO NOT add a `terminate()` fast path for workers that have never been
    * dispatched. They hold the addon too: `core-ingestion/src/index.ts`
    * resolves grammars at module scope, so a worker holds them from spawn
-   * rather than from its first parse, once its module evaluation completes.
+   * once its module evaluation completes, which it reaches on its own without
+   * ever being dispatched. (Not literally at spawn: there is a narrow
+   * addon-free window before that evaluation, which is why the one experiment
+   * appearing to exonerate undispatched workers is rejected -- see the doc.)
    * Not every grammar -- 15 of the 27 go
    * through null-returning helpers and can be absent -- but the core and the
    * twelve static ones are always there, which is the PRECONDITION the crash
@@ -209,7 +212,8 @@ export class ParsePool {
    *   worker calls process.exit(0)       0 of 6
    *
    * Per-consumer rates, the populations behind them and the statistics are in
-   * `docs/parse-pool-teardown.md` -- versioned, and not this file's history, which
+   * `docs/parse-pool-teardown.md` -- versioned, and not this file's history,
+   * which
    * still carries #598's retracted figures and, in the squashed body, every
    * superseded value next to its correction. They do not change the rule, and
    * keeping them consistent across three files proved to be its own source of
@@ -229,16 +233,16 @@ export class ParsePool {
    * boundaries, so it resolves only when the call returns on its own --
    * measured twice against ~4-4.5s of CPU-bound native work, at 3981ms and
    * 4457ms (two runs of the same experiment, not a discrepancy) -- making it
-   * slower AND crash-prone there. Only a JS-wedged worker dies promptly, in about 2ms.
+   * slower AND crash-prone there. Only a JS-wedged worker dies promptly, in
+   * about 2ms.
    *
    * Teardown does not need the thread to die. It needs the pool to stop
    * waiting on it and the thread to stop holding the process open, which is
    * exactly `unref()`. Measured on the real parse worker, four addon-loaded
    * threads left live and unref'd across process exit: 0 failures in 10 runs
-   * -- though that arm is four isolates in one teardown, so on its own it
-   * carries little: terminating four would be expected to fail about 1% of
-   * runs. The table above is twenty teardowns of a 21-worker pool and is not
-   * the comparison for it.
+   * -- though that arm is four isolates in one teardown, against a table of
+   * twenty teardowns of a 21-worker pool, so it carries little on its own.
+   * The doc works the exposures through.
    *
    * So the clocks below decide WHEN to give up, never whether it is safe to
    * kill -- and the `onError` path needs no special case either, which is what

@@ -1,6 +1,7 @@
 /**
  * Worker thread entry point for parallel file parsing.
- * Each worker maintains its own Parser singleton (safe — module state is per-thread).
+ * Each worker maintains its own Parser singleton (safe — module state is
+ * per-thread).
  * Receives: { filePath: string, source: string } | { __shutdown: true }
  * Posts:    { ok: true, result: FileParseResult } | { ok: false }
  */
@@ -34,16 +35,18 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  *
  * Whether it is as dangerous as a parsed one has never been measured: the one
  * arm that looked -- spawn-then-destroy, 0 of 120 -- tore its workers down
- * before they had loaded anything, so it measured a different population. `parse-pool.test.ts`
- * used to say the opposite -- "an untouched worker has not loaded the addon"
- * -- which is what made a `terminate()` fast path for undispatched workers
- * look safe. That is the claim being retracted; it was never in this file.
+ * before they had loaded anything, so it measured a different population.
  *
- * Rates, populations and the reasoning are in `docs/parse-pool-teardown.md`, which is
- * versioned and travels with a clone. Do not reconstruct them from this file's
- * history: `main` squash-merges, so the log here also carries #598, whose
- * figures this work retracts, and the squashed body concatenates every
- * superseded value beside its correction.
+ * `parse-pool.test.ts` used to say the opposite -- "an untouched worker has
+ * not loaded the addon" -- which is what made a `terminate()` fast path for
+ * undispatched workers look safe. That is the claim being retracted; it was
+ * never in this file.
+ *
+ * Rates, populations and the reasoning are in `docs/parse-pool-teardown.md`,
+ * which is versioned and travels with a clone. Do not reconstruct them from
+ * this file's history: `main` squash-merges, so the log here also carries
+ * #598, whose figures this work retracts, and the squashed body concatenates
+ * every superseded value beside its correction.
  *
  * They are deliberately not restated here. Keeping a statistical write-up
  * consistent across three source files produced more defects over successive

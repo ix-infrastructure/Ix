@@ -178,7 +178,10 @@ describe("ParsePool", () => {
     // `core-ingestion`, so their teardowns cannot crash. Deliberately no
     // tally: a count here goes stale the first time a test is added, with the
     // suite still green. And on the shipped build the
-    // exposure is zero everywhere, since nothing terminates a worker any more.
+    // exposure through `ParsePool` is zero, since nothing here terminates a
+    // worker any more. Not zero in the repo, though: `core-ingestion`'s own
+    // suite runs on vitest's threads pool, which terminates threads that have
+    // loaded the addon -- the doc covers that consumer.
     //
     // Asserted through a marker the worker writes when ASKED to go, because the
     // crash itself is probabilistic: a test that just tore pools down would
@@ -268,7 +271,8 @@ describe("ParsePool", () => {
     const pool = new ParsePool(path, 1, 100);
     pool.init();
     const parsing = pool.parse("slow.ts", "x");
-    // Destroy while it is mid-parse, so the first expiry lands on a BUSY worker.
+    // Destroy while it is mid-parse, so the first expiry lands on a BUSY
+    // worker.
     await new Promise(resolve => setTimeout(resolve, 50));
 
     const started = Date.now();
