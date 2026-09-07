@@ -190,7 +190,8 @@ export class ParsePool {
    * DO NOT add a `terminate()` fast path for workers that have never been
    * dispatched. They hold the addon too: `core-ingestion/src/index.ts`
    * resolves grammars at module scope, so a worker holds them from spawn
-   * rather than from its first parse. Not every grammar -- 15 of the 27 go
+   * rather than from its first parse, once its module evaluation completes.
+   * Not every grammar -- 15 of the 27 go
    * through null-returning helpers and can be absent -- but the core and the
    * twelve static ones are always there, which is the PRECONDITION the crash
    * needs. Whether it is also sufficient is unknown: spawn-then-destroy was
@@ -238,7 +239,9 @@ export class ParsePool {
    * waiting on it and the thread to stop holding the process open, which is
    * exactly `unref()`. Measured on the real parse worker, four addon-loaded
    * threads left live and unref'd across process exit: 0 failures in 10 runs,
-   * against the `terminate()` row of the table above.
+   * where `terminate()` at the SAME exposure -- one teardown -- would be
+   * expected to fail well under half the time. The table above is twenty
+   * teardowns per process and is not the comparison for this arm.
    *
    * So the clocks below decide WHEN to give up, never whether it is safe to
    * kill -- and the `onError` path needs no special case either, which is what
@@ -337,8 +340,8 @@ export class ParsePool {
         // loop alive, so the CLI exits, and nobody disposes an isolate that
         // still holds the addon. Measured on the real parse worker, four
         // addon-loaded threads left live and unref'd across process exit: 0
-        // failures in 10 runs, against the `terminate()` row in `shutdown`'s
-        // table above.
+        // failures in 10 runs. Note that is one teardown per run, so it is
+        // not comparable to `shutdown`'s twenty-teardown table.
         //
         // The cost is written up on `shutdown` above: a wedged worker survives
         // until the process exits. Nothing for the CLI, and `ix watch` runs

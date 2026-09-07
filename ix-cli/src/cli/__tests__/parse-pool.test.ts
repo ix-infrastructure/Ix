@@ -547,8 +547,9 @@ describe("ParsePool", () => {
     // crash. Not because parsing loads the addon: `index.ts` resolves
     // 27 grammars plus the core at module scope -- twelve by static import, the
     // rest eagerly through helpers -- so these threads hold those grammars
-    // from spawn. Many are optional and some required ones also load through
-    // null-returning helpers, so the guaranteed floor is the core plus the
+    // once their module evaluation completes. Many are optional, and exactly
+    // one required grammar (`tree-sitter-powershell`) also loads through a
+    // null-returning helper, so the guaranteed floor is the core plus the
     // statically imported grammars; the exact tally is in
     // `docs/parse-pool-teardown.md` rather than here.
     //

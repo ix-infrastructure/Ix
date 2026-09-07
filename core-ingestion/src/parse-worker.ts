@@ -21,9 +21,12 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * committed, summary printed, and a non-zero `$?` for anything that reads it.
  * If you are here because a clean `ix map` exited 139, this is it.
  *
- * NEVER-DISPATCHED WORKERS ARE NOT EXEMPT. The addon is held from SPAWN, not
- * from the first parse: `index.ts` resolves its grammars at module scope and
- * this file imports it statically. A worker that has parsed nothing still
+ * NEVER-DISPATCHED WORKERS ARE NOT EXEMPT. The addon is held from module
+ * EVALUATION, not from the first parse: `index.ts` resolves its grammars at
+ * module scope and this file imports it statically, so a worker reaches that
+ * state on its own without being dispatched. (Not literally from spawn --
+ * `index.ts` has top-level `await`, so there is a brief window after
+ * `new Worker()` holding nothing.) A worker that has parsed nothing still
  * holds the core and the twelve statically imported grammars. That is the
  * precondition the crash needs, so an undispatched worker is not known to be
  * safe to terminate. Workers that had parsed were the ones observed to crash

@@ -79,27 +79,45 @@ counts double; and `ingest-files.test.ts` is not uniformly 30 files — it calls
 crashes the most" is therefore false for several of the teardowns behind the
 data. This remains an open confound.
 
-**The addon is held from spawn, not from the first parse.**
+**The addon is held from module evaluation, not from the first parse.**
 `core-ingestion/src/index.ts` resolves grammars at module scope and
-`parse-worker.ts` imports it statically. A spawned worker always holds the core
+`parse-worker.ts` imports it statically, so a worker reaches that state on its
+own, without being dispatched. It is not literally "from spawn": `index.ts` has
+top-level `await`, so there is a brief window after `new Worker()` in which the
+thread holds nothing — reachable, since `init()` spawns eagerly and a throw
+during discovery can reach `destroy()` with no dispatch at all. Once evaluated,
+a worker holds the core
 plus the **twelve statically imported** grammars — not "13 required", because
 `tree-sitter-powershell` is a required dependency that nonetheless loads
 through a null-returning helper. That is the precondition the crash needs, so
 an undispatched worker is **not known to be safe to terminate**. Workers that
-had parsed were the ones observed to crash and spawn-then-destroy was not, but
-the mechanism was never isolated and the rate for undispatched workers was
-never measured.
+had parsed were the ones observed to crash and spawn-then-destroy was not — 6
+runs of twenty teardowns each, 0 crashes — but the mechanism was never
+isolated. Under the fitted rate that null result would be a 0.04% outcome,
+which is why it cannot simply be dismissed either; nobody has separated "no
+parse" from the other things that differ.
 
-**Known theoretical exposure that does not manifest.** `core-ingestion`'s own
-suite runs `vitest run --pool threads`, and 36 of its 38 test files import
-`./index.js`. Note the mechanism differs from the parse worker's: vitest's
-worker entry does not import `core-ingestion`, so a thread picks the addon up
-when it *evaluates* such a test file, not at spawn — a thread can be spawned
-and torn down having run none. Either way tinypool tears those threads down
-with `terminate()`, which is the exposed shape. Measured anyway: 0 segfault
-signatures in 10 local runs, and the `core-ingestion tests` CI step passes on
-all five matrix legs. Recorded so the next reader does not have to rediscover
-the question.
+**The strongest evidence against the harness rate transferring.**
+`core-ingestion`'s own suite runs `vitest run --pool threads`, and 36 of its 38
+test files import `./index.js`. The mechanism differs from the parse worker's:
+vitest's worker entry does not import `core-ingestion`, so a thread picks the
+addon up when it *evaluates* such a test file, not at spawn — a thread can be
+spawned and torn down having run none. Either way tinypool tears those threads
+down with `terminate()`, which is the exposed shape.
+
+Measured: **0 segfault signatures in 10 local runs**, and the `core-ingestion
+tests` CI step passes on all five matrix legs. Do not read that as
+reassurance — read it as a problem for the model. If the 6.3% harness rate
+applied here, then at even ~10 addon-loaded teardowns per run `P(0 crashes in
+10 runs)` is 1.5e-3, and at one teardown per test file it is ~1e-11. So either
+this is not the same shape as the harness, or holding the addon is nowhere
+near sufficient for the crash.
+
+That matters beyond bookkeeping: the "do not add a `terminate()` fast path"
+rule leans on the addon being the thing that makes termination dangerous. The
+rule still stands — the precondition is real and nobody has isolated what else
+is needed — but it stands on "not known to be safe", not on a rate anyone can
+quote for it.
 
 ## Superseded figures
 
