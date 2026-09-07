@@ -195,19 +195,22 @@ export class ParsePool {
    * That row is twenty teardowns per process in a minimal harness. The full
    * set, pre-fix build, pool of 21:
    *
-   *   minimal harness, ONE teardown then exit   5 of 40
-   *   minimal harness, twenty teardowns         5 of 6, 7 of 10, 7 of 12
-   *   a real `ix ingest` of 300 files           0 of 60
+   *   minimal harness, twenty teardowns   19 of 28 runs crashed
+   *   minimal harness, ONE teardown       5 of 40
+   *   a real `ix ingest` of 300 files     0 of 60
    *
-   * Like with like -- both single teardowns -- 5 of 40 against 0 of 60 is a
-   * real difference (Fisher exact p = 0.009), so a real ingest does behave
-   * differently from the harness. Why is not established, and it is NOT
-   * teardown count, since both are one. Do not rely on it.
+   * The two harness arms agree: pooled, the twenty-teardown runs imply ~5.5%
+   * per teardown, and 5 of 40 is consistent with that (P = 0.07). One rate,
+   * roughly 3-8%.
    *
-   * The twenty-teardown runs imply 8.6%, 5.8% and 4.3% per teardown against the
-   * single-teardown 12.5%; they disagree, so no per-command impact is claimed
-   * here. Two earlier revisions claimed one in each direction by quoting
-   * whichever estimate suited, and both were wrong.
+   * The real ingest does not fit it. 0 of 60 against the pooled rate has
+   * probability 0.033, and like-for-like at a single teardown, 5 of 40 vs 0 of
+   * 60 is Fisher exact p = 0.009. So an ingest behaves differently from the
+   * harness; WHY is unestablished, and it is NOT teardown count, since both are
+   * one. Do not rely on it.
+   *
+   * The user-visible signature is exit 139 after a successful ingest -- patches
+   * committed, summary printed, non-zero `$?`.
    *
    * What is solid: the crash is real and it reached the suite --
    * `ingest-files.test.ts` drives 14 real ingests per vitest process and

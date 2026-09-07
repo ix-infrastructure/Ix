@@ -175,15 +175,17 @@ describe("ParsePool", () => {
     //   terminate()                    5 of 6 runs died with SIGSEGV (139)
     //   worker closes its own port     0 of 6
     //
-    // The rest of the measurements, and what they do and do not support, are
-    // on `shutdown` in `parse-pool.ts`. Short version: no per-command impact is
-    // claimed, because the per-teardown estimates disagree (4.3-12.5%).
+    // The rest of the measurements are on `shutdown` in `parse-pool.ts`. Short
+    // version: the harness runs imply ~5.5% per teardown, and a real
+    // `ix ingest` was 0 of 60, which does not fit that rate for reasons
+    // nobody has established.
     //
     // This file has exactly ONE addon-loaded teardown per process: of the 13
     // pools in it -- four above this line, nine below -- only the real-worker
     // test loads the bindings, and an un-addon'd worker is not the crashing
-    // case. So it is exposed once, not thirteen times and not zero. `ingest-files.test.ts`, with 14 real ingests
-    // per process, is where this actually showed up.
+    // case. So it is exposed once, not thirteen times and not zero.
+    // `ingest-files.test.ts`, with 14 real ingests per process, is where this
+    // actually showed up.
     //
     // Asserted through a marker the worker writes when ASKED to go, because the
     // crash itself is probabilistic: a test that just tore pools down would
@@ -207,8 +209,11 @@ describe("ParsePool", () => {
 
     const pool = new ParsePool(path, 2);
     pool.init();
-    // Parse first: an untouched worker has not loaded the addon, and it is the
-    // loaded-then-idle thread that crashes.
+    // Parse first. Not because an untouched worker lacks the addon -- it has
+    // it, since `index.ts` imports tree-sitter and its grammars statically, so
+    // every spawned worker dlopens them -- but because having PARSED is what
+    // was observed to arm the crash: spawn-then-destroy with no parse did not
+    // reproduce it.
     await Promise.all([pool.parse("a.ts", "x"), pool.parse("b.ts", "x")]);
     await pool.destroy();
 
@@ -289,8 +294,8 @@ describe("ParsePool", () => {
     // that looks idle and unresponsive and abandons it -- one that was about to
     // answer. Under the old `terminate()` this was the segfault itself; the
     // pool unrefs now, so the cost is a lost parse result rather than the
-    // process, and it is still wrong. (No rate quoted on purpose -- the
-    // per-teardown estimates disagree; see the note at the top of this file.)
+    // process, and it is still wrong. (The rate is quoted once, in
+    // `parse-pool.ts`, not repeated here.)
     //
     // The timings are chosen so the two rules give different answers, which is
     // the only way to catch this. Grace 300ms, so ticks land at 300/600/900. A
@@ -546,7 +551,8 @@ describe("ParsePool", () => {
     const pool = new ParsePool(real, 2, 10000);
     pool.init();
     // Parse for real, so the threads have the tree-sitter addon loaded -- an
-    // untouched worker does not, and it is the loaded-then-idle thread that
+    // untouched worker has parsed nothing, and it is the parsed-then-idle
+    // thread that
     // crashes under `terminate()`.
     const results = await Promise.all([
       pool.parse("a.ts", "export function a(): number { return 1; }"),

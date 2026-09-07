@@ -17,46 +17,52 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * process -- the parses need not even be in flight, an idle worker that has
  * parsed once is enough.
  *
- * How often: no per-command figure is claimed, because the runs do not pin
- * one. Measured on the pre-fix build, Windows / Node 26, pool of 21:
+ * The signature, which was never in dispute: exit 139 after a completely
+ * successful ingest -- patches committed, summary printed, and a non-zero `$?`
+ * for anything that reads it. If you are here because a clean `ix map` exited
+ * 139, this is it.
  *
- *   minimal harness, ONE teardown then exit     5 of 40
- *   minimal harness, twenty teardowns           5 of 6, 7 of 10, 7 of 12
- *   a real `ix ingest` of 300 files             0 of 60
+ * How often, measured on the pre-fix build (Windows / Node 26, pool of 21):
  *
- * Two things the numbers do say. Comparing like with like -- both single
- * teardowns -- 5 of 40 against 0 of 60 is a real difference (Fisher exact
- * p = 0.009), so a real ingest is not simply the harness with a CLI around it.
- * WHY is not established, and it is not teardown count, because both are one.
- * Do not rely on the difference.
+ *   minimal harness, twenty teardowns per process   19 of 28 runs crashed
+ *   minimal harness, ONE teardown then exit          5 of 40
+ *   a real `ix ingest` of 300 files                  0 of 60
  *
- * And the twenty-teardown runs imply 8.6%, 5.8% and 4.3% per teardown, against
- * 12.5% from the single-teardown runs. Those disagree, so quoting any one of
- * them as "the" rate -- in either direction -- is picking a number to suit an
- * argument. Two earlier versions of this comment did exactly that.
+ * Pooling the twenty-teardown runs gives about 5.5% per teardown, and the
+ * single-teardown arm (12.5%) is consistent with that once the sample sizes are
+ * taken seriously -- P(>=5 of 40 | p=0.055) = 0.07. So there is ONE harness
+ * rate, roughly 3-8%, not the four contradictory ones an earlier revision of
+ * this comment claimed in order to argue no rate could be quoted.
  *
- * The ingests really did parse, so 0 of 60 is not a silently broken addon.
- * Both counters that could hide one read zero, and they catch different things:
+ * The real ingest is the outlier. Against the pooled rate, 0 of 60 has
+ * probability 0.033, and compared like with like -- harness and ingest both at
+ * a single teardown -- 5 of 40 against 0 of 60 gives Fisher exact p = 0.009. It
+ * really does behave differently, WHY is not established, and it is not
+ * teardown count, because both are one. Do not rely on the difference.
  *
- *   - `parseError: 0`. The `tree-sitter` import in `index.ts` is STATIC, so a
- *     worker whose bindings failed would throw during module evaluation, never
- *     reach `parseFile`, and die -- which `ParsePool` counts as a crashed parse
- *     and `ingestFiles` folds into the reported figure
- *     (`parseErrors + crashedParses()`). A bindings failure shows up here.
- *   - `unparsed: 0`. That covers the quieter case, a parse that returns null
- *     because an optional grammar is absent.
- *
- * The graph also held 300 classes and 300 functions. An earlier revision of
- * this comment said a bindings failure would land in `filesSkippedUnparsed`
- * and "never in `parseErrors`" -- that is the null-returning grammar case, not
- * this one, and it had the counter backwards.
+ * Those ingests genuinely parsed, so 0 of 60 is not a silently broken addon.
+ * A bindings failure would move BOTH counters and both read zero: the workers
+ * die at module evaluation, which raises the reported `parseError`
+ * (`parseErrors + crashedParses()`), and their tasks resolve null, which raises
+ * `unparsed`. They are not disjoint -- an earlier revision said they "catch
+ * different things", and `ingest.ts` says the opposite in as many words. What
+ * `unparsed` catches ALONE is the quieter case of a healthy worker returning
+ * null because an optional grammar is absent. The graph also held 300 classes
+ * and 300 functions.
  *
  * What is established: the crash is real, reproducible, and it reached the
  * suite. `ingest-files.test.ts` drives 14 real ingests per vitest process and
  * produced it as an intermittent "Worker exited unexpectedly". The MCP server's
  * in-process runner (`createInProcessRunner`, the default unless
  * IX_MCP_SUBPROCESS=1) has that same many-pools-in-one-process shape, which is
- * why it is named here; it was not measured.
+ * why it is named; it was not measured.
+ *
+ * Note the addon is loaded at SPAWN, not at first parse: the `tree-sitter`
+ * import and its twelve grammars are static in `index.ts`, and this file
+ * statically imports that. Every spawned worker holds it. Parsing still seems
+ * to be what arms the crash -- spawn-then-destroy without any parse did not
+ * reproduce it (0 of 6) -- but do not treat a never-dispatched worker as
+ * addon-free.
  *
  * Closing the port from INSIDE lets the thread unwind its own event loop and
  * dispose its isolate in order. Measured 0 crashes in the same experiment.
