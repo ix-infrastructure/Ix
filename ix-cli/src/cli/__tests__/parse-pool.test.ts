@@ -176,16 +176,17 @@ describe("ParsePool", () => {
     //   worker closes its own port     0 of 6
     //
     // The rest of the measurements are on `shutdown` in `parse-pool.ts`. Short
-    // version: the harness runs imply ~5.5% per teardown, and a real
-    // `ix ingest` was 0 of 60, which does not fit that rate for reasons
-    // nobody has established.
+    // version: the harness runs fit ~6.3% per teardown, and a real `ix ingest`
+    // was 0 of 60, which does not fit that rate for reasons nobody has
+    // established.
     //
-    // This file has exactly ONE addon-loaded teardown per process: of the 13
-    // pools in it -- four above this line, nine below -- only the real-worker
-    // test loads the bindings, and an un-addon'd worker is not the crashing
-    // case. So it is exposed once, not thirteen times and not zero.
-    // `ingest-files.test.ts`, with 14 real ingests per process, is where this
-    // actually showed up.
+    // Only ONE pool in this file loads the addon -- the real-worker test near
+    // the bottom. Every other fixture here is an inline .mjs that never imports
+    // `core-ingestion`, so those teardowns cannot crash. That one pool runs at
+    // concurrency 2, so the file's exposure is a single teardown of two
+    // addon-loaded threads, not the 21-thread pool the measured rate is quoted
+    // for -- exposed, but not comparably. `ingest-files.test.ts`, with 14 real
+    // ingests per process, is where this actually showed up.
     //
     // Asserted through a marker the worker writes when ASKED to go, because the
     // crash itself is probabilistic: a test that just tore pools down would
@@ -209,11 +210,12 @@ describe("ParsePool", () => {
 
     const pool = new ParsePool(path, 2);
     pool.init();
-    // Parse first. Not because an untouched worker lacks the addon -- it has
-    // it, since `index.ts` imports tree-sitter and its grammars statically, so
-    // every spawned worker dlopens them -- but because having PARSED is what
-    // was observed to arm the crash: spawn-then-destroy with no parse did not
-    // reproduce it.
+    // Parse first so the worker is idle-after-work, which is the state
+    // `destroy()` meets in a real run. Note this fixture is an inline .mjs that
+    // never imports `core-ingestion`, so no addon is loaded here and the crash
+    // itself cannot occur -- what is pinned is the MECHANISM, that the pool
+    // asks rather than terminates. The real-worker test lower down is the one
+    // that runs against the addon.
     await Promise.all([pool.parse("a.ts", "x"), pool.parse("b.ts", "x")]);
     await pool.destroy();
 
@@ -294,8 +296,7 @@ describe("ParsePool", () => {
     // that looks idle and unresponsive and abandons it -- one that was about to
     // answer. Under the old `terminate()` this was the segfault itself; the
     // pool unrefs now, so the cost is a lost parse result rather than the
-    // process, and it is still wrong. (The rate is quoted once, in
-    // `parse-pool.ts`, not repeated here.)
+    // process, and it is still wrong.
     //
     // The timings are chosen so the two rules give different answers, which is
     // the only way to catch this. Grace 300ms, so ticks land at 300/600/900. A
@@ -550,10 +551,11 @@ describe("ParsePool", () => {
     // bound by a factor of three, on any runner.
     const pool = new ParsePool(real, 2, 10000);
     pool.init();
-    // Parse for real, so the threads have the tree-sitter addon loaded -- an
-    // untouched worker has parsed nothing, and it is the parsed-then-idle
-    // thread that
-    // crashes under `terminate()`.
+    // Parse for real, because having PARSED is what was observed to arm the
+    // crash. Not because parsing loads the addon: `index.ts` imports
+    // tree-sitter and its grammars statically, so these threads hold it from
+    // spawn. It is the parsed-then-idle thread that crashed under
+    // `terminate()`; spawn-then-destroy with no parse did not.
     const results = await Promise.all([
       pool.parse("a.ts", "export function a(): number { return 1; }"),
       pool.parse("b.ts", "export function b(): number { return 2; }"),

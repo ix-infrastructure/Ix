@@ -28,11 +28,13 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  *   minimal harness, ONE teardown then exit          5 of 40
  *   a real `ix ingest` of 300 files                  0 of 60
  *
- * Pooling the twenty-teardown runs gives about 5.5% per teardown, and the
- * single-teardown arm (12.5%) is consistent with that once the sample sizes are
- * taken seriously -- P(>=5 of 40 | p=0.055) = 0.07. So there is ONE harness
- * rate, roughly 3-8%, not the four contradictory ones an earlier revision of
- * this comment claimed in order to argue no rate could be quoted.
+ * The two arms agree once the sample sizes are taken seriously: the
+ * single-teardown arm's point estimate is 12.5%, but P(>=5 of 40 | p=0.055) is
+ * 0.07, so it is not evidence against the twenty-teardown arm. Fitting both
+ * together gives a per-teardown rate of 6.3%, 95% CI 4.1-9.3% (the
+ * twenty-teardown arm alone gives 5.5%, CI 3.4-8.5%). One rate, not the four
+ * contradictory ones an earlier revision claimed in order to argue that no rate
+ * could be quoted at all.
  *
  * The real ingest is the outlier. Against the pooled rate, 0 of 60 has
  * probability 0.033, and compared like with like -- harness and ingest both at
@@ -44,10 +46,13 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * A bindings failure would move BOTH counters and both read zero: the workers
  * die at module evaluation, which raises the reported `parseError`
  * (`parseErrors + crashedParses()`), and their tasks resolve null, which raises
- * `unparsed`. They are not disjoint -- an earlier revision said they "catch
- * different things", and `ingest.ts` says the opposite in as many words. What
- * `unparsed` catches ALONE is the quieter case of a healthy worker returning
- * null because an optional grammar is absent. The graph also held 300 classes
+ * `unparsed`. Be precise about which counter: the RAW `parseErrors` variable
+ * and `filesSkippedUnparsed` are disjoint, which is exactly what
+ * `ingest.ts:3482` says and why the summary adds `+ crashedParses()`. It is the
+ * REPORTED `parseError` field that a dead pool moves, so it is that field which
+ * rules a bindings failure out. What `unparsed` catches ALONE is the quieter
+ * case of a healthy worker returning null because an optional grammar is
+ * absent. The graph also held 300 classes
  * and 300 functions.
  *
  * What is established: the crash is real, reproducible, and it reached the
@@ -61,8 +66,9 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * import and its twelve grammars are static in `index.ts`, and this file
  * statically imports that. Every spawned worker holds it. Parsing still seems
  * to be what arms the crash -- spawn-then-destroy without any parse did not
- * reproduce it (0 of 6) -- but do not treat a never-dispatched worker as
- * addon-free.
+ * reproduce it in 6 runs of TWENTY teardowns each, where the fitted rate
+ * predicts a crash in all but ~0.1% of such runs -- but do not treat a
+ * never-dispatched worker as addon-free.
  *
  * Closing the port from INSIDE lets the thread unwind its own event loop and
  * dispose its isolate in order. Measured 0 crashes in the same experiment.

@@ -199,9 +199,9 @@ export class ParsePool {
    *   minimal harness, ONE teardown       5 of 40
    *   a real `ix ingest` of 300 files     0 of 60
    *
-   * The two harness arms agree: pooled, the twenty-teardown runs imply ~5.5%
-   * per teardown, and 5 of 40 is consistent with that (P = 0.07). One rate,
-   * roughly 3-8%.
+   * The two harness arms agree: 5 of 40 is not evidence against the
+   * twenty-teardown arm (P = 0.07), and fitting both gives 6.3% per teardown,
+   * 95% CI 4.1-9.3%.
    *
    * The real ingest does not fit it. 0 of 60 against the pooled rate has
    * probability 0.033, and like-for-like at a single teardown, 5 of 40 vs 0 of
