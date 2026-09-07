@@ -28,7 +28,12 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  *   MINIMAL HARNESS (pool of 21, nothing else in the process)
  *     twenty teardowns per process        19 of 28 runs crashed
  *     one teardown then exit               5 of 40
- *     -> fitting both: 6.3% per teardown, 95% CI 4.1-9.3%
+ *     -> fitting both: 6.3% per teardown, 95% CI 4.1-9.3%. Pooling is
+ *        licensed by the consistency check, which belongs here and not only
+ *        in the PR: P(>=5 of 40 | p=0.055) = 0.07, so the single-teardown
+ *        arm's own point estimate of 12.5% is sampling noise against the
+ *        other arm rather than a second rate -- which is why it falls
+ *        outside the interval just quoted.
  *
  *   REAL INGESTS (`ingest-files.test.ts` under vitest, ~9.5 ingests per
  *   process at the time; it drives 14 today)
@@ -51,24 +56,34 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * are the ones tied to ~9.5, so multiply back up rather than re-dividing 2 of
  * 75 by 14.
  *
- * Load also accounts for most of the harness/real gap: the harness is 22x the
- * idle rate but only 3.1x the loaded one. What remains unexplained is that 3.1x,
- * not the 22x an earlier revision of this comment made much of.
+ * Do NOT read the loaded rate as subtracting load from the harness/real gap.
+ * The harness's own load state was never varied -- those runs are the quiet
+ * arm -- so the only load-matched comparison available is idle against idle,
+ * and that is the 22x. Against the loaded real rate it is 3.1x, but that mixes
+ * conditions: if load raises the rate, as it plainly does here, a loaded
+ * harness would sit above 6.3% and the true gap would be wider. Treat 3.1x as
+ * a lower bound on what is unexplained, not the residue after removing load.
+ * An earlier revision of this comment claimed the latter.
  *
  * Parses per worker is NOT controlled anywhere, and counting it properly turns
  * it from a threat into a second argument. `ingestFiles` parses a `.ts` file
  * TWICE -- once in the index prescan and once in the streaming loop, both on
  * this pool -- so a 30-file ingest dispatches ~60 tasks, not 30. Over a
  * 21-worker pool that is ~2.9 per worker for the vitest fixture and ~28.6 for
- * the 300-file `ix ingest`, against ~1.4 for the harness, which does no
- * prescan.
+ * the `ix ingest` measurement, against ~1.4 for the harness, which does no
+ * prescan. Both fixtures were entirely `.ts`, so the doubling applies to every
+ * file in them; on a mixed repo only the extensions in `PARSER_DERIVED_PRESCAN`
+ * are parsed twice and the figure falls toward the single-parse count.
  *
- * So the harness parses the LEAST per worker and crashes the most, by 22x. If
- * exposure grew with parses per worker the ordering would be the other way
- * round, which makes it an unlikely explanation for the gap rather than an
- * uncontrolled one. It is still uncontrolled between the two real-ingest
- * datasets (2.9 against 28.6), and there the same reasoning applies: the CLI
- * parses ten times more per worker and crashed zero times in 60.
+ * So the harness parses the LEAST per worker and crashes the most, by 22x --
+ * the wrong ordering for parses-per-worker to be the explanation. That
+ * comparison is between the harness and the idle vitest arm, both of which
+ * have enough runs to carry it.
+ *
+ * It does NOT extend to the 2.9-against-28.6 pair. 0 of 60 has little power
+ * there: even if the rate scaled fully with parses per worker, P(zero in 60)
+ * would still be about 0.18. The variable stays uncontrolled between the two
+ * real-ingest datasets; it is simply not evidence either way.
  *
  * So the harness overstates real exposure -- 22x against an idle machine, 3.1x
  * against a loaded one -- and the CLI result is not the anomaly it looks like
@@ -106,22 +121,25 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * worker. Up to, because 14 of the 27 are optional dependencies that load
  * through helpers returning null when absent: the Windows machine these
  * numbers came from has no `tree-sitter-sas` prebuild, and an
- * `--omit=optional` install holds only the 13 required grammars. The floor is
- * what matters for the conclusion -- a spawned worker always holds the core
- * and a dozen-odd grammars, never zero. Parsing still
+ * `--omit=optional` install holds only the 13 required grammars -- twelve
+ * static plus `tree-sitter-powershell`, which is required but happens to load
+ * through the same optional-tolerant helper. The floor is what matters for the
+ * conclusion: a spawned worker always holds the core and those thirteen, never
+ * zero. Parsing still
  * seems to be what arms the crash -- spawn-then-destroy with no parse did not
  * reproduce it in 6 runs of twenty teardowns, an outcome the fitted rate makes
  * a 0.04% event ACROSS the six (per single run it predicts 27% clean, so one
  * clean run would mean nothing).
  *
  * That experiment is confounded, though, and the inference is weaker than it
- * looks: four of those grammar loads are TOP-LEVEL `await`, so a worker's
- * module evaluation is still suspended for a moment after spawn and its
- * `message` handler is not yet registered. A worker destroyed in that window
- * could not answer `__shutdown` and may not have finished loading either, so
- * "no parse" and "not fully loaded" are not separated. Treat "parsing arms it"
- * as unproven, and certainly not as a licence to terminate a never-dispatched
- * worker.
+ * looks. It ran against the PRE-FIX build, where `destroy()` was an
+ * unconditional `terminate()` and `__shutdown` did not exist, so nothing was
+ * ever asked and message-handler timing is beside the point. What does matter
+ * is that four grammar loads are TOP-LEVEL `await`: a worker spawned and
+ * destroyed in the same breath may still have been mid-evaluation, holding
+ * fewer addons -- or none -- when it was terminated. So "no parse" and "not
+ * fully loaded" are not separated. Treat "parsing arms it" as unproven, and
+ * certainly not as a licence to terminate a never-dispatched worker.
  *
  * Closing the port from INSIDE lets the thread unwind its own event loop and
  * dispose its isolate in order. Measured 0 crashes in the same experiment.

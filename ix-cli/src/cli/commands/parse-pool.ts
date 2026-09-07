@@ -211,14 +211,16 @@ export class ParsePool {
    * over that file's 14 ingests gives 3.9% of processes when idle and 25% when
    * loaded; the idle figure understates a CI leg by 6.5x.
    *
-   * Load also explains most of the harness/real gap: the harness is 22x the
-   * idle rate but only 3.1x the loaded one, and it is that 3.1x which is
-   * unexplained. It is not pool size -- 21 in both -- nor teardown count. Nor,
+   * The loaded rate does not subtract load from the gap: the harness was never
+   * run loaded, so idle-against-idle (22x) is the only load-matched
+   * comparison, and the 3.1x against the loaded real rate mixes conditions --
+   * a lower bound on the gap, not the residue. It is not pool size -- 21 in both -- nor teardown count. Nor,
    * on the evidence, parses per worker: `ingestFiles` parses a `.ts` file twice
-   * (prescan and streaming loop), so the vitest fixture is ~2.9 per worker and
-   * the 300-file `ix ingest` ~28.6, against ~1.4 for the harness. The harness
-   * parses the least and crashes the most, which is the wrong way round for
-   * that to be the cause. Both rates are per teardown of a 21-worker pool, so
+   * (prescan and streaming loop), so the all-`.ts` vitest fixture is ~2.9 per
+   * worker and the all-`.ts` 300-file `ix ingest` ~28.6, against ~1.4 for the
+   * harness. The harness parses the least and crashes the most, which is the
+   * wrong way round for that to be the cause -- though 0 of 60 has too little
+   * power to say anything about the 2.9-against-28.6 pair. Both rates are per teardown of a 21-worker pool, so
    * neither carries to another size.
    *
    * The user-visible signature is exit 139 after a successful ingest -- patches
