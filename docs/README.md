@@ -4,3 +4,4 @@
 - [`--format llm` output convention](llm-format.md) — the machine-readable record stream
 - [Consolidating the per-host plugins onto `ix mcp`](mcp-plugin-consolidation.md)
 - [System prerequisites](prerequisites.md) — what the installer checks for and installs
+- [Parse-pool teardown](parse-pool-teardown.md) — why nothing calls `terminate()`, and what was measured

@@ -16,7 +16,12 @@ completely successful ingest** — patches committed, summary printed, and a
 non-zero `$?` for anything that reads it.
 
 The comparison that settles the verb, twenty pool teardowns per process, six
-runs each:
+runs of each variant. Those six `terminate()` runs are **not a separate
+experiment**: they are one of the three arms pooled into the 19-of-28 figure
+below (7 of 12, 7 of 10, and these 5 of 6). Read on their own they imply 8.6%
+per teardown, which is close to the retracted "one in twelve" — that is the
+hazard of quoting a single arm, and the reason the fit below uses all of
+them.
 
 | teardown | result |
 |---|---|
@@ -86,11 +91,15 @@ the mechanism was never isolated and the rate for undispatched workers was
 never measured.
 
 **Known theoretical exposure that does not manifest.** `core-ingestion`'s own
-suite runs `vitest run --pool threads` and 36 of its 38 test files import
-`./index.js`, so every vitest worker thread holds the addon from spawn and
-tinypool tears those threads down. Measured anyway: 0 segfault signatures in 10
-local runs, and the `core-ingestion tests` CI step passes on all five matrix
-legs. Recorded so the next reader does not have to rediscover the question.
+suite runs `vitest run --pool threads`, and 36 of its 38 test files import
+`./index.js`. Note the mechanism differs from the parse worker's: vitest's
+worker entry does not import `core-ingestion`, so a thread picks the addon up
+when it *evaluates* such a test file, not at spawn — a thread can be spawned
+and torn down having run none. Either way tinypool tears those threads down
+with `terminate()`, which is the exposed shape. Measured anyway: 0 segfault
+signatures in 10 local runs, and the `core-ingestion tests` CI step passes on
+all five matrix legs. Recorded so the next reader does not have to rediscover
+the question.
 
 ## Superseded figures
 

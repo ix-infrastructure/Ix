@@ -174,10 +174,10 @@ describe("ParsePool", () => {
     // `../commands/parse-pool.ts`; rates and populations are in
     // `docs/parse-pool-teardown.md`, not restated here. What matters
     // for this file: only the real-worker test near the bottom loads the
-    // addon. Every other pool here is built on an inline `.mjs` fixture that
-    // never imports `core-ingestion`, so its teardowns cannot crash. Stated
-    // without counts on purpose -- a census in a comment goes stale the first
-    // time a test is added, with the suite still green. And on the shipped build the
+    // addon; pools built on the inline `.mjs` fixtures never import
+    // `core-ingestion`, so their teardowns cannot crash. Deliberately no
+    // tally: a count here goes stale the first time a test is added, with the
+    // suite still green. And on the shipped build the
     // exposure is zero everywhere, since nothing terminates a worker any more.
     //
     // Asserted through a marker the worker writes when ASKED to go, because the

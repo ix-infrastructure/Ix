@@ -193,8 +193,10 @@ export class ParsePool {
    * rather than from its first parse. Not every grammar -- 15 of the 27 go
    * through null-returning helpers and can be absent -- but the core and the
    * twelve static ones are always there, which is the PRECONDITION the crash
-   * needs. Necessary, not sufficient: spawn-then-destroy was observed not to
-   * crash, so holding the addon is not on its own enough.
+   * needs. Whether it is also sufficient is unknown: spawn-then-destroy was
+   * observed not to crash, but with too small a sample to establish either
+   * safety or insufficiency -- the inference is symmetric, and reading it
+   * either way is the over-claim this comment exists to avoid.
    *
    * One experiment did find that workers which had parsed crashed while
    * spawn-then-destroy did not, and it is tempting to read a safe fast path
@@ -227,15 +229,16 @@ export class ParsePool {
    * rule had a counterexample, because `terminate()` is simply the wrong verb
    * for teardown. It is what segfaults. Against a worker inside a native call
    * it does not even preempt: V8's termination interrupt is only checked at JS
-   * boundaries, so it resolves when the call returns on its own (3981ms
-   * against ~4s of CPU-bound native work, measured), making it slower AND
-   * crash-prone there. Only a JS-wedged worker dies promptly, in about 2ms.
+   * boundaries, so it resolves only when the call returns on its own --
+   * measured twice against ~4-4.5s of CPU-bound native work, at 3981ms and
+   * 4457ms (two runs of the same experiment, not a discrepancy) -- making it
+   * slower AND crash-prone there. Only a JS-wedged worker dies promptly, in about 2ms.
    *
    * Teardown does not need the thread to die. It needs the pool to stop
    * waiting on it and the thread to stop holding the process open, which is
    * exactly `unref()`. Measured on the real parse worker, four addon-loaded
    * threads left live and unref'd across process exit: 0 failures in 10 runs,
-   * against 5 of 6 for `terminate()`.
+   * against the `terminate()` row of the table above.
    *
    * So the clocks below decide WHEN to give up, never whether it is safe to
    * kill -- and the `onError` path needs no special case either, which is what
@@ -328,13 +331,14 @@ export class ParsePool {
         // `terminate()` was the wrong verb for this whole branch. It is what
         // segfaults -- that is the bug this file exists to fix -- and against a
         // worker inside a native call it does not even preempt: it resolves
-        // when the call returns (4457ms against ~4.5s of work, measured), so it
-        // was strictly slower AND crash-prone there. `unref()` gives the only
+        // only when the call returns, so it was strictly slower AND
+        // crash-prone there (the timings are on `shutdown` above). `unref()` gives the only
         // thing teardown actually needs: the thread stops keeping the event
         // loop alive, so the CLI exits, and nobody disposes an isolate that
         // still holds the addon. Measured on the real parse worker, four
         // addon-loaded threads left live and unref'd across process exit: 0
-        // failures in 10 runs, against 5 of 6 for `terminate()`.
+        // failures in 10 runs, against the `terminate()` row in `shutdown`'s
+        // table above.
         //
         // The cost is written up on `shutdown` above: a wedged worker survives
         // until the process exits. Nothing for the CLI, and `ix watch` runs
