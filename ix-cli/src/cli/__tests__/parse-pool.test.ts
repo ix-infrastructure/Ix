@@ -176,11 +176,14 @@ describe("ParsePool", () => {
     //   worker closes its own port     0 of 6
     //
     // The rest of the measurements are on `shutdown` in `parse-pool.ts`. Short
-    // version: the minimal harness fits ~6.3% per teardown; real ingests are
-    // 0.28% on an idle machine and 2.1% on a loaded one. Plan against the
-    // loaded figure: for `ingest-files.test.ts` that is ~25% of processes
-    // rather than ~4%, and CI is the loaded case. Those numbers are that
-    // file's, not this one's -- see below for what this file is exposed to.
+    // version, all of it measured on the PRE-FIX build: the minimal harness
+    // fits ~6.3% per teardown; real ingests 0.28% idle and 2.1% loaded. Plan
+    // against the loaded figure -- for `ingest-files.test.ts` that was ~25% of
+    // processes rather than ~4%, and CI is the loaded case.
+    //
+    // On the SHIPPED build all of those are zero, here and everywhere, because
+    // nothing terminates a worker any more. The numbers describe what the bug
+    // did, not a flake budget to hunt for now.
     //
     // Only ONE pool in this file loads the addon -- the real-worker test near
     // the bottom. Every other fixture here is an inline .mjs that never imports
@@ -559,8 +562,9 @@ describe("ParsePool", () => {
     // 27 grammars plus the core at module scope -- twelve by static import, the
     // rest eagerly through helpers, four of them by top-level `await` -- so
     // these threads hold up to 28 addons from spawn (14 of the 27 grammars are
-    // optional and may be absent; the core and the 13 required ones never
-    // are).
+    // optional; `tree-sitter-powershell` is required but loads through the
+    // same tolerant helper and can be absent too, so the guaranteed floor is
+    // the core plus the twelve STATIC grammars -- never zero).
     //
     // The parsed-then-idle thread is what was observed to crash under
     // `terminate()` while spawn-then-destroy was not -- but that inference is

@@ -185,7 +185,16 @@ export class ParsePool {
    * that has loaded the tree-sitter native bindings segfaults the process. The
    * thread does not have to be busy: an idle worker that has parsed a single
    * file is enough, because the crash is in disposing an isolate that still
-   * holds the addon. Measured on Windows/Node 26, twenty pool teardowns per
+   * holds the addon.
+   *
+   * DO NOT add a `terminate()` fast path for workers that have never been
+   * dispatched. They hold the addon too: `core-ingestion/index.ts` resolves
+   * every grammar at module scope, so a worker holds them from spawn rather
+   * than from its first parse. Having parsed did correlate with the crash in
+   * one experiment, but that experiment is confounded and `parse-worker.ts`
+   * retracts the inference -- see there. This is the file where such a fast
+   * path would be written, which is why the warning lives here and not only
+   * in the tests. Measured on Windows/Node 26, twenty pool teardowns per
    * process, six runs each:
    *
    *   terminate()                        5 of 6 runs died with SIGSEGV (139)
@@ -214,13 +223,17 @@ export class ParsePool {
    * The loaded rate does not subtract load from the gap: the harness was never
    * run loaded, so idle-against-idle (22x) is the only load-matched
    * comparison, and the 3.1x against the loaded real rate mixes conditions --
-   * a lower bound on the gap, not the residue. It is not pool size -- 21 in both -- nor teardown count. Nor,
+   * a lower bound on the gap, not the residue.
+   *
+   * It is not pool size -- 21 in both -- nor teardown count. Nor,
    * on the evidence, parses per worker: `ingestFiles` parses a `.ts` file twice
    * (prescan and streaming loop), so the all-`.ts` vitest fixture is ~2.9 per
    * worker and the all-`.ts` 300-file `ix ingest` ~28.6, against ~1.4 for the
    * harness. The harness parses the least and crashes the most, which is the
    * wrong way round for that to be the cause -- though 0 of 60 has too little
-   * power to say anything about the 2.9-against-28.6 pair. Both rates are per teardown of a 21-worker pool, so
+   * power to say anything about the 2.9-against-28.6 pair.
+   *
+   * Both rates are per teardown of a 21-worker pool, so
    * neither carries to another size.
    *
    * The user-visible signature is exit 139 after a successful ingest -- patches

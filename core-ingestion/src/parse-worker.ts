@@ -50,7 +50,7 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * 7.3x above is the per-teardown ratio; these are per-process). The loaded
  * figure rests on 9 of 50 processes, so its 95% interval is wide: 12%-43% once
  * rolled up. Wide, and still an order above the idle case -- Fisher exact on
- * 2/75 against 9/50 is p = 0.006.
+ * 2/75 against 9/50 is p = 0.007 two-sided (0.004 one-sided).
  *
  * The per-teardown rate is the portable quantity; the per-process counts
  * are the ones tied to ~9.5, so multiply back up rather than re-dividing 2 of
@@ -121,11 +121,13 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * worker. Up to, because 14 of the 27 are optional dependencies that load
  * through helpers returning null when absent: the Windows machine these
  * numbers came from has no `tree-sitter-sas` prebuild, and an
- * `--omit=optional` install holds only the 13 required grammars -- twelve
- * static plus `tree-sitter-powershell`, which is required but happens to load
- * through the same optional-tolerant helper. The floor is what matters for the
- * conclusion: a spawned worker always holds the core and those thirteen, never
- * zero. Parsing still
+ * `--omit=optional` install holds only the 13 required grammars. But the
+ * guaranteed floor is lower still: `tree-sitter-powershell` is a required
+ * dependency that nonetheless loads through the optional-tolerant helper, so
+ * it is null wherever it has no prebuild -- and it is simply absent from this
+ * checkout. What a spawned worker is ALWAYS holding is the core plus the
+ * twelve STATIC grammars. That is the number the conclusion needs, and it is
+ * never zero. Parsing still
  * seems to be what arms the crash -- spawn-then-destroy with no parse did not
  * reproduce it in 6 runs of twenty teardowns, an outcome the fitted rate makes
  * a 0.04% event ACROSS the six (per single run it predicts 27% clean, so one
