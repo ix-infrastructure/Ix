@@ -27,6 +27,21 @@ const importViaFunction = new Function(
 ) as (specifier: string) => Promise<any>;
 
 /**
+ * Is this "this host cannot do dynamic import", as opposed to any other error?
+ *
+ * Exported for its test. The shapes it has to accept are not guessable, which
+ * is why that test derives them from a real failure rather than writing plausible
+ * ones by hand.
+ */
+export function isVmDynamicImportUnavailable(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return (
+    (typeof code === "string" && code.startsWith("ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING")) ||
+    /dynamic import callback/i.test(String(err))
+  );
+}
+
+/**
  * Load a built `core-ingestion` module by absolute file URL.
  *
  * The `new Function` indirection is the primary path and stays first: it keeps
@@ -44,21 +59,6 @@ const importViaFunction = new Function(
  * genuine module-not-found still propagates, rather than being retried and
  * reported twice.
  */
-/**
- * Is this "this host cannot do dynamic import", as opposed to any other error?
- *
- * Exported for its test. The shapes it has to accept are not guessable, which
- * is why that test derives them from a real failure rather than writing plausible
- * ones by hand.
- */
-export function isVmDynamicImportUnavailable(err: unknown): boolean {
-  const code = (err as NodeJS.ErrnoException | null)?.code;
-  return (
-    (typeof code === "string" && code.startsWith("ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING")) ||
-    /dynamic import callback/i.test(String(err))
-  );
-}
-
 const importModule = async (specifier: string): Promise<any> => {
   try {
     return await importViaFunction(specifier);

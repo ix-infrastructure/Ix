@@ -47,10 +47,33 @@ describe("isVmDynamicImportUnavailable", () => {
     // test, never reaches the message test, and the fallback never fires on the
     // one host it is for.
     const original = (await realVmFailure()) as Error;
+    // Guarded for the same reason test 1 asserts it: if the host ever gains a
+    // dynamic-import hook this is `null`, and `original.message` would fail
+    // with an opaque TypeError instead of naming the cause.
+    expect(original, "expected the vm indirection to fail under vite-node").not.toBeNull();
     const wrapped = new Error(original.message, { cause: original });
     (wrapped as NodeJS.ErrnoException).code = "ERR_LOAD_URL";
 
     expect(isVmDynamicImportUnavailable(wrapped)).toBe(true);
+  });
+
+  it("matches on the CODE alone, when the message no longer says anything", async () => {
+    // The case that makes the code check load-bearing. The real error carries
+    // BOTH a matching code and a matching message, so `||` short-circuits on
+    // the message and the code clause is never reached: deleting it left this
+    // file 4/4 green. That is not a hypothetical gap -- a later "simplification"
+    // back to a message-only match is exactly the pre-#613 form, ships green,
+    // and then Node rewords the message and the fallback silently stops firing.
+    //
+    // Derived, like the others: the real error with its real code, and only the
+    // message replaced.
+    const original = (await realVmFailure()) as Error;
+    expect(original, "expected the vm indirection to fail under vite-node").not.toBeNull();
+    const reworded = new Error("the wording of this error changed upstream");
+    (reworded as NodeJS.ErrnoException).code = (original as NodeJS.ErrnoException).code;
+
+    expect(reworded.message).not.toMatch(/dynamic import callback/i);
+    expect(isVmDynamicImportUnavailable(reworded)).toBe(true);
   });
 
   it("does not throw when the error carries a NUMERIC code", async () => {

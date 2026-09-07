@@ -150,7 +150,19 @@ class FakeBackend {
   }
 
   async stop(): Promise<void> {
-    if (this.server) await new Promise<void>((resolve) => this.server!.close(() => resolve()));
+    if (!this.server) return;
+    const server = this.server;
+    // `closeAllConnections` first, and a deadline behind it. `close()` waits for
+    // every open socket, so one keep-alive connection the run did not finish
+    // with leaves this pending -- and a hook that never settles takes its
+    // timeout, at which point NEITHER `finally` in the teardown runs and both
+    // temp trees leak anyway. The teardown can only be made safe if this cannot
+    // hang, so the fix belongs here rather than in another `try`.
+    server.closeAllConnections?.();
+    await Promise.race([
+      new Promise<void>((resolve) => server.close(() => resolve())),
+      new Promise<void>((resolve) => setTimeout(resolve, 2000).unref?.()),
+    ]);
   }
 
   private route(url: string, body: string, res: ServerResponse): void {
@@ -363,7 +375,14 @@ describe("ingestFiles against a fake backend", () => {
       // the ingest path grows an endpoint, this fails once with its name,
       // rather than ten tests passing against a fake that agreed with
       // everything.
-      expect(backend.unknownPaths, "endpoints the fake does not implement").toEqual([]);
+      // Guarded, because this is the line that runs FIRST. An earlier revision
+      // optional-chained `backend?.stop()` in the `finally` below for the case
+      // where `beforeEach` throws before assigning it -- but this dereference
+      // comes first, so it threw the TypeError and the guard down there could
+      // never help.
+      if (backend !== undefined) {
+        expect(backend.unknownPaths, "endpoints the fake does not implement").toEqual([]);
+      }
     } finally {
       // In a `finally`, because the assertion above threw straight past all of
       // this -- in exactly the case it exists for. The server stayed listening
@@ -374,9 +393,12 @@ describe("ingestFiles against a fake backend", () => {
       // snapshotted those polluted values and the file's final restore wrote
       // the fixture `HOME` back into the process.
       // And the steps do not share fate. Env first, because it is the one that
-      // leaks OUT of this file: a `stop()` that rejects or outruns the hook
-      // timeout would otherwise skip it and leave the whole process pointed at
-      // a deleted fixture home. `backend` is optional-chained because a
+      // leaks OUT of this file: a `stop()` that REJECTS would otherwise skip it
+      // and leave the whole process pointed at a deleted fixture home. Note
+      // what this does NOT buy -- on a hook timeout the hook promise is rejected
+      // from outside while the `await` is still pending, so no `finally` here
+      // runs at all. That case is handled where it has to be, by making
+      // `stop()` unable to hang. `backend` is optional-chained because a
       // `beforeEach` that throws in `mkdtempSync` leaves it unassigned, and a
       // TypeError here would bury that failure.
       for (const [k, v] of Object.entries(saved)) {
@@ -386,8 +408,14 @@ describe("ingestFiles against a fake backend", () => {
       try {
         await backend?.stop();
       } finally {
-        rmSync(home, { recursive: true, force: true });
-        rmSync(repo, { recursive: true, force: true });
+        // Guarded like `backend`, for the same scenario. `force: true`
+        // suppresses ENOENT, not the argument-type check: `rmSync(undefined,
+        // ...)` throws ERR_INVALID_ARG_TYPE, so a first `beforeEach` failing
+        // inside `mkdtempSync` would raise a second, unrelated error here and
+        // skip the `repo` removal entirely -- leaking the tree in exactly the
+        // case cleanup exists for.
+        if (home) rmSync(home, { recursive: true, force: true });
+        if (repo) rmSync(repo, { recursive: true, force: true });
       }
     }
   });
