@@ -178,8 +178,9 @@ describe("ParsePool", () => {
     // The rest of the measurements are on `shutdown` in `parse-pool.ts`. Short
     // version: the minimal harness fits ~6.3% per teardown; real ingests are
     // 0.28% on an idle machine and 2.1% on a loaded one. Plan against the
-    // loaded figure -- for this suite that is ~25% of processes rather than
-    // ~4%, and CI is the loaded case.
+    // loaded figure: for `ingest-files.test.ts` that is ~25% of processes
+    // rather than ~4%, and CI is the loaded case. Those numbers are that
+    // file's, not this one's -- see below for what this file is exposed to.
     //
     // Only ONE pool in this file loads the addon -- the real-worker test near
     // the bottom. Every other fixture here is an inline .mjs that never imports
@@ -555,12 +556,16 @@ describe("ParsePool", () => {
     pool.init();
     // Parse for real, because having PARSED is what was observed to arm the
     // crash. Not because parsing loads the addon: `index.ts` resolves
-    // tree-sitter and ~27 grammars at module scope -- twelve by static import,
-    // the rest eagerly through helpers -- so these threads hold them from
-    // spawn. It is the parsed-then-idle thread that was observed to crash
-    // under `terminate()`, while spawn-then-destroy with no parse was not --
-    // which is a statement about what ARMS it, not a licence to terminate
-    // never-dispatched workers. They hold the addon too.
+    // 27 grammars plus the core at module scope -- twelve by static import, the
+    // rest eagerly through helpers -- so these threads hold all 28 addons from
+    // spawn. The parsed-then-idle thread is what was observed to crash under
+    // `terminate()` while spawn-then-destroy was not -- but that inference is
+    // CONFOUNDED and `parse-worker.ts` retracts it: four grammars load through
+    // top-level `await`, so a just-spawned worker is still evaluating and has
+    // not registered its message handler, and "no parse" cannot be separated
+    // from "not fully loaded". Parse here because the real run does; do not
+    // read it as a licence to terminate never-dispatched workers, which hold
+    // the addons too.
     const results = await Promise.all([
       pool.parse("a.ts", "export function a(): number { return 1; }"),
       pool.parse("b.ts", "export function b(): number { return 2; }"),

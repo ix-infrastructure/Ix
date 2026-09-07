@@ -209,14 +209,16 @@ export class ParsePool {
    *
    * PLAN AGAINST THE LOADED RATE -- CI is the loaded case. Multiplying back up
    * over that file's 14 ingests gives 3.9% of processes when idle and 25% when
-   * loaded; the idle figure understates a CI leg sevenfold.
+   * loaded; the idle figure understates a CI leg by 6.5x.
    *
    * Load also explains most of the harness/real gap: the harness is 22x the
    * idle rate but only 3.1x the loaded one, and it is that 3.1x which is
-   * unexplained. It is not pool size -- 21 in both -- nor teardown count. Both
-   * rates are per teardown of a 21-worker pool, so neither carries to another
-   * size, and parses per worker differs between the two populations (~1.4
-   * against ~14) without having been controlled.
+   * unexplained. It is not pool size -- 21 in both -- nor teardown count, nor
+   * parses per worker, which is ~1.4 in the harness and in the vitest fixture
+   * alike. (That last one is uncontrolled between the two REAL-ingest datasets,
+   * where it is ~1.4 against ~14, so it bears on the 0-of-60 argument rather
+   * than on this gap -- see `parse-worker.ts`.) Both rates are per teardown of
+   * a 21-worker pool, so neither carries to another size.
    *
    * The user-visible signature is exit 139 after a successful ingest -- patches
    * committed, summary printed, non-zero `$?`.

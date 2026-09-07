@@ -41,8 +41,8 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * PLAN AGAINST THE LOADED RATE. CI is the loaded case, and the two differ by
  * 7.3x. Today's exposure for that file, multiplying the per-teardown rate back
  * up over its 14 ingests, is 3.9% of processes when idle and 25% when loaded --
- * quoting the idle number as "the" number understates a CI leg by about seven
- * times. The per-teardown rate is the portable quantity; the per-process counts
+ * quoting the idle number as "the" number understates a CI leg by 6.5x (the
+ * 7.3x above is the per-teardown ratio; these are per-process). The per-teardown rate is the portable quantity; the per-process counts
  * are the ones tied to ~9.5, so multiply back up rather than re-dividing 2 of
  * 75 by 14.
  *
@@ -50,13 +50,15 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * idle rate but only 3.1x the loaded one. What remains unexplained is that 3.1x,
  * not the 22x an earlier revision of this comment made much of.
  *
- * One variable that is NOT controlled between these populations: parses per
- * worker. The vitest fixture is 30 files over a 21-worker pool (~1.4 each); the
- * `ix ingest` measurement was 300 files over the same pool (~14 each). If
- * exposure grows with parses per worker -- which the "having parsed arms it"
- * observation below makes plausible -- then 0 of 60 is more surprising than the
- * probabilities above suggest, and those probabilities are the floor of the
- * argument rather than the whole of it.
+ * One variable is NOT controlled, and it is worth being exact about WHICH
+ * comparison it threatens. Parses per worker: the harness parsed 30 files over
+ * a 21-worker pool and so did the vitest fixture (~1.4 each), but the
+ * `ix ingest` measurement was 300 files over the same pool (~14 each). So it
+ * cannot explain the harness-versus-real gap -- those two agree -- but it does
+ * sit between the two REAL-ingest datasets, which is the pair the 0-of-60
+ * argument rests on. If exposure grows with parses per worker, and the "having
+ * parsed arms it" observation below makes that plausible, then 0 of 60 is more
+ * surprising than the probabilities above suggest.
  *
  * So the harness overstates real exposure -- 22x against an idle machine, 3.1x
  * against a loaded one -- and the CLI result is not the anomaly it looks like
@@ -89,8 +91,9 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * Note the addon is loaded at SPAWN, not at first parse: `index.ts` pulls in
  * `tree-sitter` and twelve grammars by static import, ELEVEN more optional ones
  * eagerly through `tryLoadGrammar` at module scope, and four more through
- * top-level `await` -- about 27 native addons, all resolved before this file's
- * body runs, so every spawned REAL worker holds them. Parsing still
+ * top-level `await` -- 27 grammars plus the core, so 28 native addons, all
+ * resolved before this file's body runs and held by every spawned REAL
+ * worker. Parsing still
  * seems to be what arms the crash -- spawn-then-destroy with no parse did not
  * reproduce it in 6 runs of twenty teardowns, an outcome the fitted rate makes
  * a 0.04% event ACROSS the six (per single run it predicts 27% clean, so one
