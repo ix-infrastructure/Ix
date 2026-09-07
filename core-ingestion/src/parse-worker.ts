@@ -25,9 +25,10 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  * from the first parse: `index.ts` resolves its grammars at module scope and
  * this file imports it statically. A worker that has parsed nothing still
  * holds the core and the twelve statically imported grammars, so terminating
- * it can crash exactly as terminating a busy one can. Comments here once said
- * the opposite, which is what made a `terminate()` fast path for undispatched
- * workers look safe.
+ * it can crash exactly as terminating a busy one can. `parse-pool.test.ts`
+ * used to say the opposite -- "an untouched worker has not loaded the addon"
+ * -- which is what made a `terminate()` fast path for undispatched workers
+ * look safe. That is the claim being retracted; it was never in this file.
  *
  * Rates, populations, and the reasoning behind them are in PR #650 and the
  * commits on this file. They are deliberately NOT restated here: keeping a

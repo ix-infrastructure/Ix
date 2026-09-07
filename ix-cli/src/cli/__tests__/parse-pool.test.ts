@@ -169,11 +169,9 @@ describe("ParsePool", () => {
     // hang. `Worker.terminate()` tears a thread down from outside, and doing
     // that to one that has loaded the tree-sitter native bindings segfaults the
     // PROCESS -- an idle worker that parsed a single file is enough, because
-    // the crash is in disposing an isolate that still holds the addon. Twenty
-    // teardowns per process, six runs each, on Windows/Node 26:
-    //
-    // The comparison itself is in `ParsePool.shutdown`; rates and populations
-    // are in PR #650, not restated here. What matters
+    // the crash is in disposing an isolate that still holds the addon. The
+    // comparison that settles it is in `ParsePool.shutdown`; rates and
+    // populations are in PR #650, not restated here. What matters
     // for this file: only ONE pool below loads the addon -- the real-worker
     // test near the bottom -- because the other twelve fixtures are inline
     // `.mjs` that never import `core-ingestion`. And on the shipped build the
@@ -551,16 +549,12 @@ describe("ParsePool", () => {
     // same tolerant helper and can be absent too, so the guaranteed floor is
     // the core plus the twelve STATIC grammars -- never zero).
     //
-    // The parsed-then-idle thread is what was observed to crash under
-    // `terminate()` while spawn-then-destroy was not -- but that inference is
-    // CONFOUNDED and `parse-worker.ts` retracts it: four grammars load through
-    // top-level `await`, so a worker spawned and destroyed in the same breath
-    // may still have been mid-evaluation and holding fewer addons, and "no
-    // parse" cannot be separated from "not fully loaded".
-    //
-    // Parse here because the real run does; do not
-    // read it as a licence to terminate never-dispatched workers, which hold
-    // the core and the static grammars too.
+    // Workers that had parsed were the ones observed to crash under
+    // `terminate()`, and spawn-then-destroy was not -- but that was never
+    // isolated from how far module evaluation had got, so it does not
+    // establish that an undispatched worker is safe to terminate. It is not:
+    // it holds the core and the static grammars from spawn. Parse here
+    // because the real run does.
     const results = await Promise.all([
       pool.parse("a.ts", "export function a(): number { return 1; }"),
       pool.parse("b.ts", "export function b(): number { return 2; }"),
