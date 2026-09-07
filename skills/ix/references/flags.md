@@ -505,7 +505,7 @@ Search the knowledge graph by term — ranked by structural relevance.
 | `--limit` | `<n>` | `10` | Max results |
 | `--kind` | `<kind>` | — | Filter and boost results by node kind (e.g. class, function, decision) |
 | `--language` | `<lang>` | — | Filter by language/file extension (e.g. scala, ts) |
-| `--path` | `<path>` | — | Boost results from files matching this path substring |
+| `--path` | `<path>` | — | Filter results by file path (case-insensitive substring match). Keyword searches widen the candidate window up to 2000 nodes and warn if that bound is reached. |
 | `--as-of` | `<rev>` | — | Search as of a specific revision |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--include-tests` | — | off | Include test and fixture entities in results |

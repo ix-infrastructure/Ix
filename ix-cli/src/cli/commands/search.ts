@@ -102,6 +102,8 @@ function normalizePath(value: string | undefined): string {
   return (value ?? "").toLowerCase().replace(/\\/g, "/");
 }
 
+const PATH_CANDIDATE_LIMIT = 2000;
+
 export function registerSearchCommand(program: Command): void {
   program
     .command("search <term>")
@@ -109,7 +111,7 @@ export function registerSearchCommand(program: Command): void {
     .option("--limit <n>", "Max results", "10")
     .option("--kind <kind>", "Filter and boost results by node kind (e.g. class, function, decision)")
     .option("--language <lang>", "Filter by language/file extension (e.g. scala, ts)")
-    .option("--path <path>", "Boost results from files matching this path substring")
+    .option("--path <path>", "Filter results by file path (case-insensitive substring match)")
     .option("--as-of <rev>", "Search as of a specific revision")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--include-tests", "Include test and fixture entities in results")
@@ -123,7 +125,9 @@ export function registerSearchCommand(program: Command): void {
   5. Container-aware near match
   6. Fuzzy/incidental match
 
-Use --path to boost results from specific directories.
+Use --path to filter results from specific directories.
+Keyword searches with --path widen the candidate window up to 2000 nodes.
+If that bound is reached, a diagnostic warns that matches may be missing.
 
 Examples:
   ix search IngestionService --kind class
@@ -142,7 +146,7 @@ Examples:
       const effectivePathFilter = opts.path;
 
       // Fetch more results than requested so we can re-rank and trim
-      const fetchLimit = Math.min(limit * 3, 60);
+      let fetchLimit = Math.min(limit * 3, 60);
       // Auto-detect a multi-repo system; when present, scope by system_id (which
       // spans all member repos) instead of the single-repo workspace_id.
       const systemId = await resolveReadSystemId(client);
@@ -150,27 +154,41 @@ Examples:
       // Semantic search hits a different backend endpoint that embeds the term and
       // returns nodes already ordered by vector similarity. It ignores --language
       // and --as-of (the endpoint accepts neither); scoping is shared.
-      const rawNodes = opts.semantic
-        ? await client.semanticSearch(term, {
-            limit: fetchLimit,
+      const fetchCandidates = (candidateLimit: number) => opts.semantic
+        ? client.semanticSearch(term, {
+            limit: candidateLimit,
             kind: opts.kind,
             workspaceId,
             systemId,
           })
-        : await client.search(term, {
-            limit: fetchLimit,
+        : client.search(term, {
+            limit: candidateLimit,
             kind: opts.kind,
             language: opts.language,
             asOfRev: opts.asOf ? parseInt(opts.asOf, 10) : undefined,
             workspaceId,
             systemId,
           });
-      const nodes = effectivePathFilter
-        ? rawNodes.filter((node: any) => {
+      let rawNodes = await fetchCandidates(fetchLimit);
+      const filterPath = (candidates: typeof rawNodes) => effectivePathFilter
+        ? candidates.filter((node: any) => {
             const sourceUri = normalizePath(node.provenance?.sourceUri ?? node.provenance?.source_uri ?? "");
             return sourceUri.includes(normalizePath(effectivePathFilter));
           })
-        : rawNodes;
+        : candidates;
+      let nodes = filterPath(rawNodes);
+
+      // The released search API cannot filter by path or paginate. Widen its
+      // prefix only when filtering leaves too few results, with a finite bound.
+      while (effectivePathFilter && !opts.semantic && fetchLimit > 0
+        && rawNodes.length >= fetchLimit && fetchLimit < PATH_CANDIDATE_LIMIT
+        && applyRoleFilter(nodes, opts).filtered.length < limit) {
+        fetchLimit = Math.min(fetchLimit * 4, PATH_CANDIDATE_LIMIT);
+        rawNodes = await fetchCandidates(fetchLimit);
+        nodes = filterPath(rawNodes);
+      }
+      const pathWindowLimited = effectivePathFilter && !opts.semantic
+        && fetchLimit === PATH_CANDIDATE_LIMIT && rawNodes.length >= fetchLimit;
 
       // Re-rank client-side using shared scoring + backend weight. The rank object
       // is still computed for display (tier/score), but for semantic search we keep
@@ -193,6 +211,12 @@ Examples:
       const ranked = trimmed.map(s => s.node);
 
       const diagnostics: { code: string; message: string }[] = [];
+      if (pathWindowLimited) {
+        diagnostics.push({
+          code: "path_search_truncated",
+          message: `Search inspected only the first ${PATH_CANDIDATE_LIMIT} candidates before filtering by path; matching results may be missing. Use a more specific search term.`,
+        });
+      }
       if (!opts.kind) {
         diagnostics.push({
           code: "unfiltered_search",
@@ -239,6 +263,7 @@ Examples:
         }, null, 2));
       } else {
         formatNodes(ranked, opts.format);
+        if (pathWindowLimited) stderr(chalk.dim(diagnostics.find(d => d.code === "path_search_truncated")!.message));
         const hint = roleHint(hiddenTestCount);
         if (hint) stderr(chalk.dim(hint));
       }
