@@ -194,57 +194,22 @@ export class ParsePool {
    * null-returning helpers and can be absent -- but the core and the twelve
    * static ones are always there, which is all the crash needs.
    *
-   * Having parsed did correlate with the crash in
-   * one experiment, but that experiment is confounded and `parse-worker.ts`
-   * retracts the inference -- see there. This is the file where such a fast
-   * path would be written, which is why the warning lives here and not only
-   * in the tests. Measured on Windows/Node 26, twenty pool teardowns per
-   * process, six runs each:
+   * Having parsed did correlate with the crash in one experiment, but that
+   * experiment is confounded and `parse-worker.ts` retracts the inference.
+   * This is the file where such a fast path would be written, which is why the
+   * warning lives here and not only in the tests.
+   *
+   * The comparison that settles the verb, on Windows/Node 26, twenty pool
+   * teardowns per process, six runs each:
    *
    *   terminate()                        5 of 6 runs died with SIGSEGV (139)
    *   worker closes its own port         0 of 6
    *   worker calls process.exit(0)       0 of 6
    *
-   * Those six runs are part of a MINIMAL HARNESS arm; there is a second
-   * population that behaves very differently. Pre-fix build:
-   *
-   *   minimal harness (pool of 21, nothing else in the process)
-   *     twenty teardowns per process   19 of 28 runs crashed
-   *     one teardown then exit          5 of 40
-   *     -> both fit 6.3% per teardown, 95% CI 4.1-9.3%
-   *
-   *   real ingests (`ingest-files.test.ts`, ~9.5 ingests per process then)
-   *     idle machine                  2 of 75 processes -> 0.28% per teardown
-   *     loaded machine                9 of 50 processes -> 2.1% per teardown
-   *     a real `ix ingest` of 300 files 0 of 60
-   *     -> P(zero in 60) is 0.84 at the idle rate, 0.29 at the loaded one:
-   *        unremarkable under either, so not an anomaly
-   *
-   * PLAN AGAINST THE LOADED RATE -- CI is the loaded case. Multiplying back up
-   * over that file's 14 ingests gives 3.9% of processes when idle and 25% when
-   * loaded; the idle figure understates a CI leg by 6.5x.
-   *
-   * The loaded rate does not subtract load from the gap: the harness was never
-   * run loaded, so idle-against-idle (22x) is the only load-matched
-   * comparison, and the 3.1x against the loaded real rate mixes conditions --
-   * a lower bound on the gap, not the residue.
-   *
-   * It is not pool size -- 21 in both -- nor teardown count. Nor,
-   * on the evidence, parses per worker: `ingestFiles` parses a `.ts` file twice
-   * (prescan and streaming loop), so the all-`.ts` vitest fixture is ~2.9 per
-   * worker and the all-`.ts` 300-file `ix ingest` ~28.6, against ~1.4 for the
-   * harness. The harness parses the least and crashes the most, which is the
-   * wrong way round for that to be the cause -- though 0 of 60 has too little
-   * power to say anything about the 2.9-against-28.6 pair.
-   *
-   * Both rates are per teardown of a 21-worker pool, so
-   * neither carries to another size.
-   *
-   * The user-visible signature is exit 139 after a successful ingest -- patches
-   * committed, summary printed, non-zero `$?`.
-   *
-   * What is solid: the crash is real, and real ingests do hit it -- rarely.
-   * That is why nothing in this file terminates a worker.
+   * Per-consumer rates, the populations behind them and the statistics are in
+   * PR #650 and this file's history, not here. They do not change the rule,
+   * and keeping them consistent across three files proved to be its own source
+   * of errors.
    *
    * What the grace period bounds, precisely: the wait for a reply from a
    * worker that is IDLE and does not answer -- one whose JS event loop is

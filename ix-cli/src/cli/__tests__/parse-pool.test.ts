@@ -172,30 +172,12 @@ describe("ParsePool", () => {
     // the crash is in disposing an isolate that still holds the addon. Twenty
     // teardowns per process, six runs each, on Windows/Node 26:
     //
-    //   terminate()                    5 of 6 runs died with SIGSEGV (139)
-    //   worker closes its own port     0 of 6
-    //
-    // The rest of the measurements are on `shutdown` in `parse-pool.ts`. Short
-    // version, all of it measured on the PRE-FIX build: the minimal harness
-    // fits ~6.3% per teardown; real ingests 0.28% idle and 2.1% loaded. Plan
-    // against the loaded figure -- for `ingest-files.test.ts` that would be
-    // ~25% of processes today rather than ~4%, and CI is the loaded case.
-    // (What was MEASURED on that file is 9 of 50 loaded and 2 of 75 idle, at
-    // ~9.5 ingests each; 25% and 4% are those rates rolled up over today's
-    // 14.)
-    //
-    // On the SHIPPED build all of those are zero, here and everywhere, because
-    // nothing terminates a worker any more. The numbers describe what the bug
-    // did, not a flake budget to hunt for now.
-    //
-    // Only ONE pool in this file loads the addon -- the real-worker test near
-    // the bottom. Every other fixture here is an inline .mjs that never imports
-    // `core-ingestion`, so those teardowns cannot crash. That one pool runs at
-    // concurrency 2, so the file's exposure is a single teardown of two
-    // addon-loaded threads, not the 21-thread pool the measured rate is quoted
-    // for -- exposed, but not comparably. `ingest-files.test.ts` is where this
-    // actually showed up; it drove ~9.5 real ingests per process when those
-    // crashes were seen, and 14 today.
+    // The comparison itself is in `ParsePool.shutdown`; rates and populations
+    // are in PR #650, not restated here. What matters
+    // for this file: only ONE pool below loads the addon -- the real-worker
+    // test near the bottom -- because the other twelve fixtures are inline
+    // `.mjs` that never import `core-ingestion`. And on the shipped build the
+    // exposure is zero everywhere, since nothing terminates a worker any more.
     //
     // Asserted through a marker the worker writes when ASKED to go, because the
     // crash itself is probabilistic: a test that just tore pools down would
