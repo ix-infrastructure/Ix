@@ -429,7 +429,11 @@ describe("canonical watch refresh", () => {
     } finally {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
-  }, 30_000);
+    // 60s, not the suite default and not the 30s this used to carry. It starts
+    // TWO real CLI children, one of them through tsx, which compiles on the way
+    // up -- and it still timed out at 35.7s against 30s on a loaded Windows
+    // runner. The budget has to cover the slowest leg, not the median one.
+  }, 60_000);
 
   it("delegates the workspace root to the existing map command with full ingest enabled", () => {
     const root = "/workspace/project";
