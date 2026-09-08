@@ -207,13 +207,22 @@ export class ParsePool {
    * `core-ingestion/src/index.ts` stale, with nothing red. Whether it is also
    * sufficient has never been measured: the one experiment that looked --
    * spawn-then-destroy, 0 of 120 -- destroyed its pool with no wait for an
-   * ack or an `'online'` event, so it tore threads down inside that window,
-   * before they had finished loading. Different population; it says nothing
-   * about undispatched workers. This is the file where a fast path would be
-   * written, which is why the warning is here and not only in the tests.
+   * ack or an `'online'` event. So it very probably tore threads down inside
+   * that window, before they had finished loading -- a different population,
+   * saying nothing about undispatched workers. Probably, not certainly: that
+   * is an inference from the teardown code, not a measurement, and it is the
+   * sole reason for discarding the only evidence AGAINST this rule.
+   *
+   * This is the file where a fast path would be written, which is why the
+   * warning is here and not only in the tests.
    *
    * The comparison that settles the verb, on Windows/Node 26, twenty pool
-   * teardowns per process, six runs each:
+   * teardowns per process, six runs each. It settles WHICH VERB, and that is
+   * all: do not derive a rate from it. Read alone the first row implies 8.6%
+   * per pool teardown, which is close to the "one in twelve" this whole
+   * change exists to retract -- it is one of three arms, and the pooled fit
+   * over all of them is in `docs/parse-pool-teardown.md`. Quoting a single
+   * arm is how the retracted figure got published the first time.
    *
    *   terminate()                        5 of 6 runs died with SIGSEGV (139)
    *   worker closes its own port         0 of 6

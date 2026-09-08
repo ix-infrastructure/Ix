@@ -36,8 +36,9 @@ if (!parentPort) throw new Error('parse-worker must run inside a worker thread')
  *
  * Whether it is as dangerous as a parsed one has never been measured: the one
  * arm that looked -- spawn-then-destroy, 0 of 120 -- destroyed its pool with
- * no wait for an ack or an `'online'` event, so it tore threads down before
- * they had finished loading: a different population.
+ * no wait for an ack or an `'online'` event, so it very probably tore threads
+ * down before they had finished loading: a different population. Inferred
+ * from that teardown code, not measured.
  *
  * `parse-pool.test.ts` used to say the opposite -- "an untouched worker has
  * not loaded the addon" -- which is what made a `terminate()` fast path for

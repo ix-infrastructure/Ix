@@ -158,8 +158,8 @@ an undispatched worker is **not known to be safe to terminate**. Workers that
 had parsed were the ones observed to crash, and a spawn-then-destroy arm went
 0 of 120 teardowns. **Do not use that arm.** Its harness calls `pool.init()`
 and then `await pool.destroy()` with nothing in between — no wait for an ack
-or an `'online'` event — so it tore the workers down inside the addon-free
-window
+or an `'online'` event. The inference is that it therefore tore the workers
+down inside the addon-free window
 described above. It measured threads that had not finished loading, which is a
 different population from "evaluated but never dispatched", and it therefore
 says nothing about whether parsing matters. Earlier revisions of this document
@@ -203,9 +203,13 @@ those disposals as independent gives `1-(1-h)^21 = 0.063`, i.e. **h = 0.31%**
 — a factor of 20.5, and for a pool of 21 that is the only shape the answer can
 take: at small h the pool rate is about 21h, so the ratio can approach 21 and
 never exceed it. Any conversion factor larger than the pool size is arithmetic
-that went wrong, which is how the ~28× an earlier revision quoted here was
-caught (it was 8.6% over 0.31% — a single arm's per-pool rate against the
-pooled per-isolate one).
+that went wrong, which is how a bad conversion factor quoted here in an
+earlier revision was caught: it divided 8.6% by 0.31%, a single arm's per-pool
+rate against the pooled per-isolate one, and got 27.7. Written out because it
+rounds to 28 and so does the harness-overstatement figure above, which is
+correct and unrelated (6.3% over 0.225%). Two different quantities landing on
+the same rounded number, one of them retracted, is exactly the confusion this
+file exists to prevent.
 
 **Independence is an assumption, and this document has direct evidence
 against it.** The idle-vs-loaded real-ingest rates differ 7× at identical pool
@@ -214,8 +218,11 @@ the model moves the rate. Carrying `h` from the harness onto vitest's
 one-at-a-time terminations is also a cross-population transfer — the same move
 this file retracts for the "one in twelve" figure. The conclusion survives
 either way, which is why it is stated rather than hedged away: redo it with
-the real-ingest IDLE hazard instead and `P(0 in 10 runs)` is about 0.95
-against 0.33, both unremarkable. Nothing here rests on the exact h.
+the real-ingest IDLE hazard instead — 0.225% per pool over 21 isolates is
+h = 1.07e-4, and 36 terminated isolates over 10 runs gives **0.96** — against
+0.33, both unremarkable. Nothing here rests on the exact h. (An earlier
+revision said 0.95; the stated inputs give 0.962, and every other figure in
+this file reproduces to the digit.)
 
 How many addon-loaded isolates a run terminates is not a guess: `isolate`
 defaults to `true`, `core-ingestion` ships no vitest config to change it, and

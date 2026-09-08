@@ -13,13 +13,21 @@ import Parser from 'tree-sitter';
 // fresh process on Node 26:
 //
 //   tree-sitter-c-sharp                     required  type=module    -> 1
-//   tree-sitter-powershell                  required  type=module    -> 1
+//   tree-sitter-powershell                  required  type=module    -> 1  (*)
 //   @tree-sitter-grammars/tree-sitter-lua   optional  type=module    -> 1
 //   tree-sitter-css                         optional  type=module    -> 1
 //   the other 11 required grammars          required  type=commonjs  -> 0
 //   the other 11 optional grammars          optional  type=commonjs  -> 0
 //   tree-sitter-sas                         optional  type=module    -> 0
 //                                             (full-filename main + "exports")
+//
+// (*) INFERRED, not measured. `tree-sitter-powershell` is not installed in
+// every checkout -- it is absent from this one -- so its row comes from the
+// import comment below rather than from running Node against the package. CI
+// proves the subpath `bindings/node/index.js` resolves; it does not prove the
+// bare specifier would warn. Re-measure before relying on it. Marked because
+// an unverifiable row in this table is what went stale in #595 and cost
+// Ix#650 sixteen review rounds.
 //
 // The two 11s are a coincidence, not a copy-paste: 13 required grammars minus
 // c-sharp and powershell, and 14 optional minus lua, css and sas.
