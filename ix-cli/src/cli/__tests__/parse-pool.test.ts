@@ -73,13 +73,33 @@ describe("ParsePool", () => {
   `;
 
   /** Answers its first message, then faults while IDLE. */
-  const IDLE_FAULT = `
+  /**
+   * Faults ONCE per pool, not once per worker.
+   *
+   * `let served = 0` was per-thread, so the replacement armed its own fault
+   * 20ms after serving `a2.ts` -- and `b2.ts` is only posted once the parent
+   * has received a2's result and re-drained. Miss that 20ms window on a busy
+   * machine and the replacement dies with `b2.ts` in flight, which `onError`
+   * resolves to null: the exact Ix#567 signature, from the harness rather
+   * than the pool. Fixing only the first wait would have left this half of
+   * the race in place.
+   *
+   * The marker is a file because the arming has to be visible to the NEXT
+   * thread, and these fixtures share nothing else.
+   */
+  const IDLE_FAULT_ONCE = (marker: string): string => `
     import { parentPort } from 'node:worker_threads';
-    let served = 0;
+    import { existsSync, writeFileSync } from 'node:fs';
+    const marker = ${JSON.stringify(marker)};
     parentPort.on('message', (msg) => {
       if (msg && msg.__shutdown) { parentPort.close(); return; }
       parentPort.postMessage({ ok: true, result: { filePath: msg.filePath } });
-      if (++served === 1) setTimeout(() => { throw new Error('idle fault'); }, 20);
+      // Claim the fault before scheduling it, so a replacement that starts
+      // while the timer is pending still sees it taken.
+      if (!existsSync(marker)) {
+        writeFileSync(marker, 'armed');
+        setTimeout(() => { throw new Error('idle fault'); }, 20);
+      }
     });
   `;
 
@@ -136,7 +156,10 @@ describe("ParsePool", () => {
     // tasks -- and it was spliced out of `workers` but left in `idle`, so the
     // next `drain()` popped the terminated thread and posted to nothing: that
     // task's promise never settled.
-    const pool = new ParsePool(worker("idlefault", IDLE_FAULT), 1);
+    const pool = new ParsePool(
+      worker("idlefault", IDLE_FAULT_ONCE(join(dir, "idle-fault-armed"))),
+      1,
+    );
     pool.init();
 
     expect(await pool.parse("first.ts", "x")).toEqual({ filePath: "first.ts" });
@@ -162,6 +185,12 @@ describe("ParsePool", () => {
     // posts to nothing, and never settles.
     const both = await Promise.all([pool.parse("a2.ts", "x"), pool.parse("b2.ts", "x")]);
     expect(both).toEqual([{ filePath: "a2.ts" }, { filePath: "b2.ts" }]);
+    // Exactly one fault for the whole pool. This is what makes `b2.ts`
+    // deterministic rather than merely likely: a replacement that armed its
+    // own fault would make this 2, and b2 would be racing that worker's 20ms
+    // timer. Pins the fixture's once-per-pool contract, which is otherwise
+    // invisible from here.
+    expect(pool.respawnCount(), "the replacement must not fault as well").toBe(1);
 
     await pool.destroy();
   });
