@@ -195,8 +195,8 @@ export class ParsePool {
    * dispatched, and long before `index.ts`'s own body or its top-level
    * `await`s run. Note which end that pins: the addon-free window CLOSES when
    * those static imports evaluate, not when evaluation finishes. A worker
-   * suspended at one of those awaits already holds all twelve, and is not
-   * safe to terminate.
+   * suspended at one of those awaits already holds every one of them, and is
+   * not safe to terminate.
    *
    * Not every grammar: most go through null-returning helpers and can be
    * absent, but the core and the statically imported ones are always there,
@@ -462,9 +462,17 @@ export class ParsePool {
    *
    * This one is a LEVEL. `onError` increments it in the same synchronous
    * handler that does the splicing, so once it has advanced the pool has
-   * finished reacting to that death -- including one that faulted with no task
-   * in flight, which `crashedTasks()` deliberately does not count because no
-   * file was lost. That combination is otherwise unobservable from outside,
+   * BEGUN reacting to that death -- and, since the handler runs to completion
+   * before any asynchronous observer gets the loop back, has finished by the
+   * time anyone polling can read it. The distinction matters only to a future
+   * caller reading this from inside a synchronous path: the increment now
+   * runs before `dead` is latched and before the stranded queue is spliced
+   * and resolved, so such a caller could see it advanced with that work still
+   * pending.
+   *
+   * What it observes that nothing else does is a death with no task in
+   * flight, which `crashedTasks()` deliberately does not count because no
+   * file was lost. That combination is otherwise invisible from outside,
    * which is what this exists for.
    *
    * Test observability, and only that today -- nothing in `ingest.ts` reads

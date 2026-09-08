@@ -20,7 +20,10 @@ landed BEFORE the test file the real-ingest arm drives:
 
 So:
 
-- The **minimal harness** arm runs at `084f472`.
+- The **minimal harness** arm runs at `084f472` -- but the harness itself is
+  not in the repo, at that commit or any other, and it produced the 6.3% that
+  is the numerator of every ratio here. So by this section's own standard it
+  is not reproducible either: the build is named, the program is not.
 - The **real-ingest** arm needs both, and no commit has both -- checked every
   commit on `main`. It was measured on a hand-assembled tree: `b9b84ef`'s
   `ingest-files.test.ts` over `084f472`'s `parse-pool.ts`. An earlier revision
