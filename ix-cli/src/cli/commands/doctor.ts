@@ -13,6 +13,8 @@ import {
   checkBackendImage,
   checkBackendSchema,
   isNonStandardBackend,
+  dockerAvailable,
+  diagnoseBackendStack,
 } from "../backend-status.js";
 import { backendCeiling, isNewer, readBackendHealth } from "./upgrade.js";
 import { loadIngestBaseline } from "../ingest-baseline.js";
@@ -180,7 +182,18 @@ export function registerDoctorCommand(program: Command): void {
               const h = await readBackendHealth(client);
               return { ok: h.status === "ok", detail: `${endpoint} → ${h.status}` };
             } catch (e: any) {
-              return { ok: false, detail: e.message ?? "unreachable" };
+              // An unreachable backend is where a fatal Arango boot loop hides:
+              // the container restarts forever, memory-layer never leaves
+              // `Created` behind `service_healthy`, and from out here that is
+              // indistinguishable from "not started yet". Say what the stack
+              // actually reported. Ix#614.
+              const base = e.message ?? "unreachable";
+              const failure = dockerAvailable() ? diagnoseBackendStack() : null;
+              if (!failure) return { ok: false, detail: base };
+              const parts = [`${base} — ${failure.service} is ${failure.state}`];
+              if (failure.lastError) parts.push(`  last log: ${failure.lastError}`);
+              if (failure.remedy) parts.push(`  fix: ${failure.remedy}`);
+              return { ok: false, detail: parts.join("\n") };
             }
           },
         },

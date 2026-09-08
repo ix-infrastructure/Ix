@@ -12,7 +12,7 @@
 // reported schema_version against what this CLI expects, so `ix doctor` and
 // `ix upgrade` can surface both instead of looking mysteriously broken.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { IxClient } from "../client/api.js";
@@ -127,6 +127,112 @@ export function inspectBackendContainer(): BackendContainer | null {
   // Preserve local-development detection for a directly-published backend
   // whose image does not use the released repository name.
   return publishers[0] ?? null;
+}
+
+/**
+ * A container in the backend stack that is down, with whatever it said on the
+ * way out.
+ *
+ * Exists because a fatal Arango boot loop is invisible from the CLI: the
+ * failure is inside a container that keeps restarting, so every command --
+ * `ix doctor` included -- sees nothing but a backend that will not answer, and
+ * "backend not started" is indistinguishable from "backend cannot start and
+ * never will". Ix#614.
+ */
+export interface StackFailure {
+  /** Compose service name where known, else the image reference. */
+  service: string;
+  containerId: string;
+  /** Docker's own state string: `restarting`, `exited`, ... */
+  state: string;
+  /** The most recent fatal-looking log line, trimmed. */
+  lastError: string | null;
+  /** Set only for a failure whose remedy we actually know. */
+  remedy: string | null;
+}
+
+/** `docker logs` with stdout and stderr merged; "" on any failure. */
+function dockerLogsMerged(containerId: string, tail = "80"): string {
+  const r = spawnSync("docker", ["logs", "--tail", tail, containerId], {
+    encoding: "utf-8",
+    timeout: 10000,
+  });
+  return `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
+}
+
+/** Last line that looks like a hard failure, searching newest-first. */
+function lastFatalLine(logs: string): string | null {
+  const lines = logs.split("\n").map((l) => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/\bFATAL\b|\bunable to initialize\b|\bInvalid argument\b/i.test(lines[i]!)) return lines[i]!;
+  }
+  return lines.length > 0 ? lines[lines.length - 1]! : null;
+}
+
+/**
+ * Recognise failures whose fix is known, so the user gets an instruction and
+ * not just a transcript.
+ */
+function remedyFor(line: string | null): string | null {
+  if (!line) return null;
+  if (/Column families not opened:\s*VectorIndex/i.test(line)) {
+    // One-way door: the column family is in the RocksDB MANIFEST for good, so
+    // the only non-destructive fix is to keep registering it. Ix#614.
+    return "ArangoDB's data directory has the VectorIndex column family, so arangod must be started with it enabled. " +
+      "Add `--vector-index true` to the arangodb `command:` in ~/.ix/backend/docker-compose.yml, then `ix docker restart`. " +
+      "(The option is spelled `--experimental-vector-index` before ArangoDB 3.12.11.) No data is lost.";
+  }
+  return null;
+}
+
+/**
+ * Look for a container in the backend stack that is not running.
+ *
+ * Deliberately image-based rather than compose-label-based: the label is absent
+ * for a hand-run container, and this is called precisely when the stack is in a
+ * state nobody planned. Returns the highest-ranked non-running Arango -- an
+ * actively restarting, compose-managed one first, since that is what holds
+ * memory-layer's `service_healthy` gate shut.
+ */
+export function diagnoseBackendStack(): StackFailure | null {
+  const SEP = "|::|";
+  const listed = docker(["ps", "-a", "--format", `{{.ID}}${SEP}{{.Image}}${SEP}{{.State}}${SEP}{{.Label "com.docker.compose.service"}}`]);
+  if (!listed) return null;
+
+  // Rank before picking. A boot LOOP presents as `restarting`, and that is the
+  // one holding memory-layer's `service_healthy` gate shut; a long-dead
+  // `exited` container from an old experiment is the likeliest false positive,
+  // and reporting its error as the current outage would be worse than saying
+  // nothing. A compose-managed container outranks a hand-run one for the same
+  // reason.
+  const rank = (state: string, service: string): number =>
+    (state === "restarting" ? 0 : 2) + (service ? 0 : 1);
+
+  const candidates = listed.split("\n")
+    .map((row) => {
+      const [id = "", image = "", state = "", service = ""] = row.split(SEP);
+      return { id, image, state, service };
+    })
+    .filter((c) => c.id && /arangodb/i.test(c.image) && c.state !== "running")
+    .sort((a, b) => rank(a.state, a.service) - rank(b.state, b.service));
+
+  for (const { id, image, state, service } of candidates) {
+    // --tail keeps this bounded; a boot loop can produce a very large log.
+    // Both streams: `docker logs` keeps the container's stdout/stderr apart,
+    // and which one carries the fatal line is the container's choice, not
+    // ours. The arangodb image logs it on stdout; a config that sends it to
+    // stderr would otherwise make this whole diagnostic silently find nothing.
+    const logs = dockerLogsMerged(id);
+    const lastError = lastFatalLine(logs);
+    return {
+      service: service || image,
+      containerId: id,
+      state: state || "unknown",
+      lastError,
+      remedy: remedyFor(lastError),
+    };
+  }
+  return null;
 }
 
 export type BackendImageStatus =

@@ -7,14 +7,27 @@
 
 services:
   arangodb:
-    image: arangodb:3.12
+    # PINNED to an exact patch, deliberately. The rolling `3.12` tag let a
+    # `docker pull` move the engine under a live data volume, and ArangoDB's
+    # vector index leaves a one-way footprint: once `VectorIndex` is in the
+    # RocksDB MANIFEST, any arangod that does not register that column family
+    # refuses to open the database at all --
+    #   FATAL [fe3df] unable to initialize RocksDB engine:
+    #                 Invalid argument: Column families not opened: VectorIndex
+    # -- which with `restart: unless-stopped` is a fatal loop, not a degraded
+    # start, and takes memory-layer down with it via `service_healthy`. Ix#614.
+    image: arangodb:3.12.11
     networks:
       - backend
     ports:
       - "127.0.0.1:8529:8529"
     environment:
       ARANGO_NO_AUTH: "1"
-    command: ["arangod", "--server.endpoint", "tcp://0.0.0.0:8529", "--experimental-vector-index"]
+    # `--vector-index` is the current name; it was `--experimental-vector-index`
+    # before 3.12.11, which still accepts the old spelling but only as a renamed
+    # alias and warns. Pinning the image above is what makes it safe to state
+    # one spelling here.
+    command: ["arangod", "--server.endpoint", "tcp://0.0.0.0:8529", "--vector-index", "true"]
     volumes:
       - arangodb-data:/var/lib/arangodb3
     healthcheck:
