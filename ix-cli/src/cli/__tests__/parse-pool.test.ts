@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -72,7 +72,6 @@ describe("ParsePool", () => {
     process.exit(1);
   `;
 
-  /** Answers its first message, then faults while IDLE. */
   /**
    * Faults ONCE per pool, not once per worker.
    *
@@ -88,16 +87,19 @@ describe("ParsePool", () => {
    * thread, and these fixtures share nothing else.
    */
   const IDLE_FAULT_ONCE = (marker: string): string => `
-    import { parentPort } from 'node:worker_threads';
-    import { existsSync, writeFileSync } from 'node:fs';
+    import { parentPort, threadId } from 'node:worker_threads';
+    import { existsSync, appendFileSync } from 'node:fs';
     const marker = ${JSON.stringify(marker)};
     parentPort.on('message', (msg) => {
       if (msg && msg.__shutdown) { parentPort.close(); return; }
       parentPort.postMessage({ ok: true, result: { filePath: msg.filePath } });
       // Claim the fault before scheduling it, so a replacement that starts
-      // while the timer is pending still sees it taken.
+      // while the timer is pending still sees it taken. Recorded, and
+      // recorded HERE rather than in the timer, because arming is what the
+      // test needs to count and it happens synchronously with the serve --
+      // the throw is 20ms later and would be raced.
       if (!existsSync(marker)) {
-        writeFileSync(marker, 'armed');
+        appendFileSync(marker, threadId + '\\n');
         setTimeout(() => { throw new Error('idle fault'); }, 20);
       }
     });
@@ -185,12 +187,20 @@ describe("ParsePool", () => {
     // posts to nothing, and never settles.
     const both = await Promise.all([pool.parse("a2.ts", "x"), pool.parse("b2.ts", "x")]);
     expect(both).toEqual([{ filePath: "a2.ts" }, { filePath: "b2.ts" }]);
-    // Exactly one fault for the whole pool. This is what makes `b2.ts`
-    // deterministic rather than merely likely: a replacement that armed its
-    // own fault would make this 2, and b2 would be racing that worker's 20ms
-    // timer. Pins the fixture's once-per-pool contract, which is otherwise
-    // invisible from here.
-    expect(pool.respawnCount(), "the replacement must not fault as well").toBe(1);
+    // The once-per-pool contract, asserted on the ARMING rather than on the
+    // fault. Arming is synchronous with the serve; the throw is 20ms behind
+    // it. So a replacement that armed its own would have appended a second
+    // line here by now, while `respawnCount()` would still read 1 -- its
+    // timer has not fired, and the parses above take a few ms. An earlier
+    // revision asserted `respawnCount()` for this and claimed it pinned the
+    // contract; it does not. Reverting the fixture to per-thread arming
+    // passes that assertion 5 runs out of 5.
+    const armings = readFileSync(join(dir, "idle-fault-armed"), "utf8").trim().split("\n");
+    expect(armings, "the fixture must arm exactly one fault for the whole pool").toHaveLength(1);
+
+    // Kept, but for what it is: a cheap check that no EXTRA fault landed
+    // during the two parses. It is not the guard for the line above.
+    expect(pool.respawnCount(), "no further worker died during the parses").toBe(1);
 
     await pool.destroy();
   });

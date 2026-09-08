@@ -413,9 +413,12 @@ export class ParsePool {
    * that faulted with no task in flight, which `crashedTasks()` deliberately
    * does not count because no file was lost. That was the gap: an idle fault
    * moved no other counter, so a test waiting for one had nothing to wait on
-   * and used a fixed sleep, which failed about one run in eight on a loaded
-   * machine and on `windows-2022`. Polling `respawns` instead would have been
-   * a latent trap, since any completed parse resets it to zero.
+   * and used a fixed sleep. It failed 1 of 8 local runs under saturating CPU
+   * load, and separately took down the `Test (windows-2022 - node 22)` leg of
+   * an unrelated PR -- Actions run 34179642182, `parse-pool.test.ts:137`.
+   * That CI hit is one observation, not a second measurement of the rate.
+   * Polling `respawns` instead would have been a latent trap, since any
+   * completed parse resets it to zero.
    */
   respawnCount(): number {
     return this.respawnsTotal;
@@ -442,9 +445,11 @@ export class ParsePool {
   private destroyed = false;
 
   /**
-   * Remaining respawn BUDGET, not a tally: `onResult` resets it to zero on any
-   * successful round trip. Read `respawnsTotal` for "how many did this run
-   * spawn?" -- see `respawnCount()`.
+   * Respawns CONSUMED since the last successful round trip, capped at
+   * `MAX_RESPAWNS` -- so 0 means the full budget is available and 16 means it
+   * is exhausted, which is the opposite of how "budget" usually reads.
+   * `onResult` clears it on any success, so it is not a tally either: read
+   * `respawnsTotal` for "how many did this run spawn?".
    */
   private respawns = 0;
 
