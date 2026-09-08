@@ -359,7 +359,10 @@ describe("ParsePool", () => {
     // `workerDeaths()`'s own doc prescribes then hangs forever past the cap.
     expect(
       pool.workerDeaths(),
-      "the death that exhausts the respawn budget must still be counted",
+      "expected MAX_RESPAWNS + 1 deaths: the original worker plus one per " +
+        "replacement, with the last death falling past the cap. If you just " +
+        "changed MAX_RESPAWNS, this number needs changing with it; otherwise " +
+        "the death that exhausts the budget has stopped being counted",
     ).toBe(17);
 
     await pool.destroy();
