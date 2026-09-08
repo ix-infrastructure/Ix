@@ -228,17 +228,17 @@ describe("ParsePool", () => {
     // delivered before the two parses below went out. The test then failed on
     // `b2.ts` coming back null, which looks exactly like the bug it guards.
     //
-    // `respawnCount()` is the pool's own signal that `onError` ran to
+    // `workerDeaths()` is the pool's own signal that `onError` ran to
     // completion, so this waits on the state the test actually depends on and
     // is done as soon as it holds.
     // `> 0` is only correct because this is the FIRST death of the run. The
     // counter is monotonic and never resets, so a second wait written this
     // way returns immediately -- a silent no-op, which is the same class of
     // bug this test was fixed for. A later fault must capture a baseline
-    // first: `const before = pool.respawnCount()` then `() => pool
-    // .respawnCount() > before`.
+    // first: `const before = pool.workerDeaths()` then
+    // `() => pool.workerDeaths() > before`.
     await waitUntil(
-      () => pool.respawnCount() > 0,
+      () => pool.workerDeaths() > 0,
       // Ask the fixture first. If its claim failed there is no fault to wait
       // for, and reporting that the pool never reacted would blame the pool
       // for a harness problem -- the misdiagnosis this whole test exists to
@@ -271,7 +271,7 @@ describe("ParsePool", () => {
     // that cannot happen, so adding a redundant per-thread guard leaves this
     // green, which is correct and not a gap.
     //
-    // What it replaced was an assertion on `respawnCount()`, which pinned
+    // What it replaced was an assertion on `workerDeaths()`, which pinned
     // nothing: the replacement's fault is a 250ms timer and the parses above
     // take a few ms, so the count still reads 1 either way. Reverting the
     // fixture passed that one 5 runs out of 5.
@@ -280,9 +280,11 @@ describe("ParsePool", () => {
     // only proves SOME respawn happened -- a fixture that died during module
     // evaluation would satisfy it and never arm -- and the ENOENT would then
     // point at this line instead of at the contract.
-    // No thread failed to claim for an unrelated reason. Without this, a
-    // first-thread EPERM is invisible: the second thread claims successfully,
-    // arms, and every other assertion here stays green.
+    // No thread failed to claim for an unrelated reason. This catches a
+    // REPLACEMENT's claim failing -- it does not catch the first thread's,
+    // because at concurrency 1 that is the only worker, nothing respawns, and
+    // the `waitUntil` thunk above reports it before execution ever reaches
+    // here. The two checks cover different threads; neither covers both.
     expect(
       existsSync(`${marker}.failed`) ? readFileSync(`${marker}.failed`, "utf8") : "",
       "a worker failed to claim the fault for a reason other than EEXIST",
@@ -300,7 +302,7 @@ describe("ParsePool", () => {
 
     // Kept, but for what it is: a cheap check that no EXTRA fault landed
     // during the two parses. It is not the guard for the line above.
-    expect(pool.respawnCount(), "no further worker died during the parses").toBe(1);
+    expect(pool.workerDeaths(), "no further worker died during the parses").toBe(1);
 
     await pool.destroy();
   });
