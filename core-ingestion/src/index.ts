@@ -21,9 +21,11 @@ import Parser from 'tree-sitter';
 //   tree-sitter-sas                         optional  type=module    -> 0
 //                                             (full-filename main + "exports")
 //
-// (*) INFERRED, not measured. `tree-sitter-powershell` is not installed in
-// every checkout -- it is absent from this one -- so its row comes from the
-// import comment below rather than from running Node against the package. CI
+// (*) INFERRED, not measured. `tree-sitter-powershell` is absent from THIS
+// working copy's `node_modules` -- a partial install, not a property of the
+// package: it is a plain `dependencies` entry and is in `package-lock.json`,
+// so a clean `npm ci` has it. Its row therefore comes from the import comment
+// below rather than from running Node against the package. CI
 // proves the subpath `bindings/node/index.js` resolves; it does not prove the
 // bare specifier would warn. Re-measure before relying on it. Marked because
 // an unverifiable row in this table is what went stale in #595 and cost

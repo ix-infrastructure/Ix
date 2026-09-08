@@ -114,12 +114,19 @@ describe("ParsePool", () => {
     } catch (err) {
       // EEXIST is the expected answer: another thread holds the claim.
       // Anything else means THIS thread failed to claim for an unrelated
-      // reason, and if it was the first thread the next one claims
-      // successfully and the run looks entirely normal -- one arming, one
-      // respawn, green. A previous revision rethrew here and claimed that
-      // surfaced the problem; it does not, it just moves which thread
-      // faults. So record it instead, and let the test assert the absence
-      // of this file. Best-effort: if this write fails too there is
+      // reason, and the two cases differ:
+      //
+      //   the FIRST thread fails  -- at concurrency 1 it is the only worker,
+      //     so isFaulter stays false, nothing ever throws, nothing dies
+      //     and nothing respawns. The run is NOT green; it fails in
+      //     waitUntil, which reads this file to say so.
+      //   a REPLACEMENT fails     -- the fault already happened, so the test
+      //     reaches its assertions, and the .failed check below is what
+      //     catches it.
+      //
+      // Recorded rather than rethrown for both. A previous revision rethrew
+      // and claimed that surfaced the problem; it does not -- it only moves
+      // which thread faults. Best-effort: if this write fails too there is
       // nothing left to say with.
       if (err.code !== 'EEXIST') {
         try {
@@ -328,6 +335,22 @@ describe("ParsePool", () => {
 
     // And every one of them is counted, so the stitch gate sees the loss.
     expect(pool.crashedTasks()).toBeGreaterThanOrEqual(23);
+
+    // The death that hits the cap still counts. This is the only place that
+    // pins it: every other use of `workerDeaths()` watches the FIRST death of
+    // a healthy pool, where a counter incremented inside the respawn branch
+    // and one incremented outside it both read 1, so neither placement is
+    // distinguishable there. Here they are not equal -- `MAX_RESPAWNS` is 16,
+    // so the pool takes 17 deaths (the original worker plus its 16
+    // replacements) and only the last one falls outside the branch.
+    //
+    // Without this the increment can be tidied back into the branch with the
+    // suite green, and the `const before = ...` / `> before` wait that
+    // `workerDeaths()`'s own doc prescribes then hangs forever past the cap.
+    expect(
+      pool.workerDeaths(),
+      "the death that exhausts the respawn budget must still be counted",
+    ).toBeGreaterThan(16);
 
     await pool.destroy();
   });
