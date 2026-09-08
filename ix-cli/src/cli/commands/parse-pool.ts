@@ -600,7 +600,9 @@ export class ParsePool {
     // moving, and the baseline wait described on `workerDeaths()` (~140 lines
     // above) would hang on exactly the deaths a caller most wants to see.
     //
-    // What happens BELOW the cap depends on whether any worker is left. With
+    // What the cap branch itself does -- the `if/else if` immediately below --
+    // depends on whether any worker is left. (Past the cap, that is. While the
+    // budget lasts the pool simply respawns and never latches `dead`.) With
     // none, the `else if` latches `dead`, strands the queue and resolves it
     // as crashed, then returns -- so that path never reaches `drain()`. With
     // others still alive, NEITHER branch body runs and control falls straight

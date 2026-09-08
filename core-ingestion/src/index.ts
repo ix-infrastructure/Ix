@@ -21,15 +21,18 @@ import Parser from 'tree-sitter';
 //   tree-sitter-sas                         optional  type=module    -> 0
 //                                             (full-filename main + "exports")
 //
-// (*) INFERRED, not measured. `tree-sitter-powershell` is absent from THIS
-// working copy's `node_modules` -- a partial install, not a property of the
-// package: it is a plain `dependencies` entry and is in `package-lock.json`,
-// so a clean `npm ci` has it. Its row therefore comes from the import comment
-// below rather than from running Node against the package. CI
-// proves the subpath `bindings/node/index.js` resolves; it does not prove the
-// bare specifier would warn. Re-measure before relying on it. Marked because
-// an unverifiable row in this table is what went stale in #595 and cost
-// Ix#650 sixteen review rounds.
+// (*) INFERRED, not measured: nobody has run Node against the BARE specifier
+// `tree-sitter-powershell` and watched for the warning. Its row comes from the
+// import comment below, which describes the package's shape. That is the
+// durable reason, and it does not expire when the package is installed -- CI
+// installs it and proves the subpath `bindings/node/index.js` resolves, which
+// is a different thing from proving the bare specifier warns. (It was also
+// missing from the working copy this was written in, which is how the gap was
+// noticed, but do not read the marker as being about that: a clean `npm ci`
+// has it, since it is a plain `dependencies` entry in `package-lock.json`.)
+// Re-measure before relying on it, and do not clear the marker just because
+// the package is present. An unverifiable row in this table is what went
+// stale in #595 and cost Ix#650 sixteen review rounds.
 //
 // The rows above are deliberately not counted. What decides a warning is the
 // per-package shape, which is what this table is for; the required/optional

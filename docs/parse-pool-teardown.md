@@ -93,7 +93,17 @@ demonstration of agreement.
 **Real ingests** — `ingest-files.test.ts` under vitest. That file drives a
 FIXED number of ingests per process, not an average: **12** at `b9b84ef`, the
 version measured (14 today). The per-teardown rate is `1-(1-p)^12` solved
-against the process counts:
+against the process counts.
+
+The exponent is TEARDOWNS, and 12 is the ingest count, so that step rests on a
+premise worth writing down: `ingestFiles` creates its pool lazily, through
+`ensureParsePool()`, so an ingest that parses no file tears nothing down. Every
+ingest in that file parses at least one — the `fixture(N)` calls are all
+N > 0, with `force: true` — so ingests and teardowns coincide there. Add an
+empty-repo or unsupported-extension case and they stop coinciding, and
+updating this
+exponent to the new ingest count would understate the rate with nothing red.
+That is the same unrecorded-derivation failure that made 9.5 unfalsifiable.
 
 | configuration | result | per POOL teardown |
 |---|---|---|
