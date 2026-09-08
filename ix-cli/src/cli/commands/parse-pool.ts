@@ -342,8 +342,7 @@ export class ParsePool {
         // crash-prone there (the timings are on `shutdown` above). `unref()`
         // gives the only thing teardown needs: the thread stops keeping the
         // event loop alive, so the CLI exits, and nobody disposes an isolate
-        // that
-        // still holds the addon. Measured on the real parse worker, four
+        // that still holds the addon. Measured on the real parse worker, four
         // addon-loaded threads left live and unref'd across process exit: 0
         // failures in 10 runs. Note that is one teardown per run, so it is
         // not comparable to `shutdown`'s twenty-teardown table.

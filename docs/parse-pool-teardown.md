@@ -20,8 +20,9 @@ runs of each variant. Those six `terminate()` runs are **not a separate
 experiment**: they are one of the three arms pooled into the 19-of-28 figure
 below (7 of 12, 7 of 10, and these 5 of 6). Read on their own they imply 8.6%
 per POOL teardown (every rate in this file is per pool unless it says
-per-isolate; the two differ by ~28× and the distinction is worked through
-below), which is close to the retracted "one in twelve" — that is the
+per-isolate; for this 21-worker pool the two differ by ~20×, and the
+conversion is worked through below), which is close to the retracted "one in
+twelve" — that is the
 hazard of quoting a single arm, and the reason the fit below uses all of
 them.
 
@@ -126,8 +127,8 @@ threads.** `core-ingestion`'s own suite runs `vitest run --pool threads`, and
 parse worker's: vitest's worker entry does not import `core-ingestion`, so a
 thread picks the addon up when it *evaluates* such a test file, not at spawn —
 a thread can be spawned and torn down having run none. Either way the threads
-are terminated, which is the exposed shape: vitest 4's `ThreadWorker.stop()`
-is `await this.thread.terminate()`, called per worker.
+are terminated, which is the exposed shape: vitest 4's `ThreadsPoolWorker`
+does `await this.thread.terminate()` in its `stop()`, called per worker.
 
 Not tinypool, which earlier revisions of this file named. Vitest 4 dropped it:
 it is absent from `vitest@4.1.11`'s dependencies, from both lockfiles and from
@@ -148,7 +149,13 @@ showing the conversion, because getting it wrong once made this section claim a
 falsification it does not support.
 
 The 6.3% is per POOL teardown, and a pool disposes 21 isolates. The
-per-isolate hazard is therefore `1-(1-h)^21 = 0.063`, i.e. **h = 0.31%**.
+per-isolate hazard is therefore `1-(1-h)^21 = 0.063`, i.e. **h = 0.31%** — a
+factor of 20.5, which for a pool of 21 is the only shape the answer can take:
+at small h the pool rate is about 21h, so the ratio can approach 21 and never
+exceed it. Any conversion factor larger than the pool size is arithmetic that
+went wrong, which is how the ~28× an earlier revision quoted here was caught
+(it was 8.6% over 0.31% — a single arm's per-pool rate against the pooled
+per-isolate one).
 
 How many addon-loaded isolates a run terminates is not a guess: `isolate`
 defaults to `true`, `core-ingestion` ships no vitest config to change it, and
