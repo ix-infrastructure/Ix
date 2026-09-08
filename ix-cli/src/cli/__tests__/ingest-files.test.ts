@@ -175,8 +175,7 @@ class FakeBackend {
       // mysteriously slow file, with every later `afterEach` eating 2s too.
       // A future socket regression should read as a message, not as flakiness.
       process.stderr.write(
-        "FakeBackend.stop: server did not close within 2s; leaving it open rather than hanging the hook" +
-          String.fromCharCode(10),
+        "FakeBackend.stop: server did not close within 2s; leaving it open rather than hanging the hook\n",
       );
     }
   }
@@ -294,6 +293,14 @@ describe("ingestFiles against a fake backend", () => {
   let home: string;
   let repo: string;
   let backend: FakeBackend;
+  // The sentinel for `backend`, in the same spirit as the `""` reset that
+  // `home` and `repo` get. `backend` cannot use `undefined` as its own: it is
+  // read as a plain `FakeBackend` at ~35 call sites in the tests below, and
+  // widening the type to make teardown honest would put a narrowing burden on
+  // every one of them. So the freshness lives beside it instead. False means
+  // "`backend` does not refer to THIS test's fake" -- either the first test
+  // has not constructed one yet, or a `beforeEach` threw before it got there.
+  let backendIsCurrent = false;
   const saved: Record<string, string | undefined> = {};
 
   /**
@@ -367,14 +374,19 @@ describe("ingestFiles against a fake backend", () => {
     // safety -- and `rmSync("")` is a no-op on Node 26, checked, where
     // `rmSync(undefined)` throws ERR_INVALID_ARG_TYPE.
     //
-    // The fake is constructed HERE, before anything that can throw, and that
-    // position is load-bearing: `backend` has no sentinel, so a statement
-    // inserted above it that can throw would leave it holding the previous
-    // test's fake and the teardown would assert against the wrong object and
-    // pass vacuously. Keep it first.
+    // Cleared FIRST, then set immediately after the construction it describes,
+    // so the window in which `backendIsCurrent` is false is exactly the window
+    // in which `backend` is stale. A statement inserted above the assignment
+    // that throws now leaves the flag false and the teardown skips rather than
+    // asserting against the previous test's fake and passing vacuously.
+    // Constructing first is still the better position -- keep it first -- but
+    // it is no longer the only thing standing between that edit and a silent
+    // pass.
+    backendIsCurrent = false;
     home = "";
     repo = "";
     backend = new FakeBackend();
+    backendIsCurrent = true;
     home = realpathSync(mkdtempSync(join(tmpdir(), "ix-ingest-home-")));
     repo = realpathSync(mkdtempSync(join(tmpdir(), "ix-ingest-repo-")));
     const endpoint = await backend.start();
@@ -415,13 +427,14 @@ describe("ingestFiles against a fake backend", () => {
       // the ingest path grows an endpoint, this fails once with its name,
       // rather than ten tests passing against a fake that agreed with
       // everything.
-      // The guard is cheap insurance, not the mechanism -- `backend` is assigned
-      // unconditionally in `beforeEach` before anything that can throw, so this
-      // is never false today. It stays because the cost is a line and the
-      // failure it would catch (a throw introduced above the assignment) is
-      // silent: the assertion would run against the previous test's fake and
-      // pass.
-      if (backend !== undefined) {
+      // Guarded on freshness, not on existence. `backend` is typed
+      // non-nullable and holds the PREVIOUS test's fake after the first one,
+      // so an `!== undefined` test here would be true in precisely the case
+      // worth catching -- a `beforeEach` that threw above the assignment --
+      // and would assert against the wrong object and pass. That is the shape
+      // this PR was opened to fix, and it was reproduced one level up in this
+      // very hook.
+      if (backendIsCurrent) {
         expect(backend.unknownPaths, "endpoints the fake does not implement").toEqual([]);
       }
     } finally {
@@ -439,15 +452,18 @@ describe("ingestFiles against a fake backend", () => {
       // what this does NOT buy -- on a hook timeout the hook promise is rejected
       // from outside while the `await` is still pending, so no `finally` here
       // runs at all. That case is handled where it has to be, by making
-      // `stop()` unable to hang. `backend` is optional-chained because a
-      // `beforeEach` that throws in `mkdtempSync` leaves it unassigned, and a
-      // TypeError here would bury that failure.
+      // `stop()` unable to hang. The stop is guarded on the same freshness
+      // flag: a `beforeEach` that threw above the construction leaves
+      // `backend` pointing at the previous test's fake, which its own
+      // teardown already stopped. (It is NOT guarded on `mkdtempSync`
+      // throwing -- the fake is constructed above both of those calls, so a
+      // throw there leaves this test's own fake live and needing the stop.)
       for (const [k, v] of Object.entries(saved)) {
         if (v === undefined) delete process.env[k];
         else process.env[k] = v;
       }
       try {
-        await backend?.stop();
+        if (backendIsCurrent) await backend.stop();
       } finally {
         // Explicit rather than load-bearing: the `""` reset in `beforeEach` is
         // what makes these correct, and `rmSync("")` is a silent no-op anyway.
