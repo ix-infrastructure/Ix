@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/logo.png" width="40%" />
+  <img src="./ix-cli/assets/logo.png" width="40%" />
 </p>
 
 <h1 align="center">Understand any codebase instantly.</h1>

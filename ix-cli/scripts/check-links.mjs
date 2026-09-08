@@ -2,7 +2,8 @@
 // check-links.mjs — verify every reference in the repo's markdown:
 //   * absolute URLs resolve (fail on 404/410),
 //   * relative links point at a tracked file (fail when the file is renamed
-//     or removed — same breakage class as a dead URL).
+//     or removed — same breakage class as a dead URL), in markdown link
+//     syntax and in HTML src/href attributes alike.
 // Zero dependencies (Node 22+ global fetch). Mirror of the api-parity gate:
 // same shape, same exit discipline — `ok` is not assumed, it is measured.
 //
@@ -69,19 +70,27 @@ function extractUrls(text) {
   return [...out];
 }
 
-// Relative markdown link targets: `[text](path)` and `[ref]: path`.
+// Relative link targets, in the three forms this repo's markdown uses:
+// `[text](path)`, `[ref]: path`, and HTML attributes — `<img src="path">`,
+// `<a href="path">`.
+//
+// The HTML form is not a nicety. A README opens with a centred `<p>` block
+// because markdown cannot centre an image, so every banner, logo and demo in
+// this repo is an HTML `src` and none of them were scanned: Ix#605 moved
+// assets/logo.png into ix-cli/ and the README's logo 404'd on the front page
+// of the project while this gate stayed green. Absolute URLs inside these
+// attributes were always covered — extractUrls() matches on `https?://`
+// wherever it appears — so this closes the relative half only.
 function extractRelativeTargets(text) {
   const targets = [];
-  for (const m of text.matchAll(/\]\(([^)]+)\)/g)) {
-    const t = m[1].trim();
-    if (isExternal(t) || t.startsWith('#')) continue;
+  const take = (raw) => {
+    const t = raw.trim();
+    if (isExternal(t) || t.startsWith('#')) return;
     targets.push(t);
-  }
-  for (const m of text.matchAll(/^\[[^\]]*\]:\s*(\S+)/gm)) {
-    const t = m[1].replace(/^<|>$/g, '').trim();
-    if (isExternal(t) || t.startsWith('#')) continue;
-    targets.push(t);
-  }
+  };
+  for (const m of text.matchAll(/\]\(([^)]+)\)/g)) take(m[1]);
+  for (const m of text.matchAll(/^\[[^\]]*\]:\s*(\S+)/gm)) take(m[1].replace(/^<|>$/g, ''));
+  for (const m of text.matchAll(/<[a-zA-Z][^>]*?\s(?:src|href)\s*=\s*["']([^"']+)["']/g)) take(m[1]);
   return targets;
 }
 function isExternal(t) {
