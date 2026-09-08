@@ -1,479 +1,315 @@
 <p align="center">
-  <img src="./ix-cli/assets/logo.png" width="40%" />
+  <img src="./ix-cli/assets/logo.png" width="34%" alt="Ix" />
 </p>
 
-<h1 align="center">Understand any codebase instantly.</h1>
-<p align="center"><em>Your context saver and virtual cartographer.</em></p>
+<h1 align="center">Give your AI a map of your codebase.</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/github/stars/ix-infrastructure/Ix" />
-  <img src="https://img.shields.io/github/license/ix-infrastructure/Ix" />
-  <img src="https://img.shields.io/github/actions/workflow/status/ix-infrastructure/Ix/ci.yml?label=tests" />
-  <img src="https://img.shields.io/badge/platform-windows%20%7C%20macOS%20%7C%20linux-lightgrey" />
+  Ix parses your repository into a persistent system graph — symbols, calls, imports, relationships —<br/>
+  so you and your coding agents can query structure instead of grepping and guessing.
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/status-alpha-blue" />
-  <img src="https://img.shields.io/badge/focus-system--intelligence-purple" />
-  <img src="https://img.shields.io/badge/AI-persistent--memory-blueviolet" />
-  <img src="https://img.shields.io/badge/LLMs-Claude%20%7C%20Codex%20%7C%20OpenClaw%20%7C%20Gemini%20%7C%20OpenCode-orange" />
+  <img src="https://img.shields.io/github/stars/ix-infrastructure/Ix" alt="Stars" />
+  <img src="https://img.shields.io/github/license/ix-infrastructure/Ix" alt="License" />
+  <img src="https://img.shields.io/github/actions/workflow/status/ix-infrastructure/Ix/ci.yml?label=tests" alt="Tests" />
+  <img src="https://img.shields.io/badge/platform-windows%20%7C%20macOS%20%7C%20linux-lightgrey" alt="Platforms" />
 </p>
 
 <p align="center">
   <a href="https://www.ix-infra.com">Website</a> ·
-  <a href="https://github.com/ix-infrastructure/Ix/tree/main/docs">Docs</a> ·
-  <a href="https://compass.ix-infra.com">Demo</a> ·
+  <a href="./docs">Docs</a> ·
+  <a href="https://compass.ix-infra.com">Live demo</a> ·
   <a href="https://discord.gg/ncEYVHVqZ8">Discord</a>
 </p>
 
+```bash
+curl -fsSL https://ix-infra.com/install.sh | sh    # macOS / Linux
+```
+
 <p align="center">
-  ⭐ Star this repo if you find it useful
+  <img src="./assets/demo.gif" width="90%" alt="Ix mapping and querying a repository" />
 </p>
 
-<br/>
+---
 
-## What Ix is
-
-**Ix is a command-line tool that turns a codebase into a queryable map.**
-
-It parses your repository with [tree-sitter](https://tree-sitter.github.io/) across 26
-languages and builds a graph of the symbols, calls and imports it finds, stored in a
-local backend (ArangoDB, run for you via Docker). You and your AI assistant then ask
-bounded, structural questions instead of grepping and guessing:
+## Try it
 
 ```bash
 ix map .                      # build the graph for this repo
-ix explain IngestionService   # what is this, and what does it touch?
-ix impact verify_token        # what breaks if I change this?
+ix explain AuthService        # what is this, and what does it touch?
 ix trace user_login_flow      # how does this actually flow?
+ix impact verify_token        # what breaks if I change this?
 ```
 
-The graph lives on your machine, and it persists — so context survives between
-sessions, and your assistant can navigate a real map of your system instead of
-re-deriving it from whatever fits in a prompt.
+The graph lives on your machine and persists between sessions. Your agent navigates
+it through [MCP](#integrations) instead of re-deriving your architecture
+from whatever fits in a prompt.
 
-### Use Ix from any MCP client
+---
 
-The CLI includes a canonical stdio MCP server with the same graph tools used by
-the editor integrations:
+## Why Ix
+
+| | Without Ix | With Ix |
+|---|---|---|
+| **Finding things** | Search, read, search again | Query a structured graph |
+| **Architecture** | Re-derived every session | Mapped once, kept |
+| **Agent context** | Whole files pasted into the prompt | Bounded structural slices |
+| **Between sessions** | Context is lost | The graph persists |
+| **Relationships** | Inferred from fragments | Read from real edges |
+
+## The model
+
+**Map → Structure → Retrieve → Remember**
+
+| Step | What happens |
+|---|---|
+| **Map** | `ix map .` parses the repo with tree-sitter and extracts symbols, calls and imports. |
+| **Structure** | Those become nodes and edges — a graph of what calls, contains and imports what. |
+| **Retrieve** | Commands return bounded answers about one symbol or flow, not whole files. |
+| **Remember** | The graph is stored locally and survives between sessions and agent runs. |
+
+## How it works
+
+<p align="center">
+  <img src="./assets/arch.png" width="100%" alt="Ix architecture" />
+</p>
+
+`ix map` parses your repository with tree-sitter, extracts symbols, calls and
+imports, and persists them as a graph in a local backend — ArangoDB plus the memory
+layer, run for you in Docker. Three clients read that graph: the `ix` CLI, the
+`ix mcp` server your AI clients connect to, and Compass, the visualizer `ix view`
+opens.
+
+The backend ships as a released Docker image; it is not built from this repo. See
+the [HTTP API reference](./docs/api/) for the endpoints all three clients share.
+
+## Results
+
+Across our own development work, querying the graph instead of feeding files into
+the prompt cut token use by **30–99.7%**, varying widely with the task and the size
+of the repo. These are internal measurements, not a published benchmark.
+
+The mechanism is the plain part: `ix explain AuthService` returns that symbol and
+its immediate relationships. Answering the same question by reading the file — and
+the files it imports — costs far more, and costs it again next session.
+
+## Integrations
+
+Ix ships a stdio MCP server, so any MCP-capable client can use the same graph tools.
 
 ```bash
-ix mcp
-```
-
-To register it with every AI client on the machine at once:
-
-```bash
-ix mcp install            # detect clients and register `ix mcp` with each
+ix mcp install            # detect installed clients and register `ix mcp` with each
 ix mcp install --dry-run  # show what would change, write nothing
 ix mcp doctor             # check each client's registration
 ```
 
-`install` knows Claude Code, Codex, Cursor, VS Code, Gemini CLI, OpenClaw and
-opencode. It writes through each client's own MCP command where one exists
-(`claude mcp add`, `codex mcp add`, `gemini mcp add`, and `openclaw mcp set`
-everywhere but Windows), so the client owns its config format. Cursor, VS Code
-and opencode are edited directly instead, as is OpenClaw on Windows — its
-registration is passed as a JSON argument, which cmd cannot carry intact. Every
-direct write is merged in place with a `.bak` kept alongside. Cursor, VS Code
-and opencode are also detected by their config directory rather than by a shell
-command, since `cursor` and `code` are opt-in shims a GUI install may not have.
+`install` knows **Claude Code, Codex, Cursor, VS Code, Gemini CLI, OpenClaw and
+opencode**. It writes through each client's own MCP command where one exists, and
+never overwrites a server name it does not own — pass `--force` to replace one, or
+`--host <id>` to limit the run. Per-client write mechanics, repair and process
+isolation are in [docs/mcp.md](./docs/mcp.md).
 
-**It never overwrites.** If the name `ix-memory` already belongs to a different
-server — an earlier Ix plugin, say — that client is reported and left exactly as
-it was. Pass `--force` to replace it, or `--host <id>` to limit the run; an
-unrecognised id is an error rather than a silent no-op. Where a client's own
-config can be read back — Cursor, VS Code, opencode, and OpenClaw off Windows —
-`doctor` also reports a registration of ours whose recorded launcher path has
-since disappeared, and `install` repairs it. The clients that answer with a
-rendered table instead expose no stored command, so a launcher that has moved
-there is not detected: clear the name with that client's own command
-(`claude mcp remove ix-memory`) and re-run `ix mcp install`.
-
-To register a single client by hand instead, point it at `ix` with the argument
-`mcp`. For Codex:
+To register one client by hand:
 
 ```bash
 codex mcp add ix-memory -- ix mcp
 ```
 
-The client launches the server in the active workspace, so every Ix tool uses
-that repository's graph and configuration.
+### Agent skill
 
-Tool calls run inside the server process. Set `IX_MCP_SUBPROCESS=1` to run each
-one as a separate `ix` child process instead — slower by roughly the CLI's
-startup time per call, but fully isolated.
+[`skills/ix/`](skills/ix/SKILL.md) teaches any LLM agent to drive the CLI. It follows the
+[Claude Code skill format](https://code.claude.com/docs/en/skills) and the
+[agents.md](https://agents.md) standard, so Claude Code, Agents, Codex and Cursor all
+load the same tree from their own skills directory.
 
-## Sign up for Kartr
+```bash
+bash scripts/install-skill.sh   # deploy to every harness found (--dry-run to preview)
+```
 
-We built Kartr on top of this technology.
+Then ask your agent: *"Set up Ix and map this repo."*
 
-An agentic platform where AI agents with persistent memory work alongside you, at your job and in your day to day life.
+### Native plugins
 
-Kartr aggregates your knowledge from every source you already use:
+Optional per-client packages, if you prefer them to `ix mcp install`:
 
-- your code and systems
-- your docs and files
-- your email and calendar
-- your meetings and notes
-- your team chat
+```bash
+# Claude Code
+/plugin marketplace add ix-infrastructure/ix-claude-plugin
+/plugin install ix-memory
 
-One memory, built from all of it, that your agents can reason over.
+# Codex
+curl -fsSL https://ix-infra.com/codex-install.sh | sh
 
-Agents that remember.
-Agents that take initiative.
-Agents that carry context across sources and sessions.
-Agents that get more useful the longer you use them.
+# OpenClaw
+openclaw plugins install ix-infrastructure/ix-openclaw-plugin
 
-Kartr is in alpha. We're onboarding early users now.
+# Gemini
+gemini extensions install https://github.com/ix-infrastructure/ix-gemini-plugin
 
-<p align="center">
-  <a href="https://docs.google.com/forms/d/e/1FAIpQLSdh5IXVGW9mNBUtyBAsP_uysS38GgilpTNMbKRAVQf1FZ1eBg/viewform?usp=pp_url&amp;entry.2087374943=ix_github" target="_blank" rel="noopener noreferrer">
-    <img src="https://img.shields.io/badge/Sign%20up%20for%20the%20Kartr%20alpha-%E2%86%92-8A2BE2?style=for-the-badge" />
-  </a>
-</p>
+# OpenCode
+curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/ix-opencode-plugin/main/install.sh | bash
 
-## Problem
-Running out of tokens while developing?
-Not anymore...
+# Cursor
+curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/ix-cursor-plugin/main/install.sh | bash
+```
 
-
-Modern software is complicated.
-
-You read code.
-You search logs.
-You still guess.
-
-AI can’t reason about systems.
-LLMs can’t remember them either.
-
-Ix fixes both.
-
-## Demo
-
-<p align="center">
-  <img src="./assets/demo.gif" width="90%" />
-</p>
-
-Stop digging through files.
-Open the map instead.
-
-Ix improves how AI systems reason about your codebase.
-
-## Results
-
-**30-99.7% fewer tokens** on development tasks  
-**Minimum of 43% increase in daily LLM usage**  
-**Understand systems in minutes, not hours**
-
-Directed context. More signal. Persistent system memory.
+Each also publishes a Windows PowerShell installer — swap `install.sh | bash` for
+`install.ps1 | iex` via `irm`.
 
 ## Install
-### Linux/MacOS
+
+**macOS / Linux**
+
 ```bash
 curl -fsSL https://ix-infra.com/install.sh | sh
 ```
-### Windows
+
+**Windows** — install Node.js 22+ and Docker Desktop first, then:
+
 ```powershell
 irm https://ix-infra.com/install.ps1 | iex
 ```
-### Claude Plugin
-```bash
-/plugin marketplace add ix-infrastructure/ix-claude-plugin
-/plugin install ix-memory
-/reload-plugin
-```
-### Codex Plugin
-macOS / Linux:
-```bash
-curl -fsSL https://ix-infra.com/codex-install.sh | sh
-```
-Windows (PowerShell):
-```powershell
-irm https://ix-infra.com/codex-install.ps1 | iex
-```
-### OpenClaw Plugin
-```bash
-openclaw plugins install ix-infrastructure/ix-openclaw-plugin
-```
-### Gemini Extension
-```bash
-gemini extensions install https://github.com/ix-infrastructure/ix-gemini-plugin
-```
-### OpenCode Plugin
-macOS / Linux:
-```bash
-curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/ix-opencode-plugin/main/install.sh | bash
-```
-Windows (PowerShell):
-```powershell
-irm https://raw.githubusercontent.com/ix-infrastructure/ix-opencode-plugin/main/install.ps1 | iex
-```
-### Cursor Plugin
-macOS / Linux:
-```bash
-curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/ix-cursor-plugin/main/install.sh | bash
-```
-Windows (PowerShell):
-```powershell
-irm https://raw.githubusercontent.com/ix-infrastructure/ix-cursor-plugin/main/install.ps1 | iex
-```
 
-## Agent Skill (any harness)
-
-[`skills/ix/`](skills/ix/SKILL.md) is a single, self-contained **agent skill** that
-teaches any LLM agent to drive the `ix` CLI: build the graph, explain symbols,
-trace flows, analyze impact, and detect smells — instead of grepping and
-guessing. It follows the [Claude Code skill
-format](https://code.claude.com/docs/en/skills) and the
-[agents.md](https://agents.md) standard, and any skill-compatible harness loads
-the same `skills/ix/` tree natively from its own skills directory — Claude Code
-(`~/.claude/skills`), Agents (`~/.agents/skills`), Codex CLI (`~/.codex/skills`),
-and Cursor (`~/.cursor/skills-cursor`).
-
-**Install it** — `scripts/install-skill.sh` probes which agent harnesses are
-installed on this machine and deploys `skills/ix` to every one of them (Claude
-Code's `~/.claude/skills`, Agents' `~/.agents/skills` per
-[agents.md](https://agents.md), Codex's `~/.codex/skills`, and
-Cursor's `~/.cursor/skills-cursor` — the same detection
-`ix mcp install` uses). Detection is embedded; when
-[toolscan](https://github.com/Alot1z/toolscan) is available (`TOOLSCAN_PATH`
-set — never a bare-name PATH lookup, so nothing is executed unless you opt in)
-its discovery output additionally scans the common install roots beyond PATH
-(`~/.local/bin`, `%LOCALAPPDATA%`, ...) — a purely additive seam: without it
-the built-in probes decide, so a clean machine and CI behave exactly the same. Pass `--dry-run` to see the targets, or list
-harness ids to install only those:
-
-```bash
-bash scripts/install-skill.sh          # every harness found
-bash scripts/install-skill.sh --dry-run
-bash scripts/install-skill.sh claude agents
-```
-
-Then start a new session and ask your agent to set it up:
-
-> Set up Ix and map this repo
-
-The skill's bootstrap script does the rest — installs the `ix` CLI if missing,
-starts the local Docker backend, and maps the current repo:
-
-```bash
-# Bash / Git Bash / macOS / Linux
-bash skills/ix/scripts/bootstrap.sh .
-
-# Windows PowerShell
-powershell -ExecutionPolicy Bypass -File skills/ix/scripts/bootstrap.ps1 .
-```
-
-The skill follows the progressive-disclosure layout — a lean `SKILL.md` with the
-full command reference, output-format rules, and troubleshooting split into
-`references/`, plus `scripts/` for first-run setup — so it is portable to Claude
-Code, Agents, and any other skill-compatible agent. Edit `skills/ix/` and
-re-run `scripts/install-skill.sh` to update every installed copy. To produce a
-distributable zip:
-
-```bash
-python "$HOME/.agents/skills/skill-creator/scripts/package_skill.py" skills/ix dist
-```
-
-## Requirements
-
-The install script sets up everything for you on macOS and Linux. It checks for and installs anything that is missing:
-
-- Node.js 22 or newer
-- Git
-- ripgrep (powers `ix text`)
-- Docker and Docker Compose (for the local backend)
-
-All you need beforehand is a terminal with `curl` (or `wget`). On Windows, install Node.js 22+ and Docker Desktop first, then run the installer.
-
-Works on macOS, Linux, and Windows. Pre-built CLI packages are published for
-Apple Silicon macOS, Linux (x86-64 and arm64) and Windows x86-64. **Intel Macs**
-have no pre-built package — install with Homebrew, which builds from
-source: `brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/Ix && brew install ix`.
-
-For the full list, including the endpoints the installer reaches and the directories it creates, see [docs/prerequisites.md](docs/prerequisites.md).
-
-## Troubleshooting
-
-Ix talks to a backend that runs locally in Docker, so most first-run problems are the
-backend not being up yet:
-
-```bash
-ix status          # is the backend reachable?
-ix docker start    # start the backend (ArangoDB + memory layer)
-ix doctor          # check system health — server, database, graph integrity
-```
-
-If a command reports `Ix backend not reachable`, run `ix docker start` and try again.
-Set `IX_DEBUG=1` to get full stack traces on any error.
-
-## Supported Languages
-
-Ix parses and extracts symbols, calls, and imports across 27 languages, and recognizes several more config and data formats.
-
-**Languages:**
-JavaScript, TypeScript, Python, Java, C, C++, C#, Go, Ruby, Rust, PHP, Kotlin, Swift, Scala, R, SAS, Elixir, Haskell, Zig, Lua, Bash, PowerShell, HTML, XML, CSS, HCL / Terraform, Makefile
-
-CUDA (`.cu` / `.cuh`) is parsed with the C++ grammar; kernel-launch syntax
-(`kernel<<<grid, block>>>(args)`) is handled, so host-to-kernel calls appear in
-the graph. Python stub files (`.pyi`) are parsed as Python.
-
-**Also recognized:**
-YAML, JSON, TOML, SQL, Protocol Buffers, Dockerfile, Markdown
-
-## Quick Start
-
-Map your system:
+Then map a repo and register your AI clients:
 
 ```bash
 ix map .
+ix mcp install
 ```
 
-Understand a component:
+The installer checks for and installs anything missing: **Node.js 22+, Git, ripgrep**
+(powers `ix text`), and **Docker + Docker Compose** for the local backend. All you need
+beforehand is a terminal with `curl` or `wget`.
+
+<details>
+<summary><b>Platform notes and edge cases</b></summary>
+
+<br/>
+
+Pre-built CLI packages are published for Apple Silicon macOS, Linux (x86-64 and
+arm64) and Windows x86-64.
+
+**Intel Macs** have no pre-built package. Install with Homebrew, which builds from
+source:
 
 ```bash
-ix explain auth-service
+brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/Ix
+brew install ix
 ```
 
-Trace a flow:
+For the full list — including the endpoints the installer reaches and the
+directories it creates — see [docs/prerequisites.md](./docs/prerequisites.md).
+
+</details>
+
+## Commands
+
+Ix talks to a local backend, so start there if a command reports
+`Ix backend not reachable`:
 
 ```bash
-ix trace user_login_flow
+ix status          # is the backend reachable?
+ix docker start    # start it (ArangoDB + memory layer)
+ix doctor          # server, database and graph integrity
 ```
 
-Analyze impact:
+Set `IX_DEBUG=1` for full stack traces on any error.
+
+**Build the graph**
 
 ```bash
-ix impact database.schema
+ix map .           # map this repo
+ix watch           # re-map on change
 ```
 
-Stop guessing. Start navigating.
+**Understand**
 
-Map → Explain → Trace → Impact
+```bash
+ix search <term>       # find an entity by name
+ix locate <symbol>     # jump to a definition
+ix explain <symbol>    # what it is and what it touches
+ix overview <target>   # one-shot structural summary
+ix impact <target>     # blast radius of a change
+ix read <target>       # read source, by symbol or path:line-range
+```
 
-## Why Ix
+**Explore**
 
-Modern systems are not just complex, they're constantly changing.
+```bash
+ix trace <symbol>      # follow a flow up and down
+ix callers <symbol>    # what calls this
+ix callees <symbol>    # what this calls
+ix rank --by dependents --top 10   # find the load-bearing code
+ix inventory --kind function       # list components
+ix history <target>    # how an entity changed
+ix diff <from> <to>    # compare two revisions
+```
 
-Every time you switch context, onboard to a new service, or debug a flow, you start from zero.
+**Inspect the system**
 
-- knowledge is fragmented across code, logs, and people
-- context is lost between sessions
-- understanding does not persist
+```bash
+ix view            # open the Compass visualizer
+ix stats           # graph statistics
+ix smells          # detect structural issues
+```
 
-AI doesn’t solve this.
-It amplifies it: reasoning is limited to the current prompt, and memory disappears between interactions.
+Query commands take `--format text|json|llm`. Use `llm` when an agent reads the
+output — it is token-minimal and newline-delimited
+([spec](./docs/llm-format.md)). Use `json` when chaining commands.
 
-Ix is built to fix this at the system level.
+Exhaustive references: **[commands](skills/ix/references/commands.md)** ·
+**[flags](skills/ix/references/flags.md)** ·
+**[output formats](skills/ix/references/output-formats.md)** ·
+**[troubleshooting](skills/ix/references/troubleshooting.md)**
 
-- builds a structured map of your system
-- captures relationships and flows
-- persists understanding over time
-- gives both humans and AI a shared source of truth
+## Supported languages
 
-Stop re-learning your system.
-Start navigating it.
+Symbols, calls and imports are extracted across **27 languages**:
 
-## Use Cases
+`JavaScript` `TypeScript` `Python` `Java` `C` `C++` `C#` `Go` `Ruby` `Rust` `PHP`
+`Kotlin` `Swift` `Scala` `R` `SAS` `Elixir` `Haskell` `Zig` `Lua` `Bash`
+`PowerShell` `HTML` `XML` `CSS` `HCL / Terraform` `Makefile`
 
-Ix is most useful for:
+CUDA (`.cu` / `.cuh`) is parsed with the C++ grammar, including kernel-launch
+syntax (`kernel<<<grid, block>>>(args)`), so host-to-kernel calls appear in the
+graph. Python stub files (`.pyi`) are parsed as Python.
 
-- large codebases
-- unfamiliar systems
-- onboarding new engineers
-- debugging complex flows
-- improving LLM-assisted development
+Also recognized as config and data formats: `YAML` `JSON` `TOML` `SQL`
+`Protocol Buffers` `Dockerfile` `Markdown` `LaTeX`
 
-## The Shift
+## Built on Ix: Kartr
 
-Ix turns your system into a living map.
+Ix maps your code. **[Kartr](https://www.ix-infra.com)** is an agent platform built on
+the same memory engine, extended to the sources a codebase does not contain — docs and
+files, email and calendar, meetings and notes, team chat — so agents carry context
+across all of them.
 
-Not static diagrams.
-Not outdated docs.
+Kartr is in alpha and onboarding early users.
 
-A map you can explore.
-A map you can trace.
-A map that evolves with your system.
-
-With Ix you can:
-
-- Understand architecture instantly
-- Trace how anything works
-- See impact before making changes
-- Debug systems faster
-- Build persistent system memory over time
-
-## Built for humans and AI
-
-Developers use Ix to explore and understand systems.
-
-LLMs use Ix as persistent system memory.
-
-Instead of guessing from limited context,
-AI can navigate a real system map, with structure, history, and relationships.
-
-The result:
-
-- better reasoning
-- more consistent answers
-- understanding that compounds over time
-
-## Architecture
 <p align="center">
-  <img src="./assets/arch.png" width="100%"/>
+  <a href="https://docs.google.com/forms/d/e/1FAIpQLSdh5IXVGW9mNBUtyBAsP_uysS38GgilpTNMbKRAVQf1FZ1eBg/viewform?usp=pp_url&amp;entry.2087374943=ix_github" target="_blank" rel="noopener noreferrer">
+    <img src="https://img.shields.io/badge/Sign%20up%20for%20the%20Kartr%20alpha-%E2%86%92-8A2BE2?style=for-the-badge" alt="Sign up for the Kartr alpha" />
+  </a>
 </p>
-
-**How it works:**
-
-1. **Map**: build a system map from code and signals  
-2. **Structure**: identify boundaries, flows, and relationships  
-3. **Remember**: persist decisions and system knowledge  
-4. **Understand**: explore, trace, and analyze with context  
-
-## Core Capabilities
-
-**A living system map**  
-Your architecture, always up to date.
-
-**Trace flows instantly**  
-Follow how anything moves through your system.
-
-**Understand impact**  
-See what changes affect before you make them.
-
-**Persistent system memory**  
-Knowledge builds over time.
-
-**AI-assisted reasoning**  
-Explore systems with both humans and AI.
-
-## Philosophy
-
-Every complex system should have a map.
-
-Ix gives you yours.
-
-LLMs process. Ix remembers.
-
-Early stage. Rapidly evolving.
-
-If you're building complex systems, we'd love your feedback.
-
-## Contributing
-
-We welcome contributions.
-
-If you’re building with Ix or want to improve it:
-
-- open an issue
-- submit a PR
-- share feedback
-
-Early stage. Moving fast.
 
 ## Status
 
-Ix is in early development (alpha).
+Alpha, and moving quickly. APIs and behavior may change. If you are running Ix on a
+large or unusual codebase, we want the bug report.
 
-APIs and behavior may change.
+## Contributing
+
+Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for local
+setup, and [SECURITY.md](SECURITY.md) to report a vulnerability.
+
+<p align="center">
+  <a href="./docs">Docs</a> ·
+  <a href="https://www.ix-infra.com">Website</a> ·
+  <a href="https://compass.ix-infra.com">Live demo</a> ·
+  <a href="https://discord.gg/ncEYVHVqZ8">Discord</a>
+</p>
+
+<p align="center">
+  Licensed under <a href="LICENSE">Apache 2.0</a>. ⭐ Star the repo if Ix is useful to you.
+</p>

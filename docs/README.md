@@ -2,6 +2,7 @@
 
 - [HTTP API reference](api/) — the backend JSON API exposed on `http://localhost:8090`
 - [`--format llm` output convention](llm-format.md) — the machine-readable record stream
+- [`ix mcp`](mcp.md) — serving the graph tools over MCP, and registering AI clients
 - [Consolidating the per-host plugins onto `ix mcp`](mcp-plugin-consolidation.md)
 - [System prerequisites](prerequisites.md) — what the installer checks for and installs
 - [Parse-pool teardown](parse-pool-teardown.md) — why nothing calls `terminate()`, and what was measured
