@@ -91,54 +91,63 @@ describe("ParsePool", () => {
     import { parentPort, threadId } from 'node:worker_threads';
     import { writeFileSync } from 'node:fs';
     const marker = ${JSON.stringify(marker)};
+
+    // Claim at MODULE SCOPE, once per thread, before any message is
+    // served. The previous revision claimed inside the message handler,
+    // which put a filesystem write on the path of every parse: the
+    // replacement re-attempted it while serving \`b2.ts\`, and a transient
+    // EPERM there faulted a worker with a task in flight -- producing
+    // \`b2.ts -> null\`, which is the Ix#567 signature this whole test exists
+    // to tell apart from a harness problem. The old fixture did no I/O at
+    // all, so that was exposure this PR introduced. Here the write happens
+    // once, before the pool can dispatch anything, and the handler touches
+    // no filesystem at all.
+    //
+    // \`wx\` because it is one atomic syscall: \`existsSync\` then write is two,
+    // and two threads can both pass the check. That cannot happen at this
+    // pool's concurrency of 1, but the guarantee is stated
+    // unconditionally, and this is what makes it true at any size.
+    let isFaulter = false;
+    try {
+      writeFileSync(marker, threadId + '\\n', { flag: 'wx' });
+      isFaulter = true;
+    } catch (err) {
+      // EEXIST is the expected answer: another thread holds the claim.
+      // Anything else means THIS thread failed to claim for an unrelated
+      // reason, and if it was the first thread the next one claims
+      // successfully and the run looks entirely normal -- one arming, one
+      // respawn, green. A previous revision rethrew here and claimed that
+      // surfaced the problem; it does not, it just moves which thread
+      // faults. So record it instead, and let the test assert the absence
+      // of this file. Best-effort: if this write fails too there is
+      // nothing left to say with.
+      if (err.code !== 'EEXIST') {
+        try {
+          writeFileSync(marker + '.failed', threadId + ' ' + err.code + '\\n', { flag: 'a' });
+        } catch {}
+      }
+    }
+
+    let armed = false;
     parentPort.on('message', (msg) => {
       if (msg && msg.__shutdown) { parentPort.close(); return; }
       parentPort.postMessage({ ok: true, result: { filePath: msg.filePath } });
-      // Claim the fault before scheduling it, so a replacement that starts
-      // while the timer is pending still sees it taken. Recorded HERE rather
-      // than in the timer, because arming is what the test counts and it
-      // happens synchronously with the serve -- the throw is later and would
-      // be raced.
-      //
-      // The claim is \`wx\`, which fails if the file exists, rather than
-      // \`existsSync\` then append: those are two syscalls and two threads
-      // can both pass the check. That cannot happen at this pool's concurrency
-      // of 1, where no two workers ever serve at once -- but the guarantee is
-      // stated unconditionally above, and \`wx\` is what makes it true at any
-      // size rather than true by accident of the caller.
-      //
       // The delay exists so the parent has consumed this reply before the
-      // fault lands: 'message' and 'error' reach it on different channels, so
-      // a parent descheduled across both can process the 'error' first, find
-      // the task still in \`active\`, and resolve it null -- failing the
+      // fault lands: 'message' and 'error' reach it on different channels,
+      // so a parent descheduled across both can process the 'error' first,
+      // find the task still in \`active\`, and resolve it null -- failing the
       // first.ts assertion with the very signature this test is meant to
-      // distinguish. It was 20ms, which is the same order as the scheduling
-      // delays that caused the original flake; it is 250ms now.
+      // distinguish. It was 20ms, the same order as the scheduling delays
+      // that caused the original flake; it is 250ms now.
       //
       // What this does NOT do is remove the ordering dependency, and it
       // cannot: the worker has no way to learn that its reply was consumed,
       // and a fault raised while a task IS in flight never leaves a stale
       // entry in \`idle\`, which is the whole bug. So the premise needs an
-      // idle fault, and an idle fault needs a delay. This only makes the
+      // idle fault, an idle fault needs a delay, and this only makes the
       // required parent stall implausible rather than merely unlikely.
-      let armed = false;
-      try {
-        writeFileSync(marker, threadId + '\\n', { flag: 'wx' });
+      if (isFaulter && !armed) {
         armed = true;
-      } catch (err) {
-        // EEXIST is the expected answer: another thread holds the claim.
-        // Anything else -- EPERM or EBUSY from an indexer touching the fresh
-        // mkdtemp directory, ENOSPC -- means the FIRST worker failed to arm,
-        // and a bare catch would swallow that and leave the test to time out
-        // 10s later saying the pool never reacted to a fault nobody ever
-        // scheduled. Accusing the pool of a harness failure is the exact
-        // misdiagnosis this test exists to prevent, so rethrow: the worker
-        // faults, the marker stays empty, and the arming assertion fails
-        // naming the real problem.
-        if (err.code !== 'EEXIST') throw err;
-        armed = false;
-      }
-      if (armed) {
         setTimeout(() => { throw new Error('idle fault'); }, 250);
       }
     });
@@ -151,10 +160,20 @@ describe("ParsePool", () => {
    * passes on a runner that is thrashing. The timeout only decides how long
    * to wait before calling it a failure, so it can be generous.
    */
-  const waitUntil = async (cond: () => boolean, what: string, timeoutMs = 10000): Promise<void> => {
+  const waitUntil = async (
+    cond: () => boolean,
+    // A thunk, not just a string, so the message can be built when the wait
+    // FAILS. A caller waiting on something the fixture arranges needs to say
+    // "the fixture never armed" rather than "the pool never reacted", and it
+    // can only tell them apart at that moment.
+    what: string | (() => string),
+    timeoutMs = 10000,
+  ): Promise<void> => {
     const deadline = Date.now() + timeoutMs;
     while (!cond()) {
-      if (Date.now() > deadline) throw new Error(`waitUntil timed out: ${what}`);
+      if (Date.now() > deadline) {
+        throw new Error(`waitUntil timed out: ${typeof what === "string" ? what : what()}`);
+      }
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
   };
@@ -220,7 +239,16 @@ describe("ParsePool", () => {
     // .respawnCount() > before`.
     await waitUntil(
       () => pool.respawnCount() > 0,
-      "the idle fault never reached the pool",
+      // Ask the fixture first. If its claim failed there is no fault to wait
+      // for, and reporting that the pool never reacted would blame the pool
+      // for a harness problem -- the misdiagnosis this whole test exists to
+      // prevent. At concurrency 1 that is the ONLY worker, so nothing
+      // respawns and this wait is where it surfaces; the `.failed` assertion
+      // below never gets to run.
+      () =>
+        existsSync(`${marker}.failed`)
+          ? `the fixture could not claim the fault: ${readFileSync(`${marker}.failed`, "utf8").trim()}`
+          : "the idle fault never reached the pool",
     );
 
     // TWO at once, deliberately. `drain()` pops the free list, so a single
@@ -252,6 +280,13 @@ describe("ParsePool", () => {
     // only proves SOME respawn happened -- a fixture that died during module
     // evaluation would satisfy it and never arm -- and the ENOENT would then
     // point at this line instead of at the contract.
+    // No thread failed to claim for an unrelated reason. Without this, a
+    // first-thread EPERM is invisible: the second thread claims successfully,
+    // arms, and every other assertion here stays green.
+    expect(
+      existsSync(`${marker}.failed`) ? readFileSync(`${marker}.failed`, "utf8") : "",
+      "a worker failed to claim the fault for a reason other than EEXIST",
+    ).toBe("");
     const armings = (existsSync(marker) ? readFileSync(marker, "utf8") : "")
       .split("\n")
       // `.filter(Boolean)`, not `.trim()`: an empty file trims to "" and then
