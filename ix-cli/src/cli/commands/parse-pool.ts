@@ -491,12 +491,19 @@ export class ParsePool {
    * `const before = pool.workerDeaths()` and then `> before`, or it is a
    * poll that returns immediately and waits for nothing.
    *
-   * And it stops moving once teardown starts: `onError` returns at its
-   * `destroyed` guard, so no death is counted after `destroy()` has begun.
-   * A `> before` wait for a death expected during or after teardown never
-   * completes -- which is the same hang this counter was fixed to avoid at
-   * the respawn cap, just moved. That caveat is on the private `respawns`
-   * field too, which a caller reading this accessor would not see.
+   * Two things stop it moving, and a `> before` wait across either never
+   * completes -- the same hang this counter was moved out of the cap branch
+   * to avoid, one step further along:
+   *
+   *   teardown   `onError` returns at its `destroyed` guard, so no death is
+   *              counted once `destroy()` has begun.
+   *   the latch  past `MAX_RESPAWNS` with no worker left, `dead` is set and
+   *              nothing is ever spawned again, so no further death can
+   *              occur. This one bites while the process is still running
+   *              normally, which makes it the easier of the two to miss.
+   *
+   * The teardown caveat is on the private `respawns` field too, which a
+   * caller reading this accessor would not see.
    */
   workerDeaths(): number {
     return this.deaths;
