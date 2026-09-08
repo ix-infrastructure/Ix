@@ -214,14 +214,23 @@ describe("ParsePool", () => {
     // posts to nothing, and never settles.
     const both = await Promise.all([pool.parse("a2.ts", "x"), pool.parse("b2.ts", "x")]);
     expect(both).toEqual([{ filePath: "a2.ts" }, { filePath: "b2.ts" }]);
-    // The once-per-pool contract, asserted on the ARMING rather than on the
-    // fault. Arming is synchronous with the serve; the throw is 250ms behind
-    // it. So a replacement that armed its own would have written its line
-    // here by now, while `respawnCount()` would still read 1 -- its timer has
-    // not fired, and the parses above take a few ms against that 250ms of
-    // slack. An earlier revision asserted `respawnCount()` for this and
-    // claimed it pinned the contract; it does not. Reverting the fixture to
-    // per-thread arming passes that assertion 5 runs out of 5.
+    // The once-per-pool contract is ENFORCED by the fixture's `wx` flag, which
+    // makes a second arming impossible rather than detectable. This asserts
+    // that the enforcement is still there and did its job: exactly one thread
+    // armed, so `b2.ts` was never racing a replacement's timer.
+    //
+    // Be precise about what it can and cannot fail on, because two earlier
+    // revisions got this wrong in opposite directions. It fails if the `wx`
+    // claim is weakened to an append, and if the marker mechanism is replaced
+    // by per-thread counting (both verified by mutation, 3 of 3). It does NOT
+    // independently detect "a replacement armed too" -- with `wx` in place
+    // that cannot happen, so adding a redundant per-thread guard leaves this
+    // green, which is correct and not a gap.
+    //
+    // What it replaced was an assertion on `respawnCount()`, which pinned
+    // nothing: the replacement's fault is a 250ms timer and the parses above
+    // take a few ms, so the count still reads 1 either way. Reverting the
+    // fixture passed that one 5 runs out of 5.
     // Read through `existsSync`, so a marker that was never written fails as
     // "arm exactly one fault" rather than as a raw ENOENT. `waitUntil` above
     // only proves SOME respawn happened -- a fixture that died during module

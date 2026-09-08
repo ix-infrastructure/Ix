@@ -414,6 +414,11 @@ export class ParsePool {
    * flight, which `crashedTasks()` deliberately does not count because no file
    * was lost. That combination is otherwise unobservable from outside, which
    * is what this exists for.
+   *
+   * Test observability, and only that today -- nothing in `ingest.ts` reads
+   * it, so a run that respawned a dozen workers still prints the same summary
+   * as a healthy one. Surfacing it there is a reasonable thing to want and a
+   * different change; do not read this comment as saying it already happens.
    */
   respawnCount(): number {
     return this.respawnsTotal;
