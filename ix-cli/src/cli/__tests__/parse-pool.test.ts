@@ -76,9 +76,10 @@ describe("ParsePool", () => {
    * Faults ONCE per pool, not once per worker.
    *
    * `let served = 0` was per-thread, so the replacement armed its own fault
-   * 20ms after serving `a2.ts` -- and `b2.ts` is only posted once the parent
-   * has received a2's result and re-drained. Miss that 20ms window on a busy
-   * machine and the replacement dies with `b2.ts` in flight, which `onError`
+   * shortly after serving `a2.ts` -- and `b2.ts` is only posted once the
+   * parent has received a2's result and re-drained. Miss that window on a
+   * busy machine and the replacement dies with `b2.ts` in flight, which
+   * `onError`
    * resolves to null: the exact Ix#567 signature, from the harness rather
    * than the pool. Fixing only the first wait would have left this half of
    * the race in place.
@@ -88,7 +89,7 @@ describe("ParsePool", () => {
    */
   const IDLE_FAULT_ONCE = (marker: string): string => `
     import { parentPort, threadId } from 'node:worker_threads';
-    import { existsSync, appendFileSync } from 'node:fs';
+    import { writeFileSync } from 'node:fs';
     const marker = ${JSON.stringify(marker)};
     parentPort.on('message', (msg) => {
       if (msg && msg.__shutdown) { parentPort.close(); return; }
@@ -99,13 +100,20 @@ describe("ParsePool", () => {
       // happens synchronously with the serve -- the throw is later and would
       // be raced.
       //
+      // The claim is \`wx\`, which fails if the file exists, rather than
+      // \`existsSync\` then append: those are two syscalls and two threads
+      // can both pass the check. That cannot happen at this pool's concurrency
+      // of 1, where no two workers ever serve at once -- but the guarantee is
+      // stated unconditionally above, and \`wx\` is what makes it true at any
+      // size rather than true by accident of the caller.
+      //
       // The delay exists so the parent has consumed this reply before the
       // fault lands: 'message' and 'error' reach it on different channels, so
       // a parent descheduled across both can process the 'error' first, find
       // the task still in \`active\`, and resolve it null -- failing the
       // first.ts assertion with the very signature this test is meant to
       // distinguish. It was 20ms, which is the same order as the scheduling
-      // delays that caused the original flake.
+      // delays that caused the original flake; it is 250ms now.
       //
       // What this does NOT do is remove the ordering dependency, and it
       // cannot: the worker has no way to learn that its reply was consumed,
@@ -113,8 +121,14 @@ describe("ParsePool", () => {
       // entry in \`idle\`, which is the whole bug. So the premise needs an
       // idle fault, and an idle fault needs a delay. This only makes the
       // required parent stall implausible rather than merely unlikely.
-      if (!existsSync(marker)) {
-        appendFileSync(marker, threadId + '\\n');
+      let armed = false;
+      try {
+        writeFileSync(marker, threadId + '\\n', { flag: 'wx' });
+        armed = true;
+      } catch {
+        armed = false;
+      }
+      if (armed) {
         setTimeout(() => { throw new Error('idle fault'); }, 250);
       }
     });
@@ -173,15 +187,13 @@ describe("ParsePool", () => {
     // tasks -- and it was spliced out of `workers` but left in `idle`, so the
     // next `drain()` popped the terminated thread and posted to nothing: that
     // task's promise never settled.
-    const pool = new ParsePool(
-      worker("idlefault", IDLE_FAULT_ONCE(join(dir, "idle-fault-armed"))),
-      1,
-    );
+    const marker = join(dir, "idle-fault-armed");
+    const pool = new ParsePool(worker("idlefault", IDLE_FAULT_ONCE(marker)), 1);
     pool.init();
 
     expect(await pool.parse("first.ts", "x")).toEqual({ filePath: "first.ts" });
-    // Wait for the fault to LAND, not for a duration. The fixture throws 20ms
-    // after serving, and this was `setTimeout(120)` -- which is ample when the
+    // Wait for the fault to LAND, not for a duration. The fixture throws
+    // 250ms after serving, and this was `setTimeout(120)` -- ample when the
     // machine is idle (0 failures in 10 runs) and is not when it is busy: 1 of
     // 8 runs under saturating CPU load, where the 'error' event had not been
     // delivered before the two parses below went out. The test then failed on
@@ -203,14 +215,19 @@ describe("ParsePool", () => {
     const both = await Promise.all([pool.parse("a2.ts", "x"), pool.parse("b2.ts", "x")]);
     expect(both).toEqual([{ filePath: "a2.ts" }, { filePath: "b2.ts" }]);
     // The once-per-pool contract, asserted on the ARMING rather than on the
-    // fault. Arming is synchronous with the serve; the throw is 20ms behind
-    // it. So a replacement that armed its own would have appended a second
-    // line here by now, while `respawnCount()` would still read 1 -- its
-    // timer has not fired, and the parses above take a few ms. An earlier
-    // revision asserted `respawnCount()` for this and claimed it pinned the
-    // contract; it does not. Reverting the fixture to per-thread arming
-    // passes that assertion 5 runs out of 5.
-    const armings = readFileSync(join(dir, "idle-fault-armed"), "utf8")
+    // fault. Arming is synchronous with the serve; the throw is 250ms behind
+    // it. So a replacement that armed its own would have written its line
+    // here by now, while `respawnCount()` would still read 1 -- its timer has
+    // not fired, and the parses above take a few ms against that 250ms of
+    // slack. An earlier revision asserted `respawnCount()` for this and
+    // claimed it pinned the contract; it does not. Reverting the fixture to
+    // per-thread arming passes that assertion 5 runs out of 5.
+    // Read through `existsSync`, so a marker that was never written fails as
+    // "arm exactly one fault" rather than as a raw ENOENT. `waitUntil` above
+    // only proves SOME respawn happened -- a fixture that died during module
+    // evaluation would satisfy it and never arm -- and the ENOENT would then
+    // point at this line instead of at the contract.
+    const armings = (existsSync(marker) ? readFileSync(marker, "utf8") : "")
       .split("\n")
       // `.filter(Boolean)`, not `.trim()`: an empty file trims to "" and then
       // splits to [""], so ZERO armings would satisfy `toHaveLength(1)` and
