@@ -148,14 +148,24 @@ Either way the result is consistent with everything else here, and it is worth
 showing the conversion, because getting it wrong once made this section claim a
 falsification it does not support.
 
-The 6.3% is per POOL teardown, and a pool disposes 21 isolates. The
-per-isolate hazard is therefore `1-(1-h)^21 = 0.063`, i.e. **h = 0.31%** — a
-factor of 20.5, which for a pool of 21 is the only shape the answer can take:
-at small h the pool rate is about 21h, so the ratio can approach 21 and never
-exceed it. Any conversion factor larger than the pool size is arithmetic that
-went wrong, which is how the ~28× an earlier revision quoted here was caught
-(it was 8.6% over 0.31% — a single arm's per-pool rate against the pooled
-per-isolate one).
+The 6.3% is per POOL teardown, and a pool disposes 21 isolates. Treating
+those disposals as independent gives `1-(1-h)^21 = 0.063`, i.e. **h = 0.31%**
+— a factor of 20.5, and for a pool of 21 that is the only shape the answer can
+take: at small h the pool rate is about 21h, so the ratio can approach 21 and
+never exceed it. Any conversion factor larger than the pool size is arithmetic
+that went wrong, which is how the ~28× an earlier revision quoted here was
+caught (it was 8.6% over 0.31% — a single arm's per-pool rate against the
+pooled per-isolate one).
+
+**Independence is an assumption, and this document has direct evidence
+against it.** The idle-vs-loaded real-ingest rates differ 7× at identical pool
+size, and the harness overstates idle real ingests by 22×, so something not in
+the model moves the rate. Carrying `h` from the harness onto vitest's
+one-at-a-time terminations is also a cross-population transfer — the same move
+this file retracts for the "one in twelve" figure. The conclusion survives
+either way, which is why it is stated rather than hedged away: redo it with
+the real-ingest IDLE hazard instead and `P(0 in 10 runs)` is about 0.95
+against 0.33, both unremarkable. Nothing here rests on the exact h.
 
 How many addon-loaded isolates a run terminates is not a guess: `isolate`
 defaults to `true`, `core-ingestion` ships no vitest config to change it, and

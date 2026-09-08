@@ -173,19 +173,36 @@ describe("ParsePool", () => {
     // comparison that settles it is on `ParsePool.shutdown` in
     // `../commands/parse-pool.ts`; rates and populations are in
     // `docs/parse-pool-teardown.md`, not restated here. What matters
-    // for this file: only the real-worker test near the bottom loads the
-    // addon; pools built on the inline `.mjs` fixtures never import
-    // `core-ingestion`, so their teardowns cannot crash. Deliberately no
-    // tally: a count here goes stale the first time a test is added, with the
-    // suite still green. And on the shipped build nothing here calls
-    // `terminate()` at all -- Ix#598 removed it -- but do not read that as
-    // zero. A worker that will not answer `__shutdown` is
-    // left alive and `unref()`'d, and its isolate is still disposed when the
-    // process exits; that path is measured only as four addon-loaded threads,
-    // 0 failures in 10 runs, which at the per-isolate hazard is the expected
-    // result either way. Nor is the repo clear: `core-ingestion`'s own suite
-    // runs on vitest's threads pool, which does terminate threads that have
-    // loaded the addon. The doc covers both.
+    // for this file: a pool built on one of the inline `.mjs` fixtures never
+    // imports `core-ingestion`, so its teardown cannot crash, and only a pool
+    // pointed at the real built worker can. Stated as a property of the
+    // fixture rather than as "only the test at the bottom", which is true
+    // today and goes stale silently the first time a second real-worker test
+    // is added -- and goes stale in the dangerous direction, telling whoever
+    // added it that their teardown cannot crash. Deliberately no tally
+    // either, for the same reason: a count goes stale with the suite green.
+    //
+    // And on the shipped build nothing here calls `terminate()` at all --
+    // Ix#598 removed it. A worker that will not
+    // answer `__shutdown` is left alive and `unref()`'d, and process exit
+    // does NOT run the shutdown path that `terminate()` drives: probed three
+    // times, the parent never receives an 'exit' event for such a worker and
+    // the worker's own `process.on('exit')` never runs -- the process leaves
+    // at code 0 with the thread still live. That is the same thing
+    // `shutdown` in `../commands/parse-pool.ts` says, and an earlier revision
+    // of THIS comment said the opposite ("its isolate is still disposed when
+    // the process exits"), which would have told a reader the give-up path
+    // is exposed to the crash. It is the one claim in this PR that two files
+    // answered differently.
+    //
+    // The arm behind it is weak on its own -- four addon-loaded threads
+    // unref'd across exit, 0 failures in 10 runs, which at the per-isolate
+    // hazard is the expected result either way -- so the mechanism is what
+    // carries it, not the count.
+    //
+    // Nor is the repo clear: `core-ingestion`'s own suite runs on vitest's
+    // threads pool, which does terminate threads that have loaded the addon.
+    // The doc covers both.
     //
     // Asserted through a marker the worker writes when ASKED to go, because the
     // crash itself is probabilistic: a test that just tore pools down would
