@@ -405,20 +405,15 @@ export class ParsePool {
    * `onResult` clears it on every successful round trip, so a run that lost a
    * dozen workers -- each replacement then parsing a file -- ends with
    * `respawns === 0` and is indistinguishable from a run that lost none. That
-   * is the right behaviour for the cap and the wrong number for a reader.
+   * is the right behaviour for the cap and the wrong number for a reader, and
+   * it makes `respawns` useless to wait on: any completed parse resets it.
    *
-   * What it gives a test is a LEVEL, not an edge. `onError` increments this
-   * and pushes the replacement in the same synchronous handler, so once it is
-   * non-zero the pool has finished reacting to a worker death -- including one
-   * that faulted with no task in flight, which `crashedTasks()` deliberately
-   * does not count because no file was lost. That was the gap: an idle fault
-   * moved no other counter, so a test waiting for one had nothing to wait on
-   * and used a fixed sleep. It failed 1 of 8 local runs under saturating CPU
-   * load, and separately took down the `Test (windows-2022 - node 22)` leg of
-   * an unrelated PR -- Actions run 34179642182, `parse-pool.test.ts:137`.
-   * That CI hit is one observation, not a second measurement of the rate.
-   * Polling `respawns` instead would have been a latent trap, since any
-   * completed parse resets it to zero.
+   * This one is a LEVEL. `onError` increments it and pushes the replacement in
+   * the same synchronous handler, so once it is non-zero the pool has finished
+   * reacting to a worker death -- including one that faulted with no task in
+   * flight, which `crashedTasks()` deliberately does not count because no file
+   * was lost. That combination is otherwise unobservable from outside, which
+   * is what this exists for.
    */
   respawnCount(): number {
     return this.respawnsTotal;

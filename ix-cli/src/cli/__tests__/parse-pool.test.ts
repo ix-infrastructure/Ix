@@ -94,13 +94,28 @@ describe("ParsePool", () => {
       if (msg && msg.__shutdown) { parentPort.close(); return; }
       parentPort.postMessage({ ok: true, result: { filePath: msg.filePath } });
       // Claim the fault before scheduling it, so a replacement that starts
-      // while the timer is pending still sees it taken. Recorded, and
-      // recorded HERE rather than in the timer, because arming is what the
-      // test needs to count and it happens synchronously with the serve --
-      // the throw is 20ms later and would be raced.
+      // while the timer is pending still sees it taken. Recorded HERE rather
+      // than in the timer, because arming is what the test counts and it
+      // happens synchronously with the serve -- the throw is later and would
+      // be raced.
+      //
+      // The delay exists so the parent has consumed this reply before the
+      // fault lands: 'message' and 'error' reach it on different channels, so
+      // a parent descheduled across both can process the 'error' first, find
+      // the task still in \`active\`, and resolve it null -- failing the
+      // first.ts assertion with the very signature this test is meant to
+      // distinguish. It was 20ms, which is the same order as the scheduling
+      // delays that caused the original flake.
+      //
+      // What this does NOT do is remove the ordering dependency, and it
+      // cannot: the worker has no way to learn that its reply was consumed,
+      // and a fault raised while a task IS in flight never leaves a stale
+      // entry in \`idle\`, which is the whole bug. So the premise needs an
+      // idle fault, and an idle fault needs a delay. This only makes the
+      // required parent stall implausible rather than merely unlikely.
       if (!existsSync(marker)) {
         appendFileSync(marker, threadId + '\\n');
-        setTimeout(() => { throw new Error('idle fault'); }, 20);
+        setTimeout(() => { throw new Error('idle fault'); }, 250);
       }
     });
   `;
@@ -195,7 +210,15 @@ describe("ParsePool", () => {
     // revision asserted `respawnCount()` for this and claimed it pinned the
     // contract; it does not. Reverting the fixture to per-thread arming
     // passes that assertion 5 runs out of 5.
-    const armings = readFileSync(join(dir, "idle-fault-armed"), "utf8").trim().split("\n");
+    const armings = readFileSync(join(dir, "idle-fault-armed"), "utf8")
+      .split("\n")
+      // `.filter(Boolean)`, not `.trim()`: an empty file trims to "" and then
+      // splits to [""], so ZERO armings would satisfy `toHaveLength(1)` and
+      // this check would be inert. Unreachable today only because the fault
+      // demonstrably landed above -- but the obvious future fix for the
+      // ENOENT path is to pre-create the marker, which would walk straight
+      // into it.
+      .filter(Boolean);
     expect(armings, "the fixture must arm exactly one fault for the whole pool").toHaveLength(1);
 
     // Kept, but for what it is: a cheap check that no EXTRA fault landed
