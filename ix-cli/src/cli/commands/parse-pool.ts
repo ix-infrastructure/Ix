@@ -490,6 +490,13 @@ export class ParsePool {
    * test observing that first death. Anything later wants
    * `const before = pool.workerDeaths()` and then `> before`, or it is a
    * poll that returns immediately and waits for nothing.
+   *
+   * And it stops moving once teardown starts: `onError` returns at its
+   * `destroyed` guard, so no death is counted after `destroy()` has begun.
+   * A `> before` wait for a death expected during or after teardown never
+   * completes -- which is the same hang this counter was fixed to avoid at
+   * the respawn cap, just moved. That caveat is on the private `respawns`
+   * field too, which a caller reading this accessor would not see.
    */
   workerDeaths(): number {
     return this.deaths;
@@ -597,10 +604,16 @@ export class ParsePool {
     // none, the `else if` latches `dead`, strands the queue and resolves it
     // as crashed, then returns -- so that path never reaches `drain()`. With
     // others still alive, NEITHER branch body runs and control falls straight
-    // through to `drain()`. Pools here are `os.cpus().length - 1` and
-    // `respawns` is a pool-wide budget that any success resets, so the
-    // second case is the ordinary one; do not read the cap as implying the
-    // pool is finished.
+    // through to `drain()`. `ingest.ts` builds the pool with
+    // `Math.max(1, os.cpus().length - 1)` and `respawns` is a pool-wide budget
+    // that any success resets, so on an ordinary machine the fall-through is
+    // the usual case -- do not read the cap as implying the pool is finished.
+    //
+    // The floor in that expression is there because 1 is reachable, and at
+    // concurrency 1 this inverts: the death that exhausts the budget is the
+    // last worker, so `workers.length === 0` always holds and the pool always
+    // latches `dead`. On a 1-2 vCPU host, which is what CI runs, the cap does
+    // finish the pool.
     this.deaths++;
 
     if (this.respawns < ParsePool.MAX_RESPAWNS) {

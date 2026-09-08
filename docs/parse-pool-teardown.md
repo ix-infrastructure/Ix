@@ -16,7 +16,7 @@ landed BEFORE the test file the real-ingest arm drives:
 |---|---|---|
 | `084f472` | #570 | last build with the `terminate()` teardown |
 | `20e1dae` | #598 | the fix -- teardown becomes `__shutdown` + `unref()` |
-| `b9b84ef` | #597 | adds `ingest-files.test.ts` |
+| `b9b84ef` | #597 | adds `ingest-files.test.ts` AND the loader's vm fallback |
 
 So:
 
@@ -25,10 +25,20 @@ So:
   is the numerator of every ratio here. So by this section's own standard it
   is not reproducible either: the build is named, the program is not.
 - The **real-ingest** arm needs both, and no commit has both -- checked every
-  commit on `main`. It was measured on a hand-assembled tree: `b9b84ef`'s
-  `ingest-files.test.ts` over `084f472`'s `parse-pool.ts`. An earlier revision
-  of this file said "check out `084f472`", which gives "no such file". Say the
-  recipe or the arm is not reproducible.
+  commit on `main`. It was measured on a hand-assembled tree: `084f472`, plus
+  TWO files from `b9b84ef` --
+
+      ix-cli/src/cli/__tests__/ingest-files.test.ts   the harness itself
+      ix-cli/src/cli/commands/ingestion-loader.ts     or it cannot run at all
+
+  The loader is not optional. `loadIngestionModules` reaches the built
+  `core-ingestion` through `new Function("return import(specifier)")`, and
+  inside vitest's vm context that throws `A dynamic import callback was not
+  specified`. `b9b84ef` added the fallback for exactly that; `084f472` has the
+  indirection and no fallback, so the two-file recipe an earlier revision of
+  this section gave throws on the first `run()` and measures zero ingests, not
+  twelve. Before that it said "check out `084f472`", which gives "no such
+  file". Say the whole recipe or the arm is not reproducible.
 - The **vitest** check needs the CURRENT tree, not either of those: its
   "36 of 38" is today's count.
 
