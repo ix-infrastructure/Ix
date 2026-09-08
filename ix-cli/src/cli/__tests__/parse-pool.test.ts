@@ -325,7 +325,10 @@ describe("ParsePool", () => {
     // A worker that dies deterministically on construction burns through the
     // cap. Draining only the queue that existed at that instant left every
     // LATER parse waiting on a `drain()` that is a no-op with no idle workers.
-    const pool = new ParsePool(worker("dead", BORN_DEAD), 1);
+    // Named, because the death count below is derived from it as well as from
+    // the cap -- see there.
+    const concurrency = 1;
+    const pool = new ParsePool(worker("dead", BORN_DEAD), concurrency);
     pool.init();
 
     // Enough calls to outlast the cap, then more after it.
@@ -348,8 +351,14 @@ describe("ParsePool", () => {
     // a healthy pool, where a counter incremented inside the respawn branch
     // and one incremented outside it both read 1, so neither placement is
     // distinguishable there. Here they are not equal -- `MAX_RESPAWNS` is 16,
-    // so the pool takes `MAX_RESPAWNS + 1` deaths -- the original worker plus
-    // one per replacement -- and only the last falls outside the branch.
+    // so the pool takes `MAX_RESPAWNS + concurrency` deaths: every worker it
+    // ever starts dies, and it starts `concurrency` up front plus one per
+    // respawn until the budget is gone. Only the last falls outside the
+    // branch. Derived from BOTH constants, because at concurrency N the
+    // initial N-1 extra workers also die before `workers.length === 0` can
+    // latch `dead` -- so a bare `MAX_RESPAWNS + 1` silently means "and the
+    // pool is size 1", and raising the size here would fail this assertion
+    // with a message accusing the death counter.
     //
     // Asserted EXACTLY, and DERIVED from the constant rather than restated.
     // A loose `>` form pins the placement only by accident of the cap's
@@ -367,10 +376,10 @@ describe("ParsePool", () => {
     // `workerDeaths()`'s own doc prescribes then hangs forever past the cap.
     expect(
       pool.workerDeaths(),
-      "expected MAX_RESPAWNS + 1 deaths: the original worker plus one per " +
-        "replacement, with the last death falling past the cap -- so the " +
-        "death that exhausts the budget has stopped being counted",
-    ).toBe(ParsePool.MAX_RESPAWNS + 1);
+      "expected MAX_RESPAWNS + concurrency deaths: every worker the pool " +
+        "starts dies, and the last death falls past the cap -- so the death " +
+        "that exhausts the budget has stopped being counted",
+    ).toBe(ParsePool.MAX_RESPAWNS + concurrency);
 
     await pool.destroy();
   });

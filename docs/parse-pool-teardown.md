@@ -37,9 +37,10 @@ So:
   `core-ingestion` through `new Function("return import(specifier)")`, and
   inside vitest's vm context that throws `A dynamic import callback was not
   specified`. `b9b84ef` added the fallback for exactly that; `084f472` has the
-  indirection and no fallback, so the two-file recipe an earlier revision of
-  this section gave throws on the first `run()` and measures zero ingests, not
-  twelve. Before that it said "check out `084f472`", which gives "no such
+  indirection and no fallback, so the ONE-file recipe an earlier revision of
+  this section gave -- the test file alone -- throws on the first `run()` and
+  measures zero ingests, not twelve. That is what the second file above
+  fixes. Before that it said "check out `084f472`", which gives "no such
   file". Say the whole recipe or the arm is not reproducible.
 - The **vitest** check needs the CURRENT tree, not either of those: its
   "36 of 38" is today's count.

@@ -609,7 +609,9 @@ export class ParsePool {
     if (idleIdx !== -1) this.idle.splice(idleIdx, 1);
 
     // Before the cap branch, because a death past the cap still reacts -- it
-    // has already spliced `workers` and `idle` above -- and a signal meaning
+    // has already spliced `workers` above, and `idle` too if it was idle (a
+    // worker that died mid-task is in `active`, so there is nothing to splice
+    // from the free list) -- and a signal meaning
     // "the pool reacted to a death" has to advance for those too. Inside the
     // branch it counted replacements instead, so past the cap it stopped
     // moving, and the baseline wait described on `workerDeaths()` (~140 lines
