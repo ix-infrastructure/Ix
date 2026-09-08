@@ -4,6 +4,7 @@ import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { activeReadScope, ensureReadScope } from "../resolve.js";
 import { llmLine } from "../llm.js";
+import { normalizePathSeparators } from "../path-match.js";
 
 type Metric = "dependents" | "callers" | "importers" | "members";
 
@@ -44,7 +45,13 @@ export function getSourceUri(node: any): string {
   );
 }
 
-/** Apply path inclusion and exclusion filters to a list of nodes */
+/**
+ * Apply path inclusion and exclusion filters to a list of nodes.
+ *
+ * Both sides go through `normalizePathSeparators`, so `--path src\cli` (what a
+ * Windows user types) matches the `src/cli` that is actually stored. Case is
+ * left alone — see `path-match.ts` and Ix#636.
+ */
 export function applyPathFilters(
   nodes: any[],
   includePath?: string,
@@ -52,10 +59,12 @@ export function applyPathFilters(
 ): any[] {
   let result = nodes;
   if (includePath) {
-    result = result.filter((node: any) => getSourceUri(node).includes(includePath));
+    const needle = normalizePathSeparators(includePath);
+    result = result.filter((node: any) => normalizePathSeparators(getSourceUri(node)).includes(needle));
   }
   if (excludePath) {
-    result = result.filter((node: any) => !getSourceUri(node).includes(excludePath));
+    const needle = normalizePathSeparators(excludePath);
+    result = result.filter((node: any) => !normalizePathSeparators(getSourceUri(node)).includes(needle));
   }
   return result;
 }
@@ -173,7 +182,11 @@ export function registerRankCommand(program: Command): void {
 
         // 1. Fetch all entities of the given kind
         await ensureReadScope(client); // fold in a Path-2 stitched system (Ix#225 Half B)
-        const allNodes = await client.listByKind(opts.kind, { limit: 2000, scope: opts.path || undefined, ...activeReadScope() });
+        // The backend's scope is a raw AQL CONTAINS against source_uri, which is
+        // always POSIX — send the separator-normalized needle or a Windows-style
+        // --path silently matches nothing server-side too (Ix#636).
+        const scopeNeedle = opts.path ? normalizePathSeparators(opts.path) : undefined;
+        const allNodes = await client.listByKind(opts.kind, { limit: 2000, scope: scopeNeedle, ...activeReadScope() });
 
         if (allNodes.length === 0) {
           if (opts.format === "llm") {
@@ -238,7 +251,7 @@ export function registerRankCommand(program: Command): void {
           console.log(JSON.stringify({
             metric,
             kind: opts.kind,
-            scope: opts.path || undefined,
+            scope: scopeNeedle,
             results: results.map(r => ({ name: r.name, kind: r.kind, score: r.score })),
             summary: { evaluated: candidates.length, returned: results.length },
             diagnostics: diagnostics.length > 0 ? diagnostics : undefined,

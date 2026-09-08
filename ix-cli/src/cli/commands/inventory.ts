@@ -6,6 +6,7 @@ import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { relativePath } from "../format.js";
 import { llmLine } from "../llm.js";
+import { normalizePathSeparators } from "../path-match.js";
 
 /**
  * Render `ix inventory` as llm records: a header line then one `file` row per
@@ -64,17 +65,22 @@ Examples:
       // the client-side filter below ever sees it). The client-side filter is
       // kept as a fallback for older servers that ignore the scope field.
       const systemId = await resolveReadSystemId(client);
-      let nodes = await client.listByKind(opts.kind, { limit, workspaceId: systemId ? undefined : resolveWorkspaceId(), scope: opts.path, systemId });
+      // Separators only, on both the scope sent to the backend and the
+      // client-side fallback below. source_uris are always POSIX, so a Windows
+      // `--path src\cli` matched nothing in either place (Ix#636). Case is
+      // untouched — see path-match.ts.
+      const pathNeedle = opts.path ? normalizePathSeparators(opts.path) : undefined;
+      let nodes = await client.listByKind(opts.kind, { limit, workspaceId: systemId ? undefined : resolveWorkspaceId(), scope: pathNeedle, systemId });
 
-      if (opts.path) {
+      if (pathNeedle) {
         nodes = nodes.filter((n) => {
-          const uri = String(
+          const uri = normalizePathSeparators(String(
             (n as any).provenance?.source_uri ??
             n.provenance?.sourceUri ??
             n.attrs?.path ??
             ""
-          );
-          return uri.includes(opts.path!);
+          ));
+          return uri.includes(pathNeedle);
         });
       }
 
