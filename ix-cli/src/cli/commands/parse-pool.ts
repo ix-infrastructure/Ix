@@ -419,6 +419,13 @@ export class ParsePool {
    * it, so a run that respawned a dozen workers still prints the same summary
    * as a healthy one. Surfacing it there is a reasonable thing to want and a
    * different change; do not read this comment as saying it already happens.
+   *
+   * Waiting on it means waiting on a BASELINE, not on `> 0`. The count
+   * latches for the life of the run, so `> 0` answers "has any worker ever
+   * died", which is true forever after the first one -- correct only for a
+   * test observing that first death. Anything later wants
+   * `const before = pool.respawnCount()` and then `> before`, or it is a
+   * poll that returns immediately and waits for nothing.
    */
   respawnCount(): number {
     return this.respawnsTotal;

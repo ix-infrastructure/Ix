@@ -125,7 +125,17 @@ describe("ParsePool", () => {
       try {
         writeFileSync(marker, threadId + '\\n', { flag: 'wx' });
         armed = true;
-      } catch {
+      } catch (err) {
+        // EEXIST is the expected answer: another thread holds the claim.
+        // Anything else -- EPERM or EBUSY from an indexer touching the fresh
+        // mkdtemp directory, ENOSPC -- means the FIRST worker failed to arm,
+        // and a bare catch would swallow that and leave the test to time out
+        // 10s later saying the pool never reacted to a fault nobody ever
+        // scheduled. Accusing the pool of a harness failure is the exact
+        // misdiagnosis this test exists to prevent, so rethrow: the worker
+        // faults, the marker stays empty, and the arming assertion fails
+        // naming the real problem.
+        if (err.code !== 'EEXIST') throw err;
         armed = false;
       }
       if (armed) {
@@ -202,6 +212,12 @@ describe("ParsePool", () => {
     // `respawnCount()` is the pool's own signal that `onError` ran to
     // completion, so this waits on the state the test actually depends on and
     // is done as soon as it holds.
+    // `> 0` is only correct because this is the FIRST death of the run. The
+    // counter is monotonic and never resets, so a second wait written this
+    // way returns immediately -- a silent no-op, which is the same class of
+    // bug this test was fixed for. A later fault must capture a baseline
+    // first: `const before = pool.respawnCount()` then `() => pool
+    // .respawnCount() > before`.
     await waitUntil(
       () => pool.respawnCount() > 0,
       "the idle fault never reached the pool",
