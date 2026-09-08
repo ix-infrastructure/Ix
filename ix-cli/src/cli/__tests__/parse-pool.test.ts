@@ -185,14 +185,24 @@ describe("ParsePool", () => {
     // And on the shipped build nothing here calls `terminate()` at all --
     // Ix#598 removed it. A worker that will not
     // answer `__shutdown` is left alive and `unref()`'d, and process exit
-    // does NOT run the shutdown path that `terminate()` drives: probed three
-    // times, the parent never receives an 'exit' event for such a worker and
-    // the worker's own `process.on('exit')` never runs -- the process leaves
-    // at code 0 with the thread still live. That is the same thing
-    // `shutdown` in `../commands/parse-pool.ts` says, and an earlier revision
-    // of THIS comment said the opposite ("its isolate is still disposed when
-    // the process exits"), which would have told a reader the give-up path
-    // is exposed to the crash. It is the one claim in this PR that two files
+    // does NOT run the shutdown path that `terminate()` drives. Probed three
+    // times, in a standalone script rather than through this pool: the parent
+    // never receives an 'exit' event for such a worker, and the worker's own
+    // `process.on('exit')` never runs -- the process leaves at code 0 with the
+    // thread still live.
+    //
+    // Standalone matters. The give-up path calls `removeAllListeners('exit')`
+    // before it unrefs, so measured through `ParsePool` the missing event
+    // would be guaranteed by construction and would show nothing. It is the
+    // worker-side handler that carries this.
+    //
+    // The give-up branch of `shutdown` in `../commands/parse-pool.ts` says the
+    // same thing -- "nobody disposes an isolate that still holds the addon" --
+    // though that is in the branch body, not in `shutdown`'s doc header, which
+    // only covers how long a wedged worker survives. An earlier revision of
+    // THIS comment said the opposite ("its isolate is still disposed when the
+    // process exits"), which would have told a reader the give-up path is
+    // exposed to the crash. It was the one claim in this PR that two files
     // answered differently.
     //
     // The arm behind it is weak on its own -- four addon-loaded threads

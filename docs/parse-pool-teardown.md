@@ -5,8 +5,15 @@
 and of what was and was not measured. The code carries the rule; the numbers
 live here so they do not have to be kept consistent across three source files.
 
-Origin: Ix#598 (the fix) and Ix#650 (this correction). Measurements are from
-the pre-fix build `084f472`, Windows / Node 26, against a live backend.
+Origin: Ix#598 (the fix) and Ix#650 (this correction). Windows / Node 26,
+against a live backend.
+
+The harness and real-ingest arms are from the pre-fix build `084f472` --
+necessarily, since they need the `terminate()` teardown that #598 removed. The
+vitest consistency check below is NOT: it needs the current tree, and its
+"36 of 38" is today's file count. At `084f472` the suite was smaller, so
+anyone reproducing that arm by checking out `084f472` will count differently
+and should redo the arithmetic with what they find.
 
 ## The bug
 
@@ -71,6 +78,25 @@ Fisher exact on 2/75 vs 9/50 is **p = 0.007** two-sided (0.004 one-sided), so
 load matters. A real `ix ingest` of 300 files was **0 of 60** — that is *one*
 teardown per process, and `P(zero in 60)` is 0.84 at the idle rate, 0.29 at the
 loaded one. Unremarkable under either.
+
+## The grammar tally
+
+The source comments defer here for this, so it has to actually be here.
+`core-ingestion/src/index.ts` resolves **27 grammars** plus the tree-sitter
+core:
+
+| how it loads | count | can it be absent? |
+|---|---|---|
+| static `import` | 12 | no -- evaluation fails if the package is missing |
+| `tryLoadGrammar` (sync helper) | 11 | yes, returns null |
+| `tryImportGrammar` (async helper) | 4 | yes, returns null |
+
+Cross-cutting that, `package.json` has **13 required** grammars and 14
+optional. The two splits do not line up: `tree-sitter-powershell` is a
+REQUIRED dependency that still loads through the async helper, which is why
+the guaranteed floor is "the core plus the twelve static ones" and not "the 13
+required". That one package is the whole reason the distinction is worth
+writing down.
 
 ## What this does and does not establish
 
@@ -183,6 +209,27 @@ unknown, when the config already determined it.
 Mixing the two units — applying a per-pool rate to individual isolates — is
 the easiest error in this document to make, and the reason every rate here
 says which it is.
+
+## The unref-at-exit arm
+
+`shutdown()`'s give-up path leaves an unresponsive worker alive and
+`unref()`'d, and the source comments defer here for what that costs.
+
+Measured: **four addon-loaded threads left live and unref'd across process
+exit, 0 failures in 10 runs.** On its own that carries very little, and the
+comparison to make is not against the `terminate()` row of the table above:
+that row is twenty teardowns of a 21-worker pool per run, while this is four
+isolates in one teardown per run. At the per-isolate h = 0.31%, four isolates
+is ~1.2% per run and `P(0 in 10)` is 0.88 -- so this arm would look exactly
+like this whether the path is safe or not. It has no power, and it is recorded
+so nobody mistakes it for reassurance.
+
+What carries the argument is the mechanism, and it was probed separately:
+spawn a worker, `unref()` it, let the process end, and the parent never
+receives an `'exit'` event while the worker's own `process.on('exit')` never
+runs -- the process leaves at code 0 with the thread still live. Process exit
+does not run the orderly per-worker shutdown that `terminate()` drives. That
+is why `unref()` is not simply a deferred `terminate()`.
 
 ## Superseded figures
 

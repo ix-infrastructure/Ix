@@ -13,6 +13,7 @@ import Parser from 'tree-sitter';
 // fresh process on Node 26:
 //
 //   tree-sitter-c-sharp                     required  type=module    -> 1
+//   tree-sitter-powershell                  required  type=module    -> 1
 //   @tree-sitter-grammars/tree-sitter-lua   optional  type=module    -> 1
 //   tree-sitter-css                         optional  type=module    -> 1
 //   the other 11 required grammars          required  type=commonjs  -> 0
@@ -20,14 +21,20 @@ import Parser from 'tree-sitter';
 //   tree-sitter-sas                         optional  type=module    -> 0
 //                                             (full-filename main + "exports")
 //
-// The two 11s are a coincidence, not a copy-paste: 12 required grammars minus
-// c-sharp, and 14 optional minus lua, css and sas.
+// The two 11s are a coincidence, not a copy-paste: 13 required grammars minus
+// c-sharp and powershell, and 14 optional minus lua, css and sas.
 //
 // So the rule is `"type": "module"` + a directory `"main"` + no `"exports"`,
-// which today means exactly c-sharp (static, below), plus css and lua (dynamic,
-// through tryImportGrammar further down). The parse pool loads this module once
-// per worker and every worker shares the parent's stderr, so each warning
-// arrives once per worker and shreds the `ix map` progress bar.
+// which today means c-sharp (static, below) plus powershell, css and lua
+// (dynamic, through tryImportGrammar further down). The parse pool loads this
+// module once per worker and every worker shares the parent's stderr, so each
+// warning arrives once per worker and shreds the `ix map` progress bar.
+//
+// powershell was added in Ix#595 and this table was not updated: it said "12
+// required grammars" and named the shape as "exactly c-sharp, plus css and
+// lua", while the comment on the powershell import ~90 lines below has always
+// said it is "the same shape". The table was wrong on both counts, and Ix#650
+// -- a change about these files disagreeing on counts -- is where it showed.
 //
 // Do NOT pre-emptively convert the CJS grammars "for consistency". A subpath
 // import is a dependency on a package's internal layout, and it fails *hard* —

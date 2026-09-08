@@ -245,7 +245,8 @@ export class ParsePool {
    * threads left live and unref'd across process exit: 0 failures in 10 runs
    * -- though that arm is four isolates in one teardown, against a table of
    * twenty teardowns of a 21-worker pool, so it carries little on its own.
-   * The doc works the exposures through.
+   * `docs/parse-pool-teardown.md` has the section, including why 0 of 10 has
+   * no power here.
    *
    * So the clocks below decide WHEN to give up, never whether it is safe to
    * kill -- and the `onError` path needs no special case either, which is what
