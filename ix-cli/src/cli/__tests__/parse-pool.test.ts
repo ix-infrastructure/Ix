@@ -83,6 +83,21 @@ describe("ParsePool", () => {
     });
   `;
 
+  /**
+   * Poll until `cond` holds. Deliberately not a fixed sleep: every wait in
+   * this file that is really "wait for the pool to observe something" should
+   * be bounded by the observation, so it costs a few ms when idle and still
+   * passes on a runner that is thrashing. The timeout only decides how long
+   * to wait before calling it a failure, so it can be generous.
+   */
+  const waitUntil = async (cond: () => boolean, what: string, timeoutMs = 10000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs;
+    while (!cond()) {
+      if (Date.now() > deadline) throw new Error(`waitUntil timed out: ${what}`);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+
   it("parses through the pool and shuts down without hanging", async () => {
     const pool = new ParsePool(worker("echo", ECHO), 2);
     pool.init();
@@ -125,8 +140,20 @@ describe("ParsePool", () => {
     pool.init();
 
     expect(await pool.parse("first.ts", "x")).toEqual({ filePath: "first.ts" });
-    // Let the fault land while the pool is idle.
-    await new Promise((resolve) => setTimeout(resolve, 120));
+    // Wait for the fault to LAND, not for a duration. The fixture throws 20ms
+    // after serving, and this was `setTimeout(120)` -- which is ample when the
+    // machine is idle (0 failures in 10 runs) and is not when it is busy: 1 of
+    // 8 runs under saturating CPU load, where the 'error' event had not been
+    // delivered before the two parses below went out. The test then failed on
+    // `b2.ts` coming back null, which looks exactly like the bug it guards.
+    //
+    // `respawnCount()` is the pool's own signal that `onError` ran to
+    // completion, so this waits on the state the test actually depends on and
+    // is done as soon as it holds.
+    await waitUntil(
+      () => pool.respawnCount() > 0,
+      "the idle fault never reached the pool",
+    );
 
     // TWO at once, deliberately. `drain()` pops the free list, so a single
     // parse takes the replacement worker that `onError` just pushed and never

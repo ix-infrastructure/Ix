@@ -398,6 +398,25 @@ export class ParsePool {
     return this.crashed;
   }
 
+  /**
+   * Replacement workers spawned so far.
+   *
+   * The observable edge of `onError`: it increments here and pushes the
+   * replacement in the same synchronous handler, so a non-zero count means
+   * the pool has FINISHED reacting to a worker death -- including one that
+   * faulted with no task in flight, which `crashedTasks()` deliberately does
+   * not count because no file was lost.
+   *
+   * That distinction is the whole reason this exists. A test waiting for an
+   * idle fault to land had nothing to wait ON and used a fixed sleep, which
+   * failed roughly one run in eight on a loaded machine. Diagnostic value on
+   * its own too: a run that quietly respawned a dozen workers looks identical
+   * to a healthy one in every other counter.
+   */
+  respawnCount(): number {
+    return this.respawns;
+  }
+
   private onResult(w: Worker, msg: { ok: boolean; result: unknown }): void {
     const task = this.active.get(w);
     if (!task) return;
