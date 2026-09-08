@@ -344,13 +344,21 @@ describe("ParsePool", () => {
     // so the pool takes 17 deaths (the original worker plus its 16
     // replacements) and only the last one falls outside the branch.
     //
+    // Asserted as EXACTLY 17, not `> 16`. `> 16` pins the placement only
+    // while the cap is 16: raise it to 20 and an increment moved back inside
+    // the branch yields 20, which still passes, and this test goes quietly
+    // vacuous against the bug it exists to catch. `MAX_RESPAWNS` is
+    // `private static`, so the literal cannot check itself -- an exact
+    // expectation at least fails loudly when the cap moves, which is the
+    // right way for a hard-coded constant to rot.
+    //
     // Without this the increment can be tidied back into the branch with the
     // suite green, and the `const before = ...` / `> before` wait that
     // `workerDeaths()`'s own doc prescribes then hangs forever past the cap.
     expect(
       pool.workerDeaths(),
       "the death that exhausts the respawn budget must still be counted",
-    ).toBeGreaterThan(16);
+    ).toBe(17);
 
     await pool.destroy();
   });
