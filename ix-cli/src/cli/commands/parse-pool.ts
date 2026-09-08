@@ -552,8 +552,16 @@ export class ParsePool {
    */
   private dead = false;
 
-  /** Generous enough for real flakiness, small enough to stop a spawn loop. */
-  private static readonly MAX_RESPAWNS = 16;
+  /**
+   * Generous enough for real flakiness, small enough to stop a spawn loop.
+   *
+   * Public for the same reason `SHUTDOWN_GRACE_MS` is: the test that pins the
+   * capped death derives its expectation from this rather than restating it.
+   * A hard-coded 17 there fails on a cap change with a message about the
+   * counter, and the tempting repair is to loosen the assertion into
+   * something that no longer catches the bug.
+   */
+  static readonly MAX_RESPAWNS = 16;
 
   private onError(w: Worker, _err: Error): void {
     // Not during shutdown. `destroy()` ends every worker on purpose, and

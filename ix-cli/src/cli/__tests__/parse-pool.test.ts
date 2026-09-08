@@ -237,9 +237,14 @@ describe("ParsePool", () => {
     //
     // `workerDeaths()` is the pool's own signal that `onError` has REACTED to
     // a death -- it advances before `spawnWorker()` and `drain()`, so it means
-    // begun, not finished. That is enough here, and is what the test depends
-    // on: this poll runs on a 5ms timer, so it can only ever observe the
-    // handler after it has returned.
+    // begun, not finished. That is enough here, and not because of the poll
+    // interval: `waitUntil` evaluates its condition once SYNCHRONOUSLY before
+    // any timer, so a 5ms tick guarantees nothing. What guarantees it is that
+    // this test body is async and so cannot be running inside `onError` --
+    // the handler has always returned before any line here executes. The
+    // distinction matters to anyone copying the `workerDeaths() > before`
+    // pattern into a synchronous callback, which the accessor's own doc
+    // warns against.
     // `> 0` is only correct because this is the FIRST death of the run. The
     // counter is monotonic and never resets, so a second wait written this
     // way returns immediately -- a silent no-op, which is the same class of
@@ -343,16 +348,19 @@ describe("ParsePool", () => {
     // a healthy pool, where a counter incremented inside the respawn branch
     // and one incremented outside it both read 1, so neither placement is
     // distinguishable there. Here they are not equal -- `MAX_RESPAWNS` is 16,
-    // so the pool takes 17 deaths (the original worker plus its 16
-    // replacements) and only the last one falls outside the branch.
+    // so the pool takes `MAX_RESPAWNS + 1` deaths -- the original worker plus
+    // one per replacement -- and only the last falls outside the branch.
     //
-    // Asserted as EXACTLY 17, not `> 16`. `> 16` pins the placement only
-    // while the cap is 16: raise it to 20 and an increment moved back inside
-    // the branch yields 20, which still passes, and this test goes quietly
-    // vacuous against the bug it exists to catch. `MAX_RESPAWNS` is
-    // `private static`, so the literal cannot check itself -- an exact
-    // expectation at least fails loudly when the cap moves, which is the
-    // right way for a hard-coded constant to rot.
+    // Asserted EXACTLY, and DERIVED from the constant rather than restated.
+    // A loose `>` form pins the placement only by accident of the cap's
+    // value: an increment moved back inside the branch yields exactly
+    // `MAX_RESPAWNS`, so `> MAX_RESPAWNS` happens to catch it, but any
+    // "more than roughly the cap" shape stops discriminating the moment
+    // someone reaches for a rounder number. And a hard-coded 17 fails a cap
+    // change with a message about the counter, where the tempting repair is
+    // to loosen the assertion into one that no longer catches the bug.
+    // `MAX_RESPAWNS` is public for exactly this, the way
+    // `SHUTDOWN_GRACE_MS` already is for the teardown-bound test below.
     //
     // Without this the increment can be tidied back into the branch with the
     // suite green, and the `const before = ...` / `> before` wait that
@@ -360,10 +368,9 @@ describe("ParsePool", () => {
     expect(
       pool.workerDeaths(),
       "expected MAX_RESPAWNS + 1 deaths: the original worker plus one per " +
-        "replacement, with the last death falling past the cap. If you just " +
-        "changed MAX_RESPAWNS, this number needs changing with it; otherwise " +
-        "the death that exhausts the budget has stopped being counted",
-    ).toBe(17);
+        "replacement, with the last death falling past the cap -- so the " +
+        "death that exhausts the budget has stopped being counted",
+    ).toBe(ParsePool.MAX_RESPAWNS + 1);
 
     await pool.destroy();
   });

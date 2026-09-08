@@ -76,7 +76,10 @@ import C from 'tree-sitter-c';
 // @ts-ignore
 import CPP from 'tree-sitter-cpp';
 // tree-sitter-c-sharp is `"type": "module"` with a directory `"main"` and no
-// `"exports"` — the one required grammar that actually triggers DEP0151.
+// `"exports"`, so it needs the explicit file path. NOT the only required
+// grammar in that shape — tree-sitter-powershell is too, further down; the
+// table at the top of this file lists them. Saying "the only one" here is what
+// went stale when #595 added powershell.
 // @ts-ignore
 import CSharp from 'tree-sitter-c-sharp/bindings/node/index.js';
 // @ts-ignore
