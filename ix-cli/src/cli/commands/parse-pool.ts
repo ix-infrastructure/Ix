@@ -465,10 +465,12 @@ export class ParsePool {
    * BEGUN reacting to that death -- and, since the handler runs to completion
    * before any asynchronous observer gets the loop back, has finished by the
    * time anyone polling can read it. The distinction matters only to a future
-   * caller reading this from inside a synchronous path: the increment now
-   * runs before `dead` is latched and before the stranded queue is spliced
-   * and resolved, so such a caller could see it advanced with that work still
-   * pending.
+   * caller reading this from inside a synchronous path. The increment now runs
+   * before everything the handler does afterwards: on the capped path before
+   * `dead` is latched and before the queue is stranded and resolved, and on
+   * the healthy path before `spawnWorker()` and `drain()`. So such a caller
+   * could see it advanced with `idle` still empty, no replacement yet, and
+   * the queue not yet moving.
    *
    * What it observes that nothing else does is a death with no task in
    * flight, which `crashedTasks()` deliberately does not count because no
@@ -580,10 +582,13 @@ export class ParsePool {
     if (idleIdx !== -1) this.idle.splice(idleIdx, 1);
 
     // Before the cap branch, because a capped death still reacts fully --
-    // it splices `idle`, latches `dead` and drains the queue -- and a signal
+    // it splices `idle`, latches `dead`, and strands and resolves the queue --
+    // note that branch `return`s before `drain()`, so it does not drain -- and
+    // a signal
     // that means "the pool has finished reacting" has to advance for those
     // too. Inside the branch it counted replacements instead, so past the cap
-    // it stopped moving and the `> before` wait below would hang on exactly
+    // it stopped moving and the `> before` wait described on `workerDeaths()`
+    // above would hang on exactly
     // the deaths a caller most wants to observe.
     this.deaths++;
 

@@ -128,9 +128,12 @@ writing down.
 
 The minimal harness overstates real exposure by **28×** on the only
 load-matched comparison available (idle vs idle). Against the loaded real rate
-it is 3.9×, but that mixes conditions — the harness was never run loaded, and
-load raises the rate — so treat 3.9× as a lower bound on what is unexplained,
-not the residue after subtracting load.
+it is **3.86×** (6.327 / 1.640 — the unrounded MLE over the unrounded loaded
+rate; the printed 6.3 / 1.64 gives 3.84, which is why this one is written to
+two decimals rather than rounded into an ambiguity). That comparison mixes
+conditions — the harness was never run loaded, and load raises the rate — so
+treat it as a lower bound on what is unexplained, not the residue after
+subtracting load.
 
 **Parses per worker is not controlled.** `ingestFiles` parses a `.ts` file
 twice (index prescan, then streaming loop, both on the same pool), so file
@@ -203,7 +206,8 @@ falsification it does not support.
 
 The 6.3% is per POOL teardown, and a pool disposes 21 isolates. Treating
 those disposals as independent gives `1-(1-h)^21 = 0.063`, i.e. **h = 0.31%**
-— a factor of 20.5, and for a pool of 21 that is the only shape the answer can
+— a factor of **20.4** (6.327 / 0.3107; the printed figures give 20.3), and
+for a pool of 21 that is the only shape the answer can
 take: at small h the pool rate is about 21h, so the ratio can approach 21 and
 never exceed it. Any conversion factor larger than the pool size is arithmetic
 that went wrong, which is how a bad conversion factor quoted here in an
@@ -224,8 +228,12 @@ either way, which is why it is stated rather than hedged away: redo it with
 the real-ingest IDLE hazard instead — 0.225% per pool over 21 isolates is
 h = 1.07e-4, and 36 terminated isolates over 10 runs gives **0.96** — against
 0.33, both unremarkable. Nothing here rests on the exact h. (An earlier
-revision said 0.95; the stated inputs give 0.962, and every other figure in
-this file reproduces to the digit.)
+revision said 0.95; the stated inputs give 0.962.) Do not read that as "and
+everything else is exact" — an earlier revision of this parenthetical said so
+and was wrong in the same breath: the conversion factor two sections up read
+20.5 where its own inputs give 20.4. Ratios here are quoted from unrounded
+inputs, so recomputing from the ROUNDED figures printed beside them can differ
+in the last digit; where that changes the rounding, the operands are given.
 
 How many addon-loaded isolates a run terminates is not a guess: `isolate`
 defaults to `true`, `core-ingestion` ships no vitest config to change it, and
