@@ -447,8 +447,10 @@ export class ParsePool {
    * Worker deaths this run has reacted to. Monotonic.
    *
    * Deaths, not replacements: past `MAX_RESPAWNS` the pool stops replacing but
-   * still reacts -- splicing `idle`, latching `dead`, draining the queue -- and
-   * a caller watching for "did the pool notice a worker die" needs those too.
+   * still reacts -- it has spliced `workers` and `idle` before the branch is
+   * reached -- and a caller watching for "did the pool notice a worker die"
+   * needs those too. (What the branch itself does past the cap depends on
+   * whether any worker survives; `onError` spells that out.)
    * An earlier revision counted replacements and sat inside the cap branch,
    * which silently stopped advancing at exactly the point a caller most wants
    * to know.
@@ -518,7 +520,10 @@ export class ParsePool {
    * `MAX_RESPAWNS` -- so 0 means the full budget is available and 16 means it
    * is exhausted, which is the opposite of how "budget" usually reads.
    * `onResult` clears it on any success, so it is not a tally either: read
-   * `deaths` for "how many workers died this run?".
+   * `deaths` for "how many deaths did the pool REACT to?" -- which is not the
+   * same as "how many workers died": `onError` returns early once `destroy()`
+   * has begun, so the ordinary end-of-run exit of every surviving worker is
+   * uncounted, and a clean run ends at 0.
    */
   private respawns = 0;
 
@@ -581,15 +586,21 @@ export class ParsePool {
     const idleIdx = this.idle.indexOf(w);
     if (idleIdx !== -1) this.idle.splice(idleIdx, 1);
 
-    // Before the cap branch, because a capped death still reacts fully --
-    // it splices `idle`, latches `dead`, and strands and resolves the queue --
-    // note that branch `return`s before `drain()`, so it does not drain -- and
-    // a signal
-    // that means "the pool has finished reacting" has to advance for those
-    // too. Inside the branch it counted replacements instead, so past the cap
-    // it stopped moving and the `> before` wait described on `workerDeaths()`
-    // above would hang on exactly
-    // the deaths a caller most wants to observe.
+    // Before the cap branch, because a death past the cap still reacts -- it
+    // has already spliced `workers` and `idle` above -- and a signal meaning
+    // "the pool reacted to a death" has to advance for those too. Inside the
+    // branch it counted replacements instead, so past the cap it stopped
+    // moving, and the baseline wait described on `workerDeaths()` (~140 lines
+    // above) would hang on exactly the deaths a caller most wants to see.
+    //
+    // What happens BELOW the cap depends on whether any worker is left. With
+    // none, the `else if` latches `dead`, strands the queue and resolves it
+    // as crashed, then returns -- so that path never reaches `drain()`. With
+    // others still alive, NEITHER branch body runs and control falls straight
+    // through to `drain()`. Pools here are `os.cpus().length - 1` and
+    // `respawns` is a pool-wide budget that any success resets, so the
+    // second case is the ordinary one; do not read the cap as implying the
+    // pool is finished.
     this.deaths++;
 
     if (this.respawns < ParsePool.MAX_RESPAWNS) {

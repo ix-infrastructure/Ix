@@ -228,10 +228,13 @@ either way, which is why it is stated rather than hedged away: redo it with
 the real-ingest IDLE hazard instead — 0.225% per pool over 21 isolates is
 h = 1.07e-4, and 36 terminated isolates over 10 runs gives **0.96** — against
 0.33, both unremarkable. Nothing here rests on the exact h. (An earlier
-revision said 0.95; the stated inputs give 0.962.) Do not read that as "and
+revision said 0.95. That was not an arithmetic slip -- 0.95 is what the
+withdrawn 0.28% idle rate gives, to three figures -- it moved because the rate
+under it did.) Do not read that as "and
 everything else is exact" — an earlier revision of this parenthetical said so
-and was wrong in the same breath: the conversion factor two sections up read
-20.5 where its own inputs give 20.4. Ratios here are quoted from unrounded
+and was wrong in the same breath: the conversion factor earlier in this same
+section read 20.5 where its own inputs give 20.4. Ratios here are quoted from
+unrounded
 inputs, so recomputing from the ROUNDED figures printed beside them can differ
 in the last digit; where that changes the rounding, the operands are given.
 

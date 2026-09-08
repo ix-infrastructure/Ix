@@ -235,9 +235,11 @@ describe("ParsePool", () => {
     // delivered before the two parses below went out. The test then failed on
     // `b2.ts` coming back null, which looks exactly like the bug it guards.
     //
-    // `workerDeaths()` is the pool's own signal that `onError` ran to
-    // completion, so this waits on the state the test actually depends on and
-    // is done as soon as it holds.
+    // `workerDeaths()` is the pool's own signal that `onError` has REACTED to
+    // a death -- it advances before `spawnWorker()` and `drain()`, so it means
+    // begun, not finished. That is enough here, and is what the test depends
+    // on: this poll runs on a 5ms timer, so it can only ever observe the
+    // handler after it has returned.
     // `> 0` is only correct because this is the FIRST death of the run. The
     // counter is monotonic and never resets, so a second wait written this
     // way returns immediately -- a silent no-op, which is the same class of
