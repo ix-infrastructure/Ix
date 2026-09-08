@@ -251,7 +251,8 @@ the real-ingest IDLE hazard instead — 0.225% per pool over 21 isolates is
 h = 1.07e-4, and 36 terminated isolates over 10 runs gives **0.96** — against
 0.33, both unremarkable. Nothing here rests on the exact h. (An earlier
 revision said 0.95. That was not an arithmetic slip -- 0.95 is what the
-withdrawn 0.28% idle rate gives, to three figures -- it moved because the rate
+withdrawn 0.28% idle rate gives (0.953, which the file rounded to 0.95) -- it
+moved because the rate
 under it did.) Do not read that as "and
 everything else is exact" — an earlier revision of this parenthetical said so
 and was wrong in the same breath: the conversion factor earlier in this same
