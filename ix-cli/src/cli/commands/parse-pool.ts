@@ -612,8 +612,11 @@ export class ParsePool {
     // The floor in that expression is there because 1 is reachable, and at
     // concurrency 1 this inverts: the death that exhausts the budget is the
     // last worker, so `workers.length === 0` always holds and the pool always
-    // latches `dead`. On a 1-2 vCPU host, which is what CI runs, the cap does
-    // finish the pool.
+    // latches `dead`. Above 1 it does not. Which case a given machine falls
+    // into depends on its core count, and this comment deliberately does not
+    // say -- an earlier revision guessed at CI's and contradicted the machine
+    // sizes in `docs/parse-pool-teardown.md`, which is the file that owns
+    // them.
     this.deaths++;
 
     if (this.respawns < ParsePool.MAX_RESPAWNS) {
