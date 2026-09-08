@@ -16,8 +16,8 @@ import Parser from 'tree-sitter';
 //   tree-sitter-powershell                  required  type=module    -> 1  (*)
 //   @tree-sitter-grammars/tree-sitter-lua   optional  type=module    -> 1
 //   tree-sitter-css                         optional  type=module    -> 1
-//   the other 11 required grammars          required  type=commonjs  -> 0
-//   the other 11 optional grammars          optional  type=commonjs  -> 0
+//   every remaining required grammar        required  type=commonjs  -> 0
+//   every remaining optional grammar        optional  type=commonjs  -> 0
 //   tree-sitter-sas                         optional  type=module    -> 0
 //                                             (full-filename main + "exports")
 //
@@ -31,8 +31,12 @@ import Parser from 'tree-sitter';
 // an unverifiable row in this table is what went stale in #595 and cost
 // Ix#650 sixteen review rounds.
 //
-// The two 11s are a coincidence, not a copy-paste: 13 required grammars minus
-// c-sharp and powershell, and 14 optional minus lua, css and sas.
+// The rows above are deliberately not counted. What decides a warning is the
+// per-package shape, which is what this table is for; the required/optional
+// totals are arithmetic over `package.json` and belong to
+// `docs/parse-pool-teardown.md`. Restating them here is how the previous
+// version went stale -- #595 added a required grammar and the count under it
+// silently stopped being true.
 //
 // So the rule is `"type": "module"` + a directory `"main"` + no `"exports"`,
 // which today means c-sharp (static, below) plus powershell, css and lua
