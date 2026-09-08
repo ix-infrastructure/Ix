@@ -189,8 +189,8 @@ export class ParsePool {
    *
    * DO NOT add a `terminate()` fast path for workers that have never been
    * dispatched. They hold the addon too: `core-ingestion/src/index.ts`
-   * resolves grammars at module scope, and `tree-sitter` plus the twelve
-   * static grammars sit near the top of its dependency graph -- so a worker
+   * resolves grammars at module scope, and `tree-sitter` plus the statically
+   * imported grammars sit near the top of its dependency graph -- so a worker
    * holds them within moments of `new Worker()`, without ever being
    * dispatched, and long before `index.ts`'s own body or its top-level
    * `await`s run. Note which end that pins: the addon-free window CLOSES when
@@ -198,9 +198,13 @@ export class ParsePool {
    * suspended at one of those awaits already holds all twelve, and is not
    * safe to terminate.
    *
-   * Not every grammar -- 15 of the 27 go through null-returning helpers and
-   * can be absent -- but the core and the twelve static ones are always
-   * there, which is the PRECONDITION the crash needs. Whether it is also
+   * Not every grammar: most go through null-returning helpers and can be
+   * absent, but the core and the statically imported ones are always there,
+   * which is the PRECONDITION the crash needs. Counts in
+   * `docs/parse-pool-teardown.md` rather than here -- the same reason the
+   * rates live there, and #595 is the worked example of what restating them
+   * costs: it added a required grammar and left a tally in
+   * `core-ingestion/src/index.ts` stale, with nothing red. Whether it is also
    * sufficient has never been measured: the one experiment that looked --
    * spawn-then-destroy, 0 of 120 -- destroyed its pool with no wait for an
    * ack or an `'online'` event, so it tore threads down inside that window,
