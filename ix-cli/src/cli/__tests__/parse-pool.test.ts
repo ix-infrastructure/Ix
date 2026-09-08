@@ -580,14 +580,14 @@ describe("ParsePool", () => {
     pool.init();
     // Parse for real, because having PARSED is what was observed to arm the
     // crash. Not because parsing loads the addon: `index.ts` resolves
-    // 27 grammars plus the core at module scope -- twelve by static import, the
-    // rest eagerly through helpers -- so these threads hold the core and the
-    // twelve within moments of spawn, well before that module finishes
-    // evaluating. The other 15 resolve through null-returning helpers and are
-    // absent wherever a platform has no prebuild, so the guaranteed floor is
-    // the core plus the statically imported twelve -- which is all this test
-    // needs. (One of the 15, `tree-sitter-powershell`, is a required
-    // dependency that loads through a helper anyway.) The exact tally is in
+    // its grammars at module scope -- some by static import, the rest eagerly
+    // through helpers -- so these threads hold the core and the static ones
+    // within moments of spawn, well before that module finishes evaluating.
+    // The helper-loaded ones return null wherever a platform has no prebuild,
+    // so the guaranteed floor is the core plus the statically imported
+    // grammars, which is all this test needs. (Being a REQUIRED dependency
+    // does not put a grammar in that floor: `tree-sitter-powershell` is
+    // required and still loads through a helper.) The counts are in
     // `docs/parse-pool-teardown.md` rather than here.
     //
     // Workers that had parsed were the ones observed to crash under
