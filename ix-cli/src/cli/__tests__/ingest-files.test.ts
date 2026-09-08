@@ -158,7 +158,8 @@ class FakeBackend {
     // timeout, at which point NEITHER `finally` in the teardown runs and both
     // temp trees leak anyway. The teardown can only be made safe if this cannot
     // hang, so the fix belongs here rather than in another `try`.
-    server.closeAllConnections?.();
+    // Not optional-chained: `engines.node` is >=22 and this landed in 18.2.
+    server.closeAllConnections();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const closed = await Promise.race([
       new Promise<boolean>((resolve) => server.close(() => resolve(true))),
@@ -169,19 +170,21 @@ class FakeBackend {
     ]);
     clearTimeout(timer);
     if (!closed) {
-      // Not expected to fire, and it never has: `closeAllConnections()` above
-      // destroys every open socket, so `close()` drains and its callback wins
-      // this race. It is kept for the case that would break that -- a socket
-      // opened AFTER that call -- because the alternative is a hook that
-      // takes its timeout and surfaces as a mysteriously slow file, with
-      // every later `afterEach` eating 2s too.
+      // Not expected to fire, and it never has. `Promise.race` builds its
+      // array eagerly, so `server.close()` runs in the SAME tick as
+      // `closeAllConnections()` above -- the listening handle is gone before
+      // any later turn of the loop, so nothing can connect afterwards, and
+      // every socket that existed has been destroyed. There is no "late
+      // socket" story; an earlier revision of this comment invented one.
       //
-      // The message says what is actually true on that path. The LISTENING
-      // handle is already released -- `close()` does that synchronously --
-      // so the port is free; what can still be holding the worker open is a
-      // late socket.
+      // Kept anyway, as a backstop against `close()` simply never calling
+      // back -- a socket wedged in destroy, say. Deliberately a message and
+      // not a throw: the alternative it exists to prevent is a hook that
+      // never settles, which takes the hook timeout and runs NEITHER
+      // `finally` below, leaking both trees and leaving the env pointed at a
+      // deleted home. A leak that announces itself is the better trade.
       process.stderr.write(
-        "FakeBackend.stop: close did not drain within 2s; a socket opened after closeAllConnections is still up\n",
+        "FakeBackend.stop: close() did not call back within 2s; the server handle is being abandoned\n",
       );
     }
   }
@@ -368,12 +371,15 @@ describe("ingestFiles against a fake backend", () => {
     //
     // All three are describe-scoped and `afterEach` never reset them, so from
     // the second test onward they held the PREVIOUS test's values. A
-    // `beforeEach` that throws inside `mkdtempSync` then left the teardown
+    // `beforeEach` that throws anywhere in the setup then left the teardown
     // asserting against the previous test's already-stopped fake and calling
-    // `rmSync` on its already-deleted paths, while the directory this test had
-    // just created leaked -- and `rmSync` of a stale path is a silent no-op
-    // under `force: true`, so nothing went red. Clearing here is the only
-    // reason each test's teardown sees its own state.
+    // `rmSync` on its already-deleted paths -- a silent no-op under
+    // `force: true`, so nothing went red. Clearing here is the only reason
+    // each test's teardown sees its own state.
+    //
+    // (A throw in `mkdtempSync` itself leaks nothing, since no directory got
+    // made. The leak that WAS reachable came from `realpathSync` throwing
+    // after one existed, and the split assignment below is what closes it.)
     //
     // `""` rather than `undefined`, because typing these as `string |
     // undefined` costs a non-null assertion at forty use sites for no extra
@@ -434,6 +440,22 @@ describe("ingestFiles against a fake backend", () => {
     process.env.IX_LOCK_DIR = join(home, "locks");
   });
 
+  /**
+   * Remove a temp tree without letting one failure strand the next. `rmSync`
+   * with `force` suppresses ENOENT only; EBUSY and EPERM still throw, and on
+   * Windows they are ordinary -- a handle under `IX_LOCK_DIR` is enough. The
+   * leak is reported rather than raised, because failing the teardown here
+   * would mask whatever the test itself was failing on.
+   */
+  const removeTree = (dir: string): void => {
+    if (!dir) return;
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch (err) {
+      process.stderr.write(`ingest-files teardown: could not remove ${dir}: ${String(err)}\n`);
+    }
+  };
+
   afterEach(async () => {
     try {
       // Every request the run made was one this fake actually implements. If
@@ -487,27 +509,32 @@ describe("ingestFiles against a fake backend", () => {
       try {
         if (backendIsCurrent) await backend.stop();
       } finally {
-        // These guard exactly one case: `mkdtempSync` itself threw, so nothing
-        // was created and the variable still holds the `""` from the reset
-        // above. Every other failure leaves the variable naming a real
-        // directory, which is why the assignment is split from the
-        // `realpathSync` that follows it.
+        // FIRST, and before anything that can throw. The flag means
+        // "constructed by the `beforeEach` for the test now running" rather
+        // than "constructed at some point": without clearing it, it stays
+        // `true` forever after the first test, and a file- or project-level
+        // `beforeEach` added later that throws BEFORE this describe's own
+        // would find it set and assert against the stale fake -- the bug,
+        // through the one door the flag does not otherwise cover.
         //
-        // Do not read them as covering a stale path from a previous test --
-        // the reset does that, and `rmSync("")` is a silent no-op in any
-        // case. An earlier version of this comment credited them with
-        // preventing a leak that was not reachable, while the one that WAS
-        // reachable sat two lines up.
-        if (home) rmSync(home, { recursive: true, force: true });
-        if (repo) rmSync(repo, { recursive: true, force: true });
-        // Cleared on the way out, so the flag means "constructed by the
-        // `beforeEach` for the test now running" rather than "constructed at
-        // some point". Without this it stays `true` forever after the first
-        // test, and a file- or project-level `beforeEach` added later that
-        // throws BEFORE this describe's own would find it set and assert
-        // against the stale fake -- reintroducing the bug through the one
-        // door the flag does not otherwise cover.
+        // It sat below the two removals and shared their fate, which was the
+        // same mistake the outer `finally` above exists to avoid: `rmSync`
+        // suppresses only ENOENT, so one EBUSY on Windows -- a lock file under
+        // `IX_LOCK_DIR`, a `.git` handle -- skipped it AND the second removal.
         backendIsCurrent = false;
+        // Separately, for the same reason. `removeTree` swallows per
+        // directory so `home` failing cannot strand `repo`, and so a teardown
+        // error cannot replace an in-flight `unknownPaths` failure and hide
+        // which endpoint was unimplemented.
+        //
+        // The `if` inside guards exactly one case: `mkdtempSync` itself threw,
+        // so nothing was created and the variable still holds the `""` from
+        // the reset above. Every other failure leaves it naming a real
+        // directory, which is why the assignment is split from the
+        // `realpathSync` that follows it. Not a stale path from a previous
+        // test -- the reset covers that, and `rmSync("")` is a no-op anyway.
+        removeTree(home);
+        removeTree(repo);
       }
     }
   });
