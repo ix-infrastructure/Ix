@@ -74,6 +74,17 @@ describe("isVmDynamicImportUnavailable", () => {
     // own code (which is precisely why test 2 exists) or Node renames it, this
     // fails as a bare `expected false to be true` pointing at the predicate,
     // when what changed is the input.
+    // `typeof` as well as the value, because the predicate demands a STRING
+    // `code` before it calls `startsWith`. Asserting only `String(code)`
+    // passes on a non-string that stringifies the same way -- exactly the
+    // shape the NUMERIC-code test below exists for -- and the failure would
+    // then land two lines down as a bare `expected false to be true` against
+    // the predicate, which is the confusion this premise assertion is here to
+    // prevent.
+    expect(
+      typeof (original as NodeJS.ErrnoException).code,
+      "the predicate reads `code` only when it is a string",
+    ).toBe("string");
     expect(
       String((original as NodeJS.ErrnoException).code),
       "the real vm failure still carries the vm code",

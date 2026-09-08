@@ -169,13 +169,19 @@ class FakeBackend {
     ]);
     clearTimeout(timer);
     if (!closed) {
-      // Say so. Trading a hang for a leak is the right call, but a silent leak
-      // is the condition the teardown exists to prevent -- an open handle that
-      // keeps the vitest worker from exiting -- and it would surface only as a
-      // mysteriously slow file, with every later `afterEach` eating 2s too.
-      // A future socket regression should read as a message, not as flakiness.
+      // Not expected to fire, and it never has: `closeAllConnections()` above
+      // destroys every open socket, so `close()` drains and its callback wins
+      // this race. It is kept for the case that would break that -- a socket
+      // opened AFTER that call -- because the alternative is a hook that
+      // takes its timeout and surfaces as a mysteriously slow file, with
+      // every later `afterEach` eating 2s too.
+      //
+      // The message says what is actually true on that path. The LISTENING
+      // handle is already released -- `close()` does that synchronously --
+      // so the port is free; what can still be holding the worker open is a
+      // late socket.
       process.stderr.write(
-        "FakeBackend.stop: server did not close within 2s; leaving it open rather than hanging the hook\n",
+        "FakeBackend.stop: close did not drain within 2s; a socket opened after closeAllConnections is still up\n",
       );
     }
   }
@@ -387,8 +393,15 @@ describe("ingestFiles against a fake backend", () => {
     repo = "";
     backend = new FakeBackend();
     backendIsCurrent = true;
-    home = realpathSync(mkdtempSync(join(tmpdir(), "ix-ingest-home-")));
-    repo = realpathSync(mkdtempSync(join(tmpdir(), "ix-ingest-repo-")));
+    // Two steps each, deliberately. `realpathSync(mkdtempSync(...))` leaves
+    // nothing in `home` if the OUTER call throws -- and the directory exists
+    // by then, so the `if (home)` cleanup below skips a tree that is already
+    // on disk. Assigning the created path first means the variable always
+    // names whatever was created, resolved or not.
+    home = mkdtempSync(join(tmpdir(), "ix-ingest-home-"));
+    home = realpathSync(home);
+    repo = mkdtempSync(join(tmpdir(), "ix-ingest-repo-"));
+    repo = realpathSync(repo);
     const endpoint = await backend.start();
 
     // HOME *and* USERPROFILE: `os.homedir()` reads the latter on Windows, so
@@ -431,9 +444,17 @@ describe("ingestFiles against a fake backend", () => {
       // non-nullable and holds the PREVIOUS test's fake after the first one,
       // so an `!== undefined` test here would be true in precisely the case
       // worth catching -- a `beforeEach` that threw above the assignment --
-      // and would assert against the wrong object and pass. That is the shape
-      // this PR was opened to fix, and it was reproduced one level up in this
-      // very hook.
+      // and would assert against the wrong object and pass.
+      //
+      // Be clear about what this flag is and is not. It is DORMANT: nothing
+      // between the reset and the assignment can throw today, so replacing it
+      // with `true` leaves the suite green, and no test covers it. What it
+      // buys over the `!== undefined` it replaced is not coverage but
+      // correctness WHEN it fires -- the old guard was dormant AND could not
+      // have worked, since the stale fake is never `undefined`. Verified by
+      // running both forms against a `beforeEach` that throws above the
+      // assignment: the old one asserted twice against the first test's fake,
+      // the new one skipped.
       if (backendIsCurrent) {
         expect(backend.unknownPaths, "endpoints the fake does not implement").toEqual([]);
       }
@@ -455,9 +476,10 @@ describe("ingestFiles against a fake backend", () => {
       // `stop()` unable to hang. The stop is guarded on the same freshness
       // flag: a `beforeEach` that threw above the construction leaves
       // `backend` pointing at the previous test's fake, which its own
-      // teardown already stopped. (It is NOT guarded on `mkdtempSync`
-      // throwing -- the fake is constructed above both of those calls, so a
-      // throw there leaves this test's own fake live and needing the stop.)
+      // teardown already stopped. A throw in the `mkdtempSync` calls is a
+      // different case and needs no guard of its own -- `start()` runs below
+      // them, so the fake was constructed but never listened, and `stop()`
+      // returns at its own `if (!this.server)`.
       for (const [k, v] of Object.entries(saved)) {
         if (v === undefined) delete process.env[k];
         else process.env[k] = v;
@@ -465,14 +487,27 @@ describe("ingestFiles against a fake backend", () => {
       try {
         if (backendIsCurrent) await backend.stop();
       } finally {
-        // Explicit rather than load-bearing: the `""` reset in `beforeEach` is
-        // what makes these correct, and `rmSync("")` is a silent no-op anyway.
-        // They say "only remove what this test created" out loud, so the reset
-        // above cannot be mistaken for redundant and deleted -- which would put
-        // a stale path here, no-op under `force: true`, and leak the directory
-        // the failed `beforeEach` had just made, with nothing red.
+        // These guard exactly one case: `mkdtempSync` itself threw, so nothing
+        // was created and the variable still holds the `""` from the reset
+        // above. Every other failure leaves the variable naming a real
+        // directory, which is why the assignment is split from the
+        // `realpathSync` that follows it.
+        //
+        // Do not read them as covering a stale path from a previous test --
+        // the reset does that, and `rmSync("")` is a silent no-op in any
+        // case. An earlier version of this comment credited them with
+        // preventing a leak that was not reachable, while the one that WAS
+        // reachable sat two lines up.
         if (home) rmSync(home, { recursive: true, force: true });
         if (repo) rmSync(repo, { recursive: true, force: true });
+        // Cleared on the way out, so the flag means "constructed by the
+        // `beforeEach` for the test now running" rather than "constructed at
+        // some point". Without this it stays `true` forever after the first
+        // test, and a file- or project-level `beforeEach` added later that
+        // throws BEFORE this describe's own would find it set and assert
+        // against the stale fake -- reintroducing the bug through the one
+        // door the flag does not otherwise cover.
+        backendIsCurrent = false;
       }
     }
   });
