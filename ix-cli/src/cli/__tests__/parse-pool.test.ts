@@ -353,8 +353,9 @@ describe("ParsePool", () => {
     // distinguishable there. Here they are not equal -- `MAX_RESPAWNS` is 16,
     // so the pool takes `MAX_RESPAWNS + concurrency` deaths: every worker it
     // ever starts dies, and it starts `concurrency` up front plus one per
-    // respawn until the budget is gone. Only the last falls outside the
-    // branch. Derived from BOTH constants, because at concurrency N the
+    // respawn until the budget is gone. The last `concurrency` of them fall
+    // outside the branch -- one only when the pool is size 1, which is what
+    // it is here. Derived from BOTH constants, because at concurrency N the
     // initial N-1 extra workers also die before `workers.length === 0` can
     // latch `dead` -- so a bare `MAX_RESPAWNS + 1` silently means "and the
     // pool is size 1", and raising the size here would fail this assertion
@@ -377,8 +378,9 @@ describe("ParsePool", () => {
     expect(
       pool.workerDeaths(),
       "expected MAX_RESPAWNS + concurrency deaths: every worker the pool " +
-        "starts dies, and the last death falls past the cap -- so the death " +
-        "that exhausts the budget has stopped being counted",
+        "starts dies. The shortfall is the deaths PAST the cap -- the ones " +
+        "that exhaust the budget are still counted either way, so a count of " +
+        "exactly MAX_RESPAWNS means the post-cap deaths stopped being counted",
     ).toBe(ParsePool.MAX_RESPAWNS + concurrency);
 
     await pool.destroy();

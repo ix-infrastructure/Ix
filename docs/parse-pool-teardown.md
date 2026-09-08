@@ -229,7 +229,10 @@ falsification it does not support.
 
 The 6.3% is per POOL teardown, and a pool disposes 21 isolates. Treating
 those disposals as independent gives `1-(1-h)^21 = 0.063`, i.e. **h = 0.31%**
-— a factor of **20.4** (6.327 / 0.3107; the printed figures give 20.3), and
+— a factor of **20.4** (6.3267 / 0.3107; the printed figures give 20.3). The
+extra digit on the MLE is load-bearing: recomputing h from a 4-digit 6.327
+gives 0.3108, not 0.3107, which is a disagreement in the operand this very
+paragraph is about. And
 for a pool of 21 that is the only shape the answer can
 take: at small h the pool rate is about 21h, so the ratio can approach 21 and
 never exceed it. Any conversion factor larger than the pool size is arithmetic
