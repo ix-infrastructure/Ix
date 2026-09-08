@@ -19,7 +19,9 @@ The comparison that settles the verb, twenty pool teardowns per process, six
 runs of each variant. Those six `terminate()` runs are **not a separate
 experiment**: they are one of the three arms pooled into the 19-of-28 figure
 below (7 of 12, 7 of 10, and these 5 of 6). Read on their own they imply 8.6%
-per teardown, which is close to the retracted "one in twelve" — that is the
+per POOL teardown (every rate in this file is per pool unless it says
+per-isolate; the two differ by ~28× and the distinction is worked through
+below), which is close to the retracted "one in twelve" — that is the
 hazard of quoting a single arm, and the reason the fit below uses all of
 them.
 
@@ -48,9 +50,10 @@ Both arms fit one rate: **6.3% per POOL teardown, 95% CI 4.1–9.3%** — that
 is one teardown disposing all 21 of the pool's isolates, not one isolate. The
 per-isolate hazard is 0.31%; see the vitest section for why the difference
 matters. Pooling is
-licensed by asking whether the one-teardown arm contradicts the twenty-teardown
-arm's own rate (5.5%): `P(≥5 of 40 | p=0.055) = 0.067` — a failure to
-reject, borderline, not a demonstration of agreement.
+licensed by asking whether the one-teardown arm contradicts the
+twenty-teardown arm's own rate (5.5%, again per pool):
+`P(≥5 of 40 | p=0.055) = 0.067` — a failure to reject, borderline, not a
+demonstration of agreement.
 
 **Real ingests** — `ingest-files.test.ts` under vitest, ~9.5 ingests per
 process at the time of measuring (it drives 14 today):
@@ -121,16 +124,24 @@ has shown it is safe to terminate.
 threads.** `core-ingestion`'s own suite runs `vitest run --pool threads`, and
 36 of its 38 test files import `./index.js`. The mechanism differs from the
 parse worker's: vitest's worker entry does not import `core-ingestion`, so a
-thread picks the
-addon up when it *evaluates* such a test file, not at spawn — a thread can be
-spawned and torn down having run none. Either way tinypool tears those threads
-down with `terminate()`, which is the exposed shape.
+thread picks the addon up when it *evaluates* such a test file, not at spawn —
+a thread can be spawned and torn down having run none. Either way the threads
+are terminated, which is the exposed shape: vitest 4's `ThreadWorker.stop()`
+is `await this.thread.terminate()`, called per worker.
+
+Not tinypool, which earlier revisions of this file named. Vitest 4 dropped it:
+it is absent from `vitest@4.1.11`'s dependencies, from both lockfiles and from
+`node_modules` entirely. The conclusion was right and the attribution was not,
+which is worse than useless in the one document whose job is to be checkable.
 
 Measured: **0 segfault signatures in 10 local runs.** The `core-ingestion
 tests` CI step also passes on all five matrix legs, but do not weigh that
-equally: CI runs Node 22 and 24 where everything here was measured on Node 26,
-and its 3–4 vCPU runners give far fewer concurrent threads than the bracket
-below. The 10 local runs are the measurement; CI is a weaker corroboration.
+equally: CI runs Node 22 and 24, where everything here was measured on Node
+26. That is the whole of the objection — the runners' 3–4 vCPUs are NOT a
+second reason, because under per-file isolation vCPU count sets how many
+threads run at once, not how many are terminated, and it is the latter the
+arithmetic below indexes. The 10 local runs are the measurement; CI is a
+weaker corroboration.
 
 Either way the result is consistent with everything else here, and it is worth
 showing the conversion, because getting it wrong once made this section claim a
@@ -138,18 +149,19 @@ falsification it does not support.
 
 The 6.3% is per POOL teardown, and a pool disposes 21 isolates. The
 per-isolate hazard is therefore `1-(1-h)^21 = 0.063`, i.e. **h = 0.31%**.
-Tinypool terminates threads one at a time, and the number of addon-loaded
-threads per run is not something this was measured against — vitest sizes its
-pool to available parallelism, which was 21 on this machine, and 36 of the 38
-files import the index. Across that whole bracket the result is unremarkable:
 
-| addon-loaded threads per run | P(0 crashes in 10 runs) |
-|---|---|
-| 10 | 0.73 |
-| 21 (this machine's parallelism) | 0.52 |
-| 36 (one per importing file) | 0.33 |
+How many addon-loaded isolates a run terminates is not a guess: `isolate`
+defaults to `true`, `core-ingestion` ships no vitest config to change it, and
+vitest reuses a runner only when the finished task AND the next queued one are
+both non-isolated. Otherwise it stops the worker after the file. So the run
+spawns and terminates about one worker per test file — **36 addon-loaded**, of
+38 — giving `P(0 crashes in 10 runs) = 0.33`. Unremarkable, and nothing to
+explain.
 
-Nothing to explain at any of them.
+Note this is the count of TERMINATED threads, which is what the hazard applies
+to. Machine parallelism (21 here) bounds how many run concurrently and is not
+this quantity; an earlier revision offered 10 / 21 / 36 as a bracket over an
+unknown, when the config already determined it.
 
 Mixing the two units — applying a per-pool rate to individual isolates — is
 the easiest error in this document to make, and the reason every rate here

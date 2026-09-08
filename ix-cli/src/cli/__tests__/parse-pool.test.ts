@@ -178,8 +178,8 @@ describe("ParsePool", () => {
     // `core-ingestion`, so their teardowns cannot crash. Deliberately no
     // tally: a count here goes stale the first time a test is added, with the
     // suite still green. And on the shipped build nothing here calls
-    // `terminate()` at all, which is the exposure this PR removes -- but do
-    // not read that as zero. A worker that will not answer `__shutdown` is
+    // `terminate()` at all -- Ix#598 removed it -- but do not read that as
+    // zero. A worker that will not answer `__shutdown` is
     // left alive and `unref()`'d, and its isolate is still disposed when the
     // process exits; that path is measured only as four addon-loaded threads,
     // 0 failures in 10 runs, which at the per-isolate hazard is the expected
@@ -556,10 +556,11 @@ describe("ParsePool", () => {
     // 27 grammars plus the core at module scope -- twelve by static import, the
     // rest eagerly through helpers -- so these threads hold the core and the
     // twelve within moments of spawn, well before that module finishes
-    // evaluating, and the rest by the time it does. Many are optional, and
-    // exactly one required grammar (`tree-sitter-powershell`) loads through a
-    // null-returning helper, so the guaranteed floor is the core plus the
-    // statically imported grammars; the exact tally is in
+    // evaluating. The other 15 resolve through null-returning helpers and are
+    // absent wherever a platform has no prebuild, so the guaranteed floor is
+    // the core plus the statically imported twelve -- which is all this test
+    // needs. (One of the 15, `tree-sitter-powershell`, is a required
+    // dependency that loads through a helper anyway.) The exact tally is in
     // `docs/parse-pool-teardown.md` rather than here.
     //
     // Workers that had parsed were the ones observed to crash under
