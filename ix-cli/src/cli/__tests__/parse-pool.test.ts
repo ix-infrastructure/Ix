@@ -331,9 +331,16 @@ describe("ParsePool", () => {
     const pool = new ParsePool(worker("dead", BORN_DEAD), concurrency);
     pool.init();
 
-    // Enough calls to outlast the cap, then more after it.
+    // Enough calls to outlast the cap, DERIVED from it. A hard-coded depth
+    // makes the derivation below one-directional: lowering `MAX_RESPAWNS`
+    // still works, but raising it past that depth means the queue drains
+    // before the pool reaches the latch, and the death assertion then fails
+    // with a message accusing the counter -- which is the exact failure the
+    // derivation exists to prevent. `MAX_RESPAWNS` is documented as tunable,
+    // so that is a reachable edit, not a hypothetical one.
+    const queued = ParsePool.MAX_RESPAWNS + concurrency + 3;
     const first = await Promise.all(
-      Array.from({ length: 20 }, (_, i) => pool.parse(`f${i}.ts`, "x")),
+      Array.from({ length: queued }, (_, i) => pool.parse(`f${i}.ts`, "x")),
     );
     expect(first.every((r) => r === null)).toBe(true);
 
@@ -343,8 +350,9 @@ describe("ParsePool", () => {
       Promise.all([pool.parse("l1.ts", "x"), pool.parse("l2.ts", "x")]),
     ).resolves.toEqual([null, null]);
 
-    // And every one of them is counted, so the stitch gate sees the loss.
-    expect(pool.crashedTasks()).toBeGreaterThanOrEqual(23);
+    // And every one of them is counted, so the stitch gate sees the loss --
+    // the queued batch plus the three sent after the pool was dead.
+    expect(pool.crashedTasks()).toBeGreaterThanOrEqual(queued + 3);
 
     // The death that hits the cap still counts. This is the only place that
     // pins it: every other use of `workerDeaths()` watches the FIRST death of
