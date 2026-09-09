@@ -293,11 +293,6 @@ Kartr is in alpha and onboarding early users.
   </a>
 </p>
 
-## Status
-
-Alpha, and moving quickly. APIs and behavior may change. If you are running Ix on a
-large or unusual codebase, we want the bug report.
-
 ## Contributing
 
 Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for local
