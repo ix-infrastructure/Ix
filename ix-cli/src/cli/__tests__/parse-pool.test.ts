@@ -339,7 +339,11 @@ describe("ParsePool", () => {
     // derivation exists to prevent. `MAX_RESPAWNS` is documented as tunable,
     // so that is a reachable edit, not a hypothetical one.
     const postLatch = 3; // the parses issued below, after the pool is dead
-    const queued = ParsePool.MAX_RESPAWNS + concurrency + 3;
+    // Headroom, so the queue is still non-empty when `dead` latches. Unrelated
+    // to `postLatch` above; they are equal by coincidence, and unifying them
+    // would invent a coupling that does not exist.
+    const headroom = 3;
+    const queued = ParsePool.MAX_RESPAWNS + concurrency + headroom;
     const first = await Promise.all(
       Array.from({ length: queued }, (_, i) => pool.parse(`f${i}.ts`, "x")),
     );

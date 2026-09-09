@@ -447,8 +447,10 @@ export class ParsePool {
    * Worker deaths this run has reacted to. Monotonic.
    *
    * Deaths, not replacements: past `MAX_RESPAWNS` the pool stops replacing but
-   * still reacts -- it has spliced `workers` and `idle` before the branch is
-   * reached -- and a caller watching for "did the pool notice a worker die"
+   * still reacts -- it has spliced `workers` before the branch is reached, and
+   * `idle` too if the worker was idle (one that died mid-task lives in
+   * `active`, so there is nothing to take out of the free list -- which is the
+   * case the cap test exercises) -- and a caller watching for "did the pool notice a worker die"
    * needs those too. (What the branch itself does past the cap depends on
    * whether any worker survives; `onError` spells that out.)
    * An earlier revision counted replacements and sat inside the cap branch,
