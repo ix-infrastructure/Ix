@@ -1,18 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
 
-const execFile = vi.hoisted(() =>
-  vi.fn((_cmd: string, _args: string[], _opts: unknown, cb: (e: unknown, r: unknown) => void) =>
-    cb(null, { stdout: "", stderr: "" }),
-  ),
-);
-
-// Spread the real module: `config.ts`, reached through this command, imports
-// `execSync` from it.
-vi.mock("node:child_process", async (orig) => ({
-  ...(await orig<Record<string, unknown>>()),
-  execFile,
-}));
+const runRipgrep = vi.fn(async (_args: string[], _limit: number) => ({ stdout: "" }));
 
 import { registerTextCommand } from "../commands/text.js";
 
@@ -25,14 +14,14 @@ import { registerTextCommand } from "../commands/text.js";
  */
 describe("ix text does not let the search term become an rg flag", () => {
   beforeEach(() => {
-    execFile.mockClear();
+    runRipgrep.mockClear();
   });
 
   async function argvFor(term: string, extra: string[] = []): Promise<string[]> {
     const program = new Command();
-    registerTextCommand(program);
+    registerTextCommand(program, runRipgrep);
     await program.parseAsync(["text", ...extra, "--", term], { from: "user" });
-    return execFile.mock.calls[0]?.[1] as string[];
+    return runRipgrep.mock.calls[0]?.[0] as string[];
   }
 
   it.each(["--files", "--pre=/bin/sh", "--file=/etc/passwd", "-l", "--no-ignore"])(
