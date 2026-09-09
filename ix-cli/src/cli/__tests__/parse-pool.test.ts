@@ -342,8 +342,22 @@ describe("ParsePool", () => {
     // Headroom, so the queue is still non-empty when `dead` latches. Unrelated
     // to `postLatch` above; they are equal by coincidence, and unifying them
     // would invent a coupling that does not exist.
+    //
+    // This is the constant that makes this test exercise the branch it is
+    // named for, and it is worth knowing that no other assertion here
+    // protects it: both of the ones below hold at `headroom = 0` too, because
+    // then every queued task is consumed by a death and none is stranded.
+    // Mutation-checked -- deleting the strand-and-resolve body from the cap
+    // branch in `parse-pool.ts` SURVIVES at 0 and is killed at 3, where the
+    // three stranded parses never settle and this hangs to the timeout. So
+    // trimming it silently turns a queue-stranding test into one that only
+    // covers in-flight losses.
     const headroom = 3;
     const queued = ParsePool.MAX_RESPAWNS + concurrency + headroom;
+    expect(
+      headroom,
+      "headroom is this test's coverage of the stranded-queue path, not slack",
+    ).toBeGreaterThan(0);
     const first = await Promise.all(
       Array.from({ length: queued }, (_, i) => pool.parse(`f${i}.ts`, "x")),
     );
