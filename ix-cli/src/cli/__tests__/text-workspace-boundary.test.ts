@@ -60,7 +60,7 @@ describe("text workspace boundary", () => {
 
     await run(["text", "boundaryNeedle", "--root", workspace, "--path", "src", "--format", "json"]);
 
-    expect(runRipgrep).toHaveBeenCalledWith(expect.arrayContaining(["boundaryNeedle", join(workspace, "src")]));
+    expect(runRipgrep).toHaveBeenCalledWith(expect.arrayContaining(["boundaryNeedle", join(workspace, "src")]), 20);
     expect(JSON.parse(logs.join("\n"))).toMatchObject([{ path: "src/inside.ts" }]);
     expect(process.exitCode).toBeUndefined();
   });

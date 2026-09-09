@@ -1,5 +1,5 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import path from "node:path";
 import type { Command } from "commander";
 import { formatTextResults, type TextResult } from "../format.js";
@@ -7,12 +7,43 @@ import { isPathInsideResolvedRoot, resolveWorkspaceRoot } from "../config.js";
 import { stderr } from "../stderr.js";
 import { llmError } from "../llm.js";
 
-const execFileAsync = promisify(execFile);
+type RunRipgrep = (args: string[], limit: number) => Promise<{ stdout: string }>;
 
-type RunRipgrep = (args: string[]) => Promise<{ stdout: string }>;
+async function runRipgrep(args: string[], limit: number): Promise<{ stdout: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("rg", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+    const matches: string[] = [];
+    let errorOutput = "";
 
-async function runRipgrep(args: string[]): Promise<{ stdout: string }> {
-  return execFileAsync("rg", args, { maxBuffer: 10 * 1024 * 1024 });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      errorOutput = (errorOutput + chunk).slice(0, 64 * 1024);
+    });
+    lines.on("line", (line: string) => {
+      if (matches.length >= limit) return;
+      try {
+        if (JSON.parse(line).type !== "match") return;
+      } catch {
+        return;
+      }
+      matches.push(line);
+    });
+    child.on("error", reject);
+    child.on("close", (code, signal) => {
+      lines.close();
+      // Drain through exit so errors after the retained matches are not hidden.
+      if (code === 0 || code === 1) {
+        resolve({ stdout: matches.join("\n") });
+      } else {
+        reject(Object.assign(new Error("ripgrep failed"), {
+          code,
+          signal,
+          stderr: errorOutput,
+        }));
+      }
+    });
+  });
 }
 
 export function resolveTextSearchPath(root: string, searchPath: string): string {
@@ -68,7 +99,7 @@ export function registerTextCommand(program: Command, executeRipgrep: RunRipgrep
         // other tool until the timeout and leaves the child process behind.
         rgArgs.push("--", term, searchPath);
 
-        const { stdout } = await executeRipgrep(rgArgs);
+        const { stdout } = await executeRipgrep(rgArgs, limit);
 
         const results: TextResult[] = [];
         for (const line of stdout.split("\n")) {
