@@ -338,6 +338,7 @@ describe("ParsePool", () => {
     // with a message accusing the counter -- which is the exact failure the
     // derivation exists to prevent. `MAX_RESPAWNS` is documented as tunable,
     // so that is a reachable edit, not a hypothetical one.
+    const postLatch = 3; // the parses issued below, after the pool is dead
     const queued = ParsePool.MAX_RESPAWNS + concurrency + 3;
     const first = await Promise.all(
       Array.from({ length: queued }, (_, i) => pool.parse(`f${i}.ts`, "x")),
@@ -350,9 +351,14 @@ describe("ParsePool", () => {
       Promise.all([pool.parse("l1.ts", "x"), pool.parse("l2.ts", "x")]),
     ).resolves.toEqual([null, null]);
 
-    // And every one of them is counted, so the stitch gate sees the loss --
-    // the queued batch plus the three sent after the pool was dead.
-    expect(pool.crashedTasks()).toBeGreaterThanOrEqual(queued + 3);
+    // And every one of them is counted, so the stitch gate sees the loss: the
+    // whole queued batch plus every parse issued after the latch. EXACT, not
+    // a floor -- this was the last loose assertion in a test tightened
+    // everywhere else, and a floor cannot see an over-count. A regression
+    // that counted the stranded queue twice (the `else if` branch's
+    // `crashed += stranded` plus `parse()`'s own `if (this.dead)`) raises the
+    // number and slides under a `>=`.
+    expect(pool.crashedTasks()).toBe(queued + postLatch);
 
     // The death that hits the cap still counts. This is the only place that
     // pins it: every other use of `workerDeaths()` watches the FIRST death of

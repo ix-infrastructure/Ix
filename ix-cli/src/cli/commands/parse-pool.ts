@@ -629,9 +629,12 @@ export class ParsePool {
     // the usual case -- do not read the cap as implying the pool is finished.
     //
     // The floor in that expression is there because 1 is reachable, and at
-    // concurrency 1 this inverts: the death that exhausts the budget is the
-    // last worker, so `workers.length === 0` always holds and the pool always
-    // latches `dead`. Above 1 it does not. Which case a given machine falls
+    // concurrency 1 this inverts: the first death PAST the cap is also the last
+    // worker, so `workers.length === 0` always holds and the pool always
+    // latches `dead`. (Not the death that exhausts the budget -- that one
+    // still takes the respawn branch and spawns a replacement. The two are
+    // one apart, and this file is where that distinction has to stay
+    // straight.) Above concurrency 1 it does not invert. Which case a given machine falls
     // into depends on its core count, and this comment deliberately does not
     // say -- an earlier revision guessed at CI's and contradicted the machine
     // sizes in `docs/parse-pool-teardown.md`, which is the file that owns

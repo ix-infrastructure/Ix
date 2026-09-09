@@ -151,9 +151,12 @@ writing down.
 
 The minimal harness overstates real exposure by **28×** on the only
 load-matched comparison available (idle vs idle). Against the loaded real rate
-it is **3.86×** (6.327 / 1.640 — the unrounded MLE over the unrounded loaded
-rate; the printed 6.3 / 1.64 gives 3.84, which is why this one is written to
-two decimals rather than rounded into an ambiguity). That comparison mixes
+it is **3.86×** (6.3267 / 1.6397; the printed 6.3 / 1.64 gives 3.84, which is
+why this one is written to two decimals rather than rounded into an
+ambiguity). An earlier revision labelled 6.327 / 1.640 as "the unrounded MLE
+over the unrounded loaded rate" -- both are themselves rounded, and a reader
+following this file's own convention would recompute from the real values and
+think one of the two paragraphs wrong. That comparison mixes
 conditions — the harness was never run loaded, and load raises the rate — so
 treat it as a lower bound on what is unexplained, not the residue after
 subtracting load.
