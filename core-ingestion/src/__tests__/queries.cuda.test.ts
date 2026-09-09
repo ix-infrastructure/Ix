@@ -91,21 +91,29 @@ void f(std::vector<std::vector<std::vector<int>>>& v, int a, int b) {
   it('stays linear on adversarial input', () => {
     // Ingest input is an arbitrary repository, so the blanking pass is
     // attacker-controlled. The obvious regex (`/<<<[^;]*?>>>(?=\\s*\\()/g`)
-    // is quadratic here: 16k `<` took 67ms and grew 4x per doubling.
-    const timeFor = (n: number) => {
-      const evil = `void f() { ${'<'.repeat(n)}>>>x }`;
-      const started = performance.now();
-      parseFile('/repo/evil.cu', evil);
-      return performance.now() - started;
-    };
+    // backtracks quadratically over a run of `<`; the scan in
+    // `blankCudaLaunchConfigs` never rewinds behind its cursor.
+    //
+    // This is an absolute budget rather than a small-vs-large ratio. Timing
+    // one parse against another leaves only the 4x of honest growth between
+    // pass and fail, which is thinner than the run-to-run noise on a parse
+    // this size -- that comparison failed on macos-14 at a measured 8.08x
+    // (Ix CI run 34297232151). A budget at an input size where the two
+    // implementations are seconds apart has no such overlap. Measured on a
+    // dev box at 128k `<`: this scan parses in 146-240ms over 15 runs, while
+    // the regex alone spends 8.3s backtracking. 2.5s sits ~10x above the
+    // slowest honest run and ~3x below the regression it guards. The test
+    // timeout is above the budget so a quadratic pass reports the assertion
+    // and its measured cost, not a bare vitest timeout.
+    const evil = `void f() { ${'<'.repeat(128_000)}>>>x }`;
 
-    timeFor(1_000); // warm the parser so the comparison is not first-call cost
+    parseFile('/repo/warm.cu', `void f() { ${'<'.repeat(1_000)}>>>x }`);
 
-    const small = timeFor(8_000);
-    const large = timeFor(32_000);
+    const started = performance.now();
+    parseFile('/repo/evil.cu', evil);
+    const elapsed = performance.now() - started;
 
-    // 4x the input. Quadratic would be ~16x; linear scanning stays well under.
-    expect(large).toBeLessThan(Math.max(small, 1) * 8);
-  });
+    expect(elapsed).toBeLessThan(2_500);
+  }, 30_000);
 
 });
