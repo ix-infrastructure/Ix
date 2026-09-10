@@ -148,8 +148,9 @@ Every source file starts with the copyright line, in that language's comment syn
 // Copyright 2026 Ix Infrastructure INC
 ```
 
-A shebang stays on line 1 — the header goes directly beneath it. CI enforces this
-on every PR. If you add a file and the check goes red, fix every offender at once:
+A shebang stays on line 1 — the header goes directly beneath it. This is enforced
+by the `Lint & Typecheck` job, so it gates merges through the required `CI Passed`
+check. If you add a file and it goes red, fix every offender at once:
 
 ```bash
 python3 .github/scripts/copyright-headers.py --fix
