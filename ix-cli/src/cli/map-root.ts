@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { realpathSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { findWorkspaceForCwd, gitRootFor, resolveWorkspaceRoot } from "./config.js";

@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { describe, it, expect } from "vitest";
 import { renderEdgeResultsLlm } from "../format.js";
 import { renderInventoryLlm } from "../commands/inventory.js";

@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import chalk from "chalk";
 
 const OSS_HELP = [

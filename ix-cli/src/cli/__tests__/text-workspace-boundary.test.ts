@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";

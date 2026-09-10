@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";

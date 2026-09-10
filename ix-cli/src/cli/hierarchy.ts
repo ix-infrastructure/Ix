@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import type { IxClient } from "../client/api.js";
 
 export type SystemPath = Array<{ name: string; kind: string; id?: string }>;

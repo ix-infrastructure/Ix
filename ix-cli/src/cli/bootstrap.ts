@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, basename, resolve } from "node:path";
 import { homedir } from "node:os";

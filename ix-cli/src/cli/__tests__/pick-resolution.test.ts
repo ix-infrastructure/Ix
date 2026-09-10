@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { describe, it, expect } from "vitest";
 import { applyPick, type ResolveResult, type AmbiguousResult } from "../resolve.js";
 

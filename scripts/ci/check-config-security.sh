@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 Ix Infrastructure INC
+
 # Config Security Policy Checks
 #
 # Enforces deployment safety invariants for Docker Compose files:

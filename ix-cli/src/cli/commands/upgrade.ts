@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { Command } from "commander";
 import { execFileSync } from "child_process";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, mkdtempSync, lstatSync, renameSync, readdirSync } from "fs";

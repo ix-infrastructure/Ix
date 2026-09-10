@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 

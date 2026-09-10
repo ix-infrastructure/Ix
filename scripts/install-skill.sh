@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 Ix Infrastructure INC
+
 #
 # Install the Ix skill for every agent harness found on this machine.
 #

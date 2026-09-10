@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import type { EntityFacts } from "./facts.js";
 
 export type ImportanceCategory =

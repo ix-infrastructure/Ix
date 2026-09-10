@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { homedir } from "os";

@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 // Backend freshness helpers (Ix#270, Ix#271).
 //
 // Two distinct staleness problems can make a healthy-looking backend serve

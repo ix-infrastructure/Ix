@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MockInstance } from "vitest";
 import {

@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import * as nodePath from 'node:path';
 
 export type EntityRole = 'production' | 'test' | 'fixture' | 'generated' | 'external' | 'tooling';

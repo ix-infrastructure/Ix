@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import * as nodePath from 'node:path';
 import * as crypto from 'node:crypto';
 import { createRequire } from 'node:module';

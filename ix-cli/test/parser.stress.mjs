@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 /**
  * parser.stress.mjs — Comprehensive stress test for core-ingestion parser.
  *

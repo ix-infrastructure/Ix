@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { describe, it, expect } from "vitest";
 import { Command } from "commander";
 import * as fs from "node:fs";

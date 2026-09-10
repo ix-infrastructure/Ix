@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { describe, expect, it } from 'vitest';
 
 import { buildGlobalResolutionIndex, parseFile, resolveEdges, type FileParseResult, type ParsedEntity, type ParsedRelationship } from '../index.js';

@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 /**
  * ui.ts — Ix CLI brand presentation layer.
  *

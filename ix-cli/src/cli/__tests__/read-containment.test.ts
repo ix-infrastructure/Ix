@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";

@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

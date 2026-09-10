@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { type Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";

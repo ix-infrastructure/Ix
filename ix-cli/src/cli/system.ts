@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import * as fs from "node:fs";
 import * as nodePath from "node:path";
 import { createHash } from "node:crypto";

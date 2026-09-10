@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 export interface SubsystemScore {
   region_id: string;
   name: string;

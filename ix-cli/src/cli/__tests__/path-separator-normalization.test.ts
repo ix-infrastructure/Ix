@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { describe, expect, it } from "vitest";
 import { applyPathFilters } from "../commands/rank.js";
 import { normalizePathSeparators } from "../path-match.js";

@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import * as path from "node:path";
 import chalk from "chalk";
 import type { IxClient } from "../client/api.js";

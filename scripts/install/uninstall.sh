@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Ix Infrastructure INC
+
 # Ix — Uninstaller
 #
 # Removes everything installed by the Ix installer:

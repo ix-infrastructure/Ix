@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { describe, expect, it } from "vitest";
 import { join } from "node:path";
 import { homedir } from "node:os";

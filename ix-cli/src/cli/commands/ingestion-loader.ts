@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 

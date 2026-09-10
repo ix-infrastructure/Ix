@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";

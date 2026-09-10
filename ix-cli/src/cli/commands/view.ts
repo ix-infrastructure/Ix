@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { Command } from "commander";
 import { execSync, spawn } from "child_process";
 import {

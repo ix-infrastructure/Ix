@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { describe, it, expect, vi } from "vitest";
 import { renderExplainLlm, renderExplainRawLlm } from "../explain/llm.js";
 import { renderReadLlm, renderReadAmbiguityLlm, outputResult } from "../commands/read.js";

@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { llmLine } from "../llm.js";
 import { relativePath } from "../format.js";
 import type { EntityFacts } from "./facts.js";

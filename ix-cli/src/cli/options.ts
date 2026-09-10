@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { InvalidArgumentError, type Command, type Option } from "commander";
 
 /**

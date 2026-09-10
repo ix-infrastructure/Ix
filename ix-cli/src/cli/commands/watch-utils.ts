@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import * as fs from "node:fs";
 
 /** Read file content safely, returning null if inaccessible. */

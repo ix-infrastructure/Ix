@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const execFileSync = vi.hoisted(() => vi.fn());

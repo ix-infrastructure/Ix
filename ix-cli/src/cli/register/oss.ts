@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import type { Command } from "commander";
 import { registerQueryCommand } from "../commands/query.js";
 import { registerIngestCommand } from "../commands/ingest.js";

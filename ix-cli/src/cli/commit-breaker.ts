@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 // ---------------------------------------------------------------------------
 // Run-scoped cutoff for an ingest whose every commit is failing.
 //

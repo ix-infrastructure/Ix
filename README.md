@@ -14,13 +14,15 @@
   <img src="https://img.shields.io/github/license/ix-infrastructure/Ix" alt="License" />
   <img src="https://img.shields.io/github/actions/workflow/status/ix-infrastructure/Ix/ci.yml?label=tests" alt="Tests" />
   <img src="https://img.shields.io/badge/platform-windows%20%7C%20macOS%20%7C%20linux-lightgrey" alt="Platforms" />
+  <a href="https://github.com/sponsors/ix-infrastructure"><img src="https://img.shields.io/badge/sponsor-%E2%9D%A4-db61a2" alt="Sponsor Ix" /></a>
 </p>
 
 <p align="center">
   <a href="https://www.ix-infra.com">Website</a> ·
   <a href="./docs">Docs</a> ·
   <a href="https://compass.ix-infra.com">Live demo</a> ·
-  <a href="https://discord.gg/ncEYVHVqZ8">Discord</a>
+  <a href="https://discord.gg/ncEYVHVqZ8">Discord</a> ·
+  <a href="https://github.com/sponsors/ix-infrastructure">Sponsor</a>
 </p>
 
 ```bash
@@ -307,7 +309,8 @@ setup, and [SECURITY.md](SECURITY.md) to report a vulnerability.
   <a href="./docs">Docs</a> ·
   <a href="https://www.ix-infra.com">Website</a> ·
   <a href="https://compass.ix-infra.com">Live demo</a> ·
-  <a href="https://discord.gg/ncEYVHVqZ8">Discord</a>
+  <a href="https://discord.gg/ncEYVHVqZ8">Discord</a> ·
+  <a href="https://github.com/sponsors/ix-infrastructure">Sponsor</a>
 </p>
 
 <p align="center">

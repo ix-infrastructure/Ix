@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import * as crypto from 'node:crypto';
 import * as nodePath from 'node:path';
 import type { GraphPatchPayload, PatchOp } from './types.js';

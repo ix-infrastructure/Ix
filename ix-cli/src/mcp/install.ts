@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 

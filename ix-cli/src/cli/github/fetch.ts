@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 export interface GitHubRepo {
   owner: string;
   repo: string;

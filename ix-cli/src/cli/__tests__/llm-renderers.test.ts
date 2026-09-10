@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { describe, it, expect } from "vitest";
 import { renderMapLlm, type MapRegion, type MapResult } from "../commands/map.js";
 import { renderSubsystemScoreLlm, renderScopedSubsystemLlm, renderSubsystemErrorLlm } from "../commands/subsystems.js";

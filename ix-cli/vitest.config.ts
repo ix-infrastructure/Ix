@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { configDefaults, defineConfig } from "vitest/config";
 
 export default defineConfig({

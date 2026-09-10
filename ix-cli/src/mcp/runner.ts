@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import { execFile } from "node:child_process";
 import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";

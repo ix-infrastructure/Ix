@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";

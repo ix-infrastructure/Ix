@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 import type { EntityFacts } from "./facts.js";
 import type { RoleInference, RoleLabel } from "./role-inference.js";
 import type { ImportanceInference } from "./importance.js";

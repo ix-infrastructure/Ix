@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 export type EntityRole = 'production' | 'test' | 'fixture' | 'generated' | 'external' | 'tooling';
 
 export const TEST_ROLES = new Set<string>(['test', 'fixture']);

@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure INC
+
 export interface CommitResult {
   newRev: number;
   status: "Ok" | "Idempotent" | "BaseRevMismatch";
