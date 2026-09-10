@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Copyright 2026 Ix Infrastructure Inc.
+
 /**
  * Print the CLI's registered command/flag surface as JSON, one object per
  * command (subcommands included, `parent sub` as the name).

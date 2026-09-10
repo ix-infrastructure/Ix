@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 /**
  * Worker thread entry point for parallel file parsing.
  * Each worker maintains its own Parser singleton (safe — module state is

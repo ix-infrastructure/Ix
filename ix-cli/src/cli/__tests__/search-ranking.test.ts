@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import { describe, it, expect, vi } from "vitest";
 import { resolveEntityFull, scoreCandidate } from "../resolve.js";
 

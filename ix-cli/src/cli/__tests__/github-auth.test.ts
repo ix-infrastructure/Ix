@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 describe("GitHub auth resolution", () => {

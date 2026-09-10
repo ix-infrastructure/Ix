@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import type { IxClient } from "../../client/api.js";
 import type { EntityRef, Diagnostic } from "../format.js";
 import { relativePath } from "../format.js";

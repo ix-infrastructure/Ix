@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import chalk from "chalk";
 import { llmLine } from "./llm.js";
 

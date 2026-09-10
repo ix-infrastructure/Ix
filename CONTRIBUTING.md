@@ -140,6 +140,26 @@ Applies to: `ix-claude-plugin`, `ix-codex-plugin`, `ix-cursor-plugin`,
 carry runners today, so "no plugin calls this" is a claim to verify, not
 assume.
 
+## Copyright Headers
+
+Every source file starts with the copyright line, in that language's comment syntax:
+
+```ts
+// Copyright 2026 Ix Infrastructure Inc.
+```
+
+A shebang stays on line 1 — the header goes directly beneath it. This is enforced
+by the `Lint & Typecheck` job, so it gates merges through the required `CI Passed`
+check. If you add a file and it goes red, fix every offender at once:
+
+```bash
+python3 .github/scripts/copyright-headers.py --fix
+```
+
+Test fixtures, vendored code, and anything marked `linguist-generated` in
+`.gitattributes` are deliberately exempt — the parser tests snapshot fixture line
+numbers, and generated files lose the header on their next regeneration.
+
 ## Security Checks
 
 PRs and pushes to `main` run automated security checks:

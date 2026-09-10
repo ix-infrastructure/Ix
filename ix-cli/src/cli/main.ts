@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Copyright 2026 Ix Infrastructure Inc.
+
 import { Command } from "commander";
 import { registerOssCommands, registerProStubs } from "./register/oss.js";
 import { tryLoadProCommands } from "./register/pro-loader.js";

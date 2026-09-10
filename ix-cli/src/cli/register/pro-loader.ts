@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import type { Command } from "commander";
 
 export async function tryLoadProCommands(program: Command): Promise<boolean> {

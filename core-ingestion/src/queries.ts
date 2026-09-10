@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import { SupportedLanguages } from './languages.js';
 
 /* 

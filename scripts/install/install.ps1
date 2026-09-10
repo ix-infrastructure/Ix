@@ -1,3 +1,5 @@
+# Copyright 2026 Ix Infrastructure Inc.
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Ix — Windows Installer (PowerShell)
 #

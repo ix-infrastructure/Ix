@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 /**
  * diff-unresolved-target.test.ts — Ix #566
  *

@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
 
