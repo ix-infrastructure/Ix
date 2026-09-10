@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Copyright 2026 Ix Infrastructure INC
+// Copyright 2026 Ix Infrastructure Inc.
 
 /**
  * Harness registry reader for scripts/install-skill.sh.

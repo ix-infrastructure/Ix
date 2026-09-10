@@ -1,4 +1,4 @@
-// Copyright 2026 Ix Infrastructure INC
+// Copyright 2026 Ix Infrastructure Inc.
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, basename, resolve } from "node:path";

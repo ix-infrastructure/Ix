@@ -1,4 +1,4 @@
-// Copyright 2026 Ix Infrastructure INC
+// Copyright 2026 Ix Infrastructure Inc.
 
 import { describe, expect, it, vi } from "vitest";
 import { getEffectiveSystemPath, hasMapData } from "../hierarchy.js";

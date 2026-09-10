@@ -1,4 +1,4 @@
-// Copyright 2026 Ix Infrastructure INC
+// Copyright 2026 Ix Infrastructure Inc.
 
 export type EntityRole = 'production' | 'test' | 'fixture' | 'generated' | 'external' | 'tooling';
 

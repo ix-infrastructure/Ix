@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Copyright 2026 Ix Infrastructure INC
+// Copyright 2026 Ix Infrastructure Inc.
 
 // render-logo.mjs — render assets/logo.png as a terminal banner. Zero deps.
 // The repo asset is the single source of truth; no hand-maintained art lives here.

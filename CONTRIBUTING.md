@@ -145,7 +145,7 @@ assume.
 Every source file starts with the copyright line, in that language's comment syntax:
 
 ```ts
-// Copyright 2026 Ix Infrastructure INC
+// Copyright 2026 Ix Infrastructure Inc.
 ```
 
 A shebang stays on line 1 — the header goes directly beneath it. This is enforced

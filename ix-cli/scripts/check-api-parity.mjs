@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Copyright 2026 Ix Infrastructure INC
+// Copyright 2026 Ix Infrastructure Inc.
 
 /**
  * API-reference parity gate for docs/api.

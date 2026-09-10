@@ -1,4 +1,4 @@
-# Copyright 2026 Ix Infrastructure INC
+# Copyright 2026 Ix Infrastructure Inc.
 
 class Ix < Formula
   desc "Persistent memory for LLM systems — CLI for the Ix knowledge graph"

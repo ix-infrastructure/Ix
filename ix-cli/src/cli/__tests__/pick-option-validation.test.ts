@@ -1,4 +1,4 @@
-// Copyright 2026 Ix Infrastructure INC
+// Copyright 2026 Ix Infrastructure Inc.
 
 import { Command, type CommanderError } from "commander";
 import { describe, expect, it } from "vitest";

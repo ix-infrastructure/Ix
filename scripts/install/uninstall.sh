@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright 2026 Ix Infrastructure INC
+# Copyright 2026 Ix Infrastructure Inc.
 
 # Ix — Uninstaller
 #

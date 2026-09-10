@@ -1,4 +1,4 @@
-// Copyright 2026 Ix Infrastructure INC
+// Copyright 2026 Ix Infrastructure Inc.
 
 import { describe, it, expect, vi } from "vitest";
 import { renderExplainLlm, renderExplainRawLlm } from "../explain/llm.js";

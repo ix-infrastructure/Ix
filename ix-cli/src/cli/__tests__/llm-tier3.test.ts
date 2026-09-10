@@ -1,4 +1,4 @@
-// Copyright 2026 Ix Infrastructure INC
+// Copyright 2026 Ix Infrastructure Inc.
 
 import { describe, it, expect } from "vitest";
 import { renderNodesLlm, renderPatchesLlm, renderTextResultsLlm, type TextResult } from "../format.js";

@@ -1,4 +1,4 @@
-// Copyright 2026 Ix Infrastructure INC
+// Copyright 2026 Ix Infrastructure Inc.
 
 import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';

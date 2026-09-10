@@ -1,4 +1,4 @@
-// Copyright 2026 Ix Infrastructure INC
+// Copyright 2026 Ix Infrastructure Inc.
 
 import { llmLine } from "../llm.js";
 import { relativePath } from "../format.js";

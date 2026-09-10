@@ -1,4 +1,4 @@
-// Copyright 2026 Ix Infrastructure INC
+// Copyright 2026 Ix Infrastructure Inc.
 
 export interface PatchSource {
   // uri is the provenance source URI. In the client-agnostic backend design it

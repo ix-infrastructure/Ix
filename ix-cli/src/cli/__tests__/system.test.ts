@@ -1,4 +1,4 @@
-// Copyright 2026 Ix Infrastructure INC
+// Copyright 2026 Ix Infrastructure Inc.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import * as fs from "node:fs";

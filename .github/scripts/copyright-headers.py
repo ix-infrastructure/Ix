@@ -1,4 +1,4 @@
-# Copyright 2026 Ix Infrastructure INC
+# Copyright 2026 Ix Infrastructure Inc.
 
 """Enforce the Ix Infrastructure copyright header on every source file.
 
@@ -24,7 +24,7 @@ import re
 import subprocess
 import sys
 
-HEADER = "Copyright 2026 Ix Infrastructure INC"
+HEADER = "Copyright 2026 Ix Infrastructure Inc."
 
 SLASH = {".ts", ".tsx", ".mts", ".cts", ".mjs", ".cjs", ".js", ".jsx", ".scala", ".sc",
          ".java", ".go", ".rs", ".c", ".h", ".cc", ".cpp", ".hpp", ".swift", ".kt"}
@@ -88,7 +88,7 @@ def insert_at(lines, ext):
 def main(fix):
     files = tracked_files()
     generated = linguist_generated(files)
-    missing = []
+    missing, wrong = [], []
 
     for rel in files:
         ext = os.path.splitext(rel)[1]
@@ -102,7 +102,14 @@ def main(fix):
         if not text.strip():
             continue
         lines = text.split("\n")
-        if any("Copyright" in candidate for candidate in lines[:5]):
+        head = [candidate.rstrip("\r").rstrip() for candidate in lines[:5]]
+        if line in head:
+            continue
+        if any("Copyright" in candidate for candidate in head):
+            # A copyright line, but not ours verbatim — a stale spelling of the
+            # entity, or someone else's claim. Never auto-"fixed": inserting a
+            # second header would leave the file asserting two owners.
+            wrong.append(rel)
             continue
         missing.append(rel)
         if fix:
@@ -115,21 +122,33 @@ def main(fix):
             with open(rel, "w", encoding="utf-8", errors="surrogateescape", newline="") as fh:
                 fh.write("\n".join(lines))
 
-    if not missing:
+    if not missing and not wrong:
         print(f"All source files carry the header: {HEADER}")
         return 0
-    if fix:
-        print(f"Added the header to {len(missing)} file(s):")
-        for m in missing:
-            print(f"  {m}")
-        return 0
 
-    print(f"{len(missing)} source file(s) are missing the copyright header:\n")
-    for m in missing:
-        print(f"  {m}")
-    print(f'\nEvery source file must start with "{HEADER}"'
-          " in that language's comment syntax.\nFix them all with:\n"
-          "\n    python3 .github/scripts/copyright-headers.py --fix\n")
+    if wrong:
+        print(f"{len(wrong)} source file(s) carry a copyright line that is not"
+              f' exactly "{HEADER}":\n')
+        for w in wrong:
+            print(f"  {w}")
+        print("\nFix these by hand — --fix will not touch them, because inserting a"
+              "\nsecond header would leave the file naming two owners.\n")
+
+    if missing:
+        if fix:
+            print(f"Added the header to {len(missing)} file(s):")
+            for m in missing:
+                print(f"  {m}")
+        else:
+            print(f"{len(missing)} source file(s) are missing the copyright header:\n")
+            for m in missing:
+                print(f"  {m}")
+            print(f'\nEvery source file must start with "{HEADER}"'
+                  " in that language's comment syntax.\nFix them all with:\n"
+                  "\n    python3 .github/scripts/copyright-headers.py --fix\n")
+
+    if fix and not wrong:
+        return 0
     return 1
 
 

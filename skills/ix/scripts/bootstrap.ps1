@@ -1,4 +1,4 @@
-# Copyright 2026 Ix Infrastructure INC
+# Copyright 2026 Ix Infrastructure Inc.
 
 # Ix skill bootstrap (Windows PowerShell) - install the ix CLI, start the local
 # backend, and map a repo.

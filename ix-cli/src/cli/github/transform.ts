@@ -1,4 +1,4 @@
-// Copyright 2026 Ix Infrastructure INC
+// Copyright 2026 Ix Infrastructure Inc.
 
 import { createHash } from "node:crypto";
 import type { PatchOp } from "../../client/types.js";

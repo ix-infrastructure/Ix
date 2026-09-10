@@ -1,4 +1,4 @@
-// Copyright 2026 Ix Infrastructure INC
+// Copyright 2026 Ix Infrastructure Inc.
 
 import * as nodePath from 'node:path';
 import * as crypto from 'node:crypto';
