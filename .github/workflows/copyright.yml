@@ -1,0 +1,28 @@
+name: Copyright headers
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: copyright-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  headers:
+    name: Every source file carries the header
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # python3 is preinstalled on ubuntu-latest; the script uses only stdlib
+      # plus `git ls-files` / `git check-attr`, so no setup step is needed.
+      - name: Check copyright headers
+        run: python3 .github/scripts/copyright-headers.py
