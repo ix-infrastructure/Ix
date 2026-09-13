@@ -1,11 +1,11 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, basename, resolve } from "node:path";
-import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import chalk from "chalk";
 import { IxClient } from "../client/api.js";
 import { renderBanner } from "./banner.js";
 import { canonicalWorkspacePath, getEndpoint, loadConfig, saveConfig, findWorkspaceForCwd, getDefaultWorkspace, type WorkspaceConfig } from "./config.js";
+import { ixHome } from "./ix-home.js";
 import { workspaceIdForPath } from "./system.js";
 import { readBackendHealth } from "./commands/upgrade.js";
 
@@ -20,7 +20,7 @@ export interface BootstrapResult {
  * Returns true if it was just created.
  */
 export function ensureLocalConfig(): boolean {
-  const configDir = join(homedir(), ".ix");
+  const configDir = ixHome();
   const configPath = join(configDir, "config.yaml");
   mkdirSync(configDir, { recursive: true });
   try {

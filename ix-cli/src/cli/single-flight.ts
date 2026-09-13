@@ -1,7 +1,8 @@
 import { mkdirSync, writeFileSync, readFileSync, rmSync, openSync, closeSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { homedir, hostname } from "node:os";
+import { hostname } from "node:os";
 import { createHash } from "node:crypto";
+import { ixHome } from "./ix-home.js";
 
 // ---------------------------------------------------------------------------
 // CLI-level single-flight lock for `ix map` / ingest.
@@ -26,7 +27,7 @@ import { createHash } from "node:crypto";
 // Lock directory. Overridable via IX_LOCK_DIR (used by tests, and handy if
 // ~/.ix is read-only). Read per call so the override can change between runs.
 function lockDir(): string {
-  return process.env.IX_LOCK_DIR || join(homedir(), ".ix", "locks");
+  return process.env.IX_LOCK_DIR || join(ixHome(), "locks");
 }
 
 // Default: a held lock older than this is presumed stale (its holder crashed

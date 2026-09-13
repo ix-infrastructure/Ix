@@ -134,10 +134,16 @@ ripgrep>=13
 #  DIRECTORIES CREATED
 # ============================================================================
 
-# ~/.ix/                     Ix home directory
+# ~/.ix/                     Ix home directory (override with $IX_HOME)
 # ~/.ix/config.yaml          CLI configuration
 # ~/.ix/backend/             Docker Compose file for local backend
 # ~/.ix/cli/                 Installed CLI binary + node_modules
+#
+# $IX_HOME relocates ALL of the above, configuration included. Set it to give a
+# harness, a CI job or a second install its own state instead of sharing yours.
+# Note it is read at use, not at install: exporting it after an install points
+# the CLI at an empty directory, so move ~/.ix there (or unset it) rather than
+# expecting the old configuration to be found.
 #
 # Wrapper: /usr/local/bin/ix (if writable) or ~/.local/bin/ix (fallback)
 # Ports: 8090 (Memory Layer), 8529 (ArangoDB) — localhost only

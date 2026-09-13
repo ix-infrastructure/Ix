@@ -6,22 +6,30 @@ import { parse } from "yaml";
 
 import { saveConfig } from "../config.js";
 
-// Isolate ~/.ix by pointing HOME/USERPROFILE at a temp dir per test.
+// Isolate the Ix state directory with IX_HOME, deliberately NOT with HOME.
+//
+// This file used to override HOME/USERPROFILE, which worked only because
+// `os.homedir()` happens to read $HOME on POSIX under vitest's default (forks)
+// pool. Under `--pool=threads` a worker's `process.env` write never reaches the
+// environment libuv reads, so `homedir()` returned the developer's REAL home
+// and every `saveConfig` below wrote their actual ~/.ix/config.yaml -- and
+// since `workspaces` is an OSS-owned key, the config object these tests pass
+// (which has none) DELETED their whole workspace registry. The six failing
+// assertions were the only warning. `process.env.IX_HOME` is read off the
+// object by `ixHome()`, so it isolates under either pool.
 let home: string;
-let savedHome: string | undefined;
-let savedProfile: string | undefined;
+let savedIxHome: string | undefined;
 
 beforeEach(() => {
   home = fs.mkdtempSync(nodePath.join(os.tmpdir(), "ix-cfgmode-"));
-  savedHome = process.env.HOME;
-  savedProfile = process.env.USERPROFILE;
-  process.env.HOME = home;
-  process.env.USERPROFILE = home;
+  savedIxHome = process.env.IX_HOME;
+  // A path that does not exist yet: the first test asserts saveConfig creates it.
+  process.env.IX_HOME = nodePath.join(home, ".ix");
 });
 
 afterEach(() => {
-  process.env.HOME = savedHome;
-  process.env.USERPROFILE = savedProfile;
+  if (savedIxHome === undefined) delete process.env.IX_HOME;
+  else process.env.IX_HOME = savedIxHome;
   try { fs.rmSync(home, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 

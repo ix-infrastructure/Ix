@@ -1,10 +1,10 @@
 import { readFileSync, writeFileSync, existsSync, rmSync, chmodSync, renameSync, realpathSync, mkdirSync } from "node:fs";
 import { isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
-import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { parse, stringify } from "yaml";
 import { IxClient } from "../client/api.js";
+import { ixHome } from "./ix-home.js";
 
 /**
  * Path to the per-project ingest mtime cache (the "skip unchanged files on re-map"
@@ -13,13 +13,13 @@ import { IxClient } from "../client/api.js";
  */
 export function ingestMtimeCachePath(projectRoot: string): string {
   const key = createHash("sha256").update(projectRoot).digest("hex").slice(0, 12);
-  return join(homedir(), ".ix", `ingest_mtimes_${key}.json`);
+  return join(ixHome(), `ingest_mtimes_${key}.json`);
 }
 
 /** Path to the architecture-map completion marker for one project root. */
 export function mapBaselinePath(projectRoot: string): string {
   const key = createHash("sha256").update(projectRoot).digest("hex").slice(0, 12);
-  return join(homedir(), ".ix", `map_baseline_${key}.json`);
+  return join(ixHome(), `map_baseline_${key}.json`);
 }
 
 /**
@@ -30,7 +30,7 @@ export function mapBaselinePath(projectRoot: string): string {
  */
 export function stitchScopeCachePath(workspaceId: string): string {
   const key = createHash("sha256").update(workspaceId).digest("hex").slice(0, 12);
-  return join(homedir(), ".ix", `stitch_scope_${key}.json`);
+  return join(ixHome(), `stitch_scope_${key}.json`);
 }
 
 /**
@@ -64,7 +64,7 @@ export function readStitchScope(workspaceId: string): { systemId: string | null 
 export function writeStitchScope(workspaceId: string, systemId: string | null): void {
   try {
     const path = stitchScopeCachePath(workspaceId);
-    mkdirSync(join(homedir(), ".ix"), { recursive: true });
+    mkdirSync(ixHome(), { recursive: true });
     writeFileSync(path, JSON.stringify({ workspaceId, systemId }) + "\n", "utf8");
   } catch { /* non-critical */ }
 }
@@ -110,7 +110,7 @@ const defaultConfig: IxConfig = {
 };
 
 export function loadConfig(): IxConfig {
-  const configPath = join(homedir(), ".ix", "config.yaml");
+  const configPath = join(ixHome(), "config.yaml");
   if (!existsSync(configPath)) return defaultConfig;
   try {
     const raw = readFileSync(configPath, "utf-8");
@@ -144,7 +144,7 @@ const OSS_OWNED_KEYS = new Set<keyof IxConfig>([
 ]);
 
 export function saveConfig(config: IxConfig): void {
-  const configDir = join(homedir(), ".ix");
+  const configDir = ixHome();
   const configPath = join(configDir, "config.yaml");
   // 0700, to match the 0600 the config itself is written with below: the file
   // holds credentials (Pro's instances carry a tunnel JWT and a long-lived IdP
