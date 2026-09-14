@@ -66,6 +66,25 @@ describe("keyword search path candidate window", () => {
     expect(search).toHaveBeenCalledTimes(1);
   });
 
+  it("pushes --path down to the backend as a separator-normalized scope", async () => {
+    // Ix#647: the released /v1/search had no path filter, so a match past the
+    // candidate window was unreachable at any --limit. The backend gained a
+    // `scope` field; the CLI must send it on EVERY widening round, with
+    // Windows separators normalized (the stored side is POSIX) and the case
+    // left alone (the backend lowercases both sides itself).
+    dataset([...Array.from({ length: 70 }, (_, i) => node(i)), node(70, "src/target.ts")]);
+    await run(["--path", "SRC\\Target.ts"]);
+    expect(search.mock.calls.length).toBeGreaterThan(1);
+    expect(search.mock.calls.every(([, opts]) => opts.scope === "SRC/Target.ts")).toBe(true);
+  });
+
+  it("sends no scope when --path is not given", async () => {
+    dataset([node(0)]);
+    await run([]);
+    expect(search).toHaveBeenCalledTimes(1);
+    expect(search.mock.calls[0][1].scope).toBeUndefined();
+  });
+
   it("does not widen an unscoped search", async () => {
     dataset(Array.from({ length: 100 }, (_, i) => node(i)));
     await run([]);

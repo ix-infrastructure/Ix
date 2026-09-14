@@ -8,6 +8,7 @@ import { scoreCandidate, resolveReadSystemId } from "../resolve.js";
 import { applyRoleFilter, roleHint } from "../role-filter.js";
 import { stderr } from "../stderr.js";
 import { llmLine } from "../llm.js";
+import { normalizePathSeparators } from "../path-match.js";
 
 /** Render `ix search` as llm records: a header line then one `node` row per hit (rank = order). */
 export function renderSearchLlm(
@@ -126,7 +127,8 @@ export function registerSearchCommand(program: Command): void {
   6. Fuzzy/incidental match
 
 Use --path to filter results from specific directories.
-Keyword searches with --path widen the candidate window up to 2000 nodes.
+Keyword searches send --path to the backend as a candidate filter (backend 1.0.31+)
+and widen the candidate window up to 2000 nodes on older backends.
 If that bound is reached, a diagnostic warns that matches may be missing.
 
 Examples:
@@ -168,6 +170,15 @@ Examples:
             asOfRev: opts.asOf ? parseInt(opts.asOf, 10) : undefined,
             workspaceId,
             systemId,
+            // Push --path down as `scope` so a backend that knows the field
+            // (Ix-memory ≥ 1.0.31) filters candidates BEFORE its limit and the
+            // window below holds only matching paths (Ix#647: the target sat
+            // at candidate 71 and 386 and no --limit could reach it). An older
+            // backend ignores the unknown field, and the client-side filter
+            // and widening loop below still apply either way. Separators only:
+            // the backend lowercases both sides itself, and the stored side is
+            // POSIX by construction (see path-match.ts).
+            scope: effectivePathFilter ? normalizePathSeparators(effectivePathFilter) : undefined,
           });
       let rawNodes = await fetchCandidates(fetchLimit);
       const filterPath = (candidates: typeof rawNodes) => effectivePathFilter

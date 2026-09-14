@@ -97,7 +97,7 @@ export class IxClient {
 
   async search(
     term: string,
-    opts?: { limit?: number; kind?: string; language?: string; asOfRev?: number; nameOnly?: boolean; workspaceId?: string; systemId?: string }
+    opts?: { limit?: number; kind?: string; language?: string; asOfRev?: number; nameOnly?: boolean; workspaceId?: string; systemId?: string; scope?: string }
   ): Promise<GraphNode[]> {
     return this.post("/v1/search", {
       term,
@@ -108,6 +108,11 @@ export class IxClient {
       nameOnly: opts?.nameOnly,
       workspaceId: opts?.workspaceId,
       systemId: opts?.systemId,
+      // A source_uri substring the backend applies BEFORE its limit
+      // (Ix-memory ≥ 1.0.31, case-insensitive). Older backends decode the
+      // request with a derived circe decoder and drop the unknown field, so
+      // sending it is always safe; callers keep their own filter as well.
+      scope: opts?.scope,
     });
   }
 
