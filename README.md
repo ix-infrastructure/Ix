@@ -312,13 +312,6 @@ Also recognized as config and data formats: `YAML` `JSON` `TOML` `SQL`
 
 ---
 
-### Status
-
-Alpha, and moving quickly. APIs and behavior may change. If you are running Ix on a
-large or unusual codebase, we want the bug report.
-
----
-
 ### Contributing
 
 Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for local
