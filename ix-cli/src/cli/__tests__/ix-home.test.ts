@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
@@ -6,6 +6,7 @@ import { parse } from "yaml";
 
 import { ixHome } from "../ix-home.js";
 import { ingestMtimeCachePath, mapBaselinePath, saveConfig, stitchScopeCachePath } from "../config.js";
+import { ensureLocalConfig } from "../bootstrap.js";
 
 // IX_HOME, not HOME. `os.homedir()` answers from the process environment that
 // libuv sees, which a worker thread's `process.env` write never reaches -- so a
@@ -56,6 +57,12 @@ describe("state that follows IX_HOME", () => {
   // A benchmark harness that set it still read its endpoint from, and
   // registered its throwaway worktrees in, the developer's real ~/.ix.
   it("writes config.yaml under IX_HOME, not under the real home", () => {
+    // Snapshot the real file (or its absence) so "nothing landed there" is a
+    // comparison, not a guess about a filename that is never written.
+    const real = nodePath.join(os.homedir(), ".ix", "config.yaml");
+    const readReal = () => (fs.existsSync(real) ? fs.readFileSync(real, "utf8") : null);
+    const before = readReal();
+
     saveConfig({ endpoint: "http://ix-home.example", format: "json" });
 
     const written = nodePath.join(home, "config.yaml");
@@ -64,8 +71,7 @@ describe("state that follows IX_HOME", () => {
       endpoint: "http://ix-home.example",
       format: "json",
     });
-    // And nothing landed in the real one.
-    expect(fs.existsSync(nodePath.join(os.homedir(), ".ix", "config.yaml.tmp"))).toBe(false);
+    expect(readReal()).toBe(before);
   });
 
   it("keeps the 0700 directory / 0600 file guarantees under IX_HOME", () => {
@@ -82,5 +88,69 @@ describe("state that follows IX_HOME", () => {
                      stitchScopeCachePath("ws-1")]) {
       expect(nodePath.dirname(p)).toBe(home);
     }
+  });
+});
+
+describe("ensureLocalConfig under IX_HOME", () => {
+  // These need a fake "real" home with a legacy ~/.ix/config.yaml in it. A
+  // HOME/USERPROFILE override is honoured by os.homedir() under vitest's
+  // default forks pool only, so each test checks it took and otherwise returns
+  // rather than asserting against the developer's actual home.
+  let fakeHome: string;
+  let savedHome: string | undefined;
+  let savedProfile: string | undefined;
+
+  beforeEach(() => {
+    fakeHome = fs.mkdtempSync(nodePath.join(os.tmpdir(), "ix-home-legacy-"));
+    savedHome = process.env.HOME;
+    savedProfile = process.env.USERPROFILE;
+    process.env.HOME = fakeHome;
+    process.env.USERPROFILE = fakeHome;
+  });
+
+  afterEach(() => {
+    process.env.HOME = savedHome;
+    process.env.USERPROFILE = savedProfile;
+    vi.restoreAllMocks();
+    try { fs.rmSync(fakeHome, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it("names the untouched legacy ~/.ix/config.yaml when it creates a fresh config under IX_HOME", () => {
+    if (os.homedir() !== fakeHome) return;
+    const legacy = nodePath.join(fakeHome, ".ix", "config.yaml");
+    fs.mkdirSync(nodePath.dirname(legacy), { recursive: true });
+    fs.writeFileSync(legacy, "endpoint: http://legacy.example\nformat: text\n");
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    expect(ensureLocalConfig()).toBe(true);
+
+    const said = write.mock.calls.map(c => String(c[0])).join("");
+    expect(said).toContain("IX_HOME is set");
+    expect(said).toContain(nodePath.join(home, "config.yaml"));
+    expect(said).toContain(legacy);
+    // Told about, not touched.
+    expect(fs.readFileSync(legacy, "utf8")).toBe("endpoint: http://legacy.example\nformat: text\n");
+    // And the new file is the default one, not a copy.
+    expect(parse(fs.readFileSync(nodePath.join(home, "config.yaml"), "utf8"))).not.toMatchObject({
+      endpoint: "http://legacy.example",
+    });
+  });
+
+  it("says nothing when there is no legacy config to point at", () => {
+    if (os.homedir() !== fakeHome) return;
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(ensureLocalConfig()).toBe(true);
+    expect(write.mock.calls.map(c => String(c[0])).join("")).not.toContain("IX_HOME is set");
+  });
+
+  it("says nothing on the second call, because the file already exists", () => {
+    if (os.homedir() !== fakeHome) return;
+    const legacy = nodePath.join(fakeHome, ".ix", "config.yaml");
+    fs.mkdirSync(nodePath.dirname(legacy), { recursive: true });
+    fs.writeFileSync(legacy, "endpoint: http://legacy.example\n");
+    expect(ensureLocalConfig()).toBe(true);
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(ensureLocalConfig()).toBe(false);
+    expect(write).not.toHaveBeenCalled();
   });
 });
