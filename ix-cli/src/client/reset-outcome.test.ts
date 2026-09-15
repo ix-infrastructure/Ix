@@ -86,10 +86,18 @@ describe("remote reset outcome", () => {
   });
 
   it("requires reconciliation at the polling deadline without another reset", async () => {
-    const requests = mockRequests(accepted(), response({ opId, state: "running" }));
-    let clockReads = 0;
-    vi.spyOn(Date, "now").mockImplementation(() => clockReads++ === 0 ? 0 : 900001);
-    await expect(new IxClient("https://synthetic.example").reset()).rejects.toThrow("Completion was not confirmed");
-    expect(requests.map(r => r.method)).toEqual(["POST"]);
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const running = response({ opId, state: "running" });
+    vi.spyOn(running, "json").mockImplementation(async () => {
+      vi.setSystemTime(900001);
+      return { opId, state: "running" };
+    });
+    const requests = mockRequests(accepted(), running);
+    const failure = expect(new IxClient("https://synthetic.example").reset())
+      .rejects.toThrow("Completion was not confirmed");
+    await vi.advanceTimersByTimeAsync(2000);
+    await failure;
+    expect(requests.map(r => r.method)).toEqual(["POST", "GET"]);
   });
 });
