@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, basename, resolve } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -8,6 +8,8 @@ import chalk from "chalk";
 import { IxClient } from "../client/api.js";
 import { renderBanner } from "./banner.js";
 import { canonicalWorkspacePath, getEndpoint, loadConfig, saveConfig, findWorkspaceForCwd, getDefaultWorkspace, type WorkspaceConfig } from "./config.js";
+import { ixHome } from "./ix-home.js";
+import { stderr } from "./stderr.js";
 import { workspaceIdForPath } from "./system.js";
 import { readBackendHealth } from "./commands/upgrade.js";
 
@@ -18,22 +20,44 @@ export interface BootstrapResult {
 }
 
 /**
- * Ensure ~/.ix/config.yaml exists. Creates it silently if missing.
- * Returns true if it was just created.
+ * Ensure `$IX_HOME/config.yaml` (default `~/.ix/config.yaml`) exists. Creates
+ * it silently if missing. Returns true if it was just created.
  */
 export function ensureLocalConfig(): boolean {
-  const configDir = join(homedir(), ".ix");
+  const configDir = ixHome();
   const configPath = join(configDir, "config.yaml");
   mkdirSync(configDir, { recursive: true });
   try {
     // 'wx' creates the file atomically and throws EEXIST if it already exists,
     // avoiding the existsSync-then-write TOCTOU (CodeQL js/file-system-race).
     writeFileSync(configPath, `endpoint: ${getEndpoint()}\nformat: text\n`, { flag: "wx" });
+    noteRelocatedConfig(configPath);
     return true;
   } catch (err: any) {
     if (err?.code === "EEXIST") return false;
     throw err;
   }
+}
+
+/**
+ * A config was just created under `$IX_HOME` while a `~/.ix/config.yaml`
+ * exists. That is the one user-visible consequence of config following
+ * IX_HOME: someone who exported it as a custom install root before config
+ * honoured it now finds the CLI on the default endpoint with no workspaces,
+ * and nothing else says why. Say why, on stderr, at the moment it happens --
+ * which is exactly once, because the file is created exactly once.
+ *
+ * Nothing is migrated automatically: two live copies of a credential-bearing
+ * file is worse than one clear message about which one is in use.
+ */
+function noteRelocatedConfig(configPath: string): void {
+  if (!process.env.IX_HOME) return;
+  const legacy = join(homedir(), ".ix", "config.yaml");
+  if (legacy === configPath || !existsSync(legacy)) return;
+  stderr(chalk.yellow(
+    `IX_HOME is set: using ${configPath}. Your existing ${legacy} was not migrated -- ` +
+    `copy it there, or unset IX_HOME to keep using it.`,
+  ));
 }
 
 // Roots whose workspace_id was re-keyed to the path-based id during THIS process,
