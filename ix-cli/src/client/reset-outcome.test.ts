@@ -101,3 +101,4 @@ describe("remote reset outcome", () => {
     expect(requests.map(r => r.method)).toEqual(["POST", "GET"]);
   });
 });
+// Copyright 2026 Ix Infrastructure Inc.

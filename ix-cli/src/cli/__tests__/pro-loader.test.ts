@@ -48,3 +48,4 @@ it("does not treat an installed plugin with a missing export path as absent", ()
   const r=run('export const unrelated=true;', {".":"./register.js"});
   expect(r.status).toBe(1); expect(r.stderr).toContain("Installed Ix Pro could not be resolved");
 });
+// Copyright 2026 Ix Infrastructure Inc.
