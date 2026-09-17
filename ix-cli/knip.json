@@ -1,5 +1,6 @@
 {
   "$schema": "https://unpkg.com/knip@5/schema.json",
+  "ignoreDependencies": ["@ix/pro"],
   "entry": ["src/cli/main.ts", "src/index.ts", "test/parser.smoke.mjs"],
   "project": ["src/**/*.ts"],
   "ignore": ["test/fixtures/**", "test/parser.stress.mjs"],
