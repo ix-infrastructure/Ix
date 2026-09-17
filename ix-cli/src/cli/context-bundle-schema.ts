@@ -42,9 +42,18 @@ export const contextBundleSchema = z.object({
     name: z.string(),
     kind: z.string(),
     resolutionMode: z.string(),
+    path: z.string().optional(),
   }),
   entities: z.array(
-    z.object({ id: z.string(), name: z.string(), kind: z.string(), path: z.string().optional(), stale: z.boolean() }),
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      kind: z.string(),
+      path: z.string().optional(),
+      lineStart: z.number().int().positive().optional(),
+      lineEnd: z.number().int().positive().optional(),
+      stale: z.boolean(),
+    }),
   ),
   relationships: z.array(z.object({ src: z.string(), dst: z.string(), predicate: z.string() })),
   claims: z.array(
@@ -81,6 +90,16 @@ export const contextBundleSchema = z.object({
       score: z.number(),
       reason: z.string(),
       refs: z.array(z.string()),
+      // Optional and additive: bundles saved before it existed still parse.
+      // Listed rather than left to `catchall`, because an unlisted key is
+      // stripped on the way to disk and on the way back.
+      location: z
+        .object({
+          path: z.string(),
+          lineStart: z.number().int().positive().optional(),
+          lineEnd: z.number().int().positive().optional(),
+        })
+        .optional(),
     }),
   ),
   budgets: z.object({
