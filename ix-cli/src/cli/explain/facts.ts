@@ -55,15 +55,59 @@ export interface EntityFacts {
   diagnostics: Diagnostic[];
 }
 
+/** Facts only `ix explain` renders. */
+type ExplainOnlyFact =
+  | "downstreamDependents"
+  | "downstreamDepth"
+  | "callList"
+  | "systemPath"
+  | "subsystemName"
+  | "moduleName";
+
+/**
+ * The facts `ix context` reads. The explain-only ones are absent from the type
+ * rather than zeroed, so nothing can render a skipped fact as a real count.
+ * `provenance` is the raw `/v1/provenance` response the history length was
+ * read from, handed on so the caller does not fetch it a second time.
+ */
+export type ContextFacts = Omit<EntityFacts, ExplainOnlyFact> & { provenance?: unknown };
+
+const NO_DOWNSTREAM = { tree: [], truncated: false, nodesVisited: 0, maxDepthReached: 0 };
+
+/**
+ * Collect the structural facts about one entity.
+ *
+ * `scope` exists because the explain-only facts are by far the most expensive.
+ * The downstream dependency tree walks up to 100 nodes with five expands each:
+ * measured on `ix context config.ts` against the Ix repo's own graph, 230 of
+ * the command's 246 HTTP requests and ~6 of its ~10 seconds, for two numbers
+ * `ix context` never reads. `"context"` skips that tree, the system path and
+ * the per-callee lookups.
+ */
+export function collectFacts(
+  client: IxClient,
+  targetId: string,
+  targetName: string,
+  targetKind: string,
+): Promise<EntityFacts>;
+export function collectFacts(
+  client: IxClient,
+  targetId: string,
+  targetName: string,
+  targetKind: string,
+  scope: "context",
+): Promise<ContextFacts>;
 export async function collectFacts(
   client: IxClient,
   targetId: string,
   targetName: string,
   targetKind: string,
-): Promise<EntityFacts> {
+  scope: "explain" | "context" = "explain",
+): Promise<EntityFacts | ContextFacts> {
   const diagnostics: Diagnostic[] = [];
+  const forExplain = scope === "explain";
 
-  // Run parallel graph queries (including bounded downstream tree)
+  // Run parallel graph queries (including, for explain, a bounded downstream tree)
   const [details, callersResult, calleesResult, dependentsResult, importersResult, membersResult, provenance, downstream, hierarchyPath] =
     await Promise.all([
       client.entity(targetId),
@@ -73,10 +117,10 @@ export async function collectFacts(
       client.expand(targetId, { direction: "in", predicates: ["IMPORTS"] }),
       client.expand(targetId, { direction: "out", predicates: ["CONTAINS"] }),
       client.provenance(targetId).catch(() => ({ entityId: targetId, chain: [] })),
-      buildDependencyTree(client, targetId, { maxDepth: 4, maxNodes: 100 }).catch(() => ({
-        tree: [], truncated: false, nodesVisited: 0, maxDepthReached: 0,
-      })),
-      getSystemPath(client, targetId).catch(() => []),
+      forExplain
+        ? buildDependencyTree(client, targetId, { maxDepth: 4, maxNodes: 100 }).catch(() => NO_DOWNSTREAM)
+        : Promise.resolve(NO_DOWNSTREAM),
+      forExplain ? getSystemPath(client, targetId).catch(() => []) : Promise.resolve([]),
     ]);
 
   const node = details.node as any;
@@ -134,7 +178,7 @@ export async function collectFacts(
     (e: any) => e.predicate === "CALLS" && e.src === targetId,
   );
   let callList: EntityRef[] | undefined;
-  if (calleeEdges.length > 0 && calleeEdges.length <= 20) {
+  if (forExplain && calleeEdges.length > 0 && calleeEdges.length <= 20) {
     const refs = await Promise.all(
       calleeEdges.map(async (e: any): Promise<EntityRef> => {
         try {
@@ -204,7 +248,7 @@ export async function collectFacts(
   const subsystemName = hierarchyPath.find((n: any) => n.kind === "subsystem")?.name;
   const moduleName = hierarchyPath.find((n: any) => n.kind === "module")?.name;
 
-  return {
+  const facts: EntityFacts = {
     id: targetId,
     name: node.name || node.attrs?.name || targetName,
     kind: node.kind || targetKind,
@@ -231,4 +275,15 @@ export async function collectFacts(
     stale,
     diagnostics,
   };
+  if (forExplain) return facts;
+  const {
+    downstreamDependents: _downstreamDependents,
+    downstreamDepth: _downstreamDepth,
+    callList: _callList,
+    systemPath: _systemPath,
+    subsystemName: _subsystemName,
+    moduleName: _moduleName,
+    ...contextFacts
+  } = facts;
+  return { ...contextFacts, provenance };
 }

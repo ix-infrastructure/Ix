@@ -19,7 +19,7 @@ import type {
   StructuredContext,
 } from "../../client/types.js";
 import { getEndpoint } from "../config.js";
-import { collectFacts, type EntityFacts } from "../explain/facts.js";
+import { collectFacts, type ContextFacts } from "../explain/facts.js";
 import { llmLine, printLlmLines } from "../llm.js";
 import { parseBudgetOption, parsePickOption, parseRevisionOption } from "../options.js";
 import { resolveFileOrReport } from "../resolve.js";
@@ -315,8 +315,11 @@ export function registerContextCommand(program: Command): void {
       const budgets = clampBudgets(opts);
       const asOfRev = opts.asOfRev;
 
-      const [facts, context, provenance] = await Promise.all([
-        collectFacts(client, resolved.id, resolved.name, resolved.kind),
+      const [facts, context] = await Promise.all([
+        // Also carries the provenance response: `collectFacts` needs it for the
+        // history length, and fetching it again here doubled one of the
+        // slowest calls the command makes (~1.3s on the Ix repo's graph).
+        collectFacts(client, resolved.id, resolved.name, resolved.kind, "context"),
         // By id, not by name. Seeding by name makes the backend re-run the
         // search the resolver just did, and it can land on a different node of
         // the same name. Both call sites in this file must use it: converting
@@ -326,8 +329,8 @@ export function registerContextCommand(program: Command): void {
           asOfRev,
           depth: opts.depth,
         }),
-        client.provenance(resolved.id),
       ]);
+      const provenance = facts.provenance;
 
       const bundle = buildBundle({
         resolved,
@@ -415,14 +418,13 @@ async function buildFreshBundle(
   if (!resolved) return undefined;
 
   const asOfRev = opts.asOfRev;
-  const [facts, context, provenance] = await Promise.all([
-    collectFacts(client, resolved.id, resolved.name, resolved.kind),
+  const [facts, context] = await Promise.all([
+    collectFacts(client, resolved.id, resolved.name, resolved.kind, "context"),
     client.contextForNode(resolved.id, { asOfRev, depth: opts.depth }),
-    client.provenance(resolved.id),
   ]);
 
   return buildBundle({
-    resolved, facts, context, provenance, asOfRev, depth: opts.depth, budgets,
+    resolved, facts, context, provenance: facts.provenance, asOfRev, depth: opts.depth, budgets,
     graphCompleted: hasCompletedSourceGraphBaseline(),
   });
 }
@@ -1323,7 +1325,7 @@ export function renderInvestigationDiff(
 
 interface BuildInput {
   resolved: { id: string; name: string; kind: string; resolutionMode: string };
-  facts: EntityFacts;
+  facts: ContextFacts;
   context: StructuredContext;
   provenance: unknown;
   asOfRev?: number;
@@ -1528,7 +1530,7 @@ export function buildBundle(input: BuildInput): ContextBundle {
 /** Deterministic evidence ranking: tier, then a stable id tiebreaker. */
 function rankEvidence(input: {
   resolved: { id: string; name: string; kind: string };
-  facts: EntityFacts;
+  facts: ContextFacts;
   context: StructuredContext;
   relationships: Array<{ src: string; dst: string; predicate: string }>;
   prov: Record<string, unknown>;
