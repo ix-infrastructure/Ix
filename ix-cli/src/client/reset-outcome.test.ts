@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { IxClient } from "./api.js";
 
@@ -101,4 +103,3 @@ describe("remote reset outcome", () => {
     expect(requests.map(r => r.method)).toEqual(["POST", "GET"]);
   });
 });
-// Copyright 2026 Ix Infrastructure Inc.

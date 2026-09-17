@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import { afterEach, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -48,4 +50,3 @@ it("does not treat an installed plugin with a missing export path as absent", ()
   const r=run('export const unrelated=true;', {".":"./register.js"});
   expect(r.status).toBe(1); expect(r.stderr).toContain("Installed Ix Pro could not be resolved");
 });
-// Copyright 2026 Ix Infrastructure Inc.
