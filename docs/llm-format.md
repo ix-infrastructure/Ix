@@ -94,15 +94,23 @@ item name=parseFile kind=method
 `ix context <target>`:
 
 ```
-context target=Widget target_kind=class stale=false classification=current entities=2 relationships=1 claims=1 decisions=0 conflicts=0 intents=0 evidence=7 truncated_entities=0 truncated_relationships=0 truncated_evidence=0 truncated_chars=0
-evidence score=0 kind=target title="Widget (class)"
+context target=Widget target_kind=class target_path=src/widget.ts stale=false classification=current entities=2 relationships=1 claims=1 decisions=0 conflicts=0 intents=0 evidence=7 truncated_entities=0 truncated_relationships=0 truncated_evidence=0 truncated_chars=0
+evidence score=0 kind=target title="Widget (class)" path=src/widget.ts
+evidence score=10 kind=structural title="member render" path=src/widget.ts lines=12-40
 evidence score=20 kind=claim title="renders to DOM"
-evidence score=30 kind=relationship title="entity-1 --calls--> entity-2"
+evidence score=30 kind=relationship title="Widget --calls--> render"
 ```
 
 One header record, then the ranked evidence. The entity, relationship and claim
 lists stay counts here — `llm` is the token-minimal surface and the ranked
 evidence is what it exists to deliver; `--format json` carries the rest.
+
+`path=` and `lines=` say where an item is defined, when the graph knows, so a
+reader can open it instead of searching for it. For a file target, members are
+ranked by use — those used from other files first — so the ones that survive
+the evidence budget are the ones worth reading. Relationship titles name their
+endpoints; a name shared by two entities in the bundle is qualified with its
+path, and the ids stay in the `relationship` records.
 
 `ix context --diff <id>`:
 
@@ -114,7 +122,7 @@ budgets scope=effective entities=50 relationships=100 evidence=25 chars=12000
 count added_entities=1 removed_entities=0 added_relationships=1 removed_relationships=1 added_evidence=2 removed_evidence=1 added_claims=1 removed_claims=0
 entity change=added id=entity-3 kind=method name=mount path=src/widget.ts
 relationship change=removed src=entity-1 pred=calls dst=entity-2
-evidence change=added score=30 kind=relationship title="entity-1 --holds--> entity-3"
+evidence change=added score=30 kind=relationship title="Widget --holds--> mount"
 claim change=added id=c-8f31a2 entity=entity-1 status=active statement="mounts to DOM"
 ```
 
