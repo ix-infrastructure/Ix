@@ -107,7 +107,14 @@ export interface NodeSummary {
   kind: string;
   name: string;
   rev: number;
+  /** A connector's citation id. Absent on repository nodes. */
   sourceUri?: string | null;
+  /**
+   * The repository file a code, config, doc, test or schema node was parsed
+   * from. Sent by backends that have ix-infrastructure/Ix-memory#210; older
+   * ones leave repository summaries without any location.
+   */
+  path?: string | null;
 }
 
 export interface EdgeSummary {
