@@ -48,6 +48,13 @@ interface BudgetSnapshot {
  * this table, and `--help` interpolates it, so the number a user is told is
  * the number that is applied.
  */
+/**
+ * Hard cap on the conflict reports carried in a bundle. Not a `--max-*` flag:
+ * the bundle reports the count it saw either way, and a caller who needs every
+ * report wants `ix conflicts`, not a bigger context bundle.
+ */
+const MAX_CONFLICTS = 10;
+
 const BUDGETS = [
   { key: "maxEntities", flag: "--max-entities", label: "entities", help: "Maximum entities in the bundle", min: 1, max: 500, fallback: 50 },
   { key: "maxRelationships", flag: "--max-relationships", label: "relationships", help: "Maximum relationships in the bundle", min: 1, max: 1000, fallback: 100 },
@@ -203,6 +210,7 @@ interface ContextBundle {
     relationshipsTruncated: number;
     evidenceTruncated: number;
     charactersTruncated: number;
+    conflictsTruncated: number;
   };
   metadata: {
     asOfRev?: number;
@@ -1457,6 +1465,7 @@ export function buildBundle(input: BuildInput): ContextBundle {
       relationshipsTruncated: 0,
       evidenceTruncated: 0,
       charactersTruncated: 0,
+      conflictsTruncated: 0,
     },
     metadata: {
       asOfRev,
@@ -1521,6 +1530,15 @@ export function buildBundle(input: BuildInput): ContextBundle {
   bundle.truncation.evidenceTruncated = evidence.length - kept;
   const fullChars = sizedEvidence.reduce((sum, entry) => sum + entry.size, 0);
   bundle.truncation.charactersTruncated = Math.max(0, fullChars - chars);
+
+  // `conflicts[]` was the one list with no budget at all, and it is the one the
+  // backend can hand back by the dozen: it reached 12,922 of 23,030 JSON bytes
+  // on a recorded bundle. The evidence budgets never bounded it because they
+  // bound `evidence`. Cap it at a fixed depth -- a caller who wants the full
+  // set has `ix conflicts`, which is the command that renders them properly.
+  const conflictLimit = Math.min(bundle.conflicts.length, MAX_CONFLICTS);
+  bundle.truncation.conflictsTruncated = bundle.conflicts.length - conflictLimit;
+  bundle.conflicts = bundle.conflicts.slice(0, conflictLimit);
 
   return bundle;
 }
@@ -1595,17 +1613,12 @@ function rankEvidence(input: {
       refs: decision.entityId ? [decision.entityId] : [],
     });
   }
-  for (const conflict of input.context.conflicts) {
-    items.push({
-      id: `conflict:${conflict.id}`,
-      kind: "conflict",
-      source: "context.conflicts",
-      title: `${conflict.claimA} vs ${conflict.claimB}`,
-      score: 22,
-      reason: conflict.reason,
-      refs: [],
-    });
-  }
+  // Conflicts are deliberately NOT evidence. A report names its two claims by
+  // uuid, which is nothing an agent can act on, and at score 22 they outranked
+  // every relationship: on recorded bundles they were taking 12 to 17 of the 25
+  // slots and truncating away the members and imports that answer the question.
+  // The count is carried in the bundle header and the reports themselves stay
+  // in `conflicts[]` for a caller that wants them; `ix conflicts` renders them.
   for (const intent of input.context.intents) {
     items.push({
       id: `intent:${intent.id}`,
@@ -1667,7 +1680,7 @@ export function renderBundle(bundle: ContextBundle, format: string): void {
         relationships: bundle.relationships.length,
         claims: bundle.claims.length,
         decisions: bundle.decisions.length,
-        conflicts: bundle.conflicts.length,
+        conflicts: bundle.conflicts.length + bundle.truncation.conflictsTruncated,
         intents: bundle.intents.length,
         evidence: bundle.evidence.length,
         truncated_entities: bundle.truncation.entitiesTruncated,
@@ -1691,7 +1704,12 @@ export function renderBundle(bundle: ContextBundle, format: string): void {
   console.log(`  relationships: ${bundle.relationships.length}`);
   console.log(`  claims:        ${bundle.claims.length}`);
   console.log(`  decisions:     ${bundle.decisions.length}`);
-  console.log(`  conflicts:     ${bundle.conflicts.length}`);
+  // Named, not listed: see rankEvidence. The hint is what makes the count
+  // actionable, since the reports are no longer in the evidence list.
+  const conflictCount = bundle.conflicts.length + bundle.truncation.conflictsTruncated;
+  console.log(
+    `  conflicts:     ${conflictCount}${conflictCount > 0 ? " (run ix conflicts to inspect)" : ""}`,
+  );
   console.log(`  intents:       ${bundle.intents.length}`);
   if (bundle.freshness.stale) {
     renderWarning("Source has changed since last ingest. Run ix map to update.");

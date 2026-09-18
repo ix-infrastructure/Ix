@@ -94,6 +94,10 @@ export const contextBundleSchema = z.object({
     relationshipsTruncated: z.number().int().nonnegative(),
     evidenceTruncated: z.number().int().nonnegative(),
     charactersTruncated: z.number().int().nonnegative(),
+    // Optional on the way in, always written on the way out: a bundle saved
+    // before the conflict cap existed has no such counter, and refusing to
+    // read it back would break `--diff` against every investigation on disk.
+    conflictsTruncated: z.number().int().nonnegative().optional(),
   }),
   // `asOfRev` and `depth` are the two saved values `ix context --diff` re-sends
   // to the backend, so they are typed rather than accepted as anything.
