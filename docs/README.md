@@ -5,4 +5,5 @@
 - [`ix mcp`](mcp.md) — serving the graph tools over MCP, and registering AI clients
 - [Consolidating the per-host plugins onto `ix mcp`](mcp-plugin-consolidation.md)
 - [System prerequisites](prerequisites.md) — what the installer checks for and installs
+- [Installing the skill into a harness](skill-harnesses.md) — where `install-skill.sh` writes, and how it decides a harness is present
 - [Parse-pool teardown](parse-pool-teardown.md) — why nothing calls `terminate()`, and what was measured
