@@ -68,9 +68,12 @@ describe("depends full-tree traversal", () => {
     expect(dependsContent).toContain("nodesVisited >= maxNodes");
   });
 
-  it("reports truncation when limits hit", () => {
+  it("reports a cap cut and a depth stop as the different things they are", () => {
+    // Only the node cap can know that nodes were lost; reaching the depth
+    // bound means the walk stopped descending, which is not the same claim.
     expect(dependsContent).toContain("truncated = true");
-    expect(dependsContent).toContain("tree truncated");
+    expect(dependsContent).toContain("depthLimited = true");
+    expect(dependsContent).toContain("traversalHint");
   });
 });
 

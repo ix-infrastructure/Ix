@@ -23,8 +23,20 @@ export interface DependencyNode {
   cycle?: boolean;
 }
 
-const MAX_NODES = Infinity;
-const DEFAULT_MAX_DEPTH = Infinity;
+/**
+ * What an unasked-for traversal is allowed to cost.
+ *
+ * Both were `Infinity`. `ix depends` on a hub walks the whole upstream cone,
+ * which on this graph is thousands of nodes and 5-50 KB of output for a
+ * question that is usually answered by the first level or two — and the caller
+ * pays for all of it before seeing any of it.
+ *
+ * Depth 3 is far enough to show a path through an intermediate; 100 nodes is
+ * more than fits on a screen. `--depth` and `--cap` still take anything,
+ * including a larger number, and the output says when a bound was reached.
+ */
+const MAX_NODES = 100;
+const DEFAULT_MAX_DEPTH = 3;
 
 const PREDICATE_META: Record<string, { relation: DependencyNode["relation"]; sourceEdge: DependencyNode["sourceEdge"] }> = {
   CALLS:      { relation: "called_by",      sourceEdge: "CALLS" },
@@ -34,6 +46,13 @@ const PREDICATE_META: Record<string, { relation: DependencyNode["relation"]; sou
   IMPLEMENTS: { relation: "implemented_by", sourceEdge: "IMPLEMENTS" },
 };
 const ALL_DEPENDENCY_PREDICATES = Object.keys(PREDICATE_META);
+
+/** Followable first: a name and a path, then a name, then a dangling id. */
+function nodePriority(n: any): number {
+  const name = n.name || n.attrs?.name || "";
+  if (!name || isRawId(name)) return 2;
+  return (n.provenance?.source_uri ?? n.provenance?.sourceUri ?? n.attrs?.path) ? 0 : 1;
+}
 
 // ── Tree building ───────────────────────────────────────────────────
 
@@ -45,17 +64,30 @@ export async function buildDependencyTree(
   client: IxClient,
   rootId: string,
   opts?: { maxDepth?: number; maxNodes?: number; predicates?: string[] },
-): Promise<{ tree: DependencyNode[]; truncated: boolean; nodesVisited: number; maxDepthReached: number }> {
+): Promise<{
+  tree: DependencyNode[];
+  truncated: boolean;
+  depthLimited: boolean;
+  nodesVisited: number;
+  maxDepthReached: number;
+}> {
   const maxDepth = opts?.maxDepth ?? DEFAULT_MAX_DEPTH;
   const maxNodes = opts?.maxNodes ?? MAX_NODES;
   const activePredicates = (opts?.predicates ?? ALL_DEPENDENCY_PREDICATES).filter((p) => p in PREDICATE_META);
   const visited = new Set<string>([rootId]);
   let nodesVisited = 0;
   let truncated = false;
+  let depthLimited = false;
   let maxDepthReached = 0;
 
   async function expand(nodeId: string, depth: number): Promise<DependencyNode[]> {
-    if (depth > maxDepth) { truncated = true; return []; }
+    // Stopping at the depth bound is not the same as cutting something off:
+    // there may have been nothing below. `truncated` stays a claim that nodes
+    // were definitely lost — which only the node cap can know — and
+    // `depthLimited` says the walk stopped descending. With an infinite
+    // default the distinction never mattered; with a default of 3 it is the
+    // difference between a true report and a lie on most leaf branches.
+    if (depth > maxDepth) { depthLimited = true; return []; }
     if (nodesVisited >= maxNodes) { truncated = true; return []; }
 
     maxDepthReached = Math.max(maxDepthReached, depth);
@@ -70,7 +102,13 @@ export async function buildDependencyTree(
     // root would otherwise appear twice, the second time as a spurious cycle).
     const levelSeen = new Set<string>();
 
-    const processNodes = async (nodes: any[], relation: "called_by" | "imported_by" | "referenced_by" | "extended_by" | "implemented_by", sourceEdge: "CALLS" | "IMPORTS" | "REFERENCES" | "EXTENDS" | "IMPLEMENTS") => {
+    const processNodes = async (rawNodes: any[], relation: "called_by" | "imported_by" | "referenced_by" | "extended_by" | "implemented_by", sourceEdge: "CALLS" | "IMPORTS" | "REFERENCES" | "EXTENDS" | "IMPLEMENTS") => {
+      // Rank before the cap, or the cap keeps whatever the graph returned
+      // first. A node whose name is a raw id is a dangling reference nothing
+      // can follow, and one with no path costs a `locate` before it can be
+      // read; neither should displace a node carrying both. Stable within a
+      // band, and the predicate order (CALLS before IMPLEMENTS) is untouched.
+      const nodes = [...rawNodes].sort((a, b) => nodePriority(a) - nodePriority(b));
       for (const n of nodes) {
         if (nodesVisited >= maxNodes) { truncated = true; break; }
         // Skip if already emitted at this level via a different edge type.
@@ -112,7 +150,7 @@ export async function buildDependencyTree(
   }
 
   const tree = await expand(rootId, 1);
-  return { tree, truncated, nodesVisited, maxDepthReached };
+  return { tree, truncated, depthLimited, nodesVisited, maxDepthReached };
 }
 
 // ── Tree rendering ──────────────────────────────────────────────────
@@ -153,9 +191,22 @@ function renderTree(children: DependencyNode[], prefix: string, isLast: boolean[
  * row per node with an explicit `parent=<id>` (top-level nodes point at the
  * target). Consumers re-tree from id/parent alone. Ids are 8-char prefixes.
  */
+/** What stopped the walk, and the flag that lifts it. */
+export function traversalHint(
+  maxDepth: number,
+  maxNodes: number,
+  what: { truncated: boolean; depthLimited: boolean },
+): string {
+  if (what.truncated) {
+    return `Node cap of ${maxNodes} reached; nodes were dropped. Raise --cap, or start from a narrower target.`;
+  }
+  return `Stopped descending at depth ${maxDepth}; there may be more below. Raise --depth to look further.`;
+}
+
 export function renderDependsLlm(
   target: { id: string; name: string; kind: string; path?: string },
   tree: DependencyNode[], truncated: boolean, nodesVisited: number, maxDepthReached: number,
+  bounds?: { maxDepth: number; maxNodes: number; depthLimited?: boolean },
 ): string[] {
   const lines = [llmLine("depends", [
     ["target", target.name],
@@ -165,9 +216,16 @@ export function renderDependsLlm(
     ["nodes", nodesVisited],
     ["depth", maxDepthReached],
     ["truncated", truncated ? true : undefined],
+    ["depth_limited", bounds?.depthLimited ? true : undefined],
   ])];
   if (tree.length === 0) {
     lines.push(llmLine("diagnostic", [["code", "no_edges"], ["message", "No upstream dependents found."]]));
+  }
+  if (bounds && (truncated || bounds.depthLimited)) {
+    lines.push(llmLine("diagnostic", [
+      ["code", truncated ? "truncated" : "depth_limited"],
+      ["message", traversalHint(bounds.maxDepth, bounds.maxNodes, { truncated, depthLimited: !!bounds.depthLimited })],
+    ]));
   }
   const emit = (node: DependencyNode, parentId: string): void => {
     lines.push(llmLine("dep", [
@@ -222,7 +280,7 @@ export function registerDependsCommand(program: Command): void {
       const maxDepth = opts.depth ? parseInt(opts.depth, 10) : DEFAULT_MAX_DEPTH;
       const maxNodes = opts.cap ? parseInt(opts.cap, 10) : MAX_NODES;
 
-      const { tree, truncated, nodesVisited, maxDepthReached } = await buildDependencyTree(
+      const { tree, truncated, depthLimited, nodesVisited, maxDepthReached } = await buildDependencyTree(
         client, target.id, { maxDepth, maxNodes },
       );
 
@@ -240,15 +298,23 @@ export function registerDependsCommand(program: Command): void {
             nodesVisited,
             maxDepthReached,
             truncated,
-            ...(opts.depth ? { depthLimit: maxDepth } : {}),
+            depthLimited,
+            // Always, not only when the caller passed a flag: there is a
+            // default now, and a bound nobody is told about is a bound nobody
+            // can raise.
+            depthLimit: maxDepth,
+            nodeCap: maxNodes,
           },
         };
         if (tree.length === 0) {
           output.diagnostics = [{ code: "no_edges", message: `No upstream dependents found for resolved entity.` }];
         }
-        if (truncated) {
+        if (truncated || depthLimited) {
           output.diagnostics = output.diagnostics ?? [];
-          output.diagnostics.push({ code: "truncated", message: `Traversal truncated (depth: ${maxDepth}, node cap: ${maxNodes}).` });
+          output.diagnostics.push({
+            code: truncated ? "truncated" : "depth_limited",
+            message: traversalHint(maxDepth, maxNodes, { truncated, depthLimited }),
+          });
         }
         console.log(JSON.stringify(output, null, 2));
         return;
@@ -256,7 +322,7 @@ export function registerDependsCommand(program: Command): void {
 
       // ── llm output ───────────────────────────────────────────────
       if (opts.format === "llm") {
-        for (const line of renderDependsLlm(target, tree, truncated, nodesVisited, maxDepthReached)) console.log(line);
+        for (const line of renderDependsLlm(target, tree, truncated, nodesVisited, maxDepthReached, { maxDepth, maxNodes, depthLimited })) console.log(line);
         return;
       }
 
@@ -277,8 +343,9 @@ export function registerDependsCommand(program: Command): void {
         console.log(`  ${line}`);
       }
 
-      if (truncated) {
-        console.log(chalk.yellow(`\n  (tree truncated — ${nodesVisited} nodes visited, depth ${maxDepthReached})`));
+      if (truncated || depthLimited) {
+        console.log(chalk.yellow(`\n  (${nodesVisited} nodes visited, depth ${maxDepthReached})`));
+        console.log(chalk.dim(`  ${traversalHint(maxDepth, maxNodes, { truncated, depthLimited })}`));
       }
 
       console.log(chalk.dim(`\n  ${nodesVisited} upstream dependents, depth ${maxDepthReached}`));
