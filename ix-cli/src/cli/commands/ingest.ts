@@ -41,6 +41,7 @@ import {
   transformPRComment,
   transformCommit,
 } from '../github/transform.js';
+import { printJson } from '../format.js';
 // ---------------------------------------------------------------------------
 // File discovery
 // ---------------------------------------------------------------------------
@@ -3547,7 +3548,7 @@ export async function ingestFiles(
   }
 
   if (opts.format === 'json') {
-    console.log(JSON.stringify({
+    printJson({
       filesProcessed: filesDiscovered,
       filesChanged,
       patchesApplied,
@@ -3592,7 +3593,7 @@ export async function ingestFiles(
         [...langParseMs.entries()].map(([lang, s]) => [lang, { ms: Math.round(s.ms), files: s.files }])
       ),
       resolveStats,
-    }, null, 2));
+    });
   } else if (opts.printSummary !== false) {
     console.log(chalk.bold('\nIngest summary'));
     console.log(`  processed:   ${patchesApplied} files (${elapsed}s)`);
@@ -3775,7 +3776,7 @@ async function ingestGitHub(opts: {
   const elapsed = ((performance.now() - start) / 1000).toFixed(2);
 
   if (opts.format === 'json') {
-    console.log(JSON.stringify({
+    printJson({
       source: `${repo.owner}/${repo.repo}`,
       issues: data.issues.length,
       pullRequests: data.pullRequests.length,
@@ -3784,7 +3785,7 @@ async function ingestGitHub(opts: {
       rev: result.rev,
       status: result.status,
       elapsedSeconds: parseFloat(elapsed),
-    }, null, 2));
+    });
   } else {
     console.log(chalk.bold('\nGitHub ingest summary'));
     console.log(`  repo:            ${repo.owner}/${repo.repo}`);

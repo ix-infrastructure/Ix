@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import path from "node:path";
 import type { Command } from "commander";
-import { formatTextResults, type TextResult } from "../format.js";
+import { formatTextResults, printJson, type TextResult } from "../format.js";
 import { isPathInsideResolvedRoot, resolveWorkspaceRoot } from "../config.js";
 import { stderr } from "../stderr.js";
 import { llmError } from "../llm.js";
@@ -69,7 +69,7 @@ export function registerTextCommand(program: Command, executeRipgrep: RunRipgrep
       if (!isPathInsideResolvedRoot(root, searchPath)) {
         const message = `Search path is outside the workspace: ${opts.path}`;
         if (opts.format === "json") {
-          console.log(JSON.stringify({ error: "path_outside_workspace", message }, null, 2));
+          printJson({ error: "path_outside_workspace", message });
         } else if (opts.format === "llm") {
           console.log(llmError("path_outside_workspace", message));
         } else {

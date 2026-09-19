@@ -7,6 +7,7 @@ import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { llmLine, llmError, type LlmValue } from "../llm.js";
+import { printJson } from "../format.js";
 
 /** Render `ix stats` as llm records: one `nodes` line and one `edges` line. */
 export function renderStatsLlm(result: any): string[] {
@@ -40,7 +41,7 @@ export function registerStatsCommand(program: Command): void {
       }
 
       if (opts.format === "json") {
-        console.log(JSON.stringify(result, null, 2));
+        printJson(result);
         return;
       }
 

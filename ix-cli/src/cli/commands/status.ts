@@ -7,6 +7,7 @@ import { readBackendHealth } from "./upgrade.js";
 import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
 import { detectStaleFiles } from "../stale.js";
 import { llmError, llmLine, printLlmLines } from "../llm.js";
+import { printJson } from "../format.js";
 
 interface StatusStaleInfo {
   graphCompleted: boolean;
@@ -81,7 +82,7 @@ export function registerStatusCommand(program: Command): void {
             staleFiles: staleInfo?.staleFiles ?? 0,
             sampleChangedFiles: staleInfo?.sampleChangedFiles ?? [],
           };
-          console.log(JSON.stringify(result, null, 2));
+          printJson(result);
         } else {
           renderSection("Status");
           renderKeyValue("Ix Memory", health.status);

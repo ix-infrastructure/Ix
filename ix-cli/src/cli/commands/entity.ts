@@ -4,7 +4,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
-import { relativePath, stripNulls } from "../format.js";
+import { relativePath, stripNulls, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
 
 /** Render entity details as llm records: a header line then one `edge` row per edge. */
@@ -40,7 +40,7 @@ export function registerEntityCommand(program: Command): void {
       const resolvedId = await client.resolvePrefix(id);
       const result = await client.entity(resolvedId);
       if (opts.format === "json") {
-        console.log(JSON.stringify(compactEntity(result), null, 2));
+        printJson(compactEntity(result));
       } else if (opts.format === "llm") {
         for (const line of renderEntityLlm(result)) console.log(line);
       } else {

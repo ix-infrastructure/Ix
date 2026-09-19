@@ -5,7 +5,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveFileOrReport, printResolved, isRawId } from "../resolve.js";
-import { compactTreeNode, relativePath } from "../format.js";
+import { compactTreeNode, relativePath, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
 import { parsePickOption } from "../options.js";
 
@@ -250,7 +250,7 @@ export function registerDependsCommand(program: Command): void {
           output.diagnostics = output.diagnostics ?? [];
           output.diagnostics.push({ code: "truncated", message: `Traversal truncated (depth: ${maxDepth}, node cap: ${maxNodes}).` });
         }
-        console.log(JSON.stringify(output, null, 2));
+        printJson(output);
         return;
       }
 

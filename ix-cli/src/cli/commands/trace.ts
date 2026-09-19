@@ -14,7 +14,7 @@ import {
   reportResolutionFailure,
   reportUnresolvedTarget,
 } from "../ui.js";
-import { compactTreeNode, relativePath } from "../format.js";
+import { compactTreeNode, relativePath, printJson } from "../format.js";
 import { llmLine, type LlmValue } from "../llm.js";
 import { parsePickOption } from "../options.js";
 
@@ -524,7 +524,7 @@ export function registerTraceCommand(program: Command): void {
                 },
               ];
             }
-            console.log(JSON.stringify(output, null, 2));
+            printJson(output);
             return;
           }
 
@@ -594,26 +594,22 @@ export function registerTraceCommand(program: Command): void {
 
           // ── JSON ──────────────────────────────────────────────
           if (opts.format === "json") {
-            console.log(
-              JSON.stringify(
-                {
-                  mode: "directional",
-                  target: { name: target.name, kind: target.kind, path: relativePath(target.path) },
-                  direction: "both",
-                  kind: relKind,
-                  depth: maxDepth,
-                  upstream: {
-                    tree: upResult.tree.map(compactTreeNode),
-                    summary: { nodes_visited: upResult.nodesVisited, max_depth: upResult.maxDepthReached },
-                  },
-                  downstream: {
-                    tree: downResult.tree.map(compactTreeNode),
-                    summary: { nodes_visited: downResult.nodesVisited, max_depth: downResult.maxDepthReached },
-                  },
+            printJson(
+              {
+                mode: "directional",
+                target: { name: target.name, kind: target.kind, path: relativePath(target.path) },
+                direction: "both",
+                kind: relKind,
+                depth: maxDepth,
+                upstream: {
+                  tree: upResult.tree.map(compactTreeNode),
+                  summary: { nodes_visited: upResult.nodesVisited, max_depth: upResult.maxDepthReached },
                 },
-                null,
-                2,
-              ),
+                downstream: {
+                  tree: downResult.tree.map(compactTreeNode),
+                  summary: { nodes_visited: downResult.nodesVisited, max_depth: downResult.maxDepthReached },
+                },
+              },
             );
             return;
           }
@@ -694,7 +690,7 @@ export function registerTraceCommand(program: Command): void {
             output.diagnostics = diags;
           }
 
-          console.log(JSON.stringify(output, null, 2));
+          printJson(output);
           return;
         }
 

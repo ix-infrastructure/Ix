@@ -11,6 +11,7 @@ import chalk from "chalk";
 
 import { llmError } from "./llm.js";
 import type { AmbiguousResult, ResolveResult } from "./resolve.js";
+import { printJson } from "./format.js";
 
 // ── Brand palette ─────────────────────────────────────────────────────────────
 //
@@ -163,7 +164,7 @@ export function unresolvedTargetRecord(target: string | string[]): { error: stri
 export function reportUnresolvedTarget(target: string | string[], format?: string): void {
   const message = unresolvedTargetMessage(target);
   if (format === "json") {
-    console.log(JSON.stringify(unresolvedTargetRecord(target), null, 2));
+    printJson(unresolvedTargetRecord(target));
   } else if (format === "llm") {
     console.log(llmError("unresolved_target", message));
   }
@@ -178,12 +179,12 @@ export function reportAmbiguousTarget(
 ): void {
   const message = `Ambiguous symbol "${target}".`;
   if (format === "json") {
-    console.log(JSON.stringify({
+    printJson({
       error: "ambiguous_target",
       message,
       candidates: result.candidates,
       diagnostics: result.diagnostics ?? [],
-    }, null, 2));
+    });
     return;
   }
   if (format === "llm") {

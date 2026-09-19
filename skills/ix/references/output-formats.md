@@ -10,6 +10,13 @@ Query commands accept `--format text|json|llm`:
   specific field out of a response.
 - **`--format text`** — human-oriented tables and trees.
 
+### JSON is compact unless a person is watching
+
+`--format json` prints one line when stdout is not a terminal — a pipe, a
+command substitution, an agent's tool result — and indents only when you are
+reading it on screen. Indentation is whitespace a parser throws away, and it is
+about a fifth of the payload. `--pretty` forces the indented shape anywhere.
+
 ### Commands that accept `--format` but route `llm` to `text`
 
 `explain`, `read`, `status`, and the deprecated `query` do not implement `llm`

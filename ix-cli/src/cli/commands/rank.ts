@@ -7,6 +7,7 @@ import { getEndpoint } from "../config.js";
 import { activeReadScope, ensureReadScope } from "../resolve.js";
 import { llmLine } from "../llm.js";
 import { normalizePathSeparators } from "../path-match.js";
+import { printJson } from "../format.js";
 
 type Metric = "dependents" | "callers" | "importers" | "members";
 
@@ -194,14 +195,14 @@ export function registerRankCommand(program: Command): void {
           if (opts.format === "llm") {
             for (const line of renderRankLlm(metric, opts.kind, opts.path ?? null, [], 0, ["No entities found for the given kind."])) console.log(line);
           } else if (isJson) {
-            console.log(JSON.stringify({
+            printJson({
               metric,
               kind: opts.kind,
               scope: opts.path ?? null,
               results: [],
               summary: { evaluated: 0, totalCandidates: 0, returned: 0 },
               diagnostics: ["No entities found for the given kind."],
-            }, null, 2));
+            });
           } else {
             console.log(chalk.dim("No entities found for the given kind."));
           }
@@ -224,14 +225,14 @@ export function registerRankCommand(program: Command): void {
           if (opts.format === "llm") {
             for (const line of renderRankLlm(metric, opts.kind, opts.path ?? null, [], 0, [`No entities matched filters: ${filterDesc}.`])) console.log(line);
           } else if (isJson) {
-            console.log(JSON.stringify({
+            printJson({
               metric,
               kind: opts.kind,
               scope: opts.path ?? null,
               results: [],
               summary: { evaluated: 0, totalCandidates: 0, returned: 0 },
               diagnostics: [`No entities matched filters: ${filterDesc}.`],
-            }, null, 2));
+            });
           } else {
             console.log(chalk.dim(`No entities matched filters: ${filterDesc}.`));
           }
@@ -250,14 +251,14 @@ export function registerRankCommand(program: Command): void {
         if (opts.format === "llm") {
           for (const line of renderRankLlm(metric, opts.kind, opts.path ?? null, results.map(r => ({ name: r.name, kind: r.kind, score: r.score })), candidates.length, diagnostics)) console.log(line);
         } else if (isJson) {
-          console.log(JSON.stringify({
+          printJson({
             metric,
             kind: opts.kind,
             scope: scopeNeedle,
             results: results.map(r => ({ name: r.name, kind: r.kind, score: r.score })),
             summary: { evaluated: candidates.length, returned: results.length },
             diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
-          }, null, 2));
+          });
         } else {
           console.log(chalk.bold(`Top ${results.length} ${pluralize(opts.kind)} by ${metric}:`));
           const maxNameLen = Math.max(...results.map((r) => r.name.length), 1);
