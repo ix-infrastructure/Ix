@@ -47,6 +47,10 @@ surfaces (#575).
   --limit 50` exits with an error rather than a shorter list. `--detailed`
   auto-paginates on its own; `--offset` or `--regions` turns that off, and
   `--limit` only sets the page size.
+- **`ix read <file>` stops at 400 lines.** The header then carries
+  `truncated=true total_lines=<n> next=<path>:401-800`, so the next page is one
+  command away. A line range you typed (`ix read a.ts:1-900`) is never capped,
+  a symbol target is its own span, and `--all` reads the whole file.
 - **`--pick <n>` is 1-based** everywhere it appears, and is how you resolve an
   ambiguous target without re-running with a longer name.
 - **`--no-recursive` and `--no-open` negate a default-on behaviour**, so their
@@ -467,6 +471,7 @@ Read raw file content, line ranges, or symbol source code.
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--root` | `<dir>` | — | Workspace root directory |
+| `--all` | — | off | Read the whole file, past the 400-line default cap |
 
 ### `ix reset`
 
