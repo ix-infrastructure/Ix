@@ -31,6 +31,7 @@ export function renderSearchLlm(
 /** Structural kinds that should rank higher than incidental matches. */
 const STRUCTURAL_KINDS = new Set([
   "class", "trait", "object", "interface", "function", "method", "module", "file",
+  "constant",
 ]);
 
 /**

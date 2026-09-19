@@ -46,6 +46,36 @@ export const TYPESCRIPT_QUERIES = `
       name: (identifier) @name
       value: (function_expression)))) @definition.function
 
+; Module-level constants (Ix#679). Anchored under (program ...) so the 5,085
+; const declarations in ix-cli/src stay out and the 259 module-scope ones come
+; in: a blanket variable_declarator rule multiplies a package's entity count
+; ~20x with function-local bindings, which costs every ranking and every bundle
+; budget. The literal "const" keeps \`let\` out — mutable module state is not
+; the thing an agent searches for by name.
+;
+; Export is deliberately not required: BUDGETS in commands/context.ts is
+; module-scope and unexported, and an export-only rule would still miss it.
+; Destructuring patterns do not match either — \`name: (identifier)\` skips
+; \`const { a, b } = obj\`, which binds no single name worth indexing.
+;
+; The value is captured so index.ts can drop the arrow-function and
+; function-expression cases, which the four rules above have already claimed as
+; definition.function. Without that, an exported arrow function arrives twice.
+(program
+  (lexical_declaration
+    "const"
+    (variable_declarator
+      name: (identifier) @name
+      value: (_) @const.value)) @definition.const)
+
+(program
+  (export_statement
+    declaration: (lexical_declaration
+      "const"
+      (variable_declarator
+        name: (identifier) @name
+        value: (_) @const.value))) @definition.const)
+
 (import_statement
   source: (string) @import.source) @import
 
@@ -151,6 +181,36 @@ export const JAVASCRIPT_QUERIES = `
     (variable_declarator
       name: (identifier) @name
       value: (function_expression)))) @definition.function
+
+; Module-level constants (Ix#679). Anchored under (program ...) so the 5,085
+; const declarations in ix-cli/src stay out and the 259 module-scope ones come
+; in: a blanket variable_declarator rule multiplies a package's entity count
+; ~20x with function-local bindings, which costs every ranking and every bundle
+; budget. The literal "const" keeps \`let\` out — mutable module state is not
+; the thing an agent searches for by name.
+;
+; Export is deliberately not required: BUDGETS in commands/context.ts is
+; module-scope and unexported, and an export-only rule would still miss it.
+; Destructuring patterns do not match either — \`name: (identifier)\` skips
+; \`const { a, b } = obj\`, which binds no single name worth indexing.
+;
+; The value is captured so index.ts can drop the arrow-function and
+; function-expression cases, which the four rules above have already claimed as
+; definition.function. Without that, an exported arrow function arrives twice.
+(program
+  (lexical_declaration
+    "const"
+    (variable_declarator
+      name: (identifier) @name
+      value: (_) @const.value)) @definition.const)
+
+(program
+  (export_statement
+    declaration: (lexical_declaration
+      "const"
+      (variable_declarator
+        name: (identifier) @name
+        value: (_) @const.value))) @definition.const)
 
 (import_statement
   source: (string) @import.source) @import
