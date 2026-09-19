@@ -9,6 +9,7 @@ import { detectSystem } from "./system.js";
 import { resolveWorkspaceId } from "./bootstrap.js";
 import { readStitchScope, writeStitchScope } from "./config.js";
 import { reportAmbiguousTarget, reportResolutionFailure } from "./ui.js";
+import { relativePath } from "./format.js";
 
 /**
  * The read scope for the current working directory: a co-ingested multi-repo system
@@ -108,10 +109,43 @@ export interface AmbiguousResult {
   diagnostics?: Array<{ code: string; message: string }>;
 }
 
+/**
+ * A near-miss worth naming when a target does not resolve.
+ *
+ * A miss is a dead end for the caller: an agent that gets "no entity found"
+ * spends its next turn running `ix search` by hand, and a person retypes the
+ * name. The candidates are already in hand (or one search away), so they are
+ * cheaper to hand over than to make the caller ask for.
+ */
+/**
+ * What a resolver needs from its caller.
+ *
+ * `format` is here so a miss is reported once. The prose ("No entity found
+ * matching …") goes to stderr for a person; a json or llm caller gets the same
+ * fact as a record on stdout from `reportUnresolvedTarget`, and printing both
+ * means an agent running `ix … 2>&1` reads the miss twice.
+ */
+export interface ResolveOpts {
+  kind?: string;
+  path?: string;
+  pick?: number;
+  includeTests?: boolean;
+  testsOnly?: boolean;
+  searchLimit?: number;
+  format?: string;
+}
+
+export interface Suggestion {
+  id: string;
+  name: string;
+  kind: string;
+  path?: string;
+}
+
 export type ResolveResult =
   | { resolved: true; entity: ResolvedEntity; hiddenTestCount?: number }
   | { resolved: false; ambiguous: true; result: AmbiguousResult; hiddenTestCount?: number }
-  | { resolved: false; ambiguous: false; hiddenTestCount?: number };
+  | { resolved: false; ambiguous: false; hiddenTestCount?: number; suggestions?: Suggestion[] };
 
 // ── Structural kind sets ──────────────────────────────────────────────────
 
@@ -122,6 +156,39 @@ const CONTAINER_KINDS = new Set(["file", "class", "object", "trait", "interface"
 const STRUCTURAL_KINDS = new Set([
   ...CONTAINER_KINDS, "function", "method",
 ]);
+
+/**
+ * Report a miss to a person, once.
+ *
+ * Under `--format json|llm` the reporter writes a machine-readable record for
+ * the same miss on stdout, and an agent almost always runs with `2>&1`, so this
+ * prose would be a second copy of an answer it already has.
+ */
+function missProse(opts: ResolveOpts | undefined, message: string): void {
+  const format = opts?.format;
+  if (format === "json" || format === "llm") return;
+  stderr(message);
+}
+
+/** The best few near-misses to offer, newest scoring first, deduped by id. */
+function toSuggestions(nodes: any[], limit = 3): Suggestion[] {
+  const seen = new Set<string>();
+  const out: Suggestion[] = [];
+  for (const n of nodes) {
+    const id = String(n.id ?? "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const uri = n.provenance?.sourceUri ?? n.provenance?.source_uri;
+    out.push({
+      id,
+      name: String(n.name ?? n.attrs?.name ?? ""),
+      kind: String(n.kind ?? ""),
+      path: uri ? (relativePath(uri) ?? uri) : undefined,
+    });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
 
 function looksTypeLikeSymbol(symbol: string): boolean {
   return /^[A-Z][A-Za-z0-9_]*$/.test(symbol);
@@ -212,7 +279,7 @@ export async function resolveEntity(
   client: IxClient,
   symbol: string,
   preferredKinds: string[],
-  opts?: { kind?: string; path?: string; pick?: number; includeTests?: boolean; testsOnly?: boolean; searchLimit?: number }
+  opts?: ResolveOpts
 ): Promise<ResolvedEntity | null> {
   const result = await resolveEntityFull(client, symbol, preferredKinds, opts);
   if (result.resolved) return result.entity;
@@ -233,7 +300,7 @@ export async function resolveEntityFull(
   client: IxClient,
   symbol: string,
   preferredKinds: string[],
-  opts?: { kind?: string; path?: string; pick?: number; includeTests?: boolean; testsOnly?: boolean; searchLimit?: number }
+  opts?: ResolveOpts
 ): Promise<ResolveResult> {
   // Scope is applied server-side (workspace_id, or system_id for a co-ingest). Only an
   // EXPLICIT --path narrows further, client-side; we no longer default the path filter
@@ -251,7 +318,10 @@ export async function resolveEntityFull(
   });
 
   if (nodes.length === 0) {
-    stderr(`No entity found matching "${symbol}".`);
+    // Nothing to suggest: the search matched no name, and re-running it without
+    // `nameOnly` returns the same empty set (measured against a 1.4M-node graph
+    // on three terms), so a second call would only cost a round trip.
+    missProse(opts, `No entity found matching "${symbol}".`);
     return { resolved: false, ambiguous: false };
   }
 
@@ -269,8 +339,11 @@ export async function resolveEntityFull(
     : roleFiltered;
 
   if (effectivePath && filteredNodes.length === 0) {
-    stderr(`No entity named "${symbol}" found in paths matching "${effectivePath}".`);
-    return { resolved: false, ambiguous: false, hiddenTestCount };
+    missProse(opts, `No entity named "${symbol}" found in paths matching "${effectivePath}".`);
+    // The name exists — just not under --path. Saying where it does live is the
+    // whole answer to the question the filter was asking.
+    const suggestions = toSuggestions(roleFiltered);
+    return { resolved: false, ambiguous: false, hiddenTestCount, ...(suggestions.length ? { suggestions } : {}) };
   }
 
   // ── Phase 1: Exact-name candidates ──────────────────────────────────
@@ -308,8 +381,9 @@ export async function resolveEntityFull(
   }
 
   // Nothing resolved at all
-  stderr(`No entity found matching "${symbol}".`);
-  return { resolved: false, ambiguous: false, hiddenTestCount };
+  missProse(opts, `No entity found matching "${symbol}".`);
+  const suggestions = toSuggestions(filteredNodes);
+  return { resolved: false, ambiguous: false, hiddenTestCount, ...(suggestions.length ? { suggestions } : {}) };
 }
 
 /**
@@ -579,7 +653,7 @@ export function looksFileLike(target: string): boolean {
 export async function resolveFileOrEntityFull(
   client: IxClient,
   target: string,
-  opts?: { kind?: string; path?: string; pick?: number; includeTests?: boolean; testsOnly?: boolean }
+  opts?: ResolveOpts
 ): Promise<ResolveResult> {
   // 1. Raw UUID
   if (isRawId(target)) {
@@ -596,7 +670,7 @@ export async function resolveFileOrEntityFull(
         },
       };
     } catch {
-      stderr(`Entity not found: ${target}`);
+      missProse(opts, `Entity not found: ${target}`);
       return { resolved: false, ambiguous: false };
     }
   }
@@ -687,7 +761,7 @@ export async function resolveFileOrEntityFull(
 export async function resolveFileOrEntity(
   client: IxClient,
   target: string,
-  opts?: { kind?: string; path?: string; pick?: number; includeTests?: boolean; testsOnly?: boolean },
+  opts?: ResolveOpts,
 ): Promise<ResolvedEntity | null> {
   const result = await resolveFileOrEntityFull(client, target, opts);
   if (result.resolved) return result.entity;
@@ -698,10 +772,13 @@ export async function resolveFileOrEntity(
 export async function resolveFileOrReport(
   client: IxClient,
   target: string,
-  opts: { kind?: string; path?: string; pick?: number; includeTests?: boolean; testsOnly?: boolean } | undefined,
+  opts: ResolveOpts | undefined,
   format: string,
 ): Promise<ResolvedEntity | null> {
-  const result = await resolveFileOrEntityFull(client, target, opts);
+  // The format goes in so the resolver knows whether a person will read its
+  // prose, or whether the structured record below is the only copy that should
+  // reach stdout.
+  const result = await resolveFileOrEntityFull(client, target, { ...opts, format });
   if (result.resolved) return result.entity;
   reportResolutionFailure(target, result, format, opts);
   return null;
