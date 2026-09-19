@@ -10,7 +10,7 @@ import { resolveEntityFull, activeReadScope, ensureReadScope } from "../resolve.
 import { stderr } from "../stderr.js";
 import { isFileStale } from "../stale.js";
 import { relativePath } from "../format.js";
-import { llmError, llmLine, printLlmLines } from "../llm.js";
+import { llmError, llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { reportUnresolvedTarget } from "../ui.js";
 
@@ -132,7 +132,7 @@ export function renderReadAmbiguityLlm(result: AmbiguityResult, target: string):
       ["name", c.name],
       ["kind", c.kind],
       ["path", c.path ? relativePath(c.path) ?? c.path : undefined],
-      ["id", c.id],
+      ["id", llmShortId(c.id)],
     ]));
   });
   lines.push(llmLine("hint", [[

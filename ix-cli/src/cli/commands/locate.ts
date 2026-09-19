@@ -10,7 +10,7 @@ import {
 import { isFileStale } from "../stale.js";
 import { stderr } from "../stderr.js";
 import { relativePath } from "../format.js";
-import { llmLine, llmError } from "../llm.js";
+import { llmLine, llmError, llmShortId } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { getEffectiveSystemPath, hasMapData } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
@@ -256,7 +256,7 @@ export function renderLocateLlm(output: LocateOutput, symbol: string): string[] 
   const lines = [llmLine("locate", [
     ["target", t.name],
     ["kind", t.kind],
-    ["id", typeof t.id === "string" ? t.id.slice(0, 8) : undefined],
+    ["id", llmShortId(t.id)],
     ["path", t.path],
     ["line_start", output.lineRange?.start],
     ["line_end", output.lineRange?.end],

@@ -9,7 +9,7 @@ import { formatNodes, relativePath } from "../format.js";
 import { scoreCandidate, resolveReadSystemId } from "../resolve.js";
 import { applyRoleFilter, roleHint } from "../role-filter.js";
 import { stderr } from "../stderr.js";
-import { llmLine } from "../llm.js";
+import { llmLine, llmShortId } from "../llm.js";
 import { normalizePathSeparators } from "../path-match.js";
 
 /** Render `ix search` as llm records: a header line then one `node` row per hit (rank = order). */
@@ -20,7 +20,7 @@ export function renderSearchLlm(
   const lines = [llmLine("search", [["count", results.length], ["candidates", totalCandidates]])];
   for (const r of results) {
     lines.push(llmLine("node", [
-      ["name", r.name], ["kind", r.kind], ["id", r.id?.slice(0, 8)],
+      ["name", r.name], ["kind", r.kind], ["id", llmShortId(r.id)],
       ["path", r.path], ["score", r.score],
     ]));
   }

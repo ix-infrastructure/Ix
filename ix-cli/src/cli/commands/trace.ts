@@ -15,7 +15,7 @@ import {
   reportUnresolvedTarget,
 } from "../ui.js";
 import { compactTreeNode, relativePath } from "../format.js";
-import { llmLine, type LlmValue } from "../llm.js";
+import { llmLine, llmShortId, type LlmValue } from "../llm.js";
 import { parsePickOption } from "../options.js";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -344,7 +344,7 @@ function traceNodesLlm(record: string, tree: TraceNode[], rootId: string): strin
     lines.push(llmLine(record, [
       ["name", node.resolved ? node.name : undefined],
       ["kind", node.kind],
-      ["id", node.id?.slice(0, 8)],
+      ["id", llmShortId(node.id)],
       ["parent", parentId?.slice(0, 8)],
       ["path", relativePath(node.path)],
       ["cycle", node.cycle ? true : undefined],
