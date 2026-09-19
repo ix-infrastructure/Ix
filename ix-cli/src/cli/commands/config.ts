@@ -3,6 +3,12 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { loadConfig, saveConfig } from "../config.js";
+import {
+  BUILT_IN_DEFAULT_FORMAT,
+  DEFAULT_FORMAT_CHOICES,
+  isFormat,
+  resolveDefaultFormat,
+} from "../default-format.js";
 
 /** Resolve a dotted key path into a config object and return [obj, lastKey]. */
 function resolvePath(obj: any, key: string): [any, string] {
@@ -27,7 +33,7 @@ export function registerConfigCommand(program: Command): void {
       const cfg = loadConfig();
       console.log(chalk.bold("Ix Configuration\n"));
       console.log(`  endpoint    ${chalk.cyan(cfg.endpoint)}`);
-      console.log(`  format      ${chalk.cyan(cfg.format)}`);
+      console.log(`  format      ${chalk.cyan(cfg.format)}${formatOverrideNote(cfg.format)}`);
       if (cfg.workspaces?.length) {
         console.log(`  workspaces`);
         for (const ws of cfg.workspaces) {
@@ -68,10 +74,34 @@ export function registerConfigCommand(program: Command): void {
     .command("set <key> <value>")
     .description("Set a config value (e.g. ix config set user.name 'Alice')")
     .action((key: string, value: string) => {
+      // `format` is the one key here that changes what every other command
+      // prints. A typo used to save silently and then do nothing at all, since
+      // an unrecognised value falls back to text.
+      if (key === "format" && !isFormat(value)) {
+        console.error(chalk.red(`Not a format: ${value}`));
+        console.error(`Choose one of: ${DEFAULT_FORMAT_CHOICES.join(", ")}`);
+        process.exitCode = 1;
+        return;
+      }
       const cfg = loadConfig() as any;
       const [obj, lastKey] = resolvePath(cfg, key);
       obj[lastKey] = value;
       saveConfig(cfg);
       console.log(chalk.green("✓") + ` ${key} = ${chalk.cyan(value)}`);
     });
+}
+
+/**
+ * What `ix config show` adds beside a stored format that is not the one
+ * commands will actually use, because IX_FORMAT outranks it.
+ */
+function formatOverrideNote(stored: string): string {
+  const { format, ignored } = resolveDefaultFormat(process.env, () => stored);
+  if (ignored?.source === "IX_FORMAT") {
+    return chalk.dim(`  (IX_FORMAT=${ignored.value} ignored: not a format)`);
+  }
+  if (format !== (stored || BUILT_IN_DEFAULT_FORMAT)) {
+    return chalk.dim(`  (overridden by IX_FORMAT=${format})`);
+  }
+  return "";
 }
