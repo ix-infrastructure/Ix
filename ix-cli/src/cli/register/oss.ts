@@ -40,6 +40,13 @@ import { registerPatchesCommand } from "../commands/patches.js";
 import { registerMcpCommand } from "../commands/mcp.js";
 import { registerContextCommand } from "../commands/context.js";
 import { validateCliOptions } from "../options.js";
+import {
+  BUILT_IN_DEFAULT_FORMAT,
+  DEFAULT_FORMAT_CHOICES,
+  resolveDefaultFormat,
+} from "../default-format.js";
+import { loadConfig } from "../config.js";
+import { stderrDim } from "../stderr.js";
 
 const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "briefing", desc: "Session-resume briefing" },
@@ -68,7 +75,6 @@ const ADVANCED_COMMANDS = [
   "init", "ingest",
 ];
 
-const DEFAULT_FORMAT_CHOICES = ["text", "json", "llm"];
 const OPTION_CHOICES: Record<string, Record<string, string[]>> = {
   query: { depth: ["shallow", "standard", "deep"], format: ["text", "json"] },
   map: { format: [...DEFAULT_FORMAT_CHOICES, "silent"], sort: ["importance", "confidence", "size", "alpha"] },
@@ -86,17 +92,66 @@ const OPTION_CHOICES: Record<string, Record<string, string[]>> = {
 const ossCommands = new WeakSet<Command>();
 
 function configureOssOptionChoices(root: Command): void {
+  const { format: defaultFormat, ignored } = resolveDefaultFormat(
+    process.env,
+    // Never let an unreadable or half-written config.yaml stop the CLI from
+    // registering its commands; loadConfig already falls back to defaults on a
+    // parse error, and this covers the rest (an unresolvable IX_HOME).
+    () => { try { return loadConfig().format; } catch { return undefined; } },
+  );
+
+  // Only where a person will read it: an agent captures stderr, and one more
+  // line at the top of its tool result is exactly what this change is for.
+  if (ignored && process.stderr.isTTY) {
+    stderrDim(
+      `Ignoring ${ignored.source}=${ignored.value}: not one of ` +
+      `${DEFAULT_FORMAT_CHOICES.join(", ")}. Using ${defaultFormat}.`
+    );
+  }
+
   const visit = (command: Command): void => {
     ossCommands.add(command);
     const commandChoices = OPTION_CHOICES[command.name()] ?? {};
     for (const option of command.options) {
       const choices = commandChoices[option.attributeName()]
-        ?? (option.long === "--format" ? DEFAULT_FORMAT_CHOICES : undefined);
+        ?? (option.long === "--format" ? [...DEFAULT_FORMAT_CHOICES] : undefined);
       if (choices) option.choices(choices);
+      applyDefaultFormat(command, option, choices, defaultFormat);
     }
     for (const child of command.commands) visit(child);
   };
   visit(root);
+}
+
+/**
+ * Point a `--format` option at the configured default.
+ *
+ * Only an option still sitting on the built-in `text` is moved: a command that
+ * declares a different default has a reason for it, and `ix config set format`
+ * is not an instruction to override it. The default must also be a format that
+ * command accepts — `query` renders text and json only, so `IX_FORMAT=llm`
+ * leaves it where it is rather than handing the renderer a format it has no
+ * branch for.
+ */
+function applyDefaultFormat(
+  command: Command,
+  option: Command["options"][number],
+  choices: string[] | undefined,
+  defaultFormat: string,
+): void {
+  if (option.long !== "--format") return;
+  if (defaultFormat === BUILT_IN_DEFAULT_FORMAT) return;
+  if (option.defaultValue !== BUILT_IN_DEFAULT_FORMAT) return;
+  if (!choices?.includes(defaultFormat)) return;
+
+  option.default(defaultFormat);
+  // `.option()` copies the default into the command's option values as it
+  // registers, so moving the Option's default afterwards changes the help text
+  // and nothing else. The stored value has to be moved with it -- and only
+  // while it is still the default, which at registration time it always is.
+  if (command.getOptionValueSource(option.attributeName()) === "default") {
+    command.setOptionValueWithSource(option.attributeName(), defaultFormat, "default");
+  }
 }
 
 export function registerOssCommands(program: Command): void {

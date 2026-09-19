@@ -11,6 +11,29 @@ hand-written renderer emit compact records (see below); the rest route
 `--format llm` to whichever existing format is most compact (usually `text`),
 so consumers can pass the flag unconditionally without a per-command lookup.
 
+## Choosing it once
+
+`--format` on the command line always wins. When it is absent, the default is
+resolved in this order:
+
+1. `IX_FORMAT` — `text`, `json` or `llm`.
+2. `format` in `~/.ix/config.yaml`, i.e. `ix config set format llm`.
+3. `text`.
+
+A plugin or a shell profile can therefore set `IX_FORMAT=llm` once instead of
+appending the flag to every command it wraps. `ix config show` prints the
+stored value and says when `IX_FORMAT` is overriding it.
+
+Two things this deliberately does not do. It does not switch on whether stdout
+is a terminal: a script that has always parsed `text` would start receiving
+records on its next run, with nothing it could have done about it. And it does
+not apply to a command that has no `llm` renderer to switch to — `ix query`
+offers `text` and `json`, so it stays on `text` and says so in `--help`.
+
+An unrecognised value is ignored rather than fatal — it is read by every later
+command, so a typo would otherwise break all of them at once. The CLI says
+which value it ignored, on stderr, when a person is there to read it.
+
 ## Wire format
 
 - **One record per line.** Newline-delimited, no nesting.
