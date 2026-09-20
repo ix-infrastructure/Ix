@@ -2,6 +2,7 @@
 
 import chalk from "chalk";
 import { llmLine } from "./llm.js";
+import { projectRow } from "./output-shape.js";
 
 export type ResultSource = "graph" | "text" | "graph+text" | "heuristic";
 
@@ -133,11 +134,11 @@ export function formatContext(result: any, format: string): void {
 
 /** Render a flat node list as llm `node` records. */
 export function renderNodesLlm(nodes: any[]): string[] {
-  return nodes.map((n) => llmLine("node", [
+  return nodes.map((n) => llmLine("node", projectRow([
     ["kind", n.kind],
     ["id", typeof n.id === "string" ? n.id.slice(0, 8) : undefined],
     ["name", n.name || n.attrs?.name || n.attrs?.title || "(unnamed)"],
-  ]));
+  ])));
 }
 
 export function formatNodes(nodes: any[], format: string): void {
@@ -504,8 +505,8 @@ export function renderEdgeResultsLlm(
   }
   for (const ref of refs) {
     lines.push(ref.resolved
-      ? llmLine("ref", [["name", ref.name], ["kind", ref.kind], ["id", ref.id?.slice(0, 8)], ["path", ref.path]])
-      : llmLine("ref", [["kind", ref.kind], ["id", ref.id?.slice(0, 8)], ["resolved", false]]));
+      ? llmLine("ref", projectRow([["name", ref.name], ["kind", ref.kind], ["id", ref.id?.slice(0, 8)], ["path", ref.path]]))
+      : llmLine("ref", projectRow([["kind", ref.kind], ["id", ref.id?.slice(0, 8)], ["resolved", false]])));
   }
   return lines;
 }

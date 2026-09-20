@@ -9,6 +9,7 @@ import { detectSystem } from "./system.js";
 import { resolveWorkspaceId } from "./bootstrap.js";
 import { readStitchScope, writeStitchScope } from "./config.js";
 import { reportAmbiguousTarget, reportResolutionFailure } from "./ui.js";
+import { isQuiet } from "./output-shape.js";
 
 /**
  * The read scope for the current working directory: a co-ingested multi-repo system
@@ -506,6 +507,7 @@ export function printAmbiguous(symbol: string, result: AmbiguousResult, opts?: {
  * Callers should skip this when format === "json" to keep JSON strict.
  */
 export function printResolved(target: ResolvedEntity): void {
+  if (isQuiet()) return;
   const shortId = target.id.slice(0, 8);
   const modeStr = target.resolutionMode !== "exact"
     ? chalk.dim(` (${target.resolutionMode})`)

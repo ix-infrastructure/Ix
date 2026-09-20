@@ -40,6 +40,7 @@ import { registerPatchesCommand } from "../commands/patches.js";
 import { registerMcpCommand } from "../commands/mcp.js";
 import { registerContextCommand } from "../commands/context.js";
 import { validateCliOptions } from "../options.js";
+import { setOutputShape } from "../output-shape.js";
 
 const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "briefing", desc: "Session-resume briefing" },
@@ -85,14 +86,27 @@ const OPTION_CHOICES: Record<string, Record<string, string[]>> = {
  */
 const ossCommands = new WeakSet<Command>();
 
-function configureOssOptionChoices(root: Command): void {
+function configureOssOptions(root: Command): void {
   const visit = (command: Command): void => {
     ossCommands.add(command);
     const commandChoices = OPTION_CHOICES[command.name()] ?? {};
+    let rendersRows = false;
     for (const option of command.options) {
       const choices = commandChoices[option.attributeName()]
         ?? (option.long === "--format" ? DEFAULT_FORMAT_CHOICES : undefined);
       if (choices) option.choices(choices);
+      if (option.long === "--format") rendersRows = true;
+    }
+    // Declared here rather than on 33 commands by hand, and only where there
+    // is an answer to shape. A command with no `--format` prints a status
+    // line or nothing.
+    if (rendersRows) {
+      if (!command.options.some((option) => option.long === "--quiet")) {
+        command.option("--quiet", "Drop headers, section titles and advisory hints");
+      }
+      if (!command.options.some((option) => option.long === "--fields")) {
+        command.option("--fields <list>", "Keep only these fields on each row, in this order (e.g. name,path,lines)");
+      }
     }
     for (const child of command.commands) visit(child);
   };
@@ -139,9 +153,15 @@ export function registerOssCommands(program: Command): void {
   registerMcpCommand(program);
   registerContextCommand(program);
 
-  configureOssOptionChoices(program);
+  configureOssOptions(program);
 
   program.hook("preAction", (_thisCommand, actionCommand) => {
+    // Before anything prints. Both are properties of the run, not of a
+    // payload, so the renderers read them from one place rather than every
+    // signature growing two parameters it only forwards.
+    const opts = actionCommand.opts();
+    setOutputShape({ quiet: opts.quiet === true, fields: typeof opts.fields === "string" ? opts.fields : undefined });
+
     // OSS commands only. The rules below read an option's *shape* -- `<n>`
     // means a non-negative integer, `--min-confidence` means 0..1 -- which is
     // a claim about commands whose declarations live in this repo. A Pro
