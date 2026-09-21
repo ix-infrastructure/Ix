@@ -43,6 +43,15 @@ which value it ignored, on stderr, when a person is there to read it.
 - **No decorative whitespace, separators, or headers.**
 - **Omitted fields:** null, undefined, and empty values are dropped. Zeros and
   other defaults are dropped where they carry no signal.
+- **Ids are eight characters.** Any field holding an opaque identifier — `id`,
+  `parent`, `src`, `dst`, `entity`, `claim_a`/`claim_b` — carries the first
+  eight characters of it, which is what `/v1/resolve-prefix` accepts, so the
+  short form can be passed straight back to the CLI. A 36-character UUID
+  tokenizes at roughly 1.8 characters per token, and on `ix map` the ids alone
+  outweigh the labels beside them. A reference is shortened on both sides, so
+  `parent=` still matches some other row's `id=`. `--format json` carries the
+  full id. Ids that are not opaque blobs — a slug like `root`, a prefixed id
+  like `c-8f31a2` — are left whole.
 - **Quoting:** a value containing a space, `=`, `"`, `\`, or a control
   character is wrapped in double quotes. Inside quotes, `"` and `\` are
   backslash-escaped and newline / carriage-return / tab are encoded as `\n` /

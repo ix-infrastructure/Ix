@@ -152,7 +152,11 @@ ix inventory --kind function --path auth.py
 
 ## Best Practices
 
-- Always use `--kind` with `ix search` to get bounded results.
+- Always use `--kind` with `ix search` to get bounded results. A module-level
+  constant is `--kind constant`, not `function` — that covers a `const` bound
+  to an object, an array, a `Set`, a schema or a string literal in TS/JS, and
+  a Rust `const`, a Scala `val`/`var`, and their Java, C#, and Swift
+  equivalents.
 - Use `ix inventory` instead of `ix search ""` for listing entities by kind.
 - Use `ix diff --summary` for broad revision comparisons; `--full` only when
   every individual change is needed.

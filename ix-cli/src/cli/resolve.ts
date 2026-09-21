@@ -154,7 +154,7 @@ const CONTAINER_KINDS = new Set(["file", "class", "object", "trait", "interface"
 
 /** All kinds that represent real code structure (vs. config/doc/decision). */
 const STRUCTURAL_KINDS = new Set([
-  ...CONTAINER_KINDS, "function", "method",
+  ...CONTAINER_KINDS, "function", "method", "constant",
 ]);
 
 /**
@@ -754,7 +754,12 @@ export async function resolveFileOrEntityFull(
   }
 
   // 3. Symbol resolution (handles all entity kinds)
-  const allKinds = ["file", "class", "object", "trait", "interface", "module", "method", "function"];
+  //
+  // Order is a tie-break, not a filter — an unlisted kind still resolves, it
+  // just sorts last among equal-scoring candidates. `constant` is here so a
+  // module-level constant is not ranked behind every config entry and heading
+  // that happens to share its name (Ix#679).
+  const allKinds = ["file", "class", "object", "trait", "interface", "module", "method", "function", "constant"];
   return resolveEntityFull(client, target, allKinds, opts);
 }
 
