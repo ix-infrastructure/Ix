@@ -208,7 +208,7 @@ function bundleWith(claims: ScoredClaim[], stale = false) {
     provenance: { sourceType: "source", extractor: "tree-sitter", observedAt: "2026-01-01T00:00:00Z" },
     asOfRev: undefined,
     depth: undefined,
-    budgets: { maxEntities: 50, maxRelationships: 100, maxEvidence: 25, maxChars: 12000 },
+    budgets: { maxEntities: 50, maxRelationships: 100, maxEvidence: 25, maxTokens: 1500, maxChars: 12000 },
   });
 }
 
@@ -405,7 +405,7 @@ describe("ix context investigation state", () => {
       provenance: { sourceType: "source", extractor: "tree-sitter", observedAt: "2026-01-01T00:00:00Z" },
       asOfRev: undefined,
       depth: undefined,
-      budgets: { maxEntities: 50, maxRelationships: 100, maxEvidence: 25, maxChars: 12000 },
+      budgets: { maxEntities: 50, maxRelationships: 100, maxEvidence: 25, maxTokens: 1500, maxChars: 12000 },
     });
 
     const diff = diffInvestigations(stored, fresh);
@@ -487,14 +487,14 @@ describe("ix context investigation state", () => {
     // fresh bundle in front of it had been built with 50/100/25/12000 -- a
     // budget neither side of the comparison had used together.
     const saved = bundleWith([makeClaim("renders to DOM", 0.9)]);
-    saved.budgets = { maxEntities: 5, maxRelationships: 1, maxEvidence: 2, maxChars: 12000 };
+    saved.budgets = { maxEntities: 5, maxRelationships: 1, maxEvidence: 2, maxTokens: 1500, maxChars: 12000 };
     saveInvestigation("widget-check", saved);
     const stored = loadInvestigation("widget-check")!;
     const fresh = bundleWith([makeClaim("renders to DOM", 0.9)]);
-    expect(fresh.budgets).toEqual({ maxEntities: 50, maxRelationships: 100, maxEvidence: 25, maxChars: 12000 });
+    expect(fresh.budgets).toEqual({ maxEntities: 50, maxRelationships: 100, maxEvidence: 25, maxTokens: 1500, maxChars: 12000 });
 
     const baselineDiff = diffInvestigations(stored, fresh);
-    expect(baselineDiff.budgets.saved).toEqual({ maxEntities: 5, maxRelationships: 1, maxEvidence: 2, maxChars: 12000 });
+    expect(baselineDiff.budgets.saved).toEqual({ maxEntities: 5, maxRelationships: 1, maxEvidence: 2, maxTokens: 1500, maxChars: 12000 });
     expect(baselineDiff.budgets.requested).toBeUndefined();
     expect(baselineDiff.budgets.effective).toEqual(fresh.budgets);
     expect(baselineDiff.budgets.requestedApplied).toBe(false);
@@ -545,7 +545,7 @@ describe("ix context investigation state", () => {
     // future refactor flattens renderInvestigationDiff back to "entities/-
     // +", the budget block disappears and the silent ignore comes back.
     const saved = bundleWith([makeClaim("renders to DOM", 0.9)]);
-    saved.budgets = { maxEntities: 5, maxRelationships: 1, maxEvidence: 2, maxChars: 12000 };
+    saved.budgets = { maxEntities: 5, maxRelationships: 1, maxEvidence: 2, maxTokens: 1500, maxChars: 12000 };
     saveInvestigation("widget-check", saved);
     const stored = loadInvestigation("widget-check")!;
     const fresh = bundleWith([makeClaim("renders to DOM", 0.9)]);
@@ -583,9 +583,9 @@ describe("ix context investigation state", () => {
     // Records, not the prose block with the colons moved. `scope=requested`
     // carries `applied=` so the precedence rule — saved budgets govern
     // --diff — is a field an agent can test rather than a sentence to read.
-    expect(llm.lines).toContain("budgets scope=saved entities=5 relationships=1 evidence=2 chars=12000");
+    expect(llm.lines).toContain("budgets scope=saved entities=5 relationships=1 evidence=2 tokens=1500 chars=12000");
     expect(llm.lines).toContain("budgets scope=requested evidence=25 applied=false");
-    expect(llm.lines).toContain("budgets scope=effective entities=50 relationships=100 evidence=25 chars=12000");
+    expect(llm.lines).toContain("budgets scope=effective entities=50 relationships=100 evidence=25 tokens=1500 chars=12000");
     // And none of the prose survives into the record stream.
     expect(llm.lines.some((l) => l.includes(":") && l.startsWith("  "))).toBe(false);
 
@@ -686,7 +686,7 @@ describe("ix context investigation state", () => {
         provenance: { sourceType: "source", extractor: "tree-sitter", observedAt: "2026-01-01T00:00:00Z" },
         asOfRev: undefined,
         depth: undefined,
-        budgets: { maxEntities: 50, maxRelationships: 100, maxEvidence: 25, maxChars: 12000 },
+        budgets: { maxEntities: 50, maxRelationships: 100, maxEvidence: 25, maxTokens: 1500, maxChars: 12000 },
       });
 
       const lines = captureLog(() => renderInvestigationDiff(stored, fresh, "llm"));
@@ -725,12 +725,13 @@ describe("ix context investigation state", () => {
       );
 
       // An evidence title is a sentence. Same rule, and the reason the value
-      // must never be built with a template literal.
+      // must never be built with a template literal. Its endpoints are names:
+      // the ids stay in the evidence id and in the `relationship` records.
       expect(lines).toContain(
-        'evidence change=added score=30 kind=relationship title="entity-1 --holds--> entity-3"',
+        'evidence change=added score=30 kind=relationship title="Widget --holds--> mount"',
       );
       expect(lines).toContain(
-        'evidence change=removed score=30 kind=relationship title="entity-1 --calls--> entity-2"',
+        'evidence change=removed score=30 kind=relationship title="Widget --calls--> render"',
       );
 
       // One record per line — the wire format invariant.
@@ -779,7 +780,7 @@ describe("ix context investigation state", () => {
       }
       // The exact record `--diff` would emit for the same item, minus `change=`.
       expect(lines).toContain(
-        'evidence score=30 kind=relationship title="entity-1 --calls--> entity-2"',
+        'evidence score=30 kind=relationship title="Widget --calls--> render"',
       );
       // And the header is a record too, not fifteen bare `key=value` lines
       // built by interpolation — `target=${name}` breaks on any name with a

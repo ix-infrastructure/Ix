@@ -3,7 +3,7 @@
 import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
-import { formatEdgeResults } from "../format.js";
+import { formatEdgeResults, sliceEdgeResults } from "../format.js";
 import { resolveFileOrReport, printResolved } from "../resolve.js";
 import { parsePickOption } from "../options.js";
 
@@ -25,7 +25,7 @@ export function registerImportsCommand(program: Command): void {
       if (!target) return;
       if (opts.format === "text") printResolved(target);
       const result = await client.expand(target.id, { direction: "out", predicates: ["IMPORTS"] });
-      formatEdgeResults(result.nodes.slice(0, limit), "imports", target.name, opts.format, target, "graph");
+      formatEdgeResults(sliceEdgeResults(result.nodes, limit), "imports", target.name, opts.format, target, "graph");
     });
 
   program
@@ -45,6 +45,6 @@ export function registerImportsCommand(program: Command): void {
       if (!target) return;
       if (opts.format === "text") printResolved(target);
       const result = await client.expand(target.id, { direction: "in", predicates: ["IMPORTS"] });
-      formatEdgeResults(result.nodes.slice(0, limit), "imported-by", target.name, opts.format, target, "graph");
+      formatEdgeResults(sliceEdgeResults(result.nodes, limit), "imported-by", target.name, opts.format, target, "graph");
     });
 }

@@ -5,7 +5,7 @@ import { Command } from "commander";
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerTextCommand, resolveTextSearchPath } from "../commands/text.js";
+import { registerTextCommand, resolveTextSearchPath, scanWindow } from "../commands/text.js";
 
 describe("text workspace boundary", () => {
   let fixture: string;
@@ -62,7 +62,11 @@ describe("text workspace boundary", () => {
 
     await run(["text", "boundaryNeedle", "--root", workspace, "--path", "src", "--format", "json"]);
 
-    expect(runRipgrep).toHaveBeenCalledWith(expect.arrayContaining(["boundaryNeedle", join(workspace, "src")]), 20);
+    // The scan window, not `--limit`: ranking has to see more rows than it prints.
+    expect(runRipgrep).toHaveBeenCalledWith(
+      expect.arrayContaining(["boundaryNeedle", join(workspace, "src")]),
+      scanWindow(20),
+    );
     expect(JSON.parse(logs.join("\n"))).toMatchObject([{ path: "src/inside.ts" }]);
     expect(process.exitCode).toBeUndefined();
   });

@@ -284,7 +284,7 @@ Examples:
       }
 
       // --- Step 4: Try unique symbol match ---
-      const symbolResult = await trySymbolMatch(client, rawTarget, { kind: opts.kind, path: opts.path, pick: opts.pick });
+      const symbolResult = await trySymbolMatch(client, rawTarget, { kind: opts.kind, path: opts.path, pick: opts.pick, format: opts.format });
       if (symbolResult.type === "resolved") {
         const { node, sourceUri } = symbolResult;
         // sourceUri coming from the graph is workspace-relative under the
@@ -533,7 +533,7 @@ type SymbolResult =
 async function trySymbolMatch(
   client: IxClient,
   symbol: string,
-  opts: { kind?: string; path?: string; pick?: number }
+  opts: { kind?: string; path?: string; pick?: number; format?: string }
 ): Promise<SymbolResult> {
   const preferredKinds = ["file", "class", "object", "trait", "interface", "module", "function", "method"];
   const full = await resolveEntityFull(client, symbol, preferredKinds, opts);

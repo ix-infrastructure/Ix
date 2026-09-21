@@ -11,6 +11,29 @@ hand-written renderer emit compact records (see below); the rest route
 `--format llm` to whichever existing format is most compact (usually `text`),
 so consumers can pass the flag unconditionally without a per-command lookup.
 
+## Choosing it once
+
+`--format` on the command line always wins. When it is absent, the default is
+resolved in this order:
+
+1. `IX_FORMAT` — `text`, `json` or `llm`.
+2. `format` in `~/.ix/config.yaml`, i.e. `ix config set format llm`.
+3. `text`.
+
+A plugin or a shell profile can therefore set `IX_FORMAT=llm` once instead of
+appending the flag to every command it wraps. `ix config show` prints the
+stored value and says when `IX_FORMAT` is overriding it.
+
+Two things this deliberately does not do. It does not switch on whether stdout
+is a terminal: a script that has always parsed `text` would start receiving
+records on its next run, with nothing it could have done about it. And it does
+not apply to a command that has no `llm` renderer to switch to — `ix query`
+offers `text` and `json`, so it stays on `text` and says so in `--help`.
+
+An unrecognised value is ignored rather than fatal — it is read by every later
+command, so a typo would otherwise break all of them at once. The CLI says
+which value it ignored, on stderr, when a person is there to read it.
+
 ## Wire format
 
 - **One record per line.** Newline-delimited, no nesting.
@@ -56,6 +79,30 @@ region id=root kind=system label="Cli"
 region id=cli kind=subsystem label="Client" parent=root
 region id=srv kind=subsystem label="Server" parent=root
 ```
+
+## Bounded lists
+
+Any command that cuts its answer to `--limit` says both numbers on its header
+record: `shown` is what follows, `total` is what there was before the cut.
+
+```
+callers target=verify_token shown=50 total=212 resolved=48 unresolved=2
+diagnostic code=results_truncated message="212 callers; showing 50. Raise --limit to see the rest."
+```
+
+`shown < total` is the only signal that a list is partial, and it exists
+because the header used to carry a single `total` field holding the length of
+the *cut* list — so `ix callers` on a symbol with 212 callers reported
+`total=50`, which reads as "this symbol has 50 callers".
+
+Two commands cannot know a true total and say so rather than inventing one:
+
+- `ix inventory` reports `shown=N truncated=true`. The backend applies the
+  limit and has no count endpoint, so the CLI only knows the window it asked
+  for came back full.
+- `ix text` reports `shown=N scanned=M`: ripgrep's traversal is bounded by a
+  scan window, and `scanned` is how many matches were ranked, not how many
+  exist.
 
 ## Examples
 
@@ -103,15 +150,23 @@ item name=parseFile kind=method
 `ix context <target>`:
 
 ```
-context target=Widget target_kind=class stale=false classification=current entities=2 relationships=1 claims=1 decisions=0 conflicts=0 intents=0 evidence=7 truncated_entities=0 truncated_relationships=0 truncated_evidence=0 truncated_chars=0
-evidence score=0 kind=target title="Widget (class)"
+context target=Widget target_kind=class target_path=src/widget.ts stale=false classification=current entities=2 relationships=1 claims=1 decisions=0 conflicts=0 intents=0 evidence=7 truncated_entities=0 truncated_relationships=0 truncated_evidence=0 truncated_chars=0
+evidence score=0 kind=target title="Widget (class)" path=src/widget.ts
+evidence score=10 kind=structural title="member render" path=src/widget.ts lines=12-40
 evidence score=20 kind=claim title="renders to DOM"
-evidence score=30 kind=relationship title="entity-1 --calls--> entity-2"
+evidence score=30 kind=relationship title="Widget --calls--> render"
 ```
 
 One header record, then the ranked evidence. The entity, relationship and claim
 lists stay counts here — `llm` is the token-minimal surface and the ranked
 evidence is what it exists to deliver; `--format json` carries the rest.
+
+`path=` and `lines=` say where an item is defined, when the graph knows, so a
+reader can open it instead of searching for it. For a file target, members are
+ranked by use — those used from other files first — so the ones that survive
+the evidence budget are the ones worth reading. Relationship titles name their
+endpoints; a name shared by two entities in the bundle is qualified with its
+path, and the ids stay in the `relationship` records.
 
 `ix context --diff <id>`:
 
@@ -123,7 +178,7 @@ budgets scope=effective entities=50 relationships=100 evidence=25 chars=12000
 count added_entities=1 removed_entities=0 added_relationships=1 removed_relationships=1 added_evidence=2 removed_evidence=1 added_claims=1 removed_claims=0
 entity change=added id=entity-3 kind=method name=mount path=src/widget.ts
 relationship change=removed src=entity-1 pred=calls dst=entity-2
-evidence change=added score=30 kind=relationship title="entity-1 --holds--> entity-3"
+evidence change=added score=30 kind=relationship title="Widget --holds--> mount"
 claim change=added id=c-8f31a2 entity=entity-1 status=active statement="mounts to DOM"
 ```
 
