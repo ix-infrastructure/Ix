@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import { describe, it, expect } from 'vitest';
 import { parseFile } from '../index.js';
 import { SupportedLanguages } from '../languages.js';

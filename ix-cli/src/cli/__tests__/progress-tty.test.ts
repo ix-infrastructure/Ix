@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import { afterEach, describe, expect, it } from "vitest";
 
 import { canRenderProgress } from "../stderr.js";

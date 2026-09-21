@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import { createHash } from "node:crypto";
 import type { PatchOp } from "../../client/types.js";
 import type { GitHubRepo, GitHubIssue, GitHubPR, GitHubCommit, GitHubComment } from "./fetch.js";

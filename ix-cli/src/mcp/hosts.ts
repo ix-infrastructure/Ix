@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import { execFile } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { homedir, platform } from "node:os";

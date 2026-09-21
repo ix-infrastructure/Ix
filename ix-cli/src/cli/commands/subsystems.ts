@@ -1,11 +1,13 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient, type ListSubsystemsOptions } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
-import { roundFloat } from "../format.js";
-import { llmLine, llmError } from "../llm.js";
+import { roundFloat, printJson } from "../format.js";
+import { llmLine, llmError, llmShortId } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { renderMapText, renderMapLlm, type MapRegion, type MapResult } from "./map.js";
 import {
@@ -190,7 +192,7 @@ Examples:
 
         if (opts.format === "json") {
           if (opts.detailed) {
-            console.log(JSON.stringify(buildDetailedListPayload(filtered, result.pagination), null, 2));
+            printJson(buildDetailedListPayload(filtered, result.pagination));
           } else {
             const compact = filtered.map(s => ({
               name: s.name,
@@ -200,12 +202,12 @@ Examples:
               chunks_per_file: roundFloat(s.chunk_density),
               smell_files: s.smell_files,
             }));
-            console.log(JSON.stringify({ scores: compact }, null, 2));
+            printJson({ scores: compact });
           }
           return;
         }
         if (opts.detailed) {
-          console.log(JSON.stringify(buildDetailedListPayload(filtered, result.pagination), null, 2));
+          printJson(buildDetailedListPayload(filtered, result.pagination));
           return;
         }
         printScores(filtered);
@@ -223,7 +225,7 @@ Examples:
         const body = parseErrorBody(err);
         if (body) {
           if (opts.format === "json") {
-            console.log(JSON.stringify(body, null, 2));
+            printJson(body);
             process.exitCode = 1;
             return;
           }
@@ -262,7 +264,7 @@ Examples:
 
         const score = (scoreResult.scores ?? []).find((candidate) => candidate.region_id === result.target.id) ?? null;
         if (opts.format === "json") {
-          console.log(JSON.stringify(renderSubsystemExplanationJson(result, score), null, 2));
+          printJson(renderSubsystemExplanationJson(result, score));
           return;
         }
 
@@ -271,7 +273,7 @@ Examples:
       }
 
       if (opts.format === "json") {
-        console.log(JSON.stringify(compactMapResult(result), null, 2));
+        printJson(compactMapResult(result));
         return;
       }
 
@@ -311,7 +313,7 @@ Examples:
 export function renderSubsystemScoreLlm(s: SubsystemScore): string {
   // chunk_density is dropped when 0 (uncomputed / no signal); see docs/llm-format.md.
   return llmLine("region", [
-    ["id", s.region_id],
+    ["id", llmShortId(s.region_id)],
     ["label", s.name],
     ["kind", s.label_kind],
     ["level", s.level],
@@ -327,14 +329,14 @@ export function renderScopedSubsystemLlm(result: ScopedSubsystemResult): string[
   const t = result.target;
   const lines = [
     llmLine("target", [
-      ["id", t.id],
+      ["id", llmShortId(t.id)],
       ["label", t.label],
       ["kind", t.label_kind],
       ["level", t.level],
       ["files", t.file_count],
       ["confidence", roundFloat(t.confidence)],
       ["cross_cutting", t.is_cross_cutting ? true : undefined],
-      ["parent", result.parent?.id],
+      ["parent", llmShortId(result.parent?.id)],
       ["signals", t.dominant_signals.length > 0 ? t.dominant_signals.join(",") : undefined],
     ]),
     llmLine("health", [
@@ -346,12 +348,12 @@ export function renderScopedSubsystemLlm(result: ScopedSubsystemResult): string[
   ];
   const emit = (region: ScopedSubsystemRegion): void => {
     lines.push(llmLine("region", [
-      ["id", region.id],
+      ["id", llmShortId(region.id)],
       ["label", region.label],
       ["kind", region.label_kind],
       ["level", region.level],
       ["files", region.file_count],
-      ["parent", region.parent_id],
+      ["parent", llmShortId(region.parent_id)],
       ["confidence", roundFloat(region.confidence)],
       ["cross_cutting", region.is_cross_cutting ? true : undefined],
       ["signals", region.dominant_signals.length > 0 ? region.dominant_signals.join(",") : undefined],

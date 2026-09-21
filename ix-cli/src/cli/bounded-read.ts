@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 // Bounded reads of repository-controlled files (Ix#465).
 //
 // Ingestion opens files whose paths AND contents the scanned repository

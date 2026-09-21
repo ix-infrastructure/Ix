@@ -377,7 +377,7 @@ count rather than every skip, and `skipReasons.emptyFile`, previously hardcoded 
 |---|---|---|
 | `IX_STITCH_COOLDOWN_MS` | `900000` | How long to hold off after a stitch that did not prove it stopped, measured from when the attempt ended. `0` disables the cooldown; single-flight stays. Values under ~2 min are not honoured after a killed process — see above. |
 | `IX_STITCH_WAIT_MS` | `30000` | How long to wait for an in-flight stitch before skipping. `0` sheds immediately. |
-| `IX_LOCK_DIR` | `~/.ix/locks` | Where the stitch lock and cooldown record live (shared with the map lock). `ix reset` clears the cooldown, so the full re-ingest that follows one is not refused by it. |
+| `IX_LOCK_DIR` | `$IX_HOME/locks` (`~/.ix/locks` by default) | Where the stitch lock and cooldown record live (shared with the map lock). `ix reset` clears the cooldown, so the full re-ingest that follows one is not refused by it. |
 | `IX_MAP_LOCK_MAX_MS` | `1200000` | Shared with the map lock: how old a held lock must be before it is presumed abandoned and stolen. Lowering it to a few seconds so a wedged `ix map` self-heals faster also lets a second process steal the stitch lock from an in-flight stitch. The cooldown normally catches that on the next read, so it only matters together with `IX_STITCH_COOLDOWN_MS=0` — which is the one case where "single-flight stays" stops being true. |
 
 This bounds the client. Cancelling the server-side query when the client hangs

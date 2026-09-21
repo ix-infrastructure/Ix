@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import { describe, expect, it, vi } from "vitest";
 import * as nodePath from "node:path";
 

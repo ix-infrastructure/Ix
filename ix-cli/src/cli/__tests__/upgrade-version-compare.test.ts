@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import { describe, expect, it } from "vitest";
 
 import { isNewer, VERSION_RE } from "../commands/upgrade.js";

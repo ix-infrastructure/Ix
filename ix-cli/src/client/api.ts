@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import { isPreConnectionFailure, RESET_RECONCILIATION_ERROR } from "./transport.js";
 import type {
   IngestResult,
@@ -98,7 +100,7 @@ export class IxClient {
 
   async search(
     term: string,
-    opts?: { limit?: number; kind?: string; language?: string; asOfRev?: number; nameOnly?: boolean; workspaceId?: string; systemId?: string }
+    opts?: { limit?: number; kind?: string; language?: string; asOfRev?: number; nameOnly?: boolean; workspaceId?: string; systemId?: string; scope?: string }
   ): Promise<GraphNode[]> {
     return this.post("/v1/search", {
       term,
@@ -109,6 +111,11 @@ export class IxClient {
       nameOnly: opts?.nameOnly,
       workspaceId: opts?.workspaceId,
       systemId: opts?.systemId,
+      // A source_uri substring the backend applies BEFORE its limit
+      // (Ix-memory ≥ 1.0.31, case-insensitive). Older backends decode the
+      // request with a derived circe decoder and drop the unknown field, so
+      // sending it is always safe; callers keep their own filter as well.
+      scope: opts?.scope,
     });
   }
 
@@ -183,13 +190,15 @@ export class IxClient {
 
   async expand(
     id: string,
-    opts?: { direction?: string; predicates?: string[]; hops?: number }
+    opts?: { direction?: string; predicates?: string[]; hops?: number; limit?: number }
   ): Promise<{ nodes: any[]; edges: any[] }> {
     return this.post("/v1/expand", {
       nodeId: id,
       direction: opts?.direction ?? "both",
       predicates: opts?.predicates,
       hops: opts?.hops ?? 1,
+      // Only when asked for, so every existing caller sends the body it did.
+      ...(opts?.limit !== undefined ? { limit: opts.limit } : {}),
     });
   }
 

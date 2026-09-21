@@ -1,11 +1,14 @@
 #!/usr/bin/env node
+// Copyright 2026 Ix Infrastructure Inc.
+
 import { Command } from "commander";
 import { registerOssCommands, registerProStubs } from "./register/oss.js";
 import { tryLoadProCommands } from "./register/pro-loader.js";
 import { isRepairInvocation } from "./register/pro-failure.js";
 import { buildHelpText } from "./help-text.js";
-import { checkForUpdate } from "./commands/upgrade.js";
-import { renderCliError } from "./errors.js";
+import { checkForUpdate, updateCheckEnabled } from "./commands/upgrade.js";
+import { stderrIsTerminal } from "./stderr.js";
+import { detectRequestedFormat, renderCliError, setErrorFormat } from "./errors.js";
 import { getEndpoint } from "./config.js";
 
 import { readFileSync } from "fs";
@@ -37,6 +40,12 @@ try {
 
 // Set IX_DEBUG=1 to append stack traces to any rendered error.
 const debug = process.env.IX_DEBUG === "1";
+
+// Before anything can throw. The handlers below are installed for
+// `unhandledRejection` and `uncaughtException`, which can fire before
+// commander has parsed a thing, so the error boundary gets the format from
+// argv rather than from a parsed command.
+setErrorFormat(detectRequestedFormat(process.argv.slice(2)));
 
 // Resolving the endpoint reads config off disk, which can itself fail. An
 // error renderer must never throw, so failure here just drops the endpoint
@@ -103,9 +112,11 @@ registerOssCommands(program);
     registerProStubs(program);
   }
 
-  // Check for updates (non-blocking, cached 1hr) — skip for upgrade command itself
+  // Check for updates (non-blocking, cached 1hr). Only when a person is
+  // watching stderr — see updateCheckEnabled for why, and for the
+  // IX_NO_UPDATE_CHECK opt-out.
   const args = process.argv.slice(2);
-  if (args[0] !== "upgrade" && args[0] !== "mcp" && process.env.IX_MCP_CHILD !== "1") {
+  if (updateCheckEnabled(args, process.env, stderrIsTerminal())) {
     // Deliberately not awaited — but it must still be caught here. The catch
     // inside checkForUpdate only guards its inner fetch chain; the function's
     // own promise covers the synchronous cached-read path, and a corrupt

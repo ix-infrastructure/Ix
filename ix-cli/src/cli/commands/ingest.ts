@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import * as nodePath from 'node:path';
 import * as fs from 'node:fs';
 import * as crypto from 'node:crypto';
@@ -29,6 +31,10 @@ import {
 } from '../commit-breaker.js';
 import { readBackendHealth } from './upgrade.js';
 import { SUPPORTED_EXTENSIONS } from '../supported-extensions.js';
+import {
+  createIgnoreMatcher, parseIgnoreFile, parseIgnorePattern,
+  type IgnoreMatcher, type IgnorePattern,
+} from '../ignore-globs.js';
 import { canRenderProgress } from '../stderr.js';
 import { createTypeScriptModuleResolver } from '../ts-module-resolution.js';
 import {
@@ -39,6 +45,7 @@ import {
   transformPRComment,
   transformCommit,
 } from '../github/transform.js';
+import { printJson } from '../format.js';
 // ---------------------------------------------------------------------------
 // File discovery
 // ---------------------------------------------------------------------------
@@ -164,9 +171,10 @@ function parsePositiveIntEnv(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function* walkFiles(
+export function* walkFiles(
   dir: string,
   recursive: boolean,
+  exclude?: { matcher: IgnoreMatcher; root: string; onSkip?: () => void },
 ): Generator<string> {
   let entries: fs.Dirent[];
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
@@ -176,12 +184,39 @@ function* walkFiles(
     if (entry.isDirectory() && entry.name.startsWith('.') && entry.name !== '.') continue;
     if (IGNORE_DIRS.has(entry.name)) continue;
     const full = nodePath.join(dir, entry.name);
+    // Directories are tested before descending, so an excluded tree costs one
+    // check rather than one per file inside it.
+    if (exclude && exclude.matcher.matches(nodePath.relative(exclude.root, full), entry.isDirectory())) {
+      exclude.onSkip?.();
+      continue;
+    }
     if (entry.isDirectory()) {
-      if (recursive) yield* walkFiles(full, true);
+      if (recursive) yield* walkFiles(full, true, exclude);
     } else if (entry.isFile()) {
       if (isSupportedSourceFile(entry.name) && !isGeneratedFile(entry.name)) yield full;
     }
   }
+}
+
+/**
+ * The patterns in force for this ingest: `--exclude` flags first, then the
+ * `.ixignore` at the root.
+ *
+ * `.ixignore` is read from the ingest root only. A per-directory cascade is
+ * what `.gitignore` does and it is a lot of stat calls for a file almost
+ * nobody will write twice in one repository.
+ */
+export function collectExcludePatterns(root: string, cliPatterns: string[] = []): IgnorePattern[] {
+  const patterns = cliPatterns
+    .map((p) => parseIgnorePattern(p))
+    .filter((p): p is IgnorePattern => p !== null);
+  try {
+    const text = fs.readFileSync(nodePath.join(root, '.ixignore'), 'utf-8');
+    patterns.push(...parseIgnoreFile(text));
+  } catch {
+    // No .ixignore is the ordinary case.
+  }
+  return patterns;
 }
 
 function canonicalizeDiscoveredFilePath(filePath: string): string {
@@ -273,7 +308,11 @@ export function discoverIngestFilePaths(
  * looks fine alone. A test that cannot run the real listing cannot show that a
  * committed symlink escapes in the first place.
  */
-export function tryGitLsFiles(dir: string, recursive: boolean): string[] | null {
+export function tryGitLsFiles(
+  dir: string,
+  recursive: boolean,
+  exclude?: { matcher: IgnoreMatcher; root: string; onSkip?: () => void },
+): string[] | null {
   try {
     const result = spawnSync(
       'git',
@@ -292,6 +331,14 @@ export function tryGitLsFiles(dir: string, recursive: boolean): string[] | null 
       if (!line) continue;
       const fullPath = nodePath.resolve(dir, line);
       if (!recursive && nodePath.dirname(fullPath) !== dir) continue;
+      // Before the extension check, so the count reports what the caller
+      // excluded rather than what they excluded and Ix would have skipped
+      // anyway. `git ls-files` never saw IGNORE_DIRS either, which is why a
+      // git repository's `tests/` tree reaches the graph today.
+      if (exclude && exclude.matcher.matches(nodePath.relative(exclude.root, fullPath))) {
+        exclude.onSkip?.();
+        continue;
+      }
       if (!isSupportedSourceFile(fullPath)) continue;
       if (isGeneratedFile(nodePath.basename(fullPath))) continue;
       try {
@@ -890,10 +937,17 @@ export function registerIngestCommand(program: Command): void {
     .option('--root <dir>', 'Workspace root directory')
     .option('--debug', 'Show phase timing breakdown', false)
     .option('--lang <langs>', 'Comma-separated languages to include (e.g. cpp,c or typescript). Aliases: c++=cpp, c#=csharp, py=python, ts=typescript, js=javascript')
+    .option(
+      '--exclude <glob>',
+      'Exclude paths matching this glob (repeatable; same syntax as .ixignore)',
+      (value: string, previous: string[] = []) => [...previous, value],
+      [] as string[],
+    )
     .addHelpText('after', '\nExamples:\n  ix ingest ./src\n  ix ingest --path ./src --force\n  ix ingest --path ./rocksdb --lang cpp,c\n  ix ingest --github owner/repo\n  ix ingest --github owner/repo --since 2026-01-01 --limit 20 --format json\n  ix ingest --github owner/repo --token ghp_xxxx')
     .action(async (positionalPath: string | undefined, opts: {
       path?: string; recursive?: boolean; force?: boolean; github?: string; token?: string;
       since?: string; limit: string; format: string; root?: string; debug?: boolean; lang?: string;
+      exclude?: string[];
     }) => {
       const effectivePath = positionalPath ?? opts.path;
       if (opts.github) {
@@ -1365,7 +1419,7 @@ export function ingestCompletedCleanly(parseErrors: number, commitErrors: number
 
 export async function ingestFiles(
   path: string,
-  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean; deadlineSignal?: AbortSignal }
+  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean; exclude?: string[]; deadlineSignal?: AbortSignal }
 ): Promise<IngestFilesSummary> {
   const debug = opts.debug || process.env.IX_DEBUG === '1';
   const mapMode = opts.mapMode === true;
@@ -1661,6 +1715,14 @@ export async function ingestFiles(
   }, 80) : null;
 
   let filesDiscovered = 0;
+  /**
+   * Paths `--exclude` or `.ixignore` kept out of discovery.
+   *
+   * Reported, because "that file is not in the graph" and "you excluded that
+   * file" are different problems with different fixes, and an exclusion nobody
+   * is told about is indistinguishable from an ingest that missed something.
+   */
+  let filesExcluded = 0;
   let filesChanged = 0;
   let patchesApplied = 0;
   let idempotentPatches = 0;
@@ -1838,10 +1900,16 @@ export async function ingestFiles(
       throw new Error(`Path not found: ${resolvedPath}`);
     }
     const stat = fs.statSync(resolvedPath);
+    const excludePatterns = collectExcludePatterns(resolvedPath, opts.exclude ?? []);
+    const excludeMatcher = createIgnoreMatcher(excludePatterns);
+    const exclude = excludeMatcher.size > 0
+      ? { matcher: excludeMatcher, root: resolvedPath, onSkip: () => { filesExcluded += 1; } }
+      : undefined;
     const discovery = discoverIngestFilePaths(
       stat.isFile()
         ? (isSupportedSourceFile(resolvedPath) ? [resolvedPath] : [])
-        : (tryGitLsFiles(resolvedPath, opts.recursive ?? true) ?? Array.from(walkFiles(resolvedPath, opts.recursive ?? true))),
+        : (tryGitLsFiles(resolvedPath, opts.recursive ?? true, exclude)
+            ?? Array.from(walkFiles(resolvedPath, opts.recursive ?? true, exclude))),
       stat.isFile() ? undefined : resolvedPath,
     );
     const filePaths: string[] = discovery.files;
@@ -3545,8 +3613,9 @@ export async function ingestFiles(
   }
 
   if (opts.format === 'json') {
-    console.log(JSON.stringify({
+    printJson({
       filesProcessed: filesDiscovered,
+      ...(filesExcluded > 0 ? { filesExcluded } : {}),
       filesChanged,
       patchesApplied,
       filesSkipped,
@@ -3590,11 +3659,14 @@ export async function ingestFiles(
         [...langParseMs.entries()].map(([lang, s]) => [lang, { ms: Math.round(s.ms), files: s.files }])
       ),
       resolveStats,
-    }, null, 2));
+    });
   } else if (opts.printSummary !== false) {
     console.log(chalk.bold('\nIngest summary'));
     console.log(`  processed:   ${patchesApplied} files (${elapsed}s)`);
     console.log(`  discovered:  ${filesDiscovered} files`);
+    if (filesExcluded > 0) {
+      console.log(`  excluded:    ${filesExcluded} paths (--exclude / .ixignore)`);
+    }
     console.log(`  changed:     ${filesChanged} files`);
     // "skipped" without "unchanged": the count includes empty, minified-looking
     // and unparseable files, none of which were assumed unchanged. Splitting the
@@ -3773,7 +3845,7 @@ async function ingestGitHub(opts: {
   const elapsed = ((performance.now() - start) / 1000).toFixed(2);
 
   if (opts.format === 'json') {
-    console.log(JSON.stringify({
+    printJson({
       source: `${repo.owner}/${repo.repo}`,
       issues: data.issues.length,
       pullRequests: data.pullRequests.length,
@@ -3782,7 +3854,7 @@ async function ingestGitHub(opts: {
       rev: result.rev,
       status: result.status,
       elapsedSeconds: parseFloat(elapsed),
-    }, null, 2));
+    });
   } else {
     console.log(chalk.bold('\nGitHub ingest summary'));
     console.log(`  repo:            ${repo.owner}/${repo.repo}`);

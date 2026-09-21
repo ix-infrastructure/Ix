@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Ix Infrastructure Inc.
+
 # Ix — Standalone Installer
 #
 # Installs everything needed to run Ix without cloning the repo:

@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import type { Command } from "commander";
 import chalk from "chalk";
 import { renderSection, renderKeyValue, renderNote, renderResolvedHeader, colorizeKind } from "../ui.js";
@@ -6,7 +8,7 @@ import { getEndpoint } from "../config.js";
 import { resolveFileOrReport, printResolved } from "../resolve.js";
 import { bucketByHierarchy, getSystemPath, formatSystemPath, hasMapData, type SystemPath } from "../hierarchy.js";
 import { inferRiskSemantics, humanizeLabel, type ImpactFacts, type RiskSemantics } from "../impact/risk-semantics.js";
-import { stripNulls } from "../format.js";
+import { lineSpan, printJson, rowLocation, stripNulls } from "../format.js";
 import { llmLine } from "../llm.js";
 import { parsePickOption } from "../options.js";
 
@@ -294,7 +296,10 @@ async function containerImpact(
 
   // For each member (up to 20), get inbound callers
   const membersToCheck = members.slice(0, 20);
-  const memberCallerCounts: { name: string; kind: string; id: string; callerCount: number }[] = [];
+  const memberCallerCounts: Array<{
+    name: string; kind: string; id: string; callerCount: number;
+    path?: string; lineStart?: number; lineEnd?: number;
+  }> = [];
   let totalMemberCallers = 0;
 
   const callerPromises = membersToCheck.map(async (member: any) => {
@@ -308,6 +313,7 @@ async function containerImpact(
         kind: member.kind || "unknown",
         id: member.id,
         callerCount: callersResult.nodes.length,
+        ...rowLocation(member),
       };
     } catch {
       diagnostics.push(`Failed to expand callers for member ${member.id}`);
@@ -316,6 +322,7 @@ async function containerImpact(
         kind: member.kind || "unknown",
         id: member.id,
         callerCount: 0,
+        ...rowLocation(member),
       };
     }
   });
@@ -362,39 +369,35 @@ async function containerImpact(
   const risk = inferRiskSemantics(riskFacts);
 
   if (isJson) {
-    console.log(
-      JSON.stringify(
-        stripNulls({
-          resolvedTarget: { kind: target.kind, name: target.name },
-          depth,
-          systemPath: systemPathMapped.length > 0 ? systemPathMapped : undefined,
-          riskSummary: risk.riskSummary,
-          riskLevel: risk.riskLevel,
-          riskCategory: risk.category,
-          atRiskBehavior: risk.behaviorAtRisk,
-          nextStep: risk.nextStep || undefined,
-          flowPropagation: risk.flowPropagation || undefined,
-          summary: {
-            members: members.length,
-            directImporters: directImporters.length,
-            directDependents: directDependents.length,
-            memberLevelCallers: totalMemberCallers,
-          },
-          topImpactedMembers: topMembers.length > 0 ? topMembers : undefined,
-          propagationBuckets: propagationBuckets.length > 0 ? propagationBuckets.map((b) => ({
-            region: b.region.name,
-            regionKind: b.region.kind,
-            count: b.members.length,
-            members: b.members.slice(0, 5).map((m) => ({ name: m.name, kind: m.kind })),
-          })) : undefined,
-          decisions: decisions.length > 0 ? decisions : undefined,
-          tasks: tasks.length > 0 ? tasks : undefined,
-          bugs: bugs.length > 0 ? bugs : undefined,
-          diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
-        }),
-        null,
-        2
-      )
+    printJson(
+      stripNulls({
+        resolvedTarget: { kind: target.kind, name: target.name },
+        depth,
+        systemPath: systemPathMapped.length > 0 ? systemPathMapped : undefined,
+        riskSummary: risk.riskSummary,
+        riskLevel: risk.riskLevel,
+        riskCategory: risk.category,
+        atRiskBehavior: risk.behaviorAtRisk,
+        nextStep: risk.nextStep || undefined,
+        flowPropagation: risk.flowPropagation || undefined,
+        summary: {
+          members: members.length,
+          directImporters: directImporters.length,
+          directDependents: directDependents.length,
+          memberLevelCallers: totalMemberCallers,
+        },
+        topImpactedMembers: topMembers.length > 0 ? topMembers : undefined,
+        propagationBuckets: propagationBuckets.length > 0 ? propagationBuckets.map((b) => ({
+          region: b.region.name,
+          regionKind: b.region.kind,
+          count: b.members.length,
+          members: b.members.slice(0, 5).map((m) => ({ name: m.name, kind: m.kind })),
+        })) : undefined,
+        decisions: decisions.length > 0 ? decisions : undefined,
+        tasks: tasks.length > 0 ? tasks : undefined,
+        bugs: bugs.length > 0 ? bugs : undefined,
+        diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
+      }),
     );
   } else if (format === "llm") {
     const lines = [
@@ -406,7 +409,12 @@ async function containerImpact(
         ["member_callers", totalMemberCallers],
       ]),
       ...impactPropagationLlm(propagationBuckets, risk.flowPropagation),
-      ...topMembers.map((m) => llmLine("member", [["name", m.name], ["kind", m.kind], ["callers", m.callerCount]])),
+      // The rows `ix impact` exists to produce: the members a change reaches.
+      // They named a symbol and left the caller to find it.
+      ...topMembers.map((m) => llmLine("member", [
+        ["name", m.name], ["kind", m.kind], ["callers", m.callerCount],
+        ["path", m.path], ["lines", lineSpan(m)],
+      ])),
       ...impactTailLlm(risk, decisions, tasks, bugs),
     ];
     for (const line of lines) console.log(line);
@@ -502,43 +510,39 @@ async function leafImpact(
   const risk = inferRiskSemantics(riskFacts);
 
   if (isJson) {
-    console.log(
-      JSON.stringify(
-        stripNulls({
-          resolvedTarget: { kind: target.kind, name: target.name },
-          depth,
-          systemPath: systemPathMapped.length > 0 ? systemPathMapped : undefined,
-          riskSummary: risk.riskSummary,
-          riskLevel: risk.riskLevel,
-          riskCategory: risk.category,
-          atRiskBehavior: risk.behaviorAtRisk,
-          nextStep: risk.nextStep || undefined,
-          flowPropagation: risk.flowPropagation || undefined,
-          summary: {
-            callers: callersResult.nodes.length,
-            callees: calleesResult.nodes.length,
-          },
-          callerList: callersResult.nodes.length > 0 ? callersResult.nodes.map((n: any) => ({
-            kind: n.kind,
-            name: n.name || n.attrs?.name || "(unnamed)",
-          })) : undefined,
-          calleeList: calleesResult.nodes.length > 0 ? calleesResult.nodes.map((n: any) => ({
-            kind: n.kind,
-            name: n.name || n.attrs?.name || "(unnamed)",
-          })) : undefined,
-          propagationBuckets: propagationBuckets.length > 0 ? propagationBuckets.map((b) => ({
-            region: b.region.name,
-            regionKind: b.region.kind,
-            count: b.members.length,
-            members: b.members.slice(0, 5).map((m) => ({ name: m.name, kind: m.kind })),
-          })) : undefined,
-          decisions: decisions.length > 0 ? decisions : undefined,
-          tasks: tasks.length > 0 ? tasks : undefined,
-          bugs: bugs.length > 0 ? bugs : undefined,
-        }),
-        null,
-        2
-      )
+    printJson(
+      stripNulls({
+        resolvedTarget: { kind: target.kind, name: target.name },
+        depth,
+        systemPath: systemPathMapped.length > 0 ? systemPathMapped : undefined,
+        riskSummary: risk.riskSummary,
+        riskLevel: risk.riskLevel,
+        riskCategory: risk.category,
+        atRiskBehavior: risk.behaviorAtRisk,
+        nextStep: risk.nextStep || undefined,
+        flowPropagation: risk.flowPropagation || undefined,
+        summary: {
+          callers: callersResult.nodes.length,
+          callees: calleesResult.nodes.length,
+        },
+        callerList: callersResult.nodes.length > 0 ? callersResult.nodes.map((n: any) => ({
+          kind: n.kind,
+          name: n.name || n.attrs?.name || "(unnamed)",
+        })) : undefined,
+        calleeList: calleesResult.nodes.length > 0 ? calleesResult.nodes.map((n: any) => ({
+          kind: n.kind,
+          name: n.name || n.attrs?.name || "(unnamed)",
+        })) : undefined,
+        propagationBuckets: propagationBuckets.length > 0 ? propagationBuckets.map((b) => ({
+          region: b.region.name,
+          regionKind: b.region.kind,
+          count: b.members.length,
+          members: b.members.slice(0, 5).map((m) => ({ name: m.name, kind: m.kind })),
+        })) : undefined,
+        decisions: decisions.length > 0 ? decisions : undefined,
+        tasks: tasks.length > 0 ? tasks : undefined,
+        bugs: bugs.length > 0 ? bugs : undefined,
+      }),
     );
   } else if (format === "llm") {
     const toRef = (kind: string) => (n: any) =>

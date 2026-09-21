@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Copyright 2026 Ix Infrastructure Inc.
+
 // check-links.mjs — verify every reference in the repo's markdown:
 //   * absolute URLs resolve (fail on 404/410),
 //   * relative links point at a tracked file (fail when the file is renamed

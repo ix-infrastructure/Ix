@@ -1,9 +1,11 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveFileOrReport, printResolved } from "../resolve.js";
-import { relativePath } from "../format.js";
+import { relativePath, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
 import { parsePickOption } from "../options.js";
 
@@ -54,7 +56,7 @@ export function registerHistoryCommand(program: Command): void {
 
       if (opts.format === "json") {
         const patches = allPatches;
-        console.log(JSON.stringify({
+        printJson({
           resolvedTarget: { kind: resolved.kind, name: resolved.name, path: relativePath(resolved.path) },
           patches: patches.map((p: any) => ({
             rev: p.rev ?? p.data?.rev,
@@ -62,7 +64,7 @@ export function registerHistoryCommand(program: Command): void {
             intent: (p.data?.intent ?? p.intent) || undefined,
             source: relativePath(p.data?.source?.uri) ?? undefined,
           })),
-        }, null, 2));
+        });
       } else {
         const patches = Array.isArray(result) ? result : (result as any)?.patches ?? [];
         if (patches.length === 0) {

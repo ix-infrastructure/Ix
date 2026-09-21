@@ -1,8 +1,11 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import type { Command } from "commander";
 import chalk from "chalk";
 
 import { llmLine, type LlmValue } from "../llm.js";
 import type { DoctorReport, HostReport, InstallReport, Outcome } from "../../mcp/install.js";
+import { printJson } from "../format.js";
 
 /** Symbol and colour per outcome, shared by install and doctor. */
 const OUTCOME_STYLE: Record<Outcome, { mark: string; paint: (text: string) => string }> = {
@@ -47,7 +50,7 @@ function hostFields(host: HostReport): Array<[string, LlmValue]> {
 
 function renderInstall(report: InstallReport, format: string, dryRun: boolean): void {
   if (format === "json") {
-    console.log(JSON.stringify(report, null, 2));
+    printJson(report);
     return;
   }
   if (format === "llm") {
@@ -73,7 +76,7 @@ function renderInstall(report: InstallReport, format: string, dryRun: boolean): 
 
 function renderDoctor(report: DoctorReport, format: string): void {
   if (format === "json") {
-    console.log(JSON.stringify(report, null, 2));
+    printJson(report);
     return;
   }
   if (format === "llm") {
@@ -99,10 +102,15 @@ export function registerMcpCommand(program: Command): void {
   const mcp = program
     .command("mcp")
     .description("Serve Ix tools over the Model Context Protocol (stdio)")
-    .action(async () => {
+    .option(
+      "--tools <set>",
+      "Which catalog to advertise (core|all). core is ten tools; all is every one",
+      "core",
+    )
+    .action(async (opts: { tools: string }) => {
       // Keep the SDK off the startup path for ordinary CLI commands.
       const { startIxMcpServer } = await import("../../mcp/server.js");
-      await startIxMcpServer(program.version());
+      await startIxMcpServer(program.version(), opts.tools === "all" ? "all" : "core");
     });
 
   mcp

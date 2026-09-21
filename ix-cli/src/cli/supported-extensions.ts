@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 // Single source of truth for which file extensions ix discovers and ingests.
 //
 // This MUST stay in sync with core-ingestion's EXT_MAP (languages.ts): every

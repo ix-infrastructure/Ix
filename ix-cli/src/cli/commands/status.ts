@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import type { Command } from "commander";
 import { renderSection, renderKeyValue, renderWarning, renderNote, renderSuccess } from "../ui.js";
 import { IxClient } from "../../client/api.js";
@@ -5,6 +7,8 @@ import { readBackendHealth } from "./upgrade.js";
 import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
 import { detectStaleFiles } from "../stale.js";
 import { llmError, llmLine, printLlmLines } from "../llm.js";
+import { backendUnreachableError, isBackendUnreachable } from "../errors.js";
+import { printJson } from "../format.js";
 
 interface StatusStaleInfo {
   graphCompleted: boolean;
@@ -79,7 +83,7 @@ export function registerStatusCommand(program: Command): void {
             staleFiles: staleInfo?.staleFiles ?? 0,
             sampleChangedFiles: staleInfo?.sampleChangedFiles ?? [],
           };
-          console.log(JSON.stringify(result, null, 2));
+          printJson(result);
         } else {
           renderSection("Status");
           renderKeyValue("Ix Memory", health.status);
@@ -112,13 +116,20 @@ export function registerStatusCommand(program: Command): void {
           }
         }
       } catch (err) {
+        // Only a transport failure is "not reachable". Anything else — a 500
+        // from a backend that is up, a malformed response — went out under
+        // this message too, which sent people to restart a container that was
+        // running fine. Those now reach the shared boundary, which names them.
+        if (!isBackendUnreachable(err)) throw err;
         // The spec's uniform error record, so a consumer that pipes `--format
         // llm` parses the failure the same way it parses a result rather than
         // hitting an unparseable human sentence. Exit code is unchanged.
+        const unreachable = backendUnreachableError(getEndpoint());
         if (opts.format === "llm") {
-          console.log(llmError("backend_unreachable", `Ix backend not reachable at ${getEndpoint()}`));
+          console.log(llmError(unreachable.error, unreachable.message, [["hint", unreachable.next ?? null]]));
         } else {
-          console.error(`Ix backend not reachable at ${getEndpoint()}`);
+          console.error(unreachable.message);
+          if (unreachable.next) console.error(unreachable.next);
         }
         process.exit(1);
       }

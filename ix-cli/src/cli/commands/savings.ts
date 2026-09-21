@@ -1,8 +1,11 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { llmLine, printLlmLines } from "../llm.js";
+import { printJson } from "../format.js";
 
 interface CommandBreakdown {
   count: number;
@@ -153,7 +156,7 @@ export function registerSavingsCommand(program: Command): void {
 
     if (opts.format === "json") {
       const pricing = PRICING[opts.model] ?? PRICING.opus;
-      console.log(JSON.stringify({
+      printJson({
         ...result,
         computed: {
           session: {
@@ -167,7 +170,7 @@ export function registerSavingsCommand(program: Command): void {
           pricingModel: pricing.label,
           waterRateMlPer1kTokens: WATER_ML_PER_1K_TOKENS,
         },
-      }, null, 2));
+      });
       return;
     }
 

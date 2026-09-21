@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 /**
  * diff-mode-conflict.test.ts — Mutation-verified tests for diff.ts
  *

@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
@@ -5,6 +7,7 @@ import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { llmLine, llmError, type LlmValue } from "../llm.js";
+import { printJson } from "../format.js";
 
 interface SmellCandidate {
   file_id: string;
@@ -75,7 +78,7 @@ Examples:
         }
         if (opts.format === "json") {
           const smells = result.smells ?? [];
-          console.log(JSON.stringify({
+          printJson({
             count: smells.length,
             inference_version: "smell_v1",
             smells: smells.map((s: any) => ({
@@ -83,7 +86,7 @@ Examples:
               entity_id: s.entity_id?.slice(0, 12),
               confidence: s.confidence,
             })),
-          }, null, 2));
+          });
           return;
         }
         const smells = result.smells ?? [];
@@ -138,7 +141,7 @@ Examples:
             signals: c.signals,
           })),
         };
-        console.log(JSON.stringify(compact, null, 2));
+        printJson(compact);
         return;
       }
 

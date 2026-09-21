@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Command } from "commander";
@@ -7,8 +9,8 @@ import { absoluteFromSourceUri, getEndpoint, isReadablePath, readableRoots, reso
 import { resolveEntityFull, activeReadScope, ensureReadScope } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { isFileStale } from "../stale.js";
-import { relativePath } from "../format.js";
-import { llmError, llmLine, printLlmLines } from "../llm.js";
+import { relativePath, printJson } from "../format.js";
+import { llmError, llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { reportUnresolvedTarget } from "../ui.js";
 
@@ -22,6 +24,12 @@ export interface ReadResult {
   kind?: string;
   stale?: boolean;
   warning?: string;
+  /** Set when the default line cap stopped the read short of the file. */
+  truncated?: boolean;
+  /** How many lines the file has, when the read was capped. */
+  totalLines?: number;
+  /** The next page, ready to run: `path:401-800`. */
+  next?: string;
 }
 
 interface AmbiguityResult {
@@ -51,7 +59,7 @@ function guardReadable(absPath: string, explicitRoot: string | undefined, what: 
   if (isReadablePath(absPath, explicitRoot)) return true;
   const message = `Refusing to read ${what} outside the workspace: ${absPath}`;
   if (format === "json") {
-    console.log(JSON.stringify({ error: "path_outside_workspace", message }, null, 2));
+    printJson({ error: "path_outside_workspace", message });
   } else if (format === "llm") {
     console.log(llmError("path_outside_workspace", message));
   } else {
@@ -66,7 +74,7 @@ function guardReadable(absPath: string, explicitRoot: string | undefined, what: 
 function reportInvalidLineRange(target: string, format: string): void {
   const message = `Invalid line range in "${target}". Line numbers must start at 1 and the end must not precede the start.`;
   if (format === "json") {
-    console.log(JSON.stringify({ error: "invalid_line_range", message }, null, 2));
+    printJson({ error: "invalid_line_range", message });
   } else if (format === "llm") {
     console.log(llmError("invalid_line_range", message));
   } else {
@@ -75,13 +83,85 @@ function reportInvalidLineRange(target: string, format: string): void {
   process.exitCode = 1;
 }
 
-function readFileRange(filePath: string, start?: number, end?: number): { content: string; lineStart: number; lineEnd: number } {
+/**
+ * How much of a file a caller gets without asking for more.
+ *
+ * `ix read <file>` had no bound at all, and a file is the one target whose size
+ * the caller cannot see before asking: recorded reads ran 20,000 to 53,000
+ * tokens, and one benchmark run read the same file in eleven slices because the
+ * first read arrived from the wrong anchor and cost too much to repeat.
+ *
+ * 400 lines is roughly 4-6k tokens of TypeScript — enough to hold a whole
+ * small module, and small enough that a wrong guess is cheap to abandon. A
+ * range the caller typed is never capped: they said what they wanted.
+ */
+const READ_LINE_CAP = 400;
+
+function readFileRange(
+  filePath: string,
+  start?: number,
+  end?: number,
+  cap?: number,
+): { content: string; lineStart: number; lineEnd: number; truncated?: boolean; totalLines?: number } {
   const raw = fs.readFileSync(filePath, "utf-8");
   const lines = raw.split("\n");
   const lineStart = start ?? 1;
-  const lineEnd = end ?? lines.length;
-  const content = lines.slice(lineStart - 1, lineEnd).join("\n");
-  return { content, lineStart, lineEnd };
+  const requestedEnd = end ?? lines.length;
+  const capped = cap !== undefined && end === undefined && requestedEnd - lineStart + 1 > cap
+    ? lineStart + cap - 1
+    : requestedEnd;
+  const content = lines.slice(lineStart - 1, capped).join("\n");
+  if (capped === requestedEnd) return { content, lineStart, lineEnd: capped };
+  return { content, lineStart, lineEnd: capped, truncated: true, totalLines: lines.length };
+}
+
+/**
+ * The shortest path that still names this file from where the caller stands.
+ *
+ * `relativePath` is a prefix match against `process.cwd()`, which misses in two
+ * ordinary cases: a cwd and a target that disagree about a symlink (macOS
+ * resolves `/var` to `/private/var`, and any repo under a `~/code` link does
+ * the same), and Windows, where the stored separator is `\` and the match is
+ * written for `/`. A `next=` that comes back absolute still works when pasted,
+ * but it is the token cost the cursor exists to avoid.
+ *
+ * Falls back to the absolute path rather than to `..` — a cursor pointing out
+ * of the tree is worse than a long one.
+ */
+function readablePath(filePath: string): string {
+  const relative = relativePath(filePath);
+  if (relative && relative !== filePath) return relative;
+  try {
+    const fromCwd = path.relative(fs.realpathSync(process.cwd()), fs.realpathSync(filePath));
+    if (fromCwd && !fromCwd.startsWith("..") && !path.isAbsolute(fromCwd)) {
+      return fromCwd.split(path.sep).join("/");
+    }
+  } catch {
+    // An unreadable cwd or a file deleted under us: the absolute path stands.
+  }
+  return filePath;
+}
+
+/** `src/a.ts:401-800`, or nothing when the cap landed on the last line. */
+function nextPage(filePath: string, lineEnd: number, totalLines: number): string | undefined {
+  if (lineEnd >= totalLines) return undefined;
+  const from = lineEnd + 1;
+  const to = Math.min(totalLines, lineEnd + READ_LINE_CAP);
+  return `${readablePath(filePath)}:${from}-${to}`;
+}
+
+/** Fold a capped read's cursor into the result the renderers see. */
+function withCursor(
+  result: ReadResult,
+  capped: { truncated?: boolean; totalLines?: number },
+): ReadResult {
+  if (!capped.truncated || capped.totalLines === undefined) return result;
+  return {
+    ...result,
+    truncated: true,
+    totalLines: capped.totalLines,
+    next: nextPage(result.path, result.lineEnd, capped.totalLines),
+  };
 }
 
 /**
@@ -108,6 +188,10 @@ export function renderReadLlm(result: ReadResult): string[] {
       ["symbol", result.symbol],
       ["kind", result.kind],
       ["stale", result.stale ? "true" : null],
+      // The three fields that make a capped read recoverable in one call.
+      ["truncated", result.truncated ? "true" : null],
+      ["total_lines", result.totalLines !== undefined ? String(result.totalLines) : null],
+      ["next", result.next],
     ]),
     llmLine("content", [["lines", String(contentLines.length)]]),
     ...contentLines,
@@ -130,7 +214,7 @@ export function renderReadAmbiguityLlm(result: AmbiguityResult, target: string):
       ["name", c.name],
       ["kind", c.kind],
       ["path", c.path ? relativePath(c.path) ?? c.path : undefined],
-      ["id", c.id],
+      ["id", llmShortId(c.id)],
     ]));
   });
   lines.push(llmLine("hint", [[
@@ -154,7 +238,7 @@ export function outputResult(result: ReadResult, format: string): void {
     printLlmLines(renderReadLlm(result));
   } else if (format === "json") {
     const out = { ...result, path: relativePath(result.path) ?? result.path };
-    console.log(JSON.stringify(out, null, 2));
+    printJson(out);
   } else {
     if (result.stale) stderr(chalk.yellow("⚠ File has changed since last ingest. Run ix map to update.\n"));
     if (result.targetType === "symbol" || result.targetType === "filename-match") {
@@ -164,6 +248,13 @@ export function outputResult(result: ReadResult, format: string): void {
     for (let i = 0; i < lines.length; i++) {
       console.log(`${chalk.dim(String(result.lineStart + i).padStart(4))} ${lines[i]}`);
     }
+    if (result.truncated) {
+      stderr(chalk.dim(
+        `\n  ${result.lineEnd} of ${result.totalLines} lines`
+        + (result.next ? ` — next: ix read ${result.next}` : "")
+        + ", or --all for the whole file",
+      ));
+    }
   }
 }
 
@@ -171,7 +262,7 @@ function outputAmbiguity(result: AmbiguityResult, target: string, format: string
   if (format === "llm") {
     printLlmLines(renderReadAmbiguityLlm(result, target));
   } else if (format === "json") {
-    console.log(JSON.stringify(result, null, 2));
+    printJson(result);
   } else {
     const label = result.targetType === "ambiguous-file" ? "file" : "symbol";
     stderr(`Ambiguous ${label} "${target}":`);
@@ -199,6 +290,7 @@ export function registerReadCommand(program: Command): void {
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--root <dir>", "Workspace root directory")
+    .option("--all", `Read the whole file, past the ${READ_LINE_CAP}-line default cap`)
     .addHelpText("after", `\nResolution order:
   1. Exact file path          ix read src/main.ts
   2. File path with line range ix read src/main.ts:10-50
@@ -213,7 +305,10 @@ Examples:
   ix read IngestionService
   ix read ingestFile --kind method
   ix read verify_token --path auth`)
-    .action(async (target: string, opts: { format: string; kind?: string; path?: string; pick?: number; root?: string }) => {
+    .action(async (target: string, opts: { format: string; kind?: string; path?: string; pick?: number; root?: string; all?: boolean }) => {
+      // A range the caller typed is theirs; a whole file is capped unless they
+      // say otherwise.
+      const cap = opts.all ? undefined : READ_LINE_CAP;
       const root = resolveWorkspaceRoot(opts.root);
       const client = new IxClient(getEndpoint());
 
@@ -232,14 +327,14 @@ Examples:
       if (fs.existsSync(resolvedPath) && fs.statSync(resolvedPath).isFile()) {
         if (!guardReadable(resolvedPath, opts.root, "file", opts.format)) return;
         const stale = checkStale(resolvedPath);
-        const { content, lineStart, lineEnd } = readFileRange(resolvedPath, rangeStart, rangeEnd);
-        const result: ReadResult = {
+        const capped = readFileRange(resolvedPath, rangeStart, rangeEnd, cap);
+        const result: ReadResult = withCursor({
           targetType: lineRangeMatch ? "file-range" : "file",
           path: resolvedPath,
-          lineStart,
-          lineEnd,
-          content,
-        };
+          lineStart: capped.lineStart,
+          lineEnd: capped.lineEnd,
+          content: capped.content,
+        }, capped);
         if (stale) { result.stale = true; result.warning = "Results may be stale; file has changed since last ingest."; }
         outputResult(result, opts.format);
         return;
@@ -248,6 +343,16 @@ Examples:
       // --- Step 3: Try unique filename match (always, not just file-like targets) ---
       // read should prefer resolving to a real file before trying symbol match.
       // e.g. "ix read Node" should find Node.scala before trying symbol resolution.
+      //
+      // C-3 also asked for the reverse on an extension-less target — symbol
+      // before filename, because `ix read config` means the symbol far more
+      // often than the file. It is NOT done here: the only way to know a
+      // symbol exists is to ask, and `read-local-first.test.ts` guarantees
+      // zero round trips for exactly this case, after a measured 60-80s
+      // incident. The line cap below removes the cost that motivated the flip
+      // (a whole file is now 400 lines with a cursor, not 20-53k tokens), so
+      // the remaining question is precision, and it is worth one explicit
+      // decision rather than a quiet change here.
       {
         const filenameMatches = await tryFilenameMatch(client, rawTarget, root);
         if (filenameMatches.length === 1) {
@@ -257,14 +362,14 @@ Examples:
             // guard is what stops a backend from naming a file off the disk.
             if (!guardReadable(matchPath, opts.root, "graph file match", opts.format)) return;
             const stale = checkStale(matchPath);
-            const { content, lineStart, lineEnd } = readFileRange(matchPath, rangeStart, rangeEnd);
-            const result: ReadResult = {
+            const capped = readFileRange(matchPath, rangeStart, rangeEnd, cap);
+            const result: ReadResult = withCursor({
               targetType: "filename-match",
               path: matchPath,
-              lineStart,
-              lineEnd,
-              content,
-            };
+              lineStart: capped.lineStart,
+              lineEnd: capped.lineEnd,
+              content: capped.content,
+            }, capped);
             if (stale) { result.stale = true; result.warning = "Results may be stale; file has changed since last ingest."; }
             outputResult(result, opts.format);
             return;
@@ -282,7 +387,7 @@ Examples:
       }
 
       // --- Step 4: Try unique symbol match ---
-      const symbolResult = await trySymbolMatch(client, rawTarget, { kind: opts.kind, path: opts.path, pick: opts.pick });
+      const symbolResult = await trySymbolMatch(client, rawTarget, { kind: opts.kind, path: opts.path, pick: opts.pick, format: opts.format });
       if (symbolResult.type === "resolved") {
         const { node, sourceUri } = symbolResult;
         // sourceUri coming from the graph is workspace-relative under the
@@ -531,9 +636,9 @@ type SymbolResult =
 async function trySymbolMatch(
   client: IxClient,
   symbol: string,
-  opts: { kind?: string; path?: string; pick?: number }
+  opts: { kind?: string; path?: string; pick?: number; format?: string }
 ): Promise<SymbolResult> {
-  const preferredKinds = ["file", "class", "object", "trait", "interface", "module", "function", "method"];
+  const preferredKinds = ["file", "class", "object", "trait", "interface", "module", "function", "method", "constant"];
   const full = await resolveEntityFull(client, symbol, preferredKinds, opts);
 
   if (full.resolved) {

@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 /**
  * ui.ts — Ix CLI brand presentation layer.
  *
@@ -7,8 +9,10 @@
 
 import chalk from "chalk";
 
-import { llmError } from "./llm.js";
-import type { AmbiguousResult, ResolveResult } from "./resolve.js";
+import { llmError, llmLine } from "./llm.js";
+import { printJson, relativePath } from "./format.js";
+import { isQuiet } from "./output-shape.js";
+import type { AmbiguousResult, ResolveResult, Suggestion } from "./resolve.js";
 
 // ── Brand palette ─────────────────────────────────────────────────────────────
 //
@@ -24,6 +28,7 @@ import type { AmbiguousResult, ResolveResult } from "./resolve.js";
 
 /** Print a bold section title preceded by a blank line. */
 export function renderSection(title: string): void {
+  if (isQuiet()) return;
   console.log(chalk.bold(`\n${title}`));
 }
 
@@ -63,8 +68,15 @@ export function renderBreadcrumb(
 
 // ── Alerts ────────────────────────────────────────────────────────────────────
 
-/** Advisory hint, stale data, or informational note. */
+/**
+ * Advisory hint, stale data, or informational note.
+ *
+ * Silenced by `--quiet`. A warning is not: `renderWarning` says something is
+ * wrong with the answer, and a caller asking for less output is not asking to
+ * be told less about that.
+ */
 export function renderNote(text: string): void {
+  if (isQuiet()) return;
   console.log(`  ${chalk.dim("Note")}  ${chalk.dim(text)}`);
 }
 
@@ -103,6 +115,7 @@ export function renderError(text: string): void {
 
 /** Print the "Resolved: kind name" header shown at the top of most command text output. */
 export function renderResolvedHeader(kind: string, name: string): void {
+  if (isQuiet()) return;
   console.log(`${chalk.bold("Resolved:")} ${chalk.cyan(kind)} ${chalk.bold(name)}`);
 }
 
@@ -158,14 +171,56 @@ export function unresolvedTargetRecord(target: string | string[]): { error: stri
   };
 }
 
-export function reportUnresolvedTarget(target: string | string[], format?: string): void {
+export function reportUnresolvedTarget(
+  target: string | string[],
+  format?: string,
+  suggestions?: Suggestion[],
+): void {
   const message = unresolvedTargetMessage(target);
+  const near = suggestions ?? [];
   if (format === "json") {
-    console.log(JSON.stringify(unresolvedTargetRecord(target), null, 2));
+    printJson({
+      ...unresolvedTargetRecord(target),
+      ...(near.length ? { suggestions: near } : {}),
+    });
   } else if (format === "llm") {
-    console.log(llmError("unresolved_target", message));
+    const lines = [llmError("unresolved_target", message), ...candidateLines(near, "suggestion")];
+    if (near.length) {
+      lines.push(llmLine("hint", [["text", "Re-run with one of these names, or narrow with --path."]]));
+    }
+    console.log(lines.join("\n"));
+  } else if (near.length) {
+    // The resolver already wrote the miss itself for a person; this adds the
+    // part that makes it actionable.
+    console.error(chalk.dim("Did you mean:"));
+    for (const s of near) {
+      console.error(`  ${chalk.cyan((s.kind || "").padEnd(10))} ${s.name}${s.path ? chalk.dim(` in ${s.path}`) : ""}`);
+    }
   }
   process.exitCode = 1;
+}
+
+/**
+ * Candidate records for the llm format.
+ *
+ * `read` has emitted name, kind, path and id per candidate since its own
+ * renderer landed; everything else emitted `candidates=1:config.ts,2:config.ts,
+ * 3:config.ts` -- three entries that differ in nothing an agent can choose by,
+ * from the only field that was included. One call has to be enough to pick.
+ */
+function candidateLines(
+  candidates: ReadonlyArray<{ id?: string; name: string; kind?: string; path?: string }>,
+  record: "candidate" | "suggestion",
+): string[] {
+  return candidates.map((candidate, index) => llmLine(record, [
+    ["n", String(index + 1)],
+    ["name", candidate.name],
+    ["kind", candidate.kind],
+    ["path", candidate.path ? relativePath(candidate.path) ?? candidate.path : undefined],
+    // Short form: the full uuid is four times the tokens and nothing here needs
+    // it -- `--pick <n>` is the way to choose, and a prefix resolves an entity.
+    ["id", candidate.id ? candidate.id.slice(0, 8) : undefined],
+  ]));
 }
 
 export function reportAmbiguousTarget(
@@ -176,18 +231,25 @@ export function reportAmbiguousTarget(
 ): void {
   const message = `Ambiguous symbol "${target}".`;
   if (format === "json") {
-    console.log(JSON.stringify({
+    printJson({
       error: "ambiguous_target",
       message,
       candidates: result.candidates,
       diagnostics: result.diagnostics ?? [],
-    }, null, 2));
+    });
     return;
   }
   if (format === "llm") {
-    console.log(llmError("ambiguous_target", message, [
-      ["candidates", result.candidates.map((candidate, index) => `${index + 1}:${candidate.name}`).join(",")],
-    ]));
+    const hints = ["--pick <n>"];
+    if (!opts?.kind) hints.push("--kind");
+    if (!opts?.path) hints.push("--path");
+    const lines = [
+      llmError("ambiguous_target", message, [["count", String(result.candidates.length)]]),
+      ...candidateLines(result.candidates, "candidate"),
+      llmLine("hint", [["text", `Use ${hints.join(" or ")} to disambiguate.`]]),
+      ...(result.diagnostics ?? []).map((d) => llmLine("diagnostic", [["code", d.code], ["message", d.message]])),
+    ];
+    console.log(lines.join("\n"));
     return;
   }
 
@@ -212,6 +274,6 @@ export function reportResolutionFailure(
   opts?: { kind?: string; path?: string },
 ): void {
   if (result.ambiguous) reportAmbiguousTarget(target, result.result, format, opts);
-  else reportUnresolvedTarget(target, format);
+  else reportUnresolvedTarget(target, format, result.suggestions);
   process.exitCode = 1;
 }

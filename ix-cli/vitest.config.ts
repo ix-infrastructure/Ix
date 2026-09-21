@@ -1,7 +1,11 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import { configDefaults, defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    // Strips an ambient IX_HOME before each file; see the comment in the file.
+    setupFiles: ["./vitest.setup.ts"],
     // vitest 4 dropped `dist/` from its built-in exclude list. Without this the
     // compiled `dist/**/*.test.js` copies emitted by `npm run build` get
     // collected and fail (they read sibling `.ts` sources that only exist under

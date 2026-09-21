@@ -1,20 +1,25 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
-import { relativePath, stripNulls } from "../format.js";
-import { llmLine } from "../llm.js";
+import { lineSpan, relativePath, rowLocation, stripNulls, printJson } from "../format.js";
+import { llmLine, llmShortId } from "../llm.js";
 
 /** Render entity details as llm records: a header line then one `edge` row per edge. */
 export function renderEntityLlm(result: any): string[] {
   const node = result.node;
-  const path = relativePath(node.provenance?.sourceUri ?? node.provenance?.source_uri);
+  const loc = rowLocation(node);
   const edges = result.edges ?? [];
   const lines = [llmLine("entity", [
-    ["id", node.id],
+    ["id", llmShortId(node.id)],
     ["kind", node.kind],
     ["name", node.name || node.attrs?.name],
-    ["path", path],
+    ["path", loc.path],
+    // `ix entity <id>` was the one command that answered with a file and left
+    // the caller to find the entity inside it.
+    ["lines", lineSpan(loc)],
     ["rev", node.createdRev],
     ["claims", (result.claims ?? []).length || undefined],
     ["edges", edges.length || undefined],
@@ -22,7 +27,7 @@ export function renderEntityLlm(result: any): string[] {
   for (const e of edges) {
     lines.push(llmLine("edge", [
       ["pred", e.predicate],
-      ["dst", typeof e.dst === "string" ? e.dst.slice(0, 8) : e.dst],
+      ["dst", llmShortId(e.dst)],
     ]));
   }
   return lines;
@@ -38,7 +43,7 @@ export function registerEntityCommand(program: Command): void {
       const resolvedId = await client.resolvePrefix(id);
       const result = await client.entity(resolvedId);
       if (opts.format === "json") {
-        console.log(JSON.stringify(compactEntity(result), null, 2));
+        printJson(compactEntity(result));
       } else if (opts.format === "llm") {
         for (const line of renderEntityLlm(result)) console.log(line);
       } else {

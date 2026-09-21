@@ -1,22 +1,96 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+// Copyright 2026 Ix Infrastructure Inc.
+
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import path from "node:path";
 import type { Command } from "commander";
-import { formatTextResults, type TextResult } from "../format.js";
+import { formatTextResults, printJson, sliceRanked, type TextResult } from "../format.js";
 import { isPathInsideResolvedRoot, resolveWorkspaceRoot } from "../config.js";
 import { stderr } from "../stderr.js";
 import { llmError } from "../llm.js";
 
-const execFileAsync = promisify(execFile);
+type RunRipgrep = (args: string[], limit: number) => Promise<{ stdout: string }>;
 
-type RunRipgrep = (args: string[]) => Promise<{ stdout: string }>;
+async function runRipgrep(args: string[], limit: number): Promise<{ stdout: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("rg", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+    const matches: string[] = [];
+    let errorOutput = "";
 
-async function runRipgrep(args: string[]): Promise<{ stdout: string }> {
-  return execFileAsync("rg", args, { maxBuffer: 10 * 1024 * 1024 });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      errorOutput = (errorOutput + chunk).slice(0, 64 * 1024);
+    });
+    lines.on("line", (line: string) => {
+      if (matches.length >= limit) return;
+      try {
+        if (JSON.parse(line).type !== "match") return;
+      } catch {
+        return;
+      }
+      matches.push(line);
+    });
+    child.on("error", reject);
+    child.on("close", (code, signal) => {
+      lines.close();
+      // Drain through exit so errors after the retained matches are not hidden.
+      if (code === 0 || code === 1) {
+        resolve({ stdout: matches.join("\n") });
+      } else {
+        reject(Object.assign(new Error("ripgrep failed"), {
+          code,
+          signal,
+          stderr: errorOutput,
+        }));
+      }
+    });
+  });
 }
 
 export function resolveTextSearchPath(root: string, searchPath: string): string {
   return path.resolve(root, searchPath);
+}
+
+/**
+ * How far past `--limit` the scan looks before ranking.
+ *
+ * ripgrep walks the tree in directory order, so a plain `--limit 20` returns
+ * the first twenty matches it happened to reach — which on this repo means
+ * `docs/` and `README.md` before any code, because `d` and `R` sort early.
+ * Ranking the twenty rows it already cut cannot fix that; the scan has to see
+ * more than it prints. Bounded so a term matching everything is still one
+ * cheap pass.
+ */
+const SCAN_WINDOW_FACTOR = 5;
+const SCAN_WINDOW_MAX = 500;
+
+export function scanWindow(limit: number): number {
+  return Math.min(Math.max(limit * SCAN_WINDOW_FACTOR, limit), SCAN_WINDOW_MAX);
+}
+
+const TEST_PATH = /(^|\/)(tests?|__tests__|fixtures?|testdata|spec)(\/|$)|\.(test|spec)\./i;
+const PROSE_FILE = /\.(md|markdown|mdx|rst|txt|adoc)$/i;
+const GENERATED_FILE = /(^|\/)(package-lock\.json|[^/]*\.lock|[^/]*\.sum)$/i;
+
+/**
+ * Code first, then tests and fixtures, then prose and lockfiles.
+ *
+ * `ix mcp` describes this command's output as "ranked hits" and it was not
+ * ranked at all — it was ripgrep's traversal order. A README mentioning a
+ * symbol is the weakest evidence of the three: it cannot be called, read as a
+ * definition, or edited with any confidence. A test at least shows the symbol
+ * in use.
+ *
+ * Only these three bands, and the sort is stable, so within a band ripgrep's
+ * order survives. The alternative — scoring by line content — guesses at what
+ * the caller meant from a single grep term.
+ */
+export function textResultPriority(filePath: string): number {
+  const normalized = filePath.split(path.sep).join("/");
+  if (PROSE_FILE.test(normalized) || GENERATED_FILE.test(normalized)) return 2;
+  if (TEST_PATH.test(normalized)) return 1;
+  return 0;
 }
 
 export function registerTextCommand(program: Command, executeRipgrep: RunRipgrep = runRipgrep): void {
@@ -36,7 +110,7 @@ export function registerTextCommand(program: Command, executeRipgrep: RunRipgrep
       if (!isPathInsideResolvedRoot(root, searchPath)) {
         const message = `Search path is outside the workspace: ${opts.path}`;
         if (opts.format === "json") {
-          console.log(JSON.stringify({ error: "path_outside_workspace", message }, null, 2));
+          printJson({ error: "path_outside_workspace", message });
         } else if (opts.format === "llm") {
           console.log(llmError("path_outside_workspace", message));
         } else {
@@ -46,8 +120,11 @@ export function registerTextCommand(program: Command, executeRipgrep: RunRipgrep
         return;
       }
       try {
+        const window = scanWindow(limit);
         const rgArgs = [
           "--json",
+          // Per file, deliberately still `--limit`: one file monopolising the
+          // scan window is the failure this is here to avoid.
           "--max-count", String(limit),
         ];
 
@@ -68,7 +145,7 @@ export function registerTextCommand(program: Command, executeRipgrep: RunRipgrep
         // other tool until the timeout and leaves the child process behind.
         rgArgs.push("--", term, searchPath);
 
-        const { stdout } = await executeRipgrep(rgArgs);
+        const { stdout } = await executeRipgrep(rgArgs, window);
 
         const results: TextResult[] = [];
         for (const line of stdout.split("\n")) {
@@ -97,7 +174,10 @@ export function registerTextCommand(program: Command, executeRipgrep: RunRipgrep
           }
         }
 
-        formatTextResults(results.slice(0, limit), opts.format);
+        formatTextResults(
+          sliceRanked(results, limit, (r) => textResultPriority(r.path)),
+          opts.format,
+        );
       } catch (err: any) {
         if (err.code === "ENOENT") {
           stderr("Error: ripgrep (rg) is not installed. Install it: https://github.com/BurntSushi/ripgrep#installation");
@@ -105,7 +185,7 @@ export function registerTextCommand(program: Command, executeRipgrep: RunRipgrep
         }
         // rg exit 1 = no matches; render as empty result set
         if (err.code === 1 || err.status === 1) {
-          formatTextResults([], opts.format);
+          formatTextResults(sliceRanked([] as TextResult[], limit), opts.format);
           return;
         }
         // rg exit 2 = usage/regex error (e.g. literal "\n" in regex,

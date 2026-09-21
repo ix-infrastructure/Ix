@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 // Types for scripts/render-logo.mjs (imported by ix-cli tests; the CLI spawns
 // it as a subprocess, so this file is types-only for the repo's TS surface).
 export declare class LogoError extends Error {

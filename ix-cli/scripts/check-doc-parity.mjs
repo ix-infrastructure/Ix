@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Copyright 2026 Ix Infrastructure Inc.
+
 /**
  * Docs parity gate for the OSS CLI surface — part 2 of #576.
  *

@@ -53,6 +53,15 @@ jobs:
           fi
           echo "checked $checked tracked sources"
           exit $status
+      # Every source file must carry the copyright line. In this job for the
+      # same reason actionlint is: the `main` ruleset requires exactly one
+      # check, `CI Passed`, and `static` is in its `needs` — the same guard in
+      # a workflow of its own would report on the PR and gate nothing.
+      # Toolchain-free like the NUL guard above (stdlib python3 is preinstalled,
+      # and the script shells out only to `git ls-files` / `git check-attr`), so
+      # it belongs here rather than behind the npm install below.
+      - name: Copyright headers on every source file
+        run: python3 .github/scripts/copyright-headers.py
       # ── Workflow wiring ─────────────────────────────────────────────────
       #
       # In this job, not in actions-lint.yml beside zizmor, and that placement

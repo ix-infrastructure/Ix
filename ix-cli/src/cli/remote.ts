@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 // Optional extension point for a remote-ingestion backend.
 //
 // OSS ships no remote implementation. A Pro module (or other extension)

@@ -1,9 +1,11 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import { type Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { clearMapBaseline, getEndpoint } from "../config.js";
-import { roundFloat } from "../format.js";
-import { llmLine, llmError } from "../llm.js";
+import { roundFloat, printJson } from "../format.js";
+import { llmLine, llmError, llmShortId } from "../llm.js";
 import { bootstrap, resolveWorkspaceId } from "../bootstrap.js";
 import { formatFetchError } from "../errors.js";
 import { ingestFiles, type IngestFilesSummary } from "./ingest.js";
@@ -388,7 +390,7 @@ Examples:
       } catch (err: any) {
         const message = err?.message ?? "Invalid map path";
         if (opts.format === "json") {
-          console.log(JSON.stringify({ error: "invalid_map_path", message }, null, 2));
+          printJson({ error: "invalid_map_path", message });
         } else if (opts.format === "llm") {
           console.log(llmError("invalid_map_path", message));
         } else {
@@ -618,7 +620,7 @@ Examples:
       if (minConf > 0) regions = regions.filter(r => r.confidence >= minConf);
 
       if (opts.format === "json") {
-        console.log(JSON.stringify({
+        printJson({
           file_count: result.file_count,
           region_count: regions.length,
           levels: result.levels,
@@ -647,7 +649,7 @@ Examples:
             confidence: roundFloat(r.confidence),
             signals: r.dominant_signals,
           })),
-        }, null, 2));
+        });
         return;
       }
       if (opts.format === "llm") {
@@ -685,12 +687,12 @@ export function renderMapLlm(
   ]));
   for (const r of regions) {
     console.log(llmLine("region", [
-      ["id", r.id],
+      ["id", llmShortId(r.id)],
       ["kind", r.label_kind],
       ["label", r.label],
       ["level", r.level],
       ["files", r.file_count],
-      ["parent", r.parent_id],
+      ["parent", llmShortId(r.parent_id)],
       ["children", r.child_region_count > 0 ? r.child_region_count : undefined],
       ["cohesion", roundFloat(r.cohesion)],
       ["coupling", roundFloat(r.external_coupling)],

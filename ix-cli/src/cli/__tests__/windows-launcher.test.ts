@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import { describe, expect, it } from "vitest";
 import { win32 as winPath } from "node:path";
 import { readFileSync } from "node:fs";

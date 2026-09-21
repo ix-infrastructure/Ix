@@ -1,3 +1,5 @@
+// Copyright 2026 Ix Infrastructure Inc.
+
 import type { EntityFacts } from "./facts.js";
 import type { RoleLabel } from "./role-inference.js";
 import type { HierarchySemantics } from "./hierarchy-semantics.js";
