@@ -17,7 +17,9 @@ afterEach(async () => {
 });
 
 async function connect(runIx: IxRunner, proAvailable = false): Promise<Client> {
-  const server = createIxMcpServer({ version: "test", runIx, proAvailable });
+  const server = createIxMcpServer({ version: "test", runIx, proAvailable, tools: "all" });
+  // `all`, because these assertions are about the whole catalog. The core
+  // default has its own tests in mcp-toolset.test.ts.
   const client = new Client({ name: "ix-mcp-annotations-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 

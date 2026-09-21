@@ -1235,6 +1235,53 @@ function detectPlatform(): string {
  * Check for updates (non-blocking, cached for 1 hour).
  * Call this from other commands to notify users.
  */
+/**
+ * Whether the background update check should run for this invocation.
+ *
+ * The notice it can print is four or five lines on stderr, and it fires on
+ * ordinary commands. That is fine for a person at a terminal and wrong for
+ * everything else: an agent runs `ix <cmd> 2>&1`, so the notice lands at the
+ * top of every tool result it reads, and it led 100% of the `ix` calls in a
+ * recorded benchmark. A script or a CI log gets the same treatment.
+ *
+ * Skipping the check rather than only the print also drops the unawaited
+ * network fetch, which is what delays process exit on an otherwise local
+ * command.
+ *
+ * `--format` is read straight from argv because this runs before commander has
+ * parsed anything; an unparseable or absent value just leaves the check on.
+ */
+export function updateCheckEnabled(
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv,
+  stderrIsTerminal: boolean,
+): boolean {
+  // `upgrade` reports versions itself, and `mcp` speaks JSON-RPC on stdio
+  // where a stray notice is a protocol error.
+  if (argv[0] === "upgrade" || argv[0] === "mcp") return false;
+  if (env.IX_MCP_CHILD === "1") return false;
+  if (isTruthyEnv(env.IX_NO_UPDATE_CHECK)) return false;
+  if (!stderrIsTerminal) return false;
+  const format = requestedFormat(argv);
+  if (format !== undefined && format !== "text") return false;
+  return true;
+}
+
+function isTruthyEnv(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized !== "" && normalized !== "0" && normalized !== "false";
+}
+
+function requestedFormat(argv: readonly string[]): string | undefined {
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--format") return argv[i + 1];
+    if (arg !== undefined && arg.startsWith("--format=")) return arg.slice("--format=".length);
+  }
+  return undefined;
+}
+
 export async function checkForUpdate(): Promise<void> {
   const current = getCurrentVersion();
   const cache = readCache();

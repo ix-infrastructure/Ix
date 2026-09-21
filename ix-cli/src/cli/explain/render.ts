@@ -16,6 +16,13 @@ export interface ExplanationOutput {
   explanation: string;
   context: string;
   usedBy: string | null;
+  /**
+   * True when `usedBy` is the generated list of caller names rather than a
+   * hierarchy-derived narrative. The record renderer emits those names as rows
+   * of their own now, with paths, so repeating them as a sentence is the third
+   * copy of the same three names.
+   */
+  usedByIsNameList: boolean;
   whyItMatters: string;
   notes: string[];
 }
@@ -327,9 +334,9 @@ export function renderExplanation(
   const context = contextLines.join("\n");
 
   // ── Used by (named examples) ──────────────────────────────────────────
-  const usedBy = (isFoundation && meaning!.usageSummary)
-    ? meaning!.usageSummary
-    : renderUsedBy(facts);
+  const usedByNarrative = isFoundation ? meaning!.usageSummary : null;
+  const usedBy = usedByNarrative ?? renderUsedBy(facts);
+  const usedByIsNameList = !usedByNarrative;
 
   // ── Why it matters (role + importance + hierarchy fusion) ─────────────
   const whyItMatters = (isFoundation && meaning!.importanceNarrative)
@@ -341,7 +348,7 @@ export function renderExplanation(
   // ── Notes (clean diagnostics) ─────────────────────────────────────────
   const notes = renderNotes(facts);
 
-  return { explanation, context, usedBy, whyItMatters, notes };
+  return { explanation, context, usedBy, usedByIsNameList, whyItMatters, notes };
 }
 
 // ── Used by ─────────────────────────────────────────────────────────────────

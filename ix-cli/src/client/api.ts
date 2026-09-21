@@ -189,13 +189,15 @@ export class IxClient {
 
   async expand(
     id: string,
-    opts?: { direction?: string; predicates?: string[]; hops?: number }
+    opts?: { direction?: string; predicates?: string[]; hops?: number; limit?: number }
   ): Promise<{ nodes: any[]; edges: any[] }> {
     return this.post("/v1/expand", {
       nodeId: id,
       direction: opts?.direction ?? "both",
       predicates: opts?.predicates,
       hops: opts?.hops ?? 1,
+      // Only when asked for, so every existing caller sends the body it did.
+      ...(opts?.limit !== undefined ? { limit: opts.limit } : {}),
     });
   }
 
