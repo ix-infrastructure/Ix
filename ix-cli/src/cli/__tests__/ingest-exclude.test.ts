@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 
@@ -80,7 +80,13 @@ describe("ingest --exclude and .ixignore", () => {
     }
     const matcher = createIgnoreMatcher(collectExcludePatterns(root, ["playground", "docs/"]));
     const files = tryGitLsFiles(root, true, { matcher, root })!;
-    const rel = files.map((p) => relative(root, p).split(sep).join("/")).sort();
+    // Against the canonical root: `tryGitLsFiles` returns realpath'd paths (the
+    // symlink-containment guard), and on macOS `/var` resolves to
+    // `/private/var`, so relativising against the unresolved root yields a
+    // `../../..` chain. `discoverIngestFilePaths` canonicalises the root for
+    // exactly this reason; the test has to as well.
+    const canonicalRoot = realpathSync(root);
+    const rel = files.map((p) => relative(canonicalRoot, p).split(sep).join("/")).sort();
     expect(rel).toEqual(["src/a.test.ts", "src/a.ts"]);
   });
 
