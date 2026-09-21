@@ -315,18 +315,22 @@ Examples:
           message: "Results may be broad. Use --kind to filter and boost structural matches.",
         });
       }
-      // `unfiltered_search` fires on every search that did not pass `--kind`,
-      // which is most of them, and says the same eighteen words each time
-      // about results the caller can already see. It stays in JSON, where a
-      // program may be keyed to it, and stays out of the record stream an
-      // agent reads.
-      const llmDiagnostics = diagnostics.filter((d) => d.code !== "unfiltered_search");
       if (hiddenTestCount > 0) {
         diagnostics.push({
           code: "test_candidates_hidden",
           message: roleHint(hiddenTestCount)!,
         });
       }
+      // `unfiltered_search` fires on every search that did not pass `--kind`,
+      // which is most of them, and says the same eighteen words each time
+      // about results the caller can already see. It stays in JSON, where a
+      // program may be keyed to it, and stays out of the record stream an
+      // agent reads.
+      //
+      // Taken after every push, not before: `test_candidates_hidden` is the
+      // one diagnostic here that names rows the caller CANNOT see, and it is
+      // added below the `unfiltered_search` push.
+      const llmDiagnostics = diagnostics.filter((d) => d.code !== "unfiltered_search");
 
       if (opts.format === "llm") {
         const rows = trimmed.map((s) => ({
