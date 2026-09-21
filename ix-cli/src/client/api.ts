@@ -1,4 +1,4 @@
-import { isPreConnectionFailure } from "./transport.js";
+import { isPreConnectionFailure, RESET_RECONCILIATION_ERROR } from "./transport.js";
 import type {
   IngestResult,
   StructuredContext,
@@ -483,7 +483,7 @@ export class IxClient {
     catch { throw this.resetReconciliationError("The start acknowledgment was unreadable."); }
     if (!begin || typeof begin !== "object" || !("opId" in begin) ||
         typeof begin.opId !== "string" ||
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(begin.opId)) {
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(begin.opId)) {
       throw this.resetReconciliationError("The start acknowledgment had no valid operation ID.");
     }
     const opId = begin.opId;
@@ -534,9 +534,14 @@ export class IxClient {
     const operation = opId ? ` (operation ${opId})` : "";
     // Carry `cause` so IX_DEBUG=1 can still show the underlying transport
     // failure — swallowing it left no way to tell these outcomes apart.
-    return new Error(`${reason}${operation} Graph or pipeline changes may already have occurred. ` +
+    const error = new Error(
+      `${reason}${operation} Graph or pipeline changes may already have occurred. ` +
       "Do not repeat the reset until an administrator has reconciled its effects and operation records.",
       cause === undefined ? undefined : { cause });
+    // Marked so error rendering does not reclassify this by its cause and
+    // print "start the backend, then retry" over a do-not-repeat warning.
+    error.name = RESET_RECONCILIATION_ERROR;
+    return error;
   }
 
   private async runResetSync(syncPath: string): Promise<{ ok: boolean; message: string }> {

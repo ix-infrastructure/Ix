@@ -19,7 +19,16 @@
 const REPAIR_INVOCATIONS = new Set([
   "upgrade",
   "status",
+  "doctor",
+  "config",
   "docker",
+  // MCP hosts launch the server as the bare command `ix mcp` (see
+  // mcp/hosts.ts, which writes `command: "ix", args: ["mcp"]`). Without this
+  // the server exits before the mcp command is ever reached, so the host sees
+  // only a dead server and `detectPro`'s own handling never runs. Allowing it
+  // does not weaken anything: `detectPro` then declines to advertise the Pro
+  // tools, and `buildProgram` still rejects for any call that would need them.
+  "mcp",
   "help",
   "--help",
   "-h",

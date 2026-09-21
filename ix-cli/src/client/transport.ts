@@ -30,6 +30,17 @@ export const PRE_CONNECTION_CODES = new Set([
  * True when `err` (or any error in its `cause` chain — undici wraps the real
  * code one level down in a `TypeError: fetch failed`) proves nothing was sent.
  */
+/**
+ * `name` on the errors reset raises when an operation's outcome is unknown.
+ *
+ * These carry a `cause` so IX_DEBUG can show the transport failure, which puts
+ * a code like UND_ERR_SOCKET one level below an error whose OWN message is the
+ * thing the user must read. Without this marker `isBackendUnreachable` matches
+ * on that cause and renders "start the backend, then check status" — turning
+ * "do not repeat this reset" into an instruction to retry.
+ */
+export const RESET_RECONCILIATION_ERROR = "ResetReconciliationError";
+
 export function isPreConnectionFailure(err: unknown): boolean {
   for (let e: unknown = err, hops = 0; e && hops < 5; hops++) {
     const code = (e as { code?: unknown }).code;

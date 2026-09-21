@@ -540,8 +540,10 @@ export function detectPro(): Promise<boolean> {
   // resolved answer, never the rejection: `??=` would otherwise memoize a
   // rejected promise and every later caller — `ix mcp doctor`, the server's
   // own startup — would inherit it. Not advertising the tools is the correct
-  // answer here anyway, and it does not reopen the guard: each tool call
-  // spawns a fresh `ix` child (runCurrentIx), which fails closed on its own.
+  // answer here anyway, and it does not reopen the guard: `buildProgram`
+  // awaits the same loader for every in-process call (the default runner —
+  // runCurrentIx only spawns a child when IX_MCP_SUBPROCESS=1), so a call
+  // that would need Pro still fails.
   return (proProbe ??= tryLoadProCommands(new Command()).catch((err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[!!] Ix Pro is installed but failed to initialize: ${message}`);

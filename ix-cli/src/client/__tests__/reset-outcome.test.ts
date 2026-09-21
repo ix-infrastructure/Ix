@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { IxClient } from "../api.js";
+import { isBackendUnreachable } from "../../cli/errors.js";
 
 const opId = "11111111-1111-4111-8111-111111111111";
 const foreignId = "22222222-2222-4222-8222-222222222222";
@@ -131,6 +132,20 @@ describe("remote reset outcome", () => {
       .rejects.toThrow("Do not repeat the reset");
     expect(requests).toHaveLength(1);
   });
+
+  // Regression guard: attaching `cause` put a transport code one level below an
+  // error whose OWN message is the thing that must be read. Without the marker,
+  // renderCliError classified these by that cause and printed "start the
+  // backend, then check status" — telling the user to retry the reset.
+  it.each(["UND_ERR_SOCKET", "ECONNREFUSED"])(
+    "renders the do-not-repeat warning, not retry advice, when the cause is %s",
+    async (code) => {
+      const transport = coded(code);
+      mockRequests(accepted(), transport);
+      const failure = await new IxClient("https://synthetic.example").reset().catch((e) => e);
+      expect(isBackendUnreachable(failure)).toBe(false);
+      expect(failure.message).toContain("Do not repeat the reset");
+    });
 
   it("keeps reconciliation for a lost status poll and preserves the cause", async () => {
     // Asymmetric with the start call on purpose: by now the reset is accepted

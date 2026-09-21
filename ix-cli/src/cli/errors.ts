@@ -1,5 +1,5 @@
 import chalk from "chalk";
-import { PRE_CONNECTION_CODES } from "../client/transport.js";
+import { PRE_CONNECTION_CODES, RESET_RECONCILIATION_ERROR } from "../client/transport.js";
 
 /**
  * Structured error with user-facing message and optional next-step guidance.
@@ -186,7 +186,12 @@ function writeDebugDetail(err: unknown): void {
  * instead of an undici stack trace.
  */
 export function isBackendUnreachable(err: unknown): boolean {
-  const e = err as { code?: unknown; cause?: unknown } | null | undefined;
+  const e = err as { name?: unknown; code?: unknown; cause?: unknown } | null | undefined;
+  // An error that carries its own instruction must not be re-explained by its
+  // cause. Reset attaches the transport failure for IX_DEBUG, which would
+  // otherwise render "start the backend, then check status" on top of a
+  // "do not repeat this reset" warning — advising the retry it exists to stop.
+  if (e?.name === RESET_RECONCILIATION_ERROR) return false;
   if (isUnreachableCode(e)) return true;
   return isUnreachableCode(e?.cause as { code?: unknown } | null | undefined);
 }

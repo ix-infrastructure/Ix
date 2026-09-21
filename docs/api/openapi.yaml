@@ -901,7 +901,17 @@ paths:
                 type: object
                 required: [opId]
                 properties:
-                  opId: { type: string, format: uuid }
+                  # `format: uuid` alone admits uppercase hex. The backend emits
+                  # UUID.randomUUID().toString(), which is lowercase, and the
+                  # client validates this handle before polling.
+                  opId:
+                    type: string
+                    format: uuid
+                    pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        "404":
+          description: |
+            Route not present on this deployment (older backend). The client
+            falls back to the synchronous reset path on this status only.
 
   /v1/reset/status/{opId}:
     get:
@@ -922,7 +932,10 @@ paths:
                 type: object
                 required: [opId, state]
                 properties:
-                  opId: { type: string, format: uuid }
+                  opId:
+                    type: string
+                    format: uuid
+                    pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
                   state: { type: string, enum: [done, failed, running] }
                   error:
                     type: string
