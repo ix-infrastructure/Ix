@@ -2,6 +2,7 @@
 import { Command } from "commander";
 import { registerOssCommands, registerProStubs } from "./register/oss.js";
 import { tryLoadProCommands } from "./register/pro-loader.js";
+import { isRepairInvocation } from "./register/pro-failure.js";
 import { buildHelpText } from "./help-text.js";
 import { checkForUpdate } from "./commands/upgrade.js";
 import { renderCliError } from "./errors.js";
@@ -71,7 +72,26 @@ registerOssCommands(program);
 (async () => {
   const ossCmdNames = new Set(program.commands.map((c: Command) => c.name()));
 
-  const proLoaded = await tryLoadProCommands(program);
+  // An installed-but-broken Pro throws here rather than reporting absence, so
+  // commands never run without its credential guard. Note this call sits
+  // OUTSIDE the parseAsync try/catch below — render the failure here rather
+  // than letting it reach the unhandledRejection handler by accident.
+  let proLoaded = false;
+  try {
+    proLoaded = await tryLoadProCommands(program);
+  } catch (err) {
+    if (!isRepairInvocation(process.argv)) {
+      renderCliError(err, debug, safeEndpoint()); // exits 1
+    }
+    // Repair invocation: continue OSS-only. proLoaded stays false, so the Pro
+    // stubs register below and would misreport a broken Pro as absent — the
+    // warning here is what distinguishes the two, and no command in the set
+    // above reaches a stub.
+    console.error(
+      "[!!] Ix Pro is installed but failed to initialize; continuing with OSS " +
+      "commands only so this one can repair the install.",
+    );
+  }
   if (proLoaded) {
     // Collect commands that Pro added (weren't in OSS set)
     const proCommands = program.commands
