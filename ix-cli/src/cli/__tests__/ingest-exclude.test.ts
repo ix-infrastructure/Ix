@@ -80,12 +80,16 @@ describe("ingest --exclude and .ixignore", () => {
     }
     const matcher = createIgnoreMatcher(collectExcludePatterns(root, ["playground", "docs/"]));
     const files = tryGitLsFiles(root, true, { matcher, root })!;
-    // Against the canonical root: `tryGitLsFiles` returns realpath'd paths (the
-    // symlink-containment guard), and on macOS `/var` resolves to
-    // `/private/var`, so relativising against the unresolved root yields a
-    // `../../..` chain. `discoverIngestFilePaths` canonicalises the root for
-    // exactly this reason; the test has to as well.
-    const canonicalRoot = realpathSync(root);
+    // Against the canonical root, resolved the same way the code resolves the
+    // files: `tryGitLsFiles` returns `realpathSync.native` paths (the
+    // symlink-containment guard), so relativising against the raw root yields
+    // a `../../..` chain on both platforms where the two disagree — macOS
+    // resolves `/var` to `/private/var`, and Windows expands the `RUNNER~1`
+    // 8.3 short name that `os.tmpdir()` hands back. `.native` matters: the JS
+    // `realpathSync` follows links but leaves a short name alone.
+    // `discoverIngestFilePaths` canonicalises the root for exactly this
+    // reason; the test has to as well.
+    const canonicalRoot = realpathSync.native(root);
     const rel = files.map((p) => relative(canonicalRoot, p).split(sep).join("/")).sort();
     expect(rel).toEqual(["src/a.test.ts", "src/a.ts"]);
   });
