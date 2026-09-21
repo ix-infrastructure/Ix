@@ -50,3 +50,28 @@ it("does not treat an installed plugin with a missing export path as absent", ()
   const r=run('export const unrelated=true;', {".":"./register.js"});
   expect(r.status).toBe(1); expect(r.stderr).toContain("Installed Ix Pro could not be resolved");
 });
+
+// Absence is decided by re-resolving the PACKAGE, never by matching Node's
+// "Cannot find package" wording. An install with no exports map and a missing
+// entry is the shape most easily mistaken for absence: the subpath resolves
+// through the legacy path rules (resolution does not stat the file), so the
+// failure surfaces at import instead. Either way the package IS installed, so
+// the only acceptable outcome is failing closed rather than registering OSS.
+it("does not treat an installed plugin with no exports map and no entry as absent", () => {
+  const root = mkdtempSync(join(tmpdir(), "ix-pro-loader-")); roots.push(root);
+  writeFileSync(join(root, "loader.mjs"), loader);
+  writeFileSync(join(root, "run.mjs"),
+    "import {tryLoadProCommands} from './loader.mjs';\n" +
+    "try {console.log(JSON.stringify({loaded:await tryLoadProCommands({commands:[]})}));}\n" +
+    "catch(e){console.error(e.message);process.exitCode=1;}\n");
+  const pro = join(root, "node_modules", "@ix", "pro"); mkdirSync(pro, { recursive: true });
+  // No `exports`, and register.js is deliberately never written.
+  writeFileSync(join(pro, "package.json"), JSON.stringify({ name: "@ix/pro", type: "module" }));
+  writeFileSync(join(pro, "index.js"), "export const installed=true;");
+  const r = spawnSync(process.execPath, [join(root, "run.mjs")], { cwd: root, encoding: "utf8", timeout: 15000 });
+  expect(r.error).toBeUndefined();
+  expect(r.status).toBe(1);
+  expect(r.stdout).toBe("");               // never reports loaded:false
+  expect(r.stderr).toMatch(/^Installed Ix Pro could not (be resolved|initialize)\./);
+  expect(r.stderr).toContain("Reinstall the reviewed CLI/Pro pair");
+});
