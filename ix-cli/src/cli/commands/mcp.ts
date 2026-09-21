@@ -101,10 +101,15 @@ export function registerMcpCommand(program: Command): void {
   const mcp = program
     .command("mcp")
     .description("Serve Ix tools over the Model Context Protocol (stdio)")
-    .action(async () => {
+    .option(
+      "--tools <set>",
+      "Which catalog to advertise (core|all). core is ten tools; all is every one",
+      "core",
+    )
+    .action(async (opts: { tools: string }) => {
       // Keep the SDK off the startup path for ordinary CLI commands.
       const { startIxMcpServer } = await import("../../mcp/server.js");
-      await startIxMcpServer(program.version());
+      await startIxMcpServer(program.version(), opts.tools === "all" ? "all" : "core");
     });
 
   mcp

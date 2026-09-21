@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { describe, it, expect } from "vitest";
-import { renderEdgeResultsLlm } from "../format.js";
+import { renderEdgeResultsLlm, sliceEdgeResults } from "../format.js";
 import { renderInventoryLlm } from "../commands/inventory.js";
 import { renderRankLlm } from "../commands/rank.js";
 import { renderDependsLlm, type DependencyNode } from "../commands/depends.js";
@@ -13,15 +13,15 @@ describe("renderEdgeResultsLlm", () => {
       { id: "abcdef1234567890", name: "handleLogin", kind: "method", provenance: { source_uri: "src/a.ts" } },
       { id: "deadbeef00000000", name: "", kind: "method" },
     ];
-    const lines = renderEdgeResultsLlm(nodes, "callers", "verify_token", "graph");
-    expect(lines[0]).toBe("callers target=verify_token total=2 resolved=1 unresolved=1");
+    const lines = renderEdgeResultsLlm(sliceEdgeResults(nodes, 50), "callers", "verify_token", "graph");
+    expect(lines[0]).toBe("callers target=verify_token shown=2 total=2 resolved=1 unresolved=1");
     expect(lines[1]).toBe("ref name=handleLogin kind=method id=abcdef12 path=src/a.ts");
     expect(lines[2]).toBe("ref kind=method id=deadbeef resolved=false");
   });
 
   it("emits a no_edges diagnostic when empty", () => {
-    const lines = renderEdgeResultsLlm([], "callees", "foo", "graph");
-    expect(lines[0]).toBe("callees target=foo total=0 resolved=0");
+    const lines = renderEdgeResultsLlm(sliceEdgeResults([], 50), "callees", "foo", "graph");
+    expect(lines[0]).toBe("callees target=foo shown=0 total=0 resolved=0");
     expect(lines[1]).toBe('diagnostic code=no_edges message="No callees edges found."');
   });
 });
@@ -35,7 +35,7 @@ describe("renderInventoryLlm", () => {
     ];
     const lines = renderInventoryLlm("class", "auth", nodes);
     expect(lines).toEqual([
-      "inventory kind=class scope=auth total=3",
+      "inventory kind=class scope=auth shown=3",
       "file path=src/a.ts items=Foo,Bar",
       "item name=Baz kind=class",
     ]);
