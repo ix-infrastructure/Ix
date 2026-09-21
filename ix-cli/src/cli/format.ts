@@ -92,6 +92,116 @@ export function compactTreeNode(node: any): any {
   return out;
 }
 
+// ── Bounded lists ──────────────────────────────────────────────────────────
+
+/** A list that was cut to `--limit`, and what it left behind. */
+export interface Slice<T> {
+  /** The rows to print. */
+  rows: T[];
+  /** How many rows are printed. */
+  shown: number;
+  /** How many there were before the cut. */
+  total: number;
+  truncated: boolean;
+}
+
+/**
+ * Rank, then cut, then report both numbers.
+ *
+ * Every one of these commands used to slice first and then report the length of
+ * the slice as `total`, so `ix callers` on a symbol with 212 callers answered
+ * `total=50` — a number an agent has no reason to disbelieve, and which reads
+ * as "this symbol has 50 callers". The order matters as much as the count: a
+ * cut applied to an unranked list keeps whichever rows the graph happened to
+ * return first.
+ *
+ * `priority` is a small integer, low first, and the sort is stable, so rows
+ * that rank equally keep the order the backend gave them. It is not a general
+ * re-sort: the backend order carries information this layer cannot reconstruct,
+ * and the only claim made here is that rows the caller can act on should
+ * survive the cut before rows it cannot.
+ */
+export function sliceRanked<T>(all: T[], limit: number, priority?: (item: T) => number): Slice<T> {
+  const ranked = priority ? [...all].sort((a, b) => priority(a) - priority(b)) : all;
+  const rows = Number.isFinite(limit) ? ranked.slice(0, limit) : [...ranked];
+  return { rows, shown: rows.length, total: all.length, truncated: rows.length < all.length };
+}
+
+/**
+ * A name the extractor could not resolve to an entity — a raw id standing in
+ * for a call target that was never ingested.
+ */
+function isRawIdName(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(value) || /^[0-9a-f]{32,}$/i.test(value);
+}
+
+function edgeRowPriority(node: any): number {
+  const name = node.name || node.attrs?.name || "";
+  const resolved = !!name && !isRawIdName(name);
+  if (!resolved) return 2;
+  const path = node.provenance?.source_uri ?? node.provenance?.sourceUri ?? node.attrs?.path;
+  return path ? 0 : 1;
+}
+
+/**
+ * Cut an edge expansion to `--limit`, keeping the rows a caller can follow.
+ *
+ * A row whose name is a raw id is a dangling reference: `explain`, `read` and
+ * `callers` can all do nothing with it. A named row with no path costs the
+ * caller a `locate` before it can be read. Neither should displace a row that
+ * carries both.
+ */
+export function sliceEdgeResults(nodes: any[], limit: number): Slice<any> {
+  return sliceRanked(nodes, limit, edgeRowPriority);
+}
+
+/** What was left out, and the one flag that gets it. */
+export function truncationHint(slice: Slice<unknown>, relation: string): string {
+  return `${slice.total} ${relation}; showing ${slice.shown}. Raise --limit to see the rest.`;
+}
+
+// ── Row locations ──────────────────────────────────────────────────────────
+
+function lineNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * Where a row's entity is, read off the graph node the row was built from.
+ *
+ * Every one of these rows already had the node in hand and printed a name from
+ * it. A bare name costs the reader a `locate` before it can do anything, which
+ * is a whole turn — around 30k tokens — against the ~30 bytes a path and a span
+ * cost here.
+ *
+ * A file gets no span: its range is the whole file, which says nothing its path
+ * does not. Same rule the context bundle's `toLocation` uses.
+ */
+export function rowLocation(node: any): { path?: string; lineStart?: number; lineEnd?: number } {
+  const path = relativePath(
+    node?.provenance?.source_uri ?? node?.provenance?.sourceUri ?? node?.attrs?.path ?? undefined,
+  );
+  if (String(node?.kind ?? "").toLowerCase() === "file") return { path };
+  const lineStart = lineNumber(node?.attrs?.line_start);
+  const lineEnd = lineNumber(node?.attrs?.line_end);
+  return { path, lineStart, lineEnd };
+}
+
+/** `17-145`, or `17` when the entity is one line, or nothing when unknown. */
+export function lineSpan(loc: { lineStart?: number; lineEnd?: number }): string | undefined {
+  if (loc.lineStart === undefined) return undefined;
+  return loc.lineEnd !== undefined && loc.lineEnd !== loc.lineStart
+    ? `${loc.lineStart}-${loc.lineEnd}`
+    : `${loc.lineStart}`;
+}
+
+/** `src/a.ts:17-145`, for a row a person reads. */
+export function locationLabel(loc: { path?: string; lineStart?: number; lineEnd?: number }): string {
+  if (!loc.path) return "";
+  const span = lineSpan(loc);
+  return span ? `${loc.path}:${span}` : loc.path;
+}
+
 export function confidenceColor(score: number): (text: string) => string {
   if (score >= 0.8) return chalk.green;
   if (score >= 0.5) return chalk.yellow;
@@ -169,11 +279,16 @@ export function formatContext(result: any, format: string): void {
 
 /** Render a flat node list as llm `node` records. */
 export function renderNodesLlm(nodes: any[]): string[] {
-  return nodes.map((n) => llmLine("node", [
-    ["kind", n.kind],
-    ["id", typeof n.id === "string" ? n.id.slice(0, 8) : undefined],
-    ["name", n.name || n.attrs?.name || n.attrs?.title || "(unnamed)"],
-  ]));
+  return nodes.map((n) => {
+    const loc = rowLocation(n);
+    return llmLine("node", [
+      ["kind", n.kind],
+      ["id", typeof n.id === "string" ? n.id.slice(0, 8) : undefined],
+      ["name", n.name || n.attrs?.name || n.attrs?.title || "(unnamed)"],
+      ["path", loc.path],
+      ["lines", lineSpan(loc)],
+    ]);
+  });
 }
 
 export function formatNodes(nodes: any[], format: string): void {
@@ -197,8 +312,13 @@ export function formatNodes(nodes: any[], format: string): void {
         `  ${chalk.blue("decision")}  ${chalk.dim(shortId)}  ${name}`
       );
     } else {
+      // The path is what makes a search row a place rather than a word: a
+      // graph with four `config.ts` modules in it answered `ix search config`
+      // with four identical-looking rows.
+      const where = locationLabel(rowLocation(n));
       console.log(
         `  ${chalk.cyan(n.kind.padEnd(10))}  ${chalk.dim(shortId)}  ${chalk.bold(name)}`
+        + (where ? `  ${chalk.dim(where)}` : ""),
       );
     }
   }
@@ -439,17 +559,32 @@ export interface TextResult {
 }
 
 /** Render lexical search hits as llm `match` records (one per line). */
-export function renderTextResultsLlm(results: TextResult[]): string[] {
-  return results.map((r) => llmLine("match", [
-    ["path", relativePath(r.path) ?? r.path],
-    ["line", r.line_start],
-    ["lang", r.language],
-    ["symbol", r.symbol_hint],
-    ["snippet", r.snippet.trim()],
-  ]));
+export function renderTextResultsLlm(slice: Slice<TextResult>): string[] {
+  const lines = [llmLine("text", [
+    ["shown", slice.shown],
+    ["scanned", slice.total],
+    ["truncated", slice.truncated || undefined],
+  ])];
+  if (slice.truncated) {
+    lines.push(llmLine("diagnostic", [
+      ["code", "results_truncated"],
+      ["message", `${slice.total} matches scanned; showing the ${slice.shown} highest-ranked. Narrow with --path or --language, or raise --limit.`],
+    ]));
+  }
+  for (const r of slice.rows) {
+    lines.push(llmLine("match", [
+      ["path", relativePath(r.path) ?? r.path],
+      ["line", r.line_start],
+      ["lang", r.language],
+      ["symbol", r.symbol_hint],
+      ["snippet", r.snippet.trim()],
+    ]));
+  }
+  return lines;
 }
 
-export function formatTextResults(results: TextResult[], format: string): void {
+export function formatTextResults(slice: Slice<TextResult>, format: string): void {
+  const results = slice.rows;
   if (format === "json") {
     const compact = results.map(r => ({
       ...r,
@@ -459,7 +594,7 @@ export function formatTextResults(results: TextResult[], format: string): void {
     return;
   }
   if (format === "llm") {
-    for (const line of renderTextResultsLlm(results)) console.log(line);
+    for (const line of renderTextResultsLlm(slice)) console.log(line);
     return;
   }
   if (results.length === 0) {
@@ -509,29 +644,34 @@ export function formatLocateResults(results: LocateResult[], format: string): vo
  * then one `ref` row per related entity. Unresolved targets carry resolved=false.
  */
 export function renderEdgeResultsLlm(
-  nodes: any[], relation: string, symbol: string,
+  slice: Slice<any>, relation: string, symbol: string,
   source?: ResultSource, diagnostics?: Diagnostic[]
 ): string[] {
-  const isRawId = (s: string) =>
-    /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(s) || /^[0-9a-f]{32,}$/i.test(s);
-  const refs = nodes.map((n: any) => {
+  const refs = slice.rows.map((n: any) => {
     const name = n.name || n.attrs?.name || "";
     return {
-      resolved: !!name && !isRawId(name),
+      resolved: !!name && !isRawIdName(name),
       name,
       kind: n.kind ?? undefined,
       id: n.id ?? undefined,
-      path: relativePath(n.provenance?.source_uri ?? n.provenance?.sourceUri ?? n.attrs?.path ?? undefined),
+      ...rowLocation(n),
     };
   });
   const unresolved = refs.filter((r) => !r.resolved).length;
   const lines = [llmLine(relation, [
     ["target", symbol],
-    ["total", refs.length],
+    ["shown", slice.shown],
+    ["total", slice.total],
     ["resolved", refs.length - unresolved],
     ["unresolved", unresolved > 0 ? unresolved : undefined],
     ["source", source && source !== "graph" ? source : undefined],
   ])];
+  if (slice.truncated) {
+    lines.push(llmLine("diagnostic", [
+      ["code", "results_truncated"],
+      ["message", truncationHint(slice, relation)],
+    ]));
+  }
   if (refs.length === 0 && (!diagnostics || diagnostics.length === 0)) {
     lines.push(llmLine("diagnostic", [["code", "no_edges"], ["message", `No ${relation} edges found.`]]));
   }
@@ -540,24 +680,25 @@ export function renderEdgeResultsLlm(
   }
   for (const ref of refs) {
     lines.push(ref.resolved
-      ? llmLine("ref", [["name", ref.name], ["kind", ref.kind], ["id", ref.id?.slice(0, 8)], ["path", ref.path]])
+      ? llmLine("ref", [
+          ["name", ref.name], ["kind", ref.kind], ["id", ref.id?.slice(0, 8)],
+          ["path", ref.path], ["lines", lineSpan(ref)],
+        ])
       : llmLine("ref", [["kind", ref.kind], ["id", ref.id?.slice(0, 8)], ["resolved", false]]));
   }
   return lines;
 }
 
 export function formatEdgeResults(
-  nodes: any[], relation: string, symbol: string, format: string,
+  slice: Slice<any>, relation: string, symbol: string, format: string,
   resolvedTarget?: { id: string; kind: string; name: string; resolutionMode?: string },
   source?: ResultSource,
   diagnostics?: Diagnostic[]
 ): void {
-  // Check for UUID-like names that indicate unresolved references
-  const isRawId = (s: string) =>
-    /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(s) || /^[0-9a-f]{32,}$/i.test(s);
+  const nodes = slice.rows;
 
   if (format === "llm") {
-    for (const line of renderEdgeResultsLlm(nodes, relation, symbol, source, diagnostics)) {
+    for (const line of renderEdgeResultsLlm(slice, relation, symbol, source, diagnostics)) {
       console.log(line);
     }
     return;
@@ -566,12 +707,12 @@ export function formatEdgeResults(
   if (format === "json") {
     const results = nodes.map((n: any) => {
       const name = n.name || n.attrs?.name || "";
-      const resolved = !!name && !isRawId(name);
+      const resolved = !!name && !isRawIdName(name);
       const ref: any = {
         name: resolved ? name : undefined,
         kind: n.kind ?? undefined,
         id: resolved ? n.id : undefined,
-        path: relativePath(n.provenance?.source_uri ?? n.provenance?.sourceUri ?? n.attrs?.path ?? undefined),
+        ...rowLocation(n),
       };
       if (!resolved) {
         ref.resolved = false;
@@ -601,6 +742,12 @@ export function formatEdgeResults(
     } else if (diagnostics && diagnostics.length > 0) {
       output.diagnostics = diagnostics;
     }
+    if (slice.truncated) {
+      output.diagnostics = [
+        ...(output.diagnostics ?? []),
+        { code: "results_truncated", message: truncationHint(slice, relation) },
+      ];
+    }
     const unresolvedCount = results.filter((r: any) => r.resolved === false).length;
     if (unresolvedCount > 0) {
       output.diagnostics = [
@@ -608,7 +755,13 @@ export function formatEdgeResults(
         { code: "dangling_reference_filtered", message: `${unresolvedCount} result(s) could not be resolved to named entities.` },
       ];
     }
-    output.summary = { total: results.length, resolved: results.length - unresolvedCount, unresolved: unresolvedCount };
+    output.summary = {
+      shown: slice.shown,
+      total: slice.total,
+      resolved: results.length - unresolvedCount,
+      unresolved: unresolvedCount,
+      truncated: slice.truncated,
+    };
     printJson(output);
     return;
   }
@@ -624,12 +777,17 @@ export function formatEdgeResults(
   for (const n of nodes) {
     const name = n.name || n.attrs?.name || "";
     const shortId = n.id?.slice(0, 8) ?? "";
-    if (!name || isRawId(name)) {
+    if (!name || isRawIdName(name)) {
       console.log(`  ${chalk.cyan((n.kind ?? "").padEnd(10))}  ${chalk.dim(shortId)}  ${chalk.dim("(unresolved)")}`);
     } else {
-      console.log(`  ${chalk.cyan((n.kind ?? "").padEnd(10))}  ${chalk.dim(shortId)}  ${chalk.bold(name)}`);
+      const where = locationLabel(rowLocation(n));
+      console.log(
+        `  ${chalk.cyan((n.kind ?? "").padEnd(10))}  ${chalk.dim(shortId)}  ${chalk.bold(name)}`
+        + (where ? `  ${chalk.dim(where)}` : ""),
+      );
     }
   }
+  if (slice.truncated) console.log(chalk.dim(`  ${truncationHint(slice, relation)}`));
 }
 
 /** Render detected conflicts as llm `conflict` records. */

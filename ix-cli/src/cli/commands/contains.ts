@@ -3,7 +3,7 @@
 import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
-import { formatEdgeResults } from "../format.js";
+import { formatEdgeResults, sliceEdgeResults } from "../format.js";
 import { parsePickOption } from "../options.js";
 import { resolveFileOrReport, printResolved } from "../resolve.js";
 
@@ -25,7 +25,6 @@ export function registerContainsCommand(program: Command): void {
       if (!target) return;
       if (opts.format === "text") printResolved(target);
       const result = await client.expand(target.id, { direction: "out", predicates: ["CONTAINS"] });
-      const limited = result.nodes.slice(0, limit);
-      formatEdgeResults(limited, "contains", target.name, opts.format, target, "graph");
+      formatEdgeResults(sliceEdgeResults(result.nodes, limit), "contains", target.name, opts.format, target, "graph");
     });
 }

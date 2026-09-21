@@ -117,7 +117,7 @@ describe("ix context --max-* validation", () => {
       ["--max-entities", "Maximum entities in the bundle", 50, 1, 500],
       ["--max-relationships", "Maximum relationships in the bundle", 100, 1, 1000],
       ["--max-evidence", "Maximum evidence items in the bundle", 25, 1, 200],
-      ["--max-chars", "Maximum characters of evidence output", 12000, 1000, 1000000],
+      ["--max-tokens", "Maximum tokens of evidence output", 1500, 500, 200000],
     ] as const) {
       // One assertion per flag, so a failure names which one lost its default
       // rather than reporting that some string was missing from a wall of help.
@@ -125,6 +125,13 @@ describe("ix context --max-* validation", () => {
         `${flag} <n> ${text} (default: ${fallback}, clamped to ${min}-${max})`,
       );
     }
+
+    // `--max-chars` is the exception, and says so instead of naming a default
+    // it no longer has: its absence produces whatever --max-tokens works out
+    // to, not 12000.
+    expect(flat, "help for --max-chars").toContain(
+      "--max-chars <n> Maximum characters of evidence output (overrides --max-tokens; clamped to 1000-1000000)",
+    );
   });
 });
 

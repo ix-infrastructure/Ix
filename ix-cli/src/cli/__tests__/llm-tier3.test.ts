@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { describe, it, expect } from "vitest";
-import { renderNodesLlm, renderPatchesLlm, renderTextResultsLlm, type TextResult } from "../format.js";
+import { renderNodesLlm, renderPatchesLlm, renderTextResultsLlm, sliceRanked, type TextResult } from "../format.js";
 import { renderSearchLlm } from "../commands/search.js";
 import { renderHistoryLlm } from "../commands/history.js";
 
@@ -26,7 +26,10 @@ describe("renderTextResultsLlm", () => {
     const results: TextResult[] = [
       { path: "src/a.ts", line_start: 42, line_end: 42, snippet: "  const x = 1  ", engine: "ripgrep", score: 1, language: "typescript" },
     ];
-    expect(renderTextResultsLlm(results)).toEqual(['match path=src/a.ts line=42 lang=typescript snippet="const x = 1"']);
+    expect(renderTextResultsLlm(sliceRanked(results, 20))).toEqual([
+      "text shown=1 scanned=1",
+      'match path=src/a.ts line=42 lang=typescript snippet="const x = 1"',
+    ]);
   });
 });
 
