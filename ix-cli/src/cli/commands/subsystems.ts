@@ -7,7 +7,7 @@ import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { roundFloat } from "../format.js";
-import { llmLine, llmError } from "../llm.js";
+import { llmLine, llmError, llmShortId } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { renderMapText, renderMapLlm, type MapRegion, type MapResult } from "./map.js";
 import {
@@ -313,7 +313,7 @@ Examples:
 export function renderSubsystemScoreLlm(s: SubsystemScore): string {
   // chunk_density is dropped when 0 (uncomputed / no signal); see docs/llm-format.md.
   return llmLine("region", [
-    ["id", s.region_id],
+    ["id", llmShortId(s.region_id)],
     ["label", s.name],
     ["kind", s.label_kind],
     ["level", s.level],
@@ -329,14 +329,14 @@ export function renderScopedSubsystemLlm(result: ScopedSubsystemResult): string[
   const t = result.target;
   const lines = [
     llmLine("target", [
-      ["id", t.id],
+      ["id", llmShortId(t.id)],
       ["label", t.label],
       ["kind", t.label_kind],
       ["level", t.level],
       ["files", t.file_count],
       ["confidence", roundFloat(t.confidence)],
       ["cross_cutting", t.is_cross_cutting ? true : undefined],
-      ["parent", result.parent?.id],
+      ["parent", llmShortId(result.parent?.id)],
       ["signals", t.dominant_signals.length > 0 ? t.dominant_signals.join(",") : undefined],
     ]),
     llmLine("health", [
@@ -348,12 +348,12 @@ export function renderScopedSubsystemLlm(result: ScopedSubsystemResult): string[
   ];
   const emit = (region: ScopedSubsystemRegion): void => {
     lines.push(llmLine("region", [
-      ["id", region.id],
+      ["id", llmShortId(region.id)],
       ["label", region.label],
       ["kind", region.label_kind],
       ["level", region.level],
       ["files", region.file_count],
-      ["parent", region.parent_id],
+      ["parent", llmShortId(region.parent_id)],
       ["confidence", roundFloat(region.confidence)],
       ["cross_cutting", region.is_cross_cutting ? true : undefined],
       ["signals", region.dominant_signals.length > 0 ? region.dominant_signals.join(",") : undefined],

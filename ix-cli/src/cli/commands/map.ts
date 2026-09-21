@@ -5,7 +5,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { clearMapBaseline, getEndpoint } from "../config.js";
 import { roundFloat } from "../format.js";
-import { llmLine, llmError } from "../llm.js";
+import { llmLine, llmError, llmShortId } from "../llm.js";
 import { bootstrap, resolveWorkspaceId } from "../bootstrap.js";
 import { formatFetchError } from "../errors.js";
 import { ingestFiles, type IngestFilesSummary } from "./ingest.js";
@@ -687,12 +687,12 @@ export function renderMapLlm(
   ]));
   for (const r of regions) {
     console.log(llmLine("region", [
-      ["id", r.id],
+      ["id", llmShortId(r.id)],
       ["kind", r.label_kind],
       ["label", r.label],
       ["level", r.level],
       ["files", r.file_count],
-      ["parent", r.parent_id],
+      ["parent", llmShortId(r.parent_id)],
       ["children", r.child_region_count > 0 ? r.child_region_count : undefined],
       ["cohesion", roundFloat(r.cohesion)],
       ["coupling", roundFloat(r.external_coupling)],

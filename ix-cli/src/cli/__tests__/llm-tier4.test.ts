@@ -12,7 +12,9 @@ describe("renderEntityLlm", () => {
       claims: [],
       edges: [{ predicate: "CONTAINS", dst: "deadbeef00000000" }],
     });
-    expect(lines[0]).toBe("entity id=abcdef1234567890 kind=class name=Foo path=src/a.ts rev=3 edges=1");
+    // The id is shortened on the header too now — it was the one record that
+    // still carried a full one (C-11).
+    expect(lines[0]).toBe("entity id=abcdef12 kind=class name=Foo path=src/a.ts rev=3 edges=1");
     expect(lines[1]).toBe("edge pred=CONTAINS dst=deadbeef");
   });
 });

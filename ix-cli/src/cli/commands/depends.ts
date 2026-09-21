@@ -6,7 +6,7 @@ import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveFileOrReport, printResolved, isRawId } from "../resolve.js";
 import { compactTreeNode, relativePath } from "../format.js";
-import { llmLine } from "../llm.js";
+import { llmLine, llmShortId } from "../llm.js";
 import { parsePickOption } from "../options.js";
 
 // ── Tree types ──────────────────────────────────────────────────────
@@ -173,7 +173,7 @@ export function renderDependsLlm(
     lines.push(llmLine("dep", [
       ["name", node.resolved ? node.name : undefined],
       ["kind", node.kind],
-      ["id", node.id?.slice(0, 8)],
+      ["id", llmShortId(node.id)],
       ["parent", parentId?.slice(0, 8)],
       ["rel", node.relation],
       ["path", relativePath(node.path)],

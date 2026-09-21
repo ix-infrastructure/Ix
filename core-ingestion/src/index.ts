@@ -309,7 +309,12 @@ const DEFINITION_KIND_MAP: Record<string, string> = {
   'definition.impl':      'class',
   'definition.type':      'class',
   'definition.property':  'function',
-  'definition.const':     'function',
+  // Its own kind, not 'function' (Ix#679 / decision D10). Rust const_item,
+  // Scala val/var_definition, Java, C#, Swift and CSS keyframes all already
+  // routed through here, so every one of them has been arriving as a function:
+  // `ix search --kind function`, `ix inventory --kind function` and
+  // `ix rank --kind function` have been counting constants as callable code.
+  'definition.const':     'constant',
   'definition.static':    'function',
   'definition.macro':     'macro',
   'definition.union':     'class',
@@ -2541,6 +2546,17 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
 
       if (defCapture) {
         const kind = DEFINITION_KIND_MAP[defCapture.name] ?? 'function';
+
+        // A module-level `const` bound to a function is already captured by the
+        // TS/JS function rules, which run ahead of the const rule. Without this
+        // the one declaration arrives twice — once as `function`, once as
+        // `constant` — with the same name, file and line range. Only the JS/TS
+        // const rules emit `const.value`; every other language's
+        // `definition.const` has no such capture and falls straight through.
+        if (defCapture.name === 'definition.const') {
+          const valueType = match.captures.find((c: any) => c.name === 'const.value')?.node.type;
+          if (valueType === 'arrow_function' || valueType === 'function_expression') continue;
+        }
         const rawName = nameCapture?.node.text
           ?? (defCapture.name === 'definition.constructor' ? 'init' : '');
         // Strip surrounding quotes only for string-keyed definitions (R S3 method
@@ -2740,7 +2756,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
       //
       // For method_declarations, the paramTypeMap key MUST include the
       // receiver type (i.e. `Container.method`) because that's what
-      // findEnclosingFunction returns at call-resolution time. Without
+      // findEnclosingDefinition returns at call-resolution time. Without
       // this, lookups for callers inside methods miss.
       if (language === SupportedLanguages.Go) {
         const goParamScope = match.captures.find((c: any) => c.name === '_go_param_scope');
@@ -2785,7 +2801,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
           const line = typedVarScope.node.startPosition.row + 1;
           const scope = language === SupportedLanguages.PHP
             ? findEnclosing(classRanges, line, '') ?? fileName
-            : findEnclosingFunction(entities, line)
+            : findEnclosingDefinition(entities, line)
               ?? findEnclosing(classRanges, line, '')
               ?? fileName;
           if (!declaredTypeMap.has(scope)) declaredTypeMap.set(scope, new Map());
@@ -2970,7 +2986,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
 
         // For Python: skip calls that are decorator applications.
         // When a method is decorated (e.g. @util.deprecated(...)), the call sits at the
-        // class-body line before the def, so findEnclosingFunction misses the method and
+        // class-body line before the def, so findEnclosingDefinition misses the method and
         // the caller falls back to the enclosing class — producing false edges like
         // Table → deprecated.  Decorator application is not an architectural CALLS edge.
         if (language === SupportedLanguages.Python) {
@@ -3009,7 +3025,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         // Find enclosing function/method for the call; fall back to enclosing class
         // (e.g. calls in val/lazy val body at class level) before falling back to file.
         const callLine = callName.node.startPosition.row + 1;
-        const caller = findEnclosingFunction(entities, callLine)
+        const caller = findEnclosingDefinition(entities, callLine)
           ?? findEnclosing(classRanges, callLine, '')
           ?? fileName;
 
@@ -3041,7 +3057,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
             // Python: if the callee is a local alias for a class, substitute the class name.
             // e.g. engineclass = base.Engine; engineclass(pool, ...) → Engine(pool, ...)
             if (language === SupportedLanguages.Python) {
-              const funcName = findEnclosingFunction(entities, callLine);
+              const funcName = findEnclosingDefinition(entities, callLine);
               if (funcName) {
                 const typeForAssign = assignTypeMap.get(funcName)?.get(callee);
                 if (typeForAssign) return typeForAssign;
@@ -3083,7 +3099,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
             // Typed-parameter substitution: if the qualifier is a param with a declared type,
             // use the type name so e.g. `query.filter(...)` → `Query.filter`.
             // Also check assignTypeMap for variables assigned from constructor/ORM calls.
-            const funcName = findEnclosingFunction(entities, callLine);
+            const funcName = findEnclosingDefinition(entities, callLine);
             if (funcName) {
               const typeForParam = paramTypeMap.get(funcName)?.get(qualifier);
               const typeForAssign = assignTypeMap.get(funcName)?.get(qualifier);
@@ -3096,13 +3112,13 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
             // type. e.g. `opts.Run()` inside `func F(opts *Options)` → use
             // qualifier "Options" so dstName is "Options.Run", which
             // edge-resolver indexes via the container.name fallback key.
-            const funcName = findEnclosingFunction(entities, callLine);
+            const funcName = findEnclosingDefinition(entities, callLine);
             if (funcName) {
               const typeForParam = paramTypeMap.get(funcName)?.get(qualifier);
               if (typeForParam) qualifier = typeForParam;
             }
           } else if (language === SupportedLanguages.PHP) {
-            const funcName = findEnclosingFunction(entities, callLine);
+            const funcName = findEnclosingDefinition(entities, callLine);
             const className = findEnclosing(classRanges, callLine, '');
             const typeForReceiver = phpPropertyOnThis
               ? (className ? declaredTypeMap.get(className)?.get(qualifier) : undefined)
@@ -3110,7 +3126,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
             if (typeForReceiver) qualifier = typeForReceiver;
             else return callee;
           } else if (language === SupportedLanguages.C || language === SupportedLanguages.CPlusPlus) {
-            const funcName = findEnclosingFunction(entities, callLine) ?? fileName;
+            const funcName = findEnclosingDefinition(entities, callLine) ?? fileName;
             const className = findEnclosing(classRanges, callLine, '')
               ?? (funcName.includes('.') ? funcName.slice(0, funcName.lastIndexOf('.')) : undefined);
             const typeForDecl =
@@ -3148,7 +3164,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         // Prefer the enclosing function/method so parameter and return-type references
         // point back to the actual caller. Fall back to class, then file.
         const refLine = refType.node.startPosition.row + 1;
-        const src = findEnclosingFunction(entities, refLine)
+        const src = findEnclosingDefinition(entities, refLine)
           ?? findEnclosing(classRanges, refLine, typeName)
           ?? fileName;
 
@@ -4937,13 +4953,25 @@ function findEnclosing(
   return best?.name ?? null;
 }
 
-function findEnclosingFunction(
+/**
+ * The innermost definition whose body contains `line` — what a call or a
+ * reference on that line should be attributed to.
+ *
+ * `constant` counts. A constant's initializer is a body like any other: the
+ * `z.object(...)` in `const schema = z.object({...})` is a call made by
+ * `schema`, and a Scala `var baz: NodeKind = NodeKind.File` is the holder of
+ * the reference to `NodeKind`, not its enclosing class (#557). Those constants
+ * arrived here as `kind: 'function'` until Ix#679 gave them their own kind, so
+ * leaving them out would have quietly re-coarsened every such edge to the class
+ * or the file.
+ */
+function findEnclosingDefinition(
   entities: ParsedEntity[],
   line: number
 ): string | null {
   let best: ParsedEntity | null = null;
   for (const e of entities) {
-    if (e.kind !== 'function' && e.kind !== 'method') continue;
+    if (e.kind !== 'function' && e.kind !== 'method' && e.kind !== 'constant') continue;
     if (line >= e.lineStart && line <= e.lineEnd) {
       if (!best || (e.lineEnd - e.lineStart) < (best.lineEnd - best.lineStart)) {
         best = e;

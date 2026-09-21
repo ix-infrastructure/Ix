@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { llmLine } from "../llm.js";
+import { llmLine, llmShortId } from "../llm.js";
 import { relativePath } from "../format.js";
 import type { EntityFacts, EntityLocation } from "./facts.js";
 import type { RoleInference } from "./role-inference.js";
@@ -43,7 +43,7 @@ export function renderExplainLlm(
   const lines: string[] = [];
 
   lines.push(llmLine("entity", [
-    ["id", facts.id],
+    ["id", llmShortId(facts.id)],
     ["name", facts.name],
     ["kind", facts.kind],
     ["path", facts.path],
@@ -171,7 +171,7 @@ export function renderExplainRawLlm(result: {
   const lines: string[] = [];
 
   lines.push(llmLine("entity", [
-    ["id", result.id],
+    ["id", llmShortId(result.id)],
     ["name", result.name],
     ["kind", result.kind],
     ["path", result.file],

@@ -20,7 +20,7 @@ import type {
 } from "../../client/types.js";
 import { getEndpoint } from "../config.js";
 import { collectFacts, type ContextFacts, type EntityLocation } from "../explain/facts.js";
-import { llmLine, printLlmLines } from "../llm.js";
+import { llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { parseBudgetOption, parsePickOption, parseRevisionOption } from "../options.js";
 import { resolveFileOrReport } from "../resolve.js";
 import { createStaleProbe, hasCompletedSourceGraphBaseline } from "../stale.js";
@@ -1256,7 +1256,8 @@ function entityRecord(change: RecordChange) {
       change,
       // Relationship records name their endpoints by entity id, so this is
       // what lets a reader resolve `src=`/`dst=` to something it has seen.
-      id: e.id,
+      // Shortened on both sides of that reference, so it still resolves.
+      id: llmShortId(e.id),
       kind: e.kind,
       name: e.name,
       path: e.path,
@@ -1282,8 +1283,8 @@ function claimRecord(change: RecordChange) {
   return (c: ContextBundle["claims"][number]): string =>
     llmLine("claim", {
       change,
-      id: c.id,
-      entity: c.entityId,
+      id: llmShortId(c.id),
+      entity: llmShortId(c.entityId),
       status: c.status,
       statement: c.statement,
     });
@@ -1369,8 +1370,8 @@ export function renderInvestigationDiff(
       // than the format it is meant to replace is the wrong trade.
       ...diff.added.entities.map(entityRecord("added")),
       ...diff.removed.entities.map(entityRecord("removed")),
-      ...diff.added.relationships.map((r) => llmLine("relationship", { change: "added", src: r.src, pred: r.predicate, dst: r.dst })),
-      ...diff.removed.relationships.map((r) => llmLine("relationship", { change: "removed", src: r.src, pred: r.predicate, dst: r.dst })),
+      ...diff.added.relationships.map((r) => llmLine("relationship", { change: "added", src: llmShortId(r.src), pred: r.predicate, dst: llmShortId(r.dst) })),
+      ...diff.removed.relationships.map((r) => llmLine("relationship", { change: "removed", src: llmShortId(r.src), pred: r.predicate, dst: llmShortId(r.dst) })),
       ...diff.added.evidence.map(evidenceRecord("added")),
       ...diff.removed.evidence.map(evidenceRecord("removed")),
       // `statement=` is the field that says what changed. The id is the
