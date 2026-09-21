@@ -6,6 +6,42 @@ import { projectRow } from "./output-shape.js";
 
 export type ResultSource = "graph" | "text" | "graph+text" | "heuristic";
 
+// ── JSON output shape ──────────────────────────────────────────────────────
+
+/**
+ * Whether the caller explicitly asked for indented JSON.
+ *
+ * False means nobody asked, and the shape then follows the destination:
+ * indented for a terminal, compact for anything else. Two spaces of indent per
+ * level is roughly a fifth of a JSON payload, and the only reader that gains
+ * anything from it is a human looking at a screen. Every other reader — a pipe
+ * into `jq`, an agent's tool result, the MCP child process — pays tokens for
+ * whitespace it discards.
+ */
+let prettyJsonRequested = false;
+
+/** Record `--pretty`. Called once from the root `preAction` hook. */
+export function setPrettyJson(pretty: boolean): void {
+  prettyJsonRequested = pretty;
+}
+
+/**
+ * The indent `JSON.stringify` should use, read at print time.
+ *
+ * Deliberately not cached: `process.stdout.isTTY` is what makes this decision,
+ * and a test that redirects stdout would otherwise get the shape from whatever
+ * the process looked like at import time.
+ */
+function jsonIndent(): number | undefined {
+  if (prettyJsonRequested) return 2;
+  return process.stdout.isTTY ? 2 : undefined;
+}
+
+/** Print a JSON payload on stdout, indented only when that helps someone. */
+export function printJson(value: unknown): void {
+  console.log(JSON.stringify(value, null, jsonIndent()));
+}
+
 // ── JSON optimization helpers ──────────────────────────────────────────────
 
 /**
@@ -175,7 +211,7 @@ export function confidenceColor(score: number): (text: string) => string {
 
 export function formatContext(result: any, format: string): void {
   if (format === "json") {
-    console.log(JSON.stringify(result, null, 2));
+    printJson(result);
     return;
   }
 
@@ -258,7 +294,7 @@ export function renderNodesLlm(nodes: any[]): string[] {
 
 export function formatNodes(nodes: any[], format: string): void {
   if (format === "json") {
-    console.log(JSON.stringify(nodes, null, 2));
+    printJson(nodes);
     return;
   }
   if (format === "llm") {
@@ -291,7 +327,7 @@ export function formatNodes(nodes: any[], format: string): void {
 
 export function formatDecisions(nodes: any[], format: string): void {
   if (format === "json") {
-    console.log(JSON.stringify(nodes, null, 2));
+    printJson(nodes);
     return;
   }
   if (nodes.length === 0) {
@@ -320,7 +356,7 @@ const BUG_STATUS_ICONS: Record<string, string> = {
 
 export function formatBugs(nodes: any[], format: string): void {
   if (format === "json") {
-    console.log(JSON.stringify(nodes, null, 2));
+    printJson(nodes);
     return;
   }
   if (nodes.length === 0) {
@@ -359,7 +395,7 @@ export function formatPatches(patches: any[], format: string): void {
       timestamp: p.timestamp,
       source: relativePath(p.source?.uri) || undefined,
     }));
-    console.log(JSON.stringify(compact, null, 2));
+    printJson(compact);
     return;
   }
   if (format === "llm") {
@@ -384,7 +420,7 @@ export function formatPatches(patches: any[], format: string): void {
 
 export function formatIntents(intents: any[], format: string): void {
   if (format === "json") {
-    console.log(JSON.stringify(intents, null, 2));
+    printJson(intents);
     return;
   }
   if (intents.length === 0) {
@@ -450,7 +486,7 @@ export function renderDiffLlm(result: any): string[] {
 
 export function formatDiff(result: any, format: string): void {
   if (format === "json") {
-    console.log(JSON.stringify(result, null, 2));
+    printJson(result);
     return;
   }
   if (format === "llm") {
@@ -555,7 +591,7 @@ export function formatTextResults(slice: Slice<TextResult>, format: string): voi
       ...r,
       path: relativePath(r.path) ?? r.path,
     }));
-    console.log(JSON.stringify(compact, null, 2));
+    printJson(compact);
     return;
   }
   if (format === "llm") {
@@ -586,7 +622,7 @@ export interface LocateResult {
 
 export function formatLocateResults(results: LocateResult[], format: string): void {
   if (format === "json") {
-    console.log(JSON.stringify(results, null, 2));
+    printJson(results);
     return;
   }
   if (results.length === 0) {
@@ -727,7 +763,7 @@ export function formatEdgeResults(
       unresolved: unresolvedCount,
       truncated: slice.truncated,
     };
-    console.log(JSON.stringify(output, null, 2));
+    printJson(output);
     return;
   }
   if (nodes.length === 0) {
@@ -771,7 +807,7 @@ export function renderConflictsLlm(conflicts: any[]): string[] {
 
 export function formatConflicts(conflicts: any[], format: string): void {
   if (format === "json") {
-    console.log(JSON.stringify(conflicts, null, 2));
+    printJson(conflicts);
     return;
   }
   if (format === "llm") {
@@ -858,7 +894,7 @@ export function formatExplain(result: ExplainResult, format: string): void {
     if (result.diagnostics && result.diagnostics.length > 0) {
       output.diagnostics = result.diagnostics;
     }
-    console.log(JSON.stringify(output, null, 2));
+    printJson(output);
     return;
   }
   const shortId = result.id.slice(0, 8);

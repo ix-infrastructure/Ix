@@ -62,6 +62,12 @@ surfaces (#575).
   `truncated=true total_lines=<n> next=<path>:401-800`, so the next page is one
   command away. A line range you typed (`ix read a.ts:1-900`) is never capped,
   a symbol target is its own span, and `--all` reads the whole file.
+- **`ix depends` and `ix trace` stop at depth 3 and 100 nodes.** Both were
+  unbounded, which on a hub is thousands of nodes the caller pays for before
+  seeing any. The output distinguishes the two ways a walk ends:
+  `truncated=true` means the node cap dropped nodes, `depth_limited=true` means
+  the walk stopped descending and there may or may not be more. `--depth` and
+  `--cap` take anything.
 - **`--quiet` drops the scaffolding, not the bookkeeping.** Section titles,
   `Resolved:` headers and advisory hints go; warnings, error records and the
   `shown=`/`total=`/`truncated=` fields stay. A caller asking for less output is
@@ -96,6 +102,7 @@ Show methods/functions called by the given symbol (cross-file).
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -110,6 +117,7 @@ Show methods/functions that call the given symbol (cross-file).
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -146,6 +154,7 @@ List detected conflicts.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -160,6 +169,7 @@ Show members contained by the given entity (class, module, file).
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -180,6 +190,7 @@ Build a bounded, deterministic context bundle for a symbol, file, or entity (or 
 | `--max-tokens` | `<n>` | `1500` | Maximum tokens of evidence output (clamped to 500-200000) |
 | `--max-chars` | `<n>` | — | Maximum characters of evidence output; overrides `--max-tokens` (clamped to 1000-1000000) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 | `--out` | `<path>` | — | Write the JSON bundle to this file instead of stdout |
@@ -197,9 +208,10 @@ Show upstream dependents of the given entity (full tree by default).
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
-| `--depth` | `<n>` | — | Cap traversal depth |
-| `--cap` | `<n>` | — | Cap number of nodes visited |
+| `--depth` | `<n>` | `3` | Cap traversal depth |
+| `--cap` | `<n>` | `100` | Cap number of nodes visited |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 | `--include-tests` | — | off | Include test and fixture entities in results |
@@ -217,6 +229,7 @@ Show diff between two revisions, optionally scoped to a file or entity.
 | `--limit` | `<n>` | — | Max changes to return (default 100) |
 | `--full` | — | off | Return all changes (no limit) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 | `--kind` | `<kind>` | — | Filter target entity by kind |
@@ -274,6 +287,7 @@ Check Ix system health — server, database, graph integrity.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -284,6 +298,7 @@ Get entity details with claims and edges.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -297,6 +312,7 @@ Explain an entity — infers role, importance, and structural context.
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 | `--raw` | — | off | Show raw metadata dump (legacy format) |
@@ -324,6 +340,7 @@ Show provenance chain for a file or entity.
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -339,6 +356,7 @@ System risk analysis — what behavior is at risk if this changes.
 | `--depth` | `<n>` | `1` | Expansion depth for callers/importers (default 1, max 3) |
 | `--limit` | `<n>` | `10` | Max top-impacted members to show |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -353,6 +371,7 @@ Show what imports the given entity.
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -367,6 +386,7 @@ Show what the given entity imports.
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -384,6 +404,7 @@ Ingest source files or GitHub data into the knowledge graph.
 | `--limit` | `<n>` | `50` | Max items per category (default 50) |
 | `--force` | — | off | Force re-ingest even if files are unchanged (useful after parser upgrades) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 | `--root` | `<dir>` | — | Workspace root directory |
@@ -406,6 +427,7 @@ List entities by kind with optional path scoping.
 | `--path` | `<path>` | — | Filter by source file path substring |
 | `--limit` | `<n>` | `50` | Max results |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -419,6 +441,7 @@ Resolve a symbol to its position in the codebase and system hierarchy.
 | `--path` | `<path>` | — | Restrict to results from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -429,6 +452,7 @@ Map the architectural hierarchy of a codebase.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--format` | `text\|json\|llm\|silent` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 | `--level` | `<n>` | — | Show only regions at this level (1=finest, higher=coarser) |
@@ -462,6 +486,7 @@ Register `ix mcp` with the AI clients installed on this machine.
 | `--dry-run` | — | `false` | Report what would change without writing anything |
 | `--force` | — | `false` | Replace a registration held by a different server |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -473,6 +498,7 @@ Check that `ix mcp` is registered and launchable from each client.
 |---|---|---|---|
 | `--host` | `<ids...>` | — | Only these hosts |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -486,6 +512,7 @@ Structural summary — what a target contains or what surrounds it.
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -497,6 +524,7 @@ List recent patches.
 |---|---|---|---|
 | `--limit` | `<n>` | `50` | Maximum patches to return |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -509,6 +537,7 @@ List recent patches.
 | `--as-of` | `<rev>` | — | Time-travel to a specific revision |
 | `--depth` | `shallow\|standard\|deep` | `standard` | Query depth (shallow\|standard\|deep) |
 | `--format` | `text\|json` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 | `--unsafe` | — | off | Enable query (can produce large outputs) |
@@ -526,6 +555,7 @@ Rank entities by graph-derived importance (dependents, callers, importers, membe
 | `--exclude-path` | `<path>` | — | Exclude entities whose source path contains this substring |
 | `--exclude-kind` | `<kinds>` | — | Comma-separated kinds to exclude from results |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -536,6 +566,7 @@ Read raw file content, line ranges, or symbol source code.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 | `--kind` | `<kind>` | — | Filter symbol by kind |
@@ -565,6 +596,7 @@ Subcommands: `reset`.
 | `--detail` | — | off | Include per-command breakdown |
 | `--model` | `opus\|sonnet\|haiku\|gpt-4o` | `opus` | Pricing model (opus\|sonnet\|haiku\|gpt-4o) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -586,6 +618,7 @@ Search the knowledge graph by term — ranked by structural relevance.
 | `--path` | `<path>` | — | Filter results by file path (case-insensitive substring match). Keyword searches widen the candidate window up to 2000 nodes and warn if that bound is reached. |
 | `--as-of` | `<rev>` | — | Search as of a specific revision |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 | `--include-tests` | — | off | Include test and fixture entities in results |
@@ -599,6 +632,7 @@ Detect architecture smells in the codebase.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 | `--orphan-max-connections` | `<n>` | `0` | Max connections for orphan files |
@@ -614,6 +648,7 @@ Show graph statistics — node/edge counts by type.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
@@ -624,6 +659,7 @@ Show Ix backend health and status.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 | `--root` | `<dir>` | — | Workspace root directory |
@@ -635,6 +671,7 @@ Show the persisted architectural map saved by 'ix map'.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 | `--list` | — | off | List stored subsystem health scores instead of the persisted architecture map |
@@ -665,6 +702,7 @@ Fast lexical/text search across the codebase (uses ripgrep).
 | `--path` | `<dir>` | `.` | Restrict search to a workspace-relative directory |
 | `--language` | `<lang>` | — | Filter by language (python, typescript, scala, etc.) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 | `--root` | `<dir>` | — | Workspace root directory |
@@ -679,11 +717,12 @@ Follow how it connects.
 | `--upstream` | — | off | Show who calls/imports this (same as depends) |
 | `--downstream` | — | off | Show what this calls/imports (outward flow) |
 | `--kind` | `<kind>` | — | Relationship kind: calls\|imports\|depends\|contains |
-| `--depth` | `<n>` | — | Cap traversal depth in edges (also applies to `--to`) |
-| `--cap` | `<n>` | — | Cap nodes visited per direction, or across the `--to` search (including the source) |
+| `--depth` | `<n>` | `3` | Cap traversal depth in edges (also applies to `--to`) |
+| `--cap` | `<n>` | `100` | Cap nodes visited per direction, or across the `--to` search (including the source) |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 | `--include-tests` | — | off | Include test and fixture entities |

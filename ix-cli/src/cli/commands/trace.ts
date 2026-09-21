@@ -14,8 +14,9 @@ import {
   reportResolutionFailure,
   reportUnresolvedTarget,
 } from "../ui.js";
-import { compactTreeNode, relativePath } from "../format.js";
+import { compactTreeNode, relativePath, printJson } from "../format.js";
 import { llmLine, llmShortId, type LlmValue } from "../llm.js";
+import { traversalHint } from "./depends.js";
 import { parsePickOption } from "../options.js";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -38,8 +39,15 @@ interface PathNode {
 
 // ── Constants ────────────────────────────────────────────────────────
 
-const DEFAULT_MAX_DEPTH = Infinity;
-const MAX_NODES = Infinity;
+/**
+ * What an unasked-for traversal is allowed to cost — the same bounds
+ * `ix depends` uses, for the same reason: both were `Infinity`, and on a hub
+ * that is thousands of nodes the caller pays for before seeing any of them.
+ * `--depth` and `--cap` still take anything, and the output says when a bound
+ * was reached.
+ */
+const DEFAULT_MAX_DEPTH = 3;
+const MAX_NODES = 100;
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -165,15 +173,24 @@ async function buildTraceTree(
     maxDepth: number;
     maxNodes: number;
   },
-): Promise<{ tree: TraceNode[]; truncated: boolean; nodesVisited: number; maxDepthReached: number }> {
+): Promise<{
+  tree: TraceNode[];
+  truncated: boolean;
+  depthLimited: boolean;
+  nodesVisited: number;
+  maxDepthReached: number;
+}> {
   const { direction, predicates, maxDepth, maxNodes } = opts;
   const visited = new Set<string>([rootId]);
   let nodesVisited = 0;
   let truncated = false;
+  let depthLimited = false;
   let maxDepthReached = 0;
 
   async function expand(nodeId: string, depth: number): Promise<TraceNode[]> {
-    if (depth > maxDepth) { truncated = true; return []; }
+    // See depends.ts: stopping at the depth bound is not evidence that
+    // anything was cut off.
+    if (depth > maxDepth) { depthLimited = true; return []; }
     if (nodesVisited >= maxNodes) { truncated = true; return []; }
     maxDepthReached = Math.max(maxDepthReached, depth);
 
@@ -220,7 +237,7 @@ async function buildTraceTree(
   }
 
   const tree = await expand(rootId, 1);
-  return { tree, truncated, nodesVisited, maxDepthReached };
+  return { tree, truncated, depthLimited, nodesVisited, maxDepthReached };
 }
 
 // ── Path search (BFS) ────────────────────────────────────────────────
@@ -404,7 +421,7 @@ export function renderTraceSingleLlm(
     lines.push(llmLine("diagnostic", [["code", "no_edges"], ["message", `No ${direction} ${relKind} found for ${target.name}.`]]));
   }
   if (truncated) {
-    lines.push(llmLine("diagnostic", [["code", "truncated"], ["message", `Traversal truncated (depth: ${maxDepth}, node cap: ${maxNodes}).`]]));
+    lines.push(llmLine("diagnostic", [["code", "truncated"], ["message", traversalHint(maxDepth, maxNodes, { truncated: true, depthLimited: false })]]));
   }
   lines.push(...traceNodesLlm("node", tree, target.id));
   return lines;
@@ -524,7 +541,7 @@ export function registerTraceCommand(program: Command): void {
                 },
               ];
             }
-            console.log(JSON.stringify(output, null, 2));
+            printJson(output);
             return;
           }
 
@@ -594,26 +611,22 @@ export function registerTraceCommand(program: Command): void {
 
           // ── JSON ──────────────────────────────────────────────
           if (opts.format === "json") {
-            console.log(
-              JSON.stringify(
-                {
-                  mode: "directional",
-                  target: { name: target.name, kind: target.kind, path: relativePath(target.path) },
-                  direction: "both",
-                  kind: relKind,
-                  depth: maxDepth,
-                  upstream: {
-                    tree: upResult.tree.map(compactTreeNode),
-                    summary: { nodes_visited: upResult.nodesVisited, max_depth: upResult.maxDepthReached },
-                  },
-                  downstream: {
-                    tree: downResult.tree.map(compactTreeNode),
-                    summary: { nodes_visited: downResult.nodesVisited, max_depth: downResult.maxDepthReached },
-                  },
+            printJson(
+              {
+                mode: "directional",
+                target: { name: target.name, kind: target.kind, path: relativePath(target.path) },
+                direction: "both",
+                kind: relKind,
+                depth: maxDepth,
+                upstream: {
+                  tree: upResult.tree.map(compactTreeNode),
+                  summary: { nodes_visited: upResult.nodesVisited, max_depth: upResult.maxDepthReached },
                 },
-                null,
-                2,
-              ),
+                downstream: {
+                  tree: downResult.tree.map(compactTreeNode),
+                  summary: { nodes_visited: downResult.nodesVisited, max_depth: downResult.maxDepthReached },
+                },
+              },
             );
             return;
           }
@@ -690,11 +703,11 @@ export function registerTraceCommand(program: Command): void {
           }
           if (truncated) {
             const diags = (output.diagnostics as unknown[]) ?? [];
-            (diags as unknown[]).push({ code: "truncated", message: `Traversal truncated (depth: ${maxDepth}, node cap: ${maxNodes}).` });
+            (diags as unknown[]).push({ code: "truncated", message: traversalHint(maxDepth, maxNodes, { truncated: true, depthLimited: false }) });
             output.diagnostics = diags;
           }
 
-          console.log(JSON.stringify(output, null, 2));
+          printJson(output);
           return;
         }
 

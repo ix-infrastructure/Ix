@@ -40,6 +40,7 @@ import { registerPatchesCommand } from "../commands/patches.js";
 import { registerMcpCommand } from "../commands/mcp.js";
 import { registerContextCommand } from "../commands/context.js";
 import { validateCliOptions } from "../options.js";
+import { setPrettyJson } from "../format.js";
 import { setOutputShape } from "../output-shape.js";
 import {
   BUILT_IN_DEFAULT_FORMAT,
@@ -115,12 +116,19 @@ function configureOssOptions(root: Command): void {
     ossCommands.add(command);
     const commandChoices = OPTION_CHOICES[command.name()] ?? {};
     let rendersRows = false;
+    let rendersJson = false;
     for (const option of command.options) {
       const choices = commandChoices[option.attributeName()]
         ?? (option.long === "--format" ? [...DEFAULT_FORMAT_CHOICES] : undefined);
       if (choices) option.choices(choices);
       applyDefaultFormat(command, option, choices, defaultFormat);
       if (option.long === "--format") rendersRows = true;
+      if (option.long === "--format" && (choices ?? []).includes("json")) rendersJson = true;
+    }
+    // Declared here rather than 32 times by hand, and only where it means
+    // something: a command with no `--format json` has no JSON to shape.
+    if (rendersJson && !command.options.some((option) => option.long === "--pretty")) {
+      command.option("--pretty", "Indent JSON output (the default only when stdout is a terminal)");
     }
     // Declared here rather than on 33 commands by hand, and only where there
     // is an answer to shape. A command with no `--format` prints a status
@@ -212,10 +220,11 @@ export function registerOssCommands(program: Command): void {
   configureOssOptions(program);
 
   program.hook("preAction", (_thisCommand, actionCommand) => {
-    // Before anything prints. Both are properties of the run, not of a
+    // Before anything prints. All three are properties of the run, not of a
     // payload, so the renderers read them from one place rather than every
-    // signature growing two parameters it only forwards.
+    // signature growing parameters it only forwards.
     const opts = actionCommand.opts();
+    setPrettyJson(opts.pretty === true);
     setOutputShape({ quiet: opts.quiet === true, fields: typeof opts.fields === "string" ? opts.fields : undefined });
 
     // OSS commands only. The rules below read an option's *shape* -- `<n>`

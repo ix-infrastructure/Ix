@@ -25,6 +25,7 @@ import { parseBudgetOption, parsePickOption, parseRevisionOption } from "../opti
 import { resolveFileOrReport } from "../resolve.js";
 import { createStaleProbe, hasCompletedSourceGraphBaseline } from "../stale.js";
 import { renderNote, renderSection, renderWarning, renderWarningErr, reportFailure } from "../ui.js";
+import { printJson } from "../format.js";
 
 /** The `--max-*` knobs that bound a bundle. */
 interface BudgetSnapshot {
@@ -914,7 +915,7 @@ export function renderInvestigationList(
     );
   }
   if (format === "json") {
-    console.log(JSON.stringify({ investigations: summaries, skipped }, null, 2));
+    printJson({ investigations: summaries, skipped });
     return;
   }
   if (format === "llm") {
@@ -1070,7 +1071,7 @@ export function renderSavedInvestigation(id: string, format: string): void {
   const saved = loadInvestigation(id, format);
   if (!saved) return;
   if (format === "json") {
-    console.log(JSON.stringify(saved, null, 2));
+    printJson(saved);
     return;
   }
   if (format === "llm") {
@@ -1300,7 +1301,7 @@ export function renderInvestigationDiff(
   const diff = diffInvestigations(saved, fresh, requestedBudgets);
 
   if (format === "json") {
-    console.log(JSON.stringify(diff, null, 2));
+    printJson(diff);
     return;
   }
   if (format === "llm") {
@@ -1836,7 +1837,7 @@ function rankEvidence(input: {
 
 export function renderBundle(bundle: ContextBundle, format: string): void {
   if (format === "json") {
-    console.log(JSON.stringify(bundle, null, 2));
+    printJson(bundle);
     return;
   }
   if (format === "llm") {

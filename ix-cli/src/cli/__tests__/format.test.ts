@@ -282,7 +282,7 @@ describe("formatDecisions", () => {
       { id: "abc-123", kind: "decision", attrs: { title: "Use ArangoDB", rationale: "Supports MVCC" } }
     ];
     formatDecisions(decisions, "json");
-    expect(spy).toHaveBeenCalledWith(JSON.stringify(decisions, null, 2));
+    expect(spy).toHaveBeenCalledWith(JSON.stringify(decisions));
     spy.mockRestore();
   });
 
@@ -312,7 +312,7 @@ describe("formatTextResults", () => {
     const spy = vi.spyOn(console, "log").mockImplementation(() => {});
     const results = [{ path: "src/foo.ts", line_start: 42, line_end: 42, snippet: "const foo = bar;", engine: "ripgrep", score: 1.0 }];
     formatTextResults(sliceRanked(results, 20), "json");
-    expect(spy).toHaveBeenCalledWith(JSON.stringify(results, null, 2));
+    expect(spy).toHaveBeenCalledWith(JSON.stringify(results));
     spy.mockRestore();
   });
 

@@ -22,6 +22,12 @@ stored value.
 A command that does not implement the configured format keeps its own default
 rather than being handed one it cannot render — `query` renders `text` and
 `json` only, so `IX_FORMAT=llm` leaves it on `text`.
+### JSON is compact unless a person is watching
+
+`--format json` prints one line when stdout is not a terminal — a pipe, a
+command substitution, an agent's tool result — and indents only when you are
+reading it on screen. Indentation is whitespace a parser throws away, and it is
+about a fifth of the payload. `--pretty` forces the indented shape anywhere.
 
 ### Commands that accept `--format` but route `llm` to `text`
 

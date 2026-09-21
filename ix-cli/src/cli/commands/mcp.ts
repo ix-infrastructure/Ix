@@ -5,6 +5,7 @@ import chalk from "chalk";
 
 import { llmLine, type LlmValue } from "../llm.js";
 import type { DoctorReport, HostReport, InstallReport, Outcome } from "../../mcp/install.js";
+import { printJson } from "../format.js";
 
 /** Symbol and colour per outcome, shared by install and doctor. */
 const OUTCOME_STYLE: Record<Outcome, { mark: string; paint: (text: string) => string }> = {
@@ -49,7 +50,7 @@ function hostFields(host: HostReport): Array<[string, LlmValue]> {
 
 function renderInstall(report: InstallReport, format: string, dryRun: boolean): void {
   if (format === "json") {
-    console.log(JSON.stringify(report, null, 2));
+    printJson(report);
     return;
   }
   if (format === "llm") {
@@ -75,7 +76,7 @@ function renderInstall(report: InstallReport, format: string, dryRun: boolean): 
 
 function renderDoctor(report: DoctorReport, format: string): void {
   if (format === "json") {
-    console.log(JSON.stringify(report, null, 2));
+    printJson(report);
     return;
   }
   if (format === "llm") {
