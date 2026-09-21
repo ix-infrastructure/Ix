@@ -8,7 +8,7 @@ import { getEndpoint } from "../config.js";
 import { resolveFileOrReport, printResolved } from "../resolve.js";
 import { bucketByHierarchy, getSystemPath, formatSystemPath, hasMapData, type SystemPath } from "../hierarchy.js";
 import { inferRiskSemantics, humanizeLabel, type ImpactFacts, type RiskSemantics } from "../impact/risk-semantics.js";
-import { stripNulls } from "../format.js";
+import { lineSpan, rowLocation, stripNulls } from "../format.js";
 import { llmLine } from "../llm.js";
 import { parsePickOption } from "../options.js";
 
@@ -296,7 +296,10 @@ async function containerImpact(
 
   // For each member (up to 20), get inbound callers
   const membersToCheck = members.slice(0, 20);
-  const memberCallerCounts: { name: string; kind: string; id: string; callerCount: number }[] = [];
+  const memberCallerCounts: Array<{
+    name: string; kind: string; id: string; callerCount: number;
+    path?: string; lineStart?: number; lineEnd?: number;
+  }> = [];
   let totalMemberCallers = 0;
 
   const callerPromises = membersToCheck.map(async (member: any) => {
@@ -310,6 +313,7 @@ async function containerImpact(
         kind: member.kind || "unknown",
         id: member.id,
         callerCount: callersResult.nodes.length,
+        ...rowLocation(member),
       };
     } catch {
       diagnostics.push(`Failed to expand callers for member ${member.id}`);
@@ -318,6 +322,7 @@ async function containerImpact(
         kind: member.kind || "unknown",
         id: member.id,
         callerCount: 0,
+        ...rowLocation(member),
       };
     }
   });
@@ -408,7 +413,12 @@ async function containerImpact(
         ["member_callers", totalMemberCallers],
       ]),
       ...impactPropagationLlm(propagationBuckets, risk.flowPropagation),
-      ...topMembers.map((m) => llmLine("member", [["name", m.name], ["kind", m.kind], ["callers", m.callerCount]])),
+      // The rows `ix impact` exists to produce: the members a change reaches.
+      // They named a symbol and left the caller to find it.
+      ...topMembers.map((m) => llmLine("member", [
+        ["name", m.name], ["kind", m.kind], ["callers", m.callerCount],
+        ["path", m.path], ["lines", lineSpan(m)],
+      ])),
       ...impactTailLlm(risk, decisions, tasks, bugs),
     ];
     for (const line of lines) console.log(line);

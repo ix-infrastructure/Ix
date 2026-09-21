@@ -5,17 +5,31 @@
 Query commands accept `--format text|json|llm`:
 
 - **`--format llm`** — use when reading the result yourself. Token-minimal,
-  newline-delimited (`key=value`, one record per line). Smallest output.
+  newline-delimited (`key=value`, one record per line). Smallest output; on
+  `ix context` it is roughly a ninth of the same answer in `json`.
 - **`--format json`** — use when chaining results between commands or pulling a
   specific field out of a response.
 - **`--format text`** — human-oriented tables and trees.
 
+### Setting it once
+
+Resolution is: the flag, then `IX_FORMAT`, then `format` in `~/.ix/config.yaml`
+(`ix config set format llm`), then `text`. Set the env var or the config key and
+stop passing the flag; an explicit `--format` still wins on the call that needs
+something else. `ix config show` reports when `IX_FORMAT` is overriding the
+stored value.
+
+A command that does not implement the configured format keeps its own default
+rather than being handed one it cannot render — `query` renders `text` and
+`json` only, so `IX_FORMAT=llm` leaves it on `text`.
+
 ### Commands that accept `--format` but route `llm` to `text`
 
-`explain`, `read`, `status`, and the deprecated `query` do not implement `llm`
-and fall back to human-oriented text without an error. Use `--format json` on
-those if the output needs to be parsed. Everywhere else, `llm` behaves as
-documented.
+The deprecated `query` takes `text|json` only. `diff --content` (verbatim hunks)
+and `ingest` fall back to text without an error. `explain`, `read`, `status`,
+`doctor` and `savings` **do** implement `llm` — that was the last prose
+fallback, and `explain`'s records are about 55% smaller than the `json` people
+used as a workaround.
 
 ### Commands with no `--format` at all
 

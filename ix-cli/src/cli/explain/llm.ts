@@ -2,7 +2,7 @@
 
 import { llmLine } from "../llm.js";
 import { relativePath } from "../format.js";
-import type { EntityFacts } from "./facts.js";
+import type { EntityFacts, EntityLocation } from "./facts.js";
 import type { RoleInference } from "./role-inference.js";
 import type { ImportanceInference } from "./importance.js";
 import type { ExplanationOutput } from "./render.js";
@@ -26,6 +26,14 @@ import type { ExplanationOutput } from "./render.js";
  * is a real answer to "who calls this", and dropping the field would make it
  * indistinguishable from a field the renderer forgot.
  */
+/** `17-145`, or `17`, from a located entity — nothing when it has no lines. */
+function lineSpanOf(ref: EntityLocation | undefined): string | undefined {
+  if (!ref || ref.lineStart === undefined) return undefined;
+  return ref.lineEnd !== undefined && ref.lineEnd !== ref.lineStart
+    ? `${ref.lineStart}-${ref.lineEnd}`
+    : `${ref.lineStart}`;
+}
+
 export function renderExplainLlm(
   facts: EntityFacts,
   role: RoleInference,
@@ -82,19 +90,45 @@ export function renderExplainLlm(
 
   if (facts.signature) lines.push(llmLine("signature", [["text", facts.signature]]));
 
-  for (const caller of facts.topCallers) {
-    lines.push(llmLine("caller", [["name", caller]]));
-  }
-  for (const dependent of facts.topDependents) {
-    lines.push(llmLine("dependent", [["name", dependent]]));
-  }
-  for (const member of facts.members) {
-    lines.push(llmLine("member", [["name", member]]));
+  // The same three names, three times over. A caller is nearly always also a
+  // dependent — `relativePath` on this repo emitted three `caller` rows, the
+  // same three as `dependent` rows, and then a `used_by` sentence naming them
+  // again: ten lines where three carry the information.
+  //
+  // So: callers first, dependents only where they are not already a caller,
+  // and each row says which relations it stands for.
+  const relations = new Map<string, { rel: string[]; ref?: EntityLocation }>();
+  const note = (name: string, rel: string, ref?: EntityLocation) => {
+    const entry = relations.get(name) ?? { rel: [], ref: undefined };
+    entry.rel.push(rel);
+    entry.ref = entry.ref ?? ref;
+    relations.set(name, entry);
+  };
+  facts.topCallers.forEach((name, i) => note(name, "caller", facts.topCallerRefs?.[i]));
+  facts.topDependents.forEach((name, i) => note(name, "dependent", facts.topDependentRefs?.[i]));
+  for (const [name, { rel, ref }] of relations) {
+    lines.push(llmLine("uses", [
+      ["name", name],
+      ["rel", rel.join(",")],
+      ["path", ref?.path],
+      ["lines", lineSpanOf(ref)],
+    ]));
   }
 
-  // Kept from the prose because it is the one part that is not derivable from
-  // the records above: `usedBy` names call sites the counts only total up.
-  if (rendered.usedBy) lines.push(llmLine("used_by", [["text", rendered.usedBy]]));
+  facts.members.forEach((name, i) => {
+    const ref = facts.memberRefs?.[i];
+    lines.push(llmLine("member", [
+      ["name", name],
+      ["path", ref?.path],
+      ["lines", lineSpanOf(ref)],
+    ]));
+  });
+
+  // The generated `used_by` sentence is those names a third time; only a
+  // hierarchy-derived narrative says something the rows above do not.
+  if (rendered.usedBy && !rendered.usedByIsNameList) {
+    lines.push(llmLine("used_by", [["text", rendered.usedBy]]));
+  }
 
   for (const note of rendered.notes) {
     lines.push(llmLine("note", [["text", note]]));
