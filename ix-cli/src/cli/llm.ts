@@ -48,6 +48,49 @@ export function llmQuote(raw: string): string {
   return `"${escaped}"`;
 }
 
+/**
+ * The id prefix records carry.
+ *
+ * Eight hex characters, which is what `/v1/resolve-prefix` already accepts
+ * everywhere the CLI takes an id, so the short form is not a display-only
+ * abbreviation — it is a value the caller can pass straight back. A full v4
+ * UUID is 36 characters and tokenizes at roughly 1.8 characters per token, so
+ * on `ix map` (30 regions, each with its own id and its parent's) the ids alone
+ * outweigh the labels they are attached to.
+ *
+ * Only ids that *are* opaque blobs are shortened. Region ids are UUIDs here but
+ * claim ids look like `c-8f31a2` and region ids can be slugs (`root`,
+ * `cli-commands`); truncating those would corrupt a value rather than
+ * abbreviate it.
+ */
+const SHORT_ID_LENGTH = 8;
+const HEX_ONLY = /^[0-9a-f]+$/i;
+const MIN_OPAQUE_LENGTH = 16;
+
+/**
+ * Hex, ignoring dashes, and long enough that no part of it is a word.
+ *
+ * Both halves matter. Hex-only rules out a slug (`root`, `cli-commands`) and a
+ * prefixed id (`c-8f31a2`), and the length floor rules out a short hex-looking
+ * word — `cafe`, `decade` — that happens to be a label. Anything that passes is
+ * an opaque identifier whose first eight characters carry the same meaning as
+ * all of them.
+ *
+ * Idempotent: an already-shortened `8ebf63f9` is seven characters of hex short
+ * of the floor and comes back unchanged.
+ */
+function isOpaqueId(raw: string): boolean {
+  const hex = raw.replace(/-/g, "");
+  return hex.length >= MIN_OPAQUE_LENGTH && HEX_ONLY.test(hex);
+}
+
+export function llmShortId(value: LlmValue): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  const raw = String(value);
+  if (raw === "") return undefined;
+  return isOpaqueId(raw) ? raw.slice(0, SHORT_ID_LENGTH) : raw;
+}
+
 /** Render a single `key=value` token, or null if the value is omitted. */
 export function llmField(key: string, value: LlmValue): string | null {
   if (value === null || value === undefined) return null;

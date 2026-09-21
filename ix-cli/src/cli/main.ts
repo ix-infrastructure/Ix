@@ -7,7 +7,7 @@ import { tryLoadProCommands } from "./register/pro-loader.js";
 import { buildHelpText } from "./help-text.js";
 import { checkForUpdate, updateCheckEnabled } from "./commands/upgrade.js";
 import { stderrIsTerminal } from "./stderr.js";
-import { renderCliError } from "./errors.js";
+import { detectRequestedFormat, renderCliError, setErrorFormat } from "./errors.js";
 import { getEndpoint } from "./config.js";
 
 import { readFileSync } from "fs";
@@ -39,6 +39,12 @@ try {
 
 // Set IX_DEBUG=1 to append stack traces to any rendered error.
 const debug = process.env.IX_DEBUG === "1";
+
+// Before anything can throw. The handlers below are installed for
+// `unhandledRejection` and `uncaughtException`, which can fire before
+// commander has parsed a thing, so the error boundary gets the format from
+// argv rather than from a parsed command.
+setErrorFormat(detectRequestedFormat(process.argv.slice(2)));
 
 // Resolving the endpoint reads config off disk, which can itself fail. An
 // error renderer must never throw, so failure here just drops the endpoint

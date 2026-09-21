@@ -9,7 +9,7 @@ import { formatNodes, relativePath } from "../format.js";
 import { scoreCandidate, resolveReadSystemId } from "../resolve.js";
 import { applyRoleFilter, roleHint } from "../role-filter.js";
 import { stderr } from "../stderr.js";
-import { llmLine } from "../llm.js";
+import { llmLine, llmShortId } from "../llm.js";
 import { isQuiet, projectRow } from "../output-shape.js";
 import { normalizePathSeparators } from "../path-match.js";
 
@@ -21,7 +21,7 @@ export function renderSearchLlm(
   const lines = [llmLine("search", [["count", results.length], ["candidates", totalCandidates]])];
   for (const r of results) {
     lines.push(llmLine("node", projectRow([
-      ["name", r.name], ["kind", r.kind], ["id", r.id?.slice(0, 8)],
+      ["name", r.name], ["kind", r.kind], ["id", llmShortId(r.id)],
       ["path", r.path], ["score", r.score],
     ])));
   }
@@ -36,6 +36,7 @@ export function renderSearchLlm(
 /** Structural kinds that should rank higher than incidental matches. */
 const STRUCTURAL_KINDS = new Set([
   "class", "trait", "object", "interface", "function", "method", "module", "file",
+  "constant",
 ]);
 
 /**
