@@ -6,7 +6,7 @@ import { IxClient, type ListSubsystemsOptions } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
-import { roundFloat } from "../format.js";
+import { roundFloat, printJson } from "../format.js";
 import { llmLine, llmError, llmShortId } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { renderMapText, renderMapLlm, type MapRegion, type MapResult } from "./map.js";
@@ -192,7 +192,7 @@ Examples:
 
         if (opts.format === "json") {
           if (opts.detailed) {
-            console.log(JSON.stringify(buildDetailedListPayload(filtered, result.pagination), null, 2));
+            printJson(buildDetailedListPayload(filtered, result.pagination));
           } else {
             const compact = filtered.map(s => ({
               name: s.name,
@@ -202,12 +202,12 @@ Examples:
               chunks_per_file: roundFloat(s.chunk_density),
               smell_files: s.smell_files,
             }));
-            console.log(JSON.stringify({ scores: compact }, null, 2));
+            printJson({ scores: compact });
           }
           return;
         }
         if (opts.detailed) {
-          console.log(JSON.stringify(buildDetailedListPayload(filtered, result.pagination), null, 2));
+          printJson(buildDetailedListPayload(filtered, result.pagination));
           return;
         }
         printScores(filtered);
@@ -225,7 +225,7 @@ Examples:
         const body = parseErrorBody(err);
         if (body) {
           if (opts.format === "json") {
-            console.log(JSON.stringify(body, null, 2));
+            printJson(body);
             process.exitCode = 1;
             return;
           }
@@ -264,7 +264,7 @@ Examples:
 
         const score = (scoreResult.scores ?? []).find((candidate) => candidate.region_id === result.target.id) ?? null;
         if (opts.format === "json") {
-          console.log(JSON.stringify(renderSubsystemExplanationJson(result, score), null, 2));
+          printJson(renderSubsystemExplanationJson(result, score));
           return;
         }
 
@@ -273,7 +273,7 @@ Examples:
       }
 
       if (opts.format === "json") {
-        console.log(JSON.stringify(compactMapResult(result), null, 2));
+        printJson(compactMapResult(result));
         return;
       }
 

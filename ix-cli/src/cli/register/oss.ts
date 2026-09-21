@@ -40,6 +40,7 @@ import { registerPatchesCommand } from "../commands/patches.js";
 import { registerMcpCommand } from "../commands/mcp.js";
 import { registerContextCommand } from "../commands/context.js";
 import { validateCliOptions } from "../options.js";
+import { setPrettyJson } from "../format.js";
 import {
   BUILT_IN_DEFAULT_FORMAT,
   DEFAULT_FORMAT_CHOICES,
@@ -92,7 +93,7 @@ const OPTION_CHOICES: Record<string, Record<string, string[]>> = {
  */
 const ossCommands = new WeakSet<Command>();
 
-function configureOssOptionChoices(root: Command): void {
+function configureOssOptions(root: Command): void {
   const { format: defaultFormat, ignored } = resolveDefaultFormat(
     process.env,
     // Never let an unreadable or half-written config.yaml stop the CLI from
@@ -113,11 +114,18 @@ function configureOssOptionChoices(root: Command): void {
   const visit = (command: Command): void => {
     ossCommands.add(command);
     const commandChoices = OPTION_CHOICES[command.name()] ?? {};
+    let rendersJson = false;
     for (const option of command.options) {
       const choices = commandChoices[option.attributeName()]
         ?? (option.long === "--format" ? [...DEFAULT_FORMAT_CHOICES] : undefined);
       if (choices) option.choices(choices);
       applyDefaultFormat(command, option, choices, defaultFormat);
+      if (option.long === "--format" && (choices ?? []).includes("json")) rendersJson = true;
+    }
+    // Declared here rather than 32 times by hand, and only where it means
+    // something: a command with no `--format json` has no JSON to shape.
+    if (rendersJson && !command.options.some((option) => option.long === "--pretty")) {
+      command.option("--pretty", "Indent JSON output (the default only when stdout is a terminal)");
     }
     for (const child of command.commands) visit(child);
   };
@@ -195,9 +203,14 @@ export function registerOssCommands(program: Command): void {
   registerMcpCommand(program);
   registerContextCommand(program);
 
-  configureOssOptionChoices(program);
+  configureOssOptions(program);
 
   program.hook("preAction", (_thisCommand, actionCommand) => {
+    // Before anything prints. `--pretty` is a property of the run, not of a
+    // payload, so the renderers read it from one place instead of threading a
+    // flag through every signature that ends in a `console.log`.
+    setPrettyJson(actionCommand.opts().pretty === true);
+
     // OSS commands only. The rules below read an option's *shape* -- `<n>`
     // means a non-negative integer, `--min-confidence` means 0..1 -- which is
     // a claim about commands whose declarations live in this repo. A Pro

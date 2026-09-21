@@ -4,7 +4,7 @@ import { type Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { clearMapBaseline, getEndpoint } from "../config.js";
-import { roundFloat } from "../format.js";
+import { roundFloat, printJson } from "../format.js";
 import { llmLine, llmError, llmShortId } from "../llm.js";
 import { bootstrap, resolveWorkspaceId } from "../bootstrap.js";
 import { formatFetchError } from "../errors.js";
@@ -390,7 +390,7 @@ Examples:
       } catch (err: any) {
         const message = err?.message ?? "Invalid map path";
         if (opts.format === "json") {
-          console.log(JSON.stringify({ error: "invalid_map_path", message }, null, 2));
+          printJson({ error: "invalid_map_path", message });
         } else if (opts.format === "llm") {
           console.log(llmError("invalid_map_path", message));
         } else {
@@ -620,7 +620,7 @@ Examples:
       if (minConf > 0) regions = regions.filter(r => r.confidence >= minConf);
 
       if (opts.format === "json") {
-        console.log(JSON.stringify({
+        printJson({
           file_count: result.file_count,
           region_count: regions.length,
           levels: result.levels,
@@ -649,7 +649,7 @@ Examples:
             confidence: roundFloat(r.confidence),
             signals: r.dominant_signals,
           })),
-        }, null, 2));
+        });
         return;
       }
       if (opts.format === "llm") {

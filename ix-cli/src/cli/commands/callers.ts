@@ -6,7 +6,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
-import { formatEdgeResults, relativePath, sliceEdgeResults } from "../format.js";
+import { formatEdgeResults, printJson, relativePath, sliceEdgeResults } from "../format.js";
 import { parsePickOption } from "../options.js";
 import { resolveFileOrReport, printResolved } from "../resolve.js";
 import { stderr } from "../stderr.js";
@@ -84,7 +84,7 @@ export function registerCallersCommand(program: Command): void {
               return;
             }
             if (opts.format === "json") {
-              console.log(JSON.stringify({
+              printJson({
                 results: textResults,
                 resultSource: "text",
                 resolvedTarget: target,
@@ -96,7 +96,7 @@ export function registerCallersCommand(program: Command): void {
                   code: "text_fallback_used",
                   message: "No graph-backed CALLS/REFERENCES edges found. If files were ingested before extraction was added, run: ix ingest --force --recursive .",
                 }],
-              }, null, 2));
+              });
             } else {
               stderr(chalk.dim("No graph-backed CALLS/REFERENCES edges found. Showing text-based candidate usages."));
               stderr(chalk.dim("Tip: if files were ingested before CALLS extraction, run: ix ingest --force --recursive .\n"));

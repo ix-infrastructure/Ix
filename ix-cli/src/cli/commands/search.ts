@@ -5,7 +5,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
-import { formatNodes, relativePath } from "../format.js";
+import { formatNodes, relativePath, printJson } from "../format.js";
 import { scoreCandidate, resolveReadSystemId } from "../resolve.js";
 import { applyRoleFilter, roleHint } from "../role-filter.js";
 import { stderr } from "../stderr.js";
@@ -346,7 +346,7 @@ Examples:
       }
 
       if (opts.format === "json") {
-        console.log(JSON.stringify({
+        printJson({
           results: trimmed.map((s, i) => ({
             id: s.node.id,
             name: s.node.name || (s.node.attrs as any)?.name || "(unnamed)",
@@ -363,7 +363,7 @@ Examples:
             totalCandidates: rawNodes.length,
           },
           diagnostics,
-        }, null, 2));
+        });
       } else {
         formatNodes(ranked, opts.format);
         if (pathWindowLimited) stderr(chalk.dim(diagnostics.find(d => d.code === "path_search_truncated")!.message));

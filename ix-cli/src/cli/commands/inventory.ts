@@ -6,7 +6,7 @@ import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
-import { relativePath } from "../format.js";
+import { relativePath, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
 import { normalizePathSeparators } from "../path-match.js";
 
@@ -140,7 +140,7 @@ Examples:
           byFile: grouped,
         };
         if (ungrouped.length > 0) output.ungrouped = ungrouped;
-        console.log(JSON.stringify(output, null, 2));
+        printJson(output);
         return;
       }
 

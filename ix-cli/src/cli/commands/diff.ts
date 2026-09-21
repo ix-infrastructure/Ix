@@ -11,7 +11,7 @@ import { IxClient } from "../../client/api.js";
 
 import { getEndpoint } from "../config.js";
 import { resolveFileOrReport, printResolved, type ResolvedEntity } from "../resolve.js";
-import { formatDiff, relativePath } from "../format.js";
+import { formatDiff, relativePath, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
 import { reportFailure } from "../ui.js";
 import { parsePickOption } from "../options.js";
@@ -511,7 +511,7 @@ export function registerDiffCommand(program: Command): void {
         const result: any = await client.diff(from, to, { summary: true, entityId });
 
         if (opts.format === "json") {
-          console.log(JSON.stringify(compactDiffResult(result), null, 2));
+          printJson(compactDiffResult(result));
         } else if (opts.format === "llm") {
           console.log(renderDiffSummaryLlm(result));
         } else {
@@ -574,7 +574,7 @@ export function registerDiffCommand(program: Command): void {
               if (displaySpan) {
                 jsonResult.lineSpan = displaySpan;
               }
-              console.log(JSON.stringify(jsonResult, null, 2));
+              printJson(jsonResult);
             } else {
               console.log(chalk.cyan.bold(`\nDiff: rev ${from} → ${to}`));
               if (diffLines.length === 0) {
@@ -627,7 +627,7 @@ export function registerDiffCommand(program: Command): void {
               c.sourceContent = afterSource ?? beforeSource;
             }
           }
-          console.log(JSON.stringify(compactDiffResult(result), null, 2));
+          printJson(compactDiffResult(result));
         } else {
           await formatDiffContent(result);
         }
@@ -648,14 +648,14 @@ export function registerDiffCommand(program: Command): void {
             const changeCount = diffLines.filter(l => l.startsWith("+") || l.startsWith("-")).length;
 
             if (opts.format === "json") {
-              console.log(JSON.stringify({
+              printJson({
                 ...compactDiffResult(result),
                 textualChanges: {
                   detected: true,
                   lineChanges: changeCount,
                   note: "Textual changes detected but not captured by graph parser (e.g. comments, whitespace).",
                 },
-              }, null, 2));
+              });
             } else {
               const name = resolved.name ?? fileUri;
               console.log(chalk.yellow(`${name} modified (${changeCount} textual changes — not captured by parser)`));
@@ -667,7 +667,7 @@ export function registerDiffCommand(program: Command): void {
       }
 
       if (opts.format === "json") {
-        console.log(JSON.stringify(compactDiffResult(result), null, 2));
+        printJson(compactDiffResult(result));
       } else if (opts.format === "llm") {
         formatDiff(result, "llm");
       } else {

@@ -9,7 +9,7 @@ import { absoluteFromSourceUri, getEndpoint, isReadablePath, readableRoots, reso
 import { resolveEntityFull, activeReadScope, ensureReadScope } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { isFileStale } from "../stale.js";
-import { relativePath } from "../format.js";
+import { relativePath, printJson } from "../format.js";
 import { llmError, llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { reportUnresolvedTarget } from "../ui.js";
@@ -59,7 +59,7 @@ function guardReadable(absPath: string, explicitRoot: string | undefined, what: 
   if (isReadablePath(absPath, explicitRoot)) return true;
   const message = `Refusing to read ${what} outside the workspace: ${absPath}`;
   if (format === "json") {
-    console.log(JSON.stringify({ error: "path_outside_workspace", message }, null, 2));
+    printJson({ error: "path_outside_workspace", message });
   } else if (format === "llm") {
     console.log(llmError("path_outside_workspace", message));
   } else {
@@ -74,7 +74,7 @@ function guardReadable(absPath: string, explicitRoot: string | undefined, what: 
 function reportInvalidLineRange(target: string, format: string): void {
   const message = `Invalid line range in "${target}". Line numbers must start at 1 and the end must not precede the start.`;
   if (format === "json") {
-    console.log(JSON.stringify({ error: "invalid_line_range", message }, null, 2));
+    printJson({ error: "invalid_line_range", message });
   } else if (format === "llm") {
     console.log(llmError("invalid_line_range", message));
   } else {
@@ -238,7 +238,7 @@ export function outputResult(result: ReadResult, format: string): void {
     printLlmLines(renderReadLlm(result));
   } else if (format === "json") {
     const out = { ...result, path: relativePath(result.path) ?? result.path };
-    console.log(JSON.stringify(out, null, 2));
+    printJson(out);
   } else {
     if (result.stale) stderr(chalk.yellow("⚠ File has changed since last ingest. Run ix map to update.\n"));
     if (result.targetType === "symbol" || result.targetType === "filename-match") {
@@ -262,7 +262,7 @@ function outputAmbiguity(result: AmbiguityResult, target: string, format: string
   if (format === "llm") {
     printLlmLines(renderReadAmbiguityLlm(result, target));
   } else if (format === "json") {
-    console.log(JSON.stringify(result, null, 2));
+    printJson(result);
   } else {
     const label = result.targetType === "ambiguous-file" ? "file" : "symbol";
     stderr(`Ambiguous ${label} "${target}":`);

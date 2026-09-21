@@ -3,7 +3,7 @@
 import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
-import { formatExplain, relativePath, type ExplainResult, type EntityRef, type Diagnostic } from "../format.js";
+import { formatExplain, relativePath, printJson, type ExplainResult, type EntityRef, type Diagnostic } from "../format.js";
 import { resolveFileOrReport, isRawId } from "../resolve.js";
 import { isFileStale } from "../stale.js";
 import { collectFacts } from "../explain/facts.js";
@@ -53,7 +53,7 @@ export function registerExplainCommand(program: Command): void {
           rendered,
         };
         if (facts.diagnostics.length > 0) output.diagnostics = facts.diagnostics;
-        console.log(JSON.stringify(output, null, 2));
+        printJson(output);
       } else {
         if (facts.stale) {
           renderWarning("Source has changed since last ingest. Run ix map to update.");
@@ -217,7 +217,7 @@ async function rawExplain(
       output.stale = true;
       output.warning = "Results may be stale; file has changed since last ingest.";
     }
-    console.log(JSON.stringify(output, null, 2));
+    printJson(output);
   } else {
     if (stale) renderWarning("Source has changed since last ingest. Run ix map to update.");
     formatExplain(result, "text");

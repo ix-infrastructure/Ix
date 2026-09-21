@@ -6,7 +6,7 @@ import { getEndpoint } from "../config.js";
 import { resolveFileOrReport, printResolved } from "../resolve.js";
 import { getEffectiveSystemPath, getSystemPath, hasMapData } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
-import { relativePath } from "../format.js";
+import { relativePath, printJson } from "../format.js";
 import { llmLine, type LlmValue } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { renderSection, renderKeyValue, renderNote, renderBreadcrumb } from "../ui.js";
@@ -193,7 +193,7 @@ async function overviewContainer(
   };
 
   if (format === "json") {
-    console.log(JSON.stringify(result, null, 2));
+    printJson(result);
     return;
   }
 
@@ -329,7 +329,7 @@ async function overviewLeaf(
   };
 
   if (format === "json") {
-    console.log(JSON.stringify(result, null, 2));
+    printJson(result);
     return;
   }
 

@@ -9,7 +9,7 @@ import {
 } from "../resolve.js";
 import { isFileStale } from "../stale.js";
 import { stderr } from "../stderr.js";
-import { relativePath } from "../format.js";
+import { relativePath, printJson } from "../format.js";
 import { llmLine, llmError, llmShortId } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { getEffectiveSystemPath, hasMapData } from "../hierarchy.js";
@@ -209,13 +209,13 @@ async function resolveWithAmbiguity(
 
   if (result.ambiguous) {
     if (format === "json") {
-      console.log(JSON.stringify({
+      printJson({
         resolvedTarget: null,
         resolutionMode: "ambiguous",
         candidates: result.result.candidates,
         systemPath: null,
         diagnostics: result.result.diagnostics ?? [],
-      }, null, 2));
+      });
     } else if (format === "llm") {
       // The shared renderer: one record per candidate with kind, path and a
       // short id. This used to emit `candidates=1:config.ts,2:config.ts` --
@@ -272,7 +272,7 @@ export function renderLocateLlm(output: LocateOutput, symbol: string): string[] 
 
 function outputLocate(output: LocateOutput, symbol: string, format: string): void {
   if (format === "json") {
-    console.log(JSON.stringify(output, null, 2));
+    printJson(output);
     return;
   }
   if (format === "llm") {

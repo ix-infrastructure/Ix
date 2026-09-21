@@ -22,6 +22,7 @@ import { backendCeiling, isNewer, readBackendHealth } from "./upgrade.js";
 import { loadIngestBaseline } from "../ingest-baseline.js";
 import { isCloudReady } from "../remote.js";
 import { hasCompletedMapBaseline } from "../stale.js";
+import { printJson } from "../format.js";
 
 interface CheckResult {
   ok: boolean;
@@ -392,7 +393,7 @@ export function registerDoctorCommand(program: Command): void {
       }
 
       if (opts.format === "json") {
-        console.log(JSON.stringify({ healthy: !hasFailure, hasWarnings: hasWarning, checks: results }, null, 2));
+        printJson({ healthy: !hasFailure, hasWarnings: hasWarning, checks: results });
         return;
       }
 

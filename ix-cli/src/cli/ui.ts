@@ -10,7 +10,7 @@
 import chalk from "chalk";
 
 import { llmError, llmLine } from "./llm.js";
-import { relativePath } from "./format.js";
+import { printJson, relativePath } from "./format.js";
 import type { AmbiguousResult, ResolveResult, Suggestion } from "./resolve.js";
 
 // ── Brand palette ─────────────────────────────────────────────────────────────
@@ -169,10 +169,10 @@ export function reportUnresolvedTarget(
   const message = unresolvedTargetMessage(target);
   const near = suggestions ?? [];
   if (format === "json") {
-    console.log(JSON.stringify({
+    printJson({
       ...unresolvedTargetRecord(target),
       ...(near.length ? { suggestions: near } : {}),
-    }, null, 2));
+    });
   } else if (format === "llm") {
     const lines = [llmError("unresolved_target", message), ...candidateLines(near, "suggestion")];
     if (near.length) {
@@ -221,12 +221,12 @@ export function reportAmbiguousTarget(
 ): void {
   const message = `Ambiguous symbol "${target}".`;
   if (format === "json") {
-    console.log(JSON.stringify({
+    printJson({
       error: "ambiguous_target",
       message,
       candidates: result.candidates,
       diagnostics: result.diagnostics ?? [],
-    }, null, 2));
+    });
     return;
   }
   if (format === "llm") {
