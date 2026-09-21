@@ -115,12 +115,39 @@ function readFileRange(
   return { content, lineStart, lineEnd: capped, truncated: true, totalLines: lines.length };
 }
 
+/**
+ * The shortest path that still names this file from where the caller stands.
+ *
+ * `relativePath` is a prefix match against `process.cwd()`, which misses in two
+ * ordinary cases: a cwd and a target that disagree about a symlink (macOS
+ * resolves `/var` to `/private/var`, and any repo under a `~/code` link does
+ * the same), and Windows, where the stored separator is `\` and the match is
+ * written for `/`. A `next=` that comes back absolute still works when pasted,
+ * but it is the token cost the cursor exists to avoid.
+ *
+ * Falls back to the absolute path rather than to `..` — a cursor pointing out
+ * of the tree is worse than a long one.
+ */
+function readablePath(filePath: string): string {
+  const relative = relativePath(filePath);
+  if (relative && relative !== filePath) return relative;
+  try {
+    const fromCwd = path.relative(fs.realpathSync(process.cwd()), fs.realpathSync(filePath));
+    if (fromCwd && !fromCwd.startsWith("..") && !path.isAbsolute(fromCwd)) {
+      return fromCwd.split(path.sep).join("/");
+    }
+  } catch {
+    // An unreadable cwd or a file deleted under us: the absolute path stands.
+  }
+  return filePath;
+}
+
 /** `src/a.ts:401-800`, or nothing when the cap landed on the last line. */
 function nextPage(filePath: string, lineEnd: number, totalLines: number): string | undefined {
   if (lineEnd >= totalLines) return undefined;
   const from = lineEnd + 1;
   const to = Math.min(totalLines, lineEnd + READ_LINE_CAP);
-  return `${relativePath(filePath) ?? filePath}:${from}-${to}`;
+  return `${readablePath(filePath)}:${from}-${to}`;
 }
 
 /** Fold a capped read's cursor into the result the renderers see. */

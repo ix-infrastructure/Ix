@@ -2,7 +2,7 @@
 
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -95,6 +95,25 @@ describe("ix read line cap", () => {
     expect(note).toContain("--all");
     // The source itself is still on stdout, all 400 lines of it.
     expect(logs).toHaveLength(400);
+  });
+
+  it("keeps the cursor relative when the root is reached through a symlink", async () => {
+    // macOS resolves `/var` to `/private/var`, so `process.cwd()` and a path
+    // built from `--root` disagree about a link on every temp-dir run there;
+    // any repo under a `~/code` symlink does the same on Linux. A prefix match
+    // against cwd misses, and the cursor used to come back absolute.
+    const linked = join(originalCwd === root ? tmpdir() : tmpdir(), `ix-read-cap-link-${process.pid}`);
+    rmSync(linked, { force: true });
+    symlinkSync(root, linked, "dir");
+    try {
+      const program = new Command();
+      program.name("ix").exitOverride();
+      registerReadCommand(program);
+      await program.parseAsync(["read", "src/big.ts", "--format", "llm", "--root", linked], { from: "user" });
+      expect(logs[0]).toContain("next=src/big.ts:401-800");
+    } finally {
+      rmSync(linked, { force: true });
+    }
   });
 
   it("does not offer a next page from the last one", async () => {
