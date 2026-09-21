@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 
 import { llmShortId } from "../llm.js";
-import { renderEdgeResultsLlm, renderNodesLlm, renderConflictsLlm } from "../format.js";
+import { renderEdgeResultsLlm, renderNodesLlm, renderConflictsLlm, sliceEdgeResults } from "../format.js";
 import { renderEntityLlm } from "../commands/entity.js";
 import { renderSubsystemScoreLlm } from "../commands/subsystems.js";
 
@@ -50,7 +50,8 @@ describe("no renderer emits a full id", () => {
 
   it("edge results", () => {
     const lines = renderEdgeResultsLlm(
-      [{ id: UUID, name: "handleLogin", kind: "method", provenance: { source_uri: "src/a.ts" } }],
+      // #688 made this take a Slice rather than a bare array.
+      sliceEdgeResults([{ id: UUID, name: "handleLogin", kind: "method", provenance: { source_uri: "src/a.ts" } }], 10),
       "callers", "verify_token", "graph",
     );
     expect(lines.join("\n")).not.toMatch(FULL_UUID);
