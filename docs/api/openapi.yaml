@@ -893,14 +893,15 @@ paths:
       summary: Begin an async wipe (remote deployments)
       operationId: resetAsync
       responses:
-        "200":
+        "202":
           description: Operation handle
           content:
             application/json:
               schema:
                 type: object
+                required: [opId]
                 properties:
-                  opId: { type: string }
+                  opId: { type: string, format: uuid }
 
   /v1/reset/status/{opId}:
     get:
@@ -919,11 +920,19 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [opId, state]
                 properties:
+                  opId: { type: string, format: uuid }
                   state: { type: string, enum: [done, failed, running] }
                   error:
                     type: string
                     nullable: true
+        "404":
+          description: |
+            No ledger entry for this operation. The ledger is in-process and
+            bounded, so a restart, a different replica or eviction produces
+            this for an operation that may have completed. It is NOT proof the
+            reset did not run.
 
   /v1/reset/code:
     post:

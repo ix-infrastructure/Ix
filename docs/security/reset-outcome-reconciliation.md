@@ -12,9 +12,18 @@ the operation ID when known and never submits another reset on these paths.
 
 An administrator should inspect the original operation, graph effects and
 pipeline claim before deciding how to recover. Do not delete a durable claim
-or create a new reset solely because a status is absent. The kOS status ledger
-is process-local and tenant-authorized: restarts, replica selection, eviction
-or an authorization mismatch can make an operation unavailable.
+or create a new reset solely because a status is absent. The status ledger is
+process-local and bounded: restarts, replica selection and eviction can each
+make an operation unavailable while the reset itself completed.
+
+The status route resolves an operation ID against that ledger alone and does
+not itself scope the lookup to a tenant; any authorization is whatever the
+transport in front of it enforces. Reset scoping is also still being
+corrected — a pooled full reset could truncate the bootstrap database despite
+resolving a different tenant (Ix-memory#207, backported for production in
+#208). Until those land, treat the blast radius of a repeated reset as wider
+than the tenant that issued it, which is the main reason this client stops
+rather than retrying.
 
 Local synchronous reset and the existing synchronous fallback for an absent
 async **start** route remain. A 404 from **status** never invokes that fallback.

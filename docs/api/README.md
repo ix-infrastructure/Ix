@@ -620,14 +620,22 @@ Reset savings metrics.
 | POST | `/v1/reset/async` | Begin an async wipe (remote endpoints) |
 | POST | `/v1/reset/code` | Wipe only the code graph, preserving planning artifacts |
 | POST | `/v1/reset/code/async` | Async variant of the code wipe |
-| GET | `/v1/reset/status/{opId}` | Poll async op — `{ state: "done" \| "failed", error? }` |
+| GET | `/v1/reset/status/{opId}` | Poll async op — `{ opId, state: "running" \| "done" \| "failed", error? }` |
 | POST | `/v1/reset/workspace` | **Scoped** wipe — `{ workspaceId }`; other workspaces untouched |
 
 **Async reset flow (client-side):** local endpoints use the sync path; remote
-endpoints begin via `/async`, then poll `/v1/reset/status/{opId}` every 2s up
-to 15 minutes. A 404 on `begin` falls back to the sync path (old backend); a
-404 on `status` means the op was lost to a server restart — reset is idempotent,
-so re-run to confirm.
+endpoints begin via `/async`, which answers **202** with `{ opId }` (a
+lowercase RFC-4122 UUID), then poll `/v1/reset/status/{opId}` every 2s up to
+15 minutes. The status body repeats `opId`, and the client rejects a body
+naming a different operation.
+
+A 404 on `begin` falls back to the sync path (old backend). A 404 on `status`
+does **not**: the op ledger is in-process, so a restart, a different replica or
+eviction drops the entry while the reset itself may have completed. Reset is
+not safely repeatable — re-running can delete work created since the original
+operation — so the client stops and reports the operation ID for an
+administrator to reconcile. Do not advise re-running it. See
+[reset outcome reconciliation](../security/reset-outcome-reconciliation.md).
 
 ## Visualizer Proxy Surface
 
