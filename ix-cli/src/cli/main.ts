@@ -5,7 +5,8 @@ import { Command } from "commander";
 import { registerOssCommands, registerProStubs } from "./register/oss.js";
 import { tryLoadProCommands } from "./register/pro-loader.js";
 import { buildHelpText } from "./help-text.js";
-import { checkForUpdate } from "./commands/upgrade.js";
+import { checkForUpdate, updateCheckEnabled } from "./commands/upgrade.js";
+import { stderrIsTerminal } from "./stderr.js";
 import { renderCliError } from "./errors.js";
 import { getEndpoint } from "./config.js";
 
@@ -85,9 +86,11 @@ registerOssCommands(program);
     registerProStubs(program);
   }
 
-  // Check for updates (non-blocking, cached 1hr) — skip for upgrade command itself
+  // Check for updates (non-blocking, cached 1hr). Only when a person is
+  // watching stderr — see updateCheckEnabled for why, and for the
+  // IX_NO_UPDATE_CHECK opt-out.
   const args = process.argv.slice(2);
-  if (args[0] !== "upgrade" && args[0] !== "mcp" && process.env.IX_MCP_CHILD !== "1") {
+  if (updateCheckEnabled(args, process.env, stderrIsTerminal())) {
     // Deliberately not awaited — but it must still be caught here. The catch
     // inside checkForUpdate only guards its inner fetch chain; the function's
     // own promise covers the synchronous cached-read path, and a corrupt

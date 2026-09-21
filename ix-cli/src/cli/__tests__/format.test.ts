@@ -7,6 +7,7 @@ import {
   formatConflicts,
   formatDecisions,
   formatTextResults,
+  sliceRanked,
   confidenceColor,
 } from "../format.js";
 
@@ -310,14 +311,14 @@ describe("formatTextResults", () => {
   it("should output JSON when format is json", () => {
     const spy = vi.spyOn(console, "log").mockImplementation(() => {});
     const results = [{ path: "src/foo.ts", line_start: 42, line_end: 42, snippet: "const foo = bar;", engine: "ripgrep", score: 1.0 }];
-    formatTextResults(results, "json");
+    formatTextResults(sliceRanked(results, 20), "json");
     expect(spy).toHaveBeenCalledWith(JSON.stringify(results, null, 2));
     spy.mockRestore();
   });
 
   it("should show 'No text matches found.' for empty results", () => {
     const spy = vi.spyOn(console, "log").mockImplementation(() => {});
-    formatTextResults([], "text");
+    formatTextResults(sliceRanked([], 20), "text");
     expect(spy).toHaveBeenCalledWith("No text matches found.");
     spy.mockRestore();
   });
@@ -325,7 +326,7 @@ describe("formatTextResults", () => {
   it("should display path:line_start and snippet in text mode", () => {
     const spy = vi.spyOn(console, "log").mockImplementation(() => {});
     const results = [{ path: "src/foo.ts", line_start: 42, line_end: 42, snippet: "const foo = bar;", engine: "ripgrep", score: 1.0 }];
-    formatTextResults(results, "text");
+    formatTextResults(sliceRanked(results, 20), "text");
     const output = spy.mock.calls.map(c => c[0]).join("\n");
     expect(output).toContain("src/foo.ts");
     expect(output).toContain(":42");

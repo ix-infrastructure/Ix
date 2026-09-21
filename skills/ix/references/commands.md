@@ -7,17 +7,23 @@ This file routes a goal to a command. For the complete flag surface of any
 command — every option, its accepted values and its default — see
 [flags.md](flags.md).
 
+The examples carry no `--format`. Set it once instead of per call: `IX_FORMAT=llm`
+in the environment, or `ix config set format llm`. `llm` is the format to read —
+records, one per line, and on `ix context` roughly a ninth of the bytes of the
+same answer in `json`. Reach for `--format json` on the one call whose output you
+are going to parse. See [output-formats.md](output-formats.md).
+
 ## High-Level Workflow Commands (prefer first)
 
 These aggregate multiple graph operations into single bounded responses.
 
 | Goal | Command | Example |
 |---|---|---|
-| Blast radius / impact | `ix impact` | `ix impact UserService --format llm` |
-| Hotspot discovery | `ix rank` | `ix rank --by dependents --kind class --top 10 --format llm` |
-| One-shot summary | `ix overview` | `ix overview IngestionService --format llm` |
-| Deterministic context bundle | `ix context` | `ix context IngestionService --format llm` |
-| Scoped entity listing | `ix inventory` | `ix inventory --kind function --path auth.py --format llm` |
+| Blast radius / impact | `ix impact` | `ix impact UserService` |
+| Hotspot discovery | `ix rank` | `ix rank --by dependents --kind class --top 10` |
+| One-shot summary | `ix overview` | `ix overview IngestionService` |
+| Deterministic context bundle | `ix context` | `ix context IngestionService` |
+| Scoped entity listing | `ix inventory` | `ix inventory --kind function --path auth.py` |
 
 ## Finding & Understanding Code
 
@@ -26,7 +32,7 @@ These aggregate multiple graph operations into single bounded responses.
 | Find entity by name | `ix search` | `ix search IngestionService --kind class --limit 10` |
 | Understand a symbol | `ix explain` | `ix explain IngestionService` |
 | Read source code | `ix read` | `ix read src/auth.py:10-50` or `ix read verify_token` |
-| Full entity details | `ix entity` | `ix entity <id> --format json` |
+| Full entity details | `ix entity` | `ix entity <id>` |
 | Fast text search | `ix text` | `ix text "verify_token" --language python --limit 20` |
 | Find symbol (graph+text) | `ix locate` | `ix locate AuthProvider --kind class` |
 
@@ -34,7 +40,7 @@ These aggregate multiple graph operations into single bounded responses.
 
 | Goal | Command | Example |
 |---|---|---|
-| What calls a function | `ix callers` | `ix callers verify_token --format json` |
+| What calls a function | `ix callers` | `ix callers verify_token` |
 | What a function calls | `ix callees` | `ix callees processPayment` |
 | Members of a class | `ix contains` | `ix contains IngestionService` |
 | What an entity imports | `ix imports` | `ix imports auth_provider.py` |
@@ -45,18 +51,18 @@ These aggregate multiple graph operations into single bounded responses.
 
 | Goal | Command | Example |
 |---|---|---|
-| Entity history | `ix history` | `ix history <entityId> --format llm` |
-| Changes between revisions | `ix diff` | `ix diff 1 5 --summary --format llm` |
-| Detect contradictions | `ix conflicts` | `ix conflicts --format llm` |
+| Entity history | `ix history` | `ix history <entityId>` |
+| Changes between revisions | `ix diff` | `ix diff 1 5 --summary` |
+| Detect contradictions | `ix conflicts` | `ix conflicts` |
 
 ## Architecture Analysis
 
 | Goal | Command | Example |
 |---|---|---|
-| Detect code smells | `ix smells` | `ix smells --format json` |
-| Score subsystems | `ix subsystems` | `ix subsystems --level 2 --format json` |
-| List smell claims | `ix smells --list` | `ix smells --list --format json` |
-| List subsystem scores | `ix subsystems --list` | `ix subsystems --list --format json` |
+| Detect code smells | `ix smells` | `ix smells` |
+| Score subsystems | `ix subsystems` | `ix subsystems --level 2` |
+| List smell claims | `ix smells --list` | `ix smells --list` |
+| List subsystem scores | `ix subsystems --list` | `ix subsystems --list` |
 
 ## Ingestion & Health
 
@@ -67,14 +73,14 @@ These aggregate multiple graph operations into single bounded responses.
 | Backend health | `ix status` | `ix status` |
 | System doctor | `ix doctor` | `ix doctor` |
 | Start backend | `ix docker start` | `ix docker start` |
-| Graph statistics | `ix stats` | `ix stats --format json` |
+| Graph statistics | `ix stats` | `ix stats` |
 
 ## Session Metrics
 
 | Goal | Command | Example |
 |---|---|---|
-| Token savings so far | `ix savings` | `ix savings --format llm` |
-| Per-command breakdown | `ix savings --detail` | `ix savings --detail --format llm` |
+| Token savings so far | `ix savings` | `ix savings` |
+| Per-command breakdown | `ix savings --detail` | `ix savings --detail` |
 | Clear lifetime totals | `ix savings reset` | `ix savings reset` |
 
 `ix savings` reports how many tokens the graph saved against a naive
@@ -92,7 +98,7 @@ estimates.
 |---|---|---|---|
 | `--detail` | — | off | Add one record per command type, within each scope |
 | `--model <model>` | `opus\|sonnet\|haiku\|gpt-4o` | `opus` | Pricing table for `money_saved` only — token and water figures do not change |
-| `--format <fmt>` | `text\|json\|llm` | `text` | See output-formats.md |
+| `--format <fmt>` | `text\|json\|llm` | `IX_FORMAT`, else `format` in config, else `text` | See output-formats.md |
 
 `ix savings reset` clears **both** scopes (`DELETE /v1/savings`, which runs
 `session.set(empty) *> store.resetSavings`). It takes no flags, does not prompt,
@@ -122,26 +128,26 @@ Reading a graph command's savings needs the backend up: the numbers come from
 
 **"How does ingestion work?"**
 ```bash
-ix overview IngestionService --format json    # start here
-ix contains IngestionService --format json    # more detail if needed
-ix callees parseFile --format json
+ix overview IngestionService    # start here
+ix contains IngestionService    # more detail if needed
+ix callees parseFile
 ```
 
 **"What depends on verify_token?"**
 ```bash
-ix impact verify_token --format json          # one-shot answer
-ix callers verify_token --format json         # or manually
-ix imported-by verify_token --format json
+ix impact verify_token          # one-shot answer
+ix callers verify_token         # or manually
+ix imported-by verify_token
 ```
 
 **"What are the most important classes?"**
 ```bash
-ix rank --by dependents --kind class --top 10 --format json
+ix rank --by dependents --kind class --top 10
 ```
 
 **"List all functions in a file"**
 ```bash
-ix inventory --kind function --path auth.py --format llm
+ix inventory --kind function --path auth.py
 ```
 
 ## Best Practices

@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import path from "node:path";
 import type { Command } from "commander";
-import { formatTextResults, type TextResult } from "../format.js";
+import { formatTextResults, sliceRanked, type TextResult } from "../format.js";
 import { isPathInsideResolvedRoot, resolveWorkspaceRoot } from "../config.js";
 import { stderr } from "../stderr.js";
 import { llmError } from "../llm.js";
@@ -52,6 +52,47 @@ export function resolveTextSearchPath(root: string, searchPath: string): string 
   return path.resolve(root, searchPath);
 }
 
+/**
+ * How far past `--limit` the scan looks before ranking.
+ *
+ * ripgrep walks the tree in directory order, so a plain `--limit 20` returns
+ * the first twenty matches it happened to reach — which on this repo means
+ * `docs/` and `README.md` before any code, because `d` and `R` sort early.
+ * Ranking the twenty rows it already cut cannot fix that; the scan has to see
+ * more than it prints. Bounded so a term matching everything is still one
+ * cheap pass.
+ */
+const SCAN_WINDOW_FACTOR = 5;
+const SCAN_WINDOW_MAX = 500;
+
+export function scanWindow(limit: number): number {
+  return Math.min(Math.max(limit * SCAN_WINDOW_FACTOR, limit), SCAN_WINDOW_MAX);
+}
+
+const TEST_PATH = /(^|\/)(tests?|__tests__|fixtures?|testdata|spec)(\/|$)|\.(test|spec)\./i;
+const PROSE_FILE = /\.(md|markdown|mdx|rst|txt|adoc)$/i;
+const GENERATED_FILE = /(^|\/)(package-lock\.json|[^/]*\.lock|[^/]*\.sum)$/i;
+
+/**
+ * Code first, then tests and fixtures, then prose and lockfiles.
+ *
+ * `ix mcp` describes this command's output as "ranked hits" and it was not
+ * ranked at all — it was ripgrep's traversal order. A README mentioning a
+ * symbol is the weakest evidence of the three: it cannot be called, read as a
+ * definition, or edited with any confidence. A test at least shows the symbol
+ * in use.
+ *
+ * Only these three bands, and the sort is stable, so within a band ripgrep's
+ * order survives. The alternative — scoring by line content — guesses at what
+ * the caller meant from a single grep term.
+ */
+export function textResultPriority(filePath: string): number {
+  const normalized = filePath.split(path.sep).join("/");
+  if (PROSE_FILE.test(normalized) || GENERATED_FILE.test(normalized)) return 2;
+  if (TEST_PATH.test(normalized)) return 1;
+  return 0;
+}
+
 export function registerTextCommand(program: Command, executeRipgrep: RunRipgrep = runRipgrep): void {
   program
     .command("text <term>")
@@ -79,8 +120,11 @@ export function registerTextCommand(program: Command, executeRipgrep: RunRipgrep
         return;
       }
       try {
+        const window = scanWindow(limit);
         const rgArgs = [
           "--json",
+          // Per file, deliberately still `--limit`: one file monopolising the
+          // scan window is the failure this is here to avoid.
           "--max-count", String(limit),
         ];
 
@@ -101,7 +145,7 @@ export function registerTextCommand(program: Command, executeRipgrep: RunRipgrep
         // other tool until the timeout and leaves the child process behind.
         rgArgs.push("--", term, searchPath);
 
-        const { stdout } = await executeRipgrep(rgArgs, limit);
+        const { stdout } = await executeRipgrep(rgArgs, window);
 
         const results: TextResult[] = [];
         for (const line of stdout.split("\n")) {
@@ -130,7 +174,10 @@ export function registerTextCommand(program: Command, executeRipgrep: RunRipgrep
           }
         }
 
-        formatTextResults(results.slice(0, limit), opts.format);
+        formatTextResults(
+          sliceRanked(results, limit, (r) => textResultPriority(r.path)),
+          opts.format,
+        );
       } catch (err: any) {
         if (err.code === "ENOENT") {
           stderr("Error: ripgrep (rg) is not installed. Install it: https://github.com/BurntSushi/ripgrep#installation");
@@ -138,7 +185,7 @@ export function registerTextCommand(program: Command, executeRipgrep: RunRipgrep
         }
         // rg exit 1 = no matches; render as empty result set
         if (err.code === 1 || err.status === 1) {
-          formatTextResults([], opts.format);
+          formatTextResults(sliceRanked([] as TextResult[], limit), opts.format);
           return;
         }
         // rg exit 2 = usage/regex error (e.g. literal "\n" in regex,

@@ -27,5 +27,15 @@ export function stderrDim(message: string): void {
  * whatever the first import happened to see.
  */
 export function canRenderProgress(): boolean {
+  return stderrIsTerminal();
+}
+
+/**
+ * Whether stderr is a terminal, i.e. whether anything written there is going to
+ * a person watching rather than into a capture.
+ *
+ * Read at each call, for the reason given on `canRenderProgress`.
+ */
+export function stderrIsTerminal(): boolean {
   return Boolean(process.stderr.isTTY);
 }

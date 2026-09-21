@@ -14,7 +14,7 @@ import { llmLine, llmError } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { getEffectiveSystemPath, hasMapData } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
-import { renderSection, renderKeyValue, renderNote, renderWarning, renderBreadcrumb } from "../ui.js";
+import { renderSection, renderKeyValue, renderNote, renderWarning, renderBreadcrumb, reportAmbiguousTarget } from "../ui.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "trait", "object", "interface"]);
 const FILE_KINDS = new Set(["file"]);
@@ -201,7 +201,7 @@ async function resolveWithAmbiguity(
 
   // Symbol resolution — use full result to detect ambiguity
   const allKinds = ["file", "class", "object", "trait", "interface", "module", "function", "method"];
-  const result = await resolveEntityFull(client, symbol, allKinds, opts);
+  const result = await resolveEntityFull(client, symbol, allKinds, { ...opts, format });
 
   if (result.resolved) {
     return { target: result.entity, ambiguous: false };
@@ -217,9 +217,10 @@ async function resolveWithAmbiguity(
         diagnostics: result.result.diagnostics ?? [],
       }, null, 2));
     } else if (format === "llm") {
-      console.log(llmError("ambiguous_target", `Ambiguous symbol "${symbol}".`, [
-        ["candidates", result.result.candidates.map((c, i) => `${i + 1}:${c.name}`).join(",")],
-      ]));
+      // The shared renderer: one record per candidate with kind, path and a
+      // short id. This used to emit `candidates=1:config.ts,2:config.ts` --
+      // nothing to choose between.
+      reportAmbiguousTarget(symbol, result.result, "llm", opts);
     } else {
       printAmbiguous(symbol, result.result, opts);
     }
