@@ -200,7 +200,7 @@ async function resolveWithAmbiguity(
   }
 
   // Symbol resolution — use full result to detect ambiguity
-  const allKinds = ["file", "class", "object", "trait", "interface", "module", "function", "method"];
+  const allKinds = ["file", "class", "object", "trait", "interface", "module", "function", "method", "constant"];
   const result = await resolveEntityFull(client, symbol, allKinds, opts);
 
   if (result.resolved) {

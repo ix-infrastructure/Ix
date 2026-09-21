@@ -535,7 +535,7 @@ async function trySymbolMatch(
   symbol: string,
   opts: { kind?: string; path?: string; pick?: number }
 ): Promise<SymbolResult> {
-  const preferredKinds = ["file", "class", "object", "trait", "interface", "module", "function", "method"];
+  const preferredKinds = ["file", "class", "object", "trait", "interface", "module", "function", "method", "constant"];
   const full = await resolveEntityFull(client, symbol, preferredKinds, opts);
 
   if (full.resolved) {
