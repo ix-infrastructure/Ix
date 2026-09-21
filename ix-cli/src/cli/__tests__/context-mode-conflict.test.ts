@@ -242,7 +242,7 @@ describe("mode-flag coverage does not drift from the command", () => {
    */
   const CONTEXT_BUILD_FLAGS = [
     "kind", "path", "pick", "depth", "asOfRev",
-    "maxEntities", "maxRelationships", "maxEvidence", "maxChars",
+    "maxEntities", "maxRelationships", "maxEvidence", "maxTokens", "maxChars",
   ];
   /** Meaningful to every mode, so in neither group. */
   const CONTEXT_UNIVERSAL_FLAGS = ["format"];

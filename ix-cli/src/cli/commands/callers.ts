@@ -6,7 +6,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
-import { formatEdgeResults, relativePath } from "../format.js";
+import { formatEdgeResults, relativePath, sliceEdgeResults } from "../format.js";
 import { parsePickOption } from "../options.js";
 import { resolveFileOrReport, printResolved } from "../resolve.js";
 import { stderr } from "../stderr.js";
@@ -72,7 +72,7 @@ export function registerCallersCommand(program: Command): void {
             if (opts.format === "llm") {
               console.log(llmLine("callers", [
                 ["target", target.name], ["source", "text"],
-                ["total", textResults.length], ["candidates", candidatesFound],
+                ["shown", textResults.length], ["total", candidatesFound],
               ]));
               console.log(llmLine("diagnostic", [
                 ["code", "text_fallback_used"],
@@ -113,9 +113,9 @@ export function registerCallersCommand(program: Command): void {
         } catch { /* ripgrep not available or no matches */ }
 
         // Both graph and text empty
-        formatEdgeResults([], "callers", target.name, opts.format, target, "graph");
+        formatEdgeResults(sliceEdgeResults([], limit), "callers", target.name, opts.format, target, "graph");
       } else {
-        formatEdgeResults(result.nodes.slice(0, limit), "callers", target.name, opts.format, target, "graph");
+        formatEdgeResults(sliceEdgeResults(result.nodes, limit), "callers", target.name, opts.format, target, "graph");
       }
     });
 
@@ -140,6 +140,6 @@ export function registerCallersCommand(program: Command): void {
         direction: "out",
         predicates: ["CALLS", "REFERENCES"],
       });
-      formatEdgeResults(result.nodes.slice(0, calleeLimit), "callees", target.name, opts.format, target, "graph");
+      formatEdgeResults(sliceEdgeResults(result.nodes, calleeLimit), "callees", target.name, opts.format, target, "graph");
     });
 }

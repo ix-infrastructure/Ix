@@ -7,8 +7,11 @@ set -euo pipefail
 # Ix — Connect a Project
 #
 # Connects a project to Ix:
-#   1. Adds IX rules to CLAUDE.md (so Claude follows the IX workflow)
+#   1. Prepares the project (`ix init`, deprecated -- kept for older installs)
 #   2. Ingests the project's source code into the knowledge graph
+#
+# It does NOT write rules into CLAUDE.md. It used to say so, and `ix init` used
+# to do it; the agent-facing instructions ship as the `ix` skill now.
 #
 # Usage:
 #   ./scripts/connect.sh ~/my-project
@@ -40,7 +43,7 @@ while [[ $# -gt 0 ]]; do
       echo "  -h, --help               Show this help"
       echo ""
       echo "What this does:"
-      echo "  1. Adds IX rules to CLAUDE.md (mandatory LLM workflow)"
+      echo "  1. Prepares the project (ix init)"
       echo "  2. Ingests the project's source code into the knowledge graph"
       echo ""
       echo "To disconnect later:"
@@ -94,9 +97,9 @@ echo ""
 echo "  Project: $PROJECT_DIR"
 echo ""
 
-# ── Step 1: Add IX rules to CLAUDE.md ────────────────────────────────────────
+# ── Step 1: Prepare the project ──────────────────────────────────────────────
 
-echo "── [1] CLAUDE.md ────────────────────────────────────"
+echo "── [1] Prepare ──────────────────────────────────────"
 
 cd "$PROJECT_DIR"
 $IX_CMD init --force 2>&1 | grep -v "^$" | grep -v "Initializing\|Next:"

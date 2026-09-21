@@ -103,7 +103,7 @@ function input() {
     provenance: { sourceType: "source", extractor: "tree-sitter", observedAt: "2026-01-01T00:00:00Z" },
     asOfRev: undefined,
     depth: undefined,
-    budgets: { maxEntities: 50, maxRelationships: 100, maxEvidence: 25, maxChars: 12000 },
+    budgets: { maxEntities: 50, maxRelationships: 100, maxEvidence: 25, maxTokens: 1500, maxChars: 12000 },
   };
 }
 
@@ -135,7 +135,7 @@ describe("ix context bundle", () => {
   it("enforces budgets and reports explicit truncation", () => {
     const bundle = buildBundle({
       ...input(),
-      budgets: { maxEntities: 1, maxRelationships: 0, maxEvidence: 2, maxChars: 12000 },
+      budgets: { maxEntities: 1, maxRelationships: 0, maxEvidence: 2, maxTokens: 1500, maxChars: 12000 },
     });
 
     expect(bundle.entities).toHaveLength(1);
@@ -172,7 +172,7 @@ describe("ix context bundle", () => {
       ...input(),
       context: makeContext({ nodes, edges }),
       // Room for the target plus a couple of entities, not all four.
-      budgets: { maxEntities: 3, maxRelationships: 100, maxEvidence: 25, maxChars: 12000 },
+      budgets: { maxEntities: 3, maxRelationships: 100, maxEvidence: 25, maxTokens: 1500, maxChars: 12000 },
     });
 
     const kept = new Set(bundle.entities.map((e) => e.id));
@@ -287,7 +287,7 @@ describe("ix context bundle", () => {
     buildBundle({
       ...input(),
       context: makeContext({ nodes }),
-      budgets: { maxEntities: 5, maxRelationships: 100, maxEvidence: 25, maxChars: 12000 },
+      budgets: { maxEntities: 5, maxRelationships: 100, maxEvidence: 25, maxTokens: 1500, maxChars: 12000 },
       isStale: () => { probes += 1; return false; },
     });
 
@@ -339,9 +339,75 @@ describe("ix context bundle", () => {
     expect(second.intents).toEqual(first.intents);
   });
 
+  it("keeps conflicts out of the evidence list", () => {
+    const conflicts: ConflictReport[] = Array.from({ length: 8 }, (_, i) => ({
+      id: `c-${i}`,
+      claimA: `12e6db16-e88f-34d1-92ab-4d1700fd67a${i}`,
+      claimB: `494d48cd-fff5-37a9-93f5-060c0760c52${i}`,
+      reason: "Potential inconsistency (same field prefix)",
+      recommendation: "rec",
+    }));
+
+    const bundle = buildBundle({ ...input(), context: makeContext({ conflicts }) });
+
+    expect(bundle.evidence.some((item) => item.kind === "conflict")).toBe(false);
+    // A claim uuid is not something an agent can act on; none should be
+    // reachable through the evidence list at all.
+    const rendered = JSON.stringify(bundle.evidence);
+    expect(rendered).not.toContain("12e6db16");
+    // The reports themselves are still carried, and still counted.
+    expect(bundle.conflicts).toHaveLength(8);
+  });
+
+  it("leaves the evidence budget to real structure when conflicts are present", () => {
+    // The regression this exists for: 8 conflicts used to take 8 of the 10
+    // slots and push the structural facts out of the bundle entirely.
+    const conflicts: ConflictReport[] = Array.from({ length: 8 }, (_, i) => ({
+      id: `c-${i}`,
+      claimA: `claim-a-${i}`,
+      claimB: `claim-b-${i}`,
+      reason: "Potential inconsistency (same field prefix)",
+      recommendation: "rec",
+    }));
+    const budgets = { maxEntities: 50, maxRelationships: 100, maxEvidence: 10, maxTokens: 1500, maxChars: 12000 };
+
+    const withConflicts = buildBundle({ ...input(), budgets, context: makeContext({ conflicts }) });
+    const without = buildBundle({ ...input(), budgets, context: makeContext() });
+
+    const structural = (b: typeof withConflicts) => b.evidence.filter((i) => i.kind === "structural").length;
+    expect(structural(withConflicts)).toBe(structural(without));
+    expect(structural(withConflicts)).toBeGreaterThan(0);
+  });
+
+  it("caps the conflict reports it carries and says how many it dropped", () => {
+    const conflicts: ConflictReport[] = Array.from({ length: 31 }, (_, i) => ({
+      id: `c-${String(i).padStart(2, "0")}`,
+      claimA: `claim-a-${String(i).padStart(2, "0")}`,
+      claimB: `claim-b-${String(i).padStart(2, "0")}`,
+      reason: "Potential inconsistency (same field prefix)",
+      recommendation: "rec",
+    }));
+
+    const bundle = buildBundle({ ...input(), context: makeContext({ conflicts }) });
+
+    expect(bundle.conflicts).toHaveLength(10);
+    expect(bundle.truncation.conflictsTruncated).toBe(21);
+    // Kept + dropped still reports the true count to the renderers.
+    expect(bundle.conflicts.length + bundle.truncation.conflictsTruncated).toBe(31);
+    // The cut is taken after the deterministic sort, so it is reproducible.
+    expect(bundle.conflicts.map((c) => c.claimA)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `claim-a-${String(i).padStart(2, "0")}`),
+    );
+  });
+
+  it("reports no conflict truncation when the bundle is under the cap", () => {
+    const bundle = buildBundle({ ...input(), context: makeContext() });
+    expect(bundle.truncation.conflictsTruncated).toBe(0);
+  });
+
   it("bounds evidence by the exact serialized representation, not an estimate", () => {
     const claims = Array.from({ length: 60 }, (_, i) => makeClaim(`statement number ${i} with some padding text`, 0.5));
-    const budgets = { maxEntities: 50, maxRelationships: 100, maxEvidence: 25, maxChars: 500 };
+    const budgets = { maxEntities: 50, maxRelationships: 100, maxEvidence: 25, maxTokens: 1500, maxChars: 500 };
 
     const bundle = buildBundle({ ...input(), context: makeContext({ claims }), budgets });
 
