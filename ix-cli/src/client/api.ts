@@ -1,3 +1,4 @@
+import { isPreConnectionFailure } from "./transport.js";
 import type {
   IngestResult,
   StructuredContext,
@@ -456,8 +457,14 @@ export class IxClient {
         body: JSON.stringify({}),
         signal: AbortSignal.timeout(30 * 1000),
       });
-    } catch {
-      throw this.resetReconciliationError("The start response was unavailable.");
+    } catch (error) {
+      // A refused connection or unresolved host proves the request never left
+      // this machine, so nothing was deleted and nothing needs reconciling.
+      // Rethrowing lets renderCliError give its actionable "backend not
+      // reachable" message instead of a data-integrity warning — which would
+      // otherwise fire on the most common failure of a fresh install.
+      if (isPreConnectionFailure(error)) throw error;
+      throw this.resetReconciliationError("The start response was unavailable.", undefined, error);
     }
 
     if (beginResp.status === 404) {
@@ -489,8 +496,11 @@ export class IxClient {
           method: "GET",
           signal: AbortSignal.timeout(30 * 1000),
         });
-      } catch {
-        throw this.resetReconciliationError("The status response was unavailable.", opId);
+      } catch (error) {
+        // NOT treated as pre-connection like the start call above: the reset
+        // was already accepted (202) and is running server-side, so losing the
+        // status poll is ambiguous no matter why it failed.
+        throw this.resetReconciliationError("The status response was unavailable.", opId, error);
       }
       // Missing process-local status does not prove the reset did not run.
       // A new reset could delete writes created after the original operation.
@@ -520,10 +530,13 @@ export class IxClient {
     throw this.resetReconciliationError("Completion was not confirmed within 15 minutes.", opId);
   }
 
-  private resetReconciliationError(reason: string, opId?: string): Error {
+  private resetReconciliationError(reason: string, opId?: string, cause?: unknown): Error {
     const operation = opId ? ` (operation ${opId})` : "";
+    // Carry `cause` so IX_DEBUG=1 can still show the underlying transport
+    // failure — swallowing it left no way to tell these outcomes apart.
     return new Error(`${reason}${operation} Graph or pipeline changes may already have occurred. ` +
-      "Do not repeat the reset until an administrator has reconciled its effects and operation records.");
+      "Do not repeat the reset until an administrator has reconciled its effects and operation records.",
+      cause === undefined ? undefined : { cause });
   }
 
   private async runResetSync(syncPath: string): Promise<{ ok: boolean; message: string }> {

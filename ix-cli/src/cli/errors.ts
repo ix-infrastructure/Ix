@@ -1,4 +1,5 @@
 import chalk from "chalk";
+import { PRE_CONNECTION_CODES } from "../client/transport.js";
 
 /**
  * Structured error with user-facing message and optional next-step guidance.
@@ -125,15 +126,12 @@ export function formatFetchError(err: unknown): string {
  * 10s connect timeout fires first and reports `UND_ERR_CONNECT_TIMEOUT`, which
  * is already listed here.
  */
-const UNREACHABLE_CODES = new Set([
-  "ECONNREFUSED",
-  "ENOTFOUND",
-  "EHOSTUNREACH",
-  "ENETUNREACH",
-  "EAI_AGAIN",
-  "UND_ERR_CONNECT_TIMEOUT",
-  "UND_ERR_SOCKET",
-]);
+// The pre-connection codes are shared with the HTTP client, which needs the
+// same "nothing was transmitted" judgement to decide whether a failed reset
+// could have deleted anything. One definition, not two: a second hand-written
+// copy is how the two drift apart. `UND_ERR_SOCKET` is added only here — see
+// above for why it counts as unreachable for rendering but not for reset.
+const UNREACHABLE_CODES = new Set([...PRE_CONNECTION_CODES, "UND_ERR_SOCKET"]);
 
 function isUnreachableCode(e: { code?: unknown } | null | undefined): boolean {
   return typeof e?.code === "string" && UNREACHABLE_CODES.has(e.code);
