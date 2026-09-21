@@ -68,6 +68,13 @@ surfaces (#575).
   `truncated=true` means the node cap dropped nodes, `depth_limited=true` means
   the walk stopped descending and there may or may not be more. `--depth` and
   `--cap` take anything.
+- **`ix ingest` honours `--exclude <glob>` and a `.ixignore` at the ingest
+  root.** A deliberate subset of `.gitignore`: `#` comments, `*`, `?`, `**`, a
+  leading `/` to anchor at the root, a trailing `/` for directories only, and a
+  bare name matching at any depth. **No** `!` negation and no character
+  classes — a pattern that starts with `!` is dropped rather than half-honoured.
+  Excluded paths are counted in the ingest summary, so an exclusion is never
+  mistaken for a missed file.
 - **`--quiet` drops the scaffolding, not the bookkeeping.** Section titles,
   `Resolved:` headers and advisory hints go; warnings, error records and the
   `shown=`/`total=`/`truncated=` fields stay. A caller asking for less output is
@@ -410,6 +417,7 @@ Ingest source files or GitHub data into the knowledge graph.
 | `--root` | `<dir>` | — | Workspace root directory |
 | `--debug` | — | `false` | Show phase timing breakdown |
 | `--lang` | `<langs>` | — | Comma-separated languages to include (e.g. cpp,c or typescript). Aliases: c++=cpp, c#=csharp, py=python, ts=typescript, js=javascript |
+| `--exclude` | `<glob>` | — | Exclude paths matching this glob (repeatable; same syntax as `.ixignore`) |
 
 ### `ix init`
 
