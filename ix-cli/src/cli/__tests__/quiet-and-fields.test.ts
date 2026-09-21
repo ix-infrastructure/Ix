@@ -3,7 +3,7 @@
 import { Command } from "commander";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { renderEdgeResultsLlm, renderNodesLlm } from "../format.js";
+import { renderEdgeResultsLlm, renderNodesLlm, sliceEdgeResults } from "../format.js";
 import { renderSearchLlm } from "../commands/search.js";
 import { renderInventoryLlm } from "../commands/inventory.js";
 import { renderNote, renderSection, renderWarning } from "../ui.js";
@@ -58,7 +58,8 @@ describe("--fields", () => {
     setOutputShape({ fields: "name" });
     expect(renderNodesLlm([node])).toEqual(["node name=relativePath"]);
     const refs = renderEdgeResultsLlm(
-      [{ id: "abcdef1234567890", name: "handleLogin", kind: "method", provenance: { source_uri: "src/a.ts" } }],
+      // #688 made this take a Slice rather than a bare array.
+      sliceEdgeResults([{ id: "abcdef1234567890", name: "handleLogin", kind: "method", provenance: { source_uri: "src/a.ts" } }], 10),
       "callers", "verify", "graph",
     );
     expect(refs[1]).toBe("ref name=handleLogin");

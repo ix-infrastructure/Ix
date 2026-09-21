@@ -39,7 +39,7 @@ const role = { role: "service", confidence: "high", reasons: [] } as any;
 const importance = { level: "high", category: "broad-shared-dependency", reasons: [] } as any;
 const rendered = {
   explanation: "PROSE_EXPLANATION", context: "PROSE_CONTEXT",
-  usedBy: null, whyItMatters: "PROSE_WHY", notes: [],
+  usedBy: null, usedByIsNameList: true, whyItMatters: "PROSE_WHY", notes: [],
 };
 
 describe("explain --format llm", () => {

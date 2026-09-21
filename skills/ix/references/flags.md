@@ -47,6 +47,17 @@ surfaces (#575).
   --limit 50` exits with an error rather than a shorter list. `--detailed`
   auto-paginates on its own; `--offset` or `--regions` turns that off, and
   `--limit` only sets the page size.
+- **`ix context` budgets the evidence block in tokens, not characters.**
+  `--max-tokens` defaults to 1,500 and is converted at 2.14 characters per
+  token, measured across 41 recorded bundles. `--max-chars` is still there for
+  a caller who needs exact bytes and overrides it; passing both is refused
+  rather than silently ranked, because the output does not say which one won.
+- **`ix mcp` advertises ten tools by default**, not twenty-six: `ix_health`,
+  `ix_locate`, `ix_search`, `ix_text`, `ix_impact`, `ix_overview`, `ix_read`,
+  `ix_neighbors`, `ix_explain` and `ix_context`. `ix_neighbors{relation}`
+  replaces `ix_callers` / `ix_callees` / `ix_imports` / `ix_imported_by`, whose
+  schemas differed by one word. `--tools=all` advertises every tool, and the Pro
+  tools are offered under both whenever Pro is installed.
 - **`--quiet` drops the scaffolding, not the bookkeeping.** Section titles,
   `Resolved:` headers and advisory hints go; warnings, error records and the
   `shown=`/`total=`/`truncated=` fields stay. A caller asking for less output is
@@ -162,7 +173,8 @@ Build a bounded, deterministic context bundle for a symbol, file, or entity (or 
 | `--max-entities` | `<n>` | — | Maximum entities in the bundle (default: 50, clamped to 1-500) |
 | `--max-relationships` | `<n>` | — | Maximum relationships in the bundle (default: 100, clamped to 1-1000) |
 | `--max-evidence` | `<n>` | — | Maximum evidence items in the bundle (default: 25, clamped to 1-200) |
-| `--max-chars` | `<n>` | — | Maximum characters of evidence output (default: 12000, clamped to 1000-1000000) |
+| `--max-tokens` | `<n>` | `1500` | Maximum tokens of evidence output (clamped to 500-200000) |
+| `--max-chars` | `<n>` | — | Maximum characters of evidence output; overrides `--max-tokens` (clamped to 1000-1000000) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
@@ -432,7 +444,9 @@ Serve Ix tools over the Model Context Protocol (stdio).
 
 Subcommands: `install`, `doctor`.
 
-No flags.
+| Flag | Value | Default | Effect |
+|---|---|---|---|
+| `--tools` | `core\|all` | `core` | Which catalog to advertise — ten tools, or every one |
 
 #### `ix mcp install`
 

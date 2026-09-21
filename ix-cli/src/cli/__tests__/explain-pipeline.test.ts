@@ -191,7 +191,7 @@ describe("inferRole", () => {
       kind: "method",
       name: "processPayment",
       path: "src/billing.ts",
-      container: { kind: "class", name: "PaymentService" },
+      container: { id: "container-id", kind: "class", name: "PaymentService" },
       callerCount: 3,
       calleeCount: 2,
     });
@@ -258,7 +258,7 @@ describe("inferRole", () => {
       callerCount: 0,
       calleeCount: 0,
       memberCount: 0,
-      container: { kind: "class", name: "Foo" },
+      container: { id: "container-id", kind: "class", name: "Foo" },
     });
     const result = inferRole(facts);
     // Should NOT say "role could not be determined"
@@ -416,7 +416,7 @@ describe("renderExplanation", () => {
     const facts = makeFacts({
       kind: "method",
       name: "resolve",
-      container: { kind: "class", name: "ConflictService" },
+      container: { id: "container-id", kind: "class", name: "ConflictService" },
       callerCount: 3,
       calleeCount: 2,
     });
@@ -428,7 +428,7 @@ describe("renderExplanation", () => {
 
   it("includes container context when present", () => {
     const facts = makeFacts({
-      container: { kind: "class", name: "OrderService" },
+      container: { id: "container-id", kind: "class", name: "OrderService" },
     });
     const role = inferRole(facts);
     const importance = inferImportance(facts);
@@ -957,7 +957,7 @@ describe("system-aware explanation sentence", () => {
       kind: "method",
       name: "resolve",
       path: "src/cli/conflict.ts",
-      container: { kind: "class", name: "ConflictService" },
+      container: { id: "container-id", kind: "class", name: "ConflictService" },
       callerCount: 3,
       calleeCount: 2,
       dependentCount: 5,
@@ -1526,7 +1526,7 @@ describe("inferFlowSemantics", () => {
     const facts = makeFacts({
       name: "resolveConflict",
       path: "src/cli/conflict.ts",
-      container: { kind: "class", name: "ConflictService" },
+      container: { id: "container-id", kind: "class", name: "ConflictService" },
     });
     const flow = inferFlowSemantics(facts);
     expect(flow.flowName).toBe("conflict-resolution flow");
@@ -1568,7 +1568,7 @@ describe("inferFlowSemantics", () => {
   it("container-based: execute in IngestionService → ingestion pipeline", () => {
     const facts = makeFacts({
       name: "execute",
-      container: { kind: "class", name: "IngestionService" },
+      container: { id: "container-id", kind: "class", name: "IngestionService" },
     });
     const flow = inferFlowSemantics(facts);
     expect(flow.flowName).toBe("ingestion pipeline");
@@ -1578,7 +1578,7 @@ describe("inferFlowSemantics", () => {
     const facts = makeFacts({
       name: "resolve",
       path: "src/conflict.ts",
-      container: { kind: "class", name: "ConflictService" },
+      container: { id: "container-id", kind: "class", name: "ConflictService" },
     });
     const flow = inferFlowSemantics(facts);
     expect(flow.flowName).toBe("conflict-resolution flow");
@@ -1660,7 +1660,7 @@ describe("flow-aware rendering for callables", () => {
       kind: "method",
       name: "resolveConflict",
       path: "src/cli/conflict.ts",
-      container: { kind: "class", name: "ConflictService" },
+      container: { id: "container-id", kind: "class", name: "ConflictService" },
       callerCount: 3,
       calleeCount: 2,
       dependentCount: 5,
