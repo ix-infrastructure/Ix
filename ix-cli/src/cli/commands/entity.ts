@@ -5,7 +5,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { getEndpoint } from "../config.js";
 import { lineSpan, relativePath, rowLocation, stripNulls } from "../format.js";
-import { llmLine } from "../llm.js";
+import { llmLine, llmShortId } from "../llm.js";
 
 /** Render entity details as llm records: a header line then one `edge` row per edge. */
 export function renderEntityLlm(result: any): string[] {
@@ -13,7 +13,7 @@ export function renderEntityLlm(result: any): string[] {
   const loc = rowLocation(node);
   const edges = result.edges ?? [];
   const lines = [llmLine("entity", [
-    ["id", node.id],
+    ["id", llmShortId(node.id)],
     ["kind", node.kind],
     ["name", node.name || node.attrs?.name],
     ["path", loc.path],
@@ -27,7 +27,7 @@ export function renderEntityLlm(result: any): string[] {
   for (const e of edges) {
     lines.push(llmLine("edge", [
       ["pred", e.predicate],
-      ["dst", typeof e.dst === "string" ? e.dst.slice(0, 8) : e.dst],
+      ["dst", llmShortId(e.dst)],
     ]));
   }
   return lines;

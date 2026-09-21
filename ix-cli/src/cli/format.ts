@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import chalk from "chalk";
-import { llmLine } from "./llm.js";
+import { llmLine, llmShortId } from "./llm.js";
 
 export type ResultSource = "graph" | "text" | "graph+text" | "heuristic";
 
@@ -247,7 +247,7 @@ export function renderNodesLlm(nodes: any[]): string[] {
     const loc = rowLocation(n);
     return llmLine("node", [
       ["kind", n.kind],
-      ["id", typeof n.id === "string" ? n.id.slice(0, 8) : undefined],
+      ["id", llmShortId(n.id)],
       ["name", n.name || n.attrs?.name || n.attrs?.title || "(unnamed)"],
       ["path", loc.path],
       ["lines", lineSpan(loc)],
@@ -645,10 +645,10 @@ export function renderEdgeResultsLlm(
   for (const ref of refs) {
     lines.push(ref.resolved
       ? llmLine("ref", [
-          ["name", ref.name], ["kind", ref.kind], ["id", ref.id?.slice(0, 8)],
+          ["name", ref.name], ["kind", ref.kind], ["id", llmShortId(ref.id)],
           ["path", ref.path], ["lines", lineSpan(ref)],
         ])
-      : llmLine("ref", [["kind", ref.kind], ["id", ref.id?.slice(0, 8)], ["resolved", false]]));
+      : llmLine("ref", [["kind", ref.kind], ["id", llmShortId(ref.id)], ["resolved", false]]));
   }
   return lines;
 }
@@ -761,8 +761,8 @@ export function renderConflictsLlm(conflicts: any[]): string[] {
     lines.push(llmLine("conflict", [
       ["reason", c.reason],
       ["recommendation", c.recommendation],
-      ["claim_a", c.claimA],
-      ["claim_b", c.claimB],
+      ["claim_a", llmShortId(c.claimA)],
+      ["claim_b", llmShortId(c.claimB)],
     ]));
   }
   return lines;

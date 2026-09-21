@@ -2,6 +2,66 @@
 
 import chalk from "chalk";
 
+import { llmError } from "./llm.js";
+
+// ── Answering in the format the caller asked for ───────────────────────────
+
+/**
+ * The `--format` this run was invoked with, or undefined for the default.
+ *
+ * A failure is the one answer an agent is least equipped to guess at, and it
+ * was the only one this CLI would not give in the format it had been asked
+ * for: a backend that is down produced several lines of coloured prose on
+ * stderr and nothing at all on stdout, so a caller parsing records saw an
+ * empty stream and a non-zero exit with no reason attached.
+ */
+let requestedFormat: string | undefined;
+
+/** Record the format for the error boundary. Called once, from `main.ts`. */
+export function setErrorFormat(format: string | undefined): void {
+  requestedFormat = format;
+}
+
+/**
+ * The `--format` the caller typed, read straight off argv.
+ *
+ * Read from argv rather than from the parsed command because this has to work
+ * before commander has parsed anything: the handler that calls
+ * `renderCliError` is installed for `unhandledRejection` and
+ * `uncaughtException`, which can fire at any point, including during
+ * registration.
+ *
+ * Only what was typed. `IX_FORMAT` and `config.format` choose the default
+ * elsewhere (#682); until that lands, honouring them here would answer in
+ * records for a run whose payload came out as text.
+ *
+ * Stops at `--`, so a term that merely looks like a flag —
+ * `ix text -- "--format llm"` — is not read as one.
+ */
+export function detectRequestedFormat(argv: readonly string[]): string | undefined {
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--") return undefined;
+    if (arg.startsWith("--format=")) return arg.slice("--format=".length);
+    if (arg === "--format") return argv[i + 1];
+  }
+  return undefined;
+}
+
+/**
+ * Emit the failure as one record on stdout, or return false if the caller did
+ * not ask for records.
+ *
+ * On stdout, not stderr: stdout is where the answer goes, and "there is no
+ * answer, because X" is an answer. The human prose is then skipped rather than
+ * printed alongside, so the caller gets exactly one report.
+ */
+function emitLlmError(code: string, message: string, hint?: string): boolean {
+  if (requestedFormat !== "llm") return false;
+  console.log(llmError(code, message, hint ? [["hint", hint]] : []));
+  return true;
+}
+
 /**
  * Structured error with user-facing message and optional next-step guidance.
  * Parsed from backend JSON responses that include `error`, `message`, and `next` fields.
@@ -195,11 +255,35 @@ export function isBackendUnreachable(err: unknown): boolean {
   return isUnreachableCode(e?.cause as { code?: unknown } | null | undefined);
 }
 
+/**
+ * The one description of a backend nobody answered at.
+ *
+ * Shared so a command that catches the failure itself — `ix status` does, to
+ * keep its own shape — reports the same code, the same sentence and the same
+ * next step as the process-wide boundary. It was two wordings before, one of
+ * them with no next step at all.
+ */
+export function backendUnreachableError(endpoint?: string): StructuredError {
+  return {
+    error: "backend_unreachable",
+    message: `Ix backend not reachable${endpoint ? ` at ${endpoint}` : ""}.`,
+    // `ix docker start` only fixes a backend this machine is supposed to run.
+    // Pro points `config.endpoint` at a cloud instance, where that advice is
+    // both useless and actively wrong — it starts a backend you aren't using.
+    next: isLocalEndpoint(endpoint)
+      ? "Start it with `ix docker start`, then check `ix status`."
+      : "Check your network, and that the endpoint is right (`ix config get endpoint`).",
+  };
+}
+
 export function renderCliError(err: unknown, debug = false, endpoint?: string): void {
   if (err instanceof CliUsageError || err instanceof CliResolutionError) {
-    process.stderr.write(chalk.red(`Error: ${err.message}\n`));
-    if (err.hint) {
-      process.stderr.write(chalk.dim(`${err.hint}\n`));
+    const code = err instanceof CliUsageError ? "usage_error" : "resolution_failed";
+    if (!emitLlmError(code, err.message, err.hint)) {
+      process.stderr.write(chalk.red(`Error: ${err.message}\n`));
+      if (err.hint) {
+        process.stderr.write(chalk.dim(`${err.hint}\n`));
+      }
     }
     if (debug && err instanceof CliResolutionError && err.detail) {
       process.stderr.write(chalk.dim(`Detail: ${err.detail}\n`));
@@ -210,23 +294,19 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string): 
   const e = err as any;
 
   if (isBackendUnreachable(err)) {
-    renderStructuredError({
-      error: "backend_unreachable",
-      message: `Ix backend not reachable${endpoint ? ` at ${endpoint}` : ""}.`,
-      // `ix docker start` only fixes a backend this machine is supposed to run.
-      // Pro points `config.endpoint` at a cloud instance, where that advice is
-      // both useless and actively wrong — it starts a backend you aren't using.
-      next: isLocalEndpoint(endpoint)
-        ? "Start it with `ix docker start`, then check `ix status`."
-        : "Check your network, and that the endpoint is right (`ix config get endpoint`).",
-    });
+    const unreachable = backendUnreachableError(endpoint);
+    if (!emitLlmError(unreachable.error, unreachable.message, unreachable.next)) {
+      renderStructuredError(unreachable);
+    }
     if (debug) writeDebugDetail(err);
     process.exit(1);
   }
 
   const structured = typeof e?.message === "string" ? parseBackendError(e.message) : null;
   if (structured) {
-    renderStructuredError(structured);
+    if (!emitLlmError(structured.error, structured.message, structured.next)) {
+      renderStructuredError(structured);
+    }
     if (debug) writeDebugDetail(err);
     process.exit(1);
   }
@@ -234,7 +314,11 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string): 
   // formatFetchError unwraps `fetch failed` so the transport cause is visible
   // rather than being hidden behind a message that says nothing.
   const msg = err === null || err === undefined ? String(err) : formatFetchError(err);
-  process.stderr.write(chalk.red(`Error: ${msg}\n`));
+  // `cli_error` because nothing above recognised it: the code has to stay
+  // stable and honest rather than guess at a class from the message text.
+  if (!emitLlmError("cli_error", msg)) {
+    process.stderr.write(chalk.red(`Error: ${msg}\n`));
+  }
 
   if (debug) writeDebugDetail(err);
 
