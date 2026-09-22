@@ -1496,7 +1496,9 @@ export function buildBundle(input: BuildInput): ContextBundle {
         id: ref.id,
         name: ref.name,
         kind: ref.kind,
-        ...locationFields(ref),
+        // A package's provenance names the file that imports it, not the
+        // package: `node:fs` came out located in `commands/watch.ts`.
+        ...(ref.kind === "module" ? {} : locationFields(ref)),
         stale: false, // replaced below, for the entities that survive the budget
       });
     }
@@ -1529,18 +1531,38 @@ export function buildBundle(input: BuildInput): ContextBundle {
         kind: node.kind,
         path: node.path ?? node.sourceUri ?? undefined,
       }));
+  // The facts collector's own record of an entity wins over the backend's
+  // summary of it. Backends up to at least 1.0.30 summarize a file's members
+  // with the FILE's name and no path, so a member that reached the bundle
+  // through the summaries -- ahead of its located ref, which `seen` then
+  // skipped -- came out as twelve entities all named `watch.ts`.
+  const trailingMembers = memberRefs.slice(LEADING_MEMBERS);
+  const locatedById = new Map(trailingMembers.map((ref) => [ref.id, ref]));
+  const fileNames = new Set(
+    [...contextNodes, resolved].filter((n) => n.kind === "file").map((n) => n.name));
   for (const node of orderedNodes(contextNodes)) {
     if (seen.has(node.id)) continue;
+    const located = locatedById.get(node.id);
+    if (located) {
+      pushLocated([located]);
+      continue;
+    }
+    // The same defect with no located ref to fall back on: a symbol with no
+    // location, named after a file. Its name is wrong and it cannot be
+    // opened, so it would only spend entity budget misleading the reader.
+    if (!node.path && node.kind !== "file" && node.kind !== "module" && fileNames.has(node.name)) {
+      continue;
+    }
     seen.add(node.id);
     entities.push({
       id: node.id,
       name: node.name,
       kind: node.kind,
-      path: node.path,
+      ...(node.kind === "module" || !node.path ? {} : { path: node.path }),
       stale: false, // replaced below, for the entities that survive the budget
     });
   }
-  pushLocated(memberRefs.slice(LEADING_MEMBERS));
+  pushLocated(trailingMembers);
 
   // Relationships: graph edges, ordered deterministically.
   const contextEdges = context.edges.length > 0 ? context.edges : (context.edgeSummaries ?? []);
