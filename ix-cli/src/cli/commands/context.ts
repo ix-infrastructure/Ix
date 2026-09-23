@@ -62,7 +62,7 @@ const BUDGETS = [
   { key: "maxEntities", flag: "--max-entities", label: "entities", help: "Maximum entities in the bundle", min: 1, max: 500, fallback: 50 },
   { key: "maxRelationships", flag: "--max-relationships", label: "relationships", help: "Maximum relationships in the bundle", min: 1, max: 1000, fallback: 100 },
   { key: "maxEvidence", flag: "--max-evidence", label: "evidence", help: "Maximum evidence items in the bundle", min: 1, max: 200, fallback: 25 },
-  { key: "maxTokens", flag: "--max-tokens", label: "tokens", help: "Maximum tokens of evidence output", min: 500, max: 200_000, fallback: 1_500 },
+  { key: "maxTokens", flag: "--max-tokens", label: "tokens", help: "Maximum tokens of evidence output", min: 500, max: 200_000, fallback: 3_000 },
   { key: "maxChars", flag: "--max-chars", label: "chars", help: "Maximum characters of evidence output", min: 1000, max: 1_000_000, fallback: 12_000 },
 ] as const satisfies ReadonlyArray<{
   key: keyof BudgetSnapshot;

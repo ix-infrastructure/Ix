@@ -13,9 +13,9 @@ import {
 describe("--max-tokens", () => {
   it("is what bounds a default bundle, not 12,000 characters", () => {
     const budgets = clampBudgets({});
-    expect(budgets.maxTokens).toBe(1500);
-    expect(budgets.maxChars).toBe(Math.round(1500 * BUNDLE_CHARS_PER_TOKEN));
-    // The old default was nearly four times this.
+    expect(budgets.maxTokens).toBe(3000);
+    expect(budgets.maxChars).toBe(Math.round(3000 * BUNDLE_CHARS_PER_TOKEN));
+    // The old character default was nearly twice this.
     expect(budgets.maxChars).toBeLessThan(12_000);
   });
 
@@ -37,7 +37,7 @@ describe("--max-tokens", () => {
     expect(budgets.maxChars).toBe(40_000);
     // The token field still reports what it would have been, so --diff can say
     // which budget the caller had in force.
-    expect(budgets.maxTokens).toBe(1500);
+    expect(budgets.maxTokens).toBe(3000);
   });
 
   it("is refused alongside --max-chars rather than silently losing to it", () => {

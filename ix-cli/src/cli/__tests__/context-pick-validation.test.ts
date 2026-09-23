@@ -117,7 +117,7 @@ describe("ix context --max-* validation", () => {
       ["--max-entities", "Maximum entities in the bundle", 50, 1, 500],
       ["--max-relationships", "Maximum relationships in the bundle", 100, 1, 1000],
       ["--max-evidence", "Maximum evidence items in the bundle", 25, 1, 200],
-      ["--max-tokens", "Maximum tokens of evidence output", 1500, 500, 200000],
+      ["--max-tokens", "Maximum tokens of evidence output", 3000, 500, 200000],
     ] as const) {
       // One assertion per flag, so a failure names which one lost its default
       // rather than reporting that some string was missing from a wall of help.
