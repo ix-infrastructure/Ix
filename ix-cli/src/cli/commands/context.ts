@@ -18,15 +18,16 @@ import type {
   IntentReport,
   StructuredContext,
 } from "../../client/types.js";
-import { getEndpoint } from "../config.js";
+import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
 import { collectFacts, type ContextFacts, type EntityLocation } from "../explain/facts.js";
-import { collectRelatedFiles, type RelatedRef } from "../explain/related-files.js";
+import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/related-files.js";
+import { collectTextReferences, gitRepoAccess, type TextSource } from "../explain/text-references.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { parseBudgetOption, parsePickOption, parseRevisionOption } from "../options.js";
-import { resolveFileOrReport } from "../resolve.js";
+import { activeReadScope, resolveFileOrReport } from "../resolve.js";
 import { createStaleProbe, hasCompletedSourceGraphBaseline } from "../stale.js";
 import { renderNote, renderSection, renderWarning, renderWarningErr, reportFailure } from "../ui.js";
-import { printJson } from "../format.js";
+import { printJson, relativePath } from "../format.js";
 
 /** The `--max-*` knobs that bound a bundle. */
 interface BudgetSnapshot {
@@ -1456,8 +1457,60 @@ async function collectContextFacts(
   resolved: { id: string; name: string; kind: string },
 ): Promise<ContextFacts> {
   const facts = await collectFacts(client, resolved.id, resolved.name, resolved.kind, "context");
-  const relatedRefs = await collectRelatedFiles(client, resolved, facts).catch(() => []);
+  const graphRefs = await collectRelatedFiles(client, resolved, facts).catch(() => []);
+  const textRefs = await collectTextRelated(client, facts, graphRefs).catch(() => []);
+  // Added to the graph's files, not ranked against them. Put first and sharing
+  // the eight slots, they displaced graph finds the benchmark needed
+  // (`main.ts` for `mcp/runner.ts`) with mentions that led nowhere.
+  const relatedRefs = [...graphRefs.slice(0, MAX_RELATED), ...textRefs];
   return relatedRefs.length > 0 ? { ...facts, relatedRefs } : facts;
+}
+
+/** Imported files whose text is read for names, after the target's own. */
+const TEXT_SOURCE_IMPORTS = 8;
+
+/**
+ * Files linked to the target by text rather than by any graph edge: a path in
+ * a string (`"../../../../core-ingestion/dist/languages.js"`), a file named
+ * in a comment, a test that reads a file by path. Read from the working tree,
+ * so skipped outside a git checkout. See `collectTextReferences`.
+ */
+async function collectTextRelated(
+  client: IxClient,
+  facts: ContextFacts,
+  graphRefs: RelatedRef[],
+): Promise<RelatedRef[]> {
+  if (!facts.path) return [];
+  const repo = gitRepoAccess(resolveWorkspaceRoot());
+  if (!repo) return [];
+  const sources: TextSource[] = [
+    { path: facts.path, role: "target" },
+    ...(facts.importRefs ?? [])
+      .filter((ref) => ref.kind === "file" && ref.path)
+      .slice(0, TEXT_SOURCE_IMPORTS)
+      .map((ref) => ({ path: ref.path!, role: "import" as const })),
+  ];
+  const known = new Set<string>();
+  for (const ref of [
+    ...(facts.importRefs ?? []), ...(facts.calleeRefs ?? []), ...(facts.topCallerRefs ?? []),
+    ...(facts.topDependentRefs ?? []), ...(facts.neighbourRefs ?? []), ...graphRefs,
+  ]) {
+    if (ref.path) known.add(ref.path);
+  }
+  const found = collectTextReferences(repo, sources, known);
+  const scope = activeReadScope();
+  return Promise.all(found.map(async (ref): Promise<RelatedRef> => {
+    const name = ref.path.split("/").pop()!;
+    // The file's node, for an entity id the rest of the bundle can refer to.
+    // Scoped: a backend holding two checkouts of one repository has two.
+    const nodes = await client.search(name, { kind: "file", nameOnly: true, limit: 10, ...scope })
+      .catch(() => []);
+    const node = nodes.find((n) => relativePath(n.provenance?.sourceUri) === ref.path);
+    return {
+      id: node?.id ?? `file:${ref.path}`, name, kind: "file", path: ref.path,
+      score: ref.score, reason: ref.reason, via: [], named: ref.reason,
+    };
+  }));
 }
 
 export function buildBundle(input: BuildInput): ContextBundle {
@@ -2158,6 +2211,7 @@ function formatLocation(location: EvidenceLocation): string {
 /** `rank.ts via listByKind, resolveWorkspaceId`, or just `rank.ts`. */
 function relatedClause(ref: RelatedRef): string {
   const name = (ref.path ?? ref.name).split("/").pop();
+  if (ref.named) return `${name} (${ref.named})`;
   return ref.via.length > 0 ? `${name} via ${ref.via.join(", ")}` : `${name} directly`;
 }
 

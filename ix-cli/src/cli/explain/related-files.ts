@@ -48,6 +48,8 @@ export interface RelatedRef extends EntityLocation {
   reason: string;
   /** The names it was reached through, most weight first; empty when direct. */
   via: string[];
+  /** Set when the link is textual rather than a graph edge: `named in watch.ts`. */
+  named?: string;
 }
 
 /** How many related files a bundle carries. */
