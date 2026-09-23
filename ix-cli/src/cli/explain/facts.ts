@@ -7,6 +7,7 @@ import { isRawId } from "../resolve.js";
 import { isFileStale } from "../stale.js";
 import { buildDependencyTree } from "../commands/depends.js";
 import { getSystemPath } from "../hierarchy.js";
+import type { RelatedRef } from "./related-files.js";
 
 /** A related entity and where it is defined. */
 export interface EntityLocation {
@@ -69,6 +70,11 @@ export interface EntityFacts {
   /** The entities behind `topCallers` / `topDependents`, same order. */
   topCallerRefs?: EntityLocation[];
   topDependentRefs?: EntityLocation[];
+  /**
+   * Files two steps out, ranked (`collectRelatedFiles`). Filled by `ix context`
+   * only: the walk costs a second round of requests that `explain` does not need.
+   */
+  relatedRefs?: RelatedRef[];
 
   /**
    * What the target itself reaches: the files it imports and the functions it
