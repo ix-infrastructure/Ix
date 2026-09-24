@@ -462,6 +462,9 @@ export class IxClient {
     try {
       beginResp = await fetch(`${this.endpoint}${asyncPath}`, {
         method: "POST",
+        // A redirect can replay a destructive POST or hide an accepted reset
+        // behind a later connection failure/404. Inspect the first response.
+        redirect: "manual",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
         signal: AbortSignal.timeout(30 * 1000),
@@ -476,6 +479,10 @@ export class IxClient {
       throw this.resetReconciliationError("The start response was unavailable.", undefined, error);
     }
 
+    if (beginResp.status >= 300 && beginResp.status < 400) {
+      await beginResp.body?.cancel().catch(() => {});
+      throw this.resetReconciliationError(`The start route redirected (${beginResp.status}).`);
+    }
     if (beginResp.status === 404) {
       return this.runResetSync(syncPath);
     }
@@ -503,6 +510,7 @@ export class IxClient {
       try {
         statusResp = await fetch(`${this.endpoint}/v1/reset/status/${opId}`, {
           method: "GET",
+          redirect: "manual",
           signal: AbortSignal.timeout(30 * 1000),
         });
       } catch (error) {
@@ -517,6 +525,7 @@ export class IxClient {
         throw this.resetReconciliationError("The status is unavailable or inaccessible.", opId);
       }
       if (statusResp.status !== 200) {
+        await statusResp.body?.cancel().catch(() => {});
         throw this.resetReconciliationError(`Status request returned ${statusResp.status}.`, opId);
       }
       let status: unknown;
@@ -556,10 +565,15 @@ export class IxClient {
   private async runResetSync(syncPath: string): Promise<{ ok: boolean; message: string }> {
     const resp = await fetch(`${this.endpoint}${syncPath}`, {
       method: "POST",
+      redirect: "manual",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
       signal: AbortSignal.timeout(10 * 60 * 1000),
     });
+    if (resp.status >= 300 && resp.status < 400) {
+      await resp.body?.cancel().catch(() => {});
+      throw this.resetReconciliationError(`The synchronous reset route redirected (${resp.status}).`);
+    }
     if (!resp.ok) {
       const text = await resp.text();
       throw new Error(`${resp.status}: ${text}`);

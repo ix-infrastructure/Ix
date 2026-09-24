@@ -26,6 +26,14 @@ something the CLI can infer.
 
 Local synchronous reset and the existing synchronous fallback for an absent
 async **start** route remain. A 404 from **status** never invokes that fallback.
+
+The client never follows redirects for async start, status polling, local sync
+reset or legacy sync fallback. A redirected start may already have run; following
+307/308 can replay its POST, while following a redirect to a 404 can incorrectly
+trigger sync fallback. A refused redirect target also says nothing about whether
+the initial reset ran. Redirect responses therefore require reconciliation, with
+the original operation ID retained when known. Configure the direct backend
+endpoint before any operator-approved recovery; do not repeat an uncertain reset.
 Authentication errors at start remain errors. This patch does not add tenant
 headers, credentials or an authorization bypass; the remote transport must
 establish the expected verified caller identity.
