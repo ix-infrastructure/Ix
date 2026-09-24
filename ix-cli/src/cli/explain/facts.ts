@@ -7,6 +7,7 @@ import { isRawId } from "../resolve.js";
 import { isFileStale } from "../stale.js";
 import { buildDependencyTree } from "../commands/depends.js";
 import { getSystemPath } from "../hierarchy.js";
+import type { CommitRef } from "./history.js";
 import type { RelatedRef } from "./related-files.js";
 
 /** A related entity and where it is defined. */
@@ -75,6 +76,8 @@ export interface EntityFacts {
    * only: the walk costs a second round of requests that `explain` does not need.
    */
   relatedRefs?: RelatedRef[];
+  /** The target file's latest commits, newest first. `ix context` only. */
+  recentCommits?: CommitRef[];
 
   /**
    * What the target itself reaches: the files it imports and the functions it

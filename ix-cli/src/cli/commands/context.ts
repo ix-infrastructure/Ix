@@ -22,6 +22,7 @@ import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
 import { collectFacts, type ContextFacts, type EntityLocation } from "../explain/facts.js";
 import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/related-files.js";
 import { collectTextReferences, gitRepoAccess, type TextSource } from "../explain/text-references.js";
+import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { parseBudgetOption, parsePickOption, parseRevisionOption } from "../options.js";
 import { activeReadScope, resolveFileOrReport } from "../resolve.js";
@@ -1459,11 +1460,56 @@ async function collectContextFacts(
   const facts = await collectFacts(client, resolved.id, resolved.name, resolved.kind, "context");
   const graphRefs = await collectRelatedFiles(client, resolved, facts).catch(() => []);
   const textRefs = await collectTextRelated(client, facts, graphRefs).catch(() => []);
+  const history = await collectHistory(client, facts, [...graphRefs, ...textRefs]).catch(() => undefined);
   // Added to the graph's files, not ranked against them. Put first and sharing
   // the eight slots, they displaced graph finds the benchmark needed
   // (`main.ts` for `mcp/runner.ts`) with mentions that led nowhere.
-  const relatedRefs = [...graphRefs.slice(0, MAX_RELATED), ...textRefs];
-  return relatedRefs.length > 0 ? { ...facts, relatedRefs } : facts;
+  const relatedRefs = [...graphRefs.slice(0, MAX_RELATED), ...textRefs, ...(history?.coChanged ?? [])];
+  return {
+    ...facts,
+    ...(relatedRefs.length > 0 ? { relatedRefs } : {}),
+    ...(history?.recent.length ? { recentCommits: history.recent } : {}),
+  };
+}
+
+/**
+ * The target file's recent commits, and the files that changed with it. From
+ * the working tree's git, so absent outside a checkout. See `explain/history.ts`.
+ */
+async function collectHistory(
+  client: IxClient,
+  facts: ContextFacts,
+  related: RelatedRef[],
+): Promise<{ recent: CommitRef[]; coChanged: RelatedRef[] } | undefined> {
+  if (!facts.path) return undefined;
+  const git = gitRunner(resolveWorkspaceRoot());
+  const known = new Set<string>([facts.path]);
+  for (const ref of [
+    ...(facts.importRefs ?? []), ...(facts.calleeRefs ?? []), ...(facts.topCallerRefs ?? []),
+    ...(facts.topDependentRefs ?? []), ...(facts.neighbourRefs ?? []), ...related,
+  ]) {
+    if (ref.path) known.add(ref.path);
+  }
+  const recent = recentCommits(git, facts.path);
+  const coChanged = await Promise.all(coChangedFiles(git, facts.path, known).map(async (c) => {
+    const name = c.path.split("/").pop()!;
+    const id = await fileNodeId(client, c.path);
+    const named = `changed with the target in ${c.commits} commits`;
+    return { id, name, kind: "file", path: c.path, score: c.score, reason: named, via: [], named };
+  }));
+  return { recent, coChanged };
+}
+
+/**
+ * A file's graph node id, for an entity the rest of the bundle can refer to.
+ * Scoped: a backend holding two checkouts of one repository has two. Falls
+ * back to a synthetic id rather than dropping a file the graph has not seen.
+ */
+async function fileNodeId(client: IxClient, path: string): Promise<string> {
+  const name = path.split("/").pop()!;
+  const nodes = await client.search(name, { kind: "file", nameOnly: true, limit: 10, ...activeReadScope() })
+    .catch(() => []);
+  return nodes.find((n) => relativePath(n.provenance?.sourceUri) === path)?.id ?? `file:${path}`;
 }
 
 /** Imported files whose text is read for names, after the target's own. */
@@ -1498,19 +1544,10 @@ async function collectTextRelated(
     if (ref.path) known.add(ref.path);
   }
   const found = collectTextReferences(repo, sources, known);
-  const scope = activeReadScope();
-  return Promise.all(found.map(async (ref): Promise<RelatedRef> => {
-    const name = ref.path.split("/").pop()!;
-    // The file's node, for an entity id the rest of the bundle can refer to.
-    // Scoped: a backend holding two checkouts of one repository has two.
-    const nodes = await client.search(name, { kind: "file", nameOnly: true, limit: 10, ...scope })
-      .catch(() => []);
-    const node = nodes.find((n) => relativePath(n.provenance?.sourceUri) === ref.path);
-    return {
-      id: node?.id ?? `file:${ref.path}`, name, kind: "file", path: ref.path,
-      score: ref.score, reason: ref.reason, via: [], named: ref.reason,
-    };
-  }));
+  return Promise.all(found.map(async (ref): Promise<RelatedRef> => ({
+    id: await fileNodeId(client, ref.path), name: ref.path.split("/").pop()!, kind: "file", path: ref.path,
+    score: ref.score, reason: ref.reason, via: [], named: ref.reason,
+  })));
 }
 
 export function buildBundle(input: BuildInput): ContextBundle {
@@ -1846,6 +1883,19 @@ function rankEvidence(input: {
       refs: relatedRefs.map((ref) => ref.id),
     });
   }
+  // What happened to the target's file lately. The subjects carry what a
+  // one-hop bundle cannot: that the sibling commands were already fixed for
+  // the same condition, or that the same bug was fixed next door.
+  const commits = input.facts.recentCommits ?? [];
+  if (commits.length > 0) {
+    const file = (input.facts.path ?? "").split("/").pop();
+    structural.push({
+      id: "recent-commits", source: "git.history",
+      title: `recent commits to ${file}: ${commits.map((c) => `${c.sha} ${c.subject}`).join("; ")}`,
+      reason: `newest first (${commits.map((c) => c.date).join(", ")}); \`git show <sha>\` for the change`,
+      refs: [],
+    });
+  }
   // Then outward. The file an answer lives in is most often one the target
   // imports: measured on the benchmark task set, 6 of 19 tasks' answers are a
   // direct import of their entry point, and none were in the bundle. These go
@@ -1886,7 +1936,9 @@ function rankEvidence(input: {
   }
   pushMembers(leadingMembers.slice(MEMBERS_BEFORE_OUTWARD));
   structural.forEach((item, index) => {
-    items.push({ ...item, kind: "structural", score: 10 + index });
+    // Recent commits are provenance -- where the file's current shape came
+    // from -- and keep to the stable kinds consumers already route on.
+    items.push({ ...item, kind: item.source === "git.history" ? "provenance" : "structural", score: 10 + index });
   });
 
   for (const scored of input.context.claims) {
@@ -2065,6 +2117,7 @@ const CUT_LABELS: Record<string, string> = {
   "facts.callees": "call",
   "facts.neighbours": "neighbouring definition",
   "facts.related": "related file",
+  "git.history": "recent commits",
   "facts.callers": "caller",
   "facts.dependents": "dependent",
   "context.claims": "claim",
