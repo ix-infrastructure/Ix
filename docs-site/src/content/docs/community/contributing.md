@@ -42,8 +42,8 @@ backend, open an issue describing what the CLI needs, and a maintainer will carr
 
 ## Improving these docs
 
-Every page has an **Edit page** link at the bottom. The site's source is in
-[`docs-site/`](https://github.com/ix-infrastructure/Ix/tree/main/docs-site). To preview changes locally:
+Every page has an **Edit page** link at the bottom. The site's source is in `docs-site/` in the Ix repository. To
+preview changes locally:
 
 ```bash
 cd docs-site
