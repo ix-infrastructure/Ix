@@ -1,0 +1,75 @@
+---
+title: Quickstart
+description: Install Ix, map a repository and ask it your first questions in about five minutes.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components'
+
+<Steps>
+
+1. **Install Ix**
+
+   ```bash
+   curl -fsSL https://ix-infra.com/install.sh | sh
+   ```
+
+   On Windows, see [Installation](/getting-started/installation/).
+
+2. **Map a repository**
+
+   From the root of any repository:
+
+   ```bash
+   ix map .
+   ```
+
+   Ix parses every supported file, extracts symbols, calls and imports, and stores them in the local graph. The
+   graph persists, so later sessions start from it instead of from scratch.
+
+3. **Ask it questions**
+
+   ```bash
+   ix search AuthService --kind class   # find an entity by name
+   ix explain AuthService               # what it is and what it touches
+   ix callers verify_token              # what calls this function
+   ix trace user_login_flow             # follow a flow up and down
+   ix impact verify_token               # what breaks if I change it
+   ```
+
+   Replace the names with symbols from your own code.
+
+4. **Find the load-bearing code**
+
+   ```bash
+   ix rank --by dependents --kind class --top 10
+   ```
+
+5. **Connect your AI agent**
+
+   ```bash
+   ix mcp install
+   ```
+
+   This detects the AI clients installed on your machine and registers Ix's MCP server with each one. Then ask your
+   agent a question about the codebase. See [AI agents](/integrations/overview/) for details.
+
+6. **See it**
+
+   ```bash
+   ix view
+   ```
+
+   This opens [Compass](/guides/compass/), the visualizer, in your browser.
+
+</Steps>
+
+<Aside type="tip" title="Keep the graph fresh">
+  The graph goes stale as code changes. Run `ix watch` to re-map on every change, or `ix map --silent` after a batch
+  of edits. The editor plugins re-ingest files you edit automatically.
+</Aside>
+
+## Next steps
+
+- [How Ix works](/concepts/how-it-works/): what is running on your machine
+- [Everyday workflows](/guides/everyday-workflows/): recipes for common questions
+- [Command reference](/reference/commands/): every command, grouped by the question it answers
