@@ -266,6 +266,17 @@ describe("related files in a bundle", () => {
     expect(lines.join("\n")).toContain("src/rank.ts");
   });
 
+  it("says why a textual link is there, instead of what it was reached through", () => {
+    const languages: RelatedRef = {
+      id: "file:core-ingestion/src/languages.ts", name: "languages.ts", kind: "file",
+      path: "core-ingestion/src/languages.ts", score: 0.6, reason: "named in supported-extensions.ts",
+      via: [], named: "named in supported-extensions.ts",
+    };
+    const row = build([rank, languages]).evidence.find((e) => e.source === "facts.related")!;
+    expect(row.title).toBe("related files: src/rank.ts, core-ingestion/src/languages.ts");
+    expect(row.reason).toContain("languages.ts (named in supported-extensions.ts)");
+  });
+
   it("adds no row when nothing was found", () => {
     expect(build([]).evidence.some((e) => e.source === "facts.related")).toBe(false);
   });
