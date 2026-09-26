@@ -1,0 +1,70 @@
+---
+title: Ix Documentation
+description: Ix parses your repository into a persistent graph of symbols, calls and imports, so you and your coding agents can query structure instead of grepping and guessing.
+template: splash
+hero:
+  title: |
+    Understand any codebase <span class="accent">instantly.</span>
+  image:
+    html: '<img class="hero-demo" src="/demo.gif" width="960" height="540" alt="Ix mapping a repository and answering explain, trace and impact queries in a terminal" />'
+  tagline: Ix maps your repository into a persistent graph of symbols, calls and imports. You and your coding agents query that graph instead of grepping and guessing.
+  actions:
+    - text: Get started
+      link: /getting-started/quickstart/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/ix-infrastructure/Ix
+      icon: github
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components'
+
+## Install in one line
+
+```bash
+curl -fsSL https://ix-infra.com/install.sh | sh    # macOS / Linux
+```
+
+```powershell
+irm https://ix-infra.com/install.ps1 | iex          # Windows (install Node.js 22+ and Docker Desktop first)
+```
+
+Then map a repository and ask it a question:
+
+```bash
+ix map .                      # build the graph for this repo
+ix explain AuthService        # what is this, and what does it touch?
+ix impact verify_token        # what breaks if I change this?
+```
+
+## What you can do with Ix
+
+<CardGrid>
+  <Card title="Answer structural questions" icon="magnifier">
+    Find a symbol, see what calls it, follow a flow through the code, and measure the blast radius of a change.
+    Each answer covers one symbol or flow instead of whole files.
+  </Card>
+  <Card title="Give your agents a map" icon="rocket">
+    `ix mcp install` registers the graph tools with Claude Code, Codex, Cursor, VS Code, Gemini CLI, OpenClaw and
+    opencode.
+  </Card>
+  <Card title="Keep context between sessions" icon="document">
+    The graph lives on your machine and persists. Your architecture is mapped once, not rediscovered every session.
+  </Card>
+  <Card title="See the whole system" icon="puzzle">
+    `ix view` opens Compass, an interactive visualizer of your codebase's structure.
+  </Card>
+</CardGrid>
+
+## Where to go next
+
+<CardGrid>
+  <LinkCard title="Quickstart" description="Install Ix, map a repo and run your first queries." href="/getting-started/quickstart/" />
+  <LinkCard title="Connect your AI agent" description="Register Ix's MCP server with the clients you use." href="/integrations/overview/" />
+  <LinkCard title="Command reference" description="Every ix command, grouped by the question it answers." href="/reference/commands/" />
+  <LinkCard title="HTTP API" description="The local backend's endpoints, generated from the OpenAPI spec." href="/api/overview/" />
+</CardGrid>
+
+Ix is open source under the Apache 2.0 license. Questions? Join us on [Discord](https://discord.gg/ncEYVHVqZ8).

@@ -1,0 +1,68 @@
+---
+title: Native plugins
+description: Optional per-client Ix packages for Claude Code, Codex, Cursor, Gemini, OpenCode and OpenClaw.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components'
+
+Each native plugin packages Ix for one client. Use one instead of `ix mcp install` if you prefer a client's own
+plugin system. Each plugin lives in its own repository under
+[ix-infrastructure](https://github.com/ix-infrastructure).
+
+<Tabs syncKey="client">
+  <TabItem label="Claude Code">
+    In Claude Code:
+
+    ```text
+    /plugin marketplace add ix-infrastructure/ix-claude-plugin
+    /plugin install ix-memory
+    ```
+
+    [ix-claude-plugin on GitHub](https://github.com/ix-infrastructure/ix-claude-plugin)
+  </TabItem>
+  <TabItem label="Codex">
+    ```bash
+    curl -fsSL https://ix-infra.com/codex-install.sh | sh
+    ```
+
+    [ix-codex-plugin on GitHub](https://github.com/ix-infrastructure/ix-codex-plugin)
+  </TabItem>
+  <TabItem label="Cursor">
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/ix-cursor-plugin/main/install.sh | bash
+    ```
+
+    [ix-cursor-plugin on GitHub](https://github.com/ix-infrastructure/ix-cursor-plugin)
+  </TabItem>
+  <TabItem label="Gemini CLI">
+    ```bash
+    gemini extensions install https://github.com/ix-infrastructure/ix-gemini-plugin
+    ```
+
+    [ix-gemini-plugin on GitHub](https://github.com/ix-infrastructure/ix-gemini-plugin)
+  </TabItem>
+  <TabItem label="OpenCode">
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/ix-infrastructure/ix-opencode-plugin/main/install.sh | bash
+    ```
+
+    [ix-opencode-plugin on GitHub](https://github.com/ix-infrastructure/ix-opencode-plugin)
+  </TabItem>
+  <TabItem label="OpenClaw">
+    ```bash
+    openclaw plugins install ix-infrastructure/ix-openclaw-plugin
+    ```
+
+    [ix-openclaw-plugin on GitHub](https://github.com/ix-infrastructure/ix-openclaw-plugin)
+  </TabItem>
+</Tabs>
+
+<Aside type="tip" title="Windows">
+  Every `install.sh` installer has a PowerShell counterpart. Replace `curl … install.sh | bash` with
+  `irm … install.ps1 | iex`.
+</Aside>
+
+<Aside type="note">
+  If a plugin has already registered an MCP server named `ix-memory`, `ix mcp install` won't overwrite it. It
+  reports that client and leaves it as it is. Pass `--force` to replace the registration with `ix mcp`.
+</Aside>

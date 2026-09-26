@@ -1,0 +1,72 @@
+/* Copyright 2026 Ix Infrastructure Inc. */
+
+/* Brand tokens from ix-infra.com: navy background, #489AF1 accent, Inter. */
+
+:root {
+  --sl-font: 'Inter Variable', system-ui, sans-serif;
+  --sl-content-width: 48rem;
+}
+
+:root[data-theme='dark'] {
+  --sl-color-accent-low: #10244a;
+  --sl-color-accent: #489af1;
+  --sl-color-accent-high: #c4dffb;
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #e4e1de;
+  --sl-color-gray-2: #c9c6c3;
+  --sl-color-gray-3: #9aa3b8;
+  --sl-color-gray-4: #5b6784;
+  --sl-color-gray-5: #273758;
+  --sl-color-gray-6: #121a3d;
+  --sl-color-black: #0a0f2c;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #dbeafd;
+  --sl-color-accent: #1f6fd1;
+  --sl-color-accent-high: #0e3a73;
+  --sl-color-white: #0a0f2c;
+  --sl-color-gray-1: #1b2440;
+  --sl-color-gray-2: #33405f;
+  --sl-color-gray-3: #56627f;
+  --sl-color-gray-4: #8a93a8;
+  --sl-color-gray-5: #c8ccd6;
+  --sl-color-gray-6: #eceae7;
+  --sl-color-gray-7: #f6f5f3;
+  --sl-color-black: #ffffff;
+}
+
+/* Splash hero: the site's "instantly." blue on the headline's second line. */
+.hero h1 .accent {
+  color: var(--sl-color-accent);
+}
+
+:root[data-theme='dark'] .hero {
+  background: radial-gradient(ellipse 60% 70% at 70% 40%, rgba(72, 154, 241, 0.16), transparent 70%);
+}
+
+.site-title img {
+  height: 1.6rem;
+  width: auto;
+}
+
+.sl-link-button.primary {
+  background: var(--sl-color-accent);
+  border-color: var(--sl-color-accent);
+  color: #ffffff;
+}
+
+.hero-demo {
+  width: 100%;
+  height: auto;
+  border-radius: 0.75rem;
+  border: 1px solid var(--sl-color-gray-5);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
+}
+
+/* The default current-page pill uses accent-high, which glares on navy. */
+.sidebar-content a[aria-current='page'] {
+  background-color: var(--sl-color-accent-low);
+  color: var(--sl-color-accent-high);
+  font-weight: 600;
+}

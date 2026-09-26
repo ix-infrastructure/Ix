@@ -1,0 +1,93 @@
+---
+title: Installation
+description: Install the ix CLI and its local backend on macOS, Linux or Windows.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components'
+
+The installer sets up the `ix` CLI and everything it needs. All you need beforehand is a terminal with `curl` or
+`wget`.
+
+<Tabs syncKey="os">
+  <TabItem label="macOS / Linux">
+    ```bash
+    curl -fsSL https://ix-infra.com/install.sh | sh
+    ```
+  </TabItem>
+  <TabItem label="Windows">
+    Install [Node.js 22+](https://nodejs.org/) and [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+    first, then run in PowerShell:
+
+    ```powershell
+    irm https://ix-infra.com/install.ps1 | iex
+    ```
+  </TabItem>
+  <TabItem label="Intel Mac (Homebrew)">
+    No pre-built package is published for Intel Macs. Homebrew builds Ix from source:
+
+    ```bash
+    brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/Ix
+    brew install ix
+    ```
+  </TabItem>
+</Tabs>
+
+Pre-built CLI packages are published for Apple Silicon macOS, Linux (x86-64 and arm64) and Windows x86-64.
+
+## What the installer sets up
+
+The installer checks for each of these and installs anything missing:
+
+| Component | Why Ix needs it |
+|---|---|
+| **Node.js 22+** | Runs the `ix` CLI |
+| **Git** | Workspace detection |
+| **ripgrep** | Powers `ix text`. Optional: a failed install only prints a warning |
+| **Docker + Docker Compose** | Runs the local backend |
+
+The backend is two containers, bound to localhost only:
+
+- **ArangoDB 3.12**, the graph database, on `127.0.0.1:8529`
+- **Ix Memory Layer**, the HTTP API the CLI talks to, on `127.0.0.1:8090`
+
+<Aside type="note" title="Docker on Windows and first launch on macOS">
+  On Windows, Docker Desktop isn't installed automatically. Install it, then re-run the installer. On macOS, Docker
+  Desktop's first launch shows a license agreement. The installer detects this and waits up to five minutes for you
+  to accept it.
+</Aside>
+
+<Aside type="tip" title="Docker Hub rate limits">
+  Docker Hub limits anonymous pulls to 100 per six hours per IP. If a pull fails, run `docker login` (free) and try
+  again. The Ix Memory Layer image is published on GHCR, which has no such limit.
+</Aside>
+
+## Verify the install
+
+```bash
+ix --version       # the CLI is on your PATH
+ix status          # the backend is reachable
+ix doctor          # server, database and graph integrity
+```
+
+If `ix status` reports `Ix backend not reachable`, start the backend with `ix docker start`. See
+[Troubleshooting](/guides/troubleshooting/) for other first-run problems.
+
+## Files and directories
+
+| Path | Contents |
+|---|---|
+| `~/.ix/` | Ix home directory. Override with `$IX_HOME` |
+| `~/.ix/config.yaml` | CLI configuration |
+| `~/.ix/backend/` | Docker Compose file for the local backend |
+| `~/.ix/cli/` | Installed CLI and its dependencies |
+| `/usr/local/bin/ix` or `~/.local/bin/ix` | The `ix` wrapper, in whichever is writable |
+
+The complete list, including every network endpoint the installer contacts, is in
+[`docs/prerequisites.md`](https://github.com/ix-infrastructure/Ix/blob/main/docs/prerequisites.md).
+
+## Upgrading
+
+```bash
+ix upgrade --check   # see whether an update is available
+ix upgrade           # upgrade the CLI, backend and components
+```
