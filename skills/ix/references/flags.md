@@ -48,8 +48,11 @@ surfaces (#575).
   auto-paginates on its own; `--offset` or `--regions` turns that off, and
   `--limit` only sets the page size.
 - **`ix context` budgets the evidence block in tokens, not characters.**
-  `--max-tokens` defaults to 1,500 and is converted at 2.14 characters per
-  token, measured across 41 recorded bundles. `--max-chars` is still there for
+  `--max-tokens` defaults to 3,000 and is converted at 2.14 characters per
+  token, measured across 41 recorded bundles. At 1,500 the evidence block held
+  about ten items, and for a file target those were its own members: ix-bench
+  agents were shown 0.59 of the expected files ix had found, against all of
+  them at 3,000, for about 320 more tokens. `--max-chars` is still there for
   a caller who needs exact bytes and overrides it; passing both is refused
   rather than silently ranked, because the output does not say which one won.
 - **`ix mcp` advertises ten tools by default**, not twenty-six: `ix_health`,
@@ -194,7 +197,7 @@ Build a bounded, deterministic context bundle for a symbol, file, or entity (or 
 | `--max-entities` | `<n>` | — | Maximum entities in the bundle (default: 50, clamped to 1-500) |
 | `--max-relationships` | `<n>` | — | Maximum relationships in the bundle (default: 100, clamped to 1-1000) |
 | `--max-evidence` | `<n>` | — | Maximum evidence items in the bundle (default: 25, clamped to 1-200) |
-| `--max-tokens` | `<n>` | `1500` | Maximum tokens of evidence output (clamped to 500-200000) |
+| `--max-tokens` | `<n>` | `3000` | Maximum tokens of evidence output (clamped to 500-200000) |
 | `--max-chars` | `<n>` | — | Maximum characters of evidence output; overrides `--max-tokens` (clamped to 1000-1000000) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |

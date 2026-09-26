@@ -20,6 +20,7 @@ import type {
 } from "../../client/types.js";
 import { getEndpoint } from "../config.js";
 import { collectFacts, type ContextFacts, type EntityLocation } from "../explain/facts.js";
+import { collectRelatedFiles, type RelatedRef } from "../explain/related-files.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { parseBudgetOption, parsePickOption, parseRevisionOption } from "../options.js";
 import { resolveFileOrReport } from "../resolve.js";
@@ -61,7 +62,7 @@ const BUDGETS = [
   { key: "maxEntities", flag: "--max-entities", label: "entities", help: "Maximum entities in the bundle", min: 1, max: 500, fallback: 50 },
   { key: "maxRelationships", flag: "--max-relationships", label: "relationships", help: "Maximum relationships in the bundle", min: 1, max: 1000, fallback: 100 },
   { key: "maxEvidence", flag: "--max-evidence", label: "evidence", help: "Maximum evidence items in the bundle", min: 1, max: 200, fallback: 25 },
-  { key: "maxTokens", flag: "--max-tokens", label: "tokens", help: "Maximum tokens of evidence output", min: 500, max: 200_000, fallback: 1_500 },
+  { key: "maxTokens", flag: "--max-tokens", label: "tokens", help: "Maximum tokens of evidence output", min: 500, max: 200_000, fallback: 3_000 },
   { key: "maxChars", flag: "--max-chars", label: "chars", help: "Maximum characters of evidence output", min: 1000, max: 1_000_000, fallback: 12_000 },
 ] as const satisfies ReadonlyArray<{
   key: keyof BudgetSnapshot;
@@ -402,7 +403,7 @@ export function registerContextCommand(program: Command): void {
         // Also carries the provenance response: `collectFacts` needs it for the
         // history length, and fetching it again here doubled one of the
         // slowest calls the command makes (~1.3s on the Ix repo's graph).
-        collectFacts(client, resolved.id, resolved.name, resolved.kind, "context"),
+        collectContextFacts(client, resolved),
         // By id, not by name. Seeding by name makes the backend re-run the
         // search the resolver just did, and it can land on a different node of
         // the same name. Both call sites in this file must use it: converting
@@ -502,7 +503,7 @@ async function buildFreshBundle(
 
   const asOfRev = opts.asOfRev;
   const [facts, context] = await Promise.all([
-    collectFacts(client, resolved.id, resolved.name, resolved.kind, "context"),
+    collectContextFacts(client, resolved),
     client.contextForNode(resolved.id, { asOfRev, depth: opts.depth }),
   ]);
 
@@ -1444,6 +1445,21 @@ interface BuildInput {
   graphCompleted?: boolean;
 }
 
+/**
+ * The facts a bundle is built from: one hop from `collectFacts`, then the
+ * ranked files two hops out, which are seeded from those facts. The second
+ * step is best-effort -- a bundle without it is the bundle `ix context` built
+ * before it existed, and failing the command over it would be a regression.
+ */
+async function collectContextFacts(
+  client: IxClient,
+  resolved: { id: string; name: string; kind: string },
+): Promise<ContextFacts> {
+  const facts = await collectFacts(client, resolved.id, resolved.name, resolved.kind, "context");
+  const relatedRefs = await collectRelatedFiles(client, resolved, facts).catch(() => []);
+  return relatedRefs.length > 0 ? { ...facts, relatedRefs } : facts;
+}
+
 export function buildBundle(input: BuildInput): ContextBundle {
   const { resolved, facts, context, provenance, asOfRev, depth, budgets } = input;
 
@@ -1496,7 +1512,9 @@ export function buildBundle(input: BuildInput): ContextBundle {
         id: ref.id,
         name: ref.name,
         kind: ref.kind,
-        ...locationFields(ref),
+        // A package's provenance names the file that imports it, not the
+        // package: `node:fs` came out located in `commands/watch.ts`.
+        ...(ref.kind === "module" ? {} : locationFields(ref)),
         stale: false, // replaced below, for the entities that survive the budget
       });
     }
@@ -1512,6 +1530,9 @@ export function buildBundle(input: BuildInput): ContextBundle {
     ...(facts.neighbourRefs ?? []),
     ...(facts.topCallerRefs ?? []),
     ...(facts.topDependentRefs ?? []),
+    // Two steps out, ranked. After everything one step out, and ahead of the
+    // backend's context nodes, which are ordered by kind and name only.
+    ...(facts.relatedRefs ?? []),
   ]);
   // Compact and standard backend responses omit the full graph arrays and
   // carry the same graph as summaries. Falling back here keeps the default
@@ -1529,18 +1550,38 @@ export function buildBundle(input: BuildInput): ContextBundle {
         kind: node.kind,
         path: node.path ?? node.sourceUri ?? undefined,
       }));
+  // The facts collector's own record of an entity wins over the backend's
+  // summary of it. Backends up to at least 1.0.30 summarize a file's members
+  // with the FILE's name and no path, so a member that reached the bundle
+  // through the summaries -- ahead of its located ref, which `seen` then
+  // skipped -- came out as twelve entities all named `watch.ts`.
+  const trailingMembers = memberRefs.slice(LEADING_MEMBERS);
+  const locatedById = new Map(trailingMembers.map((ref) => [ref.id, ref]));
+  const fileNames = new Set(
+    [...contextNodes, resolved].filter((n) => n.kind === "file").map((n) => n.name));
   for (const node of orderedNodes(contextNodes)) {
     if (seen.has(node.id)) continue;
+    const located = locatedById.get(node.id);
+    if (located) {
+      pushLocated([located]);
+      continue;
+    }
+    // The same defect with no located ref to fall back on: a symbol with no
+    // location, named after a file. Its name is wrong and it cannot be
+    // opened, so it would only spend entity budget misleading the reader.
+    if (!node.path && node.kind !== "file" && node.kind !== "module" && fileNames.has(node.name)) {
+      continue;
+    }
     seen.add(node.id);
     entities.push({
       id: node.id,
       name: node.name,
       kind: node.kind,
-      path: node.path,
+      ...(node.kind === "module" || !node.path ? {} : { path: node.path }),
       stale: false, // replaced below, for the entities that survive the budget
     });
   }
-  pushLocated(memberRefs.slice(LEADING_MEMBERS));
+  pushLocated(trailingMembers);
 
   // Relationships: graph edges, ordered deterministically.
   const contextEdges = context.edges.length > 0 ? context.edges : (context.edgeSummaries ?? []);
@@ -1720,10 +1761,36 @@ function rankEvidence(input: {
   ): Array<{ name: string; ref?: EntityLocation }> =>
     (refs ? refs.map((ref) => ({ name: ref.name, ref })) : names.map((name) => ({ name }))).slice(0, limit);
 
-  for (const { name, ref } of related(input.facts.members, input.facts.memberRefs, LEADING_MEMBERS)) {
+  const leadingMembers = related(input.facts.members, input.facts.memberRefs, LEADING_MEMBERS);
+  const pushMembers = (members: typeof leadingMembers) => {
+    for (const { name, ref } of members) {
+      structural.push({
+        id: `member:${name}`, source: "facts.members", title: `member ${name}`,
+        reason: ref ? memberReason(ref) : "defined in the target", refs: ref ? [ref.id] : [], ...locationField(ref),
+      });
+    }
+  };
+  // The most-used members first, the rest last. A file target's evidence at
+  // the default budget was the target and its first ten members and nothing
+  // else -- the part of a bundle an agent sees anyway the moment it opens the
+  // target. Measured on ix-bench, 0.55 of the expected files were in the
+  // bundle and 0.32 in the text an agent is shown.
+  pushMembers(leadingMembers.slice(0, MEMBERS_BEFORE_OUTWARD));
+  // Two steps out: a neighbour's import, or a file that depends on what the
+  // target depends on. Before the imports, which the target's own header
+  // lists; these are the files a one-hop bundle cannot name at all.
+  //
+  // One row for all of them. As a row each, five related files cost as much
+  // of the evidence budget as five imports, and at the default budget the
+  // imports then fell off the end instead: the files moved, the count the
+  // agent could see did not.
+  const relatedRefs = input.facts.relatedRefs ?? [];
+  if (relatedRefs.length > 0) {
     structural.push({
-      id: `member:${name}`, source: "facts.members", title: `member ${name}`,
-      reason: ref ? memberReason(ref) : "defined in the target", refs: ref ? [ref.id] : [], ...locationField(ref),
+      id: "related-files", source: "facts.related",
+      title: `related files: ${relatedRefs.map((ref) => ref.path ?? ref.name).join(", ")}`,
+      reason: `two steps from the target, ranked; ${relatedRefs.map(relatedClause).join("; ")}`,
+      refs: relatedRefs.map((ref) => ref.id),
     });
   }
   // Then outward. The file an answer lives in is most often one the target
@@ -1764,6 +1831,7 @@ function rankEvidence(input: {
       reason: "calls, imports or references the target", refs: ref ? [ref.id] : [], ...locationField(ref),
     });
   }
+  pushMembers(leadingMembers.slice(MEMBERS_BEFORE_OUTWARD));
   structural.forEach((item, index) => {
     items.push({ ...item, kind: "structural", score: 10 + index });
   });
@@ -1943,6 +2011,7 @@ const CUT_LABELS: Record<string, string> = {
   "facts.imports": "import",
   "facts.callees": "call",
   "facts.neighbours": "neighbouring definition",
+  "facts.related": "related file",
   "facts.callers": "caller",
   "facts.dependents": "dependent",
   "context.claims": "claim",
@@ -2020,6 +2089,8 @@ const SHOWN_IMPORTS = 8;
 
 /** Members of neighbouring files named in the evidence; the rest are entities. */
 const SHOWN_NEIGHBOUR_MEMBERS = 6;
+/** Members shown before anything outside the target; the rest close the list. */
+const MEMBERS_BEFORE_OUTWARD = 5;
 
 type Located = { path?: string; lineStart?: number; lineEnd?: number };
 
@@ -2082,6 +2153,12 @@ function lineRange(location: EvidenceLocation): string | undefined {
 function formatLocation(location: EvidenceLocation): string {
   const lines = lineRange(location);
   return lines ? `${location.path}:${lines}` : location.path;
+}
+
+/** `rank.ts via listByKind, resolveWorkspaceId`, or just `rank.ts`. */
+function relatedClause(ref: RelatedRef): string {
+  const name = (ref.path ?? ref.name).split("/").pop();
+  return ref.via.length > 0 ? `${name} via ${ref.via.join(", ")}` : `${name} directly`;
 }
 
 function memberReason(ref: EntityLocation): string {
