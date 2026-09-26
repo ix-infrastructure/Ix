@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
 
 /**
@@ -207,12 +207,18 @@ export function gitRepoAccess(root: string): RepoAccess | undefined {
   return {
     files: () => listing,
     read: (path) => {
-      const abs = join(root, path);
+      // One descriptor for the size check and the read, so the file measured
+      // is the file read (CodeQL js/file-system-race). A missing file throws
+      // at open and reads as undefined, as an unreadable one does.
+      let fd: number | undefined;
       try {
-        if (!existsSync(abs) || statSync(abs).size > MAX_SCAN_BYTES) return undefined;
-        return readFileSync(abs, "utf-8");
+        fd = openSync(join(root, path), "r");
+        if (fstatSync(fd).size > MAX_SCAN_BYTES) return undefined;
+        return readFileSync(fd, "utf-8");
       } catch {
         return undefined;
+      } finally {
+        if (fd !== undefined) closeSync(fd);
       }
     },
     grep: (needle) => {

@@ -152,6 +152,9 @@ describe("gitRepoAccess", () => {
     const repo = gitRepoAccess(dir)!;
     expect(repo.files().sort()).toEqual(["src/a.ts", "src/b.ts"]);
     expect(repo.read("src/a.ts")).toContain("b.ts");
+    expect(repo.read("src/missing.ts")).toBeUndefined();
+    write("src/big.ts", "x".repeat(300 * 1024));
+    expect(repo.read("src/big.ts")).toBeUndefined();
     expect(repo.grep("b.ts")).toEqual([{ path: "src/a.ts", line: "// see b.ts" }]);
     expect(repo.grep("nothing-matches")).toEqual([]);
   });
