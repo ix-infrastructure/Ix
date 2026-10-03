@@ -5,7 +5,8 @@ import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { parseFile, resolveEdges } from '../index.js';
+import { parseFile } from '../index.js';
+import { resolveEdges } from './helpers/untiered.js';
 
 const repoRoot = path.resolve(import.meta.dirname, '../../..');
 // Frozen in-repo fixtures. This walked `memory-layer/` until #557 -- a

@@ -77,7 +77,11 @@ const STRUCTURAL_PREDICATES = new Set(["CONTAINS", "DEFINES", "CONTAINS_CHUNK"])
 
 /** Below this many symbols the coverage ratio is too noisy to judge by. */
 const MIN_SYMBOLS_FOR_RATIO = 50;
-/** Structural edges per symbol below which a graph is called hollow. Healthy: ~1.2. */
+/**
+ * Structural edges per symbol below which a graph is called hollow. Healthy:
+ * about 1.0 for an `ix map` graph (one CONTAINS per symbol; chunks and their
+ * DEFINES are not written), more after `ix ingest`, which adds chunks.
+ */
 const MIN_STRUCTURAL_COVERAGE = 0.2;
 /** A graph with at least this many symbols and no structural edge at all is hollow. */
 const MIN_SYMBOLS_FOR_ZERO = 5;

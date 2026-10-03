@@ -401,14 +401,24 @@ function stripChunkOps(patch: GraphPatchPayload): GraphPatchPayload {
   };
 }
 
-/** Strip chunks and claims from patches — mapMode only needs nodes + edges. */
-function stripMapModeOps(patch: GraphPatchPayload): GraphPatchPayload {
+/**
+ * Strip chunks and claims from patches — mapMode only needs nodes + edges.
+ *
+ * Every edge that touches a dropped chunk goes too, not only the chunk
+ * predicates: a named chunk also DEFINES its symbol, and keeping that edge
+ * once its chunk is gone left one dangling DEFINES per function in every
+ * `ix map` graph.
+ */
+export function stripMapModeOps(patch: GraphPatchPayload): GraphPatchPayload {
+  const droppedNodes = new Set<unknown>(
+    patch.ops.filter(op => op.type === 'UpsertNode' && op['kind'] === 'chunk').map(op => op['id']),
+  );
   return {
     ...patch,
     ops: patch.ops.filter(op => {
       if (op.type === 'AssertClaim' || op.type === 'RetractClaim') return false;
       if (op.type === 'UpsertNode' && op['kind'] === 'chunk') return false;
-      if (op.type === 'UpsertEdge' && (op['predicate'] === 'CONTAINS_CHUNK' || op['predicate'] === 'NEXT')) return false;
+      if (op.type === 'UpsertEdge' && (droppedNodes.has(op['src']) || droppedNodes.has(op['dst']))) return false;
       return true;
     }),
   };

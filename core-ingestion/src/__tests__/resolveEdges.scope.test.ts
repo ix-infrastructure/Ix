@@ -10,7 +10,8 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { parseFile, resolveEdges, type FileParseResult, type ResolvedEdge } from '../index.js';
+import { parseFile, type FileParseResult, type ResolvedEdge } from '../index.js';
+import { resolveEdges } from './helpers/untiered.js';
 import { buildPatch, buildPatchWithResolution } from '../patch-builder.js';
 
 function parse(filePath: string, source: string): FileParseResult {

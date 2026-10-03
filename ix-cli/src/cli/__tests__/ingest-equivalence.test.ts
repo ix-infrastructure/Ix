@@ -263,10 +263,12 @@ describe("incremental ix map equals a fresh map (fake backend)", () => {
   });
 
   // F-03. Files that call a renamed or deleted function are unchanged, so
-  // nothing re-resolves them. Fresh, their calls are unresolved; incremental,
-  // the edges are simply gone, and after a restore they never come back.
-  it.fails("IN-11: renaming a called function re-resolves its callers", async () => {
-    await runSequence("head", [edit("renameFunction", "web/math.ts", 0)]);
+  // nothing re-resolves them. Their edges go when the name goes, and when it
+  // comes back -- renamed back, or the file restored -- they never return.
+  // (A plain rename now passes: since IN-08 an unresolved call writes no edge,
+  // fresh or incremental, so the rename back is what shows the defect.)
+  it.fails("IN-11: a called function renamed and renamed back re-binds its callers", async () => {
+    await runSequence("head", [edit("renameFunction", "web/math.ts", 0), { kind: "revert", a: 0, b: 0 }]);
   });
 
   it.fails("IN-11: restoring a deleted file re-binds its callers", async () => {
