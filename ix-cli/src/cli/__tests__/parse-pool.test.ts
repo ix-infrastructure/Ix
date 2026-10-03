@@ -868,4 +868,63 @@ describe("ParsePool", () => {
     expect(elapsed).toBeLessThan(3000);
     expect(pool.crashedTasks(), "a clean teardown is not a crash").toBe(0);
   }, 20000);
+
+  /**
+   * Blocks its event loop for 1.5 s on `slow.ts` -- standing in for a parse
+   * stuck in native code, which no budget check inside the worker can reach --
+   * then answers. Every other file answers at once.
+   */
+  const SLOW_ON_ONE = `
+    import { parentPort } from 'node:worker_threads';
+    parentPort.on('message', (msg) => {
+      if (msg && msg.__shutdown) { parentPort.close(); return; }
+      if (msg.filePath === 'slow.ts') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
+      parentPort.postMessage({ ok: true, result: { filePath: msg.filePath } });
+    });
+  `;
+
+  it("settles a parse that holds its worker past the backstop as a timeout, and carries on", async () => {
+    const pool = new ParsePool(worker("slow", SLOW_ON_ONE), 1, undefined, undefined, 200);
+    pool.init();
+    const start = Date.now();
+
+    const [slow, next] = await Promise.all([pool.parse("slow.ts", "x"), pool.parse("a.ts", "y")]);
+
+    expect(slow, "settled, not left pending").toBeNull();
+    expect(next, "a replacement worker took the queue").toEqual({ filePath: "a.ts" });
+    expect(Date.now() - start, "did not wait for the slow parse").toBeLessThan(1400);
+    expect(pool.timedOutFiles()).toEqual(["slow.ts"]);
+    expect(pool.crashedTasks(), "a timeout is not a crash: it recurs every run").toBe(0);
+    await pool.destroy();
+  });
+
+  /** Reports a budget timeout for `t.ts`, as the real worker does. */
+  const REPORTS_TIMEOUT = `
+    import { parentPort } from 'node:worker_threads';
+    parentPort.on('message', (msg) => {
+      if (msg && msg.__shutdown) { parentPort.close(); return; }
+      if (msg.filePath === 't.ts') {
+        parentPort.postMessage({ ok: false, result: null, reason: 'timeout', message: 'budget' });
+      } else {
+        parentPort.postMessage({ ok: false, result: null, reason: 'error', message: 'boom' });
+      }
+    });
+  `;
+
+  it("names a file the worker reports as timed out, and only one that counts", async () => {
+    const pool = new ParsePool(worker("reports", REPORTS_TIMEOUT), 1);
+    pool.init();
+
+    const results = await Promise.all([
+      pool.parse("t.ts", "x"),
+      pool.parse("e.ts", "x"),
+      // The index prescan does not count its losses; see `parse`.
+      pool.parse("t.ts", "x", false),
+    ]);
+
+    expect(results).toEqual([null, null, null]);
+    expect(pool.timedOutFiles()).toEqual(["t.ts"]);
+    expect(pool.crashedTasks()).toBe(0);
+    await pool.destroy();
+  });
 });

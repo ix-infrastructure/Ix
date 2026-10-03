@@ -1046,6 +1046,14 @@ const COMMIT_STATUS_IDEMPOTENT = 'Idempotent';
 const COMMIT_STATUS_BASE_REV_MISMATCH = 'BaseRevMismatch';
 
 /** Minimal local-ingest facts needed by commands that continue after ingestion. */
+/** The stderr note for files skipped because their parse ran past the budget. */
+export function describeParseTimeouts(files: readonly string[], sample = 5): string {
+  const shown = files.slice(0, sample).join(", ");
+  const more = files.length > sample ? ` and ${files.length - sample} more` : "";
+  return `Skipped ${files.length} file(s) whose parse ran past the per-file budget: ${shown}${more}. ` +
+    "They are not in the graph. Raise the budget with IX_PARSE_BUDGET_MS (milliseconds, 0 = none).";
+}
+
 export interface IngestFilesSummary {
   filesDiscovered: number;
   patchesApplied: number;
@@ -1120,6 +1128,12 @@ export interface IngestFilesSummary {
    * something must not claim the graph is where it was.
    */
   graphUnchanged: boolean;
+  /**
+   * Files skipped because their parse ran past the per-file budget
+   * (IX_PARSE_BUDGET_MS, default 10 s), workspace-relative. A subset of the
+   * unparsed skips, named because a file that times out does so on every run.
+   */
+  parseTimeouts: string[];
 }
 
 /**
@@ -1747,6 +1761,8 @@ export async function ingestFiles(
    * narrowing makes `pool` `never` down there.
    */
   const crashedParses = (): number => (pool === null ? 0 : pool.crashedTasks());
+  /** Files whose parse ran past the budget; see `ParsePool.timedOutFiles`. */
+  const timedOutParses = (): string[] => (pool === null ? [] : pool.timedOutFiles());
   const ensureParsePool = (): ParsePool => {
     if (pool) return pool;
     pool = new ParsePool(workerPath, Math.max(1, os.cpus().length - 1));
@@ -3801,6 +3817,7 @@ export async function ingestFiles(
     stitchErrors,
     stitchSkipped,
     stitchSkippedRule,
+    parseTimeouts: timedOutParses(),
     graphUnchanged:
       opts.force !== true &&
       !workspaceMigrated &&
@@ -3849,6 +3866,9 @@ export async function ingestFiles(
     // reads as an unexplained regression without the reason.
     process.stderr.write(`  ${describeStitchSkipped(stitchSkipped, stitchSkippedRule, debug)}\n`);
   }
+  if (summary.parseTimeouts.length > 0) {
+    process.stderr.write(`  ${describeParseTimeouts(summary.parseTimeouts)}\n`);
+  }
   if (commitReport.kind === "warn") {
     process.stderr.write(`  ${commitReport.message}\n`);
     // Non-zero even though we do not throw. A partial failure still means the
@@ -3889,7 +3909,8 @@ export async function ingestFiles(
       // `minifiedLikely` and `unparsed` are the buckets that are subsets of
       // `filesSkipped`; `parseError` and `tooLarge` are counted separately and
       // always were.
-      skipReasons: { unchanged: filesSkippedAsUnchanged, emptyFile: filesSkippedAsEmpty, parseError: parseErrors + crashedParses(), unparsed: filesSkippedUnparsed, tooLarge, minifiedLikely, outsideRoot },
+      skipReasons: { unchanged: filesSkippedAsUnchanged, emptyFile: filesSkippedAsEmpty, parseError: parseErrors + crashedParses(), unparsed: filesSkippedUnparsed, parseTimeout: summary.parseTimeouts.length, tooLarge, minifiedLikely, outsideRoot },
+      parseTimeouts: summary.parseTimeouts,
       commitErrors,
       stitchErrors,
       // Ix#568. Present only when the stitch was refused before it was sent, so
@@ -3936,6 +3957,7 @@ export async function ingestFiles(
     if (commitErrors > 0) console.log(`  ${chalk.red('commit errors:')}     ${commitErrors}`);
     if (tooLarge > 0) console.log(`  ${chalk.dim('skipped too large:')} ${tooLarge}`);
     if (minifiedLikely > 0) console.log(`  ${chalk.dim('skipped minified:')} ${minifiedLikely}`);
+    if (summary.parseTimeouts.length > 0) console.log(`  ${chalk.yellow("skipped parse timeout:")} ${summary.parseTimeouts.length} ${chalk.dim(`(${summary.parseTimeouts.join(", ")})`)}`);
     // Not dimmed like the others: these were dropped because the repo pointed
     // at files outside itself, which is worth a look rather than a shrug.
     if (outsideRoot > 0) console.log(`  ${chalk.yellow('skipped outside root:')} ${outsideRoot} ${chalk.dim('(symlinks leaving the tree)')}`);

@@ -676,6 +676,31 @@ describe("ingestFiles against a fake backend", () => {
     expect(baselineFiles()).toEqual(expect.arrayContaining([join(repo, "src", "m000.ts"), join(repo, "src", "m002.ts")]));
   });
 
+  it("names a file whose parse runs past the budget, and ingests the rest", async () => {
+    // About 2.5 s of parsing, under the 1 MB cap, against a 1 s budget.
+    // Whichever gives up first -- the worker's own check or the pool's
+    // backstop at twice the budget --
+    // the file must be named, not folded silently into "unparsed".
+    fixture(3);
+    const calls = Array.from({ length: 60_000 }, (_, i) => `  foo(${i});`);
+    writeFileSync(join(repo, "src", "huge.ts"), [`import { foo } from './m000';`, "export function big() {", ...calls, "}"].join("\n"), "utf8");
+    execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+    const saved = process.env.IX_PARSE_BUDGET_MS;
+    process.env.IX_PARSE_BUDGET_MS = "1000";
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const summary = await ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
+
+      expect(summary.parseTimeouts).toEqual(["src/huge.ts"]);
+      expect(backend.acceptedPatches(), "the other three still land").toBe(3);
+      expect(stderr.mock.calls.map(([c]) => String(c)).join("")).toContain("src/huge.ts");
+    } finally {
+      stderr.mockRestore();
+      if (saved === undefined) delete process.env.IX_PARSE_BUDGET_MS;
+      else process.env.IX_PARSE_BUDGET_MS = saved;
+    }
+  });
+
   it("ingests only the languages --lang names, and keeps the rest of the baseline", async () => {
     fixture(3);
     writeFileSync(join(repo, "src", "tool.py"), "def tool():\n    return 1\n", "utf8");

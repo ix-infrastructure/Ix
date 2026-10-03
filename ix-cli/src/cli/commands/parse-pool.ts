@@ -26,7 +26,21 @@ type Task = {
   resolve: (result: unknown) => void;
   /** Does losing this one mean the RUN lost a file? See `parse`. */
   counts: boolean;
+  /** The backstop for a parse that never answers; see `onTaskTimeout`. */
+  timer?: ReturnType<typeof setTimeout>;
 };
+
+/**
+ * The per-file parse budget the worker enforces, read as core-ingestion's
+ * `parseBudgetMs()` reads it: IX_PARSE_BUDGET_MS, default 10 s, 0 = none.
+ * Restated rather than imported, because ix-cli does not depend on that
+ * package at runtime.
+ */
+function parseBudgetMsFromEnv(): number {
+  const raw = process.env.IX_PARSE_BUDGET_MS;
+  const n = raw === undefined || raw.trim() === '' ? Number.NaN : Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 10_000;
+}
 
 export class ParsePool {
   private workers: Worker[] = [];
@@ -39,15 +53,19 @@ export class ParsePool {
    *   stops waiting for it.
    * @param maxWaitMs The ceiling on waiting for a BUSY one.
    *
-   * Both injectable only so the tests can pin the behaviour without spending
-   * the real periods -- the ceiling test would otherwise cost ten seconds on
-   * every leg of the matrix. `ingestFiles` passes neither.
+   * @param taskTimeoutMs How long one parse may hold a worker before the pool
+   *   gives up on it; 0 = never. See `onTaskTimeout`.
+   *
+   * All three injectable only so the tests can pin the behaviour without
+   * spending the real periods -- the ceiling test would otherwise cost ten
+   * seconds on every leg of the matrix. `ingestFiles` passes none of them.
    */
   constructor(
     private workerPath: string,
     private concurrency: number,
     private graceMs: number = ParsePool.SHUTDOWN_GRACE_MS,
     private maxWaitMs: number = ParsePool.SHUTDOWN_MAX_WAIT_MS,
+    private taskTimeoutMs: number = 2 * parseBudgetMsFromEnv(),
   ) {}
 
   init(): void {
@@ -132,7 +150,10 @@ export class ParsePool {
     // Not counted, for the same reason the stranded queue is not: every gate
     // that reads `crashedParses()` has already run by the time `destroy()` is
     // called from the outermost `finally`.
-    for (const task of this.active.values()) task.resolve(null);
+    for (const task of this.active.values()) {
+      clearTimeout(task.timer);
+      task.resolve(null);
+    }
     this.active.clear();
     this.workers = [];
     this.idle = [];
@@ -426,7 +447,64 @@ export class ParsePool {
       const task = this.queue.shift()!;
       this.active.set(w, task);
       w.postMessage({ filePath: task.filePath, source: task.source });
+      if (this.taskTimeoutMs > 0) {
+        task.timer = setTimeout(() => this.onTaskTimeout(w, task), this.taskTimeoutMs);
+        // A pending backstop must not hold the process open on its own.
+        task.timer.unref?.();
+      }
     }
+  }
+
+  /**
+   * Files whose parse ran past the budget, in the order they gave up --
+   * reported by the worker's own budget or by the backstop below. Only tasks
+   * that count (see `parse`). Not counted in `crashedTasks()`: a file that
+   * times out does so every run, and a crash withholds the mtime baseline,
+   * which would re-read the whole repo forever over one slow file.
+   */
+  timedOutFiles(): string[] {
+    return [...this.timedOut];
+  }
+
+  private timedOut: string[] = [];
+
+  /**
+   * The backstop for a parse that never answers.
+   *
+   * The worker enforces the parse budget itself, but only between matches: a
+   * file stuck inside tree-sitter's native parse or query never reaches a
+   * check. So past twice the budget the pool settles the task as a timeout,
+   * lets the worker go and starts a replacement under the same respawn cap a
+   * crash uses.
+   *
+   * Let go, NOT terminated -- `shutdown` explains at length why `terminate()`
+   * segfaults the process. The thread is asked to close once it is done and is
+   * `unref`'d meanwhile, so it burns its core until the native call returns or
+   * the process exits, and its late answer goes nowhere.
+   */
+  private onTaskTimeout(w: Worker, task: Task): void {
+    if (this.destroyed || this.active.get(w) !== task) return;
+    this.active.delete(w);
+    if (task.counts) this.timedOut.push(task.filePath);
+    task.resolve(null);
+    const idx = this.workers.indexOf(w);
+    if (idx !== -1) this.workers.splice(idx, 1);
+    // As `shutdown` does when it gives up, and for the same reasons: drop the
+    // listeners that close over the pool, keep one that captures nothing.
+    w.removeAllListeners('message');
+    w.removeAllListeners('exit');
+    w.removeAllListeners('error');
+    w.on('error', SWALLOW_ERROR);
+    w.postMessage({ __shutdown: true });
+    w.unref();
+    if (this.respawns < ParsePool.MAX_RESPAWNS) {
+      this.respawns++;
+      this.spawnWorker();
+    } else if (this.workers.length === 0) {
+      this.latchDead();
+      return;
+    }
+    this.drain();
   }
 
   /**
@@ -513,10 +591,12 @@ export class ParsePool {
     return this.deaths;
   }
 
-  private onResult(w: Worker, msg: { ok: boolean; result: unknown }): void {
+  private onResult(w: Worker, msg: { ok: boolean; result: unknown; reason?: string }): void {
     const task = this.active.get(w);
     if (!task) return;
     this.active.delete(w);
+    clearTimeout(task.timer);
+    if (!msg.ok && msg.reason === 'timeout' && task.counts) this.timedOut.push(task.filePath);
     // A successful round trip clears the respawn budget. The cap exists to
     // stop a worker that dies deterministically from spinning spawn -> die ->
     // spawn; it is not meant to be a lifetime quota. As a per-run total it made
@@ -579,6 +659,7 @@ export class ParsePool {
     const task = this.active.get(w);
     if (task) {
       this.active.delete(w);
+      clearTimeout(task.timer);
       if (task.counts) this.crashed++;
       task.resolve(null); // isolate: failed file = null parse result
     }
@@ -649,18 +730,24 @@ export class ParsePool {
       this.respawns++;
       this.spawnWorker();
     } else if (this.workers.length === 0) {
-      // Out of workers and out of replacements. Nothing queued can ever be
-      // parsed, so resolve it rather than leave `Promise.all` waiting on a pool
-      // that no longer exists -- and LATCH it, because `parse()` must answer the
-      // same way for every call after this, not just for what happened to be
-      // queued at this instant. Counted as crashed, which is what it is, so the
-      // stitch gate knows this run lost files.
-      this.dead = true;
-      const stranded = this.queue.splice(0, this.queue.length);
-      this.crashed += stranded.filter(t => t.counts).length;
-      for (const t of stranded) t.resolve(null);
+      this.latchDead();
       return;
     }
     this.drain();
+  }
+
+  /**
+   * Out of workers and out of replacements. Nothing queued can ever be
+   * parsed, so resolve it rather than leave `Promise.all` waiting on a pool
+   * that no longer exists -- and LATCH it, because `parse()` must answer the
+   * same way for every call after this, not just for what happened to be
+   * queued at this instant. Counted as crashed, which is what it is, so the
+   * stitch gate knows this run lost files.
+   */
+  private latchDead(): void {
+    this.dead = true;
+    const stranded = this.queue.splice(0, this.queue.length);
+    this.crashed += stranded.filter(t => t.counts).length;
+    for (const t of stranded) t.resolve(null);
   }
 }
