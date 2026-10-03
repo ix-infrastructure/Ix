@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-import { ingestFiles } from "../commands/ingest.js";
+import { acquireIngestLock, ingestFiles } from "../commands/ingest.js";
+import { acquireMapLock } from "../single-flight.js";
 import { ingestMtimeCachePath, ingestRebuildPath, loadConfig } from "../config.js";
 import { workspaceIdForPath } from "../system.js";
 import { FakeBackend } from "./helpers/fake-backend.js";
@@ -780,6 +781,97 @@ describe("ingestFiles against a fake backend", () => {
       expect(summary.idempotentPatches).toBeGreaterThan(0);
       expect(summary.replayedChanges).toEqual([]);
     });
+  });
+
+  describe("one failing file does not stop the baseline", () => {
+    // The baseline used to be written only by a clean run. One unreadable file
+    // then meant no run ever recorded anything again: every map re-read the
+    // whole workspace, and deleted files were never retracted.
+    const incremental = () =>
+      ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
+    const stage = () => execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+    const stored = () => loadIngestBaseline(repo)!;
+    let stderr: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    });
+    afterEach(() => {
+      stderr.mockRestore();
+      process.exitCode = undefined;
+    });
+
+    it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+      "records every other file and retracts a deletion while one file is unreadable",
+      async () => {
+        fixture(3);
+        // The graph model: a deletion reconciles through /v1/patches/:id and
+        // /v1/entity/:id, which only it serves.
+        backend.semantics = "head";
+        const broken = join(repo, "src", "m000.ts");
+        const deleted = join(repo, "src", "m001.ts");
+        await incremental();
+        const before = stored().files.get(broken);
+
+        writeFileSync(broken, "export const changed = 1;\n", "utf8");
+        rmSync(deleted);
+        stage(); // before the chmod: git cannot read the file either
+        execFileSync("chmod", ["000", broken]);
+        backend.resetRequests();
+        try {
+          const summary = await incremental();
+          expect(summary.parseErrors, "the unreadable file is an error").toBeGreaterThan(0);
+        } finally {
+          execFileSync("chmod", ["644", broken]);
+        }
+
+        const files = stored().files;
+        expect(files.has(deleted), "the deletion was retracted and recorded").toBe(false);
+        expect(backend.sourceUris).toContain("src/m001.ts");
+        expect(files.get(join(repo, "src", "m002.ts")), "a settled file is recorded").toBeDefined();
+        expect(files.get(broken), "the failed file keeps its old mtime").toBe(before);
+
+        // Readable again: the next run sends it, and only it.
+        backend.resetRequests();
+        await incremental();
+        expect(backend.acceptedPatches()).toBe(1);
+        expect(stored().files.get(broken)).toBe(statSync(broken).mtimeMs);
+      },
+    );
+
+    it("a failed lookup is not a reset", async () => {
+      fixture(3);
+      backend.rememberHashes = true;
+      await incremental();
+      backend.failSourceHashes = true;
+      backend.resetRequests();
+
+      const summary = await incremental();
+
+      expect(summary.filesSkippedAsUnchanged, "still incremental").toBe(3);
+      expect(backend.commitCount).toBe(0);
+    });
+
+    it("leaves no temp file beside the baseline", async () => {
+      fixture(2);
+      await incremental();
+      const dir = join(home, ".ix");
+      expect(existsSync(ingestMtimeCachePath(repo))).toBe(true);
+      expect(execFileSync("ls", ["-a", dir], { encoding: "utf8" })).not.toMatch(/\.tmp/);
+    });
+  });
+
+  it("ix ingest refuses to run beside a map of the same workspace", () => {
+    fixture(1);
+    const held = acquireMapLock(repo, "test");
+    try {
+      expect(held).not.toBeNull();
+      expect(acquireIngestLock(join(repo, "src"))).toBeNull();
+    } finally {
+      held?.release();
+    }
+    const free = acquireIngestLock(repo);
+    expect(free).toBeTruthy();
+    free?.release();
   });
 
   it("ingests only the languages --lang names, and keeps the rest of the baseline", async () => {

@@ -135,8 +135,13 @@ export function saveIngestBaseline(
       ...(extractor ? { extractor } : {}),
       ...(replayedFiles.length > 0 ? { replayedFiles: [...replayedFiles].sort() } : {}),
     };
-    fs.mkdirSync(path.dirname(ingestMtimeCachePath(projectRoot)), { recursive: true });
-    fs.writeFileSync(ingestMtimeCachePath(projectRoot), JSON.stringify(data));
+    const target = ingestMtimeCachePath(projectRoot);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    // Via a temp file and rename: a process killed mid-write left a truncated
+    // baseline, which reads as none, and the next map re-ingested everything.
+    const tmp = `${target}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(data));
+    fs.renameSync(tmp, target);
   } catch {
     // The cache is an optimization and freshness hint. Ingestion itself succeeded.
   }
