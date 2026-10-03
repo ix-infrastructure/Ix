@@ -278,6 +278,12 @@ export interface FileParseResult {
    * Absent for non-PHP files and for PHP files in the global namespace.
    */
   phpNamespaceBlocks?: number;
+  /**
+   * The tree has ERROR or MISSING nodes: tree-sitter recovered, and whatever
+   * sat in the broken region may be missing from `entities`. Absent when the
+   * file parsed cleanly.
+   */
+  hasParseErrors?: true;
   fileRole: RoleClassification;
 }
 
@@ -351,6 +357,12 @@ const TYPE_BUILTINS = new Set([
   // TypeScript / JavaScript
   'string', 'number', 'boolean', 'void', 'null', 'undefined', 'any', 'never',
   'unknown', 'object', 'bigint', 'symbol',
+  // TypeScript utility types, now that generic arguments, arrays and unions
+  // are referenced too. Only names no other language uses for its own types:
+  // this set is shared, and `Buffer` or `Error` are real types elsewhere.
+  'Record', 'Partial', 'Required', 'Readonly', 'ReadonlyArray', 'Pick', 'Omit',
+  'Exclude', 'Extract', 'NonNullable', 'ReturnType', 'Parameters', 'InstanceType',
+  'Awaited', 'PromiseLike', 'WeakMap', 'WeakSet',
   // Java / Kotlin / Scala
   'String', 'Integer', 'Long', 'Double', 'Float', 'Boolean', 'Byte', 'Short',
   'Character', 'Object', 'Void', 'Int', 'Unit', 'Any', 'AnyVal', 'AnyRef',
@@ -2540,9 +2552,10 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     // (e.g. `@Nullable Object @Nullable ... args`). The second annotation causes
     // error recovery to truncate the enclosing class_declaration, orphaning all
     // subsequent methods. Strip any @Annotation immediately before `...` in-memory
-    // so the class body parses correctly.
+    // so the class body parses correctly. Blanked with spaces, not deleted, so
+    // every later byte offset and column still matches the file on disk.
     let parseSource = language === SupportedLanguages.Java
-      ? source.replace(/@\w+\s*(?=\.\.\.)/g, '')
+      ? source.replace(/@\w+\s*(?=\.\.\.)/g, m => ' '.repeat(m.length))
       : source;
 
     // Rust: unwrap feature-gating macros (cfg_rt! { ... }, cfg_io! { ... }, etc.)
@@ -3458,6 +3471,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       // file. A key that is present-but-undefined still serializes, which would
       // rewrite every checked-in parseFile snapshot for no behavioural reason.
       ...(phpNamespaces.blocks > 0 ? { phpNamespaceBlocks: phpNamespaces.blocks } : {}),
+      // Absent unless true, for the same reason.
+      ...(tree.rootNode.hasError ? { hasParseErrors: true as const } : {}),
       fileRole: classifyFileRole(filePath, source),
     };
   } catch (e) {

@@ -701,6 +701,17 @@ describe("ingestFiles against a fake backend", () => {
     }
   });
 
+  it("counts files tree-sitter parsed with errors, and still ingests them", async () => {
+    fixture(2);
+    writeFileSync(join(repo, "src", "broken.ts"), "export function ok() { return 1; }\nexport function bad( {\n", "utf8");
+    execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+
+    const summary = await run();
+
+    expect(summary.filesWithParseErrors).toBe(1);
+    expect(backend.acceptedPatches()).toBe(3);
+  });
+
   it("ingests only the languages --lang names, and keeps the rest of the baseline", async () => {
     fixture(3);
     writeFileSync(join(repo, "src", "tool.py"), "def tool():\n    return 1\n", "utf8");

@@ -1129,6 +1129,12 @@ export interface IngestFilesSummary {
    */
   graphUnchanged: boolean;
   /**
+   * Files tree-sitter parsed with ERROR or MISSING nodes. They are in the
+   * graph, but whatever sat in the broken region may not be. Not counted in
+   * `parseErrors`, which is files that produced nothing.
+   */
+  filesWithParseErrors: number;
+  /**
    * Files skipped because their parse ran past the per-file budget
    * (IX_PARSE_BUDGET_MS, default 10 s), workspace-relative. A subset of the
    * unparsed skips, named because a file that times out does so on every run.
@@ -1849,6 +1855,8 @@ export async function ingestFiles(
   let filesChanged = 0;
   let patchesApplied = 0;
   let idempotentPatches = 0;
+  /** Files that parsed with ERROR or MISSING nodes: indexed, but possibly incompletely. */
+  let filesWithParseErrors = 0;
   // What `graphUnchanged` is computed from, beside the counters above. Each is
   // a way this run can have written to the graph, or have found it not where
   // the last run left it, without a patch being counted.
@@ -3264,6 +3272,7 @@ export async function ingestFiles(
             if (!parsed) { filesSkipped++; filesSkippedUnparsed++; continue; }
             entitiesParsed += parsed.entities.length;
             batch.push({ filePath: chunk[j].filePath, parsed, hash: chunk[j].hash, previousHash: chunk[j].previousHash });
+            if (parsed.hasParseErrors) filesWithParseErrors++;
           }
           await pendingFlush;
           pendingFlush = flushBatch(batch);
@@ -3432,6 +3441,7 @@ export async function ingestFiles(
           if (!parsed) { filesSkipped++; filesSkippedUnparsed++; continue; }
           entitiesParsed += parsed.entities.length;
           batch.push({ filePath: f.filePath, parsed, hash: f.hash, previousHash: f.previousHash });
+          if (parsed.hasParseErrors) filesWithParseErrors++;
         }
         await pendingFlushB;
         pendingFlushB = flushBatch(batch);
@@ -3817,6 +3827,7 @@ export async function ingestFiles(
     stitchErrors,
     stitchSkipped,
     stitchSkippedRule,
+    filesWithParseErrors,
     parseTimeouts: timedOutParses(),
     graphUnchanged:
       opts.force !== true &&
@@ -3893,6 +3904,7 @@ export async function ingestFiles(
       patchesApplied,
       filesSkipped,
       idempotentPatches,
+      filesWithParseErrors,
       entitiesParsed,
       latestRev,
       // `unchanged` is the files we ASSUMED unchanged, not every skip. It used
@@ -3957,6 +3969,7 @@ export async function ingestFiles(
     if (commitErrors > 0) console.log(`  ${chalk.red('commit errors:')}     ${commitErrors}`);
     if (tooLarge > 0) console.log(`  ${chalk.dim('skipped too large:')} ${tooLarge}`);
     if (minifiedLikely > 0) console.log(`  ${chalk.dim('skipped minified:')} ${minifiedLikely}`);
+    if (filesWithParseErrors > 0) console.log(`  ${chalk.yellow("parsed with errors:")} ${filesWithParseErrors} ${chalk.dim("(tree-sitter recovered; parts may be missing)")}`);
     if (summary.parseTimeouts.length > 0) console.log(`  ${chalk.yellow("skipped parse timeout:")} ${summary.parseTimeouts.length} ${chalk.dim(`(${summary.parseTimeouts.join(", ")})`)}`);
     // Not dimmed like the others: these were dropped because the repo pointed
     // at files outside itself, which is worth a look rather than a shrug.

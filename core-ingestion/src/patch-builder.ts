@@ -260,7 +260,7 @@ export function buildPatch(
     if (!seenNodeIds.has(id)) {
       seenNodeIds.add(id);
       const roleAttrs = e.kind === 'file'
-        ? { role: result.fileRole.role, role_confidence: result.fileRole.role_confidence, role_signals: result.fileRole.role_signals }
+        ? { role: result.fileRole.role, role_confidence: result.fileRole.role_confidence, role_signals: result.fileRole.role_signals, ...(result.hasParseErrors ? { parse_errors: true } : {}) }
         : { role: result.fileRole.role, role_source: 'inherited_from_file' };
       ops.push({
         type: 'UpsertNode',
@@ -573,7 +573,7 @@ export function buildPatchWithResolution(
     if (!seenNodeIds2.has(id)) {
       seenNodeIds2.add(id);
       const roleAttrs = e.kind === 'file'
-        ? { role: result.fileRole.role, role_confidence: result.fileRole.role_confidence, role_signals: result.fileRole.role_signals }
+        ? { role: result.fileRole.role, role_confidence: result.fileRole.role_confidence, role_signals: result.fileRole.role_signals, ...(result.hasParseErrors ? { parse_errors: true } : {}) }
         : { role: result.fileRole.role, role_source: 'inherited_from_file' };
       ops.push({
         type: 'UpsertNode',
