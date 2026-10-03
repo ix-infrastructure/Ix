@@ -676,6 +676,72 @@ describe("ingestFiles against a fake backend", () => {
     expect(baselineFiles()).toEqual(expect.arrayContaining([join(repo, "src", "m000.ts"), join(repo, "src", "m002.ts")]));
   });
 
+  describe("a file the backend has never seen is an incremental change", () => {
+    // A new file has no source hash on the backend, so `knownHashes` came back
+    // empty and the whole repository took the first-ingest path: every file
+    // re-read, re-parsed and re-sent to add one.
+    const incremental = () =>
+      ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
+    const stage = () => execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+
+    beforeEach(() => {
+      fixture(16);
+      backend.rememberHashes = true;
+    });
+
+    it("adding one file sends one patch", async () => {
+      await incremental();
+      writeFileSync(join(repo, "src", "added.ts"), "export const added = 1;\n", "utf8");
+      stage();
+      backend.resetRequests();
+
+      const summary = await incremental();
+
+      expect(backend.acceptedPatches(), "patches on the wire").toBe(1);
+      expect(backend.commitCount).toBe(1);
+      expect(summary.filesSkippedAsUnchanged).toBe(16);
+      expect(summary.filesDiscovered).toBe(17);
+    });
+
+    it("an empty file that gains content sends one patch", async () => {
+      writeFileSync(join(repo, "src", "empty.ts"), "", "utf8");
+      stage();
+      await incremental();
+      writeFileSync(join(repo, "src", "empty.ts"), "export const filled = 1;\n", "utf8");
+      backend.resetRequests();
+
+      const summary = await incremental();
+
+      expect(backend.acceptedPatches()).toBe(1);
+      expect(summary.filesSkippedAsUnchanged).toBe(16);
+    });
+
+    it("a file that shrinks under the size cap sends one patch", async () => {
+      writeFileSync(join(repo, "src", "big.ts"), `export const big = "${"x".repeat(1024 * 1024)}";\n`, "utf8");
+      stage();
+      await incremental();
+      writeFileSync(join(repo, "src", "big.ts"), "export const big = 'small';\n", "utf8");
+      backend.resetRequests();
+
+      const summary = await incremental();
+
+      expect(backend.acceptedPatches()).toBe(1);
+      expect(summary.filesSkippedAsUnchanged).toBe(16);
+    });
+
+    it("a wiped backend still re-sends everything", async () => {
+      await incremental();
+      writeFileSync(join(repo, "src", "added.ts"), "export const added = 1;\n", "utf8");
+      stage();
+      backend.rememberHashes = false;
+      backend.resetRequests();
+
+      await incremental();
+
+      expect(backend.acceptedPatches(), "the DB-reset guard empties the baseline").toBe(17);
+    });
+  });
+
   it("ingests only the languages --lang names, and keeps the rest of the baseline", async () => {
     fixture(3);
     writeFileSync(join(repo, "src", "tool.py"), "def tool():\n    return 1\n", "utf8");
