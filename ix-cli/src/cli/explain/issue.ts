@@ -201,8 +201,12 @@ export async function pickStartingPoints(
   const tracked = new Set(deps.files);
   const byBasename = new Map<string, string[]>();
   for (const file of deps.files) {
+    // push, not a spread: copying the list on every insert was quadratic in
+    // the number of files sharing a basename (index.ts, README.md).
     const base = posix.basename(file);
-    byBasename.set(base, [...(byBasename.get(base) ?? []), file]);
+    const list = byBasename.get(base);
+    if (list) list.push(file);
+    else byBasename.set(base, [file]);
   }
   for (const token of paths) {
     if (starts.length >= max) return { starts, unresolved };

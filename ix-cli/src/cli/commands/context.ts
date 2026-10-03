@@ -1615,8 +1615,8 @@ async function collectHistory(
   ]) {
     if (ref.path) known.add(ref.path);
   }
-  const recent = recentCommits(git, facts.path);
-  const coChanged = await Promise.all(coChangedFiles(git, facts.path, known).map(async (c) => {
+  const [recent, coChanges] = await Promise.all([recentCommits(git, facts.path), coChangedFiles(git, facts.path, known)]);
+  const coChanged = await Promise.all(coChanges.map(async (c) => {
     const name = c.path.split("/").pop()!;
     const id = await fileNodeId(client, c.path);
     const named = `changed with the target in ${c.commits} commits`;
