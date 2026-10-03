@@ -39,6 +39,15 @@ export function ingestRebuildPath(projectRoot: string): string {
   return join(ixHome(), `ingest_rebuild_${key}.json`);
 }
 
+/**
+ * Path to the per-file symbol summaries an incremental map resolves against
+ * (see `ingest-symbols.ts`). Cleared with the mtime cache.
+ */
+export function ingestSymbolsPath(projectRoot: string): string {
+  const key = rootKey(projectRoot);
+  return join(ixHome(), `ingest_symbols_${key}.json`);
+}
+
 /** Path to the architecture-map completion marker for one project root. */
 export function mapBaselinePath(projectRoot: string): string {
   const key = rootKey(projectRoot);
@@ -131,6 +140,7 @@ export function clearMapBaseline(projectRoot: string): void {
 export function clearIngestMtimeCache(projectRoot: string): void {
   try { rmSync(ingestMtimeCachePath(projectRoot), { force: true }); } catch { /* non-critical */ }
   try { rmSync(ingestRebuildPath(projectRoot), { force: true }); } catch { /* non-critical */ }
+  try { rmSync(ingestSymbolsPath(projectRoot), { force: true }); } catch { /* non-critical */ }
   clearMapBaseline(projectRoot);
 }
 

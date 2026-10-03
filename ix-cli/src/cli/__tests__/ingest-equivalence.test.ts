@@ -234,10 +234,11 @@ describe("incremental ix map equals a fresh map (fake backend)", () => {
     await runSequence("head", [edit("editBody", "web/calc.ts"), edit("addFunction", "web/report.ts")]);
   });
 
-  // F-03. An edited Python or Java file is resolved against the batch of
-  // changed files alone, so its cross-file CALLS are re-pointed at phantom
-  // module nodes or dropped. TypeScript is spared by the index prescan.
-  it.fails("IN-10: a body edit to a Python or Java file keeps its cross-file edges", async () => {
+  // F-03. Before IN-09/IN-10 an edited Python or Java file was resolved
+  // against the batch of changed files alone, so its cross-file CALLS were
+  // re-pointed at phantom module nodes or dropped. It now resolves against the
+  // symbol table, in every language.
+  it("IN-10: a body edit to a Python or Java file keeps its cross-file edges", async () => {
     await runSequence("head", [edit("editBody", "pkg/app.py"), edit("editBody", "src/com/ex/App.java")]);
   });
 
