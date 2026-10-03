@@ -163,6 +163,27 @@ function isGeneratedFile(basename: string): boolean {
 }
 
 const MAX_FILE_BYTES = 1024 * 1024; // 1 MB
+
+/** Parse workers at most, unless IX_PARSE_WORKERS says otherwise. */
+const DEFAULT_PARSE_WORKERS = 8;
+/** Files a parse worker should have before another one is worth starting. */
+const FILES_PER_PARSE_WORKER = 50;
+
+/**
+ * How many parse workers `expectedTasks` files deserve: one per 50 files,
+ * never more than the cores less one or IX_PARSE_WORKERS (default 8), never
+ * fewer than one. Each worker loads every grammar, about 70 MB, so a worker
+ * per core for a one-file edit cost more than the parse.
+ */
+export function parsePoolSize(
+  expectedTasks: number,
+  cores: number = os.availableParallelism(),
+  configured: string | undefined = process.env.IX_PARSE_WORKERS,
+): number {
+  const fromEnv = Number(configured);
+  const cap = configured !== undefined && Number.isInteger(fromEnv) && fromEnv > 0 ? fromEnv : DEFAULT_PARSE_WORKERS;
+  return Math.max(1, Math.min(cores - 1, cap, Math.ceil(expectedTasks / FILES_PER_PARSE_WORKER)));
+}
 const MINIFIED_BYTES_THRESHOLD = 200 * 1024;
 const MINIFIED_MAX_LINE_THRESHOLD = 20_000;
 const MINIFIED_AVG_LINE_THRESHOLD = 2_000;
@@ -1763,10 +1784,20 @@ export async function ingestFiles(
   const crashedParses = (): number => (pool === null ? 0 : pool.crashedTasks());
   /** Files whose parse ran past the budget; see `ParsePool.timedOutFiles`. */
   const timedOutParses = (): string[] => (pool === null ? [] : pool.timedOutFiles());
-  const ensureParsePool = (): ParsePool => {
-    if (pool) return pool;
-    pool = new ParsePool(workerPath, Math.max(1, os.cpus().length - 1));
-    pool.init();
+  /**
+   * The pool, sized to the work the caller is about to give it: one worker per
+   * 50 files, capped by the cores and by IX_PARSE_WORKERS (default 8). A
+   * one-file edit used to start a worker per core -- 23 threads and about
+   * 1.6 GB on a 24-core machine -- to parse one file. Workers start lazily, so
+   * the size is a ceiling, and a later, larger phase can raise it.
+   */
+  const ensureParsePool = (expectedTasks: number): ParsePool => {
+    const size = parsePoolSize(expectedTasks);
+    if (pool) {
+      pool.growTo(size);
+      return pool;
+    }
+    pool = new ParsePool(workerPath, size);
     return pool;
   };
 
@@ -1803,7 +1834,7 @@ export async function ingestFiles(
         // streaming loop below. A loss here is not a file the RUN lost, and
         // counting it as one refused the stitch and withheld the baseline over
         // files that were all present.
-        chunk.map(fp => ensureParsePool().parse(fp, relSources.get(fp)!, false).catch(() => null)),
+        chunk.map(fp => ensureParsePool(targets.length).parse(fp, relSources.get(fp)!, false).catch(() => null)),
       );
       for (let j = 0; j < chunk.length; j++) {
         if (parsed[j]) preParsed.set(chunk[j], parsed[j]);
@@ -3255,7 +3286,7 @@ export async function ingestFiles(
           // paths. f.absFilePath is retained only for debug/error display.
           const parseResults = await Promise.all(
             chunk.map(f =>
-              ensureParsePool().parse(f.filePath, f.source).then(r => { progressCurrent++; return r; }),
+              ensureParsePool(parseable.length).parse(f.filePath, f.source).then(r => { progressCurrent++; return r; }),
             ),
           );
           const batch: ParsedFile[] = [];
@@ -3415,7 +3446,7 @@ export async function ingestFiles(
             const relFilePath = toWorkspaceRelative(absFilePath);
             const fd: NonNullable<FileData> = { filePath: relFilePath, source: sourceText, hash, previousHash: previousHash !== hash ? previousHash : undefined };
             fileData[idx] = fd;
-            parsePromises[idx] = ensureParsePool().parse(fd.filePath, fd.source).then(r => { progressCurrent++; return r; });
+            parsePromises[idx] = ensureParsePool(filePaths.length).parse(fd.filePath, fd.source).then(r => { progressCurrent++; return r; });
           } catch (err) {
             parseErrors++;
             process.stderr.write(`\n  [read error] ${absFilePath}: ${err}\n`);

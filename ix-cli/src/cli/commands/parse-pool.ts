@@ -68,10 +68,32 @@ export class ParsePool {
     private taskTimeoutMs: number = 2 * parseBudgetMsFromEnv(),
   ) {}
 
+  /**
+   * Start every worker now. Optional: without it the pool starts workers as
+   * work queues up (see `drain`), which is what `ingestFiles` wants -- a
+   * one-file edit then starts one worker, not `concurrency` of them.
+   */
   init(): void {
-    for (let i = 0; i < this.concurrency; i++) {
-      this.spawnWorker();
-    }
+    while (this.started < this.concurrency) this.startWorker();
+  }
+
+  /**
+   * Raise the ceiling on workers. A later, larger phase of a run asks for more
+   * than the first one did; the pool never shrinks, and the new workers start
+   * only if queued work needs them.
+   */
+  growTo(concurrency: number): void {
+    if (concurrency <= this.concurrency) return;
+    this.concurrency = concurrency;
+    this.drain();
+  }
+
+  /** Workers started to fill the ceiling. Replacements for dead ones are not counted; see `onError`. */
+  private started = 0;
+
+  private startWorker(): void {
+    this.started++;
+    this.spawnWorker();
   }
 
   /**
@@ -442,6 +464,13 @@ export class ParsePool {
   }
 
   private drain(): void {
+    // Start workers on demand, one per queued task no idle worker can take,
+    // up to the ceiling. Only first starts: a dead worker's replacement is
+    // `onError`'s, under the respawn cap, so a worker that dies on load cannot
+    // turn this into a spawn loop.
+    while (!this.dead && !this.destroyed && this.queue.length > this.idle.length && this.started < this.concurrency) {
+      this.startWorker();
+    }
     while (this.idle.length > 0 && this.queue.length > 0) {
       const w = this.idle.pop()!;
       const task = this.queue.shift()!;
@@ -708,19 +737,20 @@ export class ParsePool {
     // none, the `else if` latches `dead`, strands the queue and resolves it
     // as crashed, then returns -- so that path never reaches `drain()`. With
     // others still alive, NEITHER branch body runs and control falls straight
-    // through to `drain()`. `ingest.ts` builds the pool with
-    // `Math.max(1, os.cpus().length - 1)` and `respawns` is a pool-wide budget
-    // that any success resets, so on an ordinary machine the fall-through is
-    // the usual case -- do not read the cap as implying the pool is finished.
+    // through to `drain()`. `ingest.ts` sizes the pool with `parsePoolSize`
+    // -- one worker per 50 files, at most the cores less one or 8 -- and
+    // `respawns` is a pool-wide budget that any success resets, so on a run
+    // of any size the fall-through is the usual case -- do not read the cap as
+    // implying the pool is finished.
     //
-    // The floor in that expression is there because 1 is reachable, and at
-    // concurrency 1 this inverts: the first death PAST the cap is also the last
+    // Concurrency 1 is common -- any run of 50 files or fewer -- and there
+    // this inverts: the first death PAST the cap is also the last
     // worker, so `workers.length === 0` always holds and the pool always
     // latches `dead`. (Not the death that exhausts the budget -- that one
     // still takes the respawn branch and spawns a replacement. The two are
     // one apart, and this file is where that distinction has to stay
-    // straight.) Above concurrency 1 it does not invert. Which case a given machine falls
-    // into depends on its core count, and this comment deliberately does not
+    // straight.) Above concurrency 1 it does not invert. Which case a given run falls
+    // into depends on its size and the core count, and this comment deliberately does not
     // say -- an earlier revision guessed at CI's and contradicted the machine
     // sizes in `docs/parse-pool-teardown.md`, which is the file that owns
     // them.

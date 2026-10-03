@@ -911,6 +911,49 @@ describe("ParsePool", () => {
     });
   `;
 
+  /** Echoes, and appends a line to `marker` when it starts: one line per worker. */
+  const COUNTS_STARTS = (marker: string) => `
+    import { parentPort, threadId } from 'node:worker_threads';
+    import { appendFileSync } from 'node:fs';
+    appendFileSync(${JSON.stringify(marker)}, threadId + '\\n');
+    parentPort.on('message', (msg) => {
+      if (msg && msg.__shutdown) { parentPort.close(); return; }
+      parentPort.postMessage({ ok: true, result: { filePath: msg.filePath } });
+    });
+  `;
+
+  it("starts workers only as work arrives, up to its size", async () => {
+    // A one-file edit used to start a worker per core to parse one file.
+    const marker = join(dir, "starts");
+    const pool = new ParsePool(worker("counts", COUNTS_STARTS(marker)), 4);
+    const started = () => (existsSync(marker) ? readFileSync(marker, "utf8").trim().split("\n").length : 0);
+
+    await pool.parse("a.ts", "x");
+    expect(started(), "one task, one worker").toBe(1);
+
+    await Promise.all(["b", "c", "d", "e", "f", "g"].map((f) => pool.parse(`${f}.ts`, "x")));
+    expect(started(), "never more than the pool's size").toBeLessThanOrEqual(4);
+
+    await pool.destroy();
+  });
+
+  it("grows when a later phase asks for more, and never shrinks", async () => {
+    const marker = join(dir, "grows");
+    const pool = new ParsePool(worker("grows", COUNTS_STARTS(marker)), 1);
+    const started = () => readFileSync(marker, "utf8").trim().split("\n").length;
+
+    await Promise.all(["a", "b", "c"].map((f) => pool.parse(`${f}.ts`, "x")));
+    expect(started()).toBe(1);
+
+    pool.growTo(3);
+    pool.growTo(2);
+    await Promise.all(["d", "e", "f", "g"].map((f) => pool.parse(`${f}.ts`, "x")));
+    expect(started()).toBeGreaterThan(1);
+    expect(started()).toBeLessThanOrEqual(3);
+
+    await pool.destroy();
+  });
+
   it("names a file the worker reports as timed out, and only one that counts", async () => {
     const pool = new ParsePool(worker("reports", REPORTS_TIMEOUT), 1);
     pool.init();
