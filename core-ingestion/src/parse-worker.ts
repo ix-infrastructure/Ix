@@ -5,7 +5,9 @@
  * Each worker maintains its own Parser singleton (safe — module state is
  * per-thread).
  * Receives: { filePath: string, source: string } | { __shutdown: true }
- * Posts:    { ok: true, result: FileParseResult } | { ok: false }
+ * Posts:    { ok: true, result: FileParseResult }
+ *         | { ok: false, result: null, reason?: 'timeout' | 'error', message?: string }
+ *           (no reason: no grammar handles the file)
  */
 import { parentPort } from 'node:worker_threads';
 import { parseFile } from './index.js';
@@ -88,10 +90,13 @@ parentPort.on('message', (msg: ParseMessage | ShutdownMessage) => {
     return;
   }
   const { filePath, source } = msg as ParseMessage;
+  // Why a file came back null, so the pool can name the ones that ran past
+  // the parse budget instead of folding them into "unparsed".
+  let failure: { reason: 'timeout' | 'error'; message: string } | undefined;
   try {
-    const result = parseFile(filePath, source);
-    parentPort!.postMessage({ ok: result !== null, result: result ?? null });
-  } catch {
-    parentPort!.postMessage({ ok: false, result: null });
+    const result = parseFile(filePath, source, { onFailure: (f) => { failure = f; } });
+    parentPort!.postMessage({ ok: result !== null, result: result ?? null, ...(failure ?? {}) });
+  } catch (err) {
+    parentPort!.postMessage({ ok: false, result: null, reason: 'error', message: String(err) });
   }
 });
