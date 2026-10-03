@@ -43,6 +43,7 @@
     "eslint": "^10.11.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-unused-imports": "^4.4.1",
+    "fast-check": "^4.10.2",
     "knip": "^6.38.0",
     "prettier": "^3.9.9",
     "tsx": "^4.23.15",
