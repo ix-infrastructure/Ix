@@ -14,9 +14,9 @@ import { homedir, platform } from "os";
 import { fileURLToPath } from "url";
 import { createConnection } from "net";
 import { resolveWorkspaceId } from "../bootstrap.js";
-import { findWorkspaceForCwd, getDefaultWorkspace, loadWorkspaces, getEndpoint } from "../config.js";
+import { findWorkspaceForCwd, getDefaultWorkspace, loadWorkspaces } from "../config.js";
 import { detectSystem } from "../system.js";
-import { IxClient } from "../../client/api.js";
+import { createClient } from "../../client/factory.js";
 
 const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
 const PID_FILE = join(IX_HOME, "compass.pid");
@@ -665,7 +665,7 @@ export function registerViewCommand(program: Command): void {
         systemId = detectSystem(process.cwd())?.systemId ?? null;
         if (!systemId && workspaceId) {
           try {
-            const looked = await new IxClient(getEndpoint()).workspaceSystem(workspaceId);
+            const looked = await createClient().workspaceSystem(workspaceId);
             systemId = looked.systemId ?? null;
           } catch {
             // Older backend without the stitch endpoint, or backend down — fall back to

@@ -5,7 +5,8 @@ import * as path from "node:path";
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
-import { absoluteFromSourceUri, getEndpoint, isReadablePath, readableRoots, resolveWorkspaceRoot } from "../config.js";
+import { createClient } from "../../client/factory.js";
+import { absoluteFromSourceUri, isReadablePath, readableRoots, resolveWorkspaceRoot } from "../config.js";
 import { resolveEntityFull, activeReadScope, ensureReadScope } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { isFileStale } from "../stale.js";
@@ -334,7 +335,7 @@ Examples:
       // say otherwise.
       const cap = opts.all ? undefined : READ_LINE_CAP;
       const root = resolveWorkspaceRoot(opts.root);
-      const client = new IxClient(getEndpoint());
+      const client = createClient();
 
       // --- Step 1: Parse line range if present ---
       const lineRangeMatch = target.match(/^(.+?):(\d+)-(\d+)$/);

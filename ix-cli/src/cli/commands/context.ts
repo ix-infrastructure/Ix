@@ -12,7 +12,7 @@ import {
 } from "../context-bundle-schema.js";
 
 import { IxClient } from "../../client/api.js";
-import { QUERY_CLIENT_OPTIONS } from "../../client/request-memo.js";
+import { createClient } from "../../client/factory.js";
 import type {
   ConflictReport,
   DecisionReport,
@@ -20,7 +20,7 @@ import type {
   IntentReport,
   StructuredContext,
 } from "../../client/types.js";
-import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
+import { resolveWorkspaceRoot } from "../config.js";
 import { collectFacts, type ContextFacts, type EntityLocation } from "../explain/facts.js";
 import {
   CENTRE_FALLBACK_TRIES,
@@ -456,7 +456,7 @@ export function registerContextCommand(program: Command): void {
         return;
       }
 
-      const client = new IxClient(getEndpoint(), undefined, QUERY_CLIENT_OPTIONS);
+      const client = createClient({ query: true });
 
       const resolved = await resolveFileOrReport(client, target, {
         kind: opts.kind,
@@ -571,7 +571,7 @@ async function buildFreshBundle(
   budgets: BudgetSnapshot,
   format: string,
 ): Promise<ContextBundle | undefined> {
-  const client = new IxClient(getEndpoint(), undefined, QUERY_CLIENT_OPTIONS);
+  const client = createClient({ query: true });
   const resolved = await resolveFileOrReport(client, target, {
     kind: opts.kind,
     path: opts.path,
@@ -1675,7 +1675,7 @@ async function buildIssueBundle(
 ): Promise<ContextBundle | undefined> {
   const text = await readIssueOrReport(arg, opts.format);
   if (text === undefined) return undefined;
-  const client = new IxClient(getEndpoint(), undefined, QUERY_CLIENT_OPTIONS);
+  const client = createClient({ query: true });
   const plan = await planIssueWith(client, text);
   // A path start has no node yet, and the graph may not have one either: it
   // does not index every tracked file. chooseCentre walks BM25 for one it does.
@@ -1776,7 +1776,7 @@ async function planIssueWith(client: IxClient, text: string) {
 async function emitLeanIssue(arg: string, opts: ContextOptions): Promise<void> {
   const text = await readIssueOrReport(arg, opts.format);
   if (text === undefined) return;
-  const view = leanIssueView(await planIssueWith(new IxClient(getEndpoint(), undefined, QUERY_CLIENT_OPTIONS), text));
+  const view = leanIssueView(await planIssueWith(createClient({ query: true }), text));
   if (opts.format === "json") {
     printJson({ kind: "issue_lean", ...view });
   } else if (opts.format === "llm") {

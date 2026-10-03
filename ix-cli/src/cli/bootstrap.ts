@@ -5,7 +5,7 @@ import { join, basename, resolve } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import chalk from "chalk";
-import { IxClient } from "../client/api.js";
+import { createClient } from "../client/factory.js";
 import { renderBanner } from "./banner.js";
 import { canonicalWorkspacePath, getEndpoint, gitRootFor, loadConfig, loadWorkspaces, saveConfig, findWorkspaceForCwd, type WorkspaceConfig } from "./config.js";
 import { WorkspaceNotMappedError, workspaceNotMappedHint } from "./errors.js";
@@ -200,7 +200,7 @@ export function canAutoStartBackend(endpoint: string): boolean {
  */
 export async function ensureBackendAvailable(): Promise<void> {
   const endpoint = getEndpoint();
-  const client = new IxClient(endpoint);
+  const client = createClient({ endpoint });
   try {
     // Through readBackendHealth so this probe records the release the backend
     // reports, like every other health fetch. `ix init` never reaches the

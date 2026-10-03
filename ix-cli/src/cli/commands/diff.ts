@@ -8,8 +8,9 @@ import { promisify } from "node:util";
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
+import { createClient } from "../../client/factory.js";
 
-import { absoluteFromSourceUri, getEndpoint, resolveWorkspaceRoot } from "../config.js";
+import { absoluteFromSourceUri, resolveWorkspaceRoot } from "../config.js";
 import { resolveFileOrReport, printResolved, type ResolvedEntity } from "../resolve.js";
 import { formatDiff, relativePath, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
@@ -491,7 +492,7 @@ export function registerDiffCommand(program: Command): void {
         reportFailure("mode_conflict", conflict, opts.format);
         return;
       }
-      const client = new IxClient(getEndpoint());
+      const client = createClient();
       const from = parseInt(fromRev, 10);
       const to = parseInt(toRev, 10);
 

@@ -3,7 +3,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { spawnSync } from "child_process";
-import { IxClient } from "../../client/api.js";
+import { createClient } from "../../client/factory.js";
 import { getEndpoint, clearIngestMtimeCache, clearStitchScopeCache, findWorkspaceForCwd } from "../config.js";
 import { canRenderProgress } from "../stderr.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
@@ -63,7 +63,7 @@ export function registerResetCommand(program: Command): void {
         }
       }
 
-      const client = new IxClient(getEndpoint());
+      const client = createClient();
       const label = opts.code ? "Wiping code graph..." : "Wiping graph...";
       const spinnerFrames = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
       let spinIdx = 0;
@@ -181,7 +181,7 @@ async function resetThisWorkspace(opts: { yes?: boolean; ingest?: boolean }): Pr
     }
   }
 
-  const client = new IxClient(getEndpoint());
+  const client = createClient();
   try {
     await client.deleteWorkspace(ws.workspace_id);
   } catch (err: any) {

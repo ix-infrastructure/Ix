@@ -12,7 +12,7 @@ import { ParsePool } from './parse-pool.js';
 import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
 import type { GraphPatchPayload } from '../../client/types.js';
-import { canonicalWorkspacePath, getEndpoint, isPathInside, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
+import { canonicalWorkspacePath, isPathInside, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
 import { resolveIngestRoot } from '../map-root.js';
 import {
   clearRebuildProgress, extractorChanged, isRev, loadIngestBaseline, loadRebuildProgress,
@@ -51,6 +51,7 @@ import {
   transformCommit,
 } from '../github/transform.js';
 import { printJson } from '../format.js';
+import { createClient } from "../../client/factory.js";
 // ---------------------------------------------------------------------------
 // File discovery
 // ---------------------------------------------------------------------------
@@ -1713,7 +1714,7 @@ export async function ingestFiles(
     process.stderr.write(`[multi-repo] system "${detectedSystem!.name}" (${systemId}) members=${detectedSystem!.members.join(', ')} packages=${Object.keys(packageRegistry).length} declaredDeps=${depCount}\n`);
   }
 
-  const client = new IxClient(getEndpoint(), opts.deadlineSignal);
+  const client = createClient({ deadlineSignal: opts.deadlineSignal });
 
   // Schema-version check forces a clean re-ingest when the backend's graph
   // format has changed in a way that invalidates existing node IDs (e.g. the
@@ -4067,7 +4068,7 @@ async function ingestGitHub(opts: {
 }): Promise<void> {
   const repo = parseGitHubRepo(opts.github!);
   const token = await resolveGitHubToken(opts.token);
-  const client = new IxClient(getEndpoint());
+  const client = createClient();
   const limit = parseInt(opts.limit, 10);
   const start = performance.now();
 

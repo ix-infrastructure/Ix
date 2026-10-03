@@ -2,8 +2,8 @@
 
 import { type Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
-import { clearMapBaseline, clearMapResultCache, getEndpoint } from "../config.js";
+import { createClient } from "../../client/factory.js";
+import { clearMapBaseline, clearMapResultCache } from "../config.js";
 import { roundFloat, printJson } from "../format.js";
 import { llmLine, llmError, llmShortId } from "../llm.js";
 import { bootstrap, resolveWorkspaceId } from "../bootstrap.js";
@@ -533,7 +533,7 @@ Examples:
       }
       const ingestMs = Math.round(performance.now() - ingestStart);
 
-      const client = new IxClient(getEndpoint(), deadlineSignal);
+      const client = createClient({ deadlineSignal });
 
       const mapBarWidth = 25;
       const mapStart    = performance.now();

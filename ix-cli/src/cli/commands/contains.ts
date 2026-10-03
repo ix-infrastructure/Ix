@@ -1,8 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import type { Command } from "commander";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../../client/factory.js";
 import { formatEdgeResults, sliceEdgeResults } from "../format.js";
 import { parsePickOption } from "../options.js";
 import { resolveFileOrReport, printResolved } from "../resolve.js";
@@ -18,7 +17,7 @@ export function registerContainsCommand(program: Command): void {
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", "\nExamples:\n  ix contains IngestionService\n  ix contains auth.py --kind file --format json\n  ix contains MyClass --limit 20\n  ix contains package --path crates/regex/Cargo.toml")
     .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; limit: string; format: string }) => {
-      const client = new IxClient(getEndpoint());
+      const client = createClient();
       const limit = parseInt(opts.limit, 10);
       const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
       const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
