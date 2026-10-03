@@ -3144,9 +3144,16 @@ export async function ingestFiles(
       }
     };
 
-    if ((knownHashes.size > 0 || mtimeChangedPaths.length === 0) && !opts.force) {
+    // A local baseline with mtimes is enough to take the incremental path, even
+    // when the backend knows none of the changed files: adding one new file to a
+    // mapped repo is exactly that, and it used to re-send the whole repository.
+    // `mtimeCache` is empty after --force, a workspace migration or the DB-reset
+    // guard above, so those still take Path B.
+    const hasBaseline = previousBaseline !== null && mtimeCache.size > 0;
+    if ((hasBaseline || knownHashes.size > 0 || mtimeChangedPaths.length === 0) && !opts.force) {
       // Path A: has baseline or all mtime-clean → pre-scan to detect changes before loading modules.
-      // If nothing changed, module load is skipped entirely.
+      // If nothing changed, module load is skipped entirely. A file with no
+      // backend hash is new: it is parsed and sent with no reconcile.
       const changedPaths: Array<{ filePath: string; bytes: Buffer; hash: string; previousHash: string | undefined }> = [];
       for (const filePath of mtimeChangedPaths) {
         try {
@@ -3255,18 +3262,17 @@ export async function ingestFiles(
         await pendingFlush;
       }
     } else {
-      // Path B: no baseline (first ingest) or --force → load modules, then stream parse + commit.
+      // Path B: no baseline (first ingest, migrated workspace, wiped backend) or
+      // --force → load modules, then stream parse + commit.
       //
       // Ix#568: this branch walks ALL of `filePaths`, re-reading, re-hashing and
       // re-parsing every one, and its hash-clean short-circuit cannot fire here
       // -- `knownHashes` is empty by construction on the non-force entry, and
       // the check is `!opts.force` on the other. So the mtime skips the stat
-      // loop recorded did not actually happen, and leaving them counted refused
-      // the stitch on the commonest incremental shape there is: add ONE new
-      // file to a mapped repo, and `loadExistingHashes` returns nothing for it,
-      // so `knownHashes.size === 0` sends the whole repo down here -- every file
-      // parsed, registration complete -- while the gate still saw N-1 files
-      // "skipped as unchanged" and silently declined to stitch.
+      // loop recorded did not actually happen, and leaving them counted would
+      // refuse the stitch on a run that parsed every file. (Adding one file to
+      // a mapped repo used to land here too; the baseline check above keeps it
+      // on Path A now.)
       filesSkipped -= filesSkippedAsUnchanged;
       filesSkippedAsUnchanged = 0;
       const moduleStart = performance.now();
