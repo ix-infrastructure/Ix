@@ -8,19 +8,8 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { resolveWorkspaceRoot, clearIngestMtimeCache } from "../config.js";
 import { bootstrap, ensureWorkspaceIdState } from "../bootstrap.js";
-import { SUPPORTED_EXTENSIONS } from "../supported-extensions.js";
+import { discoverSourceFiles, isGeneratedFile, isSupportedSourceFile, SKIPPED_DIRS } from "../file-discovery.js";
 
-const SUPPORTED_NAMES = new Set([
-  ".gitignore", ".gitattributes", ".editorconfig", ".env",
-  ".eslintrc", ".prettierrc", ".babelrc",
-  "Makefile", "Dockerfile", "Procfile", "Gemfile", "Rakefile",
-  "BUILD", "WORKSPACE",
-]);
-
-const IGNORE_DIRS = new Set([
-  "node_modules", ".git", "dist", "build", "target", ".next",
-  ".cache", "__pycache__", ".ix", ".claude",
-]);
 
 const DEBOUNCE_MS = 300;
 const MAP_COALESCED_EXIT_CODE = 75;
@@ -216,15 +205,15 @@ export function updatePollingSnapshot(
   return changed;
 }
 
+/** The files `ix map` would ingest -- the same test discovery applies. */
 function isSupportedPath(filePath: string): boolean {
-  const ext = path.extname(filePath).toLowerCase();
-  return SUPPORTED_EXTENSIONS.has(ext) || SUPPORTED_NAMES.has(path.basename(filePath));
+  return isSupportedSourceFile(filePath) && !isGeneratedFile(path.basename(filePath));
 }
 
 export function shouldWatch(root: string, filePath: string): boolean {
   if (!isSupportedPath(filePath)) return false;
   const segments = path.relative(root, filePath).split(path.sep);
-  return !segments.some(segment => IGNORE_DIRS.has(segment));
+  return !segments.some(segment => SKIPPED_DIRS.has(segment));
 }
 
 export function prepareMigratedWorkspaceRefresh(
@@ -234,23 +223,9 @@ export function prepareMigratedWorkspaceRefresh(
   clear(root);
 }
 
+/** The files `ix map` would discover under `dir` (see `file-discovery.ts`). */
 function collectFiles(dir: string): string[] {
-  const results: string[] = [];
-  const stack = [dir];
-  while (stack.length > 0) {
-    const current = stack.pop()!;
-    let entries: fs.Dirent[];
-    try { entries = fs.readdirSync(current, { withFileTypes: true }); }
-    catch { continue; }
-    for (const entry of entries) {
-      if (IGNORE_DIRS.has(entry.name)) continue;
-      if (entry.name.startsWith(".") && entry.isDirectory()) continue;
-      const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) stack.push(fullPath);
-      else if (entry.isFile() && isSupportedPath(fullPath)) results.push(fullPath);
-    }
-  }
-  return results;
+  return discoverSourceFiles(dir);
 }
 
 function createBatchNotifier(root: string, scheduler: WatchRefreshScheduler): {

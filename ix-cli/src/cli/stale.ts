@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { resolveWorkspaceRoot } from "./config.js";
 import { loadIngestBaseline } from "./ingest-baseline.js";
 import { hasCompletedMapFor } from "./map-baseline.js";
-import { SUPPORTED_EXTENSIONS } from "./supported-extensions.js";
+import { discoverSourceFiles } from "./file-discovery.js";
 
 export interface StaleInfo {
   graphCompleted: boolean;
@@ -16,51 +16,13 @@ export interface StaleInfo {
   sampleChangedFiles: string[];
 }
 
-const SUPPORTED_NAMES = new Set([
-  ".gitignore", ".gitattributes", ".editorconfig", ".env",
-  ".eslintrc", ".prettierrc", ".babelrc",
-  "Makefile", "Dockerfile", "Procfile", "Gemfile", "Rakefile",
-  "BUILD", "WORKSPACE",
-]);
-
-const IGNORE_DIRS = new Set([
-  "node_modules", ".git", "dist", "build", "target", ".next",
-  ".cache", "__pycache__", ".ix", ".claude",
-]);
-
 /**
- * Walk a directory and collect file paths with supported extensions.
- * Bounded to prevent runaway on huge repos.
+ * The files `ix map` would discover (see `file-discovery.ts`), so "changed
+ * since the last ingest" is judged over the same set the ingest recorded.
+ * Unbounded: a cap made every file past it look deleted.
  */
-function collectFiles(dir: string, limit: number = 5000): string[] {
-  const results: string[] = [];
-  const stack = [dir];
-
-  while (stack.length > 0 && results.length < limit) {
-    const current = stack.pop()!;
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(current, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (results.length >= limit) break;
-      if (entry.name.startsWith(".") && entry.isDirectory()) continue;
-      if (IGNORE_DIRS.has(entry.name)) continue;
-
-      const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(fullPath);
-      } else if (entry.isFile()) {
-        const ext = path.extname(entry.name).toLowerCase();
-        if (SUPPORTED_EXTENSIONS.has(ext) || SUPPORTED_NAMES.has(entry.name)) {
-          results.push(fullPath);
-        }
-      }
-    }
-  }
-  return results;
+function collectFiles(dir: string): string[] {
+  return discoverSourceFiles(dir);
 }
 
 function differsFromIngestBaseline(
