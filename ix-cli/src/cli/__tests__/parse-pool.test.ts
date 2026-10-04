@@ -878,13 +878,16 @@ describe("ParsePool", () => {
     import { parentPort } from 'node:worker_threads';
     parentPort.on('message', (msg) => {
       if (msg && msg.__shutdown) { parentPort.close(); return; }
-      if (msg.filePath === 'slow.ts') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
+      if (msg.filePath === 'slow.ts') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 6000);
       parentPort.postMessage({ ok: true, result: { filePath: msg.filePath } });
     });
   `;
 
   it("settles a parse that holds its worker past the backstop as a timeout, and carries on", async () => {
-    const pool = new ParsePool(worker("slow", SLOW_ON_ONE), 1, undefined, undefined, 200);
+    // The backstop also runs for `a.ts` from the moment it is handed to the
+    // replacement worker, whose start-up counts against it. 1 s leaves room for
+    // that start on a busy runner; the slow parse holds its worker for 6 s.
+    const pool = new ParsePool(worker("slow", SLOW_ON_ONE), 1, undefined, undefined, 1000);
     pool.init();
     const start = Date.now();
 
@@ -892,7 +895,7 @@ describe("ParsePool", () => {
 
     expect(slow, "settled, not left pending").toBeNull();
     expect(next, "a replacement worker took the queue").toEqual({ filePath: "a.ts" });
-    expect(Date.now() - start, "did not wait for the slow parse").toBeLessThan(1400);
+    expect(Date.now() - start, "did not wait for the slow parse").toBeLessThan(5000);
     expect(pool.timedOutFiles()).toEqual(["slow.ts"]);
     expect(pool.crashedTasks(), "a timeout is not a crash: it recurs every run").toBe(0);
     await pool.destroy();

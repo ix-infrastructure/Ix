@@ -1066,7 +1066,6 @@ const COMMIT_STATUS_IDEMPOTENT = 'Idempotent';
  */
 const COMMIT_STATUS_BASE_REV_MISMATCH = 'BaseRevMismatch';
 
-/** Minimal local-ingest facts needed by commands that continue after ingestion. */
 /** The stderr note for files skipped because their parse ran past the budget. */
 export function describeParseTimeouts(files: readonly string[], sample = 5): string {
   const shown = files.slice(0, sample).join(", ");
@@ -1075,6 +1074,7 @@ export function describeParseTimeouts(files: readonly string[], sample = 5): str
     "They are not in the graph. Raise the budget with IX_PARSE_BUDGET_MS (milliseconds, 0 = none).";
 }
 
+/** Minimal local-ingest facts needed by commands that continue after ingestion. */
 export interface IngestFilesSummary {
   filesDiscovered: number;
   patchesApplied: number;
