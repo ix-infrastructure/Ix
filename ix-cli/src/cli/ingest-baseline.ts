@@ -140,8 +140,15 @@ export function saveIngestBaseline(
     // Via a temp file and rename: a process killed mid-write left a truncated
     // baseline, which reads as none, and the next map re-ingested everything.
     const tmp = `${target}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(data));
-    fs.renameSync(tmp, target);
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(data));
+      fs.renameSync(tmp, target);
+    } catch (err) {
+      // A failed rename (a locked target on Windows, say) must not leave the
+      // temp file behind; one would pile up per failing run.
+      fs.rmSync(tmp, { force: true });
+      throw err;
+    }
   } catch {
     // The cache is an optimization and freshness hint. Ingestion itself succeeded.
   }
