@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { resolveWorkspaceRoot } from "./config.js";
 import { loadIngestBaseline } from "./ingest-baseline.js";
 import { hasCompletedMapFor } from "./map-baseline.js";
-import { discoverSourceFiles } from "./file-discovery.js";
+import { canonicalizeDiscoveredFilePath, discoverSourceFiles } from "./file-discovery.js";
 
 export interface StaleInfo {
   graphCompleted: boolean;
@@ -66,31 +66,43 @@ export function detectStaleFiles(
     };
   }
 
-  const files = collectFiles(workspaceRoot);
-  const currentFiles = new Set(files.map((filePath) => path.resolve(filePath)));
+  // Discovery returns canonical paths (macOS `/var` is `/private/var`, a
+  // Windows 8.3 name is expanded), while the baseline's keys sit under the root
+  // as it was given. Compare and display both under the canonical root.
+  const canonicalRoot = canonicalizeDiscoveredFilePath(workspaceRoot);
+  const underCanonicalRoot = (absolutePath: string): string =>
+    canonicalRoot !== workspaceRoot && absolutePath.startsWith(workspaceRoot + path.sep)
+      ? canonicalRoot + absolutePath.slice(workspaceRoot.length)
+      : absolutePath;
+  const ingestedMtimes = new Map<string, number>();
+  for (const [ingestedPath, mtime] of baseline.files) {
+    const absolutePath = path.isAbsolute(ingestedPath)
+      ? path.resolve(ingestedPath)
+      : path.resolve(workspaceRoot, ingestedPath);
+    ingestedMtimes.set(underCanonicalRoot(absolutePath), mtime);
+  }
+
+  const files = collectFiles(workspaceRoot).map(underCanonicalRoot);
+  const currentFiles = new Set(files);
   const changedFiles: string[] = [];
 
   for (const filePath of files) {
     try {
       const stat = fs.statSync(filePath);
       if (
-        differsFromIngestBaseline(filePath, stat.mtimeMs, baseline.files, baseline.lastIngestAt)
+        differsFromIngestBaseline(filePath, stat.mtimeMs, ingestedMtimes, baseline.lastIngestAt)
       ) {
         // Make path relative to root for display
-        const relative = path.relative(workspaceRoot, filePath);
-        changedFiles.push(relative);
+        changedFiles.push(path.relative(canonicalRoot, filePath));
       }
     } catch {
       // skip inaccessible files
     }
   }
 
-  for (const ingestedPath of baseline.files.keys()) {
-    const absolutePath = path.isAbsolute(ingestedPath)
-      ? path.resolve(ingestedPath)
-      : path.resolve(workspaceRoot, ingestedPath);
+  for (const absolutePath of ingestedMtimes.keys()) {
     if (!currentFiles.has(absolutePath) && !fs.existsSync(absolutePath)) {
-      changedFiles.push(path.relative(workspaceRoot, absolutePath));
+      changedFiles.push(path.relative(canonicalRoot, absolutePath));
     }
   }
 

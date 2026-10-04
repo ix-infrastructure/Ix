@@ -335,6 +335,43 @@ describe("workspace-scoped staleness", () => {
     expect(loadIngestBaseline(root)?.currentRev).toBe(20);
   });
 
+  it("judges a root reached through a symlink by its own relative paths", () => {
+    // macOS's tmpdir (/var -> /private/var) and Windows 8.3 names are roots
+    // whose canonical path differs. Discovery returns canonical paths; the
+    // baseline may hold either spelling, and the report must say `a.js`.
+    const realRoot = path.join(home, "real");
+    const linkedRoot = path.join(home, "linked");
+    writeSource(realRoot, "a.js", "export const a = 1;\n");
+    writeSource(realRoot, "b.js", "export const b = 1;\n");
+    writeSource(realRoot, "gone.js", "export const gone = 1;\n");
+    fs.symlinkSync(realRoot, linkedRoot, "junction");
+    const fileA = path.join(linkedRoot, "a.js");
+    const fileB = fs.realpathSync.native(path.join(realRoot, "b.js"));
+    const gone = path.join(linkedRoot, "gone.js");
+
+    expect(
+      persistIngestBaselineIfClean(
+        linkedRoot,
+        new Map([
+          [fileA, fs.statSync(fileA).mtimeMs],
+          [fileB, fs.statSync(fileB).mtimeMs],
+          [gone, fs.statSync(gone).mtimeMs],
+        ]),
+        3,
+        0,
+        0,
+        new Date(Date.now() + 60_000),
+      ),
+    ).toBe(true);
+    expect(detectStaleFiles(linkedRoot).staleFiles).toBe(0);
+
+    moveMtimeForward(fileA);
+    fs.rmSync(gone);
+    const result = detectStaleFiles(linkedRoot);
+    expect(result.staleFiles).toBe(2);
+    expect([...result.sampleChangedFiles].sort()).toEqual(["a.js", "gone.js"]);
+  });
+
   it("uses ingest time for files absent from the mtime cache", async () => {
     const root = path.join(home, "partial-cache");
     const mappedFile = writeSource(root, "mapped.js", "export const mapped = true;\n");
