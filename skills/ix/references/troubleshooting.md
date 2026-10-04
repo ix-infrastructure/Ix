@@ -61,6 +61,9 @@ again.
 - `IX_PARSE_BUDGET_MS=N` — how long `ix map` / `ix ingest` may spend parsing
   one file (default 10000). A file that runs past it is skipped and named in
   the summary (`parseTimeouts` in `--format json`). `0` turns the budget off.
+- `IX_PARSE_WORKERS=N` — the most parse workers `ix map` / `ix ingest` starts
+  (default 8, never more than the cores less one). Each loads every grammar,
+  so a small edit starts one; raise it for a faster first map on a large machine.
 
 ## Harness presence (hermetic reproduction)
 
