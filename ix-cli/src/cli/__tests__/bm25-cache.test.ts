@@ -124,6 +124,46 @@ describe("cachedBm25Ranker", () => {
     expect(watched.reads.sort()).toEqual(["src/auth/refresh.ts", "src/auth/session.ts"]);
   });
 
+  it("keys reuse on HEAD's blob, not a staged one the worktree has reverted", async () => {
+    const original = readFileSync(join(dir, "src/list.ts"), "utf-8");
+    const staged = "export function validatePassword() { password password password }\n";
+    // Staged, then the worktree put back to HEAD's text: clean against HEAD,
+    // but the index holds the staged blob.
+    write("src/list.ts", staged);
+    git("add", "src/list.ts");
+    write("src/list.ts", original);
+    const repo = gitRepoAccess(dir)!;
+    const files = sourceFiles(repo);
+    cachedBm25Ranker(dir)(repo, files, QUERIES[0]);
+
+    // Commit what was staged, then bring the worktree up to it.
+    git("commit", "-q", "-m", "commit the staged text");
+    git("checkout", "--", "src/list.ts");
+    const moved = gitRepoAccess(dir)!;
+
+    expect(cachedBm25Ranker(dir)(moved, files, QUERIES[0])).toEqual(bm25Rank(moved, files, QUERIES[0]));
+  });
+
+  it("after a HEAD move that deletes and renames files, scores exactly as bm25Rank", async () => {
+    const repo = gitRepoAccess(dir)!;
+    cachedBm25Ranker(dir)(repo, sourceFiles(repo), QUERIES[0]);
+
+    git("mv", "src/auth/login.ts", "src/auth/signin.ts");
+    git("rm", "-q", "src/list.ts");
+    git("commit", "-q", "-m", "rename and delete");
+    const moved = gitRepoAccess(dir)!;
+    const files = sourceFiles(moved);
+    const watched = counting(moved);
+
+    for (const q of QUERIES) {
+      expect(cachedBm25Ranker(dir)(q === QUERIES[0] ? watched : moved, files, q)).toEqual(bm25Rank(moved, files, q));
+    }
+    expect(watched.reads).toEqual(["src/auth/signin.ts"]);
+    const index = JSON.parse(readFileSync(bm25IndexPath(dir), "utf-8"));
+    expect(index.paths).not.toContain("src/list.ts");
+    expect(index.paths).not.toContain("src/auth/login.ts");
+  });
+
   it("rebuilds when HEAD moves", async () => {
     const repo = gitRepoAccess(dir)!;
     cachedBm25Ranker(dir)(repo, sourceFiles(repo), QUERIES[2]);

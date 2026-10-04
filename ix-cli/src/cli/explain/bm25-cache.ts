@@ -75,7 +75,7 @@ export interface GitState {
   head: string;
   /** Tracked paths (relative to the root, as `git ls-files` prints them) that differ from HEAD. */
   dirty: ReadonlySet<string>;
-  /** Each tracked path's blob id in the index, when known. */
+  /** Each path's blob id at HEAD, when known. */
   blobs?: ReadonlyMap<string, string>;
 }
 
@@ -104,12 +104,15 @@ export function readGitState(root: string): GitState | undefined {
     // --relative: paths relative to `root`, like `git ls-files` run there.
     // --no-renames: a rename lists both of its paths, not only the new one.
     const dirty = run(["diff", "--name-only", "--relative", "--no-renames", "-z", "HEAD", "--"]);
-    // `<mode> <blob> <stage>\t<path>` per entry, relative to the root as
-    // `git ls-files` prints paths there.
+    // HEAD's blobs, not the index's: a clean file's text is HEAD's, while a
+    // staged change the worktree has since reverted leaves a different blob
+    // in the index, and reusing counts by that blob after it is committed
+    // would score the old text. `<mode> <type> <blob>\t<path>` per entry,
+    // relative to (and limited to) the root, as `git ls-files` prints paths.
     const blobs = new Map<string, string>();
-    for (const entry of run(["ls-files", "-s", "-z"]).split("\0")) {
+    for (const entry of run(["ls-tree", "-r", "-z", head]).split("\0")) {
       const tab = entry.indexOf("\t");
-      if (tab > 0) blobs.set(entry.slice(tab + 1), entry.slice(0, tab).split(" ")[1]);
+      if (tab > 0) blobs.set(entry.slice(tab + 1), entry.slice(0, tab).split(" ")[2]);
     }
     return { head, dirty: new Set(dirty.split("\0").filter(Boolean)), blobs };
   } catch {
