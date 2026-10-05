@@ -21,8 +21,11 @@ import { SUPPORTED_EXTENSIONS } from "./supported-extensions.js";
  *
  * Now: git lists the files when it can (NUL-separated, unquoted); otherwise the
  * walk honours each directory's `.gitignore`, so the two agree on an ordinary
- * tree. Both skip the same short list of directories that are never source
- * (build output, dependencies, VCS metadata, caches) and count what they
+ * tree. The walk also skips a short list of directories that are never source
+ * (build output, dependencies, VCS metadata, caches) by name. In a work tree
+ * git's own ignore rules decide instead: a tracked file is kept whatever its
+ * directory is called -- a committed `build/` or `out/` can be source -- and
+ * only untracked files under those names are skipped. Both count what they
  * skipped. Tests and fixtures are in the set; the role classifier is what
  * tells them apart.
  *
@@ -31,7 +34,11 @@ import { SUPPORTED_EXTENSIONS } from "./supported-extensions.js";
  * git does.
  */
 
-/** Never source: build output, dependencies, VCS metadata, tool caches. */
+/**
+ * Never source: build output, dependencies, VCS metadata, tool caches. Skipped
+ * by name in a walk, and for untracked files in a work tree; never for a file
+ * git tracks.
+ */
 export const SKIPPED_DIRS: ReadonlySet<string> = new Set([
   "node_modules", ".git", ".hg", ".svn", "dist", "build", "target", "out", ".next",
   "__pycache__", ".tox", ".venv", "venv", ".mypy_cache", ".pytest_cache",
@@ -105,7 +112,7 @@ export type DiscoveryExclude = { matcher: IgnoreMatcher; root: string; onSkip?: 
 
 /** What discovery left out, so it can be reported rather than guessed at. */
 export interface DiscoveryCounts {
-  /** Files under a `SKIPPED_DIRS` directory (git mode) or such directories (walk). */
+  /** Untracked files under a `SKIPPED_DIRS` directory (git mode) or such directories (walk). */
   skippedDirs: number;
   /** Listed files that could not be stat'd: permissions, a race with a delete. */
   unreadable: number;
@@ -160,6 +167,12 @@ export function tryGitLsFiles(
     );
     if (result.status !== 0) return null;
 
+    // Asked only when a listed file sits under a skipped name.
+    let untracked: Set<string> | null = null;
+    const isUntracked = (entry: string): boolean => {
+      untracked ??= gitUntracked(dir);
+      return untracked.has(entry);
+    };
     const files: string[] = [];
     const seenCanonical = new Set<string>();
     for (const entry of result.stdout.split("\0")) {
@@ -174,7 +187,11 @@ export function tryGitLsFiles(
         continue;
       }
       if (!isCandidate(fullPath)) continue;
-      if (inSkippedDir(entry)) { counts.skippedDirs++; continue; }
+      // A tracked file stays: git is told what is generated through
+      // .gitignore, and a repository that commits a `build/` or `out/` tree
+      // is saying it is source. An untracked one under such a name is what a
+      // missing .gitignore line would have caught -- a fresh `node_modules`.
+      if (inSkippedDir(entry) && isUntracked(entry)) { counts.skippedDirs++; continue; }
       try {
         if (!fs.statSync(fullPath).isFile()) continue;
       } catch {
@@ -190,6 +207,18 @@ export function tryGitLsFiles(
   } catch {
     return null;
   }
+}
+
+/** Untracked, not-ignored entries under `dir`, as `git ls-files` spells them. */
+function gitUntracked(dir: string): Set<string> {
+  const result = spawnSync("git", [...GIT_SAFE_CONFIG, "ls-files", "-z", "--others", "--exclude-standard"], {
+    cwd: dir,
+    encoding: "utf-8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  // Unknown: treat every listed file as tracked, which keeps it.
+  if (result.status !== 0) return new Set();
+  return new Set(result.stdout.split("\0").filter(Boolean));
 }
 
 /** `.gitignore` matchers in force for a directory: each one's own, with the directory it is relative to. */

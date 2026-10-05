@@ -168,7 +168,12 @@ Ingest a path into the graph. Long-running: the client allows **30 minutes**.
 > hash-unchanged*, `emptyFile` is a real count rather than a hardcoded `0`, and
 > there is an extra `unparsed` bucket for files the parse pool returned nothing
 > for. A file whose parse ran past `IX_PARSE_BUDGET_MS` is counted in
-> `parseTimeout` and named in a top-level `parseTimeouts` list.
+> `parseTimeout` and named in a top-level `parseTimeouts` list. Two buckets
+> come from discovery and are not part of `filesSkipped`: `skippedDirs` counts
+> files left out under a directory that is never source (build output,
+> dependencies, VCS metadata, tool caches) -- by name on a plain walk, and only
+> for untracked files in a git work tree, where a tracked file is always kept
+> -- and `unreadable` counts listed files that could not be stat'd.
 > That is the client's own summary of its own run and is not this response;
 > see the stitch section below for why the narrower `unchanged` is load-bearing
 > there.

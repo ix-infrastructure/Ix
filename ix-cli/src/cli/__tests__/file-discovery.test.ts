@@ -66,13 +66,40 @@ describe('file discovery', () => {
   });
 
   it('counts what it skipped instead of dropping it silently', () => {
-    const root = tree({ 'src/a.ts': '', 'src/gone.ts': '', 'dist/b.js': '' });
+    const root = tree({ 'src/a.ts': '', 'src/gone.ts': '' });
     git(root, 'init', '-q');
     git(root, 'add', '-A');
     rmSync(join(root, 'src', 'gone.ts')); // tracked, no longer on disk
+    writeFileSync(join(root, 'src', 'b.js'), '', 'utf8');
+    mkdirSync(join(root, 'dist'));
+    writeFileSync(join(root, 'dist', 'b.js'), '', 'utf8'); // untracked build output
     const counts = emptyDiscoveryCounts();
-    expect(rel(root, discoverSourceFiles(root, { counts }))).toEqual(['src/a.ts']);
+    expect(rel(root, discoverSourceFiles(root, { counts }))).toEqual(['src/a.ts', 'src/b.js']);
     expect(counts).toEqual({ skippedDirs: 1, unreadable: 1 });
+  });
+
+  it('keeps a tracked file whatever its directory is called; skips untracked ones under those names', () => {
+    // A repository that commits `build/` or `out/` is saying it is source.
+    // git's ignore rules decide what is generated in a work tree; the names
+    // are only a fallback for what nothing told git to ignore.
+    const files = {
+      'build/gen.ts': '', 'out/main.ts': '', 'target/T.java': '', 'obj/x.cs': '', 'coverage/report.js': '',
+      'src/app.ts': '',
+    };
+    const root = tree(files);
+    git(root, 'init', '-q');
+    git(root, 'add', '-A');
+    writeFileSync(join(root, 'build', 'fresh.ts'), '', 'utf8'); // untracked, not ignored
+    const counts = emptyDiscoveryCounts();
+    expect(rel(root, discoverSourceFiles(root, { counts }))).toEqual([
+      'build/gen.ts', 'coverage/report.js', 'obj/x.cs', 'out/main.ts', 'src/app.ts', 'target/T.java',
+    ]);
+    expect(counts.skippedDirs).toBe(1);
+
+    // Without git there is no record of what is tracked: the walk keeps
+    // skipping those names.
+    const plain = tree(files);
+    expect(rel(plain, discoverSourceFiles(plain))).toEqual(['src/app.ts']);
   });
 
   it('copies of one tree agree whether or not they are a git checkout', () => {
