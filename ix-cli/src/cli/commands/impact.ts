@@ -4,8 +4,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { renderSection, renderKeyValue, renderNote, renderResolvedHeader, renderWarning, colorizeKind } from "../ui.js";
 import { IxClient } from "../../client/api.js";
-import { QUERY_CLIENT_OPTIONS } from "../../client/request-memo.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../../client/factory.js";
 import { activeReadScope, resolveFileOrReport, printResolved } from "../resolve.js";
 import { checkGraphHealth, graphHealthJson, graphHealthLlmFields, graphHealthProse, isUnhealthy } from "../graph-health.js";
 import { bucketByHierarchy, getSystemPath, formatSystemPath, hasMapData, type SystemPath } from "../hierarchy.js";
@@ -35,7 +34,7 @@ export function registerImpactCommand(program: Command): void {
         symbol: string,
         opts: { kind?: string; path?: string; pick?: number; depth: string; limit: string; format: string }
       ) => {
-        const client = new IxClient(getEndpoint(), undefined, QUERY_CLIENT_OPTIONS);
+        const client = createClient({ query: true });
         const limit = parseInt(opts.limit, 10);
         const depth = Math.min(Math.max(parseInt(opts.depth, 10) || 1, 1), 3);
 

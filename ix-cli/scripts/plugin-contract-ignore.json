@@ -1,0 +1,44 @@
+{
+  "ignore": [
+    {
+      "where": "ix-codex-plugin/tests/test_auto_map.py",
+      "match": "locate --limit",
+      "why": "asserts the old `ix locate --limit` form is no longer emitted"
+    },
+    {
+      "where": "ix-codex-plugin/tests/test_ix_argv_resolution.py",
+      "match": "\"git\"",
+      "why": "argv resolution test with a non-ix command"
+    },
+    {
+      "where": "ix-openclaw-plugin/tests/cli-argv.test.mjs",
+      "match": "--limit",
+      "why": "asserts runIx is never called with `locate --limit`"
+    },
+    {
+      "where": "ix-openclaw-plugin/tests/cli-argv.test.mjs",
+      "match": "--path",
+      "why": "asserts runIx is never called with `smells --path`"
+    },
+    {
+      "where": "ix-cursor-plugin/mcp/lib/parser.ts",
+      "match": "ix output is not valid JSON",
+      "why": "error message prose"
+    },
+    {
+      "where": "ix-opencode-plugin/TOOL_CONTRACT.md",
+      "match": "ix unavailable",
+      "why": "prose"
+    },
+    {
+      "where": "ix-opencode-plugin/runtime/cli.ts",
+      "match": "ix exited",
+      "why": "error message prose"
+    },
+    {
+      "where": "ix-opencode-plugin/tests/tools.test.ts",
+      "match": "ix unavailable",
+      "why": "prose in an expected message"
+    }
+  ]
+}

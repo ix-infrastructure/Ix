@@ -2,7 +2,7 @@
 
 import type { Command } from "commander";
 import { renderSection, renderKeyValue, renderWarning, renderNote, renderSuccess } from "../ui.js";
-import { IxClient } from "../../client/api.js";
+import { createClient } from "../../client/factory.js";
 import { readBackendHealth } from "./upgrade.js";
 import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
 import { detectStaleFiles } from "../stale.js";
@@ -67,7 +67,7 @@ export function registerStatusCommand(program: Command): void {
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--root <dir>", "Workspace root directory")
     .action(async (opts: { format: string; root?: string }) => {
-      const client = new IxClient(getEndpoint());
+      const client = createClient();
       try {
         const health = await readBackendHealth(client);
         const root = resolveWorkspaceRoot(opts.root);

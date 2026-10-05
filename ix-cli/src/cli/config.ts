@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { readFileSync, writeFileSync, existsSync, rmSync, chmodSync, renameSync, realpathSync, mkdirSync } from "node:fs";
-import { isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { parse, stringify } from "yaml";
@@ -254,11 +254,12 @@ export function getEndpoint(): string {
   return process.env.IX_ENDPOINT || loadConfig().endpoint;
 }
 
-// Single-place factory for IxClient instances. Pro commands and future OSS
-// code paths should prefer this over `new IxClient(getEndpoint())` so auth
-// and endpoint resolution can evolve in one spot.
+// Kept for @ix/pro, which imports it. The factory itself is the synchronous
+// `createClient` in client/factory.ts; this wrapper loads it lazily because
+// that module imports `getEndpoint` from this one.
 export async function createClient(): Promise<IxClient> {
-  return new IxClient(getEndpoint());
+  const factory = await import("../client/factory.js");
+  return factory.createClient();
 }
 
 export function loadWorkspaces(): WorkspaceConfig[] {
@@ -326,15 +327,47 @@ export function isReadablePath(candidate: string, explicitRoot?: string): boolea
   );
 }
 
+/**
+ * Is `dir` the root of a linked git worktree (`git worktree add`)? Its `.git`
+ * is a file pointing at the main repository's `.git/worktrees/<name>`, a git
+ * directory that holds a `commondir` file -- git's own mark of a linked
+ * worktree. A submodule's `.git` file points at a full git directory with no
+ * `commondir`, even when it lives under `.git/worktrees/<wt>/modules/` (a
+ * submodule checked out in a worktree), and is not one: a submodule is part
+ * of the repository that contains it.
+ */
+export function isLinkedWorktreeRoot(dir: string): boolean {
+  try {
+    // Read, not stat-then-read: a .git directory throws EISDIR here, which is
+    // the "not a linked worktree" answer anyway.
+    const gitdir = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(join(dir, ".git"), "utf-8"))?.[1];
+    // Relative when written with worktree.useRelativePaths (git 2.48+).
+    return !!gitdir && existsSync(join(resolvePath(dir, gitdir), "commondir"));
+  } catch {
+    return false;
+  }
+}
+
 export function selectWorkspaceForCwd(
   workspaces: WorkspaceConfig[],
   cwd: string,
 ): WorkspaceConfig | undefined {
   const canonicalCwd = canonicalWorkspacePath(cwd);
-  return workspaces
+  const match = workspaces
     .map(workspace => ({ workspace, root: canonicalWorkspacePath(workspace.root_path) }))
     .filter(({ root }) => isPathInside(root, canonicalCwd))
-    .sort((a, b) => b.root.length - a.root.length)[0]?.workspace;
+    .sort((a, b) => b.root.length - a.root.length)[0];
+  if (!match) return undefined;
+  // A linked worktree nested inside a registered repository (Claude Code puts
+  // them at <repo>/.claude/worktrees/<name>) is a separate checkout, usually
+  // on another branch. Answering for it from the enclosing repo's workspace
+  // read and mapped the wrong tree; it is unmapped until it is registered,
+  // exactly like a sibling worktree. Lexically below the match, so a few stats.
+  for (let dir = canonicalCwd; dir !== match.root; dir = dirname(dir)) {
+    if (isLinkedWorktreeRoot(dir)) return undefined;
+    if (dirname(dir) === dir) break;
+  }
+  return match.workspace;
 }
 
 export function findWorkspaceForCwd(cwd: string): WorkspaceConfig | undefined {
@@ -409,7 +442,8 @@ export function resolveWorkspaceRoot(explicitRoot?: string, cwd = process.cwd())
  */
 export function gitRootFor(cwd: string): string | undefined {
   try {
-    const out = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    // -c: never run a core.fsmonitor command the repository's config names.
+    const out = execFileSync("git", ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "rev-parse", "--show-toplevel"], {
       cwd,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],

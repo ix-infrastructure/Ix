@@ -12,7 +12,7 @@ import { ParsePool } from './parse-pool.js';
 import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
 import type { GraphPatchPayload } from '../../client/types.js';
-import { canonicalWorkspacePath, getEndpoint, isPathInside, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
+import { canonicalWorkspacePath, isPathInside, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
 import { resolveIngestRoot } from '../map-root.js';
 import { acquireMapLock, type LockHandle } from '../single-flight.js';
 import {
@@ -23,7 +23,7 @@ import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
 import { loadIngestionModules } from './ingestion-loader.js';
 import { declaredPackageDirs } from '../package-dirs.js';
-import { ensureWorkspaceIdState } from '../bootstrap.js';
+import { ensureWorkspaceIdState, workspaceStateFor } from '../bootstrap.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
 import { admitStitchWaiting, connectionNeverEstablished, type StitchRefusal } from '../stitch-guard.js';
@@ -53,6 +53,7 @@ import {
 } from '../github/transform.js';
 import { printJson } from '../format.js';
 import { describeReplayedChanges } from '../graph-health.js';
+import { createClient } from "../../client/factory.js";
 // ---------------------------------------------------------------------------
 // File discovery
 // ---------------------------------------------------------------------------
@@ -326,7 +327,9 @@ export function tryGitLsFiles(
   try {
     const result = spawnSync(
       'git',
-      ['ls-files', '--cached', '--others', '--exclude-standard'],
+      // -c: a cloned repository's own .git/config can name a core.fsmonitor
+      // command, which ls-files would run. Never let it.
+      ['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', 'ls-files', '--cached', '--others', '--exclude-standard'],
       {
         cwd: dir,
         encoding: 'utf-8',
@@ -1629,16 +1632,15 @@ export async function ingestFiles(
   // discovery, deletion and the stitch are limited to it, and the rest of the
   // workspace's baseline is carried forward untouched.
   const workspaceRoot = resolveIngestRoot(resolvedPath, fs.statSync(resolvedPath).isDirectory(), opts.root);
+  // A new workspace is only registered once a commit lands (below, before the
+  // summary): see workspaceStateFor.
   const {
     workspaceId,
     migrated: workspaceMigrated,
     previousWorkspaceId,
-    created: workspaceCreated,
     name: workspaceName,
-  } = ensureWorkspaceIdState(workspaceRoot);
-  if (workspaceCreated && !opts.suppressOutput && opts.format === 'text') {
-    process.stderr.write(chalk.dim(`Registered workspace "${workspaceName}" (${workspaceRoot}).\n`));
-  }
+    pending: registrationPending,
+  } = workspaceStateFor(workspaceRoot);
   // What this run discovers. A migrated workspace is widened to its root: the
   // re-key below re-ingests everything under the new id and then deletes the
   // old id's graph, which after a scoped run would leave the rest of the
@@ -1794,7 +1796,7 @@ export async function ingestFiles(
     process.stderr.write(`[multi-repo] system "${detectedSystem!.name}" (${systemId}) members=${detectedSystem!.members.join(', ')} packages=${Object.keys(packageRegistry).length} declaredDeps=${depCount}\n`);
   }
 
-  const client = new IxClient(getEndpoint(), opts.deadlineSignal);
+  const client = createClient({ deadlineSignal: opts.deadlineSignal });
 
   // Schema-version check forces a clean re-ingest when the backend's graph
   // format has changed in a way that invalidates existing node IDs (e.g. the
@@ -3951,6 +3953,15 @@ export async function ingestFiles(
 
   const elapsed = ((performance.now() - start) / 1000).toFixed(2);
 
+  // A new workspace is registered only now, and only if the backend took
+  // something: see workspaceStateFor.
+  if (registrationPending && patchesTheBackendTook > 0) {
+    ensureWorkspaceIdState(workspaceRoot);
+    if (!opts.suppressOutput && opts.format === 'text') {
+      process.stderr.write(chalk.dim(`Registered workspace "${workspaceName}" (${workspaceRoot}).\n`));
+    }
+  }
+
   // Reported before the suppressOutput return, and thrown when nothing landed.
   //
   // `ix map` passes suppressOutput unconditionally, so every commit failure
@@ -4262,7 +4273,7 @@ async function ingestGitHub(opts: {
 }): Promise<void> {
   const repo = parseGitHubRepo(opts.github!);
   const token = await resolveGitHubToken(opts.token);
-  const client = new IxClient(getEndpoint());
+  const client = createClient();
   const limit = parseInt(opts.limit, 10);
   const start = performance.now();
 

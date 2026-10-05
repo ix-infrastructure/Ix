@@ -2,8 +2,7 @@
 
 import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
-import { QUERY_CLIENT_OPTIONS } from "../../client/request-memo.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../../client/factory.js";
 import { resolveFileOrReport, printResolved } from "../resolve.js";
 import { getEffectiveSystemPath, getSystemPath, hasMapData } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
@@ -58,7 +57,7 @@ Examples:
   ix overview scoreCandidate --pick 2`
     )
     .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; format: string }) => {
-      const client = new IxClient(getEndpoint(), undefined, QUERY_CLIENT_OPTIONS);
+      const client = createClient({ query: true });
       const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
       const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
       if (!target) return;

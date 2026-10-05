@@ -33,7 +33,9 @@ naming the changed symbols' callers, importers that use them, and tests that
 reach them -- or prints nothing. Always exits 0: a backend that is down, an
 unmapped workspace, a file not in the graph or a non-code file all print
 nothing. Gives up after IX_HOOK_TIMEOUT_MS (default 3000). IX_HOOK_DEBUG=1
-says why on stderr.
+says why on stderr; IX_HOOK_LOG=<file> appends one JSON line per call saying
+what it did (no_changes, diff_unchanged, reported, silent, timeout;
+tool-edit outside git) and why.
 
 .claude/settings.json:
   {"hooks":{"PostToolUse":[{"matcher":"Edit|MultiEdit|Write|Bash",

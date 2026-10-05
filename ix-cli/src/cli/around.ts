@@ -90,6 +90,47 @@ export interface AroundSymbol {
   tests: AroundSection;
   /** Other definitions in the same file with the same name. */
   sameName: Array<{ kind: string; lineStart: number; lineEnd: number }>;
+  /**
+   * Set when the edit is inside a class-like container but outside every
+   * member the graph has: a field, an annotation, a declaration line. Such a
+   * container's "callers" are mostly references to the type, so they are
+   * counted, not listed.
+   */
+  declarations?: { lineStart: number; lineEnd: number };
+}
+
+/** Definitions whose "callers" are references to a type rather than calls. */
+export const CONTAINER_KINDS = new Set([
+  "class", "interface", "enum", "struct", "trait", "object", "module", "record",
+  "annotation", "union", "namespace", "impl", "type",
+]);
+
+/**
+ * The edited lines inside container `d` that no member of it covers -- its
+ * fields and declarations, which the graph does not index as definitions
+ * (Java and TypeScript fields are not) -- or undefined when every edited line
+ * is inside a member.
+ */
+export function declarationLines(
+  d: PlacedDef, placed: PlacedDef[], ranges: LineRange[],
+): { start: number; end: number } | undefined {
+  if (!CONTAINER_KINDS.has(d.kind.toLowerCase())) return undefined;
+  const members = placed.filter((o) => o.id !== d.id && o.start >= d.start && o.end <= d.end
+    && (o.end - o.start) < (d.end - d.start));
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const r of ranges) {
+    if (r.insertion) {
+      if (r.start >= d.start && r.start <= d.end && !members.some((m) => m.start <= r.start && m.end >= r.end)) {
+        lo = Math.min(lo, r.start); hi = Math.max(hi, r.start);
+      }
+      continue;
+    }
+    for (let l = Math.max(r.start, d.start); l <= Math.min(r.end, d.end); l++) {
+      if (!members.some((m) => l >= m.start && l <= m.end)) { lo = Math.min(lo, l); hi = Math.max(hi, l); }
+    }
+  }
+  return lo <= hi ? { start: lo, end: hi } : undefined;
 }
 
 export interface AroundResult {
@@ -100,6 +141,12 @@ export interface AroundResult {
   symbols: AroundSymbol[];
   /** Every importer of the file, at its import line. */
   importers: AroundSection & { tests: number };
+  /**
+   * Edited definitions left out because the request excluded them (the hook's
+   * "already told"); absent when none were. Lets the hook's log tell an edit
+   * outside every definition from one inside a definition it already reported.
+   */
+  excluded?: number;
 }
 
 export interface AroundCaps {
@@ -111,6 +158,24 @@ export interface AroundCaps {
 }
 
 export const DEFAULT_CAPS: AroundCaps = { symbols: 3, callers: 8, users: 5, tests: 5, importers: 5 };
+
+/**
+ * How close `other` is to `edited`, smaller first: 0 for the same directory,
+ * then one more for each directory you climb from `edited` to a shared one.
+ *
+ * Measured on 93 hook runs over SWE-PolyBench multi-file issues: a caller in
+ * the edited file's own directory was a file the fix changed 10 times in 16,
+ * one elsewhere 19 in 96; for importers that use the name, 5 in 10 against 3
+ * in 31.
+ */
+export function localityRank(edited: string, other: string): number {
+  const a = edited.split("/").slice(0, -1);
+  const b = other.split("/").slice(0, -1);
+  let shared = 0;
+  while (shared < a.length && shared < b.length && a[shared] === b[shared]) shared++;
+  // Directories climbed from the edited file, plus one if `other` then goes down another.
+  return (a.length - shared) + (b.length > shared ? 1 : 0);
+}
 
 /** The default token budget for rendered output: it lands in an agent's context after every edit. */
 export const DEFAULT_TOKEN_BUDGET = 300;
@@ -440,10 +505,12 @@ export async function gatherAround(client: AroundClient, req: AroundRequest): Pr
   // Which definitions to report on.
   let chosen: PlacedDef[];
   const preloaded = new Map<string, any[]>();
+  let alreadyReported = 0;
   if (req.ranges && req.ranges.length > 0) {
-    chosen = selectEdited(anchorPlaced, req.ranges, Number.MAX_SAFE_INTEGER)
-      .filter((d) => !req.exclude?.has(d.id))
-      .slice(0, caps.symbols);
+    const edited = selectEdited(anchorPlaced, req.ranges, Number.MAX_SAFE_INTEGER);
+    const fresh = edited.filter((d) => !req.exclude?.has(d.id));
+    alreadyReported = edited.length - fresh.length;
+    chosen = fresh.slice(0, caps.symbols);
   } else {
     // The whole file: its outermost definitions, the most-called first, so a
     // capped answer keeps the ones with dependents.
@@ -479,8 +546,10 @@ export async function gatherAround(client: AroundClient, req: AroundRequest): Pr
     const target = { name: d.name, kind: d.kind, path: relPath };
 
     const nonTest = hop1.filter((r) => !isTestFile(rowLocation(r).path ?? ""));
+    // Other files first (the agent has this one open), the nearest first.
+    const near = (r: any) => localityRank(relPath, rowLocation(r).path ?? "");
     const crossFirst = [...nonTest].sort((a, b) =>
-      Number(rowLocation(a).path === relPath) - Number(rowLocation(b).path === relPath));
+      Number(rowLocation(a).path === relPath) - Number(rowLocation(b).path === relPath) || near(a) - near(b));
     const callers = crossFirst.slice(0, caps.callers)
       .map((row) => siteRef(row, safeSite("callers", row, target, req.files)));
     const callerPaths = new Set(hop1.map((r) => rowLocation(r).path));
@@ -523,6 +592,9 @@ export async function gatherAround(client: AroundClient, req: AroundRequest): Pr
         return { kind: o.kind, lineStart: c?.start ?? o.lineStart, lineEnd: c?.end ?? o.lineEnd };
       });
     const testRows = [...tests.values()];
+    const decl = req.ranges && req.ranges.length > 0 ? declarationLines(d, anchorPlaced, req.ranges) : undefined;
+    // In the current file's coordinates, like the symbol's own span.
+    const shift = here.start - d.start;
     return {
       id: d.id,
       name: d.name,
@@ -532,9 +604,13 @@ export async function gatherAround(client: AroundClient, req: AroundRequest): Pr
       lineEnd: here.end,
       movedFrom: here.start !== d.lineStart ? d.lineStart : undefined,
       callers: { total: nonTest.length, rows: callers },
-      users: { total: users.length, rows: users.slice(0, caps.users) },
+      users: {
+        total: users.length,
+        rows: [...users].sort((x, y) => localityRank(relPath, x.path) - localityRank(relPath, y.path)).slice(0, caps.users),
+      },
       tests: { total: testRows.length, rows: testRows.slice(0, caps.tests) },
       sameName,
+      ...(decl ? { declarations: { lineStart: decl.start + shift, lineEnd: decl.end + shift } } : {}),
     };
   }));
 
@@ -558,6 +634,7 @@ export async function gatherAround(client: AroundClient, req: AroundRequest): Pr
     graph: isUnhealthy(health) ? health : undefined,
     symbols,
     importers,
+    ...(alreadyReported > 0 ? { excluded: alreadyReported } : {}),
   };
 }
 

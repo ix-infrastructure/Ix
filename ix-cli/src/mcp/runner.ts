@@ -324,8 +324,11 @@ export interface InProcessRunnerOptions {
  * process. In a server that never exits they are leaks, and each of them makes
  * the next tool call answer from something stale rather than fail loudly.
  */
-function invalidateAfter(args: string[]): void {
-  if (SCOPE_CHANGING_COMMANDS.has(args[0] ?? "")) resetReadScope();
+function invalidateAfter(args: string[], failed = false): void {
+  // A failed read is often "no workspace here"; whatever the user does next
+  // (map, cd, register) should be looked up fresh rather than answered from
+  // the scope that just failed.
+  if (failed || SCOPE_CHANGING_COMMANDS.has(args[0] ?? "")) resetReadScope();
 }
 
 /**
@@ -450,7 +453,7 @@ async function executeInProcess(
     activeRun = null;
 
     if (commandSettled) {
-      invalidateAfter(args);
+      invalidateAfter(args, failure !== null || (commandExitCode !== undefined && commandExitCode !== 0));
       releaseLocksOf(run);
     } else {
       liveOrphans.add(finished);

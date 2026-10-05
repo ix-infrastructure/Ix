@@ -1,0 +1,9 @@
+# Copyright 2026 Ix Infrastructure Inc.
+#
+# Added by stack.mjs only when IX_E2E_BACKEND_IMAGE is set: runs that image
+# instead of the pinned one in compose.e2e.yml (for example a backend built
+# from an Ix-memory branch).
+
+services:
+  memory-layer:
+    image: ${IX_E2E_BACKEND_IMAGE:?set IX_E2E_BACKEND_IMAGE}

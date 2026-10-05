@@ -209,8 +209,14 @@ describe("view running port state", () => {
     expect(output).not.toContain("It is scoped to");
   });
 
+  /** What the recorded port answers to stop's check (an unknown /__ix route). */
+  function portAnswers(status: number, body: unknown): void {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify(body), { status }));
+  }
+
   it("removes persisted state when the visualizer stops", async () => {
     seedRunningState(19123);
+    portAnswers(404, { ok: false, error: "not found: /__ix/ping" });
     const kill = vi.spyOn(process, "kill").mockReturnValue(true);
 
     const output = await runView(["stop"]);
@@ -220,6 +226,20 @@ describe("view running port state", () => {
     expect(existsSync(pidFile())).toBe(false);
     expect(existsSync(scopeFile())).toBe(false);
     expect(existsSync(portFile())).toBe(false);
+  });
+
+  it("does not signal a PID whose recorded port is now something else", async () => {
+    // The PID file outlived the visualizer and its number now belongs to an
+    // unrelated process; the port answers, but not as the visualizer.
+    seedRunningState(19123);
+    portAnswers(200, { hello: "world" });
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+
+    const output = await runView(["stop"]);
+
+    expect(output).toContain("now belongs to another process");
+    expect(kill).not.toHaveBeenCalledWith(4242, "SIGTERM");
+    expect(existsSync(pidFile())).toBe(false);
   });
 
   it("says the requested port was not honoured", async () => {

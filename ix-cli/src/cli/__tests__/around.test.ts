@@ -11,7 +11,7 @@ vi.mock("../resolve.js", () => ({
 }));
 
 import {
-  DEFAULT_CAPS, estimateTokens, findUseInImporter, fitToBudget, gatherAround, importStatementText, isTestFile,
+  CONTAINER_KINDS, declarationLines, DEFAULT_CAPS, localityRank, estimateTokens, findUseInImporter, fitToBudget, gatherAround, importStatementText, isTestFile,
   outermostDefs, parseAroundTarget, placeDefs, selectEdited, type AroundResult, type FileDef,
 } from "../around.js";
 import { aroundJson, renderAroundLlm, renderAroundText } from "../around-render.js";
@@ -112,6 +112,55 @@ describe("selectEdited", () => {
 
   it("finds the outermost definitions for a whole-file question", () => {
     expect(outermostDefs(placed).map((d) => d.id)).toEqual(["cls", "f"]);
+  });
+});
+
+describe("declarationLines: an edit to a class outside its methods", () => {
+  const placed = placeDefs([
+    def("cls", "Box", 1, 20, { kind: "class" }),
+    def("m1", "open", 2, 5, { kind: "method", topLevel: false, container: "Box" }),
+    def("m2", "close", 7, 10, { kind: "method", topLevel: false, container: "Box" }),
+    def("f", "free", 22, 25),
+  ], []);
+  const cls = placed.find((d) => d.id === "cls")!;
+
+  it("finds the edited lines no member covers -- a field, a declaration", () => {
+    expect(declarationLines(cls, placed, [{ start: 12, end: 14 }])).toEqual({ start: 12, end: 14 });
+    expect(declarationLines(cls, placed, [{ start: 4, end: 6 }])).toEqual({ start: 6, end: 6 });
+  });
+
+  it("is undefined when every edited line is inside a method", () => {
+    expect(declarationLines(cls, placed, [{ start: 3, end: 4 }, { start: 8, end: 9 }])).toBeUndefined();
+  });
+
+  it("is undefined for a function, whose callers are calls", () => {
+    expect(declarationLines(placed.find((d) => d.id === "f")!, placed, [{ start: 23, end: 23 }])).toBeUndefined();
+  });
+
+  it("covers the class-like kinds", () => {
+    for (const k of ["class", "interface", "enum", "struct", "trait"]) expect(CONTAINER_KINDS.has(k), k).toBe(true);
+    for (const k of ["function", "method", "constructor"]) expect(CONTAINER_KINDS.has(k), k).toBe(false);
+  });
+
+  it("renders as declarations, with the type's references counted, not listed", () => {
+    const result = {
+      path: "src/Box.java",
+      symbols: [{
+        id: "cls", name: "Box", kind: "class", path: "src/Box.java", lineStart: 1, lineEnd: 20,
+        callers: { total: 40, rows: [{ path: "src/A.java", line: 3, snippet: "Box b = new Box();" }] },
+        users: { total: 0, rows: [] },
+        tests: { total: 1, rows: [{ path: "test/BoxTest.java", line: 9, snippet: "new Box()" }] },
+        sameName: [],
+        declarations: { lineStart: 12, lineEnd: 14 },
+      }],
+      importers: { total: 0, tests: 0, rows: [] },
+    } as any;
+    const text = renderAroundText(result, { lead: "Ix: you changed" });
+    expect(text).toContain("Ix: you changed declarations in `Box` outside its methods (src/Box.java:12-14).");
+    expect(text).toContain("the class is referenced from 40 places.");
+    expect(text).not.toContain("src/A.java:3");
+    expect(text).toContain("test/BoxTest.java:9");
+    expect(renderAroundLlm(result).filter((l) => l.startsWith("caller "))).toEqual([]);
   });
 });
 
@@ -253,6 +302,14 @@ describe("gatherAround", () => {
     expect(result.importers.total).toBe(2);
   });
 
+  it("counts the edited definitions it was told to leave out", async () => {
+    const req = { relPath: "src/lib.ts", ranges: [{ start: 2, end: 2 }], anchorLines: FILES["src/lib.ts"], files: new SourceFiles(root) };
+    const result = await gatherAround(mockClient() as any, { ...req, exclude: new Set(["d-target"]) });
+    expect(result.symbols).toEqual([]);
+    expect(result.excluded).toBe(1);
+    expect((await gatherAround(mockClient() as any, req)).excluded).toBeUndefined();
+  });
+
   it("caps callers and keeps the total", async () => {
     const result = await gatherAround(mockClient(20) as any, {
       relPath: "src/lib.ts",
@@ -336,5 +393,22 @@ describe("renderers", () => {
     expect(renderAroundText(r)).toContain("Graph is degraded");
     expect(renderAroundLlm(r)[1]).toMatch(/^graph status=degraded reason=hollow/);
     expect(aroundJson(r).graph).toMatchObject({ status: "degraded" });
+  });
+});
+
+describe("localityRank", () => {
+  it("puts the edited file's own directory first, then the nearest", () => {
+    const edited = "src/main/java/a/b/Foo.java";
+    expect(localityRank(edited, "src/main/java/a/b/Bar.java")).toBe(0);
+    expect(localityRank(edited, "src/main/java/a/b/c/Baz.java")).toBe(1);
+    expect(localityRank(edited, "src/main/java/a/x/Qux.java")).toBe(2);
+    expect(localityRank(edited, "other/module/Z.java")).toBeGreaterThan(localityRank(edited, "src/main/java/a/x/Qux.java"));
+  });
+
+  it("orders a list nearest first", () => {
+    const edited = "lib/plugins/aws/deploy.js";
+    const sorted = ["lib/classes/Service.js", "lib/plugins/aws/package.js", "lib/plugins/print.js"]
+      .sort((a, b) => localityRank(edited, a) - localityRank(edited, b));
+    expect(sorted).toEqual(["lib/plugins/aws/package.js", "lib/plugins/print.js", "lib/classes/Service.js"]);
   });
 });

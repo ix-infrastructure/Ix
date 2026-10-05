@@ -2,8 +2,7 @@
 
 import type { Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../../client/factory.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { relativePath, printJson } from "../format.js";
@@ -79,7 +78,7 @@ Examples:
     .action(async (opts: {
       kind: string; path?: string; limit: string; format: string;
     }) => {
-      const client = new IxClient(getEndpoint());
+      const client = createClient();
       const limit = parseInt(opts.limit, 10);
 
       // Pass --path as a server-side scope so the LIMIT is applied AFTER path

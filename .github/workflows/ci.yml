@@ -295,9 +295,62 @@ jobs:
           echo "::endgroup::"
           node -e "const d=require('./doctor-unmapped.json');const c=(d.checks||[]).find(c=>c.name==='Workspace for this directory');if(!c){console.error('no workspace check in doctor output');process.exit(1)}if(c.ok||d.healthy){console.error('doctor reported healthy in a directory with no workspace');process.exit(1)}console.log('unmapped cwd reported:',c.detail)"
 
+      # The correctness harness (ix-cli/test/e2e): edit sequences against a
+      # backend pinned by digest in compose.e2e.yml, not the :latest the smoke
+      # step uses, so a backend release cannot turn an unrelated CLI PR red.
+      # Its own ports (8290/8729), next to the smoke stack. Scenarios that fail
+      # until a fix lands are marked failsUntil([...]) and pass while they fail.
+      - name: Start harness backend (pinned)
+        working-directory: ix-cli
+        run: npm run e2e:up
+
+      - name: Correctness scenarios (incremental equals fresh)
+        working-directory: ix-cli
+        env:
+          IX_E2E: "1"
+          IX_E2E_DIFF_DIR: ${{ runner.temp }}/e2e-diffs
+        # dist/ is already built above; test:e2e would rebuild it.
+        run: npx vitest run --config vitest.e2e.config.ts
+
+      # Performance gate (ix-cli/scripts/perf-gate.mjs): backend requests and
+      # response bytes per command on a fixed fixture -- Ix itself at a pinned
+      # tag -- against ix-cli/test/perf/budgets.json. Fails above budget + 10%,
+      # which is what an added N+1 or a doubled payload looks like. Wall time is
+      # reported only.
+      - name: Check out the perf fixture (Ix v0.12.0)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: v0.12.0
+          path: perf-fixture
+          persist-credentials: false
+
+      - name: Performance gate (requests, bytes)
+        working-directory: ix-cli
+        env:
+          IX_E2E: "1"
+        run: node scripts/perf-gate.mjs "$GITHUB_WORKSPACE/perf-fixture" --out "$RUNNER_TEMP/perf-results.json"
+
+      - name: Upload perf results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: perf-results
+          path: ${{ runner.temp }}/perf-results.json
+          if-no-files-found: ignore
+
+      - name: Upload graph diffs on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-graph-diffs
+          path: ${{ runner.temp }}/e2e-diffs
+          if-no-files-found: ignore
+
       - name: Backend logs on failure
         if: failure()
-        run: docker compose -f docker-compose.standalone.yml logs --tail 200
+        run: |
+          docker compose -f docker-compose.standalone.yml logs --tail 200
+          (cd ix-cli && node test/e2e/stack.mjs logs)
 
   # ── API-reference parity gate ────────────────────────────────────────────
   # docs/api/openapi.yaml claims to be generated from the client source; this
