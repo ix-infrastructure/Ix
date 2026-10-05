@@ -6,8 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-import { acquireIngestLock, ingestFiles } from "../commands/ingest.js";
-import { acquireMapLock } from "../single-flight.js";
+import { ingestFiles, ingestPathSingleFlight } from "../commands/ingest.js";
+import { acquireMapLock, takeMapRerun } from "../single-flight.js";
 import { ingestMtimeCachePath, ingestRebuildPath, loadConfig } from "../config.js";
 import { workspaceIdForPath } from "../system.js";
 import { FakeBackend } from "./helpers/fake-backend.js";
@@ -893,18 +893,78 @@ describe("ingestFiles against a fake backend", () => {
     });
   });
 
-  it("ix ingest refuses to run beside a map of the same workspace", () => {
-    fixture(1);
-    const held = acquireMapLock(repo, "test");
-    try {
-      expect(held).not.toBeNull();
-      expect(acquireIngestLock(join(repo, "src"))).toBeNull();
-    } finally {
-      held?.release();
-    }
-    const free = acquireIngestLock(repo);
-    expect(free).toBeTruthy();
-    free?.release();
+  describe("ix ingest coalesces with a map or ingest of the same workspace", () => {
+    // It used to exit 1 with "run this again", which an editor hook or an MCP
+    // client that ingests after every edit reported as a failed ingest, while
+    // `ix map` in the same spot coalesces and exits 0.
+    let stdout: ReturnType<typeof vi.spyOn>;
+    let stderr: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      stdout = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      process.exitCode = undefined;
+    });
+    afterEach(() => {
+      stdout.mockRestore();
+      stderr.mockRestore();
+      process.exitCode = undefined;
+      delete process.env.IX_MAP_COALESCE_EXIT_CODE;
+    });
+    const written = (spy: ReturnType<typeof vi.spyOn>) =>
+      spy.mock.calls.map((call: unknown[]) => String(call[0])).join("");
+
+    it("exits 0, asks the holder for a rerun, and prints JSON a client can parse", async () => {
+      fixture(1);
+      const held = acquireMapLock(repo, "test");
+      try {
+        expect(held).not.toBeNull();
+        backend.resetRequests();
+        await ingestPathSingleFlight(join(repo, "src"), { format: "json" });
+
+        expect(process.exitCode, "a coalesce is not a failure").toBeUndefined();
+        expect(backend.commitCount, "nothing ran beside the holder").toBe(0);
+        expect(JSON.parse(written(stdout))).toEqual({ coalesced: true, workspace: repo });
+        expect(takeMapRerun(repo), "the holder is asked to run once more").toBe(true);
+      } finally {
+        held?.release();
+      }
+    });
+
+    it("honours IX_MAP_COALESCE_EXIT_CODE, as ix map does", async () => {
+      fixture(1);
+      const held = acquireMapLock(repo, "test");
+      try {
+        process.env.IX_MAP_COALESCE_EXIT_CODE = "75";
+        await ingestPathSingleFlight(repo, { format: "text" });
+        expect(process.exitCode).toBe(75);
+        expect(written(stderr)).toContain("Another ix map or ix ingest is running");
+      } finally {
+        held?.release();
+      }
+    });
+
+    it("a holding ingest re-runs for the one that coalesced, so its edit lands", async () => {
+      fixture(3);
+      await ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
+      const first = join(repo, "src", "m000.ts");
+      const second = join(repo, "src", "m002.ts");
+      writeFileSync(first, "export const first = 1;\n", "utf8");
+      writeFileSync(second, "export const second = 2;\n", "utf8");
+
+      // The lock is taken before the first await, so the second call finds it
+      // held whatever the scheduling.
+      const holder = ingestPathSingleFlight(first, { format: "json" });
+      const waiter = ingestPathSingleFlight(second, { format: "json" });
+      await Promise.all([holder, waiter]);
+
+      expect(process.exitCode).toBeUndefined();
+      const files = loadIngestBaseline(repo)!.files;
+      expect(files.get(second), "the coalesced run's file was ingested").toBe(statSync(second).mtimeMs);
+      expect(files.get(first)).toBe(statSync(first).mtimeMs);
+      const after = acquireMapLock(repo, "after");
+      expect(after, "the lock was let go").not.toBeNull();
+      after?.release();
+    });
   });
 
   it("ingests only the languages --lang names, and keeps the rest of the baseline", async () => {

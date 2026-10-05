@@ -14,7 +14,8 @@ import { IxClient } from '../../client/api.js';
 import type { GraphPatchPayload } from '../../client/types.js';
 import { canonicalWorkspacePath, isPathInside, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
 import { resolveIngestRoot } from '../map-root.js';
-import { acquireMapLock, type LockHandle } from '../single-flight.js';
+import { acquireMapLock, requestMapRerun, takeMapRerun } from '../single-flight.js';
+import { applyRequestedMapCoalesceExitCode } from './map.js';
 import {
   clearRebuildProgress, extractorChanged, isRev, loadIngestBaseline, loadRebuildProgress,
   saveIngestBaseline, saveRebuildProgress, type BaselineFileNotes,
@@ -1030,20 +1031,74 @@ function renderProgressLine(phase: string, current: number, total: number): stri
 // Command registration
 // ---------------------------------------------------------------------------
 
-/**
- * The map lock for the workspace `target` ingests into: a handle, `null` when
- * another map or ingest holds it, or `undefined` when the target cannot be
- * resolved -- `ingestFiles` then reports that error itself.
- */
-export function acquireIngestLock(target: string, explicitRoot?: string): LockHandle | null | undefined {
-  let root: string;
+type PathIngestOpts = Parameters<typeof ingestFiles>[1];
+
+/** The workspace root `target` ingests into, or undefined when it cannot be resolved. */
+function ingestLockRoot(target: string, explicitRoot?: string): string | undefined {
   try {
     const resolved = nodePath.resolve(target);
-    root = resolveIngestRoot(resolved, fs.statSync(resolved).isDirectory(), explicitRoot);
+    return resolveIngestRoot(resolved, fs.statSync(resolved).isDirectory(), explicitRoot);
   } catch {
+    // `ingestFiles` reports a missing or unreadable path itself.
     return undefined;
   }
-  return acquireMapLock(root, `ix ingest ${root}`);
+}
+
+/**
+ * `ix ingest <path>`, single-flight per workspace under the lock `ix map`
+ * holds. Two ingests (or an ingest and a map) over one workspace race on the
+ * mtime baseline: the second to finish overwrites what the first recorded.
+ *
+ * A run that finds the lock held coalesces the way `ix map` does: it asks the
+ * holder for one more pass (`requestMapRerun`) and exits 0, unless
+ * IX_MAP_COALESCE_EXIT_CODE asks for another code. It used to exit 1, which
+ * editor hooks and MCP clients that ingest after every edit reported as a
+ * failed ingest. The holder takes the request before it lets go: `ix map`
+ * re-ingests the workspace, and so does a holding `ix ingest` when the
+ * workspace has a baseline -- an incremental pass, so it costs a stat per
+ * file. Without a baseline that pass would be a first ingest of the whole
+ * workspace, so it re-ingests only its own path then.
+ */
+export async function ingestPathSingleFlight(target: string, opts: PathIngestOpts): Promise<void> {
+  const root = ingestLockRoot(target, opts.root);
+  if (root === undefined) {
+    await ingestFiles(target, opts);
+    return;
+  }
+  const lock = acquireMapLock(root, `ix ingest ${root}`);
+  if (lock === null) {
+    requestMapRerun(root);
+    if (opts.format === 'json') {
+      // A JSON consumer gets an object, not an empty stdout it cannot parse.
+      printJson({ coalesced: true, workspace: root });
+    } else {
+      process.stderr.write(chalk.dim('  Another ix map or ix ingest is running for this workspace; it will pick up this change before it exits.\n'));
+    }
+    applyRequestedMapCoalesceExitCode();
+    return;
+  }
+  // Holding the lock: a request left before now is covered by this run, which
+  // has not read the tree yet.
+  takeMapRerun(root);
+  try {
+    await ingestFiles(target, opts);
+    if (takeMapRerun(root)) {
+      // One pass at most, as in `ix map`. The waiting run's own flags are not
+      // known here, so this is a plain incremental pass.
+      const rerunTarget = loadIngestBaseline(root) !== null ? root : target;
+      try {
+        await ingestFiles(rerunTarget, {
+          recursive: true, format: 'json', printSummary: false, suppressOutput: true, root: opts.root,
+        });
+      } catch (err: any) {
+        if (opts.format !== 'json') {
+          process.stderr.write(chalk.dim(`  Re-run for an ingest that waited on this one failed: ${err?.message ?? err}\n`));
+        }
+      }
+    }
+  } finally {
+    lock.release();
+  }
 }
 
 export function registerIngestCommand(program: Command): void {
@@ -1077,20 +1132,7 @@ export function registerIngestCommand(program: Command): void {
       if (opts.github) {
         await ingestGitHub(opts);
       } else if (effectivePath) {
-        // The same per-workspace lock `ix map` holds. Two ingests (or an ingest
-        // and a map) over one workspace race on the mtime baseline: the second
-        // to finish overwrites what the first recorded.
-        const lock = acquireIngestLock(effectivePath, opts.root);
-        if (lock === null) {
-          process.stderr.write(chalk.yellow('  Another ix map or ix ingest is running for this workspace. Run this again when it finishes.\n'));
-          process.exitCode = 1;
-          return;
-        }
-        try {
-          await ingestFiles(effectivePath, opts);
-        } finally {
-          lock?.release();
-        }
+        await ingestPathSingleFlight(effectivePath, opts);
       } else {
         console.error('Error: provide a <path> or use --github <owner/repo>');
         process.exit(1);
