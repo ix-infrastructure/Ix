@@ -13,6 +13,7 @@ interface SerializedIngestBaseline {
   tracksMapBaseline?: boolean;
   extractor?: string;
   replayedFiles?: string[];
+  pendingFiles?: string[];
 }
 
 export interface IngestBaseline {
@@ -46,7 +47,28 @@ export interface IngestBaseline {
    * are kept at the previous value, so the next run sends them again.
    */
   replayedFiles: string[];
+  /**
+   * Workspace-relative paths of changed files the last run could not ingest:
+   * a read or build error, a failed commit, a parse lost to a dead worker.
+   * Each keeps its previous mtime, so the next run retries it. A new file has
+   * no previous mtime and is left out of `files`, and a file missing from
+   * `files` is judged stale against `lastIngestAt`, which that same run moved
+   * past the file's mtime -- so without this list `ix status` called the
+   * graph current while the file was not in it.
+   */
+  pendingFiles: string[];
 }
+
+/** Per-file lists a baseline write records beside the mtimes. */
+export interface BaselineFileNotes {
+  /** See `IngestBaseline.replayedFiles`. */
+  replayedFiles?: readonly string[];
+  /** See `IngestBaseline.pendingFiles`. */
+  pendingFiles?: readonly string[];
+}
+
+const stringList = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((p): p is string => typeof p === "string") : [];
 
 /**
  * What counts as a revision, for both sides of this file.
@@ -93,9 +115,8 @@ export function loadIngestBaseline(projectRoot: string): IngestBaseline | null {
       lastIngestAt,
       tracksMapBaseline: data.tracksMapBaseline === true,
       extractor: typeof data.extractor === "string" ? data.extractor : null,
-      replayedFiles: Array.isArray(data.replayedFiles)
-        ? data.replayedFiles.filter((p): p is string => typeof p === "string")
-        : [],
+      replayedFiles: stringList(data.replayedFiles),
+      pendingFiles: stringList(data.pendingFiles),
     };
   } catch {
     return null;
@@ -109,7 +130,7 @@ export function saveIngestBaseline(
   now: Date = new Date(),
   deletedFiles: Map<string, string[]> = new Map(),
   extractor?: string | null,
-  replayedFiles: readonly string[] = [],
+  { replayedFiles = [], pendingFiles = [] }: BaselineFileNotes = {},
 ): void {
   try {
     // Keep the last good rev rather than writing a shape the read side will
@@ -134,6 +155,7 @@ export function saveIngestBaseline(
       tracksMapBaseline: true,
       ...(extractor ? { extractor } : {}),
       ...(replayedFiles.length > 0 ? { replayedFiles: [...replayedFiles].sort() } : {}),
+      ...(pendingFiles.length > 0 ? { pendingFiles: [...new Set(pendingFiles)].sort() } : {}),
     };
     const target = ingestMtimeCachePath(projectRoot);
     fs.mkdirSync(path.dirname(target), { recursive: true });

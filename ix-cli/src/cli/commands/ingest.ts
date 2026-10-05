@@ -17,7 +17,7 @@ import { resolveIngestRoot } from '../map-root.js';
 import { acquireMapLock, type LockHandle } from '../single-flight.js';
 import {
   clearRebuildProgress, extractorChanged, isRev, loadIngestBaseline, loadRebuildProgress,
-  saveIngestBaseline, saveRebuildProgress,
+  saveIngestBaseline, saveRebuildProgress, type BaselineFileNotes,
 } from '../ingest-baseline.js';
 import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
@@ -972,10 +972,10 @@ export function persistIngestBaselineIfClean(
   now?: Date,
   deletedFiles: Map<string, string[]> = new Map(),
   extractor?: string | null,
-  replayedFiles: readonly string[] = [],
+  notes: BaselineFileNotes = {},
 ): boolean {
   if (!ingestCompletedCleanly(parseErrors, commitErrors)) return false;
-  return persistIngestBaseline(projectRoot, mtimes, currentRev, now, deletedFiles, extractor, replayedFiles);
+  return persistIngestBaseline(projectRoot, mtimes, currentRev, now, deletedFiles, extractor, notes);
 }
 
 /**
@@ -989,7 +989,7 @@ export function persistIngestBaseline(
   now?: Date,
   deletedFiles: Map<string, string[]> = new Map(),
   extractor?: string | null,
-  replayedFiles: readonly string[] = [],
+  notes: BaselineFileNotes = {},
 ): boolean {
   // An empty mtime map is normally a discovery failure, not an empty repo —
   // an over-broad ignore rule, the wrong cwd, a glob that matched nothing —
@@ -1002,7 +1002,7 @@ export function persistIngestBaseline(
   // empty is a real state and is persisted; without them, it is still treated
   // as discovery having gone wrong.
   if (mtimes.size === 0 && deletedFiles.size === 0) return false;
-  saveIngestBaseline(projectRoot, mtimes, currentRev, now, deletedFiles, extractor, replayedFiles);
+  saveIngestBaseline(projectRoot, mtimes, currentRev, now, deletedFiles, extractor, notes);
   return true;
 }
 
@@ -3656,7 +3656,7 @@ export async function ingestFiles(
             new Date(previousBaseline.lastIngestAt),
             durableDeletedFiles,
             previousBaseline.extractor,
-            previousBaseline.replayedFiles,
+            { replayedFiles: previousBaseline.replayedFiles, pendingFiles: previousBaseline.pendingFiles },
           );
         }
       }
@@ -3712,6 +3712,19 @@ export async function ingestFiles(
       const rel = toWorkspaceRelative(abs);
       return !committedRel.has(rel) && !(unparsedRel.has(rel) && !lostParses);
     });
+    // Name the unsettled files too. A new one has no previous mtime, so it is
+    // left out of the baseline, and `ix status` judges a file the baseline
+    // does not list against `lastIngestAt` -- which this write moves past the
+    // file's mtime. Without the list, status called the graph current while
+    // the file was missing from it. A replayed change has its own list. As
+    // with replays, a run that did not look at a file has not resolved it.
+    const pendingFiles = [
+      ...unsettled.map(toWorkspaceRelative).filter(rel => !replayedChanges.has(rel)),
+      ...(previousBaseline?.pendingFiles ?? []).filter(rel => {
+        const abs = nodePath.resolve(workspaceRoot, rel);
+        return (!inScope(abs) || langExcluded.includes(abs)) && fs.existsSync(abs);
+      }),
+    ];
     // A deletion whose patch did not land keeps its entry, so it is found
     // deleted again next run.
     const failedDeletions = deletedPaths.filter(abs => !committedRel.has(toWorkspaceRelative(abs)));
@@ -3728,7 +3741,7 @@ export async function ingestFiles(
       // An unfinished re-ingest must not vouch for the new extractor: files
       // that failed would then be hash-clean next run and keep the old output.
       runClean ? baselineExtractor : (previousBaseline?.extractor ?? baselineExtractor),
-      replayedFiles,
+      { replayedFiles, pendingFiles },
     );
     if (rebuildProgress !== null) {
       // Finished: the baseline now records the new extractor. Otherwise keep

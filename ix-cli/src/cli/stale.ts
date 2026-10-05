@@ -78,6 +78,15 @@ function differsFromIngestBaseline(
 }
 
 /**
+ * Absolute paths of the files the last run could not ingest. They count as
+ * changed whatever their mtime: a new one is absent from `files` with an mtime
+ * older than `lastIngestAt`, which would otherwise read as current.
+ */
+function pendingSet(workspaceRoot: string, pendingFiles: readonly string[]): Set<string> {
+  return new Set(pendingFiles.map((rel) => path.resolve(workspaceRoot, rel)));
+}
+
+/**
  * Detect files that have been modified since the last ingest.
  * Uses the workspace-local ingest baseline so another workspace cannot advance it.
  *
@@ -110,12 +119,14 @@ export function detectStaleFiles(
   const files = collectFiles(workspaceRoot);
   const currentFiles = new Set(files.map((filePath) => path.resolve(filePath)));
   const changedFiles: string[] = [];
+  const pending = pendingSet(workspaceRoot, baseline.pendingFiles);
 
   for (const filePath of files) {
     try {
       const stat = fs.statSync(filePath);
       if (
-        differsFromIngestBaseline(filePath, stat.mtimeMs, baseline.files, baseline.lastIngestAt)
+        pending.has(path.resolve(filePath))
+        || differsFromIngestBaseline(filePath, stat.mtimeMs, baseline.files, baseline.lastIngestAt)
       ) {
         // Make path relative to root for display
         const relative = path.relative(workspaceRoot, filePath);
@@ -196,6 +207,7 @@ export function isFileStale(filePath: string): boolean {
 export function createStaleProbe(): (filePath: string) => boolean {
   const workspaceRoot = path.resolve(resolveWorkspaceRoot());
   const baseline = loadIngestBaseline(workspaceRoot);
+  const pending = baseline ? pendingSet(workspaceRoot, baseline.pendingFiles) : new Set<string>();
 
   return (filePath: string): boolean => {
     // No baseline means the question this probe answers — "did this file change
@@ -213,6 +225,7 @@ export function createStaleProbe(): (filePath: string) => boolean {
     if (!fs.existsSync(absolutePath)) {
       return baseline.files.has(absolutePath) || baseline.files.has(filePath);
     }
+    if (pending.has(absolutePath)) return true;
 
     try {
       return differsFromIngestBaseline(

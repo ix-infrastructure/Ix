@@ -838,6 +838,39 @@ describe("ingestFiles against a fake backend", () => {
       },
     );
 
+    it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+      "a new file that fails is pending: retried, and ix status does not call the graph current",
+      async () => {
+        // A new file has no previous mtime to keep, so it dropped out of the
+        // baseline while `lastIngestAt` moved past its mtime, and status
+        // judged it current.
+        fixture(3);
+        await incremental();
+        const added = join(repo, "src", "added.ts");
+        writeFileSync(added, "export const added = 1;\n", "utf8");
+        stage();
+        execFileSync("chmod", ["000", added]);
+        try {
+          await incremental();
+        } finally {
+          execFileSync("chmod", ["644", added]);
+        }
+
+        expect(stored().files.has(added)).toBe(false);
+        expect(stored().pendingFiles).toEqual(["src/added.ts"]);
+        const status = detectStaleFiles(repo);
+        expect(status.staleFiles).toBe(1);
+        expect(status.sampleChangedFiles).toEqual(["src/added.ts"]);
+        expect(renderStatusLlm("ok", "x", status)[0]).toContain("stale=true");
+
+        // The next run sends it and clears the list.
+        await incremental();
+        expect(stored().files.get(added)).toBe(statSync(added).mtimeMs);
+        expect(stored().pendingFiles).toEqual([]);
+        expect(detectStaleFiles(repo).staleFiles).toBe(0);
+      },
+    );
+
     it("a failed lookup is not a reset", async () => {
       fixture(3);
       backend.rememberHashes = true;

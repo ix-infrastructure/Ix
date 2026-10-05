@@ -317,6 +317,7 @@ describe("workspace-scoped staleness", () => {
       tracksMapBaseline: true,
       extractor: "tree-sitter/9.9",
       replayedFiles: [],
+      pendingFiles: [],
     });
   });
 
