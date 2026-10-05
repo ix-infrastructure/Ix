@@ -1,0 +1,81 @@
+# Copyright 2026 Ix Infrastructure Inc.
+#
+# Throwaway backend for the real-backend harness (test/e2e). Every scenario
+# resets this database, so it gets its own compose project and ports and must
+# never be pointed at a stack anything else uses. See test/e2e/README.md.
+# Start and stop it with `npm run e2e:up` / `npm run e2e:down` (stack.mjs).
+#
+#   IX_E2E_PROJECT        compose project name      (default ix-e2e)
+#   IX_E2E_BACKEND_PORT   host port of memory-layer (default 8290)
+#   IX_E2E_ARANGO_PORT    host port of ArangoDB     (default 8729)
+#   IX_E2E_BACKEND_IMAGE  memory-layer image        (default: the pin below; see stack.mjs)
+#
+# Memory is capped: ArangoDB's caches otherwise size themselves from host RAM
+# (a 9 GB block cache on a 30 GB host). The whole stack stays under ~2.7 GB.
+
+name: ${IX_E2E_PROJECT:-ix-e2e}
+
+services:
+  arangodb:
+    image: arangodb:3.12.12
+    networks: [backend]
+    ports:
+      # Published only for the graph-signature reads in graph-sig.mjs.
+      - "127.0.0.1:${IX_E2E_ARANGO_PORT:-8729}:8529"
+    environment:
+      ARANGO_NO_AUTH: "1"
+      # Every default derived from "physical memory" derives from this instead.
+      ARANGODB_OVERRIDE_DETECTED_TOTAL_MEMORY: "1G"
+    command:
+      - arangod
+      - --server.endpoint=tcp://0.0.0.0:8529
+      - --vector-index=true
+      - --rocksdb.block-cache-size=268435456          # 256 MB
+      - --rocksdb.enforce-block-cache-size-limit=true
+      - --rocksdb.total-write-buffer-size=134217728   # 128 MB
+      - --cache.size=67108864                         # 64 MB edge/document cache
+      - --query.memory-limit=536870912                # 512 MB per query
+      - --query.global-memory-limit=805306368         # 768 MB all queries
+    mem_limit: 1200m
+    memswap_limit: 1200m
+    volumes:
+      - arangodb-data:/var/lib/arangodb3
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8529/_api/version || exit 1"]
+      interval: 5s
+      timeout: 5s
+      start_period: 60s
+      retries: 15
+
+  memory-layer:
+    # Literal, so Dependabot can propose bumps. Set IX_E2E_BACKEND_IMAGE to run
+    # another image (stack.mjs then adds compose.image-override.yml).
+    image: ghcr.io/ix-infrastructure/ix-memory-layer:1.0.32@sha256:4923d043a31d6dac5edae4ef55b05367dcf6575652a421c4c6b5e83bcebf92c9
+    networks: [backend]
+    ports:
+      - "127.0.0.1:${IX_E2E_BACKEND_PORT:-8290}:8090"
+    environment:
+      ARANGO_HOST: arangodb
+      ARANGO_PORT: "8529"
+      ARANGO_DATABASE: ix_memory
+      ARANGO_USER: root
+      ARANGO_PASSWORD: ""
+      PORT: "8090"
+      JAVA_TOOL_OPTIONS: "-Xmx512m"
+    mem_limit: 1500m
+    memswap_limit: 1500m
+    depends_on:
+      arangodb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8090/v1/health"]
+      interval: 5s
+      timeout: 3s
+      start_period: 15s
+      retries: 12
+
+volumes:
+  arangodb-data:
+
+networks:
+  backend:

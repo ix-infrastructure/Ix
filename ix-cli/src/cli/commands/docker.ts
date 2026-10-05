@@ -3,9 +3,10 @@
 import { Command } from "commander";
 import { execFileSync, spawn } from "child_process";
 import { createInterface } from "readline";
-import { existsSync, mkdirSync } from "fs";
-import { join } from "path";
+import { copyFileSync, existsSync, mkdirSync } from "fs";
+import { dirname, join } from "path";
 import { homedir } from "os";
+import { fileURLToPath } from "url";
 import { stampBackendVersionAfterPull } from "./upgrade.js";
 
 const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
@@ -13,14 +14,70 @@ const COMPOSE_DIR = join(IX_HOME, "backend");
 const LOCAL_COMPOSE = join(COMPOSE_DIR, "docker-compose.yml");
 const HEALTH_URL = "http://localhost:8090/v1/health";
 const ARANGO_URL = "http://localhost:8529/_api/version";
-const GITHUB_RAW =
-  "https://raw.githubusercontent.com/ix-infrastructure/Ix/main";
 
+/**
+ * The compose file this CLI release ships. `npm run build` copies the repo's
+ * docker-compose.standalone.yml to dist/, which the release tarball carries;
+ * a source checkout also finds it at the repo root, four levels above this
+ * file. Both are located from the CLI's own install, never from the cwd.
+ */
+function bundledComposeFile(): string | null {
+  if (process.env.NODE_ENV === "test" && process.env.IX_BUNDLED_COMPOSE !== undefined) {
+    return process.env.IX_BUNDLED_COMPOSE && existsSync(process.env.IX_BUNDLED_COMPOSE)
+      ? process.env.IX_BUNDLED_COMPOSE
+      : null;
+  }
+  const here = dirname(fileURLToPath(import.meta.url));
+  for (const candidate of [
+    join(here, "..", "..", "docker-compose.standalone.yml"),
+    join(here, "..", "..", "..", "..", "docker-compose.standalone.yml"),
+  ]) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * The backend's compose file, ~/.ix/backend/docker-compose.yml, written from
+ * the copy this CLI ships when it is missing. Never a docker-compose.yml from
+ * the working directory: `ix docker start` inside an untrusted repository
+ * would otherwise run whatever services that repository's compose file
+ * declares. And never a download from the `main` branch, which may not match
+ * the installed CLI.
+ */
 function findComposeFile(): string | null {
   if (existsSync(LOCAL_COMPOSE)) return LOCAL_COMPOSE;
-  const repoCompose = join(process.cwd(), "docker-compose.yml");
-  if (existsSync(repoCompose)) return repoCompose;
-  return null;
+  const bundled = bundledComposeFile();
+  if (!bundled) return null;
+  try {
+    mkdirSync(COMPOSE_DIR, { recursive: true });
+    copyFileSync(bundled, LOCAL_COMPOSE);
+    return LOCAL_COMPOSE;
+  } catch {
+    return null;
+  }
+}
+
+function reportMissingCompose(): void {
+  console.error(`[error] No backend compose file at ${LOCAL_COMPOSE}, and this CLI install does not ship one.`);
+  console.error("  Reinstall or run 'ix upgrade' to restore it.");
+}
+
+/** Compose projects whose volumes are Ix backend data: ix docker's own, and a repo checkout run directly. */
+const IX_COMPOSE_PROJECTS = new Set(["backend", "ix"]);
+
+/**
+ * Is this volume an Ix backend's ArangoDB data? Exact compose project and
+ * volume names. The previous test (project starting with "ix", volume
+ * containing "arango") also matched other stacks' databases on the same
+ * machine (ix-bench, a personal or test backend), which --remove-all-data
+ * then deleted.
+ */
+export function isIxArangoVolume(labels: Map<string, string>): boolean {
+  return (
+    IX_COMPOSE_PROJECTS.has(labels.get("com.docker.compose.project") ?? "") &&
+    labels.get("com.docker.compose.volume") === "arangodb-data"
+  );
 }
 
 function findIxArangoVolumes(): string[] {
@@ -42,10 +99,7 @@ function findIxArangoVolumes(): string[] {
         if (eq > 0) labelMap.set(pair.slice(0, eq), pair.slice(eq + 1));
       }
 
-      const project = labelMap.get("com.docker.compose.project") ?? "";
-      const volume = labelMap.get("com.docker.compose.volume") ?? "";
-
-      return project.startsWith("ix") && volume.includes("arango");
+      return isIxArangoVolume(labelMap);
     }).map((line) => line.split("|", 1)[0]);
   } catch {
     return [];
@@ -91,19 +145,8 @@ export function registerDockerCommand(program: Command): void {
     .alias("up")
     .description("Start the IX backend (ArangoDB + Memory Layer)")
     .action(async () => {
-      // Always ensure standalone compose file exists so stop/restart work from any directory
-      if (!existsSync(LOCAL_COMPOSE)) {
-        try {
-          mkdirSync(COMPOSE_DIR, { recursive: true });
-          execFileSync(
-            "curl",
-            ["-fsSL", `${GITHUB_RAW}/docker-compose.standalone.yml`, "-o", LOCAL_COMPOSE],
-            { stdio: "ignore" }
-          );
-        } catch {
-          // Non-critical — start can still work from repo dir
-        }
-      }
+      // Written before anything else, so stop/restart/logs work from any directory.
+      const composeFile = findComposeFile();
 
       if (isHealthy()) {
         console.log("[ok] Backend is already running and healthy");
@@ -118,23 +161,9 @@ export function registerDockerCommand(program: Command): void {
         process.exit(1);
       }
 
-      let composeFile = findComposeFile();
-
       if (!composeFile) {
-        console.log("Downloading docker-compose.yml...");
-        try {
-          mkdirSync(COMPOSE_DIR, { recursive: true });
-          execFileSync(
-            "curl",
-            ["-fsSL", `${GITHUB_RAW}/docker-compose.standalone.yml`, "-o", LOCAL_COMPOSE],
-            { stdio: "inherit" }
-          );
-          composeFile = LOCAL_COMPOSE;
-          console.log(`[ok] Saved to ${COMPOSE_DIR}`);
-        } catch {
-          console.error("[error] Failed to download docker-compose.yml");
-          process.exit(1);
-        }
+        reportMissingCompose();
+        process.exit(1);
       }
 
       console.log("Starting backend services...");
@@ -153,8 +182,8 @@ export function registerDockerCommand(program: Command): void {
       // when `ix upgrade` runs, so starting the backend any other way leaves a
       // file naming an older release and the update notice fires on every
       // command for ever. The compose file is passed because it decides whether
-      // that premise holds at all: this falls back to any docker-compose.yml in
-      // the working directory, which may pin a tag, a digest, or a local build.
+      // that premise holds at all: a user may have edited it to pin a tag, a
+      // digest, or a local build.
       // Awaited so the stamp is on disk before the command returns, and it
       // cannot fail the start: the helper swallows its own errors.
       await stampBackendVersionAfterPull(composeFile);
@@ -187,8 +216,7 @@ export function registerDockerCommand(program: Command): void {
     .action(async (opts) => {
       const composeFile = findComposeFile();
       if (!composeFile) {
-        console.error("[error] No docker-compose.yml found.");
-        console.error("  Run 'ix docker start' first, or run from the Ix repo.");
+        reportMissingCompose();
         process.exit(1);
       }
 
@@ -300,7 +328,7 @@ export function registerDockerCommand(program: Command): void {
     .action((opts) => {
       const composeFile = findComposeFile();
       if (!composeFile) {
-        console.error("[error] No docker-compose.yml found.");
+        reportMissingCompose();
         process.exit(1);
       }
 
@@ -316,7 +344,7 @@ export function registerDockerCommand(program: Command): void {
     .action(() => {
       const composeFile = findComposeFile();
       if (!composeFile) {
-        console.error("[error] No docker-compose.yml found.");
+        reportMissingCompose();
         process.exit(1);
       }
 

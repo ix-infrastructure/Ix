@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { createServer } from "node:net";
 import { Script } from "node:vm";
 import * as http from "node:http";
-import { browserUrl, runningInstanceLines, serverRuntimeArgs, serverScript } from "../commands/view.js";
+import { browserOpener, browserUrl, runningInstanceLines, serverRuntimeArgs, serverScript } from "../commands/view.js";
 
 interface StartServerOptions {
   workspaceId?: string;
@@ -289,6 +289,119 @@ describe("view server (/__ix/remap)", () => {
     }
   });
 
+  /**
+   * Run `body` against a server proxying to a recording fake backend, then put
+   * the default server back. `env` reaches the server process.
+   */
+  async function withBackend(
+    env: Record<string, string>,
+    body: (seen: http.IncomingHttpHeaders[]) => Promise<void>,
+  ): Promise<void> {
+    const seen: http.IncomingHttpHeaders[] = [];
+    const backend = http.createServer((req, res) => {
+      seen.push(req.headers);
+      req.resume();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end('{"ok":true}');
+    });
+    await new Promise<void>((resolve, reject) => {
+      backend.once("error", reject);
+      backend.listen(0, "127.0.0.1", resolve);
+    });
+    const address = backend.address();
+    if (!address || typeof address === "string") throw new Error("backend did not bind a TCP port");
+    try {
+      await startServer(env, mapRoot, { backendUrl: `http://127.0.0.1:${address.port}` });
+      await body(seen);
+    } finally {
+      await stopServer();
+      await new Promise<void>((resolve, reject) => backend.close((err) => (err ? reject(err) : resolve())));
+      await startServer({ STUB_EXIT: "0" });
+    }
+  }
+
+  /** A request with headers fetch will not send (Host), answered with its status. */
+  const rawStatus = (method: string, path: string, headers: Record<string, string>) =>
+    new Promise<number>((resolve, reject) => {
+      const req = http.request({ host: "127.0.0.1", port, path, method, headers }, (res) => {
+        res.resume();
+        res.on("end", () => resolve(res.statusCode ?? 0));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+
+  it("refuses a cross-origin POST to the /v1 proxy without reaching the backend", async () => {
+    await withBackend({}, async (seen) => {
+      const res = await post("/v1/reset", { origin: "https://evil.example" });
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ ok: false, error: "forbidden: loopback only" });
+      expect(seen).toHaveLength(0);
+    });
+  });
+
+  it("refuses a foreign Host on the /v1 proxy and on static files (DNS rebinding)", async () => {
+    await withBackend({}, async (seen) => {
+      expect(await rawStatus("GET", "/v1/health", { host: "attacker.example" })).toBe(403);
+      expect(await rawStatus("POST", "/v1/reset", { host: `attacker.example:${port}` })).toBe(403);
+      expect(await rawStatus("GET", "/", { host: "attacker.example" })).toBe(403);
+      expect(seen).toHaveLength(0);
+    });
+  });
+
+  it("refuses a request the browser marks cross-site, even with no Origin", async () => {
+    await withBackend({}, async (seen) => {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/health`, { headers: { "sec-fetch-site": "cross-site" } });
+      expect(res.status).toBe(403);
+      expect(seen).toHaveLength(0);
+    });
+  });
+
+  it("still serves the visualizer and proxies its same-origin reads", async () => {
+    await withBackend({}, async (seen) => {
+      const page = await fetch(`http://127.0.0.1:${port}/`, { headers: { "sec-fetch-site": "none" } });
+      expect(page.status).toBe(200);
+      expect(await page.text()).toContain("fake compass");
+      const res = await fetch(`http://127.0.0.1:${port}/v1/health`, {
+        headers: { origin: `http://localhost:${port}`, "sec-fetch-site": "same-origin" },
+      });
+      expect(res.status).toBe(200);
+      expect(seen).toHaveLength(1);
+    });
+  });
+
+  it("sends the backend token and never the caller's own credentials or origin", async () => {
+    await withBackend({ IX_VIEW_BACKEND_TOKEN: "tok-123" }, async (seen) => {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/search`, {
+        method: "POST",
+        headers: { authorization: "Bearer caller", origin: `http://127.0.0.1:${port}`, "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(res.status).toBe(200);
+      expect(seen[0].authorization).toBe("Bearer tok-123");
+      expect(seen[0].origin).toBeUndefined();
+    });
+  });
+
+  it("proxies only /v1 paths, after resolving dot segments", async () => {
+    await withBackend({ IX_VIEW_BACKEND_TOKEN: "tok-123" }, async (seen) => {
+      for (const path of ["/v1/../admin", "/v1/%2e%2e/admin", "/v1/%2E%2E/admin", "/v1x", "/v1.."]) {
+        expect(await rawStatus("GET", path, { host: `127.0.0.1:${port}` })).toBe(404);
+      }
+      expect(seen).toHaveLength(0);
+      expect(await rawStatus("GET", "/v1/a/../health?x=1", { host: `127.0.0.1:${port}` })).toBe(200);
+      expect(seen).toHaveLength(1);
+    });
+  });
+
+  it("forwards no Authorization at all while there is no token", async () => {
+    await withBackend({ IX_VIEW_BACKEND_TOKEN: "" }, async (seen) => {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/health`, { headers: { authorization: "Bearer caller" } });
+      expect(res.status).toBe(200);
+      expect(seen[0].authorization).toBeUndefined();
+    });
+  });
+
   it("accepts a same-origin loopback Origin", async () => {
     const res = await post("/__ix/remap", { origin: `http://localhost:${port}`, host: `127.0.0.1:${port}` });
     expect(res.status).toBe(200);
@@ -545,5 +658,15 @@ describe("generated server script", () => {
     const script = serverScript();
     expect(script).not.toContain("`");
     expect(script).not.toContain("\\");
+  });
+});
+
+describe("browserOpener", () => {
+  // The URL is one argument to a program, never part of a shell command line.
+  it("passes the URL as a single argument on every platform", () => {
+    const url = "http://localhost:4173/?ix=abc;rm -rf ~";
+    expect(browserOpener(url, "darwin")).toEqual(["open", [url]]);
+    expect(browserOpener(url, "linux")).toEqual(["xdg-open", [url]]);
+    expect(browserOpener(url, "win32")).toEqual(["explorer.exe", [url]]);
   });
 });

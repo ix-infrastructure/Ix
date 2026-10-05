@@ -3,7 +3,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient, type ListSubsystemsOptions } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../../client/factory.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { roundFloat, printJson } from "../format.js";
@@ -117,7 +117,7 @@ Examples:
       verbose?: boolean;
       explain?: boolean;
     }) => {
-      const client = new IxClient(getEndpoint());
+      const client = createClient();
       // Auto-detect a multi-repo system; scope by system_id (spanning all member
       // repos) when present, otherwise the single-repo workspace_id.
       const systemId = await resolveReadSystemId(client);

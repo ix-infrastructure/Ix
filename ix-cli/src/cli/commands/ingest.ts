@@ -12,17 +12,19 @@ import { ParsePool } from './parse-pool.js';
 import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
 import type { GraphPatchPayload } from '../../client/types.js';
-import { canonicalWorkspacePath, getEndpoint, isPathInside, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
+import { canonicalWorkspacePath, isPathInside, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
 import { resolveIngestRoot } from '../map-root.js';
+import { acquireMapLock, requestMapRerun, takeMapRerun } from '../single-flight.js';
+import { applyRequestedMapCoalesceExitCode } from './map.js';
 import {
   clearRebuildProgress, extractorChanged, isRev, loadIngestBaseline, loadRebuildProgress,
-  saveIngestBaseline, saveRebuildProgress,
+  saveIngestBaseline, saveRebuildProgress, type BaselineFileNotes,
 } from '../ingest-baseline.js';
 import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
 import { loadIngestionModules } from './ingestion-loader.js';
 import { declaredPackageDirs } from '../package-dirs.js';
-import { ensureWorkspaceIdState } from '../bootstrap.js';
+import { ensureWorkspaceIdState, workspaceStateFor } from '../bootstrap.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
 import { admitStitchWaiting, connectionNeverEstablished, type StitchRefusal } from '../stitch-guard.js';
@@ -51,6 +53,8 @@ import {
   transformCommit,
 } from '../github/transform.js';
 import { printJson } from '../format.js';
+import { describeReplayedChanges } from '../graph-health.js';
+import { createClient } from "../../client/factory.js";
 // ---------------------------------------------------------------------------
 // File discovery
 // ---------------------------------------------------------------------------
@@ -345,7 +349,9 @@ export function tryGitLsFiles(
   try {
     const result = spawnSync(
       'git',
-      ['ls-files', '--cached', '--others', '--exclude-standard'],
+      // -c: a cloned repository's own .git/config can name a core.fsmonitor
+      // command, which ls-files would run. Never let it.
+      ['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', 'ls-files', '--cached', '--others', '--exclude-standard'],
       {
         cwd: dir,
         encoding: 'utf-8',
@@ -957,6 +963,28 @@ export function carryForwardMtimes(
   return out;
 }
 
+/**
+ * The mtimes to record, with each of `retried` back at its previous mtime --
+ * or left out when it had none -- so the next run sees it as changed and sends
+ * it again. For files whose patch this run could not get applied (F-01): a
+ * deleted file comes back too, which is what makes the next run find it
+ * deleted again.
+ */
+export function retryOnNextRun(
+  mtimes: Map<string, number>,
+  previousMtimes: Map<string, number>,
+  retried: readonly string[],
+): Map<string, number> {
+  if (retried.length === 0) return mtimes;
+  const out = new Map(mtimes);
+  for (const filePath of retried) {
+    const previous = previousMtimes.get(filePath);
+    if (previous === undefined) out.delete(filePath);
+    else out.set(filePath, previous);
+  }
+  return out;
+}
+
 export function persistIngestBaselineIfClean(
   projectRoot: string,
   mtimes: Map<string, number>,
@@ -966,8 +994,25 @@ export function persistIngestBaselineIfClean(
   now?: Date,
   deletedFiles: Map<string, string[]> = new Map(),
   extractor?: string | null,
+  notes: BaselineFileNotes = {},
 ): boolean {
   if (!ingestCompletedCleanly(parseErrors, commitErrors)) return false;
+  return persistIngestBaseline(projectRoot, mtimes, currentRev, now, deletedFiles, extractor, notes);
+}
+
+/**
+ * Write the baseline -- whatever errors the run had. The caller has already
+ * left the files it did not settle at their previous mtimes.
+ */
+export function persistIngestBaseline(
+  projectRoot: string,
+  mtimes: Map<string, number>,
+  currentRev: number,
+  now?: Date,
+  deletedFiles: Map<string, string[]> = new Map(),
+  extractor?: string | null,
+  notes: BaselineFileNotes = {},
+): boolean {
   // An empty mtime map is normally a discovery failure, not an empty repo —
   // an over-broad ignore rule, the wrong cwd, a glob that matched nothing —
   // and persisting it silently discards the baseline, forcing a full re-ingest
@@ -979,7 +1024,7 @@ export function persistIngestBaselineIfClean(
   // empty is a real state and is persisted; without them, it is still treated
   // as discovery having gone wrong.
   if (mtimes.size === 0 && deletedFiles.size === 0) return false;
-  saveIngestBaseline(projectRoot, mtimes, currentRev, now, deletedFiles, extractor);
+  saveIngestBaseline(projectRoot, mtimes, currentRev, now, deletedFiles, extractor, notes);
   return true;
 }
 
@@ -1006,6 +1051,76 @@ function renderProgressLine(phase: string, current: number, total: number): stri
 // ---------------------------------------------------------------------------
 // Command registration
 // ---------------------------------------------------------------------------
+
+type PathIngestOpts = Parameters<typeof ingestFiles>[1];
+
+/** The workspace root `target` ingests into, or undefined when it cannot be resolved. */
+function ingestLockRoot(target: string, explicitRoot?: string): string | undefined {
+  try {
+    const resolved = nodePath.resolve(target);
+    return resolveIngestRoot(resolved, fs.statSync(resolved).isDirectory(), explicitRoot);
+  } catch {
+    // `ingestFiles` reports a missing or unreadable path itself.
+    return undefined;
+  }
+}
+
+/**
+ * `ix ingest <path>`, single-flight per workspace under the lock `ix map`
+ * holds. Two ingests (or an ingest and a map) over one workspace race on the
+ * mtime baseline: the second to finish overwrites what the first recorded.
+ *
+ * A run that finds the lock held coalesces the way `ix map` does: it asks the
+ * holder for one more pass (`requestMapRerun`) and exits 0, unless
+ * IX_MAP_COALESCE_EXIT_CODE asks for another code. It used to exit 1, which
+ * editor hooks and MCP clients that ingest after every edit reported as a
+ * failed ingest. The holder takes the request before it lets go: `ix map`
+ * re-ingests the workspace, and so does a holding `ix ingest` when the
+ * workspace has a baseline -- an incremental pass, so it costs a stat per
+ * file. Without a baseline that pass would be a first ingest of the whole
+ * workspace, so it re-ingests only its own path then.
+ */
+export async function ingestPathSingleFlight(target: string, opts: PathIngestOpts): Promise<void> {
+  const root = ingestLockRoot(target, opts.root);
+  if (root === undefined) {
+    await ingestFiles(target, opts);
+    return;
+  }
+  const lock = acquireMapLock(root, `ix ingest ${root}`);
+  if (lock === null) {
+    requestMapRerun(root);
+    if (opts.format === 'json') {
+      // A JSON consumer gets an object, not an empty stdout it cannot parse.
+      printJson({ coalesced: true, workspace: root });
+    } else {
+      process.stderr.write(chalk.dim('  Another ix map or ix ingest is running for this workspace; it will pick up this change before it exits.\n'));
+    }
+    applyRequestedMapCoalesceExitCode();
+    return;
+  }
+  // Holding the lock: a request left before now is covered by this run, which
+  // has not read the tree yet.
+  takeMapRerun(root);
+  try {
+    await ingestFiles(target, opts);
+    if (takeMapRerun(root)) {
+      // One pass at most, as in `ix map`. The waiting run's own flags are not
+      // known here, so this is a plain incremental pass.
+      const rerunTarget = loadIngestBaseline(root) !== null ? root : target;
+      try {
+        await ingestFiles(rerunTarget, {
+          recursive: true, format: 'json', printSummary: false, suppressOutput: true, root: opts.root,
+        });
+      } catch (err: any) {
+        if (opts.format !== 'json') {
+          process.stderr.write(chalk.dim(`  Re-run for an ingest that waited on this one failed: ${err?.message ?? err}\n`));
+        }
+      }
+    }
+  } finally {
+    lock.release();
+  }
+}
 
 export function registerIngestCommand(program: Command): void {
   program
@@ -1038,7 +1153,7 @@ export function registerIngestCommand(program: Command): void {
       if (opts.github) {
         await ingestGitHub(opts);
       } else if (effectivePath) {
-        await ingestFiles(effectivePath, opts);
+        await ingestPathSingleFlight(effectivePath, opts);
       } else {
         console.error('Error: provide a <path> or use --github <owner/repo>');
         process.exit(1);
@@ -1094,6 +1209,17 @@ export interface IngestFilesSummary {
    * sign that nothing needed to be (#527).
    */
   idempotentPatches: number;
+  /**
+   * Changed files whose patch the backend answered `Idempotent` (F-01), by
+   * workspace-relative path. Unlike the rest of `idempotentPatches`, these
+   * are not harmless: the file differs from what the backend last recorded
+   * for it, yet its patch id was committed before -- a file reverted to
+   * earlier bytes, or deleted and restored -- so the backend wrote nothing and
+   * the graph still shows the content in between. Not counted as errors and
+   * not in the exit code; the run warns, and the baseline keeps these files
+   * dirty so the next run sends them again.
+   */
+  replayedChanges: string[];
   /**
    * Files this run skipped because they were already unchanged — mtime-clean
    * against the local baseline, or hash-clean against the backend.
@@ -1294,8 +1420,8 @@ export function describeStitchSkipped(
   // stay frozen. Only a run that re-ingests every file gets back in.
   // Every branch names `--force`, because nothing else re-registers this
   // workspace. A skipped stitch does NOT stop the run persisting its mtime
-  // baseline -- `persistIngestBaselineIfClean` gates on parse and commit errors
-  // only -- so an ordinary re-run is incremental, skips unchanged files, and
+  // baseline -- the baseline records every file the run settled, stitch or
+  // not -- so an ordinary re-run is incremental, skips unchanged files, and
   // never enters the stitch block. "Re-run once that finishes" and "raise
   // IX_MAP_DEADLINE_MS" were both promises this code cannot keep: the re-run
   // prints nothing, exits 0, and the cross-repo edges stay exactly as stale.
@@ -1583,16 +1709,15 @@ export async function ingestFiles(
   // discovery, deletion and the stitch are limited to it, and the rest of the
   // workspace's baseline is carried forward untouched.
   const workspaceRoot = resolveIngestRoot(resolvedPath, fs.statSync(resolvedPath).isDirectory(), opts.root);
+  // A new workspace is only registered once a commit lands (below, before the
+  // summary): see workspaceStateFor.
   const {
     workspaceId,
     migrated: workspaceMigrated,
     previousWorkspaceId,
-    created: workspaceCreated,
     name: workspaceName,
-  } = ensureWorkspaceIdState(workspaceRoot);
-  if (workspaceCreated && !opts.suppressOutput && opts.format === 'text') {
-    process.stderr.write(chalk.dim(`Registered workspace "${workspaceName}" (${workspaceRoot}).\n`));
-  }
+    pending: registrationPending,
+  } = workspaceStateFor(workspaceRoot);
   // What this run discovers. A migrated workspace is widened to its root: the
   // re-key below re-ingests everything under the new id and then deletes the
   // old id's graph, which after a scoped run would leave the rest of the
@@ -1748,7 +1873,7 @@ export async function ingestFiles(
     process.stderr.write(`[multi-repo] system "${detectedSystem!.name}" (${systemId}) members=${detectedSystem!.members.join(', ')} packages=${Object.keys(packageRegistry).length} declaredDeps=${depCount}\n`);
   }
 
-  const client = new IxClient(getEndpoint(), opts.deadlineSignal);
+  const client = createClient({ deadlineSignal: opts.deadlineSignal });
 
   // Schema-version check forces a clean re-ingest when the backend's graph
   // format has changed in a way that invalidates existing node IDs (e.g. the
@@ -1880,6 +2005,16 @@ export async function ingestFiles(
   let filesChanged = 0;
   let patchesApplied = 0;
   let idempotentPatches = 0;
+  /** Workspace-relative paths of changed files the backend answered `Idempotent` (F-01). */
+  const replayedChanges = new Set<string>();
+  // Per-file outcomes, so one failing file does not keep the whole baseline
+  // from being written. A changed file is settled once its patch is committed
+  // (`committedRel`), its content turns out to be what the backend has, or it
+  // is skipped for a reason that will not change (minified); a file that
+  // parsed to nothing is settled only if no worker crashed this run.
+  const committedRel = new Set<string>();
+  const settledAbs = new Set<string>();
+  const unparsedRel = new Set<string>();
   // What `graphUnchanged` is computed from, beside the counters above. Each is
   // a way this run can have written to the graph, or have found it not where
   // the last run left it, without a patch being counted.
@@ -2184,10 +2319,23 @@ export async function ingestFiles(
     // DB-reset guard: if the mtime cache has entries but the server returns no hashes
     // for a small sample, the DB was wiped (e.g. `ix reset` run from a different dir
     // so the cache wasn't cleared). Invalidate the cache so files are re-ingested.
+    // Every baseline entry was committed (a file that failed keeps its previous
+    // entry or none), so each sampled file should be known to the backend.
+    // The sample is spread across the baseline rather than its first five
+    // entries, and a lookup that FAILED proves nothing: it used to come back
+    // empty and read as a reset, re-ingesting the whole workspace over one
+    // timed-out request.
     if (!opts.force && mtimeCache.size > 0) {
-      const samplePaths = [...mtimeCache.keys()].slice(0, 5);
-      const sampleHashes = await loadExistingHashes(client, samplePaths, toWorkspaceRelative, sourceWorkspaceIdOf, debug);
-      if (sampleHashes.size === 0) {
+      const keys = [...mtimeCache.keys()];
+      const step = Math.max(1, Math.floor(keys.length / 5));
+      const samplePaths = keys.filter((_, i) => i % step === 0).slice(0, 5);
+      let sampleHashes: Map<string, string> | undefined;
+      try {
+        sampleHashes = await loadExistingHashes(client, samplePaths, toWorkspaceRelative, sourceWorkspaceIdOf, debug, true);
+      } catch (err) {
+        if (debug) process.stderr.write(`\n  DB-reset check skipped: hash lookup failed: ${err}\n`);
+      }
+      if (sampleHashes !== undefined && sampleHashes.size === 0) {
         mtimeCache.clear();
         // What an unfinished re-ingest committed is gone with the rest.
         rebuildProgress?.clear();
@@ -2331,13 +2479,50 @@ export async function ingestFiles(
       patch: GraphPatchPayload;
       fileNumber: number;
       filePath: string;
+      /**
+       * The graph should change when this lands: the backend held a different
+       * hash for the file, it is a deletion, or it was forced (a restored file
+       * and its dependents). Such a patch answered `Idempotent` wrote nothing
+       * the graph needed -- see `settleCommitted`.
+       */
+      changed: boolean;
     };
 
     const makePreparedPatch = (
       patch: GraphPatchPayload,
       fileNumber: number,
       filePath: string,
-    ): PreparedPatch => ({ patch, fileNumber, filePath });
+      changed: boolean,
+    ): PreparedPatch => ({ patch, fileNumber, filePath, changed });
+
+    let forcedRelativePaths: Set<string> | undefined;
+    /** Whether a workspace-relative path was forced this run. Built on first use, once the set is final. */
+    const isForced = (relFilePath: string): boolean =>
+      (forcedRelativePaths ??= new Set([...forceReingestPaths].map(toWorkspaceRelative))).has(relFilePath);
+
+    /**
+     * Record a patch the backend took, or one it only claims to hold.
+     *
+     * A changed file answered `Idempotent` is a replay of a patch id the backend
+     * committed before: a file reverted to earlier bytes, or deleted and
+     * restored. The backend wrote nothing, so the graph still shows the content
+     * in between (F-01). Such a patch is counted in `replayedChanges`, named in
+     * the summary, and kept away from `onCommitted`, and its file keeps its old
+     * mtime in the baseline so the next run tries again.
+     */
+    const settleCommitted = (
+      item: PreparedPatch,
+      rev: number,
+      replay: boolean,
+      onCommitted?: (item: PreparedPatch, rev: number) => void,
+    ): void => {
+      if (replay && item.changed) {
+        replayedChanges.add(item.filePath);
+        return;
+      }
+      committedRel.add(item.filePath);
+      onCommitted?.(item, rev);
+    };
 
     // Commit HTTP batches in parallel (COMMIT_CONCURRENCY workers). Each worker pulls
     // the next unsent chunk from a shared queue. JS is single-threaded so the queue
@@ -2535,7 +2720,7 @@ export async function ingestFiles(
                 patchesTheBackendTook++;
                 commitBreaker.recordSuccess();
                 if (result.status === COMMIT_STATUS_IDEMPOTENT) idempotentPatches++;
-                opts?.onCommitted?.(item, result.rev);
+                settleCommitted(item, result.rev, result.status === COMMIT_STATUS_IDEMPOTENT, opts?.onCommitted);
               } catch (commitErr) {
                 // Counted apart from parseErrors: a patch that parsed fine and
                 // failed to commit means the graph is now behind the working
@@ -2714,7 +2899,9 @@ export async function ingestFiles(
             // `idempotentPatches: 0` and fall back to the language hypothesis
             // this change exists to retire.
             if (result.status === COMMIT_STATUS_IDEMPOTENT) idempotentPatches += chunk.length;
-            for (const item of chunk) opts?.onCommitted?.(item, result.rev);
+            for (const item of chunk) {
+              settleCommitted(item, result.rev, result.status === COMMIT_STATUS_IDEMPOTENT, opts?.onCommitted);
+            }
             if (debug) process.stderr.write(`  [cutoff] bulk placed ${chunk.length} of ${items.length} held
 `);
             probeQueue = rest;
@@ -2744,7 +2931,8 @@ export async function ingestFiles(
                   // `latestRev` rather than a rev of its own: the server holds
                   // these already, so their rev is at or below it, and
                   // `saveIngestBaseline` floors what it stores anyway.
-                  for (const item of landed) opts?.onCommitted?.(item, latestRev);
+                  // A replay by definition: the server already held these ids.
+                  for (const item of landed) settleCommitted(item, latestRev, true, opts?.onCommitted);
                   // NOT `patchesTheBackendTook`. That counter's whole reason for
                   // existing is to keep 409-sourced counts from reopening a gate
                   // closed against a dead backend -- "counted only where a
@@ -2880,9 +3068,10 @@ export async function ingestFiles(
               // `BaseRevMismatch` wrote nothing: the backend read the latest rev
               // outside the transaction and it moved before the commit ran. It
               // is a lost race, not a replay, so it must not count as applied —
-              // and it belongs in commitErrors, because that is what stops
-              // `persistIngestBaselineIfClean` caching these files as unchanged
-              // and leaving them missing from the graph until the next edit.
+              // it belongs in commitErrors, and it must not reach
+              // `settleCommitted`: an unsettled file keeps its previous mtime,
+              // which is what stops the baseline caching it as unchanged and
+              // leaving it missing from the graph until the next edit.
               if (result.status === COMMIT_STATUS_BASE_REV_MISMATCH) {
                 commitErrors += items.length;
                 if (debug) {
@@ -2898,7 +3087,9 @@ export async function ingestFiles(
               // One status covers the whole bulk: the backend commits the chunk
               // as a unit, so `Idempotent` means every patch in it was a replay.
               if (result.status === COMMIT_STATUS_IDEMPOTENT) idempotentPatches += items.length;
-              for (const item of items) opts?.onCommitted?.(item, result.rev);
+              for (const item of items) {
+                settleCommitted(item, result.rev, result.status === COMMIT_STATUS_IDEMPOTENT, opts?.onCommitted);
+              }
             },
             commitIndividually,
             shouldStop: () => commitBreaker.tripped(),
@@ -3079,7 +3270,7 @@ export async function ingestFiles(
             if (mapMode) patch = stripMapModeOps(patch);
             // source.uri (workspace-relative) and source.workspaceId are set
             // inside buildPatch; the backend stores both as opaque attributes.
-            preparedPatches.push(makePreparedPatch(patch, j + 1, p.filePath));
+            preparedPatches.push(makePreparedPatch(patch, j + 1, p.filePath, previousHash !== undefined || isForced(p.filePath)));
           } catch (err) {
             parseErrors++;
             process.stderr.write(`\n  [patch build error] ${p.filePath}: ${err}\n`);
@@ -3157,7 +3348,7 @@ export async function ingestFiles(
             }
             if (mapMode) patch = stripMapModeOps(patch);
             // source.uri and source.workspaceId are set inside buildPatch (see flushBatch).
-            preparedPatches.push(makePreparedPatch(patch, j + 1, p.filePath));
+            preparedPatches.push(makePreparedPatch(patch, j + 1, p.filePath, previousHash !== undefined || isForced(p.filePath)));
           } catch (err) {
             parseErrors++;
             process.stderr.write(`\n  [patch build error] ${p.filePath}: ${err}\n`);
@@ -3202,6 +3393,7 @@ export async function ingestFiles(
           if (!forceReingestPaths.has(filePath) && knownHashes.get(filePath) === hash) {
             filesSkipped++;
             filesSkippedAsUnchanged++;
+            settledAbs.add(filePath);
             progressCurrent++;
             continue;
           }
@@ -3230,6 +3422,7 @@ export async function ingestFiles(
           const sourceText = bytes.toString('utf-8');
           if (isLikelyMinifiedSource(sourceText)) {
             minifiedLikely++;
+            settledAbs.add(filePath);
             filesSkipped++;
             progressCurrent++;
             if (debug) process.stderr.write(`\n  [skip minified-likely] ${filePath}\n`);
@@ -3292,7 +3485,7 @@ export async function ingestFiles(
           const batch: ParsedFile[] = [];
           for (let j = 0; j < chunk.length; j++) {
             const parsed = parseResults[j] as any;
-            if (!parsed) { filesSkipped++; filesSkippedUnparsed++; continue; }
+            if (!parsed) { filesSkipped++; filesSkippedUnparsed++; unparsedRel.add(chunk[j].filePath); continue; }
             entitiesParsed += parsed.entities.length;
             batch.push({ filePath: chunk[j].filePath, parsed, hash: chunk[j].hash, previousHash: chunk[j].previousHash });
           }
@@ -3433,12 +3626,14 @@ export async function ingestFiles(
             if (!opts.force && !forceReingestPaths.has(absFilePath) && knownHashes.get(absFilePath) === hash) {
               filesSkipped++;
               filesSkippedAsUnchanged++;
+              settledAbs.add(absFilePath);
               return;
             }
             const previousHash = knownHashes.get(absFilePath);
             const sourceText = bytes.toString('utf-8');
             if (isLikelyMinifiedSource(sourceText)) {
               minifiedLikely++;
+              settledAbs.add(absFilePath);
               filesSkipped++;
               if (debug) process.stderr.write(`\n  [skip minified-likely] ${absFilePath}\n`);
               return;
@@ -3460,7 +3655,7 @@ export async function ingestFiles(
           const f = fileData[j];
           if (!f) continue;
           const parsed = parseResults[j] as any;
-          if (!parsed) { filesSkipped++; filesSkippedUnparsed++; continue; }
+          if (!parsed) { filesSkipped++; filesSkippedUnparsed++; unparsedRel.add(f.filePath); continue; }
           entitiesParsed += parsed.entities.length;
           batch.push({ filePath: f.filePath, parsed, hash: f.hash, previousHash: f.previousHash });
         }
@@ -3515,7 +3710,7 @@ export async function ingestFiles(
             mapMode,
           );
           if (mapMode) patch = stripMapModeOps(patch);
-          deletedPatches.push(makePreparedPatch(patch, i + 1, relFilePath));
+          deletedPatches.push(makePreparedPatch(patch, i + 1, relFilePath, true));
           const dependents = [...dependentSourceUris].sort();
           nextDeletedFiles.set(absFilePath, dependents);
           pendingDeletionRecovery.set(relFilePath, {
@@ -3537,16 +3732,26 @@ export async function ingestFiles(
             const recovery = pendingDeletionRecovery.get(item.filePath);
             if (!recovery || !previousBaseline) return;
             durableDeletedFiles.set(recovery.absolutePath, recovery.dependents);
-            saveIngestBaseline(
-              projectRoot,
-              previousMtimes,
-              previousBaseline.currentRev,
-              new Date(previousBaseline.lastIngestAt),
-              durableDeletedFiles,
-              previousBaseline.extractor,
-            );
           },
         });
+        // Once, after the deletions -- it was once per deleted file, the whole
+        // baseline rewritten each time. The run's own baseline write follows;
+        // this records the restore hints in case the run dies before then.
+        if (previousBaseline && durableDeletedFiles.size > 0) {
+          saveIngestBaseline(
+            projectRoot,
+            previousMtimes,
+            previousBaseline.currentRev,
+            new Date(previousBaseline.lastIngestAt),
+            durableDeletedFiles,
+            previousBaseline.extractor,
+            {
+              replayedFiles: previousBaseline.replayedFiles,
+              pendingFiles: previousBaseline.pendingFiles,
+              parseTimeouts: previousBaseline.parseTimeouts,
+            },
+          );
+        }
       }
     }
 
@@ -3569,28 +3774,82 @@ export async function ingestFiles(
     // writes none -- one written from a part of the workspace would mark the
     // whole graph complete.
     const outOfScope = scopedRun ? [...previousMtimes.keys()].filter(fp => !inScope(fp)) : [];
-    const baselinePersisted = (scopedRun && !previousBaseline) ? false : persistIngestBaselineIfClean(
+    // Replayed changes keep their previous mtime, so the next run sends them
+    // again. Patches name files workspace-relative; the baseline is keyed by
+    // absolute path, deleted files included.
+    const absoluteFor = new Map(
+      [...previousMtimes.keys(), ...currentMtimes.keys()].map(abs => [toWorkspaceRelative(abs), abs]),
+    );
+    const replayedAbsolute = [...replayedChanges].flatMap(rel => absoluteFor.get(rel) ?? []);
+    // A run that did not look at a file has not resolved its replay.
+    const replayedFiles = [
+      ...replayedChanges,
+      ...(previousBaseline?.replayedFiles ?? []).filter(rel => {
+        const abs = absoluteFor.get(rel);
+        return abs !== undefined && (!inScope(abs) || langExcluded.includes(abs));
+      }),
+    ];
+    // Per file, not all or nothing. The baseline used to be written only when
+    // the whole run was clean, so one permanently unreadable file meant no run
+    // ever recorded anything again: every map re-read the whole workspace and
+    // deletions were never retracted. Now every file this run settled is
+    // recorded, and every changed file it did not settle -- a read or build
+    // error, a commit that failed, a parse lost to a dead worker -- keeps its
+    // previous mtime (or none) so the next run tries it again. Lost parses
+    // still count: a run whose worker pool died resolves every later file as
+    // null, and recording those would skip them as unchanged for good.
+    const runClean = ingestCompletedCleanly(parseErrors + crashedParses(), commitErrors);
+    const lostParses = crashedParses() > 0;
+    // A parse that ran past the budget is not settled either, though it is
+    // not a crash: the file is not in the graph. It used to be recorded clean,
+    // and since a slow file times out on every run, it was then skipped as
+    // unchanged for good while status called the graph current.
+    const timedOut = new Set(timedOutParses());
+    const unsettled = mtimeChangedPaths.filter(abs => {
+      if (settledAbs.has(abs)) return false;
+      const rel = toWorkspaceRelative(abs);
+      if (timedOut.has(rel)) return true;
+      return !committedRel.has(rel) && !(unparsedRel.has(rel) && !lostParses);
+    });
+    // Name the unsettled files too. A new one has no previous mtime, so it is
+    // left out of the baseline, and `ix status` judges a file the baseline
+    // does not list against `lastIngestAt` -- which this write moves past the
+    // file's mtime. Without the list, status called the graph current while
+    // the file was missing from it. A replayed change has its own list. As
+    // with replays, a run that did not look at a file has not resolved it.
+    const notLookedAt = (rel: string): boolean => {
+      const abs = nodePath.resolve(workspaceRoot, rel);
+      return (!inScope(abs) || langExcluded.includes(abs)) && fs.existsSync(abs);
+    };
+    const pendingFiles = [
+      ...unsettled.map(toWorkspaceRelative).filter(rel => !replayedChanges.has(rel) && !timedOut.has(rel)),
+      ...(previousBaseline?.pendingFiles ?? []).filter(notLookedAt),
+    ];
+    // Timeouts get their own list, which `ix status` warns about by name: the
+    // fix is a larger IX_PARSE_BUDGET_MS, not another run.
+    const parseTimeouts = [...timedOut, ...(previousBaseline?.parseTimeouts ?? []).filter(notLookedAt)];
+    // A deletion whose patch did not land keeps its entry, so it is found
+    // deleted again next run.
+    const failedDeletions = deletedPaths.filter(abs => !committedRel.has(toWorkspaceRelative(abs)));
+    const baselinePersisted = (scopedRun && !previousBaseline) ? false : persistIngestBaseline(
       projectRoot,
-      carryForwardMtimes(currentMtimes, previousMtimes, [...deferredDeletions, ...langExcluded, ...outOfScope]),
+      retryOnNextRun(
+        carryForwardMtimes(currentMtimes, previousMtimes, [...deferredDeletions, ...failedDeletions, ...langExcluded, ...outOfScope]),
+        previousMtimes,
+        [...replayedAbsolute, ...unsettled],
+      ),
       latestRev,
-      // Lost parses count as parse errors HERE, whatever they are called
-      // elsewhere. A run whose worker pool died resolves every later file as
-      // null, and those increment `filesSkippedUnparsed` rather than
-      // `parseErrors` -- so without this the run wrote an mtime baseline for
-      // tens of thousands of files it never parsed or committed, exited 0, and
-      // every later incremental map skipped them as unchanged. Half the graph
-      // missing, recoverable only by `--force`, and worse than `main`, which
-      // respawns without a cap and loses one file per crash.
-      parseErrors + crashedParses(),
-      commitErrors,
       scopedRun && previousBaseline ? new Date(previousBaseline.lastIngestAt) : undefined,
       nextDeletedFiles,
-      baselineExtractor,
+      // An unfinished re-ingest must not vouch for the new extractor: files
+      // that failed would then be hash-clean next run and keep the old output.
+      runClean ? baselineExtractor : (previousBaseline?.extractor ?? baselineExtractor),
+      { replayedFiles, pendingFiles, parseTimeouts },
     );
     if (rebuildProgress !== null) {
       // Finished: the baseline now records the new extractor. Otherwise keep
       // what landed, so the next run resumes from here.
-      if (baselinePersisted) clearRebuildProgress(projectRoot);
+      if (baselinePersisted && runClean) clearRebuildProgress(projectRoot);
       else saveRebuildProgress(projectRoot, currentExtractor, rebuildProgress);
     }
 
@@ -3810,6 +4069,15 @@ export async function ingestFiles(
 
   const elapsed = ((performance.now() - start) / 1000).toFixed(2);
 
+  // A new workspace is registered only now, and only if the backend took
+  // something: see workspaceStateFor.
+  if (registrationPending && patchesTheBackendTook > 0) {
+    ensureWorkspaceIdState(workspaceRoot);
+    if (!opts.suppressOutput && opts.format === 'text') {
+      process.stderr.write(chalk.dim(`Registered workspace "${workspaceName}" (${workspaceRoot}).\n`));
+    }
+  }
+
   // Reported before the suppressOutput return, and thrown when nothing landed.
   //
   // `ix map` passes suppressOutput unconditionally, so every commit failure
@@ -3834,6 +4102,7 @@ export async function ingestFiles(
     filesDiscovered,
     patchesApplied,
     idempotentPatches,
+    replayedChanges: [...replayedChanges].sort(),
     filesSkippedAsUnchanged,
     // `+ crashedParses()`, as the baseline and delete guards already do. Files
     // lost to a dead parse pool raise `filesSkippedUnparsed`, never
@@ -3900,6 +4169,10 @@ export async function ingestFiles(
   if (summary.parseTimeouts.length > 0) {
     process.stderr.write(`  ${describeParseTimeouts(summary.parseTimeouts)}\n`);
   }
+  if (replayedChanges.size > 0) {
+    // stderr and exit 0: nothing failed on this side, and the next run retries.
+    process.stderr.write(`  ${describeReplayedChanges(summary.replayedChanges)}\n`);
+  }
   if (commitReport.kind === "warn") {
     process.stderr.write(`  ${commitReport.message}\n`);
     // Non-zero even though we do not throw. A partial failure still means the
@@ -3924,6 +4197,7 @@ export async function ingestFiles(
       patchesApplied,
       filesSkipped,
       idempotentPatches,
+      replayedChanges: summary.replayedChanges,
       entitiesParsed,
       latestRev,
       // `unchanged` is the files we ASSUMED unchanged, not every skip. It used
@@ -3986,6 +4260,7 @@ export async function ingestFiles(
     const parseErrorsShown = parseErrors + crashedParses();
     if (parseErrorsShown > 0) console.log(`  ${chalk.red('parse errors:')}      ${parseErrorsShown}`);
     if (commitErrors > 0) console.log(`  ${chalk.red('commit errors:')}     ${commitErrors}`);
+    if (replayedChanges.size > 0) console.log(`  ${chalk.yellow('not applied:')}       ${replayedChanges.size} ${chalk.dim('(see the warning above)')}`);
     if (tooLarge > 0) console.log(`  ${chalk.dim('skipped too large:')} ${tooLarge}`);
     if (minifiedLikely > 0) console.log(`  ${chalk.dim('skipped minified:')} ${minifiedLikely}`);
     if (summary.parseTimeouts.length > 0) console.log(`  ${chalk.yellow("skipped parse timeout:")} ${summary.parseTimeouts.length} ${chalk.dim(`(${summary.parseTimeouts.join(", ")})`)}`);
@@ -4120,7 +4395,7 @@ async function ingestGitHub(opts: {
 }): Promise<void> {
   const repo = parseGitHubRepo(opts.github!);
   const token = await resolveGitHubToken(opts.token);
-  const client = new IxClient(getEndpoint());
+  const client = createClient();
   const limit = parseInt(opts.limit, 10);
   const start = performance.now();
 

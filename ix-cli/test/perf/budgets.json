@@ -1,0 +1,52 @@
+{
+  "fixture": "perf-fixture",
+  "budgets": {
+    "map (fresh)": {
+      "requests": 9,
+      "bytes": 940272,
+      "wallMs": 16221
+    },
+    "map (no-op)": {
+      "requests": 6,
+      "bytes": 914,
+      "wallMs": 448
+    },
+    "map (one-line TS edit)": {
+      "requests": 10,
+      "bytes": 925866,
+      "wallMs": 5686
+    },
+    "map (add one file)": {
+      "requests": 459,
+      "bytes": 966736,
+      "wallMs": 14162
+    },
+    "context IxClient": {
+      "requests": 106,
+      "bytes": 6221598,
+      "wallMs": 2214,
+      "tolerance": 1.25
+    },
+    "context --from-issue": {
+      "requests": 118,
+      "bytes": 2959562,
+      "wallMs": 1356,
+      "tolerance": 1.25
+    },
+    "impact resolveWorkspaceRoot": {
+      "requests": 26,
+      "bytes": 43144,
+      "wallMs": 442
+    },
+    "rank dependents/function": {
+      "requests": 1819,
+      "bytes": 5494180,
+      "wallMs": 6464
+    },
+    "callers getEndpoint": {
+      "requests": 3,
+      "bytes": 41825,
+      "wallMs": 353
+    }
+  }
+}

@@ -3,7 +3,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../../client/factory.js";
 import { resolveFileOrEntityFull, resolveFileOrReport, activeReadScope, ensureReadScope } from "../resolve.js";
 import type { ResolvedEntity } from "../resolve.js";
 import {
@@ -508,7 +508,7 @@ export function registerTraceCommand(program: Command): void {
           testsOnly?: boolean;
         },
       ) => {
-        const client = new IxClient(getEndpoint());
+        const client = createClient();
 
         const resolveOpts = {
           path: opts.path,

@@ -2,13 +2,14 @@
 
 import { Command } from "commander";
 import { execFileSync } from "child_process";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, mkdtempSync, lstatSync, renameSync, readdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, mkdtempSync, lstatSync, realpathSync, renameSync, readdirSync } from "fs";
 import { basename, dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { homedir } from "os";
 import chalk from "chalk";
 import { BACKEND_IMAGE, checkBackendImage, isNonStandardBackend } from "../backend-status.js";
 import { canRenderProgress } from "../stderr.js";
+import { ChecksumError, attestationCommand, downloadVerified, verifyAttestation } from "../integrity.js";
 import type { IxClient } from "../../client/api.js";
 import {
   BACKEND_VERSION_FILE,
@@ -167,6 +168,17 @@ function splitVersion(v: string): [number[], string[]] {
     return Number.isFinite(parsed) ? parsed : 0;
   });
   return [nums, pre ? pre.split(".") : []];
+}
+
+/** Is the running CLI's entry point inside a Homebrew Cellar? */
+export function homebrewInstall(entryPoint: string): boolean {
+  let real = entryPoint;
+  try {
+    real = realpathSync(entryPoint);
+  } catch {
+    // keep the path as given
+  }
+  return /[\\/]Cellar[\\/]ix[\\/]/.test(real);
 }
 
 /**
@@ -459,8 +471,8 @@ export function stampDisagreesWithPull(trackedVersion: string, pulled: string): 
  *
  * The premise of stamping after a pull is that `--pull always` fetched the
  * current release — which holds only if the file being started actually tracks
- * `:latest`. `ix docker start` falls back to any `docker-compose.yml` in the
- * working directory, so it may well not: a compose that pins `:1.0.13`, pins a
+ * `:latest`. The user may have edited ~/.ix/backend/docker-compose.yml, so it
+ * may well not: a compose that pins `:1.0.13`, pins a
  * digest, or points at a locally-built image pulls something that is not the
  * latest release, and stamping it would put a version in the file that the
  * running container does not have.
@@ -1443,6 +1455,9 @@ export function registerUpgradeCommand(program: Command): void {
       // is up to date` and exit 0, which is what a script or a user skimming
       // the last line believed.
       const failures: string[] = [];
+      // A Homebrew install whose CLI this run declined to touch. The closing
+      // line must not then say "[ok] ix is up to date" under the brew hint.
+      let cliLeftToBrew = false;
 
       const cliUpToDate = !isNewer(latest, current);
       if (cliUpToDate) {
@@ -1451,7 +1466,12 @@ export function registerUpgradeCommand(program: Command): void {
         outstanding.push(`CLI ${current} → ${latest}`);
         console.log(`New CLI version available: ${chalk.green(latest)}`);
 
-        if (!opts.check) {
+        if (!opts.check && homebrewInstall(process.argv[1] ?? "")) {
+          // Unpacking a release over a Homebrew keg would replace files brew
+          // owns, and the next `brew upgrade` would undo it. Brew updates it.
+          cliLeftToBrew = true;
+          console.log(`  This ix was installed with Homebrew. Update it with: ${chalk.cyan("brew upgrade ix")}`);
+        } else if (!opts.check) {
           const platform = detectPlatform();
           const isWindows = platform.startsWith("windows");
           const archiveName = isWindows
@@ -1477,12 +1497,16 @@ export function registerUpgradeCommand(program: Command): void {
           console.log(`Downloading ix ${latest} for ${platform}...`);
 
           try {
-            execFileSync(
-              "curl",
-              ["-fsSL", "--progress-bar", url, "-o", tmpFile],
-              { stdio: ["ignore", "inherit", "inherit"], timeout: 300000 }
-            );
-          } catch {
+            // Checked against the release's published .sha256 before anything
+            // extracts or runs it; a missing checksum fails closed.
+            downloadVerified(url, tmpFile, { timeoutMs: 300000, progress: true });
+          } catch (err) {
+            if (err instanceof ChecksumError) {
+              console.error(`[error] ${err.message}`);
+              console.error("  The download was not installed. Your existing install is untouched.");
+              rmQuiet(tmpDirRaw);
+              process.exit(1);
+            }
             console.error(`[error] Failed to download ${url}`);
             console.error("  You can also upgrade manually:");
             console.error(
@@ -1494,6 +1518,20 @@ export function registerUpgradeCommand(program: Command): void {
             // replace the actionable message above with a raw EPERM.
             rmQuiet(tmpDirRaw);
             process.exit(1);
+          }
+
+          // Provenance, when the GitHub CLI is there to check it. Reported, not
+          // enforced: the checksum above is the gate (see verifyAttestation).
+          const attestation = verifyAttestation(tmpFile, `${GITHUB_ORG}/${GITHUB_REPO}`);
+          if (attestation.status === "verified") {
+            console.log("[ok] Checksum and build provenance verified");
+          } else {
+            console.log("[ok] Checksum verified");
+            const [ghCmd, ghArgs] = attestationCommand(archiveName, `${GITHUB_ORG}/${GITHUB_REPO}`);
+            if (attestation.status === "failed") {
+              console.error(`[!!] Build provenance could not be verified: ${attestation.detail}`);
+            }
+            console.log(chalk.dim(`  To check build provenance yourself: ${ghCmd} ${ghArgs.join(" ")}`));
           }
 
           console.log("Installing...");
@@ -1807,10 +1845,12 @@ export function registerUpgradeCommand(program: Command): void {
           const compassBackup = join(IX_HOME, `.compass-backup-${process.pid}`);
           let stage = "download";
           try {
-            execFileSync("curl", ["-fsSL", compassUrl, "-o", compassTar], {
-              stdio: ["ignore", "inherit", "inherit"],
-              timeout: 60000,
-            });
+            try {
+              downloadVerified(compassUrl, compassTar, { timeoutMs: 60000 });
+            } catch (err) {
+              if (err instanceof ChecksumError) stage = "checksum";
+              throw err;
+            }
             stage = "extract";
             installCompassBundle(compassTar, COMPASS_DIR, compassStaging, compassBackup);
             // Its own stage: a failure here is a bundle that installed fine and
@@ -1867,16 +1907,17 @@ export function registerUpgradeCommand(program: Command): void {
 
       console.log("");
       // Two independent reasons the run may not end clean, and they cannot
-      // both apply: `backendUpgradeSkipped` requires an install run, while
-      // `closingStatus` only reports outstanding work under `--check`. The
-      // skipped-backend case is checked first because it describes work this
-      // run declined to do, which outranks work it merely found.
+      // both apply: `backendUpgradeSkipped` and `cliLeftToBrew` require an
+      // install run, while `closingStatus` only reports outstanding work under
+      // `--check`. The declined steps are checked first because they describe
+      // work this run declined to do, which outranks work it merely found.
       const closing = closingStatus(opts.check, outstanding, failures);
       if (closing.failed) {
         console.log(`[!!] ix upgrade did not complete: ${closing.summary} failed (see above)`);
         process.exitCode = 1;
-      } else if (backendUpgradeSkipped) {
-        console.log("[!!] ix upgrade finished with the backend unchanged");
+      } else if (cliLeftToBrew || backendUpgradeSkipped) {
+        if (cliLeftToBrew) console.log("[!!] ix upgrade finished with the CLI unchanged: run brew upgrade ix");
+        if (backendUpgradeSkipped) console.log("[!!] ix upgrade finished with the backend unchanged");
       } else if (closing.upToDate) {
         console.log("[ok] ix is up to date");
       } else {

@@ -37,7 +37,7 @@ import type { RepoAccess } from "./text-references.js";
  * same `bm25Score`. Bump INDEX_VERSION whenever `bm25Tokens` or `bm25Doc`
  * changes what a document is, or a stale index would score the old way.
  */
-const INDEX_VERSION = 1;
+const INDEX_VERSION = 2;
 
 /**
  * What the tokenizer does to a probe that exercises its rules: case, camel
@@ -61,8 +61,11 @@ interface Bm25Index {
   /** Clean files that were scored, and each one's length in words. */
   paths: string[];
   lengths: number[];
+  /** Each scored file's git blob id, so a later HEAD reuses it while unchanged. */
+  blobs: string[];
   /** Clean files that were not scored (too large or unreadable at HEAD). */
   skipped: string[];
+  skippedBlobs: string[];
   /** Every word, to a flat list of [document index, count] pairs. */
   postings: Record<string, number[]>;
 }
@@ -72,7 +75,12 @@ export interface GitState {
   head: string;
   /** Tracked paths (relative to the root, as `git ls-files` prints them) that differ from HEAD. */
   dirty: ReadonlySet<string>;
+  /** Each path's blob id at HEAD, when known. */
+  blobs?: ReadonlyMap<string, string>;
 }
+
+/** Every git call here is bounded: none may hold up `ix context` for long. */
+const GIT_TIMEOUT_MS = 5_000;
 
 /** Path of the index for one workspace root, under IX_HOME. */
 export function bm25IndexPath(root: string): string {
@@ -83,19 +91,34 @@ export function bm25IndexPath(root: string): string {
 /**
  * HEAD and the files that differ from it, or undefined outside a checkout (or
  * on an unborn branch). `--no-optional-locks` because this runs in whatever
- * checkout the user is in, and a read must not rewrite its index file.
+ * checkout the user is in, and a read must not rewrite its index file. `-c`
+ * because `diff HEAD` reads the index, which runs a core.fsmonitor command the
+ * repository's own config names.
  */
 export function readGitState(root: string): GitState | undefined {
   try {
-    const run = (args: string[]) => execFileSync("git", ["--no-optional-locks", ...args], {
+    const run = (args: string[]) => execFileSync("git", [
+      "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", ...args,
+    ], {
       cwd: root, encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024,
+      timeout: GIT_TIMEOUT_MS,
     });
     const head = run(["rev-parse", "--verify", "-q", "HEAD"]).trim();
     if (!head) return undefined;
     // --relative: paths relative to `root`, like `git ls-files` run there.
     // --no-renames: a rename lists both of its paths, not only the new one.
     const dirty = run(["diff", "--name-only", "--relative", "--no-renames", "-z", "HEAD", "--"]);
-    return { head, dirty: new Set(dirty.split("\0").filter(Boolean)) };
+    // HEAD's blobs, not the index's: a clean file's text is HEAD's, while a
+    // staged change the worktree has since reverted leaves a different blob
+    // in the index, and reusing counts by that blob after it is committed
+    // would score the old text. `<mode> <type> <blob>\t<path>` per entry,
+    // relative to (and limited to) the root, as `git ls-files` prints paths.
+    const blobs = new Map<string, string>();
+    for (const entry of run(["ls-tree", "-r", "-z", head]).split("\0")) {
+      const tab = entry.indexOf("\t");
+      if (tab > 0) blobs.set(entry.slice(tab + 1), entry.slice(0, tab).split(" ")[2]);
+    }
+    return { head, dirty: new Set(dirty.split("\0").filter(Boolean)), blobs };
   } catch {
     return undefined;
   }
@@ -116,10 +139,16 @@ export function cachedBm25Ranker(
     const indexPath = opts.indexPath ?? bm25IndexPath(root);
     const weights = bm25QueryWeights(query);
     const terms = [...weights.keys()];
-    const index = loadIndex(indexPath, root, state.head);
-    if (index) return bm25Score(docsFromIndex(index, repo, files, terms, state.dirty), weights);
+    const index = loadIndex(indexPath, root);
+    if (index && index.head === state.head) {
+      return bm25Score(docsFromIndex(index, repo, files, terms, state.dirty), weights);
+    }
 
-    const { docs, built } = buildIndex(repo, files, terms, state, root);
+    // Built for another commit, or not at all. A file whose blob is unchanged
+    // since that index keeps its counts; only the rest are read and tokenised
+    // again. On a HEAD move that touched a handful of files, that is a
+    // handful of reads instead of the whole repository.
+    const { docs, built } = buildIndex(repo, files, terms, state, root, index);
     // Only if nothing moved while the files were being read: a file edited in
     // that window would otherwise be stored as HEAD's text.
     const after = readState();
@@ -162,31 +191,63 @@ function docsFromIndex(
   return docs;
 }
 
+/** A previous index's per-file counts, inverted from its postings once. */
+function countsByFile(index: Bm25Index): Array<Map<string, number>> {
+  const counts = index.paths.map(() => new Map<string, number>());
+  for (const term of Object.keys(index.postings)) {
+    const list = index.postings[term];
+    for (let k = 0; k < list.length; k += 2) counts[list[k]]?.set(term, list[k + 1]);
+  }
+  return counts;
+}
+
 function buildIndex(
   repo: Pick<RepoAccess, "read">,
   files: string[],
   terms: string[],
   state: GitState,
   root: string,
+  previous?: Bm25Index,
 ): { docs: Map<string, Bm25Doc>; built: Bm25Index } {
+  const reusable = previous && state.blobs ? previous : undefined;
+  const prevPosition = new Map((reusable?.paths ?? []).map((path, i) => [path, i]));
+  const prevSkipped = new Map((reusable?.skipped ?? []).map((path, i) => [path, reusable!.skippedBlobs[i]]));
+  let prevCounts: Array<Map<string, number>> | undefined;
   const built: Bm25Index = {
     v: INDEX_VERSION, tok: TOKENIZER_FINGERPRINT, root, head: state.head, maxBytes: MAX_BM25_BYTES,
-    paths: [], lengths: [], skipped: [],
+    paths: [], lengths: [], blobs: [], skipped: [], skippedBlobs: [],
     // No prototype: `constructor` and `tostring` are words too.
     postings: Object.create(null) as Record<string, number[]>,
   };
   const docs = new Map<string, Bm25Doc>();
   for (const path of files) {
-    const full = bm25Doc(path, repo.read(path));
     const clean = !state.dirty.has(path);
+    const blob = state.blobs?.get(path) ?? "";
+    let full: Bm25Doc | undefined;
+    if (reusable && clean && blob) {
+      const j = prevPosition.get(path);
+      if (j !== undefined && reusable.blobs[j] === blob) {
+        prevCounts ??= countsByFile(reusable);
+        full = { tf: prevCounts[j], length: reusable.lengths[j] };
+      } else if (prevSkipped.get(path) === blob) {
+        built.skipped.push(path);
+        built.skippedBlobs.push(blob);
+        continue;
+      }
+    }
+    full ??= bm25Doc(path, repo.read(path));
     if (!full) {
-      if (clean) built.skipped.push(path);
+      if (clean) {
+        built.skipped.push(path);
+        built.skippedBlobs.push(blob);
+      }
       continue;
     }
     if (clean) {
       const i = built.paths.length;
       built.paths.push(path);
       built.lengths.push(full.length);
+      built.blobs.push(blob);
       for (const [term, count] of full.tf) (built.postings[term] ??= []).push(i, count);
     }
     const tf = new Map<string, number>();
@@ -199,12 +260,16 @@ function buildIndex(
   return { docs, built };
 }
 
-function loadIndex(path: string, root: string, head: string): Bm25Index | undefined {
+function loadIndex(path: string, root: string): Bm25Index | undefined {
   try {
     const data = JSON.parse(readFileSync(path, "utf-8")) as Partial<Bm25Index>;
-    if (data.v !== INDEX_VERSION || data.tok !== TOKENIZER_FINGERPRINT || data.root !== root || data.head !== head || data.maxBytes !== MAX_BM25_BYTES) return undefined;
+    if (data.v !== INDEX_VERSION || data.tok !== TOKENIZER_FINGERPRINT || data.root !== root || data.maxBytes !== MAX_BM25_BYTES) return undefined;
+    if (typeof data.head !== "string") return undefined;
     if (!Array.isArray(data.paths) || !Array.isArray(data.lengths) || !Array.isArray(data.skipped)) return undefined;
-    if (data.paths.length !== data.lengths.length || !data.postings || typeof data.postings !== "object") return undefined;
+    if (!Array.isArray(data.blobs) || !Array.isArray(data.skippedBlobs)) return undefined;
+    if (data.paths.length !== data.lengths.length || data.paths.length !== data.blobs.length) return undefined;
+    if (data.skipped.length !== data.skippedBlobs.length) return undefined;
+    if (!data.postings || typeof data.postings !== "object") return undefined;
     return data as Bm25Index;
   } catch {
     return undefined;

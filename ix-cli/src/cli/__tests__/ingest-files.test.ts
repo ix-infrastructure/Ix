@@ -1,16 +1,19 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createServer, type Server, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-import { ingestFiles } from "../commands/ingest.js";
+import { ingestFiles, ingestPathSingleFlight } from "../commands/ingest.js";
+import { acquireMapLock, takeMapRerun } from "../single-flight.js";
 import { ingestMtimeCachePath, ingestRebuildPath, loadConfig } from "../config.js";
 import { workspaceIdForPath } from "../system.js";
+import { FakeBackend } from "./helpers/fake-backend.js";
+import { loadIngestBaseline } from "../ingest-baseline.js";
+import { detectStaleFiles } from "../stale.js";
+import { renderStatusLlm } from "../commands/status.js";
 
 /**
  * Integration tests that drive `ingestFiles` end to end against a fake backend.
@@ -43,312 +46,6 @@ import { workspaceIdForPath } from "../system.js";
  * mutation-validated directly in `commit-breaker.test.ts`, and that division is
  * deliberate: coarse wiring here, decision tables there.
  */
-
-/** A backend that answers the endpoints an ingest touches, and records them. */
-class FakeBackend {
-  readonly requests: Array<{ path: string; patches: number; code?: number }> = [];
-  /** `source.uri` of every patch sent in a commit request, accepted or not. */
-  readonly sourceUris: string[] = [];
-  /** `source.workspaceId` beside each of `sourceUris`, in the same order. */
-  readonly sourceWorkspaceIds: Array<string | undefined> = [];
-  /** The ops of the last patch sent for each `source.uri`. */
-  readonly lastOps = new Map<string, Array<Record<string, unknown>>>();
-  /** Paths this fake does not implement. Asserted empty after every test. */
-  readonly unknownPaths: string[] = [];
-
-  private server: Server | undefined;
-  private rev = 0;
-
-  /** Patch-source substrings this backend refuses, whatever else is healthy. */
-  poison: string[] = [];
-  /** Fail every commit, the Ix#560 shape. */
-  refuseEverything = false;
-  /** Refuse re-sends of patches a 409 already confirmed. */
-  refuseReplays = false;
-  /**
-   * Answer the CUTOFF DRAIN's bulk with `BaseRevMismatch`, and nothing else.
-   *
-   * A 200 that wrote nothing: the backend read the latest rev outside the
-   * transaction and it moved before the commit ran. Without a knob the harness
-   * could only ever serve "Ok", so every `status` branch in the three commit
-   * sites was unreachable from any test.
-   *
-   * Aimed at the drain specifically, by shape rather than by counting
-   * requests. The drain is the only bulk that happens AFTER the per-file
-   * fan-out, so "a bulk with at least one single behind it" names it exactly,
-   * and stays right if the number of requests before it ever changes.
-   */
-  mismatchOnDrainBulk = false;
-  /**
-   * Answer this many commits (bulk or single) `BaseRevMismatch` before taking
-   * any: what a second `ix map` committing to the same backend does to this
-   * one. A 200 that wrote nothing, like `mismatchOnDrainBulk`.
-   */
-  loseBaseRevRaces = 0;
-  /**
-   * Refuse the opening bulk and every per-file send, but ACCEPT the drain.
-   *
-   * The only shape that reaches an accepted cutoff drain, and it took three
-   * tries to find because each failed one looked plausible. Poisoning files
-   * does not work: the cutoff holds the patches that FAILED as well as the
-   * untried ones, so the drain carries the poison and is refused. Refusing by
-   * request count does not work either: the cutoff trips on the fifth failure
-   * and the drain follows immediately, so any threshold high enough to produce
-   * five failures is still in force when the drain arrives. Both were measured
-   * at zero accepted bulks in the whole run, via `acceptedBulks()`.
-   *
-   * Refusing by KIND separates them: the opening bulk (no singles behind it)
-   * and every single are refused, which trips the cutoff; the drain is the only
-   * bulk with singles behind it, and it is answered 200 -- so the code that
-   * reads its status is finally reached.
-   */
-  refuseUntilDrain = false;
-  /** Fired after `abortAfterCommits` commit requests, if set. */
-  abortAfterCommits: number | undefined;
-  private readonly aborter = new AbortController();
-
-  /** A run deadline that fires at a known POINT IN THE COMMIT SEQUENCE. */
-  get deadlineSignal(): AbortSignal {
-    return this.aborter.signal;
-  }
-  /** Answer a bulk with 409 naming every patch as already committed. */
-  bulk409AllLanded = false;
-  /** Status for POST /v1/stitch. */
-  stitchStatus = 200;
-  /**
-   * Answer `/v1/source-hashes` with the hashes of patches this fake accepted,
-   * as the real backend does. Off by default: with it off every lookup is
-   * empty, so the DB-reset guard sends each incremental run down the full
-   * path, which the tests written before it rely on.
-   */
-  rememberHashes = false;
-  /** Answer `/v1/source-hashes` with a 500, as a backend under load does. */
-  failSourceHashes = false;
-  private readonly hashes = new Map<string, { workspaceId: string | null; uri: string; hash: string }>();
-
-  /** Forget every request so far, so a second run can be measured on its own. */
-  resetRequests(): void {
-    this.requests.splice(0, this.requests.length);
-  }
-
-  get stitchCount(): number {
-    return this.requests.filter((r) => r.path === "/v1/stitch").length;
-  }
-
-  /** Patches in commit requests the backend ACCEPTED. */
-  acceptedPatches(): number {
-    return this.requests
-      .filter(r => (r.path === "/v1/patches/bulk" || r.path === "/v1/patch") && r.code === 200)
-      .reduce((sum, r) => sum + r.patches, 0);
-  }
-
-  /** Bulk commits that the backend ACCEPTED, in order. */
-  acceptedBulks(): number {
-    return this.requests.filter(r => r.path === "/v1/patches/bulk" && r.code === 200).length;
-  }
-
-  get bulkCount(): number {
-    return this.requests.filter((r) => r.path === "/v1/patches/bulk").length;
-  }
-
-  get singleCount(): number {
-    return this.requests.filter((r) => r.path === "/v1/patch").length;
-  }
-
-  get commitCount(): number {
-    return this.bulkCount + this.singleCount;
-  }
-
-  async start(): Promise<string> {
-    this.server = createServer((req, res) => {
-      // Collect and concat, rather than `body += chunk`. Appending a Buffer to
-      // a string decodes each TCP chunk on its own, so a multi-byte character
-      // split across a chunk boundary is corrupted -- and a bulk body for
-      // thirty patches is comfortably big enough to be split. Latent while the
-      // fixtures are ASCII; the first non-ASCII one would make `JSON.parse`
-      // throw and silently route the request down a different branch.
-      const chunks: Buffer[] = [];
-      req.on("data", (c: Buffer) => chunks.push(c));
-      req.on("end", () => this.route(req.url ?? "/", Buffer.concat(chunks).toString("utf8"), res));
-    });
-    await new Promise<void>((resolve, reject) => {
-      // Without the `error` listener a failed bind -- EACCES under a
-      // restrictive sandbox, EADDRNOTAVAIL where loopback is unusual -- never
-      // settles this promise, and surfaces as a beforeEach hook timeout plus an
-      // unhandled 'error' event rather than as the bind error it is.
-      this.server!.once("error", reject);
-      this.server!.listen(0, "127.0.0.1", resolve);
-    });
-    return `http://127.0.0.1:${(this.server!.address() as AddressInfo).port}`;
-  }
-
-  async stop(): Promise<void> {
-    if (!this.server) return;
-    const server = this.server;
-    // `closeAllConnections` first, and a deadline behind it. `close()` waits for
-    // every open socket, so one keep-alive connection the run did not finish
-    // with leaves this pending -- and a hook that never settles takes its
-    // timeout, at which point NEITHER `finally` in the teardown runs and both
-    // temp trees leak anyway. The teardown can only be made safe if this cannot
-    // hang, so the fix belongs here rather than in another `try`.
-    // Not optional-chained: `engines.node` is >=22 and this landed in 18.2.
-    server.closeAllConnections();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const closed = await Promise.race([
-      new Promise<boolean>((resolve) => server.close(() => resolve(true))),
-      new Promise<boolean>((resolve) => {
-        timer = setTimeout(() => resolve(false), 2000);
-        timer.unref?.();
-      }),
-    ]);
-    clearTimeout(timer);
-    if (!closed) {
-      // Not expected to fire, and it never has. `Promise.race` builds its
-      // array eagerly, so `server.close()` runs in the SAME tick as
-      // `closeAllConnections()` above -- the listening handle is gone before
-      // any later turn of the loop, so nothing can connect afterwards, and
-      // every socket that existed has been destroyed. There is no "late
-      // socket" story; an earlier revision of this comment invented one.
-      //
-      // Kept anyway, as a backstop against `close()` simply never calling
-      // back -- a socket wedged in destroy, say. Deliberately a message and
-      // not a throw: the alternative it exists to prevent is a hook that
-      // never settles, which takes the hook timeout and runs NEITHER
-      // `finally` below, leaking both trees and leaving the env pointed at a
-      // deleted home. A leak that announces itself is the better trade.
-      process.stderr.write(
-        "FakeBackend.stop: close() did not call back within 2s; the server handle is being abandoned\n",
-      );
-    }
-  }
-
-  private route(url: string, body: string, res: ServerResponse): void {
-    const path = new URL(url, "http://x").pathname;
-    const send = (code: number, payload: unknown): void => {
-      // Stamp the answer onto the request that produced it. Whether a bulk was
-      // ACCEPTED or refused is the difference between two completely different
-      // code paths in `ingestFiles`, and a test that assumes the wrong one is
-      // measuring nothing -- which is exactly how the drain test below first
-      // went wrong.
-      const last = this.requests[this.requests.length - 1];
-      if (last !== undefined && last.code === undefined) last.code = code;
-      res.writeHead(code, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(payload));
-    };
-
-    if (path === "/v1/patches/bulk" || path === "/v1/patch") {
-      type SentPatch = {
-        patchId?: string;
-        source?: { uri?: string; sourceHash?: string; workspaceId?: string };
-        ops?: Array<Record<string, unknown>>;
-      };
-      let patches: SentPatch[] = [];
-      try {
-        const parsed = JSON.parse(body) as { patches?: SentPatch[] };
-        patches = parsed.patches ?? [parsed as SentPatch];
-      } catch {
-        /* a body we cannot read is still a request */
-      }
-      this.requests.push({ path, patches: patches.length });
-      for (const { source, ops } of patches) {
-        if (!source?.uri) continue;
-        this.sourceUris.push(source.uri);
-        this.sourceWorkspaceIds.push(source.workspaceId);
-        this.lastOps.set(source.uri, ops ?? []);
-      }
-      if (this.abortAfterCommits !== undefined && this.commitCount >= this.abortAfterCommits) {
-        this.aborter.abort();
-      }
-
-      if (path === "/v1/patch" && this.refuseReplays) {
-        return send(500, { error: "500: already committed" });
-      }
-      if (path === "/v1/patches/bulk" && this.bulk409AllLanded) {
-        const ids = patches.map((p) => p.patchId).filter(Boolean);
-        return send(409, { error: "bulk group partially committed", committed_patch_ids: ids });
-      }
-      // Ahead of the poison check, deliberately. The drain carries the patches
-      // the cutoff held back, which for any fixture that trips the cutoff
-      // includes the poisoned ones -- so the poison branch answered 500 and the
-      // drain never reached the success path at all. A first attempt at this
-      // set the status further down and measured nothing, because no bulk in
-      // the test ever got there.
-      const isDrainBulk = path === "/v1/patches/bulk" && this.singleCount > 0;
-      if (this.loseBaseRevRaces > 0) {
-        this.loseBaseRevRaces--;
-        return send(200, { rev: this.rev, applied: 0, status: "BaseRevMismatch" });
-      }
-      if (this.mismatchOnDrainBulk && isDrainBulk) {
-        // A 200 that wrote NOTHING: the backend read the latest rev outside the
-        // transaction and it moved before the commit ran. `applied: 0` and the
-        // rev deliberately left where it was, because nothing landed.
-        return send(200, { rev: this.rev, applied: 0, status: "BaseRevMismatch" });
-      }
-      const refused =
-        this.refuseEverything ||
-        (this.refuseUntilDrain && !isDrainBulk) ||
-        this.poison.some((p) => body.includes(p));
-      // Answered synchronously. A `commitDelayMs` knob lived here and no test
-      // ever set it -- the deadline test fires off request COUNT instead, which
-      // is what makes it deterministic. Reviving it needs care rather than a
-      // one-liner: `stop()` resolves on `server.close()` without cancelling a
-      // pending timer, so a deferred response outlives the test that armed it
-      // and fires against a closed server.
-      if (refused) return send(500, { error: "500: transaction begin timeout" });
-      this.rev += patches.length || 1;
-      if (this.rememberHashes) {
-        for (const { source } of patches) {
-          if (source?.uri && source.sourceHash) {
-            this.hashes.set(`${source.workspaceId ?? ""}\0${source.uri}`,
-              { workspaceId: source.workspaceId ?? null, uri: source.uri, hash: source.sourceHash });
-          }
-        }
-      }
-      // `status` included, because `PatchCommitResult` declares it required and
-      // the ingest path branches on it. Serving 200s without it left
-      // `result.status` undefined everywhere, so this fake could never produce
-      // an `Idempotent` or `BaseRevMismatch` answer -- the two branches that
-      // decide whether a patch lands in `patchesApplied` or `commitErrors`, and
-      // so whether the mtime baseline is written at all. A regression that
-      // flipped the applied test from "not BaseRevMismatch" to `=== "Ok"` would
-      // have counted zero patches applied against the real backend while every
-      // test here stayed green.
-      send(
-        200,
-        path === "/v1/patches/bulk"
-          ? { rev: this.rev, applied: patches.length, status: "Ok" }
-          : { rev: this.rev, status: "Ok" },
-      );
-      return;
-    }
-
-    if (path === "/v1/health") return send(200, { status: "ok", version: "1.0.28" });
-    if (path === "/v1/source-hashes") {
-      if (this.failSourceHashes) return send(500, { error: "500: transaction begin timeout" });
-      if (!this.rememberHashes) return send(200, []);
-      let uris: string[] = [];
-      try { uris = (JSON.parse(body) as { uris?: string[] }).uris ?? []; } catch { /* none */ }
-      const wanted = new Set(uris);
-      return send(200, [...this.hashes.values()].filter((row) => wanted.has(row.uri)));
-    }
-    if (path.startsWith("/v1/stitch/system/")) return send(200, { systemId: null });
-    if (path === "/v1/stitch") {
-      this.requests.push({ path, patches: 0 });
-      if (this.stitchStatus !== 200)
-        return send(this.stitchStatus, { error: "AQL: query timed out" });
-      return send(200, { stitched: 0, systemId: null, edges: [] });
-    }
-    // 404, not `200 {}`. A fake that answers every unrecognised path with a
-    // cheerful empty body cannot fail: product code that starts calling a new
-    // endpoint -- or mistypes an existing one -- gets a success here where the
-    // real backend would 404, and the harness stays green while measuring a
-    // request the backend never served. The path is recorded as well as
-    // refused, so the afterEach names it rather than leaving a stray 404 to be
-    // explained.
-    this.unknownPaths.push(path);
-    return send(404, { error: `404: no such endpoint ${path}` });
-  }
-}
 
 describe("ingestFiles against a fake backend", () => {
   // Every test here runs a REAL ingest -- discovery, a worker-thread parse
@@ -983,7 +680,7 @@ describe("ingestFiles against a fake backend", () => {
     expect(baselineFiles()).toEqual(expect.arrayContaining([join(repo, "src", "m000.ts"), join(repo, "src", "m002.ts")]));
   });
 
-  it("names a file whose parse runs past the budget, and ingests the rest", async () => {
+  it("names a file whose parse runs past the budget, ingests the rest, and retries it until it lands", async () => {
     // About 2.5 s of parsing, under the 1 MB cap, against a 1 s budget.
     // Whichever gives up first -- the worker's own check or the pool's
     // backstop at twice the budget --
@@ -1001,11 +698,322 @@ describe("ingestFiles against a fake backend", () => {
       expect(summary.parseTimeouts).toEqual(["src/huge.ts"]);
       expect(backend.acceptedPatches(), "the other three still land").toBe(3);
       expect(stderr.mock.calls.map(([c]) => String(c)).join("")).toContain("src/huge.ts");
+
+      // Skipped, not settled: it used to be recorded clean, so every later run
+      // skipped it as unchanged while status called the graph current.
+      const huge = join(repo, "src", "huge.ts");
+      const stored = loadIngestBaseline(repo)!;
+      expect(stored.files.has(huge), "not recorded as ingested").toBe(false);
+      expect(stored.parseTimeouts).toEqual(["src/huge.ts"]);
+      expect(stored.pendingFiles).toEqual([]);
+      const status = detectStaleFiles(repo);
+      expect(status.parseTimeouts).toEqual(["src/huge.ts"]);
+      expect(status.staleFiles, "named once, as a timeout").toBe(0);
+      const llm = renderStatusLlm("ok", "x", status);
+      expect(llm[0]).toContain("parse_timeouts=1");
+      expect(llm[0]).toContain("stale=true");
+
+      // With the budget off, the next run parses it and the warning goes.
+      process.env.IX_PARSE_BUDGET_MS = "0";
+      expect(backend.sourceUris).not.toContain("src/huge.ts");
+      const next = await ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
+      expect(next.parseTimeouts).toEqual([]);
+      expect(backend.sourceUris, "retried, not skipped as unchanged").toContain("src/huge.ts");
+      expect(loadIngestBaseline(repo)!.files.get(huge)).toBe(statSync(huge).mtimeMs);
+      expect(loadIngestBaseline(repo)!.parseTimeouts).toEqual([]);
+      expect(detectStaleFiles(repo).parseTimeouts).toEqual([]);
     } finally {
       stderr.mockRestore();
       if (saved === undefined) delete process.env.IX_PARSE_BUDGET_MS;
       else process.env.IX_PARSE_BUDGET_MS = saved;
     }
+  });
+
+  describe("a changed file the backend answers Idempotent is reported, not marked clean (F-01)", () => {
+    // A revert sends the patch id the backend committed for the original
+    // bytes. The shipped backend replays any id it has seen, so it answers
+    // `Idempotent`, writes nothing, and the graph keeps the edit -- while the
+    // CLI used to count the patch as applied, record the file as clean, and
+    // let `ix status` say the graph was up to date.
+    const incremental = () =>
+      ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
+    const target = () => join(repo, "src", "m003.ts");
+    let tick = Date.now();
+    /** Write and give the file an mtime no earlier write can share. */
+    const write = (text: string) => {
+      writeFileSync(target(), text, "utf8");
+      tick += 10_000;
+      utimesSync(target(), new Date(tick), new Date(tick));
+      execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+    };
+    const stored = () => loadIngestBaseline(repo)!;
+    let stderr: ReturnType<typeof vi.spyOn>;
+    const warnings = (): string[] =>
+      stderr.mock.calls.map((call: unknown[]) => String(call[0])).filter((c: string) => c.includes("Graph is unverified"));
+
+    beforeEach(() => {
+      fixture(16);
+      stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      // Earlier tests in this file end runs that set it.
+      process.exitCode = undefined;
+    });
+    afterEach(() => {
+      stderr.mockRestore();
+      process.exitCode = undefined;
+    });
+
+    const revert = async () => {
+      const original = readFileSync(target(), "utf8");
+      await incremental();
+      write("export function f3(): number { return 33; }\n");
+      await incremental();
+      write(original);
+      backend.resetRequests();
+      return incremental();
+    };
+
+    it("a revert on a backend without BEW-03 is named and stays dirty", async () => {
+      backend.semantics = "legacy";
+
+      const summary = await revert();
+
+      expect(backend.commitCount, "the revert was sent").toBeGreaterThan(0);
+      expect(summary.replayedChanges).toEqual(["src/m003.ts"]);
+      expect(warnings().join("")).toContain("src/m003.ts");
+      expect(process.exitCode, "a warning, not a failure").not.toBe(1);
+      expect(stored().replayedFiles).toEqual(["src/m003.ts"]);
+      expect(stored().files.get(target()), "kept dirty for the next run").not.toBe(statSync(target()).mtimeMs);
+
+      const status = detectStaleFiles(repo);
+      expect(status.replayedFiles).toEqual(["src/m003.ts"]);
+      expect(renderStatusLlm("ok", "x", status)[0]).toContain("stale=true");
+
+      // The next run tries again rather than calling the file unchanged.
+      backend.resetRequests();
+      const next = await incremental();
+      expect(next.filesSkippedAsUnchanged).toBe(15);
+      expect(next.replayedChanges).toEqual(["src/m003.ts"]);
+    });
+
+    it("a revert on a backend with BEW-03 is applied and nothing is reported", async () => {
+      backend.semantics = "head";
+
+      const summary = await revert();
+
+      expect(summary.replayedChanges).toEqual([]);
+      expect(warnings()).toEqual([]);
+      expect(stored().replayedFiles).toEqual([]);
+      expect(stored().files.get(target())).toBe(statSync(target()).mtimeMs);
+    });
+
+    it("a restored file on a backend without BEW-03 is named", async () => {
+      backend.semantics = "legacy";
+      const original = readFileSync(target(), "utf8");
+      await incremental();
+      rmSync(target());
+      execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+      await incremental();
+      write(original);
+
+      const summary = await incremental();
+
+      expect(summary.replayedChanges).toEqual(["src/m003.ts"]);
+    });
+
+    it("an unchanged file answered Idempotent is not reported", async () => {
+      // --force re-sends every file; replays of unchanged content are fine.
+      backend.semantics = "legacy";
+      await incremental();
+
+      const summary = await ingestFiles(repo, { format: "text", force: true, suppressOutput: true, printSummary: false });
+
+      expect(summary.idempotentPatches).toBeGreaterThan(0);
+      expect(summary.replayedChanges).toEqual([]);
+    });
+  });
+
+  describe("one failing file does not stop the baseline", () => {
+    // The baseline used to be written only by a clean run. One unreadable file
+    // then meant no run ever recorded anything again: every map re-read the
+    // whole workspace, and deleted files were never retracted.
+    const incremental = () =>
+      ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
+    const stage = () => execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+    const stored = () => loadIngestBaseline(repo)!;
+    let stderr: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    });
+    afterEach(() => {
+      stderr.mockRestore();
+      process.exitCode = undefined;
+    });
+
+    it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+      "records every other file and retracts a deletion while one file is unreadable",
+      async () => {
+        fixture(3);
+        // The graph model: a deletion reconciles through /v1/patches/:id and
+        // /v1/entity/:id, which only it serves.
+        backend.semantics = "head";
+        const broken = join(repo, "src", "m000.ts");
+        const deleted = join(repo, "src", "m001.ts");
+        await incremental();
+        const before = stored().files.get(broken);
+
+        writeFileSync(broken, "export const changed = 1;\n", "utf8");
+        rmSync(deleted);
+        stage(); // before the chmod: git cannot read the file either
+        execFileSync("chmod", ["000", broken]);
+        backend.resetRequests();
+        try {
+          const summary = await incremental();
+          expect(summary.parseErrors, "the unreadable file is an error").toBeGreaterThan(0);
+        } finally {
+          execFileSync("chmod", ["644", broken]);
+        }
+
+        const files = stored().files;
+        expect(files.has(deleted), "the deletion was retracted and recorded").toBe(false);
+        expect(backend.sourceUris).toContain("src/m001.ts");
+        expect(files.get(join(repo, "src", "m002.ts")), "a settled file is recorded").toBeDefined();
+        expect(files.get(broken), "the failed file keeps its old mtime").toBe(before);
+
+        // Readable again: the next run sends it, and only it.
+        backend.resetRequests();
+        await incremental();
+        expect(backend.acceptedPatches()).toBe(1);
+        expect(stored().files.get(broken)).toBe(statSync(broken).mtimeMs);
+      },
+    );
+
+    it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+      "a new file that fails is pending: retried, and ix status does not call the graph current",
+      async () => {
+        // A new file has no previous mtime to keep, so it dropped out of the
+        // baseline while `lastIngestAt` moved past its mtime, and status
+        // judged it current.
+        fixture(3);
+        await incremental();
+        const added = join(repo, "src", "added.ts");
+        writeFileSync(added, "export const added = 1;\n", "utf8");
+        stage();
+        execFileSync("chmod", ["000", added]);
+        try {
+          await incremental();
+        } finally {
+          execFileSync("chmod", ["644", added]);
+        }
+
+        expect(stored().files.has(added)).toBe(false);
+        expect(stored().pendingFiles).toEqual(["src/added.ts"]);
+        const status = detectStaleFiles(repo);
+        expect(status.staleFiles).toBe(1);
+        expect(status.sampleChangedFiles).toEqual(["src/added.ts"]);
+        expect(renderStatusLlm("ok", "x", status)[0]).toContain("stale=true");
+
+        // The next run sends it and clears the list.
+        await incremental();
+        expect(stored().files.get(added)).toBe(statSync(added).mtimeMs);
+        expect(stored().pendingFiles).toEqual([]);
+        expect(detectStaleFiles(repo).staleFiles).toBe(0);
+      },
+    );
+
+    it("a failed lookup is not a reset", async () => {
+      fixture(3);
+      backend.rememberHashes = true;
+      await incremental();
+      backend.failSourceHashes = true;
+      backend.resetRequests();
+
+      const summary = await incremental();
+
+      expect(summary.filesSkippedAsUnchanged, "still incremental").toBe(3);
+      expect(backend.commitCount).toBe(0);
+    });
+
+    it("leaves no temp file beside the baseline", async () => {
+      fixture(2);
+      await incremental();
+      const dir = join(home, ".ix");
+      expect(existsSync(ingestMtimeCachePath(repo))).toBe(true);
+      expect(execFileSync("ls", ["-a", dir], { encoding: "utf8" })).not.toMatch(/\.tmp/);
+    });
+  });
+
+  describe("ix ingest coalesces with a map or ingest of the same workspace", () => {
+    // It used to exit 1 with "run this again", which an editor hook or an MCP
+    // client that ingests after every edit reported as a failed ingest, while
+    // `ix map` in the same spot coalesces and exits 0.
+    let stdout: ReturnType<typeof vi.spyOn>;
+    let stderr: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      stdout = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      process.exitCode = undefined;
+    });
+    afterEach(() => {
+      stdout.mockRestore();
+      stderr.mockRestore();
+      process.exitCode = undefined;
+      delete process.env.IX_MAP_COALESCE_EXIT_CODE;
+    });
+    const written = (spy: ReturnType<typeof vi.spyOn>) =>
+      spy.mock.calls.map((call: unknown[]) => String(call[0])).join("");
+
+    it("exits 0, asks the holder for a rerun, and prints JSON a client can parse", async () => {
+      fixture(1);
+      const held = acquireMapLock(repo, "test");
+      try {
+        expect(held).not.toBeNull();
+        backend.resetRequests();
+        await ingestPathSingleFlight(join(repo, "src"), { format: "json" });
+
+        expect(process.exitCode, "a coalesce is not a failure").toBeUndefined();
+        expect(backend.commitCount, "nothing ran beside the holder").toBe(0);
+        expect(JSON.parse(written(stdout))).toEqual({ coalesced: true, workspace: repo });
+        expect(takeMapRerun(repo), "the holder is asked to run once more").toBe(true);
+      } finally {
+        held?.release();
+      }
+    });
+
+    it("honours IX_MAP_COALESCE_EXIT_CODE, as ix map does", async () => {
+      fixture(1);
+      const held = acquireMapLock(repo, "test");
+      try {
+        process.env.IX_MAP_COALESCE_EXIT_CODE = "75";
+        await ingestPathSingleFlight(repo, { format: "text" });
+        expect(process.exitCode).toBe(75);
+        expect(written(stderr)).toContain("Another ix map or ix ingest is running");
+      } finally {
+        held?.release();
+      }
+    });
+
+    it("a holding ingest re-runs for the one that coalesced, so its edit lands", async () => {
+      fixture(3);
+      await ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
+      const first = join(repo, "src", "m000.ts");
+      const second = join(repo, "src", "m002.ts");
+      writeFileSync(first, "export const first = 1;\n", "utf8");
+      writeFileSync(second, "export const second = 2;\n", "utf8");
+
+      // The lock is taken before the first await, so the second call finds it
+      // held whatever the scheduling.
+      const holder = ingestPathSingleFlight(first, { format: "json" });
+      const waiter = ingestPathSingleFlight(second, { format: "json" });
+      await Promise.all([holder, waiter]);
+
+      expect(process.exitCode).toBeUndefined();
+      const files = loadIngestBaseline(repo)!.files;
+      expect(files.get(second), "the coalesced run's file was ingested").toBe(statSync(second).mtimeMs);
+      expect(files.get(first)).toBe(statSync(first).mtimeMs);
+      const after = acquireMapLock(repo, "after");
+      expect(after, "the lock was let go").not.toBeNull();
+      after?.release();
+    });
   });
 
   it("ingests only the languages --lang names, and keeps the rest of the baseline", async () => {

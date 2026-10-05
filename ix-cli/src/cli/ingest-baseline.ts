@@ -12,6 +12,9 @@ interface SerializedIngestBaseline {
   lastIngestAt?: string;
   tracksMapBaseline?: boolean;
   extractor?: string;
+  replayedFiles?: string[];
+  pendingFiles?: string[];
+  parseTimeouts?: string[];
 }
 
 export interface IngestBaseline {
@@ -37,7 +40,47 @@ export interface IngestBaseline {
    * any extractor, so it counts as a change. See `extractorChanged`.
    */
   extractor: string | null;
+  /**
+   * Workspace-relative paths of changed files the last run sent and the
+   * backend answered `Idempotent`: it already held that patch id and wrote
+   * nothing, so the graph does not show these files as they are (F-01, a
+   * revert or a restore). Empty when every change was applied. Their mtimes
+   * are kept at the previous value, so the next run sends them again.
+   */
+  replayedFiles: string[];
+  /**
+   * Workspace-relative paths of changed files the last run could not ingest:
+   * a read or build error, a failed commit, a parse lost to a dead worker.
+   * Each keeps its previous mtime, so the next run retries it. A new file has
+   * no previous mtime and is left out of `files`, and a file missing from
+   * `files` is judged stale against `lastIngestAt`, which that same run moved
+   * past the file's mtime -- so without this list `ix status` called the
+   * graph current while the file was not in it.
+   */
+  pendingFiles: string[];
+  /**
+   * Workspace-relative paths of files whose parse ran past the per-file
+   * budget (`IX_PARSE_BUDGET_MS`) on the last run, so they are not in the
+   * graph. Not settled: like `pendingFiles` they keep their previous mtime
+   * (or none) and every run tries them again, and `ix status` warns about
+   * them rather than calling the graph current. A slow file times out on
+   * every run, so recording it clean skipped it for good.
+   */
+  parseTimeouts: string[];
 }
+
+/** Per-file lists a baseline write records beside the mtimes. */
+export interface BaselineFileNotes {
+  /** See `IngestBaseline.replayedFiles`. */
+  replayedFiles?: readonly string[];
+  /** See `IngestBaseline.pendingFiles`. */
+  pendingFiles?: readonly string[];
+  /** See `IngestBaseline.parseTimeouts`. */
+  parseTimeouts?: readonly string[];
+}
+
+const stringList = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((p): p is string => typeof p === "string") : [];
 
 /**
  * What counts as a revision, for both sides of this file.
@@ -84,6 +127,9 @@ export function loadIngestBaseline(projectRoot: string): IngestBaseline | null {
       lastIngestAt,
       tracksMapBaseline: data.tracksMapBaseline === true,
       extractor: typeof data.extractor === "string" ? data.extractor : null,
+      replayedFiles: stringList(data.replayedFiles),
+      pendingFiles: stringList(data.pendingFiles),
+      parseTimeouts: stringList(data.parseTimeouts),
     };
   } catch {
     return null;
@@ -97,6 +143,7 @@ export function saveIngestBaseline(
   now: Date = new Date(),
   deletedFiles: Map<string, string[]> = new Map(),
   extractor?: string | null,
+  { replayedFiles = [], pendingFiles = [], parseTimeouts = [] }: BaselineFileNotes = {},
 ): void {
   try {
     // Keep the last good rev rather than writing a shape the read side will
@@ -120,9 +167,24 @@ export function saveIngestBaseline(
       // sets it, which is what ends the grandfathering for this workspace.
       tracksMapBaseline: true,
       ...(extractor ? { extractor } : {}),
+      ...(replayedFiles.length > 0 ? { replayedFiles: [...replayedFiles].sort() } : {}),
+      ...(pendingFiles.length > 0 ? { pendingFiles: [...new Set(pendingFiles)].sort() } : {}),
+      ...(parseTimeouts.length > 0 ? { parseTimeouts: [...new Set(parseTimeouts)].sort() } : {}),
     };
-    fs.mkdirSync(path.dirname(ingestMtimeCachePath(projectRoot)), { recursive: true });
-    fs.writeFileSync(ingestMtimeCachePath(projectRoot), JSON.stringify(data));
+    const target = ingestMtimeCachePath(projectRoot);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    // Via a temp file and rename: a process killed mid-write left a truncated
+    // baseline, which reads as none, and the next map re-ingested everything.
+    const tmp = `${target}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(data));
+      fs.renameSync(tmp, target);
+    } catch (err) {
+      // A failed rename (a locked target on Windows, say) must not leave the
+      // temp file behind; one would pile up per failing run.
+      fs.rmSync(tmp, { force: true });
+      throw err;
+    }
   } catch {
     // The cache is an optimization and freshness hint. Ingestion itself succeeded.
   }

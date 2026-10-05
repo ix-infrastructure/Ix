@@ -57,14 +57,23 @@ export default defineConfig({
       reporter: ["text", "json", "html"],
       include: ["src/**/*.ts"],
       exclude: ["src/**/__tests__/**", "src/**/*.d.ts"],
-      // Floor set just below the current baseline (measured across ALL src files,
-      // not just tested ones) so it catches regressions without flaking. Ratchet
-      // these up as coverage improves; never lower.
+      // Floors about three points under the measured baseline (2026-10-03,
+      // across ALL src files: 68.2 / 60.6 / 77.1 / 69.3), so deleting a test
+      // file fails CI while ordinary churn does not. The old floors
+      // (22/21/28/23) sat 45 points below and could not fail. Ratchet up as
+      // coverage improves; never lower. A change that drops one of these adds
+      // tests -- it does not move the floor.
       thresholds: {
-        statements: 22,
-        branches: 21,
-        functions: 28,
-        lines: 23,
+        statements: 65,
+        branches: 57,
+        functions: 74,
+        lines: 66,
+        // The files the ingest and retrieval lanes change most, each about two
+        // points under its own baseline (statements / lines).
+        "src/cli/commands/ingest.ts": { statements: 70, lines: 72 },
+        "src/cli/commands/context.ts": { statements: 72, lines: 72 },
+        "src/cli/resolve.ts": { statements: 75, lines: 77 },
+        "src/client/api.ts": { statements: 51, lines: 55 },
       },
     },
   },

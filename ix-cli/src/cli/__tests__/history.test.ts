@@ -13,19 +13,19 @@ import { coChangedFiles, gitRunner, recentCommits, type GitRunner } from "../exp
 
 /** A `git log` that answers from a fixed list of commits, newest first. */
 function fakeGit(commits: Array<{ sha: string; date: string; subject: string; files: string[] }>): GitRunner {
-  return (args) => {
+  return async (args) => {
     const path = args[args.indexOf("--") + 1];
     const depth = Number((args.find((a) => /^-\d+$/.test(a)) ?? "-1000").slice(1));
     const touching = commits.filter((c) => c.files.includes(path)).slice(0, depth);
     if (args.includes("--full-diff")) {
-      return touching.map((c) => `@${c.sha}\n\n${c.files.join("\n")}\n`).join("");
+      return touching.map((c) => `\0${c.sha}\n\n${c.files.join("\n")}\n`).join("");
     }
     return touching.map((c) => `${c.sha}\t${c.date}\t${c.subject}`).join("\n");
   };
 }
 
 describe("recentCommits", () => {
-  it("keeps the newest two, adds the newest fixes, and stays newest first", () => {
+  it("keeps the newest two, adds the newest fixes, and stays newest first", async () => {
     // inventory.ts before the rank fix: the fix to the same bug next door was
     // behind three feature commits.
     const git = fakeGit([
@@ -36,25 +36,25 @@ describe("recentCommits", () => {
       { sha: "97d66ff", date: "2026-05-30", subject: "fix: inventory uses listByKind", files: ["inventory.ts"] },
       { sha: "0000001", date: "2026-05-01", subject: "fix: an older fix", files: ["inventory.ts"] },
     ]);
-    expect(recentCommits(git, "inventory.ts").map((c) => c.sha)).toEqual(["d4ed26f", "7ab9034", "bee214b", "97d66ff"]);
+    expect((await recentCommits(git, "inventory.ts")).map((c) => c.sha)).toEqual(["d4ed26f", "7ab9034", "bee214b", "97d66ff"]);
   });
 
-  it("does not repeat a commit that is both newest and a fix", () => {
+  it("does not repeat a commit that is both newest and a fix", async () => {
     const git = fakeGit([
       { sha: "a", date: "d", subject: "fix(cli): fail unresolved graph commands (#547)", files: ["resolve.ts"] },
       { sha: "b", date: "d", subject: "perf: cut ix read", files: ["resolve.ts"] },
       { sha: "c", date: "d", subject: "fix(mcp): close leaks", files: ["resolve.ts"] },
     ]);
-    expect(recentCommits(git, "resolve.ts").map((c) => c.sha)).toEqual(["a", "b", "c"]);
+    expect((await recentCommits(git, "resolve.ts")).map((c) => c.sha)).toEqual(["a", "b", "c"]);
   });
 
-  it("is empty when git cannot answer", () => {
-    expect(recentCommits(() => undefined, "x.ts")).toEqual([]);
+  it("is empty when git cannot answer", async () => {
+    expect(await recentCommits(async () => undefined, "x.ts")).toEqual([]);
   });
 });
 
 describe("coChangedFiles", () => {
-  it("ranks files that changed with the target, discounting sweeps", () => {
+  it("ranks files that changed with the target, discounting sweeps", async () => {
     const sweep = Array.from({ length: 25 }, (_, i) => `f${i}.ts`);
     const git = fakeGit([
       { sha: "1", date: "d", subject: "s", files: ["inventory.ts", "rank.ts", "api.ts"] },
@@ -64,18 +64,18 @@ describe("coChangedFiles", () => {
       { sha: "5", date: "d", subject: "sweep", files: ["inventory.ts", ...sweep] },
       { sha: "6", date: "d", subject: "sweep", files: ["inventory.ts", ...sweep] },
     ]);
-    const found = coChangedFiles(git, "inventory.ts", new Set());
+    const found = await coChangedFiles(git, "inventory.ts", new Set());
     expect(found.map((c) => c.path)).toEqual(["rank.ts", "api.ts"]);
     expect(found[0]).toMatchObject({ commits: 2 });
   });
 
-  it("skips files the bundle has, and tests unless the target is one", () => {
+  it("skips files the bundle has, and tests unless the target is one", async () => {
     const git = fakeGit([
       { sha: "1", date: "d", subject: "s", files: ["a.ts", "b.ts", "src/__tests__/a.test.ts"] },
       { sha: "2", date: "d", subject: "s", files: ["a.ts", "b.ts", "src/__tests__/a.test.ts"] },
     ]);
-    expect(coChangedFiles(git, "a.ts", new Set(["b.ts"]))).toEqual([]);
-    expect(coChangedFiles(git, "src/__tests__/a.test.ts", new Set()).map((c) => c.path)).toEqual(["a.ts", "b.ts"]);
+    expect(await coChangedFiles(git, "a.ts", new Set(["b.ts"]))).toEqual([]);
+    expect((await coChangedFiles(git, "src/__tests__/a.test.ts", new Set())).map((c) => c.path)).toEqual(["a.ts", "b.ts"]);
   });
 });
 
@@ -86,9 +86,9 @@ describe("gitRunner", () => {
     dir = undefined;
   });
 
-  it("reads a real repository's log, and returns undefined outside one", () => {
+  it("reads a real repository's log, and returns undefined outside one", async () => {
     dir = mkdtempSync(join(tmpdir(), "ix-history-"));
-    expect(gitRunner(dir)(["log", "-1"])).toBeUndefined();
+    expect(await gitRunner(dir)(["log", "-1"])).toBeUndefined();
     const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
     git("init", "-q");
     git("config", "user.email", "t@example.com");
@@ -100,11 +100,31 @@ describe("gitRunner", () => {
       git("commit", "-q", "-m", subject);
     }
     const run = gitRunner(dir);
-    expect(recentCommits(run, "a.ts").map((c) => c.subject)).toEqual(["fix: a handles b", "feat: add a"]);
-    expect(coChangedFiles(run, "a.ts", new Set()).map((c) => [c.path, c.commits])).toEqual([["b.ts", 2]]);
+    expect((await recentCommits(run, "a.ts")).map((c) => c.subject)).toEqual(["fix: a handles b", "feat: add a"]);
+    expect((await coChangedFiles(run, "a.ts", new Set())).map((c) => [c.path, c.commits])).toEqual([["b.ts", 2]]);
   });
 
-  it("finds co-changes for a workspace in a subdirectory of its repository", () => {
+  it("keeps a commit whole when a path in it contains @", async () => {
+    // The commit marker used to be "@", so `packages/@scope/x.ts` split its
+    // commit and the files after it were credited to nothing.
+    dir = mkdtempSync(join(tmpdir(), "ix-history-"));
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+    git("init", "-q");
+    git("config", "user.email", "t@example.com");
+    git("config", "user.name", "t");
+    mkdirSync(join(dir, "packages", "@scope"), { recursive: true });
+    for (const i of [0, 1]) {
+      writeFileSync(join(dir, "a.ts"), `// ${i}\n`);
+      writeFileSync(join(dir, "packages", "@scope", "x.ts"), `// ${i}\n`);
+      writeFileSync(join(dir, "z.ts"), `// ${i}\n`);
+      git("add", ".");
+      git("commit", "-q", "-m", `change ${i}`);
+    }
+    const found = (await coChangedFiles(gitRunner(dir), "a.ts", new Set(), 5)).map((c) => [c.path, c.commits]);
+    expect(found).toEqual(expect.arrayContaining([["packages/@scope/x.ts", 2], ["z.ts", 2]]));
+  });
+
+  it("finds co-changes for a workspace in a subdirectory of its repository", async () => {
     // `git log --name-only` prints paths from the repository's top level, while
     // the target path is relative to the workspace root git runs in.
     dir = mkdtempSync(join(tmpdir(), "ix-history-"));
@@ -120,12 +140,12 @@ describe("gitRunner", () => {
       git("commit", "-q", "-m", `change ${i}`);
     }
     const run = gitRunner(join(dir, "packages", "web"));
-    expect(coChangedFiles(run, "a.ts", new Set()).map((c) => [c.path, c.commits])).toEqual([["b.ts", 2]]);
+    expect((await coChangedFiles(run, "a.ts", new Set())).map((c) => [c.path, c.commits])).toEqual([["b.ts", 2]]);
   });
 });
 
 describe("recent commits in a bundle", () => {
-  it("is one provenance row naming each commit, right after the related files", () => {
+  it("is one provenance row naming each commit, right after the related files", async () => {
     const facts: ContextFacts = {
       id: "f", name: "resolve.ts", kind: "file", path: "ix-cli/src/cli/resolve.ts",
       members: [], memberCount: 0, callerCount: 0, calleeCount: 0, dependentCount: 0, importerCount: 0,

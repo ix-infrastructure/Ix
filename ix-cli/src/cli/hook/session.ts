@@ -55,8 +55,11 @@ export function canonicalPath(p: string): string {
   return parent === resolved ? resolved : path.join(canonicalPath(parent), path.basename(resolved));
 }
 
+// This runs from session hooks in whatever checkout the agent is in. Reading
+// the index (diff HEAD) runs a core.fsmonitor command the repository's own
+// config names; never let it.
 function git(cwd: string, args: string[]): string {
-  return execFileSync("git", ["-C", cwd, ...args], {
+  return execFileSync("git", ["-C", cwd, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", ...args], {
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "ignore"],
     timeout: GIT_TIMEOUT_MS,
@@ -81,9 +84,11 @@ export function gitTopLevel(dir: string): string | undefined {
 export function gitDiffHead(repoRoot: string): string {
   // The prefixes are spelled out because the user's config can change them:
   // `diff.mnemonicPrefix` writes `c/` and `w/`, `diff.noprefix` none, and
-  // `parseUnifiedDiff` strips `a/` and `b/`.
+  // `parseUnifiedDiff` strips `a/` and `b/`. --no-textconv: a textconv driver
+  // is a command from the repository's config, and the line numbers wanted
+  // here are the file's own, not a converted rendering's.
   return git(repoRoot, [
-    "diff", "-U0", "--no-color", "--no-ext-diff", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/", "HEAD", "--",
+    "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/", "HEAD", "--",
   ]);
 }
 
