@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-import { ingestFiles } from "../commands/ingest.js";
+import { ingestFiles, ingestPathSingleFlight } from "../commands/ingest.js";
+import { acquireMapLock, takeMapRerun } from "../single-flight.js";
 import { ingestMtimeCachePath, ingestRebuildPath, loadConfig } from "../config.js";
 import { workspaceIdForPath } from "../system.js";
 import { FakeBackend } from "./helpers/fake-backend.js";
@@ -804,6 +805,190 @@ describe("ingestFiles against a fake backend", () => {
 
       expect(summary.idempotentPatches).toBeGreaterThan(0);
       expect(summary.replayedChanges).toEqual([]);
+    });
+  });
+
+  describe("one failing file does not stop the baseline", () => {
+    // The baseline used to be written only by a clean run. One unreadable file
+    // then meant no run ever recorded anything again: every map re-read the
+    // whole workspace, and deleted files were never retracted.
+    const incremental = () =>
+      ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
+    const stage = () => execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+    const stored = () => loadIngestBaseline(repo)!;
+    let stderr: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    });
+    afterEach(() => {
+      stderr.mockRestore();
+      process.exitCode = undefined;
+    });
+
+    it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+      "records every other file and retracts a deletion while one file is unreadable",
+      async () => {
+        fixture(3);
+        // The graph model: a deletion reconciles through /v1/patches/:id and
+        // /v1/entity/:id, which only it serves.
+        backend.semantics = "head";
+        const broken = join(repo, "src", "m000.ts");
+        const deleted = join(repo, "src", "m001.ts");
+        await incremental();
+        const before = stored().files.get(broken);
+
+        writeFileSync(broken, "export const changed = 1;\n", "utf8");
+        rmSync(deleted);
+        stage(); // before the chmod: git cannot read the file either
+        execFileSync("chmod", ["000", broken]);
+        backend.resetRequests();
+        try {
+          const summary = await incremental();
+          expect(summary.parseErrors, "the unreadable file is an error").toBeGreaterThan(0);
+        } finally {
+          execFileSync("chmod", ["644", broken]);
+        }
+
+        const files = stored().files;
+        expect(files.has(deleted), "the deletion was retracted and recorded").toBe(false);
+        expect(backend.sourceUris).toContain("src/m001.ts");
+        expect(files.get(join(repo, "src", "m002.ts")), "a settled file is recorded").toBeDefined();
+        expect(files.get(broken), "the failed file keeps its old mtime").toBe(before);
+
+        // Readable again: the next run sends it, and only it.
+        backend.resetRequests();
+        await incremental();
+        expect(backend.acceptedPatches()).toBe(1);
+        expect(stored().files.get(broken)).toBe(statSync(broken).mtimeMs);
+      },
+    );
+
+    it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+      "a new file that fails is pending: retried, and ix status does not call the graph current",
+      async () => {
+        // A new file has no previous mtime to keep, so it dropped out of the
+        // baseline while `lastIngestAt` moved past its mtime, and status
+        // judged it current.
+        fixture(3);
+        await incremental();
+        const added = join(repo, "src", "added.ts");
+        writeFileSync(added, "export const added = 1;\n", "utf8");
+        stage();
+        execFileSync("chmod", ["000", added]);
+        try {
+          await incremental();
+        } finally {
+          execFileSync("chmod", ["644", added]);
+        }
+
+        expect(stored().files.has(added)).toBe(false);
+        expect(stored().pendingFiles).toEqual(["src/added.ts"]);
+        const status = detectStaleFiles(repo);
+        expect(status.staleFiles).toBe(1);
+        expect(status.sampleChangedFiles).toEqual(["src/added.ts"]);
+        expect(renderStatusLlm("ok", "x", status)[0]).toContain("stale=true");
+
+        // The next run sends it and clears the list.
+        await incremental();
+        expect(stored().files.get(added)).toBe(statSync(added).mtimeMs);
+        expect(stored().pendingFiles).toEqual([]);
+        expect(detectStaleFiles(repo).staleFiles).toBe(0);
+      },
+    );
+
+    it("a failed lookup is not a reset", async () => {
+      fixture(3);
+      backend.rememberHashes = true;
+      await incremental();
+      backend.failSourceHashes = true;
+      backend.resetRequests();
+
+      const summary = await incremental();
+
+      expect(summary.filesSkippedAsUnchanged, "still incremental").toBe(3);
+      expect(backend.commitCount).toBe(0);
+    });
+
+    it("leaves no temp file beside the baseline", async () => {
+      fixture(2);
+      await incremental();
+      const dir = join(home, ".ix");
+      expect(existsSync(ingestMtimeCachePath(repo))).toBe(true);
+      expect(execFileSync("ls", ["-a", dir], { encoding: "utf8" })).not.toMatch(/\.tmp/);
+    });
+  });
+
+  describe("ix ingest coalesces with a map or ingest of the same workspace", () => {
+    // It used to exit 1 with "run this again", which an editor hook or an MCP
+    // client that ingests after every edit reported as a failed ingest, while
+    // `ix map` in the same spot coalesces and exits 0.
+    let stdout: ReturnType<typeof vi.spyOn>;
+    let stderr: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      stdout = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      process.exitCode = undefined;
+    });
+    afterEach(() => {
+      stdout.mockRestore();
+      stderr.mockRestore();
+      process.exitCode = undefined;
+      delete process.env.IX_MAP_COALESCE_EXIT_CODE;
+    });
+    const written = (spy: ReturnType<typeof vi.spyOn>) =>
+      spy.mock.calls.map((call: unknown[]) => String(call[0])).join("");
+
+    it("exits 0, asks the holder for a rerun, and prints JSON a client can parse", async () => {
+      fixture(1);
+      const held = acquireMapLock(repo, "test");
+      try {
+        expect(held).not.toBeNull();
+        backend.resetRequests();
+        await ingestPathSingleFlight(join(repo, "src"), { format: "json" });
+
+        expect(process.exitCode, "a coalesce is not a failure").toBeUndefined();
+        expect(backend.commitCount, "nothing ran beside the holder").toBe(0);
+        expect(JSON.parse(written(stdout))).toEqual({ coalesced: true, workspace: repo });
+        expect(takeMapRerun(repo), "the holder is asked to run once more").toBe(true);
+      } finally {
+        held?.release();
+      }
+    });
+
+    it("honours IX_MAP_COALESCE_EXIT_CODE, as ix map does", async () => {
+      fixture(1);
+      const held = acquireMapLock(repo, "test");
+      try {
+        process.env.IX_MAP_COALESCE_EXIT_CODE = "75";
+        await ingestPathSingleFlight(repo, { format: "text" });
+        expect(process.exitCode).toBe(75);
+        expect(written(stderr)).toContain("Another ix map or ix ingest is running");
+      } finally {
+        held?.release();
+      }
+    });
+
+    it("a holding ingest re-runs for the one that coalesced, so its edit lands", async () => {
+      fixture(3);
+      await ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
+      const first = join(repo, "src", "m000.ts");
+      const second = join(repo, "src", "m002.ts");
+      writeFileSync(first, "export const first = 1;\n", "utf8");
+      writeFileSync(second, "export const second = 2;\n", "utf8");
+
+      // The lock is taken before the first await, so the second call finds it
+      // held whatever the scheduling.
+      const holder = ingestPathSingleFlight(first, { format: "json" });
+      const waiter = ingestPathSingleFlight(second, { format: "json" });
+      await Promise.all([holder, waiter]);
+
+      expect(process.exitCode).toBeUndefined();
+      const files = loadIngestBaseline(repo)!.files;
+      expect(files.get(second), "the coalesced run's file was ingested").toBe(statSync(second).mtimeMs);
+      expect(files.get(first)).toBe(statSync(first).mtimeMs);
+      const after = acquireMapLock(repo, "after");
+      expect(after, "the lock was let go").not.toBeNull();
+      after?.release();
     });
   });
 
