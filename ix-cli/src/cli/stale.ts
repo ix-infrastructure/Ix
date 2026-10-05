@@ -119,12 +119,18 @@ export function detectStaleFiles(
   const canonicalSet = (relPaths: readonly string[]): Set<string> =>
     new Set([...absoluteSet(workspaceRoot, relPaths)].map(underCanonicalRoot));
   const pending = canonicalSet(baseline.pendingFiles);
-  const timedOut = canonicalSet(baseline.parseTimeouts);
+  // Canonical path -> the baseline's own workspace-relative spelling, which is
+  // what status reports: POSIX separators on every platform, as the ingest
+  // summary names them.
+  const timedOut = new Map(
+    baseline.parseTimeouts.map((rel) => [underCanonicalRoot(path.resolve(workspaceRoot, rel)), rel]),
+  );
   const parseTimeouts: string[] = [];
 
   for (const filePath of files) {
-    if (timedOut.has(filePath)) {
-      parseTimeouts.push(path.relative(canonicalRoot, filePath));
+    const timedOutAs = timedOut.get(filePath);
+    if (timedOutAs !== undefined) {
+      parseTimeouts.push(timedOutAs);
       continue;
     }
     try {
