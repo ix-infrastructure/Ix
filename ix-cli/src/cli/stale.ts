@@ -128,12 +128,16 @@ export function detectStaleFiles(
   const currentFiles = new Set(files.map((filePath) => path.resolve(filePath)));
   const changedFiles: string[] = [];
   const pending = absoluteSet(workspaceRoot, baseline.pendingFiles);
-  const timedOut = absoluteSet(workspaceRoot, baseline.parseTimeouts);
+  // Absolute path -> the baseline's own workspace-relative spelling, which is
+  // what status reports: POSIX separators on every platform, as the ingest
+  // summary names them.
+  const timedOut = new Map(baseline.parseTimeouts.map((rel) => [path.resolve(workspaceRoot, rel), rel]));
   const parseTimeouts: string[] = [];
 
   for (const filePath of files) {
-    if (timedOut.has(path.resolve(filePath))) {
-      parseTimeouts.push(path.relative(workspaceRoot, filePath));
+    const timedOutAs = timedOut.get(path.resolve(filePath));
+    if (timedOutAs !== undefined) {
+      parseTimeouts.push(timedOutAs);
       continue;
     }
     try {
