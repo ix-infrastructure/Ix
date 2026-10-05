@@ -255,6 +255,14 @@ describe("incremental ix map equals a fresh map (fake backend)", () => {
     });
   });
 
+  // The index prescan holds no Python or Java symbols, so an added file in
+  // either language still takes the whole-repository pass: resolved alone, its
+  // cross-file calls would point at a module node or at nothing.
+  it("IN-01: an added Python or Java file keeps its cross-file calls", async () => {
+    await runSequence("head", [edit("addFile", undefined, 0)], { langs: ["py"] });
+    await runSequence("head", [edit("addFile", undefined, 1)], { langs: ["java"] });
+  });
+
   // F-04. Dropping the file's last import removes a node, the patch carries a
   // DeleteNode, and a delete-bearing patch goes to `/v1/patch`, which does not
   // sweep: the removed CALLS and IMPORTS edges stay live.

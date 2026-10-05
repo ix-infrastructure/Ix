@@ -3229,7 +3229,17 @@ export async function ingestFiles(
     // mapped repo is exactly that, and it used to re-send the whole repository.
     // `mtimeCache` is empty after --force, a workspace migration or the DB-reset
     // guard above, so those still take Path B.
-    const hasBaseline = previousBaseline !== null && mtimeCache.size > 0;
+    //
+    // Only for files whose cross-file references Path A can resolve, though.
+    // Path A resolves the changed files as one batch against `globalIndex`, and
+    // that index holds the symbols of the prescan languages only (Go, PHP, R,
+    // SAS, JS/TS). A new Python or Java file resolved that way binds its calls
+    // to itself alone, so they point at a module node or at nothing; the
+    // whole-repository pass resolves them. Those files keep that pass until the
+    // persisted symbol table (IN-10) covers every language.
+    const unknownToBackend = mtimeChangedPaths.filter(fp => !knownHashes.has(fp));
+    const hasBaseline = previousBaseline !== null && mtimeCache.size > 0
+      && unknownToBackend.every(needsIndexPrescan);
     if ((hasBaseline || knownHashes.size > 0 || mtimeChangedPaths.length === 0) && !opts.force) {
       // Path A: has baseline or all mtime-clean → pre-scan to detect changes before loading modules.
       // If nothing changed, module load is skipped entirely. A file with no
@@ -3351,8 +3361,8 @@ export async function ingestFiles(
       // the check is `!opts.force` on the other. So the mtime skips the stat
       // loop recorded did not actually happen, and leaving them counted would
       // refuse the stitch on a run that parsed every file. (Adding one file to
-      // a mapped repo used to land here too; the baseline check above keeps it
-      // on Path A now.)
+      // a mapped repo used to land here whatever its language; the baseline
+      // check above keeps prescan-language additions on Path A now.)
       filesSkipped -= filesSkippedAsUnchanged;
       filesSkippedAsUnchanged = 0;
       const moduleStart = performance.now();
