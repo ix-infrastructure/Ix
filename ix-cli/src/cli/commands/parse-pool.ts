@@ -458,9 +458,10 @@ export class ParsePool {
   /**
    * Files whose parse ran past the budget, in the order they gave up --
    * reported by the worker's own budget or by the backstop below. Only tasks
-   * that count (see `parse`). Not counted in `crashedTasks()`: a file that
-   * times out does so every run, and a crash withholds the mtime baseline,
-   * which would re-read the whole repo forever over one slow file.
+   * that count (see `parse`). Not counted in `crashedTasks()`: a crash leaves
+   * every file the run could not parse unsettled in the baseline, and one slow
+   * file must not do that to the rest. The ingest keeps just these files
+   * unsettled and records them for `ix status`.
    */
   timedOutFiles(): string[] {
     return [...this.timedOut];

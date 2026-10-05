@@ -20,6 +20,8 @@ interface StatusStaleInfo {
   sampleChangedFiles: string[];
   /** Changed files the last run could not get applied (F-01); see `IngestBaseline.replayedFiles`. */
   replayedFiles?: string[];
+  /** Files skipped because their parse ran past the budget; see `IngestBaseline.parseTimeouts`. */
+  parseTimeouts?: string[];
 }
 
 /**
@@ -47,8 +49,10 @@ export function renderStatusLlm(
     ["last_ingest_at", staleInfo?.lastIngestAt ?? null],
     ["stale_files", staleInfo ? String(staleInfo.staleFiles) : null],
     ["not_applied", staleInfo ? String(staleInfo.replayedFiles?.length ?? 0) : null],
+    ["parse_timeouts", staleInfo ? String(staleInfo.parseTimeouts?.length ?? 0) : null],
     ["stale", staleInfo
-      ? (!staleInfo.graphCompleted || staleInfo.staleFiles > 0 || (staleInfo.replayedFiles?.length ?? 0) > 0 ? "true" : "false")
+      ? (!staleInfo.graphCompleted || staleInfo.staleFiles > 0 || (staleInfo.replayedFiles?.length ?? 0) > 0
+        || (staleInfo.parseTimeouts?.length ?? 0) > 0 ? "true" : "false")
       : null],
   ])];
   for (const f of staleInfo?.sampleChangedFiles ?? []) {
@@ -57,7 +61,18 @@ export function renderStatusLlm(
   for (const f of staleInfo?.replayedFiles ?? []) {
     lines.push(llmLine("not_applied", [["path", f]]));
   }
+  for (const f of staleInfo?.parseTimeouts ?? []) {
+    lines.push(llmLine("parse_timeout", [["path", f]]));
+  }
   return lines;
+}
+
+/** The `ix status` warning for files the last run skipped on the parse budget. */
+function describeStatusParseTimeouts(files: readonly string[], sample = 5): string {
+  const shown = files.slice(0, sample).join(", ");
+  const more = files.length > sample ? ` and ${files.length - sample} more` : "";
+  return `${files.length} file(s) are not in the graph: their parse ran past the per-file budget (${shown}${more}). ` +
+    "Raise IX_PARSE_BUDGET_MS (milliseconds, 0 = none) and run ix map.";
 }
 
 export function registerStatusCommand(program: Command): void {
@@ -92,6 +107,7 @@ export function registerStatusCommand(program: Command): void {
             staleFiles: staleInfo?.staleFiles ?? 0,
             sampleChangedFiles: staleInfo?.sampleChangedFiles ?? [],
             replayedFiles: staleInfo?.replayedFiles ?? [],
+            parseTimeouts: staleInfo?.parseTimeouts ?? [],
           };
           printJson(result);
         } else {
@@ -120,8 +136,13 @@ export function registerStatusCommand(program: Command): void {
                 renderNote(`... and ${staleInfo.staleFiles - staleInfo.sampleChangedFiles.length} more`);
               }
               renderNote("Run ix map to update.");
-            } else {
+            } else if (staleInfo.parseTimeouts.length === 0) {
               renderSuccess("Graph is up to date.");
+            }
+            if (staleInfo.graphCompleted && staleInfo.parseTimeouts.length > 0) {
+              // Beside the other states, not instead of them: another map
+              // will not bring these files in, a larger budget will.
+              renderWarning(describeStatusParseTimeouts(staleInfo.parseTimeouts));
             }
             if (staleInfo.graphCompleted && !staleInfo.mapCompleted) {
               renderWarning("No completed architecture map is recorded for this source revision.");

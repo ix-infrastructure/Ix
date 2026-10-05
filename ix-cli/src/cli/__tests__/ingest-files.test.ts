@@ -680,7 +680,7 @@ describe("ingestFiles against a fake backend", () => {
     expect(baselineFiles()).toEqual(expect.arrayContaining([join(repo, "src", "m000.ts"), join(repo, "src", "m002.ts")]));
   });
 
-  it("names a file whose parse runs past the budget, and ingests the rest", async () => {
+  it("names a file whose parse runs past the budget, ingests the rest, and retries it until it lands", async () => {
     // About 2.5 s of parsing, under the 1 MB cap, against a 1 s budget.
     // Whichever gives up first -- the worker's own check or the pool's
     // backstop at twice the budget --
@@ -698,6 +698,30 @@ describe("ingestFiles against a fake backend", () => {
       expect(summary.parseTimeouts).toEqual(["src/huge.ts"]);
       expect(backend.acceptedPatches(), "the other three still land").toBe(3);
       expect(stderr.mock.calls.map(([c]) => String(c)).join("")).toContain("src/huge.ts");
+
+      // Skipped, not settled: it used to be recorded clean, so every later run
+      // skipped it as unchanged while status called the graph current.
+      const huge = join(repo, "src", "huge.ts");
+      const stored = loadIngestBaseline(repo)!;
+      expect(stored.files.has(huge), "not recorded as ingested").toBe(false);
+      expect(stored.parseTimeouts).toEqual(["src/huge.ts"]);
+      expect(stored.pendingFiles).toEqual([]);
+      const status = detectStaleFiles(repo);
+      expect(status.parseTimeouts).toEqual(["src/huge.ts"]);
+      expect(status.staleFiles, "named once, as a timeout").toBe(0);
+      const llm = renderStatusLlm("ok", "x", status);
+      expect(llm[0]).toContain("parse_timeouts=1");
+      expect(llm[0]).toContain("stale=true");
+
+      // With the budget off, the next run parses it and the warning goes.
+      process.env.IX_PARSE_BUDGET_MS = "0";
+      expect(backend.sourceUris).not.toContain("src/huge.ts");
+      const next = await ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
+      expect(next.parseTimeouts).toEqual([]);
+      expect(backend.sourceUris, "retried, not skipped as unchanged").toContain("src/huge.ts");
+      expect(loadIngestBaseline(repo)!.files.get(huge)).toBe(statSync(huge).mtimeMs);
+      expect(loadIngestBaseline(repo)!.parseTimeouts).toEqual([]);
+      expect(detectStaleFiles(repo).parseTimeouts).toEqual([]);
     } finally {
       stderr.mockRestore();
       if (saved === undefined) delete process.env.IX_PARSE_BUDGET_MS;

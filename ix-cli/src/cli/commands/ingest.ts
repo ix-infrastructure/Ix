@@ -3714,7 +3714,11 @@ export async function ingestFiles(
             new Date(previousBaseline.lastIngestAt),
             durableDeletedFiles,
             previousBaseline.extractor,
-            { replayedFiles: previousBaseline.replayedFiles, pendingFiles: previousBaseline.pendingFiles },
+            {
+              replayedFiles: previousBaseline.replayedFiles,
+              pendingFiles: previousBaseline.pendingFiles,
+              parseTimeouts: previousBaseline.parseTimeouts,
+            },
           );
         }
       }
@@ -3765,9 +3769,15 @@ export async function ingestFiles(
     // null, and recording those would skip them as unchanged for good.
     const runClean = ingestCompletedCleanly(parseErrors + crashedParses(), commitErrors);
     const lostParses = crashedParses() > 0;
+    // A parse that ran past the budget is not settled either, though it is
+    // not a crash: the file is not in the graph. It used to be recorded clean,
+    // and since a slow file times out on every run, it was then skipped as
+    // unchanged for good while status called the graph current.
+    const timedOut = new Set(timedOutParses());
     const unsettled = mtimeChangedPaths.filter(abs => {
       if (settledAbs.has(abs)) return false;
       const rel = toWorkspaceRelative(abs);
+      if (timedOut.has(rel)) return true;
       return !committedRel.has(rel) && !(unparsedRel.has(rel) && !lostParses);
     });
     // Name the unsettled files too. A new one has no previous mtime, so it is
@@ -3776,13 +3786,17 @@ export async function ingestFiles(
     // file's mtime. Without the list, status called the graph current while
     // the file was missing from it. A replayed change has its own list. As
     // with replays, a run that did not look at a file has not resolved it.
+    const notLookedAt = (rel: string): boolean => {
+      const abs = nodePath.resolve(workspaceRoot, rel);
+      return (!inScope(abs) || langExcluded.includes(abs)) && fs.existsSync(abs);
+    };
     const pendingFiles = [
-      ...unsettled.map(toWorkspaceRelative).filter(rel => !replayedChanges.has(rel)),
-      ...(previousBaseline?.pendingFiles ?? []).filter(rel => {
-        const abs = nodePath.resolve(workspaceRoot, rel);
-        return (!inScope(abs) || langExcluded.includes(abs)) && fs.existsSync(abs);
-      }),
+      ...unsettled.map(toWorkspaceRelative).filter(rel => !replayedChanges.has(rel) && !timedOut.has(rel)),
+      ...(previousBaseline?.pendingFiles ?? []).filter(notLookedAt),
     ];
+    // Timeouts get their own list, which `ix status` warns about by name: the
+    // fix is a larger IX_PARSE_BUDGET_MS, not another run.
+    const parseTimeouts = [...timedOut, ...(previousBaseline?.parseTimeouts ?? []).filter(notLookedAt)];
     // A deletion whose patch did not land keeps its entry, so it is found
     // deleted again next run.
     const failedDeletions = deletedPaths.filter(abs => !committedRel.has(toWorkspaceRelative(abs)));
@@ -3799,7 +3813,7 @@ export async function ingestFiles(
       // An unfinished re-ingest must not vouch for the new extractor: files
       // that failed would then be hash-clean next run and keep the old output.
       runClean ? baselineExtractor : (previousBaseline?.extractor ?? baselineExtractor),
-      { replayedFiles, pendingFiles },
+      { replayedFiles, pendingFiles, parseTimeouts },
     );
     if (rebuildProgress !== null) {
       // Finished: the baseline now records the new extractor. Otherwise keep

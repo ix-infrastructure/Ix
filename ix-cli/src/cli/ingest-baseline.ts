@@ -14,6 +14,7 @@ interface SerializedIngestBaseline {
   extractor?: string;
   replayedFiles?: string[];
   pendingFiles?: string[];
+  parseTimeouts?: string[];
 }
 
 export interface IngestBaseline {
@@ -57,6 +58,15 @@ export interface IngestBaseline {
    * graph current while the file was not in it.
    */
   pendingFiles: string[];
+  /**
+   * Workspace-relative paths of files whose parse ran past the per-file
+   * budget (`IX_PARSE_BUDGET_MS`) on the last run, so they are not in the
+   * graph. Not settled: like `pendingFiles` they keep their previous mtime
+   * (or none) and every run tries them again, and `ix status` warns about
+   * them rather than calling the graph current. A slow file times out on
+   * every run, so recording it clean skipped it for good.
+   */
+  parseTimeouts: string[];
 }
 
 /** Per-file lists a baseline write records beside the mtimes. */
@@ -65,6 +75,8 @@ export interface BaselineFileNotes {
   replayedFiles?: readonly string[];
   /** See `IngestBaseline.pendingFiles`. */
   pendingFiles?: readonly string[];
+  /** See `IngestBaseline.parseTimeouts`. */
+  parseTimeouts?: readonly string[];
 }
 
 const stringList = (value: unknown): string[] =>
@@ -117,6 +129,7 @@ export function loadIngestBaseline(projectRoot: string): IngestBaseline | null {
       extractor: typeof data.extractor === "string" ? data.extractor : null,
       replayedFiles: stringList(data.replayedFiles),
       pendingFiles: stringList(data.pendingFiles),
+      parseTimeouts: stringList(data.parseTimeouts),
     };
   } catch {
     return null;
@@ -130,7 +143,7 @@ export function saveIngestBaseline(
   now: Date = new Date(),
   deletedFiles: Map<string, string[]> = new Map(),
   extractor?: string | null,
-  { replayedFiles = [], pendingFiles = [] }: BaselineFileNotes = {},
+  { replayedFiles = [], pendingFiles = [], parseTimeouts = [] }: BaselineFileNotes = {},
 ): void {
   try {
     // Keep the last good rev rather than writing a shape the read side will
@@ -156,6 +169,7 @@ export function saveIngestBaseline(
       ...(extractor ? { extractor } : {}),
       ...(replayedFiles.length > 0 ? { replayedFiles: [...replayedFiles].sort() } : {}),
       ...(pendingFiles.length > 0 ? { pendingFiles: [...new Set(pendingFiles)].sort() } : {}),
+      ...(parseTimeouts.length > 0 ? { parseTimeouts: [...new Set(parseTimeouts)].sort() } : {}),
     };
     const target = ingestMtimeCachePath(projectRoot);
     fs.mkdirSync(path.dirname(target), { recursive: true });

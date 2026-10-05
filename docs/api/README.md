@@ -167,7 +167,9 @@ Ingest a path into the graph. Long-running: the client allows **30 minutes**.
 > under the same key: `unchanged` there counts only files skipped as *mtime- or
 > hash-unchanged*, `emptyFile` is a real count rather than a hardcoded `0`, and
 > there is an extra `unparsed` bucket for files the parse pool returned nothing
-> for. That is the client's own summary of its own run and is not this response;
+> for. A file whose parse ran past `IX_PARSE_BUDGET_MS` is counted in
+> `parseTimeout` and named in a top-level `parseTimeouts` list.
+> That is the client's own summary of its own run and is not this response;
 > see the stitch section below for why the narrower `unchanged` is load-bearing
 > there.
 
