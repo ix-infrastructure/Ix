@@ -58,6 +58,15 @@ again.
   another writer (a second `ix map` on the same backend) moved the graph
   revision under it (default 8). Only a commit that loses every retry is
   counted as failed and left for the next run.
+- `IX_PARSE_BUDGET_MS=N` — how long `ix map` / `ix ingest` may spend parsing
+  one file (default 10000). A file that runs past it is skipped and named in
+  the summary (`parseTimeouts` in `--format json`). It is not recorded as
+  ingested: every later run tries it again, and `ix status` warns about it by
+  name (`parseTimeouts` in `--format json`, `parse_timeouts` in `--format llm`)
+  until a run gets it in. `0` turns the budget off.
+- `IX_PARSE_WORKERS=N` — the most parse workers `ix map` / `ix ingest` starts
+  (default 8, never more than the cores less one). Each loads every grammar,
+  so a small edit starts one; raise it for a faster first map on a large machine.
 
 ## Harness presence (hermetic reproduction)
 

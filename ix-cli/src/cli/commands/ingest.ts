@@ -13,12 +13,14 @@ import { IxClient } from '../../client/api.js';
 import type { GraphPatchPayload } from '../../client/types.js';
 import { canonicalWorkspacePath, isPathInside, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
 import { resolveIngestRoot } from '../map-root.js';
+import { acquireMapLock, requestMapRerun, takeMapRerun } from '../single-flight.js';
+import { applyRequestedMapCoalesceExitCode } from './map.js';
 import {
   canonicalizeDiscoveredFilePath, discoverSourceFiles, emptyDiscoveryCounts, isSupportedSourceFile,
 } from '../file-discovery.js';
 import {
   clearRebuildProgress, extractorChanged, isRev, loadIngestBaseline, loadRebuildProgress,
-  saveIngestBaseline, saveRebuildProgress,
+  saveIngestBaseline, saveRebuildProgress, type BaselineFileNotes,
 } from '../ingest-baseline.js';
 import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
@@ -102,6 +104,27 @@ function parseLangs(raw: string): Set<string> {
 
 
 const MAX_FILE_BYTES = 1024 * 1024; // 1 MB
+
+/** Parse workers at most, unless IX_PARSE_WORKERS says otherwise. */
+const DEFAULT_PARSE_WORKERS = 8;
+/** Files a parse worker should have before another one is worth starting. */
+const FILES_PER_PARSE_WORKER = 50;
+
+/**
+ * How many parse workers `expectedTasks` files deserve: one per 50 files,
+ * never more than the cores less one or IX_PARSE_WORKERS (default 8), never
+ * fewer than one. Each worker loads every grammar, about 70 MB, so a worker
+ * per core for a one-file edit cost more than the parse.
+ */
+export function parsePoolSize(
+  expectedTasks: number,
+  cores: number = os.availableParallelism(),
+  configured: string | undefined = process.env.IX_PARSE_WORKERS,
+): number {
+  const fromEnv = Number(configured);
+  const cap = configured !== undefined && Number.isInteger(fromEnv) && fromEnv > 0 ? fromEnv : DEFAULT_PARSE_WORKERS;
+  return Math.max(1, Math.min(cores - 1, cap, Math.ceil(expectedTasks / FILES_PER_PARSE_WORKER)));
+}
 const MINIFIED_BYTES_THRESHOLD = 200 * 1024;
 const MINIFIED_MAX_LINE_THRESHOLD = 20_000;
 const MINIFIED_AVG_LINE_THRESHOLD = 2_000;
@@ -819,9 +842,25 @@ export function persistIngestBaselineIfClean(
   now?: Date,
   deletedFiles: Map<string, string[]> = new Map(),
   extractor?: string | null,
-  replayedFiles: readonly string[] = [],
+  notes: BaselineFileNotes = {},
 ): boolean {
   if (!ingestCompletedCleanly(parseErrors, commitErrors)) return false;
+  return persistIngestBaseline(projectRoot, mtimes, currentRev, now, deletedFiles, extractor, notes);
+}
+
+/**
+ * Write the baseline -- whatever errors the run had. The caller has already
+ * left the files it did not settle at their previous mtimes.
+ */
+export function persistIngestBaseline(
+  projectRoot: string,
+  mtimes: Map<string, number>,
+  currentRev: number,
+  now?: Date,
+  deletedFiles: Map<string, string[]> = new Map(),
+  extractor?: string | null,
+  notes: BaselineFileNotes = {},
+): boolean {
   // An empty mtime map is normally a discovery failure, not an empty repo —
   // an over-broad ignore rule, the wrong cwd, a glob that matched nothing —
   // and persisting it silently discards the baseline, forcing a full re-ingest
@@ -833,7 +872,7 @@ export function persistIngestBaselineIfClean(
   // empty is a real state and is persisted; without them, it is still treated
   // as discovery having gone wrong.
   if (mtimes.size === 0 && deletedFiles.size === 0) return false;
-  saveIngestBaseline(projectRoot, mtimes, currentRev, now, deletedFiles, extractor, replayedFiles);
+  saveIngestBaseline(projectRoot, mtimes, currentRev, now, deletedFiles, extractor, notes);
   return true;
 }
 
@@ -860,6 +899,76 @@ function renderProgressLine(phase: string, current: number, total: number): stri
 // ---------------------------------------------------------------------------
 // Command registration
 // ---------------------------------------------------------------------------
+
+type PathIngestOpts = Parameters<typeof ingestFiles>[1];
+
+/** The workspace root `target` ingests into, or undefined when it cannot be resolved. */
+function ingestLockRoot(target: string, explicitRoot?: string): string | undefined {
+  try {
+    const resolved = nodePath.resolve(target);
+    return resolveIngestRoot(resolved, fs.statSync(resolved).isDirectory(), explicitRoot);
+  } catch {
+    // `ingestFiles` reports a missing or unreadable path itself.
+    return undefined;
+  }
+}
+
+/**
+ * `ix ingest <path>`, single-flight per workspace under the lock `ix map`
+ * holds. Two ingests (or an ingest and a map) over one workspace race on the
+ * mtime baseline: the second to finish overwrites what the first recorded.
+ *
+ * A run that finds the lock held coalesces the way `ix map` does: it asks the
+ * holder for one more pass (`requestMapRerun`) and exits 0, unless
+ * IX_MAP_COALESCE_EXIT_CODE asks for another code. It used to exit 1, which
+ * editor hooks and MCP clients that ingest after every edit reported as a
+ * failed ingest. The holder takes the request before it lets go: `ix map`
+ * re-ingests the workspace, and so does a holding `ix ingest` when the
+ * workspace has a baseline -- an incremental pass, so it costs a stat per
+ * file. Without a baseline that pass would be a first ingest of the whole
+ * workspace, so it re-ingests only its own path then.
+ */
+export async function ingestPathSingleFlight(target: string, opts: PathIngestOpts): Promise<void> {
+  const root = ingestLockRoot(target, opts.root);
+  if (root === undefined) {
+    await ingestFiles(target, opts);
+    return;
+  }
+  const lock = acquireMapLock(root, `ix ingest ${root}`);
+  if (lock === null) {
+    requestMapRerun(root);
+    if (opts.format === 'json') {
+      // A JSON consumer gets an object, not an empty stdout it cannot parse.
+      printJson({ coalesced: true, workspace: root });
+    } else {
+      process.stderr.write(chalk.dim('  Another ix map or ix ingest is running for this workspace; it will pick up this change before it exits.\n'));
+    }
+    applyRequestedMapCoalesceExitCode();
+    return;
+  }
+  // Holding the lock: a request left before now is covered by this run, which
+  // has not read the tree yet.
+  takeMapRerun(root);
+  try {
+    await ingestFiles(target, opts);
+    if (takeMapRerun(root)) {
+      // One pass at most, as in `ix map`. The waiting run's own flags are not
+      // known here, so this is a plain incremental pass.
+      const rerunTarget = loadIngestBaseline(root) !== null ? root : target;
+      try {
+        await ingestFiles(rerunTarget, {
+          recursive: true, format: 'json', printSummary: false, suppressOutput: true, root: opts.root,
+        });
+      } catch (err: any) {
+        if (opts.format !== 'json') {
+          process.stderr.write(chalk.dim(`  Re-run for an ingest that waited on this one failed: ${err?.message ?? err}\n`));
+        }
+      }
+    }
+  } finally {
+    lock.release();
+  }
+}
 
 export function registerIngestCommand(program: Command): void {
   program
@@ -892,7 +1001,7 @@ export function registerIngestCommand(program: Command): void {
       if (opts.github) {
         await ingestGitHub(opts);
       } else if (effectivePath) {
-        await ingestFiles(effectivePath, opts);
+        await ingestPathSingleFlight(effectivePath, opts);
       } else {
         console.error('Error: provide a <path> or use --github <owner/repo>');
         process.exit(1);
@@ -919,6 +1028,14 @@ const COMMIT_STATUS_IDEMPOTENT = 'Idempotent';
  * work still needs doing.
  */
 const COMMIT_STATUS_BASE_REV_MISMATCH = 'BaseRevMismatch';
+
+/** The stderr note for files skipped because their parse ran past the budget. */
+export function describeParseTimeouts(files: readonly string[], sample = 5): string {
+  const shown = files.slice(0, sample).join(", ");
+  const more = files.length > sample ? ` and ${files.length - sample} more` : "";
+  return `Skipped ${files.length} file(s) whose parse ran past the per-file budget: ${shown}${more}. ` +
+    "They are not in the graph. Raise the budget with IX_PARSE_BUDGET_MS (milliseconds, 0 = none).";
+}
 
 /** Minimal local-ingest facts needed by commands that continue after ingestion. */
 export interface IngestFilesSummary {
@@ -1006,6 +1123,12 @@ export interface IngestFilesSummary {
    * something must not claim the graph is where it was.
    */
   graphUnchanged: boolean;
+  /**
+   * Files skipped because their parse ran past the per-file budget
+   * (IX_PARSE_BUDGET_MS, default 10 s), workspace-relative. A subset of the
+   * unparsed skips, named because a file that times out does so on every run.
+   */
+  parseTimeouts: string[];
 }
 
 /**
@@ -1145,8 +1268,8 @@ export function describeStitchSkipped(
   // stay frozen. Only a run that re-ingests every file gets back in.
   // Every branch names `--force`, because nothing else re-registers this
   // workspace. A skipped stitch does NOT stop the run persisting its mtime
-  // baseline -- `persistIngestBaselineIfClean` gates on parse and commit errors
-  // only -- so an ordinary re-run is incremental, skips unchanged files, and
+  // baseline -- the baseline records every file the run settled, stitch or
+  // not -- so an ordinary re-run is incremental, skips unchanged files, and
   // never enters the stitch block. "Re-run once that finishes" and "raise
   // IX_MAP_DEADLINE_MS" were both promises this code cannot keep: the re-run
   // prints nothing, exits 0, and the cross-repo edges stay exactly as stale.
@@ -1632,10 +1755,22 @@ export async function ingestFiles(
    * narrowing makes `pool` `never` down there.
    */
   const crashedParses = (): number => (pool === null ? 0 : pool.crashedTasks());
-  const ensureParsePool = (): ParsePool => {
-    if (pool) return pool;
-    pool = new ParsePool(workerPath, Math.max(1, os.cpus().length - 1));
-    pool.init();
+  /** Files whose parse ran past the budget; see `ParsePool.timedOutFiles`. */
+  const timedOutParses = (): string[] => (pool === null ? [] : pool.timedOutFiles());
+  /**
+   * The pool, sized to the work the caller is about to give it: one worker per
+   * 50 files, capped by the cores and by IX_PARSE_WORKERS (default 8). A
+   * one-file edit used to start a worker per core -- 23 threads and about
+   * 1.6 GB on a 24-core machine -- to parse one file. Workers start lazily, so
+   * the size is a ceiling, and a later, larger phase can raise it.
+   */
+  const ensureParsePool = (expectedTasks: number): ParsePool => {
+    const size = parsePoolSize(expectedTasks);
+    if (pool) {
+      pool.growTo(size);
+      return pool;
+    }
+    pool = new ParsePool(workerPath, size);
     return pool;
   };
 
@@ -1672,7 +1807,7 @@ export async function ingestFiles(
         // streaming loop below. A loss here is not a file the RUN lost, and
         // counting it as one refused the stitch and withheld the baseline over
         // files that were all present.
-        chunk.map(fp => ensureParsePool().parse(fp, relSources.get(fp)!, false).catch(() => null)),
+        chunk.map(fp => ensureParsePool(targets.length).parse(fp, relSources.get(fp)!, false).catch(() => null)),
       );
       for (let j = 0; j < chunk.length; j++) {
         if (parsed[j]) preParsed.set(chunk[j], parsed[j]);
@@ -1722,6 +1857,14 @@ export async function ingestFiles(
   let idempotentPatches = 0;
   /** Workspace-relative paths of changed files the backend answered `Idempotent` (F-01). */
   const replayedChanges = new Set<string>();
+  // Per-file outcomes, so one failing file does not keep the whole baseline
+  // from being written. A changed file is settled once its patch is committed
+  // (`committedRel`), its content turns out to be what the backend has, or it
+  // is skipped for a reason that will not change (minified); a file that
+  // parsed to nothing is settled only if no worker crashed this run.
+  const committedRel = new Set<string>();
+  const settledAbs = new Set<string>();
+  const unparsedRel = new Set<string>();
   // What `graphUnchanged` is computed from, beside the counters above. Each is
   // a way this run can have written to the graph, or have found it not where
   // the last run left it, without a patch being counted.
@@ -2028,10 +2171,23 @@ export async function ingestFiles(
     // DB-reset guard: if the mtime cache has entries but the server returns no hashes
     // for a small sample, the DB was wiped (e.g. `ix reset` run from a different dir
     // so the cache wasn't cleared). Invalidate the cache so files are re-ingested.
+    // Every baseline entry was committed (a file that failed keeps its previous
+    // entry or none), so each sampled file should be known to the backend.
+    // The sample is spread across the baseline rather than its first five
+    // entries, and a lookup that FAILED proves nothing: it used to come back
+    // empty and read as a reset, re-ingesting the whole workspace over one
+    // timed-out request.
     if (!opts.force && mtimeCache.size > 0) {
-      const samplePaths = [...mtimeCache.keys()].slice(0, 5);
-      const sampleHashes = await loadExistingHashes(client, samplePaths, toWorkspaceRelative, sourceWorkspaceIdOf, debug);
-      if (sampleHashes.size === 0) {
+      const keys = [...mtimeCache.keys()];
+      const step = Math.max(1, Math.floor(keys.length / 5));
+      const samplePaths = keys.filter((_, i) => i % step === 0).slice(0, 5);
+      let sampleHashes: Map<string, string> | undefined;
+      try {
+        sampleHashes = await loadExistingHashes(client, samplePaths, toWorkspaceRelative, sourceWorkspaceIdOf, debug, true);
+      } catch (err) {
+        if (debug) process.stderr.write(`\n  DB-reset check skipped: hash lookup failed: ${err}\n`);
+      }
+      if (sampleHashes !== undefined && sampleHashes.size === 0) {
         mtimeCache.clear();
         // What an unfinished re-ingest committed is gone with the rest.
         rebuildProgress?.clear();
@@ -2216,6 +2372,7 @@ export async function ingestFiles(
         replayedChanges.add(item.filePath);
         return;
       }
+      committedRel.add(item.filePath);
       onCommitted?.(item, rev);
     };
 
@@ -2763,9 +2920,10 @@ export async function ingestFiles(
               // `BaseRevMismatch` wrote nothing: the backend read the latest rev
               // outside the transaction and it moved before the commit ran. It
               // is a lost race, not a replay, so it must not count as applied —
-              // and it belongs in commitErrors, because that is what stops
-              // `persistIngestBaselineIfClean` caching these files as unchanged
-              // and leaving them missing from the graph until the next edit.
+              // it belongs in commitErrors, and it must not reach
+              // `settleCommitted`: an unsettled file keeps its previous mtime,
+              // which is what stops the baseline caching it as unchanged and
+              // leaving it missing from the graph until the next edit.
               if (result.status === COMMIT_STATUS_BASE_REV_MISMATCH) {
                 commitErrors += items.length;
                 if (debug) {
@@ -3087,6 +3245,7 @@ export async function ingestFiles(
           if (!forceReingestPaths.has(filePath) && knownHashes.get(filePath) === hash) {
             filesSkipped++;
             filesSkippedAsUnchanged++;
+            settledAbs.add(filePath);
             progressCurrent++;
             continue;
           }
@@ -3115,6 +3274,7 @@ export async function ingestFiles(
           const sourceText = bytes.toString('utf-8');
           if (isLikelyMinifiedSource(sourceText)) {
             minifiedLikely++;
+            settledAbs.add(filePath);
             filesSkipped++;
             progressCurrent++;
             if (debug) process.stderr.write(`\n  [skip minified-likely] ${filePath}\n`);
@@ -3171,13 +3331,13 @@ export async function ingestFiles(
           // paths. f.absFilePath is retained only for debug/error display.
           const parseResults = await Promise.all(
             chunk.map(f =>
-              ensureParsePool().parse(f.filePath, f.source).then(r => { progressCurrent++; return r; }),
+              ensureParsePool(parseable.length).parse(f.filePath, f.source).then(r => { progressCurrent++; return r; }),
             ),
           );
           const batch: ParsedFile[] = [];
           for (let j = 0; j < chunk.length; j++) {
             const parsed = parseResults[j] as any;
-            if (!parsed) { filesSkipped++; filesSkippedUnparsed++; continue; }
+            if (!parsed) { filesSkipped++; filesSkippedUnparsed++; unparsedRel.add(chunk[j].filePath); continue; }
             entitiesParsed += parsed.entities.length;
             batch.push({ filePath: chunk[j].filePath, parsed, hash: chunk[j].hash, previousHash: chunk[j].previousHash });
           }
@@ -3318,12 +3478,14 @@ export async function ingestFiles(
             if (!opts.force && !forceReingestPaths.has(absFilePath) && knownHashes.get(absFilePath) === hash) {
               filesSkipped++;
               filesSkippedAsUnchanged++;
+              settledAbs.add(absFilePath);
               return;
             }
             const previousHash = knownHashes.get(absFilePath);
             const sourceText = bytes.toString('utf-8');
             if (isLikelyMinifiedSource(sourceText)) {
               minifiedLikely++;
+              settledAbs.add(absFilePath);
               filesSkipped++;
               if (debug) process.stderr.write(`\n  [skip minified-likely] ${absFilePath}\n`);
               return;
@@ -3331,7 +3493,7 @@ export async function ingestFiles(
             const relFilePath = toWorkspaceRelative(absFilePath);
             const fd: NonNullable<FileData> = { filePath: relFilePath, source: sourceText, hash, previousHash: previousHash !== hash ? previousHash : undefined };
             fileData[idx] = fd;
-            parsePromises[idx] = ensureParsePool().parse(fd.filePath, fd.source).then(r => { progressCurrent++; return r; });
+            parsePromises[idx] = ensureParsePool(filePaths.length).parse(fd.filePath, fd.source).then(r => { progressCurrent++; return r; });
           } catch (err) {
             parseErrors++;
             process.stderr.write(`\n  [read error] ${absFilePath}: ${err}\n`);
@@ -3345,7 +3507,7 @@ export async function ingestFiles(
           const f = fileData[j];
           if (!f) continue;
           const parsed = parseResults[j] as any;
-          if (!parsed) { filesSkipped++; filesSkippedUnparsed++; continue; }
+          if (!parsed) { filesSkipped++; filesSkippedUnparsed++; unparsedRel.add(f.filePath); continue; }
           entitiesParsed += parsed.entities.length;
           batch.push({ filePath: f.filePath, parsed, hash: f.hash, previousHash: f.previousHash });
         }
@@ -3422,17 +3584,26 @@ export async function ingestFiles(
             const recovery = pendingDeletionRecovery.get(item.filePath);
             if (!recovery || !previousBaseline) return;
             durableDeletedFiles.set(recovery.absolutePath, recovery.dependents);
-            saveIngestBaseline(
-              projectRoot,
-              previousMtimes,
-              previousBaseline.currentRev,
-              new Date(previousBaseline.lastIngestAt),
-              durableDeletedFiles,
-              previousBaseline.extractor,
-              previousBaseline.replayedFiles,
-            );
           },
         });
+        // Once, after the deletions -- it was once per deleted file, the whole
+        // baseline rewritten each time. The run's own baseline write follows;
+        // this records the restore hints in case the run dies before then.
+        if (previousBaseline && durableDeletedFiles.size > 0) {
+          saveIngestBaseline(
+            projectRoot,
+            previousMtimes,
+            previousBaseline.currentRev,
+            new Date(previousBaseline.lastIngestAt),
+            durableDeletedFiles,
+            previousBaseline.extractor,
+            {
+              replayedFiles: previousBaseline.replayedFiles,
+              pendingFiles: previousBaseline.pendingFiles,
+              parseTimeouts: previousBaseline.parseTimeouts,
+            },
+          );
+        }
       }
     }
 
@@ -3470,33 +3641,67 @@ export async function ingestFiles(
         return abs !== undefined && (!inScope(abs) || langExcluded.includes(abs));
       }),
     ];
-    const baselinePersisted = (scopedRun && !previousBaseline) ? false : persistIngestBaselineIfClean(
+    // Per file, not all or nothing. The baseline used to be written only when
+    // the whole run was clean, so one permanently unreadable file meant no run
+    // ever recorded anything again: every map re-read the whole workspace and
+    // deletions were never retracted. Now every file this run settled is
+    // recorded, and every changed file it did not settle -- a read or build
+    // error, a commit that failed, a parse lost to a dead worker -- keeps its
+    // previous mtime (or none) so the next run tries it again. Lost parses
+    // still count: a run whose worker pool died resolves every later file as
+    // null, and recording those would skip them as unchanged for good.
+    const runClean = ingestCompletedCleanly(parseErrors + crashedParses(), commitErrors);
+    const lostParses = crashedParses() > 0;
+    // A parse that ran past the budget is not settled either, though it is
+    // not a crash: the file is not in the graph. It used to be recorded clean,
+    // and since a slow file times out on every run, it was then skipped as
+    // unchanged for good while status called the graph current.
+    const timedOut = new Set(timedOutParses());
+    const unsettled = mtimeChangedPaths.filter(abs => {
+      if (settledAbs.has(abs)) return false;
+      const rel = toWorkspaceRelative(abs);
+      if (timedOut.has(rel)) return true;
+      return !committedRel.has(rel) && !(unparsedRel.has(rel) && !lostParses);
+    });
+    // Name the unsettled files too. A new one has no previous mtime, so it is
+    // left out of the baseline, and `ix status` judges a file the baseline
+    // does not list against `lastIngestAt` -- which this write moves past the
+    // file's mtime. Without the list, status called the graph current while
+    // the file was missing from it. A replayed change has its own list. As
+    // with replays, a run that did not look at a file has not resolved it.
+    const notLookedAt = (rel: string): boolean => {
+      const abs = nodePath.resolve(workspaceRoot, rel);
+      return (!inScope(abs) || langExcluded.includes(abs)) && fs.existsSync(abs);
+    };
+    const pendingFiles = [
+      ...unsettled.map(toWorkspaceRelative).filter(rel => !replayedChanges.has(rel) && !timedOut.has(rel)),
+      ...(previousBaseline?.pendingFiles ?? []).filter(notLookedAt),
+    ];
+    // Timeouts get their own list, which `ix status` warns about by name: the
+    // fix is a larger IX_PARSE_BUDGET_MS, not another run.
+    const parseTimeouts = [...timedOut, ...(previousBaseline?.parseTimeouts ?? []).filter(notLookedAt)];
+    // A deletion whose patch did not land keeps its entry, so it is found
+    // deleted again next run.
+    const failedDeletions = deletedPaths.filter(abs => !committedRel.has(toWorkspaceRelative(abs)));
+    const baselinePersisted = (scopedRun && !previousBaseline) ? false : persistIngestBaseline(
       projectRoot,
       retryOnNextRun(
-        carryForwardMtimes(currentMtimes, previousMtimes, [...deferredDeletions, ...langExcluded, ...outOfScope]),
+        carryForwardMtimes(currentMtimes, previousMtimes, [...deferredDeletions, ...failedDeletions, ...langExcluded, ...outOfScope]),
         previousMtimes,
-        replayedAbsolute,
+        [...replayedAbsolute, ...unsettled],
       ),
       latestRev,
-      // Lost parses count as parse errors HERE, whatever they are called
-      // elsewhere. A run whose worker pool died resolves every later file as
-      // null, and those increment `filesSkippedUnparsed` rather than
-      // `parseErrors` -- so without this the run wrote an mtime baseline for
-      // tens of thousands of files it never parsed or committed, exited 0, and
-      // every later incremental map skipped them as unchanged. Half the graph
-      // missing, recoverable only by `--force`, and worse than `main`, which
-      // respawns without a cap and loses one file per crash.
-      parseErrors + crashedParses(),
-      commitErrors,
       scopedRun && previousBaseline ? new Date(previousBaseline.lastIngestAt) : undefined,
       nextDeletedFiles,
-      baselineExtractor,
-      replayedFiles,
+      // An unfinished re-ingest must not vouch for the new extractor: files
+      // that failed would then be hash-clean next run and keep the old output.
+      runClean ? baselineExtractor : (previousBaseline?.extractor ?? baselineExtractor),
+      { replayedFiles, pendingFiles, parseTimeouts },
     );
     if (rebuildProgress !== null) {
       // Finished: the baseline now records the new extractor. Otherwise keep
       // what landed, so the next run resumes from here.
-      if (baselinePersisted) clearRebuildProgress(projectRoot);
+      if (baselinePersisted && runClean) clearRebuildProgress(projectRoot);
       else saveRebuildProgress(projectRoot, currentExtractor, rebuildProgress);
     }
 
@@ -3764,6 +3969,7 @@ export async function ingestFiles(
     stitchErrors,
     stitchSkipped,
     stitchSkippedRule,
+    parseTimeouts: timedOutParses(),
     graphUnchanged:
       opts.force !== true &&
       !workspaceMigrated &&
@@ -3812,6 +4018,9 @@ export async function ingestFiles(
     // reads as an unexplained regression without the reason.
     process.stderr.write(`  ${describeStitchSkipped(stitchSkipped, stitchSkippedRule, debug)}\n`);
   }
+  if (summary.parseTimeouts.length > 0) {
+    process.stderr.write(`  ${describeParseTimeouts(summary.parseTimeouts)}\n`);
+  }
   if (replayedChanges.size > 0) {
     // stderr and exit 0: nothing failed on this side, and the next run retries.
     process.stderr.write(`  ${describeReplayedChanges(summary.replayedChanges)}\n`);
@@ -3857,7 +4066,12 @@ export async function ingestFiles(
       // `minifiedLikely` and `unparsed` are the buckets that are subsets of
       // `filesSkipped`; `parseError` and `tooLarge` are counted separately and
       // always were.
-      skipReasons: { unchanged: filesSkippedAsUnchanged, emptyFile: filesSkippedAsEmpty, parseError: parseErrors + crashedParses(), unparsed: filesSkippedUnparsed, tooLarge, minifiedLikely, outsideRoot, unreadable: discoveryCounts.unreadable, skippedDirs: discoveryCounts.skippedDirs },
+      skipReasons: {
+        unchanged: filesSkippedAsUnchanged, emptyFile: filesSkippedAsEmpty, parseError: parseErrors + crashedParses(),
+        unparsed: filesSkippedUnparsed, parseTimeout: summary.parseTimeouts.length, tooLarge, minifiedLikely, outsideRoot,
+        unreadable: discoveryCounts.unreadable, skippedDirs: discoveryCounts.skippedDirs,
+      },
+      parseTimeouts: summary.parseTimeouts,
       commitErrors,
       stitchErrors,
       // Ix#568. Present only when the stitch was refused before it was sent, so
@@ -3905,6 +4119,7 @@ export async function ingestFiles(
     if (replayedChanges.size > 0) console.log(`  ${chalk.yellow('not applied:')}       ${replayedChanges.size} ${chalk.dim('(see the warning above)')}`);
     if (tooLarge > 0) console.log(`  ${chalk.dim('skipped too large:')} ${tooLarge}`);
     if (minifiedLikely > 0) console.log(`  ${chalk.dim('skipped minified:')} ${minifiedLikely}`);
+    if (summary.parseTimeouts.length > 0) console.log(`  ${chalk.yellow("skipped parse timeout:")} ${summary.parseTimeouts.length} ${chalk.dim(`(${summary.parseTimeouts.join(", ")})`)}`);
     // Not dimmed like the others: these were dropped because the repo pointed
     // at files outside itself, which is worth a look rather than a shrug.
     if (outsideRoot > 0) console.log(`  ${chalk.yellow('skipped outside root:')} ${outsideRoot} ${chalk.dim('(symlinks leaving the tree)')}`);

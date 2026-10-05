@@ -706,9 +706,12 @@ function jsTsDeclarationBinds(node: any, name: string, namespace: 'value' | 'typ
   return false;
 }
 
+// `namedChildren` once rather than `namedChild(i)` per index: each indexed
+// call walks the children from the start, so the loop was quadratic in the
+// scope's size before it did any work.
 function jsTsScopeDirectlyBinds(scope: any, name: string, namespace: 'value' | 'type'): boolean {
-  for (let i = 0; i < scope.namedChildCount; i++) {
-    if (jsTsDeclarationBinds(scope.namedChild(i), name, namespace)) return true;
+  for (const child of scope.namedChildren) {
+    if (jsTsDeclarationBinds(child, name, namespace)) return true;
   }
   return false;
 }
@@ -717,19 +720,50 @@ function jsTsFunctionHasVarBinding(node: any, name: string, isRoot = true): bool
   if (!node) return false;
   if (!isRoot && JS_TS_FUNCTION_NODES.has(node.type)) return false;
   if (node.type === 'variable_declaration' && jsTsDeclarationBinds(node, name, 'value')) return true;
-  for (let i = 0; i < node.namedChildCount; i++) {
-    if (jsTsFunctionHasVarBinding(node.namedChild(i), name, false)) return true;
+  for (const child of node.namedChildren) {
+    if (jsTsFunctionHasVarBinding(child, name, false)) return true;
   }
   return false;
 }
 
+/**
+ * Answers of the two whole-scope scans behind `isJsTsImportShadowed`, for one
+ * parse: node id -> `${kind}\0${namespace}\0${name}` -> result. Without it each
+ * USE of an imported name rescanned every enclosing scope, so a file with 4,000
+ * `it(...)` calls scanned its 4,000 top-level statements 4,000 times. Node ids
+ * are unique only within one tree, hence one memo per parse.
+ */
+type JsTsShadowMemo = Map<number, Map<string, boolean>>;
+
+function memoisedScan(memo: JsTsShadowMemo | undefined, node: any, key: string, scan: () => boolean): boolean {
+  if (!memo) return scan();
+  let forNode = memo.get(node.id);
+  if (!forNode) {
+    forNode = new Map();
+    memo.set(node.id, forNode);
+  }
+  let result = forNode.get(key);
+  if (result === undefined) {
+    result = scan();
+    forNode.set(key, result);
+  }
+  return result;
+}
+
 /** True when a declaration shadows an imported JS/TS name at this use. */
-function isJsTsImportShadowed(identifierNode: any, name: string, namespace: 'value' | 'type'): boolean {
+function isJsTsImportShadowed(
+  identifierNode: any,
+  name: string,
+  namespace: 'value' | 'type',
+  memo?: JsTsShadowMemo,
+): boolean {
   let child = identifierNode;
   let scope = identifierNode?.parent;
   while (scope) {
     if (scope.type === 'statement_block' || scope.type === 'program') {
-      if (jsTsScopeDirectlyBinds(scope, name, namespace)) return true;
+      if (memoisedScan(memo, scope, `scope\0${namespace}\0${name}`, () => jsTsScopeDirectlyBinds(scope, name, namespace))) {
+        return true;
+      }
     }
     if (namespace === 'value' && scope.type === 'catch_clause') {
       if (jsTsBindingPatternContains(scope.childForFieldName?.('parameter'), name)) return true;
@@ -743,7 +777,7 @@ function isJsTsImportShadowed(identifierNode: any, name: string, namespace: 'val
         if (scope.childForFieldName?.('name')?.text === name) return true;
         if (jsTsBindingPatternContains(scope.childForFieldName?.('parameters'), name)) return true;
         const body = scope.childForFieldName?.('body');
-        if (body && jsTsFunctionHasVarBinding(body, name)) return true;
+        if (body && memoisedScan(memo, body, `var\0${name}`, () => jsTsFunctionHasVarBinding(body, name))) return true;
       } else if (jsTsTypeParametersContain(scope.childForFieldName?.('type_parameters'), name)) {
         return true;
       }
@@ -2435,7 +2469,31 @@ function phpNamespaceForNode(node: any, spans: PhpNamespaceSpan[]): string | und
   return active;
 }
 
-export function parseFile(filePath: string, source: string): FileParseResult | null {
+/** Default per-file parse budget in ms, overridable with IX_PARSE_BUDGET_MS. */
+export const DEFAULT_PARSE_BUDGET_MS = 10_000;
+
+/** The per-file budget: IX_PARSE_BUDGET_MS if it is a non-negative number, else the default. 0 = none. */
+export function parseBudgetMs(): number {
+  const raw = process.env.IX_PARSE_BUDGET_MS;
+  const n = raw === undefined || raw.trim() === '' ? Number.NaN : Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_PARSE_BUDGET_MS;
+}
+
+/** Thrown inside `parseFile` when a file runs past its budget; never escapes it. */
+class ParseBudgetExceeded extends Error {}
+
+export interface ParseFileOptions {
+  /** Give up on the file after this many ms. Defaults to `parseBudgetMs()`; 0 turns the budget off. */
+  budgetMs?: number;
+  /**
+   * Called when a supported file does not parse, before `parseFile` returns
+   * null: `timeout` when it ran past the budget, `error` for anything else.
+   * Not called for a file no grammar handles.
+   */
+  onFailure?: (failure: { reason: 'timeout' | 'error'; message: string }) => void;
+}
+
+export function parseFile(filePath: string, source: string, opts: ParseFileOptions = {}): FileParseResult | null {
   const language = detectLanguageForSource(filePath, source);
   if (!language) return null;
   if (language === SupportedLanguages.YAML) return parseYamlFile(filePath, source);
@@ -2454,6 +2512,21 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
 
   const queries = LANGUAGE_QUERIES[language];
   if (!queries) return null;
+
+  const budgetMs = opts.budgetMs ?? parseBudgetMs();
+  const deadline = budgetMs > 0 ? performance.now() + budgetMs : Number.POSITIVE_INFINITY;
+  let budgetTicks = 0;
+  /**
+   * Called once per match in both passes. The tree-sitter parse and query run
+   * in native code and cannot be interrupted, but the passes over the matches
+   * are where a file can go quadratic, and a file that does must not hold a
+   * parse worker for minutes. The worker pool has a backstop for the rest.
+   */
+  const checkBudget = (): void => {
+    if ((++budgetTicks & 63) === 0 && performance.now() > deadline) {
+      throw new ParseBudgetExceeded(`parse budget of ${budgetMs} ms exceeded`);
+    }
+  };
 
   try {
     const parser = getParser();
@@ -2570,6 +2643,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
         }
       }
     }
+    const jsTsShadowMemo: JsTsShadowMemo = new Map();
     const recordJsTsImportUse = (
       predicate: string,
       srcName: string,
@@ -2580,7 +2654,10 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
     ): void => {
       if (!isJsTs || !jsTsImportedLocalNames.has(localName)) return;
       const key = `${predicate}\x00${srcName}\x00${dstName}`;
-      const unshadowed = !isJsTsImportShadowed(identifierNode, localName, namespace);
+      // Every use is still evaluated: the edge is kept when ANY use is
+      // unshadowed, so the check cannot move behind the de-dup. The memo makes
+      // each use cost its scope depth rather than the size of its scopes.
+      const unshadowed = !isJsTsImportShadowed(identifierNode, localName, namespace, jsTsShadowMemo);
       jsTsImportUseHasUnshadowed.set(key, (jsTsImportUseHasUnshadowed.get(key) ?? false) || unshadowed);
     };
 
@@ -2604,6 +2681,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
 
     // --- First pass: collect definitions ---
     for (const match of pass1Matches) {
+      checkBudget();
       // Definition captures: name + definition.*
       const defCapture = match.captures.find((c: any) =>
         c.name.startsWith('definition.')
@@ -2879,6 +2957,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
 
     // --- Second pass: calls and imports ---
     for (const match of pass2Matches) {
+      checkBudget();
       // Full import statement captures (Scala: reconstructs dotted package paths)
       const importStmt = match.captures.find((c: any) => c.name === 'import.stmt');
       if (importStmt) {
@@ -3381,6 +3460,7 @@ export function parseFile(filePath: string, source: string): FileParseResult | n
     };
   } catch (e) {
     if (process.env.IX_PARSE_DEBUG === '1') console.error('parseFile threw:', e);
+    opts.onFailure?.({ reason: e instanceof ParseBudgetExceeded ? 'timeout' : 'error', message: String(e) });
     return null;
   }
 }

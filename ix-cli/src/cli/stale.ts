@@ -16,6 +16,12 @@ export interface StaleInfo {
   sampleChangedFiles: string[];
   /** Changed files the last run could not get applied (F-01); see `IngestBaseline.replayedFiles`. */
   replayedFiles: string[];
+  /**
+   * Files the last run skipped because their parse ran past the budget, still
+   * on disk; see `IngestBaseline.parseTimeouts`. Not counted in `staleFiles`:
+   * another run will not fix them, a larger IX_PARSE_BUDGET_MS will.
+   */
+  parseTimeouts: string[];
 }
 
 /**
@@ -37,6 +43,16 @@ function differsFromIngestBaseline(
   return ingestedMtime === undefined
     ? mtimeMs > Date.parse(lastIngestAt)
     : ingestedMtime !== mtimeMs;
+}
+
+/**
+ * Absolute paths for a baseline's list of files the last run could not
+ * ingest. They count as changed whatever their mtime: a new one is absent from
+ * `files` with an mtime older than `lastIngestAt`, which would otherwise read
+ * as current.
+ */
+function absoluteSet(workspaceRoot: string, relPaths: readonly string[]): Set<string> {
+  return new Set(relPaths.map((rel) => path.resolve(workspaceRoot, rel)));
 }
 
 /**
@@ -66,6 +82,7 @@ export function detectStaleFiles(
       staleFiles: 0,
       sampleChangedFiles: [],
       replayedFiles: [],
+      parseTimeouts: [],
     };
   }
 
@@ -88,12 +105,23 @@ export function detectStaleFiles(
   const files = collectFiles(workspaceRoot).map(underCanonicalRoot);
   const currentFiles = new Set(files);
   const changedFiles: string[] = [];
+  // Under the canonical root, like everything else compared here.
+  const canonicalSet = (relPaths: readonly string[]): Set<string> =>
+    new Set([...absoluteSet(workspaceRoot, relPaths)].map(underCanonicalRoot));
+  const pending = canonicalSet(baseline.pendingFiles);
+  const timedOut = canonicalSet(baseline.parseTimeouts);
+  const parseTimeouts: string[] = [];
 
   for (const filePath of files) {
+    if (timedOut.has(filePath)) {
+      parseTimeouts.push(path.relative(canonicalRoot, filePath));
+      continue;
+    }
     try {
       const stat = fs.statSync(filePath);
       if (
-        differsFromIngestBaseline(filePath, stat.mtimeMs, ingestedMtimes, baseline.lastIngestAt)
+        pending.has(filePath)
+        || differsFromIngestBaseline(filePath, stat.mtimeMs, ingestedMtimes, baseline.lastIngestAt)
       ) {
         // Make path relative to root for display
         changedFiles.push(path.relative(canonicalRoot, filePath));
@@ -117,6 +145,7 @@ export function detectStaleFiles(
     staleFiles: changedFiles.length,
     sampleChangedFiles: changedFiles.slice(0, maxSamples),
     replayedFiles: baseline.replayedFiles,
+    parseTimeouts,
   };
 }
 
@@ -170,6 +199,9 @@ export function isFileStale(filePath: string): boolean {
 export function createStaleProbe(): (filePath: string) => boolean {
   const workspaceRoot = path.resolve(resolveWorkspaceRoot());
   const baseline = loadIngestBaseline(workspaceRoot);
+  const pending = baseline
+    ? absoluteSet(workspaceRoot, [...baseline.pendingFiles, ...baseline.parseTimeouts])
+    : new Set<string>();
 
   return (filePath: string): boolean => {
     // No baseline means the question this probe answers — "did this file change
@@ -187,6 +219,7 @@ export function createStaleProbe(): (filePath: string) => boolean {
     if (!fs.existsSync(absolutePath)) {
       return baseline.files.has(absolutePath) || baseline.files.has(filePath);
     }
+    if (pending.has(absolutePath)) return true;
 
     try {
       return differsFromIngestBaseline(

@@ -77,6 +77,7 @@ describe("workspace-scoped staleness", () => {
       staleFiles: 1,
       sampleChangedFiles: ["a.js"],
       replayedFiles: [],
+      parseTimeouts: [],
     });
 
     expect(
@@ -141,6 +142,7 @@ describe("workspace-scoped staleness", () => {
       staleFiles: 0,
       sampleChangedFiles: [],
       replayedFiles: [],
+      parseTimeouts: [],
     });
     // The workspace is unverified, but no individual file is known to have
     // changed — the distinction this pair of assertions exists to pin down.
@@ -203,6 +205,7 @@ describe("workspace-scoped staleness", () => {
       staleFiles: 0,
       sampleChangedFiles: [],
       replayedFiles: [],
+      parseTimeouts: [],
     });
   });
 
@@ -276,6 +279,7 @@ describe("workspace-scoped staleness", () => {
       staleFiles: 1,
       sampleChangedFiles: ["deleted.js"],
       replayedFiles: [],
+      parseTimeouts: [],
     });
     // From inside the workspace, as a read runs. The probe resolves the active
     // root from cwd, and a repository cwd now outranks `default: true` (see
@@ -317,6 +321,8 @@ describe("workspace-scoped staleness", () => {
       tracksMapBaseline: true,
       extractor: "tree-sitter/9.9",
       replayedFiles: [],
+      pendingFiles: [],
+      parseTimeouts: [],
     });
   });
 

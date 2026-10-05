@@ -23,6 +23,8 @@ ix config set format llm      # set a value
 | `IX_MCP_SUBPROCESS=1` | Runs each MCP tool call in its own `ix` process |
 | `IX_COMMIT_FAILURE_LIMIT=<n>` | Consecutive failed commits before `ix map` stops (default 5). `0` never stops |
 | `IX_COMMIT_BASE_REV_RETRIES=<n>` | Re-sends of a commit after another writer on the same backend moved the graph revision under it (default 8) |
+| `IX_PARSE_BUDGET_MS=<ms>` | How long `ix map` / `ix ingest` may spend parsing one file before skipping it and naming it in the summary (default 10000). A skipped file is tried again on every run, and `ix status` warns about it until it is in the graph. `0` turns the budget off |
+| `IX_PARSE_WORKERS=<n>` | Most parse workers `ix map` / `ix ingest` starts (default 8, never more than the cores less one). Workers start as files need them, one per 50 files |
 
 ### Bootstrap script variables
 
