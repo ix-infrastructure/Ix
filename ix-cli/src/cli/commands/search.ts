@@ -2,8 +2,7 @@
 
 import type { Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../../client/factory.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { disambiguatingIds, formatNodes, lineSpan, relativePath, printJson, rowLocation } from "../format.js";
 import { baseScore, originPenalty, hasDefinitionOf, mergeById, resolveReadSystemId } from "../resolve.js";
@@ -328,7 +327,7 @@ Examples:
     .action(async (term: string, opts: {
       limit: string; kind?: string; language?: string; path?: string; asOf?: string; format: string; includeTests?: boolean; testsOnly?: boolean; semantic?: boolean
     }) => {
-      const client = new IxClient(getEndpoint());
+      const client = createClient();
       const limit = parseInt(opts.limit, 10);
       // Only an explicit --path scopes results. The active workspace is already
       // applied server-side via workspaceId (below), and provenance.sourceUri is

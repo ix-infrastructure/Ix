@@ -56,6 +56,11 @@ export interface RepoAccess {
   read(path: string): string | undefined;
   /** Files containing `needle` literally, with the matching lines. */
   grep(needle: string): Array<{ path: string; line: string }>;
+  /**
+   * `grep` for several needles in one pass, keyed by needle. Optional: when
+   * present, a bundle's reverse lookups cost one search instead of one each.
+   */
+  grepAll?(needles: string[]): Map<string, Array<{ path: string; line: string }>>;
 }
 
 /** Text references a bundle carries. */
@@ -92,8 +97,12 @@ export function collectTextReferences(
   const tracked = new Set(files);
   const byBasename = new Map<string, string[]>();
   for (const file of files) {
+    // push, not a spread: copying the list on every insert was quadratic in
+    // the number of files sharing a basename (index.ts, README.md).
     const base = posix.basename(file);
-    byBasename.set(base, [...(byBasename.get(base) ?? []), file]);
+    const list = byBasename.get(base);
+    if (list) list.push(file);
+    else byBasename.set(base, [file]);
   }
   const sourcePaths = new Set(sources.map((s) => s.path));
   const found = new Map<string, TextReference>();
@@ -102,6 +111,14 @@ export function collectTextReferences(
     const prior = found.get(path);
     if (!prior || score > prior.score) found.set(path, { path, score, reason });
   };
+
+  // Every reverse lookup the loop below will make, in one search when the
+  // repository can do that.
+  const reverseNames = [...new Set(sources
+    .map((s) => posix.basename(s.path))
+    .filter((name) => (byBasename.get(name) ?? []).length === 1))];
+  const grepped = repo.grepAll && reverseNames.length > 0 ? repo.grepAll(reverseNames) : undefined;
+  const grep = (name: string) => grepped?.get(name) ?? (grepped ? [] : repo.grep(name));
 
   for (const source of sources) {
     const text = repo.read(source.path);
@@ -124,7 +141,7 @@ export function collectTextReferences(
     // shares can be attributed from a bare mention.
     if ((byBasename.get(name) ?? []).length !== 1) continue;
     const mentioners = new Set<string>();
-    for (const hit of repo.grep(name)) {
+    for (const hit of grep(name)) {
       if (hit.path === source.path || !tracked.has(hit.path) || !CODE_FILE.test(hit.path)) continue;
       if (IMPORT_LINE.test(hit.line)) continue;
       mentioners.add(hit.path);
@@ -169,6 +186,36 @@ export function resolveToken(
   return candidates.size === 1 ? [...candidates][0] : undefined;
 }
 
+/** How long one git call on the bundle path may take. */
+const GIT_TIMEOUT_MS = 10_000;
+
+/**
+ * `git grep -F` for every needle at once, with each matching line credited to
+ * every needle it contains: the same answer as one literal search per needle,
+ * for one process instead of up to nine.
+ */
+function gitGrep(root: string, needles: string[]): Map<string, Array<{ path: string; line: string }>> {
+  const hits = new Map<string, Array<{ path: string; line: string }>>(needles.map((n) => [n, []]));
+  if (needles.length === 0) return hits;
+  let out: string;
+  try {
+    out = execFileSync("git", ["grep", "-n", "-I", "-F", ...needles.flatMap((n) => ["-e", n])], {
+      cwd: root, encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 16 * 1024 * 1024,
+      timeout: GIT_TIMEOUT_MS,
+    });
+  } catch {
+    return hits; // exit 1 is "no match"; a timeout is no answer
+  }
+  for (const row of out.split("\n")) {
+    if (!row) continue;
+    const first = row.indexOf(":");
+    const second = row.indexOf(":", first + 1);
+    const hit = { path: row.slice(0, first), line: row.slice(second + 1) };
+    for (const needle of needles) if (hit.line.includes(needle)) hits.get(needle)!.push(hit);
+  }
+  return hits;
+}
+
 /** A path and the source paths its build output could have come from. */
 const BUILD_EXTENSIONS: Array<[RegExp, string[]]> = [
   [/\.js$/, [".ts", ".tsx", ".js"]],
@@ -200,6 +247,7 @@ export function gitRepoAccess(root: string): RepoAccess | undefined {
   try {
     listing = execFileSync("git", ["ls-files", "-z"], {
       cwd: root, encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024,
+      timeout: GIT_TIMEOUT_MS,
     }).split("\0").filter(Boolean);
   } catch {
     return undefined;
@@ -221,19 +269,7 @@ export function gitRepoAccess(root: string): RepoAccess | undefined {
         if (fd !== undefined) closeSync(fd);
       }
     },
-    grep: (needle) => {
-      try {
-        const out = execFileSync("git", ["grep", "-n", "-I", "-F", "-e", needle], {
-          cwd: root, encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 16 * 1024 * 1024,
-        });
-        return out.split("\n").filter(Boolean).map((row) => {
-          const first = row.indexOf(":");
-          const second = row.indexOf(":", first + 1);
-          return { path: row.slice(0, first), line: row.slice(second + 1) };
-        });
-      } catch {
-        return []; // exit 1 is "no match"
-      }
-    },
+    grep: (needle) => gitGrep(root, [needle]).get(needle) ?? [],
+    grepAll: (needles) => gitGrep(root, needles),
   };
 }

@@ -2,8 +2,7 @@
 
 import type { Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../../client/factory.js";
 import { llmLine, printLlmLines } from "../llm.js";
 import { printJson } from "../format.js";
 
@@ -145,7 +144,7 @@ export function registerSavingsCommand(program: Command): void {
     .option("--format <fmt>", "Output format (text|json|llm)", "text");
 
   cmd.action(async (opts: { detail?: boolean; model: string; format: string }) => {
-    const client = new IxClient(getEndpoint());
+    const client = createClient();
     const detail = opts.detail ?? false;
     const result: SavingsResponse = await client.savings(detail);
 
@@ -202,7 +201,7 @@ export function registerSavingsCommand(program: Command): void {
   cmd.command("reset")
     .description("Reset lifetime savings totals")
     .action(async () => {
-      const client = new IxClient(getEndpoint());
+      const client = createClient();
       await client.savingsReset();
       console.log(chalk.green("  Savings data reset."));
     });

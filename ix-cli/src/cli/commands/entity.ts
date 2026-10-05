@@ -2,8 +2,7 @@
 
 import type { Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../../client/factory.js";
 import { lineSpan, relativePath, rowLocation, stripNulls, printJson } from "../format.js";
 import { llmLine, llmShortId } from "../llm.js";
 
@@ -39,7 +38,7 @@ export function registerEntityCommand(program: Command): void {
     .description("Get entity details with claims and edges")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .action(async (id: string, opts: { format: string }) => {
-      const client = new IxClient(getEndpoint());
+      const client = createClient();
       const resolvedId = await client.resolvePrefix(id);
       const result = await client.entity(resolvedId);
       if (opts.format === "json") {

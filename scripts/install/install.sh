@@ -54,12 +54,16 @@ step()  { printf "\n-- %s --\n" "$*"; }
 # _fetch URL         — write response to stdout
 # _download URL FILE — write response to FILE
 
+# _location URL     — the Location header URL redirects to, without following it
+
 if command -v curl >/dev/null 2>&1; then
   _fetch()    { curl -fsSL "$1"; }
   _download() { curl -fL --progress-bar "$1" -o "$2"; }
+  _location() { curl -fsSI "$1" 2>/dev/null | tr -d '\r' | sed -n 's/^[Ll]ocation:[[:space:]]*//p' | tail -1; }
 elif command -v wget >/dev/null 2>&1; then
   _fetch()    { wget -qO- "$1"; }
   _download() { wget --show-progress -qO "$2" "$1" 2>&1 || wget -O "$2" "$1"; }
+  _location() { wget -S --spider --max-redirect=0 "$1" 2>&1 | tr -d '\r' | sed -n 's/^[[:space:]]*[Ll]ocation:[[:space:]]*\([^[:space:]]*\).*/\1/p' | tail -1; }
 else
   err "curl or wget is required but neither was found.
   Install one first and re-run:
@@ -121,12 +125,69 @@ resolve_version() {
 
   latest=$(_fetch "https://api.github.com/repos/${GITHUB_ORG}/${GITHUB_REPO}/releases/latest" 2>/dev/null \
     | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\([^"]*\)".*/\1/p' || true)
-  if [ -n "$latest" ]; then
-    echo "$latest"
-    return
+  if [ -z "$latest" ]; then
+    # Second source: the web redirect from /releases/latest to /releases/tag/v<x>,
+    # which works when the API is rate-limited or blocked.
+    latest=$(_location "https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/releases/latest" \
+      | sed -n 's#.*/releases/tag/v\([^/?]*\)$#\1#p' || true)
   fi
+  # Never guess. The old fallback named a version (0.1.0) that was never
+  # released, so an unreachable API turned into a 404 after the install had
+  # already started changing things.
+  if [ -z "$latest" ]; then
+    return 1
+  fi
+  echo "$latest"
+}
 
-  echo "0.1.0"
+# version_lt A B — true when release A is older than release B. Compares the
+# numeric x.y.z; a pre-release (x.y.z-rc1) sorts before its release.
+version_lt() {
+  awk -v a="$1" -v b="$2" 'BEGIN {
+    split(a, A, "-"); split(b, B, "-"); split(A[1], x, "."); split(B[1], y, ".")
+    for (i = 1; i <= 3; i++) { xi = x[i] + 0; yi = y[i] + 0; if (xi < yi) exit 0; if (xi > yi) exit 1 }
+    exit !(A[2] != "" && B[2] == "")
+  }'
+}
+
+# sha256_of FILE — hex digest, with whichever tool this system has.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "$1" | awk '{print $NF}'
+  else return 1
+  fi
+}
+
+# verify_checksum FILE URL NAME — check FILE against the release's published
+# URL.sha256 (sha256sum format, naming NAME). Fails closed: a missing,
+# malformed or mismatching checksum stops the install before anything is
+# extracted. Removes $TMP_DIR on failure.
+verify_checksum() {
+  vc_file=$1; vc_url=$2; vc_name=$3
+  vc_sums="$vc_file.sha256"
+  if ! _fetch "$vc_url.sha256" > "$vc_sums" 2>/dev/null; then
+    rm -rf "$TMP_DIR" || true
+    err "No published checksum at $vc_url.sha256. Refusing to install an unverified archive."
+  fi
+  vc_expected=$(awk 'NF { print tolower($1); exit }' "$vc_sums")
+  vc_named=$(awk 'NF { print $2; exit }' "$vc_sums" | sed 's/^[*]//')
+  case "$vc_expected" in
+    *[!0-9a-f]*|"") vc_expected="" ;;
+  esac
+  if [ "${#vc_expected}" -ne 64 ] || { [ -n "$vc_named" ] && [ "$(basename "$vc_named")" != "$vc_name" ]; }; then
+    rm -rf "$TMP_DIR" || true
+    err "The checksum file at $vc_url.sha256 is not a sha256 for $vc_name. Refusing to install."
+  fi
+  if ! vc_actual=$(sha256_of "$vc_file"); then
+    rm -rf "$TMP_DIR" || true
+    err "No SHA-256 tool found (sha256sum, shasum or openssl). Install one and re-run."
+  fi
+  vc_actual=$(printf '%s' "$vc_actual" | tr 'A-F' 'a-f')
+  if [ "$vc_actual" != "$vc_expected" ]; then
+    rm -rf "$TMP_DIR" || true
+    err "Checksum mismatch for $vc_name: expected $vc_expected, got $vc_actual. The download was not installed."
+  fi
 }
 
 resolve_backend_version() {
@@ -179,7 +240,7 @@ echo "║       Ix — Install                ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
-VERSION=$(resolve_version)
+VERSION=$(resolve_version) || err "Could not find the latest Ix release: GitHub did not answer. Set IX_VERSION=<version> to install a specific release."
 PLATFORM=$(detect_platform)
 echo "  Version:  $VERSION"
 echo "  Platform: $PLATFORM"
@@ -916,18 +977,69 @@ if [ "$SKIP_CLI_INSTALL" = "0" ] && [ -x "$IX_BIN/ix" ]; then
   existing_version=$(check_installed_version)
   if [ "$existing_version" = "$VERSION" ]; then
     info "ix CLI v${VERSION} is already installed"
+  elif [ -z "${IX_VERSION:-}" ] && [ "$existing_version" != "unknown" ] && version_lt "$VERSION" "$existing_version"; then
+    # "Latest" older than what is installed means a stale API answer or a
+    # pulled release, not a request to go back. A rollback must be asked for.
+    warn "Installed ix CLI v${existing_version} is newer than the latest release (v${VERSION}); leaving it in place."
+    warn "To install v${VERSION} anyway, re-run with IX_VERSION=${VERSION}."
+    SKIP_CLI_INSTALL=1
   else
+    # Nothing is removed here: the new tree is downloaded, verified and staged
+    # first, and only then swapped in (swap_into_place).
     echo "  Upgrading ix CLI from $existing_version to $VERSION..."
-    rm -rf "$INSTALL_DIR"
   fi
 fi
+
+# swap_into_place DIR — make DIR the CLI install. The old install is moved
+# aside rather than deleted and put back if the swap fails, the same shape as
+# install.ps1 and swapInStagedTree in upgrade.ts.
+#
+# $INSTALL_DIR may hold a working CLI from either installer (install.ps1 writes
+# %IX_HOME%\bin\ix.cmd rather than $IX_BIN/ix, and pick_bin_dir() can resolve
+# differently than it did last run). Deleting it outright would destroy a
+# working CLI with nothing to restore from, and `mv` onto a directory that
+# survived would silently nest the tree inside it.
+swap_into_place() {
+  CLI_BACKUP="$IX_HOME/.cli-backup-$$"
+  # `|| true` on every cleanup rm below. Under `set -e` a bare rm that fails
+  # aborts the script where it stands — verified — and the ones after the swap
+  # sit between the new tree and the shim write, so a locked leftover would
+  # install the CLI and then skip the launcher, ensure_path and both version
+  # stamps. That is the brick rmQuiet() exists to prevent on the TS side and
+  # that install.ps1 avoids with -ErrorAction SilentlyContinue.
+  if ! rm -rf "$CLI_BACKUP" 2>/dev/null && [ -e "$CLI_BACKUP" ]; then
+    rm -rf "$1" "$TMP_DIR" || true
+    err "Could not clear a leftover backup at $CLI_BACKUP. Remove it and re-run. The existing install is untouched."
+  fi
+  # An empty directory left by an older installer is not an install, and
+  # moving it aside would report restoring a CLI that never existed. rmdir
+  # fails harmlessly on a populated install, which is the one to move aside.
+  rmdir "$INSTALL_DIR" 2>/dev/null || true
+  if [ -e "$INSTALL_DIR" ] && ! mv "$INSTALL_DIR" "$CLI_BACKUP"; then
+    rm -rf "$1" "$TMP_DIR" || true
+    err "Could not move the existing install aside from $INSTALL_DIR. It is untouched."
+  fi
+  if mv "$1" "$INSTALL_DIR"; then
+    rm -rf "$CLI_BACKUP" || true
+  else
+    # if/else, not `mv ... && warn`: with && a *failed* restore short-circuits
+    # and says nothing at all, so the user is never told the only surviving
+    # copy is at $CLI_BACKUP — which is the case the backup exists for.
+    if [ -d "$CLI_BACKUP" ] && [ ! -e "$INSTALL_DIR" ] && mv "$CLI_BACKUP" "$INSTALL_DIR"; then
+      warn "Restored the previous CLI after a failed update."
+    elif [ -d "$CLI_BACKUP" ]; then
+      warn "Your previous CLI is at $CLI_BACKUP — move it to $INSTALL_DIR to restore it."
+    fi
+    rm -rf "$1" "$TMP_DIR" || true
+    err "Could not install to $INSTALL_DIR."
+  fi
+}
 
 if [ "$SKIP_CLI_INSTALL" = "0" ] && { [ ! -x "$IX_BIN/ix" ] || [ "$(check_installed_version)" != "$VERSION" ]; }; then
   # Records that the compass now under $IX_HOME/cli came out of THIS release
   # tarball. The stamp block near the end of the script needs to know: it must
   # never label a bundle it did not install (Ix#376).
   CLI_EXTRACTED=1
-  mkdir -p "$INSTALL_DIR"
 
   TMP_DIR=$(mktemp -d)
   TMP_FILE="$TMP_DIR/${TARBALL_NAME}"
@@ -965,6 +1077,10 @@ if [ "$SKIP_CLI_INSTALL" = "0" ] && { [ ! -x "$IX_BIN/ix" ] || [ "$(check_instal
     err "CLI download failed. See above for alternatives."
   fi
 
+  # Before anything reads the archive.
+  verify_checksum "$TMP_FILE" "$TARBALL_URL" "$TARBALL_NAME"
+  info "Checksum verified"
+
   # Extract
   if [ "$PLATFORM" = "windows-amd64" ]; then
     # unzip has no --strip-components, and the zip nests everything under
@@ -991,54 +1107,19 @@ if [ "$SKIP_CLI_INSTALL" = "0" ] && { [ ! -x "$IX_BIN/ix" ] || [ "$(check_instal
       rm -rf "$TMP_DIR"
       err "Extracted archive is not an ix release: expected one top-level directory containing ix.cmd, found $ZIP_TOP_COUNT."
     fi
-    # Move the old install aside rather than deleting it, then put it back if
-    # the swap fails — the same shape as install.ps1 and swapInStagedTree.
-    #
-    # $INSTALL_DIR is not reliably the empty directory `mkdir -p` just made. The
-    # `rm -rf "$INSTALL_DIR"` in the upgrade branch above only runs when
-    # `[ -x "$IX_BIN/ix" ]`, and install.ps1 writes %IX_HOME%\bin\ix.cmd rather
-    # than $IX_BIN/ix — so a populated install reaches here whenever the two
-    # installers are mixed, or pick_bin_dir() resolves differently than it did
-    # last run. Deleting that outright would destroy a working CLI with nothing
-    # to restore from, and `mv` onto a directory that survived the delete would
-    # silently nest the tree inside it, recreating the exact layout this is
-    # here to remove.
-    ZIP_BACKUP="$IX_HOME/.cli-backup-$$"
-    # `|| true` on every cleanup rm below. Under `set -e` a bare rm that fails
-    # aborts the script where it stands — verified — and the ones after the swap
-    # sit between the new tree and the shim write, so a locked leftover would
-    # install the CLI and then skip the launcher, ensure_path and both version
-    # stamps. That is the brick rmQuiet() exists to prevent on the TS side and
-    # that install.ps1 avoids with -ErrorAction SilentlyContinue.
-    if ! rm -rf "$ZIP_BACKUP" 2>/dev/null && [ -e "$ZIP_BACKUP" ]; then
-      rm -rf "$TMP_DIR" || true
-      err "Could not clear a leftover backup at $ZIP_BACKUP. Remove it and re-run. The existing install is untouched."
-    fi
-    # Drop the empty directory `mkdir -p` just made, so a first-time install has
-    # no backup at all and cannot report restoring a CLI that never existed.
-    # rmdir fails harmlessly on a populated install, which is the one we want to
-    # move aside.
-    rmdir "$INSTALL_DIR" 2>/dev/null || true
-    if [ -e "$INSTALL_DIR" ] && ! mv "$INSTALL_DIR" "$ZIP_BACKUP"; then
-      rm -rf "$TMP_DIR" || true
-      err "Could not move the existing install aside from $INSTALL_DIR. It is untouched."
-    fi
-    if mv "$ZIP_TOP" "$INSTALL_DIR"; then
-      rm -rf "$ZIP_BACKUP" || true
-    else
-      # if/else, not `mv ... && warn`: with && a *failed* restore short-circuits
-      # and says nothing at all, so the user is never told the only surviving
-      # copy is at $ZIP_BACKUP — which is the case the backup exists for.
-      if [ -d "$ZIP_BACKUP" ] && [ ! -e "$INSTALL_DIR" ] && mv "$ZIP_BACKUP" "$INSTALL_DIR"; then
-        warn "Restored the previous CLI after a failed update."
-      elif [ -d "$ZIP_BACKUP" ]; then
-        warn "Your previous CLI is at $ZIP_BACKUP — move it to $INSTALL_DIR to restore it."
-      fi
-      rm -rf "$TMP_DIR" || true
-      err "Could not install to $INSTALL_DIR."
-    fi
+    swap_into_place "$ZIP_TOP"
   else
-    tar -xzf "$TMP_FILE" -C "$INSTALL_DIR" --strip-components=1
+    # Extract into a staging directory beside the install and swap it in only
+    # once it holds a launcher. Extracting straight into $INSTALL_DIR after
+    # deleting it left no CLI at all whenever the download or the extract failed.
+    CLI_STAGING="$IX_HOME/.cli-staging-$$"
+    rm -rf "$CLI_STAGING" 2>/dev/null || true
+    mkdir -p "$CLI_STAGING"
+    if ! tar -xzf "$TMP_FILE" -C "$CLI_STAGING" --strip-components=1 || [ ! -x "$CLI_STAGING/ix" ]; then
+      rm -rf "$CLI_STAGING" "$TMP_DIR" || true
+      err "The CLI archive did not extract to an ix release. The existing install is untouched."
+    fi
+    swap_into_place "$CLI_STAGING"
   fi
   rm -rf "$TMP_DIR"
   info "Extracted CLI"

@@ -14,6 +14,8 @@ export interface StaleInfo {
   currentRev: number;
   staleFiles: number;
   sampleChangedFiles: string[];
+  /** Changed files the last run could not get applied (F-01); see `IngestBaseline.replayedFiles`. */
+  replayedFiles: string[];
 }
 
 const SUPPORTED_NAMES = new Set([
@@ -101,6 +103,7 @@ export function detectStaleFiles(
       currentRev: 0,
       staleFiles: 0,
       sampleChangedFiles: [],
+      replayedFiles: [],
     };
   }
 
@@ -139,6 +142,7 @@ export function detectStaleFiles(
     currentRev: baseline.currentRev,
     staleFiles: changedFiles.length,
     sampleChangedFiles: changedFiles.slice(0, maxSamples),
+    replayedFiles: baseline.replayedFiles,
   };
 }
 

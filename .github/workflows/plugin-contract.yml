@@ -1,0 +1,57 @@
+# Plugin contract: every `ix …` invocation in the six editor plugins must name
+# a command this CLI registers, with long flags that command accepts
+# (ix-cli/scripts/check-plugin-contract.mjs). A flag renamed or removed here
+# otherwise breaks a plugin silently, and a plugin that starts calling a flag
+# the CLI never had is caught by the nightly run.
+#
+# Advisory for now: not part of CI Passed. The extraction from prompt text is
+# heuristic, so it runs on its own until the ignore list has settled.
+name: Plugin contract
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "ix-cli/src/cli/**"
+      - "ix-cli/scripts/check-plugin-contract.mjs"
+      - "ix-cli/scripts/plugin-contract-ignore.json"
+      - ".github/workflows/plugin-contract.yml"
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Plugin contract (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: |
+            ix-cli/package-lock.json
+            core-ingestion/package-lock.json
+      - name: Cache core-ingestion native deps
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: core-ingestion/node_modules
+          key: core-ingestion-v2-${{ runner.os }}-node22-${{ hashFiles('core-ingestion/package-lock.json') }}
+      - name: Install & build
+        working-directory: ix-cli
+        run: |
+          npm ci --silent
+          npm run build
+      - name: Check every plugin's ix invocations (plugins' main)
+        working-directory: ix-cli
+        run: node scripts/check-plugin-contract.mjs --clone

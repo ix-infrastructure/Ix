@@ -12,6 +12,7 @@ interface SerializedIngestBaseline {
   lastIngestAt?: string;
   tracksMapBaseline?: boolean;
   extractor?: string;
+  replayedFiles?: string[];
 }
 
 export interface IngestBaseline {
@@ -37,6 +38,14 @@ export interface IngestBaseline {
    * any extractor, so it counts as a change. See `extractorChanged`.
    */
   extractor: string | null;
+  /**
+   * Workspace-relative paths of changed files the last run sent and the
+   * backend answered `Idempotent`: it already held that patch id and wrote
+   * nothing, so the graph does not show these files as they are (F-01, a
+   * revert or a restore). Empty when every change was applied. Their mtimes
+   * are kept at the previous value, so the next run sends them again.
+   */
+  replayedFiles: string[];
 }
 
 /**
@@ -84,6 +93,9 @@ export function loadIngestBaseline(projectRoot: string): IngestBaseline | null {
       lastIngestAt,
       tracksMapBaseline: data.tracksMapBaseline === true,
       extractor: typeof data.extractor === "string" ? data.extractor : null,
+      replayedFiles: Array.isArray(data.replayedFiles)
+        ? data.replayedFiles.filter((p): p is string => typeof p === "string")
+        : [],
     };
   } catch {
     return null;
@@ -97,6 +109,7 @@ export function saveIngestBaseline(
   now: Date = new Date(),
   deletedFiles: Map<string, string[]> = new Map(),
   extractor?: string | null,
+  replayedFiles: readonly string[] = [],
 ): void {
   try {
     // Keep the last good rev rather than writing a shape the read side will
@@ -120,6 +133,7 @@ export function saveIngestBaseline(
       // sets it, which is what ends the grandfathering for this workspace.
       tracksMapBaseline: true,
       ...(extractor ? { extractor } : {}),
+      ...(replayedFiles.length > 0 ? { replayedFiles: [...replayedFiles].sort() } : {}),
     };
     fs.mkdirSync(path.dirname(ingestMtimeCachePath(projectRoot)), { recursive: true });
     fs.writeFileSync(ingestMtimeCachePath(projectRoot), JSON.stringify(data));
