@@ -277,10 +277,14 @@ export function* walkFiles(
 /**
  * The source files under `dir`, canonical and de-duplicated: git's list when
  * `dir` is in a work tree, else the walk.
+ *
+ * `walkLimit` stops the walk after that many files. A git listing is bounded
+ * by the repository, but a walk is bounded by nothing: a command run from a
+ * home directory would read the whole disk.
  */
 export function discoverSourceFiles(
   dir: string,
-  opts: { recursive?: boolean; exclude?: DiscoveryExclude; counts?: DiscoveryCounts } = {},
+  opts: { recursive?: boolean; exclude?: DiscoveryExclude; counts?: DiscoveryCounts; walkLimit?: number } = {},
 ): string[] {
   const recursive = opts.recursive ?? true;
   const counts = opts.counts ?? emptyDiscoveryCounts();
@@ -289,6 +293,7 @@ export function discoverSourceFiles(
   const out: string[] = [];
   const seen = new Set<string>();
   for (const filePath of walkFiles(dir, recursive, opts.exclude, counts)) {
+    if (opts.walkLimit !== undefined && out.length >= opts.walkLimit) break;
     const canonical = canonicalizeDiscoveredFilePath(filePath);
     if (seen.has(canonical)) continue;
     seen.add(canonical);

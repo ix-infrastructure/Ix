@@ -25,12 +25,21 @@ export interface StaleInfo {
 }
 
 /**
- * The files `ix map` would discover (see `file-discovery.ts`), so "changed
- * since the last ingest" is judged over the same set the ingest recorded.
- * Unbounded: a cap made every file past it look deleted.
+ * Most files `ix status` reads when the workspace is not a git work tree; the
+ * cap the old status walk had. A walk has no bound of its own, and status runs
+ * on every agent turn: from a home directory it would read the whole disk.
+ * Files past the cap are not checked for changes. They do not look deleted:
+ * a baseline entry counts as deleted only when the file is gone from disk.
  */
-function collectFiles(dir: string): string[] {
-  return discoverSourceFiles(dir);
+const STATUS_WALK_LIMIT = 5000;
+
+/**
+ * The files `ix map` would discover (see `file-discovery.ts`), so "changed
+ * since the last ingest" is judged over the same set the ingest recorded. A
+ * git listing is complete; a walk stops at `walkLimit`.
+ */
+function collectFiles(dir: string, walkLimit: number): string[] {
+  return discoverSourceFiles(dir, { walkLimit });
 }
 
 function differsFromIngestBaseline(
@@ -69,7 +78,8 @@ function absoluteSet(workspaceRoot: string, relPaths: readonly string[]): Set<st
  */
 export function detectStaleFiles(
   root: string,
-  maxSamples: number = 5
+  maxSamples: number = 5,
+  walkLimit: number = STATUS_WALK_LIMIT,
 ): StaleInfo {
   const workspaceRoot = path.resolve(root);
   const baseline = loadIngestBaseline(workspaceRoot);
@@ -102,7 +112,7 @@ export function detectStaleFiles(
     ingestedMtimes.set(underCanonicalRoot(absolutePath), mtime);
   }
 
-  const files = collectFiles(workspaceRoot).map(underCanonicalRoot);
+  const files = collectFiles(workspaceRoot, walkLimit).map(underCanonicalRoot);
   const currentFiles = new Set(files);
   const changedFiles: string[] = [];
   // Under the canonical root, like everything else compared here.

@@ -102,6 +102,13 @@ describe('file discovery', () => {
     expect(rel(plain, discoverSourceFiles(plain))).toEqual(['src/app.ts']);
   });
 
+  it('stops a walk at walkLimit, and never caps a git listing', () => {
+    const root = tree({ 'a.ts': '', 'b.ts': '', 'c.ts': '', 'd.ts': '' });
+    expect(discoverSourceFiles(root, { walkLimit: 2 })).toHaveLength(2);
+    git(root, 'init', '-q');
+    expect(discoverSourceFiles(root, { walkLimit: 2 })).toHaveLength(4);
+  });
+
   it('copies of one tree agree whether or not they are a git checkout', () => {
     // The same tree as a git repository with committed files and as a plain
     // copy: discovery must not depend on how it was obtained.

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { execFileSync } from "node:child_process";
 
 import { clearIngestMtimeCache, clearMapBaseline, ingestMtimeCachePath, saveConfig } from "../config.js";
 import { loadIngestBaseline } from "../ingest-baseline.js";
@@ -381,6 +382,30 @@ describe("workspace-scoped staleness", () => {
     const result = detectStaleFiles(linkedRoot);
     expect(result.staleFiles).toBe(2);
     expect([...result.sampleChangedFiles].sort()).toEqual(["a.js", "gone.js"]);
+  });
+
+  it("stops a walk at its cap without calling the files past it deleted; a git listing is not capped", () => {
+    // Status runs on every agent turn. Without a cap, a walk of a directory
+    // that is not a work tree -- a home directory, say -- reads the whole disk.
+    const root = path.join(home, "capped");
+    const files = ["a.js", "b.js", "c.js", "d.js", "e.js"].map((name) => writeSource(root, name, ""));
+    persistIngestBaselineIfClean(
+      root,
+      new Map(files.map((f) => [f, fs.statSync(f).mtimeMs])),
+      4,
+      0,
+      0,
+      new Date(Date.now() + 60_000),
+    );
+    for (const f of files) moveMtimeForward(f);
+
+    expect(detectStaleFiles(root, 5).staleFiles, "uncapped, every edit is seen").toBe(5);
+    const capped = detectStaleFiles(root, 5, 3);
+    expect(capped.staleFiles, "only the files read, and none reported deleted").toBe(3);
+
+    execFileSync("git", ["init", "-q"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["add", "-A"], { cwd: root, stdio: "ignore" });
+    expect(detectStaleFiles(root, 5, 3).staleFiles, "git lists the whole repository").toBe(5);
   });
 
   it("uses ingest time for files absent from the mtime cache", async () => {
