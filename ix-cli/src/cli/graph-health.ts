@@ -73,6 +73,22 @@ export const GRAPH_REBUILD_FIX = "ix reset --workspace --yes --ingest";
 /** For a registered workspace the backend holds nothing for. */
 export const GRAPH_MAP_FIX = "ix map";
 
+/**
+ * The warning for changed files the backend answered `Idempotent` (F-01): it
+ * had committed their patch id before -- a file reverted to earlier bytes, or
+ * deleted and restored -- so it wrote nothing, and the graph still shows the
+ * content in between. Shared by `ix map` and `ix status`.
+ */
+export function describeReplayedChanges(files: readonly string[], sample = 5): string {
+  const shown = files.slice(0, sample).join(", ");
+  const more = files.length > sample ? ` and ${files.length - sample} more` : "";
+  return (
+    `Graph is unverified: ${files.length} changed file(s) were not applied: ${shown}${more}. ` +
+    "The backend already held their patch (a revert, or a restored file) and wrote nothing. " +
+    `The next ix map sends them again; if this persists, rebuild with: ${GRAPH_REBUILD_FIX}`
+  );
+}
+
 const STRUCTURAL_PREDICATES = new Set(["CONTAINS", "DEFINES", "CONTAINS_CHUNK"]);
 
 /** Below this many symbols the coverage ratio is too noisy to judge by. */

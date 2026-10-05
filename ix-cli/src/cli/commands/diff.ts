@@ -8,8 +8,9 @@ import { promisify } from "node:util";
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
+import { createClient } from "../../client/factory.js";
 
-import { absoluteFromSourceUri, getEndpoint, resolveWorkspaceRoot } from "../config.js";
+import { absoluteFromSourceUri, isReadablePath, resolveWorkspaceRoot } from "../config.js";
 import { resolveFileOrReport, printResolved, type ResolvedEntity } from "../resolve.js";
 import { formatDiff, relativePath, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
@@ -163,6 +164,10 @@ function compactDiffResult(result: any): any {
 /** Load full file content from current disk. */
 export function loadFileFromDisk(uri: string, root?: string): string | null {
   const filePath = absoluteFromSourceUri(uri, root);
+  // A source_uri comes from the graph, and an absolute one is used as-is: the
+  // same confinement as `ix read`, so a crafted graph cannot make diff print
+  // /etc/passwd.
+  if (!isReadablePath(filePath, root)) return null;
   try {
     if (!fs.existsSync(filePath)) return null;
     return fs.readFileSync(filePath, "utf-8");
@@ -343,6 +348,7 @@ function readSourceSpan(node: any): string | null {
   if (lineStart == null || lineEnd == null) return null;
 
   const filePath = absoluteFromSourceUri(uri);
+  if (!isReadablePath(filePath)) return null;
   try {
     if (!fs.existsSync(filePath)) return null;
     const content = fs.readFileSync(filePath, "utf-8");
@@ -491,7 +497,7 @@ export function registerDiffCommand(program: Command): void {
         reportFailure("mode_conflict", conflict, opts.format);
         return;
       }
-      const client = new IxClient(getEndpoint());
+      const client = createClient();
       const from = parseInt(fromRev, 10);
       const to = parseInt(toRev, 10);
 

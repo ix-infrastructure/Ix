@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { mkdirSync, writeFileSync, readFileSync, rmSync, openSync, closeSync, realpathSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync, linkSync, statSync, utimesSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { hostname } from "node:os";
 import { createHash } from "node:crypto";
@@ -19,7 +19,7 @@ import { ixHome } from "./ix-home.js";
 // guarantee holds no matter what launches it (hook, watcher, manual, CI). The
 // first invocation for a workspace takes the lock; any concurrent invocation
 // sees a live holder and exits quietly (coalesces) instead of piling on. A
-// stale lock (dead holder, or older than IX_MAP_LOCK_MAX_MS) is stolen so a
+// stale lock (dead holder, or untouched for IX_MAP_LOCK_MAX_MS) is stolen so a
 // crashed map never wedges future runs.
 //
 // Keeping the authority in the CLI (rather than only in a shell-hook lock)
@@ -104,12 +104,33 @@ function readMeta(path: string): LockMeta | null {
   }
 }
 
-/** A held lock is stale if its holder is gone, on another host, or too old. */
-function isStale(meta: LockMeta | null): boolean {
-  if (!meta) return true; // unparseable/empty → treat as abandoned
+/** How often a holder touches its lock file to show it is still working. */
+const HEARTBEAT_MS = 30_000;
+
+/** When the lock file was last written or touched by its holder. */
+function lastHeartbeat(path: string): number | null {
+  try { return statSync(path).mtimeMs; } catch { return null; }
+}
+
+/**
+ * A held lock is stale when its holder is gone: a dead pid on this host, or a
+ * holder that has not touched the file for `IX_MAP_LOCK_MAX_MS` -- on another
+ * host, where the pid cannot be checked, or on this one, where the pid may
+ * have been reused by an unrelated process.
+ *
+ * Age alone no longer makes a lock stale. It used to be measured from
+ * `startedAt`, so a live map running longer than 20 minutes was stolen, and a
+ * second map ran beside it.
+ */
+function isStale(meta: LockMeta | null, path?: string): boolean {
+  const heartbeat = path ? lastHeartbeat(path) : null;
+  const silentFor = Date.now() - (heartbeat ?? meta?.startedAt ?? 0);
+  // Unreadable meta: written whole via link(), so a holder never leaves one
+  // behind mid-write. Give a foreign or truncated file a moment before
+  // taking it.
+  if (!meta) return silentFor > 5_000;
   if (meta.host === hostname() && !pidAlive(meta.pid)) return true;
-  if (Date.now() - meta.startedAt > lockMaxMs()) return true;
-  return false;
+  return silentFor > lockMaxMs();
 }
 
 /**
@@ -118,9 +139,10 @@ function isStale(meta: LockMeta | null): boolean {
  * Returns a LockHandle on success, or null if another live invocation already
  * holds it — in which case the caller should coalesce (skip its own run).
  *
- * Acquisition is atomic via O_CREAT|O_EXCL ('wx'); the classic create-exclusive
- * lockfile. On contention we inspect the holder: a stale lock is removed and
- * acquisition retried once.
+ * Acquisition is atomic via link(): the meta is written to a private file and
+ * hard-linked into place, which fails if the lock exists, like O_EXCL. On
+ * contention we inspect the holder: a stale lock is removed and acquisition
+ * retried once.
  */
 export function acquireMapLock(workspaceRoot: string, label: string): LockHandle | null {
   return acquireLockAt(lockPathFor(workspaceRoot), label);
@@ -140,26 +162,32 @@ export function acquireLockAt(path: string, label: string): LockHandle | null {
   const meta: LockMeta = { pid: process.pid, host: hostname(), startedAt: Date.now(), label };
 
   const tryCreate = (): boolean => {
+    // The meta is written to a private file first and linked into place.
+    // link() fails if the lock exists, like O_EXCL, but the lock appears
+    // complete: creating it empty and then writing left a window in which
+    // another process read an empty lock as abandoned and took it.
+    const tmp = `${path}.${process.pid}.${meta.startedAt}.tmp`;
     try {
-      // 'wx' = O_CREAT | O_EXCL: fails if the file already exists. mode 0600 —
-      // the lock carries no secrets but matches the rest of ~/.ix.
-      const fd = openSync(path, "wx", 0o600);
-      try { writeFileSync(fd, JSON.stringify(meta)); } finally { closeSync(fd); }
+      // mode 0600 — the lock carries no secrets but matches the rest of ~/.ix.
+      writeFileSync(tmp, JSON.stringify(meta), { mode: 0o600 });
+      linkSync(tmp, path);
       return true;
     } catch (err: any) {
       if (err?.code === "EEXIST") return false;
       // Any other error (e.g. permission, read-only FS): fail open rather than
       // block the user's map. Single-flight is an optimization, not correctness.
       return true;
+    } finally {
+      try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
     }
   };
 
-  if (tryCreate()) return makeHandle(path);
+  if (tryCreate()) return makeHandle(path, meta);
 
   // Contended — is the holder still alive?
-  if (isStale(readMeta(path))) {
+  if (isStale(readMeta(path), path)) {
     try { rmSync(path, { force: true }); } catch { /* best effort */ }
-    if (tryCreate()) return makeHandle(path);
+    if (tryCreate()) return makeHandle(path, meta);
   }
   return null; // a live holder owns it — caller should coalesce
 }
@@ -192,18 +220,36 @@ export function setLockOwnerResolver(resolve: () => LockOwner): void {
 
 const held = new Map<() => void, LockOwner>();
 
-function makeHandle(path: string): LockHandle {
+/** The lock at `path` is still the one `meta` describes -- not a successor's. */
+function stillOurs(path: string, meta: LockMeta): boolean {
+  const current = readMeta(path);
+  return current !== null && current.pid === meta.pid && current.startedAt === meta.startedAt && current.host === meta.host;
+}
+
+function makeHandle(path: string, meta: LockMeta): LockHandle {
   let released = false;
+  // Touch the file while the lock is held: `isStale` reads its mtime, so a
+  // live holder is never mistaken for an abandoned one however long it runs.
+  const heartbeat = setInterval(() => {
+    if (!stillOurs(path, meta)) return;
+    const now = new Date();
+    try { utimesSync(path, now, now); } catch { /* best effort */ }
+  }, HEARTBEAT_MS);
+  heartbeat.unref?.();
   const release = (): void => {
     if (released) return;
     released = true;
     held.delete(release);
+    clearInterval(heartbeat);
     // Both listeners are removed with the lock. A long-lived process that maps
     // repeatedly would otherwise accumulate one set per map and trip Node's
     // max-listeners warning.
     process.off("exit", release);
     process.off("SIGINT", onSigint);
     process.off("SIGTERM", onSigterm);
+    // Only our own lock. If it was taken over as stale, deleting it would
+    // free a lock someone else now holds and let a third runner in.
+    if (!stillOurs(path, meta)) return;
     try { rmSync(path, { force: true }); } catch { /* best effort */ }
   };
   const onSigint = (): void => { release(); process.exit(130); };
@@ -237,11 +283,36 @@ export function releaseLocksOwnedBy(owner: LockOwner): void {
   for (const [release, heldBy] of [...held]) if (heldBy === owner) release();
 }
 
+/**
+ * Ask the process holding the map lock for `workspaceRoot` to run once more.
+ *
+ * A map that coalesces used to exit and tell nobody: an edit made after the
+ * holder had read that file reached the graph only on a third invocation.
+ * The marker sits beside the lock; the holder takes it before it lets go.
+ */
+export function requestMapRerun(workspaceRoot: string): void {
+  try {
+    mkdirSync(lockDir(), { recursive: true });
+    writeFileSync(`${lockPathFor(workspaceRoot)}.rerun`, String(Date.now()), { mode: 0o600 });
+  } catch { /* best effort: without it the next edit's map catches up */ }
+}
+
+/** True, and the request consumed, when a coalesced map asked for a rerun. */
+export function takeMapRerun(workspaceRoot: string): boolean {
+  const marker = `${lockPathFor(workspaceRoot)}.rerun`;
+  try {
+    rmSync(marker);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ── Test-only surface ──────────────────────────────────────────────────────
 // Exported for unit tests; not part of the public CLI API.
 export function lockPathForTest(workspaceRoot: string): string {
   return lockPathFor(workspaceRoot);
 }
 export function isStaleForTest(path: string): boolean {
-  return isStale(readMeta(path));
+  return isStale(readMeta(path), path);
 }

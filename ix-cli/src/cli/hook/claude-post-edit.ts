@@ -2,8 +2,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
+import { createClient } from "../../client/factory.js";
+import { resolveWorkspaceRoot } from "../config.js";
 import { SourceFiles } from "../edge-sites.js";
 import { isSourcePath } from "../explain/issue.js";
 import type { FileDiff } from "./session.js";
@@ -224,6 +224,8 @@ export interface HookOutcome {
   reported: string[];
   /** False when edited symbols were left for a later call by the symbol cap. */
   complete: boolean;
+  /** What happened to each file and symbol, for `IX_HOOK_LOG`. */
+  notes?: string[];
 }
 
 const NOTHING: HookOutcome = { reported: [], complete: true };
@@ -232,6 +234,14 @@ const MAX_FILES = 8;
 /** Symbols reported per run, across all files. */
 const MAX_SYMBOLS = 3;
 const LEAD = "Ix: you changed";
+
+/**
+ * Rows the hook prints per symbol. In 93 recorded runs the first caller
+ * listed was a file the fix changed 24 times in 61, later ones 5 in 51, and
+ * no test row ever was (agents are told not to edit tests), so the hook shows
+ * the nearest two callers and users and one test, and counts the rest.
+ */
+export const HOOK_CAPS = { symbols: 3, callers: 2, users: 2, tests: 1, importers: 5 };
 const FOOTER = "These may need updating to match your edit.";
 
 function defaultReadFile(abs: string): string | undefined {
@@ -289,7 +299,7 @@ function graphPath(roots: Roots, worktreeFile: string): string | undefined {
 function gatherWith(deps: HookDeps, opts: HookOptions): (req: AroundRequest) => Promise<AroundResult> {
   if (deps.gather) return deps.gather;
   const timeoutMs = hookTimeoutMs(opts.env);
-  return (req) => gatherAround(new IxClient(getEndpoint(), AbortSignal.timeout(timeoutMs)), req);
+  return (req) => gatherAround(createClient({ deadlineSignal: AbortSignal.timeout(timeoutMs) }), req);
 }
 
 /**
@@ -321,14 +331,16 @@ export function renderHookText(results: AroundResult[], budget: number): string 
  */
 export function summarize(results: AroundResult[], budget: number): HookOutcome {
   const reported: string[] = [];
+  const notes: string[] = [];
   const shown: AroundResult[] = [];
   let slots = MAX_SYMBOLS;
   let complete = true;
   for (const r of results) {
     const keep = [];
+    if (r.symbols.length === 0) notes.push(`${r.path}: ${r.excluded ? "already_reported" : "no_definition_covers"}`);
     for (const s of r.symbols) {
       const deps = s.callers.total + s.users.total + s.tests.total;
-      if (deps === 0) { reported.push(symbolKey(r.path, s.id)); continue; }
+      if (deps === 0) { reported.push(symbolKey(r.path, s.id)); notes.push(`${r.path}#${s.name}: no_dependents`); continue; }
       if (slots === 0) { complete = false; continue; }
       slots--;
       keep.push(s);
@@ -336,8 +348,9 @@ export function summarize(results: AroundResult[], budget: number): HookOutcome 
     }
     if (keep.length > 0) shown.push({ ...r, symbols: keep });
   }
-  if (shown.length === 0) return { reported, complete };
-  return { output: postToolUseOutput(renderHookText(shown, budget)), reported, complete };
+  for (const r of shown) for (const s of r.symbols) notes.push(`${r.path}#${s.name}: reported`);
+  if (shown.length === 0) return { reported, complete, notes };
+  return { output: postToolUseOutput(renderHookText(shown, budget)), reported, complete, notes };
 }
 
 /**
@@ -371,6 +384,7 @@ export async function reportChangedFiles(
       const exclude = new Set([...ctx.already].filter((k) => k.startsWith(`${relPath}#`)).map((k) => k.slice(relPath.length + 1)));
       requests.push({
         relPath, ranges: f.oldRanges, anchorLines: head.split("\n"), currentLines: current.split("\n"), files, exclude,
+        caps: HOOK_CAPS,
       });
       debug(`${relPath} old-side ${JSON.stringify(f.oldRanges)}`);
     }
@@ -416,7 +430,7 @@ export async function reportToolEdit(
     const exclude = new Set([...already].filter((k) => k.startsWith(`${relPath}#`)).map((k) => k.slice(relPath.length + 1)));
     const result = await gatherWith(deps, opts)({
       relPath, ranges: where.ranges, anchorLines: where.anchorLines, currentLines: current.split("\n"),
-      files: new SourceFiles(roots.sourceRoot), exclude,
+      files: new SourceFiles(roots.sourceRoot), exclude, caps: HOOK_CAPS,
     });
     if (!hasDependents(result)) debug("no dependents");
     return summarize([result], opts.budget ?? DEFAULT_TOKEN_BUDGET);

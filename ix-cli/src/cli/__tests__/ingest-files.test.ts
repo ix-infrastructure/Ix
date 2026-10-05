@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -10,6 +10,9 @@ import { ingestFiles } from "../commands/ingest.js";
 import { ingestMtimeCachePath, ingestRebuildPath, loadConfig } from "../config.js";
 import { workspaceIdForPath } from "../system.js";
 import { FakeBackend } from "./helpers/fake-backend.js";
+import { loadIngestBaseline } from "../ingest-baseline.js";
+import { detectStaleFiles } from "../stale.js";
+import { renderStatusLlm } from "../commands/status.js";
 
 /**
  * Integration tests that drive `ingestFiles` end to end against a fake backend.
@@ -739,6 +742,109 @@ describe("ingestFiles against a fake backend", () => {
       await incremental();
 
       expect(backend.acceptedPatches(), "the DB-reset guard empties the baseline").toBe(17);
+    });
+  });
+
+  describe("a changed file the backend answers Idempotent is reported, not marked clean (F-01)", () => {
+    // A revert sends the patch id the backend committed for the original
+    // bytes. The shipped backend replays any id it has seen, so it answers
+    // `Idempotent`, writes nothing, and the graph keeps the edit -- while the
+    // CLI used to count the patch as applied, record the file as clean, and
+    // let `ix status` say the graph was up to date.
+    const incremental = () =>
+      ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
+    const target = () => join(repo, "src", "m003.ts");
+    let tick = Date.now();
+    /** Write and give the file an mtime no earlier write can share. */
+    const write = (text: string) => {
+      writeFileSync(target(), text, "utf8");
+      tick += 10_000;
+      utimesSync(target(), new Date(tick), new Date(tick));
+      execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+    };
+    const stored = () => loadIngestBaseline(repo)!;
+    let stderr: ReturnType<typeof vi.spyOn>;
+    const warnings = (): string[] =>
+      stderr.mock.calls.map((call: unknown[]) => String(call[0])).filter((c: string) => c.includes("Graph is unverified"));
+
+    beforeEach(() => {
+      fixture(16);
+      stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      // Earlier tests in this file end runs that set it.
+      process.exitCode = undefined;
+    });
+    afterEach(() => {
+      stderr.mockRestore();
+      process.exitCode = undefined;
+    });
+
+    const revert = async () => {
+      const original = readFileSync(target(), "utf8");
+      await incremental();
+      write("export function f3(): number { return 33; }\n");
+      await incremental();
+      write(original);
+      backend.resetRequests();
+      return incremental();
+    };
+
+    it("a revert on a backend without BEW-03 is named and stays dirty", async () => {
+      backend.semantics = "legacy";
+
+      const summary = await revert();
+
+      expect(backend.commitCount, "the revert was sent").toBeGreaterThan(0);
+      expect(summary.replayedChanges).toEqual(["src/m003.ts"]);
+      expect(warnings().join("")).toContain("src/m003.ts");
+      expect(process.exitCode, "a warning, not a failure").not.toBe(1);
+      expect(stored().replayedFiles).toEqual(["src/m003.ts"]);
+      expect(stored().files.get(target()), "kept dirty for the next run").not.toBe(statSync(target()).mtimeMs);
+
+      const status = detectStaleFiles(repo);
+      expect(status.replayedFiles).toEqual(["src/m003.ts"]);
+      expect(renderStatusLlm("ok", "x", status)[0]).toContain("stale=true");
+
+      // The next run tries again rather than calling the file unchanged.
+      backend.resetRequests();
+      const next = await incremental();
+      expect(next.filesSkippedAsUnchanged).toBe(15);
+      expect(next.replayedChanges).toEqual(["src/m003.ts"]);
+    });
+
+    it("a revert on a backend with BEW-03 is applied and nothing is reported", async () => {
+      backend.semantics = "head";
+
+      const summary = await revert();
+
+      expect(summary.replayedChanges).toEqual([]);
+      expect(warnings()).toEqual([]);
+      expect(stored().replayedFiles).toEqual([]);
+      expect(stored().files.get(target())).toBe(statSync(target()).mtimeMs);
+    });
+
+    it("a restored file on a backend without BEW-03 is named", async () => {
+      backend.semantics = "legacy";
+      const original = readFileSync(target(), "utf8");
+      await incremental();
+      rmSync(target());
+      execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+      await incremental();
+      write(original);
+
+      const summary = await incremental();
+
+      expect(summary.replayedChanges).toEqual(["src/m003.ts"]);
+    });
+
+    it("an unchanged file answered Idempotent is not reported", async () => {
+      // --force re-sends every file; replays of unchanged content are fine.
+      backend.semantics = "legacy";
+      await incremental();
+
+      const summary = await ingestFiles(repo, { format: "text", force: true, suppressOutput: true, printSummary: false });
+
+      expect(summary.idempotentPatches).toBeGreaterThan(0);
+      expect(summary.replayedChanges).toEqual([]);
     });
   });
 

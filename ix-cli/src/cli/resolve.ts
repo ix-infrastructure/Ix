@@ -8,7 +8,8 @@ import { stderr } from "./stderr.js";
 import { applyRoleFilter } from "./role-filter.js";
 import { detectSystem } from "./system.js";
 import { requireReadWorkspaceId, resolveWorkspaceId } from "./bootstrap.js";
-import { readStitchScope, resolveWorkspaceRoot, writeStitchScope } from "./config.js";
+import { readStitchScope, resolveWorkspaceRoot, stitchScopeCachePath, writeStitchScope } from "./config.js";
+import { ixHome } from "./ix-home.js";
 import { checkGraphHealth, isUnhealthy, type GraphHealth } from "./graph-health.js";
 import { reportAmbiguousTarget, reportResolutionFailure } from "./ui.js";
 import { relativePath } from "./format.js";
@@ -27,7 +28,52 @@ import {
  * (getActiveWorkspaceRoot vs. workspace-relative source_uri) dropped every candidate
  * (issue #228, originally fixed in search.ts only).
  */
-let _scopeCache: { cwd: string; workspaceId?: string; systemId?: string; stitchChecked?: boolean } | undefined;
+let _scopeCache: {
+  cwd: string;
+  workspaceId?: string;
+  systemId?: string;
+  stitchChecked?: boolean;
+  /** scopeKey() when this was computed; a different key means it is stale. */
+  key: string;
+} | undefined;
+
+function mtimeOf(file: string): string {
+  try {
+    return String(fs.statSync(file).mtimeMs);
+  } catch {
+    return "-";
+  }
+}
+
+/**
+ * What a cached scope depends on besides the cwd: config.yaml, where `ix map`
+ * registers a workspace, and the workspace's stitch-scope file, which a map or
+ * ingest clears. `ix mcp` keeps this cache for the whole session, and the map
+ * that changes either one usually runs in another process -- an editor hook,
+ * a terminal -- that resetReadScope() never hears about. Two stats per read.
+ */
+function scopeKey(workspaceId: string | undefined): string {
+  const stitch = workspaceId ? mtimeOf(stitchScopeCachePath(workspaceId)) : "-";
+  return `${mtimeOf(path.join(ixHome(), "config.yaml"))}|${stitch}`;
+}
+
+/** The cached scope for `cwd`, if it is still current. */
+function currentCache(cwd: string): NonNullable<typeof _scopeCache> | undefined {
+  if (_scopeCache?.cwd !== cwd) return undefined;
+  const ws = _scopeCache.workspaceId ?? resolveWorkspaceIdQuiet(cwd);
+  if (_scopeCache.key !== scopeKey(ws)) return undefined;
+  return _scopeCache;
+}
+
+// The workspace id for the stitch-file part of the key. Only consulted for a
+// system-scoped entry, where the cache holds no workspace id of its own.
+function resolveWorkspaceIdQuiet(cwd: string): string | undefined {
+  try {
+    return resolveWorkspaceId(cwd);
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Drop the cached scope so the next read resolves it again.
@@ -47,11 +93,15 @@ export function activeReadScope(): { workspaceId?: string; systemId?: string } {
 }
 function activeScope(): { workspaceId?: string; systemId?: string } {
   const cwd = process.cwd();
-  if (_scopeCache?.cwd === cwd) return _scopeCache;
+  const cached = currentCache(cwd);
+  if (cached) return cached;
   const systemId = detectSystem(cwd)?.systemId;
   const workspaceId = systemId ? undefined : resolveWorkspaceId(cwd);
-  _scopeCache = { cwd, workspaceId, systemId, stitchChecked: false };
-  return _scopeCache;
+  const scope = { cwd, workspaceId, systemId, stitchChecked: false, key: scopeKey(workspaceId) };
+  // "No workspace here" is never cached: it is exactly the answer an `ix map`
+  // run elsewhere changes, and recomputing it is a few file reads.
+  _scopeCache = workspaceId || systemId ? scope : undefined;
+  return scope;
 }
 
 /**
@@ -79,9 +129,12 @@ export async function ensureReadScope(
 
 async function foldStitchedSystem(client: Pick<IxClient, "workspaceSystem">): Promise<void> {
   const cwd = process.cwd();
-  if (_scopeCache?.cwd === cwd && _scopeCache.stitchChecked) return;
+  if (currentCache(cwd)?.stitchChecked) return;
   const localSystem = detectSystem(cwd)?.systemId;
-  if (localSystem) { _scopeCache = { cwd, systemId: localSystem, stitchChecked: true }; return; }
+  if (localSystem) {
+    _scopeCache = { cwd, systemId: localSystem, stitchChecked: true, key: scopeKey(resolveWorkspaceIdQuiet(cwd)) };
+    return;
+  }
   const ws = resolveWorkspaceId(cwd);
   let systemId: string | undefined;
   if (ws) {
@@ -101,7 +154,10 @@ async function foldStitchedSystem(client: Pick<IxClient, "workspaceSystem">): Pr
       } catch { /* best-effort: leave the scope at workspace level, cache nothing */ }
     }
   }
-  _scopeCache = { cwd, workspaceId: systemId ? undefined : ws, systemId, stitchChecked: true };
+  // Unmapped: leave nothing cached, so the next read looks again (see activeScope).
+  _scopeCache = ws || systemId
+    ? { cwd, workspaceId: systemId ? undefined : ws, systemId, stitchChecked: true, key: scopeKey(ws) }
+    : undefined;
 }
 
 /**
@@ -724,7 +780,9 @@ export function printResolved(target: ResolvedEntity): void {
 
 /** Check if a string looks like a raw UUID (not a human-readable name). */
 export function isRawId(s: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(s)
+  // Anchored at both ends: a UUID followed by anything else (`<uuid>/../health`)
+  // is a name to search for, not an id to put into a URL path.
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
     || /^[0-9a-f]{32,}$/i.test(s);
 }
 

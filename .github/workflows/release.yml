@@ -47,6 +47,10 @@ on:
         description: "Build + package on all platforms only; skip publishing the release and the Homebrew PR"
         type: boolean
         default: false
+      overwrite:
+        description: "Replace the assets of a release that already exists (otherwise publishing refuses)"
+        type: boolean
+        default: false
 
 # Least privilege at the top; the release job elevates to what it needs.
 permissions:
@@ -163,6 +167,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The tag being released, not whatever the dispatch ran from: a
+          # dispatch with tag vX used to build the default branch's HEAD and
+          # publish it as vX.
+          ref: ${{ github.event.inputs.tag || github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -179,6 +187,17 @@ jobs:
           else
             TAG="${INPUT_TAG:-$REF_NAME}"
             echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+            # What is built must be exactly the tag that names it. Any of the
+            # tags on HEAD, not `git describe --exact-match`: describe names one
+            # tag per commit, so a commit carrying several (v0.10.0-rc.1 to
+            # rc.4 share one) would refuse every tag on it but that one.
+            # Captured first, not piped into `grep -q`: under pipefail an early
+            # grep exit can fail the pipeline on git's SIGPIPE.
+            AT=$(git tag --points-at HEAD)
+            if ! grep -Fxq -- "$TAG" <<<"$AT"; then
+              echo "::error::HEAD $(git rev-parse --short HEAD) is not tagged $TAG (its tags: ${AT:-none}). Refusing to build $TAG from another commit."
+              exit 1
+            fi
           fi
 
       - name: Set up Node.js
@@ -227,6 +246,11 @@ jobs:
           before_ing=$(size core-ingestion/node_modules)
           (cd ix-cli && npm prune --omit=dev)
           (cd core-ingestion && npm prune --omit=dev)
+          # tree-sitter-cli arrives transitively as a runtime dependency but is
+          # grammar-authoring tooling: a native binary nothing at runtime runs,
+          # shipped in every tarball and absent from the SBOM. The parse check
+          # below proves the CLI still works without it.
+          rm -rf core-ingestion/node_modules/tree-sitter-cli core-ingestion/node_modules/.bin/tree-sitter
           echo "ix-cli/node_modules:         ${before_cli:-?} MB -> $(size ix-cli/node_modules) MB"
           echo "core-ingestion/node_modules: ${before_ing:-?} MB -> $(size core-ingestion/node_modules) MB"
 
@@ -305,6 +329,8 @@ jobs:
             || { echo "::error::cli/dist/cli/main.js missing from staging — the tarball would contain no CLI at all"; exit 1; }
           test -f "$STAGING/cli/package.json" && test -d "$STAGING/cli/node_modules" \
             || { echo "::error::cli/package.json or cli/node_modules missing from staging — the CLI would not start"; exit 1; }
+          test -f "$STAGING/cli/dist/docker-compose.standalone.yml" \
+            || { echo "::error::cli/dist/docker-compose.standalone.yml missing from staging — ix docker start would have no backend compose file"; exit 1; }
           cp -rL ix-cli/scripts/render-logo.mjs ix-cli/scripts/render-logo.d.mts "$STAGING/cli/scripts/"
           cp -rL ix-cli/assets/logo.png "$STAGING/cli/assets/"
           test -f "$STAGING/cli/scripts/render-logo.mjs" && test -f "$STAGING/cli/assets/logo.png" \
@@ -406,7 +432,10 @@ jobs:
       - name: Generate SBOM (${{ matrix.target }})
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
-          path: ix-cli
+          # The staged tree is what the archive contains: cli, core-ingestion
+          # and compass. Scanning ix-cli alone left core-ingestion's shipped
+          # runtime tree uncatalogued.
+          path: ix-${{ steps.version.outputs.version }}-${{ matrix.target }}
           format: spdx-json
           output-file: ix-${{ steps.version.outputs.version }}-${{ matrix.target }}.sbom.spdx.json
           artifact-name: sbom-${{ matrix.target }}.spdx.json
@@ -444,6 +473,7 @@ jobs:
         # branch and opens a PR with this token (see .github/zizmor.yml).
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -513,6 +543,21 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: "_artifacts/*.tar.gz,_artifacts/*.zip"
+
+      - name: Refuse to replace an existing release's assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ steps.version.outputs.version }}
+          OVERWRITE: ${{ github.event.inputs.overwrite || 'false' }}
+        run: |
+          # Publishing uploads assets by name, so re-running it for a tag that
+          # is already released silently replaces what users have been
+          # downloading. Only an explicit `overwrite` dispatch may do that.
+          assets=$(gh release view "$TAG" --json assets --jq '.assets | length' 2>/dev/null || echo 0)
+          if [ "$assets" -gt 0 ] && [ "$OVERWRITE" != "true" ]; then
+            echo "::error::$TAG is already released with $assets assets. Re-run the dispatch with overwrite=true to replace them."
+            exit 1
+          fi
 
       - name: Create Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
