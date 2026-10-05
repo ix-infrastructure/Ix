@@ -8,7 +8,7 @@
     },
     "map (no-op)": {
       "requests": 6,
-      "bytes": 914,
+      "bytes": 1017,
       "wallMs": 448
     },
     "map (one-line TS edit)": {
