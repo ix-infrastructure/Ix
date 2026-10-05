@@ -129,6 +129,10 @@ function inSkippedDir(relativePath: string): boolean {
   return parts.some(p => SKIPPED_DIRS.has(p));
 }
 
+const GIT_SAFE_CONFIG = [
+  "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.quotePath=false",
+];
+
 /**
  * The files `git ls-files` reports under `dir`, canonical and de-duplicated, or
  * null when `dir` is not in a git work tree.
@@ -145,7 +149,9 @@ export function tryGitLsFiles(
   try {
     const result = spawnSync(
       "git",
-      ["-c", "core.quotePath=false", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+      // core.fsmonitor / core.hooksPath: a cloned repository's own .git/config
+      // can name a command ls-files would run. Never let it.
+      [...GIT_SAFE_CONFIG, "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
       {
         cwd: dir,
         encoding: "utf-8",

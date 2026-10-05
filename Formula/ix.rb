@@ -28,6 +28,9 @@ class Ix < Formula
       # Run tsc directly — npm run build would redundantly rebuild core-ingestion
       # via build-core-ingestion.mjs, which triggers native module compilation
       system "npx", "tsc"
+      # The backend compose file `ix docker start` writes to ~/.ix/backend/.
+      # npm run build copies it into dist/; this build skips npm run build.
+      cp "../docker-compose.standalone.yml", "dist/docker-compose.standalone.yml"
 
       # Install the compiled CLI and its dependencies
       libexec.install "dist", "node_modules", "package.json"

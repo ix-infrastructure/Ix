@@ -1,0 +1,12 @@
+{
+  "name": "polyglot-b-fixture",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Second fixture for the Ix real-backend harness",
+  "scripts": {
+    "lint": "ruff lib"
+  },
+  "dependencies": {
+    "is-odd": "^3.0.1"
+  }
+}

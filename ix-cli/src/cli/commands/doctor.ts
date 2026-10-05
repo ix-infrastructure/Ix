@@ -3,7 +3,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { renderSection, renderSuccess, renderError } from "../ui.js";
-import { IxClient } from "../../client/api.js";
+import { createClient } from "../../client/factory.js";
 import {
   canonicalWorkspacePath,
   findWorkspaceForCwd,
@@ -207,7 +207,7 @@ export function registerDoctorCommand(program: Command): void {
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .action(async (opts: { format: string }) => {
       const endpoint = getEndpoint();
-      const client = new IxClient(endpoint);
+      const client = createClient({ endpoint });
 
       // "Graph has nodes" and "Graph has edges" are two questions about one
       // response. They were two `client.stats()` calls, run back to back by the

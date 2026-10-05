@@ -2,13 +2,14 @@
 
 import type { Command } from "commander";
 import { renderSection, renderKeyValue, renderWarning, renderNote, renderSuccess } from "../ui.js";
-import { IxClient } from "../../client/api.js";
+import { createClient } from "../../client/factory.js";
 import { readBackendHealth } from "./upgrade.js";
 import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
 import { detectStaleFiles } from "../stale.js";
 import { llmError, llmLine, printLlmLines } from "../llm.js";
 import { backendUnreachableError, isBackendUnreachable } from "../errors.js";
 import { printJson } from "../format.js";
+import { describeReplayedChanges } from "../graph-health.js";
 
 interface StatusStaleInfo {
   graphCompleted: boolean;
@@ -17,6 +18,8 @@ interface StatusStaleInfo {
   lastIngestAt: string | null;
   staleFiles: number;
   sampleChangedFiles: string[];
+  /** Changed files the last run could not get applied (F-01); see `IngestBaseline.replayedFiles`. */
+  replayedFiles?: string[];
 }
 
 /**
@@ -43,10 +46,16 @@ export function renderStatusLlm(
     ["rev", staleInfo ? String(staleInfo.currentRev) : null],
     ["last_ingest_at", staleInfo?.lastIngestAt ?? null],
     ["stale_files", staleInfo ? String(staleInfo.staleFiles) : null],
-    ["stale", staleInfo ? (!staleInfo.graphCompleted || staleInfo.staleFiles > 0 ? "true" : "false") : null],
+    ["not_applied", staleInfo ? String(staleInfo.replayedFiles?.length ?? 0) : null],
+    ["stale", staleInfo
+      ? (!staleInfo.graphCompleted || staleInfo.staleFiles > 0 || (staleInfo.replayedFiles?.length ?? 0) > 0 ? "true" : "false")
+      : null],
   ])];
   for (const f of staleInfo?.sampleChangedFiles ?? []) {
     lines.push(llmLine("changed", [["path", f]]));
+  }
+  for (const f of staleInfo?.replayedFiles ?? []) {
+    lines.push(llmLine("not_applied", [["path", f]]));
   }
   return lines;
 }
@@ -58,7 +67,7 @@ export function registerStatusCommand(program: Command): void {
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--root <dir>", "Workspace root directory")
     .action(async (opts: { format: string; root?: string }) => {
-      const client = new IxClient(getEndpoint());
+      const client = createClient();
       try {
         const health = await readBackendHealth(client);
         const root = resolveWorkspaceRoot(opts.root);
@@ -82,6 +91,7 @@ export function registerStatusCommand(program: Command): void {
             lastIngestAt: staleInfo?.lastIngestAt ?? null,
             staleFiles: staleInfo?.staleFiles ?? 0,
             sampleChangedFiles: staleInfo?.sampleChangedFiles ?? [],
+            replayedFiles: staleInfo?.replayedFiles ?? [],
           };
           printJson(result);
         } else {
@@ -97,6 +107,10 @@ export function registerStatusCommand(program: Command): void {
             if (!staleInfo.graphCompleted) {
               renderWarning("No completed source graph ingest is recorded for this workspace.");
               renderNote("Run ix map to build a trustworthy graph.");
+            } else if ((staleInfo.replayedFiles?.length ?? 0) > 0) {
+              // Ahead of the stale-file check: a restored file can look current
+              // by mtime while the graph still holds the content in between.
+              renderWarning(describeReplayedChanges(staleInfo.replayedFiles!));
             } else if (staleInfo.staleFiles > 0) {
               renderWarning(`${staleInfo.staleFiles} file(s) changed since last ingest:`);
               for (const f of staleInfo.sampleChangedFiles) {
