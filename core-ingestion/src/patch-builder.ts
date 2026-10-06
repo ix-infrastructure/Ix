@@ -134,7 +134,9 @@ function deduplicateUpsertEdges(ops: PatchOp[]): PatchOp[] {
  * old id and the new output never lands -- 1.26: JS/TS calls resolve by scope,
  * not name alone, and helper-loaded / dist/ imports link to their sources.
  * 1.27: Python, Rust and PHP bare calls no longer resolve to another file's
- * class member.
+ * class member. 1.28: no edge is written without a node at both ends (calls
+ * that resolve nowhere go on their caller as `unresolved_calls`), and
+ * cross-file edges carry `confidence` and `tier`.
  *
  * `ix map` skips files whose mtime or source hash is unchanged, which would
  * keep the old extractor's edges on them, so the ingest baseline records this
@@ -152,11 +154,11 @@ export function patchActor(): string {
 }
 
 export function extractorName(): string {
-  return `tree-sitter/1.27`;
+  return `tree-sitter/1.28`;
 }
 
 /** Previous extractor versions — their patches are superseded when re-ingesting. */
-export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.26', 'tree-sitter/1.25', 'tree-sitter/1.24', 'tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
+export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.27', 'tree-sitter/1.26', 'tree-sitter/1.25', 'tree-sitter/1.24', 'tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
 
 /** Patch ids that may own the active graph entities for a stored source hash. */
 export function sourcePatchIdCandidates(

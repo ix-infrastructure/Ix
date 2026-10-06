@@ -75,22 +75,23 @@ describe("revert to earlier content", () => {
     }),
   );
 
-  it(
-    "[fails until BEW-03] rename a function and back equals the original",
-    failsUntil(["BEW-03"], async () => {
-      const co = checkout("polyglot");
-      map(env, co);
-      const a = await signature(env, co);
+  // Marked [fails until BEW-03] until tree-sitter/1.28. All that was left of
+  // the renamed state was edges with no live node at either end: the renamed
+  // function's CALLS to names that resolve nowhere (`re.sub`, `lower`) and
+  // its chunk's DEFINES. 1.28 writes neither. A -> B -> A still covers BEW-03.
+  it("rename a function and back equals the original", async () => {
+    const co = checkout("polyglot");
+    map(env, co);
+    const a = await signature(env, co);
 
-      for (const f of ["app/utils.py", "app/repository.py"])
-        edit(co, f, replaceAll("to_snake_case", "to_snake_case_renamed"));
-      map(env, co);
-      git(co.dir, "checkout", "--", ".");
-      map(env, co);
+    for (const f of ["app/utils.py", "app/repository.py"])
+      edit(co, f, replaceAll("to_snake_case", "to_snake_case_renamed"));
+    map(env, co);
+    git(co.dir, "checkout", "--", ".");
+    map(env, co);
 
-      expectSameGraph("rename and back", await signature(env, co), a);
-    }),
-  );
+    expectSameGraph("rename and back", await signature(env, co), a);
+  });
 
   it(
     "[fails until BEW-03, IN-04] delete a file and restore it equals the original",
