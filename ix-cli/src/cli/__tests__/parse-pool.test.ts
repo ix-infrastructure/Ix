@@ -868,4 +868,109 @@ describe("ParsePool", () => {
     expect(elapsed).toBeLessThan(3000);
     expect(pool.crashedTasks(), "a clean teardown is not a crash").toBe(0);
   }, 20000);
+
+  /**
+   * Blocks its event loop for 1.5 s on `slow.ts` -- standing in for a parse
+   * stuck in native code, which no budget check inside the worker can reach --
+   * then answers. Every other file answers at once.
+   */
+  const SLOW_ON_ONE = `
+    import { parentPort } from 'node:worker_threads';
+    parentPort.on('message', (msg) => {
+      if (msg && msg.__shutdown) { parentPort.close(); return; }
+      if (msg.filePath === 'slow.ts') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 6000);
+      parentPort.postMessage({ ok: true, result: { filePath: msg.filePath } });
+    });
+  `;
+
+  it("settles a parse that holds its worker past the backstop as a timeout, and carries on", async () => {
+    // The backstop also runs for `a.ts` from the moment it is handed to the
+    // replacement worker, whose start-up counts against it. 1 s leaves room for
+    // that start on a busy runner; the slow parse holds its worker for 6 s.
+    const pool = new ParsePool(worker("slow", SLOW_ON_ONE), 1, undefined, undefined, 1000);
+    pool.init();
+    const start = Date.now();
+
+    const [slow, next] = await Promise.all([pool.parse("slow.ts", "x"), pool.parse("a.ts", "y")]);
+
+    expect(slow, "settled, not left pending").toBeNull();
+    expect(next, "a replacement worker took the queue").toEqual({ filePath: "a.ts" });
+    expect(Date.now() - start, "did not wait for the slow parse").toBeLessThan(5000);
+    expect(pool.timedOutFiles()).toEqual(["slow.ts"]);
+    expect(pool.crashedTasks(), "a timeout is not a crash: it recurs every run").toBe(0);
+    await pool.destroy();
+  });
+
+  /** Reports a budget timeout for `t.ts`, as the real worker does. */
+  const REPORTS_TIMEOUT = `
+    import { parentPort } from 'node:worker_threads';
+    parentPort.on('message', (msg) => {
+      if (msg && msg.__shutdown) { parentPort.close(); return; }
+      if (msg.filePath === 't.ts') {
+        parentPort.postMessage({ ok: false, result: null, reason: 'timeout', message: 'budget' });
+      } else {
+        parentPort.postMessage({ ok: false, result: null, reason: 'error', message: 'boom' });
+      }
+    });
+  `;
+
+  /** Echoes, and appends a line to `marker` when it starts: one line per worker. */
+  const COUNTS_STARTS = (marker: string) => `
+    import { parentPort, threadId } from 'node:worker_threads';
+    import { appendFileSync } from 'node:fs';
+    appendFileSync(${JSON.stringify(marker)}, threadId + '\\n');
+    parentPort.on('message', (msg) => {
+      if (msg && msg.__shutdown) { parentPort.close(); return; }
+      parentPort.postMessage({ ok: true, result: { filePath: msg.filePath } });
+    });
+  `;
+
+  it("starts workers only as work arrives, up to its size", async () => {
+    // A one-file edit used to start a worker per core to parse one file.
+    const marker = join(dir, "starts");
+    const pool = new ParsePool(worker("counts", COUNTS_STARTS(marker)), 4);
+    const started = () => (existsSync(marker) ? readFileSync(marker, "utf8").trim().split("\n").length : 0);
+
+    await pool.parse("a.ts", "x");
+    expect(started(), "one task, one worker").toBe(1);
+
+    await Promise.all(["b", "c", "d", "e", "f", "g"].map((f) => pool.parse(`${f}.ts`, "x")));
+    expect(started(), "never more than the pool's size").toBeLessThanOrEqual(4);
+
+    await pool.destroy();
+  });
+
+  it("grows when a later phase asks for more, and never shrinks", async () => {
+    const marker = join(dir, "grows");
+    const pool = new ParsePool(worker("grows", COUNTS_STARTS(marker)), 1);
+    const started = () => readFileSync(marker, "utf8").trim().split("\n").length;
+
+    await Promise.all(["a", "b", "c"].map((f) => pool.parse(`${f}.ts`, "x")));
+    expect(started()).toBe(1);
+
+    pool.growTo(3);
+    pool.growTo(2);
+    await Promise.all(["d", "e", "f", "g"].map((f) => pool.parse(`${f}.ts`, "x")));
+    expect(started()).toBeGreaterThan(1);
+    expect(started()).toBeLessThanOrEqual(3);
+
+    await pool.destroy();
+  });
+
+  it("names a file the worker reports as timed out, and only one that counts", async () => {
+    const pool = new ParsePool(worker("reports", REPORTS_TIMEOUT), 1);
+    pool.init();
+
+    const results = await Promise.all([
+      pool.parse("t.ts", "x"),
+      pool.parse("e.ts", "x"),
+      // The index prescan does not count its losses; see `parse`.
+      pool.parse("t.ts", "x", false),
+    ]);
+
+    expect(results).toEqual([null, null, null]);
+    expect(pool.timedOutFiles()).toEqual(["t.ts"]);
+    expect(pool.crashedTasks()).toBe(0);
+    await pool.destroy();
+  });
 });

@@ -241,9 +241,9 @@ describe("incremental ix map equals a fresh map (fake backend)", () => {
     await runSequence("head", [edit("editBody", "pkg/app.py"), edit("editBody", "src/com/ex/App.java")]);
   });
 
-  // F-07. A new file has no backend hash, so the whole repository takes the
-  // first-ingest path and every file is parsed and sent again.
-  it.fails("IN-01: adding a file sends one patch", async () => {
+  // F-07. A new file has no backend hash; before IN-01 that sent the whole
+  // repository down the first-ingest path, every file parsed and sent again.
+  it("IN-01: adding a file sends one patch", async () => {
     await runSequence("head", [edit("addFile", undefined, 0)], {
       langs: ["ts"],
       check: (world) => {
@@ -253,6 +253,14 @@ describe("incremental ix map equals a fresh map (fake backend)", () => {
         expect(sent, "patches on the wire").toBe(1);
       },
     });
+  });
+
+  // The index prescan holds no Python or Java symbols, so an added file in
+  // either language still takes the whole-repository pass: resolved alone, its
+  // cross-file calls would point at a module node or at nothing.
+  it("IN-01: an added Python or Java file keeps its cross-file calls", async () => {
+    await runSequence("head", [edit("addFile", undefined, 0)], { langs: ["py"] });
+    await runSequence("head", [edit("addFile", undefined, 1)], { langs: ["java"] });
   });
 
   // F-04. Dropping the file's last import removes a node, the patch carries a

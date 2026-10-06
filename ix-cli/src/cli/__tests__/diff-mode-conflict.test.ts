@@ -338,6 +338,8 @@ describe("mergeDiffOptions", () => {
 // ══════════════════════════════════════════════════════════════════════
 
 describe("loadFileFromDisk", () => {
+  // tmpDir is passed as the root: reads are confined to readable roots, and a
+  // temp dir is in no workspace.
   let tmpDir: string;
 
   beforeEach(() => {
@@ -351,17 +353,17 @@ describe("loadFileFromDisk", () => {
   it("returns file content when file exists", () => {
     const filePath = join(tmpDir, "exists.txt");
     writeFileSync(filePath, "hello world", "utf-8");
-    expect(loadFileFromDisk(filePath)).toBe("hello world");
+    expect(loadFileFromDisk(filePath, tmpDir)).toBe("hello world");
   });
 
   it("returns null when file does not exist", () => {
-    expect(loadFileFromDisk(join(tmpDir, "nope.txt"))).toBeNull();
+    expect(loadFileFromDisk(join(tmpDir, "nope.txt"), tmpDir)).toBeNull();
   });
 
   it("returns empty string for an empty file (not null)", () => {
     const filePath = join(tmpDir, "empty.txt");
     writeFileSync(filePath, "", "utf-8");
-    const result = loadFileFromDisk(filePath);
+    const result = loadFileFromDisk(filePath, tmpDir);
     // Empty string is falsy but NOT null — this is a meaningful distinction.
     // MUTATION: changing the return to undefined or null must fail.
     expect(result).toBe("");
@@ -371,34 +373,34 @@ describe("loadFileFromDisk", () => {
   it("returns null when path is a directory (not a file)", () => {
     // readFileSync on a directory throws; catch block returns null.
     mkdirSync(join(tmpDir, "subdir"));
-    expect(loadFileFromDisk(join(tmpDir, "subdir"))).toBeNull();
+    expect(loadFileFromDisk(join(tmpDir, "subdir"), tmpDir)).toBeNull();
   });
 
   it("returns content with multi-line content", () => {
     const filePath = join(tmpDir, "multi.txt");
     writeFileSync(filePath, "line1\nline2\nline3", "utf-8");
-    expect(loadFileFromDisk(filePath)).toBe("line1\nline2\nline3");
+    expect(loadFileFromDisk(filePath, tmpDir)).toBe("line1\nline2\nline3");
   });
 
   it("returns content with special characters", () => {
     const filePath = join(tmpDir, "special.txt");
     writeFileSync(filePath, "hello\tworld\n\"quotes\" and 'apostrophes'", "utf-8");
-    expect(loadFileFromDisk(filePath)).toBe("hello\tworld\n\"quotes\" and 'apostrophes'");
+    expect(loadFileFromDisk(filePath, tmpDir)).toBe("hello\tworld\n\"quotes\" and 'apostrophes'");
   });
 
   it("returns content with Unicode (emoji + CJK)", () => {
     const filePath = join(tmpDir, "unicode.txt");
     writeFileSync(filePath, "hello 😀 你好世界", "utf-8");
-    expect(loadFileFromDisk(filePath)).toBe("hello 😀 你好世界");
+    expect(loadFileFromDisk(filePath, tmpDir)).toBe("hello 😀 你好世界");
   });
 
   it("returns null for path with null bytes (catch block)", () => {
     // A path containing null bytes will cause readFileSync to throw.
-    expect(loadFileFromDisk(join(tmpDir, "file\0.txt") as any)).toBeNull();
+    expect(loadFileFromDisk(join(tmpDir, "file\0.txt") as any, tmpDir)).toBeNull();
   });
 
   it("returns null for non-existent parent directory", () => {
-    expect(loadFileFromDisk(join(tmpDir, "no", "such", "dir", "file.txt"))).toBeNull();
+    expect(loadFileFromDisk(join(tmpDir, "no", "such", "dir", "file.txt"), tmpDir)).toBeNull();
   });
 });
 

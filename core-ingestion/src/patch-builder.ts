@@ -140,6 +140,17 @@ function deduplicateUpsertEdges(ops: PatchOp[]): PatchOp[] {
  * keep the old extractor's edges on them, so the ingest baseline records this
  * name and a run that finds a different one re-ingests every file once.
  */
+/**
+ * Actor stamped on ingestion patches. A kOS cloud backend binds a patch's actor
+ * to the verified principal and REJECTS a non-empty actor that differs from it
+ * (403 "body actor ... conflicts with verified principal"), so a cloud ingest
+ * must send an empty actor (IX_PATCH_ACTOR="") and let the server stamp the
+ * authenticated identity. Local/OSS backends keep the historical default.
+ */
+export function patchActor(): string {
+  return process.env.IX_PATCH_ACTOR ?? 'ix/ingestion';
+}
+
 export function extractorName(): string {
   return `tree-sitter/1.27`;
 }
@@ -438,7 +449,7 @@ export function buildPatch(
 
   return {
     patchId,
-    actor: 'ix/ingestion',
+    actor: patchActor(),
     timestamp: new Date().toISOString(),
     source: {
       uri: filePath,
@@ -494,7 +505,7 @@ export function buildDeletionPatch(
 
   return {
     patchId: computePatchId(filePath, deletionHash, extractor),
-    actor: 'ix/ingestion',
+    actor: patchActor(),
     timestamp: new Date().toISOString(),
     source: {
       uri: filePath,
@@ -861,7 +872,7 @@ export function buildPatchWithResolution(
 
   return {
     patchId,
-    actor: 'ix/ingestion',
+    actor: patchActor(),
     timestamp: new Date().toISOString(),
     source: {
       uri: filePath,

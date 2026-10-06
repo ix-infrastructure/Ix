@@ -57,6 +57,21 @@ export default tseslint.config(
     },
   },
   {
+    // Every client comes from createClient() in client/factory.ts, so a token,
+    // an abort signal, a limiter or a deadline is added in one place.
+    files: ["src/**/*.ts"],
+    ignores: ["src/client/**", "src/**/__tests__/**"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "NewExpression[callee.name='IxClient']",
+          message: "Build clients with createClient() from client/factory.ts, not new IxClient().",
+        },
+      ],
+    },
+  },
+  {
     // Tests exercise odd shapes deliberately; relax the strictest type rules.
     files: ["src/**/__tests__/**", "test/**"],
     rules: {

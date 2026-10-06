@@ -165,3 +165,16 @@ describe("extractor re-ingest progress", () => {
     expect(fs.existsSync(ingestRebuildPath(root))).toBe(false);
   });
 });
+
+describe("ingest baseline atomic write", () => {
+  it("leaves no temp file behind when the rename fails", () => {
+    const root = path.join(home, "p");
+    const target = ingestMtimeCachePath(root);
+    // A directory where the baseline goes makes the rename fail.
+    fs.mkdirSync(target, { recursive: true });
+
+    saveIngestBaseline(root, new Map([["a.ts", 1_000]]), 3);
+
+    expect(fs.readdirSync(path.dirname(target)).filter(name => name.endsWith(".tmp"))).toEqual([]);
+  });
+});

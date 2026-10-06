@@ -89,6 +89,13 @@ surfaces (#575).
   directory inside it refreshes just that part, leaving the rest of the
   workspace alone. Only a path in no workspace and no repository becomes a
   workspace of its own.
+- **`ix ingest <path>` coalesces with a running `ix map` or `ix ingest` of the
+  same workspace**, as `ix map` does: it does not run beside the holder, asks
+  it for one more pass, and exits 0 (or `IX_MAP_COALESCE_EXIT_CODE`). With
+  `--format json` it prints `{"coalesced": true, "workspace": <root>}`. The
+  holder runs the extra pass before it exits: `ix map` re-ingests the
+  workspace, and so does `ix ingest` once the workspace has a baseline
+  (otherwise it re-ingests only its own path).
 - **`ix ingest` honours `--exclude <glob>` and a `.ixignore` at the workspace
   root**, matched relative to that root. A deliberate subset of `.gitignore`: `#` comments, `*`, `?`, `**`, a
   leading `/` to anchor at the root, a trailing `/` for directories only, and a
@@ -395,7 +402,7 @@ No flags.
 
 #### `ix hook claude-post-edit`
 
-Claude Code PostToolUse hook, matcher `Edit|MultiEdit|Write|Bash`. Reads the hook JSON on stdin and the working tree's `git diff -U0 HEAD`, so an edit made through a Bash script counts as much as one made with Edit or Write; each hunk's old side locates the edited symbols in HEAD's text, which is what the graph indexed. Prints `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"..."}}` naming the changed symbols' callers, importers that use them, and tests that reach them -- each symbol once per session (state per `session_id` in `IX_HOOK_STATE_DIR`, default `<IX_HOME>/hook-state`, dropped after a week unused). A call whose diff is empty or unchanged since the last report answers from one git call, without loading the CLI. Always exits 0; any failure (backend down, unmapped workspace, file not in the graph, non-code or untracked file, `IX_HOOK_TIMEOUT_MS`, default 3000, exceeded) prints nothing. Outside a git repository it falls back to the Edit/Write tool's own patch. `IX_HOOK_DEBUG=1` says why on stderr.
+Claude Code PostToolUse hook, matcher `Edit|MultiEdit|Write|Bash`. Reads the hook JSON on stdin and the working tree's `git diff -U0 HEAD`, so an edit made through a Bash script counts as much as one made with Edit or Write; each hunk's old side locates the edited symbols in HEAD's text, which is what the graph indexed. Prints `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"..."}}` naming the changed symbols' callers, importers that use them, and tests that reach them -- each symbol once per session (state per `session_id` in `IX_HOOK_STATE_DIR`, default `<IX_HOME>/hook-state`, dropped after a week unused). A call whose diff is empty or unchanged since the last report answers from one git call, without loading the CLI. Always exits 0; any failure (backend down, unmapped workspace, file not in the graph, non-code or untracked file, `IX_HOOK_TIMEOUT_MS`, default 3000, exceeded) prints nothing. Outside a git repository it falls back to the Edit/Write tool's own patch. `IX_HOOK_DEBUG=1` says why on stderr; `IX_HOOK_LOG=<file>` appends one JSON line per call with what it did (`no_changes`, `diff_unchanged`, `reported`, `silent`, `timeout`; `tool-edit` outside git) and why.
 
 | Flag | Value | Default | Effect |
 |---|---|---|---|

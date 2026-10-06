@@ -38,7 +38,9 @@ export interface AroundTextOptions {
 
 /** The symbols as the first line names them: `` `name` (path:lines) ``. */
 function symbolList(result: AroundResult): string {
-  return result.symbols.map((s) => `\`${s.name}\` (${s.path}:${span(s)})`).join(", ");
+  return result.symbols.map((s) => s.declarations
+    ? `declarations in \`${s.name}\` outside its methods (${s.path}:${span(s.declarations)})`
+    : `\`${s.name}\` (${s.path}:${span(s)})`).join(", ");
 }
 
 export function renderAroundText(result: AroundResult, opts: AroundTextOptions = {}): string {
@@ -55,7 +57,12 @@ export function renderAroundText(result: AroundResult, opts: AroundTextOptions =
   const many = result.symbols.length > 1;
   for (const s of result.symbols) {
     const p = many ? `\`${s.name}\` ` : "";
-    lines.push(...sectionLines(`${p}callers`, s.callers, "  "));
+    if (s.declarations) {
+      // A class's "callers" are mostly references to the type: counted, not listed.
+      if (s.callers.total > 0) lines.push(`${p}the ${s.kind} is referenced from ${s.callers.total} place${s.callers.total === 1 ? "" : "s"}.`);
+    } else {
+      lines.push(...sectionLines(`${p}callers`, s.callers, "  "));
+    }
     lines.push(...sectionLines(`${p}used by importers`, s.users, "  "));
     lines.push(...sectionLines(`${p}tests`, s.tests, "  "));
     if (s.sameName.length > 0) {
@@ -91,9 +98,11 @@ function symbolLlm(s: AroundSymbol, many: boolean): string[] {
     llmLine("symbol", [
       ["name", s.name], ["kind", s.kind], ["path", s.path], ["lines", span(s)],
       ["moved_from", s.movedFrom],
+      ["declarations", s.declarations ? span(s.declarations) : undefined],
       ["callers", s.callers.total], ["users", s.users.total], ["tests", s.tests.total],
     ]),
-    ...s.callers.rows.map((r) => llmLine("caller", [...of, ...refFields(r)])),
+    // Edited declarations of a container: its "callers" are type references, counted above.
+    ...(s.declarations ? [] : s.callers.rows.map((r) => llmLine("caller", [...of, ...refFields(r)]))),
     ...s.users.rows.map((r) => llmLine("user", [...of, ...refFields(r)])),
     ...s.tests.rows.map((r) => llmLine("test", [...of, ...refFields(r)])),
     ...s.sameName.map((o) => llmLine("same_name", [...of, ["kind", o.kind], ["lines", span(o)]])),

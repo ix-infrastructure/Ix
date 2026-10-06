@@ -167,7 +167,14 @@ Ingest a path into the graph. Long-running: the client allows **30 minutes**.
 > under the same key: `unchanged` there counts only files skipped as *mtime- or
 > hash-unchanged*, `emptyFile` is a real count rather than a hardcoded `0`, and
 > there is an extra `unparsed` bucket for files the parse pool returned nothing
-> for. That is the client's own summary of its own run and is not this response;
+> for. A file whose parse ran past `IX_PARSE_BUDGET_MS` is counted in
+> `parseTimeout` and named in a top-level `parseTimeouts` list. Two buckets
+> come from discovery and are not part of `filesSkipped`: `skippedDirs` counts
+> files left out under a directory that is never source (build output,
+> dependencies, VCS metadata, tool caches) -- by name on a plain walk, and only
+> for untracked files in a git work tree, where a tracked file is always kept
+> -- and `unreadable` counts listed files that could not be stat'd.
+> That is the client's own summary of its own run and is not this response;
 > see the stitch section below for why the narrower `unchanged` is load-bearing
 > there.
 
@@ -378,7 +385,7 @@ count rather than every skip, and `skipReasons.emptyFile`, previously hardcoded 
 | `IX_STITCH_COOLDOWN_MS` | `900000` | How long to hold off after a stitch that did not prove it stopped, measured from when the attempt ended. `0` disables the cooldown; single-flight stays. Values under ~2 min are not honoured after a killed process — see above. |
 | `IX_STITCH_WAIT_MS` | `30000` | How long to wait for an in-flight stitch before skipping. `0` sheds immediately. |
 | `IX_LOCK_DIR` | `$IX_HOME/locks` (`~/.ix/locks` by default) | Where the stitch lock and cooldown record live (shared with the map lock). `ix reset` clears the cooldown, so the full re-ingest that follows one is not refused by it. |
-| `IX_MAP_LOCK_MAX_MS` | `1200000` | Shared with the map lock: how old a held lock must be before it is presumed abandoned and stolen. Lowering it to a few seconds so a wedged `ix map` self-heals faster also lets a second process steal the stitch lock from an in-flight stitch. The cooldown normally catches that on the next read, so it only matters together with `IX_STITCH_COOLDOWN_MS=0` — which is the one case where "single-flight stays" stops being true. |
+| `IX_MAP_LOCK_MAX_MS` | `1200000` | Shared with the map lock: how long a held lock may go untouched before it is presumed abandoned and stolen (a holder touches its lock every 30 s; a lock whose pid is dead on this host is taken at once). Lowering it below 30 s so a wedged `ix map` self-heals faster also lets a second process steal the stitch lock from an in-flight stitch. The cooldown normally catches that on the next read, so it only matters together with `IX_STITCH_COOLDOWN_MS=0` — which is the one case where "single-flight stays" stops being true. |
 
 This bounds the client. Cancelling the server-side query when the client hangs
 up, and making the join indexed rather than a full scan, are backend concerns

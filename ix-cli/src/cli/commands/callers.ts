@@ -4,8 +4,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
+import { createClient } from "../../client/factory.js";
+import { resolveWorkspaceRoot } from "../config.js";
 import { formatEdgeResults, printJson, relativePath, sliceEdgeResults, type Diagnostic } from "../format.js";
 import { checkGraphHealth, graphHealthProse, isUnhealthy, type GraphHealth } from "../graph-health.js";
 import { parsePickOption } from "../options.js";
@@ -16,6 +16,15 @@ import { edgeTargetFor, rankTextUses, withEdgeSites } from "../edge-sites.js";
 import { renderWarning } from "../ui.js";
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * rg's argv for the text fallback. -F and -e: the name is a literal pattern,
+ * never a regex or a flag (a symbol named `--pre=x` would otherwise run an rg
+ * preprocessor). `--` ends the options before the root.
+ */
+export function callersTextSearchArgs(name: string, root: string): string[] {
+  return ["--json", "--max-count", "10", "-F", "-e", name, "--", root];
+}
 
 /**
  * The graph's health, as edge-result diagnostics. On a hollowed graph "no
@@ -44,7 +53,7 @@ export function registerCallersCommand(program: Command): void {
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", "\nExamples:\n  ix callers verify_token\n  ix callers processPayment --format json\n  ix callers parse --kind method --limit 20")
     .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; limit: string; format: string }) => {
-      const client = new IxClient(getEndpoint());
+      const client = createClient();
       const limit = parseInt(opts.limit, 10);
       const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
       const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
@@ -66,9 +75,10 @@ export function registerCallersCommand(program: Command): void {
         // Fallback to text search
         try {
           const root = resolveWorkspaceRoot();
-          const { stdout } = await execFileAsync("rg", [
-            "--json", "--max-count", "10", target.name, root,
-          ], { maxBuffer: 5 * 1024 * 1024 });
+          // The timeout bounds a search that rg could otherwise run for ever.
+          const { stdout } = await execFileAsync("rg", callersTextSearchArgs(target.name, root), {
+            maxBuffer: 5 * 1024 * 1024, timeout: 10_000,
+          });
 
           const allTextResults: any[] = [];
           for (const line of stdout.split("\n")) {
@@ -90,6 +100,9 @@ export function registerCallersCommand(program: Command): void {
             } catch { /* skip malformed lines */ }
           }
 
+          // rg searches files in parallel, so match order varies between runs;
+          // sort first so the ranking, and the output, do not.
+          allTextResults.sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : x.line - y.line));
           // Calls first and the definition out: an unranked fallback led with
           // import lines and the target's own signature.
           const ranked = rankTextUses(
@@ -166,7 +179,7 @@ export function registerCallersCommand(program: Command): void {
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", "\nExamples:\n  ix callees processPayment\n  ix callees parse --format json")
     .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; limit: string; format: string }) => {
-      const client = new IxClient(getEndpoint());
+      const client = createClient();
       const calleeLimit = parseInt(opts.limit, 10);
       const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
       const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);

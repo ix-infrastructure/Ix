@@ -1,5 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { hookTimeoutMs, readStdin, withDeadline } from "./io.js";
 import {
@@ -30,14 +31,49 @@ export interface EntryDeps extends HookDeps {
   gitDiffHead?: (repoRoot: string) => string;
 }
 
+/**
+ * One JSON line per hook call, appended to `IX_HOOK_LOG` when it is set: what
+ * the call did and why it printed nothing when it did not. Best-effort.
+ */
+export function appendHookLog(file: string | undefined, record: Record<string, unknown>): void {
+  if (!file) return;
+  try { fs.appendFileSync(file, `${JSON.stringify(record)}\n`); } catch { /* never fail the hook over its log */ }
+}
+
 /** Never throws; undefined means print nothing. */
 export async function runPostEditHook(raw: string, opts: HookOptions = {}, deps: EntryDeps = {}): Promise<string | undefined> {
-  const debug = deps.debug ?? (() => {});
   const env = opts.env ?? process.env;
+  const logFile = env.IX_HOOK_LOG || undefined;
+  const started = Date.now();
+  const notes: string[] = [];
+  const record: Record<string, unknown> = { ts: new Date().toISOString() };
+  const outer = deps.debug;
+  const debug = (m: string) => { if (logFile) notes.push(m); outer?.(m); };
+  deps = { ...deps, debug };
+  let output: string | undefined;
+  try {
+    output = await runPostEditHookInner(raw, opts, deps, env, record, notes);
+    return output;
+  } finally {
+    if (logFile) {
+      appendHookLog(logFile, {
+        ...record, ms: Date.now() - started, chars: output?.length ?? 0, notes,
+      });
+    }
+  }
+}
+
+async function runPostEditHookInner(
+  raw: string, opts: HookOptions, deps: EntryDeps, env: NodeJS.ProcessEnv,
+  record: Record<string, unknown>, notes: string[],
+): Promise<string | undefined> {
+  const debug = deps.debug ?? (() => {});
   try {
     let input: PostToolUseInput;
     try { input = JSON.parse(raw) as PostToolUseInput; } catch { debug("stdin is not JSON"); return undefined; }
     if (!input || typeof input !== "object") return undefined;
+    record.session = input.session_id;
+    record.tool = input.tool_name;
     const base = input.cwd && path.isAbsolute(input.cwd) ? input.cwd : process.cwd();
     const worktree = path.resolve(opts.worktree ?? base);
     const repoRoot = (deps.gitTopLevel ?? gitTopLevel)(worktree);
@@ -47,20 +83,25 @@ export async function runPostEditHook(raw: string, opts: HookOptions = {}, deps:
       const state = loadState(file);
       const heavy = await import("./claude-post-edit.js");
       const outcome = await heavy.reportToolEdit(input, new Set(state.reported), opts, deps);
+      record.path = "tool-edit";
+      notes.push(...(outcome.notes ?? []));
       if (outcome.reported.length > 0) saveState(file, { ...state, reported: [...state.reported, ...outcome.reported] });
       return outcome.output;
     }
 
     const diff = (deps.gitDiffHead ?? gitDiffHead)(repoRoot);
-    if (!diff.trim()) { debug("no tracked changes"); return undefined; }
+    if (!diff.trim()) { record.path = "no_changes"; debug("no tracked changes"); return undefined; }
     const fp = fingerprint(diff);
     const file = statePath(input.session_id, repoRoot, env);
     const state = loadState(file);
-    if (state.fingerprint === fp) { debug("diff unchanged since last report"); return undefined; }
+    if (state.fingerprint === fp) { record.path = "diff_unchanged"; debug("diff unchanged since last report"); return undefined; }
 
     const files = parseUnifiedDiff(diff);
     const heavy = await import("./claude-post-edit.js");
     const outcome = await heavy.reportChangedFiles({ repoRoot, files, already: new Set(state.reported) }, opts, deps);
+    record.path = outcome.output ? "reported" : "silent";
+    record.files = files.length;
+    notes.push(...(outcome.notes ?? []));
     saveState(file, {
       // Keep the old fingerprint while edited symbols wait behind the cap, so
       // the next call -- even one that edits nothing -- reports them.
@@ -72,6 +113,26 @@ export async function runPostEditHook(raw: string, opts: HookOptions = {}, deps:
     debug(`failed: ${err instanceof Error ? err.message : String(err)}`);
     return undefined;
   }
+}
+
+/**
+ * The hook's answer, or undefined once `ms` have passed. A call the deadline
+ * cuts off never writes its own `IX_HOOK_LOG` line -- the process exits before
+ * `runPostEditHook` finishes -- so it is logged here: a timeout is one of the
+ * reasons the hook is silent, and the log is where that is looked up.
+ */
+export async function answerWithin(raw: string, opts: HookOptions, ms: number, deps: EntryDeps = {}): Promise<string | undefined> {
+  const started = Date.now();
+  let settled = false;
+  const work = runPostEditHook(raw, opts, deps).finally(() => { settled = true; });
+  const out = await withDeadline(work, ms);
+  if (!settled) {
+    deps.debug?.(`no answer within ${ms} ms`);
+    appendHookLog((opts.env ?? process.env).IX_HOOK_LOG || undefined, {
+      ts: new Date(started).toISOString(), path: "timeout", ms: Date.now() - started, chars: 0, notes: [],
+    });
+  }
+  return out;
 }
 
 /** `--graph-root <dir>`, `--worktree=<dir>`, `--budget <n>`; anything else is ignored. */
@@ -104,7 +165,7 @@ export async function runHookProcess(opts: HookOptions): Promise<void> {
   try {
     const raw = await readStdin(timeout);
     const left = Math.max(0, timeout - (Date.now() - started));
-    out = await withDeadline(runPostEditHook(raw, opts, { debug }), left);
+    out = await answerWithin(raw, opts, left, { debug });
   } catch (err) {
     debug(`failed: ${err instanceof Error ? err.message : String(err)}`);
     out = undefined;
