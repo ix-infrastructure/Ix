@@ -103,6 +103,12 @@ export interface EntityFacts {
 
   // Call details
   callList?: EntityRef[];
+  /**
+   * Calls the target makes that the graph has no node for -- builtins,
+   * library functions, names that resolved nowhere. Ingest writes no edge for
+   * them, so they are read off the target's own attrs (`unresolvedCallsOf`).
+   */
+  unresolvedCalls?: UnresolvedCalls;
 
   // Hierarchy (scene graph)
   systemPath?: Array<{ name: string; kind: string }>;
@@ -116,11 +122,44 @@ export interface EntityFacts {
   diagnostics: Diagnostic[];
 }
 
+/**
+ * Calls a node makes that no edge records. `names` is capped at ingest (in
+ * source order); `total` counts every distinct name, so `total > names.length`
+ * means the list was cut.
+ */
+export interface UnresolvedCalls {
+  names: string[];
+  total: number;
+}
+
+/**
+ * The unresolved calls ingest recorded on a node (`unresolved_calls`,
+ * `unresolved_call_count`; tree-sitter/1.28 on), or undefined when it recorded
+ * none. A graph built before then has dangling CALLS edges instead, which
+ * `resolveCallList` still reports.
+ */
+export function unresolvedCallsOf(attrs: unknown): UnresolvedCalls | undefined {
+  const a = (attrs ?? {}) as { unresolved_calls?: unknown; unresolved_call_count?: unknown };
+  const names = Array.isArray(a.unresolved_calls)
+    ? a.unresolved_calls.filter((n): n is string => typeof n === "string" && n.length > 0)
+    : [];
+  const count = typeof a.unresolved_call_count === "number" ? a.unresolved_call_count : 0;
+  const total = Math.max(count, names.length);
+  return total > 0 ? { names, total } : undefined;
+}
+
+/** `a, b, c` -- or `a, b, c and 4 more` when the list was cut. */
+export function unresolvedCallNames(calls: UnresolvedCalls): string {
+  const more = calls.total - calls.names.length;
+  return calls.names.join(", ") + (more > 0 ? `${calls.names.length > 0 ? " and " : ""}${more} more` : "");
+}
+
 /** Facts only `ix explain` renders. */
 type ExplainOnlyFact =
   | "downstreamDependents"
   | "downstreamDepth"
   | "callList"
+  | "unresolvedCalls"
   | "systemPath"
   | "subsystemName"
   | "moduleName";
@@ -476,14 +515,18 @@ export async function collectFacts(
   const topCallers = topCallerRefs.map((r) => r.name);
   const topDependents = topDependentRefs.map((r) => r.name);
 
-  if (callList) {
-    const unresolvedCount = callList.filter((r) => !r.resolved).length;
-    if (unresolvedCount > 0) {
-      diagnostics.push({
-        code: "unresolved_call_target",
-        message: `${unresolvedCount} callee(s) could not be resolved to named entities.`,
-      });
+  // Calls with no node behind them. Since tree-sitter/1.28 ingest writes no
+  // edge for those and names them on the caller instead; a graph built before
+  // then still has them as dangling edges, which the call list finds.
+  const unresolvedCalls = unresolvedCallsOf(node.attrs);
+  const danglingCallees = callList?.filter((r) => !r.resolved).length ?? 0;
+  if (unresolvedCalls || danglingCallees > 0) {
+    const parts: string[] = [];
+    if (unresolvedCalls) {
+      parts.push(`${unresolvedCalls.total} called name(s) have no definition in the graph: ${unresolvedCallNames(unresolvedCalls)}.`);
     }
+    if (danglingCallees > 0) parts.push(`${danglingCallees} callee(s) could not be resolved to named entities.`);
+    diagnostics.push({ code: "unresolved_call_target", message: parts.join(" ") });
   }
 
   // Staleness
@@ -546,6 +589,7 @@ export async function collectFacts(
     introducedRev: node.createdRev ?? node.created_rev,
     historyLength: history?.chain?.length ?? 0,
     callList,
+    unresolvedCalls,
     systemPath: systemPathMapped,
     subsystemName,
     moduleName,
@@ -557,6 +601,7 @@ export async function collectFacts(
     downstreamDependents: _downstreamDependents,
     downstreamDepth: _downstreamDepth,
     callList: _callList,
+    unresolvedCalls: _unresolvedCalls,
     systemPath: _systemPath,
     subsystemName: _subsystemName,
     moduleName: _moduleName,

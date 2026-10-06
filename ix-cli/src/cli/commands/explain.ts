@@ -6,7 +6,7 @@ import { createClient } from "../../client/factory.js";
 import { formatExplain, relativePath, printJson, type ExplainResult, type EntityRef, type Diagnostic } from "../format.js";
 import { resolveFileOrReport, isRawId, activeReadScope } from "../resolve.js";
 import { isFileStale } from "../stale.js";
-import { collectFacts } from "../explain/facts.js";
+import { collectFacts, unresolvedCallNames, unresolvedCallsOf } from "../explain/facts.js";
 import { inferRole } from "../explain/role-inference.js";
 import { inferImportance } from "../explain/importance.js";
 import { renderExplanation } from "../explain/render.js";
@@ -205,6 +205,26 @@ async function rawExplain(
         message: `${unresolvedCount} callee(s) could not be resolved to named entities. Use ${forMcp() ? "ix_text" : "ix text"} to locate them.`,
       });
     }
+  }
+  // Calls with no node to point at write no edge (tree-sitter/1.28 on); ingest
+  // names them on the caller instead. Listed after the resolved ones, unless
+  // there were too many of those to list: then the diagnostic alone names them.
+  const unresolvedCalls = unresolvedCallsOf(node.attrs);
+  if (unresolvedCalls) {
+    if (callList || calleeEdges.length === 0) {
+      callList = [
+        ...(callList ?? []),
+        ...unresolvedCalls.names.map((name): EntityRef => ({
+          name,
+          resolved: false,
+          suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: name }) : `ix text "${name}"`,
+        })),
+      ];
+    }
+    diagnostics.push({
+      code: "unresolved_call_target",
+      message: `${unresolvedCalls.total} called name(s) have no definition in the graph: ${unresolvedCallNames(unresolvedCalls)}.`,
+    });
   }
 
   if (stale) {
