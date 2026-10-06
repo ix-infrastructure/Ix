@@ -206,10 +206,11 @@ function run(): void { new Helper(); Helper(); }
     const rPatch = buildPatchWithResolution(rResult, 'hash', '', []);
     expect(rPatch.ops.filter(op => op.type === 'UpsertNode' && String((op as any).id).startsWith('external://'))).toEqual([]);
     // Not externalised -- and with no node to point at, not written at all.
-    // The file node counts it instead.
+    // The caller records the name instead.
     expect(rPatch.ops).not.toContainEqual(expect.objectContaining({ type: 'UpsertEdge', predicate: 'CALLS' }));
     expect(rPatch.ops).toContainEqual(expect.objectContaining({
-      type: 'UpsertNode', kind: 'file', attrs: expect.objectContaining({ unresolved_calls: 1 }),
+      type: 'UpsertNode', name: 'validate',
+      attrs: expect.objectContaining({ unresolved_calls: ['is.null'], unresolved_call_count: 1 }),
     }));
 
     const goFile = '/repo/main.go';

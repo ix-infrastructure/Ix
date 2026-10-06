@@ -194,15 +194,48 @@ function toMemberRelativePath(filePath: string, multiRepo?: MultiRepoContext): s
   return slash >= 0 ? norm.slice(slash + 1) : norm;
 }
 
+/** Most unresolved callee names kept on one node; the count covers them all. */
+export const UNRESOLVED_CALLS_CAP = 20;
+
 /**
- * Record on the file node how many CALLS had no destination node. Their
- * edges are not written (an edge needs a node at both ends), so this count is
- * what is left for `ix explain` to report. Names are not kept.
+ * Calls that wrote no edge, by the node that makes them. An edge needs a node
+ * at both ends, so a call to a builtin, a library or a name that resolved
+ * nowhere leaves no trace in the graph but these attrs, which is what `ix
+ * explain` reads to say which calls it could not follow:
+ *
+ *  - `unresolved_calls`: the distinct callee names as written at the call
+ *    site, in first-seen (source) order, at most UNRESOLVED_CALLS_CAP;
+ *  - `unresolved_call_count`: how many distinct names there were, so a cut
+ *    list is visible as one.
+ *
+ * A call goes on the function, method or class that makes it; one from
+ * module-level code, or from a caller no node was written for, on the file.
+ * Nodes with none get neither attr.
  */
-function setUnresolvedCalls(ops: PatchOp[], fileNodeId: string, count: number): void {
-  const fileNode = ops.find(op => op.type === 'UpsertNode' && op.id === fileNodeId) as
-    { attrs?: Record<string, unknown> } | undefined;
-  if (fileNode) fileNode.attrs = { ...(fileNode.attrs ?? {}), unresolved_calls: count };
+function unresolvedCallRecorder(knownNodeIds: ReadonlySet<string>, fileNodeId: string) {
+  const byNode = new Map<string, Set<string>>();
+  return {
+    add(srcNodeId: string, calleeName: string): void {
+      const owner = knownNodeIds.has(srcNodeId) ? srcNodeId : fileNodeId;
+      let names = byNode.get(owner);
+      if (!names) { names = new Set<string>(); byNode.set(owner, names); }
+      names.add(calleeName);
+    },
+    /** Write the attrs onto the UpsertNode ops already in `ops`. */
+    applyTo(ops: PatchOp[]): void {
+      if (byNode.size === 0) return;
+      for (const op of ops) {
+        if (op.type !== 'UpsertNode') continue;
+        const names = byNode.get(op.id as string);
+        if (!names) continue;
+        op.attrs = {
+          ...((op.attrs as Record<string, unknown> | undefined) ?? {}),
+          unresolved_calls: [...names].slice(0, UNRESOLVED_CALLS_CAP),
+          unresolved_call_count: names.size,
+        };
+      }
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -370,7 +403,7 @@ export function buildPatch(
   // `keepEdge` in buildPatchWithResolution. Without resolution, that means a
   // node this patch writes or an external node it mints.
   const seenExternalNodes = new Set<string>();
-  let unresolvedCalls = 0;
+  const unresolvedCalls = unresolvedCallRecorder(seenNodeIds, fileNodeId);
   for (const r of relationships) {
     // For CONTAINS edges, srcName is the container of dstName — use that to disambiguate.
     const srcKey = resolveKey(r.srcName);
@@ -379,7 +412,7 @@ export function buildPatch(
       : resolveKey(r.dstName);
     const external = r.predicate === 'CALLS' && dstKey.includes('::') && !allQKeys.has(dstKey);
     if (!seenNodeIds.has(nodeId(idPath, srcKey)) || (!external && !seenNodeIds.has(nodeId(idPath, dstKey)))) {
-      if (r.predicate === 'CALLS') unresolvedCalls++;
+      if (r.predicate === 'CALLS') unresolvedCalls.add(nodeId(idPath, srcKey), r.dstName);
       continue;
     }
 
@@ -413,7 +446,7 @@ export function buildPatch(
       attrs: {},
     });
   }
-  setUnresolvedCalls(ops, fileNodeId, unresolvedCalls);
+  unresolvedCalls.applyTo(ops);
 
   // AssertClaim for each relationship (feeds the confidence/conflict engine)
   // phpCallKind splits the relationship dedup key, so `handle(); $obj->handle();`
@@ -688,8 +721,8 @@ export function buildPatchWithResolution(
 
   const seenExternalNodes2 = new Set<string>();
   const emittedEdgeIdentities = new Set<string>();
-  /** CALLS dropped for want of a destination node; recorded on the file node. */
-  let unresolvedCalls = 0;
+  /** CALLS dropped for want of a destination node; recorded on their caller. */
+  const unresolvedCalls = unresolvedCallRecorder(seenNodeIds2, fileNodeId2);
   const relationshipShapeCounts = new Map<string, number>();
   for (const relationship of relationships) {
     const key = `${relationship.srcName}:${relationship.predicate}:${relationship.dstName}`;
@@ -800,7 +833,7 @@ export function buildPatchWithResolution(
     const dst = resolveDst(r, dstKey);
     const { dstNodeId, externalPkg, resolution } = dst;
     if (!keepEdge(nodeId(idPath, srcKey), dst)) {
-      if (r.predicate === 'CALLS') unresolvedCalls++;
+      if (r.predicate === 'CALLS') unresolvedCalls.add(nodeId(idPath, srcKey), r.dstName);
       continue;
     }
     if (externalPkg && !seenExternalNodes2.has(dstNodeId)) {
@@ -841,7 +874,7 @@ export function buildPatchWithResolution(
         : {},
     });
   }
-  setUnresolvedCalls(ops, fileNodeId2, unresolvedCalls);
+  unresolvedCalls.applyTo(ops);
 
   // phpCallKind splits the relationship dedup key, so `handle(); $obj->handle();`
   // arrives as two relationships that produce byte-identical claims. The kind is

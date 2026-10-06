@@ -6,7 +6,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { parseFile, resolveEdges, type FileParseResult, type ResolvedEdge } from '../index.js';
-import { buildPatchWithResolution } from '../patch-builder.js';
+import { buildPatchWithResolution, UNRESOLVED_CALLS_CAP } from '../patch-builder.js';
 
 /**
  * No edge without both endpoints: every `UpsertEdge` in a repository's patch
@@ -70,13 +70,21 @@ describe('every edge has a node at both ends', () => {
     }
   });
 
-  it('records the calls it could not place on the file node', () => {
-    const fileNodes = patches.flatMap((p) => p.ops.filter((op) => op.type === 'UpsertNode' && op.kind === 'file'));
-    expect(fileNodes.length).toBe(results.length);
-    for (const node of fileNodes) expect(typeof (node.attrs as Record<string, unknown>).unresolved_calls).toBe('number');
-    // This package calls plenty of builtins (`.map`, `push`, `Math.max`...).
-    const total = fileNodes.reduce((sum, n) => sum + ((n.attrs as Record<string, number>).unresolved_calls ?? 0), 0);
-    expect(total).toBeGreaterThan(0);
+  it('records the calls it could not place on the node that makes them', () => {
+    const upserts = patches.flatMap((p) => p.ops.filter((op) => op.type === 'UpsertNode')) as Array<{
+      kind: string; attrs: Record<string, unknown>;
+    }>;
+    const recording = upserts.filter((n) => n.attrs.unresolved_call_count !== undefined);
+    // This package calls plenty of builtins (`.map`, `push`, `Math.max`...),
+    // and mostly from inside functions.
+    expect(recording.filter((n) => n.kind === 'function' || n.kind === 'method').length).toBeGreaterThan(10);
+    for (const n of recording) {
+      const names = n.attrs.unresolved_calls as string[];
+      expect(names.length).toBe(Math.min(n.attrs.unresolved_call_count as number, UNRESOLVED_CALLS_CAP));
+      expect(new Set(names).size).toBe(names.length);
+    }
+    // No node is ever handed both a count and nothing to show for it.
+    expect(upserts.filter((n) => n.attrs.unresolved_calls !== undefined && n.attrs.unresolved_call_count === undefined)).toEqual([]);
   });
 });
 
