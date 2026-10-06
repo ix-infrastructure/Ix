@@ -40,12 +40,12 @@
     },
     "rank dependents/function": {
       "requests": 1819,
-      "bytes": 5494180,
+      "bytes": 6158281,
       "wallMs": 6464
     },
     "callers getEndpoint": {
       "requests": 3,
-      "bytes": 41825,
+      "bytes": 48362,
       "wallMs": 353
     }
   }
