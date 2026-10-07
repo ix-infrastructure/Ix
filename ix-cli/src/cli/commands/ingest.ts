@@ -2480,8 +2480,7 @@ export async function ingestFiles(
      *
      * Ops, not the suggested count itself: the backend sizes its suggestion
      * from the group's average patch, and a count cut lets a run of larger
-     * files through over the budget (against a backend with a 4 MB budget, a
-     * count limit took 7 refusals to settle on a 316-file map, the op budget 3).
+     * files through over the budget, to be refused again.
      */
     const learnBulkLimits = <T extends { patch: GraphPatchPayload }>(items: T[], err: unknown): T[][] => {
       const ops = items.reduce((sum, item) => sum + opsOf(item), 0);
