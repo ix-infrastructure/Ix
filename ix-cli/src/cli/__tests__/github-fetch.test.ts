@@ -4,6 +4,21 @@ import { describe, expect, it } from "vitest";
 
 import { ghFetchList } from "../github/fetch.js";
 
+describe("parseGitHubRepo", () => {
+  it("parses owner/repo format", async () => {
+    const { parseGitHubRepo } = await import("../github/fetch.js");
+    expect(parseGitHubRepo("ix-infrastructure/IX-Memory")).toEqual({
+      owner: "ix-infrastructure",
+      repo: "IX-Memory",
+    });
+  });
+
+  it("throws on invalid format", async () => {
+    const { parseGitHubRepo } = await import("../github/fetch.js");
+    expect(() => parseGitHubRepo("invalid")).toThrow();
+  });
+});
+
 describe("ghFetchList", () => {
   /** A list endpoint holding `total` items, recording the URLs it was asked for. */
   const endpoint = (total: number) => {
