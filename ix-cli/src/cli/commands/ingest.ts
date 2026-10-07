@@ -3755,9 +3755,11 @@ export async function ingestFiles(
       { replayedFiles, pendingFiles, parseTimeouts },
     );
     // The symbol table describes files, not the graph, so it is kept whether or
-    // not every commit landed -- pruned to the files that still exist.
+    // not every commit landed -- pruned to the files that still exist. A
+    // `--lang` run's resolution paths hold its languages only; the files it
+    // left out still exist and keep their entries, as they keep their baseline.
     if (symbolTableChanged) {
-      const existing = new Set(resolutionPaths.map(toWorkspaceRelative));
+      const existing = new Set([...resolutionPaths, ...langExcluded].map(toWorkspaceRelative));
       const table = symbolTable();
       for (const rel of [...table.keys()]) if (!existing.has(rel)) table.delete(rel);
       saveIngestSymbols(projectRoot, currentExtractor, table);

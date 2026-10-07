@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 
 import { ingestFiles, ingestPathSingleFlight } from "../commands/ingest.js";
 import { acquireMapLock, takeMapRerun } from "../single-flight.js";
-import { ingestMtimeCachePath, ingestRebuildPath, loadConfig } from "../config.js";
+import { ingestMtimeCachePath, ingestRebuildPath, ingestSymbolsPath, loadConfig } from "../config.js";
 import { workspaceIdForPath } from "../system.js";
 import { FakeBackend } from "./helpers/fake-backend.js";
 import { loadIngestBaseline } from "../ingest-baseline.js";
@@ -1336,6 +1336,25 @@ describe("ingestFiles against a fake backend", () => {
 
     expect(resolved, "the fixture's call resolved to lib/b.ts at first").not.toEqual(fresh);
     expect(scoped).toEqual(fresh);
+  });
+
+  it("keeps other languages' symbol-table entries on a --lang run", async () => {
+    // The table was pruned to the run's resolution paths, which `--lang`
+    // filters, so every other language was dropped and re-parsed next map.
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src", "a.ts"), "export function a(): number { return 1; }\n", "utf8");
+    writeFileSync(join(repo, "src", "b.py"), "def b():\n    return 1\n", "utf8");
+    execFileSync("git", ["init", "-q"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+    const tableFiles = () =>
+      Object.keys((JSON.parse(readFileSync(ingestSymbolsPath(repo), "utf8")) as { files: Record<string, unknown> }).files).sort();
+
+    await ingestFiles(repo, quiet);
+    expect(tableFiles()).toEqual(["src/a.ts", "src/b.py"]);
+
+    writeFileSync(join(repo, "src", "b.py"), "def b():\n    return 2\n", "utf8");
+    await ingestFiles(repo, { ...quiet, lang: "py" });
+    expect(tableFiles()).toEqual(["src/a.ts", "src/b.py"]);
   });
 
   it("writes no baseline from a subdirectory run when the workspace has none", async () => {
