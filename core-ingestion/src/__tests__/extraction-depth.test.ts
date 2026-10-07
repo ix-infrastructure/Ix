@@ -57,6 +57,29 @@ describe('TypeScript extraction', () => {
   }
 });
 
+describe('TypeScript overloads', () => {
+  it('are one function, spanning the implementation', () => {
+    const r = parseFile('/repo/over.ts', [
+      'export function over(a: string): string;',
+      'export function over(a: number): number;',
+      'export function over(a: any): any {',
+      '  return a;',
+      '}',
+    ].join('\n'))!;
+    const over = r.entities.filter(e => e.name === 'over');
+    expect(over.map(e => [e.lineStart, e.lineEnd])).toEqual([[3, 5]]);
+    expect(r.chunks.filter(c => c.name === 'over').map(c => [c.lineStart, c.lineEnd])).toEqual([[3, 5]]);
+  });
+
+  it('without an implementation (declare, .d.ts) are one function at the first signature', () => {
+    const r = parseFile('/repo/over.d.ts', [
+      'export declare function over(a: string): string;',
+      'export declare function over(a: number): number;',
+    ].join('\n'))!;
+    expect(r.entities.filter(e => e.name === 'over').map(e => e.lineStart)).toEqual([1]);
+  });
+});
+
 describe('parse errors', () => {
   it('flags a file tree-sitter had to recover, and puts it on the file node', () => {
     const broken = parseFile('/repo/broken.ts', 'export function ok() { return 1; }\nexport function bad( {\n')!;

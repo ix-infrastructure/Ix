@@ -2694,6 +2694,28 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       ? collectPhpNamespaces(tree.rootNode)
       : { spans: [], blocks: 0 };
 
+    // TypeScript overloads: `function f(a: string): string;` lines above the
+    // implementation are signatures of the same function. They become one
+    // entity, spanning the implementation -- or the first signature where there
+    // is none (`declare function`, a .d.ts) -- not one entity per line, which
+    // gave the function node the span of its first signature.
+    const overloadKey = (defNode: any, name: string): string => {
+      let scope = defNode.parent;
+      while (scope && (scope.type === 'export_statement' || scope.type === 'ambient_declaration')) scope = scope.parent;
+      return `${scope?.startIndex ?? -1}:${name}`;
+    };
+    const implementedOverloads = new Set<string>();
+    if (language === SupportedLanguages.TypeScript) {
+      for (const match of pass1Matches) {
+        const def = match.captures.find((c: any) => c.name === 'definition.function')?.node;
+        const name = match.captures.find((c: any) => c.name === 'name')?.node.text;
+        if (def && name && (def.type === 'function_declaration' || def.type === 'generator_function_declaration')) {
+          implementedOverloads.add(overloadKey(def, name));
+        }
+      }
+    }
+    const seenSignatures = new Set<string>();
+
     // --- First pass: collect definitions ---
     for (const match of pass1Matches) {
       checkBudget();
@@ -2726,6 +2748,12 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           ? rawName.replace(/^(['"])(.*)\1$/, '$2')
           : rawName;
         if (!name || name.length === 0) continue;
+
+        if (defCapture.node.type === 'function_signature') {
+          const key = overloadKey(defCapture.node, name);
+          if (implementedOverloads.has(key) || seenSignatures.has(key)) continue;
+          seenSignatures.add(key);
+        }
 
         // SAS module entities (DATA/PROC steps, PROC SQL CREATE) need extra
         // shaping so they reflect real data artifacts rather than parser noise.
