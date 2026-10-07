@@ -143,7 +143,7 @@ function run(): void { new Helper(); Helper(); }
     const result = fileResult(
       file,
       SupportedLanguages.R,
-      [entity('fitModel', SupportedLanguages.R)],
+      [entity('fitModel', SupportedLanguages.R), entity('localHelper', SupportedLanguages.R)],
       [
         { srcName: 'fitModel', dstName: 'dplyr::filter', predicate: 'CALLS' },
         { srcName: 'fitModel', dstName: 'localHelper', predicate: 'CALLS' },
@@ -205,9 +205,13 @@ function run(): void { new Helper(); Helper(); }
     );
     const rPatch = buildPatchWithResolution(rResult, 'hash', '', []);
     expect(rPatch.ops.filter(op => op.type === 'UpsertNode' && String((op as any).id).startsWith('external://'))).toEqual([]);
-    expect(rPatch.ops).toContainEqual(
-      expect.objectContaining({ type: 'UpsertEdge', predicate: 'CALLS', dst: nodeId(rFile, 'is.null') }),
-    );
+    // Not externalised -- and with no node to point at, not written at all.
+    // The caller records the name instead.
+    expect(rPatch.ops).not.toContainEqual(expect.objectContaining({ type: 'UpsertEdge', predicate: 'CALLS' }));
+    expect(rPatch.ops).toContainEqual(expect.objectContaining({
+      type: 'UpsertNode', name: 'validate',
+      attrs: expect.objectContaining({ unresolved_calls: ['is.null'], unresolved_call_count: 1 }),
+    }));
 
     const goFile = '/repo/main.go';
     const goResult = fileResult(
@@ -218,9 +222,7 @@ function run(): void { new Helper(); Helper(); }
     );
     const goPatch = buildPatchWithResolution(goResult, 'hash', '', []);
     expect(goPatch.ops.filter(op => op.type === 'UpsertNode' && String((op as any).id).startsWith('external://'))).toEqual([]);
-    expect(goPatch.ops).toContainEqual(
-      expect.objectContaining({ type: 'UpsertEdge', predicate: 'CALLS', dst: nodeId(goFile, 'fmt.Println') }),
-    );
+    expect(goPatch.ops).not.toContainEqual(expect.objectContaining({ type: 'UpsertEdge', predicate: 'CALLS' }));
   });
 
   it('keeps resolved qualified CALLS that cross-file resolution found', () => {
@@ -281,6 +283,7 @@ struct Trajectory {};
       dstQualifiedKey: 'GraphUtils.h',
       predicate: 'IMPORTS',
       confidence: 0.9,
+      tier: 'import',
     });
 
     const patch = buildPatchWithResolution(importer!, 'test-hash', '', resolvedEdges);
@@ -302,7 +305,7 @@ describe('buildPatch', () => {
     const result = fileResult(
       file,
       SupportedLanguages.R,
-      [entity('fitModel', SupportedLanguages.R)],
+      [entity('fitModel', SupportedLanguages.R), entity('localHelper', SupportedLanguages.R)],
       [
         { srcName: 'fitModel', dstName: 'dplyr::filter', predicate: 'CALLS' },
         { srcName: 'fitModel', dstName: 'localHelper', predicate: 'CALLS' },
@@ -489,7 +492,8 @@ describe('colliding edge ids (#554)', () => {
     const result = fileResult(
       sourceFile,
       SupportedLanguages.TypeScript,
-      [entity('run', SupportedLanguages.TypeScript, 'function', 'A')],
+      // A local `helper` too: an edge is only written to a node that exists.
+      [entity('run', SupportedLanguages.TypeScript, 'function', 'A'), entity('helper', SupportedLanguages.TypeScript)],
       [
         { srcName: 'run', dstName: 'helper', predicate: 'CALLS' },
         { srcName: 'A.run', dstName: 'helper', predicate: 'CALLS' },
@@ -543,7 +547,7 @@ describe('colliding edge ids (#554)', () => {
     const result = fileResult(
       '/repo/plain.ts',
       SupportedLanguages.TypeScript,
-      [entity('alpha', SupportedLanguages.TypeScript)],
+      [entity('alpha', SupportedLanguages.TypeScript), entity('beta', SupportedLanguages.TypeScript)],
       [{ srcName: 'alpha', dstName: 'beta', predicate: 'CALLS' }],
     );
     const edge: any = buildPatchWithResolution(result, 'test-hash', '', []).ops

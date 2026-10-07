@@ -3,7 +3,7 @@
 import * as crypto from 'node:crypto';
 import * as nodePath from 'node:path';
 import type { GraphPatchPayload, PatchOp } from './types.js';
-import type { FileParseResult, ParsedEntity, ResolvedEdge } from './index.js';
+import type { FileParseResult, ParsedEntity, ResolutionTier, ResolvedEdge } from './index.js';
 
 // ---------------------------------------------------------------------------
 // Deterministic UUID from a string (matches existing CLI convention)
@@ -134,18 +134,31 @@ function deduplicateUpsertEdges(ops: PatchOp[]): PatchOp[] {
  * old id and the new output never lands -- 1.26: JS/TS calls resolve by scope,
  * not name alone, and helper-loaded / dist/ imports link to their sources.
  * 1.27: Python, Rust and PHP bare calls no longer resolve to another file's
- * class member.
+ * class member. 1.28: no edge is written without a node at both ends (calls
+ * that resolve nowhere go on their caller as `unresolved_calls`), and
+ * cross-file edges carry `confidence` and `tier`.
  *
  * `ix map` skips files whose mtime or source hash is unchanged, which would
  * keep the old extractor's edges on them, so the ingest baseline records this
  * name and a run that finds a different one re-ingests every file once.
  */
+/**
+ * Actor stamped on ingestion patches. A kOS cloud backend binds a patch's actor
+ * to the verified principal and REJECTS a non-empty actor that differs from it
+ * (403 "body actor ... conflicts with verified principal"), so a cloud ingest
+ * must send an empty actor (IX_PATCH_ACTOR="") and let the server stamp the
+ * authenticated identity. Local/OSS backends keep the historical default.
+ */
+export function patchActor(): string {
+  return process.env.IX_PATCH_ACTOR ?? 'ix/ingestion';
+}
+
 export function extractorName(): string {
-  return `tree-sitter/1.27`;
+  return `tree-sitter/1.28`;
 }
 
 /** Previous extractor versions — their patches are superseded when re-ingesting. */
-export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.26', 'tree-sitter/1.25', 'tree-sitter/1.24', 'tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
+export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.27', 'tree-sitter/1.26', 'tree-sitter/1.25', 'tree-sitter/1.24', 'tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
 
 /** Patch ids that may own the active graph entities for a stored source hash. */
 export function sourcePatchIdCandidates(
@@ -181,6 +194,50 @@ function toMemberRelativePath(filePath: string, multiRepo?: MultiRepoContext): s
   const norm = filePath.replace(/\\/g, '/');
   const slash = norm.indexOf('/');
   return slash >= 0 ? norm.slice(slash + 1) : norm;
+}
+
+/** Most unresolved callee names kept on one node; the count covers them all. */
+export const UNRESOLVED_CALLS_CAP = 20;
+
+/**
+ * Calls that wrote no edge, by the node that makes them. An edge needs a node
+ * at both ends, so a call to a builtin, a library or a name that resolved
+ * nowhere leaves no trace in the graph but these attrs, which is what `ix
+ * explain` reads to say which calls it could not follow:
+ *
+ *  - `unresolved_calls`: the distinct callee names as written at the call
+ *    site, in first-seen (source) order, at most UNRESOLVED_CALLS_CAP;
+ *  - `unresolved_call_count`: how many distinct names there were, so a cut
+ *    list is visible as one.
+ *
+ * A call goes on the function, method or class that makes it; one from
+ * module-level code, or from a caller no node was written for, on the file.
+ * Nodes with none get neither attr.
+ */
+function unresolvedCallRecorder(knownNodeIds: ReadonlySet<string>, fileNodeId: string) {
+  const byNode = new Map<string, Set<string>>();
+  return {
+    add(srcNodeId: string, calleeName: string): void {
+      const owner = knownNodeIds.has(srcNodeId) ? srcNodeId : fileNodeId;
+      let names = byNode.get(owner);
+      if (!names) { names = new Set<string>(); byNode.set(owner, names); }
+      names.add(calleeName);
+    },
+    /** Write the attrs onto the UpsertNode ops already in `ops`. */
+    applyTo(ops: PatchOp[]): void {
+      if (byNode.size === 0) return;
+      for (const op of ops) {
+        if (op.type !== 'UpsertNode') continue;
+        const names = byNode.get(op.id as string);
+        if (!names) continue;
+        op.attrs = {
+          ...((op.attrs as Record<string, unknown> | undefined) ?? {}),
+          unresolved_calls: [...names].slice(0, UNRESOLVED_CALLS_CAP),
+          unresolved_call_count: names.size,
+        };
+      }
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -309,11 +366,12 @@ export function buildPatch(
       predicate: 'CONTAINS_CHUNK',
       attrs: {},
     });
-    // Chunk -[DEFINES]-> Symbol (only for named chunks)
+    // Chunk -[DEFINES]-> Symbol (only for named chunks whose symbol this patch
+    // writes; any other would point at a node that does not exist)
     if (chunk.name !== null) {
       const symbolKey = chunk.container ? `${chunk.container}.${chunk.name}` : chunk.name;
       const symbolNid = nodeId(idPath, symbolKey);
-      ops.push({
+      if (seenNodeIds.has(symbolNid)) ops.push({
         type: 'UpsertEdge',
         id: edgeId(idPath, cid, symbolNid, 'DEFINES'),
         src: cid,
@@ -343,17 +401,25 @@ export function buildPatch(
     }
   }
 
-  // UpsertEdge for each relationship
+  // UpsertEdge for each relationship -- only those with a node at both ends; see
+  // `keepEdge` in buildPatchWithResolution. Without resolution, that means a
+  // node this patch writes or an external node it mints.
   const seenExternalNodes = new Set<string>();
+  const unresolvedCalls = unresolvedCallRecorder(seenNodeIds, fileNodeId);
   for (const r of relationships) {
     // For CONTAINS edges, srcName is the container of dstName — use that to disambiguate.
     const srcKey = resolveKey(r.srcName);
     const dstKey = r.predicate === 'CONTAINS'
       ? resolveKey(r.dstName, r.srcName)
       : resolveKey(r.dstName);
+    const external = r.predicate === 'CALLS' && dstKey.includes('::') && !allQKeys.has(dstKey);
+    if (!seenNodeIds.has(nodeId(idPath, srcKey)) || (!external && !seenNodeIds.has(nodeId(idPath, dstKey)))) {
+      if (r.predicate === 'CALLS') unresolvedCalls.add(nodeId(idPath, srcKey), r.dstName);
+      continue;
+    }
 
     let dstNid: string;
-    if (r.predicate === 'CALLS' && dstKey.includes('::') && !allQKeys.has(dstKey)) {
+    if (external) {
       const sep = dstKey.indexOf('::');
       const pkgName = dstKey.slice(0, sep);
       const funcName = dstKey.slice(sep + 2);
@@ -382,6 +448,7 @@ export function buildPatch(
       attrs: {},
     });
   }
+  unresolvedCalls.applyTo(ops);
 
   // AssertClaim for each relationship (feeds the confidence/conflict engine)
   // phpCallKind splits the relationship dedup key, so `handle(); $obj->handle();`
@@ -417,7 +484,7 @@ export function buildPatch(
 
   return {
     patchId,
-    actor: 'ix/ingestion',
+    actor: patchActor(),
     timestamp: new Date().toISOString(),
     source: {
       uri: filePath,
@@ -473,7 +540,7 @@ export function buildDeletionPatch(
 
   return {
     patchId: computePatchId(filePath, deletionHash, extractor),
-    actor: 'ix/ingestion',
+    actor: patchActor(),
     timestamp: new Date().toISOString(),
     source: {
       uri: filePath,
@@ -502,13 +569,20 @@ export function buildPatchWithResolution(
   // Build lookup: `${srcName}:${predicate}:${dstName}` → { dstFilePath, dstQualifiedKey }
   // Callers should pass only edges for this file (pre-grouped) for best performance,
   // but we still tolerate the full array for backward compatibility.
-  const edgeResolution = new Map<string, { dstFilePath: string; dstQualifiedKey: string }>();
+  const edgeResolution = new Map<string, {
+    dstFilePath: string;
+    dstQualifiedKey: string;
+    confidence: number;
+    tier: ResolutionTier | undefined;
+  }>();
   for (const edge of resolvedEdges) {
     if (edge.srcFilePath !== result.filePath) continue;
     const callKind = edge.phpCallKind ? `:${edge.phpCallKind}` : '';
     edgeResolution.set(`${edge.srcName}:${edge.predicate}:${edge.dstName}${callKind}`, {
       dstFilePath: edge.dstFilePath,
       dstQualifiedKey: edge.dstQualifiedKey,
+      confidence: edge.confidence,
+      tier: edge.tier,
     });
   }
 
@@ -619,7 +693,7 @@ export function buildPatchWithResolution(
     if (chunk.name !== null) {
       const symbolKey = chunk.container ? `${chunk.container}.${chunk.name}` : chunk.name;
       const symbolNid = nodeId(idPath, symbolKey);
-      ops.push({
+      if (seenNodeIds2.has(symbolNid)) ops.push({
         type: 'UpsertEdge',
         id: edgeId(idPath, cid, symbolNid, 'DEFINES'),
         src: cid,
@@ -649,6 +723,8 @@ export function buildPatchWithResolution(
 
   const seenExternalNodes2 = new Set<string>();
   const emittedEdgeIdentities = new Set<string>();
+  /** CALLS dropped for want of a destination node; recorded on their caller. */
+  const unresolvedCalls = unresolvedCallRecorder(seenNodeIds2, fileNodeId2);
   const relationshipShapeCounts = new Map<string, number>();
   for (const relationship of relationships) {
     const key = `${relationship.srcName}:${relationship.predicate}:${relationship.dstName}`;
@@ -664,6 +740,8 @@ export function buildPatchWithResolution(
   const resolveDst = (r: (typeof relationships)[number], dstKey: string): {
     dstNodeId: string;
     externalPkg: { pkgName: string; funcName: string } | null;
+    /** Set when resolveEdges tied the edge to another file. */
+    resolution: { confidence: number; tier: ResolutionTier | undefined } | null;
   } => {
     const baseKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
     const salted = r.phpCallKind ? `${baseKey}:${r.phpCallKind}` : baseKey;
@@ -672,8 +750,12 @@ export function buildPatchWithResolution(
     if (edgeResolution.has(matched)) {
       // Cross-file resolved — use the defining file's nodeId, in the dst repo's
       // workspace namespace (matters only for cross-repo edges in a co-ingest).
-      const { dstFilePath, dstQualifiedKey } = edgeResolution.get(matched)!;
-      return { dstNodeId: dstNodeIdInRepo(dstFilePath, dstQualifiedKey), externalPkg: null };
+      const { dstFilePath, dstQualifiedKey, confidence, tier } = edgeResolution.get(matched)!;
+      return {
+        dstNodeId: dstNodeIdInRepo(dstFilePath, dstQualifiedKey),
+        externalPkg: null,
+        resolution: { confidence, tier },
+      };
     }
     if (r.predicate === 'CALLS' && dstKey.includes('::') && !allQKeys2.has(dstKey)) {
       const sep = dstKey.indexOf('::');
@@ -682,10 +764,23 @@ export function buildPatchWithResolution(
       return {
         dstNodeId: nodeId(`external://${pkgName}`, dstKey),
         externalPkg: { pkgName, funcName },
+        resolution: null,
       };
     }
-    return { dstNodeId: nodeId(idPath, dstKey), externalPkg: null };
+    return { dstNodeId: nodeId(idPath, dstKey), externalPkg: null, resolution: null };
   };
+
+  /**
+   * Whether the edge has a node at both ends. The source must be one this
+   * patch upserts; the destination one this patch upserts, an external node it
+   * mints, or a node in the file resolveEdges tied it to. Anything else used to
+   * be written anyway, pointing at an id no patch ever creates: a call to a
+   * builtin, a library, or a name that resolved nowhere. Those dangling edges
+   * were over half the edges in a typical graph.
+   */
+  const keepEdge = (srcNodeId: string, dst: ReturnType<typeof resolveDst>): boolean =>
+    seenNodeIds2.has(srcNodeId) &&
+    (dst.resolution !== null || dst.externalPkg !== null || seenNodeIds2.has(dst.dstNodeId));
 
   const relationshipDstKey = (r: (typeof relationships)[number]): string =>
     r.predicate === 'CONTAINS' ? resolveKey(r.dstName, r.srcName) : resolveKey(r.dstName);
@@ -717,10 +812,13 @@ export function buildPatchWithResolution(
       const edgeDstKey = r.phpCallKind && (relationshipShapeCounts.get(baseKey) ?? 0) > 1
         ? `${dstKey}:${r.phpCallKind}`
         : dstKey;
+      const dst = resolveDst(r, dstKey);
+      // Only edges that are written can collide.
+      if (!keepEdge(nodeId(idPath, srcKey), dst)) continue;
       const tuple = edgeIdTuple(srcKey, edgeDstKey, r.predicate);
       let seen = dstsByTuple.get(tuple);
       if (!seen) { seen = new Set<string>(); dstsByTuple.set(tuple, seen); }
-      seen.add(resolveDst(r, dstKey).dstNodeId);
+      seen.add(dst.dstNodeId);
     }
     for (const [tuple, dsts] of dstsByTuple) {
       if (dsts.size > 1) collidingIdTuples.add(tuple);
@@ -734,7 +832,12 @@ export function buildPatchWithResolution(
       : resolveKey(r.dstName);
 
     const baseResolutionKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
-    const { dstNodeId, externalPkg } = resolveDst(r, dstKey);
+    const dst = resolveDst(r, dstKey);
+    const { dstNodeId, externalPkg, resolution } = dst;
+    if (!keepEdge(nodeId(idPath, srcKey), dst)) {
+      if (r.predicate === 'CALLS') unresolvedCalls.add(nodeId(idPath, srcKey), r.dstName);
+      continue;
+    }
     if (externalPkg && !seenExternalNodes2.has(dstNodeId)) {
       seenExternalNodes2.add(dstNodeId);
       ops.push({
@@ -768,9 +871,12 @@ export function buildPatchWithResolution(
       src: nodeId(idPath, srcKey),
       dst: dstNodeId,
       predicate: r.predicate,
-      attrs: {},
+      attrs: resolution
+        ? { confidence: resolution.confidence, ...(resolution.tier ? { tier: resolution.tier } : {}) }
+        : {},
     });
   }
+  unresolvedCalls.applyTo(ops);
 
   // phpCallKind splits the relationship dedup key, so `handle(); $obj->handle();`
   // arrives as two relationships that produce byte-identical claims. The kind is
@@ -801,7 +907,7 @@ export function buildPatchWithResolution(
 
   return {
     patchId,
-    actor: 'ix/ingestion',
+    actor: patchActor(),
     timestamp: new Date().toISOString(),
     source: {
       uri: filePath,

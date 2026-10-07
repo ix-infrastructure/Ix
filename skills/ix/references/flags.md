@@ -89,6 +89,13 @@ surfaces (#575).
   directory inside it refreshes just that part, leaving the rest of the
   workspace alone. Only a path in no workspace and no repository becomes a
   workspace of its own.
+- **`ix ingest <path>` coalesces with a running `ix map` or `ix ingest` of the
+  same workspace**, as `ix map` does: it does not run beside the holder, asks
+  it for one more pass, and exits 0 (or `IX_MAP_COALESCE_EXIT_CODE`). With
+  `--format json` it prints `{"coalesced": true, "workspace": <root>}`. The
+  holder runs the extra pass before it exits: `ix map` re-ingests the
+  workspace, and so does `ix ingest` once the workspace has a baseline
+  (otherwise it re-ingests only its own path).
 - **`ix ingest` honours `--exclude <glob>` and a `.ixignore` at the workspace
   root**, matched relative to that root. A deliberate subset of `.gitignore`: `#` comments, `*`, `?`, `**`, a
   leading `/` to anchor at the root, a trailing `/` for directories only, and a

@@ -2,13 +2,14 @@
 
 import type { Command } from "commander";
 import { renderSection, renderKeyValue, renderWarning, renderNote, renderSuccess } from "../ui.js";
-import { IxClient } from "../../client/api.js";
+import { createClient } from "../../client/factory.js";
 import { readBackendHealth } from "./upgrade.js";
 import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
 import { detectStaleFiles } from "../stale.js";
 import { llmError, llmLine, printLlmLines } from "../llm.js";
 import { backendUnreachableError, isBackendUnreachable } from "../errors.js";
 import { printJson } from "../format.js";
+import { describeReplayedChanges } from "../graph-health.js";
 
 interface StatusStaleInfo {
   graphCompleted: boolean;
@@ -17,6 +18,10 @@ interface StatusStaleInfo {
   lastIngestAt: string | null;
   staleFiles: number;
   sampleChangedFiles: string[];
+  /** Changed files the last run could not get applied (F-01); see `IngestBaseline.replayedFiles`. */
+  replayedFiles?: string[];
+  /** Files skipped because their parse ran past the budget; see `IngestBaseline.parseTimeouts`. */
+  parseTimeouts?: string[];
 }
 
 /**
@@ -43,12 +48,31 @@ export function renderStatusLlm(
     ["rev", staleInfo ? String(staleInfo.currentRev) : null],
     ["last_ingest_at", staleInfo?.lastIngestAt ?? null],
     ["stale_files", staleInfo ? String(staleInfo.staleFiles) : null],
-    ["stale", staleInfo ? (!staleInfo.graphCompleted || staleInfo.staleFiles > 0 ? "true" : "false") : null],
+    ["not_applied", staleInfo ? String(staleInfo.replayedFiles?.length ?? 0) : null],
+    ["parse_timeouts", staleInfo ? String(staleInfo.parseTimeouts?.length ?? 0) : null],
+    ["stale", staleInfo
+      ? (!staleInfo.graphCompleted || staleInfo.staleFiles > 0 || (staleInfo.replayedFiles?.length ?? 0) > 0
+        || (staleInfo.parseTimeouts?.length ?? 0) > 0 ? "true" : "false")
+      : null],
   ])];
   for (const f of staleInfo?.sampleChangedFiles ?? []) {
     lines.push(llmLine("changed", [["path", f]]));
   }
+  for (const f of staleInfo?.replayedFiles ?? []) {
+    lines.push(llmLine("not_applied", [["path", f]]));
+  }
+  for (const f of staleInfo?.parseTimeouts ?? []) {
+    lines.push(llmLine("parse_timeout", [["path", f]]));
+  }
   return lines;
+}
+
+/** The `ix status` warning for files the last run skipped on the parse budget. */
+function describeStatusParseTimeouts(files: readonly string[], sample = 5): string {
+  const shown = files.slice(0, sample).join(", ");
+  const more = files.length > sample ? ` and ${files.length - sample} more` : "";
+  return `${files.length} file(s) are not in the graph: their parse ran past the per-file budget (${shown}${more}). ` +
+    "Raise IX_PARSE_BUDGET_MS (milliseconds, 0 = none) and run ix map.";
 }
 
 export function registerStatusCommand(program: Command): void {
@@ -58,7 +82,7 @@ export function registerStatusCommand(program: Command): void {
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--root <dir>", "Workspace root directory")
     .action(async (opts: { format: string; root?: string }) => {
-      const client = new IxClient(getEndpoint());
+      const client = createClient();
       try {
         const health = await readBackendHealth(client);
         const root = resolveWorkspaceRoot(opts.root);
@@ -82,6 +106,8 @@ export function registerStatusCommand(program: Command): void {
             lastIngestAt: staleInfo?.lastIngestAt ?? null,
             staleFiles: staleInfo?.staleFiles ?? 0,
             sampleChangedFiles: staleInfo?.sampleChangedFiles ?? [],
+            replayedFiles: staleInfo?.replayedFiles ?? [],
+            parseTimeouts: staleInfo?.parseTimeouts ?? [],
           };
           printJson(result);
         } else {
@@ -97,6 +123,10 @@ export function registerStatusCommand(program: Command): void {
             if (!staleInfo.graphCompleted) {
               renderWarning("No completed source graph ingest is recorded for this workspace.");
               renderNote("Run ix map to build a trustworthy graph.");
+            } else if ((staleInfo.replayedFiles?.length ?? 0) > 0) {
+              // Ahead of the stale-file check: a restored file can look current
+              // by mtime while the graph still holds the content in between.
+              renderWarning(describeReplayedChanges(staleInfo.replayedFiles!));
             } else if (staleInfo.staleFiles > 0) {
               renderWarning(`${staleInfo.staleFiles} file(s) changed since last ingest:`);
               for (const f of staleInfo.sampleChangedFiles) {
@@ -106,8 +136,13 @@ export function registerStatusCommand(program: Command): void {
                 renderNote(`... and ${staleInfo.staleFiles - staleInfo.sampleChangedFiles.length} more`);
               }
               renderNote("Run ix map to update.");
-            } else {
+            } else if (staleInfo.parseTimeouts.length === 0) {
               renderSuccess("Graph is up to date.");
+            }
+            if (staleInfo.graphCompleted && staleInfo.parseTimeouts.length > 0) {
+              // Beside the other states, not instead of them: another map
+              // will not bring these files in, a larger budget will.
+              renderWarning(describeStatusParseTimeouts(staleInfo.parseTimeouts));
             }
             if (staleInfo.graphCompleted && !staleInfo.mapCompleted) {
               renderWarning("No completed architecture map is recorded for this source revision.");

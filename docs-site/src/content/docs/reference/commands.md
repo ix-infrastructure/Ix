@@ -74,6 +74,11 @@ workspace is left alone. A path outside every workspace and repository is ingest
 `.gitignore` syntax: `#` comments, `*`, `?`, `**`, a leading `/` to anchor to the root, a trailing `/` for
 directories, and bare names that match at any depth. There is no `!` negation.
 
+`ix ingest <path>` and `ix map` take the same per-workspace lock. A run that finds it held does not run beside
+the holder: it asks the holder for one more pass, prints a note (or `{"coalesced": true, ...}` with
+`--format json`) and exits 0, or with `IX_MAP_COALESCE_EXIT_CODE` if that is set. The holder runs that pass
+before it exits: `ix map` re-ingests the workspace, and so does `ix ingest` when the workspace has been mapped.
+
 ## Setup and health
 
 | Command | Does |

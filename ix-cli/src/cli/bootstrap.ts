@@ -5,13 +5,14 @@ import { join, basename, resolve } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import chalk from "chalk";
-import { IxClient } from "../client/api.js";
+import { createClient } from "../client/factory.js";
 import { renderBanner } from "./banner.js";
 import { canonicalWorkspacePath, getEndpoint, gitRootFor, loadConfig, loadWorkspaces, saveConfig, findWorkspaceForCwd, type WorkspaceConfig } from "./config.js";
 import { WorkspaceNotMappedError, workspaceNotMappedHint } from "./errors.js";
 import { ixHome } from "./ix-home.js";
 import { stderr } from "./stderr.js";
 import { workspaceIdForPath } from "./system.js";
+import { IX_CALLER_ENV } from "./next-step.js";
 import { readBackendHealth } from "./commands/upgrade.js";
 import { isLocalEndpoint } from "./backend-version.js";
 
@@ -133,6 +134,27 @@ export function ensureWorkspaceIdState(cwd = process.cwd()): { workspaceId: stri
 }
 
 /**
+ * The workspace state for `root` WITHOUT registering a new one: an existing
+ * workspace exactly as ensureWorkspaceIdState returns it, or, for a root not
+ * registered yet, the id it would get with `pending: true` and nothing written.
+ *
+ * For `ix ingest <path>`, which must not register a workspace until something
+ * was actually ingested into it. Every registered workspace is a root `ix read`
+ * may open files from, so registering first let a failed ingest of any path --
+ * the backend down, or a path nobody meant to ingest -- widen what reads can
+ * open, permanently. The caller registers with ensureWorkspaceIdState once a
+ * commit has landed.
+ */
+export function workspaceStateFor(root: string): {
+  workspaceId: string; migrated: boolean; previousWorkspaceId?: string; created: boolean; name: string; pending: boolean;
+} {
+  const rootPath = canonicalWorkspacePath(resolve(root));
+  const registered = (loadConfig().workspaces ?? []).some(w => canonicalWorkspacePath(w.root_path) === rootPath);
+  if (registered) return { ...ensureWorkspaceIdState(rootPath), pending: false };
+  return { workspaceId: workspaceIdForPath(rootPath), migrated: false, created: true, name: basename(rootPath), pending: true };
+}
+
+/**
  * Resolve the stable workspace id for a root, registering the workspace (and
  * persisting a fresh id) on first use. This id is folded into node identity by
  * core-ingestion, so it must be stable for a given workspace root and distinct
@@ -200,7 +222,7 @@ export function canAutoStartBackend(endpoint: string): boolean {
  */
 export async function ensureBackendAvailable(): Promise<void> {
   const endpoint = getEndpoint();
-  const client = new IxClient(endpoint);
+  const client = createClient({ endpoint });
   try {
     // Through readBackendHealth so this probe records the release the backend
     // reports, like every other health fetch. `ix init` never reaches the
@@ -209,6 +231,12 @@ export async function ensureBackendAvailable(): Promise<void> {
   } catch {
     if (!canAutoStartBackend(endpoint)) {
       throw new Error(`Ix backend at ${endpoint} is not reachable.`);
+    }
+    // Never from inside `ix mcp`: a tool call would start Docker containers
+    // on the user's machine without anyone asking, with the child's output
+    // inherited onto the server's stdio. Say what to run instead.
+    if (process.env[IX_CALLER_ENV] === "mcp") {
+      throw new Error(`Ix backend at ${endpoint} is not reachable (backend_unreachable). Start it with: ix docker start`);
     }
     try {
       // This CLI's own entry point under this node, not `ix` off PATH: on

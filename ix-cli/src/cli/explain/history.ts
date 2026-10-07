@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 
 import { isTestPath } from "./related-files.js";
 
@@ -40,8 +40,15 @@ export interface CoChange {
   score: number;
 }
 
-/** Runs `git <args>` in the repository and returns stdout, or undefined. */
-export type GitRunner = (args: string[]) => string | undefined;
+/** Runs `git <args>` in the repository and resolves stdout, or undefined. */
+export type GitRunner = (args: string[]) => Promise<string | undefined>;
+
+/**
+ * How long one `git log` may take. Asynchronous and bounded: on a large
+ * history the synchronous call blocked `ix context` -- and the MCP timer that
+ * is meant to cut it off -- for as long as git cared to take.
+ */
+const GIT_TIMEOUT_MS = 5_000;
 
 /** Newest commits shown, whatever they are. */
 export const RECENT_COMMITS = 2;
@@ -66,8 +73,8 @@ const MIN_CO_CHANGES = 2;
  * same bug in `inventory.ts` (#229) was that file's fifth commit, behind
  * three features. A fix is where a file's bug knowledge lives.
  */
-export function recentCommits(git: GitRunner, path: string): CommitRef[] {
-  const out = git(["log", `-${RECENT_WINDOW}`, "--format=%h%x09%ad%x09%s", "--date=short", "--", path]);
+export async function recentCommits(git: GitRunner, path: string): Promise<CommitRef[]> {
+  const out = await git(["log", `-${RECENT_WINDOW}`, "--format=%h%x09%ad%x09%s", "--date=short", "--", path]);
   if (!out) return [];
   const all = out.split("\n").filter(Boolean).map((line) => {
     const [sha, date, ...subject] = line.split("\t");
@@ -80,23 +87,27 @@ export function recentCommits(git: GitRunner, path: string): CommitRef[] {
   return all.filter((c) => chosen.has(c));
 }
 
-export function coChangedFiles(
+export async function coChangedFiles(
   git: GitRunner,
   path: string,
   exclude: ReadonlySet<string>,
   limit = MAX_CO_CHANGES,
-): CoChange[] {
+): Promise<CoChange[]> {
   // --full-diff lists every file each commit touched, not only `path`: one
   // call instead of one `git show` per commit. --relative prints them relative
   // to the workspace root git runs in, as `path` is: without it they were
   // relative to the repository's top level, so a workspace in a subdirectory
   // of its repo (`ix map packages/web`) never matched `path` and had no
   // co-changes at all.
-  const out = git(["log", `-${HISTORY_DEPTH}`, "--format=@%h", "--name-only", "--relative", "--full-diff", "--", path]);
+  //
+  // Each commit starts with a NUL before its hash. It used to be "@", which a
+  // path can contain (`packages/@scope/x.ts`): such a path split its commit in
+  // two and its files were credited to nothing.
+  const out = await git(["log", `-${HISTORY_DEPTH}`, "--format=%x00%h", "--name-only", "--relative", "--full-diff", "--", path]);
   if (!out) return [];
   const targetIsTest = isTestPath(path);
   const tally = new Map<string, CoChange>();
-  for (const block of out.split("@").slice(1)) {
+  for (const block of out.split("\0").slice(1)) {
     const files = [...new Set(block.split("\n").slice(1).map((l) => l.trim()).filter(Boolean))];
     if (files.length > MAX_COMMIT_FILES || !files.includes(path)) continue;
     for (const file of files) {
@@ -115,13 +126,13 @@ export function coChangedFiles(
 
 /** `git` in `root`, or undefined when it fails (not a checkout, no history). */
 export function gitRunner(root: string): GitRunner {
-  return (args) => {
-    try {
-      return execFileSync("git", args, {
-        cwd: root, encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 16 * 1024 * 1024,
-      });
-    } catch {
-      return undefined;
-    }
-  };
+  return (args) =>
+    new Promise((resolve) => {
+      execFile(
+        "git",
+        args,
+        { cwd: root, encoding: "utf-8", maxBuffer: 16 * 1024 * 1024, timeout: GIT_TIMEOUT_MS },
+        (err, stdout) => resolve(err ? undefined : stdout),
+      );
+    });
 }

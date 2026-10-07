@@ -3534,8 +3534,18 @@ export interface ResolvedEdge {
   dstQualifiedKey: string;      // qualified key used for nodeId in the defining file
   predicate: string;            // "CALLS" | "EXTENDS"
   confidence: number;           // 0.9 import-scoped | 0.8 transitive | 0.5 global
+  /** Which resolution tier produced the edge; written on the edge with `confidence`. */
+  tier?: ResolutionTier;
   phpCallKind?: ParsedRelationship['phpCallKind'];
 }
+
+/**
+ * `binding`: an explicit import binding names the target. `import`: the
+ * target is in a file this one imports (or the import itself). `transitive`:
+ * one re-export hop away. `qualifier`: a dotted name's qualifier picked the
+ * file. `global`: the only definition of the name anywhere.
+ */
+export type ResolutionTier = 'binding' | 'import' | 'transitive' | 'qualifier' | 'global';
 
 // ---------------------------------------------------------------------------
 // resolveCallEdges helpers
@@ -3720,7 +3730,12 @@ export function buildGlobalResolutionIndex(
   const goPkgPathToFiles = new Map<string, string[]>();
   const phpFqcnToTypes = new Map<string, Array<{ filePath: string; typeName: string }>>();
 
-  for (const fp of filePaths) {
+  // A summarized file is indexed by path too, so `resolveEdges` can rely on
+  // the index's path maps holding every file it has a summary for.
+  const indexPaths = summaries
+    ? [...new Set([...filePaths, ...summaries.keys()])]
+    : filePaths;
+  for (const fp of indexPaths) {
     const ext = nodePath.extname(fp);
     const stem = nodePath.basename(fp, ext);
 
@@ -4133,8 +4148,14 @@ export function resolveEdges(
   // (IN-09). `results` is only the set of files whose edges are resolved.
   // Files the index knows only through its older per-language maps (a caller
   // that passed no summaries) keep those entries.
+  const batchSummaries = results.map(summarizeParseResult);
   const summaries = new Map<string, FileSummary>(globalIndex?.summaries ?? []);
-  for (const r of results) summaries.set(r.filePath, summarizeParseResult(r));
+  for (const s of batchSummaries) summaries.set(s.filePath, s);
+  // The index's maps already hold every file it has a summary for (its symbol
+  // maps from the summaries, its path maps from paths and summaries alike), so
+  // only the batch's own summaries are laid over them below. Redoing the whole
+  // index here cost every call O(repository), and the path maps' de-dup made
+  // it quadratic in the size of a common stem (`index`, `__init__`).
   // Renamed-import call resolution (Z): a call to a renamed local binding (`import
   // { format as fmt }; fmt()`) should resolve as the provider's public symbol
   // (`format`), so in-repo AND co-ingest resolution link it to the real definition.
@@ -4305,12 +4326,12 @@ export function resolveEdges(
   const fileQKeys = globalIndex
     ? new Map<string, Map<string, string[]>>(globalIndex.fileQKeys)
     : new Map<string, Map<string, string[]>>();
-  for (const s of summaries.values()) fileQKeys.set(s.filePath, qkeyMapOf(s));  // overrides the index's own entry
+  for (const s of batchSummaries) fileQKeys.set(s.filePath, qkeyMapOf(s));  // overrides the index's own entry
 
   const filePublicNames = globalIndex
     ? new Map<string, Map<string, string>>(globalIndex.filePublicNames ?? [])
     : new Map<string, Map<string, string>>();
-  for (const s of summaries.values()) {
+  for (const s of batchSummaries) {
     if (s.exportPublicNames) filePublicNames.set(s.filePath, new Map(s.exportPublicNames));
     else filePublicNames.delete(s.filePath);
   }
@@ -4366,29 +4387,30 @@ export function resolveEdges(
     }
   }
 
+  // Add `fp` under `key` without touching the index's own array: the maps are
+  // shallow copies, and pushing into a shared list leaked one batch's files
+  // into the index every later batch resolves against.
+  const addPath = (map: Map<string, string[]>, key: string, fp: string): void => {
+    const list = map.get(key);
+    if (!list) map.set(key, [fp]);
+    else if (!list.includes(fp)) map.set(key, [...list, fp]);
+  };
+
   // stemToFiles: seed from global index, then add batch entries.
   const stemToFiles = globalIndex
     ? new Map<string, string[]>(globalIndex.stemToFiles)
     : new Map<string, string[]>();
-  for (const r of summaries.values()) {
-    const stem = nodePath.basename(r.filePath, nodePath.extname(r.filePath));
-    const list = stemToFiles.get(stem) ?? [];
-    if (!list.includes(r.filePath)) list.push(r.filePath);
-    stemToFiles.set(stem, list);
+  for (const r of batchSummaries) {
+    addPath(stemToFiles, nodePath.basename(r.filePath, nodePath.extname(r.filePath)), r.filePath);
   }
 
   // dirToIndexFiles: seed from global index, then add batch entries.
   const dirToIndexFiles = globalIndex
     ? new Map<string, string[]>(globalIndex.dirToIndexFiles)
     : new Map<string, string[]>();
-  for (const r of summaries.values()) {
+  for (const r of batchSummaries) {
     const stem = nodePath.basename(r.filePath, nodePath.extname(r.filePath));
-    if (stem === 'index') {
-      const dirName = nodePath.basename(nodePath.dirname(r.filePath));
-      const list = dirToIndexFiles.get(dirName) ?? [];
-      if (!list.includes(r.filePath)) list.push(r.filePath);
-      dirToIndexFiles.set(dirName, list);
-    }
+    if (stem === 'index') addPath(dirToIndexFiles, nodePath.basename(nodePath.dirname(r.filePath)), r.filePath);
   }
 
   // Relative imports must be resolved against the importing file's directory.
@@ -4417,17 +4439,14 @@ export function resolveEdges(
   const packageToFiles = globalIndex
     ? new Map<string, string[]>(globalIndex.packageToFiles)
     : new Map<string, string[]>();
-  for (const r of summaries.values()) {
+  for (const r of batchSummaries) {
     const ext = nodePath.extname(r.filePath);
     if (ext !== '.scala' && ext !== '.java') continue;
     const dir = nodePath.dirname(r.filePath);
     const parts = dir.split(/[/\\]/);
     const maxDepth = Math.min(8, parts.length);
     for (let i = parts.length - 1; i >= parts.length - maxDepth; i--) {
-      const pkg = parts.slice(i).join('.');
-      const list = packageToFiles.get(pkg) ?? [];
-      if (!list.includes(r.filePath)) list.push(r.filePath);
-      packageToFiles.set(pkg, list);
+      addPath(packageToFiles, parts.slice(i).join('.'), r.filePath);
     }
   }
 
@@ -4438,19 +4457,13 @@ export function resolveEdges(
   const goPkgPathToFiles = globalIndex
     ? new Map<string, string[]>(globalIndex.goPkgPathToFiles)
     : new Map<string, string[]>();
-  for (const r of summaries.values()) {
+  for (const r of batchSummaries) {
     if (nodePath.extname(r.filePath) !== '.go') continue;
-    const dirName = nodePath.basename(nodePath.dirname(r.filePath));
-    const list = goPkgDirToFiles.get(dirName) ?? [];
-    if (!list.includes(r.filePath)) list.push(r.filePath);
-    goPkgDirToFiles.set(dirName, list);
+    addPath(goPkgDirToFiles, nodePath.basename(nodePath.dirname(r.filePath)), r.filePath);
     const parts = nodePath.dirname(r.filePath).replace(/\\/g, '/').split('/').filter(Boolean);
     const maxDepth = Math.min(8, parts.length);
     for (let i = parts.length - 1; i >= parts.length - maxDepth; i--) {
-      const pkgPath = parts.slice(i).join('/');
-      const pkgList = goPkgPathToFiles.get(pkgPath) ?? [];
-      if (!pkgList.includes(r.filePath)) pkgList.push(r.filePath);
-      goPkgPathToFiles.set(pkgPath, pkgList);
+      addPath(goPkgPathToFiles, parts.slice(i).join('/'), r.filePath);
     }
   }
 
@@ -4999,6 +5012,7 @@ export function resolveEdges(
               dstQualifiedKey: fileEntityName(fp),
               predicate: 'IMPORTS',
               confidence: 0.9,
+              tier: 'import',
             });
             stats.resolvedImport++;
           } else if (phpType.entries.length > 1) {
@@ -5019,7 +5033,7 @@ export function resolveEdges(
                 const fp = matchFiles[0];
                 const dstQualifiedKey = bestQKey(fileQKeys, fp, entityName);
                 if (dstQualifiedKey !== null) {
-                  resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: 'IMPORTS', confidence: 0.9 });
+                  resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: 'IMPORTS', confidence: 0.9, tier: 'import' });
                   stats.resolvedImport++;
                   continue;
                 }
@@ -5048,6 +5062,7 @@ export function resolveEdges(
             dstQualifiedKey: fileEntityName(fp),
             predicate: 'IMPORTS',
             confidence: 0.9,
+            tier: 'import',
           });
           stats.resolvedImport++;
           continue;
@@ -5071,7 +5086,7 @@ export function resolveEdges(
           if (srcRepo !== undefined && depRepo !== undefined && depRepo !== srcRepo) {
             const entryFp = entryFileOf.get(depRepo);
             if (entryFp && entryFp !== srcFilePath) {
-              resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: entryFp, dstName: rel.dstName, dstQualifiedKey: fileEntityName(entryFp), predicate: 'IMPORTS', confidence: 0.7 });
+              resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: entryFp, dstName: rel.dstName, dstQualifiedKey: fileEntityName(entryFp), predicate: 'IMPORTS', confidence: 0.7, tier: 'import' });
               stats.resolvedImport++;
               continue;
             }
@@ -5104,6 +5119,7 @@ export function resolveEdges(
               dstQualifiedKey,
               predicate: rel.predicate,
               confidence: 0.9,
+              tier: 'binding',
               ...(rel.phpCallKind ? { phpCallKind: rel.phpCallKind } : {}),
             });
             stats.resolvedQualifier++;
@@ -5180,6 +5196,7 @@ export function resolveEdges(
                 dstQualifiedKey,
                 predicate: rel.predicate,
                 confidence: 0.9,
+                tier: 'binding',
               });
               continue;
             }
@@ -5207,6 +5224,7 @@ export function resolveEdges(
                 dstQualifiedKey,
                 predicate: rel.predicate,
                 confidence: 0.9,
+                tier: 'binding',
               });
               continue;
             }
@@ -5283,7 +5301,7 @@ export function resolveEdges(
               const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart, preferredQKey);
               if (dstQualifiedKey !== null) {
                 // dstName must match rel.dstName so buildPatchWithResolution can look it up
-                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9 });
+                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9, tier: 'qualifier' });
               }
             }
             continue;
@@ -5308,7 +5326,7 @@ export function resolveEdges(
             if (fileHasSymbol.get(qfp)?.has(memberPart)) {
               const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart, `${qualifierPart}.${memberPart}`);
               if (dstQualifiedKey !== null) {
-                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.7 });
+                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.7, tier: 'qualifier' });
               }
             }
           }
@@ -5324,7 +5342,7 @@ export function resolveEdges(
         const fp = narrowedImportMatches[0];
         const dstQualifiedKey = targetQKey(fp);
         if (dstQualifiedKey === null) continue; // ambiguous — do not emit bad nodeId
-        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9 });
+        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9, tier: 'import' });
         continue;
       }
       if (unboundAmbientCall) continue;
@@ -5349,7 +5367,7 @@ export function resolveEdges(
         const fp = narrowedTransitiveMatches[0];
         const dstQualifiedKey = targetQKey(fp);
         if (dstQualifiedKey === null) continue;
-        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.8 });
+        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.8, tier: 'transitive' });
         continue;
       }
       if (configuredBindingTargets?.length === 0) continue;
@@ -5392,7 +5410,7 @@ export function resolveEdges(
         if (bareCall && !definesAtModuleScope(fp)) continue; // only a member of that name
         const dstQualifiedKey = targetQKey(fp);
         if (dstQualifiedKey === null) continue; // ambiguous — do not emit bad nodeId
-        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.5 });
+        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.5, tier: 'global' });
         stats.resolvedGlobal++;
         continue;
       }

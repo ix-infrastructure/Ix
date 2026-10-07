@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Command } from "commander";
 import { registerMapCommand } from "../commands/map.js";
 import { canonicalMapRoot, resolveIngestRoot, resolveMapRoot } from "../map-root.js";
-import { loadConfig } from "../config.js";
+import { findWorkspaceForCwd, loadConfig } from "../config.js";
 import { lockPathForTest } from "../single-flight.js";
 
 const fixtures: string[] = [];
@@ -170,6 +170,110 @@ describe("map root resolution", () => {
     writeFileSync(file, "export {};\n");
 
     expect(() => canonicalMapRoot(file)).toThrow(`Map path is not a directory: ${file}`);
+  });
+});
+
+describe("nested linked worktrees", () => {
+  /** A committed repository registered as a workspace, with a linked worktree at `wtPath`. */
+  function repoWithWorktree(wtRelative: string): { repo: string; wt: string } {
+    const repo = realpathSync.native(fixture());
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd: repo, stdio: "ignore" });
+    git("init", "-q", "-b", "main");
+    writeFileSync(join(repo, "a.ts"), "export const a = 1;\n");
+    git("add", "-A");
+    git("commit", "-q", "-m", "init");
+    const wt = join(repo, wtRelative);
+    git("worktree", "add", "-q", "-b", "feature", wt);
+    register(repo);
+    return { repo, wt: realpathSync.native(wt) };
+  }
+
+  function register(...roots: string[]): void {
+    writeFileSync(join(home, ".ix", "config.yaml"), [
+      "endpoint: http://localhost:8090",
+      "workspaces:",
+      ...roots.flatMap((root, i) => [
+        `  - workspace_id: ws-${i}`,
+        `    workspace_name: ws-${i}`,
+        `    root_path: ${root}`,
+        "    default: false",
+      ]),
+      "",
+    ].join("\n"));
+  }
+
+  it("treats a worktree inside a registered repo as unmapped, and maps the worktree itself", () => {
+    const { wt } = repoWithWorktree(join(".claude", "worktrees", "x"));
+    const inside = join(wt, "src");
+    mkdirSync(inside, { recursive: true });
+
+    expect(findWorkspaceForCwd(wt)).toBeUndefined();
+    expect(findWorkspaceForCwd(inside)).toBeUndefined();
+    expect(resolveMapRoot(undefined, wt)).toBe(wt);
+    expect(resolveMapRoot(undefined, inside)).toBe(wt);
+  });
+
+  it("answers for a registered nested worktree from its own workspace", () => {
+    const { repo, wt } = repoWithWorktree(join(".claude", "worktrees", "y"));
+    register(repo, wt);
+    expect(findWorkspaceForCwd(wt)?.workspace_id).toBe("ws-1");
+    expect(findWorkspaceForCwd(repo)?.workspace_id).toBe("ws-0");
+  });
+
+  it("keeps a submodule and a nested clone inside the enclosing workspace", () => {
+    const { repo } = repoWithWorktree(join(".claude", "worktrees", "z"));
+    // A submodule's .git file points into .git/modules/, not .git/worktrees/.
+    const sub = join(repo, "vendor", "sub");
+    mkdirSync(sub, { recursive: true });
+    writeFileSync(join(sub, ".git"), "gitdir: ../../.git/modules/vendor/sub\n");
+    // A nested repository with its own .git directory is not a linked worktree.
+    const clone = join(repo, "third_party", "lib");
+    mkdirSync(join(clone, ".git"), { recursive: true });
+
+    expect(findWorkspaceForCwd(sub)?.workspace_id).toBe("ws-0");
+    expect(findWorkspaceForCwd(clone)?.workspace_id).toBe("ws-0");
+  });
+
+  it("ingests a file in a nested worktree into the worktree, not the enclosing repo", () => {
+    const { wt } = repoWithWorktree(join(".claude", "worktrees", "i"));
+    expect(resolveIngestRoot(join(wt, "a.ts"), false)).toBe(wt);
+  });
+
+  it("treats a sibling worktree as unmapped while only the main checkout is registered", () => {
+    const { wt } = repoWithWorktree(join("..", `sibling-${Date.now()}`));
+    fixtures.push(wt);
+    expect(findWorkspaceForCwd(wt)).toBeUndefined();
+    expect(resolveMapRoot(undefined, wt)).toBe(wt);
+  });
+
+  it("keeps a real submodule, in the main checkout and in a registered worktree, in its workspace", () => {
+    const upstream = realpathSync.native(fixture());
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "protocol.file.allow=always", ...args], { cwd, stdio: "ignore" });
+    git(upstream, "init", "-q", "-b", "main");
+    git(upstream, "commit", "-q", "--allow-empty", "-m", "sub");
+
+    const { repo } = repoWithWorktree(join(".claude", "worktrees", "s"));
+    git(repo, "submodule", "add", "-q", upstream, join("libs", "sub"));
+    git(repo, "commit", "-q", "-m", "submodule");
+    // A worktree created after the submodule, so it checks the submodule out
+    // too. Its .git file points into .git/worktrees/<wt>/modules/, which is
+    // still a submodule and not a worktree boundary.
+    const wt = join(repo, ".claude", "worktrees", "t");
+    git(repo, "worktree", "add", "-q", "-b", "with-sub", wt);
+    git(wt, "submodule", "update", "--init", "-q");
+    register(repo, realpathSync.native(wt));
+
+    expect(findWorkspaceForCwd(join(repo, "libs", "sub"))?.workspace_id).toBe("ws-0");
+    expect(findWorkspaceForCwd(join(wt, "libs", "sub"))?.workspace_id).toBe("ws-1");
+  });
+
+  it("still answers for the main checkout and its subdirectories", () => {
+    const { repo } = repoWithWorktree(join(".claude", "worktrees", "w"));
+    expect(findWorkspaceForCwd(repo)?.workspace_id).toBe("ws-0");
+    mkdirSync(join(repo, "src"), { recursive: true });
+    expect(findWorkspaceForCwd(join(repo, "src"))?.workspace_id).toBe("ws-0");
   });
 });
 

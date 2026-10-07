@@ -234,16 +234,17 @@ describe("incremental ix map equals a fresh map (fake backend)", () => {
     await runSequence("head", [edit("editBody", "web/calc.ts"), edit("addFunction", "web/report.ts")]);
   });
 
-  // F-03. An edited Python or Java file is resolved against the batch of
-  // changed files alone, so its cross-file CALLS are re-pointed at phantom
-  // module nodes or dropped. TypeScript is spared by the index prescan.
-  it.fails("IN-10: a body edit to a Python or Java file keeps its cross-file edges", async () => {
+  // F-03. Before IN-09/IN-10 an edited Python or Java file was resolved
+  // against the batch of changed files alone, so its cross-file CALLS were
+  // re-pointed at phantom module nodes or dropped. It now resolves against the
+  // symbol table, in every language.
+  it("IN-10: a body edit to a Python or Java file keeps its cross-file edges", async () => {
     await runSequence("head", [edit("editBody", "pkg/app.py"), edit("editBody", "src/com/ex/App.java")]);
   });
 
-  // F-07. A new file has no backend hash, so the whole repository takes the
-  // first-ingest path and every file is parsed and sent again.
-  it.fails("IN-01: adding a file sends one patch", async () => {
+  // F-07. A new file has no backend hash; before IN-01 that sent the whole
+  // repository down the first-ingest path, every file parsed and sent again.
+  it("IN-01: adding a file sends one patch", async () => {
     await runSequence("head", [edit("addFile", undefined, 0)], {
       langs: ["ts"],
       check: (world) => {
@@ -255,6 +256,20 @@ describe("incremental ix map equals a fresh map (fake backend)", () => {
     });
   });
 
+  // The persisted symbol table gives the index every language's symbols, so an
+  // added Python or Java file takes the incremental path too: one patch, and
+  // its cross-file calls resolve as a fresh map resolves them.
+  it("IN-01/IN-10: an added Python or Java file sends one patch and keeps its cross-file calls", async () => {
+    const onePatch = (world: World) => {
+      const sent = world.backend.requests
+        .filter((r) => r.path === "/v1/patches/bulk" || r.path === "/v1/patch")
+        .reduce((sum, r) => sum + r.patches, 0);
+      expect(sent, "patches on the wire").toBe(1);
+    };
+    await runSequence("head", [edit("addFile", undefined, 0)], { langs: ["py"], check: onePatch });
+    await runSequence("head", [edit("addFile", undefined, 1)], { langs: ["java"], check: onePatch });
+  });
+
   // F-04. Dropping the file's last import removes a node, the patch carries a
   // DeleteNode, and a delete-bearing patch goes to `/v1/patch`, which does not
   // sweep: the removed CALLS and IMPORTS edges stay live.
@@ -263,10 +278,12 @@ describe("incremental ix map equals a fresh map (fake backend)", () => {
   });
 
   // F-03. Files that call a renamed or deleted function are unchanged, so
-  // nothing re-resolves them. Fresh, their calls are unresolved; incremental,
-  // the edges are simply gone, and after a restore they never come back.
-  it.fails("IN-11: renaming a called function re-resolves its callers", async () => {
-    await runSequence("head", [edit("renameFunction", "web/math.ts", 0)]);
+  // nothing re-resolves them. Their edges go when the name goes, and when it
+  // comes back -- renamed back, or the file restored -- they never return.
+  // (A plain rename now passes: since IN-08 an unresolved call writes no edge,
+  // fresh or incremental, so the rename back is what shows the defect.)
+  it.fails("IN-11: a called function renamed and renamed back re-binds its callers", async () => {
+    await runSequence("head", [edit("renameFunction", "web/math.ts", 0), { kind: "revert", a: 0, b: 0 }]);
   });
 
   it.fails("IN-11: restoring a deleted file re-binds its callers", async () => {
