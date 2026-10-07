@@ -738,6 +738,53 @@ export function isPayloadTooLargeError(err: unknown): boolean {
   return PAYLOAD_TOO_LARGE_PATTERNS.some(pattern => message.includes(pattern));
 }
 
+/**
+ * What a 413 from the bulk writer's own estimate says one request should hold
+ * (Ix-memory#232: `suggestedMaxPatches` in the body). Absent from a 413 that
+ * ArangoDB raised mid-write, or a proxy's.
+ */
+export function parseSuggestedMaxPatches(err: unknown): number | undefined {
+  const text = String(err);
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end <= start) return undefined;
+  try {
+    const n = (JSON.parse(text.slice(start, end + 1)) as { suggestedMaxPatches?: unknown }).suggestedMaxPatches;
+    return typeof n === 'number' && Number.isInteger(n) && n >= 1 ? n : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Per-request bounds on a bulk commit. A run lowers them when a commit is too large. */
+export interface BulkLimits {
+  maxFiles: number;
+  /** Ops across the request's patches: the backend's transaction grows with them. */
+  maxOps: number;
+}
+
+/**
+ * Cut `items` into bulk requests in order, each within `limits`. An item over
+ * `maxOps` on its own still goes, alone: one patch cannot be split.
+ */
+export function cutBulkChunks<T>(items: T[], opsOf: (item: T) => number, limits: BulkLimits): T[][] {
+  const chunks: T[][] = [];
+  let current: T[] = [];
+  let ops = 0;
+  for (const item of items) {
+    const n = opsOf(item);
+    if (current.length > 0 && (current.length >= limits.maxFiles || ops + n > limits.maxOps)) {
+      chunks.push(current);
+      current = [];
+      ops = 0;
+    }
+    current.push(item);
+    ops += n;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
 export async function commitBulkWithPayloadSplit<T, R>(
   items: T[],
   handlers: {
@@ -745,6 +792,15 @@ export async function commitBulkWithPayloadSplit<T, R>(
     onBulkCommitted: (batch: T[], result: R) => void;
     commitIndividually: (batch: T[], error: unknown, opts?: { replay?: boolean }) => Promise<void>;
     onSplit?: (batch: T[], error: unknown) => void;
+    /**
+     * How to cut a group the backend found too large, when the caller knows
+     * better than halving: what the 413 suggested, or a size the run has
+     * learned. Pieces go out in order, one at a time. Fewer than two pieces,
+     * or absent, and the group is bisected.
+     */
+    splitTooLarge?: (batch: T[], error: unknown) => T[][] | undefined;
+    /** Cut what is left of a split group to the bounds as they stand now. */
+    recut?: (batch: T[]) => T[][];
     /** Patch id of an item, so a partly-committed group can be resumed. */
     patchIdOf?: (item: T) => string | undefined;
     onPartialBulk?: (landed: T[], missing: T[], error: unknown) => void;
@@ -796,6 +852,19 @@ export async function commitBulkWithPayloadSplit<T, R>(
   } catch (err) {
     if (isPayloadTooLargeError(err) && items.length > 1) {
       handlers.onSplit?.(items, err);
+      let pieces = handlers.splitTooLarge?.(items, err);
+      if (pieces && pieces.length > 1) {
+        // The rest is re-cut after each piece: a piece that is refused again
+        // lowers the bounds, and the pieces after it should not each be
+        // refused at the size it already failed at.
+        while (pieces.length > 0) {
+          const [head, ...tail] = pieces;
+          await commitBulkWithPayloadSplit(head, handlers);
+          const rest = tail.flat();
+          pieces = rest.length === 0 ? [] : handlers.recut?.(rest) ?? tail;
+        }
+        return;
+      }
       const midpoint = Math.ceil(items.length / 2);
       await commitBulkWithPayloadSplit(items.slice(0, midpoint), handlers);
       await commitBulkWithPayloadSplit(items.slice(midpoint), handlers);
@@ -2394,6 +2463,38 @@ export async function ingestFiles(
     // and overlaps well with commit (~5s) + parse (~5s).
     const PARSE_STREAM_CHUNK     = filePaths.length > 10_000 ? 500 : 500;
     const COMMIT_HTTP_MAX_FILES  = parsePositiveIntEnv('IX_COMMIT_HTTP_MAX_FILES', 1000); // files per HTTP request to the backend
+    // Ops per HTTP request. The backend's transaction grows with them, about
+    // 4.3 KB a document against a 512 MB cap (~119k documents), so a 500-file
+    // batch of a large repository could not fit and failed after 14-20 s.
+    const COMMIT_MAX_OPS         = parsePositiveIntEnv('IX_COMMIT_MAX_OPS', 60_000);
+    /**
+     * The bulk bounds for the rest of the run. A 413 lowers them, so later
+     * batches start at a size that fits instead of failing and splitting again.
+     */
+    const bulkLimits: BulkLimits = { maxFiles: COMMIT_HTTP_MAX_FILES, maxOps: COMMIT_MAX_OPS };
+    const opsOf = (item: { patch: GraphPatchPayload }): number => item.patch.ops.length;
+    /**
+     * Learn from a group the backend found too large, as an op budget: the
+     * patch count its 413 suggests, at this group's ops per patch, or else
+     * half the group's ops. Then cut the group to the new bounds.
+     *
+     * Ops, not the suggested count itself: the backend sizes its suggestion
+     * from the group's average patch, and a count cut lets a run of larger
+     * files through over the budget (against a backend with a 4 MB budget, a
+     * count limit took 7 refusals to settle on a 316-file map, the op budget 3).
+     */
+    const learnBulkLimits = <T extends { patch: GraphPatchPayload }>(items: T[], err: unknown): T[][] => {
+      const ops = items.reduce((sum, item) => sum + opsOf(item), 0);
+      const suggested = parseSuggestedMaxPatches(err);
+      const budget = suggested !== undefined && suggested < items.length
+        ? Math.floor((ops * suggested) / items.length)
+        : Math.floor(ops / 2);
+      bulkLimits.maxOps = Math.max(1, Math.min(bulkLimits.maxOps, budget));
+      if (debug) {
+        process.stderr.write(`\n  [bulk limits] now ${bulkLimits.maxFiles} files / ${bulkLimits.maxOps} ops per request\n`);
+      }
+      return cutBulkChunks(items, opsOf, bulkLimits);
+    };
     const COMMIT_CONCURRENCY     = parsePositiveIntEnv('IX_COMMIT_CONCURRENCY', 8); // parallel HTTP save requests
     const COMMIT_CONFLICT_RETRIES = parsePositiveIntEnv('IX_COMMIT_CONFLICT_RETRIES', 6); // retry transient Arango lock conflicts
     // Re-sends of a commit that lost the base-rev race to another writer; see retryOnBaseRevRace.
@@ -2407,7 +2508,7 @@ export async function ingestFiles(
 
     if (debug) {
       process.stderr.write(
-        `\n  Save config: httpBatch=${COMMIT_HTTP_MAX_FILES} concurrency=${COMMIT_CONCURRENCY}\n`
+        `\n  Save config: httpBatch=${COMMIT_HTTP_MAX_FILES} maxOps=${COMMIT_MAX_OPS} concurrency=${COMMIT_CONCURRENCY}\n`
       );
     }
 
@@ -2490,22 +2591,23 @@ export async function ingestFiles(
       const deferredByDeadline: PreparedPatch[] = [];
 
       const chunks: PreparedPatch[][] = [];
-      let bulkChunk: PreparedPatch[] = [];
-      const flushBulkChunk = (): void => {
-        if (bulkChunk.length === 0) return;
-        chunks.push(bulkChunk);
-        bulkChunk = [];
+      let bulkRun: PreparedPatch[] = [];
+      const flushBulkRun = (): void => {
+        if (bulkRun.length === 0) return;
+        chunks.push(...cutBulkChunks(bulkRun, opsOf, bulkLimits));
+        bulkRun = [];
       };
       for (const item of preparedPatches) {
         if (patchRequiresPerFileCommit(item.patch, bulkDeletes)) {
-          flushBulkChunk();
+          flushBulkRun();
           chunks.push([item]);
         } else {
-          bulkChunk.push(item);
-          if (bulkChunk.length === COMMIT_HTTP_MAX_FILES) flushBulkChunk();
+          bulkRun.push(item);
         }
       }
-      flushBulkChunk();
+      flushBulkRun();
+      const isBulkChunk = (chunk: PreparedPatch[]): boolean =>
+        !chunk.some(item => patchRequiresPerFileCommit(item.patch, bulkDeletes));
 
       const commitMsPerChunk = new Array<number>(chunks.length).fill(0);
       // The drain belongs to no chunk, but its time is still commit time --
@@ -2790,7 +2892,7 @@ export async function ingestFiles(
         let probeQueue = items.filter(item => !needsPerFile(item));
 
         while (probeQueue.length > 1) {
-          const chunk = probeQueue.slice(0, COMMIT_HTTP_MAX_FILES);
+          const chunk = cutBulkChunks(probeQueue, opsOf, bulkLimits)[0];
           const rest = probeQueue.slice(chunk.length);
           const bulkStart = performance.now();
           try {
@@ -3058,6 +3160,8 @@ export async function ingestFiles(
                 `\n  [bulk partly committed, resuming] ${landed.length} already landed, re-sending ${missing.length}: ${err}\n`
               );
             },
+            splitTooLarge: learnBulkLimits,
+            recut: items => cutBulkChunks(items, opsOf, bulkLimits),
             onSplit: (items, err) => {
               if (!debug) return;
               const first = items[0];
@@ -3082,9 +3186,11 @@ export async function ingestFiles(
         }
       };
 
-      await Promise.all(
-        Array.from({ length: Math.min(COMMIT_CONCURRENCY, chunks.length) }, () => worker())
-      );
+      // Several bulk requests from one batch go one at a time. Each takes the
+      // backend's exclusive lock, so sending them side by side bought no
+      // throughput and lost base-rev races (BaseRevMismatch) to each other.
+      const workers = chunks.filter(isBulkChunk).length > 1 ? 1 : Math.min(COMMIT_CONCURRENCY, chunks.length);
+      await Promise.all(Array.from({ length: workers }, () => worker()));
 
       // Nothing stays abandoned while the backend is demonstrably accepting
       // writes. Five adjacent patches the backend rejects on their own merits

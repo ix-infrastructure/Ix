@@ -29,6 +29,10 @@ export class FakeBackend {
   poison: string[] = [];
   /** Fail every commit, the Ix#560 shape. */
   refuseEverything = false;
+  /** Answer a bulk of more than this many ops (over two or more patches) with a 413. */
+  maxBulkOps: number | undefined = undefined;
+  /** Put `suggestedMaxPatches` in that 413, as the bulk writer's estimate does. */
+  suggestMaxPatches = false;
   /** Refuse re-sends of patches a 409 already confirmed. */
   refuseReplays = false;
   /**
@@ -381,6 +385,20 @@ export class FakeBackend {
         this.aborter.abort();
       }
 
+      if (path === "/v1/patches/bulk" && this.maxBulkOps !== undefined && patches.length > 1) {
+        const ops = patches.reduce((sum, p) => sum + (p.ops?.length ?? 0), 0);
+        if (ops > this.maxBulkOps) {
+          // The bulk writer's estimate refusal (Ix-memory#232): a 413 before
+          // any write, with the patch count that would fit when asked to say.
+          const perPatch = ops / patches.length;
+          const suggested = Math.max(1, Math.floor(this.maxBulkOps / perPatch));
+          return send(413, {
+            error: "payload_too_large",
+            message: `bulk commit of ${patches.length} patches is over the transaction budget`,
+            ...(this.suggestMaxPatches ? { suggestedMaxPatches: suggested } : {}),
+          });
+        }
+      }
       if (path === "/v1/patch" && this.refuseReplays) {
         return send(500, { error: "500: already committed" });
       }
