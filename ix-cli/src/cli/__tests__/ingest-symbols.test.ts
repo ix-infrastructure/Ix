@@ -6,7 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { ingestSymbolsPath } from "../config.js";
-import { loadIngestSymbols, saveIngestSymbols, type SymbolEntry } from "../ingest-symbols.js";
+import {
+  changedNames, definedNames, findDependents, loadIngestSymbols, resolutionHash, saveIngestSymbols, type SymbolEntry,
+} from "../ingest-symbols.js";
 
 describe("ingest symbol table", () => {
   let home: string;
@@ -44,5 +46,49 @@ describe("ingest symbol table", () => {
     }));
     expect([...loadIngestSymbols(root, "x").keys()]).toEqual(["a.py"]);
     expect(existsSync(ingestSymbolsPath(root))).toBe(true);
+  });
+
+  it("keeps a resolution hash across a save", () => {
+    saveIngestSymbols(root, "x", new Map([["a.py", { ...entry("a.py"), res: "r1" }]]));
+    expect(loadIngestSymbols(root, "x").get("a.py")?.res).toBe("r1");
+  });
+});
+
+describe("dependents (IN-11)", () => {
+  const summary = (filePath: string, fields: Record<string, unknown>) => ({ filePath, ...fields });
+  const entry = (s: ReturnType<typeof summary>): SymbolEntry => ({ hash: "h", summary: s });
+
+  it("changes no names when the signature is the same, and the symmetric difference otherwise", () => {
+    const before = summary("m.ts", { sig: "s1", qkeys: [["add", "add"], ["sub", "sub"]] });
+    expect(changedNames(before, summary("m.ts", { sig: "s1", qkeys: [["add", "add"], ["sub", "sub"]] }))).toEqual(new Set());
+    const after = summary("m.ts", { sig: "s2", qkeys: [["add", "add"], ["minus", "minus"]], exportPublicNames: [["default", "add"]] });
+    expect(changedNames(before, after)).toEqual(new Set(["sub", "minus", "default"]));
+    // Added or deleted: every name it defines.
+    expect(changedNames(undefined, before)).toEqual(new Set(["add", "sub"]));
+    expect(changedNames(before, undefined)).toEqual(new Set(["add", "sub"]));
+    expect(definedNames(summary("p.php", { phpTypes: [["App\\Foo", "Foo"]] }))).toEqual(new Set(["App\\Foo", "Foo"]));
+  });
+
+  it("finds files that refer to a changed name, by whole name or by segment, or import a path that came or went", () => {
+    const table = new Map<string, SymbolEntry>([
+      ["main.ts", entry(summary("main.ts", { refs: ["sub"], imports: [{ dstName: "./math", importRaw: "./math" }] }))],
+      ["obj.ts", entry(summary("obj.ts", { refs: ["calc.sub"] }))],
+      ["mod.py", entry(summary("mod.py", { refs: ["Mod::sub"] }))],
+      ["other.ts", entry(summary("other.ts", { refs: ["mul"], imports: [{ dstName: "./util" }] }))],
+      ["uses-new.ts", entry(summary("uses-new.ts", { refs: [], imports: [{ dstName: "./added", importRaw: "./added" }] }))],
+      ["math.ts", entry(summary("math.ts", { refs: ["sub"] }))],
+    ]);
+    expect(findDependents(table, new Set(["sub"]), [], new Set(["math.ts"]))).toEqual(["main.ts", "mod.py", "obj.ts"]);
+    expect(findDependents(table, new Set(), ["web/added.ts"], new Set())).toEqual(["uses-new.ts"]);
+    expect(findDependents(table, new Set(), ["pkg/util/index.ts"], new Set())).toEqual(["other.ts"]);
+    expect(findDependents(table, new Set(), [], new Set())).toEqual([]);
+  });
+
+  it("hashes a patch's edges and their targets, in any order, and nothing else", () => {
+    const a = { type: "UpsertEdge", id: "e1", dst: "n1" };
+    const b = { type: "UpsertEdge", id: "e2", dst: "n2" };
+    const node = { type: "UpsertNode", id: "n9" };
+    expect(resolutionHash([a, b, node])).toBe(resolutionHash([b, a]));
+    expect(resolutionHash([a, b])).not.toBe(resolutionHash([a, { ...b, dst: "n3" }]));
   });
 });

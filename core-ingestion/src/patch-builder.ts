@@ -565,6 +565,13 @@ export function buildPatchWithResolution(
   resolvedEdges: ResolvedEdge[],
   previousSourceHash?: string,
   multiRepo?: MultiRepoContext,
+  /**
+   * Set when an unchanged file is re-sent because what its edges resolve to
+   * changed elsewhere (IN-11): a hash of its new resolution. The patch id must
+   * differ from the one its unchanged bytes already have, or the backend
+   * answers `Idempotent` and keeps the old edges.
+   */
+  resolutionSalt?: string,
 ): GraphPatchPayload {
   // Build lookup: `${srcName}:${predicate}:${dstName}` → { dstFilePath, dstQualifiedKey }
   // Callers should pass only edges for this file (pre-grouped) for best performance,
@@ -899,7 +906,7 @@ export function buildPatchWithResolution(
   }
 
   const extractor = extractorName();
-  const patchId = computePatchId(filePath, sourceHash, extractor);
+  const patchId = computePatchId(filePath, sourceHash, resolutionSalt ? `${extractor}#r${resolutionSalt}` : extractor);
   const previousPatchId = previousSourceHash
     ? computePatchId(filePath, previousSourceHash, extractor)
     : legacyPatchId(filePath, sourceHash);

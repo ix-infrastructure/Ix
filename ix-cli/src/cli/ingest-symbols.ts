@@ -1,5 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ingestSymbolsPath } from "./config.js";
@@ -42,6 +43,25 @@ export interface SymbolEntry {
    */
   mtime?: number;
   summary: StoredSummary;
+  /**
+   * What the file's last committed patch resolved its edges to: a hash of its
+   * edge ids and their targets (`resolutionHash`). An unchanged file is
+   * re-sent when names it uses change elsewhere, and only if this differs.
+   */
+  res?: string;
+}
+
+/**
+ * A hash of a patch's edges and where they point. Same bytes resolved against
+ * the same names gives the same value, so it changes exactly when something
+ * the file refers to moved, appeared or went away.
+ */
+export function resolutionHash(ops: ReadonlyArray<{ type?: unknown; id?: unknown; dst?: unknown }>): string {
+  const pairs = ops
+    .filter(op => op.type === "UpsertEdge")
+    .map(op => `${String(op.id)}>${String(op.dst)}`)
+    .sort();
+  return createHash("sha256").update(pairs.join("\n")).digest("hex");
 }
 
 interface SerializedSymbolTable {
@@ -89,4 +109,90 @@ export function saveIngestSymbols(projectRoot: string, extractor: string, table:
   } catch {
     // An optimization: losing it costs the next run a parse of what it lacks.
   }
+}
+
+// ── Dependents (IN-11) ──────────────────────────────────────────────────
+// A file that did not change can still need re-sending: a call it makes may
+// now resolve somewhere else, or nowhere, because a name it uses was added,
+// renamed or removed in another file. The table knows what every file defines
+// and refers to, so the run can find those files without reading the rest.
+
+type SummaryFields = {
+  qkeys?: Array<[string, string]>;
+  exportPublicNames?: Array<[string, string]>;
+  phpTypes?: Array<[string, string]>;
+  refs?: string[];
+  imports?: Array<{ dstName?: string; importRaw?: string }>;
+  sig?: string;
+};
+
+/** The names other files can resolve to in a summary. */
+export function definedNames(summary: StoredSummary | undefined): Set<string> {
+  const names = new Set<string>();
+  if (!summary) return names;
+  const s = summary as SummaryFields;
+  for (const [name, qkey] of s.qkeys ?? []) { names.add(name); names.add(qkey); }
+  for (const [publicName] of s.exportPublicNames ?? []) names.add(publicName);
+  for (const [fqcn, typeName] of s.phpTypes ?? []) { names.add(fqcn); names.add(typeName); }
+  return names;
+}
+
+/** Names defined before or after but not both; none when the signature is the same. */
+export function changedNames(before: StoredSummary | undefined, after: StoredSummary | undefined): Set<string> {
+  const b = before as SummaryFields | undefined;
+  const a = after as SummaryFields | undefined;
+  if (b?.sig !== undefined && b.sig === a?.sig) return new Set();
+  const was = definedNames(before);
+  const now = definedNames(after);
+  const out = new Set<string>();
+  for (const n of was) if (!now.has(n)) out.add(n);
+  for (const n of now) if (!was.has(n)) out.add(n);
+  return out;
+}
+
+/** The stem an import of `relPath` would name: `math` for `web/math.ts`, `web` for `web/index.ts`. */
+function importStem(relPath: string): string {
+  const posix = relPath.replace(/\\/g, "/");
+  const stem = path.posix.basename(posix).replace(/\.[^.]+$/, "");
+  if (stem === "index" || stem === "__init__" || stem === "mod") return path.posix.basename(path.posix.dirname(posix));
+  return stem;
+}
+
+/**
+ * Files in `table` that may resolve differently now: a name they refer to is in
+ * `names` (also by its first or last segment, for `obj.method` and `Mod::f`), or
+ * an import of theirs names the stem of a path in `paths` (a file that appeared
+ * or went away). Files in `exclude` -- the ones the run already sent -- are left
+ * out. Over-matching costs a parse; the resolution hash then decides whether
+ * anything is sent.
+ */
+export function findDependents(
+  table: ReadonlyMap<string, SymbolEntry>,
+  names: ReadonlySet<string>,
+  paths: Iterable<string>,
+  exclude: ReadonlySet<string>,
+): string[] {
+  const stems = new Set<string>();
+  for (const p of paths) {
+    const stem = importStem(p);
+    if (stem.length > 0 && stem !== ".") stems.add(stem);
+  }
+  if (names.size === 0 && stems.size === 0) return [];
+  const out: string[] = [];
+  for (const [rel, entry] of table) {
+    if (exclude.has(rel)) continue;
+    const s = entry.summary as SummaryFields;
+    const byName = (s.refs ?? []).some(ref => {
+      if (names.has(ref)) return true;
+      const parts = ref.split(/::|->|\.|#|\\/).filter(Boolean);
+      return parts.length > 1 && (names.has(parts[0]) || names.has(parts[parts.length - 1]));
+    });
+    const byImport = !byName && stems.size > 0 && (s.imports ?? []).some(imp => {
+      const spec = imp.importRaw ?? imp.dstName ?? "";
+      for (const stem of stems) if (spec.includes(stem)) return true;
+      return false;
+    });
+    if (byName || byImport) out.push(rel);
+  }
+  return out.sort();
 }

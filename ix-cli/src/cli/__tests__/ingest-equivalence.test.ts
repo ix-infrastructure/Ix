@@ -278,16 +278,26 @@ describe("incremental ix map equals a fresh map (fake backend)", () => {
   });
 
   // F-03. Files that call a renamed or deleted function are unchanged, so
-  // nothing re-resolves them. Their edges go when the name goes, and when it
-  // comes back -- renamed back, or the file restored -- they never return.
-  // (A plain rename now passes: since IN-08 an unresolved call writes no edge,
-  // fresh or incremental, so the rename back is what shows the defect.)
-  it.fails("IN-11: a called function renamed and renamed back re-binds its callers", async () => {
+  // nothing re-resolved them: their edges went when the name went, and when it
+  // came back -- renamed back, or the file restored -- they never returned.
+  // The run now re-resolves the files that refer to a changed name.
+  it("IN-11: a called function renamed and renamed back re-binds its callers", async () => {
     await runSequence("head", [edit("renameFunction", "web/math.ts", 0), { kind: "revert", a: 0, b: 0 }]);
   });
 
-  it.fails("IN-11: restoring a deleted file re-binds its callers", async () => {
+  it("IN-11: restoring a deleted file re-binds its callers", async () => {
     await runSequence("head", [edit("deleteThenRestore", "web/math.ts")]);
+  });
+
+  it("IN-11: a re-map with nothing renamed re-sends no caller", async () => {
+    await runSequence("head", [edit("editBody", "web/math.ts")], {
+      check: (world) => {
+        const sent = world.backend.requests
+          .filter((r) => r.path === "/v1/patches/bulk" || r.path === "/v1/patch")
+          .reduce((sum, r) => sum + r.patches, 0);
+        expect(sent, "only the edited file").toBe(1);
+      },
+    });
   });
 
   it("a revert and a delete-then-restore re-apply, on a backend with BEW-03", async () => {
