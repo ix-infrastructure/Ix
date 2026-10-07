@@ -2230,17 +2230,40 @@ export async function ingestFiles(
     const mtimeChangedSet = new Set(mtimeChangedPaths);
     let summarize: ((parsed: any) => StoredSummary) | null = null;
     /** Record what a parse in this run learned about a file, for the next run. */
-    const noteSummary = (relFilePath: string, hash: string, parsed: any): void => {
+    const noteSummary = (relFilePath: string, hash: string, parsed: any, mtime: number | undefined): void => {
       if (!summarize || !parsed) return;
-      symbolTable.set(relFilePath, { hash, summary: summarize(parsed) });
+      symbolTable.set(relFilePath, { hash, summary: summarize(parsed), ...(mtime !== undefined ? { mtime } : {}) });
       symbolTableChanged = true;
     };
-    /** An entry still describes its file: the same bytes, or (with a baseline) mtime-clean. */
+    /** The file's mtime now: from this run's stat loop, or a stat for a file outside it. */
+    const mtimeNow = (absFilePath: string): number | undefined => {
+      const known = currentMtimes.get(absFilePath);
+      if (known !== undefined) return known;
+      try { return fs.statSync(absFilePath).mtimeMs; } catch { return undefined; }
+    };
+    /**
+     * An entry still describes its file: the same bytes, or (with a baseline)
+     * a file that is mtime-clean AND still has the mtime the entry was read at.
+     * The baseline alone is not enough: the table is saved after it and can be
+     * older (a failed save, a run killed in between), and a scoped run does not
+     * stat the files outside its scope, so they never look changed.
+     */
     const tableEntryValid = (absFilePath: string, entry: SymbolEntry | undefined, trustMtime: boolean): boolean => {
       if (!entry) return false;
       const hash = currentHashes.get(absFilePath);
-      if (hash !== undefined) return entry.hash === hash;
-      return trustMtime && !mtimeChangedSet.has(absFilePath);
+      if (hash !== undefined) {
+        if (entry.hash !== hash) return false;
+        // Same bytes under a new mtime (a touch, a checkout): record the new
+        // one, or the entry fails the mtime check on every run from now on.
+        const mtime = currentMtimes.get(absFilePath);
+        if (mtime !== undefined && entry.mtime !== mtime) {
+          entry.mtime = mtime;
+          symbolTableChanged = true;
+        }
+        return true;
+      }
+      if (!trustMtime || mtimeChangedSet.has(absFilePath) || entry.mtime === undefined) return false;
+      return mtimeNow(absFilePath) === entry.mtime;
     };
 
     /**
@@ -2278,6 +2301,9 @@ export async function ingestFiles(
       const SUMMARY_CHUNK = 500;
       for (let i = 0; i < missing.length; i += SUMMARY_CHUNK) {
         const chunk = missing.slice(i, i + SUMMARY_CHUNK);
+        // Stat'd before the read, so a file that changes in between is
+        // recorded with its older mtime and re-read next time.
+        const mtimes = chunk.map(mtimeNow);
         const bytes = await Promise.all(chunk.map(fp => fs.promises.readFile(fp).catch(() => null)));
         const parsed = await Promise.all(chunk.map((fp, j) => {
           const b = bytes[j];
@@ -2291,7 +2317,7 @@ export async function ingestFiles(
           const hash = sha256(b);
           currentHashes.set(chunk[j], hash);
           const rel = toWorkspaceRelative(chunk[j]);
-          noteSummary(rel, hash, parsed[j]);
+          noteSummary(rel, hash, parsed[j], mtimes[j]);
           const entry = symbolTable.get(rel);
           if (entry && entry.hash === hash) summaries.set(rel, entry.summary);
         }
@@ -3275,7 +3301,7 @@ export async function ingestFiles(
             if (!parsed) { filesSkipped++; filesSkippedUnparsed++; continue; }
             entitiesParsed += parsed.entities.length;
             batch.push({ filePath: chunk[j].filePath, parsed, hash: chunk[j].hash, previousHash: chunk[j].previousHash });
-            noteSummary(chunk[j].filePath, chunk[j].hash, parsed);
+            noteSummary(chunk[j].filePath, chunk[j].hash, parsed, currentMtimes.get(chunk[j].absFilePath));
           }
           await pendingFlush;
           pendingFlush = flushBatch(batch);
@@ -3436,7 +3462,7 @@ export async function ingestFiles(
           if (!parsed) { filesSkipped++; filesSkippedUnparsed++; continue; }
           entitiesParsed += parsed.entities.length;
           batch.push({ filePath: f.filePath, parsed, hash: f.hash, previousHash: f.previousHash });
-          noteSummary(f.filePath, f.hash, parsed);
+          noteSummary(f.filePath, f.hash, parsed, currentMtimes.get(chunk[j]));
         }
         await pendingFlushB;
         pendingFlushB = flushBatch(batch);

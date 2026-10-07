@@ -921,6 +921,42 @@ describe("ingestFiles against a fake backend", () => {
     expect(edges()).toEqual(full);
   });
 
+  it("does not resolve a scoped run against a stale symbol-table entry for a file outside the scope", async () => {
+    // The table is trusted for a file the baseline calls mtime-clean, but a
+    // scoped run never stats the files outside its scope, so it vouched for an
+    // edited `lib/b.ts` with the symbols it had before the edit.
+    // Real commit semantics, so the incremental run has hashes to compare.
+    backend.semantics = "head";
+    mkdirSync(join(repo, "src"), { recursive: true });
+    mkdirSync(join(repo, "lib"), { recursive: true });
+    writeFileSync(join(repo, "lib", "b.ts"), "export function helper(): number { return 1; }\n", "utf8");
+    writeFileSync(join(repo, "src", "a.ts"), "import { helper } from '../lib/b';\nexport function caller(): number { return helper(); }\n", "utf8");
+    execFileSync("git", ["init", "-q"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+    const edges = () => (backend.lastOps.get("src/a.ts") ?? [])
+      .filter(op => op.type === "UpsertEdge")
+      .map(op => `${String(op.predicate)} ${String(op.dst)}`)
+      .sort();
+
+    await ingestFiles(repo, quiet);
+    const resolved = edges();
+
+    // `helper` is gone from lib/b.ts; a.ts still calls it. Only src/ is re-mapped.
+    writeFileSync(join(repo, "lib", "b.ts"), "export function renamed(): number { return 1; }\n", "utf8");
+    writeFileSync(join(repo, "src", "a.ts"), "import { helper } from '../lib/b';\nexport function caller(): number { return helper() + 1; }\n", "utf8");
+    backend.lastOps.clear();
+    await ingestFiles(join(repo, "src"), quiet);
+    const scoped = edges();
+
+    // What a fresh map of the edited workspace says about a.ts.
+    backend.lastOps.clear();
+    await ingestFiles(repo, { ...quiet, force: true });
+    const fresh = edges();
+
+    expect(resolved, "the fixture's call resolved to lib/b.ts at first").not.toEqual(fresh);
+    expect(scoped).toEqual(fresh);
+  });
+
   it("writes no baseline from a subdirectory run when the workspace has none", async () => {
     // One written from `src/` alone would report the whole graph complete.
     fixture(2);

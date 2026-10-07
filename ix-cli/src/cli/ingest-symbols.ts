@@ -33,6 +33,14 @@ export interface StoredSummary {
 export interface SymbolEntry {
   /** sha256 of the file the summary describes. */
   hash: string;
+  /**
+   * The file's mtime when it was read for this summary, stat'd before the read.
+   * An entry is trusted without reading its file only while the file still has
+   * this mtime: the baseline's mtimes say nothing about this table, which is
+   * saved separately and can be older, and a scoped run never stats the files
+   * outside its scope.
+   */
+  mtime?: number;
   summary: StoredSummary;
 }
 
