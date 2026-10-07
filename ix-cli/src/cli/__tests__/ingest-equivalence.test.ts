@@ -256,12 +256,18 @@ describe("incremental ix map equals a fresh map (fake backend)", () => {
     });
   });
 
-  // The index prescan holds no Python or Java symbols, so an added file in
-  // either language still takes the whole-repository pass: resolved alone, its
-  // cross-file calls would point at a module node or at nothing.
-  it("IN-01: an added Python or Java file keeps its cross-file calls", async () => {
-    await runSequence("head", [edit("addFile", undefined, 0)], { langs: ["py"] });
-    await runSequence("head", [edit("addFile", undefined, 1)], { langs: ["java"] });
+  // The persisted symbol table gives the index every language's symbols, so an
+  // added Python or Java file takes the incremental path too: one patch, and
+  // its cross-file calls resolve as a fresh map resolves them.
+  it("IN-01/IN-10: an added Python or Java file sends one patch and keeps its cross-file calls", async () => {
+    const onePatch = (world: World) => {
+      const sent = world.backend.requests
+        .filter((r) => r.path === "/v1/patches/bulk" || r.path === "/v1/patch")
+        .reduce((sum, r) => sum + r.patches, 0);
+      expect(sent, "patches on the wire").toBe(1);
+    };
+    await runSequence("head", [edit("addFile", undefined, 0)], { langs: ["py"], check: onePatch });
+    await runSequence("head", [edit("addFile", undefined, 1)], { langs: ["java"], check: onePatch });
   });
 
   // F-04. Dropping the file's last import removes a node, the patch carries a
