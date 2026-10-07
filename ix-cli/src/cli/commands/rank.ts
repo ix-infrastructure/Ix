@@ -3,7 +3,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../../client/factory.js";
 import { activeReadScope, ensureReadScope } from "../resolve.js";
 import { llmLine } from "../llm.js";
 import { normalizePathSeparators } from "../path-match.js";
@@ -186,7 +186,7 @@ export function registerRankCommand(program: Command): void {
 
         const topN = parseInt(opts.top, 10);
         const isJson = opts.format === "json";
-        const client = new IxClient(getEndpoint());
+        const client = createClient();
         const diagnostics: string[] = [];
 
         // 1. Fetch all entities of the given kind

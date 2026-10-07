@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { resolveWorkspaceRoot } from "./config.js";
 import { loadIngestBaseline } from "./ingest-baseline.js";
 import { hasCompletedMapFor } from "./map-baseline.js";
-import { SUPPORTED_EXTENSIONS } from "./supported-extensions.js";
+import { canonicalizeDiscoveredFilePath, discoverSourceFiles } from "./file-discovery.js";
 
 export interface StaleInfo {
   graphCompleted: boolean;
@@ -14,53 +14,32 @@ export interface StaleInfo {
   currentRev: number;
   staleFiles: number;
   sampleChangedFiles: string[];
+  /** Changed files the last run could not get applied (F-01); see `IngestBaseline.replayedFiles`. */
+  replayedFiles: string[];
+  /**
+   * Files the last run skipped because their parse ran past the budget, still
+   * on disk; see `IngestBaseline.parseTimeouts`. Not counted in `staleFiles`:
+   * another run will not fix them, a larger IX_PARSE_BUDGET_MS will.
+   */
+  parseTimeouts: string[];
 }
 
-const SUPPORTED_NAMES = new Set([
-  ".gitignore", ".gitattributes", ".editorconfig", ".env",
-  ".eslintrc", ".prettierrc", ".babelrc",
-  "Makefile", "Dockerfile", "Procfile", "Gemfile", "Rakefile",
-  "BUILD", "WORKSPACE",
-]);
-
-const IGNORE_DIRS = new Set([
-  "node_modules", ".git", "dist", "build", "target", ".next",
-  ".cache", "__pycache__", ".ix", ".claude",
-]);
+/**
+ * Most files `ix status` reads when the workspace is not a git work tree; the
+ * cap the old status walk had. A walk has no bound of its own, and status runs
+ * on every agent turn: from a home directory it would read the whole disk.
+ * Files past the cap are not checked for changes. They do not look deleted:
+ * a baseline entry counts as deleted only when the file is gone from disk.
+ */
+const STATUS_WALK_LIMIT = 5000;
 
 /**
- * Walk a directory and collect file paths with supported extensions.
- * Bounded to prevent runaway on huge repos.
+ * The files `ix map` would discover (see `file-discovery.ts`), so "changed
+ * since the last ingest" is judged over the same set the ingest recorded. A
+ * git listing is complete; a walk stops at `walkLimit`.
  */
-function collectFiles(dir: string, limit: number = 5000): string[] {
-  const results: string[] = [];
-  const stack = [dir];
-
-  while (stack.length > 0 && results.length < limit) {
-    const current = stack.pop()!;
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(current, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (results.length >= limit) break;
-      if (entry.name.startsWith(".") && entry.isDirectory()) continue;
-      if (IGNORE_DIRS.has(entry.name)) continue;
-
-      const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(fullPath);
-      } else if (entry.isFile()) {
-        const ext = path.extname(entry.name).toLowerCase();
-        if (SUPPORTED_EXTENSIONS.has(ext) || SUPPORTED_NAMES.has(entry.name)) {
-          results.push(fullPath);
-        }
-      }
-    }
-  }
-  return results;
+function collectFiles(dir: string, walkLimit: number): string[] {
+  return discoverSourceFiles(dir, { walkLimit });
 }
 
 function differsFromIngestBaseline(
@@ -73,6 +52,16 @@ function differsFromIngestBaseline(
   return ingestedMtime === undefined
     ? mtimeMs > Date.parse(lastIngestAt)
     : ingestedMtime !== mtimeMs;
+}
+
+/**
+ * Absolute paths for a baseline's list of files the last run could not
+ * ingest. They count as changed whatever their mtime: a new one is absent from
+ * `files` with an mtime older than `lastIngestAt`, which would otherwise read
+ * as current.
+ */
+function absoluteSet(workspaceRoot: string, relPaths: readonly string[]): Set<string> {
+  return new Set(relPaths.map((rel) => path.resolve(workspaceRoot, rel)));
 }
 
 /**
@@ -89,7 +78,8 @@ function differsFromIngestBaseline(
  */
 export function detectStaleFiles(
   root: string,
-  maxSamples: number = 5
+  maxSamples: number = 5,
+  walkLimit: number = STATUS_WALK_LIMIT,
 ): StaleInfo {
   const workspaceRoot = path.resolve(root);
   const baseline = loadIngestBaseline(workspaceRoot);
@@ -101,34 +91,65 @@ export function detectStaleFiles(
       currentRev: 0,
       staleFiles: 0,
       sampleChangedFiles: [],
+      replayedFiles: [],
+      parseTimeouts: [],
     };
   }
 
-  const files = collectFiles(workspaceRoot);
-  const currentFiles = new Set(files.map((filePath) => path.resolve(filePath)));
+  // Discovery returns canonical paths (macOS `/var` is `/private/var`, a
+  // Windows 8.3 name is expanded), while the baseline's keys sit under the root
+  // as it was given. Compare and display both under the canonical root.
+  const canonicalRoot = canonicalizeDiscoveredFilePath(workspaceRoot);
+  const underCanonicalRoot = (absolutePath: string): string =>
+    canonicalRoot !== workspaceRoot && absolutePath.startsWith(workspaceRoot + path.sep)
+      ? canonicalRoot + absolutePath.slice(workspaceRoot.length)
+      : absolutePath;
+  const ingestedMtimes = new Map<string, number>();
+  for (const [ingestedPath, mtime] of baseline.files) {
+    const absolutePath = path.isAbsolute(ingestedPath)
+      ? path.resolve(ingestedPath)
+      : path.resolve(workspaceRoot, ingestedPath);
+    ingestedMtimes.set(underCanonicalRoot(absolutePath), mtime);
+  }
+
+  const files = collectFiles(workspaceRoot, walkLimit).map(underCanonicalRoot);
+  const currentFiles = new Set(files);
   const changedFiles: string[] = [];
+  // Under the canonical root, like everything else compared here.
+  const canonicalSet = (relPaths: readonly string[]): Set<string> =>
+    new Set([...absoluteSet(workspaceRoot, relPaths)].map(underCanonicalRoot));
+  const pending = canonicalSet(baseline.pendingFiles);
+  // Canonical path -> the baseline's own workspace-relative spelling, which is
+  // what status reports: POSIX separators on every platform, as the ingest
+  // summary names them.
+  const timedOut = new Map(
+    baseline.parseTimeouts.map((rel) => [underCanonicalRoot(path.resolve(workspaceRoot, rel)), rel]),
+  );
+  const parseTimeouts: string[] = [];
 
   for (const filePath of files) {
+    const timedOutAs = timedOut.get(filePath);
+    if (timedOutAs !== undefined) {
+      parseTimeouts.push(timedOutAs);
+      continue;
+    }
     try {
       const stat = fs.statSync(filePath);
       if (
-        differsFromIngestBaseline(filePath, stat.mtimeMs, baseline.files, baseline.lastIngestAt)
+        pending.has(filePath)
+        || differsFromIngestBaseline(filePath, stat.mtimeMs, ingestedMtimes, baseline.lastIngestAt)
       ) {
         // Make path relative to root for display
-        const relative = path.relative(workspaceRoot, filePath);
-        changedFiles.push(relative);
+        changedFiles.push(path.relative(canonicalRoot, filePath));
       }
     } catch {
       // skip inaccessible files
     }
   }
 
-  for (const ingestedPath of baseline.files.keys()) {
-    const absolutePath = path.isAbsolute(ingestedPath)
-      ? path.resolve(ingestedPath)
-      : path.resolve(workspaceRoot, ingestedPath);
+  for (const absolutePath of ingestedMtimes.keys()) {
     if (!currentFiles.has(absolutePath) && !fs.existsSync(absolutePath)) {
-      changedFiles.push(path.relative(workspaceRoot, absolutePath));
+      changedFiles.push(path.relative(canonicalRoot, absolutePath));
     }
   }
 
@@ -139,6 +160,8 @@ export function detectStaleFiles(
     currentRev: baseline.currentRev,
     staleFiles: changedFiles.length,
     sampleChangedFiles: changedFiles.slice(0, maxSamples),
+    replayedFiles: baseline.replayedFiles,
+    parseTimeouts,
   };
 }
 
@@ -192,6 +215,9 @@ export function isFileStale(filePath: string): boolean {
 export function createStaleProbe(): (filePath: string) => boolean {
   const workspaceRoot = path.resolve(resolveWorkspaceRoot());
   const baseline = loadIngestBaseline(workspaceRoot);
+  const pending = baseline
+    ? absoluteSet(workspaceRoot, [...baseline.pendingFiles, ...baseline.parseTimeouts])
+    : new Set<string>();
 
   return (filePath: string): boolean => {
     // No baseline means the question this probe answers — "did this file change
@@ -209,6 +235,7 @@ export function createStaleProbe(): (filePath: string) => boolean {
     if (!fs.existsSync(absolutePath)) {
       return baseline.files.has(absolutePath) || baseline.files.has(filePath);
     }
+    if (pending.has(absolutePath)) return true;
 
     try {
       return differsFromIngestBaseline(

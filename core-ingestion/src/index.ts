@@ -3491,8 +3491,18 @@ export interface ResolvedEdge {
   dstQualifiedKey: string;      // qualified key used for nodeId in the defining file
   predicate: string;            // "CALLS" | "EXTENDS"
   confidence: number;           // 0.9 import-scoped | 0.8 transitive | 0.5 global
+  /** Which resolution tier produced the edge; written on the edge with `confidence`. */
+  tier?: ResolutionTier;
   phpCallKind?: ParsedRelationship['phpCallKind'];
 }
+
+/**
+ * `binding`: an explicit import binding names the target. `import`: the
+ * target is in a file this one imports (or the import itself). `transitive`:
+ * one re-export hop away. `qualifier`: a dotted name's qualifier picked the
+ * file. `global`: the only definition of the name anywhere.
+ */
+export type ResolutionTier = 'binding' | 'import' | 'transitive' | 'qualifier' | 'global';
 
 // ---------------------------------------------------------------------------
 // resolveCallEdges helpers
@@ -4959,6 +4969,7 @@ export function resolveEdges(
               dstQualifiedKey: fileEntityName(fp),
               predicate: 'IMPORTS',
               confidence: 0.9,
+              tier: 'import',
             });
             stats.resolvedImport++;
           } else if (phpType.entries.length > 1) {
@@ -4979,7 +4990,7 @@ export function resolveEdges(
                 const fp = matchFiles[0];
                 const dstQualifiedKey = bestQKey(fileQKeys, fp, entityName);
                 if (dstQualifiedKey !== null) {
-                  resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: 'IMPORTS', confidence: 0.9 });
+                  resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: fp, dstName, dstQualifiedKey, predicate: 'IMPORTS', confidence: 0.9, tier: 'import' });
                   stats.resolvedImport++;
                   continue;
                 }
@@ -5008,6 +5019,7 @@ export function resolveEdges(
             dstQualifiedKey: fileEntityName(fp),
             predicate: 'IMPORTS',
             confidence: 0.9,
+            tier: 'import',
           });
           stats.resolvedImport++;
           continue;
@@ -5031,7 +5043,7 @@ export function resolveEdges(
           if (srcRepo !== undefined && depRepo !== undefined && depRepo !== srcRepo) {
             const entryFp = entryFileOf.get(depRepo);
             if (entryFp && entryFp !== srcFilePath) {
-              resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: entryFp, dstName: rel.dstName, dstQualifiedKey: fileEntityName(entryFp), predicate: 'IMPORTS', confidence: 0.7 });
+              resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: entryFp, dstName: rel.dstName, dstQualifiedKey: fileEntityName(entryFp), predicate: 'IMPORTS', confidence: 0.7, tier: 'import' });
               stats.resolvedImport++;
               continue;
             }
@@ -5064,6 +5076,7 @@ export function resolveEdges(
               dstQualifiedKey,
               predicate: rel.predicate,
               confidence: 0.9,
+              tier: 'binding',
               ...(rel.phpCallKind ? { phpCallKind: rel.phpCallKind } : {}),
             });
             stats.resolvedQualifier++;
@@ -5140,6 +5153,7 @@ export function resolveEdges(
                 dstQualifiedKey,
                 predicate: rel.predicate,
                 confidence: 0.9,
+                tier: 'binding',
               });
               continue;
             }
@@ -5167,6 +5181,7 @@ export function resolveEdges(
                 dstQualifiedKey,
                 predicate: rel.predicate,
                 confidence: 0.9,
+                tier: 'binding',
               });
               continue;
             }
@@ -5243,7 +5258,7 @@ export function resolveEdges(
               const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart, preferredQKey);
               if (dstQualifiedKey !== null) {
                 // dstName must match rel.dstName so buildPatchWithResolution can look it up
-                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9 });
+                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9, tier: 'qualifier' });
               }
             }
             continue;
@@ -5268,7 +5283,7 @@ export function resolveEdges(
             if (fileHasSymbol.get(qfp)?.has(memberPart)) {
               const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart, `${qualifierPart}.${memberPart}`);
               if (dstQualifiedKey !== null) {
-                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.7 });
+                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.7, tier: 'qualifier' });
               }
             }
           }
@@ -5284,7 +5299,7 @@ export function resolveEdges(
         const fp = narrowedImportMatches[0];
         const dstQualifiedKey = targetQKey(fp);
         if (dstQualifiedKey === null) continue; // ambiguous — do not emit bad nodeId
-        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9 });
+        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9, tier: 'import' });
         continue;
       }
       if (unboundAmbientCall) continue;
@@ -5309,7 +5324,7 @@ export function resolveEdges(
         const fp = narrowedTransitiveMatches[0];
         const dstQualifiedKey = targetQKey(fp);
         if (dstQualifiedKey === null) continue;
-        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.8 });
+        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.8, tier: 'transitive' });
         continue;
       }
       if (configuredBindingTargets?.length === 0) continue;
@@ -5352,7 +5367,7 @@ export function resolveEdges(
         if (bareCall && !definesAtModuleScope(fp)) continue; // only a member of that name
         const dstQualifiedKey = targetQKey(fp);
         if (dstQualifiedKey === null) continue; // ambiguous — do not emit bad nodeId
-        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.5 });
+        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.5, tier: 'global' });
         stats.resolvedGlobal++;
         continue;
       }

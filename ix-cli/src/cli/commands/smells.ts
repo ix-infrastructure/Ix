@@ -2,8 +2,7 @@
 
 import type { Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../../client/factory.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { llmLine, llmError, type LlmValue } from "../llm.js";
@@ -63,7 +62,7 @@ Examples:
       weakMaxNeighbors: string;
       list?: boolean;
     }) => {
-      const client = new IxClient(getEndpoint());
+      const client = createClient();
       const systemId = await resolveReadSystemId(client);
 
       if (opts.list) {

@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import type { EntityFacts } from "./facts.js";
+import { unresolvedCallNames, type EntityFacts } from "./facts.js";
 import type { RoleInference, RoleLabel } from "./role-inference.js";
 import type { ImportanceInference } from "./importance.js";
 import {
@@ -536,7 +536,11 @@ function renderNotes(facts: EntityFacts): string[] {
   for (const d of facts.diagnostics) {
     switch (d.code) {
       case "unresolved_call_target":
-        notes.push(`Some downstream calls could not be resolved to named entities. Run ${forMcp() ? "ix_map" : "`ix map`"} to improve coverage.`);
+        // Named when ingest recorded them; a pre-1.28 graph only has dangling
+        // edges, and the next map rebuilds it.
+        notes.push(facts.unresolvedCalls
+          ? `Calls with no definition in the graph (builtins, libraries or unresolved names): ${unresolvedCallNames(facts.unresolvedCalls)}.`
+          : `Some downstream calls could not be resolved to named entities. Run ${forMcp() ? "ix_map" : "`ix map`"} to improve coverage.`);
         break;
       case "stale_source":
         notes.push("Source file has changed since last ingest — results may be incomplete.");

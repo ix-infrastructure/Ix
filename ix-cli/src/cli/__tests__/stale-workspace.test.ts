@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { execFileSync } from "node:child_process";
 
 import { clearIngestMtimeCache, clearMapBaseline, ingestMtimeCachePath, saveConfig } from "../config.js";
 import { loadIngestBaseline } from "../ingest-baseline.js";
@@ -76,6 +77,8 @@ describe("workspace-scoped staleness", () => {
       currentRev: 11,
       staleFiles: 1,
       sampleChangedFiles: ["a.js"],
+      replayedFiles: [],
+      parseTimeouts: [],
     });
 
     expect(
@@ -139,6 +142,8 @@ describe("workspace-scoped staleness", () => {
       currentRev: 0,
       staleFiles: 0,
       sampleChangedFiles: [],
+      replayedFiles: [],
+      parseTimeouts: [],
     });
     // The workspace is unverified, but no individual file is known to have
     // changed — the distinction this pair of assertions exists to pin down.
@@ -200,6 +205,8 @@ describe("workspace-scoped staleness", () => {
       currentRev: 26,
       staleFiles: 0,
       sampleChangedFiles: [],
+      replayedFiles: [],
+      parseTimeouts: [],
     });
   });
 
@@ -272,6 +279,8 @@ describe("workspace-scoped staleness", () => {
       currentRev: 14,
       staleFiles: 1,
       sampleChangedFiles: ["deleted.js"],
+      replayedFiles: [],
+      parseTimeouts: [],
     });
     // From inside the workspace, as a read runs. The probe resolves the active
     // root from cwd, and a repository cwd now outranks `default: true` (see
@@ -312,6 +321,9 @@ describe("workspace-scoped staleness", () => {
       lastIngestAt: completedAt.toISOString(),
       tracksMapBaseline: true,
       extractor: "tree-sitter/9.9",
+      replayedFiles: [],
+      pendingFiles: [],
+      parseTimeouts: [],
     });
   });
 
@@ -333,6 +345,67 @@ describe("workspace-scoped staleness", () => {
     expect(persistIngestBaselineIfClean(root, new Map(), 21, 0, 0)).toBe(false);
     expect(loadIngestBaseline(root)?.files.size).toBe(1);
     expect(loadIngestBaseline(root)?.currentRev).toBe(20);
+  });
+
+  it("judges a root reached through a symlink by its own relative paths", () => {
+    // macOS's tmpdir (/var -> /private/var) and Windows 8.3 names are roots
+    // whose canonical path differs. Discovery returns canonical paths; the
+    // baseline may hold either spelling, and the report must say `a.js`.
+    const realRoot = path.join(home, "real");
+    const linkedRoot = path.join(home, "linked");
+    writeSource(realRoot, "a.js", "export const a = 1;\n");
+    writeSource(realRoot, "b.js", "export const b = 1;\n");
+    writeSource(realRoot, "gone.js", "export const gone = 1;\n");
+    fs.symlinkSync(realRoot, linkedRoot, "junction");
+    const fileA = path.join(linkedRoot, "a.js");
+    const fileB = fs.realpathSync.native(path.join(realRoot, "b.js"));
+    const gone = path.join(linkedRoot, "gone.js");
+
+    expect(
+      persistIngestBaselineIfClean(
+        linkedRoot,
+        new Map([
+          [fileA, fs.statSync(fileA).mtimeMs],
+          [fileB, fs.statSync(fileB).mtimeMs],
+          [gone, fs.statSync(gone).mtimeMs],
+        ]),
+        3,
+        0,
+        0,
+        new Date(Date.now() + 60_000),
+      ),
+    ).toBe(true);
+    expect(detectStaleFiles(linkedRoot).staleFiles).toBe(0);
+
+    moveMtimeForward(fileA);
+    fs.rmSync(gone);
+    const result = detectStaleFiles(linkedRoot);
+    expect(result.staleFiles).toBe(2);
+    expect([...result.sampleChangedFiles].sort()).toEqual(["a.js", "gone.js"]);
+  });
+
+  it("stops a walk at its cap without calling the files past it deleted; a git listing is not capped", () => {
+    // Status runs on every agent turn. Without a cap, a walk of a directory
+    // that is not a work tree -- a home directory, say -- reads the whole disk.
+    const root = path.join(home, "capped");
+    const files = ["a.js", "b.js", "c.js", "d.js", "e.js"].map((name) => writeSource(root, name, ""));
+    persistIngestBaselineIfClean(
+      root,
+      new Map(files.map((f) => [f, fs.statSync(f).mtimeMs])),
+      4,
+      0,
+      0,
+      new Date(Date.now() + 60_000),
+    );
+    for (const f of files) moveMtimeForward(f);
+
+    expect(detectStaleFiles(root, 5).staleFiles, "uncapped, every edit is seen").toBe(5);
+    const capped = detectStaleFiles(root, 5, 3);
+    expect(capped.staleFiles, "only the files read, and none reported deleted").toBe(3);
+
+    execFileSync("git", ["init", "-q"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["add", "-A"], { cwd: root, stdio: "ignore" });
+    expect(detectStaleFiles(root, 5, 3).staleFiles, "git lists the whole repository").toBe(5);
   });
 
   it("uses ingest time for files absent from the mtime cache", async () => {

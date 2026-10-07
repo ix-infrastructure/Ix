@@ -5,9 +5,14 @@ export interface GitHubRepo {
   repo: string;
 }
 
+const GITHUB_NAME = /^[A-Za-z0-9_.-]+$/;
+
 export function parseGitHubRepo(input: string): GitHubRepo {
   const parts = input.split("/");
-  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+  // Each part goes into an API URL path, so `..`, `.`, or anything outside
+  // GitHub's own name alphabet would change which endpoint is requested.
+  const valid = (p: string | undefined): p is string => !!p && GITHUB_NAME.test(p) && p !== "." && p !== "..";
+  if (parts.length !== 2 || !valid(parts[0]) || !valid(parts[1])) {
     throw new Error(`Invalid repo format: "${input}". Expected "owner/repo".`);
   }
   return { owner: parts[0], repo: parts[1] };
@@ -87,7 +92,7 @@ export async function fetchGitHubData(
   const { owner, repo: repoName } = repo;
   const base = `https://api.github.com/repos/${owner}/${repoName}`;
   const limit = opts.limit ?? 50;
-  const sinceParam = opts.since ? `&since=${opts.since}` : "";
+  const sinceParam = opts.since ? `&since=${encodeURIComponent(opts.since)}` : "";
 
   const issues = await ghFetch<GitHubIssue[]>(
     `${base}/issues?state=all&per_page=${limit}&sort=updated&direction=desc${sinceParam}`,

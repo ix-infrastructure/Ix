@@ -126,7 +126,7 @@ export class IxClient {
     });
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`${resp.status}: ${text}`);
+      throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
     }
     return resp.json() as Promise<IngestResult>;
   }
@@ -214,7 +214,7 @@ export class IxClient {
     claims: unknown[];
     edges: unknown[];
   }> {
-    return this.get(`/v1/entity/${id}`);
+    return this.get(`/v1/entity/${encodeURIComponent(id)}`);
   }
 
   async expandByName(
@@ -273,7 +273,7 @@ export class IxClient {
   }
 
   async getPatch(id: string): Promise<unknown> {
-    return this.get(`/v1/patches/${id}`);
+    return this.get(`/v1/patches/${encodeURIComponent(id)}`);
   }
 
   /**
@@ -307,7 +307,7 @@ export class IxClient {
   }
 
   async provenance(entityId: string): Promise<unknown> {
-    return this.post(`/v1/provenance/${entityId}`, {});
+    return this.post(`/v1/provenance/${encodeURIComponent(entityId)}`, {});
   }
 
   async commitPatch(patch: GraphPatchPayload): Promise<PatchCommitResult> {
@@ -319,7 +319,7 @@ export class IxClient {
     });
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`${resp.status}: ${text}`);
+      throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
     }
     return resp.json() as Promise<PatchCommitResult>;
   }
@@ -367,7 +367,7 @@ export class IxClient {
   // TTL, so turning an outage into `null` pinned every later read in a stitched
   // workspace to the single repo until the next map.
   async workspaceSystem(workspaceId: string): Promise<{ systemId: string | null }> {
-    try { return await this.get(`/v1/stitch/system/${workspaceId}`); }
+    try { return await this.get(`/v1/stitch/system/${encodeURIComponent(workspaceId)}`); }
     catch (err) {
       if (err instanceof Error && err.message.startsWith("404:")) return { systemId: null };
       throw err;
@@ -387,7 +387,7 @@ export class IxClient {
     });
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`${resp.status}: ${text}`);
+      throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
     }
     return resp.json();
   }
@@ -401,7 +401,7 @@ export class IxClient {
     });
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`${resp.status}: ${text}`);
+      throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
     }
     return resp.json() as Promise<PatchCommitResult>;
   }
@@ -550,7 +550,7 @@ export class IxClient {
     }
     if (!beginResp.ok) {
       const text = await beginResp.text();
-      throw new Error(`${beginResp.status}: ${text}`);
+      throw new Error(`${beginResp.status}: ${errorBodyForMessage(text)}`);
     }
 
     if (beginResp.status !== 202) {
@@ -659,7 +659,7 @@ export class IxClient {
     }
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`${resp.status}: ${text}`);
+      throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
     }
     return resp.json() as Promise<{ ok: boolean; message: string }>;
   }
@@ -673,7 +673,7 @@ export class IxClient {
     const resp = await fetch(`${this.endpoint}/v1/savings`, { method: "DELETE" });
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`${resp.status}: ${text}`);
+      throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
     }
     return resp.json();
   }
@@ -733,7 +733,7 @@ export class IxClient {
       const run = async (): Promise<SuccessBody> => {
         const resp = await send();
         const text = await resp.text();
-        if (!resp.ok) throw new Error(`${resp.status}: ${text}`);
+        if (!resp.ok) throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
         return { status: resp.status, text };
       };
       return this.limiter ? this.limiter.run(run) : run();
@@ -743,6 +743,25 @@ export class IxClient {
       : await fetchBody();
     return parseOrThrowWithStatus<T>(body);
   }
+}
+
+/**
+ * An error response body as it goes into an Error message. A JSON body is kept
+ * whole: callers read its error code back out of the message. Anything else,
+ * such as a proxy's HTML page, is cut to 300 characters, so a multi-megabyte
+ * page never becomes a message, a log line or an MCP tool result.
+ */
+export function errorBodyForMessage(text: string, max = 300): string {
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      JSON.parse(trimmed);
+      return text;
+    } catch {
+      // not JSON after all: truncate below
+    }
+  }
+  return text.length > max ? `${text.slice(0, max)}… (${text.length - max} more characters)` : text;
 }
 
 interface SuccessBody {

@@ -2,7 +2,8 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { buildGlobalResolutionIndex, parseFile, resolveEdges, type FileParseResult, type ParsedEntity, type ParsedRelationship } from '../index.js';
+import { buildGlobalResolutionIndex, parseFile, type FileParseResult, type ParsedEntity, type ParsedRelationship } from '../index.js';
+import { resolveEdges } from './helpers/untiered.js';
 import { SupportedLanguages } from '../languages.js';
 
 function entity(

@@ -5,9 +5,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 
 import { z } from "zod";
+import { isReadablePath } from "../cli/config.js";
 
 import {
   createProtocolStdout,
@@ -660,6 +661,19 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
           true,
         );
       }
+      // Confined like ix_read. An ingested path's workspace becomes a root
+      // ix_read may open files from, so an unconfined path let a caller turn
+      // any directory into a readable one (ix_ingest, then ix_read).
+      if (typeof input.path === "string" && !isReadablePath(resolvePath(process.cwd(), input.path))) {
+        return textResult(
+          JSON.stringify({
+            error: "path_outside_workspace",
+            message: `Refusing to ingest a path outside the workspace: ${input.path}. Run ix map in that directory to make it a workspace.`,
+            tool: "ix_ingest",
+          }),
+          true,
+        );
+      }
       const options: string[] = [];
       pushOption(options, "--github", input.github);
       pushOption(options, "--since", input.since);
@@ -813,6 +827,18 @@ function toArgv(argv: IxArgv, format: string): string[] {
 const MAX_TOOL_RESULT_BYTES = 24 * 1024;
 
 /**
+ * The failure text an error result carries. A command's stderr can be a whole
+ * stack trace or a multi-megabyte proxy page, and an error result goes into
+ * the model's context the same as a success does.
+ */
+const MAX_ERROR_DETAIL_CHARS = 4000;
+export function capErrorDetail(detail: string): string {
+  return detail.length > MAX_ERROR_DETAIL_CHARS
+    ? `${detail.slice(0, MAX_ERROR_DETAIL_CHARS)}… (${detail.length - MAX_ERROR_DETAIL_CHARS} more characters)`
+    : detail;
+}
+
+/**
  * Cap a record stream, on a line boundary, and say so in a record.
  *
  * Record streams only. Cutting JSON produces something that does not parse,
@@ -883,7 +909,7 @@ async function runJsonStructured(
   const result = await runIx(toArgv(argv, "json"), DEFAULT_TIMEOUT_MS);
   if (!result.ok) {
     const detail = result.stderr.trim() || result.stdout.trim() || `${argv.command} failed without output`;
-    return textResult(JSON.stringify({ error: detail, tool }), true);
+    return textResult(JSON.stringify({ error: capErrorDetail(detail), tool }), true);
   }
   const text = result.stdout.trim() || "{}";
   const parsed = parseJsonOutput(text);
@@ -915,7 +941,7 @@ async function runCommand(
       result.stderr.trim() ||
       result.stdout.trim() ||
       `${args.slice(0, 2).join(" ")} failed without output`;
-    return textResult(JSON.stringify({ error: detail, tool }), true);
+    return textResult(JSON.stringify({ error: capErrorDetail(detail), tool }), true);
   }
 
   return textResult(result.stdout.trim() || "{}");
@@ -943,7 +969,7 @@ async function runSmells(runIx: IxRunner, input: ToolInput): Promise<CallToolRes
   const result = await runIx(toArgv(ix("smells"), "json"), DEFAULT_TIMEOUT_MS);
   if (!result.ok) {
     const detail = result.stderr.trim() || result.stdout.trim() || "smells failed without output";
-    return textResult(JSON.stringify({ error: detail, tool: "ix_smells" }), true);
+    return textResult(JSON.stringify({ error: capErrorDetail(detail), tool: "ix_smells" }), true);
   }
 
   const parsed = parseJsonOutput(result.stdout);

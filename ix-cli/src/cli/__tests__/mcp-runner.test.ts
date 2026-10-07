@@ -405,6 +405,21 @@ describe("in-process ix runner", () => {
     });
   });
 
+  it("invalidates the read-scope cache after a failed run", async () => {
+    const run = testRunner();
+    resetReadScope.mockClear();
+
+    // A failed read is often "no workspace here"; the next call must look the
+    // scope up again rather than answer from the one that just failed.
+    expect(await run(["soft-fail"])).toMatchObject({ ok: false });
+    expect(resetReadScope).toHaveBeenCalledTimes(1);
+    expect(await run(["boom"])).toMatchObject({ ok: false });
+    expect(resetReadScope).toHaveBeenCalledTimes(2);
+
+    await run(["say", "read"]);
+    expect(resetReadScope).toHaveBeenCalledTimes(2);
+  });
+
   it("fails the run when output is truncated to protect the server heap", async () => {
     const run = createInProcessRunner({
       createProgram: createTestProgram,
