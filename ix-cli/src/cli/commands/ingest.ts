@@ -1100,6 +1100,8 @@ export interface IngestFilesSummary {
    * back out. That is the shape a #527 run has, and it is exactly right here.
    */
   filesSkippedAsUnchanged: number;
+  /** Files over the 1 MB parse limit, left out of the graph. Absent where no run counted them. */
+  filesTooLarge?: number;
   parseErrors: number;
   commitErrors: number;
   stitchErrors: number;
@@ -3982,6 +3984,7 @@ export async function ingestFiles(
     idempotentPatches,
     replayedChanges: [...replayedChanges].sort(),
     filesSkippedAsUnchanged,
+    filesTooLarge: tooLarge,
     // `+ crashedParses()`, as the baseline and delete guards already do. Files
     // lost to a dead parse pool raise `filesSkippedUnparsed`, never
     // `parseErrors`, so without this everything downstream read the run as
@@ -4303,7 +4306,10 @@ async function ingestGitHub(opts: {
   for (const commit of data.commits) allOps.push(...transformCommit(repo, commit));
 
   const patch: GraphPatchPayload = {
-    patchId: deterministicId(`github://${repo.owner}/${repo.repo}:${since}:${Date.now()}`),
+    // From what is sent, not the clock: the same issues, PRs and commits give
+    // the same id, so re-running an unchanged ingest is a no-op on the backend
+    // instead of a new revision of identical facts.
+    patchId: deterministicId(`github://${repo.owner}/${repo.repo}:${sha256(Buffer.from(JSON.stringify(allOps)))}`),
     // IX_PATCH_ACTOR="" lets a kOS cloud backend stamp the verified principal
     // (it 403s a non-empty actor that differs from it); see core-ingestion patchActor().
     actor: process.env.IX_PATCH_ACTOR ?? 'ix/github-ingest',

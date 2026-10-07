@@ -1082,6 +1082,17 @@ describe("ingestFiles against a fake backend", () => {
     });
   });
 
+  it("counts a file over the size limit in the summary, so ix map can say so", async () => {
+    fixture(2);
+    writeFileSync(join(repo, "src", "huge.ts"), `export const big = "${"x".repeat(1024 * 1024 + 10)}";\n`, "utf8");
+    execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+
+    const summary = await run();
+
+    expect(summary.filesTooLarge).toBe(1);
+    expect(summary.patchesApplied).toBe(2);
+  });
+
   it("ingests only the languages --lang names, and keeps the rest of the baseline", async () => {
     fixture(3);
     writeFileSync(join(repo, "src", "tool.py"), "def tool():\n    return 1\n", "utf8");

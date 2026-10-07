@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { persistIngestBaselineIfClean } from "../commands/ingest.js";
-import { persistCompletedMapBaseline } from "../commands/map.js";
+import { describeTooLargeFiles, persistCompletedMapBaseline } from "../commands/map.js";
 import { loadMapBaseline, saveMapBaseline } from "../map-baseline.js";
 import { ingestMtimeCachePath } from "../config.js";
 import { hasCompletedMapBaseline } from "../stale.js";
@@ -179,5 +179,15 @@ describe("upgrade from a baseline written before the map marker", () => {
     saveMapBaseline(root, 4);
 
     expect(hasCompletedMapBaseline(root)).toBe(false);
+  });
+});
+
+describe("describeTooLargeFiles", () => {
+  it("names files left out for size, and says nothing when there were none", () => {
+    expect(describeTooLargeFiles({ filesTooLarge: 1 })).toBe("1 file over 1 MB was not mapped.");
+    expect(describeTooLargeFiles({ filesTooLarge: 3 })).toBe("3 files over 1 MB were not mapped.");
+    expect(describeTooLargeFiles({ filesTooLarge: 0 })).toBeUndefined();
+    expect(describeTooLargeFiles({})).toBeUndefined();
+    expect(describeTooLargeFiles(undefined)).toBeUndefined();
   });
 });

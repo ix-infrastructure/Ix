@@ -286,10 +286,25 @@ export function describeDroppedFiles(
 }
 
 function emitDroppedFileWarning(
-  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors"> | undefined,
+  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors" | "filesTooLarge"> | undefined,
 ): void {
   const message = describeDroppedFiles(ingest);
   if (message) process.stderr.write(chalk.yellow(`  ${message}\n`));
+  const tooLarge = describeTooLargeFiles(ingest);
+  if (tooLarge) process.stderr.write(chalk.dim(`  ${tooLarge}\n`));
+}
+
+/**
+ * Files over the 1 MB parse limit are left out of the map. `ix ingest` lists
+ * them in its summary; `ix map` said nothing, so a large generated or vendored
+ * file was simply absent from the graph with no hint why.
+ */
+export function describeTooLargeFiles(
+  ingest: Pick<IngestFilesSummary, "filesTooLarge"> | undefined,
+): string | undefined {
+  const n = ingest?.filesTooLarge ?? 0;
+  if (n <= 0) return undefined;
+  return `${n} file${n === 1 ? "" : "s"} over 1 MB ${n === 1 ? "was" : "were"} not mapped.`;
 }
 
 /**
