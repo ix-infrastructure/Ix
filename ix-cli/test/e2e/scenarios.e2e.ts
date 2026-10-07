@@ -55,25 +55,25 @@ function edit(co: Checkout, rel: string, change: (text: string) => string): void
 const replaceAll = (from: string, to: string) => (text: string) => text.split(from).join(to);
 
 describe("revert to earlier content", () => {
-  it(
-    "[fails until BEW-03] A -> B -> A equals A",
-    failsUntil(["BEW-03"], async () => {
-      const co = checkout("polyglot");
-      map(env, co);
-      const a = await signature(env, co);
+  // Was [fails until BEW-03]. BEW-03 is in the pinned backend; what was left
+  // was the edited Python file's cross-file calls, resolved against itself
+  // alone until the persisted symbol table (IN-10).
+  it("A -> B -> A equals A", async () => {
+    const co = checkout("polyglot");
+    map(env, co);
+    const a = await signature(env, co);
 
-      edit(
-        co,
-        "app/pricing.py",
-        (t) => t + "\n\ndef surcharge(amount):\n    return add_tax(amount) + 100\n",
-      );
-      map(env, co);
-      edit(co, "app/pricing.py", (t) => t.slice(0, t.indexOf("\n\ndef surcharge")));
-      map(env, co);
+    edit(
+      co,
+      "app/pricing.py",
+      (t) => t + "\n\ndef surcharge(amount):\n    return add_tax(amount) + 100\n",
+    );
+    map(env, co);
+    edit(co, "app/pricing.py", (t) => t.slice(0, t.indexOf("\n\ndef surcharge")));
+    map(env, co);
 
-      expectSameGraph("A->B->A", await signature(env, co), a);
-    }),
-  );
+    expectSameGraph("A->B->A", await signature(env, co), a);
+  });
 
   // Marked [fails until BEW-03] until tree-sitter/1.28. All that was left of
   // the renamed state was edges with no live node at either end: the renamed
@@ -156,18 +156,15 @@ describe("two workspaces in one backend", () => {
 });
 
 describe("incremental equals fresh", () => {
-  it(
-    "[fails until IN-10] edit one Python file",
-    failsUntil(["IN-10"], async () => {
-      const co = checkout("polyglot");
-      map(env, co);
-      edit(co, "app/services.py", (t) => t + "\n# edited\n");
-      map(env, co);
-      const incremental = await signature(env, co);
+  it("edit one Python file", async () => {
+    const co = checkout("polyglot");
+    map(env, co);
+    edit(co, "app/services.py", (t) => t + "\n# edited\n");
+    map(env, co);
+    const incremental = await signature(env, co);
 
-      expectSameGraph("python edit", incremental, await freshSignature(env, co));
-    }),
-  );
+    expectSameGraph("python edit", incremental, await freshSignature(env, co));
+  });
 
   it("edit one TypeScript file", async () => {
     const co = checkout("polyglot");
