@@ -1161,6 +1161,40 @@ describe("ingestFiles against a fake backend", () => {
     expect(backend.singleCount, "the fan-out is for failures only").toBe(0);
   });
 
+  describe("a patch that deletes (IN-04)", () => {
+    const incremental = () =>
+      ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
+    const perFile = () => backend.requests.filter(r => r.path === "/v1/patch").length;
+    /** Map two files, then drop `g` from one of them: its patch carries a DeleteNode. */
+    const removeAFunction = async (): Promise<void> => {
+      backend.semantics = "head";
+      mkdirSync(join(repo, "src"), { recursive: true });
+      writeFileSync(join(repo, "src", "a.ts"), "export function f(): number { return 1; }\nexport function g(): number { return 2; }\n", "utf8");
+      writeFileSync(join(repo, "src", "b.ts"), "export const b = 1;\n", "utf8");
+      execFileSync("git", ["init", "-q"], { cwd: repo, stdio: "ignore" });
+      execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+      await incremental();
+      writeFileSync(join(repo, "src", "a.ts"), "export function f(): number { return 1; }\n", "utf8");
+      backend.resetRequests();
+      await incremental();
+    };
+
+    it("goes through the bulk route on a backend that applies bulk deletes", async () => {
+      backend.releaseVersion = "1.0.32";
+      await removeAFunction();
+      expect(backend.lastOps.get("src/a.ts")?.some(op => op.type === "DeleteNode"), "the patch deletes").toBe(true);
+      expect(backend.bulkCount).toBe(1);
+      expect(perFile()).toBe(0);
+    });
+
+    it("goes to /v1/patch on its own on a backend that reports no release, or an older one", async () => {
+      backend.releaseVersion = null;
+      await removeAFunction();
+      expect(backend.lastOps.get("src/a.ts")?.some(op => op.type === "DeleteNode"), "the patch deletes").toBe(true);
+      expect(perFile()).toBe(1);
+    });
+  });
+
   // ── Which workspace a path belongs to ─────────────────────────────────
   //
   // `ix ingest <path>` used to treat the path as its own workspace root: `ix
