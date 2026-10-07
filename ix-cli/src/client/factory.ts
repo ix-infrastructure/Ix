@@ -3,6 +3,7 @@
 import { getEndpoint, getLocalToken } from "../cli/config.js";
 import { IxClient } from "./api.js";
 import { QUERY_CLIENT_OPTIONS } from "./request-memo.js";
+import { combineSignals, currentRunSignal } from "./run-signal.js";
 
 export interface CreateClientOptions {
   /** Backend URL. Defaults to `getEndpoint()` (IX_ENDPOINT, then config.yaml). */
@@ -27,7 +28,9 @@ export function createClient(opts: CreateClientOptions = {}): IxClient {
   const token = getLocalToken(endpoint);
   return new IxClient(
     endpoint,
-    opts.deadlineSignal,
+    // Under `ix mcp`, the tool call's own deadline as well: its timeout aborts
+    // this client's requests instead of leaving them open (see run-signal.ts).
+    combineSignals(opts.deadlineSignal, currentRunSignal()),
     { ...(opts.query ? QUERY_CLIENT_OPTIONS : {}), ...(token ? { token } : {}) },
   );
 }
