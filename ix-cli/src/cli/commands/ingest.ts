@@ -2223,7 +2223,11 @@ export async function ingestFiles(
     // `ingest-symbols.ts`). The resolution index is built from it, so an edit
     // parses only the files that changed, in any language, and still resolves
     // against all the others.
-    const symbolTable = loadIngestSymbols(projectRoot, currentExtractor);
+    // Loaded on first use: a run with nothing to parse never reads it, and on a
+    // large repository it is tens of megabytes of JSON.
+    let loadedSymbolTable: Map<string, SymbolEntry> | undefined;
+    const symbolTable = (): Map<string, SymbolEntry> =>
+      (loadedSymbolTable ??= loadIngestSymbols(projectRoot, currentExtractor));
     let symbolTableChanged = false;
     /** sha256 of each file this run has read, by absolute path. */
     const currentHashes = new Map<string, string>();
@@ -2232,7 +2236,7 @@ export async function ingestFiles(
     /** Record what a parse in this run learned about a file, for the next run. */
     const noteSummary = (relFilePath: string, hash: string, parsed: any, mtime: number | undefined): void => {
       if (!summarize || !parsed) return;
-      symbolTable.set(relFilePath, { hash, summary: summarize(parsed), ...(mtime !== undefined ? { mtime } : {}) });
+      symbolTable().set(relFilePath, { hash, summary: summarize(parsed), ...(mtime !== undefined ? { mtime } : {}) });
       symbolTableChanged = true;
     };
     /** The file's mtime now: from this run's stat loop, or a stat for a file outside it. */
@@ -2288,7 +2292,7 @@ export async function ingestFiles(
       const missing: string[] = [];
       for (const abs of resolutionPaths) {
         const rel = toWorkspaceRelative(abs);
-        const entry = symbolTable.get(rel);
+        const entry = symbolTable().get(rel);
         if (tableEntryValid(abs, entry, trustMtime)) {
           summaries.set(rel, entry!.summary);
           continue;
@@ -2318,7 +2322,7 @@ export async function ingestFiles(
           currentHashes.set(chunk[j], hash);
           const rel = toWorkspaceRelative(chunk[j]);
           noteSummary(rel, hash, parsed[j], mtimes[j]);
-          const entry = symbolTable.get(rel);
+          const entry = symbolTable().get(rel);
           if (entry && entry.hash === hash) summaries.set(rel, entry.summary);
         }
       }
@@ -3591,8 +3595,9 @@ export async function ingestFiles(
     // not every commit landed -- pruned to the files that still exist.
     if (symbolTableChanged) {
       const existing = new Set(resolutionPaths.map(toWorkspaceRelative));
-      for (const rel of [...symbolTable.keys()]) if (!existing.has(rel)) symbolTable.delete(rel);
-      saveIngestSymbols(projectRoot, currentExtractor, symbolTable);
+      const table = symbolTable();
+      for (const rel of [...table.keys()]) if (!existing.has(rel)) table.delete(rel);
+      saveIngestSymbols(projectRoot, currentExtractor, table);
     }
     if (rebuildProgress !== null) {
       // Finished: the baseline now records the new extractor. Otherwise keep
