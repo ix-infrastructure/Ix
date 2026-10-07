@@ -298,7 +298,10 @@ No flags.
 
 Start the IX backend (ArangoDB + Memory Layer).
 
-No flags.
+| Flag | Value | Default | Effect |
+|---|---|---|---|
+| `--local-token` | — | off | Require a bearer token on the backend; the CLI stores and sends it |
+| `--no-local-token` | — | — | Stop requiring the token and forget the stored one |
 
 #### `ix docker stop`
 
