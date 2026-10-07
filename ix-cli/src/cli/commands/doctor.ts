@@ -20,6 +20,8 @@ import { resolveReadSystemId } from "../resolve.js";
 import { assessGraphStats } from "../graph-health.js";
 import { llmLine, printLlmLines } from "../llm.js";
 import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { parse as parseYaml } from "yaml";
 import { join as pathJoin, resolve as resolvePath, win32 as winPath } from "node:path";
 import { homedir } from "node:os";
 import {
@@ -35,7 +37,7 @@ import { loadIngestBaseline } from "../ingest-baseline.js";
 import { isCloudReady } from "../remote.js";
 import { hasCompletedMapBaseline } from "../stale.js";
 import { printJson } from "../format.js";
-import type { CapabilitiesResponse } from "../../client/types.js";
+import type { CapabilitiesResponse, HealthResponse } from "../../client/types.js";
 
 interface CheckResult {
   ok: boolean;
@@ -239,6 +241,71 @@ export function assessLocalAuth(
   };
 }
 
+/**
+ * A health answer, including the 503 a backend sends while it cannot reach its
+ * database: that is a server that answered, and the body says what is wrong.
+ * Thrown for anything else.
+ */
+export function healthFromError(err: unknown): HealthResponse | null {
+  const m = /^503:\s*(\{.*\})\s*$/s.exec((err as Error)?.message ?? "");
+  if (!m) return null;
+  try {
+    const body = JSON.parse(m[1]!) as HealthResponse;
+    return typeof body?.status === "string" ? body : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * "Database reachable" from the health answer. A backend that reports
+ * `database` says so itself; an older one never touched the database for
+ * health, so `probe` asks a route that does (`/v1/revisions/current`).
+ */
+export async function assessDatabase(
+  health: HealthResponse | Error,
+  probe: () => Promise<unknown>,
+): Promise<CheckResult> {
+  if (health instanceof Error) return { ok: true, detail: "backend unreachable (skipped)" };
+  if (health.database === "reachable") return { ok: true, detail: "reachable (backend health)" };
+  if (health.database === "unreachable") {
+    return { ok: false, detail: "the memory layer cannot reach ArangoDB — check 'ix docker status' and 'ix docker logs'" };
+  }
+  try {
+    await probe();
+    return { ok: true, detail: "reachable (read the current revision)" };
+  } catch (e) {
+    const msg = (e as Error)?.message ?? String(e);
+    return { ok: false, detail: `the backend could not read its database: ${msg.slice(0, 200)}` };
+  }
+}
+
+/** "Config file parses": a config.yaml Ix cannot read is otherwise silently replaced by defaults. */
+export function assessConfigFile(configPath: string, read: (p: string) => string | null): CheckResult {
+  const raw = read(configPath);
+  if (raw === null) return { ok: true, detail: "no config file (defaults)" };
+  try {
+    const parsed = parseYaml(raw);
+    if (parsed !== null && parsed !== undefined && (typeof parsed !== "object" || Array.isArray(parsed))) {
+      return { ok: false, detail: `${configPath} is not a mapping of settings` };
+    }
+    return { ok: true, detail: configPath };
+  } catch (e) {
+    const first = ((e as Error)?.message ?? String(e)).split("\n")[0];
+    return { ok: false, detail: `${configPath} does not parse, so Ix runs on defaults: ${first}` };
+  }
+}
+
+/** "ripgrep on PATH": `ix text` needs it; everything else works without it. */
+export function checkRipgrep(run: () => string = () => execFileSync("rg", ["--version"], { encoding: "utf-8", timeout: 5000 })): CheckResult {
+  try {
+    const first = run().split("\n")[0]?.trim();
+    return { ok: true, detail: first || "rg found" };
+  } catch {
+    return { ok: false, warn: true, detail: "rg not found on PATH — 'ix text' needs ripgrep" };
+  }
+}
+
 export function registerDoctorCommand(program: Command): void {
   program
     .command("doctor")
@@ -294,6 +361,16 @@ export function registerDoctorCommand(program: Command): void {
         return { stats, scope, systemId };
       })());
 
+      // One /v1/health for "Server reachable" and "Database reachable". A 503
+      // with a health body is the backend reporting a dead database, so it is
+      // an answer, not a failure to reach the server.
+      let healthOnce: Promise<HealthResponse> | undefined;
+      const health = (): Promise<HealthResponse> => (healthOnce ??= readBackendHealth(client).catch((e: unknown) => {
+        const degraded = healthFromError(e);
+        if (degraded) return degraded;
+        throw e;
+      }));
+
       const checks: Check[] = [
         {
           name: "Server reachable",
@@ -301,8 +378,10 @@ export function registerDoctorCommand(program: Command): void {
             try {
               // Records what the backend says it is running; see
               // backend-version.ts. Free — this response is already needed.
-              const h = await readBackendHealth(client);
-              return { ok: h.status === "ok", detail: `${endpoint} → ${h.status}` };
+              const h = await health();
+              // A degraded answer is still a server that answered; the
+              // database check below names what is wrong with it.
+              return { ok: h.status === "ok" || h.status === "degraded", detail: `${endpoint} → ${h.status}` };
             } catch (e: any) {
               // An unreachable backend is where a fatal Arango boot loop hides:
               // the container restarts forever, memory-layer never leaves
@@ -310,13 +389,25 @@ export function registerDoctorCommand(program: Command): void {
               // indistinguishable from "not started yet". Say what the stack
               // actually reported. Ix#614.
               const base = e.message ?? "unreachable";
-              const failure = dockerAvailable() ? diagnoseBackendStack() : null;
+              const failure = isLocalEndpoint(endpoint) && dockerAvailable() ? diagnoseBackendStack() : null;
               if (!failure) return { ok: false, detail: base };
               const parts = [`${base} — ${failure.service} is ${failure.state}`];
               if (failure.lastError) parts.push(`  last log: ${failure.lastError}`);
               if (failure.remedy) parts.push(`  fix: ${failure.remedy}`);
               return { ok: false, detail: parts.join("\n") };
             }
+          },
+        },
+        {
+          name: "Database reachable",
+          run: async () => {
+            let h: HealthResponse | Error;
+            try {
+              h = await health();
+            } catch (e) {
+              h = e instanceof Error ? e : new Error(String(e));
+            }
+            return assessDatabase(h, () => client.currentRevision());
           },
         },
         {
@@ -479,7 +570,7 @@ export function registerDoctorCommand(program: Command): void {
           // Ix#270: trust the running container, not the version stamp.
           name: "Backend is the released image",
           run: async () => {
-            const status = checkBackendImage();
+            const status = checkBackendImage(endpoint);
             switch (status.kind) {
               case "ok": {
                 if (isNonStandardBackend(status.container)) {
@@ -505,7 +596,9 @@ export function registerDoctorCommand(program: Command): void {
               case "latest-not-pulled":
                 return { ok: true, warn: true, detail: `can't verify — ${BACKEND_IMAGE}:latest not pulled locally` };
               case "not-running":
-                return { ok: true, detail: "no backend container on :8090 (skipped)" };
+                return { ok: true, detail: `no backend container for ${endpoint} (skipped)` };
+              case "remote":
+                return { ok: true, detail: "remote endpoint, no local container (skipped)" };
               case "docker-unavailable":
                 return { ok: true, detail: "docker unavailable (skipped)" };
             }
@@ -527,6 +620,17 @@ export function registerDoctorCommand(program: Command): void {
           },
         },
       ];
+
+      checks.push(
+        {
+          name: "Config file parses",
+          run: async () => assessConfigFile(
+            pathJoin(ixHome(), "config.yaml"),
+            (p) => { try { return readFileSync(p, "utf-8"); } catch { return null; } },
+          ),
+        },
+        { name: "ripgrep on PATH", run: async () => checkRipgrep() },
+      );
 
       // Windows-only: a launcher pointing at a CLI the upgrade moved (Ix#385).
       if (process.platform === "win32") {
@@ -571,7 +675,7 @@ export function registerDoctorCommand(program: Command): void {
 
       console.log();
       if (hasFailure) {
-        renderError("Some checks failed. Run with --format json for details.");
+        renderError("Some checks failed.");
       } else if (hasWarning) {
         renderSuccess("All checks passed (with warnings).");
       } else {

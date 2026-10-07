@@ -2,6 +2,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 type FakeWorkspace = { workspace_id: string; workspace_name: string; root_path: string; default: boolean };
 
@@ -21,6 +24,7 @@ const scope = {
   sourceBaseline: true,
   mapCompleted: true,
   cloudReady: false,
+  databaseDown: false,
 };
 
 vi.mock("../../client/api.js", () => ({
@@ -95,10 +99,16 @@ vi.mock("../backend-status.js", async (orig) => ({
 
 vi.mock("../commands/upgrade.js", async (orig) => ({
   ...(await orig<typeof import("../commands/upgrade.js")>()),
-  readBackendHealth: async () => ({ status: "ok", schema_version: 3 }),
+  // A current backend reports its database; a 503 with a health body is that
+  // backend saying ArangoDB is down.
+  readBackendHealth: async () => {
+    if (scope.databaseDown) throw new Error('503: {"status":"degraded","database":"unreachable","schema_version":3}');
+    return { status: "ok", schema_version: 3, database: "reachable" };
+  },
 }));
 
 let savedEndpoint: string | undefined;
+let savedHome: string | undefined;
 let savedExitCode: number | string | undefined;
 
 beforeEach(() => {
@@ -110,10 +120,14 @@ beforeEach(() => {
   scope.sourceBaseline = true;
   scope.mapCompleted = true;
   scope.cloudReady = false;
+  scope.databaseDown = false;
   // Belt and braces with the mocks above: nothing in this test may depend on a
   // backend being reachable, or on how quickly a given OS refuses a connection.
   savedEndpoint = process.env.IX_ENDPOINT;
   process.env.IX_ENDPOINT = "http://127.0.0.1:9";
+  // "Config file parses" reads $IX_HOME/config.yaml: never the developer's.
+  savedHome = process.env.IX_HOME;
+  process.env.IX_HOME = mkdtempSync(join(tmpdir(), "ix-doctor-"));
   savedExitCode = process.exitCode;
   process.exitCode = undefined;
 });
@@ -121,6 +135,9 @@ beforeEach(() => {
 afterEach(() => {
   if (savedEndpoint === undefined) delete process.env.IX_ENDPOINT;
   else process.env.IX_ENDPOINT = savedEndpoint;
+  rmSync(process.env.IX_HOME!, { recursive: true, force: true });
+  if (savedHome === undefined) delete process.env.IX_HOME;
+  else process.env.IX_HOME = savedHome;
   process.exitCode = savedExitCode;
 });
 
@@ -173,6 +190,18 @@ describe("ix doctor", () => {
     expect(lines).toContain(
       'check name="Completed map for this workspace" status=ok detail="recorded at revision 42"',
     );
+  });
+
+  it("fails, naming the database, when the backend reports ArangoDB unreachable", async () => {
+    scope.databaseDown = true;
+
+    const lines = await runDoctor();
+
+    expect(lines[0]).toContain("healthy=false");
+    expect(process.exitCode).toBe(1);
+    // The server answered, so it is reachable; the database is what is down.
+    expect(lines).toContain('check name="Server reachable" status=ok detail="http://127.0.0.1:9 → degraded"');
+    expect(lines.find((l) => l.includes('name="Database reachable"'))).toMatch(/status=fail .*cannot reach ArangoDB/);
   });
 
   it("does not report a partial graph as healthy when no completed baseline exists", async () => {
