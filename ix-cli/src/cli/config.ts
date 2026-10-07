@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { readFileSync, writeFileSync, existsSync, rmSync, chmodSync, renameSync, realpathSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, rmSync, chmodSync, renameSync, realpathSync, mkdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -8,6 +8,7 @@ import { parse, stringify } from "yaml";
 import { IxClient } from "../client/api.js";
 import { ixHome } from "./ix-home.js";
 import { isLocalEndpoint } from "./backend-version.js";
+import { acquireLockAt, namedLockPath } from "./single-flight.js";
 
 /**
  * The key of a project root's per-root state files. Canonical first: `ix
@@ -156,6 +157,27 @@ const defaultConfig: IxConfig = {
   format: "text",
 };
 
+/**
+ * config.yaml exists and does not parse. Thrown rather than answered with the
+ * defaults: falling back silently ran every command against the default
+ * endpoint with no workspaces, and the first registration then saved over the
+ * file. The error boundary prints the path and the parser's message.
+ */
+export class ConfigParseError extends Error {
+  constructor(readonly path: string, readonly detail: string) {
+    super(`${path} is not valid YAML: ${detail}`);
+    this.name = "ConfigParseError";
+  }
+}
+
+/**
+ * The last parse of config.yaml, keyed by the file's mtime and size. A command
+ * loads the config a dozen times or more, and with many workspaces each YAML
+ * parse costs milliseconds; the key catches a write by another process, and
+ * `saveConfig` drops it for this one.
+ */
+let configMemo: { path: string; mtimeMs: number; size: number; config: IxConfig } | undefined;
+
 export function loadConfig(): IxConfig {
   const configPath = join(ixHome(), "config.yaml");
   // A copy, here and below: callers edit what they get back and save it.
@@ -163,20 +185,110 @@ export function loadConfig(): IxConfig {
   // workspace into it, so every later load in the process that found no
   // config file -- a fresh IX_HOME, a deleted file -- inherited workspaces
   // that were never in either.
-  if (!existsSync(configPath)) return { ...defaultConfig };
+  let stat: { mtimeMs: number; size: number };
   try {
-    const raw = readFileSync(configPath, "utf-8");
-    const parsed = parse(raw) as Partial<IxConfig>;
-    // Normalize workspace_id to a string. saveConfig quotes an all-digit path-hash
-    // id, but a hand-edited or legacy unquoted value parses from YAML as a number,
-    // which then silently breaks string id comparisons (e.g. migration detection
-    // would re-key a workspace that is already on the correct id).
-    if (Array.isArray(parsed.workspaces)) {
-      parsed.workspaces = parsed.workspaces.map((w) => ({ ...w, workspace_id: String(w.workspace_id) }));
-    }
-    return { ...defaultConfig, ...parsed };
+    stat = statSync(configPath);
   } catch {
     return { ...defaultConfig };
+  }
+  if (configMemo && configMemo.path === configPath && configMemo.mtimeMs === stat.mtimeMs && configMemo.size === stat.size) {
+    return structuredClone(configMemo.config);
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(configPath, "utf-8");
+  } catch {
+    return { ...defaultConfig };
+  }
+  let parsed: Partial<IxConfig> | null;
+  try {
+    parsed = parse(raw) as Partial<IxConfig> | null;
+  } catch (err) {
+    throw new ConfigParseError(configPath, (err instanceof Error ? err.message : String(err)).split("\n")[0]!);
+  }
+  if (parsed === null || parsed === undefined) parsed = {}; // an empty file
+  if (typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ConfigParseError(configPath, "the top level is not a mapping of settings");
+  }
+  // Normalize workspace_id to a string. saveConfig quotes an all-digit path-hash
+  // id, but a hand-edited or legacy unquoted value parses from YAML as a number,
+  // which then silently breaks string id comparisons (e.g. migration detection
+  // would re-key a workspace that is already on the correct id).
+  if (Array.isArray(parsed.workspaces)) {
+    parsed.workspaces = parsed.workspaces.map((w) => ({ ...w, workspace_id: String(w.workspace_id) }));
+  }
+  const config = { ...defaultConfig, ...parsed };
+  configMemo = { path: configPath, mtimeMs: stat.mtimeMs, size: stat.size, config: structuredClone(config) };
+  return config;
+}
+
+/**
+ * The `format` setting alone, for command registration, which runs before
+ * anything else on every invocation -- `ix --version` included. A full parse
+ * of a config with a thousand workspaces is ~60 ms, all of it for one scalar
+ * that sits on its own top-level line, so this reads that line. A memoised
+ * parse is used when there is one. Undefined when the file or the key is
+ * missing or unreadable: registration never fails on the config.
+ */
+export function readConfiguredFormat(): string | undefined {
+  const configPath = join(ixHome(), "config.yaml");
+  if (configMemo?.path === configPath) {
+    try {
+      const st = statSync(configPath);
+      if (st.mtimeMs === configMemo.mtimeMs && st.size === configMemo.size) return configMemo.config.format;
+    } catch { return undefined; }
+  }
+  let raw: string;
+  try { raw = readFileSync(configPath, "utf-8"); } catch { return undefined; }
+  const m = /^format:[ \t]*(?:"([^"\n]*)"|'([^'\n]*)'|([^\s#]+))[ \t]*(?:#.*)?$/m.exec(raw);
+  return m ? (m[1] ?? m[2] ?? m[3]) : undefined;
+}
+
+/** Test hook: forget the memoised parse. */
+export function resetConfigMemo(): void {
+  configMemo = undefined;
+}
+
+/** How long a config write waits for another process's before going ahead anyway. */
+const CONFIG_LOCK_WAIT_MS = 5_000;
+
+/**
+ * Read config.yaml, apply `mutate`, and write it back, with no other Ix
+ * process writing it in between.
+ *
+ * `saveConfig` alone is atomic per write but last-writer-wins: eight `ix map`
+ * runs registering eight new repositories each read the file, each appended
+ * its own workspace, and each renamed its copy over the others' -- leaving one
+ * or two of the eight. Under the lock each one reads what the previous one
+ * wrote. The lock is the single-flight link lock, so a crashed holder is
+ * detected by its dead pid; past {@link CONFIG_LOCK_WAIT_MS} the write goes
+ * ahead unlocked rather than hang a command.
+ *
+ * `mutate` gets a fresh read, never the memoised one, and returns the config
+ * to save, or undefined to leave the file as it is.
+ */
+export function updateConfig<T>(mutate: (config: IxConfig) => { save?: IxConfig; result: T }): T {
+  const configPath = join(ixHome(), "config.yaml");
+  const lock = waitForLock(namedLockPath("config", configPath), `config write ${configPath}`);
+  try {
+    configMemo = undefined;
+    const { save, result } = mutate(loadConfig());
+    if (save) saveConfig(save);
+    return result;
+  } finally {
+    lock?.release();
+  }
+}
+
+function waitForLock(path: string, label: string): { release(): void } | null {
+  const deadline = Date.now() + CONFIG_LOCK_WAIT_MS;
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    const handle = acquireLockAt(path, label);
+    if (handle) return handle;
+    if (Date.now() >= deadline) return null;
+    // A synchronous wait: registration runs inside synchronous callers.
+    Atomics.wait(pause, 0, 0, 5 + Math.floor(Math.random() * 20));
   }
 }
 
@@ -252,6 +364,7 @@ export function saveConfig(config: IxConfig): void {
   } catch {
     // chmod can fail on exotic filesystems; the temp's create-mode is the primary guard.
   }
+  configMemo = undefined;
 }
 
 export function getEndpoint(): string {
@@ -287,21 +400,24 @@ export function storedLocalToken(): string | undefined {
 export function ensureLocalToken(): string {
   const existing = storedLocalToken();
   if (existing) return existing;
-  const config = loadConfig();
-  const token = randomBytes(32).toString("hex");
-  saveConfig({ ...config, auth: { ...config.auth, local_token: token } });
-  return token;
+  return updateConfig((config) => {
+    const stored = config.auth?.local_token;
+    if (typeof stored === "string" && stored.trim()) return { result: stored.trim() };
+    const token = randomBytes(32).toString("hex");
+    return { save: { ...config, auth: { ...config.auth, local_token: token } }, result: token };
+  });
 }
 
 /** Forget the stored local token. */
 export function clearLocalToken(): void {
-  const config = loadConfig();
-  if (!config.auth?.local_token) return;
-  const { local_token: _dropped, ...rest } = config.auth;
-  const next: IxConfig = { ...config };
-  if (Object.keys(rest).length > 0) next.auth = rest;
-  else delete next.auth;
-  saveConfig(next);
+  updateConfig((config) => {
+    if (!config.auth?.local_token) return { result: undefined };
+    const { local_token: _dropped, ...rest } = config.auth;
+    const next: IxConfig = { ...config };
+    if (Object.keys(rest).length > 0) next.auth = rest;
+    else delete next.auth;
+    return { save: next, result: undefined };
+  });
 }
 
 // Kept for @ix/pro, which imports it. The factory itself is the synchronous

@@ -91,6 +91,7 @@ before it exits: `ix map` re-ingests the workspace, and so does `ix ingest` when
 | `ix view` | Opens the [Compass](/guides/compass/) visualizer |
 | `ix mcp` | Runs the [MCP server](/integrations/mcp/). `ix mcp install` registers it with your clients |
 | `ix config show` / `get` / `set` | Reads and writes [configuration](/reference/configuration/) |
+| `ix config prune` | Removes registered workspaces whose directory no longer exists (`--dry-run` lists them) |
 | `ix savings` | Reports tokens saved against reading files directly. `--detail` breaks it down by command |
 | `ix savings reset` | Clears the saved totals. Can't be undone |
 | `ix help [topic]` | Help on a command, or the `workflows` and `advanced` topics |
