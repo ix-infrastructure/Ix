@@ -325,6 +325,20 @@ export function backendUnreachableError(endpoint?: string): StructuredError {
   };
 }
 
+/**
+ * The backend answered 401 `local_token_required`: it was started with
+ * IX_LOCAL_TOKEN and this CLI sent no token, or a different one.
+ */
+export function localTokenRequiredError(endpoint?: string): StructuredError {
+  return {
+    error: "local_token_required",
+    message: `The Ix backend${endpoint ? ` at ${endpoint}` : ""} requires a token this CLI did not send or that it refused.`,
+    next: isLocalEndpoint(endpoint)
+      ? "Run `ix docker start --local-token` to give the backend this CLI's stored token, or set IX_TOKEN to the backend's token."
+      : "Set IX_TOKEN to the token that backend was started with.",
+  };
+}
+
 export function renderCliError(err: unknown, debug = false, endpoint?: string): void {
   if (err instanceof CliUsageError || err instanceof CliResolutionError) {
     const code = err instanceof CliUsageError ? "usage_error" : "resolution_failed";
@@ -355,6 +369,15 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string): 
     const unreachable = backendUnreachableError(endpoint);
     if (!emitLlmError(unreachable.error, unreachable.message, unreachable.next)) {
       renderStructuredError(unreachable);
+    }
+    if (debug) writeDebugDetail(err);
+    process.exit(1);
+  }
+
+  if (e?.name === "LocalTokenRequiredError") {
+    const refused = localTokenRequiredError(endpoint);
+    if (!emitLlmError(refused.error, refused.message, refused.next)) {
+      renderStructuredError(refused);
     }
     if (debug) writeDebugDetail(err);
     process.exit(1);
