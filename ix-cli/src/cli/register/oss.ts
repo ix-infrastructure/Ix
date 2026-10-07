@@ -71,16 +71,6 @@ const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "workflow", desc: "Attach, show, validate, or run staged workflows" },
 ];
 
-/** Commands hidden from default help but still callable. */
-const ADVANCED_COMMANDS = [
-  "contains", "callers", "callees", "imports", "imported-by",
-  "depends", "entity", "text", "conflicts", "query",
-  // init is deprecated; ingest is now an implementation detail
-  "init", "ingest",
-  // run by an agent harness, not typed
-  "hook",
-];
-
 const OPTION_CHOICES: Record<string, Record<string, string[]>> = {
   query: { depth: ["shallow", "standard", "deep"], format: ["text", "json"] },
   map: { format: [...DEFAULT_FORMAT_CHOICES, "silent"], sort: ["importance", "confidence", "size", "alpha"] },
@@ -241,14 +231,6 @@ export function registerOssCommands(program: Command): void {
     if (!ossCommands.has(actionCommand)) return;
     validateCliOptions(actionCommand);
   });
-
-  // Hide advanced commands from default help
-  const advancedSet = new Set(ADVANCED_COMMANDS);
-  for (const cmd of program.commands) {
-    if (advancedSet.has(cmd.name())) {
-      (cmd as any).hidden = true;
-    }
-  }
 }
 
 export function registerProStubs(program: Command): void {

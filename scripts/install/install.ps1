@@ -119,7 +119,7 @@ function Write-Warn($msg) { Write-Host "  [!!] $msg" -ForegroundColor Yellow }
 function Remove-InstallerScratch {
     if (-not $IxHome) { return }
     try {
-        foreach ($name in @(".cli-staging-$PID.zip", ".cli-staging-pull-$PID.log")) {
+        foreach ($name in @(".cli-staging-$PID.zip", ".cli-staging-$PID.zip.sha256", ".cli-staging-pull-$PID.log")) {
             $p = Join-Path $IxHome $name
             if (Test-Path -LiteralPath $p -PathType Leaf) {
                 Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
@@ -166,8 +166,22 @@ function Test-Healthy {
 function Get-LatestVersion {
     try {
         $release = Invoke-RestMethod "https://api.github.com/repos/$GithubOrg/$GithubRepo/releases/latest"
-        return $release.tag_name -replace '^v',''
-    } catch { return "0.6.0" }
+        $tag = $release.tag_name -replace '^v',''
+        if ($tag) { return $tag }
+    } catch { }
+    # Second source, as in install.sh: the web redirect from /releases/latest to
+    # /releases/tag/v<x>, which works when the API is rate-limited or blocked.
+    # curl.exe rather than Invoke-WebRequest, whose redirect handling differs
+    # between 5.1 and 7.
+    try {
+        $headers = curl.exe -fsSI "https://github.com/$GithubOrg/$GithubRepo/releases/latest" 2>$null
+        foreach ($line in $headers) {
+            if ($line -match '^[Ll]ocation:\s*\S*/releases/tag/v([^/?\s]+)') { return $Matches[1] }
+        }
+    } catch { }
+    # Never guess. The old fallback named a stale version (0.6.0), so an
+    # unreachable API quietly installed a months-old CLI.
+    Write-Err "Could not find the latest Ix release: GitHub did not answer. Set IX_VERSION=<version> to install a specific release."
 }
 
 function Resolve-Version {
@@ -288,7 +302,12 @@ if ($SkipBackend) {
     $composeFile = "$ComposeDir\docker-compose.yml"
 
     Write-Host "Downloading compose..."
-    curl.exe -L -o "$composeFile" "$GithubRaw/docker-compose.standalone.yml"
+    # --fail: without it a 404 page is saved as the compose file and the
+    # failure only shows up later, as a YAML error from docker compose.
+    curl.exe -L --fail --show-error -o "$composeFile" "$GithubRaw/docker-compose.standalone.yml"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Could not download the backend compose file"
+    }
     Write-Ok "Compose ready"
 
     Write-Host "Starting backend..."
@@ -397,6 +416,27 @@ $size = (Get-Item -LiteralPath $tmp).Length
 if ($size -lt 100000) {
     Write-Err "Downloaded file too small (likely failed)"
 }
+
+# Check the archive against the release's published .sha256 before anything
+# extracts it. Fails closed: a missing or malformed checksum stops the install,
+# and nothing in cli\ has been touched yet.
+$sumFile = "$IxHome\.cli-staging-$PID.zip.sha256"
+curl.exe -L --fail --silent --show-error -o "$sumFile" "$Url.sha256"
+if ($LASTEXITCODE -ne 0) {
+    Remove-Item -LiteralPath $tmp, $sumFile -Force -ErrorAction SilentlyContinue
+    Write-Err "No published checksum at $Url.sha256. Refusing to install an unverified archive."
+}
+$sumLine = (Get-Content -LiteralPath $sumFile | Where-Object { $_.Trim() } | Select-Object -First 1)
+Remove-Item -LiteralPath $sumFile -Force -ErrorAction SilentlyContinue
+if (-not ($sumLine -match '^\s*([0-9a-fA-F]{64})(?:\s+\*?(\S+))?\s*$') -or ($Matches[2] -and (Split-Path -Leaf $Matches[2]) -ne $Tarball)) {
+    Write-Err "The checksum file at $Url.sha256 is not a sha256 for $Tarball. Refusing to install."
+}
+$expectedHash = $Matches[1].ToLowerInvariant()
+$actualHash = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actualHash -ne $expectedHash) {
+    Write-Err "Checksum mismatch for ${Tarball}: expected $expectedHash, got $actualHash. The download was not installed."
+}
+Write-Ok "Checksum verified"
 
 Write-Host "Extracting CLI..."
 

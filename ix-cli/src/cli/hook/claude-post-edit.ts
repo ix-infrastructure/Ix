@@ -2,8 +2,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
+import { createClient } from "../../client/factory.js";
+import { resolveWorkspaceRoot } from "../config.js";
 import { SourceFiles } from "../edge-sites.js";
 import { isSourcePath } from "../explain/issue.js";
 import type { FileDiff } from "./session.js";
@@ -299,7 +299,7 @@ function graphPath(roots: Roots, worktreeFile: string): string | undefined {
 function gatherWith(deps: HookDeps, opts: HookOptions): (req: AroundRequest) => Promise<AroundResult> {
   if (deps.gather) return deps.gather;
   const timeoutMs = hookTimeoutMs(opts.env);
-  return (req) => gatherAround(new IxClient(getEndpoint(), AbortSignal.timeout(timeoutMs)), req);
+  return (req) => gatherAround(createClient({ deadlineSignal: AbortSignal.timeout(timeoutMs) }), req);
 }
 
 /**

@@ -2,8 +2,8 @@
 
 import { type Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
-import { clearMapBaseline, clearMapResultCache, getEndpoint } from "../config.js";
+import { createClient } from "../../client/factory.js";
+import { clearMapBaseline, clearMapResultCache } from "../config.js";
 import { roundFloat, printJson } from "../format.js";
 import { llmLine, llmError, llmShortId } from "../llm.js";
 import { bootstrap, resolveWorkspaceId } from "../bootstrap.js";
@@ -11,7 +11,7 @@ import { formatFetchError } from "../errors.js";
 import { ingestFiles, type IngestFilesSummary } from "./ingest.js";
 import { detectSystem } from "../system.js";
 import { getRemoteRunner, isCloudReady } from "../remote.js";
-import { acquireMapLock } from "../single-flight.js";
+import { acquireMapLock, requestMapRerun, takeMapRerun } from "../single-flight.js";
 import { canRenderProgress } from "../stderr.js";
 import { loadIngestBaseline } from "../ingest-baseline.js";
 import { saveMapBaseline } from "../map-baseline.js";
@@ -207,7 +207,10 @@ export function describeEmptyCompletedMap(
   // backend cannot build a hierarchy for skips its 99 clean files, and one
   // reverted file whose content was ingested before commits as `Idempotent` —
   // giving patches === 1, idempotentPatches === 1, file_count === 0 with a
-  // graph that is perfectly intact and a 24-hour wait that changes nothing.
+  // graph that is not empty, and a 24-hour wait that changes nothing here. That
+  // graph is not intact either: the revert was never applied, so it still
+  // shows the file's content in between. The ingest reports that one itself,
+  // as `replayedChanges` (F-01).
   // A real #527 run skips nothing: the DB-reset guard clears the mtime cache
   // and the hash lookup comes back empty, so every file is re-submitted.
   if (patches > 0 && ingest.idempotentPatches >= patches && ingest.filesSkippedAsUnchanged === 0) {
@@ -404,301 +407,12 @@ Examples:
   ix map . --full --verbose`
     )
     .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; verbose?: boolean; silent?: boolean }) => {
-      let cwd: string;
+      const held: HeldMap = {};
       try {
-        cwd = resolveMapRoot(pathArg);
-      } catch (err: any) {
-        const message = err?.message ?? "Invalid map path";
-        if (opts.format === "json") {
-          printJson({ error: "invalid_map_path", message });
-        } else if (opts.format === "llm") {
-          console.log(llmError("invalid_map_path", message));
-        } else {
-          console.error(chalk.red("Error:"), message);
-        }
-        process.exitCode = 1;
-        return;
+        await runMapCommand(pathArg, opts, held);
+      } finally {
+        if (held.root) await rerunIfRequested(held.root, held.local === true, opts);
       }
-
-      const silent = opts.silent === true || opts.format === "silent";
-
-      // Single-flight: refuse to stack. Background refresh can fire `ix map`
-      // repeatedly (e.g. once per change); if a map is slow or the backend is
-      // unhealthy, those invocations would otherwise pile up and run concurrently
-      // against the backend. The first map for a workspace holds the lock; any
-      // concurrent one coalesces and exits 0 here. The lock auto-releases on
-      // process exit (see single-flight.ts) and a stale lock from a crashed map
-      // is stolen, so this never wedges.
-      const mapLock = acquireMapLock(cwd, `ix map ${cwd}`);
-      if (!mapLock) {
-        if (!silent && opts.format !== "json" && opts.format !== "llm") {
-          process.stderr.write(chalk.dim("  Another ix map is already running for this workspace — skipping.\n"));
-        }
-        applyRequestedMapCoalesceExitCode();
-        return; // coalesce; the in-flight map will refresh the graph
-      }
-
-      // Background refresh is a local-only convenience. When invoked
-      // automatically (IX_AUTO_MAP=1, set by the editor/agent hooks) against a
-      // remote backend, skip: a remote graph should be fed deliberately, not by
-      // a write on every change from every client. Manual `ix map` is never
-      // skipped; opt the automatic path back in with IX_AUTO_MAP_CLOUD=1.
-      const autoMap = process.env.IX_AUTO_MAP === "1";
-      const cloudReady = await isCloudReady();
-      if (shouldSkipAutoMap({ auto: autoMap, cloudReady })) {
-        if (!silent && opts.format !== "json" && opts.format !== "llm") {
-          process.stderr.write(chalk.dim("  Skipping automatic map: active backend is remote (run `ix map` manually to refresh it).\n"));
-        }
-        return; // lock releases on process exit
-      }
-
-      // Shared wall-clock deadline applied to every backend request this command
-      // makes (ingest + map), so the whole operation is bounded even if the
-      // backend stalls on individual long per-request timeouts.
-      const deadlineSignal = mapDeadlineSignal();
-
-      // Auto-detect a multi-repo system (>= 2 child repo roots). When present we
-      // scope the map to its system_id; otherwise it's an ordinary single-repo map.
-      const systemId = detectSystem(cwd)?.systemId;
-
-      // json and llm are machine formats: suppress progress chatter and route
-      // ingestion through the quiet path so stdout carries only the result.
-      const machineFormat = opts.format === "json" || opts.format === "llm";
-      // Report an error on the right channel: structured record for llm, prose for the rest.
-      const emitError = (msg: string) => {
-        if (opts.format === "llm") console.log(llmError("backend_error", msg));
-        else console.error(chalk.red("Error:"), msg);
-      };
-
-      // Print warning when --full override is active
-      if (opts.full && !machineFormat && !silent) {
-        console.log(chalk.yellow("\nWarning"));
-        console.log(chalk.yellow("  Full local map override enabled.\n"));
-        console.log("  Ix will ignore automatic local safety limits and attempt full local mapping.");
-        console.log("  This may take a long time or fail on very large systems.\n");
-      }
-
-      // Ingest the path before mapping so the graph is up to date.
-      //
-      // Routing: if Pro is loaded AND the user has an active cloud
-      // instance configured (isCloudReady === true), route ingestion
-      // through the cloud pipeline. To force local, switch the active
-      // instance with `ix instance use local` (or `ix instance bind
-      // local` to scope to one workspace).
-      //
-      // The local backend bootstrap below only runs on the local path —
-      // cloud ingestion doesn't require a local Ix backend.
-      const ingestStart = performance.now();
-      let localIngest: IngestFilesSummary | undefined;
-      if (cloudReady) {
-        const runner = getRemoteRunner()!; // isCloudReady guarantees non-null
-        try {
-          await runner.runIngestion({
-            cwd,
-            silent,
-            format: (machineFormat || silent) ? "json" : "text",
-          });
-        } catch (err: any) {
-          emitError(formatFetchError(err));
-          process.exitCode = 1;
-          return;
-        }
-      } else {
-        try {
-          await bootstrap(cwd);
-        } catch (err: any) {
-          emitError(err.message);
-          process.exitCode = 1;
-          return;
-        }
-        try {
-          localIngest = await ingestFiles(cwd, {
-            recursive: true,
-            format: (machineFormat || silent) ? "json" : "text",
-            printSummary: false,
-            suppressOutput: true,
-            mapMode: mapModeForIngest(),
-            deadlineSignal,
-            // `ix map` has no --debug, so the per-file `[commit error] <uri>`
-            // detail was unreachable from the command that produced the
-            // failure — and the failure message told the user to pass a flag
-            // that does not exist. --verbose is map's equivalent lever.
-            debug: Boolean(opts.verbose),
-          });
-        } catch (err: any) {
-          emitError(formatFetchError(err));
-          process.exitCode = 1;
-          return;
-        }
-      }
-      const ingestMs = Math.round(performance.now() - ingestStart);
-
-      const client = new IxClient(getEndpoint(), deadlineSignal);
-
-      const mapBarWidth = 25;
-      const mapStart    = performance.now();
-
-      // Path-2 grouping (Ix#225 Half B): a co-ingest system is found by detectSystem
-      // above; a SEPARATELY-ingested repo that the stitcher joined into a system has
-      // no local marker, so look its system_id up from the backend and scope to it,
-      // making `ix map <repo>` show the whole stitched system.
-      let effectiveSystemId = systemId;
-      if (!effectiveSystemId) {
-        const ws = resolveWorkspaceId(cwd);
-        if (ws) {
-          // Best-effort, as before workspaceSystem started reporting failures:
-          // an unanswered lookup leaves the map at workspace scope.
-          const looked = await client.workspaceSystem(ws).catch(() => ({ systemId: null }));
-          if (looked.systemId) effectiveSystemId = looked.systemId;
-        }
-      }
-      const mapRequest = { full: opts.full, workspaceId: effectiveSystemId ? undefined : resolveWorkspaceId(cwd), systemId: effectiveSystemId };
-
-      // Reuse the last response when this run's ingest wrote nothing and the
-      // backend's head revision has not moved since it was computed. Local
-      // only: a cloud ingest reports no summary, so it cannot vouch for that.
-      const cacheSlot = localIngest ? await resolveMapCacheSlot(client, mapRequest, () => readBackendHealth(client)) : undefined;
-      const cached = cacheSlot && localIngest?.graphUnchanged ? loadCachedMap(cwd, cacheSlot) : undefined;
-
-      let result: MapView;
-      if (cached) {
-        result = cached;
-      } else {
-        // Same gate as the ingest bar: --silent and the machine formats were the
-        // only ways to avoid this, and neither is available to something merely
-        // capturing normal output.
-        const mapInterval = (!machineFormat && !silent && canRenderProgress()) ? setInterval(() => {
-          const elapsed  = performance.now() - mapStart;
-          const pct      = 1 - Math.exp(-elapsed / 4000);
-          const filled   = Math.round(pct * mapBarWidth);
-          const bar      = chalk.cyan('█'.repeat(filled)) + chalk.dim('░'.repeat(mapBarWidth - filled));
-          const pctStr   = chalk.cyan(`${Math.min(Math.round(pct * 100), 99)}%`.padStart(4));
-          process.stderr.write(`\r  Computing map...  ${bar}  ${pctStr}`);
-        }, 80) : null;
-
-        try {
-          result = await client.map(mapRequest) as MapResult;
-        } catch (err: any) {
-          if (mapInterval) { clearInterval(mapInterval); process.stderr.write('\r' + ' '.repeat(60) + '\r'); }
-          clearMapResultCache(cwd);
-          emitError(formatFetchError(err));
-          process.exitCode = 1;
-          return;
-        }
-        if (mapInterval) { clearInterval(mapInterval); process.stderr.write('\r' + ' '.repeat(60) + '\r'); }
-      }
-      const mapMs = Math.round(performance.now() - mapStart);
-
-      const emptyMapError = invalidateBaselineForIncompleteCompletedMap(result, localIngest, cwd);
-      if (emptyMapError) {
-        emitError(emptyMapError);
-        process.exitCode = 1;
-        return;
-      }
-      // The cache holds the latest response the backend gave, or nothing: a
-      // response that is not kept removes the one before it, so a later hit
-      // can never be older than a miss in between.
-      if (persistCompletedMapBaseline(result, cwd) && cacheSlot) {
-        if (!cached) saveCachedMap(cwd, cacheSlot, result);
-      } else {
-        clearMapResultCache(cwd);
-      }
-
-      // stderr, so it reaches a human on the text path and never contaminates
-      // the JSON/llm payload on stdout. The exit code deliberately stays 0:
-      // plugins read this command's JSON through runners that discard stdout on
-      // a non-zero exit, so failing here would hide the very diagnostics the
-      // caller needs (the #539 lesson).
-      emitDroppedFileWarning(localIngest);
-
-      if (silent) {
-        const systems    = result.regions.filter(r => r.label_kind === "system").length;
-        const subsystems = result.regions.filter(r => r.label_kind === "subsystem").length;
-        const modules    = result.regions.filter(r => r.label_kind === "module").length;
-        // Ix#568: `--silent` returns before both format branches AND wins over
-        // `--format llm`, so it is the one output the hooks this field exists
-        // for actually see. A skipped stitch deliberately does not move the exit
-        // code -- without a token here an automated consumer cannot tell a clean
-        // map from one whose cross-repo edges are up to 15 minutes stale.
-        // Ix#568. The RULE, not just the fact -- and not for `incomplete`.
-        //
-        // `--silent` is the hook surface: one terse line per run. `incomplete`
-        // fires on nearly every incremental map, so emitting it here would put
-        // a token on almost every line and make `stitch_skipped` useless as a
-        // signal, while a consumer that actually needs to know an incremental
-        // map registered nothing has `--format json` and `--format llm`, which
-        // both carry it. What stays here is the guard refusing -- the case that
-        // means a backend is being protected from stacked joins.
-        const rule = localIngest?.stitchSkippedRule;
-        const stitch =
-          rule === undefined || rule === "incomplete" || rule === "run-errors"
-            ? ""
-            // `stitch_skipped_rule`, not `stitch_skipped`. The json and llm
-            // formats put the English prose under `stitch_skipped` and the rule
-            // under `stitch_skipped_rule`, and emitting the RULE under the
-            // prose key here gave one name two value spaces: a hook matching
-            // `stitch_skipped=cooling` on this line silently stopped matching
-            // the moment it was pointed at `--format json`.
-            : ` · stitch_skipped_rule=${rule}`;
-        process.stderr.write(
-          `map: ${result.file_count} files · ${systems}s/${subsystems}ss/${modules}m regions · ${mapMs}ms${stitch}\n`
-        );
-        return;
-      }
-
-      if (!machineFormat) {
-        const mapSec = (mapMs / 1000).toFixed(1);
-        process.stderr.write(chalk.dim(`  Mapped in ${mapSec}s\n`));
-      }
-
-      const minConf = parseFloat(opts.minConfidence ?? "0");
-      const levelFilter = opts.level ? parseInt(opts.level, 10) : null;
-      const parsedMaxItems = parseInt(opts.maxItems ?? "10", 10);
-      const maxItems = Number.isFinite(parsedMaxItems) && parsedMaxItems > 0 ? parsedMaxItems : 10;
-      const sortMode = normalizeSortMode(opts.sort);
-
-      let regions = result.regions;
-      if (levelFilter !== null) regions = regions.filter(r => r.level === levelFilter);
-      if (minConf > 0) regions = regions.filter(r => r.confidence >= minConf);
-
-      if (opts.format === "json") {
-        printJson({
-          file_count: result.file_count,
-          region_count: regions.length,
-          levels: result.levels,
-          map_rev: result.map_rev,
-          outcome: result.outcome,
-          // Always present so a consumer can branch on them without a key check.
-          // A dropped file is silent otherwise: the backend still answers with a
-          // completed outcome, so `outcome` alone cannot distinguish a whole map
-          // from one missing every file that failed to build a patch (#554).
-          parse_errors: localIngest?.parseErrors ?? 0,
-          commit_errors: localIngest?.commitErrors ?? 0,
-          // Ix#568. The whole reason this is reported at all is hooks that run
-          // `ix map` and read the machine output; leaving it only in
-          // `ix ingest --format json` puts it where those hooks never look.
-          // `?? null`, not left undefined: JSON.stringify drops an undefined
-          // value, so a consumer could not tell the field apart from an older
-          // CLI that never emitted it. Its siblings are always present too.
-          stitch_skipped: localIngest?.stitchSkipped ?? null,
-          stitch_skipped_rule: localIngest?.stitchSkippedRule ?? null,
-          regions: regions.map((r: any) => ({
-            label: r.label,
-            level: r.level,
-            files: r.file_count,
-            cohesion: roundFloat(r.cohesion),
-            coupling: roundFloat(r.external_coupling),
-            confidence: roundFloat(r.confidence),
-            signals: r.dominant_signals,
-          })),
-        });
-        return;
-      }
-      if (opts.format === "llm") {
-        renderMapLlm(result, regions, localIngest);
-        return;
-      }
-      renderMapText(result, cwd, opts);
     });
 }
 
@@ -1103,4 +817,342 @@ function formatRegionLine(region: MapRegion, verbose: boolean, depth = 0): strin
   const fileText = depth === 0 ? chalk.dim(`${region.file_count} files`) : chalk.dim(`${region.file_count}`);
   const signalText = signals.length > 0 ? chalk.dim(`  ${signals}`) : "";
   return `${badge} ${chalk.bold(region.label)}  ${fileText}  ${clarityColor(`${clarity} ${confPct}%`)}${signalText}${crosscut}`;
+}
+
+/** What a map that ran holds when it finishes: the workspace whose lock it took. */
+interface HeldMap { root?: string; local?: boolean }
+
+async function runMapCommand(pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; verbose?: boolean; silent?: boolean }, held: HeldMap): Promise<void> {
+  let cwd: string;
+  try {
+    cwd = resolveMapRoot(pathArg);
+  } catch (err: any) {
+    const message = err?.message ?? "Invalid map path";
+    if (opts.format === "json") {
+      printJson({ error: "invalid_map_path", message });
+    } else if (opts.format === "llm") {
+      console.log(llmError("invalid_map_path", message));
+    } else {
+      console.error(chalk.red("Error:"), message);
+    }
+    process.exitCode = 1;
+    return;
+  }
+
+  const silent = opts.silent === true || opts.format === "silent";
+
+  // Single-flight: refuse to stack. Background refresh can fire `ix map`
+  // repeatedly (e.g. once per change); if a map is slow or the backend is
+  // unhealthy, those invocations would otherwise pile up and run concurrently
+  // against the backend. The first map for a workspace holds the lock; any
+  // concurrent one coalesces and exits 0 here. The lock auto-releases on
+  // process exit (see single-flight.ts) and a stale lock from a crashed map
+  // is stolen, so this never wedges.
+  const mapLock = acquireMapLock(cwd, `ix map ${cwd}`);
+  if (!mapLock) {
+    if (!silent && opts.format !== "json" && opts.format !== "llm") {
+      process.stderr.write(chalk.dim("  Another ix map is already running for this workspace — skipping.\n"));
+    }
+    // Tell the holder: this run's reason (an edit, usually) may have come
+    // after it read the file, so it runs one more ingest before it lets go.
+    requestMapRerun(cwd);
+    applyRequestedMapCoalesceExitCode();
+    return; // coalesce; the in-flight map will refresh the graph
+  }
+  // Holding the lock: whatever a map that coalesced before now asked for, this
+  // run covers -- it has not read the tree yet.
+  takeMapRerun(cwd);
+  held.root = cwd;
+
+  // Background refresh is a local-only convenience. When invoked
+  // automatically (IX_AUTO_MAP=1, set by the editor/agent hooks) against a
+  // remote backend, skip: a remote graph should be fed deliberately, not by
+  // a write on every change from every client. Manual `ix map` is never
+  // skipped; opt the automatic path back in with IX_AUTO_MAP_CLOUD=1.
+  const autoMap = process.env.IX_AUTO_MAP === "1";
+  const cloudReady = await isCloudReady();
+  if (shouldSkipAutoMap({ auto: autoMap, cloudReady })) {
+    if (!silent && opts.format !== "json" && opts.format !== "llm") {
+      process.stderr.write(chalk.dim("  Skipping automatic map: active backend is remote (run `ix map` manually to refresh it).\n"));
+    }
+    return; // lock releases on process exit
+  }
+
+  // Shared wall-clock deadline applied to every backend request this command
+  // makes (ingest + map), so the whole operation is bounded even if the
+  // backend stalls on individual long per-request timeouts.
+  const deadlineSignal = mapDeadlineSignal();
+
+  // Auto-detect a multi-repo system (>= 2 child repo roots). When present we
+  // scope the map to its system_id; otherwise it's an ordinary single-repo map.
+  const systemId = detectSystem(cwd)?.systemId;
+
+  // json and llm are machine formats: suppress progress chatter and route
+  // ingestion through the quiet path so stdout carries only the result.
+  const machineFormat = opts.format === "json" || opts.format === "llm";
+  // Report an error on the right channel: structured record for llm, prose for the rest.
+  const emitError = (msg: string) => {
+    if (opts.format === "llm") console.log(llmError("backend_error", msg));
+    else console.error(chalk.red("Error:"), msg);
+  };
+
+  // Print warning when --full override is active
+  if (opts.full && !machineFormat && !silent) {
+    console.log(chalk.yellow("\nWarning"));
+    console.log(chalk.yellow("  Full local map override enabled.\n"));
+    console.log("  Ix will ignore automatic local safety limits and attempt full local mapping.");
+    console.log("  This may take a long time or fail on very large systems.\n");
+  }
+
+  // Ingest the path before mapping so the graph is up to date.
+  //
+  // Routing: if Pro is loaded AND the user has an active cloud
+  // instance configured (isCloudReady === true), route ingestion
+  // through the cloud pipeline. To force local, switch the active
+  // instance with `ix instance use local` (or `ix instance bind
+  // local` to scope to one workspace).
+  //
+  // The local backend bootstrap below only runs on the local path —
+  // cloud ingestion doesn't require a local Ix backend.
+  const ingestStart = performance.now();
+  let localIngest: IngestFilesSummary | undefined;
+  if (cloudReady) {
+    const runner = getRemoteRunner()!; // isCloudReady guarantees non-null
+    try {
+      await runner.runIngestion({
+        cwd,
+        silent,
+        format: (machineFormat || silent) ? "json" : "text",
+      });
+    } catch (err: any) {
+      emitError(formatFetchError(err));
+      process.exitCode = 1;
+      return;
+    }
+  } else {
+    try {
+      await bootstrap(cwd);
+    } catch (err: any) {
+      emitError(err.message);
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      localIngest = await ingestFiles(cwd, {
+        recursive: true,
+        format: (machineFormat || silent) ? "json" : "text",
+        printSummary: false,
+        suppressOutput: true,
+        mapMode: mapModeForIngest(),
+        deadlineSignal,
+        // `ix map` has no --debug, so the per-file `[commit error] <uri>`
+        // detail was unreachable from the command that produced the
+        // failure — and the failure message told the user to pass a flag
+        // that does not exist. --verbose is map's equivalent lever.
+        debug: Boolean(opts.verbose),
+      });
+    } catch (err: any) {
+      emitError(formatFetchError(err));
+      process.exitCode = 1;
+      return;
+    }
+    // Only a local ingest that got through earns the rerun: after a failed
+    // one the backend was just seen to be down or out of time.
+    held.local = true;
+  }
+  const ingestMs = Math.round(performance.now() - ingestStart);
+
+  const client = createClient({ deadlineSignal });
+
+  const mapBarWidth = 25;
+  const mapStart    = performance.now();
+
+  // Path-2 grouping (Ix#225 Half B): a co-ingest system is found by detectSystem
+  // above; a SEPARATELY-ingested repo that the stitcher joined into a system has
+  // no local marker, so look its system_id up from the backend and scope to it,
+  // making `ix map <repo>` show the whole stitched system.
+  let effectiveSystemId = systemId;
+  if (!effectiveSystemId) {
+    const ws = resolveWorkspaceId(cwd);
+    if (ws) {
+      // Best-effort, as before workspaceSystem started reporting failures:
+      // an unanswered lookup leaves the map at workspace scope.
+      const looked = await client.workspaceSystem(ws).catch(() => ({ systemId: null }));
+      if (looked.systemId) effectiveSystemId = looked.systemId;
+    }
+  }
+  const mapRequest = { full: opts.full, workspaceId: effectiveSystemId ? undefined : resolveWorkspaceId(cwd), systemId: effectiveSystemId };
+
+  // Reuse the last response when this run's ingest wrote nothing and the
+  // backend's head revision has not moved since it was computed. Local
+  // only: a cloud ingest reports no summary, so it cannot vouch for that.
+  const cacheSlot = localIngest ? await resolveMapCacheSlot(client, mapRequest, () => readBackendHealth(client)) : undefined;
+  const cached = cacheSlot && localIngest?.graphUnchanged ? loadCachedMap(cwd, cacheSlot) : undefined;
+
+  let result: MapView;
+  if (cached) {
+    result = cached;
+  } else {
+    // Same gate as the ingest bar: --silent and the machine formats were the
+    // only ways to avoid this, and neither is available to something merely
+    // capturing normal output.
+    const mapInterval = (!machineFormat && !silent && canRenderProgress()) ? setInterval(() => {
+      const elapsed  = performance.now() - mapStart;
+      const pct      = 1 - Math.exp(-elapsed / 4000);
+      const filled   = Math.round(pct * mapBarWidth);
+      const bar      = chalk.cyan('█'.repeat(filled)) + chalk.dim('░'.repeat(mapBarWidth - filled));
+      const pctStr   = chalk.cyan(`${Math.min(Math.round(pct * 100), 99)}%`.padStart(4));
+      process.stderr.write(`\r  Computing map...  ${bar}  ${pctStr}`);
+    }, 80) : null;
+
+    try {
+      result = await client.map(mapRequest) as MapResult;
+    } catch (err: any) {
+      if (mapInterval) { clearInterval(mapInterval); process.stderr.write('\r' + ' '.repeat(60) + '\r'); }
+      clearMapResultCache(cwd);
+      emitError(formatFetchError(err));
+      process.exitCode = 1;
+      return;
+    }
+    if (mapInterval) { clearInterval(mapInterval); process.stderr.write('\r' + ' '.repeat(60) + '\r'); }
+  }
+  const mapMs = Math.round(performance.now() - mapStart);
+
+  const emptyMapError = invalidateBaselineForIncompleteCompletedMap(result, localIngest, cwd);
+  if (emptyMapError) {
+    emitError(emptyMapError);
+    process.exitCode = 1;
+    return;
+  }
+  // The cache holds the latest response the backend gave, or nothing: a
+  // response that is not kept removes the one before it, so a later hit
+  // can never be older than a miss in between.
+  if (persistCompletedMapBaseline(result, cwd) && cacheSlot) {
+    if (!cached) saveCachedMap(cwd, cacheSlot, result);
+  } else {
+    clearMapResultCache(cwd);
+  }
+
+  // stderr, so it reaches a human on the text path and never contaminates
+  // the JSON/llm payload on stdout. The exit code deliberately stays 0:
+  // plugins read this command's JSON through runners that discard stdout on
+  // a non-zero exit, so failing here would hide the very diagnostics the
+  // caller needs (the #539 lesson).
+  emitDroppedFileWarning(localIngest);
+
+  if (silent) {
+    const systems    = result.regions.filter(r => r.label_kind === "system").length;
+    const subsystems = result.regions.filter(r => r.label_kind === "subsystem").length;
+    const modules    = result.regions.filter(r => r.label_kind === "module").length;
+    // Ix#568: `--silent` returns before both format branches AND wins over
+    // `--format llm`, so it is the one output the hooks this field exists
+    // for actually see. A skipped stitch deliberately does not move the exit
+    // code -- without a token here an automated consumer cannot tell a clean
+    // map from one whose cross-repo edges are up to 15 minutes stale.
+    // Ix#568. The RULE, not just the fact -- and not for `incomplete`.
+    //
+    // `--silent` is the hook surface: one terse line per run. `incomplete`
+    // fires on nearly every incremental map, so emitting it here would put
+    // a token on almost every line and make `stitch_skipped` useless as a
+    // signal, while a consumer that actually needs to know an incremental
+    // map registered nothing has `--format json` and `--format llm`, which
+    // both carry it. What stays here is the guard refusing -- the case that
+    // means a backend is being protected from stacked joins.
+    const rule = localIngest?.stitchSkippedRule;
+    const stitch =
+      rule === undefined || rule === "incomplete" || rule === "run-errors"
+        ? ""
+        // `stitch_skipped_rule`, not `stitch_skipped`. The json and llm
+        // formats put the English prose under `stitch_skipped` and the rule
+        // under `stitch_skipped_rule`, and emitting the RULE under the
+        // prose key here gave one name two value spaces: a hook matching
+        // `stitch_skipped=cooling` on this line silently stopped matching
+        // the moment it was pointed at `--format json`.
+        : ` · stitch_skipped_rule=${rule}`;
+    process.stderr.write(
+      `map: ${result.file_count} files · ${systems}s/${subsystems}ss/${modules}m regions · ${mapMs}ms${stitch}\n`
+    );
+    return;
+  }
+
+  if (!machineFormat) {
+    const mapSec = (mapMs / 1000).toFixed(1);
+    process.stderr.write(chalk.dim(`  Mapped in ${mapSec}s\n`));
+  }
+
+  const minConf = parseFloat(opts.minConfidence ?? "0");
+  const levelFilter = opts.level ? parseInt(opts.level, 10) : null;
+  const parsedMaxItems = parseInt(opts.maxItems ?? "10", 10);
+  const maxItems = Number.isFinite(parsedMaxItems) && parsedMaxItems > 0 ? parsedMaxItems : 10;
+  const sortMode = normalizeSortMode(opts.sort);
+
+  let regions = result.regions;
+  if (levelFilter !== null) regions = regions.filter(r => r.level === levelFilter);
+  if (minConf > 0) regions = regions.filter(r => r.confidence >= minConf);
+
+  if (opts.format === "json") {
+    printJson({
+      file_count: result.file_count,
+      region_count: regions.length,
+      levels: result.levels,
+      map_rev: result.map_rev,
+      outcome: result.outcome,
+      // Always present so a consumer can branch on them without a key check.
+      // A dropped file is silent otherwise: the backend still answers with a
+      // completed outcome, so `outcome` alone cannot distinguish a whole map
+      // from one missing every file that failed to build a patch (#554).
+      parse_errors: localIngest?.parseErrors ?? 0,
+      commit_errors: localIngest?.commitErrors ?? 0,
+      // Ix#568. The whole reason this is reported at all is hooks that run
+      // `ix map` and read the machine output; leaving it only in
+      // `ix ingest --format json` puts it where those hooks never look.
+      // `?? null`, not left undefined: JSON.stringify drops an undefined
+      // value, so a consumer could not tell the field apart from an older
+      // CLI that never emitted it. Its siblings are always present too.
+      stitch_skipped: localIngest?.stitchSkipped ?? null,
+      stitch_skipped_rule: localIngest?.stitchSkippedRule ?? null,
+      regions: regions.map((r: any) => ({
+        label: r.label,
+        level: r.level,
+        files: r.file_count,
+        cohesion: roundFloat(r.cohesion),
+        coupling: roundFloat(r.external_coupling),
+        confidence: roundFloat(r.confidence),
+        signals: r.dominant_signals,
+      })),
+    });
+    return;
+  }
+  if (opts.format === "llm") {
+    renderMapLlm(result, regions, localIngest);
+    return;
+  }
+  renderMapText(result, cwd, opts);
+}
+
+/**
+ * One more ingest when a map that coalesced into this one asked for it (see
+ * `requestMapRerun`), before the lock is let go. One pass at most: under a
+ * stream of edits a rerun per request would never finish, and the next edit's
+ * own map picks up whatever arrives after it. Ingest only -- this run's output
+ * has already been printed, and the hierarchy is refreshed by the next map.
+ */
+async function rerunIfRequested(root: string, local: boolean, opts: { silent?: boolean; format: string }): Promise<void> {
+  if (!local || !takeMapRerun(root)) return;
+  try {
+    await ingestFiles(root, {
+      recursive: true,
+      format: "json",
+      printSummary: false,
+      suppressOutput: true,
+      mapMode: mapModeForIngest(),
+      // Bounded like the run it follows: its own budget, since the first
+      // run's may be all but spent.
+      deadlineSignal: mapDeadlineSignal(),
+    });
+  } catch (err: any) {
+    if (opts.silent !== true && opts.format !== "json" && opts.format !== "llm") {
+      process.stderr.write(chalk.dim(`  Re-run for a map that waited on this one failed: ${err?.message ?? err}\n`));
+    }
+  }
 }

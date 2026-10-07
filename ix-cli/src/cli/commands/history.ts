@@ -2,8 +2,7 @@
 
 import type { Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint } from "../config.js";
+import { createClient } from "../../client/factory.js";
 import { resolveFileOrReport, printResolved } from "../resolve.js";
 import { relativePath, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
@@ -39,7 +38,7 @@ export function registerHistoryCommand(program: Command): void {
   ix history IngestionService --kind class
   ix history <entity-uuid>`)
     .action(async (target: string, opts: { kind?: string; path?: string; pick?: number; format: string }) => {
-      const client = new IxClient(getEndpoint());
+      const client = createClient();
       const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
       const resolved = await resolveFileOrReport(client, target, resolveOpts, opts.format);
       if (!resolved) return;

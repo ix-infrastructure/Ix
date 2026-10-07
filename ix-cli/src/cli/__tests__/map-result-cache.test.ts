@@ -25,7 +25,8 @@ import {
   saveCachedMap,
   type MapCacheSlot,
 } from "../map-result-cache.js";
-import { lockPathForTest } from "../single-flight.js";
+import { acquireMapLock, lockPathForTest, requestMapRerun, takeMapRerun } from "../single-flight.js";
+import { createHash } from "node:crypto";
 
 /**
  * `ix map` reuses its last `/v1/map` response when a run ingested nothing and
@@ -51,6 +52,10 @@ class FakeBackend {
   revisionRecord = false;
   release = "1.0.30";
   systemId: string | null = null;
+  /** Run on the next commit request, then cleared. */
+  onCommit: (() => void) | undefined;
+  /** Answer every commit with a 500, as a backend that is down would. */
+  failCommits = false;
   readonly hashes = new Map<string, { workspaceId: string | null; uri: string; hash: string }>();
   private readonly patches = new Map<string, unknown[]>();
   private server: Server | undefined;
@@ -88,6 +93,11 @@ class FakeBackend {
     };
 
     if (path === "/v1/patches/bulk" || path === "/v1/patch") {
+      // Fired once, mid-run: what happens in the world while a map commits.
+      const hook = this.onCommit;
+      this.onCommit = undefined;
+      hook?.();
+      if (this.failCommits) return send(500, { error: "backend unavailable" });
       type SentPatch = { patchId?: string; source?: { uri?: string; sourceHash?: string; workspaceId?: string }; intent?: string; ops?: unknown[] };
       let patches: SentPatch[] = [];
       try {
@@ -200,6 +210,21 @@ describe("ix map reuses an unchanged map", () => {
     return { stdout: stdout.join("\n"), stderr: stderr.join("") };
   }
 
+  /** `ix map <repo> --silent` in-process, without asserting on the exit code. */
+  async function runMap(): Promise<void> {
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const program = new Command();
+      registerMapCommand(program);
+      await program.parseAsync(["node", "ix", "map", repo, "--silent"]);
+    } finally {
+      write.mockRestore();
+      error.mockRestore();
+      rmSync(lockPathForTest(repo), { force: true });
+    }
+  }
+
   beforeEach(async () => {
     backend = new FakeBackend();
     home = realpathSync(mkdtempSync(join(tmpdir(), "ix-mapcache-home-")));
@@ -234,6 +259,64 @@ describe("ix map reuses an unchanged map", () => {
       home = "";
       repo = "";
     }
+  });
+
+  describe("a map that coalesces is not lost", () => {
+    const hashOf = (text: string) => createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex");
+    const stored = (uri: string) => [...backend.hashes.values()].find(row => row.uri === uri)?.hash;
+
+    it("a coalescing map leaves a rerun request for the holder", async () => {
+      const holder = acquireMapLock(repo, "holder")!;
+      try {
+        await map("--silent");
+        expect(takeMapRerun(repo)).toBe(true);
+      } finally {
+        holder.release();
+      }
+    });
+
+    it("the holder runs once more for an edit made while it was committing", async () => {
+      await map("--silent");
+      writeFileSync(join(repo, "src", "m1.ts"), "export const changed = 1;\n", "utf8");
+      const late = "export const late = 2;\n";
+      // Mid-commit: an edit lands after this run read the tree, and the
+      // editor's own `ix map` coalesces.
+      backend.onCommit = () => {
+        writeFileSync(join(repo, "src", "m2.ts"), late, "utf8");
+        requestMapRerun(repo);
+      };
+
+      await map("--silent");
+
+      expect(stored("src/m2.ts"), "the late edit reached the backend in this invocation").toBe(hashOf(late));
+      expect(takeMapRerun(repo), "the request was consumed").toBe(false);
+    });
+
+    it("a map whose ingest failed does not rerun against the same backend", async () => {
+      // The rerun ran from a finally block whatever had happened: after a
+      // failed ingest it retried a backend just seen to be down, with no
+      // deadline, keeping the lock (and the hook waiting on it) for as long
+      // as that took.
+      backend.failCommits = true;
+      const commits = () => backend.requests.filter(p => p === "/v1/patches/bulk" || p === "/v1/patch").length;
+      await runMap();
+      expect(process.exitCode, "the ingest failed").toBe(1);
+      const oneRun = commits();
+      process.exitCode = undefined;
+      backend.requests.length = 0;
+
+      backend.onCommit = () => requestMapRerun(repo);
+      await runMap();
+      expect(process.exitCode).toBe(1);
+      expect(commits(), "no second ingest after a failed one").toBe(oneRun);
+    });
+
+    it("a request left before a map starts is satisfied by that map, not rerun", async () => {
+      requestMapRerun(repo);
+      await map("--silent");
+      const commits = backend.requests.filter(p => p === "/v1/patches/bulk" || p === "/v1/patch").length;
+      expect(commits, "one ingest, not two").toBe(1);
+    });
   });
 
   it("makes no map request for an unchanged repo, and prints the same thing", async () => {

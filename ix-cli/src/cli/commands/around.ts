@@ -4,8 +4,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Command } from "commander";
 import chalk from "chalk";
-import { IxClient } from "../../client/api.js";
-import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
+import { createClient } from "../../client/factory.js";
+import { resolveWorkspaceRoot } from "../config.js";
 import { printJson } from "../format.js";
 import { llmError, printLlmLines } from "../llm.js";
 import { parseBudgetOption } from "../options.js";
@@ -106,7 +106,7 @@ Examples:
       const lines = readLines(abs);
       const limit = Math.max(1, parseInt(opts.limit, 10) || DEFAULT_CAPS.callers);
       const caps = capsFor(limit);
-      const client = new IxClient(getEndpoint());
+      const client = createClient();
 
       let result: AroundResult;
       try {

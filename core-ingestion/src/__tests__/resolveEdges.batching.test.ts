@@ -140,3 +140,51 @@ describe('resolveEdges scales with the repository', () => {
     expect(time(large) / time(small)).toBeLessThan(3);
   });
 });
+
+describe('resolveEdges against a summarized index', () => {
+  it('an index built from summaries alone resolves like one built with the paths too', () => {
+    const summariesOnly = buildGlobalResolutionIndex(
+      [],
+      undefined,
+      undefined,
+      new Map(mixed.map((r) => [r.filePath, summarizeParseResult(r)])),
+    );
+    const whole = new Set(resolveEdges(mixed, undefined, indexOf(mixed)).map(key));
+    expect(batched(mixed, mixed.map((_, i) => i), summariesOnly)).toEqual(whole);
+  });
+
+  it('resolving a batch leaves the index as it was', () => {
+    const indexed = mixed.filter((r) => r.filePath !== 'web/calc.ts');
+    const index = indexOf(indexed);
+    const snapshot = (i: ReturnType<typeof indexOf>) => JSON.stringify(
+      [i.stemToFiles, i.dirToIndexFiles, i.packageToFiles, i.goPkgDirToFiles, i.goPkgPathToFiles].map((m) => [...m]),
+    );
+    const before = snapshot(index);
+    // Not in the index, and its stem and directory collide with files that are.
+    const extra = [parseFile('web/index/index.ts', "export const x = 1;\n")!, parseFile('src/com/ex/Extra.java', 'package com.ex;\npublic class Extra {}\n')!];
+    resolveEdges([...extra, mixed.find((r) => r.filePath === 'web/calc.ts')!], undefined, index);
+    expect(snapshot(index)).toBe(before);
+  });
+
+  it('a one-file batch costs time linear in the repository, not in a common stem squared', () => {
+    // Every file is an `index.ts`: one stem list as long as the repository.
+    function repo(n: number) {
+      const results: FileParseResult[] = [];
+      for (let i = 0; i < n; i++) {
+        const r = parseFile(`p${i}/index.ts`, `export function f${i}() { return 1; }\n`);
+        if (r) results.push(r);
+      }
+      return { results, index: indexOf(results) };
+    }
+    const time = ({ results, index }: ReturnType<typeof repo>) => Math.min(...[0, 1, 2].map(() => {
+      const t = performance.now();
+      resolveEdges([results[0]], undefined, index);
+      return performance.now() - t;
+    }));
+    const small = repo(3000);
+    const large = repo(12000);
+    time(small); // warm up
+    // 4x the files: linear is ~4x, the old per-call de-dup was ~16x.
+    expect(time(large) / time(small)).toBeLessThan(8);
+  });
+});

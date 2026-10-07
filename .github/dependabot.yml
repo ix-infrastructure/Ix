@@ -8,6 +8,14 @@ updates:
       actions:
         patterns: ["*"]
 
+  # The backend image the real-backend harness runs against, pinned by digest
+  # in ix-cli/test/e2e/compose.e2e.yml. A bump PR runs the scenarios against the
+  # new release before any CLI PR sees it.
+  - package-ecosystem: docker-compose
+    directory: /ix-cli/test/e2e
+    schedule:
+      interval: weekly
+
   - package-ecosystem: npm
     directory: /ix-cli
     schedule:
