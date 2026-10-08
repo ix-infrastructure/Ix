@@ -4276,6 +4276,16 @@ export function githubCommitFailure(result: { status?: string }): string | undef
     "(BaseRevMismatch), so nothing was ingested. Run the command again once other ingests have finished.";
 }
 
+/**
+ * The `--github` patch id, from what is sent rather than the clock: the same
+ * issues, PRs and commits give the same id, so re-running an unchanged ingest
+ * is a no-op on the backend instead of a new revision of identical facts.
+ * Exported for tests.
+ */
+export function githubPatchId(repo: { owner: string; repo: string }, ops: unknown[]): string {
+  return deterministicId(`github://${repo.owner}/${repo.repo}:${sha256(Buffer.from(JSON.stringify(ops)))}`);
+}
+
 async function ingestGitHub(opts: {
   github?: string; token?: string; since?: string;
   limit: string; format: string;
@@ -4306,10 +4316,7 @@ async function ingestGitHub(opts: {
   for (const commit of data.commits) allOps.push(...transformCommit(repo, commit));
 
   const patch: GraphPatchPayload = {
-    // From what is sent, not the clock: the same issues, PRs and commits give
-    // the same id, so re-running an unchanged ingest is a no-op on the backend
-    // instead of a new revision of identical facts.
-    patchId: deterministicId(`github://${repo.owner}/${repo.repo}:${sha256(Buffer.from(JSON.stringify(allOps)))}`),
+    patchId: githubPatchId(repo, allOps),
     // IX_PATCH_ACTOR="" lets a kOS cloud backend stamp the verified principal
     // (it 403s a non-empty actor that differs from it); see core-ingestion patchActor().
     actor: process.env.IX_PATCH_ACTOR ?? 'ix/github-ingest',

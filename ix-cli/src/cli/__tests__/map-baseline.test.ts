@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { persistIngestBaselineIfClean } from "../commands/ingest.js";
-import { describeTooLargeFiles, persistCompletedMapBaseline } from "../commands/map.js";
+import { describeTooLargeFiles, persistCompletedMapBaseline, silentSummaryLine } from "../commands/map.js";
 import { loadMapBaseline, saveMapBaseline } from "../map-baseline.js";
 import { ingestMtimeCachePath } from "../config.js";
 import { hasCompletedMapBaseline } from "../stale.js";
@@ -189,5 +189,17 @@ describe("describeTooLargeFiles", () => {
     expect(describeTooLargeFiles({ filesTooLarge: 0 })).toBeUndefined();
     expect(describeTooLargeFiles({})).toBeUndefined();
     expect(describeTooLargeFiles(undefined)).toBeUndefined();
+  });
+});
+
+describe("silentSummaryLine", () => {
+  const base = { files: 12, systems: 1, subsystems: 2, modules: 3, mapMs: 40, stitch: "" };
+
+  it("keeps --silent to one line, carrying the oversized-file count as a token", () => {
+    expect(silentSummaryLine(base)).toBe("map: 12 files · 1s/2ss/3m regions · 40ms\n");
+    expect(silentSummaryLine({ ...base, filesTooLarge: 0 })).toBe("map: 12 files · 1s/2ss/3m regions · 40ms\n");
+    const line = silentSummaryLine({ ...base, stitch: " · stitch_skipped_rule=cooling", filesTooLarge: 2 });
+    expect(line).toBe("map: 12 files · 1s/2ss/3m regions · 40ms · stitch_skipped_rule=cooling · too_large=2\n");
+    expect(line.split("\n")).toHaveLength(2);
   });
 });

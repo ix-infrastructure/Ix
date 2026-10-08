@@ -287,11 +287,30 @@ export function describeDroppedFiles(
 
 function emitDroppedFileWarning(
   ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors" | "filesTooLarge"> | undefined,
+  silent: boolean,
 ): void {
   const message = describeDroppedFiles(ingest);
   if (message) process.stderr.write(chalk.yellow(`  ${message}\n`));
+  // Not under --silent: an oversized file is counted on every run, not only
+  // the one that first met it, so a line here would turn the hook surface's
+  // one summary line into two on every map of such a repo. `silentSummaryLine`
+  // carries the count as a token instead.
+  if (silent) return;
   const tooLarge = describeTooLargeFiles(ingest);
   if (tooLarge) process.stderr.write(chalk.dim(`  ${tooLarge}\n`));
+}
+
+/**
+ * The one stderr line `ix map --silent` prints. `too_large=N` appears only
+ * when files were left out for size, so a repo without any keeps the line it
+ * always had. Exported for tests.
+ */
+export function silentSummaryLine(s: {
+  files: number; systems: number; subsystems: number; modules: number; mapMs: number;
+  stitch: string; filesTooLarge?: number;
+}): string {
+  const tooLarge = (s.filesTooLarge ?? 0) > 0 ? ` · too_large=${s.filesTooLarge}` : "";
+  return `map: ${s.files} files · ${s.systems}s/${s.subsystems}ss/${s.modules}m regions · ${s.mapMs}ms${s.stitch}${tooLarge}\n`;
 }
 
 /**
@@ -1053,7 +1072,7 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
   // plugins read this command's JSON through runners that discard stdout on
   // a non-zero exit, so failing here would hide the very diagnostics the
   // caller needs (the #539 lesson).
-  emitDroppedFileWarning(localIngest);
+  emitDroppedFileWarning(localIngest, silent);
 
   if (silent) {
     const systems    = result.regions.filter(r => r.label_kind === "system").length;
@@ -1084,9 +1103,10 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
         // `stitch_skipped=cooling` on this line silently stopped matching
         // the moment it was pointed at `--format json`.
         : ` · stitch_skipped_rule=${rule}`;
-    process.stderr.write(
-      `map: ${result.file_count} files · ${systems}s/${subsystems}ss/${modules}m regions · ${mapMs}ms${stitch}\n`
-    );
+    process.stderr.write(silentSummaryLine({
+      files: result.file_count, systems, subsystems, modules, mapMs, stitch,
+      filesTooLarge: localIngest?.filesTooLarge,
+    }));
     return;
   }
 
