@@ -315,6 +315,9 @@ describe("in-process ix runner", () => {
         version: "test-version",
         createProgram: createTestProgram,
         orphanGraceMs: 60,
+        // This map ignores the abort (as work the run signal cannot reach
+        // does), and is abandoned at once rather than waited for.
+        abortSettleMs: 0,
       });
 
       // Abandoned at 40ms, grace fires at ~100ms, still working until ~400ms.

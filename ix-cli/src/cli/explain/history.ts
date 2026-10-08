@@ -3,6 +3,7 @@
 import { execFile } from "node:child_process";
 
 import { isTestPath } from "./related-files.js";
+import { currentRunSignal } from "../../client/run-signal.js";
 
 /**
  * What git remembers about a context target's file.
@@ -131,7 +132,8 @@ export function gitRunner(root: string): GitRunner {
       execFile(
         "git",
         args,
-        { cwd: root, encoding: "utf-8", maxBuffer: 16 * 1024 * 1024, timeout: GIT_TIMEOUT_MS },
+        // Killed with the `ix mcp` tool call that runs it (run-signal.ts).
+        { cwd: root, encoding: "utf-8", maxBuffer: 16 * 1024 * 1024, timeout: GIT_TIMEOUT_MS, signal: currentRunSignal() },
         (err, stdout) => resolve(err ? undefined : stdout),
       );
     });
