@@ -122,7 +122,7 @@ export class FakeBackend {
    * report none, as a pre-#157 backend does. `null` reports none in any mode.
    */
   releaseVersion: string | null | undefined = undefined;
-  private readonly nodes = new Map<string, { kind: unknown; name: unknown; live: boolean }>();
+  private readonly nodes = new Map<string, { kind: unknown; name: unknown; attrs?: unknown; live: boolean }>();
   private readonly edges = new Map<string, {
     src: unknown; dst: unknown; predicate: unknown; workspaceId: string; uri: string; live: boolean;
   }>();
@@ -198,7 +198,7 @@ export class FakeBackend {
     if (!deletesApplied) this.applyDeletes(patch);
     for (const op of patch.ops ?? []) {
       const id = String(op.id);
-      if (op.type === "UpsertNode") this.nodes.set(id, { kind: op.kind, name: op.name, live: true });
+      if (op.type === "UpsertNode") this.nodes.set(id, { kind: op.kind, name: op.name, attrs: op.attrs, live: true });
       else if (op.type === "UpsertEdge") {
         this.edges.set(id, { src: op.src, dst: op.dst, predicate: op.predicate, workspaceId, uri, live: true });
       }
@@ -474,7 +474,7 @@ export class FakeBackend {
       const edges = [...this.edges]
         .filter(([, e]) => e.live && (e.src === id || e.dst === id))
         .map(([edgeId, e]) => ({ id: edgeId, predicate: e.predicate, provenance: { sourceUri: e.uri } }));
-      return send(200, { node: { id, kind: node.kind, name: node.name }, edges });
+      return send(200, { node: { id, kind: node.kind, name: node.name, attrs: node.attrs ?? {} }, edges });
     }
     if (path === "/v1/stitch") {
       this.requests.push({ path, patches: 0 });

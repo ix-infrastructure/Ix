@@ -100,6 +100,50 @@ describe("reconcileRemovedEntities", () => {
     expect(reconciled.ops.filter(o => o.type === "DeleteEdge").map(o => o["id"])).toEqual(ids.map(id => `e-${id}`));
   });
 
+  describe("an external package node, which every caller in the workspace shares", () => {
+    const ext = { type: "UpsertNode", id: "ext-filter", kind: "function", attrs: { external: true, package: "dplyr" } };
+    const edges = [
+      { id: "own-call", predicate: "CALLS", provenance: { sourceUri: "src/example.ts" } },
+      { id: "other-call", predicate: "CALLS", provenance: { sourceUri: "src/other.ts" } },
+    ];
+
+    it("stays, with the other files' edges, when this file stops calling it", async () => {
+      const getPatch = vi.fn().mockResolvedValue({ data: { ops: [ext] } });
+      const entity = vi.fn().mockResolvedValue({ node: { kind: "function" }, claims: [], edges });
+      const dependents = new Set<string>();
+
+      const reconciled = await reconcileRemovedEntities({ getPatch, entity }, patchWith([]), ["prev"], dependents);
+
+      expect(reconciled.ops.filter(o => o.type === "DeleteNode")).toEqual([]);
+      expect(reconciled.ops.filter(o => o.type === "DeleteEdge").map(o => o["id"])).toEqual(["own-call"]);
+      expect([...dependents], "the other file keeps its edge, so it is not a dependent").toEqual([]);
+    });
+
+    it("is recognised from the entity's attrs when the stored patch kept no ops", async () => {
+      const getPatch = vi.fn().mockResolvedValue({
+        data: { entityIds: ["ext-filter"], nodeOpCount: 1, edgeOpCount: 0 },
+      });
+      const entity = vi.fn().mockResolvedValue({
+        node: { kind: "function", attrs: { external: true } }, claims: [], edges,
+      });
+
+      const reconciled = await reconcileRemovedEntities({ getPatch, entity }, patchWith([]), ["prev"]);
+
+      expect(reconciled.ops.filter(o => o.type === "DeleteNode")).toEqual([]);
+      expect(reconciled.ops.filter(o => o.type === "DeleteEdge").map(o => o["id"])).toEqual(["own-call"]);
+    });
+
+    it("goes when this file was its last caller", async () => {
+      const getPatch = vi.fn().mockResolvedValue({ data: { ops: [ext] } });
+      const entity = vi.fn().mockResolvedValue({ node: { kind: "function" }, claims: [], edges: [edges[0]] });
+
+      const reconciled = await reconcileRemovedEntities({ getPatch, entity }, patchWith([]), ["prev"]);
+
+      expect(reconciled.ops.filter(o => o.type === "DeleteNode").map(o => o["id"])).toEqual(["ext-filter"]);
+      expect(reconciled.ops.filter(o => o.type === "DeleteEdge").map(o => o["id"])).toEqual(["own-call"]);
+    });
+  });
+
   it("reingests surviving dependents when a deleted file returns", () => {
     const projectRoot = nodePath.resolve("workspace");
     const returnedPath = nodePath.join(projectRoot, "src", "returned.ts");

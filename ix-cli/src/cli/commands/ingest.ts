@@ -305,6 +305,17 @@ interface StoredPatchEntities {
   nodeIds: string[];
   /** Node kinds the stored patch wrote, when it kept its ops; empty otherwise. */
   kinds: Map<string, string>;
+  /** External package nodes (`attrs.external`) the stored patch wrote. */
+  external: Set<string>;
+}
+
+/**
+ * Whether a node is an external package node: `external://<pkg>` keyed by the
+ * workspace, not the file, so every file that calls into the package writes
+ * the same one.
+ */
+function isExternalNode(entityNode: unknown): boolean {
+  return (entityNode as { attrs?: { external?: unknown } } | undefined)?.attrs?.external === true;
 }
 
 function readStoredPatchEntities(raw: unknown): StoredPatchEntities | null {
@@ -315,10 +326,13 @@ function readStoredPatchEntities(raw: unknown): StoredPatchEntities | null {
   } | undefined;
   if (!data) return null;
   if (Array.isArray(data.ops)) {
-    const ops = data.ops as Array<{ type?: unknown; id?: unknown; kind?: unknown }>;
+    const ops = data.ops as Array<{ type?: unknown; id?: unknown; kind?: unknown; attrs?: unknown }>;
     const kinds = new Map<string, string>();
+    const external = new Set<string>();
     for (const op of ops) {
-      if (op.type === 'UpsertNode' && typeof op.id === 'string' && typeof op.kind === 'string') kinds.set(op.id, op.kind);
+      if (op.type !== 'UpsertNode' || typeof op.id !== 'string') continue;
+      if (typeof op.kind === 'string') kinds.set(op.id, op.kind);
+      if (isExternalNode(op)) external.add(op.id);
     }
     return {
       nodeIds: ops
@@ -326,6 +340,7 @@ function readStoredPatchEntities(raw: unknown): StoredPatchEntities | null {
         .map(op => op.id)
         .filter((id): id is string => typeof id === 'string'),
       kinds,
+      external,
     };
   }
   if (!Array.isArray(data.entityIds)) return null;
@@ -338,6 +353,7 @@ function readStoredPatchEntities(raw: unknown): StoredPatchEntities | null {
   return {
     nodeIds: entityIds.slice(0, nodeCount),
     kinds: new Map(),
+    external: new Set(),
   };
 }
 
@@ -418,19 +434,38 @@ export async function reconcileRemovedEntities(
     if (mapMode && (entity.node as { kind?: unknown } | undefined)?.kind === 'chunk') {
       continue;
     }
-    removedNodeIds.push(nodeId);
-    for (const edge of entity.edges ?? []) {
+    const edges = (entity.edges ?? []).map(edge => {
       const edgeRecord = edge as {
         id?: unknown;
+        predicate?: unknown;
         provenance?: { sourceUri?: unknown; source_uri?: unknown };
       };
-      const edgeId = edgeRecord.id;
-      const predicate = (edge as { predicate?: unknown }).predicate;
+      return {
+        id: edgeRecord.id,
+        predicate: edgeRecord.predicate,
+        sourceUri: edgeRecord.provenance?.sourceUri ?? edgeRecord.provenance?.source_uri,
+      };
+    });
+    // An external package node is shared by every file in the workspace that
+    // calls into the package. This file no longer writing it does not remove
+    // it: while another file's edges still reach it, the node and those edges
+    // stay, and only this file's own edges to it go.
+    const shared = (previous.external.has(nodeId) || isExternalNode(entity.node))
+      && edges.some(edge => edge.sourceUri !== patch.source.uri);
+    if (shared) {
+      for (const edge of edges) {
+        if (typeof edge.id === 'string' && edge.sourceUri === patch.source.uri && !currentEdgeIds.has(edge.id)) {
+          removedEdgeIds.add(edge.id);
+        }
+      }
+      continue;
+    }
+    removedNodeIds.push(nodeId);
+    for (const { id: edgeId, predicate, sourceUri } of edges) {
       const isChunkEdge = typeof predicate === 'string' && CHUNK_PREDICATES.has(predicate);
       if (typeof edgeId === 'string' && !currentEdgeIds.has(edgeId) && !(mapMode && isChunkEdge)) {
         removedEdgeIds.add(edgeId);
       }
-      const sourceUri = edgeRecord.provenance?.sourceUri ?? edgeRecord.provenance?.source_uri;
       if (
         dependentSourceUris &&
         typeof sourceUri === 'string' &&
@@ -461,17 +496,17 @@ export async function reconcileRemovedEntities(
 }
 
 /**
- * Whether `patch` must go to `/v1/patch` on its own. Only a patch that deletes,
- * and only against a backend whose bulk route is not known to apply deletes.
- * `/v1/patch` does not sweep the file's old edges, so a removed call between
- * two surviving symbols stayed live there; the bulk route sweeps them.
- */
-/**
  * Files reconciled at once, and entity lookups in flight across all of them:
  * the graph walkers' cap (`EXPAND_CONCURRENCY`), for the same reason.
  */
 const RECONCILE_CONCURRENCY = 8;
 
+/**
+ * Whether `patch` must go to `/v1/patch` on its own. Only a patch that deletes,
+ * and only against a backend whose bulk route is not known to apply deletes.
+ * `/v1/patch` does not sweep the file's old edges, so a removed call between
+ * two surviving symbols stayed live there; the bulk route sweeps them.
+ */
 export function patchRequiresPerFileCommit(patch: GraphPatchPayload, bulkDeletes = false): boolean {
   if (bulkDeletes) return false;
   return patch.ops.some(op => op.type === 'DeleteNode' || op.type === 'DeleteEdge');
