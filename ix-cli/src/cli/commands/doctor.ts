@@ -4,12 +4,16 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { renderSection, renderSuccess, renderError } from "../ui.js";
 import { createClient } from "../../client/factory.js";
+import { IxClient } from "../../client/api.js";
 import {
   canonicalWorkspacePath,
+  ConfigParseError,
+  DEFAULT_ENDPOINT,
   findWorkspaceForCwd,
   getDefaultWorkspace,
   getEndpoint,
   gitRootFor,
+  loadConfig,
   loadWorkspaces,
   selectWorkspaceForCwd,
   type WorkspaceConfig,
@@ -285,19 +289,68 @@ export async function assessDatabase(
   }
 }
 
-/** "Config file parses": a config.yaml Ix cannot read is otherwise silently replaced by defaults. */
+/** What every other command does with a config.yaml that does not parse (#807). */
+const CONFIG_REFUSAL = "other ix commands refuse to run until it is fixed";
+
+/**
+ * "Config file parses". A config.yaml that does not parse stops every other
+ * command (`loadConfig` throws ConfigParseError), so this is a failure, and the
+ * one doctor is still able to report: it catches that error itself.
+ */
 export function assessConfigFile(configPath: string, read: (p: string) => string | null): CheckResult {
   const raw = read(configPath);
   if (raw === null) return { ok: true, detail: "no config file (defaults)" };
   try {
     const parsed = parseYaml(raw);
     if (parsed !== null && parsed !== undefined && (typeof parsed !== "object" || Array.isArray(parsed))) {
-      return { ok: false, detail: `${configPath} is not a mapping of settings` };
+      return { ok: false, detail: `${configPath} is not a mapping of settings, so ${CONFIG_REFUSAL}` };
     }
     return { ok: true, detail: configPath };
   } catch (e) {
     const first = ((e as Error)?.message ?? String(e)).split("\n")[0];
-    return { ok: false, detail: `${configPath} does not parse, so Ix runs on defaults: ${first}` };
+    return { ok: false, detail: `${configPath} does not parse, so ${CONFIG_REFUSAL}: ${first}` };
+  }
+}
+
+/** The answer of a check that needs config.yaml when config.yaml does not parse. */
+const CONFIG_NOT_CHECKED: CheckResult = { ok: true, detail: "not checked: config.yaml does not parse" };
+
+function isConfigParseError(e: unknown): e is ConfigParseError {
+  return (e as Error | undefined)?.name === "ConfigParseError";
+}
+
+/**
+ * The endpoint and client doctor checks with. A config.yaml that does not parse
+ * is the one failure doctor must survive, since reporting it is its job: the
+ * endpoint falls back to IX_ENDPOINT or the default, and the client is built
+ * without the stored token, which lives in the file that does not parse.
+ */
+function doctorClient(): { endpoint: string; client: IxClient } {
+  let endpoint: string;
+  try {
+    endpoint = getEndpoint();
+  } catch (e) {
+    if (!isConfigParseError(e)) throw e;
+    endpoint = process.env.IX_ENDPOINT || DEFAULT_ENDPOINT;
+  }
+  try {
+    return { endpoint, client: createClient({ endpoint }) };
+  } catch (e) {
+    if (!isConfigParseError(e)) throw e;
+    // createClient read the stored token from the file that does not parse.
+    const token = process.env.IX_TOKEN?.trim();
+    // eslint-disable-next-line no-restricted-syntax -- the factory cannot build a client without config.yaml
+    return { endpoint, client: new IxClient(endpoint, undefined, token ? { token } : {}) };
+  }
+}
+
+/** A workspace lookup, or none when config.yaml (where workspaces live) does not parse. */
+function workspaceOrNone(lookup: () => WorkspaceConfig | undefined): WorkspaceConfig | undefined {
+  try {
+    return lookup();
+  } catch (e) {
+    if (isConfigParseError(e)) return undefined;
+    throw e;
   }
 }
 
@@ -317,8 +370,14 @@ export function registerDoctorCommand(program: Command): void {
     .description("Check Ix system health — server, database, graph integrity")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .action(async (opts: { format: string }) => {
-      const endpoint = getEndpoint();
-      const client = createClient({ endpoint });
+      const { endpoint, client } = doctorClient();
+      // Asked of the file directly: with IX_ENDPOINT and IX_TOKEN set,
+      // building the client never reads it.
+      let configBroken = false;
+      try { loadConfig(); } catch (e) {
+        if (!isConfigParseError(e)) throw e;
+        configBroken = true;
+      }
 
       // "Graph has nodes" and "Graph has edges" are two questions about one
       // response. They were two `client.stats()` calls, run back to back by the
@@ -338,11 +397,14 @@ export function registerDoctorCommand(program: Command): void {
       // never-ingested directory passed every check while quoting another repo's
       // graph (#518). Local, so it still answers when the backend is unreachable.
       const cwd = process.cwd();
-      const matchedWorkspace = findWorkspaceForCwd(cwd);
-      const substitutedWorkspace = matchedWorkspace ? undefined : getDefaultWorkspace();
+      const matchedWorkspace = workspaceOrNone(() => findWorkspaceForCwd(cwd));
+      const substitutedWorkspace = matchedWorkspace ? undefined : workspaceOrNone(getDefaultWorkspace);
 
       let statsOnce: Promise<{ stats: any; scope: string; systemId?: string }> | undefined;
       const sharedStats = (): Promise<{ stats: any; scope: string; systemId?: string }> => (statsOnce ??= (async () => {
+        // Without the workspaces there is no scope to count in, and an
+        // unscoped count would be reported as if it were this directory's.
+        if (configBroken) throw new ConfigParseError(pathJoin(ixHome(), "config.yaml"), "see Config file parses");
         // Scoped the same way `ix stats` scopes, because doctor disagreeing with
         // stats about the size of the graph is the whole of #510. Not a
         // tombstone fix: /v1/stats filters `deleted_rev == null` in every one of
@@ -440,6 +502,7 @@ export function registerDoctorCommand(program: Command): void {
             } catch { /* fall through to the local answer */ }
 
             if (systemScoped) return { ok: true, detail: "scoped to the active system" };
+            if (configBroken) return CONFIG_NOT_CHECKED;
             if (matchedWorkspace) return { ok: true, detail: `workspace '${matchedWorkspace.workspace_name}'` };
             if (substitutedWorkspace) {
               return {
@@ -476,6 +539,7 @@ export function registerDoctorCommand(program: Command): void {
           // doctor`.
           name: "Completed map for this workspace",
           run: async () => {
+            if (configBroken) return CONFIG_NOT_CHECKED;
             if (!matchedWorkspace) {
               return { ok: false, warn: true, detail: "no local workspace to check" };
             }
@@ -515,6 +579,7 @@ export function registerDoctorCommand(program: Command): void {
               const total = stats.nodes?.total ?? 0;
               return { ok: total > 0, detail: `${total} nodes in ${scope}` };
             } catch (e: any) {
+              if (isConfigParseError(e)) return CONFIG_NOT_CHECKED;
               return { ok: false, detail: e.message ?? "stats failed" };
             }
           },
@@ -527,6 +592,7 @@ export function registerDoctorCommand(program: Command): void {
               const total = stats.edges?.total ?? 0;
               return { ok: total > 0, detail: `${total} edges in ${scope}` };
             } catch (e: any) {
+              if (isConfigParseError(e)) return CONFIG_NOT_CHECKED;
               return { ok: false, detail: e.message ?? "stats failed" };
             }
           },
@@ -555,6 +621,7 @@ export function registerDoctorCommand(program: Command): void {
               // not a second failure for one problem.
               return { ok: true, detail: `not judged: no ${health.status === "empty" ? "nodes" : "edge breakdown"} in ${scope}` };
             } catch (e: any) {
+              if (isConfigParseError(e)) return CONFIG_NOT_CHECKED;
               return { ok: false, detail: e.message ?? "stats failed" };
             }
           },
@@ -567,6 +634,7 @@ export function registerDoctorCommand(program: Command): void {
               const count = Array.isArray(c) ? c.length : 0;
               return { ok: count === 0, detail: count === 0 ? "clean" : `${count} conflict(s)` };
             } catch (e: any) {
+              if (isConfigParseError(e)) return CONFIG_NOT_CHECKED;
               return { ok: false, detail: e.message ?? "conflicts check failed" };
             }
           },
@@ -652,7 +720,15 @@ export function registerDoctorCommand(program: Command): void {
 
       const results: Array<{ name: string } & CheckResult> = [];
       for (const check of checks) {
-        const result = await check.run();
+        let result: CheckResult;
+        try {
+          result = await check.run();
+        } catch (e) {
+          // A check that reached for config.yaml and found it unparseable. Any
+          // other throw is a bug in the check and still surfaces.
+          if (!isConfigParseError(e)) throw e;
+          result = CONFIG_NOT_CHECKED;
+        }
         results.push({ name: check.name, ...result });
       }
 
