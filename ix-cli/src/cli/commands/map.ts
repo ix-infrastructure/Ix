@@ -7,7 +7,7 @@ import { clearMapBaseline, clearMapResultCache } from "../config.js";
 import { roundFloat, printJson } from "../format.js";
 import { llmLine, llmError, llmShortId } from "../llm.js";
 import { bootstrap, resolveWorkspaceId } from "../bootstrap.js";
-import { formatFetchError } from "../errors.js";
+import { configParseError, formatFetchError, renderStructuredError } from "../errors.js";
 import { ingestFiles, type IngestFilesSummary } from "./ingest.js";
 import { detectSystem } from "../system.js";
 import { getRemoteRunner, isCloudReady } from "../remote.js";
@@ -827,6 +827,16 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
   try {
     cwd = resolveMapRoot(pathArg);
   } catch (err: any) {
+    // Finding the root reads config.yaml. A config that does not parse is not a
+    // bad path: say what it is, as every other command does.
+    if (err?.name === "ConfigParseError") {
+      const broken = configParseError(err.path, err.detail);
+      if (opts.format === "json") printJson(broken);
+      else if (opts.format === "llm") console.log(llmError(broken.error, broken.message, [["hint", broken.next ?? ""]]));
+      else renderStructuredError(broken);
+      process.exitCode = 1;
+      return;
+    }
     const message = err?.message ?? "Invalid map path";
     if (opts.format === "json") {
       printJson({ error: "invalid_map_path", message });
