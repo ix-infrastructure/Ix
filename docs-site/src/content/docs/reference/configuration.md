@@ -57,7 +57,7 @@ All services bind to `127.0.0.1` only.
 | `8090` | Ix Memory Layer (the HTTP API) |
 | `8080` | Compass (`ix view`), configurable with `--port` |
 
-ArangoDB has no host port: it runs without authentication, so only the memory layer reaches it, over the Compose network. To use its web UI, publish the port yourself in `~/.ix/backend/docker-compose.override.yml`, which `ix docker` applies, then run `ix docker start`:
+ArangoDB has no host port: it runs without authentication, so only the memory layer reaches it, over the Compose network. To use its web UI, publish the port yourself in `~/.ix/backend/docker-compose.override.yml`, which `ix docker` applies, then run `ix docker stop` and `ix docker start` (a backend that is already healthy is left as it is, so `ix docker start` alone does not apply it):
 
 ```yaml
 services:
