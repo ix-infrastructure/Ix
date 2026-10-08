@@ -484,6 +484,28 @@ describe("ingestFiles against a fake backend", () => {
     }
   });
 
+  it("an ingest's reads are not cut off by the read deadline (CL-15)", async () => {
+    // `ix ingest` passes no deadline, and an incremental run reads each changed
+    // file's previous patch (GET /v1/patches/:id) only after discovery and the
+    // parse, which on a real repo take minutes. A read deadline counted from
+    // the client's creation would fail every one of those reads.
+    const graph = new FakeBackend({ semantics: "head" });
+    process.env.IX_ENDPOINT = await graph.start();
+    try {
+      fixture(5);
+      await ingestFiles(repo, { format: "json", suppressOutput: true, printSummary: false });
+      writeFileSync(join(repo, "src", "m000.ts"), "export function g0(): number { return 0; }\n", "utf8");
+      graph.resetRequests();
+      process.env.IX_READ_DEADLINE_MS = "1";
+      const summary = await ingestFiles(repo, { format: "json", suppressOutput: true, printSummary: false });
+      expect(summary.patchesApplied).toBe(1);
+      expect(graph.unknownPaths).toEqual([]);
+    } finally {
+      delete process.env.IX_READ_DEADLINE_MS;
+      await graph.stop();
+    }
+  });
+
   it("blames the clock for the clock's losses, not the backend", async () => {
     // The cutoff and the run deadline both abandon patches, and three separate
     // review rounds found them attributed to each other -- the run telling the

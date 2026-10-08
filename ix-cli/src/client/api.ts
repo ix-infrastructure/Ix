@@ -37,6 +37,40 @@ export interface IxClientOptions {
   maxInFlight?: number;
   /** Sent as `Authorization: Bearer <token>` on every request (see `getLocalToken`). */
   token?: string;
+  /**
+   * Reads (GETs, and the POSTs in `SHARED_READ_PREFIXES`) fail once this many
+   * ms have passed since the client was created or since its last write
+   * through `post` finished: a whole-command bound on a hung backend, which the
+   * 2-minute per-request timeout is not. Writes are never cut off by it, and
+   * the time a write takes is not charged to the reads after it (`ix
+   * subsystems --list` scores, which can take minutes, then reads the scores).
+   * 0 or absent: no such bound.
+   */
+  readDeadlineMs?: number;
+  /**
+   * Retry a read once, after a short random wait, when the connection was
+   * refused or reset before it carried anything, or the answer was 502/503/504.
+   * Writes are never retried.
+   */
+  retryReads?: boolean;
+}
+
+/** Statuses a proxy or a restarting backend answers with, for which one retry is worth it. */
+const RETRYABLE_READ_STATUS = /^(502|503|504):/;
+
+/**
+ * A connection dropped mid-request. Not safe to repeat for a write, which may
+ * have been applied; a read can simply be asked again.
+ */
+const DROPPED_CONNECTION_CODES = new Set(["ECONNRESET", "EPIPE", "UND_ERR_SOCKET"]);
+
+function hasCode(err: unknown, codes: ReadonlySet<string>): boolean {
+  for (let e: unknown = err, hops = 0; e && hops < 5; hops++) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string" && codes.has(code)) return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 /**
@@ -56,6 +90,10 @@ export class IxClient {
   private readonly memo?: RequestMemo<SuccessBody>;
   private readonly limiter?: Limiter;
   private readonly token?: string;
+  private readonly readDeadlineMs?: number;
+  /** When reads stop being sent (epoch ms); moved on by each write. */
+  private readDeadlineAt?: number;
+  private readonly retryReads: boolean;
 
   // An optional deadline signal shared across every request this client makes.
   // `ix map` sets it to a hard wall-clock budget so that, even when the backend
@@ -72,6 +110,11 @@ export class IxClient {
     if (options.shareReads) this.memo = new RequestMemo();
     if (options.maxInFlight !== undefined) this.limiter = new Limiter(options.maxInFlight);
     if (options.token) this.token = options.token;
+    if (options.readDeadlineMs && options.readDeadlineMs > 0) {
+      this.readDeadlineMs = options.readDeadlineMs;
+      this.readDeadlineAt = Date.now() + options.readDeadlineMs;
+    }
+    this.retryReads = options.retryReads === true;
   }
 
   /**
@@ -91,13 +134,18 @@ export class IxClient {
     return this.memo?.hits ?? 0;
   }
 
-  // Combine a per-request timeout with the optional shared deadline. Whichever
-  // fires first aborts the fetch. AbortSignal.any propagates the first abort.
-  private signalFor(perRequestMs: number): AbortSignal {
-    const perRequest = AbortSignal.timeout(perRequestMs);
-    return this.deadlineSignal
-      ? AbortSignal.any([perRequest, this.deadlineSignal])
-      : perRequest;
+  // Combine a per-request timeout with the optional shared deadline, and for a
+  // read with the client's read deadline. Whichever fires first aborts the
+  // fetch. AbortSignal.any propagates the first abort.
+  private signalFor(perRequestMs: number, read = false): AbortSignal {
+    const signals = [AbortSignal.timeout(perRequestMs)];
+    if (this.deadlineSignal) signals.push(this.deadlineSignal);
+    // AbortSignal.timeout is unref'd by Node, so it never holds a finished
+    // process open.
+    if (read && this.readDeadlineAt !== undefined) {
+      signals.push(AbortSignal.timeout(Math.max(0, this.readDeadlineAt - Date.now())));
+    }
+    return signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
   }
 
   async query(
@@ -743,8 +791,9 @@ export class IxClient {
         body: payload,
         // These small reads/writes (source-hashes, stitch, list, ...) had no
         // timeout, so a stalled connection could hang the process indefinitely.
-        // 2 min per request, also bounded by the shared deadline when set.
-        signal: this.signalFor(2 * 60 * 1000),
+        // 2 min per request, also bounded by the shared deadline when set, and
+        // by the read deadline when this POST is a read.
+        signal: this.signalFor(2 * 60 * 1000, isSharedRead(path)),
       }));
   }
 
@@ -752,8 +801,22 @@ export class IxClient {
     return this.read<T>("GET", path, "", () =>
       fetch(`${this.endpoint}${path}`, {
         headers: this.headers(false),
-        signal: this.signalFor(timeoutMs),
+        signal: this.signalFor(timeoutMs, true),
       }));
+  }
+
+  /**
+   * Whether a failed read is worth one more try: the request never reached a
+   * backend (refused, unresolvable), the connection dropped under it, or a
+   * proxy or a restarting backend answered 502/503/504. Never once a deadline
+   * has fired.
+   */
+  private shouldRetry(err: unknown): boolean {
+    if (!this.retryReads) return false;
+    if (this.deadlineSignal?.aborted) return false;
+    if (this.readDeadlineAt !== undefined && Date.now() >= this.readDeadlineAt) return false;
+    if (isPreConnectionFailure(err) || hasCode(err, DROPPED_CONNECTION_CODES)) return true;
+    return err instanceof Error && RETRYABLE_READ_STATUS.test(err.message);
   }
 
   /**
@@ -762,15 +825,35 @@ export class IxClient {
    * and the path is a read, and parsed per caller either way.
    */
   private async read<T>(method: string, path: string, payload: string, send: () => Promise<Response>): Promise<T> {
+    const isRead = method === "GET" || isSharedRead(path);
     const fetchBody = async (): Promise<SuccessBody> => {
-      const run = async (): Promise<SuccessBody> => {
+      const once = async (): Promise<SuccessBody> => {
         const resp = await send();
         const text = await resp.text();
         if (!resp.ok) throw httpError(resp.status, text);
         return { status: resp.status, text };
       };
+      const run = async (): Promise<SuccessBody> => {
+        try {
+          return await once();
+        } catch (err) {
+          if (!isRead || !this.shouldRetry(err)) throw err;
+          // 100-300 ms, so a burst of reads that all hit one restart does not
+          // come back in lockstep.
+          await new Promise((resolve) => setTimeout(resolve, 100 + Math.random() * 200));
+          return once();
+        }
+      };
       return this.limiter ? this.limiter.run(run) : run();
     };
+    if (!isRead) {
+      try {
+        return parseOrThrowWithStatus<T>(await fetchBody());
+      } finally {
+        // The reads after a write get the whole read deadline again.
+        if (this.readDeadlineMs !== undefined) this.readDeadlineAt = Date.now() + this.readDeadlineMs;
+      }
+    }
     const body = this.memo && isSharedRead(path)
       ? await this.memo.run(`${method} ${path} ${payload}`, fetchBody)
       : await fetchBody();
