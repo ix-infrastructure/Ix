@@ -178,6 +178,12 @@ describe("doctor checks", () => {
     expect(await assessDatabase({ status: "ok" }, async () => ({ rev: 3 }))).toMatchObject({ ok: true });
     expect(await assessDatabase({ status: "ok" }, async () => { throw new Error("500: arango connection refused"); }))
       .toMatchObject({ ok: false, detail: expect.stringMatching(/could not read its database: 500/) });
+    // A 1.0.32 backend enforcing the token: health is exempt, the probe is not.
+    // A refused token is not a dead database.
+    const { LocalTokenRequiredError } = await import("../../client/api.js");
+    expect(await assessDatabase({ status: "ok" }, async () => {
+      throw new LocalTokenRequiredError('{"error":"unauthorized","code":"local_token_required"}');
+    })).toMatchObject({ ok: true, detail: expect.stringMatching(/refused this CLI's token/) });
   });
 
   it("a 503 health body is an answer, anything else is not", async () => {

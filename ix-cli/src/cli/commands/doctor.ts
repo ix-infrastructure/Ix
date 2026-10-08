@@ -275,6 +275,11 @@ export async function assessDatabase(
     await probe();
     return { ok: true, detail: "reachable (read the current revision)" };
   } catch (e) {
+    // The read was refused for want of the token, so it says nothing about the
+    // database; "Backend token" reports the refusal.
+    if ((e as Error)?.name === "LocalTokenRequiredError") {
+      return { ok: true, detail: "not checked: the backend refused this CLI's token (see Backend token)" };
+    }
     const msg = (e as Error)?.message ?? String(e);
     return { ok: false, detail: `the backend could not read its database: ${msg.slice(0, 200)}` };
   }
