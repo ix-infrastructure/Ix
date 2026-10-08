@@ -1,10 +1,12 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { execFile } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { Command } from "commander";
@@ -20,7 +22,11 @@ import { parse } from "yaml";
 
 const execFileAsync = promisify(execFile);
 const CLI_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
-const TSX = join(CLI_ROOT, "node_modules", ".bin", "tsx");
+// tsx's own entry, run by this node: node_modules/.bin/tsx is a .cmd shim on
+// Windows, which execFile cannot start (ENOENT).
+const TSX_CLI = join(CLI_ROOT, "node_modules", "tsx", "dist", "cli.mjs");
+const tsx = (args: string[], options: Parameters<typeof execFileAsync>[2]) =>
+  execFileAsync(process.execPath, [TSX_CLI, ...args], options);
 const BOOTSTRAP = join(CLI_ROOT, "src", "cli", "bootstrap.ts");
 
 let home: string;
@@ -43,9 +49,11 @@ afterEach(() => {
 const configPath = () => join(home, "config.yaml");
 
 describe("parallel registrations", () => {
-  it.skipIf(process.platform === "win32")("8 processes registering 8 repositories at once keep all 8", async () => {
+  // Generous: each process is a cold tsx start, and a slow macOS or Windows
+  // runner takes seconds per start. The lock itself waits up to 30 s.
+  it("8 processes registering 8 repositories at once keep all 8", async () => {
     const script = join(home, "register.mts");
-    writeFileSync(script, `import { ensureWorkspaceRegistered } from ${JSON.stringify(BOOTSTRAP)};\nensureWorkspaceRegistered(process.argv[2]);\n`);
+    writeFileSync(script, `import { ensureWorkspaceRegistered } from ${JSON.stringify(pathToFileURL(BOOTSTRAP).href)};\nensureWorkspaceRegistered(process.argv[2]);\n`);
     for (let trial = 0; trial < 2; trial++) {
       rmSync(configPath(), { force: true });
       const dirs = Array.from({ length: 8 }, (_, i) => {
@@ -53,12 +61,98 @@ describe("parallel registrations", () => {
         mkdirSync(d, { recursive: true });
         return d;
       });
-      await Promise.all(dirs.map((d) =>
-        execFileAsync(TSX, [script, d], { env: { ...process.env, IX_HOME: home, IX_LOCK_DIR: join(home, "locks") } })));
+      const env: NodeJS.ProcessEnv = { ...process.env, IX_HOME: home, IX_LOCK_DIR: join(home, "locks") };
+      delete env.FORCE_COLOR;
+      await Promise.all(dirs.map((d) => tsx([script, d], { env })));
       const registered = (parse(readFileSync(configPath(), "utf8")).workspaces ?? []).map((w: { root_path: string }) => w.root_path);
-      expect(registered.sort()).toEqual(dirs.sort());
+      // Registration stores the canonical path (macOS: /private/var/..., not
+      // tmpdir's /var/...; Windows: the long name, not RUNNER~1).
+      expect(registered.sort()).toEqual(dirs.map((d) => realpathSync.native(d)).sort());
     }
-  }, 60_000);
+  }, 180_000);
+});
+
+describe("the config lock", () => {
+  const lockDir = () => join(home, "locks");
+  beforeEach(() => { process.env.IX_LOCK_DIR = lockDir(); });
+  afterEach(() => {
+    delete process.env.IX_LOCK_DIR;
+    delete process.env.IX_CONFIG_LOCK_WAIT_MS;
+  });
+
+  async function lockFile(): Promise<string> {
+    const { namedLockPath } = await import("../single-flight.js");
+    return namedLockPath("config", configPath());
+  }
+
+  /** A pid that was alive a moment ago and is not now. */
+  function deadPid(): number {
+    const out = execFileSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" });
+    return Number(out);
+  }
+
+  function plant(path: string, pid: number): void {
+    mkdirSync(lockDir(), { recursive: true });
+    writeFileSync(path, JSON.stringify({ pid, host: hostname(), token: "planted", startedAt: Date.now(), label: "test" }));
+  }
+
+  it("breaks a lock left by a dead process, and the write goes through", async () => {
+    const path = await lockFile();
+    plant(path, deadPid()); // fresh mtime: only the dead pid makes it stale
+    const { updateConfig, loadConfig } = await import("../config.js");
+    const started = Date.now();
+    updateConfig((c) => ({ save: { ...c, format: "json" }, result: undefined }));
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(loadConfig().format).toBe("json");
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("breaks a lock older than the bound even when its pid is alive", async () => {
+    const path = await lockFile();
+    plant(path, process.pid);
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(path, old, old);
+    const { saveConfig, loadConfig } = await import("../config.js");
+    saveConfig({ ...loadConfig(), format: "llm" });
+    expect(loadConfig().format).toBe("llm");
+  });
+
+  it("fails loudly, writing nothing, while a live holder keeps it", async () => {
+    writeFileSync(configPath(), "endpoint: http://localhost:8090\nformat: text\n");
+    const before = readFileSync(configPath(), "utf8");
+    const path = await lockFile();
+    plant(path, process.pid);
+    process.env.IX_CONFIG_LOCK_WAIT_MS = "300";
+    const { updateConfig, saveConfig, loadConfig, ConfigLockError } = await import("../config.js");
+    expect(() => updateConfig((c) => ({ save: { ...c, format: "json" }, result: undefined }))).toThrow(ConfigLockError);
+    expect(() => saveConfig({ ...loadConfig(), format: "json" })).toThrow(/Nothing was written/);
+    expect(readFileSync(configPath(), "utf8")).toBe(before);
+    expect(existsSync(path)).toBe(true); // a live holder's lock is not taken
+
+    const { renderCliError } = await import("../errors.js");
+    const lines: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => { lines.push(a.join(" ")); });
+    vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { lines.push(a.join(" ")); });
+    vi.spyOn(process.stderr, "write").mockImplementation((s: string | Uint8Array) => { lines.push(String(s)); return true; });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => { throw new Error(`exit ${code}`); }) as never);
+    let err: unknown;
+    try { updateConfig(() => ({ result: undefined })); } catch (e) { err = e; }
+    expect(() => renderCliError(err)).toThrow("exit 1");
+    const text = lines.join("\n");
+    expect(text).toContain(path);
+    expect(text).not.toMatch(/\n\s+at /); // no stack trace
+  });
+
+  it("is re-entrant: saveConfig inside updateConfig does not wait on itself", async () => {
+    process.env.IX_CONFIG_LOCK_WAIT_MS = "300";
+    const { updateConfig, saveConfig, loadConfig } = await import("../config.js");
+    updateConfig((c) => {
+      saveConfig({ ...c, format: "json" });
+      return { save: { ...loadConfig(), endpoint: "http://127.0.0.1:8190" }, result: undefined };
+    });
+    expect(loadConfig()).toMatchObject({ format: "json", endpoint: "http://127.0.0.1:8190" });
+    expect(existsSync(await lockFile())).toBe(false);
+  });
 });
 
 describe("a config that does not parse", () => {
@@ -101,7 +195,7 @@ describe("a config that does not parse", () => {
       const env: NodeJS.ProcessEnv = { ...process.env, IX_HOME: home, IX_ENDPOINT: "http://127.0.0.1:1" };
       delete env.FORCE_COLOR;
       for (const format of ["json", "llm"]) {
-        const out = await execFileAsync(TSX, [main, "map", "--format", format], { cwd: repo, env })
+        const out = await tsx([main, "map", "--format", format], { cwd: repo, env })
           .then(() => { throw new Error("ix map exited 0 on a broken config"); },
                 (e: { code?: number; stdout?: string }) => e);
         expect(out.code).toBe(1);

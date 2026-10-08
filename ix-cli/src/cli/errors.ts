@@ -338,6 +338,19 @@ export function configParseError(path: string, detail: string): StructuredError 
 }
 
 /**
+ * config.yaml could not be locked for a write. Nothing was written: Ix never
+ * writes the file unlocked, because that is how parallel registrations lost
+ * each other's workspaces.
+ */
+export function configLockError(detail: string): StructuredError {
+  return {
+    error: "config_lock_timeout",
+    message: `Ix could not lock its config to write it: ${detail}`,
+    next: "Wait for the other ix command to finish and run this one again.",
+  };
+}
+
+/**
  * The backend answered 401 `local_token_required`: it was started with
  * IX_LOCAL_TOKEN and this CLI sent no token, or a different one.
  */
@@ -389,6 +402,13 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string): 
   if (e?.name === "ConfigParseError") {
     const broken = configParseError(e.path, e.detail);
     if (!emitLlmError(broken.error, broken.message, broken.next)) renderStructuredError(broken);
+    if (debug) writeDebugDetail(err);
+    process.exit(1);
+  }
+
+  if (e?.name === "ConfigLockError") {
+    const locked = configLockError(e.detail);
+    if (!emitLlmError(locked.error, locked.message, locked.next)) renderStructuredError(locked);
     if (debug) writeDebugDetail(err);
     process.exit(1);
   }

@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import chalk from "chalk";
 import { createClient } from "../client/factory.js";
 import { renderBanner } from "./banner.js";
-import { canonicalWorkspacePath, getEndpoint, gitRootFor, loadConfig, loadWorkspaces, findWorkspaceForCwd, updateConfig, type IxConfig, type WorkspaceConfig } from "./config.js";
+import { canonicalWorkspacePath, getEndpoint, gitRootFor, loadConfig, loadWorkspaces, findWorkspaceForCwd, updateConfig, withConfigWriteLock, type IxConfig, type WorkspaceConfig } from "./config.js";
 import { WorkspaceNotMappedError, workspaceNotMappedHint } from "./errors.js";
 import { ixHome } from "./ix-home.js";
 import { stderr } from "./stderr.js";
@@ -30,16 +30,21 @@ export function ensureLocalConfig(): boolean {
   const configDir = ixHome();
   const configPath = join(configDir, "config.yaml");
   mkdirSync(configDir, { recursive: true });
-  try {
-    // 'wx' creates the file atomically and throws EEXIST if it already exists,
-    // avoiding the existsSync-then-write TOCTOU (CodeQL js/file-system-race).
-    writeFileSync(configPath, `endpoint: ${getEndpoint()}\nformat: text\n`, { flag: "wx" });
-    noteRelocatedConfig(configPath);
-    return true;
-  } catch (err: any) {
-    if (err?.code === "EEXIST") return false;
-    throw err;
-  }
+  // Under the config lock like every other write, so a registration that has
+  // just read "no file" is not overtaken by this one.
+  const created = withConfigWriteLock(() => {
+    try {
+      // 'wx' creates the file atomically and throws EEXIST if it already exists,
+      // avoiding the existsSync-then-write TOCTOU (CodeQL js/file-system-race).
+      writeFileSync(configPath, `endpoint: ${getEndpoint()}\nformat: text\n`, { flag: "wx" });
+      return true;
+    } catch (err: any) {
+      if (err?.code === "EEXIST") return false;
+      throw err;
+    }
+  });
+  if (created) noteRelocatedConfig(configPath);
+  return created;
 }
 
 /**

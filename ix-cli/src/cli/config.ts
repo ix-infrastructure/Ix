@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { readFileSync, writeFileSync, existsSync, rmSync, chmodSync, renameSync, realpathSync, mkdirSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, rmSync, chmodSync, realpathSync, mkdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -8,7 +8,9 @@ import { parse, stringify } from "yaml";
 import { IxClient } from "../client/api.js";
 import { ixHome } from "./ix-home.js";
 import { isLocalEndpoint } from "./backend-version.js";
-import { acquireLockAt, namedLockPath } from "./single-flight.js";
+import { renameWithRetry, withConfigLock } from "./config-lock.js";
+
+export { ConfigLockError } from "./config-lock.js";
 
 /**
  * The key of a project root's per-root state files. Canonical first: `ix
@@ -249,9 +251,6 @@ export function resetConfigMemo(): void {
   configMemo = undefined;
 }
 
-/** How long a config write waits for another process's before going ahead anyway. */
-const CONFIG_LOCK_WAIT_MS = 5_000;
-
 /**
  * Read config.yaml, apply `mutate`, and write it back, with no other Ix
  * process writing it in between.
@@ -260,36 +259,30 @@ const CONFIG_LOCK_WAIT_MS = 5_000;
  * runs registering eight new repositories each read the file, each appended
  * its own workspace, and each renamed its copy over the others' -- leaving one
  * or two of the eight. Under the lock each one reads what the previous one
- * wrote. The lock is the single-flight link lock, so a crashed holder is
- * detected by its dead pid; past {@link CONFIG_LOCK_WAIT_MS} the write goes
- * ahead unlocked rather than hang a command.
+ * wrote. A writer that cannot get the lock waits, breaks it if its holder is
+ * gone, and otherwise fails with `ConfigLockError`; it never writes unlocked
+ * (see config-lock.ts).
  *
  * `mutate` gets a fresh read, never the memoised one, and returns the config
- * to save, or undefined to leave the file as it is.
+ * to save, or undefined to leave the file as it is. It must be synchronous.
  */
 export function updateConfig<T>(mutate: (config: IxConfig) => { save?: IxConfig; result: T }): T {
   const configPath = join(ixHome(), "config.yaml");
-  const lock = waitForLock(namedLockPath("config", configPath), `config write ${configPath}`);
-  try {
+  return withConfigLock(configPath, `config write ${configPath}`, () => {
     configMemo = undefined;
     const { save, result } = mutate(loadConfig());
     if (save) saveConfig(save);
     return result;
-  } finally {
-    lock?.release();
-  }
+  });
 }
 
-function waitForLock(path: string, label: string): { release(): void } | null {
-  const deadline = Date.now() + CONFIG_LOCK_WAIT_MS;
-  const pause = new Int32Array(new SharedArrayBuffer(4));
-  for (;;) {
-    const handle = acquireLockAt(path, label);
-    if (handle) return handle;
-    if (Date.now() >= deadline) return null;
-    // A synchronous wait: registration runs inside synchronous callers.
-    Atomics.wait(pause, 0, 0, 5 + Math.floor(Math.random() * 20));
-  }
+/**
+ * Run `fn` holding the config lock, for a write that is not a plain
+ * `updateConfig` -- creating the file, say. Synchronous only.
+ */
+export function withConfigWriteLock<T>(fn: () => T): T {
+  const configPath = join(ixHome(), "config.yaml");
+  return withConfigLock(configPath, `config write ${configPath}`, fn);
 }
 
 // Keys the OSS schema owns. For these, the in-memory `config` argument is
@@ -308,9 +301,18 @@ const OSS_OWNED_KEYS = new Set<keyof IxConfig>([
   "auth",
 ]);
 
+/**
+ * Write `config` over config.yaml, keeping the keys OSS does not own. Takes the
+ * config lock (re-entrantly, so `updateConfig` can call it), and re-reads the
+ * file under it, so the keys it preserves are the current ones.
+ */
 export function saveConfig(config: IxConfig): void {
   const configDir = ixHome();
   const configPath = join(configDir, "config.yaml");
+  withConfigLock(configPath, `config write ${configPath}`, () => writeConfigLocked(config, configDir, configPath));
+}
+
+function writeConfigLocked(config: IxConfig, configDir: string, configPath: string): void {
   // 0700, to match the 0600 the config itself is written with below: the file
   // holds credentials (Pro's instances carry a tunnel JWT and a long-lived IdP
   // refresh token), and a directory created at the default umask (typically
@@ -351,10 +353,14 @@ export function saveConfig(config: IxConfig): void {
   // js/file-system-race). Same-dir keeps the rename atomic; rename replaces on
   // POSIX and Windows alike, and inherits the temp's 0600 mode (tightening any
   // pre-existing group/world-readable config).
-  const tmpPath = `${configPath}.${process.pid}.tmp`;
+  //
+  // On Windows the rename is MoveFileEx with REPLACE_EXISTING, which fails with
+  // EPERM/EBUSY while another process has the target open -- an unlocked
+  // reader, an indexer, antivirus -- so it is retried for a few seconds.
+  const tmpPath = `${configPath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   writeFileSync(tmpPath, stringify(merged), { mode: 0o600 });
   try {
-    renameSync(tmpPath, configPath);
+    renameWithRetry(tmpPath, configPath);
   } catch (err) {
     try { rmSync(tmpPath, { force: true }); } catch { /* best effort */ }
     throw err;
