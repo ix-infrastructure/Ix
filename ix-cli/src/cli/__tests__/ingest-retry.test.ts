@@ -4,11 +4,14 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   commitBulkWithPayloadSplit,
   commitFailureIndictsBackend,
+  cutBulkChunks,
+  DEFAULT_COMMIT_MAX_OPS,
   isAbortError,
   isBulkPartiallyCommittedError,
   isPayloadTooLargeError,
   isRetryableCommitConflict,
   parseBulkCommittedPatchIds,
+  parseSuggestedMaxPatches,
 } from '../commands/ingest.js';
 
 // Verbatim from a backend that refused a bulk save of a >1,000-file repo (Ix#516).
@@ -164,6 +167,32 @@ describe('commitBulkWithPayloadSplit', () => {
     ]);
     expect(committed).toEqual([1, 2, 3, 4, 5]);
     expect(commitIndividually).not.toHaveBeenCalled();
+  });
+
+  it('cuts a too-large group the way the caller says, in order and one piece at a time', async () => {
+    const bulkCalls: number[][] = [];
+    const committed: number[] = [];
+    let inFlight = 0;
+    let peak = 0;
+
+    await commitBulkWithPayloadSplit([1, 2, 3, 4, 5, 6, 7], {
+      commitBulk: async batch => {
+        bulkCalls.push([...batch]);
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise(r => setTimeout(r, 1));
+        inFlight--;
+        if (batch.length > 3) throw new Error('413: {"error":"payload_too_large","suggestedMaxPatches":3}');
+        return batch.length;
+      },
+      onBulkCommitted: batch => committed.push(...batch),
+      commitIndividually: vi.fn(async () => {}),
+      splitTooLarge: (batch, err) => cutBulkChunks(batch, () => 1, { maxFiles: parseSuggestedMaxPatches(err)!, maxOps: Infinity }),
+    });
+
+    expect(bulkCalls).toEqual([[1, 2, 3, 4, 5, 6, 7], [1, 2, 3], [4, 5, 6], [7]]);
+    expect(committed).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(peak).toBe(1);
   });
 
   it('keeps the per-file path for a single rejected patch', async () => {
@@ -485,5 +514,32 @@ describe('partly-committed bulk groups', () => {
     });
 
     expect(commitIndividually).toHaveBeenCalledWith([1, 2], error);
+  });
+});
+
+describe('bulk request bounds (IN-05)', () => {
+  it('defaults under the bulk writer\'s pre-flight budget on a non-empty graph', () => {
+    // Ix-memory BulkTransactionBudget.Default: 80% of ArangoDB's 512 MB stream
+    // transaction at 4,300 bytes per upserted document, doubled once rev > 0.
+    // A default over it is refused with a 413 on the first large request of
+    // every map but a backend's first.
+    const limitBytes = Math.floor((512 * 1024 * 1024 * 8) / 10);
+    const nonEmptyGraphDocs = Math.floor(limitBytes / (4300 * 2));
+    expect(DEFAULT_COMMIT_MAX_OPS).toBeLessThanOrEqual(nonEmptyGraphDocs);
+  });
+
+  it('cuts by files and by ops, in order, and sends an over-size patch alone', () => {
+    const ops = [10, 10, 10, 50, 10, 200, 10];
+    const cut = cutBulkChunks(ops.map((n, i) => ({ i, n })), item => item.n, { maxFiles: 3, maxOps: 60 });
+    expect(cut.map(c => c.map(item => item.i))).toEqual([[0, 1, 2], [3, 4], [5], [6]]);
+    expect(cutBulkChunks([], () => 1, { maxFiles: 3, maxOps: 60 })).toEqual([]);
+  });
+
+  it('reads the patch count a 413 suggests, and nothing from one that has none', () => {
+    expect(parseSuggestedMaxPatches(new Error('413: {"error":"payload_too_large","message":"x","suggestedMaxPatches":120}'))).toBe(120);
+    expect(parseSuggestedMaxPatches(new Error('413: {"error":"payload_too_large"}'))).toBeUndefined();
+    expect(parseSuggestedMaxPatches(new Error('413: {"suggestedMaxPatches":0}'))).toBeUndefined();
+    expect(parseSuggestedMaxPatches(ARANGO_TRANSACTION_LIMIT_ERROR)).toBeUndefined();
+    expect(parseSuggestedMaxPatches(new Error('413: request rejected'))).toBeUndefined();
   });
 });

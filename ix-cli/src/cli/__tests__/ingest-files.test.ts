@@ -1239,6 +1239,55 @@ describe("ingestFiles against a fake backend", () => {
     });
   });
 
+  describe("bulk requests bounded by size (IN-05)", () => {
+    // 1,100 files: three parse batches, so what the first batch learns has two
+    // more batches to hold for. The backend refuses a bulk over 300 ops.
+    const tooLarge = () => backend.requests.filter(r => r.path === "/v1/patches/bulk" && r.code === 413).length;
+    const saved = process.env.IX_COMMIT_MAX_OPS;
+    afterEach(() => {
+      if (saved === undefined) delete process.env.IX_COMMIT_MAX_OPS;
+      else process.env.IX_COMMIT_MAX_OPS = saved;
+    });
+
+    it("learns the size from the first 413 that suggests one, and is refused no more that run", async () => {
+      fixture(1100);
+      backend.maxBulkOps = 300;
+      backend.suggestMaxPatches = true;
+
+      const summary = await run();
+
+      expect(tooLarge()).toBe(1);
+      expect(summary.commitErrors).toBe(0);
+      expect(summary.patchesApplied).toBe(1100);
+      expect(backend.singleCount, "no per-file fallback").toBe(0);
+    });
+
+    it("halves by ops on a 413 that suggests nothing, and later batches start at the learned size", async () => {
+      fixture(1100);
+      backend.maxBulkOps = 300;
+
+      const summary = await run();
+
+      // A few halvings in the first batch only; bisecting each batch afresh
+      // was three times as many.
+      expect(tooLarge()).toBeGreaterThan(0);
+      expect(tooLarge()).toBeLessThanOrEqual(4);
+      expect(summary.commitErrors).toBe(0);
+      expect(summary.patchesApplied).toBe(1100);
+    });
+
+    it("is never refused when IX_COMMIT_MAX_OPS keeps every request under the cap", async () => {
+      fixture(1100);
+      backend.maxBulkOps = 300;
+      process.env.IX_COMMIT_MAX_OPS = "300";
+
+      const summary = await run();
+
+      expect(tooLarge()).toBe(0);
+      expect(summary.patchesApplied).toBe(1100);
+    });
+  });
+
   // ── Which workspace a path belongs to ─────────────────────────────────
   //
   // `ix ingest <path>` used to treat the path as its own workspace root: `ix
