@@ -5,6 +5,7 @@ import {
   commitBulkWithPayloadSplit,
   commitFailureIndictsBackend,
   cutBulkChunks,
+  DEFAULT_COMMIT_MAX_OPS,
   isAbortError,
   isBulkPartiallyCommittedError,
   isPayloadTooLargeError,
@@ -517,6 +518,16 @@ describe('partly-committed bulk groups', () => {
 });
 
 describe('bulk request bounds (IN-05)', () => {
+  it('defaults under the bulk writer\'s pre-flight budget on a non-empty graph', () => {
+    // Ix-memory BulkTransactionBudget.Default: 80% of ArangoDB's 512 MB stream
+    // transaction at 4,300 bytes per upserted document, doubled once rev > 0.
+    // A default over it is refused with a 413 on the first large request of
+    // every map but a backend's first.
+    const limitBytes = Math.floor((512 * 1024 * 1024 * 8) / 10);
+    const nonEmptyGraphDocs = Math.floor(limitBytes / (4300 * 2));
+    expect(DEFAULT_COMMIT_MAX_OPS).toBeLessThanOrEqual(nonEmptyGraphDocs);
+  });
+
   it('cuts by files and by ops, in order, and sends an over-size patch alone', () => {
     const ops = [10, 10, 10, 50, 10, 200, 10];
     const cut = cutBulkChunks(ops.map((n, i) => ({ i, n })), item => item.n, { maxFiles: 3, maxOps: 60 });

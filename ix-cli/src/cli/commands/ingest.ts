@@ -756,6 +756,20 @@ export function parseSuggestedMaxPatches(err: unknown): number | undefined {
   }
 }
 
+/**
+ * Ops per bulk request unless `IX_COMMIT_MAX_OPS` says otherwise. The backend's
+ * transaction grows with them, about 4.3 KB a document against ArangoDB's
+ * 512 MB cap, so a 500-file batch of a large repository could not fit and
+ * failed after 14-20 s.
+ *
+ * The bound that matters is the bulk writer's own pre-flight budget (Ix-memory
+ * `BulkTransactionBudget`, from 1.0.32): 80% of 512 MB at 4,300 bytes per
+ * upserted document, doubled once the graph holds anything, which is about
+ * 49,900 documents on every map but a backend's first. Over it, a request is
+ * refused with a 413 before any write; this default stays under it.
+ */
+export const DEFAULT_COMMIT_MAX_OPS = 45_000;
+
 /** Per-request bounds on a bulk commit. A run lowers them when a commit is too large. */
 export interface BulkLimits {
   maxFiles: number;
@@ -2463,10 +2477,8 @@ export async function ingestFiles(
     // and overlaps well with commit (~5s) + parse (~5s).
     const PARSE_STREAM_CHUNK     = filePaths.length > 10_000 ? 500 : 500;
     const COMMIT_HTTP_MAX_FILES  = parsePositiveIntEnv('IX_COMMIT_HTTP_MAX_FILES', 1000); // files per HTTP request to the backend
-    // Ops per HTTP request. The backend's transaction grows with them, about
-    // 4.3 KB a document against a 512 MB cap (~119k documents), so a 500-file
-    // batch of a large repository could not fit and failed after 14-20 s.
-    const COMMIT_MAX_OPS         = parsePositiveIntEnv('IX_COMMIT_MAX_OPS', 60_000);
+    // Ops per HTTP request; see DEFAULT_COMMIT_MAX_OPS.
+    const COMMIT_MAX_OPS         = parsePositiveIntEnv('IX_COMMIT_MAX_OPS', DEFAULT_COMMIT_MAX_OPS);
     /**
      * The bulk bounds for the rest of the run. A 413 lowers them, so later
      * batches start at a size that fits instead of failing and splitting again.
