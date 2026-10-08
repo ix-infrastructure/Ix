@@ -29,6 +29,10 @@ export class FakeBackend {
   poison: string[] = [];
   /** Fail every commit, the Ix#560 shape. */
   refuseEverything = false;
+  /** Answer a bulk of more than this many ops (over two or more patches) with a 413. */
+  maxBulkOps: number | undefined = undefined;
+  /** Put `suggestedMaxPatches` in that 413, as the bulk writer's estimate does. */
+  suggestMaxPatches = false;
   /** Refuse re-sends of patches a 409 already confirmed. */
   refuseReplays = false;
   /**
@@ -116,7 +120,13 @@ export class FakeBackend {
    *     uri). An older id is written again and becomes the head (BEW-03).
    */
   semantics: "legacy" | "head" | undefined;
-  private readonly nodes = new Map<string, { kind: unknown; name: unknown; live: boolean }>();
+  /**
+   * The `release_version` /v1/health reports. Unset, `head` reports a release
+   * whose bulk route applies deletes (BEW-03 and #237 are in it) and the others
+   * report none, as a pre-#157 backend does. `null` reports none in any mode.
+   */
+  releaseVersion: string | null | undefined = undefined;
+  private readonly nodes = new Map<string, { kind: unknown; name: unknown; attrs?: unknown; live: boolean }>();
   private readonly edges = new Map<string, {
     src: unknown; dst: unknown; predicate: unknown; workspaceId: string; uri: string; live: boolean;
   }>();
@@ -158,26 +168,43 @@ export class FakeBackend {
     return this.heads.get(`${record.workspaceId}\0${record.uri}`) === patchId;
   }
 
-  private applyPatch(patch: SentPatch, sweep: boolean, bulkGroup: string | null): void {
+  private sweepEdgesOf(patch: SentPatch): void {
     const workspaceId = patch.source?.workspaceId ?? "";
     const uri = patch.source?.uri ?? "";
-    this.rev++;
-    if (sweep) {
-      for (const e of this.edges.values()) {
-        if (e.live && e.uri === uri && e.workspaceId === workspaceId) e.live = false;
-      }
+    for (const e of this.edges.values()) {
+      if (e.live && e.uri === uri && e.workspaceId === workspaceId) e.live = false;
     }
+  }
+
+  private applyDeletes(patch: SentPatch): void {
     for (const op of patch.ops ?? []) {
       const id = String(op.id);
-      if (op.type === "UpsertNode") this.nodes.set(id, { kind: op.kind, name: op.name, live: true });
-      else if (op.type === "UpsertEdge") {
-        this.edges.set(id, { src: op.src, dst: op.dst, predicate: op.predicate, workspaceId, uri, live: true });
-      } else if (op.type === "DeleteNode") {
+      if (op.type === "DeleteNode") {
         const n = this.nodes.get(id);
         if (n) n.live = false;
       } else if (op.type === "DeleteEdge") {
         const e = this.edges.get(id);
         if (e) e.live = false;
+      }
+    }
+  }
+
+  /**
+   * One patch's writes. A bulk request runs its phases across all of its
+   * patches -- every sweep, then every delete, then every upsert -- as
+   * BulkWriteApi `commitChunk` does, so a delete in one file's patch never
+   * removes what another patch of the same request writes.
+   */
+  private applyPatch(patch: SentPatch, bulkGroup: string | null, deletesApplied = false): void {
+    const workspaceId = patch.source?.workspaceId ?? "";
+    const uri = patch.source?.uri ?? "";
+    this.rev++;
+    if (!deletesApplied) this.applyDeletes(patch);
+    for (const op of patch.ops ?? []) {
+      const id = String(op.id);
+      if (op.type === "UpsertNode") this.nodes.set(id, { kind: op.kind, name: op.name, attrs: op.attrs, live: true });
+      else if (op.type === "UpsertEdge") {
+        this.edges.set(id, { src: op.src, dst: op.dst, predicate: op.predicate, workspaceId, uri, live: true });
       }
     }
     if (patch.patchId === undefined) return;
@@ -193,14 +220,16 @@ export class FakeBackend {
       if (patch?.patchId !== undefined && this.alreadyCommitted(patch.patchId)) {
         return send(200, { rev: this.stored.get(patch.patchId)!.rev, status: "Idempotent" });
       }
-      if (patch) this.applyPatch(patch, false, null);
+      if (patch) this.applyPatch(patch, null);
       return send(200, { rev: this.rev, status: "Ok" });
     }
     const ids = patches.map((p) => p.patchId ?? "");
     const group = createHash("sha256").update(ids.join(",")).digest("hex");
     const done = ids.filter((id) => this.alreadyCommitted(id));
     if (done.length === 0) {
-      for (const p of patches) this.applyPatch(p, true, group);
+      for (const p of patches) this.sweepEdgesOf(p);
+      for (const p of patches) this.applyDeletes(p);
+      for (const p of patches) this.applyPatch(p, group, true);
       return send(200, { rev: this.rev, applied: patches.length, status: "Ok" });
     }
     if (done.length !== ids.length) {
@@ -356,6 +385,20 @@ export class FakeBackend {
         this.aborter.abort();
       }
 
+      if (path === "/v1/patches/bulk" && this.maxBulkOps !== undefined && patches.length > 1) {
+        const ops = patches.reduce((sum, p) => sum + (p.ops?.length ?? 0), 0);
+        if (ops > this.maxBulkOps) {
+          // The bulk writer's estimate refusal (Ix-memory#232): a 413 before
+          // any write, with the patch count that would fit when asked to say.
+          const perPatch = ops / patches.length;
+          const suggested = Math.max(1, Math.floor(this.maxBulkOps / perPatch));
+          return send(413, {
+            error: "payload_too_large",
+            message: `bulk commit of ${patches.length} patches is over the transaction budget`,
+            ...(this.suggestMaxPatches ? { suggestedMaxPatches: suggested } : {}),
+          });
+        }
+      }
       if (path === "/v1/patch" && this.refuseReplays) {
         return send(500, { error: "500: already committed" });
       }
@@ -419,7 +462,10 @@ export class FakeBackend {
       return;
     }
 
-    if (path === "/v1/health") return send(200, { status: "ok", version: "1.0.28" });
+    if (path === "/v1/health") {
+      const release = this.releaseVersion !== undefined ? this.releaseVersion : this.semantics === "head" ? "1.0.34" : null;
+      return send(200, { status: "ok", version: "1.0.28", ...(release ? { release_version: release } : {}) });
+    }
     if (path === "/v1/source-hashes") {
       if (this.failSourceHashes) return send(500, { error: "500: transaction begin timeout" });
       let uris: string[] = [];
@@ -446,7 +492,7 @@ export class FakeBackend {
       const edges = [...this.edges]
         .filter(([, e]) => e.live && (e.src === id || e.dst === id))
         .map(([edgeId, e]) => ({ id: edgeId, predicate: e.predicate, provenance: { sourceUri: e.uri } }));
-      return send(200, { node: { id, kind: node.kind, name: node.name }, edges });
+      return send(200, { node: { id, kind: node.kind, name: node.name, attrs: node.attrs ?? {} }, edges });
     }
     if (path === "/v1/stitch") {
       this.requests.push({ path, patches: 0 });
