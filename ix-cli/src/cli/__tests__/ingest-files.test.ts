@@ -1082,6 +1082,17 @@ describe("ingestFiles against a fake backend", () => {
     });
   });
 
+  it("counts a file over the size limit in the summary, so ix map can say so", async () => {
+    fixture(2);
+    writeFileSync(join(repo, "src", "huge.ts"), `export const big = "${"x".repeat(1024 * 1024 + 10)}";\n`, "utf8");
+    execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+
+    const summary = await run();
+
+    expect(summary.filesTooLarge).toBe(1);
+    expect(summary.patchesApplied).toBe(2);
+  });
+
   it("ingests only the languages --lang names, and keeps the rest of the baseline", async () => {
     fixture(3);
     writeFileSync(join(repo, "src", "tool.py"), "def tool():\n    return 1\n", "utf8");
@@ -1192,6 +1203,39 @@ describe("ingestFiles against a fake backend", () => {
       await removeAFunction();
       expect(backend.lastOps.get("src/a.ts")?.some(op => op.type === "DeleteNode"), "the patch deletes").toBe(true);
       expect(perFile()).toBe(1);
+    });
+
+    it("goes to /v1/patch on its own on a release before the one that applies bulk deletes", async () => {
+      backend.releaseVersion = "1.0.31";
+      await removeAFunction();
+      expect(perFile()).toBe(1);
+    });
+
+    // An external package node is keyed by the workspace, not the file, so
+    // every caller writes the same one. One caller dropping its call deleted
+    // the node and every other caller's edge to it, though their files had
+    // not changed.
+    it("a file that stops calling a package function leaves the other callers' edges", async () => {
+      backend.semantics = "head";
+      backend.releaseVersion = "1.0.32";
+      mkdirSync(join(repo, "R"), { recursive: true });
+      const calls = (fn: string) => `${fn} <- function(x) {\n  dplyr::filter(x)\n}\n`;
+      writeFileSync(join(repo, "R", "a.R"), calls("fa"), "utf8");
+      writeFileSync(join(repo, "R", "b.R"), calls("fb"), "utf8");
+      execFileSync("git", ["init", "-q"], { cwd: repo, stdio: "ignore" });
+      execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+      await incremental();
+      const edgeNames = () => backend.graphSignature().edges
+        .map(line => line.split(" "))
+        .filter(([, , , predicate]) => predicate === "CALLS")
+        .map(([, src, dst]) => `${backend.nodeName(src!)} -> ${backend.nodeName(dst!)}`)
+        .sort();
+      expect(edgeNames()).toEqual(["fa[function] -> filter[function]", "fb[function] -> filter[function]"]);
+
+      writeFileSync(join(repo, "R", "a.R"), "fa <- function(x) {\n  x\n}\n", "utf8");
+      await incremental();
+
+      expect(edgeNames()).toEqual(["fb[function] -> filter[function]"]);
     });
   });
 
