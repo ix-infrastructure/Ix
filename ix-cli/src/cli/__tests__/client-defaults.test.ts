@@ -150,6 +150,27 @@ describe("a read deadline per command", () => {
     await expect(createClient({ endpoint, deadlineSignal: new AbortController().signal }).search("x")).resolves.toEqual([]);
   });
 
+  it("a write's time is not charged to the reads after it", async () => {
+    // `ix subsystems --list` on a fresh graph scores (a POST that can take
+    // minutes) and then reads the scores. Counted from the client's creation,
+    // the deadline had already passed when that read was sent.
+    handler = (url) => (url.startsWith("/v1/subsystems/score")
+      ? { status: 200, body: "{}", delayMs: 400 }
+      : { status: 200, body: '{"scores":[]}' });
+    process.env.IX_READ_DEADLINE_MS = "250";
+    const client = createClient({ endpoint });
+    await client.scoreSubsystems({ workspaceId: "ws" });
+    await expect(client.listSubsystems({ workspaceId: "ws" })).resolves.toEqual({ scores: [] });
+  });
+
+  it("the deadline still bounds the reads together, not each read", async () => {
+    handler = () => ({ status: 200, body: "[]", delayMs: 150 });
+    process.env.IX_READ_DEADLINE_MS = "250";
+    const client = createClient({ endpoint });
+    await client.search("a");
+    await expect((async () => { await client.search("b"); await client.search("c"); })()).rejects.toThrow();
+  });
+
   it("IX_READ_DEADLINE_MS: a number of ms, 0 for none, anything else the default", () => {
     expect(readDeadlineMs({})).toBe(DEFAULT_READ_DEADLINE_MS);
     expect(DEFAULT_READ_DEADLINE_MS).toBe(60_000);

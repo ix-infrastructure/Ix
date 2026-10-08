@@ -39,9 +39,12 @@ export interface IxClientOptions {
   token?: string;
   /**
    * Reads (GETs, and the POSTs in `SHARED_READ_PREFIXES`) fail once this many
-   * ms have passed since the client was created: a whole-command bound on a
-   * hung backend, which the 2-minute per-request timeout is not. Writes are
-   * never cut off by it. 0 or absent: no such bound.
+   * ms have passed since the client was created or since its last write
+   * through `post` finished: a whole-command bound on a hung backend, which the
+   * 2-minute per-request timeout is not. Writes are never cut off by it, and
+   * the time a write takes is not charged to the reads after it (`ix
+   * subsystems --list` scores, which can take minutes, then reads the scores).
+   * 0 or absent: no such bound.
    */
   readDeadlineMs?: number;
   /**
@@ -87,7 +90,9 @@ export class IxClient {
   private readonly memo?: RequestMemo<SuccessBody>;
   private readonly limiter?: Limiter;
   private readonly token?: string;
-  private readonly readDeadline?: AbortSignal;
+  private readonly readDeadlineMs?: number;
+  /** When reads stop being sent (epoch ms); moved on by each write. */
+  private readDeadlineAt?: number;
   private readonly retryReads: boolean;
 
   // An optional deadline signal shared across every request this client makes.
@@ -105,8 +110,10 @@ export class IxClient {
     if (options.shareReads) this.memo = new RequestMemo();
     if (options.maxInFlight !== undefined) this.limiter = new Limiter(options.maxInFlight);
     if (options.token) this.token = options.token;
-    // Unref'd by Node, so it never holds a finished process open.
-    if (options.readDeadlineMs && options.readDeadlineMs > 0) this.readDeadline = AbortSignal.timeout(options.readDeadlineMs);
+    if (options.readDeadlineMs && options.readDeadlineMs > 0) {
+      this.readDeadlineMs = options.readDeadlineMs;
+      this.readDeadlineAt = Date.now() + options.readDeadlineMs;
+    }
     this.retryReads = options.retryReads === true;
   }
 
@@ -133,7 +140,11 @@ export class IxClient {
   private signalFor(perRequestMs: number, read = false): AbortSignal {
     const signals = [AbortSignal.timeout(perRequestMs)];
     if (this.deadlineSignal) signals.push(this.deadlineSignal);
-    if (read && this.readDeadline) signals.push(this.readDeadline);
+    // AbortSignal.timeout is unref'd by Node, so it never holds a finished
+    // process open.
+    if (read && this.readDeadlineAt !== undefined) {
+      signals.push(AbortSignal.timeout(Math.max(0, this.readDeadlineAt - Date.now())));
+    }
     return signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
   }
 
@@ -802,7 +813,8 @@ export class IxClient {
    */
   private shouldRetry(err: unknown): boolean {
     if (!this.retryReads) return false;
-    if (this.deadlineSignal?.aborted || this.readDeadline?.aborted) return false;
+    if (this.deadlineSignal?.aborted) return false;
+    if (this.readDeadlineAt !== undefined && Date.now() >= this.readDeadlineAt) return false;
     if (isPreConnectionFailure(err) || hasCode(err, DROPPED_CONNECTION_CODES)) return true;
     return err instanceof Error && RETRYABLE_READ_STATUS.test(err.message);
   }
@@ -834,6 +846,14 @@ export class IxClient {
       };
       return this.limiter ? this.limiter.run(run) : run();
     };
+    if (!isRead) {
+      try {
+        return parseOrThrowWithStatus<T>(await fetchBody());
+      } finally {
+        // The reads after a write get the whole read deadline again.
+        if (this.readDeadlineMs !== undefined) this.readDeadlineAt = Date.now() + this.readDeadlineMs;
+      }
+    }
     const body = this.memo && isSharedRead(path)
       ? await this.memo.run(`${method} ${path} ${payload}`, fetchBody)
       : await fetchBody();
