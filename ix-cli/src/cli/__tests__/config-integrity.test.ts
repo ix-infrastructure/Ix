@@ -93,6 +93,26 @@ describe("a config that does not parse", () => {
     expect(lines.join("\n")).toMatch(/not valid YAML/);
   });
 
+  it("ix map, which finds its root through the config, names it too, not invalid_map_path", async () => {
+    writeFileSync(configPath(), "endpoint: [unclosed\n");
+    const repo = mkdtempSync(join(tmpdir(), "ix-cfg-repo-"));
+    try {
+      const main = join(CLI_ROOT, "src", "cli", "main.ts");
+      const env: NodeJS.ProcessEnv = { ...process.env, IX_HOME: home, IX_ENDPOINT: "http://127.0.0.1:1" };
+      delete env.FORCE_COLOR;
+      for (const format of ["json", "llm"]) {
+        const out = await execFileAsync(TSX, [main, "map", "--format", format], { cwd: repo, env })
+          .then(() => { throw new Error("ix map exited 0 on a broken config"); },
+                (e: { code?: number; stdout?: string }) => e);
+        expect(out.code).toBe(1);
+        expect(out.stdout).toMatch(/config_parse_error/);
+        expect(out.stdout).not.toMatch(/invalid_map_path/);
+      }
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   it("saveConfig still refuses to overwrite it", async () => {
     writeFileSync(configPath(), "endpoint: [unclosed\n");
     const { saveConfig } = await import("../config.js");
