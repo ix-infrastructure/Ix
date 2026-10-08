@@ -45,10 +45,10 @@ The installer checks for each of these and installs anything missing:
 | **ripgrep** | Powers `ix text`. Optional: a failed install only prints a warning |
 | **Docker + Docker Compose** | Runs the local backend |
 
-The backend is two containers, bound to localhost only:
+The backend is two containers. Only the memory layer has a host port, and it binds to localhost:
 
-- **ArangoDB 3.12**, the graph database, on `127.0.0.1:8529`
 - **Ix Memory Layer**, the HTTP API the CLI talks to, on `127.0.0.1:8090`
+- **ArangoDB 3.12**, the graph database, with no host port: only the memory layer reaches it, over the Compose network
 
 <Aside type="note" title="Docker on Windows and first launch on macOS">
   On Windows, Docker Desktop isn't installed automatically. Install it, then re-run the installer. On macOS, Docker

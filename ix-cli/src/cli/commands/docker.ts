@@ -3,17 +3,19 @@
 import { Command } from "commander";
 import { execFileSync, spawn } from "child_process";
 import { createInterface } from "readline";
-import { copyFileSync, existsSync, mkdirSync } from "fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
 import { stampBackendVersionAfterPull } from "./upgrade.js";
+import { clearLocalToken, ensureLocalToken } from "../config.js";
+import { createClient } from "../../client/factory.js";
+import { backendComposeArgs, composeSupportsLocalToken, parseArangoHealth } from "../backend-compose.js";
 
 const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
 const COMPOSE_DIR = join(IX_HOME, "backend");
 const LOCAL_COMPOSE = join(COMPOSE_DIR, "docker-compose.yml");
 const HEALTH_URL = "http://localhost:8090/v1/health";
-const ARANGO_URL = "http://localhost:8529/_api/version";
 
 /**
  * The compose file this CLI release ships. `npm run build` copies the repo's
@@ -55,6 +57,18 @@ function findComposeFile(): string | null {
     return LOCAL_COMPOSE;
   } catch {
     return null;
+  }
+}
+
+function arangoHealth(composeFile: string | null): ReturnType<typeof parseArangoHealth> | "unknown" {
+  if (!composeFile) return "unknown";
+  try {
+    const out = execFileSync("docker", [...backendComposeArgs(composeFile), "ps", "--format", "json", "arangodb"], {
+      encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 10000,
+    });
+    return parseArangoHealth(out);
+  } catch {
+    return "unknown";
   }
 }
 
@@ -116,13 +130,41 @@ function askConfirmation(prompt: string): Promise<boolean> {
   });
 }
 
-function isHealthy(): boolean {
+function memoryLayerResponds(timeout = 5000): boolean {
   try {
-    execFileSync("curl", ["-sf", HEALTH_URL], { stdio: "ignore", timeout: 5000 });
-    execFileSync("curl", ["-sf", ARANGO_URL], { stdio: "ignore", timeout: 5000 });
+    execFileSync("curl", ["-sf", HEALTH_URL], { stdio: "ignore", timeout });
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * The memory layer answers its health route (which reports 503 while it cannot
+ * reach ArangoDB), and this project's arangodb container, if it runs one, is
+ * not unhealthy. ArangoDB is no longer probed on a host port: the compose file
+ * does not publish one. A backend served by some other stack ("absent",
+ * "unknown") is judged by the memory layer alone, as before.
+ */
+function isHealthy(composeFile: string | null): boolean {
+  if (!memoryLayerResponds()) return false;
+  const arango = arangoHealth(composeFile);
+  return arango !== "unhealthy" && arango !== "starting";
+}
+
+/** One line on whether the running backend requires the local token. Best-effort. */
+async function reportLocalAuth(): Promise<void> {
+  try {
+    const caps = await createClient({ endpoint: "http://localhost:8090" }).fetchCapabilities();
+    if (caps.local_auth === undefined) {
+      console.log("  Local token:  not supported by this backend image (run 'ix upgrade')");
+    } else {
+      console.log(`  Local token:  ${caps.local_auth_enforcing ? "required" : "off"}`);
+    }
+  } catch (err) {
+    if ((err as Error)?.name === "LocalTokenRequiredError") {
+      console.log("  Local token:  required, and this CLI's token was refused (run 'ix docker start --local-token')");
+    }
   }
 }
 
@@ -144,14 +186,35 @@ export function registerDockerCommand(program: Command): void {
     .command("start")
     .alias("up")
     .description("Start the IX backend (ArangoDB + Memory Layer)")
-    .action(async () => {
+    .option("--local-token", "Require a bearer token on the backend; the CLI stores and sends it")
+    .option("--no-local-token", "Stop requiring the token and forget the stored one")
+    .action(async (opts: { localToken?: boolean }) => {
       // Written before anything else, so stop/restart/logs work from any directory.
       const composeFile = findComposeFile();
 
-      if (isHealthy()) {
+      // Opt-in until a release turns the token on by default. Changing it means
+      // recreating memory-layer with the new environment, so a healthy backend
+      // is not left as it is.
+      const changeToken = opts.localToken !== undefined;
+      if (opts.localToken === true) {
+        let composeText = "";
+        try { composeText = composeFile ? readFileSync(composeFile, "utf-8") : ""; } catch { /* reported below */ }
+        if (!composeSupportsLocalToken(composeText)) {
+          console.error(`[error] ${composeFile ?? LOCAL_COMPOSE} does not pass IX_LOCAL_TOKEN to the backend.`);
+          console.error("  It predates token support, and 'ix upgrade' does not replace it. Move it aside and");
+          console.error("  run this again: 'ix docker start' then writes the compose file this CLI ships.");
+          console.error(`    mv ${LOCAL_COMPOSE} ${LOCAL_COMPOSE}.old`);
+          process.exit(1);
+        }
+        ensureLocalToken();
+      } else if (opts.localToken === false) {
+        clearLocalToken();
+      }
+
+      if (!changeToken && isHealthy(composeFile)) {
         console.log("[ok] Backend is already running and healthy");
         console.log("  Memory Layer: http://localhost:8090");
-        console.log("  ArangoDB:     http://localhost:8529");
+        await reportLocalAuth();
         return;
       }
 
@@ -168,7 +231,7 @@ export function registerDockerCommand(program: Command): void {
 
       console.log("Starting backend services...");
       try {
-        execFileSync("docker", ["compose", "-f", composeFile, "up", "-d", "--pull", "always"], {
+        execFileSync("docker", [...backendComposeArgs(composeFile), "up", "-d", "--pull", "always"], {
           stdio: "inherit",
         });
       } catch {
@@ -190,11 +253,11 @@ export function registerDockerCommand(program: Command): void {
 
       console.log("Waiting for services to become healthy...");
       for (let i = 0; i < 30; i++) {
-        if (isHealthy()) {
+        if (isHealthy(composeFile)) {
           console.log("");
           console.log("[ok] Backend is ready!");
           console.log("  Memory Layer: http://localhost:8090");
-          console.log("  ArangoDB:     http://localhost:8529");
+          if (changeToken) await reportLocalAuth();
           return;
         }
         process.stdout.write(".");
@@ -221,7 +284,7 @@ export function registerDockerCommand(program: Command): void {
       }
 
       const removeLocal = opts.removeData || opts.removeAllData;
-      const args = ["compose", "-f", composeFile, "down"];
+      const args = [...backendComposeArgs(composeFile), "down"];
       if (removeLocal) args.push("-v");
 
       try {
@@ -288,11 +351,11 @@ export function registerDockerCommand(program: Command): void {
   docker
     .command("status")
     .description("Show backend container and health status")
-    .action(() => {
+    .action(async () => {
       const composeFile = findComposeFile();
       if (composeFile) {
         try {
-          execFileSync("docker", ["compose", "-f", composeFile, "ps"], {
+          execFileSync("docker", [...backendComposeArgs(composeFile), "ps"], {
             stdio: "inherit",
           });
         } catch {
@@ -300,24 +363,15 @@ export function registerDockerCommand(program: Command): void {
         }
       }
       console.log("");
-      if (isHealthy()) {
+      if (isHealthy(composeFile)) {
         console.log("[ok] Backend is healthy");
         console.log("  Memory Layer: http://localhost:8090");
-        console.log("  ArangoDB:     http://localhost:8529");
+        await reportLocalAuth();
       } else {
         console.log("[!!] Backend is not healthy");
-        try {
-          execFileSync("curl", ["-sf", HEALTH_URL], { stdio: "ignore", timeout: 3000 });
-          console.log("  Memory Layer: responding");
-        } catch {
-          console.log("  Memory Layer: not responding");
-        }
-        try {
-          execFileSync("curl", ["-sf", ARANGO_URL], { stdio: "ignore", timeout: 3000 });
-          console.log("  ArangoDB: responding");
-        } catch {
-          console.log("  ArangoDB: not responding");
-        }
+        console.log(`  Memory Layer: ${memoryLayerResponds(3000) ? "responding" : "not responding"}`);
+        const arango = arangoHealth(composeFile);
+        console.log(`  ArangoDB: ${arango === "absent" ? "no container" : arango === "unknown" ? "container state unknown" : arango}`);
       }
     });
 
@@ -332,7 +386,7 @@ export function registerDockerCommand(program: Command): void {
         process.exit(1);
       }
 
-      const args = ["compose", "-f", composeFile, "logs"];
+      const args = [...backendComposeArgs(composeFile), "logs"];
       if (opts.follow) args.push("-f");
       const child = spawn("docker", args, { stdio: "inherit" });
       child.on("exit", (code) => process.exit(code || 0));
@@ -349,7 +403,7 @@ export function registerDockerCommand(program: Command): void {
       }
 
       try {
-        execFileSync("docker", ["compose", "-f", composeFile, "restart"], {
+        execFileSync("docker", [...backendComposeArgs(composeFile), "restart"], {
           stdio: "inherit",
         });
         console.log("[ok] Backend restarted.");

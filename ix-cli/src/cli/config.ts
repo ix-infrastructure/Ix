@@ -2,11 +2,12 @@
 
 import { readFileSync, writeFileSync, existsSync, rmSync, chmodSync, renameSync, realpathSync, mkdirSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { parse, stringify } from "yaml";
 import { IxClient } from "../client/api.js";
 import { ixHome } from "./ix-home.js";
+import { isLocalEndpoint } from "./backend-version.js";
 
 /**
  * The key of a project root's per-root state files. Canonical first: `ix
@@ -146,6 +147,8 @@ export interface IxConfig {
   format: string;
   workspace?: string;
   workspaces?: WorkspaceConfig[];
+  /** Credentials for the local backend. See `getLocalToken`. */
+  auth?: { local_token?: string };
 }
 
 const defaultConfig: IxConfig = {
@@ -190,6 +193,7 @@ const OSS_OWNED_KEYS = new Set<keyof IxConfig>([
   "format",
   "workspace",
   "workspaces",
+  "auth",
 ]);
 
 export function saveConfig(config: IxConfig): void {
@@ -252,6 +256,52 @@ export function saveConfig(config: IxConfig): void {
 
 export function getEndpoint(): string {
   return process.env.IX_ENDPOINT || loadConfig().endpoint;
+}
+
+/**
+ * The bearer token the client sends to `endpoint`, if any.
+ *
+ * IX_TOKEN is the user's explicit choice and goes to whatever endpoint is
+ * configured. The stored `auth.local_token` belongs to the backend `ix docker`
+ * runs on this machine, so it is sent only to a loopback endpoint: pointing
+ * IX_ENDPOINT at another host must not hand that host the local credential.
+ */
+export function getLocalToken(endpoint: string = getEndpoint()): string | undefined {
+  const explicit = process.env.IX_TOKEN?.trim();
+  if (explicit) return explicit;
+  if (!isLocalEndpoint(endpoint)) return undefined;
+  return storedLocalToken();
+}
+
+/** The token in config.yaml's `auth.local_token`, if one is stored. */
+export function storedLocalToken(): string | undefined {
+  const stored = loadConfig().auth?.local_token;
+  return typeof stored === "string" && stored.trim() ? stored.trim() : undefined;
+}
+
+/**
+ * The stored local token, generated (32 random bytes, hex) and saved first if
+ * there is none. Only `ix docker start --local-token` calls this: the token is
+ * opt-in until a release turns it on by default.
+ */
+export function ensureLocalToken(): string {
+  const existing = storedLocalToken();
+  if (existing) return existing;
+  const config = loadConfig();
+  const token = randomBytes(32).toString("hex");
+  saveConfig({ ...config, auth: { ...config.auth, local_token: token } });
+  return token;
+}
+
+/** Forget the stored local token. */
+export function clearLocalToken(): void {
+  const config = loadConfig();
+  if (!config.auth?.local_token) return;
+  const { local_token: _dropped, ...rest } = config.auth;
+  const next: IxConfig = { ...config };
+  if (Object.keys(rest).length > 0) next.auth = rest;
+  else delete next.auth;
+  saveConfig(next);
 }
 
 // Kept for @ix/pro, which imports it. The factory itself is the synchronous

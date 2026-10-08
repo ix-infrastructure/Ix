@@ -18,6 +18,7 @@ import {
   getTrackedVersion,
   writeVersionStamp,
 } from "../backend-version.js";
+import { backendComposeArgs } from "../backend-compose.js";
 
 // Re-exported for the existing importers of this module (tests and call sites
 // that predate backend-version.ts). recordBackendRelease is deliberately NOT
@@ -1751,7 +1752,9 @@ export function registerUpgradeCommand(program: Command): void {
             try {
               execFileSync(
                 "docker",
-                ["compose", "-f", backendComposeFile, "up", "-d", "--pull", "always"],
+                // The same env and override files `ix docker start` uses, or the
+                // restart would drop the local token and a published Arango port.
+                [...backendComposeArgs(backendComposeFile), "up", "-d", "--pull", "always"],
                 { stdio: "inherit" }
               );
               console.log("[ok] Backend restarted with latest image");

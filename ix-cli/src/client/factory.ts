@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { getEndpoint } from "../cli/config.js";
+import { getEndpoint, getLocalToken } from "../cli/config.js";
 import { IxClient } from "./api.js";
 import { QUERY_CLIENT_OPTIONS } from "./request-memo.js";
 
@@ -23,9 +23,11 @@ export interface CreateClientOptions {
  * outside `src/client/` and tests.
  */
 export function createClient(opts: CreateClientOptions = {}): IxClient {
+  const endpoint = opts.endpoint ?? getEndpoint();
+  const token = getLocalToken(endpoint);
   return new IxClient(
-    opts.endpoint ?? getEndpoint(),
+    endpoint,
     opts.deadlineSignal,
-    opts.query ? QUERY_CLIENT_OPTIONS : {},
+    { ...(opts.query ? QUERY_CLIENT_OPTIONS : {}), ...(token ? { token } : {}) },
   );
 }

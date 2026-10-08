@@ -35,6 +35,8 @@ export interface IxClientOptions {
   shareReads?: boolean;
   /** At most this many requests in flight at once. */
   maxInFlight?: number;
+  /** Sent as `Authorization: Bearer <token>` on every request (see `getLocalToken`). */
+  token?: string;
 }
 
 /**
@@ -53,6 +55,7 @@ function isSharedRead(path: string): boolean {
 export class IxClient {
   private readonly memo?: RequestMemo<SuccessBody>;
   private readonly limiter?: Limiter;
+  private readonly token?: string;
 
   // An optional deadline signal shared across every request this client makes.
   // `ix map` sets it to a hard wall-clock budget so that, even when the backend
@@ -68,6 +71,19 @@ export class IxClient {
   ) {
     if (options.shareReads) this.memo = new RequestMemo();
     if (options.maxInFlight !== undefined) this.limiter = new Limiter(options.maxInFlight);
+    if (options.token) this.token = options.token;
+  }
+
+  /**
+   * The headers of every request: the JSON content type when there is a body,
+   * and the bearer token when the client has one. The one place either is set,
+   * so no request can go out without the token.
+   */
+  private headers(json: boolean): Record<string, string> {
+    const headers: Record<string, string> = {};
+    if (json) headers["Content-Type"] = "application/json";
+    if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    return headers;
   }
 
   /** Reads answered from `shareReads` instead of the backend, for diagnostics and tests. */
@@ -120,13 +136,13 @@ export class IxClient {
   async ingest(path: string, recursive?: boolean, force?: boolean): Promise<IngestResult> {
     const resp = await fetch(`${this.endpoint}/v1/ingest`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.headers(true),
       body: JSON.stringify({ path, recursive, force: force || undefined }),
       signal: this.signalFor(30 * 60 * 1000), // 30 minute timeout for large repos
     });
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
+      throw httpError(resp.status, text);
     }
     return resp.json() as Promise<IngestResult>;
   }
@@ -313,13 +329,13 @@ export class IxClient {
   async commitPatch(patch: GraphPatchPayload): Promise<PatchCommitResult> {
     const resp = await fetch(`${this.endpoint}/v1/patch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.headers(true),
       body: JSON.stringify(patch),
       signal: this.signalFor(5 * 60 * 1000), // 5 min — matches commitPatchBulk
     });
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
+      throw httpError(resp.status, text);
     }
     return resp.json() as Promise<PatchCommitResult>;
   }
@@ -381,13 +397,13 @@ export class IxClient {
     if (opts?.systemId) body.system_id = opts.systemId;
     const resp = await fetch(`${this.endpoint}/v1/map`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.headers(true),
       body: JSON.stringify(body),
       signal: this.signalFor(30 * 60 * 1000), // 30 minute timeout
     });
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
+      throw httpError(resp.status, text);
     }
     return resp.json();
   }
@@ -395,13 +411,13 @@ export class IxClient {
   async commitPatchBulk(patches: GraphPatchPayload[]): Promise<PatchCommitResult> {
     const resp = await fetch(`${this.endpoint}/v1/patches/bulk`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.headers(true),
       body: JSON.stringify({ patches }),
       signal: this.signalFor(5 * 60 * 1000), // 5 min — prevents hang when k8s ingress closes idle connections
     });
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
+      throw httpError(resp.status, text);
     }
     return resp.json() as Promise<PatchCommitResult>;
   }
@@ -527,7 +543,7 @@ export class IxClient {
         // A redirect can replay a destructive POST or hide an accepted reset
         // behind a later connection failure/404. Inspect the first response.
         redirect: "manual",
-        headers: { "Content-Type": "application/json" },
+        headers: this.headers(true),
         body: JSON.stringify({}),
         signal: AbortSignal.timeout(30 * 1000),
       });
@@ -550,7 +566,7 @@ export class IxClient {
     }
     if (!beginResp.ok) {
       const text = await beginResp.text();
-      throw new Error(`${beginResp.status}: ${errorBodyForMessage(text)}`);
+      throw httpError(beginResp.status, text);
     }
 
     if (beginResp.status !== 202) {
@@ -573,6 +589,7 @@ export class IxClient {
         statusResp = await fetch(`${this.endpoint}/v1/reset/status/${opId}`, {
           method: "GET",
           redirect: "manual",
+          headers: this.headers(false),
           signal: AbortSignal.timeout(30 * 1000),
         });
       } catch (error) {
@@ -649,7 +666,7 @@ export class IxClient {
     const resp = await fetch(`${this.endpoint}${syncPath}`, {
       method: "POST",
       redirect: "manual",
-      headers: { "Content-Type": "application/json" },
+      headers: this.headers(true),
       body: JSON.stringify({}),
       signal: AbortSignal.timeout(10 * 60 * 1000),
     });
@@ -659,7 +676,7 @@ export class IxClient {
     }
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
+      throw httpError(resp.status, text);
     }
     return resp.json() as Promise<{ ok: boolean; message: string }>;
   }
@@ -670,10 +687,13 @@ export class IxClient {
   }
 
   async savingsReset(): Promise<any> {
-    const resp = await fetch(`${this.endpoint}/v1/savings`, { method: "DELETE" });
+    const resp = await fetch(`${this.endpoint}/v1/savings`, {
+      method: "DELETE",
+      headers: this.headers(false),
+    });
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
+      throw httpError(resp.status, text);
     }
     return resp.json();
   }
@@ -695,11 +715,23 @@ export class IxClient {
 
   async capabilities(): Promise<CapabilitiesResponse> {
     try {
-      return await this.get<CapabilitiesResponse>("/v1/capabilities");
-    } catch {
+      return await this.fetchCapabilities();
+    } catch (err) {
+      // A refused token is not "an older backend": say so rather than guess.
+      if (err instanceof LocalTokenRequiredError) throw err;
       // Backend doesn't support capabilities yet — fall back to local mode.
       return {};
     }
+  }
+
+  /** `/v1/capabilities`, with every failure thrown (for `ix doctor`). */
+  async fetchCapabilities(): Promise<CapabilitiesResponse> {
+    return this.get<CapabilitiesResponse>("/v1/capabilities");
+  }
+
+  /** Whether this client sends a bearer token. */
+  get sendsToken(): boolean {
+    return this.token !== undefined;
   }
 
   private async post<T>(path: string, body: unknown): Promise<T> {
@@ -707,7 +739,7 @@ export class IxClient {
     return this.read<T>("POST", path, payload, () =>
       fetch(`${this.endpoint}${path}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: this.headers(true),
         body: payload,
         // These small reads/writes (source-hashes, stitch, list, ...) had no
         // timeout, so a stalled connection could hang the process indefinitely.
@@ -719,6 +751,7 @@ export class IxClient {
   private async get<T>(path: string, timeoutMs = 2 * 60 * 1000): Promise<T> {
     return this.read<T>("GET", path, "", () =>
       fetch(`${this.endpoint}${path}`, {
+        headers: this.headers(false),
         signal: this.signalFor(timeoutMs),
       }));
   }
@@ -733,7 +766,7 @@ export class IxClient {
       const run = async (): Promise<SuccessBody> => {
         const resp = await send();
         const text = await resp.text();
-        if (!resp.ok) throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
+        if (!resp.ok) throw httpError(resp.status, text);
         return { status: resp.status, text };
       };
       return this.limiter ? this.limiter.run(run) : run();
@@ -743,6 +776,32 @@ export class IxClient {
       : await fetchBody();
     return parseOrThrowWithStatus<T>(body);
   }
+}
+
+/**
+ * The backend refused a request for want of its local bearer token (a 401
+ * with code `local_token_required`, from the loopback guard). The message keeps
+ * the `401: <body>` shape every other HTTP failure has, so code that reads an
+ * error code back out of a message still sees it; `renderCliError` recognises
+ * the class and says how to fix it.
+ */
+export class LocalTokenRequiredError extends Error {
+  readonly code = "local_token_required";
+  constructor(body: string) {
+    super(`401: ${errorBodyForMessage(body)}`);
+    this.name = "LocalTokenRequiredError";
+  }
+}
+
+/** The error for a non-2xx response: `<status>: <body>`, or a typed one we can explain. */
+export function httpError(status: number, body: string): Error {
+  if (status === 401) {
+    try {
+      const parsed = JSON.parse(body) as { code?: unknown } | null;
+      if (parsed?.code === "local_token_required") return new LocalTokenRequiredError(body);
+    } catch { /* not the guard's JSON: a plain 401 */ }
+  }
+  return new Error(`${status}: ${errorBodyForMessage(body)}`);
 }
 
 /**

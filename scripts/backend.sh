@@ -34,7 +34,6 @@ fi
 
 COMPOSE_FILE="docker-compose.standalone.yml"
 HEALTH_URL="http://localhost:8090/v1/health"
-ARANGO_URL="http://localhost:8529/_api/version"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -102,7 +101,6 @@ wait_for_health() {
       echo ""
       echo "[ok] Backend is ready!"
       echo "  Memory Layer: http://localhost:8090"
-      echo "  ArangoDB:     http://localhost:8529"
       return 0
     fi
     printf "."
@@ -114,8 +112,15 @@ wait_for_health() {
   return 1
 }
 
+# ArangoDB publishes no host port: its health comes from Compose.
+arango_ok() {
+  local health
+  health=$(dc ps --format '{{.Health}}' arangodb 2>/dev/null) || return 0
+  [ -z "$health" ] || [ "$health" = "healthy" ]
+}
+
 is_healthy() {
-  curl -sf "$HEALTH_URL" > /dev/null 2>&1 && curl -sf "$ARANGO_URL" > /dev/null 2>&1
+  curl -sf "$HEALTH_URL" > /dev/null 2>&1 && arango_ok
 }
 
 containers_running() {
@@ -132,7 +137,6 @@ case "${1:-up}" in
     if is_healthy; then
       echo "[ok] Backend is already running and healthy"
       echo "  Memory Layer: http://localhost:8090"
-      echo "  ArangoDB:     http://localhost:8529"
       exit 0
     fi
 
