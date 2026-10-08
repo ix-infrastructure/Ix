@@ -17,9 +17,11 @@ export interface CreateClientOptions {
   query?: boolean;
   /**
    * No read deadline: the command's reads may rightly take longer (`stats` on
-   * a large graph), or the client is not one command's (`@ix/pro`'s). A caller
-   * that passes its own `deadlineSignal` (`map`, `ingest`) gets none either:
-   * it has already chosen its bound.
+   * a large graph, `map` and `ingest`, whose reads can come minutes in), or
+   * the client is not one command's (`@ix/pro`'s). A caller that passes its
+   * own `deadlineSignal` gets none either: it has already chosen its bound.
+   * `map` and `ingest` say so explicitly, because their deadline can be off
+   * (`IX_MAP_DEADLINE_MS=0`, and `ix ingest` passes none).
    */
   longRunning?: boolean;
 }

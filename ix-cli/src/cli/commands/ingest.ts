@@ -1731,7 +1731,10 @@ export async function ingestFiles(
     process.stderr.write(`[multi-repo] system "${detectedSystem!.name}" (${systemId}) members=${detectedSystem!.members.join(', ')} packages=${Object.keys(packageRegistry).length} declaredDeps=${depCount}\n`);
   }
 
-  const client = createClient({ deadlineSignal: opts.deadlineSignal });
+  // Long-running: `ix ingest` passes no deadline, and the reads it makes per
+  // changed file (GET /v1/patches/:id) come after a parse that can take
+  // minutes, past any read deadline counted from here.
+  const client = createClient({ deadlineSignal: opts.deadlineSignal, longRunning: true });
 
   // Schema-version check forces a clean re-ingest when the backend's graph
   // format has changed in a way that invalidates existing node IDs (e.g. the

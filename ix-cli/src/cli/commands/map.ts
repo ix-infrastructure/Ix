@@ -962,7 +962,9 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
   }
   const ingestMs = Math.round(performance.now() - ingestStart);
 
-  const client = createClient({ deadlineSignal });
+  // Long-running: with IX_MAP_DEADLINE_MS=0 there is no deadline, and a read
+  // deadline would then cut off a map whose reads come minutes in.
+  const client = createClient({ deadlineSignal, longRunning: true });
 
   const mapBarWidth = 25;
   const mapStart    = performance.now();
