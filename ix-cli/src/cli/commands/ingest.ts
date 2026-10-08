@@ -28,7 +28,7 @@ import { loadIngestionModules } from './ingestion-loader.js';
 import { declaredPackageDirs } from '../package-dirs.js';
 import { ensureWorkspaceIdState, workspaceStateFor } from '../bootstrap.js';
 import {
-  changedNames, findDependents, loadIngestSymbols, resolutionHash, saveIngestSymbols,
+  changedNames, findDependents, importsChanged, loadIngestSymbols, resolutionHash, saveIngestSymbols,
   type StoredSummary, type SymbolEntry,
 } from '../ingest-symbols.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
@@ -3715,13 +3715,18 @@ export async function ingestFiles(
     //
     // Path A only: Path B parses and resolves every file anyway.
     const deletedRel = deletedPaths.map(toWorkspaceRelative);
-    if (incrementalRun && (summaryBeforeRun.size > 0 || deletedRel.length > 0)) {
+    // Left pending by an earlier run whose re-send did not land.
+    const pendingRel = incrementalRun ? [...symbolTable()].filter(([, e]) => e.pending).map(([rel]) => rel) : [];
+    if (incrementalRun && (summaryBeforeRun.size > 0 || deletedRel.length > 0 || pendingRel.length > 0)) {
       const table = symbolTable();
       const names = new Set<string>();
-      const appeared: string[] = [];
+      // Paths whose importers may resolve differently: files that appeared,
+      // and files that changed what they import (a re-export moved).
+      const pathsChanged: string[] = [];
       for (const [rel, before] of summaryBeforeRun) {
-        for (const n of changedNames(before, table.get(rel)?.summary)) names.add(n);
-        if (before === undefined) appeared.push(rel);
+        const after = table.get(rel)?.summary;
+        for (const n of changedNames(before, after)) names.add(n);
+        if (before === undefined || importsChanged(before, after)) pathsChanged.push(rel);
       }
       for (const rel of deletedRel) {
         for (const n of changedNames(table.get(rel)?.summary, undefined)) names.add(n);
@@ -3729,9 +3734,19 @@ export async function ingestFiles(
       const absByRel = new Map(resolutionPaths.map(abs => [toWorkspaceRelative(abs), abs] as const));
       const exclude = new Set<string>([...summaryBeforeRun.keys(), ...deletedRel]);
       for (const rel of table.keys()) if (!absByRel.has(rel)) exclude.add(rel);
-      const dependents = findDependents(table, names, [...appeared, ...deletedRel], exclude)
+      const found = findDependents(table, names, [...pathsChanged, ...deletedRel], exclude);
+      const dependents = [...new Set([...found, ...pendingRel.filter(rel => !exclude.has(rel))])].sort()
         // A scoped run reads nothing outside its scope.
         .filter(rel => inScope(absByRel.get(rel)!));
+      // Until each lands or proves unneeded: a re-send that fails, or a file
+      // that cannot be read now, is picked up again by the next run.
+      for (const rel of dependents) {
+        const entry = table.get(rel);
+        if (entry && !entry.pending) {
+          entry.pending = true;
+          symbolTableChanged = true;
+        }
+      }
       if (debug && dependents.length > 0) {
         process.stderr.write(`\n  [dependents] ${names.size} name(s) changed; re-resolving ${dependents.length} file(s)\n`);
       }
@@ -3767,7 +3782,10 @@ export async function ingestFiles(
           const res = resolutionHash(build().ops);
           // Equal: re-resolving changes nothing this file says. A different
           // hash, or none recorded, and it is re-sent.
-          if (entry?.res === res && entry.hash === hash) continue;
+          if (entry?.res === res && entry.hash === hash) {
+            delete entry.pending;
+            continue;
+          }
           resent.push(makePreparedPatch(build(res.slice(0, 12)), resent.length + 1, rel, false));
           pendingRes.set(rel, res);
         }
@@ -3780,6 +3798,7 @@ export async function ingestFiles(
               const res = pendingRes.get(item.filePath);
               if (entry && res !== undefined) {
                 entry.res = res;
+                delete entry.pending;
                 symbolTableChanged = true;
               }
             },

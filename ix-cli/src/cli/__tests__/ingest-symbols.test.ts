@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { ingestSymbolsPath } from "../config.js";
 import {
-  changedNames, definedNames, findDependents, loadIngestSymbols, resolutionHash, saveIngestSymbols, type SymbolEntry,
+  changedNames, definedNames, findDependents, importsChanged, loadIngestSymbols, resolutionHash, saveIngestSymbols, type SymbolEntry,
 } from "../ingest-symbols.js";
 
 describe("ingest symbol table", () => {
@@ -82,6 +82,25 @@ describe("dependents (IN-11)", () => {
     expect(findDependents(table, new Set(), ["web/added.ts"], new Set())).toEqual(["uses-new.ts"]);
     expect(findDependents(table, new Set(), ["pkg/util/index.ts"], new Set())).toEqual(["other.ts"]);
     expect(findDependents(table, new Set(), [], new Set())).toEqual([]);
+  });
+
+  it("counts a name whose binding moved, and an import change, though no name came or went", () => {
+    const was = summary("b.ts", { sig: "s1", exportPublicNames: [["foo", "a"]], imports: [{ dstName: "x", importRaw: "./x" }] });
+    const now = summary("b.ts", { sig: "s2", exportPublicNames: [["foo", "b"]], imports: [{ dstName: "y", importRaw: "./y" }] });
+    expect(changedNames(was, now)).toEqual(new Set(["foo"]));
+    expect(importsChanged(was, now)).toBe(true);
+    expect(importsChanged(was, { ...was })).toBe(false);
+    // An added or deleted file is a changed path already.
+    expect(importsChanged(undefined, now)).toBe(false);
+  });
+
+  it("matches an import by path segment, not by substring", () => {
+    const table = new Map<string, SymbolEntry>([
+      ["uses-a.ts", entry(summary("uses-a.ts", { refs: [], imports: [{ importRaw: "./a.js" }] }))],
+      ["uses-data.ts", entry(summary("uses-data.ts", { refs: [], imports: [{ importRaw: "./data" }] }))],
+      ["uses-pkg-a.py", entry(summary("uses-pkg-a.py", { refs: [], imports: [{ importRaw: "pkg.a" }] }))],
+    ]);
+    expect(findDependents(table, new Set(), ["web/a.ts"], new Set())).toEqual(["uses-a.ts", "uses-pkg-a.py"]);
   });
 
   it("hashes a patch's edges and their targets, in any order, and nothing else", () => {
