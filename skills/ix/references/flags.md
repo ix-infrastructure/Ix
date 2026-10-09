@@ -173,13 +173,13 @@ Show methods/functions that call the given symbol (cross-file).
 
 Show or update Ix configuration.
 
-Subcommands: `show`, `get`, `set`.
+Subcommands: `show`, `get`, `set`, `prune`.
 
 No flags.
 
 #### `ix config show`
 
-Show current configuration.
+Show current configuration. Values of keys that look like credentials (`token`, `secret`, `jwt`, `password`) print as `(redacted)`.
 
 No flags.
 
@@ -191,9 +191,17 @@ No flags.
 
 #### `ix config set <key> <value>`
 
-Set a config value (e.g. ix config set user.name 'Alice').
+Set a config value (e.g. ix config set user.name 'Alice'). `endpoint` must be an `http://` or `https://` URL; `workspaces` cannot be set by hand.
 
 No flags.
+
+#### `ix config prune`
+
+Remove registered workspaces whose directory no longer exists. Their graphs stay in the backend.
+
+| Flag | Value | Default | Effect |
+|---|---|---|---|
+| `--dry-run` | — | off | List what would be removed without changing anything |
 
 ### `ix conflicts`
 
