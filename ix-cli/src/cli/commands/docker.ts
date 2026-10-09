@@ -10,7 +10,7 @@ import { fileURLToPath } from "url";
 import { stampBackendVersionAfterPull } from "./upgrade.js";
 import { clearLocalToken, ensureLocalToken } from "../config.js";
 import { createClient } from "../../client/factory.js";
-import { backendComposeArgs, composeSupportsLocalToken, parseArangoHealth } from "../backend-compose.js";
+import { backendComposeArgs, composeSupportsLocalToken, handSetLocalToken, parseArangoHealth } from "../backend-compose.js";
 
 const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
 const COMPOSE_DIR = join(IX_HOME, "backend");
@@ -206,7 +206,9 @@ export function registerDockerCommand(program: Command): void {
           console.error(`    mv ${LOCAL_COMPOSE} ${LOCAL_COMPOSE}.old`);
           process.exit(1);
         }
-        ensureLocalToken();
+        // A token already set by hand in .env is adopted rather than replaced,
+        // so whatever else was given it (IX_TOKEN, another client) keeps working.
+        ensureLocalToken(handSetLocalToken());
       } else if (opts.localToken === false) {
         clearLocalToken();
       }
@@ -231,7 +233,9 @@ export function registerDockerCommand(program: Command): void {
 
       console.log("Starting backend services...");
       try {
-        execFileSync("docker", [...backendComposeArgs(composeFile), "up", "-d", "--pull", "always"], {
+        // Only `up` writes .env: it is what hands the container a changed token.
+        const composeArgs = backendComposeArgs(composeFile, { writeEnv: true, clearToken: opts.localToken === false });
+        execFileSync("docker", [...composeArgs, "up", "-d", "--pull", "always"], {
           stdio: "inherit",
         });
       } catch {

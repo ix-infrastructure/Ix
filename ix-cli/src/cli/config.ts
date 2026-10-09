@@ -418,17 +418,18 @@ export function storedLocalToken(): string | undefined {
 }
 
 /**
- * The stored local token, generated (32 random bytes, hex) and saved first if
- * there is none. Only `ix docker start --local-token` calls this: the token is
- * opt-in until a release turns it on by default.
+ * The stored local token, saved first if there is none: `preferred` when given
+ * (a token the user already set by hand in ~/.ix/backend/.env), else a new one
+ * (32 random bytes, hex). Only `ix docker start --local-token` calls this: the
+ * token is opt-in until a release turns it on by default.
  */
-export function ensureLocalToken(): string {
+export function ensureLocalToken(preferred?: string): string {
   const existing = storedLocalToken();
   if (existing) return existing;
   return updateConfig((config) => {
     const stored = config.auth?.local_token;
     if (typeof stored === "string" && stored.trim()) return { result: stored.trim() };
-    const token = randomBytes(32).toString("hex");
+    const token = preferred?.trim() || randomBytes(32).toString("hex");
     return { save: { ...config, auth: { ...config.auth, local_token: token } }, result: token };
   });
 }
