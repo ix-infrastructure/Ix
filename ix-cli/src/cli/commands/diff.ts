@@ -16,6 +16,41 @@ import { formatDiff, relativePath, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
 import { reportFailure } from "../ui.js";
 import { parsePickOption } from "../options.js";
+import { resolveWorkspaceId } from "../bootstrap.js";
+
+/**
+ * The most changes the backend returns in one diff (`/v1/diff` clamps `limit`
+ * to 5000; it does not page). `--full` asks for this many, since sending no
+ * limit got the server's default of 100.
+ */
+export const DIFF_MAX_LIMIT = 5000;
+
+/**
+ * The `workspace_id` to send with a diff: `*` (every workspace) for `--all`,
+ * else the workspace this directory belongs to, as the other graph reads use.
+ * Outside any mapped workspace it is undefined, which the backend reads as
+ * every workspace -- what `ix diff` always did, so no run that worked before
+ * now fails.
+ */
+export function diffWorkspaceScope(all: boolean | undefined, cwd = process.cwd()): string | undefined {
+  if (all) return "*";
+  return resolveWorkspaceId(cwd);
+}
+
+/** The `limit` to send: the backend's maximum for `--full`, else `--limit` or the server default. */
+export function diffRequestLimit(opts: { full?: boolean; limit?: string }): number | undefined {
+  if (opts.full) return DIFF_MAX_LIMIT;
+  return opts.limit ? parseInt(opts.limit, 10) : undefined;
+}
+
+/** The text-mode line over a truncated diff. */
+export function diffTruncationNote(shown: number, total: number, full: boolean | undefined): string {
+  if (full) {
+    return `Showing ${shown} of ${total} changes: the backend returns at most ${DIFF_MAX_LIMIT}. ` +
+      "Narrow it with a target or a smaller revision range, or use --summary for counts.";
+  }
+  return `Showing ${shown} of ${total} changes. Use --full to see up to ${DIFF_MAX_LIMIT}.`;
+}
 
 /**
  * Subset of `DiffOptions` consumed by `detectDiffModeConflict`. Kept as a
@@ -477,7 +512,8 @@ export function registerDiffCommand(program: Command): void {
     .option("--summary", "Show compact summary only (server-side, fast)")
     .option("--content", "Show detailed attribute changes for each entity")
     .option("--limit <n>", "Max changes to return (default 100)")
-    .option("--full", "Return all changes (no limit)")
+    .option("--full", `Return all changes (up to the backend's maximum, ${DIFF_MAX_LIMIT})`)
+    .option("--all", "Diff every workspace on the backend, not just this one")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
@@ -490,7 +526,7 @@ export function registerDiffCommand(program: Command): void {
   ix diff 3 5 --summary`)
     .action(async (fromRev: string, toRev: string, target: string | undefined, opts: {
       entity?: string; summary?: boolean; content?: boolean; limit?: string; full?: boolean; format: string;
-      kind?: string; path?: string; pick?: number;
+      kind?: string; path?: string; pick?: number; all?: boolean;
     }) => {
       const conflict = detectDiffModeConflict(opts);
       if (conflict) {
@@ -498,6 +534,7 @@ export function registerDiffCommand(program: Command): void {
         return;
       }
       const client = createClient();
+      const workspaceId = diffWorkspaceScope(opts.all);
       const from = parseInt(fromRev, 10);
       const to = parseInt(toRev, 10);
 
@@ -517,7 +554,7 @@ export function registerDiffCommand(program: Command): void {
       }
 
       if (opts.summary) {
-        const result: any = await client.diff(from, to, { summary: true, entityId });
+        const result: any = await client.diff(from, to, { summary: true, entityId, workspaceId });
 
         if (opts.format === "json") {
           printJson(compactDiffResult(result));
@@ -536,8 +573,8 @@ export function registerDiffCommand(program: Command): void {
         return;
       }
 
-      const limit = opts.full ? undefined : (opts.limit ? parseInt(opts.limit, 10) : undefined);
-      const result: any = await client.diff(from, to, { entityId, limit });
+      const limit = diffRequestLimit(opts);
+      const result: any = await client.diff(from, to, { entityId, limit, workspaceId });
       const changes: any[] = result.changes ?? [];
 
       // ── Content mode: textual diff is primary ───────────────────────
@@ -681,7 +718,7 @@ export function registerDiffCommand(program: Command): void {
         formatDiff(result, "llm");
       } else {
         if (result.truncated) {
-          console.log(chalk.yellow(`Showing ${result.changes.length} of ${result.totalChanges} changes. Use --full to see all.\n`));
+          console.log(chalk.yellow(`${diffTruncationNote(result.changes.length, result.totalChanges, opts.full)}\n`));
         }
         formatDiff(result, "text");
       }
