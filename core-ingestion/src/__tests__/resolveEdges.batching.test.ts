@@ -180,15 +180,23 @@ describe('resolveEdges against a summarized index', () => {
       }
       return { results, index: indexOf(results) };
     }
-    const time = ({ results, index }: ReturnType<typeof repo>) => Math.min(...[0, 1, 2].map(() => {
+    // Best of seven samples, each resolving the batch REPEATS times: one
+    // resolve of a one-file batch is short enough that timer resolution and a
+    // single scheduler hiccup used to swing the ratio past the bound on macOS
+    // CI runners (8.3-8.5 against 8) though the code was linear.
+    const REPEATS = 20;
+    const time = ({ results, index }: ReturnType<typeof repo>) => Math.min(...Array.from({ length: 7 }, () => {
       const t = performance.now();
-      resolveEdges([results[0]], undefined, index);
+      for (let i = 0; i < REPEATS; i++) resolveEdges([results[0]], undefined, index);
       return performance.now() - t;
     }));
     const small = repo(3000);
     const large = repo(12000);
-    time(small); // warm up
-    // 4x the files: linear is ~4x, the old per-call de-dup was ~16x.
-    expect(time(large) / time(small)).toBeLessThan(8);
-  });
+    time(small); // warm up both sizes
+    time(large);
+    // 4x the files: linear is ~4x, the old per-call de-dup was ~16x. The bound
+    // sits between the two, with room above linear for noisy runners, and
+    // still fails the quadratic behaviour by a wide margin.
+    expect(time(large) / time(small)).toBeLessThan(10);
+  }, 60_000);
 });
