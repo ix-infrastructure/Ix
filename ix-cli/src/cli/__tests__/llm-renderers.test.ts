@@ -82,6 +82,22 @@ describe("renderMapLlm", () => {
     const noIngest = captureLog(() => renderMapLlm(result, []));
     expect(noIngest[0]).toBe("map files=1 regions=0 levels=1 rev=1 outcome=ok");
   });
+
+  it("carries the oversized-file count and a too_large row per listed path, before the regions", () => {
+    const result: MapResult = { file_count: 1, region_count: 1, levels: 1, map_rev: 1, outcome: "ok", regions: [], hierarchy: [] };
+
+    const lines = captureLog(() => renderMapLlm(result, [region({ id: "x", label: "X" })], {
+      parseErrors: 0, commitErrors: 0, filesTooLarge: 3, filesTooLargePaths: ["data/big.json", "vendor/my lib.js"],
+    }));
+    expect(lines[0]).toBe("map files=1 regions=1 levels=1 rev=1 outcome=ok files_too_large=3");
+    expect(lines[1]).toBe("too_large path=data/big.json");
+    expect(lines[2]).toBe('too_large path="vendor/my lib.js"');
+    expect(lines[3]).toMatch(/^region id=x /);
+
+    // None, none of it.
+    const clean = captureLog(() => renderMapLlm(result, [], { parseErrors: 0, commitErrors: 0, filesTooLarge: 0, filesTooLargePaths: [] }));
+    expect(clean).toEqual(["map files=1 regions=0 levels=1 rev=1 outcome=ok"]);
+  });
 });
 
 describe("renderSubsystemScoreLlm", () => {
