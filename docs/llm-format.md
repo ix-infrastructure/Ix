@@ -422,7 +422,7 @@ Two deliberate exceptions remain:
   answer and which `text` only implied through warning lines:
 
   ```
-  status backend=ok endpoint=http://localhost:8090 graph_complete=true map_complete=false rev=2467 last_ingest_at=2026-08-29T01:38:43.341Z stale_files=0 stale=false
+  status backend=ok endpoint=http://localhost:8090 graph_health=ok graph_complete=true map_complete=false rev=2467 last_ingest_at=2026-08-29T01:38:43.341Z stale_files=0 stale=false
   ```
 
   `graph_complete` and `map_complete` are two different questions and a
@@ -432,6 +432,13 @@ Two deliberate exceptions remain:
   `subsystems` and region-scoped views may be empty or stale. `stale` follows
   `graph_complete`, not `map_complete`: it is a claim about files having
   changed, and a missing hierarchy does not make a file out of date.
+
+  `graph_health` is a third, separate question: whether the graph the backend
+  holds for this workspace is whole (`ok`), has nodes but lost their edges
+  (`degraded`, followed by a `graph` record with the fix), holds nothing
+  (`empty`), or could not be checked (`unverified`: no workspace here, an older
+  backend, a slow stats read). `stale=false` says no file changed since the
+  last ingest; it does not vouch for the graph.
 
 Still routing to `text`: `diff --content` (verbatim hunks) and `ingest`, a
 hidden implementation-detail command whose output is a completion summary.

@@ -189,6 +189,10 @@ export interface HealthResponse {
   // you are" and the wrong one to "what are you really", which is what
   // checkBackendImage's digest comparison is for.
   release_version?: string;
+  // Whether the memory layer can reach its database (Ix-memory 1.0.33+). With
+  // it unreachable the backend answers 503 and `status: "degraded"`. Absent
+  // from older backends, whose health never touched the database.
+  database?: "reachable" | "unreachable";
 }
 
 export interface PatchSource {

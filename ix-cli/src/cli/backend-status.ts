@@ -18,10 +18,10 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { IxClient } from "../client/api.js";
-import { fetchBackendHealth } from "./backend-version.js";
+import { fetchBackendHealth, isLocalEndpoint } from "./backend-version.js";
+import { getEndpoint } from "./config.js";
 
 export const BACKEND_IMAGE = "ghcr.io/ix-infrastructure/ix-memory-layer";
-const BACKEND_PORT = "8090";
 const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
 const STANDARD_BACKEND_DIR = join(IX_HOME, "backend");
 
@@ -96,10 +96,28 @@ function isReleasedBackendRef(imageRef: string): boolean {
     imageRef.startsWith(`${BACKEND_IMAGE}@`);
 }
 
-/** Inspect the backend reached through the container publishing its port. */
-export function inspectBackendContainer(): BackendContainer | null {
+/**
+ * The host port a container publishes to serve `endpoint`, or null when the
+ * endpoint is not on this machine and no local container can be serving it.
+ * Taken from the configured endpoint, not a fixed 8090: with IX_ENDPOINT on
+ * another port, a fixed 8090 inspected some other stack on the same host.
+ */
+export function backendPortFor(endpoint: string): string | null {
+  if (!isLocalEndpoint(endpoint)) return null;
+  try {
+    const url = new URL(endpoint);
+    return url.port || (url.protocol === "https:" ? "443" : "80");
+  } catch {
+    return null;
+  }
+}
+
+/** Inspect the backend reached through the container publishing the endpoint's port. */
+export function inspectBackendContainer(endpoint: string = getEndpoint()): BackendContainer | null {
+  const port = backendPortFor(endpoint);
+  if (!port) return null;
   const publisherIds = containerIds(
-    docker(["ps", "--filter", `publish=${BACKEND_PORT}`, "--format", "{{.ID}}"]),
+    docker(["ps", "--filter", `publish=${port}`, "--format", "{{.ID}}"]),
   );
   if (publisherIds.length === 0) return null;
 
@@ -109,7 +127,7 @@ export function inspectBackendContainer(): BackendContainer | null {
   const directBackend = publishers.find((container) => isReleasedBackendRef(container.imageRef));
   if (directBackend) return directBackend;
 
-  // A hardened compose may publish 8090 through nginx while the memory layer
+  // A hardened compose may publish the port through nginx while the memory layer
   // stays on an internal network. Follow the publisher's compose project to
   // the service whose role is the backend instead of comparing nginx to GHCR.
   for (const publisher of publishers) {
@@ -243,6 +261,7 @@ export type BackendImageStatus =
   | { kind: "digest-mismatch"; container: BackendContainer; latestImageId: string }
   | { kind: "latest-not-pulled"; container: BackendContainer }
   | { kind: "not-running" }
+  | { kind: "remote" }
   | { kind: "docker-unavailable" };
 
 /**
@@ -250,9 +269,11 @@ export type BackendImageStatus =
  * `:latest` image. Conclusions only when we can prove a mismatch; an
  * inconclusive state (latest not pulled, docker down) never reports a problem.
  */
-export function checkBackendImage(): BackendImageStatus {
+export function checkBackendImage(endpoint: string = getEndpoint()): BackendImageStatus {
+  // A remote endpoint is served by no container on this machine.
+  if (!backendPortFor(endpoint)) return { kind: "remote" };
   if (!dockerAvailable()) return { kind: "docker-unavailable" };
-  const container = inspectBackendContainer();
+  const container = inspectBackendContainer(endpoint);
   if (!container) return { kind: "not-running" };
 
   const latestImageId = docker(["image", "inspect", `${BACKEND_IMAGE}:latest`, "--format", "{{.Id}}"]);

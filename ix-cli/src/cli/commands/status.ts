@@ -4,12 +4,22 @@ import type { Command } from "commander";
 import { renderSection, renderKeyValue, renderWarning, renderNote, renderSuccess } from "../ui.js";
 import { createClient } from "../../client/factory.js";
 import { readBackendHealth } from "./upgrade.js";
-import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
+import { findWorkspaceForCwd, getEndpoint, resolveWorkspaceRoot } from "../config.js";
 import { detectStaleFiles } from "../stale.js";
 import { llmError, llmLine, printLlmLines } from "../llm.js";
 import { backendUnreachableError, isBackendUnreachable } from "../errors.js";
 import { printJson } from "../format.js";
-import { describeReplayedChanges } from "../graph-health.js";
+import {
+  checkGraphHealth,
+  describeReplayedChanges,
+  graphHealthJson,
+  graphHealthLlmFields,
+  graphHealthProse,
+  isUnhealthy,
+  type GraphHealth,
+  type GraphHealthScope,
+} from "../graph-health.js";
+import { detectSystem } from "../system.js";
 
 interface StatusStaleInfo {
   graphCompleted: boolean;
@@ -39,10 +49,12 @@ export function renderStatusLlm(
   backend: string,
   endpoint: string,
   staleInfo: StatusStaleInfo | null,
+  graph?: GraphHealth,
 ): string[] {
   const lines = [llmLine("status", [
     ["backend", backend],
     ["endpoint", endpoint],
+    ["graph_health", graph ? graphHealthWord(graph) : null],
     ["graph_complete", staleInfo ? String(staleInfo.graphCompleted) : null],
     ["map_complete", staleInfo ? String(staleInfo.mapCompleted) : null],
     ["rev", staleInfo ? String(staleInfo.currentRev) : null],
@@ -55,6 +67,7 @@ export function renderStatusLlm(
         || (staleInfo.parseTimeouts?.length ?? 0) > 0 ? "true" : "false")
       : null],
   ])];
+  if (graph && isUnhealthy(graph)) lines.push(llmLine("graph", graphHealthLlmFields(graph)));
   for (const f of staleInfo?.sampleChangedFiles ?? []) {
     lines.push(llmLine("changed", [["path", f]]));
   }
@@ -65,6 +78,27 @@ export function renderStatusLlm(
     lines.push(llmLine("parse_timeout", [["path", f]]));
   }
   return lines;
+}
+
+/**
+ * The graph verdict as `ix status` says it. "unknown" reads as "unverified":
+ * the check could not run (no workspace here, an old backend, a slow stats
+ * probe), which is not the same as a graph that was checked and is fine.
+ */
+export function graphHealthWord(graph: GraphHealth): string {
+  return graph.status === "unknown" ? "unverified" : graph.status;
+}
+
+/**
+ * The read scope for the status root: its system when it is in one, else the
+ * workspace containing it. None when the root is in no registered workspace,
+ * so the graph check answers "unverified" rather than judging another repo.
+ */
+export function statusGraphScope(root: string): GraphHealthScope | undefined {
+  const systemId = detectSystem(root)?.systemId;
+  if (systemId) return { systemId };
+  const workspaceId = findWorkspaceForCwd(root)?.workspace_id;
+  return workspaceId ? { workspaceId } : undefined;
 }
 
 /** The `ix status` warning for files the last run skipped on the parse budget. */
@@ -86,6 +120,13 @@ export function registerStatusCommand(program: Command): void {
       try {
         const health = await readBackendHealth(client);
         const root = resolveWorkspaceRoot(opts.root);
+        // "No files changed" is about mtimes; whether the graph behind them is
+        // whole is a separate question, asked of the backend. Cached per
+        // backend revision, bounded, and never throws.
+        const scope = statusGraphScope(root);
+        const graphCheck: Promise<GraphHealth> = scope
+          ? checkGraphHealth(client, scope)
+          : Promise.resolve({ status: "unknown" });
 
         // Detect stale files
         let staleInfo;
@@ -95,8 +136,10 @@ export function registerStatusCommand(program: Command): void {
           staleInfo = null;
         }
 
+        const graph = await graphCheck;
+
         if (opts.format === "llm") {
-          printLlmLines(renderStatusLlm(health.status, getEndpoint(), staleInfo ?? null));
+          printLlmLines(renderStatusLlm(health.status, getEndpoint(), staleInfo ?? null, graph));
         } else if (opts.format === "json") {
           const result: any = {
             backend: health.status,
@@ -108,12 +151,14 @@ export function registerStatusCommand(program: Command): void {
             sampleChangedFiles: staleInfo?.sampleChangedFiles ?? [],
             replayedFiles: staleInfo?.replayedFiles ?? [],
             parseTimeouts: staleInfo?.parseTimeouts ?? [],
+            graphHealth: { ...graphHealthJson(graph), status: graphHealthWord(graph) },
           };
           printJson(result);
         } else {
           renderSection("Status");
           renderKeyValue("Ix Memory", health.status);
           renderKeyValue("Endpoint", getEndpoint());
+          renderKeyValue("Graph", graphHealthWord(graph));
           if (staleInfo) {
             renderKeyValue("Revision", String(staleInfo.currentRev));
             if (staleInfo.lastIngestAt) {
@@ -137,7 +182,9 @@ export function registerStatusCommand(program: Command): void {
               }
               renderNote("Run ix map to update.");
             } else if (staleInfo.parseTimeouts.length === 0) {
-              renderSuccess("Graph is up to date.");
+              // Only what was checked: no file's mtime moved. The graph's own
+              // state is the "Graph" line above and the warning below.
+              renderSuccess("No files changed since the last ingest.");
             }
             if (staleInfo.graphCompleted && staleInfo.parseTimeouts.length > 0) {
               // Beside the other states, not instead of them: another map
@@ -149,6 +196,7 @@ export function registerStatusCommand(program: Command): void {
               renderNote("Source graph reads remain available, but hierarchy views may be incomplete.");
             }
           }
+          if (isUnhealthy(graph)) renderWarning(graphHealthProse(graph));
         }
       } catch (err) {
         // Only a transport failure is "not reachable". Anything else — a 500
