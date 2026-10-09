@@ -322,9 +322,9 @@ describe("incremental ix map equals a fresh map (fake backend)", () => {
     await property("head", ["editBody", "addFunction", "addCall", "addFile"], ["ts"]);
   });
 
-  // The acceptance gate for the F-03 chain: IN-04, IN-10 and IN-11. The last
-  // of them to land deletes this marker.
-  it.fails("IN-11: random edit sequences of every kind", async () => {
+  // The acceptance gate for the F-03 chain: IN-04, IN-10 and IN-11. All
+  // three have landed, so it is no longer marked.
+  it("IN-11: random edit sequences of every kind", async () => {
     await property("head", EDIT_KINDS);
   });
 });

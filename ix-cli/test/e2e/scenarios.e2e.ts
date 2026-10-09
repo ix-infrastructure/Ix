@@ -26,7 +26,6 @@ import {
   map,
   resetBackend,
   expectSameGraph,
-  failsUntil,
   signature,
 } from "./harness.js";
 
@@ -176,20 +175,18 @@ describe("incremental equals fresh", () => {
     expectSameGraph("typescript edit", incremental, await freshSignature(env, co));
   });
 
-  it(
-    "[fails until IN-04, IN-10] rename a file",
-    failsUntil(["IN-04", "IN-10"], async () => {
-      const co = checkout("polyglot");
-      map(env, co);
-      renameSync(join(co.dir, "app/events.py"), join(co.dir, "app/bus.py"));
-      for (const f of ["app/services.py", "app/api.py"])
-        edit(co, f, replaceAll("from app.events import", "from app.bus import"));
-      map(env, co);
-      const incremental = await signature(env, co);
+  // Was [fails until IN-04, IN-10]. Both have landed.
+  it("rename a file", async () => {
+    const co = checkout("polyglot");
+    map(env, co);
+    renameSync(join(co.dir, "app/events.py"), join(co.dir, "app/bus.py"));
+    for (const f of ["app/services.py", "app/api.py"])
+      edit(co, f, replaceAll("from app.events import", "from app.bus import"));
+    map(env, co);
+    const incremental = await signature(env, co);
 
-      expectSameGraph("file rename", incremental, await freshSignature(env, co));
-    }),
-  );
+    expectSameGraph("file rename", incremental, await freshSignature(env, co));
+  });
 
   it("add a file", async () => {
     const co = checkout("polyglot");
