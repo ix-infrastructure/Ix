@@ -803,6 +803,23 @@ describe("ingestFiles against a fake backend", () => {
       expect(summary.filesDiscovered).toBe(17);
     });
 
+    it("adding one Python file sends one patch", async () => {
+      // Until IN-10 a new file outside the index-prescan languages forced the
+      // whole-repository pass. The symbol table covers every language, so a
+      // new Python file takes the incremental path like a TypeScript one.
+      await incremental();
+      writeFileSync(join(repo, "src", "added.py"), "def added():\n    return 1\n", "utf8");
+      stage();
+      backend.resetRequests();
+
+      const summary = await incremental();
+
+      expect(backend.acceptedPatches(), "patches on the wire").toBe(1);
+      expect(backend.commitCount).toBe(1);
+      expect(summary.filesSkippedAsUnchanged).toBe(16);
+      expect(summary.filesDiscovered).toBe(17);
+    });
+
     it("an empty file that gains content sends one patch", async () => {
       writeFileSync(join(repo, "src", "empty.ts"), "", "utf8");
       stage();

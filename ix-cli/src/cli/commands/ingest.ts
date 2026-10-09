@@ -3653,7 +3653,7 @@ export async function ingestFiles(
       // loop recorded did not actually happen, and leaving them counted would
       // refuse the stitch on a run that parsed every file. (Adding one file to
       // a mapped repo used to land here whatever its language; the baseline
-      // check above keeps prescan-language additions on Path A now.)
+      // check above keeps additions in every language on Path A now.)
       filesSkipped -= filesSkippedAsUnchanged;
       filesSkippedAsUnchanged = 0;
       const moduleStart = performance.now();
