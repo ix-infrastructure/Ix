@@ -182,8 +182,8 @@ clone.
 **You do not need the backend source to work on this repository.** Everything in
 the `ix` CLI is developed against the published backend image, which is public and
 pullable anonymously. `./scripts/backend.sh up` in [Local Setup](#local-setup)
-starts it (`ghcr.io/ix-infrastructure/ix-memory-layer:latest` plus ArangoDB, on
-`127.0.0.1:8090` and `:8529`). It installs nothing itself — it runs
+starts it (`ghcr.io/ix-infrastructure/ix-memory-layer:latest` on
+`127.0.0.1:8090`, plus ArangoDB with no host port). It installs nothing itself — it runs
 `docker compose -f docker-compose.standalone.yml` against an already-installed
 Docker. What the `curl | sh` *installer* puts on the machine is a separate list:
 [docs/prerequisites.md](docs/prerequisites.md).

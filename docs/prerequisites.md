@@ -88,7 +88,9 @@ docker-compose>=2.0
 #  STEP 3: Backend services (managed by Docker, no manual install)
 # ============================================================================
 
-# ArangoDB 3.12 — graph database (Docker container on 127.0.0.1:8529)
+# ArangoDB 3.12 — graph database (Docker container, no host port; only the
+#   memory layer reaches it. Publish 8529 in ~/.ix/backend/docker-compose.override.yml
+#   if you want its web UI:  services: { arangodb: { ports: ["127.0.0.1:8529:8529"] } })
 arangodb==3.12
 
 # Ix Memory Layer — Scala/JVM HTTP API (Docker container on 127.0.0.1:8090)
@@ -146,5 +148,5 @@ ripgrep>=13
 # expecting the old configuration to be found.
 #
 # Wrapper: /usr/local/bin/ix (if writable) or ~/.local/bin/ix (fallback)
-# Ports: 8090 (Memory Layer), 8529 (ArangoDB) — localhost only
+# Ports: 8090 (Memory Layer) — localhost only. ArangoDB publishes none.
 ```

@@ -28,7 +28,6 @@ IX_HOME="${IX_HOME:-$HOME/.ix}"
 COMPOSE_DIR="$IX_HOME/backend"
 
 HEALTH_URL="http://localhost:8090/v1/health"
-ARANGO_URL="http://localhost:8529/_api/version"
 
 NODE_MIN_MAJOR=22
 
@@ -785,10 +784,20 @@ fi
 
 step "3. Backend (ArangoDB + Memory Layer)"
 
+# ArangoDB publishes no host port, so ask Compose for its container's health.
+# No compose file or no arangodb container means some other stack serves the
+# backend: judge it by the memory layer's health alone, which reports 503
+# while it cannot reach its database.
+arango_ok() {
+  [ -f "$COMPOSE_DIR/docker-compose.yml" ] || return 0
+  _arango_health=$(dc -f "$COMPOSE_DIR/docker-compose.yml" ps --format '{{.Health}}' arangodb < /dev/null 2>/dev/null) || return 0
+  [ -z "$_arango_health" ] || [ "$_arango_health" = "healthy" ]
+}
+
 if [ "${IX_SKIP_BACKEND:-}" = "1" ]; then
   echo "  (skipped via IX_SKIP_BACKEND=1)"
 else
-  if _fetch "$HEALTH_URL" >/dev/null 2>&1 && _fetch "$ARANGO_URL" >/dev/null 2>&1; then
+  if _fetch "$HEALTH_URL" >/dev/null 2>&1 && arango_ok; then
     info "Backend is already running and healthy"
   else
     if command -v lsof >/dev/null 2>&1; then
@@ -881,7 +890,7 @@ else
     printf "  Waiting for services to become healthy..."
     i=0
     while [ "$i" -lt 45 ]; do
-      if _fetch "$HEALTH_URL" >/dev/null 2>&1 && _fetch "$ARANGO_URL" >/dev/null 2>&1; then
+      if _fetch "$HEALTH_URL" >/dev/null 2>&1 && arango_ok; then
         break
       fi
       printf "."
@@ -898,7 +907,6 @@ else
   fi
 
   echo "  Memory Layer: http://localhost:8090"
-  echo "  ArangoDB:     http://localhost:8529"
 fi
 
 # -- Step 4: Install ix CLI --
@@ -1209,7 +1217,6 @@ echo "║       Ix is ready!                ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 echo "  Backend:  http://localhost:8090"
-echo "  ArangoDB: http://localhost:8529"
 echo ""
 
 # Verify CLI works

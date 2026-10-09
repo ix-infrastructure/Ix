@@ -22,7 +22,6 @@ $IxHome = if ($env:IX_HOME) { $env:IX_HOME } else { "$env:USERPROFILE\.ix" }
 $IxBin = "$IxHome\bin"
 $ComposeDir = "$IxHome\backend"
 $HealthUrl = "http://localhost:8090/v1/health"
-$ArangoUrl = "http://localhost:8529/_api/version"
 $NodeMinMajor = 22
 
 # Installer scratch files live under $IxHome, never under $env:TEMP.
@@ -155,12 +154,25 @@ function Test-Healthy {
         # prompt that defaults to No. It only fires once a backend is actually
         # up and returning a body — a first install has nothing listening, the
         # request fails outright, and the parse never happens. So this bites on
-        # re-runs and upgrades, never on the machine you first tested. Both
-        # endpoints return JSON that nothing here reads; only the status matters.
+        # re-runs and upgrades, never on the machine you first tested. The
+        # response is JSON that nothing here reads; only the status matters.
         $null = Invoke-WebRequest -Uri $HealthUrl -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
-        $null = Invoke-WebRequest -Uri $ArangoUrl -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
-        return $true
     } catch { return $false }
+    return (Test-ArangoHealthy)
+}
+
+# ArangoDB publishes no host port, so ask Compose for its container's health.
+# No compose file, or no arangodb container, means some other stack serves the
+# backend: the memory layer's health (503 while it cannot reach its database)
+# is then the whole answer.
+function Test-ArangoHealthy {
+    $composeFile = "$ComposeDir\docker-compose.yml"
+    if (-not (Test-Path $composeFile)) { return $true }
+    try {
+        $health = (docker compose -f "$composeFile" ps --format '{{.Health}}' arangodb 2>$null | Out-String).Trim()
+    } catch { return $true }
+    if ($LASTEXITCODE -ne 0) { return $true }
+    return ([string]::IsNullOrEmpty($health) -or $health -eq "healthy")
 }
 
 function Get-LatestVersion {

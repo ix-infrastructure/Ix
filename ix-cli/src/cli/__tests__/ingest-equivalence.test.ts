@@ -271,10 +271,15 @@ describe("incremental ix map equals a fresh map (fake backend)", () => {
   });
 
   // F-04. Dropping the file's last import removes a node, the patch carries a
-  // DeleteNode, and a delete-bearing patch goes to `/v1/patch`, which does not
-  // sweep: the removed CALLS and IMPORTS edges stay live.
-  it.fails("IN-04: removing a file's last call retires its edges", async () => {
-    await runSequence("head", [edit("removeCall", "web/main.ts")]);
+  // DeleteNode, and a delete-bearing patch went to `/v1/patch`, which does not
+  // sweep: the removed CALLS and IMPORTS edges stayed live. A backend whose
+  // bulk route applies deletes now takes it there, and nothing goes per file.
+  it("IN-04: removing a file's last call retires its edges, with no /v1/patch", async () => {
+    await runSequence("head", [edit("removeCall", "web/main.ts")], {
+      check: (world) => {
+        expect(world.backend.requests.filter((r) => r.path === "/v1/patch"), "per-file commits").toEqual([]);
+      },
+    });
   });
 
   // F-03. Files that call a renamed or deleted function are unchanged, so

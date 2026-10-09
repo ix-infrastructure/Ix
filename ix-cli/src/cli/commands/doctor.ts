@@ -15,6 +15,7 @@ import {
   type WorkspaceConfig,
 } from "../config.js";
 import { ixHome } from "../ix-home.js";
+import { isLocalEndpoint } from "../backend-version.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { assessGraphStats } from "../graph-health.js";
 import { llmLine, printLlmLines } from "../llm.js";
@@ -34,6 +35,7 @@ import { loadIngestBaseline } from "../ingest-baseline.js";
 import { isCloudReady } from "../remote.js";
 import { hasCompletedMapBaseline } from "../stale.js";
 import { printJson } from "../format.js";
+import type { CapabilitiesResponse } from "../../client/types.js";
 
 interface CheckResult {
   ok: boolean;
@@ -200,6 +202,43 @@ export function checkNestedWorkspaces(
   };
 }
 
+/**
+ * Does the backend require the local bearer token, and does this CLI have the
+ * one it accepts? `caps` is the `/v1/capabilities` answer, or the error asking
+ * for it threw. A refused token fails the run, because every command fails the
+ * same way; a token the backend ignores is only a warning.
+ */
+export function assessLocalAuth(
+  caps: CapabilitiesResponse | Error,
+  sendsToken: boolean,
+  local: boolean,
+): CheckResult {
+  if (caps instanceof Error && caps.name === "LocalTokenRequiredError") {
+    return {
+      ok: false,
+      detail: sendsToken
+        ? "the backend refused this CLI's token — " +
+          (local ? "run 'ix docker start --local-token' to give the backend the stored one" : "check IX_TOKEN")
+        : "the backend requires a token and this CLI has none — " +
+          (local ? "run 'ix docker start --local-token', or set IX_TOKEN" : "set IX_TOKEN"),
+    };
+  }
+  if (caps instanceof Error) return { ok: true, detail: "backend unreachable (skipped)" };
+  if (caps.local_auth === undefined) return { ok: true, detail: "backend predates the token guard (skipped)" };
+  if (caps.local_auth_enforcing) return { ok: true, detail: "required, and this CLI's token is accepted" };
+  if (sendsToken) {
+    return {
+      ok: false, warn: true,
+      detail: "this CLI has a token but the backend does not require it — " +
+        (local ? "run 'ix docker start --local-token' to apply it" : "the backend ignores it"),
+    };
+  }
+  return {
+    ok: true,
+    detail: local ? "not required (opt in with 'ix docker start --local-token')" : "not required",
+  };
+}
+
 export function registerDoctorCommand(program: Command): void {
   program
     .command("doctor")
@@ -278,6 +317,18 @@ export function registerDoctorCommand(program: Command): void {
               if (failure.remedy) parts.push(`  fix: ${failure.remedy}`);
               return { ok: false, detail: parts.join("\n") };
             }
+          },
+        },
+        {
+          name: "Backend token",
+          run: async () => {
+            let caps: CapabilitiesResponse | Error;
+            try {
+              caps = await client.fetchCapabilities();
+            } catch (e) {
+              caps = e instanceof Error ? e : new Error(String(e));
+            }
+            return assessLocalAuth(caps, client.sendsToken === true, isLocalEndpoint(endpoint));
           },
         },
         {

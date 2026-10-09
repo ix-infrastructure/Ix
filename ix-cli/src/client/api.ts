@@ -35,6 +35,42 @@ export interface IxClientOptions {
   shareReads?: boolean;
   /** At most this many requests in flight at once. */
   maxInFlight?: number;
+  /** Sent as `Authorization: Bearer <token>` on every request (see `getLocalToken`). */
+  token?: string;
+  /**
+   * Reads (GETs, and the POSTs in `SHARED_READ_PREFIXES`) fail once this many
+   * ms have passed since the client was created or since its last write
+   * through `post` finished: a whole-command bound on a hung backend, which the
+   * 2-minute per-request timeout is not. Writes are never cut off by it, and
+   * the time a write takes is not charged to the reads after it (`ix
+   * subsystems --list` scores, which can take minutes, then reads the scores).
+   * 0 or absent: no such bound.
+   */
+  readDeadlineMs?: number;
+  /**
+   * Retry a read once, after a short random wait, when the connection was
+   * refused or reset before it carried anything, or the answer was 502/503/504.
+   * Writes are never retried.
+   */
+  retryReads?: boolean;
+}
+
+/** Statuses a proxy or a restarting backend answers with, for which one retry is worth it. */
+const RETRYABLE_READ_STATUS = /^(502|503|504):/;
+
+/**
+ * A connection dropped mid-request. Not safe to repeat for a write, which may
+ * have been applied; a read can simply be asked again.
+ */
+const DROPPED_CONNECTION_CODES = new Set(["ECONNRESET", "EPIPE", "UND_ERR_SOCKET"]);
+
+function hasCode(err: unknown, codes: ReadonlySet<string>): boolean {
+  for (let e: unknown = err, hops = 0; e && hops < 5; hops++) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string" && codes.has(code)) return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 /**
@@ -53,6 +89,11 @@ function isSharedRead(path: string): boolean {
 export class IxClient {
   private readonly memo?: RequestMemo<SuccessBody>;
   private readonly limiter?: Limiter;
+  private readonly token?: string;
+  private readonly readDeadlineMs?: number;
+  /** When reads stop being sent (epoch ms); moved on by each write. */
+  private readDeadlineAt?: number;
+  private readonly retryReads: boolean;
 
   // An optional deadline signal shared across every request this client makes.
   // `ix map` sets it to a hard wall-clock budget so that, even when the backend
@@ -68,6 +109,24 @@ export class IxClient {
   ) {
     if (options.shareReads) this.memo = new RequestMemo();
     if (options.maxInFlight !== undefined) this.limiter = new Limiter(options.maxInFlight);
+    if (options.token) this.token = options.token;
+    if (options.readDeadlineMs && options.readDeadlineMs > 0) {
+      this.readDeadlineMs = options.readDeadlineMs;
+      this.readDeadlineAt = Date.now() + options.readDeadlineMs;
+    }
+    this.retryReads = options.retryReads === true;
+  }
+
+  /**
+   * The headers of every request: the JSON content type when there is a body,
+   * and the bearer token when the client has one. The one place either is set,
+   * so no request can go out without the token.
+   */
+  private headers(json: boolean): Record<string, string> {
+    const headers: Record<string, string> = {};
+    if (json) headers["Content-Type"] = "application/json";
+    if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    return headers;
   }
 
   /** Reads answered from `shareReads` instead of the backend, for diagnostics and tests. */
@@ -75,13 +134,18 @@ export class IxClient {
     return this.memo?.hits ?? 0;
   }
 
-  // Combine a per-request timeout with the optional shared deadline. Whichever
-  // fires first aborts the fetch. AbortSignal.any propagates the first abort.
-  private signalFor(perRequestMs: number): AbortSignal {
-    const perRequest = AbortSignal.timeout(perRequestMs);
-    return this.deadlineSignal
-      ? AbortSignal.any([perRequest, this.deadlineSignal])
-      : perRequest;
+  // Combine a per-request timeout with the optional shared deadline, and for a
+  // read with the client's read deadline. Whichever fires first aborts the
+  // fetch. AbortSignal.any propagates the first abort.
+  private signalFor(perRequestMs: number, read = false): AbortSignal {
+    const signals = [AbortSignal.timeout(perRequestMs)];
+    if (this.deadlineSignal) signals.push(this.deadlineSignal);
+    // AbortSignal.timeout is unref'd by Node, so it never holds a finished
+    // process open.
+    if (read && this.readDeadlineAt !== undefined) {
+      signals.push(AbortSignal.timeout(Math.max(0, this.readDeadlineAt - Date.now())));
+    }
+    return signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
   }
 
   async query(
@@ -120,13 +184,13 @@ export class IxClient {
   async ingest(path: string, recursive?: boolean, force?: boolean): Promise<IngestResult> {
     const resp = await fetch(`${this.endpoint}/v1/ingest`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.headers(true),
       body: JSON.stringify({ path, recursive, force: force || undefined }),
       signal: this.signalFor(30 * 60 * 1000), // 30 minute timeout for large repos
     });
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
+      throw httpError(resp.status, text);
     }
     return resp.json() as Promise<IngestResult>;
   }
@@ -313,13 +377,13 @@ export class IxClient {
   async commitPatch(patch: GraphPatchPayload): Promise<PatchCommitResult> {
     const resp = await fetch(`${this.endpoint}/v1/patch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.headers(true),
       body: JSON.stringify(patch),
       signal: this.signalFor(5 * 60 * 1000), // 5 min — matches commitPatchBulk
     });
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
+      throw httpError(resp.status, text);
     }
     return resp.json() as Promise<PatchCommitResult>;
   }
@@ -381,13 +445,13 @@ export class IxClient {
     if (opts?.systemId) body.system_id = opts.systemId;
     const resp = await fetch(`${this.endpoint}/v1/map`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.headers(true),
       body: JSON.stringify(body),
       signal: this.signalFor(30 * 60 * 1000), // 30 minute timeout
     });
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
+      throw httpError(resp.status, text);
     }
     return resp.json();
   }
@@ -395,13 +459,13 @@ export class IxClient {
   async commitPatchBulk(patches: GraphPatchPayload[]): Promise<PatchCommitResult> {
     const resp = await fetch(`${this.endpoint}/v1/patches/bulk`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.headers(true),
       body: JSON.stringify({ patches }),
       signal: this.signalFor(5 * 60 * 1000), // 5 min — prevents hang when k8s ingress closes idle connections
     });
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
+      throw httpError(resp.status, text);
     }
     return resp.json() as Promise<PatchCommitResult>;
   }
@@ -527,7 +591,7 @@ export class IxClient {
         // A redirect can replay a destructive POST or hide an accepted reset
         // behind a later connection failure/404. Inspect the first response.
         redirect: "manual",
-        headers: { "Content-Type": "application/json" },
+        headers: this.headers(true),
         body: JSON.stringify({}),
         signal: AbortSignal.timeout(30 * 1000),
       });
@@ -550,7 +614,7 @@ export class IxClient {
     }
     if (!beginResp.ok) {
       const text = await beginResp.text();
-      throw new Error(`${beginResp.status}: ${errorBodyForMessage(text)}`);
+      throw httpError(beginResp.status, text);
     }
 
     if (beginResp.status !== 202) {
@@ -573,6 +637,7 @@ export class IxClient {
         statusResp = await fetch(`${this.endpoint}/v1/reset/status/${opId}`, {
           method: "GET",
           redirect: "manual",
+          headers: this.headers(false),
           signal: AbortSignal.timeout(30 * 1000),
         });
       } catch (error) {
@@ -649,7 +714,7 @@ export class IxClient {
     const resp = await fetch(`${this.endpoint}${syncPath}`, {
       method: "POST",
       redirect: "manual",
-      headers: { "Content-Type": "application/json" },
+      headers: this.headers(true),
       body: JSON.stringify({}),
       signal: AbortSignal.timeout(10 * 60 * 1000),
     });
@@ -659,7 +724,7 @@ export class IxClient {
     }
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
+      throw httpError(resp.status, text);
     }
     return resp.json() as Promise<{ ok: boolean; message: string }>;
   }
@@ -670,10 +735,13 @@ export class IxClient {
   }
 
   async savingsReset(): Promise<any> {
-    const resp = await fetch(`${this.endpoint}/v1/savings`, { method: "DELETE" });
+    const resp = await fetch(`${this.endpoint}/v1/savings`, {
+      method: "DELETE",
+      headers: this.headers(false),
+    });
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
+      throw httpError(resp.status, text);
     }
     return resp.json();
   }
@@ -695,11 +763,23 @@ export class IxClient {
 
   async capabilities(): Promise<CapabilitiesResponse> {
     try {
-      return await this.get<CapabilitiesResponse>("/v1/capabilities");
-    } catch {
+      return await this.fetchCapabilities();
+    } catch (err) {
+      // A refused token is not "an older backend": say so rather than guess.
+      if (err instanceof LocalTokenRequiredError) throw err;
       // Backend doesn't support capabilities yet — fall back to local mode.
       return {};
     }
+  }
+
+  /** `/v1/capabilities`, with every failure thrown (for `ix doctor`). */
+  async fetchCapabilities(): Promise<CapabilitiesResponse> {
+    return this.get<CapabilitiesResponse>("/v1/capabilities");
+  }
+
+  /** Whether this client sends a bearer token. */
+  get sendsToken(): boolean {
+    return this.token !== undefined;
   }
 
   private async post<T>(path: string, body: unknown): Promise<T> {
@@ -707,20 +787,36 @@ export class IxClient {
     return this.read<T>("POST", path, payload, () =>
       fetch(`${this.endpoint}${path}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: this.headers(true),
         body: payload,
         // These small reads/writes (source-hashes, stitch, list, ...) had no
         // timeout, so a stalled connection could hang the process indefinitely.
-        // 2 min per request, also bounded by the shared deadline when set.
-        signal: this.signalFor(2 * 60 * 1000),
+        // 2 min per request, also bounded by the shared deadline when set, and
+        // by the read deadline when this POST is a read.
+        signal: this.signalFor(2 * 60 * 1000, isSharedRead(path)),
       }));
   }
 
   private async get<T>(path: string, timeoutMs = 2 * 60 * 1000): Promise<T> {
     return this.read<T>("GET", path, "", () =>
       fetch(`${this.endpoint}${path}`, {
-        signal: this.signalFor(timeoutMs),
+        headers: this.headers(false),
+        signal: this.signalFor(timeoutMs, true),
       }));
+  }
+
+  /**
+   * Whether a failed read is worth one more try: the request never reached a
+   * backend (refused, unresolvable), the connection dropped under it, or a
+   * proxy or a restarting backend answered 502/503/504. Never once a deadline
+   * has fired.
+   */
+  private shouldRetry(err: unknown): boolean {
+    if (!this.retryReads) return false;
+    if (this.deadlineSignal?.aborted) return false;
+    if (this.readDeadlineAt !== undefined && Date.now() >= this.readDeadlineAt) return false;
+    if (isPreConnectionFailure(err) || hasCode(err, DROPPED_CONNECTION_CODES)) return true;
+    return err instanceof Error && RETRYABLE_READ_STATUS.test(err.message);
   }
 
   /**
@@ -729,20 +825,66 @@ export class IxClient {
    * and the path is a read, and parsed per caller either way.
    */
   private async read<T>(method: string, path: string, payload: string, send: () => Promise<Response>): Promise<T> {
+    const isRead = method === "GET" || isSharedRead(path);
     const fetchBody = async (): Promise<SuccessBody> => {
-      const run = async (): Promise<SuccessBody> => {
+      const once = async (): Promise<SuccessBody> => {
         const resp = await send();
         const text = await resp.text();
-        if (!resp.ok) throw new Error(`${resp.status}: ${errorBodyForMessage(text)}`);
+        if (!resp.ok) throw httpError(resp.status, text);
         return { status: resp.status, text };
+      };
+      const run = async (): Promise<SuccessBody> => {
+        try {
+          return await once();
+        } catch (err) {
+          if (!isRead || !this.shouldRetry(err)) throw err;
+          // 100-300 ms, so a burst of reads that all hit one restart does not
+          // come back in lockstep.
+          await new Promise((resolve) => setTimeout(resolve, 100 + Math.random() * 200));
+          return once();
+        }
       };
       return this.limiter ? this.limiter.run(run) : run();
     };
+    if (!isRead) {
+      try {
+        return parseOrThrowWithStatus<T>(await fetchBody());
+      } finally {
+        // The reads after a write get the whole read deadline again.
+        if (this.readDeadlineMs !== undefined) this.readDeadlineAt = Date.now() + this.readDeadlineMs;
+      }
+    }
     const body = this.memo && isSharedRead(path)
       ? await this.memo.run(`${method} ${path} ${payload}`, fetchBody)
       : await fetchBody();
     return parseOrThrowWithStatus<T>(body);
   }
+}
+
+/**
+ * The backend refused a request for want of its local bearer token (a 401
+ * with code `local_token_required`, from the loopback guard). The message keeps
+ * the `401: <body>` shape every other HTTP failure has, so code that reads an
+ * error code back out of a message still sees it; `renderCliError` recognises
+ * the class and says how to fix it.
+ */
+export class LocalTokenRequiredError extends Error {
+  readonly code = "local_token_required";
+  constructor(body: string) {
+    super(`401: ${errorBodyForMessage(body)}`);
+    this.name = "LocalTokenRequiredError";
+  }
+}
+
+/** The error for a non-2xx response: `<status>: <body>`, or a typed one we can explain. */
+export function httpError(status: number, body: string): Error {
+  if (status === 401) {
+    try {
+      const parsed = JSON.parse(body) as { code?: unknown } | null;
+      if (parsed?.code === "local_token_required") return new LocalTokenRequiredError(body);
+    } catch { /* not the guard's JSON: a plain 401 */ }
+  }
+  return new Error(`${status}: ${errorBodyForMessage(body)}`);
 }
 
 /**
