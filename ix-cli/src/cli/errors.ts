@@ -360,7 +360,9 @@ export function localTokenRequiredError(endpoint?: string): StructuredError {
     message: `The Ix backend${endpoint ? ` at ${endpoint}` : ""} requires a token this CLI did not send or that it refused.`,
     next: isLocalEndpoint(endpoint)
       ? "Run `ix docker start --local-token` to give the backend this CLI's stored token, or set IX_TOKEN to the backend's token."
-      : "Set IX_TOKEN to the token that backend was started with.",
+      : "This CLI sends its token (IX_TOKEN or the stored one) only to a backend on this machine. " +
+        "Reach that backend through a local port forward (for example `ssh -L 8090:localhost:8090 <host>`) " +
+        "and point IX_ENDPOINT at http://localhost:8090.",
   };
 }
 
