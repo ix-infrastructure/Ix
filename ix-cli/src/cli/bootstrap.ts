@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import chalk from "chalk";
 import { createClient } from "../client/factory.js";
 import { renderBanner } from "./banner.js";
-import { canonicalWorkspacePath, getEndpoint, gitRootFor, loadConfig, loadWorkspaces, saveConfig, findWorkspaceForCwd, type WorkspaceConfig } from "./config.js";
+import { canonicalWorkspacePath, getEndpoint, gitRootFor, loadConfig, loadWorkspaces, findWorkspaceForCwd, updateConfig, withConfigWriteLock, type IxConfig, type WorkspaceConfig } from "./config.js";
 import { WorkspaceNotMappedError, workspaceNotMappedHint } from "./errors.js";
 import { ixHome } from "./ix-home.js";
 import { stderr } from "./stderr.js";
@@ -30,16 +30,21 @@ export function ensureLocalConfig(): boolean {
   const configDir = ixHome();
   const configPath = join(configDir, "config.yaml");
   mkdirSync(configDir, { recursive: true });
-  try {
-    // 'wx' creates the file atomically and throws EEXIST if it already exists,
-    // avoiding the existsSync-then-write TOCTOU (CodeQL js/file-system-race).
-    writeFileSync(configPath, `endpoint: ${getEndpoint()}\nformat: text\n`, { flag: "wx" });
-    noteRelocatedConfig(configPath);
-    return true;
-  } catch (err: any) {
-    if (err?.code === "EEXIST") return false;
-    throw err;
-  }
+  // Under the config lock like every other write, so a registration that has
+  // just read "no file" is not overtaken by this one.
+  const created = withConfigWriteLock(() => {
+    try {
+      // 'wx' creates the file atomically and throws EEXIST if it already exists,
+      // avoiding the existsSync-then-write TOCTOU (CodeQL js/file-system-race).
+      writeFileSync(configPath, `endpoint: ${getEndpoint()}\nformat: text\n`, { flag: "wx" });
+      return true;
+    } catch (err: any) {
+      if (err?.code === "EEXIST") return false;
+      throw err;
+    }
+  });
+  if (created) noteRelocatedConfig(configPath);
+  return created;
 }
 
 /**
@@ -79,7 +84,24 @@ interface WorkspaceState { ws: WorkspaceConfig; created: boolean; migrated: bool
  */
 function getOrCreateWorkspace(cwd: string): WorkspaceState {
   const rootPath = canonicalWorkspacePath(resolve(cwd));
-  const config = loadConfig();
+  // The common case, already registered under its path id, needs no write and
+  // so no lock.
+  const known = (loadConfig().workspaces ?? []).find(w => w.root_path === rootPath && w.workspace_id === workspaceIdForPath(rootPath));
+  if (known) {
+    const previousWorkspaceId = migratedRootsThisRun.get(rootPath);
+    return { ws: known, created: false, migrated: previousWorkspaceId !== undefined, previousWorkspaceId };
+  }
+  // Read, change and write under the config lock, so parallel registrations
+  // each see the one before (see updateConfig).
+  return updateConfig((config) => {
+    let save: typeof config | undefined;
+    const state = registerIn(config, rootPath, () => { save = config; });
+    return { save, result: state };
+  });
+}
+
+/** The registration itself, on a config read under the lock; `changed` marks it for saving. */
+function registerIn(config: IxConfig, rootPath: string, changed: () => void): WorkspaceState {
   const pathId = workspaceIdForPath(rootPath);
   const existing = (config.workspaces ?? []).find(w => canonicalWorkspacePath(w.root_path) === rootPath);
   if (existing) {
@@ -92,11 +114,11 @@ function getOrCreateWorkspace(cwd: string): WorkspaceState {
     if (existing.workspace_id !== pathId) {
       const previousWorkspaceId = existing.workspace_id;
       existing.workspace_id = pathId;
-      saveConfig(config);
+      changed();
       migratedRootsThisRun.set(rootPath, previousWorkspaceId);
       return { ws: existing, created: false, migrated: true, previousWorkspaceId };
     }
-    if (pathChanged) saveConfig(config);
+    if (pathChanged) changed();
     const previousWorkspaceId = migratedRootsThisRun.get(rootPath);
     return { ws: existing, created: false, migrated: previousWorkspaceId !== undefined, previousWorkspaceId };
   }
@@ -113,7 +135,7 @@ function getOrCreateWorkspace(cwd: string): WorkspaceState {
     default: !hasDefault,
   };
   config.workspaces = [...workspaces, ws];
-  saveConfig(config);
+  changed();
   return { ws, created: true, migrated: false };
 }
 

@@ -5,10 +5,13 @@ import * as nodePath from "node:path";
 
 import type { GraphPatchPayload } from "../../client/types.js";
 import {
+  BULK_DELETES_SINCE,
+  backendAppliesBulkDeletes,
   patchRequiresPerFileCommit,
   planDeletedFileRecovery,
   reconcileRemovedEntities,
 } from "../commands/ingest.js";
+import { createLimiter } from "../tree-walk.js";
 
 function patchWith(ops: GraphPatchPayload["ops"]): GraphPatchPayload {
   return {
@@ -29,10 +32,116 @@ function patchWith(ops: GraphPatchPayload["ops"]): GraphPatchPayload {
 }
 
 describe("reconcileRemovedEntities", () => {
-  it("routes patches with deletion ops away from the bulk endpoint", () => {
+  it("routes patches with deletion ops away from the bulk endpoint, unless it applies them", () => {
     expect(patchRequiresPerFileCommit(patchWith([{ type: "DeleteNode", id: "old-node" }]))).toBe(true);
     expect(patchRequiresPerFileCommit(patchWith([{ type: "DeleteEdge", id: "old-edge" }]))).toBe(true);
     expect(patchRequiresPerFileCommit(patchWith([{ type: "UpsertNode", id: "node" }]))).toBe(false);
+    expect(patchRequiresPerFileCommit(patchWith([{ type: "DeleteNode", id: "old-node" }]), true)).toBe(false);
+    expect(patchRequiresPerFileCommit(patchWith([{ type: "DeleteEdge", id: "old-edge" }]), true)).toBe(false);
+  });
+
+  it("trusts the bulk route with deletes from the release that applies them", () => {
+    const env = {};
+    expect(backendAppliesBulkDeletes({ release_version: BULK_DELETES_SINCE }, env)).toBe(true);
+    expect(backendAppliesBulkDeletes({ release_version: "1.0.34" }, env)).toBe(true);
+    expect(backendAppliesBulkDeletes({ release_version: "v1.1.0" }, env)).toBe(true);
+    expect(backendAppliesBulkDeletes({ release_version: "1.0.31" }, env)).toBe(false);
+    expect(backendAppliesBulkDeletes({ release_version: "0.9.99" }, env)).toBe(false);
+    // No release, or not a version: an image the release pipeline did not build.
+    expect(backendAppliesBulkDeletes({}, env)).toBe(false);
+    expect(backendAppliesBulkDeletes({ release_version: "dev" }, env)).toBe(false);
+    expect(backendAppliesBulkDeletes(null, env)).toBe(false);
+    expect(backendAppliesBulkDeletes({}, { IX_BULK_DELETES: "1" })).toBe(true);
+    expect(backendAppliesBulkDeletes({ release_version: "1.0.34" }, { IX_BULK_DELETES: "0" })).toBe(false);
+  });
+
+  it("looks up no chunk the stored patch names as one, in map mode", async () => {
+    const getPatch = vi.fn().mockResolvedValue({
+      data: {
+        ops: [
+          { type: "UpsertNode", id: "file-node", kind: "file" },
+          { type: "UpsertNode", id: "chunk-L10", kind: "chunk" },
+          { type: "UpsertNode", id: "gone-fn", kind: "function" },
+        ],
+      },
+    });
+    const entity = vi.fn().mockResolvedValue({ node: { kind: "function" }, claims: [], edges: [] });
+    const patch = patchWith([{ type: "UpsertNode", id: "file-node", kind: "file", name: "example.ts" }]);
+
+    const reconciled = await reconcileRemovedEntities({ getPatch, entity }, patch, ["prev"], undefined, true);
+
+    expect(entity.mock.calls.map(c => c[0])).toEqual(["gone-fn"]);
+    expect(reconciled.ops.filter(o => o.type === "DeleteNode").map(o => o["id"])).toEqual(["gone-fn"]);
+  });
+
+  it("runs the entity lookups within the limit, and keeps candidate order whatever finishes first", async () => {
+    const ids = Array.from({ length: 20 }, (_, i) => `n${i}`);
+    const getPatch = vi.fn().mockResolvedValue({
+      data: { ops: ids.map(id => ({ type: "UpsertNode", id, kind: "function" })) },
+    });
+    let active = 0;
+    let peak = 0;
+    const entity = vi.fn().mockImplementation(async (id: string) => {
+      active++;
+      peak = Math.max(peak, active);
+      // Later ids finish first.
+      await new Promise(r => setTimeout(r, 40 - Number(id.slice(1)) * 2));
+      active--;
+      return { node: {}, claims: [], edges: [{ id: `e-${id}`, provenance: { sourceUri: "src/caller.ts" } }] };
+    });
+    const patch = patchWith([]);
+
+    const reconciled = await reconcileRemovedEntities(
+      { getPatch, entity }, patch, ["prev"], undefined, false, createLimiter(4),
+    );
+
+    expect(peak).toBe(4);
+    expect(reconciled.ops.filter(o => o.type === "DeleteNode").map(o => o["id"])).toEqual(ids);
+    expect(reconciled.ops.filter(o => o.type === "DeleteEdge").map(o => o["id"])).toEqual(ids.map(id => `e-${id}`));
+  });
+
+  describe("an external package node, which every caller in the workspace shares", () => {
+    const ext = { type: "UpsertNode", id: "ext-filter", kind: "function", attrs: { external: true, package: "dplyr" } };
+    const edges = [
+      { id: "own-call", predicate: "CALLS", provenance: { sourceUri: "src/example.ts" } },
+      { id: "other-call", predicate: "CALLS", provenance: { sourceUri: "src/other.ts" } },
+    ];
+
+    it("stays, with the other files' edges, when this file stops calling it", async () => {
+      const getPatch = vi.fn().mockResolvedValue({ data: { ops: [ext] } });
+      const entity = vi.fn().mockResolvedValue({ node: { kind: "function" }, claims: [], edges });
+      const dependents = new Set<string>();
+
+      const reconciled = await reconcileRemovedEntities({ getPatch, entity }, patchWith([]), ["prev"], dependents);
+
+      expect(reconciled.ops.filter(o => o.type === "DeleteNode")).toEqual([]);
+      expect(reconciled.ops.filter(o => o.type === "DeleteEdge").map(o => o["id"])).toEqual(["own-call"]);
+      expect([...dependents], "the other file keeps its edge, so it is not a dependent").toEqual([]);
+    });
+
+    it("is recognised from the entity's attrs when the stored patch kept no ops", async () => {
+      const getPatch = vi.fn().mockResolvedValue({
+        data: { entityIds: ["ext-filter"], nodeOpCount: 1, edgeOpCount: 0 },
+      });
+      const entity = vi.fn().mockResolvedValue({
+        node: { kind: "function", attrs: { external: true } }, claims: [], edges,
+      });
+
+      const reconciled = await reconcileRemovedEntities({ getPatch, entity }, patchWith([]), ["prev"]);
+
+      expect(reconciled.ops.filter(o => o.type === "DeleteNode")).toEqual([]);
+      expect(reconciled.ops.filter(o => o.type === "DeleteEdge").map(o => o["id"])).toEqual(["own-call"]);
+    });
+
+    it("goes when this file was its last caller", async () => {
+      const getPatch = vi.fn().mockResolvedValue({ data: { ops: [ext] } });
+      const entity = vi.fn().mockResolvedValue({ node: { kind: "function" }, claims: [], edges: [edges[0]] });
+
+      const reconciled = await reconcileRemovedEntities({ getPatch, entity }, patchWith([]), ["prev"]);
+
+      expect(reconciled.ops.filter(o => o.type === "DeleteNode").map(o => o["id"])).toEqual(["ext-filter"]);
+      expect(reconciled.ops.filter(o => o.type === "DeleteEdge").map(o => o["id"])).toEqual(["own-call"]);
+    });
   });
 
   it("reingests surviving dependents when a deleted file returns", () => {

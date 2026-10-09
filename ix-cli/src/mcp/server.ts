@@ -944,7 +944,24 @@ async function runCommand(
     return textResult(JSON.stringify({ error: capErrorDetail(detail), tool }), true);
   }
 
+  if (args.includes("--format=json")) {
+    const silent = silentJsonFailure(result, tool);
+    if (silent) return silent;
+  }
   return textResult(result.stdout.trim() || "{}");
+}
+
+/**
+ * A JSON-mode run that "succeeded" with nothing on stdout and something on
+ * stderr: a command that failed without saying so through its exit code. A
+ * JSON command always prints its answer, so this is reported as the failure it
+ * is; turning the empty stdout into `{}` told the client the tool succeeded
+ * with nothing to say. Both empty is left to the caller, as before.
+ */
+function silentJsonFailure(result: { stdout: string; stderr: string }, tool: string): CallToolResult | null {
+  if (result.stdout.trim()) return null;
+  const stderr = result.stderr.trim();
+  return stderr ? textResult(JSON.stringify({ error: capErrorDetail(stderr), tool }), true) : null;
 }
 
 /**
@@ -972,6 +989,8 @@ async function runSmells(runIx: IxRunner, input: ToolInput): Promise<CallToolRes
     return textResult(JSON.stringify({ error: capErrorDetail(detail), tool: "ix_smells" }), true);
   }
 
+  const silent = silentJsonFailure(result, "ix_smells");
+  if (silent) return silent;
   const parsed = parseJsonOutput(result.stdout);
   if (!isRecord(parsed) || !Array.isArray(parsed.candidates)) {
     const text = textResult(result.stdout.trim() || "{}");

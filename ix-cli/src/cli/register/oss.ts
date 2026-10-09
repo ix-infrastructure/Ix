@@ -49,7 +49,7 @@ import {
   DEFAULT_FORMAT_CHOICES,
   resolveDefaultFormat,
 } from "../default-format.js";
-import { loadConfig } from "../config.js";
+import { readConfiguredFormat } from "../config.js";
 import { stderrDim } from "../stderr.js";
 
 const PRO_COMMANDS: { name: string; desc: string }[] = [
@@ -92,9 +92,10 @@ function configureOssOptions(root: Command): void {
   const { format: defaultFormat, ignored } = resolveDefaultFormat(
     process.env,
     // Never let an unreadable or half-written config.yaml stop the CLI from
-    // registering its commands; loadConfig already falls back to defaults on a
-    // parse error, and this covers the rest (an unresolvable IX_HOME).
-    () => { try { return loadConfig().format; } catch { return undefined; } },
+    // registering its commands: a config that does not parse is reported by the
+    // command that needs it (ConfigParseError), not here. And no full parse for
+    // one scalar on every invocation, `--version` included.
+    () => { try { return readConfiguredFormat(); } catch { return undefined; } },
   );
 
   // Only where a person will read it: an agent captures stderr, and one more

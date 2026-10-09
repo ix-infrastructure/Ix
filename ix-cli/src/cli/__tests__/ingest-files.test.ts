@@ -11,6 +11,7 @@ import { acquireMapLock, takeMapRerun } from "../single-flight.js";
 import { ingestMtimeCachePath, ingestRebuildPath, ingestSymbolsPath, loadConfig } from "../config.js";
 import { workspaceIdForPath } from "../system.js";
 import { FakeBackend } from "./helpers/fake-backend.js";
+import { runWithSignal } from "../../client/run-signal.js";
 import { loadIngestBaseline } from "../ingest-baseline.js";
 import { detectStaleFiles } from "../stale.js";
 import { renderStatusLlm } from "../commands/status.js";
@@ -483,6 +484,28 @@ describe("ingestFiles against a fake backend", () => {
     }
   });
 
+  it("an ingest's reads are not cut off by the read deadline (CL-15)", async () => {
+    // `ix ingest` passes no deadline, and an incremental run reads each changed
+    // file's previous patch (GET /v1/patches/:id) only after discovery and the
+    // parse, which on a real repo take minutes. A read deadline counted from
+    // the client's creation would fail every one of those reads.
+    const graph = new FakeBackend({ semantics: "head" });
+    process.env.IX_ENDPOINT = await graph.start();
+    try {
+      fixture(5);
+      await ingestFiles(repo, { format: "json", suppressOutput: true, printSummary: false });
+      writeFileSync(join(repo, "src", "m000.ts"), "export function g0(): number { return 0; }\n", "utf8");
+      graph.resetRequests();
+      process.env.IX_READ_DEADLINE_MS = "1";
+      const summary = await ingestFiles(repo, { format: "json", suppressOutput: true, printSummary: false });
+      expect(summary.patchesApplied).toBe(1);
+      expect(graph.unknownPaths).toEqual([]);
+    } finally {
+      delete process.env.IX_READ_DEADLINE_MS;
+      await graph.stop();
+    }
+  });
+
   it("blames the clock for the clock's losses, not the backend", async () => {
     // The cutoff and the run deadline both abandon patches, and three separate
     // review rounds found them attributed to each other -- the run telling the
@@ -524,6 +547,30 @@ describe("ingestFiles against a fake backend", () => {
     // already the reason they fail" -- for patches the cutoff never touched.
     expect(message).toContain("ran out of time");
     expect(message).toContain("30 file patches");
+    expect(message).not.toContain("added load");
+  });
+
+  it("treats an `ix mcp` run's abort as the run deadline (CL-14)", async () => {
+    // The same shape as the case above, but the deadline arrives the way a
+    // timed-out MCP tool call delivers it: as the run signal, with no
+    // `deadlineSignal` passed. The client saw it; the commit loop did not, so
+    // the ingest kept sending per-file commits that the aborted signal failed
+    // at once and blamed them on the backend.
+    fixture(30);
+    backend.refuseEverything = true;
+    backend.abortAfterCommits = 3;
+
+    const message = await runWithSignal(backend.deadlineSignal, async () => {
+      try {
+        await ingestFiles(repo, { format: "text", force: true, suppressOutput: true, printSummary: false });
+        return "";
+      } catch (err) {
+        return String(err);
+      }
+    });
+
+    expect(backend.commitCount).toBe(3);
+    expect(message).toContain("ran out of time");
     expect(message).not.toContain("added load");
   });
 
@@ -745,6 +792,23 @@ describe("ingestFiles against a fake backend", () => {
     it("adding one file sends one patch", async () => {
       await incremental();
       writeFileSync(join(repo, "src", "added.ts"), "export const added = 1;\n", "utf8");
+      stage();
+      backend.resetRequests();
+
+      const summary = await incremental();
+
+      expect(backend.acceptedPatches(), "patches on the wire").toBe(1);
+      expect(backend.commitCount).toBe(1);
+      expect(summary.filesSkippedAsUnchanged).toBe(16);
+      expect(summary.filesDiscovered).toBe(17);
+    });
+
+    it("adding one Python file sends one patch", async () => {
+      // Until IN-10 a new file outside the index-prescan languages forced the
+      // whole-repository pass. The symbol table covers every language, so a
+      // new Python file takes the incremental path like a TypeScript one.
+      await incremental();
+      writeFileSync(join(repo, "src", "added.py"), "def added():\n    return 1\n", "utf8");
       stage();
       backend.resetRequests();
 
@@ -1093,6 +1157,17 @@ describe("ingestFiles against a fake backend", () => {
     expect(backend.acceptedPatches()).toBe(3);
   });
 
+  it("counts a file over the size limit in the summary, so ix map can say so", async () => {
+    fixture(2);
+    writeFileSync(join(repo, "src", "huge.ts"), `export const big = "${"x".repeat(1024 * 1024 + 10)}";\n`, "utf8");
+    execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+
+    const summary = await run();
+
+    expect(summary.filesTooLarge).toBe(1);
+    expect(summary.patchesApplied).toBe(2);
+  });
+
   it("ingests only the languages --lang names, and keeps the rest of the baseline", async () => {
     fixture(3);
     writeFileSync(join(repo, "src", "tool.py"), "def tool():\n    return 1\n", "utf8");
@@ -1170,6 +1245,122 @@ describe("ingestFiles against a fake backend", () => {
     expect(summary.patchesApplied).toBe(12);
     expect(backend.bulkCount).toBe(1);
     expect(backend.singleCount, "the fan-out is for failures only").toBe(0);
+  });
+
+  describe("a patch that deletes (IN-04)", () => {
+    const incremental = () =>
+      ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
+    const perFile = () => backend.requests.filter(r => r.path === "/v1/patch").length;
+    /** Map two files, then drop `g` from one of them: its patch carries a DeleteNode. */
+    const removeAFunction = async (): Promise<void> => {
+      backend.semantics = "head";
+      mkdirSync(join(repo, "src"), { recursive: true });
+      writeFileSync(join(repo, "src", "a.ts"), "export function f(): number { return 1; }\nexport function g(): number { return 2; }\n", "utf8");
+      writeFileSync(join(repo, "src", "b.ts"), "export const b = 1;\n", "utf8");
+      execFileSync("git", ["init", "-q"], { cwd: repo, stdio: "ignore" });
+      execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+      await incremental();
+      writeFileSync(join(repo, "src", "a.ts"), "export function f(): number { return 1; }\n", "utf8");
+      backend.resetRequests();
+      await incremental();
+    };
+
+    it("goes through the bulk route on a backend that applies bulk deletes", async () => {
+      backend.releaseVersion = "1.0.32";
+      await removeAFunction();
+      expect(backend.lastOps.get("src/a.ts")?.some(op => op.type === "DeleteNode"), "the patch deletes").toBe(true);
+      expect(backend.bulkCount).toBe(1);
+      expect(perFile()).toBe(0);
+    });
+
+    it("goes to /v1/patch on its own on a backend that reports no release, or an older one", async () => {
+      backend.releaseVersion = null;
+      await removeAFunction();
+      expect(backend.lastOps.get("src/a.ts")?.some(op => op.type === "DeleteNode"), "the patch deletes").toBe(true);
+      expect(perFile()).toBe(1);
+    });
+
+    it("goes to /v1/patch on its own on a release before the one that applies bulk deletes", async () => {
+      backend.releaseVersion = "1.0.31";
+      await removeAFunction();
+      expect(perFile()).toBe(1);
+    });
+
+    // An external package node is keyed by the workspace, not the file, so
+    // every caller writes the same one. One caller dropping its call deleted
+    // the node and every other caller's edge to it, though their files had
+    // not changed.
+    it("a file that stops calling a package function leaves the other callers' edges", async () => {
+      backend.semantics = "head";
+      backend.releaseVersion = "1.0.32";
+      mkdirSync(join(repo, "R"), { recursive: true });
+      const calls = (fn: string) => `${fn} <- function(x) {\n  dplyr::filter(x)\n}\n`;
+      writeFileSync(join(repo, "R", "a.R"), calls("fa"), "utf8");
+      writeFileSync(join(repo, "R", "b.R"), calls("fb"), "utf8");
+      execFileSync("git", ["init", "-q"], { cwd: repo, stdio: "ignore" });
+      execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+      await incremental();
+      const edgeNames = () => backend.graphSignature().edges
+        .map(line => line.split(" "))
+        .filter(([, , , predicate]) => predicate === "CALLS")
+        .map(([, src, dst]) => `${backend.nodeName(src!)} -> ${backend.nodeName(dst!)}`)
+        .sort();
+      expect(edgeNames()).toEqual(["fa[function] -> filter[function]", "fb[function] -> filter[function]"]);
+
+      writeFileSync(join(repo, "R", "a.R"), "fa <- function(x) {\n  x\n}\n", "utf8");
+      await incremental();
+
+      expect(edgeNames()).toEqual(["fb[function] -> filter[function]"]);
+    });
+  });
+
+  describe("bulk requests bounded by size (IN-05)", () => {
+    // 1,100 files: three parse batches, so what the first batch learns has two
+    // more batches to hold for. The backend refuses a bulk over 300 ops.
+    const tooLarge = () => backend.requests.filter(r => r.path === "/v1/patches/bulk" && r.code === 413).length;
+    const saved = process.env.IX_COMMIT_MAX_OPS;
+    afterEach(() => {
+      if (saved === undefined) delete process.env.IX_COMMIT_MAX_OPS;
+      else process.env.IX_COMMIT_MAX_OPS = saved;
+    });
+
+    it("learns the size from the first 413 that suggests one, and is refused no more that run", async () => {
+      fixture(1100);
+      backend.maxBulkOps = 300;
+      backend.suggestMaxPatches = true;
+
+      const summary = await run();
+
+      expect(tooLarge()).toBe(1);
+      expect(summary.commitErrors).toBe(0);
+      expect(summary.patchesApplied).toBe(1100);
+      expect(backend.singleCount, "no per-file fallback").toBe(0);
+    });
+
+    it("halves by ops on a 413 that suggests nothing, and later batches start at the learned size", async () => {
+      fixture(1100);
+      backend.maxBulkOps = 300;
+
+      const summary = await run();
+
+      // A few halvings in the first batch only; bisecting each batch afresh
+      // was three times as many.
+      expect(tooLarge()).toBeGreaterThan(0);
+      expect(tooLarge()).toBeLessThanOrEqual(4);
+      expect(summary.commitErrors).toBe(0);
+      expect(summary.patchesApplied).toBe(1100);
+    });
+
+    it("is never refused when IX_COMMIT_MAX_OPS keeps every request under the cap", async () => {
+      fixture(1100);
+      backend.maxBulkOps = 300;
+      process.env.IX_COMMIT_MAX_OPS = "300";
+
+      const summary = await run();
+
+      expect(tooLarge()).toBe(0);
+      expect(summary.patchesApplied).toBe(1100);
+    });
   });
 
   // ── Which workspace a path belongs to ─────────────────────────────────

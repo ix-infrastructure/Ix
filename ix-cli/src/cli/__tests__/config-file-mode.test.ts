@@ -51,7 +51,7 @@ describe("saveConfig persistence", () => {
     saveConfig({ endpoint: "http://localhost:8090", format: "json" });
 
     expect(readConfig()).toMatchObject({ endpoint: "http://localhost:8090", format: "json" });
-    expect(fs.readdirSync(cfgDir())).toEqual(["config.yaml"]);
+    expect(fs.readdirSync(cfgDir()).filter((n) => n !== "locks")).toEqual(["config.yaml"]); // the lock directory stays
   });
 
   it.skipIf(!posix)("creates the config directory 0700", () => {
@@ -84,7 +84,7 @@ describe("saveConfig persistence", () => {
 
     const currentInode = fs.statSync(cfgPath()).ino;
     if (previousInode !== 0 && currentInode !== 0) expect(currentInode).not.toBe(previousInode);
-    expect(fs.readdirSync(cfgDir())).toEqual(["config.yaml"]);
+    expect(fs.readdirSync(cfgDir()).filter((n) => n !== "locks")).toEqual(["config.yaml"]); // the lock directory stays
     expect(readConfig()).toMatchObject({ endpoint: "http://new.example", format: "json" });
   });
 
@@ -132,6 +132,6 @@ describe("saveConfig with an unparseable config", () => {
 
     expect(() => saveConfig({ endpoint: "http://localhost:8090", format: "text" })).toThrow(/not valid YAML/);
     expect(fs.readFileSync(cfgPath(), "utf8")).toBe(broken);
-    expect(fs.readdirSync(cfgDir())).toEqual(["config.yaml"]);
+    expect(fs.readdirSync(cfgDir()).filter((n) => n !== "locks")).toEqual(["config.yaml"]); // the lock directory stays
   });
 });
