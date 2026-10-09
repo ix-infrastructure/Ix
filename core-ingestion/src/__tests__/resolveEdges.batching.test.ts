@@ -126,19 +126,22 @@ describe('resolveEdges scales with the repository', () => {
   }
 
   it('doubling the files at most triples the time', () => {
+    // Best of seven on sizes large enough that one scheduler hiccup on a busy
+    // CI runner can't swing the ratio; the bound itself stays at 3x.
     const time = (results: FileParseResult[]) => {
       const index = indexOf(results);
-      return Math.min(...[0, 1, 2].map(() => {
+      return Math.min(...Array.from({ length: 7 }, () => {
         const t = performance.now();
         resolveEdges(results, undefined, index);
         return performance.now() - t;
       }));
     };
-    const small = synthetic(1000);
-    const large = synthetic(2000);
+    const small = synthetic(2000);
+    const large = synthetic(4000);
     time(small); // warm up
+    time(large);
     expect(time(large) / time(small)).toBeLessThan(3);
-  });
+  }, 60_000);
 });
 
 describe('resolveEdges against a summarized index', () => {
