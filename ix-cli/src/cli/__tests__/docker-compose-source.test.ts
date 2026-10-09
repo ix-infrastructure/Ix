@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -262,9 +262,11 @@ describe("backend .env helpers", () => {
     const { writeBackendEnv } = await import("../backend-compose.js");
     const env = join(t, "same.env");
     writeFileSync(env, "IX_LOCAL_TOKEN=x\n", { mode: 0o644 });
-    const before = statSync(env);
+    // Stat through a descriptor, not the path, so there is no check-then-use race.
+    const statOf = (p: string) => { const fd = openSync(p, "r"); try { return fstatSync(fd); } finally { closeSync(fd); } };
+    const before = statOf(env);
     writeBackendEnv("x", env);
-    const after = statSync(env);
+    const after = statOf(env);
     // Not rewritten (same inode, same mtime), but tightened to 0600: it holds a credential.
     expect(after.ino).toBe(before.ino);
     expect(after.mtimeMs).toBe(before.mtimeMs);
