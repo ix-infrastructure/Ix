@@ -193,8 +193,10 @@ const apiLines = apiSrc.split(/\r?\n/);
 // (as first arg or later) is a call pattern this gate does not know how to
 // classify — report it so the surface cannot grow a silent hole. Known
 // helpers whose string args are captured by their own pass (runReset) are
-// excluded.
-const KNOWN_HELPERS = new Set(["runReset"]);
+// excluded. So is `headers`: the method and path it is given only label the
+// IX_DEBUG line, and repeat the `fetch` beside it, which the fetch pass below
+// classifies.
+const KNOWN_HELPERS = new Set(["runReset", "headers"]);
 for (let i = 0; i < apiLines.length; i++) {
   const call = apiLines[i].match(/this\.([a-zA-Z_$][\w$]*)(?:<.*?>)?\(/);
   if (!call) continue;

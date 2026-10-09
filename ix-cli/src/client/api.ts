@@ -2,6 +2,7 @@
 
 import { isPreConnectionFailure, RESET_RECONCILIATION_ERROR } from "./transport.js";
 import { Limiter, RequestMemo } from "./request-memo.js";
+import { CORRELATION_ID_HEADER, debugRequest, nextCorrelationId } from "./correlation.js";
 import type {
   IngestResult,
   StructuredContext,
@@ -119,13 +120,18 @@ export class IxClient {
 
   /**
    * The headers of every request: the JSON content type when there is a body,
-   * and the bearer token when the client has one. The one place either is set,
-   * so no request can go out without the token.
+   * the bearer token when the client has one, and a fresh X-Correlation-Id
+   * (see correlation.ts). The one place any of them is set, so no request can
+   * go out without the token. Under IX_DEBUG the request and its id are
+   * written to stderr, to match against the backend's logs.
    */
-  private headers(json: boolean): Record<string, string> {
+  private headers(json: boolean, method: string, path: string): Record<string, string> {
     const headers: Record<string, string> = {};
     if (json) headers["Content-Type"] = "application/json";
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    const id = nextCorrelationId();
+    headers[CORRELATION_ID_HEADER] = id;
+    debugRequest(method, path, id);
     return headers;
   }
 
@@ -184,7 +190,7 @@ export class IxClient {
   async ingest(path: string, recursive?: boolean, force?: boolean): Promise<IngestResult> {
     const resp = await fetch(`${this.endpoint}/v1/ingest`, {
       method: "POST",
-      headers: this.headers(true),
+      headers: this.headers(true, "POST", "/v1/ingest"),
       body: JSON.stringify({ path, recursive, force: force || undefined }),
       signal: this.signalFor(30 * 60 * 1000), // 30 minute timeout for large repos
     });
@@ -380,7 +386,7 @@ export class IxClient {
   async commitPatch(patch: GraphPatchPayload): Promise<PatchCommitResult> {
     const resp = await fetch(`${this.endpoint}/v1/patch`, {
       method: 'POST',
-      headers: this.headers(true),
+      headers: this.headers(true, "POST", "/v1/patch"),
       body: JSON.stringify(patch),
       signal: this.signalFor(5 * 60 * 1000), // 5 min — matches commitPatchBulk
     });
@@ -448,7 +454,7 @@ export class IxClient {
     if (opts?.systemId) body.system_id = opts.systemId;
     const resp = await fetch(`${this.endpoint}/v1/map`, {
       method: "POST",
-      headers: this.headers(true),
+      headers: this.headers(true, "POST", "/v1/map"),
       body: JSON.stringify(body),
       signal: this.signalFor(30 * 60 * 1000), // 30 minute timeout
     });
@@ -462,7 +468,7 @@ export class IxClient {
   async commitPatchBulk(patches: GraphPatchPayload[]): Promise<PatchCommitResult> {
     const resp = await fetch(`${this.endpoint}/v1/patches/bulk`, {
       method: 'POST',
-      headers: this.headers(true),
+      headers: this.headers(true, "POST", "/v1/patches/bulk"),
       body: JSON.stringify({ patches }),
       signal: this.signalFor(5 * 60 * 1000), // 5 min — prevents hang when k8s ingress closes idle connections
     });
@@ -594,7 +600,7 @@ export class IxClient {
         // A redirect can replay a destructive POST or hide an accepted reset
         // behind a later connection failure/404. Inspect the first response.
         redirect: "manual",
-        headers: this.headers(true),
+        headers: this.headers(true, "POST", asyncPath),
         body: JSON.stringify({}),
         signal: AbortSignal.timeout(30 * 1000),
       });
@@ -640,7 +646,7 @@ export class IxClient {
         statusResp = await fetch(`${this.endpoint}/v1/reset/status/${opId}`, {
           method: "GET",
           redirect: "manual",
-          headers: this.headers(false),
+          headers: this.headers(false, "GET", `/v1/reset/status/${opId}`),
           signal: AbortSignal.timeout(30 * 1000),
         });
       } catch (error) {
@@ -717,7 +723,7 @@ export class IxClient {
     const resp = await fetch(`${this.endpoint}${syncPath}`, {
       method: "POST",
       redirect: "manual",
-      headers: this.headers(true),
+      headers: this.headers(true, "POST", syncPath),
       body: JSON.stringify({}),
       signal: AbortSignal.timeout(10 * 60 * 1000),
     });
@@ -740,7 +746,7 @@ export class IxClient {
   async savingsReset(): Promise<any> {
     const resp = await fetch(`${this.endpoint}/v1/savings`, {
       method: "DELETE",
-      headers: this.headers(false),
+      headers: this.headers(false, "DELETE", "/v1/savings"),
     });
     if (!resp.ok) {
       const text = await resp.text();
@@ -790,7 +796,7 @@ export class IxClient {
     return this.read<T>("POST", path, payload, () =>
       fetch(`${this.endpoint}${path}`, {
         method: "POST",
-        headers: this.headers(true),
+        headers: this.headers(true, "POST", path),
         body: payload,
         // These small reads/writes (source-hashes, stitch, list, ...) had no
         // timeout, so a stalled connection could hang the process indefinitely.
@@ -803,7 +809,7 @@ export class IxClient {
   private async get<T>(path: string, timeoutMs = 2 * 60 * 1000): Promise<T> {
     return this.read<T>("GET", path, "", () =>
       fetch(`${this.endpoint}${path}`, {
-        headers: this.headers(false),
+        headers: this.headers(false, "GET", path),
         signal: this.signalFor(timeoutMs, true),
       }));
   }

@@ -219,6 +219,26 @@ follows the header and the totals are floors.
 
 ## Examples
 
+`ix map`:
+
+```
+map files=412 regions=9 levels=2 rev=1043 outcome=full_local_completed files_too_large=2
+too_large path=data/fixtures/large.json
+too_large path=vendor/bundle.js
+region id=3f9c1a2b kind=system label=Ix level=2 files=412 children=2 cohesion=0.41 coupling=0 confidence=0.9
+region id=7d02e4c1 kind=subsystem label="Cli / Client" level=1 files=87 parent=3f9c1a2b cohesion=0.62 coupling=4.1 confidence=0.74 signals=imports,calls
+```
+
+The `map` record carries `parse_errors`, `commit_errors` and `files_too_large`
+only when they are non-zero, so a clean map says nothing about them.
+`files_too_large` counts the files over the 1 MB parse limit, which were left
+out of the graph. Up to 20 of them follow as `too_large` rows, sorted by path,
+before the regions. A count above the number of rows means the rest were not
+listed. `--format json` carries the same two things as `files_too_large`
+and `files_too_large_paths`, and has them on every map: zero and an empty list
+when no file was too large. `ix map --silent` adds `too_large=N` to its one
+line.
+
 `ix stats`:
 
 ```
