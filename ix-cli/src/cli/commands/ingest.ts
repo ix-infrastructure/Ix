@@ -28,7 +28,10 @@ import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
 import { loadIngestionModules } from './ingestion-loader.js';
 import { declaredPackageDirs } from '../package-dirs.js';
 import { ensureWorkspaceIdState, workspaceStateFor } from '../bootstrap.js';
-import { loadIngestSymbols, saveIngestSymbols, type StoredSummary, type SymbolEntry } from '../ingest-symbols.js';
+import {
+  changedNames, findDependents, importsChanged, loadIngestSymbols, resolutionHash, saveIngestSymbols,
+  type StoredSummary, type SymbolEntry,
+} from '../ingest-symbols.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
 import { admitStitchWaiting, connectionNeverEstablished, type StitchRefusal } from '../stitch-guard.js';
@@ -2491,8 +2494,32 @@ export async function ingestFiles(
     /** Record what a parse in this run learned about a file, for the next run. */
     const noteSummary = (relFilePath: string, hash: string, parsed: any, mtime: number | undefined): void => {
       if (!summarize || !parsed) return;
-      symbolTable().set(relFilePath, { hash, summary: summarize(parsed), ...(mtime !== undefined ? { mtime } : {}) });
+      const table = symbolTable();
+      const before = table.get(relFilePath);
+      if (!summaryBeforeRun.has(relFilePath)) summaryBeforeRun.set(relFilePath, before?.summary);
+      // The resolution hash describes the patch built from these bytes; it is
+      // kept until that patch is built again (noteResolution).
+      const res = before?.hash === hash ? before.res : undefined;
+      table.set(relFilePath, {
+        hash, summary: summarize(parsed), ...(mtime !== undefined ? { mtime } : {}), ...(res !== undefined ? { res } : {}),
+      });
       symbolTableChanged = true;
+    };
+    /**
+     * What each file this run parsed defined before the run, by relative path
+     * (undefined: a file the table did not have). Compared with its new
+     * summary to find the names that changed (IN-11).
+     */
+    const summaryBeforeRun = new Map<string, StoredSummary | undefined>();
+    /** Record what a file's patch resolved to, so a later run can tell whether re-resolving it changes anything. */
+    const noteResolution = (relFilePath: string, patch: GraphPatchPayload): void => {
+      const entry = symbolTable().get(relFilePath);
+      if (!entry) return;
+      const res = resolutionHash(patch.ops);
+      if (entry.res !== res) {
+        entry.res = res;
+        symbolTableChanged = true;
+      }
     };
     /** The file's mtime now: from this run's stat loop, or a stat for a file outside it. */
     const mtimeNow = (absFilePath: string): number | undefined => {
@@ -3417,6 +3444,7 @@ export async function ingestFiles(
             );
           }
           if (mapMode) patch = stripMapModeOps(patch);
+          noteResolution(p.filePath, patch);
           // source.uri (workspace-relative) and source.workspaceId are set
           // inside buildPatch; the backend stores both as opaque attributes.
           return makePreparedPatch(patch, j + 1, p.filePath, previousHash !== undefined || isForced(p.filePath));
@@ -3554,7 +3582,8 @@ export async function ingestFiles(
     // language's symbols, so a new Python or Java file binds its cross-file
     // calls as a whole-repository pass would.
     const hasBaseline = previousBaseline !== null && mtimeCache.size > 0;
-    if ((hasBaseline || knownHashes.size > 0 || mtimeChangedPaths.length === 0) && !opts.force) {
+    const incrementalRun = (hasBaseline || knownHashes.size > 0 || mtimeChangedPaths.length === 0) && !opts.force;
+    if (incrementalRun) {
       // Path A: has baseline or all mtime-clean → pre-scan to detect changes before loading modules.
       // If nothing changed, module load is skipped entirely. A file with no
       // backend hash is new: it is parsed and sent with no reconcile.
@@ -3902,6 +3931,110 @@ export async function ingestFiles(
               parseTimeouts: previousBaseline.parseTimeouts,
             },
           );
+        }
+      }
+    }
+
+    // ── Dependents (IN-11) ──────────────────────────────────────────────
+    // An unchanged file whose calls resolve to a name that was renamed,
+    // removed or added elsewhere keeps its old edges until it is re-sent:
+    // callers of a renamed function point at the old node, and when the name
+    // comes back -- renamed back, the file restored -- nothing re-binds them.
+    // The table says which names changed and which files refer to them; those
+    // files are re-parsed and re-resolved, and sent only when their resolution
+    // actually differs, under a patch id salted with it (an unsalted re-send of
+    // unchanged bytes is a replay the backend answers `Idempotent`).
+    //
+    // Path A only: Path B parses and resolves every file anyway.
+    const deletedRel = deletedPaths.map(toWorkspaceRelative);
+    // Left pending by an earlier run whose re-send did not land.
+    const pendingRel = incrementalRun ? [...symbolTable()].filter(([, e]) => e.pending).map(([rel]) => rel) : [];
+    if (incrementalRun && (summaryBeforeRun.size > 0 || deletedRel.length > 0 || pendingRel.length > 0)) {
+      const table = symbolTable();
+      const names = new Set<string>();
+      // Paths whose importers may resolve differently: files that appeared,
+      // and files that changed what they import (a re-export moved).
+      const pathsChanged: string[] = [];
+      for (const [rel, before] of summaryBeforeRun) {
+        const after = table.get(rel)?.summary;
+        for (const n of changedNames(before, after)) names.add(n);
+        if (before === undefined || importsChanged(before, after)) pathsChanged.push(rel);
+      }
+      for (const rel of deletedRel) {
+        for (const n of changedNames(table.get(rel)?.summary, undefined)) names.add(n);
+      }
+      const absByRel = new Map(resolutionPaths.map(abs => [toWorkspaceRelative(abs), abs] as const));
+      const exclude = new Set<string>([...summaryBeforeRun.keys(), ...deletedRel]);
+      for (const rel of table.keys()) if (!absByRel.has(rel)) exclude.add(rel);
+      const found = findDependents(table, names, [...pathsChanged, ...deletedRel], exclude);
+      const dependents = [...new Set([...found, ...pendingRel.filter(rel => !exclude.has(rel))])].sort()
+        // A scoped run reads nothing outside its scope.
+        .filter(rel => inScope(absByRel.get(rel)!));
+      // Until each lands or proves unneeded: a re-send that fails, or a file
+      // that cannot be read now, is picked up again by the next run.
+      for (const rel of dependents) {
+        const entry = table.get(rel);
+        if (entry && !entry.pending) {
+          entry.pending = true;
+          symbolTableChanged = true;
+        }
+      }
+      if (debug && dependents.length > 0) {
+        process.stderr.write(`\n  [dependents] ${names.size} name(s) changed; re-resolving ${dependents.length} file(s)\n`);
+      }
+      if (dependents.length > 0) {
+        const [ingestion, patchBuilder] = await loadIngestionModules();
+        resolveEdgesFn ??= ingestion.resolveEdges;
+        buildPatchFn ??= patchBuilder.buildPatchWithResolution;
+        // Over the files as they are now: the changed files' new summaries in,
+        // the deleted files out.
+        globalIndex = await buildResolutionIndex(ingestion, new Set(), false, true);
+        const reread = await Promise.all(dependents.map(async rel => {
+          const bytes = await fs.promises.readFile(absByRel.get(rel)!).catch(() => null);
+          if (!bytes || bytes.length === 0 || bytes.length > MAX_FILE_BYTES) return null;
+          const parsed = await ensureParsePool(dependents.length).parse(rel, bytes.toString('utf-8'), false).catch(() => null);
+          return parsed ? { filePath: rel, parsed, hash: sha256(bytes), previousHash: undefined } as ParsedFile : null;
+        }));
+        const batch = reread.filter((f): f is ParsedFile => f !== null);
+        const edges = resolveEdgesFn!(batch.map(f => f.parsed), resolveStats, globalIndex, resolveOpts) as any[];
+        const edgesByFile = new Map<string, any[]>();
+        for (const edge of edges) {
+          let arr = edgesByFile.get(edge.srcFilePath);
+          if (!arr) { arr = []; edgesByFile.set(edge.srcFilePath, arr); }
+          arr.push(edge);
+        }
+        const resent: PreparedPatch[] = [];
+        const pendingRes = new Map<string, string>();
+        for (const { filePath: rel, parsed: p, hash } of batch) {
+          const entry = table.get(rel);
+          const build = (salt?: string): GraphPatchPayload => {
+            const patch = buildPatchFn!(p, hash, fileWorkspaceId(rel), edgesByFile.get(rel) ?? emptyEdges, undefined, fileMultiRepo(rel), salt);
+            return mapMode ? stripMapModeOps(patch) : patch;
+          };
+          const res = resolutionHash(build().ops);
+          // Equal: re-resolving changes nothing this file says. A different
+          // hash, or none recorded, and it is re-sent.
+          if (entry?.res === res && entry.hash === hash) {
+            delete entry.pending;
+            continue;
+          }
+          resent.push(makePreparedPatch(build(res.slice(0, 12)), resent.length + 1, rel, false));
+          pendingRes.set(rel, res);
+        }
+        if (debug) process.stderr.write(`\n  [dependents] ${resent.length} of ${batch.length} resolve differently; re-sending them\n`);
+        if (resent.length > 0) {
+          filesChanged += resent.length;
+          await commitPreparedPatches(resent, resent.length, {
+            onCommitted: item => {
+              const entry = table.get(item.filePath);
+              const res = pendingRes.get(item.filePath);
+              if (entry && res !== undefined) {
+                entry.res = res;
+                delete entry.pending;
+                symbolTableChanged = true;
+              }
+            },
+          });
         }
       }
     }
