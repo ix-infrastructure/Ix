@@ -19,8 +19,11 @@ services:
     image: arangodb:3.12.11
     networks:
       - backend
-    ports:
-      - "127.0.0.1:8529:8529"
+    # No host port. ArangoDB runs without authentication, so a published port
+    # let any local process read or wipe the graph without going through the
+    # memory layer. Only memory-layer reaches it, over the compose network.
+    # For the web UI, publish it yourself in docker-compose.override.yml next
+    # to this file (`ix docker` applies that file); see docs/prerequisites.md.
     environment:
       ARANGO_NO_AUTH: "1"
     # `--vector-index` is the current name; it was `--experimental-vector-index`
@@ -51,6 +54,9 @@ services:
       ARANGO_USER: root
       ARANGO_PASSWORD: ""
       PORT: "8090"
+      # Empty: the backend requires no token. `ix docker start --local-token`
+      # writes one into .env next to this file and the CLI sends it.
+      IX_LOCAL_TOKEN: ${IX_LOCAL_TOKEN:-}
     depends_on:
       arangodb:
         condition: service_healthy

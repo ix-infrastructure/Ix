@@ -84,6 +84,31 @@ async function ghFetch<T>(url: string, token: string): Promise<T> {
   return resp.json() as Promise<T>;
 }
 
+/** GitHub serves at most this many items a page, whatever `per_page` asks for. */
+const GITHUB_PAGE_MAX = 100;
+
+/**
+ * Up to `want` items of a list endpoint, page by page. `per_page` alone
+ * silently capped every list at 100: `--limit 300` fetched 100 issues.
+ * `url` carries its own query string, without `per_page` or `page`.
+ */
+export async function ghFetchList<T>(
+  url: string,
+  token: string,
+  want: number,
+  fetchPage: (url: string, token: string) => Promise<T[]> = ghFetch,
+): Promise<T[]> {
+  const perPage = Math.max(1, Math.min(want, GITHUB_PAGE_MAX));
+  const out: T[] = [];
+  for (let page = 1; out.length < want; page++) {
+    const sep = url.includes("?") ? "&" : "?";
+    const items = await fetchPage(`${url}${sep}per_page=${perPage}&page=${page}`, token);
+    out.push(...items.slice(0, want - out.length));
+    if (items.length < perPage) break;
+  }
+  return out;
+}
+
 export async function fetchGitHubData(
   repo: GitHubRepo,
   token: string,
@@ -94,21 +119,23 @@ export async function fetchGitHubData(
   const limit = opts.limit ?? 50;
   const sinceParam = opts.since ? `&since=${encodeURIComponent(opts.since)}` : "";
 
-  const issues = await ghFetch<GitHubIssue[]>(
-    `${base}/issues?state=all&per_page=${limit}&sort=updated&direction=desc${sinceParam}`,
-    token
+  const issues = await ghFetchList<GitHubIssue>(
+    `${base}/issues?state=all&sort=updated&direction=desc${sinceParam}`,
+    token,
+    limit,
   );
   const realIssues = issues.filter((i: any) => !i.pull_request);
 
-  const pullRequests = await ghFetch<GitHubPR[]>(
-    `${base}/pulls?state=all&per_page=${limit}&sort=updated&direction=desc`,
-    token
+  const pullRequests = await ghFetchList<GitHubPR>(
+    `${base}/pulls?state=all&sort=updated&direction=desc`,
+    token,
+    limit,
   );
 
-  const commitLimit = Math.min(limit * 2, 100);
-  const commits = await ghFetch<GitHubCommit[]>(
-    `${base}/commits?per_page=${commitLimit}${sinceParam}`,
-    token
+  const commits = await ghFetchList<GitHubCommit>(
+    `${base}/commits?${sinceParam.slice(1)}`.replace(/\?$/, ""),
+    token,
+    limit * 2,
   );
 
   const issueComments = new Map<number, GitHubComment[]>();

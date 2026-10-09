@@ -325,6 +325,45 @@ export function backendUnreachableError(endpoint?: string): StructuredError {
   };
 }
 
+/**
+ * config.yaml does not parse. Every command reads it, so every command stops
+ * here, naming the file rather than quietly running on defaults.
+ */
+export function configParseError(path: string, detail: string): StructuredError {
+  return {
+    error: "config_parse_error",
+    message: `${path} is not valid YAML, so Ix will not run on a guess: ${detail}`,
+    next: `Fix the file, or move it aside to start from defaults (your workspace registrations are in it): mv ${path} ${path}.broken`,
+  };
+}
+
+/**
+ * config.yaml could not be locked for a write. Nothing was written: Ix never
+ * writes the file unlocked, because that is how parallel registrations lost
+ * each other's workspaces.
+ */
+export function configLockError(detail: string): StructuredError {
+  return {
+    error: "config_lock_timeout",
+    message: `Ix could not lock its config to write it: ${detail}`,
+    next: "Wait for the other ix command to finish and run this one again.",
+  };
+}
+
+/**
+ * The backend answered 401 `local_token_required`: it was started with
+ * IX_LOCAL_TOKEN and this CLI sent no token, or a different one.
+ */
+export function localTokenRequiredError(endpoint?: string): StructuredError {
+  return {
+    error: "local_token_required",
+    message: `The Ix backend${endpoint ? ` at ${endpoint}` : ""} requires a token this CLI did not send or that it refused.`,
+    next: isLocalEndpoint(endpoint)
+      ? "Run `ix docker start --local-token` to give the backend this CLI's stored token, or set IX_TOKEN to the backend's token."
+      : "Set IX_TOKEN to the token that backend was started with.",
+  };
+}
+
 export function renderCliError(err: unknown, debug = false, endpoint?: string): void {
   if (err instanceof CliUsageError || err instanceof CliResolutionError) {
     const code = err instanceof CliUsageError ? "usage_error" : "resolution_failed";
@@ -355,6 +394,29 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string): 
     const unreachable = backendUnreachableError(endpoint);
     if (!emitLlmError(unreachable.error, unreachable.message, unreachable.next)) {
       renderStructuredError(unreachable);
+    }
+    if (debug) writeDebugDetail(err);
+    process.exit(1);
+  }
+
+  if (e?.name === "ConfigParseError") {
+    const broken = configParseError(e.path, e.detail);
+    if (!emitLlmError(broken.error, broken.message, broken.next)) renderStructuredError(broken);
+    if (debug) writeDebugDetail(err);
+    process.exit(1);
+  }
+
+  if (e?.name === "ConfigLockError") {
+    const locked = configLockError(e.detail);
+    if (!emitLlmError(locked.error, locked.message, locked.next)) renderStructuredError(locked);
+    if (debug) writeDebugDetail(err);
+    process.exit(1);
+  }
+
+  if (e?.name === "LocalTokenRequiredError") {
+    const refused = localTokenRequiredError(endpoint);
+    if (!emitLlmError(refused.error, refused.message, refused.next)) {
+      renderStructuredError(refused);
     }
     if (debug) writeDebugDetail(err);
     process.exit(1);

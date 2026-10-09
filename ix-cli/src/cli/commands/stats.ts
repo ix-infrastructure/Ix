@@ -27,7 +27,8 @@ export function registerStatsCommand(program: Command): void {
     .description("Show graph statistics — node/edge counts by type")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .action(async (opts: { format: string }) => {
-      const client = createClient();
+      // /v1/stats takes seconds on a large graph: no read deadline.
+      const client = createClient({ longRunning: true });
       const systemId = await resolveReadSystemId(client);
       let result;
       try {
