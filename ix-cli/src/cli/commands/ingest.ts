@@ -28,6 +28,10 @@ import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
 import { loadIngestionModules } from './ingestion-loader.js';
 import { declaredPackageDirs } from '../package-dirs.js';
 import { ensureWorkspaceIdState, workspaceStateFor } from '../bootstrap.js';
+import {
+  changedNames, findDependents, importsChanged, loadIngestSymbols, resolutionHash, saveIngestSymbols,
+  type StoredSummary, type SymbolEntry,
+} from '../ingest-symbols.js';
 import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
 import { admitStitchWaiting, connectionNeverEstablished, type StitchRefusal } from '../stitch-guard.js';
@@ -63,20 +67,6 @@ import { createLimiter, type Limiter } from "../tree-walk.js";
 // ---------------------------------------------------------------------------
 
 export { isSupportedSourceFile, tryGitLsFiles, walkFiles } from '../file-discovery.js';
-
-// Extensions whose source text must be pre-read so buildGlobalResolutionIndex can
-// extract cross-batch symbols before the streaming parse loop. Go uses a fast
-// regex scan; PHP, JavaScript, TypeScript, SAS and R are parsed, so their
-// cross-batch indexes are derived from the parser's definition entities and
-// cannot drift from what the in-batch path extracts.
-const INDEX_PRESCAN_EXTENSIONS = new Set([
-  '.go', '.php', '.r', '.sas',
-  '.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx',
-]);
-
-export function needsIndexPrescan(filePath: string): boolean {
-  return INDEX_PRESCAN_EXTENSIONS.has(nodePath.extname(filePath).toLowerCase());
-}
 
 // ---------------------------------------------------------------------------
 // Language filter helpers
@@ -1325,6 +1315,12 @@ export interface IngestFilesSummary {
    */
   graphUnchanged: boolean;
   /**
+   * Files tree-sitter parsed with ERROR or MISSING nodes. They are in the
+   * graph, but whatever sat in the broken region may not be. Not counted in
+   * `parseErrors`, which is files that produced nothing.
+   */
+  filesWithParseErrors: number;
+  /**
    * Files skipped because their parse ran past the per-file budget
    * (IX_PARSE_BUDGET_MS, default 10 s), workspace-relative. A subset of the
    * unparsed skips, named because a file that times out does so on every run.
@@ -1992,45 +1988,6 @@ export async function ingestFiles(
 
 
 
-  /**
-   * Parse the prescan sources on the worker pool.
-   *
-   * buildGlobalResolutionIndex derives PHP/JS/TS/R/SAS indexes from real parse
-   * results rather than a regex, so they cannot drift from what the in-batch
-   * path extracts — the right call, but it means the index costs one parse per
-   * prescanned file. Done inside the index that is a synchronous main-thread
-   * loop, and .ts is not a rare extension: on a TypeScript repo it is most of
-   * the files, and an incremental map pays it for every unchanged file too.
-   *
-   * The pool is already running for the streaming loop below, so parse there
-   * instead and hand the results over. Only extensions whose index is
-   * parser-derived are worth the round trip; Go is a regex scan inside the
-   * index and needs nothing here.
-   */
-  const PARSER_DERIVED_PRESCAN = new Set(['.php', '.r', '.sas', '.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx']);
-  const preParsePrescanSources = async (relSources: Map<string, string>): Promise<Map<string, any>> => {
-    const targets = [...relSources.keys()].filter(
-      fp => PARSER_DERIVED_PRESCAN.has(nodePath.extname(fp).toLowerCase()),
-    );
-    const preParsed = new Map<string, any>();
-    if (targets.length === 0) return preParsed;
-    const PRESCAN_PARSE_CHUNK = 500;
-    for (let i = 0; i < targets.length; i += PRESCAN_PARSE_CHUNK) {
-      const chunk = targets.slice(i, i + PRESCAN_PARSE_CHUNK);
-      const parsed = await Promise.all(
-        // `false`: this prescan is best-effort by construction -- the caller
-        // drops nulls, and every file here is read and parsed again by the
-        // streaming loop below. A loss here is not a file the RUN lost, and
-        // counting it as one refused the stitch and withheld the baseline over
-        // files that were all present.
-        chunk.map(fp => ensureParsePool(targets.length).parse(fp, relSources.get(fp)!, false).catch(() => null)),
-      );
-      for (let j = 0; j < chunk.length; j++) {
-        if (parsed[j]) preParsed.set(chunk[j], parsed[j]);
-      }
-    }
-    return preParsed;
-  };
 
   let progressPhase   = 'Scanning';
   let progressCurrent = 0;
@@ -2081,6 +2038,8 @@ export async function ingestFiles(
   const committedRel = new Set<string>();
   const settledAbs = new Set<string>();
   const unparsedRel = new Set<string>();
+  /** Files that parsed with ERROR or MISSING nodes: indexed, but possibly incompletely. */
+  let filesWithParseErrors = 0;
   // What `graphUnchanged` is computed from, beside the counters above. Each is
   // a way this run can have written to the graph, or have found it not where
   // the last run left it, without a patch being counted.
@@ -2516,6 +2475,141 @@ export async function ingestFiles(
     type ParsedFile = { filePath: string; parsed: any; hash: string; previousHash: string | undefined };
     let resolveEdgesFn: Function | null = null;
     let buildPatchFn: Function | null = null;
+
+    // ── Symbol table ─────────────────────────────────────────────────────
+    // What every file defines, exports and imports, kept between runs (see
+    // `ingest-symbols.ts`). The resolution index is built from it, so an edit
+    // parses only the files that changed, in any language, and still resolves
+    // against all the others.
+    // Loaded on first use: a run with nothing to parse never reads it, and on a
+    // large repository it is tens of megabytes of JSON.
+    let loadedSymbolTable: Map<string, SymbolEntry> | undefined;
+    const symbolTable = (): Map<string, SymbolEntry> =>
+      (loadedSymbolTable ??= loadIngestSymbols(projectRoot, currentExtractor));
+    let symbolTableChanged = false;
+    /** sha256 of each file this run has read, by absolute path. */
+    const currentHashes = new Map<string, string>();
+    const mtimeChangedSet = new Set(mtimeChangedPaths);
+    let summarize: ((parsed: any) => StoredSummary) | null = null;
+    /** Record what a parse in this run learned about a file, for the next run. */
+    const noteSummary = (relFilePath: string, hash: string, parsed: any, mtime: number | undefined): void => {
+      if (!summarize || !parsed) return;
+      const table = symbolTable();
+      const before = table.get(relFilePath);
+      if (!summaryBeforeRun.has(relFilePath)) summaryBeforeRun.set(relFilePath, before?.summary);
+      // The resolution hash describes the patch built from these bytes; it is
+      // kept until that patch is built again (noteResolution).
+      const res = before?.hash === hash ? before.res : undefined;
+      table.set(relFilePath, {
+        hash, summary: summarize(parsed), ...(mtime !== undefined ? { mtime } : {}), ...(res !== undefined ? { res } : {}),
+      });
+      symbolTableChanged = true;
+    };
+    /**
+     * What each file this run parsed defined before the run, by relative path
+     * (undefined: a file the table did not have). Compared with its new
+     * summary to find the names that changed (IN-11).
+     */
+    const summaryBeforeRun = new Map<string, StoredSummary | undefined>();
+    /** Record what a file's patch resolved to, so a later run can tell whether re-resolving it changes anything. */
+    const noteResolution = (relFilePath: string, patch: GraphPatchPayload): void => {
+      const entry = symbolTable().get(relFilePath);
+      if (!entry) return;
+      const res = resolutionHash(patch.ops);
+      if (entry.res !== res) {
+        entry.res = res;
+        symbolTableChanged = true;
+      }
+    };
+    /** The file's mtime now: from this run's stat loop, or a stat for a file outside it. */
+    const mtimeNow = (absFilePath: string): number | undefined => {
+      const known = currentMtimes.get(absFilePath);
+      if (known !== undefined) return known;
+      try { return fs.statSync(absFilePath).mtimeMs; } catch { return undefined; }
+    };
+    /**
+     * An entry still describes its file: the same bytes, or (with a baseline)
+     * a file that is mtime-clean AND still has the mtime the entry was read at.
+     * The baseline alone is not enough: the table is saved after it and can be
+     * older (a failed save, a run killed in between), and a scoped run does not
+     * stat the files outside its scope, so they never look changed.
+     */
+    const tableEntryValid = (absFilePath: string, entry: SymbolEntry | undefined, trustMtime: boolean): boolean => {
+      if (!entry) return false;
+      const hash = currentHashes.get(absFilePath);
+      if (hash !== undefined) {
+        if (entry.hash !== hash) return false;
+        // Same bytes under a new mtime (a touch, a checkout): record the new
+        // one, or the entry fails the mtime check on every run from now on.
+        const mtime = currentMtimes.get(absFilePath);
+        if (mtime !== undefined && entry.mtime !== mtime) {
+          entry.mtime = mtime;
+          symbolTableChanged = true;
+        }
+        return true;
+      }
+      if (!trustMtime || mtimeChangedSet.has(absFilePath) || entry.mtime === undefined) return false;
+      return mtimeNow(absFilePath) === entry.mtime;
+    };
+
+    /**
+     * The resolution index over every file edges may resolve to, from the
+     * table where it is still valid. A file it lacks is read and parsed here
+     * for its summary only -- unless the streaming loop is about to parse it
+     * in a single chunk, where the batch's own summary takes precedence in
+     * `resolveEdges` anyway. Across several chunks an earlier chunk would see
+     * a later one's stale entry, so then every file without a valid entry is
+     * summarized first (for a first map, that is one extra parse of the repo).
+     *
+     * `trustMtime` is false on Path B, where there is no baseline to trust.
+     */
+    const buildResolutionIndex = async (
+      ingestion: { summarizeParseResult: (parsed: any) => StoredSummary; buildGlobalResolutionIndex: Function },
+      parsedInStream: Set<string>,
+      singleChunk: boolean,
+      trustMtime: boolean,
+    ): Promise<any> => {
+      summarize = ingestion.summarizeParseResult;
+      const summaries = new Map<string, StoredSummary>();
+      const missing: string[] = [];
+      for (const abs of resolutionPaths) {
+        const rel = toWorkspaceRelative(abs);
+        const entry = symbolTable().get(rel);
+        if (tableEntryValid(abs, entry, trustMtime)) {
+          summaries.set(rel, entry!.summary);
+          continue;
+        }
+        if (singleChunk && parsedInStream.has(abs)) continue;
+        // A scoped run reads nothing outside its scope.
+        if (scopedRun && !inScope(abs)) continue;
+        missing.push(abs);
+      }
+      const SUMMARY_CHUNK = 500;
+      for (let i = 0; i < missing.length; i += SUMMARY_CHUNK) {
+        const chunk = missing.slice(i, i + SUMMARY_CHUNK);
+        // Stat'd before the read, so a file that changes in between is
+        // recorded with its older mtime and re-read next time.
+        const mtimes = chunk.map(mtimeNow);
+        const bytes = await Promise.all(chunk.map(fp => fs.promises.readFile(fp).catch(() => null)));
+        const parsed = await Promise.all(chunk.map((fp, j) => {
+          const b = bytes[j];
+          if (!b || b.length === 0 || b.length > MAX_FILE_BYTES) return null;
+          // `false`: a loss here is not a file the run lost -- see `ParsePool.parse`.
+          return ensureParsePool(missing.length).parse(toWorkspaceRelative(fp), b.toString('utf-8'), false).catch(() => null);
+        }));
+        for (let j = 0; j < chunk.length; j++) {
+          const b = bytes[j];
+          if (!b) continue;
+          const hash = sha256(b);
+          currentHashes.set(chunk[j], hash);
+          const rel = toWorkspaceRelative(chunk[j]);
+          noteSummary(rel, hash, parsed[j], mtimes[j]);
+          const entry = symbolTable().get(rel);
+          if (entry && entry.hash === hash) summaries.set(rel, entry.summary);
+        }
+      }
+      return ingestion.buildGlobalResolutionIndex(resolutionPaths.map(toWorkspaceRelative), undefined, undefined, summaries);
+    };
     let globalIndex: any = undefined;
 
     // Larger chunks for big repos: fewer resolve+commit cycles, better edge resolution per batch.
@@ -3350,6 +3444,7 @@ export async function ingestFiles(
             );
           }
           if (mapMode) patch = stripMapModeOps(patch);
+          noteResolution(p.filePath, patch);
           // source.uri (workspace-relative) and source.workspaceId are set
           // inside buildPatch; the backend stores both as opaque attributes.
           return makePreparedPatch(patch, j + 1, p.filePath, previousHash !== undefined || isForced(p.filePath));
@@ -3482,17 +3577,13 @@ export async function ingestFiles(
     // `mtimeCache` is empty after --force, a workspace migration or the DB-reset
     // guard above, so those still take Path B.
     //
-    // Only for files whose cross-file references Path A can resolve, though.
-    // Path A resolves the changed files as one batch against `globalIndex`, and
-    // that index holds the symbols of the prescan languages only (Go, PHP, R,
-    // SAS, JS/TS). A new Python or Java file resolved that way binds its calls
-    // to itself alone, so they point at a module node or at nothing; the
-    // whole-repository pass resolves them. Those files keep that pass until the
-    // persisted symbol table (IN-10) covers every language.
-    const unknownToBackend = mtimeChangedPaths.filter(fp => !knownHashes.has(fp));
-    const hasBaseline = previousBaseline !== null && mtimeCache.size > 0
-      && unknownToBackend.every(needsIndexPrescan);
-    if ((hasBaseline || knownHashes.size > 0 || mtimeChangedPaths.length === 0) && !opts.force) {
+    // A new file in any language takes it: Path A resolves the changed files
+    // against `globalIndex`, which the persisted symbol table gives every
+    // language's symbols, so a new Python or Java file binds its cross-file
+    // calls as a whole-repository pass would.
+    const hasBaseline = previousBaseline !== null && mtimeCache.size > 0;
+    const incrementalRun = (hasBaseline || knownHashes.size > 0 || mtimeChangedPaths.length === 0) && !opts.force;
+    if (incrementalRun) {
       // Path A: has baseline or all mtime-clean → pre-scan to detect changes before loading modules.
       // If nothing changed, module load is skipped entirely. A file with no
       // backend hash is new: it is parsed and sent with no reconcile.
@@ -3501,6 +3592,7 @@ export async function ingestFiles(
         try {
           const bytes = fs.readFileSync(filePath);
           const hash = sha256(bytes);
+          currentHashes.set(filePath, hash);
           if (!forceReingestPaths.has(filePath) && knownHashes.get(filePath) === hash) {
             filesSkipped++;
             filesSkippedAsUnchanged++;
@@ -3550,36 +3642,17 @@ export async function ingestFiles(
         progressTotal   = parseable.length;
         progressCurrent = 0;
 
-        // Build global resolution index from all repo file paths (not just changed files)
-        // so cross-batch imports resolve correctly even in streaming per-chunk mode.
-        // Reuse bytes already read into changedPaths (on first install = all files, zero extra reads).
-        // Only async-read Go/R files that were mtime-clean and therefore not in changedPaths.
+        // The resolution index over every file, from the symbol table: only
+        // the changed files are parsed (below), plus any file the table lacks.
         {
-          const sources = new Map<string, string>();
-          const changedSet = new Set(changedPaths.map(c => c.filePath));
-          for (const { filePath, bytes } of changedPaths) {
-            if (needsIndexPrescan(filePath)) sources.set(filePath, bytes.toString('utf-8'));
-          }
-          const remainingIndexFiles = filePaths.filter(fp => needsIndexPrescan(fp) && !changedSet.has(fp));
-          const INDEX_READ_CONCURRENCY = 2000;
-          for (let i = 0; i < remainingIndexFiles.length; i += INDEX_READ_CONCURRENCY) {
-            const batch = remainingIndexFiles.slice(i, i + INDEX_READ_CONCURRENCY);
-            const texts = await Promise.all(batch.map(fp => fs.promises.readFile(fp, 'utf-8').catch(() => null)));
-            for (let j = 0; j < batch.length; j++) {
-              if (texts[j] != null) sources.set(batch[j], texts[j]!);
-            }
-          }
-          // Global resolution index is keyed on workspace-relative paths so
-          // that edge resolution matches the relative paths we pass into
-          // parseFile.
-          const relSources = new Map<string, string>();
-          for (const [abs, text] of sources) relSources.set(toWorkspaceRelative(abs), text);
-          const relFilePaths = resolutionPaths.map(toWorkspaceRelative);
-          const preParsed = await preParsePrescanSources(relSources);
-          globalIndex = (ingestion.buildGlobalResolutionIndex as Function)(relFilePaths, relSources, preParsed);
-          sources.clear();
-          relSources.clear();
-          preParsed.clear();
+          const indexStart = performance.now();
+          globalIndex = await buildResolutionIndex(
+            ingestion,
+            new Set(parseable.map(p => p.absFilePath)),
+            parseable.length <= PARSE_STREAM_CHUNK,
+            true,
+          );
+          timings.goIndexMs = Math.round(performance.now() - indexStart);
         }
 
         let pendingFlush: Promise<void> = Promise.resolve();
@@ -3599,6 +3672,8 @@ export async function ingestFiles(
             if (!parsed) { filesSkipped++; filesSkippedUnparsed++; unparsedRel.add(chunk[j].filePath); continue; }
             entitiesParsed += parsed.entities.length;
             batch.push({ filePath: chunk[j].filePath, parsed, hash: chunk[j].hash, previousHash: chunk[j].previousHash });
+            noteSummary(chunk[j].filePath, chunk[j].hash, parsed, currentMtimes.get(chunk[j].absFilePath));
+            if (parsed.hasParseErrors) filesWithParseErrors++;
           }
           await pendingFlush;
           pendingFlush = flushBatch(batch);
@@ -3616,7 +3691,7 @@ export async function ingestFiles(
       // loop recorded did not actually happen, and leaving them counted would
       // refuse the stitch on a run that parsed every file. (Adding one file to
       // a mapped repo used to land here whatever its language; the baseline
-      // check above keeps prescan-language additions on Path A now.)
+      // check above keeps additions in every language on Path A now.)
       filesSkipped -= filesSkippedAsUnchanged;
       filesSkippedAsUnchanged = 0;
       const moduleStart = performance.now();
@@ -3631,23 +3706,14 @@ export async function ingestFiles(
       // Index keys are workspace-relative to match the relative paths we pass
       // into parseFile below.
       {
-        const goIndexStart = performance.now();
-        const sources = new Map<string, string>();
-        const indexFiles = filePaths.filter(fp => needsIndexPrescan(fp));
-        const INDEX_READ_CONCURRENCY = 2000;
-        for (let i = 0; i < indexFiles.length; i += INDEX_READ_CONCURRENCY) {
-          const batch = indexFiles.slice(i, i + INDEX_READ_CONCURRENCY);
-          const texts = await Promise.all(batch.map(fp => fs.promises.readFile(fp, 'utf-8').catch(() => null)));
-          for (let j = 0; j < batch.length; j++) {
-            if (texts[j] != null) sources.set(toWorkspaceRelative(batch[j]), texts[j]!);
-          }
-        }
-        const relFilePaths = resolutionPaths.map(toWorkspaceRelative);
-        const preParsed = await preParsePrescanSources(sources);
-        globalIndex = ingestion.buildGlobalResolutionIndex(relFilePaths, sources, preParsed);
-        sources.clear();
-        preParsed.clear();
-        timings.goIndexMs = Math.round(performance.now() - goIndexStart);
+        const indexStart = performance.now();
+        globalIndex = await buildResolutionIndex(
+          ingestion,
+          new Set(filePaths),
+          filePaths.length <= PARSE_STREAM_CHUNK,
+          false,
+        );
+        timings.goIndexMs = Math.round(performance.now() - indexStart);
       }
 
       progressPhase   = 'Parsing';
@@ -3733,6 +3799,7 @@ export async function ingestFiles(
               await fh.close();
             }
             const hash = sha256(bytes);
+            currentHashes.set(absFilePath, hash);
             if (!opts.force && !forceReingestPaths.has(absFilePath) && knownHashes.get(absFilePath) === hash) {
               filesSkipped++;
               filesSkippedAsUnchanged++;
@@ -3768,6 +3835,8 @@ export async function ingestFiles(
           if (!parsed) { filesSkipped++; filesSkippedUnparsed++; unparsedRel.add(f.filePath); continue; }
           entitiesParsed += parsed.entities.length;
           batch.push({ filePath: f.filePath, parsed, hash: f.hash, previousHash: f.previousHash });
+          noteSummary(f.filePath, f.hash, parsed, currentMtimes.get(chunk[j]));
+          if (parsed.hasParseErrors) filesWithParseErrors++;
         }
         await pendingFlushB;
         pendingFlushB = flushBatch(batch);
@@ -3866,6 +3935,110 @@ export async function ingestFiles(
       }
     }
 
+    // ── Dependents (IN-11) ──────────────────────────────────────────────
+    // An unchanged file whose calls resolve to a name that was renamed,
+    // removed or added elsewhere keeps its old edges until it is re-sent:
+    // callers of a renamed function point at the old node, and when the name
+    // comes back -- renamed back, the file restored -- nothing re-binds them.
+    // The table says which names changed and which files refer to them; those
+    // files are re-parsed and re-resolved, and sent only when their resolution
+    // actually differs, under a patch id salted with it (an unsalted re-send of
+    // unchanged bytes is a replay the backend answers `Idempotent`).
+    //
+    // Path A only: Path B parses and resolves every file anyway.
+    const deletedRel = deletedPaths.map(toWorkspaceRelative);
+    // Left pending by an earlier run whose re-send did not land.
+    const pendingRel = incrementalRun ? [...symbolTable()].filter(([, e]) => e.pending).map(([rel]) => rel) : [];
+    if (incrementalRun && (summaryBeforeRun.size > 0 || deletedRel.length > 0 || pendingRel.length > 0)) {
+      const table = symbolTable();
+      const names = new Set<string>();
+      // Paths whose importers may resolve differently: files that appeared,
+      // and files that changed what they import (a re-export moved).
+      const pathsChanged: string[] = [];
+      for (const [rel, before] of summaryBeforeRun) {
+        const after = table.get(rel)?.summary;
+        for (const n of changedNames(before, after)) names.add(n);
+        if (before === undefined || importsChanged(before, after)) pathsChanged.push(rel);
+      }
+      for (const rel of deletedRel) {
+        for (const n of changedNames(table.get(rel)?.summary, undefined)) names.add(n);
+      }
+      const absByRel = new Map(resolutionPaths.map(abs => [toWorkspaceRelative(abs), abs] as const));
+      const exclude = new Set<string>([...summaryBeforeRun.keys(), ...deletedRel]);
+      for (const rel of table.keys()) if (!absByRel.has(rel)) exclude.add(rel);
+      const found = findDependents(table, names, [...pathsChanged, ...deletedRel], exclude);
+      const dependents = [...new Set([...found, ...pendingRel.filter(rel => !exclude.has(rel))])].sort()
+        // A scoped run reads nothing outside its scope.
+        .filter(rel => inScope(absByRel.get(rel)!));
+      // Until each lands or proves unneeded: a re-send that fails, or a file
+      // that cannot be read now, is picked up again by the next run.
+      for (const rel of dependents) {
+        const entry = table.get(rel);
+        if (entry && !entry.pending) {
+          entry.pending = true;
+          symbolTableChanged = true;
+        }
+      }
+      if (debug && dependents.length > 0) {
+        process.stderr.write(`\n  [dependents] ${names.size} name(s) changed; re-resolving ${dependents.length} file(s)\n`);
+      }
+      if (dependents.length > 0) {
+        const [ingestion, patchBuilder] = await loadIngestionModules();
+        resolveEdgesFn ??= ingestion.resolveEdges;
+        buildPatchFn ??= patchBuilder.buildPatchWithResolution;
+        // Over the files as they are now: the changed files' new summaries in,
+        // the deleted files out.
+        globalIndex = await buildResolutionIndex(ingestion, new Set(), false, true);
+        const reread = await Promise.all(dependents.map(async rel => {
+          const bytes = await fs.promises.readFile(absByRel.get(rel)!).catch(() => null);
+          if (!bytes || bytes.length === 0 || bytes.length > MAX_FILE_BYTES) return null;
+          const parsed = await ensureParsePool(dependents.length).parse(rel, bytes.toString('utf-8'), false).catch(() => null);
+          return parsed ? { filePath: rel, parsed, hash: sha256(bytes), previousHash: undefined } as ParsedFile : null;
+        }));
+        const batch = reread.filter((f): f is ParsedFile => f !== null);
+        const edges = resolveEdgesFn!(batch.map(f => f.parsed), resolveStats, globalIndex, resolveOpts) as any[];
+        const edgesByFile = new Map<string, any[]>();
+        for (const edge of edges) {
+          let arr = edgesByFile.get(edge.srcFilePath);
+          if (!arr) { arr = []; edgesByFile.set(edge.srcFilePath, arr); }
+          arr.push(edge);
+        }
+        const resent: PreparedPatch[] = [];
+        const pendingRes = new Map<string, string>();
+        for (const { filePath: rel, parsed: p, hash } of batch) {
+          const entry = table.get(rel);
+          const build = (salt?: string): GraphPatchPayload => {
+            const patch = buildPatchFn!(p, hash, fileWorkspaceId(rel), edgesByFile.get(rel) ?? emptyEdges, undefined, fileMultiRepo(rel), salt);
+            return mapMode ? stripMapModeOps(patch) : patch;
+          };
+          const res = resolutionHash(build().ops);
+          // Equal: re-resolving changes nothing this file says. A different
+          // hash, or none recorded, and it is re-sent.
+          if (entry?.res === res && entry.hash === hash) {
+            delete entry.pending;
+            continue;
+          }
+          resent.push(makePreparedPatch(build(res.slice(0, 12)), resent.length + 1, rel, false));
+          pendingRes.set(rel, res);
+        }
+        if (debug) process.stderr.write(`\n  [dependents] ${resent.length} of ${batch.length} resolve differently; re-sending them\n`);
+        if (resent.length > 0) {
+          filesChanged += resent.length;
+          await commitPreparedPatches(resent, resent.length, {
+            onCommitted: item => {
+              const entry = table.get(item.filePath);
+              const res = pendingRes.get(item.filePath);
+              if (entry && res !== undefined) {
+                entry.res = res;
+                delete entry.pending;
+                symbolTableChanged = true;
+              }
+            },
+          });
+        }
+      }
+    }
+
     const committed = performance.now();
     if (debug && baseRevRetries > 0) {
       process.stderr.write(`\n  [base-rev race] ${baseRevRetries} commit(s) re-sent after another writer moved the rev\n`);
@@ -3957,6 +4130,16 @@ export async function ingestFiles(
       runClean ? baselineExtractor : (previousBaseline?.extractor ?? baselineExtractor),
       { replayedFiles, pendingFiles, parseTimeouts },
     );
+    // The symbol table describes files, not the graph, so it is kept whether or
+    // not every commit landed -- pruned to the files that still exist. A
+    // `--lang` run's resolution paths hold its languages only; the files it
+    // left out still exist and keep their entries, as they keep their baseline.
+    if (symbolTableChanged) {
+      const existing = new Set([...resolutionPaths, ...langExcluded].map(toWorkspaceRelative));
+      const table = symbolTable();
+      for (const rel of [...table.keys()]) if (!existing.has(rel)) table.delete(rel);
+      saveIngestSymbols(projectRoot, currentExtractor, table);
+    }
     if (rebuildProgress !== null) {
       // Finished: the baseline now records the new extractor. Otherwise keep
       // what landed, so the next run resumes from here.
@@ -4229,6 +4412,7 @@ export async function ingestFiles(
     stitchErrors,
     stitchSkipped,
     stitchSkippedRule,
+    filesWithParseErrors,
     parseTimeouts: timedOutParses(),
     graphUnchanged:
       opts.force !== true &&
@@ -4310,6 +4494,7 @@ export async function ingestFiles(
       filesSkipped,
       idempotentPatches,
       replayedChanges: summary.replayedChanges,
+      filesWithParseErrors,
       entitiesParsed,
       latestRev,
       // `unchanged` is the files we ASSUMED unchanged, not every skip. It used
@@ -4379,6 +4564,7 @@ export async function ingestFiles(
     if (replayedChanges.size > 0) console.log(`  ${chalk.yellow('not applied:')}       ${replayedChanges.size} ${chalk.dim('(see the warning above)')}`);
     if (tooLarge > 0) console.log(`  ${chalk.dim('skipped too large:')} ${tooLarge}`);
     if (minifiedLikely > 0) console.log(`  ${chalk.dim('skipped minified:')} ${minifiedLikely}`);
+    if (filesWithParseErrors > 0) console.log(`  ${chalk.yellow("parsed with errors:")} ${filesWithParseErrors} ${chalk.dim("(tree-sitter recovered; parts may be missing)")}`);
     if (summary.parseTimeouts.length > 0) console.log(`  ${chalk.yellow("skipped parse timeout:")} ${summary.parseTimeouts.length} ${chalk.dim(`(${summary.parseTimeouts.join(", ")})`)}`);
     // Not dimmed like the others: these were dropped because the repo pointed
     // at files outside itself, which is worth a look rather than a shrug.
