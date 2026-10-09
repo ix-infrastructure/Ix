@@ -153,6 +153,8 @@ import { SupportedLanguages, languageFromPath } from './languages.js';
 import { LANGUAGE_QUERIES } from './queries.js';
 import { classifyFileRole } from './role-classifier.js';
 import type { RoleClassification } from './role-classifier.js';
+import { summarySignature, type FileSummary } from './symbol-index.js';
+export type { FileSummary } from './symbol-index.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -276,6 +278,12 @@ export interface FileParseResult {
    * Absent for non-PHP files and for PHP files in the global namespace.
    */
   phpNamespaceBlocks?: number;
+  /**
+   * The tree has ERROR or MISSING nodes: tree-sitter recovered, and whatever
+   * sat in the broken region may be missing from `entities`. Absent when the
+   * file parsed cleanly.
+   */
+  hasParseErrors?: true;
   fileRole: RoleClassification;
 }
 
@@ -349,6 +357,12 @@ const TYPE_BUILTINS = new Set([
   // TypeScript / JavaScript
   'string', 'number', 'boolean', 'void', 'null', 'undefined', 'any', 'never',
   'unknown', 'object', 'bigint', 'symbol',
+  // TypeScript utility types, now that generic arguments, arrays and unions
+  // are referenced too. Only names no other language uses for its own types:
+  // this set is shared, and `Buffer` or `Error` are real types elsewhere.
+  'Record', 'Partial', 'Required', 'Readonly', 'ReadonlyArray', 'Pick', 'Omit',
+  'Exclude', 'Extract', 'NonNullable', 'ReturnType', 'Parameters', 'InstanceType',
+  'Awaited', 'PromiseLike', 'WeakMap', 'WeakSet',
   // Java / Kotlin / Scala
   'String', 'Integer', 'Long', 'Double', 'Float', 'Boolean', 'Byte', 'Short',
   'Character', 'Object', 'Void', 'Int', 'Unit', 'Any', 'AnyVal', 'AnyRef',
@@ -2538,9 +2552,10 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     // (e.g. `@Nullable Object @Nullable ... args`). The second annotation causes
     // error recovery to truncate the enclosing class_declaration, orphaning all
     // subsequent methods. Strip any @Annotation immediately before `...` in-memory
-    // so the class body parses correctly.
+    // so the class body parses correctly. Blanked with spaces, not deleted, so
+    // every later byte offset and column still matches the file on disk.
     let parseSource = language === SupportedLanguages.Java
-      ? source.replace(/@\w+\s*(?=\.\.\.)/g, '')
+      ? source.replace(/@\w+\s*(?=\.\.\.)/g, m => ' '.repeat(m.length))
       : source;
 
     // Rust: unwrap feature-gating macros (cfg_rt! { ... }, cfg_io! { ... }, etc.)
@@ -2679,6 +2694,28 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       ? collectPhpNamespaces(tree.rootNode)
       : { spans: [], blocks: 0 };
 
+    // TypeScript overloads: `function f(a: string): string;` lines above the
+    // implementation are signatures of the same function. They become one
+    // entity, spanning the implementation -- or the first signature where there
+    // is none (`declare function`, a .d.ts) -- not one entity per line, which
+    // gave the function node the span of its first signature.
+    const overloadKey = (defNode: any, name: string): string => {
+      let scope = defNode.parent;
+      while (scope && (scope.type === 'export_statement' || scope.type === 'ambient_declaration')) scope = scope.parent;
+      return `${scope?.startIndex ?? -1}:${name}`;
+    };
+    const implementedOverloads = new Set<string>();
+    if (language === SupportedLanguages.TypeScript) {
+      for (const match of pass1Matches) {
+        const def = match.captures.find((c: any) => c.name === 'definition.function')?.node;
+        const name = match.captures.find((c: any) => c.name === 'name')?.node.text;
+        if (def && name && (def.type === 'function_declaration' || def.type === 'generator_function_declaration')) {
+          implementedOverloads.add(overloadKey(def, name));
+        }
+      }
+    }
+    const seenSignatures = new Set<string>();
+
     // --- First pass: collect definitions ---
     for (const match of pass1Matches) {
       checkBudget();
@@ -2711,6 +2748,12 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           ? rawName.replace(/^(['"])(.*)\1$/, '$2')
           : rawName;
         if (!name || name.length === 0) continue;
+
+        if (defCapture.node.type === 'function_signature') {
+          const key = overloadKey(defCapture.node, name);
+          if (implementedOverloads.has(key) || seenSignatures.has(key)) continue;
+          seenSignatures.add(key);
+        }
 
         // SAS module entities (DATA/PROC steps, PROC SQL CREATE) need extra
         // shaping so they reflect real data artifacts rather than parser noise.
@@ -3456,6 +3499,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       // file. A key that is present-but-undefined still serializes, which would
       // rewrite every checked-in parseFile snapshot for no behavioural reason.
       ...(phpNamespaces.blocks > 0 ? { phpNamespaceBlocks: phpNamespaces.blocks } : {}),
+      // Absent unless true, for the same reason.
+      ...(tree.rootNode.hasError ? { hasParseErrors: true as const } : {}),
       fileRole: classifyFileRole(filePath, source),
     };
   } catch (e) {
@@ -3543,6 +3588,53 @@ function ambiguousPhpTypeNames(entities: ParsedEntity[]): Set<string> {
 }
 
 /**
+ * What resolution needs from a file it resolves TO (see `FileSummary`). The
+ * same rules `resolveEdges` applies to a batch file, so a file looks the same
+ * to resolution whether it is in the batch or only in the index.
+ */
+export function summarizeParseResult(r: FileParseResult): FileSummary {
+  const qkeys: Array<[string, string]> = [];
+  for (const e of r.entities) {
+    if (e.kind === 'file' || e.kind === 'module') continue;
+    qkeys.push([e.name, qualifiedKey(e)]);
+  }
+  const exportPublicNames = r.exportPublicNames?.map((n): [string, string] => [n.public, n.local]);
+  let phpTypes: Array<[string, string]> | undefined;
+  if (r.language === SupportedLanguages.PHP) {
+    const ambiguous = ambiguousPhpTypeNames(r.entities);
+    phpTypes = [];
+    for (const e of r.entities) {
+      const fqcn = phpTypeFqcn(e);
+      if (fqcn && !ambiguous.has(e.name.toLowerCase())) phpTypes.push([fqcn, e.name]);
+    }
+  }
+  const imports: FileSummary['imports'] = [];
+  const refs = new Set<string>();
+  for (const rel of r.relationships) {
+    if (rel.predicate === 'IMPORTS') {
+      imports.push({
+        dstName: rel.dstName,
+        ...(typeof rel.importRaw === 'string' ? { importRaw: rel.importRaw } : {}),
+        ...(rel.importVia ? { importVia: rel.importVia } : {}),
+      });
+    } else if (rel.predicate === 'CALLS' || rel.predicate === 'REFERENCES' || rel.predicate === 'EXTENDS') {
+      refs.add(rel.dstName);
+    }
+  }
+  const summary = {
+    filePath: r.filePath,
+    language: r.language,
+    entityCount: r.entities.length,
+    qkeys,
+    ...(exportPublicNames ? { exportPublicNames } : {}),
+    imports,
+    ...(phpTypes ? { phpTypes } : {}),
+    refs: [...refs].sort(),
+  };
+  return { ...summary, sig: summarySignature(summary) };
+}
+
+/**
  * Given a file's qualified-key map and a plain callee name, return the single
  * unambiguous qualified key, or null if the name maps to 0 or >1 entities.
  * Callers must treat null as "do not emit" to avoid dangling nodeIds.
@@ -3591,6 +3683,23 @@ export interface GlobalResolutionIndex {
   goPkgDirToFiles:  Map<string, string[]>;
   goPkgPathToFiles: Map<string, string[]>;
   phpFqcnToTypes?:  Map<string, Array<{ filePath: string; typeName: string }>>;
+  /**
+   * Per-file summaries, every language, when the caller supplied them. With
+   * them `resolveEdges` sees every target file exactly as it would if the file
+   * were in the batch, so the batching does not change the result.
+   */
+  summaries?:       Map<string, FileSummary>;
+}
+
+/** `name -> qualified keys`, in entity order: what `resolveEdges` and buildPatch key on. */
+function qkeyMapOf(summary: FileSummary): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const [name, qk] of summary.qkeys) {
+    const list = map.get(name) ?? [];
+    list.push(qk);
+    map.set(name, list);
+  }
+  return map;
 }
 
 /**
@@ -3609,6 +3718,10 @@ export function buildGlobalResolutionIndex(
   // Absent an entry, each block falls back to parsing here, so callers that do
   // not have a pool (tests, library use) behave exactly as before.
   preParsed?: Map<string, FileParseResult>,
+  // Summaries of any files, any language (see FileSummary). A summarized file's
+  // symbols come from its summary, not from the per-language blocks below,
+  // which then only serve callers that have no summaries.
+  summaries?: Map<string, FileSummary>,
 ): GlobalResolutionIndex {
   const stemToFiles = new Map<string, string[]>();
   const dirToIndexFiles = new Map<string, string[]>();
@@ -3617,7 +3730,12 @@ export function buildGlobalResolutionIndex(
   const goPkgPathToFiles = new Map<string, string[]>();
   const phpFqcnToTypes = new Map<string, Array<{ filePath: string; typeName: string }>>();
 
-  for (const fp of filePaths) {
+  // A summarized file is indexed by path too, so `resolveEdges` can rely on
+  // the index's path maps holding every file it has a summary for.
+  const indexPaths = summaries
+    ? [...new Set([...filePaths, ...summaries.keys()])]
+    : filePaths;
+  for (const fp of indexPaths) {
     const ext = nodePath.extname(fp);
     const stem = nodePath.basename(fp, ext);
 
@@ -3815,12 +3933,36 @@ export function buildGlobalResolutionIndex(
       }
     }
 
-    for (const [fp, symbols] of fileHasSymbol) {
-      for (const sym of symbols) {
-        const list = symbolToFiles.get(sym) ?? [];
-        list.push(fp);
-        symbolToFiles.set(sym, list);
+  }
+
+  if (summaries) {
+    for (const [fp, summary] of summaries) {
+      const qkMap = qkeyMapOf(summary);
+      fileQKeys.set(fp, qkMap);
+      fileHasSymbol.set(fp, new Set(qkMap.keys()));
+      if (summary.exportPublicNames) filePublicNames.set(fp, new Map(summary.exportPublicNames));
+      else filePublicNames.delete(fp);
+    }
+    // PHP types for summarized files come from their summaries alone.
+    for (const [fqcn, entries] of phpFqcnToTypes) {
+      phpFqcnToTypes.set(fqcn, entries.filter(entry => !summaries.has(entry.filePath)));
+    }
+    for (const [fp, summary] of summaries) {
+      for (const [fqcn, typeName] of summary.phpTypes ?? []) {
+        const entries = phpFqcnToTypes.get(fqcn) ?? [];
+        if (!entries.some(entry => entry.filePath === fp && entry.typeName === typeName)) {
+          entries.push({ filePath: fp, typeName });
+        }
+        phpFqcnToTypes.set(fqcn, entries);
       }
+    }
+  }
+
+  for (const [fp, symbols] of fileHasSymbol) {
+    for (const sym of symbols) {
+      const list = symbolToFiles.get(sym) ?? [];
+      list.push(fp);
+      symbolToFiles.set(sym, list);
     }
   }
 
@@ -3835,6 +3977,7 @@ export function buildGlobalResolutionIndex(
     goPkgDirToFiles,
     goPkgPathToFiles,
     phpFqcnToTypes,
+    ...(summaries ? { summaries } : {}),
   };
 }
 
@@ -3998,6 +4141,21 @@ export function resolveEdges(
     globalCandidateTotal: 0, resolvedImport: 0, resolvedTransitive: 0,
     resolvedGlobal: 0, resolvedQualifier: 0, skippedSameFile: 0, skippedAmbiguous: 0,
   };
+  // Every file this call can resolve TO: the index's summaries with the batch's
+  // own laid over them. Everything below that describes a target file -- its
+  // symbols, exports, language, imports -- is derived from this and never from
+  // `results`, so a batch resolves exactly as the whole repository would
+  // (IN-09). `results` is only the set of files whose edges are resolved.
+  // Files the index knows only through its older per-language maps (a caller
+  // that passed no summaries) keep those entries.
+  const batchSummaries = results.map(summarizeParseResult);
+  const summaries = new Map<string, FileSummary>(globalIndex?.summaries ?? []);
+  for (const s of batchSummaries) summaries.set(s.filePath, s);
+  // The index's maps already hold every file it has a summary for (its symbol
+  // maps from the summaries, its path maps from paths and summaries alike), so
+  // only the batch's own summaries are laid over them below. Redoing the whole
+  // index here cost every call O(repository), and the path maps' de-dup made
+  // it quadratic in the size of a common stem (`index`, `__init__`).
   // Renamed-import call resolution (Z): a call to a renamed local binding (`import
   // { format as fmt }; fmt()`) should resolve as the provider's public symbol
   // (`format`), so in-repo AND co-ingest resolution link it to the real definition.
@@ -4080,11 +4238,10 @@ export function resolveEdges(
         }
       }
     }
-    for (const r of results) {
-      const srcRepo = repoOf(r.filePath);
+    for (const s of summaries.values()) {
+      const srcRepo = repoOf(s.filePath);
       if (srcRepo === undefined) continue;
-      for (const rel of r.relationships) {
-        if (rel.predicate !== 'IMPORTS') continue;
+      for (const rel of s.imports) {
         // Prefer the raw specifier when the parser preserved it: a relative import
         // (./x, ../x) is intra-repo by construction and can NEVER denote another
         // repo's package, so packageOf rejects it and it seeds no cross-repo dep.
@@ -4156,12 +4313,12 @@ export function resolveEdges(
     const better = (a: [number, number, string], b: [number, number, string]) =>
       a[0] !== b[0] ? a[0] < b[0] : a[1] !== b[1] ? a[1] < b[1] : a[2] < b[2];
     const bestScore = new Map<string, [number, number, string]>();
-    for (const r of results) {
-      const repo = repoOf(r.filePath);
+    for (const filePath of summaries.keys()) {
+      const repo = repoOf(filePath);
       if (repo === undefined) continue;
-      const s = entryScore(r.filePath);
+      const s = entryScore(filePath);
       const cur = bestScore.get(repo);
-      if (!cur || better(s, cur)) { bestScore.set(repo, s); entryFileOf.set(repo, r.filePath); }
+      if (!cur || better(s, cur)) { bestScore.set(repo, s); entryFileOf.set(repo, filePath); }
     }
   }
   // fileQKeys: seed from global index (cross-batch files), then batch entries override.
@@ -4169,27 +4326,14 @@ export function resolveEdges(
   const fileQKeys = globalIndex
     ? new Map<string, Map<string, string[]>>(globalIndex.fileQKeys)
     : new Map<string, Map<string, string[]>>();
-  for (const r of results) {
-    const qkMap = new Map<string, string[]>();
-    for (const e of r.entities) {
-      if (e.kind === 'file' || e.kind === 'module') continue;
-      const qk = qualifiedKey(e);
-      const list = qkMap.get(e.name) ?? [];
-      list.push(qk);
-      qkMap.set(e.name, list);
-    }
-    fileQKeys.set(r.filePath, qkMap);  // overrides global entry if present
-  }
+  for (const s of batchSummaries) fileQKeys.set(s.filePath, qkeyMapOf(s));  // overrides the index's own entry
 
   const filePublicNames = globalIndex
     ? new Map<string, Map<string, string>>(globalIndex.filePublicNames ?? [])
     : new Map<string, Map<string, string>>();
-  for (const r of results) {
-    if (r.exportPublicNames) {
-      filePublicNames.set(r.filePath, new Map(r.exportPublicNames.map(name => [name.public, name.local])));
-    } else {
-      filePublicNames.delete(r.filePath);
-    }
+  for (const s of batchSummaries) {
+    if (s.exportPublicNames) filePublicNames.set(s.filePath, new Map(s.exportPublicNames));
+    else filePublicNames.delete(s.filePath);
   }
 
   // fileHasSymbol: rebuilt from merged fileQKeys so per-batch overrides take effect.
@@ -4198,26 +4342,22 @@ export function resolveEdges(
     fileHasSymbol.set(fp, new Set(qkMap.keys()));
   }
 
+  // Index entries for files that have no summary, then every summarized file's
+  // own types, in summary order.
   const phpFqcnToTypes = new Map<string, Array<{ filePath: string; typeName: string }>>();
   for (const [fqcn, entries] of globalIndex?.phpFqcnToTypes ?? []) {
-    phpFqcnToTypes.set(fqcn, [...entries]);
+    const unsummarized = entries.filter(entry => !summaries.has(entry.filePath));
+    if (unsummarized.length > 0) phpFqcnToTypes.set(fqcn, unsummarized);
   }
-  for (const result of results) {
-    if (result.language !== SupportedLanguages.PHP) continue;
-    const ambiguousTypes = ambiguousPhpTypeNames(result.entities);
-    for (const entity of result.entities) {
-      const fqcn = phpTypeFqcn(entity);
-      if (!fqcn || ambiguousTypes.has(entity.name.toLowerCase())) continue;
+  for (const s of summaries.values()) {
+    for (const [fqcn, typeName] of s.phpTypes ?? []) {
       const entries = phpFqcnToTypes.get(fqcn) ?? [];
-      if (!entries.some(entry => entry.filePath === result.filePath && entry.typeName === entity.name)) {
-        entries.push({ filePath: result.filePath, typeName: entity.name });
+      if (!entries.some(entry => entry.filePath === s.filePath && entry.typeName === typeName)) {
+        entries.push({ filePath: s.filePath, typeName });
       }
       phpFqcnToTypes.set(fqcn, entries);
     }
   }
-
-  // resultsByPath: O(1) lookup replacing results.find() in transitive import loop
-  const resultsByPath = new Map<string, FileParseResult>(results.map(r => [r.filePath, r]));
 
   // symbolToFiles: rebuilt from merged fileHasSymbol (not seeded directly — per-batch
   // overrides can change which files define a symbol).
@@ -4232,33 +4372,45 @@ export function resolveEdges(
 
   // fileLanguage: filePath → SupportedLanguages (fast language lookup without re-calling languageFromPath)
   const fileLanguage = new Map<string, SupportedLanguages>();
-  for (const r of results) {
-    fileLanguage.set(r.filePath, r.language);
+  for (const s of summaries.values()) fileLanguage.set(s.filePath, s.language);
+
+  // "A.b" -> files whose qualified keys include it. The qualifier fallback
+  // asked every file in the batch per dotted call; this answers it once.
+  const qualifiedToFiles = new Map<string, string[]>();
+  for (const [fp, qkMap] of fileQKeys) {
+    for (const keys of qkMap.values()) {
+      for (const qk of new Set(keys)) {
+        const list = qualifiedToFiles.get(qk) ?? [];
+        list.push(fp);
+        qualifiedToFiles.set(qk, list);
+      }
+    }
   }
+
+  // Add `fp` under `key` without touching the index's own array: the maps are
+  // shallow copies, and pushing into a shared list leaked one batch's files
+  // into the index every later batch resolves against.
+  const addPath = (map: Map<string, string[]>, key: string, fp: string): void => {
+    const list = map.get(key);
+    if (!list) map.set(key, [fp]);
+    else if (!list.includes(fp)) map.set(key, [...list, fp]);
+  };
 
   // stemToFiles: seed from global index, then add batch entries.
   const stemToFiles = globalIndex
     ? new Map<string, string[]>(globalIndex.stemToFiles)
     : new Map<string, string[]>();
-  for (const r of results) {
-    const stem = nodePath.basename(r.filePath, nodePath.extname(r.filePath));
-    const list = stemToFiles.get(stem) ?? [];
-    if (!list.includes(r.filePath)) list.push(r.filePath);
-    stemToFiles.set(stem, list);
+  for (const r of batchSummaries) {
+    addPath(stemToFiles, nodePath.basename(r.filePath, nodePath.extname(r.filePath)), r.filePath);
   }
 
   // dirToIndexFiles: seed from global index, then add batch entries.
   const dirToIndexFiles = globalIndex
     ? new Map<string, string[]>(globalIndex.dirToIndexFiles)
     : new Map<string, string[]>();
-  for (const r of results) {
+  for (const r of batchSummaries) {
     const stem = nodePath.basename(r.filePath, nodePath.extname(r.filePath));
-    if (stem === 'index') {
-      const dirName = nodePath.basename(nodePath.dirname(r.filePath));
-      const list = dirToIndexFiles.get(dirName) ?? [];
-      if (!list.includes(r.filePath)) list.push(r.filePath);
-      dirToIndexFiles.set(dirName, list);
-    }
+    if (stem === 'index') addPath(dirToIndexFiles, nodePath.basename(nodePath.dirname(r.filePath)), r.filePath);
   }
 
   // Relative imports must be resolved against the importing file's directory.
@@ -4287,17 +4439,14 @@ export function resolveEdges(
   const packageToFiles = globalIndex
     ? new Map<string, string[]>(globalIndex.packageToFiles)
     : new Map<string, string[]>();
-  for (const r of results) {
+  for (const r of batchSummaries) {
     const ext = nodePath.extname(r.filePath);
     if (ext !== '.scala' && ext !== '.java') continue;
     const dir = nodePath.dirname(r.filePath);
     const parts = dir.split(/[/\\]/);
     const maxDepth = Math.min(8, parts.length);
     for (let i = parts.length - 1; i >= parts.length - maxDepth; i--) {
-      const pkg = parts.slice(i).join('.');
-      const list = packageToFiles.get(pkg) ?? [];
-      if (!list.includes(r.filePath)) list.push(r.filePath);
-      packageToFiles.set(pkg, list);
+      addPath(packageToFiles, parts.slice(i).join('.'), r.filePath);
     }
   }
 
@@ -4308,19 +4457,13 @@ export function resolveEdges(
   const goPkgPathToFiles = globalIndex
     ? new Map<string, string[]>(globalIndex.goPkgPathToFiles)
     : new Map<string, string[]>();
-  for (const r of results) {
+  for (const r of batchSummaries) {
     if (nodePath.extname(r.filePath) !== '.go') continue;
-    const dirName = nodePath.basename(nodePath.dirname(r.filePath));
-    const list = goPkgDirToFiles.get(dirName) ?? [];
-    if (!list.includes(r.filePath)) list.push(r.filePath);
-    goPkgDirToFiles.set(dirName, list);
+    addPath(goPkgDirToFiles, nodePath.basename(nodePath.dirname(r.filePath)), r.filePath);
     const parts = nodePath.dirname(r.filePath).replace(/\\/g, '/').split('/').filter(Boolean);
     const maxDepth = Math.min(8, parts.length);
     for (let i = parts.length - 1; i >= parts.length - maxDepth; i--) {
-      const pkgPath = parts.slice(i).join('/');
-      const pkgList = goPkgPathToFiles.get(pkgPath) ?? [];
-      if (!pkgList.includes(r.filePath)) pkgList.push(r.filePath);
-      goPkgPathToFiles.set(pkgPath, pkgList);
+      addPath(goPkgPathToFiles, parts.slice(i).join('/'), r.filePath);
     }
   }
 
@@ -4408,18 +4551,18 @@ export function resolveEdges(
     if (exactStemMatch.length === 1) return exactStemMatch[0];
 
     const ranked = [...pool].sort((a, b) => {
-      const aResult = resultsByPath.get(a);
-      const bResult = resultsByPath.get(b);
-      const aImports = aResult?.relationships.filter(rel => rel.predicate === 'IMPORTS').length ?? 0;
-      const bImports = bResult?.relationships.filter(rel => rel.predicate === 'IMPORTS').length ?? 0;
+      const aSummary = summaries.get(a);
+      const bSummary = summaries.get(b);
+      const aImports = aSummary?.imports.length ?? 0;
+      const bImports = bSummary?.imports.length ?? 0;
       if (aImports !== bImports) return bImports - aImports;
 
-      // Fall back to global index entity count for cross-batch files (not in resultsByPath).
-      // fileQKeys is seeded from buildGlobalResolutionIndex which pre-scans exported
-      // types/functions via regex, so substantive files like instance.go score higher
-      // than package-doc stubs like doc.go (which only has the package name).
-      const aEntities = aResult?.entities.length ?? fileQKeys.get(a)?.size ?? 0;
-      const bEntities = bResult?.entities.length ?? fileQKeys.get(b)?.size ?? 0;
+      // Fall back to the index's symbol count for a file with no summary.
+      // fileQKeys is seeded from buildGlobalResolutionIndex, so substantive
+      // files like instance.go score higher than package-doc stubs like doc.go
+      // (which only has the package name).
+      const aEntities = aSummary?.entityCount ?? fileQKeys.get(a)?.size ?? 0;
+      const bEntities = bSummary?.entityCount ?? fileQKeys.get(b)?.size ?? 0;
       if (aEntities !== bEntities) return bEntities - aEntities;
 
       return a.localeCompare(b);
@@ -4749,6 +4892,20 @@ export function resolveEdges(
   // ── Main resolution loop ───────────────────────────────────────────
 
 
+  /**
+   * The files of `pool` that define `name`, in `pool` order -- what a loop over
+   * the pool asking `fileHasSymbol` returns, but walking whichever side is
+   * smaller. A source file's import set grows with the repository (a common
+   * stem matches more files), and walking it once per call made resolution
+   * quadratic.
+   */
+  function definersIn(pool: Set<string>, order: Map<string, number>, name: string): string[] {
+    const definers = symbolToFiles.get(name);
+    if (!definers) return [];
+    if (definers.length >= pool.size) return [...pool].filter(fp => fileHasSymbol.get(fp)?.has(name));
+    return definers.filter(fp => pool.has(fp)).sort((a, b) => order.get(a)! - order.get(b)!);
+  }
+
   function fileDefinesQualifiedMember(filePath: string, qualifierPart: string, memberPart: string): boolean {
     const qks = fileQKeys.get(filePath)?.get(memberPart) ?? [];
     return qks.includes(`${qualifierPart}.${memberPart}`);
@@ -4818,15 +4975,19 @@ export function resolveEdges(
     // Handles re-exports: baz.ts → index.ts (re-exports from bar.ts) → bar.ts
     const transitiveFilePaths = new Set<string>();
     for (const fp of importedFilePaths) {
-      const fpResult = resultsByPath.get(fp);
-      if (!fpResult) continue;
-      for (const rel of fpResult.relationships) {
-        if (rel.predicate !== 'IMPORTS' || rel.importVia === 'helper') continue;
-        for (const transitiveFp of resolveImportTargets(fp, fpResult.language, rel.dstName, rel.importRaw)) {
+      const fpSummary = summaries.get(fp);
+      if (!fpSummary) continue;
+      for (const rel of fpSummary.imports) {
+        if (rel.importVia === 'helper') continue;
+        for (const transitiveFp of resolveImportTargets(fp, fpSummary.language, rel.dstName, rel.importRaw)) {
           if (!importedFilePaths.has(transitiveFp)) transitiveFilePaths.add(transitiveFp);
         }
       }
     }
+    // Position of each file in the two sets, so `definersIn` can return its
+    // matches in set order without walking the whole set per relationship.
+    const importedOrder = new Map([...importedFilePaths].map((fp, i) => [fp, i]));
+    const transitiveOrder = new Map([...transitiveFilePaths].map((fp, i) => [fp, i]));
 
     for (const rel of result.relationships) {
       if (rel.predicate !== 'CALLS' && rel.predicate !== 'EXTENDS' && rel.predicate !== 'REFERENCES' && rel.predicate !== 'IMPORTS') continue;
@@ -5116,7 +5277,7 @@ export function resolveEdges(
         if (memberPart && qualifierPart) {
           const elixirAliasedModule = srcLanguage === SupportedLanguages.Elixir ? result.importAliases?.[qualifierPart]: undefined;
           const aliasedImportMatches = srcLanguage === SupportedLanguages.Go ? resolveImportQualifierTargets(srcFilePath, srcLanguage, result.importAliases?.[qualifierPart] ?? '')
-          : elixirAliasedModule ? results.map(r => r.filePath).filter(fp => fp !== srcFilePath && fileHasSymbol.get(fp)?.has(elixirAliasedModule))
+          : elixirAliasedModule ? (symbolToFiles.get(elixirAliasedModule) ?? []).filter(fp => fp !== srcFilePath)
           : [];
           // Try import-scoped qualifier first
           const qualifierSearchPool = aliasedImportMatches.length > 0
@@ -5155,11 +5316,11 @@ export function resolveEdges(
             stats.skippedAmbiguous++;
             continue;
           }
-          const qualGlobalMatches = results
-            .map(r => r.filePath)
+          // Every file that defines `qualifier.member` -- the whole index, not
+          // just this batch (a lookup, where it was a scan per call).
+          const qualGlobalMatches = (qualifiedToFiles.get(`${qualifierPart}.${memberPart}`) ?? [])
             .filter(fp => fp !== srcFilePath
-              && importLanguageCompatible(srcLanguage, fileLanguage.get(fp) ?? languageFromPath(fp))
-              && fileDefinesQualifiedMember(fp, qualifierPart, memberPart));
+              && importLanguageCompatible(srcLanguage, fileLanguage.get(fp) ?? languageFromPath(fp)));
           if (qualGlobalMatches.length === 1) {
             const qfp = qualGlobalMatches[0];
             if (fileHasSymbol.get(qfp)?.has(memberPart)) {
@@ -5174,10 +5335,7 @@ export function resolveEdges(
       }
 
       // Tier 2: import-scoped (confidence 0.9)
-      const importMatches: string[] = [];
-      for (const fp of importedFilePaths) {
-        if (fileHasSymbol.get(fp)?.has(dstName) && reachable(fp)) importMatches.push(fp);
-      }
+      const importMatches = definersIn(importedFilePaths, importedOrder, dstName).filter(reachable);
       const narrowedImportMatches = narrowByRepoDeps(narrowCCandidates(importMatches, srcFilePath, srcLanguage, srcName, dstName), srcFilePath);
 
       if (narrowedImportMatches.length === 1) {
@@ -5202,10 +5360,7 @@ export function resolveEdges(
         continue;
       }
       // Tier 2.5: transitive import-scoped (confidence 0.8) — one re-export hop away
-      const transitiveMatches: string[] = [];
-      for (const fp of transitiveFilePaths) {
-        if (fileHasSymbol.get(fp)?.has(dstName) && reachable(fp)) transitiveMatches.push(fp);
-      }
+      const transitiveMatches = definersIn(transitiveFilePaths, transitiveOrder, dstName).filter(reachable);
       const narrowedTransitiveMatches = narrowByRepoDeps(narrowCCandidates(transitiveMatches, srcFilePath, srcLanguage, srcName, dstName), srcFilePath);
 
       if (narrowedTransitiveMatches.length === 1) {

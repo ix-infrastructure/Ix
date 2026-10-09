@@ -54,8 +54,12 @@ vi.mock("../commands/ingestion-loader.js", async (importOriginal) => {
             }
           }
           patch.ops.push(...dangling);
-          // The id 1.27 gave this file and content: the first previous extractor.
-          patch.patchId = patchBuilder.sourcePatchIdCandidates(parsed.filePath, hash, workspaceId)[1];
+          // The id 1.27 gave this file and content. Candidates are the current
+          // extractor's id followed by PREVIOUS_EXTRACTORS' in order, so look
+          // 1.27 up rather than assume it is the first previous one.
+          patch.patchId = patchBuilder.sourcePatchIdCandidates(parsed.filePath, hash, workspaceId)[
+            (patchBuilder as unknown as { PREVIOUS_EXTRACTORS: string[] }).PREVIOUS_EXTRACTORS.indexOf(OLD_EXTRACTOR) + 1
+          ];
           return patch;
         },
       };

@@ -7,7 +7,13 @@ type IngestionModule = {
   parseFile: (filePath: string, source: string) => any;
   resolveEdges: (results: any[], stats?: any, globalIndex?: any) => any[];
   isGrammarSupported: (filePath: string) => boolean;
-  buildGlobalResolutionIndex: (filePaths: string[], sources?: Map<string, string>, preParsed?: Map<string, any>) => any;
+  buildGlobalResolutionIndex: (
+    filePaths: string[],
+    sources?: Map<string, string>,
+    preParsed?: Map<string, any>,
+    summaries?: Map<string, any>,
+  ) => any;
+  summarizeParseResult: (parsed: any) => { filePath: string; [key: string]: unknown };
 };
 
 type PatchBuilderModule = {

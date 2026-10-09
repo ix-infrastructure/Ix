@@ -15,8 +15,34 @@ export const TYPESCRIPT_QUERIES = `
 (class_declaration
   name: (type_identifier) @name) @definition.class
 
+(abstract_class_declaration
+  name: (type_identifier) @name) @definition.class
+
 (interface_declaration
   name: (type_identifier) @name) @definition.interface
+
+; Type aliases and enums are often a TypeScript codebase's central vocabulary.
+(type_alias_declaration
+  name: (type_identifier) @name) @definition.type
+
+(enum_declaration
+  name: (identifier) @name) @definition.enum
+
+; namespace NS { ... }
+(internal_module
+  name: (identifier) @name) @definition.namespace
+
+(abstract_method_signature
+  name: (property_identifier) @name) @definition.method
+
+; A class field holding a function is a method in all but syntax: draw = () => ...
+(public_field_definition
+  name: (property_identifier) @name
+  value: [(arrow_function) (function_expression)]) @definition.method
+
+; Overload signatures: \`function f(a: string): string;\` above the implementation.
+(function_signature
+  name: (identifier) @name) @definition.function
 
 (function_declaration
   name: (identifier) @name) @definition.function
@@ -106,12 +132,24 @@ export const TYPESCRIPT_QUERIES = `
 (new_expression
   constructor: (identifier) @call.name) @call
 
-; Heritage queries - class extends
+; Heritage queries - class extends, plain or abstract, a bare name or ns.Base
 (class_declaration
   name: (type_identifier) @heritage.class
   (class_heritage
     (extends_clause
-      value: (identifier) @heritage.extends))) @heritage
+      value: [(identifier) (member_expression)] @heritage.extends))) @heritage
+
+(abstract_class_declaration
+  name: (type_identifier) @heritage.class
+  (class_heritage
+    (extends_clause
+      value: [(identifier) (member_expression)] @heritage.extends))) @heritage
+
+(abstract_class_declaration
+  name: (type_identifier) @heritage.class
+  (class_heritage
+    (implements_clause
+      (type_identifier) @heritage.implements))) @heritage.impl
 
 ; Heritage queries - class implements interface
 (class_declaration
@@ -126,8 +164,18 @@ export const TYPESCRIPT_QUERIES = `
   (extends_type_clause
     (type_identifier) @heritage.extends)) @heritage
 
-; Type references — captures types used in annotations/parameters/return types
+; Type references — captures types used in annotations/parameters/return types,
+; and inside the type forms they compose: Promise<Foo>, Foo[], Foo | null,
+; Foo & Bar, \`x as Foo\`, \`extends Base<Foo>\`, \`type T = Foo\`. Duplicates
+; per enclosing definition are dropped in index.ts.
 (type_annotation (type_identifier) @reference.type)
+(generic_type name: (type_identifier) @reference.type)
+(type_arguments (type_identifier) @reference.type)
+(array_type (type_identifier) @reference.type)
+(union_type (type_identifier) @reference.type)
+(intersection_type (type_identifier) @reference.type)
+(as_expression (type_identifier) @reference.type)
+(type_alias_declaration value: (type_identifier) @reference.type)
 `;
 
 // JavaScript queries - works with tree-sitter-javascript

@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 
 import { ingestFiles, ingestPathSingleFlight } from "../commands/ingest.js";
 import { acquireMapLock, takeMapRerun } from "../single-flight.js";
-import { ingestMtimeCachePath, ingestRebuildPath, loadConfig } from "../config.js";
+import { ingestMtimeCachePath, ingestRebuildPath, ingestSymbolsPath, loadConfig } from "../config.js";
 import { workspaceIdForPath } from "../system.js";
 import { FakeBackend } from "./helpers/fake-backend.js";
 import { runWithSignal } from "../../client/run-signal.js";
@@ -803,6 +803,23 @@ describe("ingestFiles against a fake backend", () => {
       expect(summary.filesDiscovered).toBe(17);
     });
 
+    it("adding one Python file sends one patch", async () => {
+      // Until IN-10 a new file outside the index-prescan languages forced the
+      // whole-repository pass. The symbol table covers every language, so a
+      // new Python file takes the incremental path like a TypeScript one.
+      await incremental();
+      writeFileSync(join(repo, "src", "added.py"), "def added():\n    return 1\n", "utf8");
+      stage();
+      backend.resetRequests();
+
+      const summary = await incremental();
+
+      expect(backend.acceptedPatches(), "patches on the wire").toBe(1);
+      expect(backend.commitCount).toBe(1);
+      expect(summary.filesSkippedAsUnchanged).toBe(16);
+      expect(summary.filesDiscovered).toBe(17);
+    });
+
     it("an empty file that gains content sends one patch", async () => {
       writeFileSync(join(repo, "src", "empty.ts"), "", "utf8");
       stage();
@@ -1127,6 +1144,17 @@ describe("ingestFiles against a fake backend", () => {
       expect(after, "the lock was let go").not.toBeNull();
       after?.release();
     });
+  });
+
+  it("counts files tree-sitter parsed with errors, and still ingests them", async () => {
+    fixture(2);
+    writeFileSync(join(repo, "src", "broken.ts"), "export function ok() { return 1; }\nexport function bad( {\n", "utf8");
+    execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+
+    const summary = await run();
+
+    expect(summary.filesWithParseErrors).toBe(1);
+    expect(backend.acceptedPatches()).toBe(3);
   });
 
   it("counts a file over the size limit in the summary, so ix map can say so", async () => {
@@ -1474,6 +1502,61 @@ describe("ingestFiles against a fake backend", () => {
     backend.lastOps.clear();
     await ingestFiles(join(repo, "src"), { ...quiet, force: true });
     expect(edges()).toEqual(full);
+  });
+
+  it("does not resolve a scoped run against a stale symbol-table entry for a file outside the scope", async () => {
+    // The table is trusted for a file the baseline calls mtime-clean, but a
+    // scoped run never stats the files outside its scope, so it vouched for an
+    // edited `lib/b.ts` with the symbols it had before the edit.
+    // Real commit semantics, so the incremental run has hashes to compare.
+    backend.semantics = "head";
+    mkdirSync(join(repo, "src"), { recursive: true });
+    mkdirSync(join(repo, "lib"), { recursive: true });
+    writeFileSync(join(repo, "lib", "b.ts"), "export function helper(): number { return 1; }\n", "utf8");
+    writeFileSync(join(repo, "src", "a.ts"), "import { helper } from '../lib/b';\nexport function caller(): number { return helper(); }\n", "utf8");
+    execFileSync("git", ["init", "-q"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+    const edges = () => (backend.lastOps.get("src/a.ts") ?? [])
+      .filter(op => op.type === "UpsertEdge")
+      .map(op => `${String(op.predicate)} ${String(op.dst)}`)
+      .sort();
+
+    await ingestFiles(repo, quiet);
+    const resolved = edges();
+
+    // `helper` is gone from lib/b.ts; a.ts still calls it. Only src/ is re-mapped.
+    writeFileSync(join(repo, "lib", "b.ts"), "export function renamed(): number { return 1; }\n", "utf8");
+    writeFileSync(join(repo, "src", "a.ts"), "import { helper } from '../lib/b';\nexport function caller(): number { return helper() + 1; }\n", "utf8");
+    backend.lastOps.clear();
+    await ingestFiles(join(repo, "src"), quiet);
+    const scoped = edges();
+
+    // What a fresh map of the edited workspace says about a.ts.
+    backend.lastOps.clear();
+    await ingestFiles(repo, { ...quiet, force: true });
+    const fresh = edges();
+
+    expect(resolved, "the fixture's call resolved to lib/b.ts at first").not.toEqual(fresh);
+    expect(scoped).toEqual(fresh);
+  });
+
+  it("keeps other languages' symbol-table entries on a --lang run", async () => {
+    // The table was pruned to the run's resolution paths, which `--lang`
+    // filters, so every other language was dropped and re-parsed next map.
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src", "a.ts"), "export function a(): number { return 1; }\n", "utf8");
+    writeFileSync(join(repo, "src", "b.py"), "def b():\n    return 1\n", "utf8");
+    execFileSync("git", ["init", "-q"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+    const tableFiles = () =>
+      Object.keys((JSON.parse(readFileSync(ingestSymbolsPath(repo), "utf8")) as { files: Record<string, unknown> }).files).sort();
+
+    await ingestFiles(repo, quiet);
+    expect(tableFiles()).toEqual(["src/a.ts", "src/b.py"]);
+
+    writeFileSync(join(repo, "src", "b.py"), "def b():\n    return 2\n", "utf8");
+    await ingestFiles(repo, { ...quiet, lang: "py" });
+    expect(tableFiles()).toEqual(["src/a.ts", "src/b.py"]);
   });
 
   it("writes no baseline from a subdirectory run when the workspace has none", async () => {

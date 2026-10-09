@@ -12,7 +12,6 @@ import {
   isSupportedSourceFile,
   discoverIngestFilePaths,
   isWithinDiscoveryRoot,
-  needsIndexPrescan,
   tryGitLsFiles,
 } from '../commands/ingest.js';
 
@@ -80,17 +79,6 @@ describe('dedupeDiscoveredFilePaths', () => {
     // whose name does must stay in — the reason this compares segments.
     expect(isWithinDiscoveryRoot(root, join('/repo', '..shared', 'app.ts'))).toBe(false);
     expect(isWithinDiscoveryRoot(root, join(root, '..shared', 'app.ts'))).toBe(true);
-  });
-
-  it('pre-scans every language whose index is parser-derived', () => {
-    for (const filePath of [
-      'src/Service.php',
-      'src/helper.js', 'src/helper.jsx', 'src/helper.mjs', 'src/helper.cjs',
-      'src/helper.ts', 'src/helper.tsx',
-    ]) {
-      expect(needsIndexPrescan(filePath)).toBe(true);
-    }
-    expect(needsIndexPrescan('src/service.py')).toBe(false);
   });
 });
 
