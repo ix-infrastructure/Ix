@@ -8,11 +8,12 @@ import { execFileSync } from "node:child_process";
 
 import { ingestFiles, ingestPathSingleFlight } from "../commands/ingest.js";
 import { acquireMapLock, takeMapRerun } from "../single-flight.js";
-import { ingestMtimeCachePath, ingestRebuildPath, ingestSymbolsPath, loadConfig } from "../config.js";
+import { ingestMtimeCachePath, ingestRebuildPath, ingestSymbolsJournalPath, ingestSymbolsPath, loadConfig } from "../config.js";
 import { workspaceIdForPath } from "../system.js";
 import { FakeBackend } from "./helpers/fake-backend.js";
 import { runWithSignal } from "../../client/run-signal.js";
 import { loadIngestBaseline } from "../ingest-baseline.js";
+import { loadIngestSymbols } from "../ingest-symbols.js";
 import { detectStaleFiles } from "../stale.js";
 import { renderStatusLlm } from "../commands/status.js";
 
@@ -1557,6 +1558,44 @@ describe("ingestFiles against a fake backend", () => {
     writeFileSync(join(repo, "src", "b.py"), "def b():\n    return 2\n", "utf8");
     await ingestFiles(repo, { ...quiet, lang: "py" });
     expect(tableFiles()).toEqual(["src/a.ts", "src/b.py"]);
+  });
+
+  it("writes the symbol table only when an entry changed, and then only the change", async () => {
+    // It was rewritten in full on every run that parsed anything.
+    fixture(20);
+    const table = () => readFileSync(ingestSymbolsPath(repo), "utf8");
+    const journal = ingestSymbolsJournalPath(repo);
+
+    await ingestFiles(repo, quiet);
+    const written = table();
+    const writtenAt = statSync(ingestSymbolsPath(repo)).mtimeMs;
+    expect(Object.keys((JSON.parse(written) as { files: object }).files)).toHaveLength(20);
+    expect(existsSync(journal)).toBe(false);
+
+    // Nothing changed: an incremental run and a forced re-parse of every file
+    // leave both files as they were.
+    await ingestFiles(repo, quiet);
+    await ingestFiles(repo, { ...quiet, force: true });
+    expect(table()).toBe(written);
+    expect(statSync(ingestSymbolsPath(repo)).mtimeMs).toBe(writtenAt);
+    expect(existsSync(journal)).toBe(false);
+
+    // One file changed: the table stays, and the journal carries that entry.
+    writeFileSync(join(repo, "src", "m007.ts"), "export function f7(): number { return 70; }\nexport const g7 = 1;\n", "utf8");
+    await ingestFiles(repo, quiet);
+    expect(table()).toBe(written);
+    const lines = readFileSync(journal, "utf8").trim().split("\n").map(l => JSON.parse(l) as { k?: string });
+    expect(lines.slice(1).map(l => l.k)).toEqual(["src/m007.ts"]);
+
+    // And what the next run loads is the change, with every other entry.
+    const loaded = loadIngestSymbols(repo, (JSON.parse(written) as { extractor: string }).extractor);
+    expect(loaded.size).toBe(20);
+    expect(JSON.stringify(loaded.get("src/m007.ts")?.summary)).toContain("g7");
+
+    // Unchanged again: nothing more is appended.
+    const journalText = readFileSync(journal, "utf8");
+    await ingestFiles(repo, quiet);
+    expect(readFileSync(journal, "utf8")).toBe(journalText);
   });
 
   it("writes no baseline from a subdirectory run when the workspace has none", async () => {

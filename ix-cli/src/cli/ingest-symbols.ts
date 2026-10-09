@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { ingestSymbolsPath } from "./config.js";
+import { ingestSymbolsJournalPath, ingestSymbolsPath } from "./config.js";
 
 /**
  * The symbol table an incremental `ix map` resolves against.
@@ -76,46 +76,214 @@ interface SerializedSymbolTable {
   version: number;
   root: string;
   extractor: string;
+  /**
+   * Which write of the table this is. The journal names the generation it
+   * extends, so it is applied only on top of the table it was written against.
+   * Optional: a table written before the journal existed has none, and then
+   * no journal applies to it.
+   */
+  gen?: string;
   files: Record<string, SymbolEntry>;
+}
+
+/**
+ * The table is written in full only now and then. In between, a run that
+ * changed a few entries appends them to a journal beside it, one JSON record
+ * per line, and the next load applies the journal over the table. The table
+ * keeps its version-1 shape, so a CLI that does not know about the journal
+ * still reads it; the entries it lacks are then merely older, and an older
+ * entry is checked against its file's hash and mtime before it is used.
+ *
+ * Line 1 is a header naming the table it extends; each line after it is
+ * `{"k": path, "e": entry}` (set) or `{"k": path, "d": 1}` (removed).
+ */
+interface JournalHeader {
+  journal: number;
+  root: string;
+  extractor: string;
+  gen: string;
+}
+type JournalRecord = { k: string; e: SymbolEntry } | { k: string; d: 1 };
+
+const JOURNAL_VERSION = 1;
+
+/** The journal is rewritten into the table once it would pass this share of the table's size. */
+const JOURNAL_MAX_SHARE = 0.5;
+
+/** What a load saw on disk, so a save can tell whether appending to the journal is safe. */
+interface LoadedState {
+  gen?: string;
+  tableBytes: number;
+  journalBytes: number;
+  /** Every journal line parsed and the file ended in a newline: appending to it is safe. */
+  journalIntact: boolean;
+}
+
+const loadedStates = new WeakMap<Map<string, SymbolEntry>, LoadedState>();
+
+function validEntry(entry: unknown): entry is SymbolEntry {
+  const e = entry as SymbolEntry | undefined;
+  return typeof e?.hash === "string" && !!e.summary && typeof e.summary.filePath === "string";
+}
+
+/** Apply the journal for `gen` to `table`. Returns its size and whether it can be appended to. */
+function applyJournal(
+  projectRoot: string, extractor: string, gen: string, table: Map<string, SymbolEntry>,
+): { bytes: number; intact: boolean } {
+  let text: string;
+  try {
+    text = fs.readFileSync(ingestSymbolsJournalPath(projectRoot), "utf-8");
+  } catch {
+    return { bytes: 0, intact: true };
+  }
+  const bytes = Buffer.byteLength(text);
+  const lines = text.split("\n");
+  // A journal that does not end in a newline was cut off mid-append.
+  let intact = text.length === 0 || text.endsWith("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  let header: JournalHeader | undefined;
+  try {
+    header = lines.length > 0 ? JSON.parse(lines[0]) as JournalHeader : undefined;
+  } catch {
+    header = undefined;
+  }
+  if (
+    header?.journal !== JOURNAL_VERSION || header.root !== projectRoot ||
+    header.extractor !== extractor || header.gen !== gen
+  ) {
+    // Another table's journal, or none worth reading: it is replaced, never appended to.
+    return { bytes, intact: false };
+  }
+  for (let i = 1; i < lines.length; i++) {
+    let record: JournalRecord;
+    try {
+      record = JSON.parse(lines[i]) as JournalRecord;
+    } catch {
+      intact = false;
+      continue;
+    }
+    if (typeof record?.k !== "string") { intact = false; continue; }
+    if ("d" in record) table.delete(record.k);
+    else if (validEntry(record.e)) table.set(record.k, record.e);
+  }
+  return { bytes, intact };
 }
 
 /** The table for `projectRoot` and `extractor`, or an empty one. */
 export function loadIngestSymbols(projectRoot: string, extractor: string): Map<string, SymbolEntry> {
+  const table = new Map<string, SymbolEntry>();
+  let state: LoadedState = { tableBytes: 0, journalBytes: 0, journalIntact: false };
   try {
-    const data = JSON.parse(fs.readFileSync(ingestSymbolsPath(projectRoot), "utf-8")) as SerializedSymbolTable;
-    if (data.version !== TABLE_VERSION || data.root !== projectRoot || data.extractor !== extractor) return new Map();
-    if (!data.files || typeof data.files !== "object") return new Map();
-    const table = new Map<string, SymbolEntry>();
-    for (const [rel, entry] of Object.entries(data.files)) {
-      if (typeof entry?.hash === "string" && entry.summary && typeof entry.summary.filePath === "string") {
-        table.set(rel, entry);
+    const text = fs.readFileSync(ingestSymbolsPath(projectRoot), "utf-8");
+    const data = JSON.parse(text) as SerializedSymbolTable;
+    if (
+      data.version === TABLE_VERSION && data.root === projectRoot && data.extractor === extractor &&
+      data.files && typeof data.files === "object"
+    ) {
+      for (const [rel, entry] of Object.entries(data.files)) {
+        if (validEntry(entry)) table.set(rel, entry);
+      }
+      state = { tableBytes: Buffer.byteLength(text), journalBytes: 0, journalIntact: false };
+      if (typeof data.gen === "string") {
+        const journal = applyJournal(projectRoot, extractor, data.gen, table);
+        state = { gen: data.gen, tableBytes: state.tableBytes, journalBytes: journal.bytes, journalIntact: journal.intact };
       }
     }
-    return table;
   } catch {
-    return new Map();
+    table.clear();
+    state = { tableBytes: 0, journalBytes: 0, journalIntact: false };
   }
+  loadedStates.set(table, state);
+  return table;
+}
+
+/** Write `contents` to `target` via a temp file and a rename. */
+function writeAtomically(target: string, contents: string): void {
+  const tmp = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, contents);
+  fs.renameSync(tmp, target);
 }
 
 /**
- * Write the table via a temp file and a rename, so a process killed mid-write
- * leaves the previous table rather than a truncated one.
+ * Save the table.
+ *
+ * With `changed` -- the paths whose entries this run set, altered or removed --
+ * nothing is written when it is empty, and a few changes are appended to the
+ * journal when the table on disk is the one this table was loaded from. The
+ * table itself is rewritten (via a temp file and a rename, so a process killed
+ * mid-write leaves the previous one) when there is no such table, the journal
+ * is not intact, or it would grow past half the table's size. Without
+ * `changed`, the table is rewritten.
  */
-export function saveIngestSymbols(projectRoot: string, extractor: string, table: Map<string, SymbolEntry>): void {
+export function saveIngestSymbols(
+  projectRoot: string,
+  extractor: string,
+  table: Map<string, SymbolEntry>,
+  changed?: ReadonlySet<string>,
+): void {
+  if (changed !== undefined && changed.size === 0) return;
   try {
     const target = ingestSymbolsPath(projectRoot);
+    const journalPath = ingestSymbolsJournalPath(projectRoot);
     fs.mkdirSync(path.dirname(target), { recursive: true });
+    const state = loadedStates.get(table);
+
+    if (changed !== undefined && state?.gen !== undefined && state.journalIntact && onDiskGen(target) === state.gen) {
+      const records = [...changed].sort().map(k => {
+        const e = table.get(k);
+        return JSON.stringify(e !== undefined ? { k, e } : { k, d: 1 }) + "\n";
+      }).join("");
+      const addBytes = Buffer.byteLength(records);
+      if (state.journalBytes + addBytes <= state.tableBytes * JOURNAL_MAX_SHARE) {
+        if (state.journalBytes === 0) {
+          const header: JournalHeader = { journal: JOURNAL_VERSION, root: projectRoot, extractor, gen: state.gen };
+          const headerLine = JSON.stringify(header) + "\n";
+          writeAtomically(journalPath, headerLine + records);
+          state.journalBytes = Buffer.byteLength(headerLine) + addBytes;
+        } else {
+          fs.appendFileSync(journalPath, records);
+          state.journalBytes += addBytes;
+        }
+        return;
+      }
+    }
+
+    const gen = createHash("sha256").update(`${process.pid}:${Date.now()}:${Math.random()}`).digest("hex").slice(0, 16);
     const data: SerializedSymbolTable = {
       version: TABLE_VERSION,
       root: projectRoot,
       extractor,
+      gen,
       files: Object.fromEntries(table),
     };
-    const tmp = `${target}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(data));
-    fs.renameSync(tmp, target);
+    const text = JSON.stringify(data);
+    writeAtomically(target, text);
+    // After the table: a journal left behind names the old generation and is ignored.
+    try { fs.rmSync(journalPath, { force: true }); } catch { /* ignored by gen */ }
+    loadedStates.set(table, { gen, tableBytes: Buffer.byteLength(text), journalBytes: 0, journalIntact: true });
   } catch {
     // An optimization: losing it costs the next run a parse of what it lacks.
+  }
+}
+
+/**
+ * The generation of the table on disk, read from the start of the file
+ * without parsing the rest: `gen` is written before `files`.
+ */
+function onDiskGen(target: string): string | undefined {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(target, "r");
+    const buf = Buffer.alloc(1024);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    const head = buf.subarray(0, n).toString("utf-8");
+    const filesAt = head.indexOf('"files":');
+    const m = /"gen":"([0-9a-f]+)"/.exec(filesAt === -1 ? head : head.slice(0, filesAt));
+    return m?.[1];
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) try { fs.closeSync(fd); } catch { /* nothing to do */ }
   }
 }
 

@@ -2486,7 +2486,8 @@ export async function ingestFiles(
     let loadedSymbolTable: Map<string, SymbolEntry> | undefined;
     const symbolTable = (): Map<string, SymbolEntry> =>
       (loadedSymbolTable ??= loadIngestSymbols(projectRoot, currentExtractor));
-    let symbolTableChanged = false;
+    /** Paths whose entries this run set, altered or removed: what the save writes. */
+    const symbolTableChanges = new Set<string>();
     /** sha256 of each file this run has read, by absolute path. */
     const currentHashes = new Map<string, string>();
     const mtimeChangedSet = new Set(mtimeChangedPaths);
@@ -2500,10 +2501,14 @@ export async function ingestFiles(
       // The resolution hash describes the patch built from these bytes; it is
       // kept until that patch is built again (noteResolution).
       const res = before?.hash === hash ? before.res : undefined;
-      table.set(relFilePath, {
+      const next: SymbolEntry = {
         hash, summary: summarize(parsed), ...(mtime !== undefined ? { mtime } : {}), ...(res !== undefined ? { res } : {}),
-      });
-      symbolTableChanged = true;
+      };
+      // The same bytes parse to the same summary: a forced or touched-only
+      // re-parse leaves the entry as it was, and so leaves nothing to write.
+      if (before !== undefined && JSON.stringify(before) === JSON.stringify(next)) return;
+      table.set(relFilePath, next);
+      symbolTableChanges.add(relFilePath);
     };
     /**
      * What each file this run parsed defined before the run, by relative path
@@ -2518,7 +2523,7 @@ export async function ingestFiles(
       const res = resolutionHash(patch.ops);
       if (entry.res !== res) {
         entry.res = res;
-        symbolTableChanged = true;
+        symbolTableChanges.add(relFilePath);
       }
     };
     /** The file's mtime now: from this run's stat loop, or a stat for a file outside it. */
@@ -2544,7 +2549,7 @@ export async function ingestFiles(
         const mtime = currentMtimes.get(absFilePath);
         if (mtime !== undefined && entry.mtime !== mtime) {
           entry.mtime = mtime;
-          symbolTableChanged = true;
+          symbolTableChanges.add(toWorkspaceRelative(absFilePath));
         }
         return true;
       }
@@ -3976,7 +3981,7 @@ export async function ingestFiles(
         const entry = table.get(rel);
         if (entry && !entry.pending) {
           entry.pending = true;
-          symbolTableChanged = true;
+          symbolTableChanges.add(rel);
         }
       }
       if (debug && dependents.length > 0) {
@@ -4031,7 +4036,7 @@ export async function ingestFiles(
               if (entry && res !== undefined) {
                 entry.res = res;
                 delete entry.pending;
-                symbolTableChanged = true;
+                symbolTableChanges.add(item.filePath);
               }
             },
           });
@@ -4134,11 +4139,18 @@ export async function ingestFiles(
     // not every commit landed -- pruned to the files that still exist. A
     // `--lang` run's resolution paths hold its languages only; the files it
     // left out still exist and keep their entries, as they keep their baseline.
-    if (symbolTableChanged) {
+    // Only what changed is written: nothing on a run that changed no entry,
+    // and on most runs a few journal lines rather than the whole table.
+    if (symbolTableChanges.size > 0) {
       const existing = new Set([...resolutionPaths, ...langExcluded].map(toWorkspaceRelative));
       const table = symbolTable();
-      for (const rel of [...table.keys()]) if (!existing.has(rel)) table.delete(rel);
-      saveIngestSymbols(projectRoot, currentExtractor, table);
+      for (const rel of [...table.keys()]) {
+        if (!existing.has(rel)) {
+          table.delete(rel);
+          symbolTableChanges.add(rel);
+        }
+      }
+      saveIngestSymbols(projectRoot, currentExtractor, table, symbolTableChanges);
     }
     if (rebuildProgress !== null) {
       // Finished: the baseline now records the new extractor. Otherwise keep
