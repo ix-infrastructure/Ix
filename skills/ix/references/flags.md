@@ -277,7 +277,7 @@ Show upstream dependents of the given entity (full tree by default).
 
 ### `ix diff <fromRev> <toRev> [target]`
 
-Show diff between two revisions, optionally scoped to a file or entity.
+Show diff between two revisions, optionally scoped to a file or entity. The diff covers the workspace the current directory belongs to; `--all` covers every workspace on the backend (outside any mapped workspace it does anyway).
 
 | Flag | Value | Default | Effect |
 |---|---|---|---|
@@ -285,7 +285,8 @@ Show diff between two revisions, optionally scoped to a file or entity.
 | `--summary` | — | off | Show compact summary only (server-side, fast) |
 | `--content` | — | off | Show detailed attribute changes for each entity |
 | `--limit` | `<n>` | — | Max changes to return (default 100) |
-| `--full` | — | off | Return all changes (no limit) |
+| `--full` | — | off | Return all changes (up to the backend's maximum, 5000) |
+| `--all` | — | off | Diff every workspace on the backend, not just this one |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
