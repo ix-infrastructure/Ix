@@ -10,6 +10,7 @@ import { ParsePool } from './parse-pool.js';
 // import { ResolveWorker } from './resolve-pool.js';
 import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
+import { combineSignals, currentRunSignal } from '../../client/run-signal.js';
 import type { GraphPatchPayload } from '../../client/types.js';
 import { canonicalWorkspacePath, isPathInside, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
 import { resolveIngestRoot } from '../map-root.js';
@@ -1705,6 +1706,12 @@ export async function ingestFiles(
   path: string,
   opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean; exclude?: string[]; deadlineSignal?: AbortSignal }
 ): Promise<IngestFilesSummary> {
+  // Under `ix mcp` the tool call's deadline is this run's deadline too. The
+  // client would see it anyway (createClient combines it), but the commit loop,
+  // the stitch wait and the outcome report all read `opts.deadlineSignal`: left
+  // out of it, a timed-out ingest kept fanning out per-file commits that failed
+  // at once on the aborted signal and charged them to the backend.
+  opts = { ...opts, deadlineSignal: combineSignals(opts.deadlineSignal, currentRunSignal()) };
   const debug = opts.debug || process.env.IX_DEBUG === '1';
   const mapMode = opts.mapMode === true;
   const trueStart = performance.now();
@@ -1921,7 +1928,10 @@ export async function ingestFiles(
     process.stderr.write(`[multi-repo] system "${detectedSystem!.name}" (${systemId}) members=${detectedSystem!.members.join(', ')} packages=${Object.keys(packageRegistry).length} declaredDeps=${depCount}\n`);
   }
 
-  const client = createClient({ deadlineSignal: opts.deadlineSignal });
+  // Long-running: `ix ingest` passes no deadline, and the reads it makes per
+  // changed file (GET /v1/patches/:id) come after a parse that can take
+  // minutes, past any read deadline counted from here.
+  const client = createClient({ deadlineSignal: opts.deadlineSignal, longRunning: true });
 
   // Schema-version check forces a clean re-ingest when the backend's graph
   // format has changed in a way that invalidates existing node IDs (e.g. the

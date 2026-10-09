@@ -437,7 +437,8 @@ export function clearLocalToken(): void {
 // that module imports `getEndpoint` from this one.
 export async function createClient(): Promise<IxClient> {
   const factory = await import("../client/factory.js");
-  return factory.createClient();
+  // Pro's client may outlive one command: no read deadline.
+  return factory.createClient({ longRunning: true });
 }
 
 export function loadWorkspaces(): WorkspaceConfig[] {

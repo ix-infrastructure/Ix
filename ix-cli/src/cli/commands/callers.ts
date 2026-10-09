@@ -14,6 +14,7 @@ import { stderr } from "../stderr.js";
 import { llmLine } from "../llm.js";
 import { edgeTargetFor, rankTextUses, withEdgeSites } from "../edge-sites.js";
 import { renderWarning } from "../ui.js";
+import { currentRunSignal } from "../../client/run-signal.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -77,7 +78,7 @@ export function registerCallersCommand(program: Command): void {
           const root = resolveWorkspaceRoot();
           // The timeout bounds a search that rg could otherwise run for ever.
           const { stdout } = await execFileAsync("rg", callersTextSearchArgs(target.name, root), {
-            maxBuffer: 5 * 1024 * 1024, timeout: 10_000,
+            maxBuffer: 5 * 1024 * 1024, timeout: 10_000, signal: currentRunSignal(),
           });
 
           const allTextResults: any[] = [];

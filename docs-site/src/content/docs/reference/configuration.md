@@ -21,6 +21,7 @@ ix config set format llm      # set a value
 | `IX_FORMAT` | Default output format: `text`, `json` or `llm`. Overrides the config file. `--format` overrides it |
 | `IX_TOKEN=<token>` | Bearer token sent to the backend on every request, to any endpoint. Overrides the stored local token (see [Local token](#local-token)) |
 | `IX_DEBUG=1` | Prints full stack traces on errors |
+| `IX_READ_DEADLINE_MS=<ms>` | How long one command's reads may take in all before it fails (default 60000), so a hung backend fails a query in a minute rather than after each request's 2-minute timeout. The clock restarts after each write the command makes. `ix map`, `ix ingest` and `ix stats` have no read deadline. `0` turns it off. A read that meets a refused or dropped connection, or a 502/503/504, is retried once; writes never are |
 | `IX_MCP_SUBPROCESS=1` | Runs each MCP tool call in its own `ix` process |
 | `IX_COMMIT_FAILURE_LIMIT=<n>` | Consecutive failed commits before `ix map` stops (default 5). `0` never stops |
 | `IX_COMMIT_BASE_REV_RETRIES=<n>` | Re-sends of a commit after another writer on the same backend moved the graph revision under it (default 8) |
