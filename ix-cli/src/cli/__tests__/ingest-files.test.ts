@@ -1315,8 +1315,8 @@ describe("ingestFiles against a fake backend", () => {
   });
 
   describe("bulk requests bounded by size (IN-05)", () => {
-    // 1,100 files: three parse batches, so what the first batch learns has two
-    // more batches to hold for. The backend refuses a bulk over 300 ops.
+    // More than one parse batch (500 files), so what the first batch learns has
+    // a later batch to hold for. The backend refuses a bulk over 300 ops.
     const tooLarge = () => backend.requests.filter(r => r.path === "/v1/patches/bulk" && r.code === 413).length;
     const saved = process.env.IX_COMMIT_MAX_OPS;
     afterEach(() => {
@@ -1324,8 +1324,14 @@ describe("ingestFiles against a fake backend", () => {
       else process.env.IX_COMMIT_MAX_OPS = saved;
     });
 
-    it("learns the size from the first 413 that suggests one, and is refused no more that run", async () => {
-      fixture(1100);
+    // 560 files, two parse batches: 500, then 60. At 7 ops a file the second
+    // batch is 420 ops, over the cap at the default bounds, so it is refused
+    // too unless the run kept what the first batch learned. It used to be
+    // 1,100 files (three batches), which timed out once on a slow Windows
+    // runner; the second batch alone is what the assertion needs. The longer
+    // timeout is a backstop for the fixture writes and parse there.
+    it("learns the size from the first 413 that suggests one, and is refused no more that run", { timeout: 90_000 }, async () => {
+      fixture(560);
       backend.maxBulkOps = 300;
       backend.suggestMaxPatches = true;
 
@@ -1333,8 +1339,12 @@ describe("ingestFiles against a fake backend", () => {
 
       expect(tooLarge()).toBe(1);
       expect(summary.commitErrors).toBe(0);
-      expect(summary.patchesApplied).toBe(1100);
+      expect(summary.patchesApplied).toBe(560);
       expect(backend.singleCount, "no per-file fallback").toBe(0);
+      // Both batches were sent in bounded requests. Without the learned size,
+      // the second batch goes out as one 60-patch request and is refused.
+      const accepted = backend.requests.filter(r => r.path === "/v1/patches/bulk" && r.code !== 413);
+      expect(Math.max(...accepted.map(r => r.patches))).toBeLessThanOrEqual(Math.floor(300 / 7));
     });
 
     it("halves by ops on a 413 that suggests nothing, and later batches start at the learned size", async () => {
