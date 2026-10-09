@@ -403,17 +403,19 @@ export function getEndpoint(): string {
 }
 
 /**
- * The bearer token the client sends to `endpoint`, if any.
+ * The bearer token the client sends to `endpoint`, if any: IX_TOKEN, else the
+ * stored `auth.local_token`.
  *
- * IX_TOKEN is the user's explicit choice and goes to whatever endpoint is
- * configured. The stored `auth.local_token` belongs to the backend `ix docker`
- * runs on this machine, so it is sent only to a loopback endpoint: pointing
- * IX_ENDPOINT at another host must not hand that host the local credential.
+ * Either goes only to a loopback endpoint. The token is the local backend's
+ * (`ix docker` runs it on this machine), so pointing IX_ENDPOINT at another
+ * host must not hand that host the credential. And a remote backend has its
+ * own auth: Ix Pro's cloud wrapper adds the org's JWT only to a request that
+ * carries no Authorization header, so a bearer set here would replace it.
  */
 export function getLocalToken(endpoint: string = getEndpoint()): string | undefined {
+  if (!isLocalEndpoint(endpoint)) return undefined;
   const explicit = process.env.IX_TOKEN?.trim();
   if (explicit) return explicit;
-  if (!isLocalEndpoint(endpoint)) return undefined;
   return storedLocalToken();
 }
 

@@ -449,6 +449,23 @@ describe("ingestFiles against a fake backend", () => {
     expect(backend.singleCount, "bounded by the failure limit, not one per patch").toBeLessThan(15);
   });
 
+  it("counts a plan-mismatch 409's patches as landed (Ix-memory#273)", async () => {
+    // The backend says every patch of the bulk is already committed, under a
+    // different grouping, and names them -- without the "partially committed"
+    // text the partial-commit handling used to key on. Every re-send is refused
+    // here, so the only way to zero commit errors is to credit the 409's ids.
+    fixture(30);
+    backend.bulk409PlanMismatch = true;
+    backend.refuseReplays = true;
+
+    const summary = await run();
+
+    expect(summary.commitErrors, "confirmed landed, so not errors").toBe(0);
+    expect(summary.patchesApplied).toBe(30);
+    // Never re-bulked: the same set would land on the same refused group.
+    expect(backend.bulkCount).toBe(1);
+  });
+
   it("refuses a second stitch to a backend still running the last one (Ix#568)", async () => {
     // The marker is written when a stitch STARTS and removed only on proof
     // nothing is running. A 500 is not proof -- ArangoDB keeps executing the

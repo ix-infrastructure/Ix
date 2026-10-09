@@ -601,7 +601,8 @@ const COMMIT_CONFLICT_RETRY_PATTERNS = [
 ];
 
 /**
- * A bulk commit the server accepted only in part.
+ * A bulk commit the server accepted only in part, or whose patches all landed
+ * under a different grouping.
  *
  * Re-sending the same patches cannot fix this: the group id is derived from the
  * patch ids, so an identical retry lands on the identical rejected group. The
@@ -612,7 +613,19 @@ const COMMIT_CONFLICT_RETRY_PATTERNS = [
  * JSON body is the tail of the error string.
  */
 export function isBulkPartiallyCommittedError(err: unknown): boolean {
-  return String(err).toLowerCase().includes('partially committed');
+  return String(err).toLowerCase().includes('partially committed') || isBulkPlanMismatchError(err);
+}
+
+/**
+ * Ix-memory's 409 for a bulk whose every patch id was already committed by a
+ * different request plan (BulkPlanMismatchException, Ix-memory#273): the body
+ * is `{error: "conflict", message, committed_patch_ids, committed_count}`,
+ * without the "partially committed" text, so it is recognised by its status
+ * and the ids it names. Those ids landed, exactly as in a partial commit, and
+ * are handled the same way: counted as committed, never re-bulked.
+ */
+export function isBulkPlanMismatchError(err: unknown): boolean {
+  return /(^|\s)409: \{/.test(String(err)) && parseBulkCommittedPatchIds(err) !== undefined;
 }
 
 /**
