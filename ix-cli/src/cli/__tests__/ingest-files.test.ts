@@ -1337,7 +1337,7 @@ describe("ingestFiles against a fake backend", () => {
       expect(backend.singleCount, "no per-file fallback").toBe(0);
     });
 
-    it("halves by ops on a 413 that suggests nothing, and later batches start at the learned size", async () => {
+    it("halves on a 413 that suggests nothing, and later batches start at the learned size", async () => {
       fixture(1100);
       backend.maxBulkOps = 300;
 
@@ -1349,6 +1349,32 @@ describe("ingestFiles against a fake backend", () => {
       expect(tooLarge()).toBeLessThanOrEqual(4);
       expect(summary.commitErrors).toBe(0);
       expect(summary.patchesApplied).toBe(1100);
+    });
+
+    it("keeps its op budget after a 413 for bytes: one large file does not shrink the requests after it", async () => {
+      // 60 ordinary files and one whose patch is large for its op count (a
+      // 60,000-character identifier). The body cap fits that one file alone,
+      // and all 60 others together, but not all 61. Learning an op budget from
+      // that 413 halved it on every bisection that still held the large file,
+      // until the files after it went a few per request.
+      fixture(60);
+      writeFileSync(
+        join(repo, "src", "big.ts"),
+        `export function ${"n".repeat(60_000)}(): number { return 1; }\n`,
+        "utf8",
+      );
+      execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+      backend.maxBulkBytes = 255_000;
+
+      const summary = await run();
+
+      const bulks = backend.requests.filter(r => r.path === "/v1/patches/bulk");
+      expect(tooLarge()).toBe(1);
+      expect(bulks.length, "the refused request, then the large file and the rest").toBe(3);
+      expect(Math.max(...bulks.filter(r => r.code !== 413).map(r => r.patches))).toBe(60);
+      expect(summary.commitErrors).toBe(0);
+      expect(summary.patchesApplied).toBe(61);
+      expect(backend.singleCount, "no per-file fallback").toBe(0);
     });
 
     it("is never refused when IX_COMMIT_MAX_OPS keeps every request under the cap", async () => {

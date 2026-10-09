@@ -542,4 +542,29 @@ describe('bulk request bounds (IN-05)', () => {
     expect(parseSuggestedMaxPatches(ARANGO_TRANSACTION_LIMIT_ERROR)).toBeUndefined();
     expect(parseSuggestedMaxPatches(new Error('413: request rejected'))).toBeUndefined();
   });
+
+  it('reads the count from the estimate\'s message when the body is not JSON, and none from a byte refusal', () => {
+    // Ix-memory BulkWriteApi.overBudget, as its message reads.
+    expect(parseSuggestedMaxPatches(new Error(
+      '413: bulk commit of 900 patches is estimated at 520 MB, over the 409 MB transaction budget; send at most 700 patches per request',
+    ))).toBe(700);
+    // The body cap, in each error policy: bytes, not a patch count.
+    expect(parseSuggestedMaxPatches(new Error(
+      '413: {"error":"payload_too_large","message":"the write exceeds the maximal transaction size; send fewer patches per request","correlation_id":"c"}',
+    ))).toBeUndefined();
+    expect(parseSuggestedMaxPatches(new Error(
+      '413: {"error":"payload_too_large","message":"the request body exceeds 67108864 bytes; send fewer patches per request"}',
+    ))).toBeUndefined();
+    expect(parseSuggestedMaxPatches(new Error('413: <html><body>413 Request Entity Too Large</body></html>'))).toBeUndefined();
+  });
+
+  it('cuts by bytes too once a byte bound is set, and only then', () => {
+    const items = [100, 100, 500, 100, 100, 100].map((b, i) => ({ i, b }));
+    const bytesOf = vi.fn((item: { b: number }) => item.b);
+    const unbounded = cutBulkChunks(items, () => 1, { maxFiles: 10, maxOps: 100 }, bytesOf);
+    expect(unbounded.map(c => c.map(item => item.i))).toEqual([[0, 1, 2, 3, 4, 5]]);
+    expect(bytesOf, 'not measured while no byte bound is set').not.toHaveBeenCalled();
+    const cut = cutBulkChunks(items, () => 1, { maxFiles: 10, maxOps: 100, maxBytes: 250 }, bytesOf);
+    expect(cut.map(c => c.map(item => item.i))).toEqual([[0, 1], [2], [3, 4], [5]]);
+  });
 });
