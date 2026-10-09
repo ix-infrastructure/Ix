@@ -796,20 +796,30 @@ export function isPayloadTooLargeError(err: unknown): boolean {
 
 /**
  * What a 413 from the bulk writer's own estimate says one request should hold
- * (Ix-memory#232: `suggestedMaxPatches` in the body). Absent from a 413 that
- * ArangoDB raised mid-write, or a proxy's.
+ * (Ix-memory#232: `suggestedMaxPatches` in the body, and "send at most N
+ * patches per request" in its message). Absent from a 413 that ArangoDB raised
+ * mid-write, from the backend's body cap, or from a proxy's.
+ *
+ * This is the only 413 that says the request held too many OPS. The others
+ * are about bytes, or say nothing, and a run must not learn an op count from
+ * them -- see `learnBulkLimits` in ingestFiles.
  */
 export function parseSuggestedMaxPatches(err: unknown): number | undefined {
+  const valid = (n: unknown): number | undefined =>
+    typeof n === 'number' && Number.isInteger(n) && n >= 1 ? n : undefined;
   const text = String(err);
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
-  if (start === -1 || end <= start) return undefined;
-  try {
-    const n = (JSON.parse(text.slice(start, end + 1)) as { suggestedMaxPatches?: unknown }).suggestedMaxPatches;
-    return typeof n === 'number' && Number.isInteger(n) && n >= 1 ? n : undefined;
-  } catch {
-    return undefined;
+  if (start !== -1 && end > start) {
+    try {
+      const n = valid((JSON.parse(text.slice(start, end + 1)) as { suggestedMaxPatches?: unknown }).suggestedMaxPatches);
+      if (n !== undefined) return n;
+    } catch {
+      /* not JSON: fall through to the message */
+    }
   }
+  const stated = /send at most (\d+) patches per request/i.exec(text);
+  return stated ? valid(Number(stated[1])) : undefined;
 }
 
 /**
@@ -831,25 +841,46 @@ export interface BulkLimits {
   maxFiles: number;
   /** Ops across the request's patches: the backend's transaction grows with them. */
   maxOps: number;
+  /**
+   * Serialized bytes across the request's patches, once a 413 that did not
+   * blame the op count has been seen: a body cap (Ix-memory's
+   * `IX_BULK_MAX_BODY_MB`), a proxy's limit, or one that gave no reason.
+   * Absent until then.
+   */
+  maxBytes?: number;
 }
 
 /**
  * Cut `items` into bulk requests in order, each within `limits`. An item over
- * `maxOps` on its own still goes, alone: one patch cannot be split.
+ * `maxOps` (or `maxBytes`) on its own still goes, alone: one patch cannot be
+ * split. `bytesOf` is consulted only while `limits.maxBytes` is set.
  */
-export function cutBulkChunks<T>(items: T[], opsOf: (item: T) => number, limits: BulkLimits): T[][] {
+export function cutBulkChunks<T>(
+  items: T[],
+  opsOf: (item: T) => number,
+  limits: BulkLimits,
+  bytesOf?: (item: T) => number,
+): T[][] {
+  const byteBound = limits.maxBytes !== undefined && bytesOf !== undefined ? limits.maxBytes : undefined;
   const chunks: T[][] = [];
   let current: T[] = [];
   let ops = 0;
+  let bytes = 0;
   for (const item of items) {
     const n = opsOf(item);
-    if (current.length > 0 && (current.length >= limits.maxFiles || ops + n > limits.maxOps)) {
+    const b = byteBound !== undefined && bytesOf ? bytesOf(item) : 0;
+    if (
+      current.length > 0 &&
+      (current.length >= limits.maxFiles || ops + n > limits.maxOps || (byteBound !== undefined && bytes + b > byteBound))
+    ) {
       chunks.push(current);
       current = [];
       ops = 0;
+      bytes = 0;
     }
     current.push(item);
     ops += n;
+    bytes += b;
   }
   if (current.length > 0) chunks.push(current);
   return chunks;
@@ -2666,25 +2697,60 @@ export async function ingestFiles(
     const bulkLimits: BulkLimits = { maxFiles: COMMIT_HTTP_MAX_FILES, maxOps: COMMIT_MAX_OPS };
     const opsOf = (item: { patch: GraphPatchPayload }): number => item.patch.ops.length;
     /**
-     * Learn from a group the backend found too large, as an op budget: the
-     * patch count its 413 suggests, at this group's ops per patch, or else
-     * half the group's ops. Then cut the group to the new bounds.
+     * A patch's size on the wire, measured only once a byte bound is in play
+     * (on a 413 that did not blame the op count, and in the cuts after it).
+     */
+    const patchBytes = new WeakMap<GraphPatchPayload, number>();
+    const bytesOf = (item: { patch: GraphPatchPayload }): number => {
+      let n = patchBytes.get(item.patch);
+      if (n === undefined) {
+        n = Buffer.byteLength(JSON.stringify(item.patch));
+        patchBytes.set(item.patch, n);
+      }
+      return n;
+    };
+    const cutToLimits = <T extends { patch: GraphPatchPayload }>(items: T[]): T[][] =>
+      cutBulkChunks(items, opsOf, bulkLimits, bytesOf);
+    /**
+     * Learn from a group the backend found too large, then cut the group to
+     * the new bounds.
+     *
+     * Only a 413 that names a patch count (the bulk writer's estimate,
+     * Ix-memory#232) says the group held too many ops. That one lowers the op
+     * budget: the suggested count at this group's ops per patch, or half the
+     * group's ops if the suggestion is no smaller than the group.
+     *
+     * Any other 413 -- the backend's body cap, a proxy's limit, or one with no
+     * reason -- is about bytes, or may be, and the op budget is left alone.
+     * Halving ops on it let one file with a large body but few ops drag the
+     * run's op budget down with every bisection, until later requests carried
+     * about one patch each. It lowers a separate byte budget instead, to half
+     * the refused group's bytes. A group that was refused for its bytes is
+     * over the cap, so that budget stays above half the cap however many
+     * times it is lowered.
      *
      * Ops, not the suggested count itself: the backend sizes its suggestion
      * from the group's average patch, and a count cut lets a run of larger
      * files through over the budget, to be refused again.
      */
     const learnBulkLimits = <T extends { patch: GraphPatchPayload }>(items: T[], err: unknown): T[][] => {
-      const ops = items.reduce((sum, item) => sum + opsOf(item), 0);
       const suggested = parseSuggestedMaxPatches(err);
-      const budget = suggested !== undefined && suggested < items.length
-        ? Math.floor((ops * suggested) / items.length)
-        : Math.floor(ops / 2);
-      bulkLimits.maxOps = Math.max(1, Math.min(bulkLimits.maxOps, budget));
-      if (debug) {
-        process.stderr.write(`\n  [bulk limits] now ${bulkLimits.maxFiles} files / ${bulkLimits.maxOps} ops per request\n`);
+      if (suggested !== undefined) {
+        const ops = items.reduce((sum, item) => sum + opsOf(item), 0);
+        const budget = suggested < items.length
+          ? Math.floor((ops * suggested) / items.length)
+          : Math.floor(ops / 2);
+        bulkLimits.maxOps = Math.max(1, Math.min(bulkLimits.maxOps, budget));
+      } else {
+        const bytes = items.reduce((sum, item) => sum + bytesOf(item), 0);
+        const budget = Math.max(1, Math.floor(bytes / 2));
+        bulkLimits.maxBytes = Math.min(bulkLimits.maxBytes ?? Number.POSITIVE_INFINITY, budget);
       }
-      return cutBulkChunks(items, opsOf, bulkLimits);
+      if (debug) {
+        const byteNote = bulkLimits.maxBytes !== undefined ? ` / ${bulkLimits.maxBytes} bytes` : '';
+        process.stderr.write(`\n  [bulk limits] now ${bulkLimits.maxFiles} files / ${bulkLimits.maxOps} ops${byteNote} per request\n`);
+      }
+      return cutToLimits(items);
     };
     const COMMIT_CONCURRENCY     = parsePositiveIntEnv('IX_COMMIT_CONCURRENCY', 8); // parallel HTTP save requests
     const COMMIT_CONFLICT_RETRIES = parsePositiveIntEnv('IX_COMMIT_CONFLICT_RETRIES', 6); // retry transient Arango lock conflicts
@@ -2785,7 +2851,7 @@ export async function ingestFiles(
       let bulkRun: PreparedPatch[] = [];
       const flushBulkRun = (): void => {
         if (bulkRun.length === 0) return;
-        chunks.push(...cutBulkChunks(bulkRun, opsOf, bulkLimits));
+        chunks.push(...cutToLimits(bulkRun));
         bulkRun = [];
       };
       for (const item of preparedPatches) {
@@ -3083,7 +3149,7 @@ export async function ingestFiles(
         let probeQueue = items.filter(item => !needsPerFile(item));
 
         while (probeQueue.length > 1) {
-          const chunk = cutBulkChunks(probeQueue, opsOf, bulkLimits)[0];
+          const chunk = cutToLimits(probeQueue)[0];
           const rest = probeQueue.slice(chunk.length);
           const bulkStart = performance.now();
           try {
@@ -3352,7 +3418,7 @@ export async function ingestFiles(
               );
             },
             splitTooLarge: learnBulkLimits,
-            recut: items => cutBulkChunks(items, opsOf, bulkLimits),
+            recut: cutToLimits,
             onSplit: (items, err) => {
               if (!debug) return;
               const first = items[0];

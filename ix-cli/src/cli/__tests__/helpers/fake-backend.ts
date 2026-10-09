@@ -44,6 +44,14 @@ export class FakeBackend {
   maxBulkOps: number | undefined = undefined;
   /** Put `suggestedMaxPatches` in that 413, as the bulk writer's estimate does. */
   suggestMaxPatches = false;
+  /**
+   * Answer a bulk whose body is over this many bytes (over two or more
+   * patches) with a 413, as Ix-memory's body cap (`IX_BULK_MAX_BODY_MB`) does:
+   * no patch count, since bytes are not ops.
+   */
+  maxBulkBytes: number | undefined = undefined;
+  /** Body bytes of each `/v1/patches/bulk` request, in order. */
+  readonly bulkBodyBytes: number[] = [];
   /** Refuse re-sends of patches a 409 already confirmed. */
   refuseReplays = false;
   /**
@@ -402,6 +410,17 @@ export class FakeBackend {
         this.aborter.abort();
       }
 
+      if (path === "/v1/patches/bulk") this.bulkBodyBytes.push(Buffer.byteLength(body));
+      if (path === "/v1/patches/bulk" && this.maxBulkBytes !== undefined && patches.length > 1 &&
+          Buffer.byteLength(body) > this.maxBulkBytes) {
+        // The OSS backend's strict error policy answers the body cap with this
+        // fixed text (ErrorHandler.payloadTooLargeJson without a suggestion).
+        return send(413, {
+          error: "payload_too_large",
+          message: "the write exceeds the maximal transaction size; send fewer patches per request",
+          correlation_id: "fake",
+        });
+      }
       if (path === "/v1/patches/bulk" && this.maxBulkOps !== undefined && patches.length > 1) {
         const ops = patches.reduce((sum, p) => sum + (p.ops?.length ?? 0), 0);
         if (ops > this.maxBulkOps) {
