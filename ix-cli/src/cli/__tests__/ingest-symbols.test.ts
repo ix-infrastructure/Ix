@@ -33,8 +33,16 @@ describe("ingest symbol table", () => {
   it("is empty for another extractor or another root", () => {
     saveIngestSymbols(root, "tree-sitter/1.29", new Map([["a.py", entry("a.py")]]));
     expect(loadIngestSymbols(root, "tree-sitter/1.30").size).toBe(0);
-    writeFileSync(ingestSymbolsPath("/other"), JSON.stringify({ version: 1, root, extractor: "tree-sitter/1.29", files: {} }));
+    writeFileSync(ingestSymbolsPath("/other"), JSON.stringify({ version: 2, root, extractor: "tree-sitter/1.29", files: {} }));
     expect(loadIngestSymbols("/other", "tree-sitter/1.29").size).toBe(0);
+  });
+
+  it("ignores a version-1 table, which a journal-unaware CLI would have read alone", () => {
+    writeFileSync(
+      ingestSymbolsPath(root),
+      JSON.stringify({ version: 1, root, extractor: "tree-sitter/1.29", files: { "a.py": entry("a.py") } }),
+    );
+    expect(loadIngestSymbols(root, "tree-sitter/1.29").size).toBe(0);
   });
 
   it("is empty when missing or unreadable, and drops malformed entries", () => {
@@ -42,7 +50,7 @@ describe("ingest symbol table", () => {
     writeFileSync(ingestSymbolsPath(root), "{not json");
     expect(loadIngestSymbols(root, "x").size).toBe(0);
     writeFileSync(ingestSymbolsPath(root), JSON.stringify({
-      version: 1, root, extractor: "x", files: { "a.py": entry("a.py"), "b.py": { hash: 3 }, "c.py": { hash: "h", summary: {} } },
+      version: 2, root, extractor: "x", files: { "a.py": entry("a.py"), "b.py": { hash: 3 }, "c.py": { hash: "h", summary: {} } },
     }));
     expect([...loadIngestSymbols(root, "x").keys()]).toEqual(["a.py"]);
     expect(existsSync(ingestSymbolsPath(root))).toBe(true);
@@ -101,7 +109,7 @@ describe("ingest symbol table", () => {
     it("keeps the table readable without the journal: version 1, every field it had", () => {
       seed(3);
       const data = JSON.parse(readFileSync(tablePath(), "utf8")) as Record<string, unknown>;
-      expect(data).toMatchObject({ version: 1, root, extractor: "x" });
+      expect(data).toMatchObject({ version: 2, root, extractor: "x" });
       expect(Object.keys(data.files as object)).toEqual(["f0.py", "f1.py", "f2.py"]);
     });
 
@@ -139,7 +147,7 @@ describe("ingest symbol table", () => {
       t.set("f1.py", { ...entry("f1.py"), hash: "h2" });
       saveIngestSymbols(root, "x", t, new Set(["f1.py"]));
       // A CLI that does not know the journal rewrites the table without a generation.
-      writeFileSync(tablePath(), JSON.stringify({ version: 1, root, extractor: "x", files: { "f1.py": entry("f1.py") } }));
+      writeFileSync(tablePath(), JSON.stringify({ version: 2, root, extractor: "x", files: { "f1.py": entry("f1.py") } }));
       const loaded = loadIngestSymbols(root, "x");
       expect(loaded.get("f1.py")?.hash).toBe("h1");
       // And the save after that replaces it rather than appending to it.

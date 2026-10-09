@@ -22,8 +22,13 @@ import { ingestSymbolsJournalPath, ingestSymbolsPath } from "./config.js";
  * wrote it.
  */
 
-/** Bump when the stored shape changes; an older table is ignored, not migrated. */
-const TABLE_VERSION = 1;
+/**
+ * Bump when the stored shape or meaning changes; an older table is ignored,
+ * not migrated. 2: the table may be extended by a journal (below), so a CLI
+ * that reads the table alone would see a stale "before" for the run's
+ * dependents step.
+ */
+const TABLE_VERSION = 2;
 
 /** What core-ingestion's `FileSummary` looks like from here: opaque except for the path. */
 export interface StoredSummary {
@@ -89,10 +94,12 @@ interface SerializedSymbolTable {
 /**
  * The table is written in full only now and then. In between, a run that
  * changed a few entries appends them to a journal beside it, one JSON record
- * per line, and the next load applies the journal over the table. The table
- * keeps its version-1 shape, so a CLI that does not know about the journal
- * still reads it; the entries it lacks are then merely older, and an older
- * entry is checked against its file's hash and mtime before it is used.
+ * per line, and the next load applies the journal over the table. A table
+ * read without its journal is not merely older: the dependents step diffs the
+ * names a file exported before this run against after it, and a "before"
+ * several journaled runs behind the backend misses renames that already
+ * landed. So the table is version 2, which a CLI that does not know about the
+ * journal ignores (it re-parses) rather than reading alone.
  *
  * Line 1 is a header naming the table it extends; each line after it is
  * `{"k": path, "e": entry}` (set) or `{"k": path, "d": 1}` (removed).
