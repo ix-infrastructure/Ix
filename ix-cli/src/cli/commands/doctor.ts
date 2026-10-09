@@ -208,6 +208,11 @@ export function checkNestedWorkspaces(
   };
 }
 
+/** A remote backend that asks for the local token: this CLI never sends one off the machine. */
+const REMOTE_TOKEN_HINT =
+  "this CLI sends its token (IX_TOKEN or the stored one) only to a backend on this machine; " +
+  "reach that backend through a local port forward and point IX_ENDPOINT at it";
+
 /**
  * Does the backend require the local bearer token, and does this CLI have the
  * one it accepts? `caps` is the `/v1/capabilities` answer, or the error asking
@@ -224,9 +229,9 @@ export function assessLocalAuth(
       ok: false,
       detail: sendsToken
         ? "the backend refused this CLI's token — " +
-          (local ? "run 'ix docker start --local-token' to give the backend the stored one" : "check IX_TOKEN")
+          (local ? "run 'ix docker start --local-token' to give the backend the stored one" : REMOTE_TOKEN_HINT)
         : "the backend requires a token and this CLI has none — " +
-          (local ? "run 'ix docker start --local-token', or set IX_TOKEN" : "set IX_TOKEN"),
+          (local ? "run 'ix docker start --local-token', or set IX_TOKEN" : REMOTE_TOKEN_HINT),
     };
   }
   if (caps instanceof Error) return { ok: true, detail: "backend unreachable (skipped)" };
@@ -338,7 +343,8 @@ function doctorClient(): { endpoint: string; client: IxClient } {
   } catch (e) {
     if (!isConfigParseError(e)) throw e;
     // createClient read the stored token from the file that does not parse.
-    const token = process.env.IX_TOKEN?.trim();
+    // Loopback only, as getLocalToken would have decided.
+    const token = isLocalEndpoint(endpoint) ? process.env.IX_TOKEN?.trim() : undefined;
     // eslint-disable-next-line no-restricted-syntax -- the factory cannot build a client without config.yaml
     return { endpoint, client: new IxClient(endpoint, undefined, token ? { token } : {}) };
   }
