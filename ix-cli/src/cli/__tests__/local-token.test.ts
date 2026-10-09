@@ -131,12 +131,55 @@ describe("the client sends the token on every request", () => {
 });
 
 describe("which token goes where", () => {
-  it("IX_TOKEN wins, and goes to any endpoint", async () => {
+  it("IX_TOKEN wins on a loopback endpoint and is never sent anywhere else", async () => {
     storeToken("b".repeat(64));
     process.env.IX_TOKEN = TOKEN;
     const { getLocalToken } = await import("../config.js");
     expect(getLocalToken("http://localhost:8090")).toBe(TOKEN);
-    expect(getLocalToken("https://ix.example.com")).toBe(TOKEN);
+    expect(getLocalToken("http://127.0.0.1:8090")).toBe(TOKEN);
+    expect(getLocalToken("https://ix.example.com")).toBeUndefined();
+    expect(getLocalToken("https://tunnel.ix-infra.com/t/acme")).toBeUndefined();
+    expect(getLocalToken("http://127.0.0.1.evil.com:8090")).toBeUndefined();
+  });
+
+  it("a client for a remote endpoint sends no Authorization header, even with IX_TOKEN set", async () => {
+    storeToken(TOKEN);
+    process.env.IX_TOKEN = TOKEN;
+    const sent: Array<string | null> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      sent.push(new Headers(init?.headers).get("authorization"));
+      return new Response(JSON.stringify({ results: [] }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const { createClient } = await import("../../client/factory.js");
+    const client = createClient({ endpoint: "https://ix.example.com" });
+    expect(client.sendsToken).toBe(false);
+    await client.search("x");
+    expect(sent).toEqual([null]);
+  });
+
+  it("Ix Pro's cloud JWT is no longer replaced by IX_TOKEN (createClient via config.ts)", async () => {
+    // Pro's cloud-auth.ts wraps fetch and adds `Bearer <org JWT>` to requests
+    // at the trusted cloud origin only when no Authorization header is set.
+    // Before, IX_TOKEN went to every endpoint and took the JWT's place.
+    const cloud = "https://tunnel.example.com/t/acme";
+    writeFileSync(join(home, "config.yaml"), `endpoint: ${cloud}\nformat: text\n`);
+    process.env.IX_TOKEN = TOKEN;
+    const sent: Array<string | null> = [];
+    const inner = async (_input: unknown, init?: RequestInit) => {
+      sent.push(new Headers(init?.headers).get("authorization"));
+      return new Response(JSON.stringify({ results: [] }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const headers = new Headers(init?.headers);
+      if (String(input instanceof Request ? input.url : input).startsWith(cloud) && !headers.get("authorization")) {
+        headers.set("authorization", "Bearer org-jwt");
+      }
+      return inner(input, { ...init, headers });
+    });
+    const { createClient } = await import("../config.js");
+    const client = await createClient();
+    await client.search("x");
+    expect(sent).toEqual(["Bearer org-jwt"]);
   });
 
   it("the stored token goes only to a loopback endpoint", async () => {
@@ -178,7 +221,9 @@ describe("errors and doctor", () => {
       error: "local_token_required",
       next: expect.stringContaining("ix docker start --local-token"),
     });
-    expect(localTokenRequiredError("https://ix.example.com").next).toMatch(/IX_TOKEN/);
+    // A remote backend is not told to set IX_TOKEN: it would never be sent there.
+    expect(localTokenRequiredError("https://ix.example.com").next).toMatch(/only to a backend on this machine/);
+    expect(localTokenRequiredError("https://ix.example.com").next).toMatch(/IX_ENDPOINT/);
     expect(localTokenRequiredError("https://ix.example.com").next).not.toMatch(/ix docker/);
   });
 
@@ -210,6 +255,11 @@ describe("errors and doctor", () => {
     expect(assessLocalAuth({ local_auth: "bearer-v1", local_auth_enforcing: false }, false, true)).toMatchObject({
       ok: true, detail: expect.stringMatching(/not required/),
     });
+    // A remote backend asking for a token is not told to set IX_TOKEN.
+    expect(assessLocalAuth(refused, false, false)).toMatchObject({
+      ok: false, detail: expect.stringMatching(/only to a backend on this machine/),
+    });
+    expect(assessLocalAuth(refused, false, false).detail).not.toMatch(/set IX_TOKEN/);
   });
 });
 
