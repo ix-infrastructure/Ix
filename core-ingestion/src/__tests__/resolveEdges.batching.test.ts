@@ -127,8 +127,8 @@ describe('resolveEdges scales with the repository', () => {
 
   it('doubling the files keeps the time well under quadratic', () => {
     // Best of seven on sizes large enough that one scheduler hiccup can't swing
-    // the ratio. Doubling measures ~2.2x locally but sits right at 3x on CI
-    // runners; quadratic would be ~4x, so 3.5x still catches it.
+    // the ratio. Linear doubling is ~2x and quadratic ~4x; shared CI runners sit
+    // well above linear, so the bound is 3.5x, which still catches quadratic.
     const time = (results: FileParseResult[]) => {
       const index = indexOf(results);
       return Math.min(...Array.from({ length: 7 }, () => {
@@ -180,15 +180,25 @@ describe('resolveEdges against a summarized index', () => {
       }
       return { results, index: indexOf(results) };
     }
-    const time = ({ results, index }: ReturnType<typeof repo>) => Math.min(...[0, 1, 2].map(() => {
+    // Best of seven samples, each resolving the batch REPEATS times. One
+    // resolve of a one-file batch is so short that single resolves let one
+    // scheduler hiccup swing the ratio past the old bound on CI runners
+    // although the code was linear; several per sample lifts each sample
+    // well above timer noise.
+    const REPEATS = 5;
+    const time = ({ results, index }: ReturnType<typeof repo>) => Math.min(...Array.from({ length: 7 }, () => {
       const t = performance.now();
-      resolveEdges([results[0]], undefined, index);
+      for (let i = 0; i < REPEATS; i++) resolveEdges([results[0]], undefined, index);
       return performance.now() - t;
     }));
     const small = repo(3000);
     const large = repo(12000);
-    time(small); // warm up
-    // 4x the files: linear is ~4x, the old per-call de-dup was ~16x.
-    expect(time(large) / time(small)).toBeLessThan(8);
-  });
+    time(small); // warm up both sizes
+    time(large);
+    // 4x the files: linear is ~4x (a little more, as the larger index costs a
+    // little more per entry), the old per-call de-dup was ~16x. 10 leaves room
+    // above linear for slow, noisy runners and still fails the quadratic
+    // behaviour by a wide margin.
+    expect(time(large) / time(small)).toBeLessThan(10);
+  }, 60_000);
 });
