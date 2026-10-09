@@ -1146,6 +1146,17 @@ describe("ingestFiles against a fake backend", () => {
     });
   });
 
+  it("counts files tree-sitter parsed with errors, and still ingests them", async () => {
+    fixture(2);
+    writeFileSync(join(repo, "src", "broken.ts"), "export function ok() { return 1; }\nexport function bad( {\n", "utf8");
+    execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+
+    const summary = await run();
+
+    expect(summary.filesWithParseErrors).toBe(1);
+    expect(backend.acceptedPatches()).toBe(3);
+  });
+
   it("counts a file over the size limit in the summary, so ix map can say so", async () => {
     fixture(2);
     writeFileSync(join(repo, "src", "huge.ts"), `export const big = "${"x".repeat(1024 * 1024 + 10)}";\n`, "utf8");

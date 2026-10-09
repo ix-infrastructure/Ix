@@ -26,7 +26,6 @@ import {
   map,
   resetBackend,
   expectSameGraph,
-  failsUntil,
   signature,
 } from "./harness.js";
 
@@ -93,50 +92,50 @@ describe("revert to earlier content", () => {
     expectSameGraph("rename and back", await signature(env, co), a);
   });
 
-  it(
-    "[fails until BEW-03, IN-04] delete a file and restore it equals the original",
-    failsUntil(["BEW-03", "IN-04"], async () => {
-      const co = checkout("polyglot");
-      map(env, co);
-      const a = await signature(env, co);
+  // Was failsUntil BEW-03/IN-04(/IN-10). What was left was callers of the
+  // deleted or renamed file's names: unchanged, so nothing re-resolved them.
+  // IN-11 re-resolves the files that refer to a changed name.
+  it("delete a file and restore it equals the original", async () => {
+    const co = checkout("polyglot");
+    map(env, co);
+    const a = await signature(env, co);
 
-      rmSync(join(co.dir, "app/pricing.py"));
-      map(env, co);
-      git(co.dir, "checkout", "--", "app/pricing.py");
-      map(env, co);
+    rmSync(join(co.dir, "app/pricing.py"));
+    map(env, co);
+    git(co.dir, "checkout", "--", "app/pricing.py");
+    map(env, co);
 
-      expectSameGraph("delete and restore", await signature(env, co), a);
-    }),
-  );
+    expectSameGraph("delete and restore", await signature(env, co), a);
+  });
 
-  it(
-    "[fails until BEW-03, IN-04, IN-10] branch round trip equals the starting branch",
-    failsUntil(["BEW-03", "IN-04", "IN-10"], async () => {
-      const co = checkout("polyglot");
-      git(co.dir, "checkout", "-q", "-b", "feature");
-      edit(co, "app/services.py", replaceAll("def charge(", "def charge_order("));
-      edit(co, "app/services.py", replaceAll("service.charge(", "service.charge_order("));
-      edit(co, "web/src/cart.ts", replaceAll("summary()", "describe()"));
-      edit(co, "web/src/index.ts", replaceAll("cart.summary()", "cart.describe()"));
-      rmSync(join(co.dir, "app/events.py"));
-      writeFileSync(
-        join(co.dir, "app/audit.py"),
-        "from app.utils import slugify\n\n\ndef audit_key(name):\n    return slugify(name)\n",
-      );
-      git(co.dir, "add", "-A");
-      git(co.dir, "commit", "-q", "-m", "feature");
-      git(co.dir, "checkout", "-q", "main");
+  // Was failsUntil BEW-03/IN-04(/IN-10). What was left was callers of the
+  // deleted or renamed file's names: unchanged, so nothing re-resolved them.
+  // IN-11 re-resolves the files that refer to a changed name.
+  it("branch round trip equals the starting branch", async () => {
+    const co = checkout("polyglot");
+    git(co.dir, "checkout", "-q", "-b", "feature");
+    edit(co, "app/services.py", replaceAll("def charge(", "def charge_order("));
+    edit(co, "app/services.py", replaceAll("service.charge(", "service.charge_order("));
+    edit(co, "web/src/cart.ts", replaceAll("summary()", "describe()"));
+    edit(co, "web/src/index.ts", replaceAll("cart.summary()", "cart.describe()"));
+    rmSync(join(co.dir, "app/events.py"));
+    writeFileSync(
+      join(co.dir, "app/audit.py"),
+      "from app.utils import slugify\n\n\ndef audit_key(name):\n    return slugify(name)\n",
+    );
+    git(co.dir, "add", "-A");
+    git(co.dir, "commit", "-q", "-m", "feature");
+    git(co.dir, "checkout", "-q", "main");
 
-      map(env, co);
-      const main = await signature(env, co);
-      git(co.dir, "checkout", "-q", "feature");
-      map(env, co);
-      git(co.dir, "checkout", "-q", "main");
-      map(env, co);
+    map(env, co);
+    const main = await signature(env, co);
+    git(co.dir, "checkout", "-q", "feature");
+    map(env, co);
+    git(co.dir, "checkout", "-q", "main");
+    map(env, co);
 
-      expectSameGraph("branch round trip", await signature(env, co), main);
-    }),
-  );
+    expectSameGraph("branch round trip", await signature(env, co), main);
+  });
 });
 
 describe("two workspaces in one backend", () => {
@@ -176,20 +175,18 @@ describe("incremental equals fresh", () => {
     expectSameGraph("typescript edit", incremental, await freshSignature(env, co));
   });
 
-  it(
-    "[fails until IN-04, IN-10] rename a file",
-    failsUntil(["IN-04", "IN-10"], async () => {
-      const co = checkout("polyglot");
-      map(env, co);
-      renameSync(join(co.dir, "app/events.py"), join(co.dir, "app/bus.py"));
-      for (const f of ["app/services.py", "app/api.py"])
-        edit(co, f, replaceAll("from app.events import", "from app.bus import"));
-      map(env, co);
-      const incremental = await signature(env, co);
+  // Was [fails until IN-04, IN-10]. Both have landed.
+  it("rename a file", async () => {
+    const co = checkout("polyglot");
+    map(env, co);
+    renameSync(join(co.dir, "app/events.py"), join(co.dir, "app/bus.py"));
+    for (const f of ["app/services.py", "app/api.py"])
+      edit(co, f, replaceAll("from app.events import", "from app.bus import"));
+    map(env, co);
+    const incremental = await signature(env, co);
 
-      expectSameGraph("file rename", incremental, await freshSignature(env, co));
-    }),
-  );
+    expectSameGraph("file rename", incremental, await freshSignature(env, co));
+  });
 
   it("add a file", async () => {
     const co = checkout("polyglot");

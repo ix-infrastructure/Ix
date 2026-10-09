@@ -538,6 +538,28 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "startByte": 654,
     },
     {
+      "chunkKind": "class",
+      "container": undefined,
+      "contentHash": "a73c66f5052aa408",
+      "endByte": 782,
+      "language": "typescript",
+      "lineEnd": 20,
+      "lineStart": 20,
+      "name": "CheckStatus",
+      "startByte": 738,
+    },
+    {
+      "chunkKind": "class",
+      "container": undefined,
+      "contentHash": "1ce85fb2228bdf6c",
+      "endByte": 823,
+      "language": "typescript",
+      "lineEnd": 22,
+      "lineStart": 22,
+      "name": "Loader",
+      "startByte": 784,
+    },
+    {
       "chunkKind": "function",
       "container": undefined,
       "contentHash": "6c07d4a71f08370e",
@@ -630,6 +652,24 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "lineEnd": 18,
       "lineStart": 14,
       "name": "CheckResult",
+      "packageScope": undefined,
+    },
+    {
+      "container": undefined,
+      "kind": "class",
+      "language": "typescript",
+      "lineEnd": 20,
+      "lineStart": 20,
+      "name": "CheckStatus",
+      "packageScope": undefined,
+    },
+    {
+      "container": undefined,
+      "kind": "class",
+      "language": "typescript",
+      "lineEnd": 22,
+      "lineStart": 22,
+      "name": "Loader",
       "packageScope": undefined,
     },
     {
@@ -740,6 +780,16 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "srcName": "sample-command.ts",
     },
     {
+      "dstName": "CheckStatus",
+      "predicate": "CONTAINS",
+      "srcName": "sample-command.ts",
+    },
+    {
+      "dstName": "Loader",
+      "predicate": "CONTAINS",
+      "srcName": "sample-command.ts",
+    },
+    {
       "dstName": "runChecks",
       "predicate": "CONTAINS",
       "srcName": "sample-command.ts",
@@ -787,6 +837,11 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "srcName": "sample-command.ts",
     },
     {
+      "dstName": "CheckResult",
+      "predicate": "REFERENCES",
+      "srcName": "runChecks",
+    },
+    {
       "dstName": "push",
       "predicate": "CALLS",
       "srcName": "runChecks",
@@ -798,6 +853,11 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "srcName": "runChecks",
     },
     {
+      "dstName": "CheckResult",
+      "predicate": "REFERENCES",
+      "srcName": "runOne",
+    },
+    {
       "dstName": "join",
       "predicate": "CALLS",
       "srcName": "runOne",
@@ -807,6 +867,11 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "dstName": "readFileSync",
       "predicate": "CALLS",
       "srcName": "runOne",
+    },
+    {
+      "dstName": "CheckResult",
+      "predicate": "REFERENCES",
+      "srcName": "statusOf",
     },
     {
       "dstName": "CheckStatus",
@@ -824,6 +889,16 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "srcName": "statusOf",
     },
     {
+      "dstName": "Loader",
+      "predicate": "REFERENCES",
+      "srcName": "CheckRunner",
+    },
+    {
+      "dstName": "Loader",
+      "predicate": "REFERENCES",
+      "srcName": "CheckRunner.constructor",
+    },
+    {
       "dstName": "loader",
       "predicate": "CALLS",
       "srcName": "CheckRunner.load",
@@ -832,6 +907,11 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "dstName": "CheckRunner.loader",
       "predicate": "CALLS",
       "srcName": "CheckRunner.load",
+    },
+    {
+      "dstName": "CheckResult",
+      "predicate": "REFERENCES",
+      "srcName": "CheckRunner.describe",
     },
     {
       "bareCall": true,

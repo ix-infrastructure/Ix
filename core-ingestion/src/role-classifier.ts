@@ -29,10 +29,18 @@ const TEST_FILE_PATTERNS: Array<{ pattern: RegExp; signal: string }> = [
   { pattern: /\.test\.[^.]+$/i,  signal: 'filename:.test.' },
   { pattern: /\.spec\.[^.]+$/i,  signal: 'filename:.spec.' },
   { pattern: /Tests?\.[^.]+$/,   signal: 'filename:Test(s).' },  // matches Test.cs and Tests.cs
-  { pattern: /Spec\.[^.]+$/,     signal: 'filename:Spec.' },
+  // FooSpec is a test only where the test frameworks name them so (ScalaTest,
+  // Spock, Kotest). Elsewhere `PodSpec.go` and `OpenApiSpec.ts` are code.
+  { pattern: /Spec\.(?:scala|groovy|kt|kts)$/, signal: 'filename:Spec.' },
   { pattern: /_test\.[^.]+$/i,   signal: 'filename:_test.' },
   { pattern: /_spec\.[^.]+$/i,   signal: 'filename:_spec.' },
+  // pytest's conventions
+  { pattern: /^test_[^/\\]*\.py$/, signal: 'filename:test_*.py' },
+  { pattern: /^conftest\.py$/,   signal: 'filename:conftest.py' },
 ];
+
+/** Data and docs: a `spec/` directory holding these is an API spec, not tests. */
+const DATA_FILE = /\.(?:ya?ml|json|toml|md|txt|xml|proto|graphql)$/i;
 
 const TEST_IMPORT_PATTERNS: Array<{ pattern: RegExp; signal: string }> = [
   { pattern: /from ['"](?:jest|vitest|mocha|chai|sinon|jasmine|@testing-library)/,  signal: 'import:js_test_framework' },
@@ -46,7 +54,8 @@ const TEST_IMPORT_PATTERNS: Array<{ pattern: RegExp; signal: string }> = [
   { pattern: /import\s+org\.scalatest/,                                              signal: 'import:scalatest' },
   { pattern: /import\s+munit/,                                                       signal: 'import:munit' },
   { pattern: /import\s+zio\.test/,                                                   signal: 'import:zio_test' },
-  { pattern: /"testing"/,                                                            signal: 'import:go_testing' },
+  // Go's "testing" is checked separately, and only for .go files: the string
+  // alone matched `=== "testing"` in any language.
   { pattern: /require\s+['"]rspec['"]/,                                              signal: 'import:rspec' },
   { pattern: /require\s+['"]minitest['"]/,                                           signal: 'import:minitest' },
   // C#/.NET test frameworks
@@ -62,13 +71,17 @@ const FIXTURE_PATH_PATTERNS: Array<{ pattern: RegExp; signal: string }> = [
   { pattern: /[/\\]testdata[/\\]/i,          signal: 'path:testdata/' },
 ];
 
+// Whole words only -- separated by `.`, `_`, `-` or the ends of the name, or
+// a CamelCase prefix for test doubles (`FakeClock.java`). As substrings they
+// caught `resample.py`, `SampleRate.java` and `seed.ts`, and a fixture's
+// symbols are hidden by default. `seed` is gone: a seed script is code.
 const FIXTURE_FILE_PATTERNS: Array<{ pattern: RegExp; signal: string }> = [
-  { pattern: /fixture/i, signal: 'filename:fixture' },
+  { pattern: /(?:^|[._-])fixtures?(?:[._-]|$)/i, signal: 'filename:fixture' },
   { pattern: /\.mock\.[^.]+$/i, signal: 'filename:.mock.' },
-  { pattern: /stub/i,    signal: 'filename:stub' },
-  { pattern: /fake/i,    signal: 'filename:fake' },
-  { pattern: /sample/i,  signal: 'filename:sample' },
-  { pattern: /seed/i,    signal: 'filename:seed' },
+  // No `i` flag: it would let `^Stub[A-Z]` match "Stubborn".
+  { pattern: /(?:^|[._-])(?:stubs?|Stubs?|STUBS?)(?:[._-]|$)|^Stub[A-Z]/, signal: 'filename:stub' },
+  { pattern: /(?:^|[._-])(?:fakes?|Fakes?|FAKES?)(?:[._-]|$)|^Fake[A-Z]/, signal: 'filename:fake' },
+  { pattern: /(?:^|[._-])samples?(?:[._-]|$)/i, signal: 'filename:sample' },
 ];
 
 const GENERATED_PATH_PATTERNS: Array<{ pattern: RegExp; signal: string }> = [
@@ -124,76 +137,77 @@ const TOOLING_FILE_PATTERNS: Array<{ pattern: RegExp; signal: string }> = [
 // Main classifier
 // ---------------------------------------------------------------------------
 
+/** A Go file that imports the standard `testing` package. */
+const GO_TESTING_IMPORT = /^import\s*(?:\([^)]*"testing"|"testing")/m;
+
 export function classifyFileRole(filePath: string, source?: string): RoleClassification {
-  const normalizedPath = filePath.replace(/\\/g, '/');
+  // Always with a leading `/`: the directory patterns need a separator before
+  // the name, and the CLI passes workspace-relative paths, so a root-level
+  // `tests/`, `vendor/` or `scripts/` never matched.
+  const normalizedPath = `/${filePath.replace(/\\/g, '/').replace(/^\/+/, '')}`;
   const fileName = nodePath.basename(filePath);
-  const signals: string[] = [];
+  const isDataFile = DATA_FILE.test(fileName);
+
+  /** First matching pattern of `table` against `subject`, adding `weight` to `bucket`. */
+  const buckets = new Map<EntityRole, { score: number; signals: string[] }>();
+  const add = (
+    bucket: EntityRole,
+    table: Array<{ pattern: RegExp; signal: string }>,
+    subject: string,
+    weight: number,
+    skip?: (signal: string) => boolean,
+  ): void => {
+    for (const { pattern, signal } of table) {
+      if (skip?.(signal) || !pattern.test(subject)) continue;
+      const b = buckets.get(bucket) ?? { score: 0, signals: [] };
+      b.score += weight;
+      b.signals.push(signal);
+      buckets.set(bucket, b);
+      return;
+    }
+  };
 
   // --- Test ---
-  let testScore = 0;
-  for (const { pattern, signal } of TEST_PATH_PATTERNS) {
-    if (pattern.test(normalizedPath)) { testScore += 0.8; signals.push(signal); break; }
-  }
-  for (const { pattern, signal } of TEST_FILE_PATTERNS) {
-    if (pattern.test(fileName)) { testScore += 0.9; signals.push(signal); break; }
-  }
+  add('test', TEST_PATH_PATTERNS, normalizedPath, 0.8, signal => signal === 'path:spec/' && isDataFile);
+  add('test', TEST_FILE_PATTERNS, fileName, 0.9);
   if (source) {
-    for (const { pattern, signal } of TEST_IMPORT_PATTERNS) {
-      if (pattern.test(source)) { testScore += 0.5; signals.push(signal); break; }
-    }
+    const imports = fileName.endsWith('.go')
+      ? [...TEST_IMPORT_PATTERNS, { pattern: GO_TESTING_IMPORT, signal: 'import:go_testing' }]
+      : TEST_IMPORT_PATTERNS;
+    add('test', imports, source, 0.5);
   }
 
   // --- Fixture ---
-  let fixtureScore = 0;
-  for (const { pattern, signal } of FIXTURE_PATH_PATTERNS) {
-    if (pattern.test(normalizedPath)) { fixtureScore += 0.8; signals.push(signal); break; }
-  }
-  for (const { pattern, signal } of FIXTURE_FILE_PATTERNS) {
-    if (pattern.test(fileName)) { fixtureScore += 0.6; signals.push(signal); break; }
-  }
+  add('fixture', FIXTURE_PATH_PATTERNS, normalizedPath, 0.8);
+  add('fixture', FIXTURE_FILE_PATTERNS, fileName, 0.6);
 
   // --- Generated ---
-  let generatedScore = 0;
-  for (const { pattern, signal } of GENERATED_PATH_PATTERNS) {
-    if (pattern.test(normalizedPath)) { generatedScore += 0.7; signals.push(signal); break; }
-  }
-  if (source) {
-    for (const { pattern, signal } of GENERATED_SOURCE_PATTERNS) {
-      if (pattern.test(source)) { generatedScore += 0.9; signals.push(signal); break; }
-    }
-  }
+  add('generated', GENERATED_PATH_PATTERNS, normalizedPath, 0.7);
+  if (source) add('generated', GENERATED_SOURCE_PATTERNS, source, 0.9);
 
   // --- External ---
-  let externalScore = 0;
-  for (const { pattern, signal } of EXTERNAL_PATH_PATTERNS) {
-    if (pattern.test(normalizedPath)) { externalScore += 0.9; signals.push(signal); break; }
-  }
+  add('external', EXTERNAL_PATH_PATTERNS, normalizedPath, 0.9);
 
   // --- Tooling ---
-  let toolingScore = 0;
-  for (const { pattern, signal } of TOOLING_PATH_PATTERNS) {
-    if (pattern.test(normalizedPath)) { toolingScore += 0.6; signals.push(signal); break; }
-  }
-  for (const { pattern, signal } of TOOLING_FILE_PATTERNS) {
-    if (pattern.test(fileName)) { toolingScore += 0.7; signals.push(signal); break; }
-  }
+  add('tooling', TOOLING_PATH_PATTERNS, normalizedPath, 0.6);
+  add('tooling', TOOLING_FILE_PATTERNS, fileName, 0.7);
 
   // --- Pick winner ---
-  const scores: Array<[EntityRole, number]> = [
-    ['test',      testScore],
-    ['fixture',   fixtureScore],
-    ['generated', generatedScore],
-    ['external',  externalScore],
-    ['tooling',   toolingScore],
-  ];
-  scores.sort((a, b) => b[1] - a[1]);
-  const [topRole, topScore] = scores[0];
+  // On a tie the more specific bucket wins: `test/fixtures/x.json` is a
+  // fixture, though both directories now match from the root.
+  const order: EntityRole[] = ['fixture', 'test', 'generated', 'external', 'tooling'];
+  let top: { role: EntityRole; score: number; signals: string[] } | undefined;
+  for (const role of order) {
+    const b = buckets.get(role);
+    if (b && (!top || b.score > top.score)) top = { role, ...b };
+  }
 
-  if (topScore >= 0.5) {
+  if (top && top.score >= 0.5) {
     return {
-      role: topRole,
-      role_confidence: parseFloat(Math.min(topScore, 1.0).toFixed(2)),
-      role_signals: signals,
+      role: top.role,
+      role_confidence: parseFloat(Math.min(top.score, 1.0).toFixed(2)),
+      // The winner's reasons only; another bucket's signals explain nothing.
+      role_signals: top.signals,
     };
   }
 

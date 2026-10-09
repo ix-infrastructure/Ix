@@ -278,6 +278,12 @@ export interface FileParseResult {
    * Absent for non-PHP files and for PHP files in the global namespace.
    */
   phpNamespaceBlocks?: number;
+  /**
+   * The tree has ERROR or MISSING nodes: tree-sitter recovered, and whatever
+   * sat in the broken region may be missing from `entities`. Absent when the
+   * file parsed cleanly.
+   */
+  hasParseErrors?: true;
   fileRole: RoleClassification;
 }
 
@@ -351,6 +357,12 @@ const TYPE_BUILTINS = new Set([
   // TypeScript / JavaScript
   'string', 'number', 'boolean', 'void', 'null', 'undefined', 'any', 'never',
   'unknown', 'object', 'bigint', 'symbol',
+  // TypeScript utility types, now that generic arguments, arrays and unions
+  // are referenced too. Only names no other language uses for its own types:
+  // this set is shared, and `Buffer` or `Error` are real types elsewhere.
+  'Record', 'Partial', 'Required', 'Readonly', 'ReadonlyArray', 'Pick', 'Omit',
+  'Exclude', 'Extract', 'NonNullable', 'ReturnType', 'Parameters', 'InstanceType',
+  'Awaited', 'PromiseLike', 'WeakMap', 'WeakSet',
   // Java / Kotlin / Scala
   'String', 'Integer', 'Long', 'Double', 'Float', 'Boolean', 'Byte', 'Short',
   'Character', 'Object', 'Void', 'Int', 'Unit', 'Any', 'AnyVal', 'AnyRef',
@@ -2540,9 +2552,10 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     // (e.g. `@Nullable Object @Nullable ... args`). The second annotation causes
     // error recovery to truncate the enclosing class_declaration, orphaning all
     // subsequent methods. Strip any @Annotation immediately before `...` in-memory
-    // so the class body parses correctly.
+    // so the class body parses correctly. Blanked with spaces, not deleted, so
+    // every later byte offset and column still matches the file on disk.
     let parseSource = language === SupportedLanguages.Java
-      ? source.replace(/@\w+\s*(?=\.\.\.)/g, '')
+      ? source.replace(/@\w+\s*(?=\.\.\.)/g, m => ' '.repeat(m.length))
       : source;
 
     // Rust: unwrap feature-gating macros (cfg_rt! { ... }, cfg_io! { ... }, etc.)
@@ -2681,6 +2694,28 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       ? collectPhpNamespaces(tree.rootNode)
       : { spans: [], blocks: 0 };
 
+    // TypeScript overloads: `function f(a: string): string;` lines above the
+    // implementation are signatures of the same function. They become one
+    // entity, spanning the implementation -- or the first signature where there
+    // is none (`declare function`, a .d.ts) -- not one entity per line, which
+    // gave the function node the span of its first signature.
+    const overloadKey = (defNode: any, name: string): string => {
+      let scope = defNode.parent;
+      while (scope && (scope.type === 'export_statement' || scope.type === 'ambient_declaration')) scope = scope.parent;
+      return `${scope?.startIndex ?? -1}:${name}`;
+    };
+    const implementedOverloads = new Set<string>();
+    if (language === SupportedLanguages.TypeScript) {
+      for (const match of pass1Matches) {
+        const def = match.captures.find((c: any) => c.name === 'definition.function')?.node;
+        const name = match.captures.find((c: any) => c.name === 'name')?.node.text;
+        if (def && name && (def.type === 'function_declaration' || def.type === 'generator_function_declaration')) {
+          implementedOverloads.add(overloadKey(def, name));
+        }
+      }
+    }
+    const seenSignatures = new Set<string>();
+
     // --- First pass: collect definitions ---
     for (const match of pass1Matches) {
       checkBudget();
@@ -2713,6 +2748,12 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           ? rawName.replace(/^(['"])(.*)\1$/, '$2')
           : rawName;
         if (!name || name.length === 0) continue;
+
+        if (defCapture.node.type === 'function_signature') {
+          const key = overloadKey(defCapture.node, name);
+          if (implementedOverloads.has(key) || seenSignatures.has(key)) continue;
+          seenSignatures.add(key);
+        }
 
         // SAS module entities (DATA/PROC steps, PROC SQL CREATE) need extra
         // shaping so they reflect real data artifacts rather than parser noise.
@@ -3458,6 +3499,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       // file. A key that is present-but-undefined still serializes, which would
       // rewrite every checked-in parseFile snapshot for no behavioural reason.
       ...(phpNamespaces.blocks > 0 ? { phpNamespaceBlocks: phpNamespaces.blocks } : {}),
+      // Absent unless true, for the same reason.
+      ...(tree.rootNode.hasError ? { hasParseErrors: true as const } : {}),
       fileRole: classifyFileRole(filePath, source),
     };
   } catch (e) {

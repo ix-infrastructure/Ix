@@ -555,4 +555,19 @@ describe('colliding edge ids (#554)', () => {
 
     expect(edge.id).toBe(deterministicId('/repo/plain.ts:alpha:beta:CALLS'));
   });
+
+  it('salts the patch id, and only the patch id, with a resolution hash (IN-11)', () => {
+    const result = fileResult('src/a.ts', SupportedLanguages.TypeScript, [entity('alpha', SupportedLanguages.TypeScript)], []);
+    const plain = buildPatchWithResolution(result, 'hash', 'ws', []);
+    const salted = buildPatchWithResolution(result, 'hash', 'ws', [], undefined, undefined, 'abc123');
+    const again = buildPatchWithResolution(result, 'hash', 'ws', [], undefined, undefined, 'abc123');
+    const other = buildPatchWithResolution(result, 'hash', 'ws', [], undefined, undefined, 'def456');
+
+    expect(salted.patchId).not.toBe(plain.patchId);
+    expect(again.patchId).toBe(salted.patchId);
+    expect(other.patchId).not.toBe(salted.patchId);
+    expect(salted.ops).toEqual(plain.ops);
+    expect(salted.source).toEqual(plain.source);
+    expect(salted.replaces).toEqual(plain.replaces);
+  });
 });
