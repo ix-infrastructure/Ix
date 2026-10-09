@@ -31,7 +31,7 @@ again.
 | Symptom | Fix |
 |---|---|
 | `Ix backend not reachable` | `ix docker start`, wait, then `ix doctor` |
-| `error code=local_token_required` | The backend requires a token this CLI did not send. On the local backend run `ix docker start --local-token` (gives it the CLI's stored token); for another backend set `IX_TOKEN`. `ix doctor` reports it under "Backend token" |
+| `error code=local_token_required` | The backend requires a token this CLI did not send. On the local backend run `ix docker start --local-token` (gives it the CLI's stored token) or set `IX_TOKEN`. No token is ever sent to a backend on another host: forward its port to this machine and point `IX_ENDPOINT` at the loopback address. `ix doctor` reports it under "Backend token" |
 | Docker daemon not running | Start Docker Desktop / the Docker service, then re-run bootstrap |
 | `ix: command not found` | Re-run bootstrap (installs the CLI), or restart the shell so PATH picks up the wrapper |
 | `The '<name>' command requires Ix Pro.` | Not installed — skip the step, do not retry or mention it again this session |

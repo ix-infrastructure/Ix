@@ -10,6 +10,17 @@ type SentPatch = {
   ops?: Array<Record<string, unknown>>;
 };
 
+/** Ix-memory's ErrorHandler body for BulkPlanMismatchException (Ix-memory#273). */
+function planMismatchBody(ids: string[]): Record<string, unknown> {
+  const sorted = [...ids].sort();
+  return {
+    error: "conflict",
+    message: `bulk patch IDs were previously committed by a different request plan (${sorted.length} patch IDs)`,
+    committed_patch_ids: sorted,
+    committed_count: sorted.length,
+  };
+}
+
 /** A backend that answers the endpoints an ingest touches, and records them. */
 export class FakeBackend {
   readonly requests: Array<{ path: string; patches: number; code?: number }> = [];
@@ -91,6 +102,12 @@ export class FakeBackend {
   }
   /** Answer a bulk with 409 naming every patch as already committed. */
   bulk409AllLanded = false;
+  /**
+   * Answer a bulk with Ix-memory#273's plan-mismatch 409: every id committed
+   * by a different request plan, named in `committed_patch_ids`, and no
+   * "partially committed" text.
+   */
+  bulk409PlanMismatch = false;
   /** Status for POST /v1/stitch. */
   stitchStatus = 200;
   /**
@@ -247,7 +264,7 @@ export class FakeBackend {
       });
     }
     if (done.some((id) => this.stored.get(id)!.bulkGroup !== group)) {
-      return send(409, { error: "bulk patch IDs were previously committed by a different request plan" });
+      return send(409, planMismatchBody(ids));
     }
     return send(200, { rev: Math.max(...done.map((id) => this.stored.get(id)!.rev)), applied: 0, status: "Idempotent" });
   }
@@ -420,6 +437,9 @@ export class FakeBackend {
       }
       if (path === "/v1/patch" && this.refuseReplays) {
         return send(500, { error: "500: already committed" });
+      }
+      if (path === "/v1/patches/bulk" && this.bulk409PlanMismatch) {
+        return send(409, planMismatchBody(patches.map((p) => p.patchId ?? "")));
       }
       if (path === "/v1/patches/bulk" && this.bulk409AllLanded) {
         const ids = patches.map((p) => p.patchId).filter(Boolean);

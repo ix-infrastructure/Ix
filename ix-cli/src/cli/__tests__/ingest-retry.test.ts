@@ -8,6 +8,7 @@ import {
   DEFAULT_COMMIT_MAX_OPS,
   isAbortError,
   isBulkPartiallyCommittedError,
+  isBulkPlanMismatchError,
   isPayloadTooLargeError,
   isRetryableCommitConflict,
   parseBulkCommittedPatchIds,
@@ -386,6 +387,74 @@ const partialBody = (ids: string[], expected: number) =>
   );
 
 const item = (id: string) => ({ patch: { patchId: id } });
+
+// Ix-memory#273's answer to a bulk whose every id landed under another plan
+// (ErrorHandler, BulkPlanMismatchException): the ids, no "partially committed".
+const planMismatchBody = (ids: string[]) =>
+  new Error(
+    `409: ${JSON.stringify({
+      error: 'conflict',
+      message: `bulk patch IDs were previously committed by a different request plan (${ids.length} patch IDs)`,
+      committed_patch_ids: ids,
+      committed_count: ids.length,
+    })}`
+  );
+
+describe('plan-mismatch bulk groups (Ix-memory#273)', () => {
+  it('recognises the 409 by its ids, without the partial-commit text', () => {
+    const err = planMismatchBody(['a', 'b']);
+    expect(isBulkPlanMismatchError(err)).toBe(true);
+    expect(isBulkPartiallyCommittedError(err)).toBe(true);
+    expect(parseBulkCommittedPatchIds(err)).toEqual(new Set(['a', 'b']));
+  });
+
+  it('needs both the 409 and a list of ids it can trust', () => {
+    // The pre-#273 body named no ids: still an ordinary conflict.
+    expect(isBulkPlanMismatchError(new Error('409: {"error":"conflict","message":"bulk patch IDs were previously committed by a different request plan"}'))).toBe(false);
+    expect(isBulkPlanMismatchError(new Error('409: {"committed_patch_ids":["a",7]}'))).toBe(false);
+    expect(isBulkPlanMismatchError(new Error('500: {"committed_patch_ids":["a"]}'))).toBe(false);
+    expect(isBulkPlanMismatchError(new Error('413: {"error":"payload_too_large"}'))).toBe(false);
+  });
+
+  it('counts every named patch as landed and never re-bulks them', async () => {
+    const items = ['a', 'b', 'c'].map(item);
+    const error = planMismatchBody(['a', 'b', 'c']);
+    const commitBulk = vi.fn(async () => { throw error; });
+    const commitIndividually = vi.fn(async () => {});
+
+    await commitBulkWithPayloadSplit(items, {
+      commitBulk,
+      onBulkCommitted: vi.fn(),
+      commitIndividually,
+      patchIdOf: (i) => i.patch.patchId,
+      shouldStop: () => true,
+    });
+
+    expect(commitBulk).toHaveBeenCalledOnce();
+    // A replay, so a tripped cutoff still sends it and does not count errors.
+    expect(commitIndividually).toHaveBeenCalledWith(items, error, { replay: true });
+  });
+
+  it('resends only what the body does not name', async () => {
+    const items = ['a', 'b', 'c'].map(item);
+    const bulkCalls: string[][] = [];
+    const commitIndividually = vi.fn(async () => {});
+
+    await commitBulkWithPayloadSplit(items, {
+      commitBulk: async (batch) => {
+        bulkCalls.push(batch.map((b) => b.patch.patchId));
+        if (batch.length === 3) throw planMismatchBody(['a']);
+        return 'ok';
+      },
+      onBulkCommitted: vi.fn(),
+      commitIndividually,
+      patchIdOf: (i) => i.patch.patchId,
+    });
+
+    expect(bulkCalls).toEqual([['a', 'b', 'c'], ['b', 'c']]);
+    expect(commitIndividually).toHaveBeenCalledWith([items[0]], undefined, { replay: true });
+  });
+});
 
 describe('partly-committed bulk groups', () => {
   it('recognises the 409 and reads the ids that landed', () => {
