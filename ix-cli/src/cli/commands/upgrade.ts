@@ -1754,7 +1754,7 @@ export function registerUpgradeCommand(program: Command): void {
                 "docker",
                 // The same env and override files `ix docker start` uses, or the
                 // restart would drop the local token and a published Arango port.
-                [...backendComposeArgs(backendComposeFile), "up", "-d", "--pull", "always"],
+                [...backendComposeArgs(backendComposeFile, { writeEnv: true }), "up", "-d", "--pull", "always"],
                 { stdio: "inherit" }
               );
               console.log("[ok] Backend restarted with latest image");

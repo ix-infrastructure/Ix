@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -153,6 +153,126 @@ describe("ix docker start --local-token", () => {
     writeFileSync(override, "services:\n  arangodb:\n    ports: [\"127.0.0.1:8529:8529\"]\n");
     await dockerStart();
     expect(log()).toContain(`-f ${override} up -d`);
+  });
+});
+
+async function docker(...args: string[]): Promise<void> {
+  const { registerDockerCommand } = await import("../commands/docker.js");
+  const program = new Command().exitOverride();
+  registerDockerCommand(program);
+  await program.parseAsync(["docker", ...args], { from: "user" });
+}
+
+describe("~/.ix/backend/.env: only start writes it, and it keeps what the user set", () => {
+  const backend = () => join(t, "ix-home", "backend");
+  const envFile = () => join(backend(), ".env");
+  const HAND_SET = "# my notes\nCOMPOSE_PROJECT_NAME=backend\n\nIX_LOCAL_TOKEN=\"hand-set-token\"\nFOO=bar\n";
+
+  beforeEach(() => {
+    process.env.IX_BUNDLED_COMPOSE = REPO_COMPOSE;
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ proFeaturesEnabled: false, local_auth: "bearer-v1", local_auth_enforcing: true })));
+    mkdirSync(backend(), { recursive: true });
+    writeFileSync(envFile(), HAND_SET, { mode: 0o600 });
+  });
+
+  it.skipIf(process.platform === "win32")("status, stop and restart read it but never rewrite it", async () => {
+    writeFileSync(join(t, "up"), ""); // healthy, so status also asks compose for arangodb
+    await docker("status");
+    await docker("stop");
+    await docker("restart");
+    expect(readFileSync(envFile(), "utf8")).toBe(HAND_SET);
+    // compose is still pointed at it, so ${IX_LOCAL_TOKEN} resolves the same.
+    expect(log()).toContain(`compose --env-file ${envFile()} -f ${join(backend(), "docker-compose.yml")} ps`);
+    expect(log()).toMatch(/ down\n/);
+    expect(log()).toMatch(/ restart\n/);
+  });
+
+  it.skipIf(process.platform === "win32")("logs never rewrites it", async () => {
+    const exited = new Promise<number | undefined>((resolve) => {
+      vi.spyOn(process, "exit").mockImplementation(((code?: number) => { resolve(code); }) as never);
+    });
+    await docker("logs");
+    expect(await exited).toBe(0);
+    expect(readFileSync(envFile(), "utf8")).toBe(HAND_SET);
+    expect(log()).toContain(`--env-file ${envFile()}`);
+  });
+
+  it.skipIf(process.platform === "win32")("read-only commands create none and pass none when it is missing", async () => {
+    rmSync(envFile());
+    writeFileSync(join(t, "up"), "");
+    await docker("status");
+    expect(existsSync(envFile())).toBe(false);
+    expect(log()).not.toContain("--env-file");
+  });
+
+  it.skipIf(process.platform === "win32")("start keeps a hand-set token and the user's other lines when none is stored", async () => {
+    await dockerStart();
+    expect(readFileSync(envFile(), "utf8")).toBe(HAND_SET);
+    expect(log()).toMatch(/up -d --pull always/);
+    expect(existsSync(join(t, "ix-home", "config.yaml"))).toBe(false);
+  });
+
+  it.skipIf(process.platform === "win32")("start --local-token adopts the hand-set token instead of generating another", async () => {
+    await dockerStart("--local-token");
+    expect(readFileSync(join(t, "ix-home", "config.yaml"), "utf8")).toContain("local_token: hand-set-token");
+    expect(readFileSync(envFile(), "utf8")).toBe(HAND_SET);
+  });
+
+  it.skipIf(process.platform === "win32")("a stored token wins over a different hand-set one, in place", async () => {
+    writeFileSync(join(t, "ix-home", "config.yaml"), "auth:\n  local_token: stored-token\n");
+    await dockerStart();
+    expect(readFileSync(envFile(), "utf8"))
+      .toBe("# my notes\nCOMPOSE_PROJECT_NAME=backend\n\nIX_LOCAL_TOKEN=stored-token\nFOO=bar\n");
+  });
+
+  it.skipIf(process.platform === "win32")("start --no-local-token clears the token but keeps the other lines", async () => {
+    await dockerStart("--no-local-token");
+    expect(readFileSync(envFile(), "utf8"))
+      .toBe("# my notes\nCOMPOSE_PROJECT_NAME=backend\n\nIX_LOCAL_TOKEN=\nFOO=bar\n");
+  });
+});
+
+describe("backend .env helpers", () => {
+  it("reads the token Compose would: the last assignment, unquoted, empty as none", async () => {
+    const { envFileLocalToken } = await import("../backend-compose.js");
+    expect(envFileLocalToken("")).toBeUndefined();
+    expect(envFileLocalToken("IX_LOCAL_TOKEN=\n")).toBeUndefined();
+    expect(envFileLocalToken("IX_LOCAL_TOKEN=a\r\nexport IX_LOCAL_TOKEN='b'\n")).toBe("b");
+    expect(envFileLocalToken("# IX_LOCAL_TOKEN=commented\nX_IX_LOCAL_TOKEN=other\n")).toBeUndefined();
+    // Inline comments, read as Docker Compose reads them.
+    expect(envFileLocalToken("IX_LOCAL_TOKEN=abc # mine\n")).toBe("abc");
+    expect(envFileLocalToken('IX_LOCAL_TOKEN="abc" # mine\n')).toBe("abc");
+    expect(envFileLocalToken("IX_LOCAL_TOKEN='a#b' # note\n")).toBe("a#b");
+    expect(envFileLocalToken("IX_LOCAL_TOKEN=a#b\n")).toBe("a#b");
+  });
+
+  it("chooses the stored token, else the hand-set one unless clearing", async () => {
+    const { backendStartToken } = await import("../backend-compose.js");
+    expect(backendStartToken("s", "IX_LOCAL_TOKEN=h\n")).toBe("s");
+    expect(backendStartToken(undefined, "IX_LOCAL_TOKEN=h\n")).toBe("h");
+    expect(backendStartToken(undefined, "IX_LOCAL_TOKEN=h\n", true)).toBeUndefined();
+    expect(backendStartToken(undefined, "")).toBeUndefined();
+  });
+
+  it("does not rewrite a file that already says the same", async () => {
+    const { writeBackendEnv } = await import("../backend-compose.js");
+    const env = join(t, "same.env");
+    writeFileSync(env, "IX_LOCAL_TOKEN=x\n", { mode: 0o644 });
+    // Stat through a descriptor, not the path, so there is no check-then-use race.
+    const statOf = (p: string) => { const fd = openSync(p, "r"); try { return fstatSync(fd); } finally { closeSync(fd); } };
+    const before = statOf(env);
+    writeBackendEnv("x", env);
+    const after = statOf(env);
+    // Not rewritten (same inode, same mtime), but tightened to 0600: it holds a credential.
+    expect(after.ino).toBe(before.ino);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    if (process.platform !== "win32") expect(after.mode & 0o777).toBe(0o600);
+    writeBackendEnv("y", env);
+    expect(readFileSync(env, "utf8")).toBe("IX_LOCAL_TOKEN=y\n");
   });
 });
 

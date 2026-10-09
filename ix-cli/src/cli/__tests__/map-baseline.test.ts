@@ -5,8 +5,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { persistIngestBaselineIfClean } from "../commands/ingest.js";
-import { describeTooLargeFiles, persistCompletedMapBaseline, silentSummaryLine } from "../commands/map.js";
+import { FILES_TOO_LARGE_LISTED, listTooLargeFiles, persistIngestBaselineIfClean } from "../commands/ingest.js";
+import { describeTooLargeFiles, mapJsonPayload, persistCompletedMapBaseline, silentSummaryLine } from "../commands/map.js";
 import { loadMapBaseline, saveMapBaseline } from "../map-baseline.js";
 import { ingestMtimeCachePath } from "../config.js";
 import { hasCompletedMapBaseline } from "../stale.js";
@@ -201,5 +201,43 @@ describe("silentSummaryLine", () => {
     const line = silentSummaryLine({ ...base, stitch: " · stitch_skipped_rule=cooling", filesTooLarge: 2 });
     expect(line).toBe("map: 12 files · 1s/2ss/3m regions · 40ms · stitch_skipped_rule=cooling · too_large=2\n");
     expect(line.split("\n")).toHaveLength(2);
+  });
+});
+
+describe("mapJsonPayload", () => {
+  const result = { file_count: 3, region_count: 0, levels: 1, map_rev: 9, outcome: "ok", regions: [], hierarchy: [] };
+
+  it("carries files_too_large and up to 20 of their paths, always present", () => {
+    const payload = mapJsonPayload(result, [], {
+      parseErrors: 0, commitErrors: 0, filesTooLarge: 2, filesTooLargePaths: ["a/big.json", "b/huge.ts"],
+    });
+    expect(payload.files_too_large).toBe(2);
+    expect(payload.files_too_large_paths).toEqual(["a/big.json", "b/huge.ts"]);
+    // Additive: the fields that were there before are unchanged.
+    expect(payload).toMatchObject({ file_count: 3, region_count: 0, parse_errors: 0, commit_errors: 0, stitch_skipped: null, regions: [] });
+  });
+
+  it("reports zero and an empty list when nothing was too large, or nothing was ingested locally", () => {
+    const clean = mapJsonPayload(result, [], { parseErrors: 0, commitErrors: 0, filesTooLarge: 0, filesTooLargePaths: [] });
+    expect(clean.files_too_large).toBe(0);
+    expect(clean.files_too_large_paths).toEqual([]);
+    const remote = mapJsonPayload(result, [], undefined);
+    expect(remote.files_too_large).toBe(0);
+    expect(remote.files_too_large_paths).toEqual([]);
+    expect(JSON.parse(JSON.stringify(remote))).toHaveProperty("files_too_large_paths");
+  });
+});
+
+describe("listTooLargeFiles", () => {
+  it("lists only the oversized files, relative and sorted, and at most FILES_TOO_LARGE_LISTED", () => {
+    const record = new Map<string, "empty" | "tooLarge">();
+    for (let i = 29; i >= 0; i--) record.set(`/repo/gen/f${String(i).padStart(2, "0")}.json`, "tooLarge");
+    record.set("/repo/empty.ts", "empty");
+    const listed = listTooLargeFiles(record, p => p.replace("/repo/", ""));
+    expect(listed).toHaveLength(FILES_TOO_LARGE_LISTED);
+    expect(listed[0]).toBe("gen/f00.json");
+    expect(listed).toEqual([...listed].sort());
+    expect(listed).not.toContain("empty.ts");
+    expect(listTooLargeFiles(undefined, p => p)).toEqual([]);
   });
 });

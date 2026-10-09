@@ -1183,6 +1183,7 @@ describe("ingestFiles against a fake backend", () => {
     const summary = await run();
 
     expect(summary.filesTooLarge).toBe(1);
+    expect(summary.filesTooLargePaths).toEqual(["src/huge.ts"]);
     expect(summary.patchesApplied).toBe(2);
   });
 
@@ -1333,8 +1334,8 @@ describe("ingestFiles against a fake backend", () => {
   });
 
   describe("bulk requests bounded by size (IN-05)", () => {
-    // 1,100 files: three parse batches, so what the first batch learns has two
-    // more batches to hold for. The backend refuses a bulk over 300 ops.
+    // More than one parse batch (500 files), so what the first batch learns has
+    // a later batch to hold for. The backend refuses a bulk over 300 ops.
     const tooLarge = () => backend.requests.filter(r => r.path === "/v1/patches/bulk" && r.code === 413).length;
     const saved = process.env.IX_COMMIT_MAX_OPS;
     afterEach(() => {
@@ -1342,8 +1343,14 @@ describe("ingestFiles against a fake backend", () => {
       else process.env.IX_COMMIT_MAX_OPS = saved;
     });
 
-    it("learns the size from the first 413 that suggests one, and is refused no more that run", async () => {
-      fixture(1100);
+    // 560 files, two parse batches: 500, then 60. At 7 ops a file the second
+    // batch is 420 ops, over the cap at the default bounds, so it is refused
+    // too unless the run kept what the first batch learned. It used to be
+    // 1,100 files (three batches), which timed out once on a slow Windows
+    // runner; the second batch alone is what the assertion needs. The longer
+    // timeout is a backstop for the fixture writes and parse there.
+    it("learns the size from the first 413 that suggests one, and is refused no more that run", { timeout: 90_000 }, async () => {
+      fixture(560);
       backend.maxBulkOps = 300;
       backend.suggestMaxPatches = true;
 
@@ -1351,11 +1358,15 @@ describe("ingestFiles against a fake backend", () => {
 
       expect(tooLarge()).toBe(1);
       expect(summary.commitErrors).toBe(0);
-      expect(summary.patchesApplied).toBe(1100);
+      expect(summary.patchesApplied).toBe(560);
       expect(backend.singleCount, "no per-file fallback").toBe(0);
+      // Both batches were sent in bounded requests. Without the learned size,
+      // the second batch goes out as one 60-patch request and is refused.
+      const accepted = backend.requests.filter(r => r.path === "/v1/patches/bulk" && r.code !== 413);
+      expect(Math.max(...accepted.map(r => r.patches))).toBeLessThanOrEqual(Math.floor(300 / 7));
     });
 
-    it("halves by ops on a 413 that suggests nothing, and later batches start at the learned size", async () => {
+    it("halves on a 413 that suggests nothing, and later batches start at the learned size", async () => {
       fixture(1100);
       backend.maxBulkOps = 300;
 
@@ -1367,6 +1378,32 @@ describe("ingestFiles against a fake backend", () => {
       expect(tooLarge()).toBeLessThanOrEqual(4);
       expect(summary.commitErrors).toBe(0);
       expect(summary.patchesApplied).toBe(1100);
+    });
+
+    it("keeps its op budget after a 413 for bytes: one large file does not shrink the requests after it", async () => {
+      // 60 ordinary files and one whose patch is large for its op count (a
+      // 60,000-character identifier). The body cap fits that one file alone,
+      // and all 60 others together, but not all 61. Learning an op budget from
+      // that 413 halved it on every bisection that still held the large file,
+      // until the files after it went a few per request.
+      fixture(60);
+      writeFileSync(
+        join(repo, "src", "big.ts"),
+        `export function ${"n".repeat(60_000)}(): number { return 1; }\n`,
+        "utf8",
+      );
+      execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+      backend.maxBulkBytes = 255_000;
+
+      const summary = await run();
+
+      const bulks = backend.requests.filter(r => r.path === "/v1/patches/bulk");
+      expect(tooLarge()).toBe(1);
+      expect(bulks.length, "the refused request, then the large file and the rest").toBe(3);
+      expect(Math.max(...bulks.filter(r => r.code !== 413).map(r => r.patches))).toBe(60);
+      expect(summary.commitErrors).toBe(0);
+      expect(summary.patchesApplied).toBe(61);
+      expect(backend.singleCount, "no per-file fallback").toBe(0);
     });
 
     it("is never refused when IX_COMMIT_MAX_OPS keeps every request under the cap", async () => {
