@@ -668,7 +668,7 @@ function openBrowser(url: string): void {
 
 /**
  * The token the visualizer's /v1 proxy sends to the backend: IX_TOKEN, else
- * the stored local token (the proxy only ever talks to the local backend).
+ * the stored local token, and only when that backend is on this machine.
  * Handed to the server through its environment, never argv.
  */
 function viewBackendToken(): string {

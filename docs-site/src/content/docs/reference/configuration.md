@@ -19,7 +19,7 @@ ix config set format llm      # set a value
 |---|---|
 | `IX_HOME` | Relocates everything under `~/.ix`, configuration included. Useful for giving a CI job or a second install its own state. It's read at use, not at install, so move `~/.ix` there rather than expecting the old configuration to be found |
 | `IX_FORMAT` | Default output format: `text`, `json` or `llm`. Overrides the config file. `--format` overrides it |
-| `IX_TOKEN=<token>` | Bearer token sent to the backend on every request, to any endpoint. Overrides the stored local token (see [Local token](#local-token)) |
+| `IX_TOKEN=<token>` | Bearer token sent to a local backend (localhost or another loopback address) on every request. Overrides the stored local token (see [Local token](#local-token)). Never sent to any other endpoint |
 | `IX_DEBUG=1` | Prints full stack traces on errors, and one stderr line per backend request with the `X-Correlation-Id` it sent (the backend tags its request and slow-query logs with it). Every request of one `ix` run shares the id's prefix |
 | `IX_READ_DEADLINE_MS=<ms>` | How long one command's reads may take in all before it fails (default 60000), so a hung backend fails a query in a minute rather than after each request's 2-minute timeout. The clock restarts after each write the command makes. `ix map`, `ix ingest` and `ix stats` have no read deadline. `0` turns it off. A read that meets a refused or dropped connection, or a 502/503/504, is retried once; writes never are |
 | `IX_MCP_SUBPROCESS=1` | Runs each MCP tool call in its own `ix` process |
@@ -77,4 +77,4 @@ ix docker start --no-local-token  # stop requiring it and forget it
 ix doctor                         # "Backend token" says whether it is required and accepted
 ```
 
-The token is stored as `auth.local_token` in `~/.ix/config.yaml` and written to `~/.ix/backend/.env` for Compose. The CLI and `ix view` send it only to a local endpoint; set `IX_TOKEN` to send a token to any other backend.
+The token is stored as `auth.local_token` in `~/.ix/config.yaml` and written to `~/.ix/backend/.env` for Compose. The CLI and `ix view` send it only to a local endpoint. `IX_TOKEN` overrides it, under the same rule: no token, stored or from `IX_TOKEN`, is sent to a backend on another host. To use a token-protected backend elsewhere, forward its port to this machine (for example `ssh -L 8090:localhost:8090 <host>`) and point `IX_ENDPOINT` at `http://localhost:8090`.

@@ -361,7 +361,7 @@ export class IxClient {
   async diff(
     fromRev: number,
     toRev: number,
-    opts?: { entityId?: string; summary?: boolean; limit?: number }
+    opts?: { entityId?: string; summary?: boolean; limit?: number; workspaceId?: string }
   ): Promise<unknown> {
     return this.post("/v1/diff", {
       fromRev,
@@ -369,6 +369,9 @@ export class IxClient {
       entityId: opts?.entityId,
       summary: opts?.summary,
       limit: opts?.limit,
+      // The backend reads `workspace_id` like its other reads: an id scopes
+      // the diff to that workspace, `*` (or none) means every workspace.
+      workspace_id: opts?.workspaceId,
     });
   }
 
