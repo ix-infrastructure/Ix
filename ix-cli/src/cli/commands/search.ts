@@ -12,6 +12,7 @@ import { stderr } from "../stderr.js";
 import { llmLine } from "../llm.js";
 import { isQuiet, projectRow } from "../output-shape.js";
 import { normalizePathSeparators } from "../path-match.js";
+import { checkGraphHealth } from "../graph-health.js";
 
 /** One `ix search` row as the llm renderer takes it. */
 export interface SearchLlmRow {
@@ -79,6 +80,10 @@ export function emptySearchHint(term: string, opts: { kind?: string; path?: stri
   const drop = narrowed.length > 0 ? `drop ${narrowed.join("/")}, ` : "";
   return `No entity name matches. Try part of the name, ${drop}or use ix text for a literal string.`;
 }
+
+/** Said instead of {@link emptySearchHint} when the scope holds no nodes at all. */
+export const WORKSPACE_EMPTY_MESSAGE =
+  "The graph for this workspace has no nodes, so no search can match. Run ix map to build it.";
 
 /** Structural kinds that should rank higher than incidental matches. */
 const STRUCTURAL_KINDS = new Set([
@@ -476,6 +481,17 @@ Examples:
       // Taken after every push, not before: `test_candidates_hidden` is the
       // one diagnostic here that names rows the caller CANNOT see, and it is
       // added below the `unfiltered_search` push.
+      // Nothing came back at all: before suggesting a better term, ask whether
+      // there is anything to search. An empty workspace answered "No entity
+      // name matches. Try part of the name" to every term. One cached stats
+      // read, only on this path.
+      if (rawNodes.length === 0 && (workspaceId || systemId)) {
+        const graph = await checkGraphHealth(client, { workspaceId, systemId });
+        if (graph.status === "empty") {
+          diagnostics.push({ code: "workspace_empty", message: WORKSPACE_EMPTY_MESSAGE });
+        }
+      }
+      const workspaceEmpty = diagnostics.some((d) => d.code === "workspace_empty");
       const llmDiagnostics = diagnostics.filter((d) => d.code !== "unfiltered_search");
 
       if (opts.format === "llm") {
@@ -488,7 +504,7 @@ Examples:
           score: tierRelevance(s.rank.tier),
           match: s.rank.tier >= NON_NAME_TIER ? s.rank.matchSource : undefined,
         }));
-        const hint = emptySearchHint(term, opts);
+        const hint = workspaceEmpty ? undefined : emptySearchHint(term, opts);
         for (const line of renderSearchLlm(rows, rawNodes.length, llmDiagnostics, hint)) console.log(line);
         return;
       }
@@ -511,12 +527,14 @@ Examples:
             totalCandidates: rawNodes.length,
           },
           diagnostics: ranked.length === 0
-            ? [...diagnostics, { code: "no_results", message: emptySearchHint(term, opts) }]
+            ? [...diagnostics, { code: "no_results", message: workspaceEmpty ? WORKSPACE_EMPTY_MESSAGE : emptySearchHint(term, opts) }]
             : diagnostics,
         });
       } else {
         formatNodes(ranked, opts.format);
-        if (ranked.length === 0 && !isQuiet()) stderr(chalk.dim(emptySearchHint(term, opts)));
+        if (ranked.length === 0 && !isQuiet()) {
+          stderr(chalk.dim(workspaceEmpty ? WORKSPACE_EMPTY_MESSAGE : emptySearchHint(term, opts)));
+        }
         if (pathWindowLimited) stderr(chalk.dim(diagnostics.find(d => d.code === "path_search_truncated")!.message));
         const hint = roleHint(hiddenTestCount);
         if (hint) stderr(chalk.dim(hint));

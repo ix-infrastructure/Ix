@@ -38,7 +38,7 @@ describe("inspectBackendContainer", () => {
       throw new Error(`unexpected docker invocation: ${args.join(" ")}`);
     });
 
-    expect(checkBackendImage()).toMatchObject({
+    expect(checkBackendImage("http://localhost:8090")).toMatchObject({
       kind: "ok",
       container: {
         containerId: "backend-id",
@@ -66,9 +66,30 @@ describe("inspectBackendContainer", () => {
       throw new Error(`unexpected docker invocation: ${args.join(" ")}`);
     });
 
-    expect(inspectBackendContainer()).toMatchObject({
+    expect(inspectBackendContainer("http://localhost:8090")).toMatchObject({
       containerId: "local-id",
       imageRef: "ix-memory-layer-dev:latest",
     });
+  });
+
+  it("inspects the container publishing the configured endpoint's port, not 8090", () => {
+    execFileSync.mockImplementation((_command: string, args: string[]) => {
+      if (args[0] === "info") return "ok";
+      if (args[0] === "ps" && args.includes("publish=8190")) return "other-id";
+      if (args[0] === "ps") return "default-id";
+      if (args[0] === "inspect" && args[1] === "other-id") {
+        return "sha256:other|::|ix-memory-layer-dev:latest|::||::|";
+      }
+      if (args[0] === "image" && args[2] === "sha256:other") return "[]";
+      throw new Error(`unexpected docker invocation: ${args.join(" ")}`);
+    });
+
+    expect(inspectBackendContainer("http://127.0.0.1:8190")).toMatchObject({ containerId: "other-id" });
+  });
+
+  it("does not inspect any container for a remote endpoint", () => {
+    expect(inspectBackendContainer("https://ix.example.com")).toBeNull();
+    expect(checkBackendImage("https://ix.example.com")).toEqual({ kind: "remote" });
+    expect(execFileSync).not.toHaveBeenCalled();
   });
 });

@@ -4,12 +4,16 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { renderSection, renderSuccess, renderError } from "../ui.js";
 import { createClient } from "../../client/factory.js";
+import { IxClient } from "../../client/api.js";
 import {
   canonicalWorkspacePath,
+  ConfigParseError,
+  DEFAULT_ENDPOINT,
   findWorkspaceForCwd,
   getDefaultWorkspace,
   getEndpoint,
   gitRootFor,
+  loadConfig,
   loadWorkspaces,
   selectWorkspaceForCwd,
   type WorkspaceConfig,
@@ -20,6 +24,8 @@ import { resolveReadSystemId } from "../resolve.js";
 import { assessGraphStats } from "../graph-health.js";
 import { llmLine, printLlmLines } from "../llm.js";
 import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { parse as parseYaml } from "yaml";
 import { join as pathJoin, resolve as resolvePath, win32 as winPath } from "node:path";
 import { homedir } from "node:os";
 import {
@@ -35,7 +41,7 @@ import { loadIngestBaseline } from "../ingest-baseline.js";
 import { isCloudReady } from "../remote.js";
 import { hasCompletedMapBaseline } from "../stale.js";
 import { printJson } from "../format.js";
-import type { CapabilitiesResponse } from "../../client/types.js";
+import type { CapabilitiesResponse, HealthResponse } from "../../client/types.js";
 
 interface CheckResult {
   ok: boolean;
@@ -239,14 +245,139 @@ export function assessLocalAuth(
   };
 }
 
+/**
+ * A health answer, including the 503 a backend sends while it cannot reach its
+ * database: that is a server that answered, and the body says what is wrong.
+ * Thrown for anything else.
+ */
+export function healthFromError(err: unknown): HealthResponse | null {
+  const m = /^503:\s*(\{.*\})\s*$/s.exec((err as Error)?.message ?? "");
+  if (!m) return null;
+  try {
+    const body = JSON.parse(m[1]!) as HealthResponse;
+    return typeof body?.status === "string" ? body : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * "Database reachable" from the health answer. A backend that reports
+ * `database` says so itself; an older one never touched the database for
+ * health, so `probe` asks a route that does (`/v1/revisions/current`).
+ */
+export async function assessDatabase(
+  health: HealthResponse | Error,
+  probe: () => Promise<unknown>,
+): Promise<CheckResult> {
+  if (health instanceof Error) return { ok: true, detail: "backend unreachable (skipped)" };
+  if (health.database === "reachable") return { ok: true, detail: "reachable (backend health)" };
+  if (health.database === "unreachable") {
+    return { ok: false, detail: "the memory layer cannot reach ArangoDB — check 'ix docker status' and 'ix docker logs'" };
+  }
+  try {
+    await probe();
+    return { ok: true, detail: "reachable (read the current revision)" };
+  } catch (e) {
+    // The read was refused for want of the token, so it says nothing about the
+    // database; "Backend token" reports the refusal.
+    if ((e as Error)?.name === "LocalTokenRequiredError") {
+      return { ok: true, detail: "not checked: the backend refused this CLI's token (see Backend token)" };
+    }
+    const msg = (e as Error)?.message ?? String(e);
+    return { ok: false, detail: `the backend could not read its database: ${msg.slice(0, 200)}` };
+  }
+}
+
+/** What every other command does with a config.yaml that does not parse (#807). */
+const CONFIG_REFUSAL = "other ix commands refuse to run until it is fixed";
+
+/**
+ * "Config file parses". A config.yaml that does not parse stops every other
+ * command (`loadConfig` throws ConfigParseError), so this is a failure, and the
+ * one doctor is still able to report: it catches that error itself.
+ */
+export function assessConfigFile(configPath: string, read: (p: string) => string | null): CheckResult {
+  const raw = read(configPath);
+  if (raw === null) return { ok: true, detail: "no config file (defaults)" };
+  try {
+    const parsed = parseYaml(raw);
+    if (parsed !== null && parsed !== undefined && (typeof parsed !== "object" || Array.isArray(parsed))) {
+      return { ok: false, detail: `${configPath} is not a mapping of settings, so ${CONFIG_REFUSAL}` };
+    }
+    return { ok: true, detail: configPath };
+  } catch (e) {
+    const first = ((e as Error)?.message ?? String(e)).split("\n")[0];
+    return { ok: false, detail: `${configPath} does not parse, so ${CONFIG_REFUSAL}: ${first}` };
+  }
+}
+
+/** The answer of a check that needs config.yaml when config.yaml does not parse. */
+const CONFIG_NOT_CHECKED: CheckResult = { ok: true, detail: "not checked: config.yaml does not parse" };
+
+function isConfigParseError(e: unknown): e is ConfigParseError {
+  return (e as Error | undefined)?.name === "ConfigParseError";
+}
+
+/**
+ * The endpoint and client doctor checks with. A config.yaml that does not parse
+ * is the one failure doctor must survive, since reporting it is its job: the
+ * endpoint falls back to IX_ENDPOINT or the default, and the client is built
+ * without the stored token, which lives in the file that does not parse.
+ */
+function doctorClient(): { endpoint: string; client: IxClient } {
+  let endpoint: string;
+  try {
+    endpoint = getEndpoint();
+  } catch (e) {
+    if (!isConfigParseError(e)) throw e;
+    endpoint = process.env.IX_ENDPOINT || DEFAULT_ENDPOINT;
+  }
+  try {
+    return { endpoint, client: createClient({ endpoint }) };
+  } catch (e) {
+    if (!isConfigParseError(e)) throw e;
+    // createClient read the stored token from the file that does not parse.
+    const token = process.env.IX_TOKEN?.trim();
+    // eslint-disable-next-line no-restricted-syntax -- the factory cannot build a client without config.yaml
+    return { endpoint, client: new IxClient(endpoint, undefined, token ? { token } : {}) };
+  }
+}
+
+/** A workspace lookup, or none when config.yaml (where workspaces live) does not parse. */
+function workspaceOrNone(lookup: () => WorkspaceConfig | undefined): WorkspaceConfig | undefined {
+  try {
+    return lookup();
+  } catch (e) {
+    if (isConfigParseError(e)) return undefined;
+    throw e;
+  }
+}
+
+/** "ripgrep on PATH": `ix text` needs it; everything else works without it. */
+export function checkRipgrep(run: () => string = () => execFileSync("rg", ["--version"], { encoding: "utf-8", timeout: 5000 })): CheckResult {
+  try {
+    const first = run().split("\n")[0]?.trim();
+    return { ok: true, detail: first || "rg found" };
+  } catch {
+    return { ok: false, warn: true, detail: "rg not found on PATH — 'ix text' needs ripgrep" };
+  }
+}
+
 export function registerDoctorCommand(program: Command): void {
   program
     .command("doctor")
     .description("Check Ix system health — server, database, graph integrity")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .action(async (opts: { format: string }) => {
-      const endpoint = getEndpoint();
-      const client = createClient({ endpoint });
+      const { endpoint, client } = doctorClient();
+      // Asked of the file directly: with IX_ENDPOINT and IX_TOKEN set,
+      // building the client never reads it.
+      let configBroken = false;
+      try { loadConfig(); } catch (e) {
+        if (!isConfigParseError(e)) throw e;
+        configBroken = true;
+      }
 
       // "Graph has nodes" and "Graph has edges" are two questions about one
       // response. They were two `client.stats()` calls, run back to back by the
@@ -266,11 +397,14 @@ export function registerDoctorCommand(program: Command): void {
       // never-ingested directory passed every check while quoting another repo's
       // graph (#518). Local, so it still answers when the backend is unreachable.
       const cwd = process.cwd();
-      const matchedWorkspace = findWorkspaceForCwd(cwd);
-      const substitutedWorkspace = matchedWorkspace ? undefined : getDefaultWorkspace();
+      const matchedWorkspace = workspaceOrNone(() => findWorkspaceForCwd(cwd));
+      const substitutedWorkspace = matchedWorkspace ? undefined : workspaceOrNone(getDefaultWorkspace);
 
       let statsOnce: Promise<{ stats: any; scope: string; systemId?: string }> | undefined;
       const sharedStats = (): Promise<{ stats: any; scope: string; systemId?: string }> => (statsOnce ??= (async () => {
+        // Without the workspaces there is no scope to count in, and an
+        // unscoped count would be reported as if it were this directory's.
+        if (configBroken) throw new ConfigParseError(pathJoin(ixHome(), "config.yaml"), "see Config file parses");
         // Scoped the same way `ix stats` scopes, because doctor disagreeing with
         // stats about the size of the graph is the whole of #510. Not a
         // tombstone fix: /v1/stats filters `deleted_rev == null` in every one of
@@ -294,6 +428,16 @@ export function registerDoctorCommand(program: Command): void {
         return { stats, scope, systemId };
       })());
 
+      // One /v1/health for "Server reachable" and "Database reachable". A 503
+      // with a health body is the backend reporting a dead database, so it is
+      // an answer, not a failure to reach the server.
+      let healthOnce: Promise<HealthResponse> | undefined;
+      const health = (): Promise<HealthResponse> => (healthOnce ??= readBackendHealth(client).catch((e: unknown) => {
+        const degraded = healthFromError(e);
+        if (degraded) return degraded;
+        throw e;
+      }));
+
       const checks: Check[] = [
         {
           name: "Server reachable",
@@ -301,8 +445,10 @@ export function registerDoctorCommand(program: Command): void {
             try {
               // Records what the backend says it is running; see
               // backend-version.ts. Free — this response is already needed.
-              const h = await readBackendHealth(client);
-              return { ok: h.status === "ok", detail: `${endpoint} → ${h.status}` };
+              const h = await health();
+              // A degraded answer is still a server that answered; the
+              // database check below names what is wrong with it.
+              return { ok: h.status === "ok" || h.status === "degraded", detail: `${endpoint} → ${h.status}` };
             } catch (e: any) {
               // An unreachable backend is where a fatal Arango boot loop hides:
               // the container restarts forever, memory-layer never leaves
@@ -310,13 +456,25 @@ export function registerDoctorCommand(program: Command): void {
               // indistinguishable from "not started yet". Say what the stack
               // actually reported. Ix#614.
               const base = e.message ?? "unreachable";
-              const failure = dockerAvailable() ? diagnoseBackendStack() : null;
+              const failure = isLocalEndpoint(endpoint) && dockerAvailable() ? diagnoseBackendStack() : null;
               if (!failure) return { ok: false, detail: base };
               const parts = [`${base} — ${failure.service} is ${failure.state}`];
               if (failure.lastError) parts.push(`  last log: ${failure.lastError}`);
               if (failure.remedy) parts.push(`  fix: ${failure.remedy}`);
               return { ok: false, detail: parts.join("\n") };
             }
+          },
+        },
+        {
+          name: "Database reachable",
+          run: async () => {
+            let h: HealthResponse | Error;
+            try {
+              h = await health();
+            } catch (e) {
+              h = e instanceof Error ? e : new Error(String(e));
+            }
+            return assessDatabase(h, () => client.currentRevision());
           },
         },
         {
@@ -344,6 +502,7 @@ export function registerDoctorCommand(program: Command): void {
             } catch { /* fall through to the local answer */ }
 
             if (systemScoped) return { ok: true, detail: "scoped to the active system" };
+            if (configBroken) return CONFIG_NOT_CHECKED;
             if (matchedWorkspace) return { ok: true, detail: `workspace '${matchedWorkspace.workspace_name}'` };
             if (substitutedWorkspace) {
               return {
@@ -380,6 +539,7 @@ export function registerDoctorCommand(program: Command): void {
           // doctor`.
           name: "Completed map for this workspace",
           run: async () => {
+            if (configBroken) return CONFIG_NOT_CHECKED;
             if (!matchedWorkspace) {
               return { ok: false, warn: true, detail: "no local workspace to check" };
             }
@@ -419,6 +579,7 @@ export function registerDoctorCommand(program: Command): void {
               const total = stats.nodes?.total ?? 0;
               return { ok: total > 0, detail: `${total} nodes in ${scope}` };
             } catch (e: any) {
+              if (isConfigParseError(e)) return CONFIG_NOT_CHECKED;
               return { ok: false, detail: e.message ?? "stats failed" };
             }
           },
@@ -431,6 +592,7 @@ export function registerDoctorCommand(program: Command): void {
               const total = stats.edges?.total ?? 0;
               return { ok: total > 0, detail: `${total} edges in ${scope}` };
             } catch (e: any) {
+              if (isConfigParseError(e)) return CONFIG_NOT_CHECKED;
               return { ok: false, detail: e.message ?? "stats failed" };
             }
           },
@@ -459,6 +621,7 @@ export function registerDoctorCommand(program: Command): void {
               // not a second failure for one problem.
               return { ok: true, detail: `not judged: no ${health.status === "empty" ? "nodes" : "edge breakdown"} in ${scope}` };
             } catch (e: any) {
+              if (isConfigParseError(e)) return CONFIG_NOT_CHECKED;
               return { ok: false, detail: e.message ?? "stats failed" };
             }
           },
@@ -471,6 +634,7 @@ export function registerDoctorCommand(program: Command): void {
               const count = Array.isArray(c) ? c.length : 0;
               return { ok: count === 0, detail: count === 0 ? "clean" : `${count} conflict(s)` };
             } catch (e: any) {
+              if (isConfigParseError(e)) return CONFIG_NOT_CHECKED;
               return { ok: false, detail: e.message ?? "conflicts check failed" };
             }
           },
@@ -479,7 +643,7 @@ export function registerDoctorCommand(program: Command): void {
           // Ix#270: trust the running container, not the version stamp.
           name: "Backend is the released image",
           run: async () => {
-            const status = checkBackendImage();
+            const status = checkBackendImage(endpoint);
             switch (status.kind) {
               case "ok": {
                 if (isNonStandardBackend(status.container)) {
@@ -505,7 +669,9 @@ export function registerDoctorCommand(program: Command): void {
               case "latest-not-pulled":
                 return { ok: true, warn: true, detail: `can't verify — ${BACKEND_IMAGE}:latest not pulled locally` };
               case "not-running":
-                return { ok: true, detail: "no backend container on :8090 (skipped)" };
+                return { ok: true, detail: `no backend container for ${endpoint} (skipped)` };
+              case "remote":
+                return { ok: true, detail: "remote endpoint, no local container (skipped)" };
               case "docker-unavailable":
                 return { ok: true, detail: "docker unavailable (skipped)" };
             }
@@ -528,6 +694,17 @@ export function registerDoctorCommand(program: Command): void {
         },
       ];
 
+      checks.push(
+        {
+          name: "Config file parses",
+          run: async () => assessConfigFile(
+            pathJoin(ixHome(), "config.yaml"),
+            (p) => { try { return readFileSync(p, "utf-8"); } catch { return null; } },
+          ),
+        },
+        { name: "ripgrep on PATH", run: async () => checkRipgrep() },
+      );
+
       // Windows-only: a launcher pointing at a CLI the upgrade moved (Ix#385).
       if (process.platform === "win32") {
         checks.push({
@@ -543,7 +720,15 @@ export function registerDoctorCommand(program: Command): void {
 
       const results: Array<{ name: string } & CheckResult> = [];
       for (const check of checks) {
-        const result = await check.run();
+        let result: CheckResult;
+        try {
+          result = await check.run();
+        } catch (e) {
+          // A check that reached for config.yaml and found it unparseable. Any
+          // other throw is a bug in the check and still surfaces.
+          if (!isConfigParseError(e)) throw e;
+          result = CONFIG_NOT_CHECKED;
+        }
         results.push({ name: check.name, ...result });
       }
 
@@ -571,7 +756,7 @@ export function registerDoctorCommand(program: Command): void {
 
       console.log();
       if (hasFailure) {
-        renderError("Some checks failed. Run with --format json for details.");
+        renderError("Some checks failed.");
       } else if (hasWarning) {
         renderSuccess("All checks passed (with warnings).");
       } else {

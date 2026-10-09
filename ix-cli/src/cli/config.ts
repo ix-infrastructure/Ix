@@ -164,8 +164,11 @@ export interface IxConfig {
   auth?: { local_token?: string };
 }
 
+/** The backend a config with no `endpoint` (or no config at all) points at. */
+export const DEFAULT_ENDPOINT = "http://localhost:8090";
+
 const defaultConfig: IxConfig = {
-  endpoint: "http://localhost:8090",
+  endpoint: DEFAULT_ENDPOINT,
   format: "text",
 };
 
