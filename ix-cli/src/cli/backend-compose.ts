@@ -35,9 +35,24 @@ export function envFileLocalToken(existing: string): string | undefined {
   let value: string | undefined;
   for (const line of existing.split(/\r?\n/)) {
     const m = LOCAL_TOKEN_LINE.exec(line);
-    if (m) value = m[1].trim().replace(/^(["'])(.*)\1$/, "$2").trim();
+    if (m) value = dotenvValue(m[1]);
   }
   return value ? value : undefined;
+}
+
+/**
+ * A dotenv value the way Docker Compose reads it: a quoted value ends at its
+ * closing quote (anything after, such as ` # note`, is ignored); an unquoted
+ * one ends where whitespace starts a ` #` comment.
+ */
+function dotenvValue(raw: string): string {
+  const v = raw.trim();
+  const quote = v[0];
+  if (quote === '"' || quote === "'") {
+    const close = v.indexOf(quote, 1);
+    if (close > 0) return v.slice(1, close).trim();
+  }
+  return v.replace(/\s+#.*$/, "").trim();
 }
 
 /**
@@ -75,7 +90,11 @@ function readEnvFile(envFile: string): string {
 export function writeBackendEnv(token: string | undefined, envFile: string = backendEnvFile()): void {
   const existing = readEnvFile(envFile);
   // Already says the same (however the user quoted it): leave the file as it is.
-  if (existsSync(envFile) && envFileLocalToken(existing) === (token || undefined) && LOCAL_TOKEN_IN_FILE.test(existing)) return;
+  if (existsSync(envFile) && envFileLocalToken(existing) === (token || undefined) && LOCAL_TOKEN_IN_FILE.test(existing)) {
+    // Nothing to rewrite, but the file still holds a credential: keep it 0600.
+    try { chmodSync(envFile, 0o600); } catch { /* best effort */ }
+    return;
+  }
   const next = backendEnvContents(existing, token);
   mkdirSync(dirname(envFile), { recursive: true, mode: 0o700 });
   const tmp = `${envFile}.${process.pid}.tmp`;

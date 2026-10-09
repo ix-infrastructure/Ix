@@ -243,6 +243,11 @@ describe("backend .env helpers", () => {
     expect(envFileLocalToken("IX_LOCAL_TOKEN=\n")).toBeUndefined();
     expect(envFileLocalToken("IX_LOCAL_TOKEN=a\r\nexport IX_LOCAL_TOKEN='b'\n")).toBe("b");
     expect(envFileLocalToken("# IX_LOCAL_TOKEN=commented\nX_IX_LOCAL_TOKEN=other\n")).toBeUndefined();
+    // Inline comments, read as Docker Compose reads them.
+    expect(envFileLocalToken("IX_LOCAL_TOKEN=abc # mine\n")).toBe("abc");
+    expect(envFileLocalToken('IX_LOCAL_TOKEN="abc" # mine\n')).toBe("abc");
+    expect(envFileLocalToken("IX_LOCAL_TOKEN='a#b' # note\n")).toBe("a#b");
+    expect(envFileLocalToken("IX_LOCAL_TOKEN=a#b\n")).toBe("a#b");
   });
 
   it("chooses the stored token, else the hand-set one unless clearing", async () => {
@@ -257,8 +262,13 @@ describe("backend .env helpers", () => {
     const { writeBackendEnv } = await import("../backend-compose.js");
     const env = join(t, "same.env");
     writeFileSync(env, "IX_LOCAL_TOKEN=x\n", { mode: 0o644 });
+    const before = statSync(env);
     writeBackendEnv("x", env);
-    if (process.platform !== "win32") expect(statSync(env).mode & 0o777).toBe(0o644);
+    const after = statSync(env);
+    // Not rewritten (same inode, same mtime), but tightened to 0600: it holds a credential.
+    expect(after.ino).toBe(before.ino);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    if (process.platform !== "win32") expect(after.mode & 0o777).toBe(0o600);
     writeBackendEnv("y", env);
     expect(readFileSync(env, "utf8")).toBe("IX_LOCAL_TOKEN=y\n");
   });
