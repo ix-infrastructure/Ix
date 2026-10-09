@@ -232,4 +232,8 @@ export interface CapabilitiesResponse {
   // treat absence as "unknown" rather than "false" to stay compatible with
   // older deployments.
   proFeaturesEnabled?: boolean;
+  /** The local-auth contract the backend speaks ("bearer-v1"); absent before the guard. */
+  local_auth?: string;
+  /** Whether the backend requires the bearer token (IX_LOCAL_TOKEN is set on it). */
+  local_auth_enforcing?: boolean;
 }

@@ -8,12 +8,14 @@ import { formatTextResults, printJson, sliceRanked, type TextResult } from "../f
 import { isPathInsideResolvedRoot, resolveWorkspaceRoot } from "../config.js";
 import { stderr } from "../stderr.js";
 import { llmError } from "../llm.js";
+import { currentRunSignal } from "../../client/run-signal.js";
 
 type RunRipgrep = (args: string[], limit: number) => Promise<{ stdout: string }>;
 
 async function runRipgrep(args: string[], limit: number): Promise<{ stdout: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn("rg", args, { stdio: ["ignore", "pipe", "pipe"] });
+    // Killed when an `ix mcp` tool call that runs it times out (run-signal.ts).
+    const child = spawn("rg", args, { stdio: ["ignore", "pipe", "pipe"], signal: currentRunSignal() });
     const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
     const matches: string[] = [];
     let errorOutput = "";

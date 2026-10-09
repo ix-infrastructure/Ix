@@ -15,11 +15,19 @@ import { tryLoadProCommands } from "../cli/register/pro-loader.js";
 import { resetReadScope } from "../cli/resolve.js";
 import { releaseLocksOwnedBy, setLockOwnerResolver } from "../cli/single-flight.js";
 import { IX_CALLER_ENV } from "../cli/next-step.js";
+import { runWithSignal } from "../client/run-signal.js";
 
 const execFileAsync = promisify(execFile);
 const CLI_ENTRYPOINT = fileURLToPath(new URL("../cli/main.js", import.meta.url));
 
 export const DEFAULT_TIMEOUT_MS = 30_000;
+
+/**
+ * How long a command aborted at its timeout gets to unwind before it is
+ * treated as an orphan. An aborted fetch rejects at once, so a command whose
+ * work is backend requests settles well inside this.
+ */
+const ABORT_SETTLE_MS = 1_000;
 
 /**
  * Cap on a single command's captured output. The subprocess runner got this
@@ -93,8 +101,11 @@ const runContext = new AsyncLocalStorage<ActiveRun>();
 /**
  * Commands abandoned at their timeout that are still running.
  *
- * Nothing cancels a timed-out command — no Ix command takes an abort signal —
- * so it keeps writing to the process globals after the queue has moved on.
+ * A timed-out command is aborted (its clients and children take the run's
+ * signal) and given a moment to unwind, so this is normally empty. What still
+ * lands here is work the signal does not reach -- a synchronous loop, a call
+ * outside the factory -- which keeps writing to the process globals after the
+ * queue has moved on.
  * Output is attributed per run through {@link runContext}; `process.exitCode`
  * cannot be, because it is a non-configurable accessor and so cannot be made
  * context-local (verified on Node 26: `Object.defineProperty` throws).
@@ -290,10 +301,18 @@ function throwOnUsageError(program: Command): Command {
   return program;
 }
 
+/** A run that hit its deadline, as distinct from a command that threw. */
+class RunTimeoutError extends Error {
+  constructor(label: string, timeoutMs: number) {
+    super(`${label} timed out after ${timeoutMs}ms`);
+    this.name = "RunTimeoutError";
+  }
+}
+
 function withTimeout<T>(work: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: NodeJS.Timeout;
   const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+    timer = setTimeout(() => reject(new RunTimeoutError(label, timeoutMs)), timeoutMs);
   });
   return Promise.race([work, deadline]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
@@ -315,6 +334,11 @@ export interface InProcessRunnerOptions {
    * given. Tests shorten it; nothing else should need to.
    */
   orphanGraceMs?: number;
+  /**
+   * How long a command aborted at its timeout may take to settle before it is
+   * left running as an orphan. Defaults to {@link ABORT_SETTLE_MS}.
+   */
+  abortSettleMs?: number;
 }
 
 /**
@@ -380,6 +404,7 @@ async function executeInProcess(
   createProgram: (version: string) => Command | Promise<Command>,
   maxBytes: number,
   orphanGraceMs?: number,
+  abortSettleMs: number = ABORT_SETTLE_MS,
 ): Promise<IxRunResult> {
   const program = throwOnUsageError(await createProgram(version));
   const run: ActiveRun = {
@@ -409,7 +434,12 @@ async function executeInProcess(
   let failure: string | null = null;
   let commandExitCode: number | string | undefined;
 
-  const work = runContext.run(run, () => program.parseAsync(args, { from: "user" }));
+  // Aborted at the deadline. Every client the command builds and every child it
+  // spawns takes this signal, so a timeout closes the backend connections
+  // rather than leaving the command running behind the next tool call.
+  const abort = new AbortController();
+  const work = runContext.run(run, () =>
+    runWithSignal(abort.signal, () => program.parseAsync(args, { from: "user" })));
   // Settles either way and never rejects, so it can be watched without adding a
   // second rejection handler to `work`.
   let commandSettled = false;
@@ -433,6 +463,18 @@ async function executeInProcess(
       if (error.exitCode !== 0) failure = error.message;
     } else {
       failure = error instanceof Error ? error.message : String(error);
+      if (error instanceof RunTimeoutError) {
+        // Stop the work, then give it a bounded moment to unwind, so the normal
+        // outcome is a settled command and no orphan. Its output and exit code
+        // in that moment are still this run's: the run is not closed yet.
+        abort.abort(error);
+        let settleTimer: NodeJS.Timeout | undefined;
+        await Promise.race([
+          finished,
+          new Promise<void>((resolve) => { settleTimer = setTimeout(resolve, abortSettleMs); }),
+        ]);
+        clearTimeout(settleTimer);
+      }
     }
   } finally {
     commandExitCode = commandExitCode ?? (exitCodeIsOurs ? process.exitCode : undefined);
@@ -495,7 +537,14 @@ async function executeInProcess(
     }
   }
 
-  const ok = !run.truncated && failure === null && (commandExitCode === undefined || commandExitCode === 0);
+  // While an orphan made the exit code untrustworthy, a command that printed
+  // nothing on stdout and something on stderr failed: success always prints
+  // its answer. Without this, such a failure came back ok with empty output,
+  // which the server then turned into `{}`.
+  const silentFailure = !exitCodeIsOurs && commandExitCode === undefined &&
+    run.stdout.join("").trim() === "" && run.stderr.join("").trim() !== "";
+  const ok = !run.truncated && failure === null && !silentFailure &&
+    (commandExitCode === undefined || commandExitCode === 0);
   return {
     ok,
     stdout: run.stdout.join(""),
@@ -526,12 +575,13 @@ export function createInProcessRunner(options: InProcessRunnerOptions = {}): IxR
   const createProgram = options.createProgram ?? buildProgram;
   const maxBytes = options.maxOutputBytes ?? MAX_OUTPUT_BYTES;
   const orphanGraceMs = options.orphanGraceMs;
+  const abortSettleMs = options.abortSettleMs;
 
   let queue: Promise<unknown> = Promise.resolve();
 
   return (args, timeoutMs = DEFAULT_TIMEOUT_MS) => {
     const result = queue.then(() =>
-      executeInProcess(args, timeoutMs, version, createProgram, maxBytes, orphanGraceMs),
+      executeInProcess(args, timeoutMs, version, createProgram, maxBytes, orphanGraceMs, abortSettleMs),
     );
     // The chain must survive a rejection, or one failed run would strand every
     // later call behind it. executeInProcess resolves rather than throws for

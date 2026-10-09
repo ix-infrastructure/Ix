@@ -19,7 +19,9 @@ ix config set format llm      # set a value
 |---|---|
 | `IX_HOME` | Relocates everything under `~/.ix`, configuration included. Useful for giving a CI job or a second install its own state. It's read at use, not at install, so move `~/.ix` there rather than expecting the old configuration to be found |
 | `IX_FORMAT` | Default output format: `text`, `json` or `llm`. Overrides the config file. `--format` overrides it |
+| `IX_TOKEN=<token>` | Bearer token sent to the backend on every request, to any endpoint. Overrides the stored local token (see [Local token](#local-token)) |
 | `IX_DEBUG=1` | Prints full stack traces on errors |
+| `IX_READ_DEADLINE_MS=<ms>` | How long one command's reads may take in all before it fails (default 60000), so a hung backend fails a query in a minute rather than after each request's 2-minute timeout. The clock restarts after each write the command makes. `ix map`, `ix ingest` and `ix stats` have no read deadline. `0` turns it off. A read that meets a refused or dropped connection, or a 502/503/504, is retried once; writes never are |
 | `IX_MCP_SUBPROCESS=1` | Runs each MCP tool call in its own `ix` process |
 | `IX_COMMIT_FAILURE_LIMIT=<n>` | Consecutive failed commits before `ix map` stops (default 5). `0` never stops |
 | `IX_COMMIT_BASE_REV_RETRIES=<n>` | Re-sends of a commit after another writer on the same backend moved the graph revision under it (default 8) |
@@ -43,7 +45,7 @@ These apply to the agent skill's `bootstrap.sh`:
 | Path | Contents |
 |---|---|
 | `~/.ix/config.yaml` | CLI configuration |
-| `~/.ix/backend/` | Docker Compose file for the local backend |
+| `~/.ix/backend/` | Docker Compose file for the local backend, its `.env` (the local token, mode 0600) and an optional `docker-compose.override.yml` |
 | `~/.ix/cli/` | The installed CLI |
 | `~/.ix/cli/compass/` | Compass assets, fetched by `ix upgrade` |
 
@@ -54,5 +56,25 @@ All services bind to `127.0.0.1` only.
 | Port | Service |
 |---|---|
 | `8090` | Ix Memory Layer (the HTTP API) |
-| `8529` | ArangoDB |
 | `8080` | Compass (`ix view`), configurable with `--port` |
+
+ArangoDB has no host port: it runs without authentication, so only the memory layer reaches it, over the Compose network. To use its web UI, publish the port yourself in `~/.ix/backend/docker-compose.override.yml`, which `ix docker` applies, then run `ix docker stop` and `ix docker start` (a backend that is already healthy is left as it is, so `ix docker start` alone does not apply it):
+
+```yaml
+services:
+  arangodb:
+    ports:
+      - "127.0.0.1:8529:8529"
+```
+
+## Local token
+
+The backend refuses requests from other hosts, from web pages and with non-JSON bodies. It can also require a bearer token, so that another local process cannot use it without the token in `~/.ix`. This is opt-in for now:
+
+```bash
+ix docker start --local-token     # generate a token, store it, restart the backend requiring it
+ix docker start --no-local-token  # stop requiring it and forget it
+ix doctor                         # "Backend token" says whether it is required and accepted
+```
+
+The token is stored as `auth.local_token` in `~/.ix/config.yaml` and written to `~/.ix/backend/.env` for Compose. The CLI and `ix view` send it only to a local endpoint; set `IX_TOKEN` to send a token to any other backend.

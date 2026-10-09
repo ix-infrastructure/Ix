@@ -14,7 +14,7 @@ import { homedir, platform } from "os";
 import { fileURLToPath } from "url";
 import { createConnection } from "net";
 import { resolveWorkspaceId } from "../bootstrap.js";
-import { findWorkspaceForCwd, getDefaultWorkspace, loadWorkspaces } from "../config.js";
+import { findWorkspaceForCwd, getDefaultWorkspace, getLocalToken, loadWorkspaces } from "../config.js";
 import { detectSystem } from "../system.js";
 import { createClient } from "../../client/factory.js";
 
@@ -667,12 +667,12 @@ function openBrowser(url: string): void {
 }
 
 /**
- * The token the visualizer's /v1 proxy sends to the backend. For now only an
- * explicit IX_TOKEN; once the CLI stores a local token (SEC-02) it comes from
- * there. Handed to the server through its environment, never argv.
+ * The token the visualizer's /v1 proxy sends to the backend: IX_TOKEN, else
+ * the stored local token (the proxy only ever talks to the local backend).
+ * Handed to the server through its environment, never argv.
  */
 function viewBackendToken(): string {
-  return process.env.IX_TOKEN ?? "";
+  return getLocalToken(BACKEND_URL) ?? "";
 }
 
 export function registerViewCommand(program: Command): void {

@@ -21,9 +21,9 @@ The graph is stored in a backend that runs in Docker on your machine:
 | Service | Port | Role |
 |---|---|---|
 | **Ix Memory Layer** | `127.0.0.1:8090` | The HTTP API every client talks to |
-| **ArangoDB 3.12** | `127.0.0.1:8529` | The graph database behind it |
+| **ArangoDB 3.12** | none (Compose network only) | The graph database behind it |
 
-Both bind to localhost only, so with the default local backend your code and graph stay on your machine. The backend ships as a released Docker image
+The memory layer binds to localhost only and ArangoDB publishes no port at all, so with the default local backend your code and graph stay on your machine. The backend ships as a released Docker image
 (`ghcr.io/ix-infrastructure/ix-memory-layer`). Start it with `ix docker start` and check it with `ix status`.
 
 ## Three clients, one graph

@@ -10,6 +10,7 @@ import { ParsePool } from './parse-pool.js';
 // import { ResolveWorker } from './resolve-pool.js';
 import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
+import { combineSignals, currentRunSignal } from '../../client/run-signal.js';
 import type { GraphPatchPayload } from '../../client/types.js';
 import { canonicalWorkspacePath, isPathInside, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
 import { resolveIngestRoot } from '../map-root.js';
@@ -56,6 +57,8 @@ import {
 import { printJson } from '../format.js';
 import { describeReplayedChanges } from '../graph-health.js';
 import { createClient } from "../../client/factory.js";
+import { mapLimit } from "../../client/request-memo.js";
+import { createLimiter, type Limiter } from "../tree-walk.js";
 // ---------------------------------------------------------------------------
 // File discovery
 // ---------------------------------------------------------------------------
@@ -288,6 +291,19 @@ export function stripMapModeOps(patch: GraphPatchPayload): GraphPatchPayload {
 
 interface StoredPatchEntities {
   nodeIds: string[];
+  /** Node kinds the stored patch wrote, when it kept its ops; empty otherwise. */
+  kinds: Map<string, string>;
+  /** External package nodes (`attrs.external`) the stored patch wrote. */
+  external: Set<string>;
+}
+
+/**
+ * Whether a node is an external package node: `external://<pkg>` keyed by the
+ * workspace, not the file, so every file that calls into the package writes
+ * the same one.
+ */
+function isExternalNode(entityNode: unknown): boolean {
+  return (entityNode as { attrs?: { external?: unknown } } | undefined)?.attrs?.external === true;
 }
 
 function readStoredPatchEntities(raw: unknown): StoredPatchEntities | null {
@@ -298,12 +314,21 @@ function readStoredPatchEntities(raw: unknown): StoredPatchEntities | null {
   } | undefined;
   if (!data) return null;
   if (Array.isArray(data.ops)) {
-    const ops = data.ops as Array<{ type?: unknown; id?: unknown }>;
+    const ops = data.ops as Array<{ type?: unknown; id?: unknown; kind?: unknown; attrs?: unknown }>;
+    const kinds = new Map<string, string>();
+    const external = new Set<string>();
+    for (const op of ops) {
+      if (op.type !== 'UpsertNode' || typeof op.id !== 'string') continue;
+      if (typeof op.kind === 'string') kinds.set(op.id, op.kind);
+      if (isExternalNode(op)) external.add(op.id);
+    }
     return {
       nodeIds: ops
         .filter(op => op.type === 'UpsertNode' || op.type === 'DeleteNode')
         .map(op => op.id)
         .filter((id): id is string => typeof id === 'string'),
+      kinds,
+      external,
     };
   }
   if (!Array.isArray(data.entityIds)) return null;
@@ -315,6 +340,8 @@ function readStoredPatchEntities(raw: unknown): StoredPatchEntities | null {
 
   return {
     nodeIds: entityIds.slice(0, nodeCount),
+    kinds: new Map(),
+    external: new Set(),
   };
 }
 
@@ -347,6 +374,9 @@ export async function reconcileRemovedEntities(
   // command silently destroying embedding data the expensive one built. Chunks
   // are not map mode's to reconcile, so in map mode they are left alone.
   mapMode = false,
+  // Bounds the entity lookups. One limiter shared by every file a run
+  // reconciles keeps the whole run to its slots, however many files run at once.
+  lookupLimit: Limiter = task => task(),
 ): Promise<GraphPatchPayload> {
   const previous = await loadStoredPatchEntities(client, previousPatchIds);
   const currentNodeIds = new Set(
@@ -361,46 +391,76 @@ export async function reconcileRemovedEntities(
       .map(op => op['id'])
       .filter((id): id is string => typeof id === 'string'),
   );
-  const candidateNodeIds = previous.nodeIds.filter(id => !currentNodeIds.has(id));
+  // A chunk the stored patch names as one is skipped in map mode without a
+  // lookup; patches stored without their ops still need the lookup for it.
+  const candidateNodeIds = previous.nodeIds.filter(id =>
+    !currentNodeIds.has(id) && !(mapMode && previous.kinds.get(id) === 'chunk'));
   const removedNodeIds: string[] = [];
   const removedEdgeIds = new Set<string>();
   const CHUNK_PREDICATES = new Set(['CONTAINS_CHUNK', 'NEXT']);
 
-  for (const nodeId of candidateNodeIds) {
+  // The lookups run concurrently; their results are walked in candidate order,
+  // so the patch comes out the same however they complete.
+  const lookups = await Promise.all(candidateNodeIds.map(nodeId => lookupLimit(async () => {
     try {
-      const entity = await client.entity(nodeId);
-      // The lookup is already being made for the incident edges, so the kind
-      // costs nothing extra. A node whose kind cannot be read (404 — already
-      // gone) falls through to the delete, which is a no-op server-side.
-      if (mapMode && (entity.node as { kind?: unknown } | undefined)?.kind === 'chunk') {
-        continue;
-      }
-      removedNodeIds.push(nodeId);
-      for (const edge of entity.edges ?? []) {
-        const edgeRecord = edge as {
-          id?: unknown;
-          provenance?: { sourceUri?: unknown; source_uri?: unknown };
-        };
-        const edgeId = edgeRecord.id;
-        const predicate = (edge as { predicate?: unknown }).predicate;
-        const isChunkEdge = typeof predicate === 'string' && CHUNK_PREDICATES.has(predicate);
-        if (typeof edgeId === 'string' && !currentEdgeIds.has(edgeId) && !(mapMode && isChunkEdge)) {
-          removedEdgeIds.add(edgeId);
-        }
-        const sourceUri = edgeRecord.provenance?.sourceUri ?? edgeRecord.provenance?.source_uri;
-        if (
-          dependentSourceUris &&
-          typeof sourceUri === 'string' &&
-          sourceUri !== patch.source.uri
-        ) {
-          dependentSourceUris.add(sourceUri);
-        }
-      }
+      return { nodeId, entity: await client.entity(nodeId) };
     } catch (err) {
       if (!isNotFoundError(err)) throw err;
+      return { nodeId, entity: null };
+    }
+  })));
+
+  for (const { nodeId, entity } of lookups) {
+    if (entity === null) {
       // Already absent. Emitting the delete anyway keeps the patch a complete
       // statement of intent and costs nothing.
       removedNodeIds.push(nodeId);
+      continue;
+    }
+    // The lookup is already being made for the incident edges, so the kind
+    // costs nothing extra.
+    if (mapMode && (entity.node as { kind?: unknown } | undefined)?.kind === 'chunk') {
+      continue;
+    }
+    const edges = (entity.edges ?? []).map(edge => {
+      const edgeRecord = edge as {
+        id?: unknown;
+        predicate?: unknown;
+        provenance?: { sourceUri?: unknown; source_uri?: unknown };
+      };
+      return {
+        id: edgeRecord.id,
+        predicate: edgeRecord.predicate,
+        sourceUri: edgeRecord.provenance?.sourceUri ?? edgeRecord.provenance?.source_uri,
+      };
+    });
+    // An external package node is shared by every file in the workspace that
+    // calls into the package. This file no longer writing it does not remove
+    // it: while another file's edges still reach it, the node and those edges
+    // stay, and only this file's own edges to it go.
+    const shared = (previous.external.has(nodeId) || isExternalNode(entity.node))
+      && edges.some(edge => edge.sourceUri !== patch.source.uri);
+    if (shared) {
+      for (const edge of edges) {
+        if (typeof edge.id === 'string' && edge.sourceUri === patch.source.uri && !currentEdgeIds.has(edge.id)) {
+          removedEdgeIds.add(edge.id);
+        }
+      }
+      continue;
+    }
+    removedNodeIds.push(nodeId);
+    for (const { id: edgeId, predicate, sourceUri } of edges) {
+      const isChunkEdge = typeof predicate === 'string' && CHUNK_PREDICATES.has(predicate);
+      if (typeof edgeId === 'string' && !currentEdgeIds.has(edgeId) && !(mapMode && isChunkEdge)) {
+        removedEdgeIds.add(edgeId);
+      }
+      if (
+        dependentSourceUris &&
+        typeof sourceUri === 'string' &&
+        sourceUri !== patch.source.uri
+      ) {
+        dependentSourceUris.add(sourceUri);
+      }
     }
   }
 
@@ -423,8 +483,54 @@ export async function reconcileRemovedEntities(
   };
 }
 
-export function patchRequiresPerFileCommit(patch: GraphPatchPayload): boolean {
+/**
+ * Files reconciled at once, and entity lookups in flight across all of them:
+ * the graph walkers' cap (`EXPAND_CONCURRENCY`), for the same reason.
+ */
+const RECONCILE_CONCURRENCY = 8;
+
+/**
+ * Whether `patch` must go to `/v1/patch` on its own. Only a patch that deletes,
+ * and only against a backend whose bulk route is not known to apply deletes.
+ * `/v1/patch` does not sweep the file's old edges, so a removed call between
+ * two surviving symbols stayed live there; the bulk route sweeps them.
+ */
+export function patchRequiresPerFileCommit(patch: GraphPatchPayload, bulkDeletes = false): boolean {
+  if (bulkDeletes) return false;
   return patch.ops.some(op => op.type === 'DeleteNode' || op.type === 'DeleteEdge');
+}
+
+/**
+ * The first release whose bulk route applies DeleteNode/DeleteEdge in the
+ * patch's own workspace, by indexed sweep and primary key (Ix-memory #211,
+ * #237): checked live on that release before delete-bearing patches moved there.
+ */
+export const BULK_DELETES_SINCE = '1.0.32';
+
+/**
+ * Whether the backend's bulk route can take delete-bearing patches. Decided by
+ * the release the backend reports; one that reports none (older than
+ * Ix-memory#157, or not built by the release pipeline) keeps the per-file
+ * route. `IX_BULK_DELETES=1` or `=0` overrides for such a build.
+ */
+export function backendAppliesBulkDeletes(
+  health: { release_version?: unknown } | null | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const forced = env.IX_BULK_DELETES;
+  if (forced === '1') return true;
+  if (forced === '0') return false;
+  const release = health?.release_version;
+  if (typeof release !== 'string') return false;
+  const parse = (v: string): number[] | null => {
+    const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(v.trim());
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+  };
+  const have = parse(release);
+  const need = parse(BULK_DELETES_SINCE)!;
+  if (have === null) return false;
+  for (let i = 0; i < 3; i++) if (have[i] !== need[i]) return have[i] > need[i];
+  return true;
 }
 
 export function planDeletedFileRecovery(
@@ -655,6 +761,67 @@ export function isPayloadTooLargeError(err: unknown): boolean {
   return PAYLOAD_TOO_LARGE_PATTERNS.some(pattern => message.includes(pattern));
 }
 
+/**
+ * What a 413 from the bulk writer's own estimate says one request should hold
+ * (Ix-memory#232: `suggestedMaxPatches` in the body). Absent from a 413 that
+ * ArangoDB raised mid-write, or a proxy's.
+ */
+export function parseSuggestedMaxPatches(err: unknown): number | undefined {
+  const text = String(err);
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end <= start) return undefined;
+  try {
+    const n = (JSON.parse(text.slice(start, end + 1)) as { suggestedMaxPatches?: unknown }).suggestedMaxPatches;
+    return typeof n === 'number' && Number.isInteger(n) && n >= 1 ? n : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Ops per bulk request unless `IX_COMMIT_MAX_OPS` says otherwise. The backend's
+ * transaction grows with them, about 4.3 KB a document against ArangoDB's
+ * 512 MB cap, so a 500-file batch of a large repository could not fit and
+ * failed after 14-20 s.
+ *
+ * The bound that matters is the bulk writer's own pre-flight budget (Ix-memory
+ * `BulkTransactionBudget`, from 1.0.32): 80% of 512 MB at 4,300 bytes per
+ * upserted document, doubled once the graph holds anything, which is about
+ * 49,900 documents on every map but a backend's first. Over it, a request is
+ * refused with a 413 before any write; this default stays under it.
+ */
+export const DEFAULT_COMMIT_MAX_OPS = 45_000;
+
+/** Per-request bounds on a bulk commit. A run lowers them when a commit is too large. */
+export interface BulkLimits {
+  maxFiles: number;
+  /** Ops across the request's patches: the backend's transaction grows with them. */
+  maxOps: number;
+}
+
+/**
+ * Cut `items` into bulk requests in order, each within `limits`. An item over
+ * `maxOps` on its own still goes, alone: one patch cannot be split.
+ */
+export function cutBulkChunks<T>(items: T[], opsOf: (item: T) => number, limits: BulkLimits): T[][] {
+  const chunks: T[][] = [];
+  let current: T[] = [];
+  let ops = 0;
+  for (const item of items) {
+    const n = opsOf(item);
+    if (current.length > 0 && (current.length >= limits.maxFiles || ops + n > limits.maxOps)) {
+      chunks.push(current);
+      current = [];
+      ops = 0;
+    }
+    current.push(item);
+    ops += n;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
 export async function commitBulkWithPayloadSplit<T, R>(
   items: T[],
   handlers: {
@@ -662,6 +829,15 @@ export async function commitBulkWithPayloadSplit<T, R>(
     onBulkCommitted: (batch: T[], result: R) => void;
     commitIndividually: (batch: T[], error: unknown, opts?: { replay?: boolean }) => Promise<void>;
     onSplit?: (batch: T[], error: unknown) => void;
+    /**
+     * How to cut a group the backend found too large, when the caller knows
+     * better than halving: what the 413 suggested, or a size the run has
+     * learned. Pieces go out in order, one at a time. Fewer than two pieces,
+     * or absent, and the group is bisected.
+     */
+    splitTooLarge?: (batch: T[], error: unknown) => T[][] | undefined;
+    /** Cut what is left of a split group to the bounds as they stand now. */
+    recut?: (batch: T[]) => T[][];
     /** Patch id of an item, so a partly-committed group can be resumed. */
     patchIdOf?: (item: T) => string | undefined;
     onPartialBulk?: (landed: T[], missing: T[], error: unknown) => void;
@@ -713,6 +889,19 @@ export async function commitBulkWithPayloadSplit<T, R>(
   } catch (err) {
     if (isPayloadTooLargeError(err) && items.length > 1) {
       handlers.onSplit?.(items, err);
+      let pieces = handlers.splitTooLarge?.(items, err);
+      if (pieces && pieces.length > 1) {
+        // The rest is re-cut after each piece: a piece that is refused again
+        // lowers the bounds, and the pieces after it should not each be
+        // refused at the size it already failed at.
+        while (pieces.length > 0) {
+          const [head, ...tail] = pieces;
+          await commitBulkWithPayloadSplit(head, handlers);
+          const rest = tail.flat();
+          pieces = rest.length === 0 ? [] : handlers.recut?.(rest) ?? tail;
+        }
+        return;
+      }
       const midpoint = Math.ceil(items.length / 2);
       await commitBulkWithPayloadSplit(items.slice(0, midpoint), handlers);
       await commitBulkWithPayloadSplit(items.slice(midpoint), handlers);
@@ -1087,6 +1276,8 @@ export interface IngestFilesSummary {
    * back out. That is the shape a #527 run has, and it is exactly right here.
    */
   filesSkippedAsUnchanged: number;
+  /** Files over the 1 MB parse limit, left out of the graph. Absent where no run counted them. */
+  filesTooLarge?: number;
   parseErrors: number;
   commitErrors: number;
   stitchErrors: number;
@@ -1508,6 +1699,12 @@ export async function ingestFiles(
   path: string,
   opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean; exclude?: string[]; deadlineSignal?: AbortSignal }
 ): Promise<IngestFilesSummary> {
+  // Under `ix mcp` the tool call's deadline is this run's deadline too. The
+  // client would see it anyway (createClient combines it), but the commit loop,
+  // the stitch wait and the outcome report all read `opts.deadlineSignal`: left
+  // out of it, a timed-out ingest kept fanning out per-file commits that failed
+  // at once on the aborted signal and charged them to the backend.
+  opts = { ...opts, deadlineSignal: combineSignals(opts.deadlineSignal, currentRunSignal()) };
   const debug = opts.debug || process.env.IX_DEBUG === '1';
   const mapMode = opts.mapMode === true;
   const trueStart = performance.now();
@@ -1724,14 +1921,23 @@ export async function ingestFiles(
     process.stderr.write(`[multi-repo] system "${detectedSystem!.name}" (${systemId}) members=${detectedSystem!.members.join(', ')} packages=${Object.keys(packageRegistry).length} declaredDeps=${depCount}\n`);
   }
 
-  const client = createClient({ deadlineSignal: opts.deadlineSignal });
+  // Long-running: `ix ingest` passes no deadline, and the reads it makes per
+  // changed file (GET /v1/patches/:id) come after a parse that can take
+  // minutes, past any read deadline counted from here.
+  const client = createClient({ deadlineSignal: opts.deadlineSignal, longRunning: true });
 
   // Schema-version check forces a clean re-ingest when the backend's graph
   // format has changed in a way that invalidates existing node IDs (e.g. the
   // absolute→relative source_uri migration, or folding workspace_id into ids).
   // CLIENT_EXPECTED_SCHEMA_VERSION is shared with doctor/upgrade (backend-status).
+  // Read from the same health answer. Unknown (the check failed) keeps the
+  // per-file route for delete-bearing patches.
+  let bulkDeletes = false;
+  const reconcileLookups = createLimiter(RECONCILE_CONCURRENCY);
   try {
     const health = await readBackendHealth(client);
+    bulkDeletes = backendAppliesBulkDeletes(health);
+    if (debug) process.stderr.write(`\n  [commit] delete-bearing patches via ${bulkDeletes ? 'bulk' : '/v1/patch'}\n`);
     const serverVersion = (health as any)?.schema_version;
     if (typeof serverVersion === 'number' && serverVersion !== CLIENT_EXPECTED_SCHEMA_VERSION) {
       process.stderr.write(
@@ -2385,6 +2591,35 @@ export async function ingestFiles(
     // and overlaps well with commit (~5s) + parse (~5s).
     const PARSE_STREAM_CHUNK     = filePaths.length > 10_000 ? 500 : 500;
     const COMMIT_HTTP_MAX_FILES  = parsePositiveIntEnv('IX_COMMIT_HTTP_MAX_FILES', 1000); // files per HTTP request to the backend
+    // Ops per HTTP request; see DEFAULT_COMMIT_MAX_OPS.
+    const COMMIT_MAX_OPS         = parsePositiveIntEnv('IX_COMMIT_MAX_OPS', DEFAULT_COMMIT_MAX_OPS);
+    /**
+     * The bulk bounds for the rest of the run. A 413 lowers them, so later
+     * batches start at a size that fits instead of failing and splitting again.
+     */
+    const bulkLimits: BulkLimits = { maxFiles: COMMIT_HTTP_MAX_FILES, maxOps: COMMIT_MAX_OPS };
+    const opsOf = (item: { patch: GraphPatchPayload }): number => item.patch.ops.length;
+    /**
+     * Learn from a group the backend found too large, as an op budget: the
+     * patch count its 413 suggests, at this group's ops per patch, or else
+     * half the group's ops. Then cut the group to the new bounds.
+     *
+     * Ops, not the suggested count itself: the backend sizes its suggestion
+     * from the group's average patch, and a count cut lets a run of larger
+     * files through over the budget, to be refused again.
+     */
+    const learnBulkLimits = <T extends { patch: GraphPatchPayload }>(items: T[], err: unknown): T[][] => {
+      const ops = items.reduce((sum, item) => sum + opsOf(item), 0);
+      const suggested = parseSuggestedMaxPatches(err);
+      const budget = suggested !== undefined && suggested < items.length
+        ? Math.floor((ops * suggested) / items.length)
+        : Math.floor(ops / 2);
+      bulkLimits.maxOps = Math.max(1, Math.min(bulkLimits.maxOps, budget));
+      if (debug) {
+        process.stderr.write(`\n  [bulk limits] now ${bulkLimits.maxFiles} files / ${bulkLimits.maxOps} ops per request\n`);
+      }
+      return cutBulkChunks(items, opsOf, bulkLimits);
+    };
     const COMMIT_CONCURRENCY     = parsePositiveIntEnv('IX_COMMIT_CONCURRENCY', 8); // parallel HTTP save requests
     const COMMIT_CONFLICT_RETRIES = parsePositiveIntEnv('IX_COMMIT_CONFLICT_RETRIES', 6); // retry transient Arango lock conflicts
     // Re-sends of a commit that lost the base-rev race to another writer; see retryOnBaseRevRace.
@@ -2398,7 +2633,7 @@ export async function ingestFiles(
 
     if (debug) {
       process.stderr.write(
-        `\n  Save config: httpBatch=${COMMIT_HTTP_MAX_FILES} concurrency=${COMMIT_CONCURRENCY}\n`
+        `\n  Save config: httpBatch=${COMMIT_HTTP_MAX_FILES} maxOps=${COMMIT_MAX_OPS} concurrency=${COMMIT_CONCURRENCY}\n`
       );
     }
 
@@ -2481,22 +2716,23 @@ export async function ingestFiles(
       const deferredByDeadline: PreparedPatch[] = [];
 
       const chunks: PreparedPatch[][] = [];
-      let bulkChunk: PreparedPatch[] = [];
-      const flushBulkChunk = (): void => {
-        if (bulkChunk.length === 0) return;
-        chunks.push(bulkChunk);
-        bulkChunk = [];
+      let bulkRun: PreparedPatch[] = [];
+      const flushBulkRun = (): void => {
+        if (bulkRun.length === 0) return;
+        chunks.push(...cutBulkChunks(bulkRun, opsOf, bulkLimits));
+        bulkRun = [];
       };
       for (const item of preparedPatches) {
-        if (patchRequiresPerFileCommit(item.patch)) {
-          flushBulkChunk();
+        if (patchRequiresPerFileCommit(item.patch, bulkDeletes)) {
+          flushBulkRun();
           chunks.push([item]);
         } else {
-          bulkChunk.push(item);
-          if (bulkChunk.length === COMMIT_HTTP_MAX_FILES) flushBulkChunk();
+          bulkRun.push(item);
         }
       }
-      flushBulkChunk();
+      flushBulkRun();
+      const isBulkChunk = (chunk: PreparedPatch[]): boolean =>
+        !chunk.some(item => patchRequiresPerFileCommit(item.patch, bulkDeletes));
 
       const commitMsPerChunk = new Array<number>(chunks.length).fill(0);
       // The drain belongs to no chunk, but its time is still commit time --
@@ -2759,11 +2995,11 @@ export async function ingestFiles(
         // one extra doomed request, the same price the per-chunk bulk already
         // pays and deliberately never skips.
         //
-        // DELETIONS are excluded. `runChunk` routes any patch with a
-        // DeleteNode/DeleteEdge op to its own single-item `client.commitPatch`,
-        // and `ingest-reconcile.test.ts` pins that -- the bulk endpoint is not
-        // trusted to apply delete ops. They fall through to the passes below,
-        // which commit them one at a time as their routing requires.
+        // DELETIONS are excluded on a backend whose bulk route is not known to
+        // apply delete ops (`backendAppliesBulkDeletes`): `runChunk` routes
+        // those to their own single-item `client.commitPatch`. They fall
+        // through to the passes below, which commit them one at a time as their
+        // routing requires. On a current backend they ride the bulk like the rest.
         //
         // CHUNKED at `COMMIT_HTTP_MAX_FILES`, not skipped above it. Skipping
         // meant that lowering `IX_COMMIT_HTTP_MAX_FILES` -- which #560's
@@ -2776,12 +3012,12 @@ export async function ingestFiles(
         // confirmed would be counted as a commit error -- suppressing the mtime
         // baseline and reporting files as missing from a graph that holds them,
         // which is the over-reporting `replay` exists to prevent (Ix#495).
-        const needsPerFile = (item: PreparedPatch): boolean => patchRequiresPerFileCommit(item.patch);
+        const needsPerFile = (item: PreparedPatch): boolean => patchRequiresPerFileCommit(item.patch, bulkDeletes);
         const stillToSend: PreparedPatch[] = items.filter(needsPerFile);
         let probeQueue = items.filter(item => !needsPerFile(item));
 
         while (probeQueue.length > 1) {
-          const chunk = probeQueue.slice(0, COMMIT_HTTP_MAX_FILES);
+          const chunk = cutBulkChunks(probeQueue, opsOf, bulkLimits)[0];
           const rest = probeQueue.slice(chunk.length);
           const bulkStart = performance.now();
           try {
@@ -2966,7 +3202,7 @@ export async function ingestFiles(
         ): Promise<void> =>
           commitItemsSerially(items, ms => { commitMsPerChunk[ci] += ms; }, bulkError, fallbackOpts);
 
-        const hasDeletion = chunk.some(item => patchRequiresPerFileCommit(item.patch));
+        const hasDeletion = chunk.some(item => patchRequiresPerFileCommit(item.patch, bulkDeletes));
 
         if (hasDeletion) {
           await commitIndividually(chunk);
@@ -3049,6 +3285,8 @@ export async function ingestFiles(
                 `\n  [bulk partly committed, resuming] ${landed.length} already landed, re-sending ${missing.length}: ${err}\n`
               );
             },
+            splitTooLarge: learnBulkLimits,
+            recut: items => cutBulkChunks(items, opsOf, bulkLimits),
             onSplit: (items, err) => {
               if (!debug) return;
               const first = items[0];
@@ -3073,9 +3311,11 @@ export async function ingestFiles(
         }
       };
 
-      await Promise.all(
-        Array.from({ length: Math.min(COMMIT_CONCURRENCY, chunks.length) }, () => worker())
-      );
+      // Several bulk requests from one batch go one at a time. Each takes the
+      // backend's exclusive lock, so sending them side by side bought no
+      // throughput and lost base-rev races (BaseRevMismatch) to each other.
+      const workers = chunks.filter(isBulkChunk).length > 1 ? 1 : Math.min(COMMIT_CONCURRENCY, chunks.length);
+      await Promise.all(Array.from({ length: workers }, () => worker()));
 
       // Nothing stays abandoned while the backend is demonstrably accepting
       // writes. Five adjacent patches the backend rejects on their own merits
@@ -3152,6 +3392,43 @@ export async function ingestFiles(
       return commitMsPerChunk.reduce((a, b) => a + b, 0) + drainMs;
     };
 
+    /**
+     * Build each file's patch and, for a file the backend had before, reconcile
+     * what it removed. Reconcile runs for several files at once: awaited one
+     * file at a time it was a serial chain of entity lookups per batch. The
+     * patches come back in file order, without the ones that failed to build.
+     */
+    const buildFilePatches = async (
+      files: ParsedFile[],
+      edgesByFile: Map<string, any[]>,
+    ): Promise<PreparedPatch[]> => {
+      const built = await mapLimit(files, RECONCILE_CONCURRENCY, async ({ parsed: p, hash, previousHash }, j) => {
+        try {
+          const fileWorkspace = fileWorkspaceId(p.filePath);
+          let patch = buildPatchFn!(p, hash, fileWorkspace, edgesByFile.get(p.filePath) ?? emptyEdges, previousHash, fileMultiRepo(p.filePath));
+          if (previousHash) {
+            patch = await reconcileRemovedEntities(
+              client,
+              patch,
+              sourcePatchIdCandidates(p.filePath, previousHash, fileWorkspace),
+              undefined,
+              mapMode,
+              reconcileLookups,
+            );
+          }
+          if (mapMode) patch = stripMapModeOps(patch);
+          // source.uri (workspace-relative) and source.workspaceId are set
+          // inside buildPatch; the backend stores both as opaque attributes.
+          return makePreparedPatch(patch, j + 1, p.filePath, previousHash !== undefined || isForced(p.filePath));
+        } catch (err) {
+          parseErrors++;
+          process.stderr.write(`\n  [patch build error] ${p.filePath}: ${err}\n`);
+          return null;
+        }
+      });
+      return built.filter((pp): pp is PreparedPatch => pp !== null);
+    };
+
     /** Resolve edges within a batch, build patches, and commit in sub-chunks. */
     const flushBatch = async (batch: ParsedFile[]): Promise<void> => {
       if (batch.length === 0) return;
@@ -3181,30 +3458,7 @@ export async function ingestFiles(
 
         setCurrentWork(`build commit payloads ending ${nodePath.basename(batch[batch.length - 1].filePath)}`);
         const buildStart = performance.now();
-        const preparedPatches: PreparedPatch[] = [];
-        for (let j = 0; j < batch.length; j++) {
-          const { parsed: p, hash, previousHash } = batch[j];
-          try {
-            const fileWorkspace = fileWorkspaceId(p.filePath);
-            let patch = buildPatchFn!(p, hash, fileWorkspace, batchEdgesByFile.get(p.filePath) ?? emptyEdges, previousHash, fileMultiRepo(p.filePath));
-            if (previousHash) {
-              patch = await reconcileRemovedEntities(
-                client,
-                patch,
-                sourcePatchIdCandidates(p.filePath, previousHash, fileWorkspace),
-                undefined,
-                mapMode,
-              );
-            }
-            if (mapMode) patch = stripMapModeOps(patch);
-            // source.uri (workspace-relative) and source.workspaceId are set
-            // inside buildPatch; the backend stores both as opaque attributes.
-            preparedPatches.push(makePreparedPatch(patch, j + 1, p.filePath, previousHash !== undefined || isForced(p.filePath)));
-          } catch (err) {
-            parseErrors++;
-            process.stderr.write(`\n  [patch build error] ${p.filePath}: ${err}\n`);
-          }
-        }
+        const preparedPatches = await buildFilePatches(batch, batchEdgesByFile);
         buildPatchMs += Math.round(performance.now() - buildStart);
         for (const pp of preparedPatches) {
           for (const op of pp.patch.ops) {
@@ -3260,29 +3514,7 @@ export async function ingestFiles(
         }
         setCurrentWork(`build commit payloads ending ${nodePath.basename(allParsed[allParsed.length - 1].filePath)}`);
         const buildStart = performance.now();
-        const preparedPatches: PreparedPatch[] = [];
-        for (let j = 0; j < allParsed.length; j++) {
-          const { parsed: p, hash, previousHash } = allParsed[j];
-          try {
-            const fileWorkspace = fileWorkspaceId(p.filePath);
-            let patch = buildPatchFn!(p, hash, fileWorkspace, edgesByFile.get(p.filePath) ?? emptyEdges, previousHash, fileMultiRepo(p.filePath));
-            if (previousHash) {
-              patch = await reconcileRemovedEntities(
-                client,
-                patch,
-                sourcePatchIdCandidates(p.filePath, previousHash, fileWorkspace),
-                undefined,
-                mapMode,
-              );
-            }
-            if (mapMode) patch = stripMapModeOps(patch);
-            // source.uri and source.workspaceId are set inside buildPatch (see flushBatch).
-            preparedPatches.push(makePreparedPatch(patch, j + 1, p.filePath, previousHash !== undefined || isForced(p.filePath)));
-          } catch (err) {
-            parseErrors++;
-            process.stderr.write(`\n  [patch build error] ${p.filePath}: ${err}\n`);
-          }
-        }
+        const preparedPatches = await buildFilePatches(allParsed, edgesByFile);
         buildPatchMs += Math.round(performance.now() - buildStart);
         for (const pp of preparedPatches) {
           for (const op of pp.patch.ops) {
@@ -3430,7 +3662,7 @@ export async function ingestFiles(
       // loop recorded did not actually happen, and leaving them counted would
       // refuse the stitch on a run that parsed every file. (Adding one file to
       // a mapped repo used to land here whatever its language; the baseline
-      // check above keeps prescan-language additions on Path A now.)
+      // check above keeps additions in every language on Path A now.)
       filesSkipped -= filesSkippedAsUnchanged;
       filesSkippedAsUnchanged = 0;
       const moduleStart = performance.now();
@@ -3626,6 +3858,7 @@ export async function ingestFiles(
             sourcePatchIdCandidates(relFilePath, previousHash, fileWorkspace),
             dependentSourceUris,
             mapMode,
+            reconcileLookups,
           );
           if (mapMode) patch = stripMapModeOps(patch);
           deletedPatches.push(makePreparedPatch(patch, i + 1, relFilePath, true));
@@ -4032,6 +4265,7 @@ export async function ingestFiles(
     idempotentPatches,
     replayedChanges: [...replayedChanges].sort(),
     filesSkippedAsUnchanged,
+    filesTooLarge: tooLarge,
     // `+ crashedParses()`, as the baseline and delete guards already do. Files
     // lost to a dead parse pool raise `filesSkippedUnparsed`, never
     // `parseErrors`, so without this everything downstream read the run as
@@ -4326,6 +4560,16 @@ export function githubCommitFailure(result: { status?: string }): string | undef
     "(BaseRevMismatch), so nothing was ingested. Run the command again once other ingests have finished.";
 }
 
+/**
+ * The `--github` patch id, from what is sent rather than the clock: the same
+ * issues, PRs and commits give the same id, so re-running an unchanged ingest
+ * is a no-op on the backend instead of a new revision of identical facts.
+ * Exported for tests.
+ */
+export function githubPatchId(repo: { owner: string; repo: string }, ops: unknown[]): string {
+  return deterministicId(`github://${repo.owner}/${repo.repo}:${sha256(Buffer.from(JSON.stringify(ops)))}`);
+}
+
 async function ingestGitHub(opts: {
   github?: string; token?: string; since?: string;
   limit: string; format: string;
@@ -4356,7 +4600,7 @@ async function ingestGitHub(opts: {
   for (const commit of data.commits) allOps.push(...transformCommit(repo, commit));
 
   const patch: GraphPatchPayload = {
-    patchId: deterministicId(`github://${repo.owner}/${repo.repo}:${since}:${Date.now()}`),
+    patchId: githubPatchId(repo, allOps),
     // IX_PATCH_ACTOR="" lets a kOS cloud backend stamp the verified principal
     // (it 403s a non-empty actor that differs from it); see core-ingestion patchActor().
     actor: process.env.IX_PATCH_ACTOR ?? 'ix/github-ingest',
