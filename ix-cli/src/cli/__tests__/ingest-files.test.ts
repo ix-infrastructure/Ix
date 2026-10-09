@@ -1165,6 +1165,7 @@ describe("ingestFiles against a fake backend", () => {
     const summary = await run();
 
     expect(summary.filesTooLarge).toBe(1);
+    expect(summary.filesTooLargePaths).toEqual(["src/huge.ts"]);
     expect(summary.patchesApplied).toBe(2);
   });
 

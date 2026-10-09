@@ -450,11 +450,61 @@ Examples:
     });
 }
 
+/** `ix map --format json`. Exported for tests. */
+export function mapJsonPayload(
+  result: MapView,
+  regions: MapRegion[],
+  localIngest: Pick<
+    IngestFilesSummary,
+    "parseErrors" | "commitErrors" | "stitchSkipped" | "stitchSkippedRule" | "filesTooLarge" | "filesTooLargePaths"
+  > | undefined,
+): Record<string, unknown> {
+  return {
+    file_count: result.file_count,
+    region_count: regions.length,
+    levels: result.levels,
+    map_rev: result.map_rev,
+    outcome: result.outcome,
+    // Always present so a consumer can branch on them without a key check.
+    // A dropped file is silent otherwise: the backend still answers with a
+    // completed outcome, so `outcome` alone cannot distinguish a whole map
+    // from one missing every file that failed to build a patch (#554).
+    parse_errors: localIngest?.parseErrors ?? 0,
+    commit_errors: localIngest?.commitErrors ?? 0,
+    // Ix#568. The whole reason this is reported at all is hooks that run
+    // `ix map` and read the machine output; leaving it only in
+    // `ix ingest --format json` puts it where those hooks never look.
+    // `?? null`, not left undefined: JSON.stringify drops an undefined
+    // value, so a consumer could not tell the field apart from an older
+    // CLI that never emitted it. Its siblings are always present too.
+    stitch_skipped: localIngest?.stitchSkipped ?? null,
+    stitch_skipped_rule: localIngest?.stitchSkippedRule ?? null,
+    // Files over the 1 MB parse limit, left out of the graph, and up to 20
+    // of their paths (the count is the whole number). On stderr and in the
+    // --silent line already; here for the consumers that read this payload.
+    // Always present, like their siblings.
+    files_too_large: localIngest?.filesTooLarge ?? 0,
+    files_too_large_paths: localIngest?.filesTooLargePaths ?? [],
+    regions: regions.map((r: any) => ({
+      label: r.label,
+      level: r.level,
+      files: r.file_count,
+      cohesion: roundFloat(r.cohesion),
+      coupling: roundFloat(r.external_coupling),
+      confidence: roundFloat(r.confidence),
+      signals: r.dominant_signals,
+    })),
+  };
+}
+
 /** Flat one-record-per-line region listing with explicit parent= for the llm format. */
 export function renderMapLlm(
   result: MapView,
   regions: MapRegion[],
-  ingest?: Pick<IngestFilesSummary, "parseErrors" | "commitErrors" | "stitchSkipped" | "stitchSkippedRule">,
+  ingest?: Pick<
+    IngestFilesSummary,
+    "parseErrors" | "commitErrors" | "stitchSkipped" | "stitchSkippedRule" | "filesTooLarge" | "filesTooLargePaths"
+  >,
 ): void {
   console.log(llmLine("map", [
     ["files", result.file_count],
@@ -474,7 +524,13 @@ export function renderMapLlm(
     // where they never look.
     ["stitch_skipped", ingest?.stitchSkipped],
     ["stitch_skipped_rule", ingest?.stitchSkippedRule],
+    // Files over the 1 MB parse limit, left out of the graph. Only when there
+    // are some; the `too_large` rows after this name up to 20 of them.
+    ["files_too_large", ingest?.filesTooLarge ? ingest.filesTooLarge : undefined],
   ]));
+  for (const path of ingest?.filesTooLarge ? ingest.filesTooLargePaths ?? [] : []) {
+    console.log(llmLine("too_large", [["path", path]]));
+  }
   for (const r of regions) {
     console.log(llmLine("region", [
       ["id", llmShortId(r.id)],
@@ -1138,36 +1194,7 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
   if (minConf > 0) regions = regions.filter(r => r.confidence >= minConf);
 
   if (opts.format === "json") {
-    printJson({
-      file_count: result.file_count,
-      region_count: regions.length,
-      levels: result.levels,
-      map_rev: result.map_rev,
-      outcome: result.outcome,
-      // Always present so a consumer can branch on them without a key check.
-      // A dropped file is silent otherwise: the backend still answers with a
-      // completed outcome, so `outcome` alone cannot distinguish a whole map
-      // from one missing every file that failed to build a patch (#554).
-      parse_errors: localIngest?.parseErrors ?? 0,
-      commit_errors: localIngest?.commitErrors ?? 0,
-      // Ix#568. The whole reason this is reported at all is hooks that run
-      // `ix map` and read the machine output; leaving it only in
-      // `ix ingest --format json` puts it where those hooks never look.
-      // `?? null`, not left undefined: JSON.stringify drops an undefined
-      // value, so a consumer could not tell the field apart from an older
-      // CLI that never emitted it. Its siblings are always present too.
-      stitch_skipped: localIngest?.stitchSkipped ?? null,
-      stitch_skipped_rule: localIngest?.stitchSkippedRule ?? null,
-      regions: regions.map((r: any) => ({
-        label: r.label,
-        level: r.level,
-        files: r.file_count,
-        cohesion: roundFloat(r.cohesion),
-        coupling: roundFloat(r.external_coupling),
-        confidence: roundFloat(r.confidence),
-        signals: r.dominant_signals,
-      })),
-    });
+    printJson(mapJsonPayload(result, regions, localIngest));
     return;
   }
   if (opts.format === "llm") {

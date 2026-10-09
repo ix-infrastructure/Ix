@@ -755,6 +755,23 @@ const PAYLOAD_TOO_LARGE_PATTERNS = [
   'maximal transaction size',
 ];
 
+/** How many oversized files a summary names; the count covers the rest. */
+export const FILES_TOO_LARGE_LISTED = 20;
+
+/**
+ * The oversized files in the stat loop's record, workspace-relative, sorted,
+ * and cut to `FILES_TOO_LARGE_LISTED`. Exported for tests.
+ */
+export function listTooLargeFiles(
+  record: ReadonlyMap<string, 'empty' | 'tooLarge'> | undefined,
+  toRelative: (absPath: string) => string,
+): string[] {
+  if (record === undefined) return [];
+  const paths: string[] = [];
+  for (const [path, why] of record) if (why === 'tooLarge') paths.push(toRelative(path));
+  return paths.sort().slice(0, FILES_TOO_LARGE_LISTED);
+}
+
 export function isPayloadTooLargeError(err: unknown): boolean {
   const responseError = err as { status?: unknown; statusCode?: unknown } | null;
   if (responseError?.status === 413 || responseError?.statusCode === 413) return true;
@@ -1281,6 +1298,12 @@ export interface IngestFilesSummary {
   filesSkippedAsUnchanged: number;
   /** Files over the 1 MB parse limit, left out of the graph. Absent where no run counted them. */
   filesTooLarge?: number;
+  /**
+   * Which files those were, workspace-relative and sorted, at most
+   * `FILES_TOO_LARGE_LISTED` of them: `filesTooLarge` is the whole count.
+   * Absent where no run counted them.
+   */
+  filesTooLargePaths?: string[];
   parseErrors: number;
   commitErrors: number;
   stitchErrors: number;
@@ -2152,6 +2175,8 @@ export async function ingestFiles(
    */
   const runDeadlineExpired = (): boolean => opts.deadlineSignal?.aborted === true;
   let tooLarge = 0;
+  /** The stat loop's record of empty and oversized files, once it exists; `tooLarge` counts its oversized ones. */
+  let skippedForSize: ReadonlyMap<string, 'empty' | 'tooLarge'> | undefined;
   let minifiedLikely = 0;
   let outsideRoot = 0;
   let latestRev = 0;
@@ -2388,6 +2413,7 @@ export async function ingestFiles(
      * is precisely what the check that reads this exists to prevent.
      */
     const accountedByStatLoop = new Map<string, 'empty' | 'tooLarge'>();
+    skippedForSize = accountedByStatLoop;
     for (const filePath of filePaths) {
       try {
         const st = fs.statSync(filePath);
@@ -4399,6 +4425,7 @@ export async function ingestFiles(
     replayedChanges: [...replayedChanges].sort(),
     filesSkippedAsUnchanged,
     filesTooLarge: tooLarge,
+    filesTooLargePaths: listTooLargeFiles(skippedForSize, toWorkspaceRelative),
     // `+ crashedParses()`, as the baseline and delete guards already do. Files
     // lost to a dead parse pool raise `filesSkippedUnparsed`, never
     // `parseErrors`, so without this everything downstream read the run as
