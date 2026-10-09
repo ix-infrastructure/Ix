@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
+import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 import { hostname } from "node:os";
 import { randomBytes } from "node:crypto";
@@ -95,15 +95,23 @@ interface Observed {
 }
 
 function observe(path: string): Observed | null {
-  let st;
-  try { st = statSync(path); } catch { return null; }
-  let meta: LockMeta | null = null;
+  // One descriptor for both the stat and the read, so they describe the same file.
+  let fd: number;
+  try { fd = openSync(path, "r"); } catch { return null; }
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf-8"));
-    // An older Ix wrote this lock without a token; its pid still tells.
-    if (parsed && typeof parsed === "object" && typeof parsed.pid === "number") meta = parsed as LockMeta;
-  } catch { /* being written, or not ours */ }
-  return { meta, id: `${meta?.token ?? ""}:${st.ino}:${st.mtimeMs}:${st.size}`, mtimeMs: st.mtimeMs };
+    const st = fstatSync(fd);
+    let meta: LockMeta | null = null;
+    try {
+      const parsed = JSON.parse(readFileSync(fd, "utf-8"));
+      // An older Ix wrote this lock without a token; its pid still tells.
+      if (parsed && typeof parsed === "object" && typeof parsed.pid === "number") meta = parsed as LockMeta;
+    } catch { /* being written, or not ours */ }
+    return { meta, id: `${meta?.token ?? ""}:${st.ino}:${st.mtimeMs}:${st.size}`, mtimeMs: st.mtimeMs };
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Why the observed holder is gone, or undefined while it may still be working. */

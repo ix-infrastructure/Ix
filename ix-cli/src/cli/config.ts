@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { readFileSync, writeFileSync, existsSync, rmSync, chmodSync, realpathSync, mkdirSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, rmSync, chmodSync, realpathSync, mkdirSync, statSync, openSync, fstatSync, closeSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -187,20 +187,26 @@ export function loadConfig(): IxConfig {
   // workspace into it, so every later load in the process that found no
   // config file -- a fresh IX_HOME, a deleted file -- inherited workspaces
   // that were never in either.
-  let stat: { mtimeMs: number; size: number };
+  // One descriptor for the stat and the read, so the memo's key always
+  // describes the bytes it was parsed from.
+  let fd: number;
   try {
-    stat = statSync(configPath);
+    fd = openSync(configPath, "r");
   } catch {
     return { ...defaultConfig };
   }
-  if (configMemo && configMemo.path === configPath && configMemo.mtimeMs === stat.mtimeMs && configMemo.size === stat.size) {
-    return structuredClone(configMemo.config);
-  }
+  let stat: { mtimeMs: number; size: number };
   let raw: string;
   try {
-    raw = readFileSync(configPath, "utf-8");
+    stat = fstatSync(fd);
+    if (configMemo && configMemo.path === configPath && configMemo.mtimeMs === stat.mtimeMs && configMemo.size === stat.size) {
+      return structuredClone(configMemo.config);
+    }
+    raw = readFileSync(fd, "utf-8");
   } catch {
     return { ...defaultConfig };
+  } finally {
+    closeSync(fd);
   }
   let parsed: Partial<IxConfig> | null;
   try {
