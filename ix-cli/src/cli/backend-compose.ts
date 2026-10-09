@@ -24,27 +24,81 @@ export function backendOverrideFile(): string {
   return join(ixHome(), "backend", "docker-compose.override.yml");
 }
 
+const LOCAL_TOKEN_LINE = /^\s*(?:export\s+)?IX_LOCAL_TOKEN\s*=(.*)$/;
+const LOCAL_TOKEN_IN_FILE = /^\s*(?:export\s+)?IX_LOCAL_TOKEN\s*=/m;
+
 /**
- * `.env` with IX_LOCAL_TOKEN set to `token` (empty: the backend does not
- * require one). Other lines a user added are kept.
+ * The IX_LOCAL_TOKEN a `.env` sets, if any: the last assignment, as Compose
+ * reads it, with surrounding quotes removed. An empty value is no token.
  */
-export function backendEnvContents(existing: string, token: string | undefined): string {
-  const kept = existing
-    .split(/\r?\n/)
-    .filter((line) => line.trim() !== "" && !/^\s*(export\s+)?IX_LOCAL_TOKEN\s*=/.test(line));
-  return [...kept, `IX_LOCAL_TOKEN=${token ?? ""}`].join("\n") + "\n";
+export function envFileLocalToken(existing: string): string | undefined {
+  let value: string | undefined;
+  for (const line of existing.split(/\r?\n/)) {
+    const m = LOCAL_TOKEN_LINE.exec(line);
+    if (m) value = dotenvValue(m[1]);
+  }
+  return value ? value : undefined;
 }
 
 /**
- * Write ~/.ix/backend/.env for the stored token, atomically and at mode 0600:
- * it holds the credential. Compose reads it for `${IX_LOCAL_TOKEN}`.
+ * A dotenv value the way Docker Compose reads it: a quoted value ends at its
+ * closing quote (anything after, such as ` # note`, is ignored); an unquoted
+ * one ends where whitespace starts a ` #` comment.
+ */
+function dotenvValue(raw: string): string {
+  const v = raw.trim();
+  const quote = v[0];
+  if (quote === '"' || quote === "'") {
+    const close = v.indexOf(quote, 1);
+    if (close > 0) return v.slice(1, close).trim();
+  }
+  return v.replace(/\s+#.*$/, "").trim();
+}
+
+/**
+ * `.env` with IX_LOCAL_TOKEN set to `token` (empty: the backend does not
+ * require one). Every other line a user wrote, comments and blank lines
+ * included, is kept where it was; the token line replaces the first existing
+ * one, or is appended.
+ */
+export function backendEnvContents(existing: string, token: string | undefined): string {
+  const tokenLine = `IX_LOCAL_TOKEN=${token ?? ""}`;
+  const lines = existing === "" ? [] : existing.replace(/\r?\n$/, "").split(/\r?\n/);
+  const out: string[] = [];
+  let placed = false;
+  for (const line of lines) {
+    if (LOCAL_TOKEN_LINE.test(line)) {
+      if (!placed) out.push(tokenLine);
+      placed = true;
+    } else {
+      out.push(line);
+    }
+  }
+  if (!placed) out.push(tokenLine);
+  return out.join("\n") + "\n";
+}
+
+function readEnvFile(envFile: string): string {
+  try { return readFileSync(envFile, "utf-8"); } catch { return ""; }
+}
+
+/**
+ * Write ~/.ix/backend/.env for `token`, atomically and at mode 0600: it holds
+ * the credential. Compose reads it for `${IX_LOCAL_TOKEN}`. A file that already
+ * says the same is left untouched.
  */
 export function writeBackendEnv(token: string | undefined, envFile: string = backendEnvFile()): void {
-  let existing = "";
-  try { existing = readFileSync(envFile, "utf-8"); } catch { /* none yet */ }
+  const existing = readEnvFile(envFile);
+  // Already says the same (however the user quoted it): leave the file as it is.
+  if (existsSync(envFile) && envFileLocalToken(existing) === (token || undefined) && LOCAL_TOKEN_IN_FILE.test(existing)) {
+    // Nothing to rewrite, but the file still holds a credential: keep it 0600.
+    try { chmodSync(envFile, 0o600); } catch { /* best effort */ }
+    return;
+  }
+  const next = backendEnvContents(existing, token);
   mkdirSync(dirname(envFile), { recursive: true, mode: 0o700 });
   const tmp = `${envFile}.${process.pid}.tmp`;
-  writeFileSync(tmp, backendEnvContents(existing, token), { mode: 0o600 });
+  writeFileSync(tmp, next, { mode: 0o600 });
   try {
     renameSync(tmp, envFile);
   } catch (err) {
@@ -55,14 +109,51 @@ export function writeBackendEnv(token: string | undefined, envFile: string = bac
 }
 
 /**
- * The `docker compose` arguments that name the backend's files: the env file
- * (rewritten from the stored token first, so a token change reaches the next
- * `up`) and the user's override file when there is one.
+ * The token the backend should be started with: the stored one when there is
+ * one (it is what this CLI sends, so the two must agree), else whatever the
+ * user set by hand in `.env`, which `ix docker start` has no reason to erase.
+ * `clear` (`--no-local-token`) drops a hand-set token too: the user asked for
+ * no token at all.
  */
-export function backendComposeArgs(composeFile: string): string[] {
+export function backendStartToken(
+  stored: string | undefined,
+  existing: string,
+  clear = false,
+): string | undefined {
+  if (stored) return stored;
+  return clear ? undefined : envFileLocalToken(existing);
+}
+
+/** The IX_LOCAL_TOKEN set by hand in ~/.ix/backend/.env, if any. */
+export function handSetLocalToken(envFile: string = backendEnvFile()): string | undefined {
+  return envFileLocalToken(readEnvFile(envFile));
+}
+
+export interface BackendComposeOptions {
+  /**
+   * Rewrite `.env` from the stored token first, so a token change reaches the
+   * container. Only commands that (re)create the backend (`up`) need this;
+   * read-only ones (`ps`, `logs`) and `stop`/`restart` must not touch the file.
+   */
+  writeEnv?: boolean;
+  /** With `writeEnv`: drop a hand-set token as well (`--no-local-token`). */
+  clearToken?: boolean;
+}
+
+/**
+ * The `docker compose` arguments that name the backend's files: the env file
+ * (written first only when `writeEnv` asks; passed only when it exists, since
+ * Compose refuses a missing `--env-file`) and the user's override file when
+ * there is one.
+ */
+export function backendComposeArgs(composeFile: string, opts: BackendComposeOptions = {}): string[] {
   const envFile = backendEnvFile();
-  writeBackendEnv(storedLocalToken(), envFile);
-  const args = ["compose", "--env-file", envFile, "-f", composeFile];
+  if (opts.writeEnv) {
+    writeBackendEnv(backendStartToken(storedLocalToken(), readEnvFile(envFile), opts.clearToken), envFile);
+  }
+  const args = ["compose"];
+  if (existsSync(envFile)) args.push("--env-file", envFile);
+  args.push("-f", composeFile);
   const override = backendOverrideFile();
   if (existsSync(override)) args.push("-f", override);
   return args;
