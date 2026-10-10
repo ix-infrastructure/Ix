@@ -48,12 +48,18 @@ surfaces (#575).
   --limit 50` exits with an error rather than a shorter list. `--detailed`
   auto-paginates on its own; `--offset` or `--regions` turns that off, and
   `--limit` only sets the page size.
-- **`ix context` budgets the evidence block in tokens, not characters.**
-  `--max-tokens` defaults to 3,000 and is converted at 2.14 characters per
-  token, measured across 41 recorded bundles. At 1,500 the evidence block held
-  about ten items, and for a file target those were its own members: ix-bench
-  agents were shown 0.59 of the expected files ix had found, against all of
-  them at 3,000, for about 320 more tokens. `--max-chars` is still there for
+- **`ix context` budgets the text it emits, in tokens.** `--max-tokens`
+  defaults to 3,000 and is converted to characters per output format: 3.5 per
+  token for `--format llm` and text, 2.7 for `--format json` (measured with
+  cl100k; the old flat 2.14 was measured on recorded bundles and is what saved
+  investigations from before this were sized at). For `llm` the budget covers
+  the whole output: header, diagnostics, evidence rows and `next` lines. For
+  `json` it bounds the evidence list only; entities and relationships keep
+  their own `--max-entities` and `--max-relationships` counts. `--max-evidence`
+  defaults to 200 so the token budget normally binds first. A saved
+  investigation records the format its budget was sized for, and `--diff`
+  rebuilds with it. The ix-bench result that all expected files appear at 3,000
+  tokens was measured under the old sizing. `--max-chars` is still there for
   a caller who needs exact bytes and overrides it; passing both is refused
   rather than silently ranked, because the output does not say which one won.
 - **`ix mcp` advertises five tools by default**, not twenty-six:
@@ -244,7 +250,7 @@ Build a bounded, deterministic context bundle for a symbol, file, or entity (or 
 | `--as-of-rev` | `<n>` | — | Historical context as of a graph revision |
 | `--max-entities` | `<n>` | — | Maximum entities in the bundle (default: 50, clamped to 1-500) |
 | `--max-relationships` | `<n>` | — | Maximum relationships in the bundle (default: 100, clamped to 1-1000) |
-| `--max-evidence` | `<n>` | — | Maximum evidence items in the bundle (default: 25, clamped to 1-200) |
+| `--max-evidence` | `<n>` | — | Maximum evidence items in the bundle; `--max-tokens` normally binds first (default: 200, clamped to 1-200) |
 | `--max-tokens` | `<n>` | `3000` | Maximum tokens of evidence output (clamped to 500-200000) |
 | `--max-chars` | `<n>` | — | Maximum characters of evidence output; overrides `--max-tokens` (clamped to 1000-1000000) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |

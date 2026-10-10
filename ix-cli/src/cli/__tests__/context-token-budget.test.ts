@@ -4,7 +4,7 @@ import { Command } from "commander";
 import { describe, expect, it } from "vitest";
 
 import {
-  BUNDLE_CHARS_PER_TOKEN,
+  CHARS_PER_TOKEN,
   clampBudgets,
   detectContextModeConflict,
   registerContextCommand,
@@ -14,14 +14,17 @@ describe("--max-tokens", () => {
   it("is what bounds a default bundle, not 12,000 characters", () => {
     const budgets = clampBudgets({});
     expect(budgets.maxTokens).toBe(3000);
-    expect(budgets.maxChars).toBe(Math.round(3000 * BUNDLE_CHARS_PER_TOKEN));
+    expect(budgets.maxChars).toBe(8100);
+    expect(clampBudgets({}, "llm").maxChars).toBe(10_500);
+    expect(clampBudgets({}, "text").maxChars).toBe(10_500);
     // The old character default was nearly twice this.
     expect(budgets.maxChars).toBeLessThan(12_000);
   });
 
   it("moves the character budget with it", () => {
-    expect(clampBudgets({ maxTokens: 3000 }).maxChars).toBe(Math.round(3000 * BUNDLE_CHARS_PER_TOKEN));
-    expect(clampBudgets({ maxTokens: 500 }).maxChars).toBe(1070);
+    expect(clampBudgets({ maxTokens: 3000 }, "json").maxChars).toBe(Math.round(3000 * CHARS_PER_TOKEN.json));
+    expect(clampBudgets({ maxTokens: 500 }, "llm").maxChars).toBe(1750);
+    expect(clampBudgets({ maxTokens: 500 }).maxChars).toBe(1350);
   });
 
   it("is clamped to its range before it is converted", () => {
@@ -33,8 +36,9 @@ describe("--max-tokens", () => {
   });
 
   it("gives way to an explicit --max-chars", () => {
-    const budgets = clampBudgets({ maxChars: 40_000 });
+    const budgets = clampBudgets({ maxChars: 40_000 }, "llm");
     expect(budgets.maxChars).toBe(40_000);
+    expect(clampBudgets({ maxChars: 40_000 }, "json").maxChars).toBe(40_000);
     // The token field still reports what it would have been, so --diff can say
     // which budget the caller had in force.
     expect(budgets.maxTokens).toBe(3000);
