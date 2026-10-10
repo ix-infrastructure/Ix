@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import type {
   ConflictReport,
@@ -13,7 +13,9 @@ import type {
   ScoredClaim,
 } from "../../client/types.js";
 import type { EntityFacts } from "../explain/facts.js";
-import { buildBundle, sanitizeId } from "../commands/context.js";
+import {
+  buildBundle, bundleFormat, clampBudgets, renderBundle, sanitizeId, textEvidenceLines,
+} from "../commands/context.js";
 
 function makeFacts(overrides: Partial<EntityFacts> = {}): EntityFacts {
   return {
@@ -439,5 +441,128 @@ describe("ix context bundle", () => {
     expect(sanitizeId("a.b")).toBe("a.b");
     const names = ["a/b", "a?b", "a:b", "a~2Fb", "C:\\Windows", "../..", "~"].map(sanitizeId);
     expect(new Set(names).size).toBe(names.length);
+  });
+});
+
+describe("ix context budget is charged against the emitted text", () => {
+  const manyMembers = () => {
+    const members = Array.from({ length: 150 }, (_, i) => `member_function_number_${i}`);
+    const facts = makeFacts({ members, memberCount: 150 });
+    const nodes = Array.from({ length: 150 }, (_, i) => ({
+      id: `n-${i}`, kind: "function", name: `callee_${i}`, attrs: {},
+      provenance: { sourceUri: `src/file_${i}.ts` }, createdRev: 1,
+      createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+    })) as GraphNode[];
+    const edges = Array.from({ length: 150 }, (_, i) => ({
+      id: `e-${i}`, src: "entity-1", dst: `n-${i}`, predicate: "calls", attrs: {}, createdRev: 1,
+    })) as GraphEdge[];
+    return { ...input(), facts, context: makeContext({ nodes, edges }) };
+  };
+
+  const emitted = (bundle: ReturnType<typeof buildBundle>, format: string): string => {
+    const lines: string[] = [];
+    const orig = console.log;
+    console.log = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+    try {
+      renderBundle(bundle, format);
+    } finally {
+      console.log = orig;
+    }
+    return lines.join("\n");
+  };
+
+  const prevCaller = process.env.IX_CALLER;
+  afterEach(() => {
+    if (prevCaller === undefined) delete process.env.IX_CALLER;
+    else process.env.IX_CALLER = prevCaller;
+  });
+
+  for (const caller of [undefined, "mcp"]) {
+    it(`emits within 10% of maxChars in llm when evidence was cut (IX_CALLER=${caller ?? "unset"})`, () => {
+      if (caller) process.env.IX_CALLER = caller;
+      else delete process.env.IX_CALLER;
+      const budgets = clampBudgets({ maxTokens: 600 }, "llm");
+      const bundle = buildBundle({ ...manyMembers(), budgets, format: "llm" });
+      expect(bundle.truncation.evidenceTruncated).toBeGreaterThan(0);
+      const out = emitted(bundle, "llm");
+      expect(out.length).toBeLessThanOrEqual(budgets.maxChars);
+      expect(out.length).toBeGreaterThanOrEqual(0.9 * budgets.maxChars);
+      expect(bundle.budgets.format).toBe("llm");
+    });
+  }
+
+  // Every budget in a sweep, so some settle within a few characters of
+  // maxChars: the header's `truncated_chars` digits must be the ones measured,
+  // not a placeholder that grows after the fit was checked.
+  it("never emits past maxChars in llm once the truncated_chars header is final", () => {
+    delete process.env.IX_CALLER;
+    const base = clampBudgets({}, "llm");
+    let cut = 0;
+    for (let maxChars = 1500; maxChars <= 2500; maxChars += 1) {
+      const budgets = { ...base, maxChars };
+      const bundle = buildBundle({ ...manyMembers(), budgets, format: "llm" });
+      if (bundle.truncation.evidenceTruncated > 0) cut += 1;
+      expect(bundle.truncation.charactersTruncated).toBeGreaterThan(0);
+      expect(emitted(bundle, "llm").length).toBeLessThanOrEqual(maxChars);
+    }
+    expect(cut).toBe(1001);
+  });
+
+  it("keeps every row when the whole bundle fits exactly (no reserved diagnostic)", () => {
+    const big = clampBudgets({ maxChars: 100000 }, "llm");
+    const full = buildBundle({ ...manyMembers(), budgets: big, format: "llm" });
+    expect(full.truncation.evidenceTruncated).toBe(0);
+    const exact = emitted(full, "llm").length;
+    const tight = { ...big, maxChars: exact };
+    const bundle = buildBundle({ ...manyMembers(), budgets: tight, format: "llm" });
+    expect(bundle.evidence.length).toBe(full.evidence.length);
+  });
+
+  it("bounds json evidence by its serialization, within 10% when cut", () => {
+    const budgets = clampBudgets({ maxTokens: 600 }, "json");
+    const bundle = buildBundle({ ...manyMembers(), budgets, format: "json" });
+    expect(bundle.truncation.evidenceTruncated).toBeGreaterThan(0);
+    const kept = bundle.evidence.reduce((n, e) => n + JSON.stringify(e).length, 0);
+    expect(kept).toBeLessThanOrEqual(budgets.maxChars);
+    expect(kept).toBeGreaterThanOrEqual(0.9 * budgets.maxChars);
+  });
+
+  it("bounds text evidence by the lines it prints, leaving room for the header", () => {
+    const budgets = clampBudgets({ maxTokens: 600 }, "text");
+    const bundle = buildBundle({ ...manyMembers(), budgets, format: "text" });
+    expect(bundle.truncation.evidenceTruncated).toBeGreaterThan(0);
+    const kept = bundle.evidence.reduce(
+      (n, e) => n + textEvidenceLines(e).reduce((m, l) => m + l.length + 1, 0), 0);
+    expect(kept).toBeLessThanOrEqual(budgets.maxChars - 600);
+  });
+
+  it("keeps the target row when it alone is larger than the budget", () => {
+    for (const format of ["llm", "json", "text"] as const) {
+      const bundle = buildBundle({
+        ...manyMembers(),
+        budgets: { maxEntities: 50, maxRelationships: 100, maxEvidence: 200, maxTokens: 500, maxChars: 10 },
+        format,
+      });
+      expect(bundle.evidence.length).toBe(1);
+      expect(bundle.evidence[0]!.kind).toBe("target");
+    }
+  });
+
+  it("reports charactersTruncated as full minus kept in the format's own unit", () => {
+    const budgets = clampBudgets({ maxTokens: 600 }, "json");
+    const cut = buildBundle({ ...manyMembers(), budgets, format: "json" });
+    const wide = buildBundle({
+      ...manyMembers(), format: "json", budgets: { ...budgets, maxChars: 1_000_000 },
+    });
+    const full = wide.evidence.reduce((n, e) => n + JSON.stringify(e).length, 0);
+    const kept = cut.evidence.reduce((n, e) => n + JSON.stringify(e).length, 0);
+    expect(cut.truncation.charactersTruncated).toBe(full - kept);
+  });
+
+  it("maps formats the way renderBundle does", () => {
+    expect(bundleFormat("json")).toBe("json");
+    expect(bundleFormat("llm")).toBe("llm");
+    expect(bundleFormat("text")).toBe("text");
+    expect(bundleFormat(undefined)).toBe("text");
   });
 });

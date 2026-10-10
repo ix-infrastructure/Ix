@@ -224,6 +224,21 @@ describe("ix context investigation state", () => {
     expect(loaded?.bundle.evidence).toEqual(bundle.evidence);
   });
 
+  it("round-trips the format the budget was sized for, and loads a save without one", () => {
+    const sized = bundleWith([makeClaim("renders to DOM", 0.9)]);
+    sized.budgets = { ...sized.budgets, format: "llm" };
+    saveInvestigation("sized-llm", sized);
+    expect(loadInvestigation("sized-llm")?.bundle.budgets.format).toBe("llm");
+
+    // A bundle saved before the field existed has none, and --diff sizes it as json.
+    const legacy = bundleWith([makeClaim("renders to DOM", 0.9)]);
+    delete (legacy.budgets as { format?: string }).format;
+    saveInvestigation("sized-legacy", legacy);
+    const loaded = loadInvestigation("sized-legacy");
+    expect(loaded).toBeDefined();
+    expect(loaded?.bundle.budgets.format).toBeUndefined();
+  });
+
   it("writes into an investigations subdirectory of IX_HOME, not its root", () => {
     // IX_HOME is the Ix home itself — it holds config.yaml, bin/, cli/ and
     // dotfiles like .version-check.json. Saved state belongs in a subdirectory
@@ -491,7 +506,7 @@ describe("ix context investigation state", () => {
     saveInvestigation("widget-check", saved);
     const stored = loadInvestigation("widget-check")!;
     const fresh = bundleWith([makeClaim("renders to DOM", 0.9)]);
-    expect(fresh.budgets).toEqual({ maxEntities: 50, maxRelationships: 100, maxEvidence: 25, maxTokens: 1500, maxChars: 12000 });
+    expect(fresh.budgets).toEqual({ maxEntities: 50, maxRelationships: 100, maxEvidence: 25, maxTokens: 1500, maxChars: 12000, format: "json" });
 
     const baselineDiff = diffInvestigations(stored, fresh);
     expect(baselineDiff.budgets.saved).toEqual({ maxEntities: 5, maxRelationships: 1, maxEvidence: 2, maxTokens: 1500, maxChars: 12000 });

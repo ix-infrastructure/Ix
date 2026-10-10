@@ -161,6 +161,9 @@ function buildSchemas(z: typeof Zod.z) {
       // instead, which is a worse answer than reporting `tokens=not-given`.
       maxTokens: z.number().int().positive().optional(),
       maxChars: z.number().int().positive(),
+      // Optional and declared: the output the budget was sized for. Undeclared
+      // it would be stripped on save; required it would refuse older files.
+      format: z.enum(["llm", "json", "text"]).optional(),
     }),
     truncation: z.object({
       // Optional for the same reason `budgets.maxTokens` is: a bundle saved

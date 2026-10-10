@@ -84,7 +84,7 @@ const MAX_CONFLICTS = 10;
 const BUDGETS = [
   { key: "maxEntities", flag: "--max-entities", label: "entities", help: "Maximum entities in the bundle", min: 1, max: 500, fallback: 50 },
   { key: "maxRelationships", flag: "--max-relationships", label: "relationships", help: "Maximum relationships in the bundle", min: 1, max: 1000, fallback: 100 },
-  { key: "maxEvidence", flag: "--max-evidence", label: "evidence", help: "Maximum evidence items in the bundle", min: 1, max: 200, fallback: 25 },
+  { key: "maxEvidence", flag: "--max-evidence", label: "evidence", help: "Maximum evidence items in the bundle; --max-tokens normally binds first", min: 1, max: 200, fallback: 200 },
   { key: "maxTokens", flag: "--max-tokens", label: "tokens", help: "Maximum tokens of evidence output", min: 500, max: 200_000, fallback: 3_000 },
   { key: "maxChars", flag: "--max-chars", label: "chars", help: "Maximum characters of evidence output", min: 1000, max: 1_000_000, fallback: 12_000 },
 ] as const satisfies ReadonlyArray<{
@@ -131,20 +131,29 @@ function budgetParser(key: keyof BudgetSnapshot): (value: string) => number {
   return (value: string) => parseBudgetOption(value, example);
 }
 
+/** The text a bundle is printed as: `--format llm`, `--format json`, or the prose fallthrough. */
+export type BundleFormat = "llm" | "json" | "text";
+
+/** Maps a `--format` value the way `renderBundle` does: anything but json and llm is prose. */
+export function bundleFormat(fmt: string | undefined): BundleFormat {
+  return fmt === "json" ? "json" : fmt === "llm" ? "llm" : "text";
+}
+
 /**
- * Characters per token in a real bundle.
+ * Characters per token, by the format the bundle is printed in.
  *
- * Measured across 41 recorded bundles whose prompts differed only by the
- * bundle: 2.14, against the ~4 of ordinary English. A bundle is dense
- * `key=value` and JSON with identifiers in it, and identifiers tokenize badly.
+ * `--max-tokens` is charged against the text that is actually emitted, so the
+ * ratio is per format. Measured with cl100k: llm 3.73 and json 2.69 on the
+ * audit fixture; the constants sit just under, so a bundle comes in at or under
+ * its budget. `text` measured 4.09 on a live `context.ts` bundle and shares
+ * the llm value, which keeps it on the safe side.
  *
- * Conservative on purpose, and it stays conservative as the bundle gets
- * cleaner: pulling identifier-heavy rows out raises the real ratio, so an
- * estimate pinned at 2.14 over-counts tokens and the bundle comes in under its
- * budget rather than over it. Re-measure before lowering it, never raise it to
- * make a bundle fit.
+ * The 2.14 this replaced was measured across 41 recorded bundles (JSON plus
+ * prompt) and is the value legacy saved bundles were sized at; their stored
+ * `maxChars` is kept as it is. Re-measure before raising any of these, never
+ * raise one to make a bundle fit.
  */
-export const BUNDLE_CHARS_PER_TOKEN = 2.14;
+export const CHARS_PER_TOKEN: Record<BundleFormat, number> = { llm: 3.5, json: 2.7, text: 3.5 };
 
 /**
  * Apply the table's range and default to whatever the caller supplied, and
@@ -157,7 +166,7 @@ export const BUNDLE_CHARS_PER_TOKEN = 2.14;
  * refused up front rather than silently ranked, because which one lost is not
  * visible in the output.
  */
-export function clampBudgets(opts: Partial<BudgetSnapshot>): BudgetSnapshot {
+export function clampBudgets(opts: Partial<BudgetSnapshot>, format: BundleFormat = "json"): BudgetSnapshot {
   const out = {} as BudgetSnapshot;
   for (const b of BUDGETS) {
     const raw = opts[b.key];
@@ -167,7 +176,7 @@ export function clampBudgets(opts: Partial<BudgetSnapshot>): BudgetSnapshot {
     const chars = budgetField("maxChars");
     out.maxChars = Math.min(
       chars.max,
-      Math.max(chars.min, Math.round(out.maxTokens * BUNDLE_CHARS_PER_TOKEN)),
+      Math.max(chars.min, Math.round(out.maxTokens * CHARS_PER_TOKEN[format])),
     );
   }
   return out;
@@ -302,7 +311,8 @@ interface ContextBundle {
   /** Present only for a degraded or empty graph: what is wrong and the fix. */
   graph?: Record<string, unknown>;
   evidence: EvidenceItem[];
-  budgets: BudgetSnapshot;
+  /** `format` is the output the budget was sized for; absent on bundles saved before it existed (json sizing). */
+  budgets: BudgetSnapshot & { format?: BundleFormat };
   truncation: {
     entitiesTruncated: number;
     relationshipsTruncated: number;
@@ -393,6 +403,8 @@ export function registerContextCommand(program: Command): void {
         reportFailure("mode_conflict", conflict, opts.format);
         return;
       }
+      // The output the evidence budget is charged against; --out writes JSON.
+      const fmt = opts.out ? "json" : bundleFormat(opts.format);
       if (opts.resume) {
         renderSavedInvestigation(opts.resume, opts.format);
         return;
@@ -440,7 +452,7 @@ export function registerContextCommand(program: Command): void {
         return;
       }
       if (opts.fromIssue) {
-        const bundle = await buildIssueBundle(opts.fromIssue, opts, clampBudgets(opts));
+        const bundle = await buildIssueBundle(opts.fromIssue, opts, clampBudgets(opts, fmt), fmt);
         if (bundle) await emitBundle(bundle, opts);
         return;
       }
@@ -465,7 +477,7 @@ export function registerContextCommand(program: Command): void {
       }, opts.format);
       if (!resolved) return;
 
-      const budgets = clampBudgets(opts);
+      const budgets = clampBudgets(opts, fmt);
       const asOfRev = opts.asOfRev;
 
       const [facts, context, workspaceHealth] = await Promise.all([
@@ -496,6 +508,7 @@ export function registerContextCommand(program: Command): void {
         asOfRev,
         depth: opts.depth,
         budgets,
+        format: fmt,
         graphCompleted: hasCompletedSourceGraphBaseline(),
         graphHealth: bundleGraphHealth(workspaceHealth, resolved, facts),
       });
@@ -568,7 +581,7 @@ async function emitBundle(bundle: ContextBundle, opts: ContextOptions): Promise<
 async function buildFreshBundle(
   target: string,
   opts: { kind?: string; path?: string; pick?: number; depth?: string; asOfRev?: number },
-  budgets: BudgetSnapshot,
+  budgets: BudgetSnapshot & { format?: BundleFormat },
   format: string,
 ): Promise<ContextBundle | undefined> {
   const client = createClient({ query: true });
@@ -588,6 +601,8 @@ async function buildFreshBundle(
 
   return buildBundle({
     resolved, facts, context, provenance: facts.provenance, asOfRev, depth: opts.depth, budgets,
+    // The saved bundle's own sizing format, not the diff's render format, so --diff compares like with like.
+    format: budgets.format ?? "json",
     graphCompleted: hasCompletedSourceGraphBaseline(),
     graphHealth: bundleGraphHealth(workspaceHealth, resolved, facts),
   });
@@ -1536,6 +1551,11 @@ interface BuildInput {
   depth?: string;
   budgets: BudgetSnapshot;
   /**
+   * The output the evidence budget is charged against. Defaults to json, the
+   * legacy sizing, so injected fixtures and old saved bundles keep their size.
+   */
+  format?: BundleFormat;
+  /**
    * Per-entity staleness probe. Injected so buildBundle stays a pure function
    * under test; production passes nothing and gets the real baseline-backed one.
    */
@@ -1672,6 +1692,7 @@ async function buildIssueBundle(
   arg: string,
   opts: ContextOptions,
   budgets: BudgetSnapshot,
+  format: BundleFormat,
 ): Promise<ContextBundle | undefined> {
   const text = await readIssueOrReport(arg, opts.format);
   if (text === undefined) return undefined;
@@ -1720,6 +1741,7 @@ async function buildIssueBundle(
     asOfRev: opts.asOfRev,
     depth: opts.depth,
     budgets,
+    format,
     graphCompleted: hasCompletedSourceGraphBaseline(),
     graphHealth: bundleGraphHealth(workspaceHealth, resolved, facts),
     issue: {
@@ -1934,6 +1956,7 @@ function bundleGraphHealth(
 
 export function buildBundle(input: BuildInput): ContextBundle {
   const { resolved, facts, context, provenance, asOfRev, depth, budgets } = input;
+  const format = input.format ?? "json";
 
   const stale = facts.stale;
   // Three states, not two. Without a completed source graph baseline the
@@ -2121,7 +2144,7 @@ export function buildBundle(input: BuildInput): ContextBundle {
     freshness: { stale, classification },
     ...(degraded ? { graph: graphHealthJson(health) } : {}),
     evidence: [],
-    budgets,
+    budgets: { ...budgets, format },
     truncation: {
       entitiesTruncated: 0,
       relationshipsTruncated: 0,
@@ -2176,24 +2199,81 @@ export function buildBundle(input: BuildInput): ContextBundle {
 
   // Evidence is ordered by relevance, so keep the highest-priority prefix and
   // drop the tail when either the count or the character budget is exceeded.
-  // maxChars bounds the serialized JSON size of the evidence list exactly as it
-  // is emitted in the bundle (each item's JSON.stringify length, in the item's
-  // deterministic key order), so the budget matches the actual representation
-  // rather than an estimate from metadata lengths.
-  const sizedEvidence = evidence.map((item) => ({ item, size: JSON.stringify(item).length }));
+  // Each item is sized by the text its renderer prints (the llm `evidence`
+  // line, the two prose lines, or the item's JSON), so `--max-tokens` is
+  // charged for what is emitted rather than for a serialization nobody sees.
+  // For llm the header, diagnostics and `next` lines are charged too; for json
+  // the budget bounds the evidence list only (entities and relationships have
+  // their own count budgets).
+  const sizeOf = (item: EvidenceItem): number =>
+    format === "llm" ? evidenceRecord(undefined)(item).length + 1
+      : format === "text" ? textEvidenceLines(item).reduce((sum, line) => sum + line.length + 1, 0)
+        : JSON.stringify(item).length;
+  const sizedEvidence = evidence.map((item) => ({ item, size: sizeOf(item) }));
+  // keptSize[n] = summed size of the first n items, so a cut at any count knows
+  // its `charactersTruncated` (full minus kept, in the sizing unit of the
+  // format) without a rescan.
+  const keptSize = [0];
+  for (const entry of sizedEvidence) keptSize.push(keptSize[keptSize.length - 1]! + entry.size);
+  const fullChars = keptSize[sizedEvidence.length]!;
+  // Every counter the llm header prints is set here, including
+  // `truncated_chars`, so each measurement below sees the digits that will
+  // actually be emitted for that cut.
+  const applyCut = (count: number): void => {
+    bundle.evidence = evidence.slice(0, count);
+    bundle.truncation.evidenceTruncated = evidence.length - count;
+    bundle.truncation.charactersTruncated = fullChars - keptSize[count]!;
+    const cut = summariseCut(evidence.slice(count));
+    if (cut.length > 0) bundle.truncation.cut = cut;
+    else delete bundle.truncation.cut;
+  };
+  let overhead = 0;
+  if (format === "llm") {
+    applyCut(0);
+    overhead = bundleLlmLines(bundle).join("\n").length;
+  } else if (format === "text") {
+    overhead = TEXT_HEADER_ESTIMATE;
+  }
+  const evidenceBudget = budgets.maxChars - overhead;
   let chars = 0;
   let kept = 0;
   for (const entry of sizedEvidence) {
-    if (kept >= budgets.maxEvidence || chars + entry.size > budgets.maxChars) break;
+    // The first row is the target and always survives, however small the budget.
+    if (kept >= budgets.maxEvidence || (kept > 0 && chars + entry.size > evidenceBudget)) break;
     chars += entry.size;
     kept += 1;
   }
-  bundle.evidence = evidence.slice(0, kept);
-  bundle.truncation.evidenceTruncated = evidence.length - kept;
-  const dropped = summariseCut(evidence.slice(kept));
-  if (dropped.length > 0) bundle.truncation.cut = dropped;
-  const fullChars = sizedEvidence.reduce((sum, entry) => sum + entry.size, 0);
-  bundle.truncation.charactersTruncated = Math.max(0, fullChars - chars);
+  applyCut(kept);
+  if (format === "llm") {
+    // The header digits, the bundle_truncated diagnostic and the `next` lines
+    // all depend on the cut, so settle it by measuring the real output.
+    while (kept > 1 && bundleLlmLines(bundle).join("\n").length > budgets.maxChars) {
+      kept -= 1;
+      applyCut(kept);
+    }
+    // The overhead was measured with a truncation diagnostic reserved, which a
+    // bundle that fits whole does not carry. Grow back while the real output
+    // still fits.
+    const limit = Math.min(sizedEvidence.length, budgets.maxEvidence);
+    // A complete bundle drops the truncation diagnostic, so it can fit where
+    // the nearly-complete ones do not: try the whole list before growing.
+    if (kept < limit) {
+      applyCut(limit);
+      if (bundleLlmLines(bundle).join("\n").length <= budgets.maxChars) {
+        kept = limit;
+      } else {
+        applyCut(kept);
+      }
+    }
+    while (kept < limit) {
+      applyCut(kept + 1);
+      if (bundleLlmLines(bundle).join("\n").length > budgets.maxChars) {
+        applyCut(kept);
+        break;
+      }
+      kept += 1;
+    }
+  }
 
   // `conflicts[]` was the one list with no budget at all, and it is the one the
   // backend can hand back by the dozen: it reached 12,922 of 23,030 JSON bytes
@@ -2457,20 +2537,14 @@ function issueEvidence(issue: IssueBundleInput): EvidenceItem[] {
   return items;
 }
 
-export function renderBundle(bundle: ContextBundle, format: string): void {
-  if (format === "json") {
-    printJson(bundle);
-    return;
-  }
-  if (format === "llm") {
-    // Every line through `llmLine`, none through a template literal. This block
-    // built `target=${name}` and `evidence 30 relationship <title>` by
-    // interpolation: the first breaks on any name containing a space or an `=`,
-    // and the second is positional, unquoted, and breaks on every title, which
-    // is a sentence. `ix context --diff --format llm` emits the keyed form for
-    // the same record kinds, so a consumer routing on `evidence` from the same
-    // command was handed two grammars.
-    printLlmLines([
+/**
+ * The lines `--format llm` prints, in order. Pure, so `buildBundle` can measure
+ * exactly what a budget will be charged for.
+ */
+export function bundleLlmLines(bundle: ContextBundle): string[] {
+  // Every line through `llmLine`, none through a template literal: see the
+  // history of this block. Absent sections are null and filtered out.
+  const lines: Array<string | null> = [
       llmLine("context", {
         target: bundle.target.name,
         target_kind: bundle.target.kind,
@@ -2518,7 +2592,33 @@ export function renderBundle(bundle: ContextBundle, format: string): void {
       ...(forMcp()
         ? nextToolCalls(bundle).map((step) => llmLine("next", { cmd: step.cmd, why: step.why }))
         : nextReads(bundle).map((cmd) => llmLine("next", { cmd }))),
-    ]);
+  ];
+  return lines.filter((line): line is string => line !== null);
+}
+
+/** The two prose lines `--format text` prints for one evidence item. */
+export function textEvidenceLines(item: EvidenceItem): string[] {
+  const where = item.location ? `${formatLocation(item.location)} — ` : "";
+  return [`  [${item.score}] ${item.kind} — ${item.title}`, `         ${where}${item.reason}`];
+}
+
+/** Rough size of the prose header, charged before the evidence in `--format text`. */
+const TEXT_HEADER_ESTIMATE = 600;
+
+export function renderBundle(bundle: ContextBundle, format: string): void {
+  if (format === "json") {
+    printJson(bundle);
+    return;
+  }
+  if (format === "llm") {
+    // Every line through `llmLine`, none through a template literal. This block
+    // built `target=${name}` and `evidence 30 relationship <title>` by
+    // interpolation: the first breaks on any name containing a space or an `=`,
+    // and the second is positional, unquoted, and breaks on every title, which
+    // is a sentence. `ix context --diff --format llm` emits the keyed form for
+    // the same record kinds, so a consumer routing on `evidence` from the same
+    // command was handed two grammars.
+    printLlmLines(bundleLlmLines(bundle));
     return;
   }
 
@@ -2556,9 +2656,7 @@ export function renderBundle(bundle: ContextBundle, format: string): void {
   if (bundle.evidence.length > 0) {
     renderSection("Evidence (highest relevance first)");
     for (const item of bundle.evidence) {
-      console.log(`  [${item.score}] ${item.kind} — ${item.title}`);
-      const where = item.location ? `${formatLocation(item.location)} — ` : "";
-      console.log(`         ${where}${item.reason}`);
+      for (const line of textEvidenceLines(item)) console.log(line);
     }
   }
 
