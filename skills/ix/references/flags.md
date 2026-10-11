@@ -78,10 +78,11 @@ surfaces (#575).
   the walk stopped descending and there may or may not be more. JSON carries
   them per direction in each `summary`. When `ix trace --to` finds no route, a
   search a bound cut short adds the same code after `no_path`; a bare `no_path`
-  means the whole reachable graph was searched. `--depth` and `--cap` take
-  anything. When the cap cuts a `depends` or directional `trace` walk, the
-  nodes kept are the shallowest: every node at depth d before any at depth
-  d+1, so the first level is complete before the second begins. (The walk
+  means the whole reachable graph was searched. `ix trace` rejects a
+  `--depth` or `--cap` that is not a non-negative integer as a usage error.
+  When the cap cuts a `depends` or directional `trace` walk, the nodes kept
+  are the shallowest: every node at depth d before any at depth d+1, so the
+  first level is complete before the second begins. (The walk
   used to be depth-first, and could spend the whole cap down its first
   branch.) A walk the cap does not cut is the same tree it always was.
 - **`ix ingest <path>` writes to the workspace the path belongs to** -- the
