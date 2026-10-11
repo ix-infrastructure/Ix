@@ -85,15 +85,12 @@ jobs:
       # broken `ix view` for every user. A compass failure must fail the release.
       # The token lives only in this step. It is used as a one-off fetch URL
       # rather than a remote, so it is never written to system-compass/.git/config
-      # where the build's npm install scripts could read it.
-      #
-      # COMPASS_REF is bumped by hand (Dependabot cannot track it). A bump changes
-      # the compass bundle the next release ships.
-      - name: Fetch System Compass (pinned)
+      # where the build's npm install scripts could read it. It fetches the
+      # default branch's HEAD, as the earlier `git clone` did.
+      - name: Fetch System Compass
         id: fetch-compass
         env:
           COMPASS_TOKEN: ${{ secrets.COMPASS_TOKEN }}
-          COMPASS_REF: 832a33635425a623fc2488f29082de1ebb027471
         run: |
           if [ -z "$COMPASS_TOKEN" ]; then
             echo "::error::COMPASS_TOKEN is not set. It is required to build System Compass from the private ix-infrastructure/system-compass repo. Add a fine-grained PAT with Contents:read on that repo as the COMPASS_TOKEN secret."
@@ -114,9 +111,9 @@ jobs:
           # credential from its own error output regardless, and the mask above
           # covers the value if anything else ever echoes it.
           git init -q system-compass
-          git -C system-compass fetch -q --depth 1 "https://x-access-token:${COMPASS_TOKEN}@github.com/ix-infrastructure/system-compass.git" "$COMPASS_REF" 2>&1 \
+          git -C system-compass fetch -q --depth 1 "https://x-access-token:${COMPASS_TOKEN}@github.com/ix-infrastructure/system-compass.git" HEAD 2>&1 \
             || {
-              echo "::error::Could not fetch ix-infrastructure/system-compass at ${COMPASS_REF}. COMPASS_TOKEN is set but was rejected — it is most likely expired or lacks Contents:read on that repo. Rotate it and re-run."
+              echo "::error::Could not fetch ix-infrastructure/system-compass. COMPASS_TOKEN is set but was rejected — it is most likely expired or lacks Contents:read on that repo. Rotate it and re-run."
               exit 1
             }
           git -C system-compass checkout -q --detach FETCH_HEAD
