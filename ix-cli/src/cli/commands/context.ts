@@ -259,8 +259,11 @@ interface EvidenceItem {
 
 interface ContextBundle {
   schema: typeof BUNDLE_SCHEMA;
-  /** The one explicitly declared time-dependent field. */
-  generatedAt: string;
+  /**
+   * The one explicitly declared time-dependent field. Absent from the MCP
+   * structured copy so identical calls are byte-identical.
+   */
+  generatedAt?: string;
   target: { id: string; name: string; kind: string; resolutionMode: string; path?: string };
   /**
    * Where an issue's bundle starts, and what in the issue did not resolve.

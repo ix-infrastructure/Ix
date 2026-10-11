@@ -899,7 +899,9 @@ function declaresOutputSchema(tool: string): boolean {
  * its own versioned schema (`ix-context-bundle/1`), so the structured copy is
  * stable across releases; when the output does not parse into a usable object
  * we omit structured content and keep the text result authoritative rather
- * than throwing.
+ * than throwing. The copy leaves out `generatedAt`, the bundle's one per-call
+ * field, so identical calls return identical bytes and a prompt cache or dedup
+ * can match; `--save` / `--out` files and CLI stdout keep it.
  */
 async function runJsonStructured(
   runIx: IxRunner,
@@ -920,9 +922,10 @@ async function runJsonStructured(
   if (!isRecord(parsed) || Object.keys(parsed).length === 0) {
     return textResult(text || JSON.stringify({ error: `${argv.command} produced no parseable JSON`, tool }), true);
   }
+  const { generatedAt: _perCall, ...stable } = parsed;
   return {
-    content: [{ type: "text", text }],
-    structuredContent: parsed,
+    content: [{ type: "text", text: JSON.stringify(stable) }],
+    structuredContent: stable,
   };
 }
 

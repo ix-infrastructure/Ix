@@ -25,11 +25,10 @@ function buildSchemas(z: typeof Zod.z) {
    * Versioned contract for the deterministic context bundle produced by
    * `ix context` (schema `ix-context-bundle/1`).
    *
-   * This is the single source of truth for the bundle's shape. The MCP server
-   * uses it as the `ix_context` output schema so agents get a structured
-   * contract, and the CLI validates every bundle with it on the way to disk
-   * (investigation save and `--out`) and on the way back off it
-   * (`loadInvestigation`), so a malformed or unexpected payload can never be
+   * This is the single source of truth for the bundle's shape. The CLI
+   * validates every bundle with it on the way to disk (investigation save and
+   * `--out`) and on the way back off it (`loadInvestigation`), so a malformed
+   * or unexpected payload can never be
    * written as if it were a valid bundle, nor honoured when read back.
    *
    * The shapes below mirror the `ContextBundle` and `EvidenceItem` interfaces in
@@ -46,7 +45,10 @@ function buildSchemas(z: typeof Zod.z) {
    */
   const contextBundleSchema = z.object({
     schema: z.literal(BUNDLE_SCHEMA),
-    generatedAt: z.string(),
+    // Optional on the way in: the MCP structured copy leaves it out so identical
+    // calls are byte-identical. Still declared, because zod strips an undeclared
+    // key and `--save` / `--out` files must keep it.
+    generatedAt: z.string().optional(),
     target: z.object({
       id: z.string(),
       name: z.string(),
