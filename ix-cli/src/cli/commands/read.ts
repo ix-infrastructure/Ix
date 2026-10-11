@@ -11,6 +11,7 @@ import { resolveEntityFull, activeReadScope, ensureReadScope } from "../resolve.
 import { stderr } from "../stderr.js";
 import { isFileStale } from "../stale.js";
 import { anchorSpan, bareName, countDeclarations } from "../edge-sites.js";
+import { readBoundedFile } from "../bounded-read.js";
 import { relativePath, printJson } from "../format.js";
 import { llmError, llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { parsePickOption } from "../options.js";
@@ -731,14 +732,9 @@ function mayBeTestOrFixture(file: string, source: string): boolean {
  */
 export function readsOneSymbol(root: string, name: string, file: string): boolean {
   const abs = absoluteFromSourceUri(file, root);
-  let text: string;
-  try {
-    const stat = fs.statSync(abs);
-    if (!stat.isFile() || stat.size > SUGGEST_MAX_FILE_BYTES) return false;
-    text = fs.readFileSync(abs, "utf8");
-  } catch {
-    return false;
-  }
+  // One open, fstat and read on the same handle (CodeQL js/file-system-race).
+  const text = readBoundedFile(abs, { maxBytes: SUGGEST_MAX_FILE_BYTES });
+  if (text === null) return false;
   if (mayBeTestOrFixture(file, text)) return false;
   if (countDeclarations(text.split("\n"), bareName(name)) !== 1) return false;
   // Last: the file read above is cheaper than this walk of the workspace.
