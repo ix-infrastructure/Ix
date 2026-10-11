@@ -195,4 +195,17 @@ describe("ix smells command (mocked client)", () => {
     expect(lines[0]).toBe("smells rev=7 count=80 shown=80 version=smell_v1");
     expect(lines.some(l => l.startsWith("diagnostic"))).toBe(false);
   });
+
+  it("--limit 0 keeps non-source orphans in every format", async () => {
+    fakeClient.runSmells.mockResolvedValue(report([cand("README.md", 0.9), cand("src/a.ts", 0.5)]));
+    await run("--format", "json", "--limit", "0");
+    const out = JSON.parse(logs.join("\n"));
+    expect(out.candidates.map((c: { file: string }) => c.file)).toEqual(["README.md", "src/a.ts"]);
+    expect(out.filtered_non_source).toBeUndefined();
+
+    logs.length = 0;
+    const lines = await run("--format", "llm", "--limit", "0");
+    expect(lines.some(l => l.includes("README.md"))).toBe(true);
+    expect(lines.some(l => l.includes("filtered_non_source"))).toBe(false);
+  });
 });

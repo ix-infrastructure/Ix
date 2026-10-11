@@ -117,7 +117,7 @@ export function registerSmellsCommand(program: Command): void {
     .option("--god-module-fan <n>",        "Min fan-in/out for god module",     "15")
     .option("--weak-max-neighbors <n>",    "Max neighbors for weak component",  "1")
     .option("--list",                      "List existing smell claims without rerunning")
-    .option("--limit <n>",                 "Max candidates to show, highest confidence first (0 = all; detection run only)")
+    .option("--limit <n>",                 "Max candidates to show, highest confidence first (0 = all, non-source orphans included; detection run only)")
     .addHelpText("after", `
 Runs graph-query-based architecture smell detection and stores results as
 versioned claims (inference_version=smell_v1) on affected File nodes.
@@ -209,9 +209,12 @@ Examples:
 
       // Plain `--format json` is the raw contract MCP ix_smells and plugin
       // fallbacks path-filter themselves, so it neither caps nor drops rows
-      // unless --limit is passed.
+      // unless --limit is passed. An explicit `--limit 0` means everything,
+      // so it drops nothing either, in every format.
       const rawJson = opts.format === "json" && opts.limit === undefined;
-      const selection = selectSmells(report, resolveLimit(opts.limit, opts.format), !rawJson);
+      const limit = resolveLimit(opts.limit, opts.format);
+      const everything = opts.limit !== undefined && limit === Infinity;
+      const selection = selectSmells(report, limit, !(rawJson || everything));
       const { slice, filteredNonSource } = selection;
 
       if (opts.format === "json") {
