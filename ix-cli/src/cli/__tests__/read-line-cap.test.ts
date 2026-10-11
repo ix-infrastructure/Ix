@@ -6,7 +6,29 @@ import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { registerReadCommand } from "../commands/read.js";
+import { capSpan, registerReadCommand } from "../commands/read.js";
+
+// Symbol reads resolve through the graph; these stand in for it. The spreads
+// keep every other export real, so the file-read cases below are unaffected.
+const graph = vi.hoisted(() => ({ node: {} as Record<string, unknown> }));
+
+vi.mock("../bootstrap.js", async (orig) => ({
+  ...(await orig<typeof import("../bootstrap.js")>()),
+  resolveWorkspaceId: () => "ws-test",
+}));
+
+vi.mock("../resolve.js", async (orig) => ({
+  ...(await orig<typeof import("../resolve.js")>()),
+  resolveEntityFull: vi.fn(async () => ({ resolved: true, entity: { id: "e1" } })),
+  ensureReadScope: async () => {},
+  activeReadScope: () => ({}),
+}));
+
+vi.mock("../../client/api.js", () => ({
+  IxClient: class {
+    async entity() { return { node: graph.node, claims: [], edges: [] }; }
+  },
+}));
 
 /**
  * `ix read <file>` had no bound at all. Recorded reads ran 20,000 to 53,000
@@ -121,5 +143,119 @@ describe("ix read line cap", () => {
   it("does not offer a next page from the last one", async () => {
     await read(["src/big.ts:1400-1734", "--format", "llm"]);
     expect(logs[0]).not.toContain("next=");
+  });
+});
+
+describe("ix read symbol cap", () => {
+  let root: string;
+  let logs: string[];
+  let errs: string[];
+  let originalCwd: string;
+
+  const BIG = Array.from({ length: 1734 }, (_, i) => `line ${i + 1}`).join("\n");
+
+  function symbolAt(start: number, end: number, content?: string): void {
+    graph.node = {
+      name: "bigFn",
+      kind: "function",
+      attrs: { line_start: start, line_end: end, ...(content ? { content } : {}) },
+      provenance: { source_uri: content ? undefined : join(root, "src", "big.ts") },
+    };
+  }
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "ix-read-symcap-"));
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "big.ts"), BIG);
+    originalCwd = process.cwd();
+    process.chdir(root);
+    logs = [];
+    errs = [];
+    vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => void logs.push(a.map(String).join(" ")));
+    vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      errs.push(String(chunk));
+      return true;
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    process.chdir(originalCwd);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  async function read(args: string[]): Promise<void> {
+    const program = new Command();
+    program.name("ix").exitOverride();
+    registerReadCommand(program);
+    await program.parseAsync(["read", "bigFn", ...args, "--root", root], { from: "user" });
+  }
+
+  it("cuts a symbol longer than the cap and gives a cursor", async () => {
+    symbolAt(10, 1327);
+    await read(["--format", "llm"]);
+    expect(logs[0]).toContain("line_start=10 line_end=409");
+    expect(logs[0]).toContain("truncated=true");
+    expect(logs[0]).toContain("total_lines=1318");
+    expect(logs[0]).toContain("next=src/big.ts:410-809");
+    expect(logs[1]).toBe("content lines=400 numbered=true");
+    expect(logs[2]).toMatch(/^10\t/);
+    expect(logs[401]).toMatch(/^409\t/);
+  });
+
+  it("keeps the cursor inside the symbol", async () => {
+    symbolAt(1, 500);
+    await read(["--format", "llm"]);
+    expect(logs[0]).toContain("next=src/big.ts:401-500");
+  });
+
+  it("leaves a short symbol alone", async () => {
+    symbolAt(5, 20);
+    await read(["--format", "llm"]);
+    expect(logs[0]).toContain("line_end=20");
+    expect(logs[0]).not.toContain("truncated=");
+    expect(logs[0]).not.toContain("next=");
+  });
+
+  it("--all prints the whole symbol", async () => {
+    symbolAt(10, 1327);
+    await read(["--all", "--format", "llm"]);
+    expect(logs[0]).toContain("line_end=1327");
+    expect(logs[0]).not.toContain("truncated=");
+    expect(logs[0]).not.toContain("next=");
+  });
+
+  it("carries the cursor into json", async () => {
+    symbolAt(10, 1327);
+    await read(["--format", "json"]);
+    expect(JSON.parse(logs.join("\n"))).toMatchObject({
+      targetType: "symbol", lineStart: 10, lineEnd: 409, truncated: true, totalLines: 1318,
+      next: "src/big.ts:410-809",
+    });
+  });
+
+  it("tells a person what they are missing, on stderr", async () => {
+    symbolAt(10, 1327);
+    await read([]);
+    const note = errs.join("");
+    expect(note).toContain("400 of 1318 lines");
+    expect(note).toContain("ix read src/big.ts:410-809");
+    expect(note).toContain("--all");
+    expect(note).toContain("whole symbol");
+    expect(logs).toHaveLength(400);
+  });
+
+  it("returns stored content with no file whole, since it cannot be paged", async () => {
+    symbolAt(1, 900, Array.from({ length: 900 }, (_, i) => `c${i}`).join("\n"));
+    await read(["--format", "llm"]);
+    expect(logs[0]).toContain("line_end=900");
+    expect(logs[0]).not.toContain("truncated=");
+    expect(logs[0]).not.toContain("next=");
+  });
+
+  it("capSpan returns an uncapped span unchanged", () => {
+    const lines = ["a", "b", "c"];
+    expect(capSpan(lines, 2, 3, 400)).toEqual({ content: "b\nc", lineStart: 2, lineEnd: 3 });
+    expect(capSpan(lines, 1, 3, undefined)).toEqual({ content: "a\nb\nc", lineStart: 1, lineEnd: 3 });
   });
 });

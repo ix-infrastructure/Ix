@@ -479,7 +479,7 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
   registerTool(
     ctx,
     "ix_read",
-    "Use when you have a symbol name but not its file or lines. Returns exactly that definition's source; also takes a path or path:start-end. Not needed when you already know path and range: Read does that.",
+    "Use when you have a symbol name but not its file or lines. Returns that definition's source (one over 400 lines comes back as one page plus a next= cursor when it is on disk); also takes a path or path:start-end. Not needed when you already know path and range: Read does that.",
     {
       symbol: z.string().min(1).describe("a symbol, a path, or `path:start-end`"),
       kind: z.string().min(1).optional(),
