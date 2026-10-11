@@ -10,7 +10,7 @@ import { absoluteFromSourceUri, isReadablePath, readableRoots, resolveWorkspaceR
 import { resolveEntityFull, activeReadScope, ensureReadScope } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { isFileStale } from "../stale.js";
-import { anchorSpan, bareName } from "../edge-sites.js";
+import { anchorSpan, bareName, countDeclarations } from "../edge-sites.js";
 import { relativePath, printJson } from "../format.js";
 import { llmError, llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { parsePickOption } from "../options.js";
@@ -600,8 +600,7 @@ interface LocalMatches {
  * that distinction to decide whether it may skip the backend fallback.
  */
 function findLocalBasenameMatches(root: string, target: string, limit = 25): LocalMatches {
-  const wanted = path.basename(target);
-  const wantedNoExt = wanted.replace(/\.[^.]+$/, "");
+  const matches = basenameMatcher(target);
   const paths: string[] = [];
   const stack = [root];
   let budget = WALK_ENTRY_BUDGET;
@@ -622,14 +621,128 @@ function findLocalBasenameMatches(root: string, target: string, limit = 25): Loc
         continue;
       }
       if (!entry.isFile()) continue; // symlinks are not followed
-      const nameNoExt = entry.name.replace(/\.[^.]+$/, "");
-      if (entry.name === wanted || nameNoExt === wanted || nameNoExt === wantedNoExt) {
+      if (matches(entry.name)) {
         paths.push(path.join(current, entry.name));
         if (paths.length >= limit) return { paths, exhaustive: true };
       }
     }
   }
   return { paths, exhaustive: stack.length === 0 };
+}
+
+/** Whether a file named `entryName` is one `read` would open for `target`. */
+function basenameMatcher(target: string): (entryName: string) => boolean {
+  const wanted = path.basename(target);
+  const wantedNoExt = wanted.replace(/\.[^.]+$/, "");
+  return (entryName) => {
+    const nameNoExt = entryName.replace(/\.[^.]+$/, "");
+    return entryName === wanted || nameNoExt === wanted || nameNoExt === wantedNoExt;
+  };
+}
+
+/**
+ * Whether the workspace holds a file that would turn `ix read <name> --path
+ * <file>` away from the `name` declared in `file` (at `abs`):
+ *
+ * - a file named `name`: Step 3 above opens it before any symbol lookup, and
+ *   --path does not stop it;
+ * - another file whose path contains `file`: --path is a substring test on the
+ *   graph's source path (resolve.ts), so `src/util.ts` also keeps
+ *   `lib/src/util.ts` and `src/util.tsx`, and a `name` declared there too
+ *   leaves the lookup to return candidates or the wrong one.
+ *
+ * Says yes when the walk runs out of budget, since then neither is ruled out.
+ * Files outside the workspace (another repo in the same system) are not seen.
+ */
+function suggestionCollides(root: string, name: string, abs: string, file: string): boolean {
+  const named = basenameMatcher(name);
+  const self = path.resolve(abs);
+  const needle = file.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+  const stack = [root];
+  let budget = WALK_ENTRY_BUDGET;
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (--budget <= 0) return true;
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith(".") || WALK_IGNORE_DIRS.has(entry.name)) continue;
+        stack.push(path.join(current, entry.name));
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (named(entry.name)) return true;
+      const other = path.join(current, entry.name);
+      if (other !== self && other.replace(/\\/g, "/").toLowerCase().includes(needle)) return true;
+    }
+  }
+  return false;
+}
+
+/** Past this a file is not read just to vet a suggestion; the range form stands. */
+const SUGGEST_MAX_FILE_BYTES = 2 * 1024 * 1024;
+
+/**
+ * A superset of what ingest's role classifier (core-ingestion
+ * role-classifier.ts) calls test or fixture: any one signal counts here, where
+ * the classifier weighs them. Too broad only costs a symbol suggestion.
+ */
+const TEST_LIKE_DIR = /(?:^|\/)(?:__tests__|__fixtures__|tests?|specs?|fixtures?|testdata|[^/]*\.tests?)(?:\/)/i;
+const TEST_LIKE_FILE = /(?:^|[._-])(?:tests?|spec|fixtures?|mocks?|stubs?|fakes?|samples?|conftest)(?:[._-]|$)/i;
+/** Case-sensitive, as in the classifier: `FooTest.java`, `FakeClock.java`, but not `latest.ts`. */
+const TEST_LIKE_CLASS_FILE = /(?:Tests?|Spec)\.[^.]+$|^(?:Stub|Fake|Mock)[A-Z]/;
+const TEST_LIKE_IMPORT = new RegExp([
+  /from ['"](?:jest|vitest|mocha|chai|sinon|jasmine|@testing-library)/.source,
+  /require\(['"](?:jest|vitest|mocha|chai|sinon|jasmine)['"]\)/.source,
+  /(?:import|from)\s+(?:unittest|pytest)/.source,
+  /import\s+(?:org\.junit|org\.testng|io\.mockk|org\.mockito|org\.scalatest|munit|zio\.test)/.source,
+  /require\s+['"](?:rspec|minitest)['"]/.source,
+  /using\s+(?:NUnit\.Framework|Xunit|Microsoft\.VisualStudio\.TestTools\.UnitTesting)/.source,
+  /^import\s*(?:\([^)]*"testing"|"testing")/.source,
+].join("|"), "m");
+
+/** Whether ingest may have filed `file` as a test or a fixture. */
+function mayBeTestOrFixture(file: string, source: string): boolean {
+  const normalized = file.replace(/\\/g, "/");
+  return TEST_LIKE_DIR.test(normalized)
+    || TEST_LIKE_FILE.test(path.posix.basename(normalized))
+    || TEST_LIKE_CLASS_FILE.test(path.posix.basename(normalized))
+    || TEST_LIKE_IMPORT.test(source);
+}
+
+/**
+ * Whether `ix read <name> --path <file>` would show the one declaration of
+ * `name` in `file`, so `ix context` may suggest it instead of a line range.
+ *
+ * No when a workspace file has `name` as its basename, or another workspace
+ * file's path contains `file` (see `suggestionCollides`). No unless the
+ * file on disk declares `name` exactly once: two (`save` in two classes) leave
+ * the lookup to return candidates or the other one, and none leaves the stale
+ * re-anchor nothing to find. A bundle's entities are only the target's graph
+ * neighbours, so they cannot answer this; the file can. No for a test or
+ * fixture file: the resolver drops test and fixture symbols whenever a
+ * production one shares the name, before --path is applied, so the read finds
+ * nothing and exits 1. Unreadable, missing or oversized files say no.
+ */
+export function readsOneSymbol(root: string, name: string, file: string): boolean {
+  const abs = absoluteFromSourceUri(file, root);
+  let text: string;
+  try {
+    const stat = fs.statSync(abs);
+    if (!stat.isFile() || stat.size > SUGGEST_MAX_FILE_BYTES) return false;
+    text = fs.readFileSync(abs, "utf8");
+  } catch {
+    return false;
+  }
+  if (mayBeTestOrFixture(file, text)) return false;
+  if (countDeclarations(text.split("\n"), bareName(name)) !== 1) return false;
+  // Last: the file read above is cheaper than this walk of the workspace.
+  return !suggestionCollides(root, name, abs, file);
 }
 
 /** Filter nodes to those whose filename actually matches the target basename. */

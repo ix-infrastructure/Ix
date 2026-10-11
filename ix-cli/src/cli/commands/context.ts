@@ -36,6 +36,7 @@ import {
   type StartingPoint,
   type SymbolHit,
 } from "../explain/issue.js";
+import { readsOneSymbol } from "./read.js";
 import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/related-files.js";
 import { cachedBm25Ranker } from "../explain/bm25-cache.js";
 import { collectTextReferences, gitRepoAccess, type TextSource } from "../explain/text-references.js";
@@ -2517,7 +2518,7 @@ export function renderBundle(bundle: ContextBundle, format: string): void {
       // Last, so it reads as the closing instruction it is.
       ...(forMcp()
         ? nextToolCalls(bundle).map((step) => llmLine("next", { cmd: step.cmd, why: step.why }))
-        : nextReads(bundle).map((cmd) => llmLine("next", { cmd }))),
+        : nextReads(bundle, 3, onDiskSymbolCheck()).map((row) => llmLine("next", { cmd: row.cmd, stale: row.stale || undefined }))),
     ]);
     return;
   }
@@ -2562,10 +2563,12 @@ export function renderBundle(bundle: ContextBundle, format: string): void {
     }
   }
 
-  const reads = nextReads(bundle);
+  const reads = nextReads(bundle, 3, onDiskSymbolCheck());
   if (reads.length > 0) {
     renderSection("Next");
-    for (const cmd of reads) console.log(`  ${cmd}`);
+    for (const row of reads) {
+      console.log(`  ${row.cmd}${row.stale ? "  (stale: changed since last ingest; ix map to update)" : ""}`);
+    }
   }
 
   const trunc = bundle.truncation;
@@ -2728,6 +2731,29 @@ function targetLocation(facts: ContextFacts): Located | undefined {
   return { path: facts.path, lineStart: facts.lineStart, lineEnd: facts.lineEnd };
 }
 
+/** One suggested read: the command, and whether its file changed since the last ingest. */
+export interface NextRead {
+  cmd: string;
+  stale: boolean;
+}
+
+/**
+ * A name or path a shell passes through unquoted and unsplit. No `$` (it
+ * expands), no leading `#` (it starts a comment) and no leading `-` (it reads
+ * as an option); anything else falls back to the range form.
+ */
+const SHELL_SAFE_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
+const SHELL_SAFE_PATH = /^[A-Za-z0-9_./][A-Za-z0-9_./-]*$/;
+
+/** Whether `ix read <name> --path <file>` reads `name` and nothing else; see `readsOneSymbol`. */
+export type SymbolReadCheck = (name: string, path: string) => boolean;
+
+/** `readsOneSymbol` against this workspace's files, as they are on disk now. */
+function onDiskSymbolCheck(): SymbolReadCheck {
+  const root = resolveWorkspaceRoot();
+  return (name, path) => readsOneSymbol(root, name, path);
+}
+
 /**
  * The reads worth making next, most valuable first.
  *
@@ -2738,20 +2764,71 @@ function targetLocation(facts: ContextFacts): Located | undefined {
  * byte the bundle spends, and an agent handed a path with no range opens the
  * file.
  *
+ * `stale` says the row's file changed since the last ingest, from the flags
+ * the bundle already carries. There the range is from the last ingest and
+ * points at the wrong lines, so a stale row that names a symbol is suggested
+ * as `ix read <name> --path <file>`, which re-anchors to where the name is
+ * declared on disk now. A fresh row keeps the range: it is exact, and it never
+ * fails, where a symbol read can (live, `ix read add --path
+ * core-ingestion/src/role-classifier.ts` exited 1: the resolver's name search
+ * never returned that `add`). The range form also stays for a row with no
+ * named symbol, a file or module, a name the shell would split, a name the
+ * bundle shows twice in one file, and a name `symbolRead` rejects. The bundle's
+ * entities are only the target's neighbours, so a second `save` in the same
+ * file need not be among them: renderBundle passes `onDiskSymbolCheck`, which
+ * asks the file itself (see `readsOneSymbol`).
+ *
  * Deduped, because a caller and a dependent are frequently the same function,
  * and taken in evidence order, which is already the ranking — the target first,
  * then its members, what it reaches, and what reaches it.
  */
-export function nextReads(bundle: ContextBundle, limit = 3): string[] {
+export function nextReads(
+  bundle: ContextBundle,
+  limit = 3,
+  symbolRead: SymbolReadCheck = () => true,
+): NextRead[] {
+  // `?? []`: a bundle restored from an older save, or built by hand, may carry
+  // evidence alone.
+  const entities = bundle.entities ?? [];
+  const byId = new Map<string, { id: string; name: string; kind: string; path?: string; stale?: boolean }>();
+  for (const e of entities) byId.set(e.id, e);
+  const target = bundle.target;
+  if (target?.id && !byId.has(target.id)) byId.set(target.id, target);
+  const stalePaths = new Set<string>();
+  for (const e of entities) if (e.stale && e.path) stalePaths.add(e.path);
+  const sameNameInFile = new Map<string, number>();
+  for (const e of byId.values()) {
+    if (!e.path) continue;
+    const key = `${e.path}\n${e.name}`;
+    sameNameInFile.set(key, (sameNameInFile.get(key) ?? 0) + 1);
+  }
+
   const seen = new Set<string>();
-  const reads: string[] = [];
+  const reads: NextRead[] = [];
   for (const item of bundle.evidence) {
     const loc = item.location;
     if (!loc?.path || loc.lineStart === undefined || loc.lineEnd === undefined) continue;
     const range = `${loc.path}:${loc.lineStart}-${loc.lineEnd}`;
     if (seen.has(range)) continue;
     seen.add(range);
-    reads.push(`ix read ${range}`);
+    const ref = item.refs?.[0];
+    const entity = ref ? byId.get(ref) : undefined;
+    const stale = entity?.stale === true
+      || stalePaths.has(loc.path)
+      || (loc.path === target?.path && bundle.freshness?.stale === true);
+    const kind = entity?.kind.toLowerCase();
+    const named = stale
+      && entity !== undefined
+      && entity.name !== ""
+      && kind !== "file"
+      && kind !== "module"
+      && entity.path === loc.path
+      && SHELL_SAFE_NAME.test(entity.name)
+      && SHELL_SAFE_PATH.test(loc.path)
+      && sameNameInFile.get(`${loc.path}\n${entity.name}`) === 1
+      // Last: the only check that may touch the disk.
+      && symbolRead(entity.name, loc.path);
+    reads.push({ cmd: named ? `ix read ${entity.name} --path ${loc.path}` : `ix read ${range}`, stale });
     if (reads.length === limit) break;
   }
   return reads;

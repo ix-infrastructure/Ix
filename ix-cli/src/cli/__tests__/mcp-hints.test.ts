@@ -224,7 +224,7 @@ describe("hints produced for the CLI", () => {
     expect(roleHint(1)).toBe("1 test/fixture candidate hidden. Use --include-tests to include.");
     expect(disambiguationHint("Use --pick <n> or --path to disambiguate.")).toBe("Use --pick <n> or --path to disambiguate.");
     expect(nextReads({ evidence: [{ location: { path: "src/a.ts", lineStart: 1, lineEnd: 900 } }] } as never)).toEqual([
-      "ix read src/a.ts:1-900",
+      { cmd: "ix read src/a.ts:1-900", stale: false },
     ]);
   });
 });
