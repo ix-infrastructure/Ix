@@ -6,9 +6,9 @@ import { createClient } from "../../client/factory.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { llmLine, llmError, type LlmValue } from "../llm.js";
-import { printJson } from "../format.js";
+import { printJson, sliceRanked, truncationHint, type Slice } from "../format.js";
 
-interface SmellCandidate {
+export interface SmellCandidate {
   file_id: string;
   file: string;
   smell: string;
@@ -17,11 +17,88 @@ interface SmellCandidate {
   inference_version: string;
 }
 
-interface SmellReport {
+export interface SmellReport {
   rev: number;
   run_at: string;
   count: number;
   candidates: SmellCandidate[];
+}
+
+/** Default cap on text and llm output. JSON is uncapped unless --limit is given. */
+const DEFAULT_LIMIT = 50;
+
+/**
+ * Extensions of files that hold no parsed code: docs, templates and
+ * data/config. An orphan of one of these is not an architecture finding.
+ * CSS, HTML, SQL and shell stay out of this set: an orphan stylesheet, page
+ * or script can be a real finding.
+ */
+const NON_SOURCE_EXTENSIONS = new Set([
+  // docs
+  ".md", ".mdx", ".markdown", ".rst", ".txt", ".adoc",
+  // templates
+  ".hbs", ".handlebars", ".ejs", ".mustache", ".njk", ".j2", ".jinja", ".jinja2",
+  ".liquid", ".tmpl", ".tpl", ".template",
+  // data / config
+  ".json", ".jsonc", ".yaml", ".yml", ".toml", ".ini", ".lock", ".csv", ".svg",
+]);
+
+/** Extensionless basenames that are build files, so still source. */
+const EXTENSIONLESS_SOURCE = new Set([
+  "dockerfile", "containerfile", "makefile", "gnumakefile", "rakefile", "gemfile",
+  "justfile", "jenkinsfile", "vagrantfile", "procfile", "podfile", "brewfile",
+  "fastfile", "guardfile", "berksfile", "capfile", "snakefile", "tiltfile",
+  "build", "workspace",
+  // shell dotfiles the ingester parses as Bash
+  ".bashrc", ".bash_profile", ".bash_aliases", ".bash_logout", ".zshrc", ".zprofile", ".profile",
+]);
+
+/**
+ * True for an Orphan File row whose path is a doc, template or data/config
+ * file, or an extensionless file such as README or LICENSE that is not a
+ * known build file. Never true for any other smell kind.
+ */
+export function isNonSourceOrphan(c: SmellCandidate): boolean {
+  if (c.smell !== "has_smell.orphan_file") return false;
+  const path = c.file ?? "";
+  const base = (path.split(/[\\/]/).pop() ?? "").toLowerCase();
+  if (base === "") return false;
+  const dot = base.lastIndexOf(".");
+  // No extension (README, LICENSE, CODEOWNERS) or a bare dotfile (.gitignore):
+  // non-source unless it is a known build file.
+  if (dot <= 0) return !EXTENSIONLESS_SOURCE.has(base);
+  return NON_SOURCE_EXTENSIONS.has(base.slice(dot));
+}
+
+export interface SmellSelection {
+  slice: Slice<SmellCandidate>;
+  /** Orphan File rows dropped as non-source before the cut. */
+  filteredNonSource: number;
+}
+
+/**
+ * Drop non-source orphan rows, rank by confidence (highest first, stable among
+ * ties), then cut to `limit`. `total` on the slice counts what survived the
+ * filter.
+ */
+export function selectSmells(report: SmellReport, limit: number, filterNonSource = true): SmellSelection {
+  const kept = filterNonSource ? report.candidates.filter(c => !isNonSourceOrphan(c)) : report.candidates;
+  const sorted = [...kept].sort((a, b) => b.confidence - a.confidence);
+  return {
+    slice: sliceRanked(sorted, limit),
+    filteredNonSource: report.candidates.length - kept.length,
+  };
+}
+
+/**
+ * The cap to apply: an explicit --limit wins (0 = all). Without one, text and
+ * llm stop at DEFAULT_LIMIT and JSON returns everything, because MCP ix_smells
+ * and plugin fallbacks filter the JSON by path themselves.
+ */
+function resolveLimit(raw: string | undefined, format: string): number {
+  if (raw === undefined) return format === "json" ? Infinity : DEFAULT_LIMIT;
+  const n = parseInt(raw, 10);
+  return !Number.isFinite(n) || n <= 0 ? Infinity : n;
 }
 
 const SMELL_LABELS: Record<string, string> = {
@@ -40,6 +117,7 @@ export function registerSmellsCommand(program: Command): void {
     .option("--god-module-fan <n>",        "Min fan-in/out for god module",     "15")
     .option("--weak-max-neighbors <n>",    "Max neighbors for weak component",  "1")
     .option("--list",                      "List existing smell claims without rerunning")
+    .option("--limit <n>",                 "Max candidates to show, highest confidence first (0 = all; detection run only)")
     .addHelpText("after", `
 Runs graph-query-based architecture smell detection and stores results as
 versioned claims (inference_version=smell_v1) on affected File nodes.
@@ -53,6 +131,8 @@ Examples:
   ix smells
   ix smells --god-module-chunks 15 --god-module-fan 10
   ix smells --format json
+  ix smells --limit 200
+  ix smells --limit 0
   ix smells --list`)
     .action(async (opts: {
       format: string;
@@ -61,6 +141,7 @@ Examples:
       godModuleFan: string;
       weakMaxNeighbors: string;
       list?: boolean;
+      limit?: string;
     }) => {
       const client = createClient();
       const systemId = await resolveReadSystemId(client);
@@ -126,14 +207,24 @@ Examples:
         return;
       }
 
+      // Plain `--format json` is the raw contract MCP ix_smells and plugin
+      // fallbacks path-filter themselves, so it neither caps nor drops rows
+      // unless --limit is passed.
+      const rawJson = opts.format === "json" && opts.limit === undefined;
+      const selection = selectSmells(report, resolveLimit(opts.limit, opts.format), !rawJson);
+      const { slice, filteredNonSource } = selection;
+
       if (opts.format === "json") {
         // Compact: hoist inference_version to top, drop file_id UUIDs
-        const compact = {
+        const compact: Record<string, unknown> = {
           rev: report.rev,
           run_at: report.run_at,
-          count: report.count,
+          count: slice.total,
+          shown: slice.shown,
+          truncated: slice.truncated,
+          ...(filteredNonSource > 0 ? { filtered_non_source: filteredNonSource } : {}),
           inference_version: "smell_v1",
-          candidates: report.candidates.map(c => ({
+          candidates: slice.rows.map(c => ({
             file: c.file,
             smell: c.smell,
             confidence: c.confidence,
@@ -145,23 +236,29 @@ Examples:
       }
 
       if (opts.format === "llm") {
-        for (const line of renderSmellsRunLlm(report)) console.log(line);
+        for (const line of renderSmellsRunLlm(report, selection)) console.log(line);
         return;
       }
 
+      const countText = slice.truncated
+        ? `${slice.total} candidates · showing ${slice.shown}`
+        : `${slice.total} candidates`;
+      const hiddenText = filteredNonSource > 0
+        ? ` (${filteredNonSource} non-source orphan files hidden)`
+        : "";
       console.log(
         `\n${chalk.bold("Architecture Smells")}  ` +
-        chalk.dim(`rev ${report.rev} · ${report.count} candidates`)
+        chalk.dim(`rev ${report.rev} · ${countText}${hiddenText}`)
       );
 
-      if (report.count === 0) {
+      if (slice.total === 0) {
         console.log(chalk.green("\n  No smell candidates found."));
         return;
       }
 
-      // Group by smell kind
+      // Group the shown rows by smell kind; each group stays confidence-sorted.
       const byKind = new Map<string, SmellCandidate[]>();
-      for (const c of report.candidates) {
+      for (const c of slice.rows) {
         if (!byKind.has(c.smell)) byKind.set(c.smell, []);
         byKind.get(c.smell)!.push(c);
       }
@@ -170,8 +267,7 @@ Examples:
         const label = SMELL_LABELS[kind] ?? kind;
         console.log(`\n${chalk.bold(label)}  ${chalk.dim(`(${candidates.length})`)}`);
 
-        const sorted = [...candidates].sort((a, b) => b.confidence - a.confidence);
-        for (const c of sorted) {
+        for (const c of candidates) {
           const conf = confidenceBar(c.confidence);
           const fileName = c.file.length > 45
             ? "…" + c.file.slice(-44)
@@ -180,6 +276,8 @@ Examples:
           console.log(`  ${conf} ${chalk.dim(fileName)}  ${chalk.dim(signalStr)}`);
         }
       }
+
+      if (slice.truncated) console.log(chalk.dim(`\n${truncationHint(slice, "smell candidates")}`));
 
       console.log(chalk.dim(`\nSmell claims stored with inference_version=smell_v1. Use 'ix smells --list' to retrieve.`));
     });
@@ -206,11 +304,29 @@ export function renderSmellsListLlm(smells: any[]): string[] {
   return lines;
 }
 
-/** Render a fresh `ix smells` detection run as llm records, highest-confidence first. */
-export function renderSmellsRunLlm(report: SmellReport): string[] {
-  const lines = [llmLine("smells", [["rev", report.rev], ["count", report.count], ["version", "smell_v1"]])];
-  const sorted = [...report.candidates].sort((a, b) => b.confidence - a.confidence);
-  for (const c of sorted) {
+/**
+ * Render a fresh `ix smells` detection run as llm records, highest-confidence
+ * first. Without a selection, every candidate is shown (no filter, no cap).
+ */
+export function renderSmellsRunLlm(report: SmellReport, selection?: SmellSelection): string[] {
+  const { slice, filteredNonSource } = selection ?? {
+    slice: sliceRanked([...report.candidates].sort((a, b) => b.confidence - a.confidence), Infinity),
+    filteredNonSource: 0,
+  };
+  const lines = [llmLine("smells", [
+    ["rev", report.rev],
+    ["count", slice.total],
+    ["shown", slice.shown],
+    ["filtered_non_source", filteredNonSource > 0 ? filteredNonSource : undefined],
+    ["version", "smell_v1"],
+  ])];
+  if (slice.truncated) {
+    lines.push(llmLine("diagnostic", [
+      ["code", "results_truncated"],
+      ["message", truncationHint(slice, "smell candidates")],
+    ]));
+  }
+  for (const c of slice.rows) {
     lines.push(llmLine("smell", [
       ["kind", c.smell],
       ["file", c.file],

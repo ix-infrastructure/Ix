@@ -257,10 +257,15 @@ region id=ingestion-parsers label="Ingestion / Parsers" kind=subsystem level=2 f
 `ix smells`:
 
 ```
-smells rev=42 count=2 version=smell_v1
+smells rev=42 count=2 shown=2 version=smell_v1
 smell kind=has_smell.god_module file=Region.scala confidence=0.91 chunks=42 fan_in=18 fan_out=9
 smell kind=has_smell.orphan_file file=tmp.py confidence=0.8 connections=0
 ```
+
+`count` is the number of candidates after non-source orphan files (docs,
+templates, data/config) are dropped; `filtered_non_source=<k>` appears when any
+were. Output stops at `--limit` (default 50, highest confidence first); when it
+cuts, a `diagnostic code=results_truncated` record follows the header.
 
 `ix impact <leaf>`:
 

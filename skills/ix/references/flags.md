@@ -720,6 +720,7 @@ Detect architecture smells in the codebase.
 | `--god-module-fan` | `<n>` | `15` | Min fan-in/out for god module |
 | `--weak-max-neighbors` | `<n>` | `1` | Max neighbors for weak component |
 | `--list` | — | off | List existing smell claims without rerunning |
+| `--limit` | `<n>` | 50 (text/llm); all (json) | Max candidates, highest confidence first; 0 = all (detection run only). Non-source orphan files (docs, templates, data) are dropped before the cut |
 
 ### `ix stats`
 
