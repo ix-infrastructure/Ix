@@ -81,7 +81,10 @@ afterEach(() => {
     else process.env[k] = v;
   }
   vi.restoreAllMocks();
-  rmSync(home, { recursive: true, force: true });
+  vi.doUnmock("../commands/ingestion-loader.js");
+  // maxRetries: on Windows the repo directory a doctor run just used can
+  // still be briefly busy (EBUSY), as in upgrade-backend-stamp.test.ts.
+  rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 function registerRepo(): void {
