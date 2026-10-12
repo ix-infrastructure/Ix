@@ -1472,23 +1472,82 @@ describe("ingestFiles against a fake backend", () => {
     fixture(2);
     await ingestFiles(join(repo, "src"), { ...quiet, force: true });
 
-    expect(registered()).toEqual([{ root: repo, id: workspaceIdForPath(repo), isDefault: true }]);
+    expect(registered(), "registered, but never as the default").toEqual([{ root: repo, id: workspaceIdForPath(repo), isDefault: false }]);
     expect([...new Set(sent().map(s => `${s.workspaceId} ${s.uri}`))].sort()).toEqual([
       `${workspaceIdForPath(repo)} src/m000.ts`,
       `${workspaceIdForPath(repo)} src/m001.ts`,
     ]);
   });
 
-  it("still gives a path in no workspace and no repository a workspace of its own", async () => {
+  it("ingests a loose FILE under its directory's id but registers nothing", async () => {
     // `repo` here is a plain directory: no `fixture()`, so no `git init`.
     const outside = join(repo, "loose");
     mkdirSync(outside, { recursive: true });
     writeFileSync(join(outside, "x.ts"), "export const x = 1;\n", "utf8");
+    const configPath = join(home, ".ix", "config.yaml");
+    const before = existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined;
 
     await ingestFiles(join(outside, "x.ts"), { ...quiet, force: true });
 
-    expect(registered()).toEqual([{ root: outside, id: workspaceIdForPath(outside), isDefault: true }]);
     expect(sent()).toEqual([{ uri: "x.ts", workspaceId: workspaceIdForPath(outside) }]);
+    expect(registered()).toEqual([]);
+    expect(existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined).toBe(before);
+  });
+
+  it("a coalesced rerun for a loose FILE ingest does not register the file's directory either", async () => {
+    // The holder's rerun widens a loose file to its whole directory once that
+    // directory has a baseline; registering it would make the directory readable.
+    const outside = join(repo, "loose");
+    mkdirSync(outside, { recursive: true });
+    const first = join(outside, "x.ts");
+    const second = join(outside, "y.ts");
+    writeFileSync(first, "export const x = 1;\n", "utf8");
+    // The directory was ingested once and its registration since dropped from
+    // config.yaml by hand: unregistered, but it keeps its baseline.
+    await ingestFiles(outside, quiet);
+    register();
+    expect(registered()).toEqual([]);
+    expect(loadIngestBaseline(outside), "the loose directory has a baseline, so the rerun covers all of it").not.toBeNull();
+    writeFileSync(first, "export const x = 2;\n", "utf8");
+    writeFileSync(second, "export const y = 2;\n", "utf8");
+    const configPath = join(home, ".ix", "config.yaml");
+    const before = existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined;
+    const stdout = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      // The lock is taken before the first await, so the waiter coalesces.
+      const holder = ingestPathSingleFlight(first, { format: "json" });
+      const waiter = ingestPathSingleFlight(second, { format: "json" });
+      await Promise.all([holder, waiter]);
+    } finally {
+      stdout.mockRestore();
+    }
+
+    expect(loadIngestBaseline(outside)!.files.get(second), "the rerun ran").toBe(statSync(second).mtimeMs);
+    expect(registered()).toEqual([]);
+    expect(existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined).toBe(before);
+  });
+
+  it("registers a loose DIRECTORY after a successful ingest, but never as the default", async () => {
+    const outside = join(repo, "loose");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "x.ts"), "export const x = 1;\n", "utf8");
+
+    await ingestFiles(outside, { ...quiet, force: true });
+
+    expect(registered()).toEqual([{ root: outside, id: workspaceIdForPath(outside), isDefault: false }]);
+    expect(sent()).toEqual([{ uri: "x.ts", workspaceId: workspaceIdForPath(outside) }]);
+  });
+
+  it("leaves an existing default workspace the only default", async () => {
+    fixture(2);
+    const other = join(repo, "..", `${repo.split(/[\\/]/).pop()}-default`);
+    mkdirSync(other, { recursive: true });
+    register({ root: realpathSync.native(other), isDefault: true });
+
+    await ingestFiles(join(repo, "src"), { ...quiet, force: true });
+
+    expect(registered().filter(w => w.isDefault).map(w => w.root)).toEqual([realpathSync.native(other)]);
+    expect(registered().map(w => w.root)).toContain(repo);
   });
 
   it("leaves everything outside a subdirectory run alone: deletions, baseline, extractor, stitch", async () => {

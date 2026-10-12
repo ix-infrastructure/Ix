@@ -5,10 +5,12 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve as resolvePath } from "node:path";
+import { statSync } from "node:fs";
+import { isAbsolute, join, resolve as resolvePath } from "node:path";
 
 import { z } from "zod";
-import { isReadablePath } from "../cli/config.js";
+import { isReadablePath, resolveWorkspaceRoot } from "../cli/config.js";
+import { resolveIngestRootWithSource } from "../cli/map-root.js";
 
 import {
   createProtocolStdout,
@@ -664,15 +666,35 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       // Confined like ix_read. An ingested path's workspace becomes a root
       // ix_read may open files from, so an unconfined path let a caller turn
       // any directory into a readable one (ix_ingest, then ix_read).
-      if (typeof input.path === "string" && !isReadablePath(resolvePath(process.cwd(), input.path))) {
-        return textResult(
-          JSON.stringify({
-            error: "path_outside_workspace",
-            message: `Refusing to ingest a path outside the workspace: ${input.path}. Run ix map in that directory to make it a workspace.`,
-            tool: "ix_ingest",
-          }),
-          true,
-        );
+      // Resolved against the workspace root, as ingestFiles does, not cwd:
+      // from <ws>/a, "../outside/x" is <ws>/outside for cwd but outside for the CLI.
+      if (typeof input.path === "string") {
+        const abs = isAbsolute(input.path) ? input.path : resolvePath(resolveWorkspaceRoot(), input.path);
+        if (!isReadablePath(abs)) {
+          return textResult(
+            JSON.stringify({
+              error: "path_outside_workspace",
+              message: `Refusing to ingest a path outside the workspace: ${input.path}. Run ix map in that directory to make it a workspace.`,
+              tool: "ix_ingest",
+            }),
+            true,
+          );
+        }
+        // A path in no workspace and no repository would be ingested as a
+        // workspace of its own; over MCP that is refused. A path that does not
+        // exist falls through: the CLI reports it and registers nothing.
+        let isDir: boolean | undefined;
+        try { isDir = statSync(abs).isDirectory(); } catch { /* the CLI reports it */ }
+        if (isDir !== undefined && resolveIngestRootWithSource(abs, isDir).source === "loose") {
+          return textResult(
+            JSON.stringify({
+              error: "path_outside_workspace",
+              message: `Refusing to ingest ${input.path}: it is in no mapped workspace and no git repository. Run ix map in that directory to make it a workspace.`,
+              tool: "ix_ingest",
+            }),
+            true,
+          );
+        }
       }
       const options: string[] = [];
       pushOption(options, "--github", input.github);
