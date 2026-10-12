@@ -59,6 +59,23 @@ describe("architecture map baseline", () => {
     expect(hasCompletedMapBaseline(root)).toBe(true);
   });
 
+  it("finds a map recorded under either spelling of its root, the given one or the canonical one", () => {
+    // macOS's /var -> /private/var and Windows's RUNNER~1 short names: a
+    // baseline stored as given must still be found as given, and one stored
+    // canonically (as `ix map` stores it) must be found from an alias.
+    const real = path.join(home, "real");
+    const alias = path.join(home, "alias");
+    fs.mkdirSync(real, { recursive: true });
+    fs.symlinkSync(real, alias, "junction");
+    for (const [stored, asked] of [[alias, alias], [fs.realpathSync.native(real), alias]] as const) {
+      const filePath = path.join(stored, "index.ts");
+      fs.writeFileSync(filePath, "export const one = 1;\n");
+      persistIngestBaselineIfClean(stored, new Map([[filePath, fs.statSync(filePath).mtimeMs]]), 3, 0, 0);
+      expect(persistCompletedMapBaseline({ file_count: 1, region_count: 1, regions: [], outcome: "full_local_completed" }, stored)).toBe(true);
+      expect(hasCompletedMapBaseline(asked), `stored under ${stored === alias ? "the alias" : "the real path"}`).toBe(true);
+    }
+  });
+
   it("records a one-file workspace that has no regions to build", () => {
     // The E2E fixture: one Python file, mapped as `1 files · 0s/0ss/0m
     // regions`. There is no hierarchy to build over a single file and no

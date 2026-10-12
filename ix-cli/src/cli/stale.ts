@@ -3,7 +3,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { canonicalWorkspacePath, resolveWorkspaceRoot } from "./config.js";
-import { loadIngestBaseline } from "./ingest-baseline.js";
+import { loadIngestBaseline, type IngestBaseline } from "./ingest-baseline.js";
 import { hasCompletedMapFor } from "./map-baseline.js";
 import { readMapStale } from "./map-freshness.js";
 import { canonicalizeDiscoveredFilePath, discoverSourceFiles } from "./file-discovery.js";
@@ -176,6 +176,23 @@ export function detectStaleFiles(
 }
 
 /**
+ * The ingest baseline for `root`, and the spelling of the root it is stored
+ * under. The baselines match their root as a string. `ix map` stores the
+ * canonical root, so a symlinked or 8.3-named spelling of it (RUNNER~1 on
+ * Windows) read as never mapped; a root stored as given (`ix ingest` of a path
+ * spelled that way) is still found under its own spelling first.
+ */
+function loadBaselineUnderEitherSpelling(root: string): { root: string; baseline: IngestBaseline } | null {
+  const resolved = path.resolve(root);
+  const asGiven = loadIngestBaseline(resolved);
+  if (asGiven) return { root: resolved, baseline: asGiven };
+  const canonical = canonicalWorkspacePath(resolved);
+  if (canonical === resolved) return null;
+  const baseline = loadIngestBaseline(canonical);
+  return baseline ? { root: canonical, baseline } : null;
+}
+
+/**
  * Whether the active workspace has a completed map baseline.
  *
  * The marker is written only after a non-empty hierarchy response and is tied
@@ -185,12 +202,8 @@ export function detectStaleFiles(
  */
 export function hasCompletedMapBaseline(root?: string): boolean {
   try {
-    // Canonical, as `ix map` and `ix ingest` store it: the baselines match
-    // their root as a string, so a symlinked or 8.3-named spelling of the
-    // same root (RUNNER~1 on Windows) would read as never mapped.
-    const workspaceRoot = canonicalWorkspacePath(root ?? resolveWorkspaceRoot());
-    const baseline = loadIngestBaseline(workspaceRoot);
-    return baseline !== null && hasCompletedMapFor(workspaceRoot, baseline);
+    const found = loadBaselineUnderEitherSpelling(root ?? resolveWorkspaceRoot());
+    return found !== null && hasCompletedMapFor(found.root, found.baseline);
   } catch {
     return false;
   }
@@ -199,7 +212,7 @@ export function hasCompletedMapBaseline(root?: string): boolean {
 /** Whether source ingestion completed cleanly for the active workspace. */
 export function hasCompletedSourceGraphBaseline(root?: string): boolean {
   try {
-    return loadIngestBaseline(canonicalWorkspacePath(root ?? resolveWorkspaceRoot())) !== null;
+    return loadBaselineUnderEitherSpelling(root ?? resolveWorkspaceRoot()) !== null;
   } catch {
     return false;
   }
