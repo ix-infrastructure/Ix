@@ -19,6 +19,7 @@ import { loadCachedMap, loadLastMap, resolveMapCacheSlot, saveCachedMap } from "
 import { clearMapStale, markMapStale, readMapStale } from "../map-freshness.js";
 import { resolveMapRoot } from "../map-root.js";
 import { readBackendHealth } from "./upgrade.js";
+import { renderWarning } from "../ui.js";
 import type { IxClient } from "../../client/api.js";
 
 // Hard wall-clock budget for a single `ix map`. Past this, the shared deadline
@@ -470,8 +471,9 @@ Advanced:
   --remap   Compute the map now. After an edit, \`ix map\` ingests it and
             defers the map itself: it prints the last map's regions marked
             stale (map=stale), and the next region view (overview, subsystems,
-            locate, impact, explain, view) recomputes it. IX_MAP_EAGER=1 always
-            computes, as before.
+            locate, impact, explain, view) answers from them and starts a
+            background refresh. IX_MAP_EAGER=1 always computes, as before;
+            IX_MAP_BACKGROUND_REFRESH=0 stops region views starting one.
 
 Examples:
   ix map .
@@ -602,6 +604,9 @@ export function renderMapLlm(
     // are some; the `too_large` rows after this name up to 20 of them.
     ["files_too_large", ingest?.filesTooLarge ? ingest.filesTooLarge : undefined],
   ]));
+  // Its own record too, right after the `map` record: a reader skimming the
+  // records must not take the last map's counts for this edit's.
+  if (state.mapStale) console.log(llmLine("diagnostic", [["code", "map_stale"], ["message", mapStaleNotice(state)]]));
   for (const path of ingest?.filesTooLarge ? ingest.filesTooLargePaths ?? [] : []) {
     console.log(llmLine("too_large", [["path", path]]));
   }
@@ -1281,13 +1286,12 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
     return;
   }
 
-  if (!machineFormat) {
-    if (mapStale) {
-      process.stderr.write(chalk.dim(`  Map deferred: regions are from the last map (rev ${result.map_rev}, ${result.file_count} files), not this edit (run ix map --remap or any region view to refresh)\n`));
-    } else {
-      const mapSec = (mapMs / 1000).toFixed(1);
-      process.stderr.write(chalk.dim(`  Mapped in ${mapSec}s\n`));
-    }
+  // A deferred map says so where its reader looks, not in a dim stderr
+  // aside: a text map opens with a warning on stdout, an llm map carries a
+  // `diagnostic code=map_stale` record (`renderMapLlm`).
+  if (!machineFormat && !mapStale) {
+    const mapSec = (mapMs / 1000).toFixed(1);
+    process.stderr.write(chalk.dim(`  Mapped in ${mapSec}s\n`));
   }
 
   const minConf = parseFloat(opts.minConfidence ?? "0");
@@ -1308,7 +1312,20 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
     renderMapLlm(result, regions, localIngest, staleState);
     return;
   }
+  if (staleState.mapStale) renderWarning(mapStaleNotice(staleState));
   renderMapText(result, cwd, opts);
+}
+
+/**
+ * The one sentence a deferred map's text and llm output lead with: the counts
+ * and regions are the last map's, which one, and how to get this edit's.
+ * Exported for tests.
+ */
+export function mapStaleNotice(state: MapStaleState): string {
+  const asOf = state.regionsAsOf
+    ? ` (map rev ${state.regionsAsOf.map_rev}, ${state.regionsAsOf.file_count} files)`
+    : "";
+  return `Stale map: not recomputed after this edit. Every count and region here is from the last map${asOf}. Run ix map --remap to recompute it now; region views refresh it in the background.`;
 }
 
 /**

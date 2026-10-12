@@ -104,13 +104,13 @@ describe("ix status", () => {
   }
 
   async function statusWith(
-    info: { mapCompleted?: boolean; mapStale?: boolean },
+    info: { mapCompleted?: boolean; mapStale?: boolean; mapRefreshError?: string | null },
     ...args: string[]
   ): Promise<string> {
     vi.doMock("../stale.js", async (orig) => ({
       ...(await orig<typeof import("../stale.js")>()),
       detectStaleFiles: () => ({
-        graphCompleted: true, mapCompleted: info.mapCompleted ?? true, mapStale: info.mapStale ?? false,
+        graphCompleted: true, mapCompleted: info.mapCompleted ?? true, mapStale: info.mapStale ?? false, mapRefreshError: info.mapRefreshError ?? null,
         currentRev: 7, lastIngestAt: null,
         staleFiles: 0, sampleChangedFiles: [], replayedFiles: [], parseTimeouts: [],
       }),
@@ -163,6 +163,23 @@ describe("ix status", () => {
     expect(text).toMatch(/Map:\s+stale/);
     expect(text).toMatch(/ix map --remap/);
     expect(text).not.toMatch(/No completed architecture map/);
+  });
+
+  it("reports why the last background map refresh failed, in every format", async () => {
+    registerRepo();
+    stats = { nodes: { total: 10 }, edges: { total: 10 } };
+    const failed = { mapCompleted: false, mapStale: true, mapRefreshError: "timed out after 300 s" };
+    const json = JSON.parse(await statusWith(failed, "--format", "json"));
+    expect(json.mapRefreshError).toBe("timed out after 300 s");
+
+    out.length = 0;
+    const llm = await statusWith(failed, "--format", "llm");
+    expect(llm).toMatch(/map_stale=true map_refresh_error="timed out after 300 s"/);
+
+    out.length = 0;
+    const text = await statusWith(failed);
+    expect(text).toMatch(/last background map refresh failed: timed out after 300 s/);
+    expect(text).toMatch(/ix map --remap/);
   });
 
   it("keeps the incomplete-map warning when the map is not merely stale", async () => {
@@ -269,15 +286,52 @@ describe("doctor checks", () => {
 
     markMapStale(repo);
     expect(await assessMapCompletion(repo, local))
-      .toEqual({ ok: false, warn: true, detail: expect.stringMatching(/stale \(deferred after an edit\)/) });
+      .toEqual({ ok: false, warn: true, detail: expect.stringMatching(/stale \(deferred after an edit\); a region view refreshes it in the background/) });
 
-    // A refresh was tried for that deferral and did not clear it: a map that
-    // is not completing, which fails as it did before the deferral existed.
+    // A refresh was started for that deferral and has not cleared it yet:
+    // still the design working.
     const { mapStalePath } = await import("../config.js");
     writeFileSync(mapStalePath(repo), JSON.stringify({ since: 1, ingestRev: 6, lastAttemptAt: 2 }));
-    const failedRefresh = await assessMapCompletion(repo, local);
-    expect(failedRefresh).toMatchObject({ ok: false, detail: expect.stringMatching(/last refresh did not complete/) });
-    expect(failedRefresh.warn).toBeUndefined();
+    expect(await assessMapCompletion(repo, local)).toMatchObject({ ok: false, warn: true });
+  });
+
+  it("Completed map: a failed background refresh is a warning with its reason, not a failure", async () => {
+    const { assessMapCompletion } = await import("../commands/doctor.js");
+    const { persistIngestBaselineIfClean } = await import("../commands/ingest.js");
+    const { saveMapBaseline } = await import("../map-baseline.js");
+    const { markMapStale } = await import("../map-freshness.js");
+    const { mapRefreshOutcomePath } = await import("../config.js");
+    const file = join(repo, "a.ts");
+    writeFileSync(file, "export const a = 1;\n");
+    const local = async () => false;
+    persistIngestBaselineIfClean(repo, new Map([[file, 1]]), 5, 0, 0, new Date());
+    expect(saveMapBaseline(repo, 5)).toBe(true);
+    persistIngestBaselineIfClean(repo, new Map([[file, 2]]), 6, 0, 0, new Date());
+    markMapStale(repo);
+
+    // What `runBackgroundMapRefresh` records when the map outlives its limit.
+    writeFileSync(mapRefreshOutcomePath(repo), JSON.stringify({
+      startedAt: 1, finishedAt: 2, ok: false, reason: "timed out after 300 s", pid: 1,
+    }));
+    const failed = await assessMapCompletion(repo, local);
+    expect(failed).toEqual({
+      ok: false,
+      warn: true,
+      detail: "architecture map is stale; its last background refresh failed (timed out after 300 s) — run `ix map --remap`",
+    });
+  });
+
+  it("Completed map: a stale map with no map ever completed still fails", async () => {
+    const { assessMapCompletion } = await import("../commands/doctor.js");
+    const { persistIngestBaselineIfClean } = await import("../commands/ingest.js");
+    const { markMapStale } = await import("../map-freshness.js");
+    const file = join(repo, "a.ts");
+    writeFileSync(file, "export const a = 1;\n");
+    persistIngestBaselineIfClean(repo, new Map([[file, 1]]), 5, 0, 0, new Date());
+    markMapStale(repo);
+    const never = await assessMapCompletion(repo, async () => false);
+    expect(never).toMatchObject({ ok: false, detail: expect.stringMatching(/no architecture map has ever completed/) });
+    expect(never.warn).toBeUndefined();
   });
 
   it("ripgrep on PATH warns, never fails", async () => {

@@ -8,10 +8,11 @@ import { Command } from "commander";
 
 /**
  * CL-13: `ix map` may defer the map after an edit, so every command that reads
- * regions refreshes it first with `ensureFreshMap`. These run each reader
- * against a stub client and check three things: the refresh is asked for
- * exactly once, before the first region read, and a refresh that fails
- * changes neither the output nor the exit code.
+ * regions calls `ensureFreshMap` first, which starts a background refresh and
+ * never maps inline. These run each reader against a stub client and check
+ * three things: it is asked for exactly once, before the first region read,
+ * and a refresh that cannot start changes neither the output nor the exit
+ * code.
  */
 
 // The suite runs from a checkout no workspace covers; it is about ordering,
@@ -122,7 +123,8 @@ describe.each(READERS)("ix %s refreshes a deferred map first", (_name, args, loa
     refreshImpl.current = async () => undefined;
     process.exitCode = undefined;
     home = mkdtempSync(join(tmpdir(), "ix-readers-refresh-"));
-    for (const k of ["IX_HOME", "IX_GRAPH_HEALTH"]) saved[k] = process.env[k];
+    for (const k of ["IX_HOME", "IX_GRAPH_HEALTH", "IX_MAP_BACKGROUND_REFRESH", "IX_LOCK_DIR"]) saved[k] = process.env[k];
+    process.env.IX_LOCK_DIR = join(home, "locks");
     process.env.IX_HOME = home;
     process.env.IX_GRAPH_HEALTH = "0";
   });
@@ -149,23 +151,18 @@ describe.each(READERS)("ix %s refreshes a deferred map first", (_name, args, loa
     const fineExit = process.exitCode;
     expect(fine.length, "the reader printed its answer").toBeGreaterThan(0);
 
-    // The real thing, made to fail at its first step after the marker check:
-    // whatever goes wrong inside, the reader must not see it.
+    // The real thing, made to fail where it starts the background refresh:
+    // whatever goes wrong there, the reader must not see it.
     const real = await vi.importActual<typeof import("../map-freshness.js")>("../map-freshness.js");
     real.markMapStale(join(home, "repo"), { ingestRev: 1 });
-    let mapAsked = 0;
+    let spawnAsked = 0;
+    process.env.IX_MAP_BACKGROUND_REFRESH = "1";
     refreshImpl.current = () => real.ensureFreshMap({
       root: join(home, "repo"),
-      client: {
-        endpoint: "http://127.0.0.1:1",
-        workspaceSystem: async () => ({ systemId: null }),
-        currentRevision: async () => 1,
-        health: async () => ({ status: "ok" }),
-        map: async () => { mapAsked++; throw new Error("500: map failed"); },
-      } as any,
+      spawn: () => { spawnAsked++; throw new Error("spawn EAGAIN"); },
     });
     const failed = await run(register, args);
-    expect(mapAsked, "the refresh got as far as the map").toBe(1);
+    expect(spawnAsked, "the reader got as far as starting the refresh").toBe(1);
     expect(failed).toBe(fine);
     expect(process.exitCode).toBe(fineExit);
   });

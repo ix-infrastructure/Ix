@@ -516,15 +516,19 @@ describe("ix map reuses an unchanged map", () => {
       expect(record).toMatch(/\bregions_as_of_rev=\d+\b/);
       expect(record).toMatch(/\bregions_as_of_files=4\b/);
       expect(clean.stdout).not.toContain("regions_as_of");
+      // Its own record, straight after the `map` record, not just a field on it.
+      expect(deferred.stdout.split("\n")[1]).toMatch(/^diagnostic code=map_stale message="Stale map: not recomputed after this edit\. Every count and region here is from the last map \(map rev \d+, 4 files\)\. Run ix map --remap/);
+      expect(clean.stdout).not.toContain("diagnostic");
     });
 
-    it("tells a person in text how to refresh", async () => {
+    it("opens a stale text map with a warning on stdout that says how to refresh", async () => {
       await map();
       writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
       const deferred = await map();
-      expect(deferred.stderr).toContain("Map deferred");
-      expect(deferred.stderr).toContain("ix map --remap");
-      expect(deferred.stderr, "names the map the regions are from").toMatch(/last map \(rev \d+, 4 files\)/);
+      const first = deferred.stdout.split("\n").find(l => l.trim() !== "") ?? "";
+      expect(first, "the first thing printed").toMatch(/Warning\s+Stale map: not recomputed after this edit/);
+      expect(first).toContain("ix map --remap");
+      expect(first, "names the map the regions are from").toMatch(/last map \(map rev \d+, 4 files\)/);
       expect(deferred.stderr).not.toContain("Mapped in");
     });
 

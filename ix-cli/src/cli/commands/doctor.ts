@@ -40,7 +40,8 @@ import { backendCeiling, isNewer, readBackendHealth } from "./upgrade.js";
 import { loadIngestBaseline } from "../ingest-baseline.js";
 import { isCloudReady } from "../remote.js";
 import { hasCompletedMapBaseline } from "../stale.js";
-import { readMapStale } from "../map-freshness.js";
+import { readMapRefreshOutcome, readMapStale } from "../map-freshness.js";
+import { loadMapBaseline } from "../map-baseline.js";
 import { printJson } from "../format.js";
 import type { CapabilitiesResponse, HealthResponse } from "../../client/types.js";
 
@@ -388,19 +389,31 @@ export async function assessMapCompletion(
     // and failing here would make `ix doctor` exit 1 after every edit.
     const stale = readMapStale(root);
     if (stale !== null) {
-      // A refresh was tried for this deferral and did not clear it: failed,
-      // timed out, or got no completed map back. That is the partial map this
-      // check exists to catch, so it fails as it did before CL-13.
-      if (stale.lastAttemptAt !== undefined) {
+      // Deferred maps are only ever served from a map that completed once;
+      // without one there is nothing to be merely stale against.
+      if (loadMapBaseline(root) === null && loadMapBaseline(canonicalWorkspacePath(root)) === null) {
         return {
           ok: false,
-          detail: "architecture map is stale and its last refresh did not complete — run `ix map --remap`",
+          detail: "no architecture map has ever completed for this workspace — run `ix map --remap`",
+        };
+      }
+      // A background refresh that failed is reported, not failed on: a
+      // map that takes longer than the refresh's limit, or a backend that was
+      // briefly down, must not keep `ix doctor` exiting 1 after every edit.
+      // The regions are the last completed map's, and `--remap` brings them
+      // up to date.
+      const last = readMapRefreshOutcome(root);
+      if (last?.ok === false) {
+        return {
+          ok: false,
+          warn: true,
+          detail: `architecture map is stale; its last background refresh failed (${last.reason ?? "no reason recorded"}) — run \`ix map --remap\``,
         };
       }
       return {
         ok: false,
         warn: true,
-        detail: "architecture map is stale (deferred after an edit); refreshes on the next region view",
+        detail: "architecture map is stale (deferred after an edit); a region view refreshes it in the background, or run `ix map --remap`",
       };
     }
     return {

@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { canonicalWorkspacePath, resolveWorkspaceRoot } from "./config.js";
 import { loadIngestBaseline, type IngestBaseline } from "./ingest-baseline.js";
 import { hasCompletedMapFor } from "./map-baseline.js";
-import { readMapStale } from "./map-freshness.js";
+import { readMapRefreshOutcome, readMapStale } from "./map-freshness.js";
 import { canonicalizeDiscoveredFilePath, discoverSourceFiles } from "./file-discovery.js";
 
 export interface StaleInfo {
@@ -18,6 +18,11 @@ export interface StaleInfo {
    * this says why.
    */
   mapStale: boolean;
+  /**
+   * While `mapStale`: why the last background refresh failed, when it did
+   * (`readMapRefreshOutcome`); null otherwise.
+   */
+  mapRefreshError: string | null;
   lastIngestAt: string | null;
   currentRev: number;
   staleFiles: number;
@@ -96,6 +101,7 @@ export function detectStaleFiles(
       graphCompleted: false,
       mapCompleted: false,
       mapStale: false,
+      mapRefreshError: null,
       lastIngestAt: null,
       currentRev: 0,
       staleFiles: 0,
@@ -162,10 +168,14 @@ export function detectStaleFiles(
     }
   }
 
+  const mapStale = readMapStale(workspaceRoot) !== null;
+  const lastRefresh = mapStale ? readMapRefreshOutcome(workspaceRoot) : null;
+  const mapRefreshError = lastRefresh?.ok === false ? (lastRefresh.reason ?? "no reason recorded") : null;
   return {
     graphCompleted: true,
     mapCompleted: hasCompletedMapFor(workspaceRoot, baseline),
-    mapStale: readMapStale(workspaceRoot) !== null,
+    mapStale,
+    mapRefreshError,
     lastIngestAt: baseline.lastIngestAt,
     currentRev: baseline.currentRev,
     staleFiles: changedFiles.length,

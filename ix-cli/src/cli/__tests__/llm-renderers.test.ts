@@ -107,8 +107,10 @@ describe("renderMapLlm", () => {
     expect(fresh[0]).toBe("map files=1 regions=0 levels=1 rev=1 outcome=ok");
     const named = captureLog(() => renderMapLlm(result, [], undefined, { mapStale: true, regionsAsOf: { map_rev: 1, file_count: 1 } }));
     expect(named[0]).toBe("map files=1 regions=0 levels=1 rev=1 outcome=ok map_stale=true regions_as_of_rev=1 regions_as_of_files=1");
+    expect(named[1]).toBe('diagnostic code=map_stale message="Stale map: not recomputed after this edit. Every count and region here is from the last map (map rev 1, 1 files). Run ix map --remap to recompute it now; region views refresh it in the background."');
+    expect(named).toHaveLength(2);
     const notStale = captureLog(() => renderMapLlm(result, [], undefined, { regionsAsOf: { map_rev: 1, file_count: 1 } }));
-    expect(notStale[0]).toBe("map files=1 regions=0 levels=1 rev=1 outcome=ok");
+    expect(notStale).toEqual(["map files=1 regions=0 levels=1 rev=1 outcome=ok"]);
   });
 });
 

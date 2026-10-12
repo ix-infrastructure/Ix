@@ -244,13 +244,16 @@ prints the last computed map's regions and marks the `map` record
 `map_stale=true` (only when true, so a fresh map says nothing). `files`,
 `regions`, `levels`, `rev`, `outcome` and the `region` records are then the
 last map's, not this ingest's, and `regions_as_of_rev` and
-`regions_as_of_files` name that map (both only when stale). The next region
-view (`overview`, `subsystems`, `locate`, `impact`, `explain`, `view`)
-recomputes the map once, as does `ix map --remap`; `IX_MAP_EAGER=1` makes
-every `ix map` compute, as before. A region view that cannot refresh it
-(another `ix map` holds the lock, a refresh was tried moments ago, or it
-failed) answers from the last map and says so in one line on stderr.
-`--format json` carries `map_stale` on every map (`false` when fresh) and
+`regions_as_of_files` name that map (both only when stale). A
+`diagnostic code=map_stale` record follows the `map` record and says the
+same in a sentence. The next region view (`overview`, `subsystems`,
+`locate`, `impact`, `explain`, `view`) never maps inline: it answers from
+the last map, says so in one line on stderr
+(`ix: architecture map is stale (<why>); ...`), and starts a detached
+background refresh unless one ran moments ago or another `ix map` holds the
+lock. `ix map --remap` recomputes the map at once; `IX_MAP_EAGER=1` makes
+every `ix map` compute, as before; `IX_MAP_BACKGROUND_REFRESH=0` stops region
+views starting a refresh. `--format json` carries `map_stale` on every map (`false` when fresh) and
 `regions_as_of` (`{map_rev, file_count}` of the last map, `null` when
 fresh); `ix map --silent` ends its line with `· map=stale`.
 

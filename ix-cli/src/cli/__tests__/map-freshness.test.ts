@@ -14,20 +14,31 @@ import { registerMapCommand } from "../commands/map.js";
 import { mapResultCachePath, mapStalePath } from "../config.js";
 import {
   ensureFreshMap,
+  MAP_REFRESH_ARG,
+  mapBackgroundRefreshEnabled,
+  mapBackgroundTimeoutMs,
   mapRefreshDebounceMs,
+  mapRefreshInvocation,
   markMapStale,
+  readMapRefreshOutcome,
   readMapStale,
+  runBackgroundMapRefresh,
+  type MapRefreshOutcome,
 } from "../map-freshness.js";
-import { acquireMapLock, lockPathForTest, requestMapRerun, takeMapRerun } from "../single-flight.js";
+import { acquireMapLock, lockPathForTest, mapLockHeld, requestMapRerun, takeMapRerun } from "../single-flight.js";
 import { hasCompletedMapBaseline } from "../stale.js";
 import { registerRemoteRunner } from "../remote.js";
 
 /**
- * `ensureFreshMap` (CL-13): the lazy half of a deferred `ix map`. These drive
- * the real `ix map` against a fake backend to get a deferred map, then count
- * the `/v1/map` requests the refresh makes, because "at most one, and none
- * without a marker" is the whole contract, with "never fails the reader"
- * beside it.
+ * The lazy half of a deferred `ix map` (CL-13). These drive the real `ix map`
+ * against a fake backend to get a deferred map, then check the two halves:
+ *
+ * - `ensureFreshMap`, run by every region view: never maps inline, answers
+ *   at once, and starts at most one background refresh (the spawner is
+ *   injected; no test starts a real process);
+ * - `runBackgroundMapRefresh`, what that detached process runs: at most one
+ *   `/v1/map` under the map lock, the outcome recorded, and never the
+ *   caller's exit code.
  */
 
 /** A backend that answers what `ix map` and a refresh touch, and records the paths. */
@@ -151,7 +162,7 @@ class FakeBackend {
 
 const hashOf = (text: string) => createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex");
 
-describe("ensureFreshMap", () => {
+describe("map refresh", () => {
   vi.setConfig({ testTimeout: 60_000, hookTimeout: 30_000 });
 
   let home = "";
@@ -187,36 +198,55 @@ describe("ensureFreshMap", () => {
     backend.requests.length = 0;
   }
 
-  /** What the last `refresh()` wrote on stderr, and whether it reported the map still stale. */
-  let lastStderr = "";
-  let lastStale: boolean | undefined;
-
-  /** `ensureFreshMap` for the fixture, with stdout captured (stderr in `lastStderr`). */
-  async function refresh(now?: () => number): Promise<string> {
+  /** Captures stdout and stderr around `fn`. */
+  async function captured<T>(fn: () => Promise<T>): Promise<{ value: T; out: string; err: string }> {
     const out: string[] = [];
     const err: string[] = [];
     const log = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { out.push(a.map(String).join(" ")); });
     const write = vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => { out.push(String(chunk)); return true; });
     const ewrite = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => { err.push(String(chunk)); return true; });
     try {
-      lastStale = await ensureFreshMap({ root: repo, now });
+      const value = await fn();
+      return { value, out: out.join(""), err: err.join("") };
     } finally {
       log.mockRestore();
       write.mockRestore();
       ewrite.mockRestore();
-      lastStderr = err.join("");
     }
-    return out.join("");
+  }
+
+  /** Roots the injected spawner was asked to refresh. */
+  let spawned: string[] = [];
+  /** What the injected spawner does besides recording; nothing by default. */
+  let onSpawn: (root: string) => void = () => {};
+
+  /** A region view's `ensureFreshMap` for the fixture. */
+  async function read(now?: () => number) {
+    const r = await captured(() => ensureFreshMap({
+      root: repo,
+      now,
+      spawn: (root) => { spawned.push(root); onSpawn(root); },
+    }));
+    return { stale: r.value, out: r.out, err: r.err };
+  }
+
+  /** The detached child's work, run in-process. */
+  async function child(opts: Parameters<typeof runBackgroundMapRefresh>[1] = {}) {
+    const r = await captured(() => runBackgroundMapRefresh(repo, opts));
+    return { outcome: r.value, out: r.out, err: r.err };
   }
 
   beforeEach(async () => {
     backend = new FakeBackend();
+    spawned = [];
+    onSpawn = () => {};
     home = realpathSync(mkdtempSync(join(tmpdir(), "ix-freshness-home-")));
     repo = realpathSync(mkdtempSync(join(tmpdir(), "ix-freshness-repo-")));
     const endpoint = await backend.start();
     for (const k of [
       "HOME", "USERPROFILE", "IX_HOME", "IX_ENDPOINT", "IX_LOCK_DIR", "IX_AUTO_MAP", "IX_MAP_EAGER",
       "IX_MAP_FULL_INGEST", "IX_MAP_DEADLINE_MS", "IX_MAP_REFRESH_DEBOUNCE_MS",
+      "IX_MAP_BACKGROUND_REFRESH", "IX_MAP_BACKGROUND_TIMEOUT_MS",
       "IX_STITCH_COOLDOWN_MS", "IX_STITCH_WAIT_MS",
     ]) {
       saved[k] = process.env[k];
@@ -251,217 +281,335 @@ describe("ensureFreshMap", () => {
     }
   });
 
-  it("makes no request at all without a marker", async () => {
-    await map();
-    backend.requests.length = 0;
-    await refresh();
-    expect(backend.requests).toEqual([]);
-  });
-
-  it("maps once when the marker is set, records the map and clears the marker", async () => {
-    await deferred();
-    expect(hasCompletedMapBaseline(repo)).toBe(false);
-    rmSync(mapResultCachePath(repo), { force: true });
-
-    expect(await refresh(), "nothing on stdout").toBe("");
-    expect(backend.mapRequests()).toBe(1);
-    expect(readMapStale(repo)).toBeNull();
-    expect(hasCompletedMapBaseline(repo), "the map baseline is saved").toBe(true);
-    expect(existsSync(mapResultCachePath(repo)), "the result is stored").toBe(true);
-    expect(lastStale).toBe(false);
-    expect(lastStderr, "a fresh map says nothing").toBe("");
-
-    await refresh();
-    expect(backend.mapRequests(), "a second call is a no-op").toBe(1);
-
-    // And the next unchanged `ix map` reuses it rather than asking.
-    await map();
-    expect(backend.mapRequests()).toBe(1);
-  });
-
-  it("refreshes a root named under another spelling of the same directory", async () => {
-    // Windows CI names the temp dir C:\Users\RUNNER~1\... (an 8.3 short name),
-    // while `ix map` stores the long, canonical root in its baselines. A
-    // junction (a symlink on POSIX) is the same mismatch on any platform: the
-    // marker, keyed on the canonical root, was found; the baselines, matched
-    // as strings, were not, so the refresh never recorded and the marker stayed.
-    await deferred();
-    const alias = join(home, "repo-alias");
-    symlinkSync(repo, alias, "junction");
-    expect(hasCompletedMapBaseline(alias), "an alias reads the same ingest baseline").toBe(false);
-
-    lastStale = await ensureFreshMap({ root: alias });
-    expect(backend.mapRequests()).toBe(1);
-    expect(lastStale).toBe(false);
-    expect(readMapStale(repo)).toBeNull();
-    expect(hasCompletedMapBaseline(repo)).toBe(true);
-    expect(hasCompletedMapBaseline(alias), "and the alias sees the map as complete").toBe(true);
-  });
-
-  it("does not retry a failed refresh inside the debounce window", async () => {
-    await deferred();
-    backend.mapStatus = 500;
-    let clock = 1_000_000;
-    const now = () => clock;
-    await refresh(now);
-    expect(backend.mapRequests()).toBe(1);
-    expect(readMapStale(repo)?.lastAttemptAt).toBe(1_000_000);
-
-    backend.mapStatus = 200;
-    clock += 10_000;
-    await refresh(now);
-    expect(backend.mapRequests(), "within 30 s of the attempt").toBe(1);
-    expect(lastStderr, "a debounced reader still says the map is stale").toContain("architecture map is stale");
-
-    clock += 30_000;
-    await refresh(now);
-    expect(backend.mapRequests(), "after the window").toBe(2);
-    expect(readMapStale(repo)).toBeNull();
-  });
-
-  it("does nothing while another map holds the lock, and keeps the marker", async () => {
-    await deferred();
-    const marker = readMapStale(repo);
-    const holder = acquireMapLock(repo, "holder")!;
-    try {
-      await refresh();
-    } finally {
-      holder.release();
-    }
-    expect(backend.requests).toEqual([]);
-    expect(readMapStale(repo)).toEqual(marker);
-    // The holder may be an incremental `ix map` that defers the map too, so
-    // the reader must not pass its regions off as current.
-    expect(lastStale).toBe(true);
-    expect(lastStderr).toMatch(/^ix: architecture map is stale \(another ix map is running\)/);
-    expect(lastStderr.trim().split("\n"), "one line").toHaveLength(1);
-  });
-
-  it("reads the marker again under the lock, and maps nothing a refresh just finished", async () => {
-    await deferred();
-    // A marker an earlier attempt left, outside the debounce window.
-    const seen = readMapStale(repo)!;
-    writeFileSync(mapStalePath(repo), JSON.stringify({ ...seen, lastAttemptAt: 1 }));
-    // Between this reader's first look and its taking the lock, another
-    // reader's refresh finishes and removes the marker. The clock is read
-    // at that first look, so the race is staged there.
-    let calls = 0;
-    const now = () => {
-      if (calls++ === 0) rmSync(mapStalePath(repo), { force: true });
-      return 1_000_000;
-    };
-    await refresh(now);
-    expect(backend.mapRequests(), "no second map for a refreshed map").toBe(0);
-    expect(lastStale).toBe(false);
-    expect(lastStderr).toBe("");
-  });
-
-  for (const [what, setUp] of [
-    ["a map whose outcome is not a completed one", (b: FakeBackend) => { b.mapOutcome = "partial"; }],
-    ["an empty map", (b: FakeBackend) => { b.emptyMap = true; }],
-  ] as const) {
-    it(`leaves the stored map, the baseline and the marker as they were after ${what}`, async () => {
-      await deferred();
-      const marker = readMapStale(repo)!;
-      const stored = readFileSync(mapResultCachePath(repo), "utf8");
-      setUp(backend);
-      process.exitCode = undefined;
-      await expect(refresh()).resolves.toBe("");
-      expect(backend.mapRequests()).toBe(1);
-      expect(process.exitCode).toBeUndefined();
-      const kept = readMapStale(repo);
-      expect(kept, "the marker stays").not.toBeNull();
-      expect(kept?.since).toBe(marker.since);
-      expect(kept?.ingestRev).toBe(marker.ingestRev);
-      expect(typeof kept?.lastAttemptAt, "the attempt is recorded for the debounce").toBe("number");
-      expect(readFileSync(mapResultCachePath(repo), "utf8"), "the last map is still stored").toBe(stored);
-      expect(hasCompletedMapBaseline(repo), "no completed map is claimed").toBe(false);
-      expect(lastStale).toBe(true);
-      expect(lastStderr).toMatch(/architecture map is stale \(its refresh did not complete\)/);
+  describe("ensureFreshMap (the reader)", () => {
+    it("makes no request and starts nothing without a marker", async () => {
+      await map();
+      backend.requests.length = 0;
+      const r = await read();
+      expect(r.stale).toBe(false);
+      expect(r.err).toBe("");
+      expect(backend.requests).toEqual([]);
+      expect(spawned).toEqual([]);
     });
-  }
 
-  it("never throws or sets an exit code when the backend fails, and keeps the marker", async () => {
-    await deferred();
-    const since = readMapStale(repo)!.since;
-    backend.mapStatus = 500;
-    process.exitCode = undefined;
-    await expect(refresh()).resolves.toBe("");
-    expect(process.exitCode).toBeUndefined();
-    const kept = readMapStale(repo);
-    expect(kept?.since).toBe(since);
-    expect(typeof kept?.lastAttemptAt).toBe("number");
-    expect(lastStale).toBe(true);
-    expect(lastStderr).toContain("architecture map is stale");
+    it("answers at once, maps nothing inline, and starts one background refresh", async () => {
+      await deferred();
+      const r = await read(() => 1_000_000);
+      expect(r.stale).toBe(true);
+      expect(r.out, "nothing on stdout").toBe("");
+      expect(backend.mapRequests(), "no /v1/map from the reader").toBe(0);
+      expect(spawned).toEqual([repo]);
+      expect(r.err).toBe("ix: architecture map is stale (refreshing in background); regions shown may predate recent edits. Run ix map --remap to refresh.\n");
+      expect(readMapStale(repo)?.lastAttemptAt, "the start is recorded for the debounce").toBe(1_000_000);
+      expect(mapLockHeld(repo), "the reader does not keep the lock").toBe(false);
+    });
+
+    it("returns without waiting for the refresh it started", async () => {
+      await deferred();
+      // A map slower than any hook budget, run as the child would run it.
+      backend.mapDelayMs = 3_000;
+      let running: Promise<unknown> | undefined;
+      onSpawn = (root) => { running = runBackgroundMapRefresh(root); };
+      const t0 = Date.now();
+      const r = await read();
+      const took = Date.now() - t0;
+      expect(r.stale).toBe(true);
+      expect(took, "the reader did not wait for the 3 s map").toBeLessThan(2_000);
+      expect(readMapStale(repo), "the refresh has not finished yet").not.toBeNull();
+
+      // Meanwhile another reader sees the refresh holding the lock.
+      await new Promise(resolve => setTimeout(resolve, 200));
+      const second = await read(() => Date.now() + 60_000);
+      expect(second.err).toMatch(/\(another ix map is running\)/);
+      expect(spawned, "and starts no second one").toHaveLength(1);
+
+      const outcome = await running as MapRefreshOutcome;
+      expect(outcome.ok).toBe(true);
+      expect(readMapStale(repo), "it cleared the marker").toBeNull();
+      expect(hasCompletedMapBaseline(repo)).toBe(true);
+      expect(backend.mapRequests()).toBe(1);
+    });
+
+    it("starts no refresh inside the debounce window, and one after it", async () => {
+      await deferred();
+      let clock = 1_000_000;
+      const now = () => clock;
+      await read(now);
+      expect(spawned).toHaveLength(1);
+
+      clock += 10_000;
+      const debounced = await read(now);
+      expect(spawned, "within 30 s of the start").toHaveLength(1);
+      expect(debounced.stale).toBe(true);
+      expect(debounced.err).toMatch(/^ix: architecture map is stale \(a refresh was tried moments ago\)/);
+
+      clock += 30_000;
+      await read(now);
+      expect(spawned, "after the window").toHaveLength(2);
+      expect(backend.mapRequests()).toBe(0);
+    });
+
+    it("starts no refresh while another process holds the map lock, and keeps the marker", async () => {
+      await deferred();
+      const marker = readMapStale(repo);
+      const holder = acquireMapLock(repo, "holder")!;
+      let r;
+      try {
+        r = await read();
+      } finally {
+        holder.release();
+      }
+      expect(spawned).toEqual([]);
+      expect(backend.requests).toEqual([]);
+      expect(readMapStale(repo)).toEqual(marker);
+      expect(r.stale).toBe(true);
+      expect(r.err).toMatch(/^ix: architecture map is stale \(another ix map is running\)/);
+      expect(r.err.trim().split("\n"), "one line").toHaveLength(1);
+    });
+
+    it("says why when the last background refresh failed and the retry is debounced", async () => {
+      await deferred();
+      backend.mapStatus = 500;
+      await child({ now: () => 1_000_000 });
+      const r = await read(() => 1_000_000 + 5_000);
+      expect(spawned).toEqual([]);
+      expect(r.err).toMatch(/^ix: architecture map is stale \(its last background refresh failed\)/);
+    });
+
+    it("never refreshes with IX_MAP_BACKGROUND_REFRESH=0, and says the map is stale", async () => {
+      await deferred();
+      process.env.IX_MAP_BACKGROUND_REFRESH = "0";
+      const r = await read();
+      expect(spawned).toEqual([]);
+      expect(backend.requests).toEqual([]);
+      expect(r.stale).toBe(true);
+      expect(r.err).toMatch(/^ix: architecture map is stale \(background refresh is off\)/);
+      expect(readMapStale(repo)?.lastAttemptAt, "nothing was attempted").toBeUndefined();
+    });
+
+    it("never throws or sets an exit code when the refresh cannot start", async () => {
+      await deferred();
+      onSpawn = () => { throw new Error("EAGAIN"); };
+      process.exitCode = undefined;
+      const r = await read();
+      expect(r.stale).toBe(true);
+      expect(r.err).toMatch(/\(its refresh could not start\)/);
+      expect(process.exitCode).toBeUndefined();
+    });
+
+    it("reads the marker again under the lock, and starts nothing for a map just refreshed", async () => {
+      await deferred();
+      const seen = readMapStale(repo)!;
+      writeFileSync(mapStalePath(repo), JSON.stringify({ ...seen, lastAttemptAt: 1 }));
+      // Between this reader's first look and its taking the lock, a refresh
+      // finishes and removes the marker. The debounce reads the clock at that
+      // first look, so the race is staged there.
+      let calls = 0;
+      const r = await read(() => {
+        if (calls++ === 0) rmSync(mapStalePath(repo), { force: true });
+        return 1_000_000;
+      });
+      expect(spawned).toEqual([]);
+      expect(r.stale).toBe(false);
+      expect(r.err).toBe("");
+    });
+
+    it("starts nothing for a workspace fed by a cloud runner", async () => {
+      await deferred();
+      registerRemoteRunner({ runIngestion: async () => {}, isReady: async () => true });
+      try {
+        await read();
+      } finally {
+        registerRemoteRunner({ runIngestion: async () => {}, isReady: async () => false });
+      }
+      expect(spawned).toEqual([]);
+      expect(backend.requests).toEqual([]);
+      expect(readMapStale(repo)).not.toBeNull();
+    });
+
+    it("treats a malformed marker as none", async () => {
+      await map();
+      mkdirSync(join(home, ".ix"), { recursive: true });
+      writeFileSync(mapStalePath(repo), "{not json");
+      expect(readMapStale(repo)).toBeNull();
+      writeFileSync(mapStalePath(repo), JSON.stringify({ since: "yesterday", ingestRev: 1 }));
+      expect(readMapStale(repo)).toBeNull();
+      backend.requests.length = 0;
+      await read();
+      expect(backend.requests).toEqual([]);
+      expect(spawned).toEqual([]);
+    });
   });
 
-  it("never throws or sets an exit code when the map times out", async () => {
-    await deferred();
-    process.env.IX_MAP_DEADLINE_MS = "200";
-    backend.mapDelayMs = 2_000;
-    process.exitCode = undefined;
-    await expect(refresh()).resolves.toBe("");
-    expect(process.exitCode).toBeUndefined();
-    expect(readMapStale(repo)).not.toBeNull();
-  });
+  describe("runBackgroundMapRefresh (the detached child)", () => {
+    it("maps once when the marker is set, records the map, clears the marker and the outcome", async () => {
+      await deferred();
+      expect(hasCompletedMapBaseline(repo)).toBe(false);
+      rmSync(mapResultCachePath(repo), { force: true });
 
-  it("keeps a marker that was re-written while it mapped", async () => {
-    await deferred();
-    backend.onMap = () => markMapStale(repo, { since: Date.now() + 1, ingestRev: 999 });
-    await refresh();
-    expect(backend.mapRequests()).toBe(1);
-    expect(readMapStale(repo)?.ingestRev, "a newer ingest's marker stays").toBe(999);
-  });
+      const r = await child();
+      expect(r.out, "nothing on stdout").toBe("");
+      expect(backend.mapRequests()).toBe(1);
+      expect(readMapStale(repo)).toBeNull();
+      expect(hasCompletedMapBaseline(repo), "the map baseline is saved").toBe(true);
+      expect(existsSync(mapResultCachePath(repo)), "the result is stored").toBe(true);
+      expect(r.outcome).toMatchObject({ ok: true, pid: process.pid });
+      expect(readMapRefreshOutcome(repo)).toEqual(r.outcome);
+      expect(mapLockHeld(repo), "the lock is let go").toBe(false);
 
-  it("runs a coalesced map's rerun request and re-marks the map stale", async () => {
-    await deferred();
-    const late = "export const late = 2;\n";
-    // An edit lands mid-refresh and its own `ix map` coalesces into the lock.
-    backend.onMap = () => {
-      writeFileSync(join(repo, "src", "m2.ts"), late, "utf8");
-      requestMapRerun(repo);
-    };
-    process.exitCode = undefined;
-    await refresh();
-    expect(backend.mapRequests(), "the refresh asked once").toBe(1);
-    expect(backend.hashes.get("src/m2.ts")?.hash, "the late edit reached the backend").toBe(hashOf(late));
-    expect(readMapStale(repo), "the edit's map is deferred in turn").not.toBeNull();
-    expect(takeMapRerun(repo), "and the request consumed").toBe(false);
-    expect(process.exitCode).toBeUndefined();
-    expect(lastStale, "the late edit left the map stale again").toBe(true);
-  });
+      expect((await child()).outcome, "a second run is a no-op").toBeNull();
+      expect(backend.mapRequests()).toBe(1);
 
-  it("makes no request for a workspace fed by a cloud runner", async () => {
-    await deferred();
-    registerRemoteRunner({ runIngestion: async () => {}, isReady: async () => true });
-    try {
-      await refresh();
-    } finally {
-      registerRemoteRunner({ runIngestion: async () => {}, isReady: async () => false });
+      // And the next unchanged `ix map` reuses it rather than asking.
+      await map();
+      expect(backend.mapRequests()).toBe(1);
+    });
+
+    it("refreshes a root named under another spelling of the same directory", async () => {
+      // Windows CI names the temp dir C:\Users\RUNNER~1\... (an 8.3 short name),
+      // while `ix map` stores the long, canonical root in its baselines. A
+      // junction (a symlink on POSIX) is the same mismatch on any platform.
+      await deferred();
+      const alias = join(home, "repo-alias");
+      symlinkSync(repo, alias, "junction");
+      expect(hasCompletedMapBaseline(alias), "an alias reads the same ingest baseline").toBe(false);
+
+      const outcome = await runBackgroundMapRefresh(alias);
+      expect(backend.mapRequests()).toBe(1);
+      expect(outcome?.ok).toBe(true);
+      expect(readMapStale(repo)).toBeNull();
+      expect(hasCompletedMapBaseline(repo)).toBe(true);
+      expect(hasCompletedMapBaseline(alias), "and the alias sees the map as complete").toBe(true);
+    });
+
+    it("does nothing while another process holds the map lock", async () => {
+      await deferred();
+      const marker = readMapStale(repo);
+      const holder = acquireMapLock(repo, "holder")!;
+      try {
+        expect((await child()).outcome).toBeNull();
+      } finally {
+        holder.release();
+      }
+      expect(backend.requests).toEqual([]);
+      expect(readMapStale(repo)).toEqual(marker);
+      expect(readMapRefreshOutcome(repo)).toBeNull();
+    });
+
+    for (const [what, setUp, reason] of [
+      ["a map whose outcome is not a completed one", (b: FakeBackend) => { b.mapOutcome = "partial"; }, /the map did not complete: outcome partial/],
+      ["an empty map", (b: FakeBackend) => { b.emptyMap = true; }, /the map did not complete/],
+    ] as const) {
+      it(`leaves the stored map, the baseline and the marker as they were after ${what}`, async () => {
+        await deferred();
+        const marker = readMapStale(repo)!;
+        const stored = readFileSync(mapResultCachePath(repo), "utf8");
+        setUp(backend);
+        process.exitCode = undefined;
+        const r = await child();
+        expect(r.out).toBe("");
+        expect(backend.mapRequests()).toBe(1);
+        expect(process.exitCode).toBeUndefined();
+        const kept = readMapStale(repo);
+        expect(kept, "the marker stays").not.toBeNull();
+        expect(kept?.since).toBe(marker.since);
+        expect(kept?.ingestRev).toBe(marker.ingestRev);
+        expect(readFileSync(mapResultCachePath(repo), "utf8"), "the last map is still stored").toBe(stored);
+        expect(hasCompletedMapBaseline(repo), "no completed map is claimed").toBe(false);
+        expect(r.outcome?.ok).toBe(false);
+        expect(r.outcome?.reason).toMatch(reason);
+        expect(readMapRefreshOutcome(repo)).toEqual(r.outcome);
+      });
     }
-    expect(backend.requests).toEqual([]);
-    expect(readMapStale(repo)).not.toBeNull();
-  });
 
-  it("treats a malformed marker as none", async () => {
-    await map();
-    mkdirSync(join(home, ".ix"), { recursive: true });
-    writeFileSync(mapStalePath(repo), "{not json");
-    expect(readMapStale(repo)).toBeNull();
-    writeFileSync(mapStalePath(repo), JSON.stringify({ since: "yesterday", ingestRev: 1 }));
-    expect(readMapStale(repo)).toBeNull();
-    backend.requests.length = 0;
-    await refresh();
-    expect(backend.requests).toEqual([]);
+    it("records a failed request, never throws or sets an exit code, and keeps the marker", async () => {
+      await deferred();
+      const since = readMapStale(repo)!.since;
+      backend.mapStatus = 500;
+      process.exitCode = undefined;
+      const r = await child();
+      expect(process.exitCode).toBeUndefined();
+      expect(readMapStale(repo)?.since).toBe(since);
+      expect(r.outcome?.ok).toBe(false);
+      expect(r.outcome?.reason).toMatch(/^the map request failed: /);
+      expect(r.outcome?.reason, "one line").not.toContain("\n");
+    });
+
+    it("stops at its hard time limit, records why, and lets the lock go", async () => {
+      await deferred();
+      backend.mapDelayMs = 5_000;
+      process.exitCode = undefined;
+      const t0 = Date.now();
+      const r = await child({ timeoutMs: 300 });
+      expect(Date.now() - t0).toBeLessThan(3_000);
+      expect(r.outcome).toMatchObject({ ok: false, reason: "timed out after 0.3 s" });
+      expect(readMapStale(repo), "the marker stays").not.toBeNull();
+      expect(mapLockHeld(repo)).toBe(false);
+      expect(process.exitCode).toBeUndefined();
+    });
+
+    it("keeps a marker that was re-written while it mapped", async () => {
+      await deferred();
+      backend.onMap = () => markMapStale(repo, { since: Date.now() + 1, ingestRev: 999 });
+      const r = await child();
+      expect(backend.mapRequests()).toBe(1);
+      expect(readMapStale(repo)?.ingestRev, "a newer ingest's marker stays").toBe(999);
+      expect(r.outcome).toMatchObject({ ok: true, reason: expect.stringMatching(/files changed while it was refreshed/) });
+    });
+
+    it("runs a coalesced map's rerun request and re-marks the map stale", async () => {
+      await deferred();
+      const late = "export const late = 2;\n";
+      // An edit lands mid-refresh and its own `ix map` coalesces into the lock.
+      backend.onMap = () => {
+        writeFileSync(join(repo, "src", "m2.ts"), late, "utf8");
+        requestMapRerun(repo);
+      };
+      process.exitCode = undefined;
+      await child();
+      expect(backend.mapRequests(), "the refresh asked once").toBe(1);
+      expect(backend.hashes.get("src/m2.ts")?.hash, "the late edit reached the backend").toBe(hashOf(late));
+      expect(readMapStale(repo), "the edit's map is deferred in turn").not.toBeNull();
+      expect(takeMapRerun(repo), "and the request consumed").toBe(false);
+      expect(process.exitCode).toBeUndefined();
+    });
   });
 });
 
-describe("mapRefreshDebounceMs", () => {
-  it("defaults to 30 s, takes a plain number of ms, and 0 or empty for none", () => {
+describe("mapRefreshInvocation", () => {
+  it("starts the same Node and CLI entry, detached, with no shell, no stdio and no window", async () => {
+    const inv = await mapRefreshInvocation("/w/repo", "/opt/ix/dist/cli/main.js", ["--inspect"]);
+    expect(inv.command).toBe(process.execPath);
+    expect(inv.args, "debugger flags are not cloned").toEqual(["/opt/ix/dist/cli/main.js", MAP_REFRESH_ARG, "/w/repo"]);
+    expect(inv.options).toMatchObject({ cwd: "/w/repo", detached: true, stdio: "ignore", windowsHide: true, shell: false });
+  });
+
+  it("keeps the source loader of a TypeScript entry", async () => {
+    const inv = await mapRefreshInvocation("/w/repo", "/src/cli/main.ts", ["--import", "tsx"]);
+    expect(inv.args).toEqual(["--import", "tsx", "/src/cli/main.ts", MAP_REFRESH_ARG, "/w/repo"]);
+  });
+});
+
+describe("refresh settings", () => {
+  it("mapRefreshDebounceMs defaults to 30 s, takes a plain number of ms, and 0 or empty for none", () => {
     expect(mapRefreshDebounceMs(undefined)).toBe(30_000);
     expect(mapRefreshDebounceMs("5000")).toBe(5_000);
     expect(mapRefreshDebounceMs("0")).toBe(0);
     expect(mapRefreshDebounceMs("")).toBe(0);
     expect(mapRefreshDebounceMs("30s"), "not a number of ms keeps the default").toBe(30_000);
+  });
+
+  it("mapBackgroundRefreshEnabled is on unless set to 0", () => {
+    expect(mapBackgroundRefreshEnabled({})).toBe(true);
+    expect(mapBackgroundRefreshEnabled({ IX_MAP_BACKGROUND_REFRESH: "1" })).toBe(true);
+    expect(mapBackgroundRefreshEnabled({ IX_MAP_BACKGROUND_REFRESH: "0" })).toBe(false);
+    expect(mapBackgroundRefreshEnabled({ IX_MAP_BACKGROUND_REFRESH: " 0 " })).toBe(false);
+  });
+
+  it("mapBackgroundTimeoutMs defaults to 5 min and takes a plain positive number of ms", () => {
+    expect(mapBackgroundTimeoutMs(undefined)).toBe(300_000);
+    expect(mapBackgroundTimeoutMs("60000")).toBe(60_000);
+    expect(mapBackgroundTimeoutMs("0")).toBe(300_000);
+    expect(mapBackgroundTimeoutMs("5m")).toBe(300_000);
   });
 });

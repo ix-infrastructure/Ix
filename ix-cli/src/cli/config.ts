@@ -85,6 +85,16 @@ export function mapStalePath(projectRoot: string): string {
 }
 
 /**
+ * Path to the outcome of the last background map refresh for one project
+ * root (see `map-freshness.ts`): when it ran and whether it completed, and
+ * why not. Read by `ix doctor` and `ix status`; cleared with the map baseline.
+ */
+export function mapRefreshOutcomePath(projectRoot: string): string {
+  const key = rootKey(projectRoot);
+  return join(ixHome(), `map_refresh_${key}.json`);
+}
+
+/**
  * Path to the cached answer to "is this workspace stitched into a System?".
  *
  * Kept beside the ingest mtime cache and keyed the same way. See
@@ -150,6 +160,7 @@ export function clearMapResultCache(projectRoot: string): void {
 export function clearMapBaseline(projectRoot: string): void {
   try { rmSync(mapBaselinePath(projectRoot), { force: true }); } catch { /* non-critical */ }
   try { rmSync(mapStalePath(projectRoot), { force: true }); } catch { /* non-critical */ }
+  try { rmSync(mapRefreshOutcomePath(projectRoot), { force: true }); } catch { /* non-critical */ }
   clearMapResultCache(projectRoot);
 }
 
