@@ -2,7 +2,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { resolveWorkspaceRoot } from "./config.js";
+import { canonicalWorkspacePath, resolveWorkspaceRoot } from "./config.js";
 import { loadIngestBaseline } from "./ingest-baseline.js";
 import { hasCompletedMapFor } from "./map-baseline.js";
 import { readMapStale } from "./map-freshness.js";
@@ -185,7 +185,10 @@ export function detectStaleFiles(
  */
 export function hasCompletedMapBaseline(root?: string): boolean {
   try {
-    const workspaceRoot = path.resolve(root ?? resolveWorkspaceRoot());
+    // Canonical, as `ix map` and `ix ingest` store it: the baselines match
+    // their root as a string, so a symlinked or 8.3-named spelling of the
+    // same root (RUNNER~1 on Windows) would read as never mapped.
+    const workspaceRoot = canonicalWorkspacePath(root ?? resolveWorkspaceRoot());
     const baseline = loadIngestBaseline(workspaceRoot);
     return baseline !== null && hasCompletedMapFor(workspaceRoot, baseline);
   } catch {
@@ -196,7 +199,7 @@ export function hasCompletedMapBaseline(root?: string): boolean {
 /** Whether source ingestion completed cleanly for the active workspace. */
 export function hasCompletedSourceGraphBaseline(root?: string): boolean {
   try {
-    return loadIngestBaseline(path.resolve(root ?? resolveWorkspaceRoot())) !== null;
+    return loadIngestBaseline(canonicalWorkspacePath(root ?? resolveWorkspaceRoot())) !== null;
   } catch {
     return false;
   }

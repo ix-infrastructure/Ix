@@ -161,11 +161,20 @@ export async function ensureFreshMap(opts: EnsureFreshMapOptions = {}): Promise<
 
 /** Why the map is still stale after the attempt, or undefined when it is fresh. */
 async function refresh(opts: EnsureFreshMapOptions): Promise<string | undefined> {
-  let root = opts.root;
-  if (root === undefined) {
-    // The reader's workspace (what its entity lookup queries), not the
-    // write-command routing of `resolveMapRoot`: a pinned workspace B read
-    // from an unrelated repo A must refresh B's map, not look at A's marker.
+  // The reader's workspace (what its entity lookup queries), not the
+  // write-command routing of `resolveMapRoot`: a pinned workspace B read from
+  // an unrelated repo A must refresh B's map, not look at A's marker.
+  //
+  // Canonical, as `ix map` spells it, whoever names it: the marker's path is
+  // keyed on the canonical root, but the ingest and map baselines also store
+  // the root and match it as a string. A root given under another spelling --
+  // a symlink, macOS's /tmp, a Windows 8.3 name like RUNNER~1 -- found the
+  // marker but no baseline, so every refresh failed and the marker stayed.
+  let root: string;
+  if (opts.root !== undefined) {
+    const { canonicalWorkspacePath } = await import("./config.js");
+    root = canonicalWorkspacePath(opts.root);
+  } else {
     const { canonicalMapRoot } = await import("./map-root.js");
     const { resolveWorkspaceRoot } = await import("./config.js");
     try { root = canonicalMapRoot(resolveWorkspaceRoot()); } catch { return undefined; }

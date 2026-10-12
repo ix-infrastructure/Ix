@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -277,6 +277,25 @@ describe("ensureFreshMap", () => {
     // And the next unchanged `ix map` reuses it rather than asking.
     await map();
     expect(backend.mapRequests()).toBe(1);
+  });
+
+  it("refreshes a root named under another spelling of the same directory", async () => {
+    // Windows CI names the temp dir C:\Users\RUNNER~1\... (an 8.3 short name),
+    // while `ix map` stores the long, canonical root in its baselines. A
+    // junction (a symlink on POSIX) is the same mismatch on any platform: the
+    // marker, keyed on the canonical root, was found; the baselines, matched
+    // as strings, were not, so the refresh never recorded and the marker stayed.
+    await deferred();
+    const alias = join(home, "repo-alias");
+    symlinkSync(repo, alias, "junction");
+    expect(hasCompletedMapBaseline(alias), "an alias reads the same ingest baseline").toBe(false);
+
+    lastStale = await ensureFreshMap({ root: alias });
+    expect(backend.mapRequests()).toBe(1);
+    expect(lastStale).toBe(false);
+    expect(readMapStale(repo)).toBeNull();
+    expect(hasCompletedMapBaseline(repo)).toBe(true);
+    expect(hasCompletedMapBaseline(alias), "and the alias sees the map as complete").toBe(true);
   });
 
   it("does not retry a failed refresh inside the debounce window", async () => {
