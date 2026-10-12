@@ -56,6 +56,7 @@ const ENV_KEYS = [
   "HOME", "USERPROFILE", "IX_ENDPOINT", "IX_LOCK_DIR", "IX_HOME", "IX_DEBUG",
   "IX_COMMIT_FAILURE_LIMIT", "IX_COMMIT_HTTP_MAX_FILES", "IX_COMMIT_CONCURRENCY",
   "IX_STITCH_COOLDOWN_MS", "IX_STITCH_WAIT_MS", "IX_MAP_DEADLINE_MS",
+  "IX_RECONCILE_ON_FORCE",
 ] as const;
 
 const FILES = ["pkg/util.py", "pkg/service.py", "web/math.ts"];
@@ -100,8 +101,19 @@ describe.each(["head", "legacy"] as const)("an extractor change over the %s back
   /** The run's stderr; `lastExitCode` holds the exit code it set. */
   let lastExitCode: number | string | undefined;
 
-  async function run(home: string, endpoint: string, extra: { force?: boolean; debug?: boolean } = {}): Promise<string> {
+  /**
+   * `reconcileOnForce` opts a --force run at the current extractor into the
+   * same-hash reconcile (IX_RECONCILE_ON_FORCE=1); without it only an
+   * extractor change runs it.
+   */
+  async function run(
+    home: string,
+    endpoint: string,
+    { reconcileOnForce, ...extra }: { force?: boolean; debug?: boolean; reconcileOnForce?: boolean } = {},
+  ): Promise<string> {
     mkdirSync(home, { recursive: true });
+    if (reconcileOnForce) process.env.IX_RECONCILE_ON_FORCE = "1";
+    else delete process.env.IX_RECONCILE_ON_FORCE;
     process.env.HOME = home;
     process.env.USERPROFILE = home;
     process.env.IX_ENDPOINT = endpoint;
@@ -210,7 +222,13 @@ describe.each(["head", "legacy"] as const)("an extractor change over the %s back
       backend.hidePatchReads = false;
       expect(ghosts(backend)).toHaveLength(FILES.length);
 
+      // A plain --force at the current extractor leaves them: no reconcile, no reads.
+      backend.patchReads = 0;
       await run(home, endpoint, { force: true });
+      expect(backend.patchReads).toBe(0);
+      expect(ghosts(backend)).toHaveLength(FILES.length);
+
+      await run(home, endpoint, { force: true, reconcileOnForce: true });
       expect(ghosts(backend)).toEqual([]);
     } finally {
       await backend.stop();
@@ -233,7 +251,7 @@ describe.each(["head", "legacy"] as const)("an extractor change over the %s back
       }
 
       backend.resetRequests();
-      const log = await run(home, endpoint, { force: true });
+      const log = await run(home, endpoint, { force: true, reconcileOnForce: true });
       expect(log).not.toContain("[patch build error]");
       for (const f of FILES) {
         expect(backend.lastOps.get(f)?.filter((op) => op["type"] === "DeleteNode")).toEqual([]);
@@ -259,14 +277,14 @@ describe.each(["head", "legacy"] as const)("an extractor change over the %s back
       // The current extractor's patch reads fine; only the old one, which
       // names the ghosts, fails.
       backend.failPatchReads = (_id, ops) => ops?.some((op) => op["kind"] === GHOST) ?? false;
-      const log = await run(home, endpoint, { force: true, debug: true });
+      const log = await run(home, endpoint, { force: true, debug: true, reconcileOnForce: true });
       backend.failPatchReads = false;
       expect(log).not.toContain("[patch build error]");
       expect(log).toContain("[orphan reconcile skipped]");
       expect(lastExitCode ?? 0).toBe(0);
       expect(ghosts(backend)).toHaveLength(FILES.length);
 
-      await run(home, endpoint, { force: true });
+      await run(home, endpoint, { force: true, reconcileOnForce: true });
       expect(ghosts(backend)).toEqual([]);
     } finally {
       await backend.stop();
@@ -307,11 +325,84 @@ describe.each(["head", "legacy"] as const)("an extractor change over the %s back
       for (const f of FILES) {
         expect(log.split("\n").filter((line) => line.includes(`[orphan reconcile skipped] ${f}:`))).toHaveLength(1);
       }
-      // Best effort: the orphans stay until the next rebuild or --force.
+      // Best effort: the orphans stay until the next extractor change or an
+      // opted-in --force.
       expect(ghosts(backend)).toHaveLength(FILES.length);
 
-      await run(home, endpoint, { force: true });
+      await run(home, endpoint, { force: true, reconcileOnForce: true });
       expect(ghosts(backend)).toEqual([]);
+    } finally {
+      await backend.stop();
+    }
+  });
+});
+
+/**
+ * The same-hash reconcile reads stored patches, so it must cost nothing where
+ * no extractor changed: a plain --force made no patch reads before IN-20 and
+ * an edited file made one, and both stay so.
+ */
+describe("the orphan reconcile's patch reads at an unchanged extractor", () => {
+  vi.setConfig({ testTimeout: 120_000 });
+
+  const COUNT = 200;
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "ix-reconcile-cost-")));
+  const repoDir = join(root, "repo");
+  const home = join(root, "home");
+  const saved: Record<string, string | undefined> = {};
+
+  beforeAll(() => {
+    for (const k of ENV_KEYS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    mkdirSync(join(repoDir, "pkg"), { recursive: true });
+    for (let i = 0; i < COUNT; i++) {
+      writeFileSync(join(repoDir, "pkg", `m${i}.py`), `def f${i}(x):\n    return x + ${i}\n`, "utf8");
+    }
+    execFileSync("git", ["init", "-q"], { cwd: repoDir, stdio: "ignore" });
+    execFileSync("git", ["add", "-A"], { cwd: repoDir, stdio: "ignore" });
+    mkdirSync(home, { recursive: true });
+  });
+  afterAll(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  async function run(endpoint: string, force = false): Promise<void> {
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    process.env.IX_ENDPOINT = endpoint;
+    process.env.IX_LOCK_DIR = join(home, "locks");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const exitCodeBefore = process.exitCode;
+    try {
+      await ingestFiles(repoDir, { recursive: true, format: "json", printSummary: false, suppressOutput: true, mapMode: true, force });
+      expect(process.exitCode ?? 0).toBe(0);
+    } finally {
+      process.exitCode = exitCodeBefore;
+      stderr.mockRestore();
+    }
+  }
+
+  it("makes no patch reads on a plain --force over 200 files, and one for a single edited file", async () => {
+    const backend = new FakeBackend({ semantics: "head" });
+    try {
+      const endpoint = await backend.start();
+      await run(endpoint);
+      expect(backend.acceptedPatches()).toBe(COUNT);
+
+      backend.patchReads = 0;
+      await run(endpoint, true);
+      expect(backend.patchReads).toBe(0);
+
+      writeFileSync(join(repoDir, "pkg", "m7.py"), "def f7(x):\n    return x * 7\n", "utf8");
+      backend.patchReads = 0;
+      await run(endpoint);
+      expect(backend.patchReads).toBe(1);
     } finally {
       await backend.stop();
     }

@@ -374,8 +374,9 @@ const RECONCILE_MANIFEST_WINDOW = 2;
 async function loadStoredPatchEntities(
   client: Pick<IxClient, 'getPatch'>,
   patchIds: string[],
+  window: number = RECONCILE_MANIFEST_WINDOW,
 ): Promise<StoredPatchEntities> {
-  const windowIds = patchIds.slice(0, RECONCILE_MANIFEST_WINDOW);
+  const windowIds = patchIds.slice(0, window);
   const windowResults = await Promise.all(windowIds.map(async patchId => {
     try {
       return { patchId, raw: await client.getPatch(patchId) as unknown, failed: false, error: undefined as unknown };
@@ -428,7 +429,7 @@ async function loadStoredPatchEntities(
   }
   if (primary) return primary;
 
-  for (const patchId of patchIds.slice(RECONCILE_MANIFEST_WINDOW)) {
+  for (const patchId of patchIds.slice(window)) {
     try {
       const entities = readStoredPatchEntities(await client.getPatch(patchId));
       if (entities) return entities;
@@ -450,6 +451,12 @@ interface ReconcileOptions {
   liveOnly?: boolean;
   /** Told when a later stored manifest could not be read and was left out. */
   onWindowSkipped?: (reason: string) => void;
+  /**
+   * How many leading candidates to read and merge (default
+   * RECONCILE_MANIFEST_WINDOW). 1 is the first-hit walk: one read when the
+   * current candidate exists, which is what an ordinary edit pays.
+   */
+  window?: number;
 }
 
 export async function reconcileRemovedEntities(
@@ -470,7 +477,7 @@ export async function reconcileRemovedEntities(
   lookupLimit: Limiter = task => task(),
   options: ReconcileOptions = {},
 ): Promise<GraphPatchPayload> {
-  const previous = await loadStoredPatchEntities(client, previousPatchIds);
+  const previous = await loadStoredPatchEntities(client, previousPatchIds, options.window);
   if (previous.extraSkipped) options.onWindowSkipped?.(previous.extraSkipped);
   const liveOnly = options.liveOnly === true;
   const currentNodeIds = new Set(
@@ -2472,6 +2479,18 @@ export async function ingestFiles(
       extractorRebuild = true;
       clearMapResultCache(projectRoot);
     }
+    // The same-hash orphan reconcile (IN-20) costs patch reads for every file
+    // it runs on, and only an extractor change leaves orphans behind. So it
+    // runs only when the baseline says this workspace's files were last
+    // written by another extractor -- whether this run was forced or not --
+    // and not on a plain --force at the current extractor. The baseline is
+    // the only signal that costs no read: the stored patch's own extractor
+    // is known only once it has been fetched. IX_RECONCILE_ON_FORCE=1 opts a
+    // --force run in, to repair a graph a pre-fix rebuild left polluted.
+    // The same flag widens an edited file's reconcile to the second stored
+    // patch; an ordinary edit reads only the first, as before IN-20.
+    const reconcileOrphans = extractorChanged(previousBaseline, currentExtractor)
+      || (Boolean(opts.force) && process.env.IX_RECONCILE_ON_FORCE === '1');
     const previousMtimes = previousBaseline?.files ?? new Map<string, number>();
     const {
       previousDeletedFiles,
@@ -3654,10 +3673,10 @@ export async function ingestFiles(
               undefined,
               mapMode,
               reconcileLookups,
-              { onWindowSkipped: noteOrphanSkip },
+              { onWindowSkipped: noteOrphanSkip, window: reconcileOrphans ? RECONCILE_MANIFEST_WINDOW : 1 },
             );
-          } else if (knownHash) {
-            // Same content, new extractor (or --force): ids the old extractor
+          } else if (knownHash && reconcileOrphans) {
+            // Same content, new extractor (or an opted-in --force): ids the old extractor
             // wrote and this one does not are still live. Retiring them is
             // best effort. Before this reconcile existed such a file made no
             // patch reads and was always committed as built, so any failure

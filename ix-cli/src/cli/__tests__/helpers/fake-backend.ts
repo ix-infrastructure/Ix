@@ -127,6 +127,8 @@ export class FakeBackend {
   failPatchReads: boolean | ((patchId: string, ops: Array<Record<string, unknown>> | undefined) => boolean) = false;
   /** Answer `GET /v1/patches/{id}` with a 404 for every id, as if nothing were stored. */
   hidePatchReads = false;
+  /** `GET /v1/patches/{id}` requests served, whatever their answer. */
+  patchReads = 0;
   private readonly hashes = new Map<string, { workspaceId: string | null; uri: string; hash: string }>();
 
   /**
@@ -532,6 +534,7 @@ export class FakeBackend {
     // forced or rebuilt file's reconcile sees, and survives.
     if (path.startsWith("/v1/patches/")) {
       const patchId = decodeURIComponent(path.slice("/v1/patches/".length));
+      this.patchReads++;
       const record = this.stored.get(patchId);
       const fail = typeof this.failPatchReads === "function"
         ? this.failPatchReads(patchId, record?.ops)
