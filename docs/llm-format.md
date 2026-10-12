@@ -139,6 +139,19 @@ Two commands cannot know a true total and say so rather than inventing one:
   scan window, and `scanned` is how many matches were ranked, not how many
   exist.
 
+`ix read` caps a read at 400 lines and marks the `file` record with
+`truncated=true total_lines=<n> next=<path>:<from>-<to>`. What `total_lines`
+counts depends on `target=`:
+
+- `target=file`: the lines in the file.
+- `target=symbol`: the lines in the symbol's span (`line_end - line_start + 1`
+  of the whole symbol), not the file. `next=` never pages past the symbol's
+  end, and a span the graph places past EOF is clamped to the file first.
+
+```
+file path=src/big.ts line_start=10 line_end=409 target=symbol symbol=bigFn kind=function truncated=true total_lines=1318 next=src/big.ts:410-809
+```
+
 ## Rows an agent acts on
 
 The rows below are the ones an agent reads and then opens, cites or edits, so

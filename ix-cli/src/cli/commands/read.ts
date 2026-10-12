@@ -174,10 +174,15 @@ function withCursor(
  * Cut a symbol's span at `cap` lines from its start. `lastLine` is where the
  * symbol ends, so a `next=` cursor never pages past it; `totalLines` is the
  * symbol's own line count. With no cap, or a span that fits, nothing is cut.
+ *
+ * The end is clamped to EOF first: a stale graph span that could not be
+ * re-anchored can claim lines the file no longer has, and an unclamped end
+ * would report `truncated` with a cursor that pages past the last line.
  */
 export function capSpan(
-  lines: string[], start: number, end: number, cap?: number,
+  lines: string[], start: number, rawEnd: number, cap?: number,
 ): { content: string; lineStart: number; lineEnd: number; truncated?: boolean; totalLines?: number; lastLine?: number } {
+  const end = Math.max(start, Math.min(rawEnd, lines.length));
   if (cap !== undefined && end - start + 1 > cap) {
     const shownEnd = start + cap - 1;
     return {
@@ -340,7 +345,7 @@ export function registerReadCommand(program: Command): void {
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--root <dir>", "Workspace root directory")
-    .option("--all", `Read the whole file, past the ${READ_LINE_CAP}-line default cap`)
+    .option("--all", `Read the whole file or symbol, past the ${READ_LINE_CAP}-line default cap`)
     .addHelpText("after", `\nResolution order:
   1. Exact file path          ix read src/main.ts
   2. File path with line range ix read src/main.ts:10-50

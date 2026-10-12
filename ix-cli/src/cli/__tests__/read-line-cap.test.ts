@@ -253,6 +253,36 @@ describe("ix read symbol cap", () => {
     expect(logs[0]).not.toContain("next=");
   });
 
+  it("clamps a stale span that runs past EOF, so the cursor stays in the file", async () => {
+    // big.ts has 1734 lines; the graph still says the symbol ends at 2000.
+    symbolAt(1300, 2000);
+    await read(["--format", "llm"]);
+    expect(logs[0]).toContain("line_end=1699");
+    expect(logs[0]).toContain("total_lines=435");
+    expect(logs[0]).toContain("next=src/big.ts:1700-1734");
+  });
+
+  it("does not report truncated when the span only overflows past EOF", async () => {
+    symbolAt(1500, 2000);
+    await read(["--format", "llm"]);
+    expect(logs[0]).toContain("line_end=1734");
+    expect(logs[0]).not.toContain("truncated=");
+    expect(logs[0]).not.toContain("next=");
+  });
+
+  it("capSpan clamps the end to EOF", () => {
+    const lines = ["a", "b", "c"];
+    expect(capSpan(lines, 2, 9, 400)).toEqual({ content: "b\nc", lineStart: 2, lineEnd: 3 });
+    expect(capSpan(lines, 1, 9, 2)).toMatchObject({ lineEnd: 2, truncated: true, totalLines: 3, lastLine: 3 });
+  });
+
+  it("--all help names symbols as well as files", () => {
+    const program = new Command();
+    registerReadCommand(program);
+    const all = program.commands.find((c) => c.name() === "read")!.options.find((o) => o.long === "--all")!;
+    expect(all.description).toContain("file or symbol");
+  });
+
   it("capSpan returns an uncapped span unchanged", () => {
     const lines = ["a", "b", "c"];
     expect(capSpan(lines, 2, 3, 400)).toEqual({ content: "b\nc", lineStart: 2, lineEnd: 3 });
