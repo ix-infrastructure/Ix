@@ -168,7 +168,8 @@ export function ensureWorkspaceIdState(cwd = process.cwd(), opts: RegisterOption
  * may open files from, so registering first let a failed ingest of any path --
  * the backend down, or a path nobody meant to ingest -- widen what reads can
  * open, permanently. The caller registers with `ensureWorkspaceIdState(root,
- * { setDefault: false })` once a commit has landed, and never for a loose file.
+ * { setDefault })` once a commit has landed -- `setDefault: false` for a loose
+ * directory, so it never becomes the default -- and never for a loose file.
  */
 export function workspaceStateFor(root: string): {
   workspaceId: string; migrated: boolean; previousWorkspaceId?: string; created: boolean; name: string; pending: boolean;

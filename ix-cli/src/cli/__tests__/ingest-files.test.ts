@@ -10,6 +10,7 @@ import { ingestFiles, ingestPathSingleFlight } from "../commands/ingest.js";
 import { acquireMapLock, takeMapRerun } from "../single-flight.js";
 import { ingestMtimeCachePath, ingestRebuildPath, ingestSymbolsJournalPath, ingestSymbolsPath, loadConfig } from "../config.js";
 import { workspaceIdForPath } from "../system.js";
+import { ensureWorkspaceRegistered } from "../bootstrap.js";
 import { FakeBackend } from "./helpers/fake-backend.js";
 import { runWithSignal } from "../../client/run-signal.js";
 import { loadIngestBaseline } from "../ingest-baseline.js";
@@ -1472,7 +1473,7 @@ describe("ingestFiles against a fake backend", () => {
     fixture(2);
     await ingestFiles(join(repo, "src"), { ...quiet, force: true });
 
-    expect(registered(), "registered, but never as the default").toEqual([{ root: repo, id: workspaceIdForPath(repo), isDefault: false }]);
+    expect(registered(), "registered, and the default since none existed").toEqual([{ root: repo, id: workspaceIdForPath(repo), isDefault: true }]);
     expect([...new Set(sent().map(s => `${s.workspaceId} ${s.uri}`))].sort()).toEqual([
       `${workspaceIdForPath(repo)} src/m000.ts`,
       `${workspaceIdForPath(repo)} src/m001.ts`,
@@ -1536,6 +1537,24 @@ describe("ingestFiles against a fake backend", () => {
 
     expect(registered()).toEqual([{ root: outside, id: workspaceIdForPath(outside), isDefault: false }]);
     expect(sent()).toEqual([{ uri: "x.ts", workspaceId: workspaceIdForPath(outside) }]);
+  });
+
+  it("a git-repo ingest that set the default stays the default through a later map's registration", async () => {
+    fixture(2);
+    await ingestFiles(join(repo, "src", "m000.ts"), { ...quiet, force: true });
+    // `ix map` registers through bootstrap -> ensureWorkspaceRegistered first.
+    ensureWorkspaceRegistered(repo);
+    expect(registered()).toEqual([{ root: repo, id: workspaceIdForPath(repo), isDefault: true }]);
+  });
+
+  it("an explicit --root ingest of a non-repository directory may become the default", async () => {
+    const outside = join(repo, "rooted");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "x.ts"), "export const x = 1;\n", "utf8");
+
+    await ingestFiles(outside, { ...quiet, force: true, root: outside });
+
+    expect(registered()).toEqual([{ root: realpathSync.native(outside), id: workspaceIdForPath(realpathSync.native(outside)), isDefault: true }]);
   });
 
   it("leaves an existing default workspace the only default", async () => {

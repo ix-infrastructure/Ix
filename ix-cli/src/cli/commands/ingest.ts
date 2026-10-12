@@ -4498,8 +4498,10 @@ export async function ingestFiles(
   // A new workspace is registered only now, and only if the backend took
   // something: see workspaceStateFor.
   if (registrationPending && patchesTheBackendTook > 0 && registerAfterCommit) {
-    // Never the default: an ingest must not pick the workspace other commands fall back to.
-    ensureWorkspaceIdState(workspaceRoot, { setDefault: false });
+    // A repository (or --root) ingest may become the default when none exists, as
+    // before CL-05; a loose directory never does: an ingest of a stray directory
+    // must not pick the workspace other commands fall back to.
+    ensureWorkspaceIdState(workspaceRoot, { setDefault: rootSource !== 'loose' });
     if (!opts.suppressOutput && opts.format === 'text') {
       process.stderr.write(chalk.dim(`Registered workspace "${workspaceName}" (${workspaceRoot}).\n`));
     }
