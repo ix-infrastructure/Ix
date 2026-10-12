@@ -207,7 +207,7 @@ describe("status --format llm", () => {
       root: "/r", at: "2026-10-11T00:00:00.000Z", lastIngestAt: null, graph: "diverged",
       files: 20, stale: 1, diverged: 2, unverified: 0, divergedFiles: ["a.ts", "b.ts"], fix: "ix reset --workspace --yes --ingest",
     });
-    expect(lines[0]).toBe(`${without[0]} verified_at=2026-10-11T00:00:00.000Z verified_files=20 verified_diverged=2 verified_outdated=false`);
+    expect(lines[0]).toBe(`${without[0]} verified_at=2026-10-11T00:00:00.000Z verified_files=20 verified_diverged=2 verified_outdated=false verified_graph=diverged`);
     expect(lines.slice(1)).toEqual(without.slice(1));
 
     // Ingested since that verify ran: its counts describe an earlier graph.
@@ -216,7 +216,7 @@ describe("status --format llm", () => {
         root: "/r", at: "2026-10-11T00:00:00.000Z", lastIngestAt: "2026-10-10T00:00:00.000Z", graph: "diverged",
         files: 20, stale: 0, diverged: 2, unverified: 0, divergedFiles: ["a.ts", "b.ts"], fix: "ix reset --workspace --yes --ingest",
       });
-    expect(later[0]).toMatch(/ verified_diverged=2 verified_outdated=true$/);
+    expect(later[0]).toMatch(/ verified_diverged=2 verified_outdated=true verified_graph=diverged$/);
   });
 });
 

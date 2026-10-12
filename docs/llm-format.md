@@ -462,12 +462,14 @@ Two deliberate exceptions remain:
 
   When a whole-root `ix verify` (no paths) has run for this workspace, the
   `status` record ends with what it found: `verified_at` (ISO),
-  `verified_files`, `verified_diverged` and `verified_outdated`. Only that
+  `verified_files`, `verified_diverged`, `verified_outdated` and
+  `verified_graph` (`clean`, `diverged` or `unverified`; an unverified record
+  judged no file, so its `verified_diverged=0` is not a pass). Only that
   command saves the record: `ix verify <path>` and `ix doctor` do not.
   `verified_outdated=true` means the workspace was ingested after that verify
   ran, so its counts describe an earlier graph; run `ix verify` again rather
   than act on them. `status` only reads the record; it never runs a verify.
-  With no record the four fields are absent and the line is unchanged.
+  With no record the five fields are absent and the line is unchanged.
 
 `verify` answers whether the graph's nodes match the source they came from. One
 `verify` record, then one `file` record per file that is not clean:
@@ -480,7 +482,8 @@ file path=src/b.ts state=diverged missing=3 extra=0 changed=0
 
 `graph` is `clean`, `diverged` or `unverified` (with a `reason`: `not_mapped`,
 `extractor_changed`, `parser_unavailable`, `no_files` when nothing could be
-sampled, `no_file_verified` when nothing sampled could be judged).
+sampled, `no_file_verified` when nothing sampled could be judged, `timed_out`
+when `ix doctor`'s time budget ran out before any file was judged).
 
 A file is judged by its nodes and by the backend's source hash for it, which
 is the hash of the file's newest stored patch:
@@ -494,10 +497,13 @@ is the hash of the file's newest stored patch:
   Usually an edit since the last map, fixed by `ix map`. An F-01 revert that the
   last map did not record as not applied looks exactly like this, so verify
   reports it as stale, not diverged. `missing_on_disk` is a deleted file the
-  graph still has.
+  graph still has; `not_file` is a path the graph has that is now a
+  directory or another non-regular file.
 - `unverified`, with a `reason`: `not_in_graph` (no stored hash and no nodes:
   ingest skips some files), `parse_timed_out` (the last map's parse ran out of
-  budget), `too_large` (over ingest's 1 MB limit), `unsupported_language`,
+  budget), `too_large` (over ingest's 1 MB limit), `missing_on_disk` (a named
+  path that does not exist), `not_file` (a named path that is a directory or
+  another non-regular file), `unsupported_language`,
   `no_parse`, `list_failed`, `truncated`, `hash_unknown` (the hash lookup
   failed and the nodes differ), `no_comparison`.
 

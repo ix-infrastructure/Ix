@@ -134,6 +134,11 @@ export interface VerifyReport {
   seed: number;
   counts: VerifyCounts;
   files: VerifyFileResult[];
+  /**
+   * True when `budgetMs` ran out first: `files` holds only the files judged
+   * in time. Absent on a run that finished.
+   */
+  partial?: boolean;
 }
 
 /** What `ix status` reads back: the last whole-root verify, without per-file detail. */
@@ -486,6 +491,11 @@ export interface RunVerifyOptions {
    * does: a run given `paths` never saves, and `ix doctor` passes false.
    */
   record?: boolean;
+  /**
+   * Stop starting new work after this many ms (`ix doctor`). Files not judged
+   * by then are left out and the report is `partial`. Never saves a record.
+   */
+  budgetMs?: number;
 }
 
 type VerifyClient = Pick<IxClient, "listByKind" | "getSourceHashes"> & Partial<Pick<IxClient, "stats">>;
@@ -512,6 +522,9 @@ export async function runVerify(client: VerifyClient, rootInput: string, opts: R
   const sample = opts.sample ?? DEFAULT_VERIFY_SAMPLE;
   const seed = opts.seed ?? DEFAULT_VERIFY_SEED;
   const at = (opts.now?.() ?? new Date()).toISOString();
+  const startedMs = Date.now();
+  const overBudget = (): boolean => opts.budgetMs !== undefined && Date.now() - startedMs >= opts.budgetMs;
+  let partial = false;
   const unverified = (reason: string, fix: string | null, lastIngestAt: string | null = null): VerifyReport => ({
     at, root, lastIngestAt, graph: "unverified", reason, fix, sample, seed,
     counts: { files: 0, clean: 0, stale: 0, diverged: 0, unverified: 0 }, files: [],
@@ -560,6 +573,7 @@ export async function runVerify(client: VerifyClient, rootInput: string, opts: R
   const done = new Map<string, VerifyFileResult>();
   const parsed: Parsed[] = [];
   for (const rel of rels) {
+    if (overBudget()) { partial = true; break; }
     // Only a named path gets here: ingest gave up on its parse, so it is not in
     // the graph, and parsing it on this thread would have no budget at all.
     if (timedOut.has(rel)) { done.set(rel, fileResult(rel, "unverified", "parse_timed_out")); continue; }
@@ -570,10 +584,20 @@ export async function runVerify(client: VerifyClient, rootInput: string, opts: R
     try {
       read = readBoundedBytes(nodePath.join(root, rel), VERIFY_MAX_FILE_BYTES);
     } catch {
-      read = null;
+      // Windows will not open a directory at all; it is still not a file,
+      // which is not the same as missing.
+      let exists = false;
+      try { exists = fs.statSync(nodePath.join(root, rel)) !== undefined; } catch { /* missing */ }
+      read = exists ? { refused: "not_file" } : null;
     }
     if (read && "refused" in read && read.refused === "too_large") {
       done.set(rel, fileResult(rel, "unverified", "too_large"));
+      continue;
+    }
+    if (read && "refused" in read && read.refused === "not_file") {
+      // A directory or other non-regular file where the graph may have had a
+      // file: present, so not missing_on_disk.
+      done.set(rel, known.has(rel) ? fileResult(rel, "stale", "not_file") : fileResult(rel, "unverified", "not_file"));
       continue;
     }
     if (!read || !("bytes" in read)) {
@@ -596,6 +620,9 @@ export async function runVerify(client: VerifyClient, rootInput: string, opts: R
       done.set(rel, fileResult(rel, "unverified", "no_parse"));
     }
   }
+
+  // Out of budget already: no network reads for files that could not finish.
+  if (overBudget() && parsed.length > 0) { partial = true; parsed.length = 0; }
 
   // One call for every file. null = the lookup failed, so stale and diverged
   // cannot be told apart; a file that matches is still clean.
@@ -636,14 +663,21 @@ export async function runVerify(client: VerifyClient, rootInput: string, opts: R
     return [...kinds].sort().map((kind) => ({ p, kind }));
   });
   const results = await mapLimit(reads, VERIFY_CONCURRENCY, async ({ p, kind }) => {
+    if (overBudget()) {
+      partial = true;
+      return { rel: p.rel, rows: [] as GraphNode[], failed: false, skipped: true };
+    }
     try {
       const rows = await client.listByKind(kind, { scope: p.rel, workspaceId: p.ws, limit: VERIFY_LIST_LIMIT });
-      return { rel: p.rel, rows: Array.isArray(rows) ? rows : [], failed: false };
+      return { rel: p.rel, rows: Array.isArray(rows) ? rows : [], failed: false, skipped: false };
     } catch (err) {
       if (isBackendUnreachable(err)) throw err;
-      return { rel: p.rel, rows: [] as GraphNode[], failed: true };
+      return { rel: p.rel, rows: [] as GraphNode[], failed: true, skipped: false };
     }
   });
+  // A file with any kind left unread is not judged at all: half its nodes
+  // would read as missing.
+  const skipped = new Set(results.filter((r) => r.skipped).map((r) => r.rel));
   const byFile = new Map<string, { rows: GraphNode[]; failed: boolean; truncated: boolean }>();
   for (const r of results) {
     const entry = byFile.get(r.rel) ?? { rows: [], failed: false, truncated: false };
@@ -654,6 +688,7 @@ export async function runVerify(client: VerifyClient, rootInput: string, opts: R
   }
 
   for (const p of parsed) {
+    if (skipped.has(p.rel)) continue;
     const read = byFile.get(p.rel) ?? { rows: [], failed: true, truncated: false };
     if (read.failed) { done.set(p.rel, fileResult(p.rel, "unverified", "list_failed")); continue; }
     const stored = storedNodes(read.rows as unknown as Array<Record<string, unknown>>, p.rel);
@@ -670,13 +705,15 @@ export async function runVerify(client: VerifyClient, rootInput: string, opts: R
   const files = rels.map((rel) => done.get(rel)!).filter(Boolean);
   const counts = countStates(files);
   const verdict = graphVerdict(counts);
+  // Nothing judged before the budget ran out says so, not "no files".
+  if (partial && verdict.graph === "unverified") Object.assign(verdict, { reason: "timed_out" });
   const report: VerifyReport = {
     at, root, lastIngestAt: baseline.lastIngestAt,
     graph: verdict.graph, ...(verdict.reason ? { reason: verdict.reason } : {}), fix: verdict.fix,
-    sample, seed, counts, files,
+    sample, seed, counts, files, ...(partial ? { partial: true } : {}),
   };
   // A partial run (named files, or a caller that opts out) must not replace
   // the sampled record `ix status` shows.
-  if (opts.record !== false && !(opts.paths && opts.paths.length > 0)) saveVerifyRecord(recordFromReport(report));
+  if (opts.record !== false && !partial && !(opts.paths && opts.paths.length > 0)) saveVerifyRecord(recordFromReport(report));
   return report;
 }

@@ -17,6 +17,7 @@ import { Command } from "commander";
 // A backend whose /v1/stats answer each test sets.
 let stats: unknown = { nodes: { total: 0 }, edges: { total: 0 } };
 let rev = 1;
+let healthDegraded = false;
 let server: Server;
 let endpoint: string;
 
@@ -29,6 +30,7 @@ beforeAll(async () => {
         res.writeHead(status, { "content-type": "application/json" });
         res.end(JSON.stringify(body));
       };
+      if (url.startsWith("/v1/health") && healthDegraded) return send(503, { status: "degraded", database: "unreachable" });
       if (url.startsWith("/v1/health")) return send(200, { status: "ok", schema_version: 3, database: "reachable" });
       if (url.startsWith("/v1/revisions/current")) return send(200, { rev });
       if (url.startsWith("/v1/stats")) return send(200, stats);
@@ -55,6 +57,7 @@ let out: string[];
 beforeEach(() => {
   vi.resetModules();
   rev += 1; // a new backend revision: no cached graph verdict carries over
+  healthDegraded = false;
   home = mkdtempSync(join(tmpdir(), "ix-honest-"));
   repo = join(home, "repo");
   mkdirSync(repo);
@@ -192,6 +195,21 @@ describe("ix status", () => {
     expect(JSON.parse(await status("--format", "json")).verify).toMatchObject({ outdated: false });
   });
 
+  it("an unverified record does not read as '0 diverged'", async () => {
+    registerRepo();
+    stats = HOLLOW;
+    const { saveVerifyRecord } = await import("../verify.js");
+    saveVerifyRecord({
+      root: repo, at: new Date().toISOString(), lastIngestAt: null, graph: "unverified",
+      files: 3, stale: 0, diverged: 0, unverified: 3, divergedFiles: [], fix: null,
+    });
+    const text = await status();
+    expect(text).toMatch(/Verified:?\s+\d+s ago, 3 files, unverified \(no file verified\)/);
+    expect(text).not.toMatch(/0 diverged/);
+    out.length = 0;
+    expect(await status("--format", "llm")).toMatch(/^status .*verified_graph=unverified/m);
+  });
+
   it("has verify: null and no Verified line without a record", async () => {
     registerRepo();
     stats = HOLLOW;
@@ -285,6 +303,42 @@ describe("doctor checks", () => {
       .toEqual({ ok: true, detail: "not checked: not mapped" });
     expect(await assessGraphVerify(async () => { throw new Error("404: not found"); }))
       .toMatchObject({ ok: true, detail: expect.stringMatching(/^not checked/) });
+  });
+
+  it("Graph matches a re-parse: a partial run says so; a hung run gives up after the budget", async () => {
+    const { assessGraphVerify } = await import("../commands/doctor.js");
+    const partial = await assessGraphVerify(async () => ({
+      at: "", root: "/r", lastIngestAt: null, graph: "clean", fix: null, sample: 5, seed: 24, files: [], partial: true,
+      counts: { files: 2, clean: 2, stale: 0, diverged: 0, unverified: 0 },
+    }) as any, 5_000);
+    expect(partial).toEqual({ ok: true, detail: "2 sampled files match a re-parse (nodes only) (partial: 2 of 5 files checked within 5 s)" });
+    const started = Date.now();
+    const hung = await assessGraphVerify(() => new Promise(() => {}), 10);
+    expect(hung).toMatchObject({ ok: true, detail: expect.stringMatching(/^not checked: timed out/) });
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("ix doctor: the re-parse check parses nothing when the backend is not healthy", async () => {
+    registerRepo();
+    stats = HOLLOW;
+    healthDegraded = true;
+    let loads = 0;
+    vi.doMock("../commands/ingestion-loader.js", async (orig) => {
+      const real = await orig<typeof import("../commands/ingestion-loader.js")>();
+      return { ...real, loadIngestionModules: async () => { loads++; return real.loadIngestionModules(); } };
+    });
+    const { loadIngestionModules } = await import("../commands/ingestion-loader.js");
+    const [, { extractorName }] = await loadIngestionModules();
+    loads = 0;
+    writeFileSync(join(repo, "a.ts"), "export function a() { return 1; }\n");
+    const { saveIngestBaseline } = await import("../ingest-baseline.js");
+    saveIngestBaseline(repo, new Map([[join(repo, "a.ts"), 1]]), 3, new Date(), new Map(), extractorName());
+    const { registerDoctorCommand } = await import("../commands/doctor.js");
+    const json = JSON.parse(await run(registerDoctorCommand, ["doctor", "--format", "json"]));
+    const check = json.checks.find((c: { name: string }) => c.name === "Graph matches a re-parse");
+    expect(check).toEqual({ name: "Graph matches a re-parse", ok: true, detail: "not checked: backend degraded" });
+    expect(loads).toBe(0);
+    process.exitCode = undefined;
   });
 
   it("ix doctor: the re-parse check against a backend that 404s /v1/list is 'not checked'", async () => {

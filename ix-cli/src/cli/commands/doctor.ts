@@ -380,28 +380,46 @@ export function checkRipgrep(run: () => string = () => execFileSync("rg", ["--ve
  * parser that will not load, any throw at all -- is "not checked", so this
  * check cannot give `ix doctor` an exit code it did not have.
  */
-export async function assessGraphVerify(run: () => Promise<VerifyReport>): Promise<CheckResult> {
+/** `ix doctor`'s verify: a few files, and never more than about this long. */
+export const DOCTOR_VERIFY_SAMPLE = 5;
+export const DOCTOR_VERIFY_BUDGET_MS = 5_000;
+/** Past the budget, how long an in-flight read may still take before doctor gives up. */
+const DOCTOR_VERIFY_GRACE_MS = 2_000;
+
+export async function assessGraphVerify(run: () => Promise<VerifyReport>, budgetMs?: number): Promise<CheckResult> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const report = await run();
+    // The budget stops new work; this stops a read that never returns.
+    const report = budgetMs === undefined ? await run() : await Promise.race([
+      run(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${Math.round(budgetMs / 1000)} s`)), budgetMs + DOCTOR_VERIFY_GRACE_MS);
+        timer.unref?.();
+      }),
+    ]);
     const { files, diverged, stale } = report.counts;
+    // "partial: 3 of 5" — a run that ran out of budget says how much it saw.
+    const partial = report.partial ? ` (partial: ${files} of ${report.sample} files checked within ${Math.round((budgetMs ?? 0) / 1000)} s)` : "";
     if (report.graph === "diverged") {
       const paths = report.files.filter((f) => f.state === "diverged").map((f) => f.path);
       const shown = paths.slice(0, 3).join(", ") + (paths.length > 3 ? `, and ${paths.length - 3} more` : "");
       return {
         ok: false,
         warn: true,
-        detail: `${diverged} of ${files} sampled files diverged (${shown}). Fix: ${report.fix}`,
+        detail: `${diverged} of ${files} sampled files diverged (${shown})${partial}. Fix: ${report.fix}`,
       };
     }
     if (report.graph === "unverified") {
-      return { ok: true, detail: `not checked: ${(report.reason ?? "nothing to compare").replace(/_/g, " ")}` };
+      return { ok: true, detail: `not checked: ${(report.reason ?? "nothing to compare").replace(/_/g, " ")}${partial}` };
     }
     if (stale > 0) {
-      return { ok: true, detail: `${files} sampled files match; ${stale} changed since the last ingest — run \`ix map\`` };
+      return { ok: true, detail: `${files} sampled files match${partial}; ${stale} changed since the last ingest — run \`ix map\`` };
     }
-    return { ok: true, detail: `${files} sampled files match a re-parse (nodes only)` };
+    return { ok: true, detail: `${files} sampled files match a re-parse (nodes only)${partial}` };
   } catch (e: any) {
     return { ok: true, detail: `not checked: ${e?.message ?? String(e)}` };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -674,7 +692,20 @@ export function registerDoctorCommand(program: Command): void {
           run: async () => {
             if (configBroken) return CONFIG_NOT_CHECKED;
             if (!matchedWorkspace) return { ok: true, detail: "not checked: no local workspace" };
-            return assessGraphVerify(() => runVerify(client, resolvePath(matchedWorkspace.root_path), { sample: 20, record: false }));
+            // Parsing costs nothing to report when nobody can answer the
+            // reads, so ask the (already memoized) health first.
+            try {
+              const h = await health();
+              if (h.status !== "ok") return { ok: true, detail: `not checked: backend ${h.status}` };
+            } catch {
+              return { ok: true, detail: "not checked: backend not reachable" };
+            }
+            return assessGraphVerify(
+              () => runVerify(client, resolvePath(matchedWorkspace.root_path), {
+                sample: DOCTOR_VERIFY_SAMPLE, record: false, budgetMs: DOCTOR_VERIFY_BUDGET_MS,
+              }),
+              DOCTOR_VERIFY_BUDGET_MS,
+            );
           },
         },
         {

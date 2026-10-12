@@ -426,6 +426,46 @@ describe("runVerify", () => {
     expect(report.graph).toBe("unverified");
   });
 
+  it("a named directory is not_file, not missing_on_disk", async () => {
+    const root = nodePath.join(home, "repo");
+    fs.mkdirSync(nodePath.join(root, "dir.ts"), { recursive: true });
+    register(root);
+    const [, builder] = await loadIngestionModules();
+    saveIngestBaseline(root, new Map(), 3, new Date(), new Map(), builder.extractorName());
+    const report = await runVerify(fakeClient({ rows: [], hashes: [] }).client, root, { paths: ["dir.ts"], sample: 1 });
+    expect(report.files).toEqual([expect.objectContaining({ path: "dir.ts", state: "unverified", reason: "not_file" })]);
+  });
+
+  it("budgetMs: stops starting reads when it runs out, leaves unjudged files out, and saves no record", async () => {
+    const root = nodePath.join(home, "repo");
+    fs.mkdirSync(root);
+    const rels = ["a.ts", "b.ts", "c.ts"];
+    for (const [i, rel] of rels.entries()) fs.writeFileSync(nodePath.join(root, rel), `export function f${i}() { return ${i}; }\n`);
+    register(root);
+    const [, builder] = await loadIngestionModules();
+    saveIngestBaseline(root, new Map(rels.map((r) => [nodePath.join(root, r), 1])), 3, new Date(), new Map(), builder.extractorName());
+    let lists = 0;
+    const slow = {
+      async listByKind() { lists++; await new Promise((r) => setTimeout(r, 40)); return []; },
+      async getSourceHashes() { return []; },
+    } as any;
+    const report = await runVerify(slow, root, { sample: 3, budgetMs: 60 });
+    expect(report.partial).toBe(true);
+    // 11 default kinds x 3 files without a budget; a few reads at most with one.
+    expect(lists).toBeLessThan(11 * 3);
+    expect(report.files.length).toBeLessThan(3);
+    expect(fs.existsSync(verifyRecordPath(root))).toBe(false);
+
+    // Out of budget before anything is judged: unverified, and says why.
+    const none = await runVerify(slow, root, { sample: 3, budgetMs: 0 });
+    expect(none).toMatchObject({ graph: "unverified", reason: "timed_out", partial: true, files: [] });
+
+    // No budget: complete, no `partial` key.
+    const full = await runVerify(fakeClient({ rows: [], hashes: [] }).client, root, { sample: 3, record: false });
+    expect(full.files).toHaveLength(3);
+    expect("partial" in full).toBe(false);
+  });
+
   it("multi-repo: per-repo workspace ids and member-relative ids, as ingest builds them", async () => {
     const root = nodePath.join(home, "system");
     for (const repo of ["repo-a", "repo-b"]) {
