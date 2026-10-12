@@ -155,4 +155,17 @@ describe("ix context --from-issue bundle", () => {
     expect(b.issue).toBeUndefined();
     expect(contextBundleSchema.safeParse(JSON.parse(JSON.stringify(b))).success).toBe(true);
   });
+
+  it("accepts a bundle with and without generatedAt, and keeps the key when present", () => {
+    const b = JSON.parse(JSON.stringify(build(issue())));
+    expect(typeof b.generatedAt).toBe("string");
+    const withKey = contextBundleSchema.safeParse(b);
+    expect(withKey.success).toBe(true);
+    expect(withKey.data?.generatedAt).toBe(b.generatedAt);
+
+    const { generatedAt: _omit, ...without } = b;
+    const parsed = contextBundleSchema.safeParse(without);
+    expect(parsed.success).toBe(true);
+    expect(parsed.data && "generatedAt" in parsed.data).toBe(false);
+  });
 });
