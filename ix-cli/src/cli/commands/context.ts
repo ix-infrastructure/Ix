@@ -2517,7 +2517,7 @@ export function renderBundle(bundle: ContextBundle, format: string): void {
       ...bundle.evidence.map(evidenceRecord(undefined)),
       // Last, so it reads as the closing instruction it is.
       ...(forMcp()
-        ? nextToolCalls(bundle, onDiskSymbolCheck(bundle))
+        ? nextToolCalls(bundle, onDiskSymbolCheck())
           .map((step) => llmLine("next", { cmd: step.cmd, why: step.why, stale: step.stale, reanchor: step.reanchor }))
         : renderedNextReads(bundle).map((row) => llmLine("next", { cmd: row.cmd, stale: row.stale || undefined }))),
     ]);
@@ -2750,25 +2750,30 @@ const SHELL_SAFE_PATH = /^[A-Za-z0-9_./][A-Za-z0-9_./-]*$/;
 export type SymbolReadCheck = (name: string, path: string) => boolean;
 
 /**
- * One on-disk check per bundle (`symbolReadChecker`: one workspace walk, each
- * row's answer kept), so rendering the same bundle again — a budget-fitting
- * loop re-measuring its lines — never repeats the file reads or the walk.
+ * One on-disk check per workspace root (`symbolReadChecker`: one workspace
+ * walk, each row's answer kept), shared by every bundle rendered against that
+ * root within SYMBOL_CHECK_TTL_MS. Keyed on the root, not the bundle object,
+ * so a render that sizes several copies of a bundle (a budget-fitting loop
+ * measuring prefixes) still walks once. The short lifetime keeps a long-lived
+ * `ix mcp` process from answering from a stale walk after files change.
  */
-const bundleSymbolChecks = new WeakMap<ContextBundle, SymbolReadCheck>();
+const SYMBOL_CHECK_TTL_MS = 5_000;
+const symbolChecksByRoot = new Map<string, { check: SymbolReadCheck; at: number }>();
 
-/** `readsOneSymbol` against this workspace's files, as they are on disk now, memoised per bundle. */
-function onDiskSymbolCheck(bundle: ContextBundle): SymbolReadCheck {
-  let check = bundleSymbolChecks.get(bundle);
-  if (!check) {
-    check = symbolReadChecker(resolveWorkspaceRoot());
-    bundleSymbolChecks.set(bundle, check);
-  }
+/** `readsOneSymbol` against this workspace's files, as they are on disk now, memoised per root. */
+function onDiskSymbolCheck(): SymbolReadCheck {
+  const root = resolveWorkspaceRoot();
+  const now = Date.now();
+  const cached = symbolChecksByRoot.get(root);
+  if (cached && now - cached.at < SYMBOL_CHECK_TTL_MS) return cached.check;
+  const check = symbolReadChecker(root);
+  symbolChecksByRoot.set(root, { check, at: now });
   return check;
 }
 
 /** The `next` rows renderBundle prints: `nextReads` with the on-disk check, cheap to call again. */
 export function renderedNextReads(bundle: ContextBundle): NextRead[] {
-  return nextReads(bundle, 3, onDiskSymbolCheck(bundle));
+  return nextReads(bundle, 3, onDiskSymbolCheck());
 }
 
 /**
@@ -2793,7 +2798,7 @@ export function renderedNextReads(bundle: ContextBundle): NextRead[] {
  * bundle shows twice in one file, and a name `symbolRead` rejects. The bundle's
  * entities are only the target's neighbours, so a second `save` in the same
  * file need not be among them: renderBundle passes `onDiskSymbolCheck`, which
- * asks the file itself (see `readsOneSymbol`), once per bundle.
+ * asks the file itself (see `readsOneSymbol`), once per workspace root.
  *
  * Deduped, because a caller and a dependent are frequently the same function,
  * and taken in evidence order, which is already the ranking — the target first,

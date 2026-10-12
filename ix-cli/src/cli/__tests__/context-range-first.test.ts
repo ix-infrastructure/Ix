@@ -17,6 +17,16 @@ vi.mock("../commands/read.js", async (importOriginal) => ({
   symbolReadChecker: vi.fn(() => () => true),
 }));
 
+// renderBundle keeps one on-disk check per workspace root for a few seconds.
+// Each test starts a minute later on a fake clock, so none inherits another's.
+let clock = Date.UTC(2026, 0, 1);
+beforeEach(() => {
+  clock += 60_000;
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(clock);
+});
+afterEach(() => vi.useRealTimers());
+
 function bundleWith(evidence: Array<Record<string, unknown>>): never {
   return { evidence } as never;
 }
@@ -235,14 +245,19 @@ describe("renderBundle prints the stale flag on next rows", () => {
     ]);
   });
 
-  // A budget-fitting loop re-renders the same bundle; the on-disk check (file
-  // reads plus a workspace walk) must be built once for it, not per render.
-  it("builds the on-disk check once per bundle, however often it renders", () => {
-    const bundle = renderable();
+  // A budget-fitting loop re-renders the bundle, or prefix copies of it; the
+  // on-disk check (file reads plus a workspace walk) must be built once per
+  // workspace root for all of them, not per render or per bundle object.
+  it("builds the on-disk check once per workspace root, across renders and bundle copies", () => {
     vi.mocked(symbolReadChecker).mockClear();
+    const bundle = renderable();
     for (let i = 0; i < 5; i++) captureLog(() => renderBundle(bundle, "llm"));
     renderedNextReads(bundle);
+    for (let i = 0; i < 4; i++) captureLog(() => renderBundle({ ...(renderable() as object) } as never, "llm"));
+    captureLog(() => renderBundle(renderable(), "text"));
     expect(vi.mocked(symbolReadChecker)).toHaveBeenCalledTimes(1);
+    // A later render (an `ix mcp` process minutes on) walks afresh.
+    vi.setSystemTime(clock + 30_000);
     captureLog(() => renderBundle(renderable(), "llm"));
     expect(vi.mocked(symbolReadChecker)).toHaveBeenCalledTimes(2);
   });
