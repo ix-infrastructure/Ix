@@ -87,8 +87,9 @@ surfaces (#575).
 - **`ix ingest <path>` writes to the workspace the path belongs to** -- the
   registered workspace containing it, else its git repository -- and a file or
   directory inside it refreshes just that part, leaving the rest of the
-  workspace alone. Only a path in no workspace and no repository becomes a
-  workspace of its own.
+  workspace alone. Only a directory in no workspace and no repository becomes
+  a workspace of its own (never the default); a loose file there is ingested
+  but registers nothing, so `ix read` cannot open its neighbours.
 - **`ix ingest <path>` coalesces with a running `ix map` or `ix ingest` of the
   same workspace**, as `ix map` does: it does not run beside the holder, asks
   it for one more pass, and exits 0 (or `IX_MAP_COALESCE_EXIT_CODE`). With
