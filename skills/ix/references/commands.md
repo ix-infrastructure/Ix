@@ -98,6 +98,7 @@ mapped one, pass `--graph-root <mapped>` and `--worktree <agent checkout>`.
 | Ingest GitHub data | `ix ingest` | `ix ingest --github owner/repo --limit 50` |
 | Backend health | `ix status` | `ix status` |
 | System doctor | `ix doctor` | `ix doctor` |
+| Is the graph actually right? (nodes vs a re-parse) | `ix verify` | `ix verify --sample 20` or `ix verify src/auth.py` |
 | Start backend | `ix docker start` | `ix docker start` |
 | Graph statistics | `ix stats` | `ix stats` |
 

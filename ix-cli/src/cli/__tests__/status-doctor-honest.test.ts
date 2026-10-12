@@ -138,6 +138,30 @@ describe("ix status", () => {
     expect(llm).toMatch(/^graph status=empty reason=no_nodes/m);
   });
 
+  it("shows the last ix verify, and warns when it found divergence", async () => {
+    registerRepo();
+    stats = HOLLOW;
+    const { saveVerifyRecord } = await import("../verify.js");
+    saveVerifyRecord({
+      root: repo, at: new Date().toISOString(), lastIngestAt: null, graph: "diverged",
+      files: 20, stale: 0, diverged: 1, unverified: 0, divergedFiles: ["a.ts"], fix: "ix reset --workspace --yes --ingest",
+    });
+    const text = await status();
+    expect(text).toMatch(/Verified:?\s+\d+s ago, 20 files, 1 diverged/);
+    expect(text).toMatch(/last ix verify found 1 file/);
+    out.length = 0;
+    const json = JSON.parse(await status("--format", "json"));
+    expect(json.verify).toMatchObject({ graph: "diverged", files: 20, diverged: 1 });
+  });
+
+  it("has verify: null and no Verified line without a record", async () => {
+    registerRepo();
+    stats = HOLLOW;
+    expect(await status()).not.toMatch(/Verified/);
+    out.length = 0;
+    expect(JSON.parse(await status("--format", "json")).verify).toBeNull();
+  });
+
   it("says unverified, not ok, when the directory is in no workspace", async () => {
     stats = HOLLOW;
     const json = JSON.parse(await status("--format", "json"));
@@ -200,6 +224,47 @@ describe("doctor checks", () => {
     expect(assessConfigFile("c.yaml", () => "endpoint: http://localhost:8090\n")).toMatchObject({ ok: true });
     expect(assessConfigFile("c.yaml", () => "endpoint: [unclosed\n")).toMatchObject({ ok: false, detail: expect.stringMatching(/does not parse/) });
     expect(assessConfigFile("c.yaml", () => "- a\n- b\n")).toMatchObject({ ok: false });
+  });
+
+  it("Graph matches a re-parse: a warning at worst, never a failure", async () => {
+    const { assessGraphVerify } = await import("../commands/doctor.js");
+    const report = (graph: string, counts: Record<string, number>, extra: Record<string, unknown> = {}) => async () => ({
+      at: "", root: "/r", lastIngestAt: null, graph, fix: null, sample: 20, seed: 24, files: [],
+      counts: { files: 20, clean: 0, stale: 0, diverged: 0, unverified: 0, ...counts }, ...extra,
+    }) as any;
+    expect(await assessGraphVerify(report("clean", { clean: 20 }))).toMatchObject({ ok: true });
+    expect(await assessGraphVerify(report("clean", { clean: 19, stale: 1 })))
+      .toMatchObject({ ok: true, detail: expect.stringMatching(/ix map/) });
+    const diverged = await assessGraphVerify(report("diverged", { clean: 19, diverged: 1 }, {
+      fix: "ix reset --workspace --yes --ingest",
+      files: [{ path: "src/a.ts", state: "diverged" }],
+    }));
+    expect(diverged).toEqual({
+      ok: false, warn: true,
+      detail: "1 of 20 sampled files diverged (src/a.ts). Fix: ix reset --workspace --yes --ingest",
+    });
+    expect(await assessGraphVerify(report("unverified", { unverified: 20 }, { reason: "not_mapped" })))
+      .toEqual({ ok: true, detail: "not checked: not mapped" });
+    expect(await assessGraphVerify(async () => { throw new Error("404: not found"); }))
+      .toMatchObject({ ok: true, detail: expect.stringMatching(/^not checked/) });
+  });
+
+  it("ix doctor: the re-parse check against a backend that 404s /v1/list is 'not checked'", async () => {
+    registerRepo();
+    stats = HOLLOW;
+    const { loadIngestionModules } = await import("../commands/ingestion-loader.js");
+    const [, { extractorName }] = await loadIngestionModules();
+    writeFileSync(join(repo, "a.ts"), "export function a() { return 1; }\n");
+    const { saveIngestBaseline } = await import("../ingest-baseline.js");
+    saveIngestBaseline(repo, new Map([[join(repo, "a.ts"), 1]]), 3, new Date(), new Map(), extractorName());
+    const { registerDoctorCommand } = await import("../commands/doctor.js");
+    const json = JSON.parse(await run(registerDoctorCommand, ["doctor", "--format", "json"]));
+    const check = json.checks.find((c: { name: string }) => c.name === "Graph matches a re-parse");
+    expect(check).toMatchObject({ ok: true, detail: expect.stringMatching(/^not checked/) });
+    // It adds no failure: healthy is decided by the other checks alone.
+    const others = json.checks.filter((c: { name: string }) => c.name !== "Graph matches a re-parse");
+    expect(json.healthy).toBe(!others.some((c: { ok: boolean; warn?: boolean }) => !c.ok && !c.warn));
+    process.exitCode = undefined;
   });
 
   it("ripgrep on PATH warns, never fails", async () => {

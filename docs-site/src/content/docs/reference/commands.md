@@ -85,6 +85,7 @@ before it exits: `ix map` re-ingests the workspace, and so does `ix ingest` when
 |---|---|
 | `ix status` | Checks the backend is reachable |
 | `ix doctor` | Checks server, database and graph integrity |
+| `ix verify` | Compares the graph's nodes to a fresh re-parse of a sample of files (nodes only, not edges) |
 | `ix docker start` / `stop` / `restart` | Starts, stops or restarts the local backend containers |
 | `ix docker start --local-token` | Makes the local backend require a bearer token, which the CLI stores and sends (`--no-local-token` turns it off). See [Local token](/reference/configuration/#local-token) |
 | `ix docker status` / `logs` | Shows container health, or tails the backend's logs |

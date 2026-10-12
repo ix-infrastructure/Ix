@@ -41,6 +41,7 @@ import { loadIngestBaseline } from "../ingest-baseline.js";
 import { isCloudReady } from "../remote.js";
 import { hasCompletedMapBaseline } from "../stale.js";
 import { printJson } from "../format.js";
+import { runVerify, type VerifyReport } from "../verify.js";
 import type { CapabilitiesResponse, HealthResponse } from "../../client/types.js";
 
 interface CheckResult {
@@ -370,6 +371,40 @@ export function checkRipgrep(run: () => string = () => execFileSync("rg", ["--ve
   }
 }
 
+/**
+ * "Graph matches a re-parse": the last line of defence for a graph whose
+ * counts look fine and whose nodes do not (see `verify.ts`).
+ *
+ * Never a failure. A diverged sample is a warning with the fix, and anything
+ * that stops the comparison -- no workspace, an old backend that 404s, a
+ * parser that will not load, any throw at all -- is "not checked", so this
+ * check cannot give `ix doctor` an exit code it did not have.
+ */
+export async function assessGraphVerify(run: () => Promise<VerifyReport>): Promise<CheckResult> {
+  try {
+    const report = await run();
+    const { files, diverged, stale } = report.counts;
+    if (report.graph === "diverged") {
+      const paths = report.files.filter((f) => f.state === "diverged").map((f) => f.path);
+      const shown = paths.slice(0, 3).join(", ") + (paths.length > 3 ? `, and ${paths.length - 3} more` : "");
+      return {
+        ok: false,
+        warn: true,
+        detail: `${diverged} of ${files} sampled files diverged (${shown}). Fix: ${report.fix}`,
+      };
+    }
+    if (report.graph === "unverified") {
+      return { ok: true, detail: `not checked: ${(report.reason ?? "nothing to compare").replace(/_/g, " ")}` };
+    }
+    if (stale > 0) {
+      return { ok: true, detail: `${files} sampled files match; ${stale} changed since the last ingest — run \`ix map\`` };
+    }
+    return { ok: true, detail: `${files} sampled files match a re-parse (nodes only)` };
+  } catch (e: any) {
+    return { ok: true, detail: `not checked: ${e?.message ?? String(e)}` };
+  }
+}
+
 export function registerDoctorCommand(program: Command): void {
   program
     .command("doctor")
@@ -630,6 +665,16 @@ export function registerDoctorCommand(program: Command): void {
               if (isConfigParseError(e)) return CONFIG_NOT_CHECKED;
               return { ok: false, detail: e.message ?? "stats failed" };
             }
+          },
+        },
+        {
+          // Counts can all be healthy while a file's nodes are not what its
+          // source says (F-01). A small sampled re-parse; see verify.ts.
+          name: "Graph matches a re-parse",
+          run: async () => {
+            if (configBroken) return CONFIG_NOT_CHECKED;
+            if (!matchedWorkspace) return { ok: true, detail: "not checked: no local workspace" };
+            return assessGraphVerify(() => runVerify(client, resolvePath(matchedWorkspace.root_path), { sample: 20, record: false }));
           },
         },
         {

@@ -816,6 +816,20 @@ Upgrade ix CLI, backend, and components to the latest version.
 |---|---|---|---|
 | `--check` | — | off | Only check for updates, don't install |
 
+### `ix verify [paths...]`
+
+Compare the graph's nodes to a fresh re-parse of a sample of files. Nodes only: edges are not compared yet.
+
+| Flag | Value | Default | Effect |
+|---|---|---|---|
+| `--sample` | `<n>` | `20` (or the number of paths given) | How many files to check: named paths first, then files the last map could not apply, then the most recently changed, then a seeded random pick |
+| `--seed` | `<n>` | `24` | Seed for the random part of the sample; the same seed checks the same files |
+| `--root` | `<dir>` | — | Workspace root directory |
+| `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
+| `--quiet` | — | off | Drop headers, section titles and advisory hints |
+| `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
+
 ### `ix view`
 
 Open the Ix System Compass visualizer.

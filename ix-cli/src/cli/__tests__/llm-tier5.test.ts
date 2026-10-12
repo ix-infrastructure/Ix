@@ -193,6 +193,23 @@ describe("status --format llm", () => {
 
     expect(lines).toEqual(["status backend=ok endpoint=http://localhost:8090"]);
   });
+
+  it("is byte-identical with no verify record, and appends the last verify when there is one", () => {
+    const staleInfo = {
+      graphCompleted: true, mapCompleted: true,
+      currentRev: 11, lastIngestAt: null, staleFiles: 0, sampleChangedFiles: [],
+    };
+    const without = renderStatusLlm("ok", "http://localhost:8090", staleInfo);
+    expect(renderStatusLlm("ok", "http://localhost:8090", staleInfo, undefined, null)).toEqual(without);
+    expect(without[0]).not.toContain("verified_");
+
+    const lines = renderStatusLlm("ok", "http://localhost:8090", staleInfo, undefined, {
+      root: "/r", at: "2026-10-11T00:00:00.000Z", lastIngestAt: null, graph: "diverged",
+      files: 20, stale: 1, diverged: 2, unverified: 0, divergedFiles: ["a.ts", "b.ts"], fix: "ix reset --workspace --yes --ingest",
+    });
+    expect(lines[0]).toBe(`${without[0]} verified_at=2026-10-11T00:00:00.000Z verified_files=20 verified_diverged=2`);
+    expect(lines.slice(1)).toEqual(without.slice(1));
+  });
 });
 
 describe("doctor --format llm", () => {

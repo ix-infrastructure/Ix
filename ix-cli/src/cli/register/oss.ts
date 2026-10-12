@@ -41,6 +41,7 @@ import { registerMcpCommand } from "../commands/mcp.js";
 import { registerContextCommand } from "../commands/context.js";
 import { registerAroundCommand } from "../commands/around.js";
 import { registerHookCommand } from "../commands/hook.js";
+import { registerVerifyCommand } from "../commands/verify.js";
 import { validateCliOptions } from "../options.js";
 import { setPrettyJson } from "../format.js";
 import { setOutputShape } from "../output-shape.js";
@@ -213,6 +214,7 @@ export function registerOssCommands(program: Command): void {
   registerContextCommand(program);
   registerAroundCommand(program);
   registerHookCommand(program);
+  registerVerifyCommand(program);
 
   configureOssOptions(program);
 

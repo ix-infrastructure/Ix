@@ -460,6 +460,28 @@ Two deliberate exceptions remain:
   backend, a slow stats read). `stale=false` says no file changed since the
   last ingest; it does not vouch for the graph.
 
+  When `ix verify` has run for this workspace, the `status` record ends with
+  what it found: `verified_at` (ISO), `verified_files` and `verified_diverged`.
+  `status` only reads that record; it never runs a verify. With no record the
+  three fields are absent and the line is unchanged.
+
+`verify` answers whether the graph's nodes match the source they came from. One
+`verify` record, then one `file` record per file that is not clean:
+
+```
+verify graph=diverged files=20 clean=18 stale=1 diverged=1 unverified=0 fix="ix reset --workspace --yes --ingest"
+file path=src/a.ts state=stale reason=changed_since_ingest missing=0 extra=1 changed=2
+file path=src/b.ts state=diverged missing=3 extra=0 changed=0
+```
+
+`graph` is `clean`, `diverged` or `unverified` (with a `reason`: `not_mapped`,
+`extractor_changed`, `parser_unavailable`, `no_file_verified`). A `stale` file
+changed since the last map and does not make the graph diverged; its fix is
+`ix map`. A `diverged` file's nodes do not match a re-parse and no edit is pending:
+its stored hash equals the disk hash, or the last map replayed it (F-01) and
+it has not changed since. Nodes only: edges are not compared. The command exits 0 for every
+verdict.
+
 Still routing to `text`: `diff --content` (verbatim hunks) and `ingest`, a
 hidden implementation-detail command whose output is a completion summary.
 

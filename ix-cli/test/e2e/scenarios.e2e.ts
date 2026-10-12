@@ -14,7 +14,7 @@
 
 import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterAll, beforeAll, beforeEach, describe, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   type Checkout,
   type E2eEnv,
@@ -23,6 +23,7 @@ import {
   e2eEnv,
   freshSignature,
   git,
+  ix,
   map,
   resetBackend,
   expectSameGraph,
@@ -208,5 +209,40 @@ describe("incremental equals fresh", () => {
     map(env, co);
 
     expectSameGraph("map twice", await signature(env, co), first);
+  });
+});
+
+describe("ix verify (CL-24A)", () => {
+  // Nodes only: the graph is compared with a re-parse of the files on disk.
+  it("a fresh map verifies clean; an unmapped edit is stale, not diverged", async () => {
+    const co = checkout("polyglot");
+    map(env, co);
+    const clean = ix(env, co, ["verify", "--format", "llm", "--sample", "50"]);
+    expect(clean.status).toBe(0);
+    expect(clean.stdout).toMatch(/^verify graph=clean .*diverged=0/m);
+    expect(clean.stdout).not.toMatch(/state=diverged/);
+
+    edit(co, "app/services.py", (t) => t + "\n\ndef added_after_map():\n    return 1\n");
+    const stale = ix(env, co, ["verify", "app/services.py", "--format", "llm"]);
+    expect(stale.status).toBe(0);
+    expect(stale.stdout).toMatch(/^verify graph=clean .*stale=1 .*diverged=0/m);
+    expect(stale.stdout).toMatch(/^file path=app\/services\.py state=stale/m);
+  });
+
+  // The F-01 shape (rename a file, map, rename it back, map) was expected to
+  // leave the file diverged. On backend 1.0.34 it does not: the last map
+  // leaves replayedFiles empty and every node of the file stored with the
+  // current hash (checked live, 2026-10-11), so verify must say clean.
+  // Divergence itself is pinned by the fake-backend tests in verify.test.ts.
+  it("a rename and rename back verifies clean", async () => {
+    const co = checkout("polyglot");
+    map(env, co);
+    renameSync(join(co.dir, "app/pricing.py"), join(co.dir, "app/pricing_moved.py"));
+    map(env, co);
+    renameSync(join(co.dir, "app/pricing_moved.py"), join(co.dir, "app/pricing.py"));
+    map(env, co);
+    const out = ix(env, co, ["verify", "app/pricing.py", "--format", "llm"]);
+    expect(out.status).toBe(0);
+    expect(out.stdout).toMatch(/^verify graph=clean files=1 clean=1 .*diverged=0/m);
   });
 });
