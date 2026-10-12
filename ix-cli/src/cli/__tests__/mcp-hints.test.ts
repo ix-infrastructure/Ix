@@ -136,6 +136,40 @@ describe("hints produced for an MCP caller", () => {
     }
   });
 
+  // Maintainer decision: additive stale info for MCP. The range call stays;
+  // a stale read step adds `stale` and, when the name re-anchors, `reanchor`.
+  it("flag a stale read step and offer the re-anchored symbol read beside the range", () => {
+    const stale = {
+      ...(bundle(
+        { name: "verify", kind: "function", path: "src/auth.ts" },
+        [],
+        [{ location: { path: "src/auth.ts", lineStart: 10, lineEnd: 40 }, refs: ["t"] }],
+      ) as object),
+      freshness: { stale: true },
+    } as never;
+    const read = nextToolCalls(stale).find((s) => s.cmd.startsWith("ix_read"))!;
+    expect(read).toEqual({
+      cmd: "ix_read symbol=src/auth.ts:10-40",
+      why: "the top-ranked evidence",
+      stale: true,
+      reanchor: "ix_read symbol=verify path=src/auth.ts",
+    });
+    expectRunnableOverMcp(read.reanchor!);
+    // The on-disk check says no: still flagged stale, no symbol form.
+    expect(nextToolCalls(stale, () => false).find((s) => s.cmd.startsWith("ix_read"))).toEqual({
+      cmd: "ix_read symbol=src/auth.ts:10-40",
+      why: "the top-ranked evidence",
+      stale: true,
+    });
+    // A fresh file carries neither key.
+    const fresh = nextToolCalls(bundle(
+      { name: "verify", kind: "function", path: "src/auth.ts" },
+      [],
+      [{ location: { path: "src/auth.ts", lineStart: 10, lineEnd: 40 }, refs: ["t"] }],
+    ));
+    for (const step of fresh) expect(Object.keys(step).sort()).toEqual(["cmd", "why"]);
+  });
+
   it("close a file's bundle with its importers, by path", () => {
     const steps = nextToolCalls(bundle({ name: "auth.ts", kind: "file", path: "src/auth.ts" }));
     expect(steps[0].cmd).toBe("ix_neighbors symbol=src/auth.ts relation=imported_by");

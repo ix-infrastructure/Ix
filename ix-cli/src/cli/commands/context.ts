@@ -2517,7 +2517,8 @@ export function renderBundle(bundle: ContextBundle, format: string): void {
       ...bundle.evidence.map(evidenceRecord(undefined)),
       // Last, so it reads as the closing instruction it is.
       ...(forMcp()
-        ? nextToolCalls(bundle).map((step) => llmLine("next", { cmd: step.cmd, why: step.why }))
+        ? nextToolCalls(bundle, onDiskSymbolCheck(bundle))
+          .map((step) => llmLine("next", { cmd: step.cmd, why: step.why, stale: step.stale, reanchor: step.reanchor }))
         : renderedNextReads(bundle).map((row) => llmLine("next", { cmd: row.cmd, stale: row.stale || undefined }))),
     ]);
     return;
@@ -2803,6 +2804,31 @@ export function nextReads(
   limit = 3,
   symbolRead: SymbolReadCheck = () => true,
 ): NextRead[] {
+  const rows = rowFreshness(bundle);
+  const seen = new Set<string>();
+  const reads: NextRead[] = [];
+  for (const item of bundle.evidence) {
+    const loc = item.location;
+    if (!loc?.path || loc.lineStart === undefined || loc.lineEnd === undefined) continue;
+    const range = `${loc.path}:${loc.lineStart}-${loc.lineEnd}`;
+    if (seen.has(range)) continue;
+    seen.add(range);
+    const { stale, symbol } = rows(item, loc.path, symbolRead);
+    reads.push({ cmd: symbol ? `ix read ${symbol} --path ${loc.path}` : `ix read ${range}`, stale });
+    if (reads.length === limit) break;
+  }
+  return reads;
+}
+
+/**
+ * For one evidence row at `path`: whether its file changed since the last
+ * ingest, and, for a stale row, the symbol name `read <name> --path <path>`
+ * re-anchors to — undefined wherever the range form must stand (see
+ * {@link nextReads} for each condition). Shared by the CLI and MCP closes.
+ */
+function rowFreshness(
+  bundle: ContextBundle,
+): (item: EvidenceItem, path: string, symbolRead: SymbolReadCheck) => { stale: boolean; symbol?: string } {
   // `?? []`: a bundle restored from an older save, or built by hand, may carry
   // evidence alone.
   const entities = bundle.entities ?? [];
@@ -2818,36 +2844,34 @@ export function nextReads(
     const key = `${e.path}\n${e.name}`;
     sameNameInFile.set(key, (sameNameInFile.get(key) ?? 0) + 1);
   }
-
-  const seen = new Set<string>();
-  const reads: NextRead[] = [];
-  for (const item of bundle.evidence) {
-    const loc = item.location;
-    if (!loc?.path || loc.lineStart === undefined || loc.lineEnd === undefined) continue;
-    const range = `${loc.path}:${loc.lineStart}-${loc.lineEnd}`;
-    if (seen.has(range)) continue;
-    seen.add(range);
+  return (item, path, symbolRead) => {
     const ref = item.refs?.[0];
     const entity = ref ? byId.get(ref) : undefined;
     const stale = entity?.stale === true
-      || stalePaths.has(loc.path)
-      || (loc.path === target?.path && bundle.freshness?.stale === true);
+      || stalePaths.has(path)
+      || (path === target?.path && bundle.freshness?.stale === true);
     const kind = entity?.kind.toLowerCase();
     const named = stale
       && entity !== undefined
       && entity.name !== ""
       && kind !== "file"
       && kind !== "module"
-      && entity.path === loc.path
+      && entity.path === path
       && SHELL_SAFE_NAME.test(entity.name)
-      && SHELL_SAFE_PATH.test(loc.path)
-      && sameNameInFile.get(`${loc.path}\n${entity.name}`) === 1
+      && SHELL_SAFE_PATH.test(path)
+      && sameNameInFile.get(`${path}\n${entity.name}`) === 1
       // Last: the only check that may touch the disk.
-      && symbolRead(entity.name, loc.path);
-    reads.push({ cmd: named ? `ix read ${entity.name} --path ${loc.path}` : `ix read ${range}`, stale });
-    if (reads.length === limit) break;
-  }
-  return reads;
+      && symbolRead(entity.name, path);
+    return named ? { stale, symbol: entity.name } : { stale };
+  };
+}
+
+/** One MCP next step; `stale` and `reanchor` appear only on a stale read (see {@link nextToolCalls}). */
+export interface NextToolCall {
+  cmd: string;
+  why: string;
+  stale?: true;
+  reanchor?: string;
 }
 
 /** Longest range a suggested read may span; past it the read covers its head only. */
@@ -2866,10 +2890,18 @@ export const NEXT_READ_MAX_LINES = 120;
  *
  * Every call names core tools only, and pins the target's file with `path=` so
  * an ambiguous name resolves to the entity this bundle was built for.
+ *
+ * The read step carries `stale: true` when its file changed since the last
+ * ingest (its range is from the last ingest), and then, if the symbol re-anchors
+ * safely (the same checks as {@link nextReads}), `reanchor`: an `ix_read
+ * symbol=<name> path=<file>` call that lands on where the name is now.
  */
-export function nextToolCalls(bundle: ContextBundle): Array<{ cmd: string; why: string }> {
+export function nextToolCalls(
+  bundle: ContextBundle,
+  symbolRead: SymbolReadCheck = () => true,
+): NextToolCall[] {
   const { name, kind, path } = bundle.target;
-  const steps: Array<{ cmd: string; why: string }> = [];
+  const steps: NextToolCall[] = [];
   const isFile = kind.toLowerCase() === "file";
   // A file resolves by its path; a symbol by name, pinned to its file.
   const symbol = isFile ? (path ?? name) : name;
@@ -2882,16 +2914,22 @@ export function nextToolCalls(bundle: ContextBundle): Array<{ cmd: string; why: 
   );
   steps.push({ cmd: suggest.impact(symbol, pin), why: "what a change here reaches, before you edit it" });
 
-  const read = bundle.evidence.find(
+  const readItem = bundle.evidence.find(
     (item) => item.location?.path && item.location.lineStart !== undefined && item.location.lineEnd !== undefined,
-  )?.location;
-  if (read?.lineStart !== undefined && read.lineEnd !== undefined) {
+  );
+  const read = readItem?.location;
+  if (readItem && read?.lineStart !== undefined && read.lineEnd !== undefined) {
     const end = Math.min(read.lineEnd, read.lineStart + NEXT_READ_MAX_LINES - 1);
+    // Additive: the range call is unchanged; a stale file adds `stale` and,
+    // where the name re-anchors safely, the symbol form beside it.
+    const { stale, symbol } = rowFreshness(bundle)(readItem, read.path, symbolRead);
     steps.push({
       cmd: toolCall("ix_read", { symbol: `${read.path}:${read.lineStart}-${end}` }),
       why: end < read.lineEnd
         ? `first ${NEXT_READ_MAX_LINES} of ${read.lineEnd - read.lineStart + 1} lines of the top-ranked evidence`
         : "the top-ranked evidence",
+      ...(stale ? { stale: true as const } : {}),
+      ...(symbol ? { reanchor: toolCall("ix_read", { symbol, path: read.path }) } : {}),
     });
   }
   return steps;
