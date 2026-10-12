@@ -6,17 +6,31 @@
  *
  * Everything else that reports on the graph's health (`ix status`, `ix doctor`,
  * graph-health.ts) reads counts or mtimes, so a graph whose nodes quietly stop
- * matching the source -- a revert the backend answered `Idempotent` (F-01), a
- * lost incremental write -- passes every one of them. This is the only check
- * that looks at the nodes themselves.
+ * matching the source -- nodes an earlier ingest left behind, a lost write --
+ * passes every one of them. This is the only check that looks at the nodes
+ * themselves.
  *
  * Node-level only. Each file is read from disk, parsed and built into the same
  * patch ingest would build (no edges), and its UpsertNode ops are the expected
- * set. The stored set comes from `/v1/list` scoped reads, one per node kind,
- * filtered to rows whose `provenance.sourceUri` is exactly that file. One
- * `/v1/source-hashes` call tells a file that is simply out of date (stale: run
- * `ix map`) from one whose stored nodes disagree with the very bytes they claim
- * to come from (diverged: rebuild).
+ * set. The stored set comes from `/v1/list` scoped reads, one per node kind the
+ * workspace holds (`/v1/stats` byKind, plus the parse's own kinds), filtered to
+ * rows whose `provenance.sourceUri` is exactly that file.
+ *
+ * What the source hash can and cannot say. `/v1/source-hashes` answers with
+ * the sourceHash of the file's newest stored patch (highest rev). A patch the
+ * backend answers `Idempotent` writes no patch, so after a revert or a restore
+ * (F-01) the newest patch is still the edit in between and its hash is not the
+ * disk hash. A hash mismatch alone therefore cannot tell "edited since the last
+ * map" from "reverted, and the revert was not applied". Verify tells them apart
+ * only with the ingest baseline's `replayedFiles`, the files the last map saw
+ * answered `Idempotent`:
+ *  - stored hash == disk hash, nodes differ: diverged. The graph claims these
+ *    bytes and holds other nodes (left-behind nodes, a lost write).
+ *  - stored hash != disk hash, the file is in `replayedFiles` and unchanged
+ *    since that map, nodes differ: diverged (F-01, `replayed_not_applied`).
+ *  - stored hash != disk hash otherwise: stale (`ix map`). That includes an
+ *    F-01 revert the baseline does not list (a baseline from an older CLI):
+ *    verify cannot see it, and does not claim to.
  *
  * TODO(CL-24, F-03/F-06): edge comparison. Edges -- CONTAINS and every
  * cross-file edge -- are deliberately not compared, and no partial edge check
@@ -33,7 +47,7 @@ import { createHash } from "node:crypto";
 import type { IxClient } from "../client/api.js";
 import type { GraphNode } from "../client/types.js";
 import { mapLimit } from "../client/request-memo.js";
-import { findWorkspaceForCwd, verifyRecordPath } from "./config.js";
+import { canonicalWorkspacePath, findWorkspaceForCwd, verifyRecordPath } from "./config.js";
 import { extractorChanged, loadIngestBaseline, type IngestBaseline } from "./ingest-baseline.js";
 import { detectSystem, repoWorkspaceIdFor } from "./system.js";
 import { normalizePathSeparators } from "./path-match.js";
@@ -45,9 +59,17 @@ export const DEFAULT_VERIFY_SAMPLE = 20;
 export const DEFAULT_VERIFY_SEED = 24;
 /** Rows per `/v1/list` read. A file with this many of one kind is not judged. */
 export const VERIFY_LIST_LIMIT = 5000;
-/** Kinds always read, so an extra stored node of a common kind is seen. */
+/**
+ * Kinds always read. The kinds `/v1/stats` reports for the workspace are read
+ * too (that list is what makes an extra node of any kind visible); these cover
+ * a stats read that fails or lags.
+ */
 export const VERIFY_DEFAULT_KINDS: readonly string[] = ["file", "function", "method", "class", "interface", "module", "constant", "variable", "trait", "enum", "type"];
 const VERIFY_CONCURRENCY = 4;
+/** Ingest skips files over this many bytes (`MAX_FILE_BYTES` in ingest.ts), so verify does too. */
+const VERIFY_MAX_FILE_BYTES = 1024 * 1024;
+/** Bound on the `/v1/stats` read that lists the workspace's kinds. */
+const VERIFY_STATS_TIMEOUT_MS = 15_000;
 
 export type VerifyFileState = "clean" | "stale" | "diverged" | "unverified";
 export type VerifyGraphVerdict = "clean" | "diverged" | "unverified";
@@ -113,7 +135,7 @@ export interface VerifyReport {
   files: VerifyFileResult[];
 }
 
-/** What `ix status` and `ix doctor` read back: the last verify, without per-file detail. */
+/** What `ix status` reads back: the last whole-root verify, without per-file detail. */
 export interface VerifyRecord {
   root: string;
   at: string;
@@ -162,7 +184,9 @@ export interface PickVerifyOptions {
  * Which files to verify, in order: the ones named, then the ones the last run
  * could not get applied (`replayedFiles`, the F-01 suspects), then the most
  * recently changed up to half the sample, then a seeded shuffle of the rest.
- * Files whose parse timed out are not in the graph by design and are skipped.
+ * Files whose parse timed out are not in the graph by design and are not
+ * sampled; a named one is still picked, and `runVerify` reports it unverified
+ * (`parse_timed_out`) without parsing it.
  */
 export function pickVerifyFiles(
   root: string,
@@ -291,11 +315,13 @@ const isEmptyDiff = (diff: NodeDiff): boolean =>
  * none, null when the lookup itself failed. `diff` is null when there was
  * nothing to compare (no parse, a failed read of the stored nodes).
  *
- *  - stale: the bytes on disk are not the bytes the graph was built from. `ix map` fixes it.
+ *  - stale: the stored hash is not the disk hash and nothing says why. Usually
+ *    an edit since the last map (`ix map` fixes it); see the module comment
+ *    for the F-01 revert this cannot be told apart from.
  *  - diverged: the nodes disagree with bytes the graph should hold: the stored
- *    hash equals the disk hash, or the last ingest replayed this file (F-01:
- *    reverted, backend answered Idempotent, so the stored hash is the older
- *    edit's) and the file has not changed since.
+ *    hash equals the disk hash, or `replayed` (the last map sent these bytes,
+ *    the backend answered Idempotent, so the stored hash is the edit in
+ *    between) and the file has not changed since.
  *  - unverified: no judgement was possible. A file with no stored hash and no
  *    stored nodes is here too: ingest skips some files on purpose (empty,
  *    minified-looking), and that is not something a re-map would change.
@@ -312,8 +338,9 @@ export function classifyFile(
   if (!diff) return { state: "unverified", reason: "no_comparison" };
   if (storedHash === undefined && storedCount === 0) return { state: "unverified", reason: "not_in_graph" };
   // F-01: the last ingest sent these very bytes and the backend answered
-  // Idempotent (it holds a patch with this id), so the newest stored patch is
-  // an older edit and the stored nodes are that edit's. Not fixed by `ix map`.
+  // Idempotent (it holds a patch with this id) and wrote no patch, so the
+  // newest stored patch, and the hash, are the edit in between. Not fixed by
+  // `ix map`, which sends the same patch id again.
   if (replayed && storedHash !== null && storedHash !== diskHash && !isEmptyDiff(diff)) {
     return { state: "diverged", reason: "replayed_not_applied" };
   }
@@ -358,7 +385,10 @@ export function recordFromReport(report: VerifyReport): VerifyRecord {
 export function loadVerifyRecord(projectRoot: string): VerifyRecord | null {
   try {
     const data = JSON.parse(fs.readFileSync(verifyRecordPath(projectRoot), "utf-8")) as Partial<VerifyRecord>;
-    if (data.root !== projectRoot || typeof data.at !== "string") return null;
+    if (typeof data.root !== "string" || typeof data.at !== "string") return null;
+    // Canonical on both sides: `--root .`, a trailing slash or a symlinked
+    // path names the same root as the canonical one `ix verify` saved.
+    if (canonicalWorkspacePath(data.root) !== canonicalWorkspacePath(projectRoot)) return null;
     if (data.graph !== "clean" && data.graph !== "diverged" && data.graph !== "unverified") return null;
     const count = (v: unknown): number => (typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : 0);
     return {
@@ -376,6 +406,15 @@ export function loadVerifyRecord(projectRoot: string): VerifyRecord | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether `record` describes an older graph than the one there is now: the
+ * workspace has been ingested since it ran. `ix status` then shows it as
+ * history, not as advice. Unknown (no current ingest time) is not outdated.
+ */
+export function verifyRecordOutdated(record: Pick<VerifyRecord, "lastIngestAt">, lastIngestAt: string | null | undefined): boolean {
+  return typeof lastIngestAt === "string" && record.lastIngestAt !== lastIngestAt;
 }
 
 /** Best-effort, like the other per-root state files: a failed write costs a status line. */
@@ -441,11 +480,14 @@ export interface RunVerifyOptions {
   /** For tests: stands in for `loadIngestionModules`. */
   loadModules?: () => Promise<Awaited<ReturnType<typeof loadIngestionModules>>>;
   now?: () => Date;
-  /** Save the status record (default true; ignored when `paths` is given). */
+  /**
+   * Save the record `ix status` reads (default true). Only a whole-root run
+   * does: a run given `paths` never saves, and `ix doctor` passes false.
+   */
   record?: boolean;
 }
 
-type VerifyClient = Pick<IxClient, "listByKind" | "getSourceHashes">;
+type VerifyClient = Pick<IxClient, "listByKind" | "getSourceHashes"> & Partial<Pick<IxClient, "stats">>;
 
 const sha256 = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
 
@@ -462,7 +504,10 @@ const fileResult = (path: string, state: VerifyFileState, reason?: string): Veri
  * every read command does; any other failed read only makes its file
  * unverified.
  */
-export async function runVerify(client: VerifyClient, root: string, opts: RunVerifyOptions = {}): Promise<VerifyReport> {
+export async function runVerify(client: VerifyClient, rootInput: string, opts: RunVerifyOptions = {}): Promise<VerifyReport> {
+  // Ingest saves its baseline under the canonical root (`resolveIngestRoot`),
+  // and `loadIngestBaseline` compares the string exactly.
+  const root = canonicalWorkspacePath(rootInput);
   const sample = opts.sample ?? DEFAULT_VERIFY_SAMPLE;
   const seed = opts.seed ?? DEFAULT_VERIFY_SEED;
   const at = (opts.now?.() ?? new Date()).toISOString();
@@ -500,6 +545,8 @@ export async function runVerify(client: VerifyClient, root: string, opts: RunVer
     if (rel !== null) known.add(rel);
   }
 
+  const timedOut = new Set(baseline.parseTimeouts.map(normalizePathSeparators));
+
   // Files the last ingest replayed (F-01 suspects) that have not changed since.
   const replayedSet = new Set(baseline.replayedFiles.map(normalizePathSeparators));
   const ingestMs = Date.parse(baseline.lastIngestAt);
@@ -512,9 +559,16 @@ export async function runVerify(client: VerifyClient, root: string, opts: RunVer
   const done = new Map<string, VerifyFileResult>();
   const parsed: Parsed[] = [];
   for (const rel of rels) {
+    // Only a named path gets here: ingest gave up on its parse, so it is not in
+    // the graph, and parsing it on this thread would have no budget at all.
+    if (timedOut.has(rel)) { done.set(rel, fileResult(rel, "unverified", "parse_timed_out")); continue; }
     let bytes: Buffer;
     try {
-      bytes = fs.readFileSync(nodePath.join(root, rel));
+      const abs = nodePath.join(root, rel);
+      // Ingest's own size gate: such a file is not in the graph, and this
+      // bounds the in-process parse of a named one.
+      if (fs.statSync(abs).size > VERIFY_MAX_FILE_BYTES) { done.set(rel, fileResult(rel, "unverified", "too_large")); continue; }
+      bytes = fs.readFileSync(abs);
     } catch {
       // In the baseline, gone from disk: the graph has not caught up with a
       // deletion, which is what `ix map` is for.
@@ -551,8 +605,24 @@ export async function runVerify(client: VerifyClient, root: string, opts: RunVer
     }
   }
 
+  // Every kind each workspace holds, so a stored node of a kind the parse no
+  // longer produces (and the default list lacks) is still read and seen as
+  // extra. `/v1/list` needs a kind, and the backend accepts any kind string.
+  const wsKinds = new Map<string, string[]>();
+  for (const ws of new Set(parsed.map((p) => p.ws))) {
+    try {
+      const stats = await client.stats?.({ workspaceId: ws, timeoutMs: VERIFY_STATS_TIMEOUT_MS });
+      const byKind = stats?.nodes?.byKind;
+      if (Array.isArray(byKind)) {
+        wsKinds.set(ws, byKind.map((k: { kind?: unknown }) => k?.kind).filter((k): k is string => typeof k === "string"));
+      }
+    } catch (err) {
+      if (isBackendUnreachable(err)) throw err;
+    }
+  }
+
   const reads = parsed.flatMap((p) => {
-    const kinds = new Set(VERIFY_DEFAULT_KINDS);
+    const kinds = new Set([...VERIFY_DEFAULT_KINDS, ...(wsKinds.get(p.ws) ?? [])]);
     for (const node of p.expected.values()) kinds.add(node.kind);
     kinds.delete("chunk");
     return [...kinds].sort().map((kind) => ({ p, kind }));

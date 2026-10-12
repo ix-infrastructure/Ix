@@ -2,7 +2,7 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
@@ -99,11 +99,14 @@ const HOLLOW = {
 };
 
 describe("ix status", () => {
+  let lastIngestAt: string | null = null;
+  beforeEach(() => { lastIngestAt = null; });
+
   async function status(...args: string[]): Promise<string> {
     vi.doMock("../stale.js", async (orig) => ({
       ...(await orig<typeof import("../stale.js")>()),
       detectStaleFiles: () => ({
-        graphCompleted: true, mapCompleted: true, currentRev: 7, lastIngestAt: null,
+        graphCompleted: true, mapCompleted: true, currentRev: 7, lastIngestAt,
         staleFiles: 0, sampleChangedFiles: [], replayedFiles: [], parseTimeouts: [],
       }),
     }));
@@ -152,6 +155,41 @@ describe("ix status", () => {
     out.length = 0;
     const json = JSON.parse(await status("--format", "json"));
     expect(json.verify).toMatchObject({ graph: "diverged", files: 20, diverged: 1 });
+  });
+
+  it("a verify from before the last ingest is labelled, gives no Fix, and says outdated in llm and json", async () => {
+    registerRepo();
+    stats = HOLLOW;
+    lastIngestAt = new Date().toISOString();
+    const { saveVerifyRecord } = await import("../verify.js");
+    saveVerifyRecord({
+      root: repo, at: new Date(Date.now() - 60_000).toISOString(), lastIngestAt: "2026-10-01T00:00:00.000Z", graph: "diverged",
+      files: 20, stale: 0, diverged: 1, unverified: 0, divergedFiles: ["a.ts"], fix: "ix reset --workspace --yes --ingest",
+    });
+    const text = await status();
+    expect(text).toMatch(/Verified:?\s+.*1 diverged \(before last ingest\)/);
+    expect(text).toMatch(/ingested since\. Run ix verify to check the graph as it is now/);
+    expect(text).not.toMatch(/last ix verify found[^\n]*Fix:/);
+    out.length = 0;
+    expect(await status("--format", "llm")).toMatch(/verified_outdated=true/);
+    out.length = 0;
+    expect(JSON.parse(await status("--format", "json")).verify).toMatchObject({ outdated: true, diverged: 1 });
+  });
+
+  it("a verify from the current ingest is not outdated, and keeps its Fix", async () => {
+    registerRepo();
+    stats = HOLLOW;
+    lastIngestAt = "2026-10-10T00:00:00.000Z";
+    const { saveVerifyRecord } = await import("../verify.js");
+    saveVerifyRecord({
+      root: repo, at: new Date().toISOString(), lastIngestAt, graph: "diverged",
+      files: 20, stale: 0, diverged: 1, unverified: 0, divergedFiles: ["a.ts"], fix: "ix reset --workspace --yes --ingest",
+    });
+    const text = await status();
+    expect(text).not.toMatch(/before last ingest/);
+    expect(text).toMatch(/last ix verify found 1 file[^\n]*Fix: ix reset --workspace --yes --ingest/);
+    out.length = 0;
+    expect(JSON.parse(await status("--format", "json")).verify).toMatchObject({ outdated: false });
   });
 
   it("has verify: null and no Verified line without a record", async () => {
@@ -261,6 +299,10 @@ describe("doctor checks", () => {
     const json = JSON.parse(await run(registerDoctorCommand, ["doctor", "--format", "json"]));
     const check = json.checks.find((c: { name: string }) => c.name === "Graph matches a re-parse");
     expect(check).toMatchObject({ ok: true, detail: expect.stringMatching(/^not checked/) });
+    // Doctor samples without saving: the record `ix status` shows is the last
+    // whole-root `ix verify`'s alone.
+    const { verifyRecordPath } = await import("../config.js");
+    expect(existsSync(verifyRecordPath(repo))).toBe(false);
     // It adds no failure: healthy is decided by the other checks alone.
     const others = json.checks.filter((c: { name: string }) => c.name !== "Graph matches a re-parse");
     expect(json.healthy).toBe(!others.some((c: { ok: boolean; warn?: boolean }) => !c.ok && !c.warn));

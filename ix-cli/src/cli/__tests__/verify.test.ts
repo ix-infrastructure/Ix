@@ -22,6 +22,8 @@ import {
   runVerify,
   saveVerifyRecord,
   storedNodes,
+  VERIFY_DEFAULT_KINDS,
+  verifyRecordOutdated,
   type VerifyNode,
   type VerifyReport,
 } from "../verify.js";
@@ -142,11 +144,15 @@ describe("classifyFile", () => {
   it("stale when the bytes changed since ingest", () => {
     expect(classifyFile("h2", "h1", missing, false, 3).state).toBe("stale");
   });
-  it("diverged when the hash is equal and nodes are missing (F-01)", () => {
+  it("diverged when the hash is equal and nodes are missing", () => {
     expect(classifyFile("h", "h", missing, false, 0)).toEqual({ state: "diverged" });
-    // F-01: reverted file, backend still holds the older patch's hash.
-    expect(classifyFile("h2", "h1", missing, false, 3, true).state).toBe("diverged");
-    expect(classifyFile("h2", "h1", missing, false, 3, false).state).toBe("stale");
+  });
+  it("F-01: the stored hash is the edit in between, so only a recorded replay makes it diverged", () => {
+    // The backend's source hash is the newest stored patch's; an Idempotent
+    // revert writes none, so the hashes differ even though nothing is pending.
+    expect(classifyFile("h2", "h1", missing, false, 3, true)).toEqual({ state: "diverged", reason: "replayed_not_applied" });
+    // Not recorded as replayed: indistinguishable from an edit since the map.
+    expect(classifyFile("h2", "h1", missing, false, 3, false)).toEqual({ state: "stale", reason: "changed_since_ingest" });
   });
   it("unverified when truncated, with no comparison, or with no hash and no nodes", () => {
     expect(classifyFile("h", "h", empty, true).state).toBe("unverified");
@@ -209,11 +215,18 @@ async function ingestedRows(root: string, rel: string, workspaceId: string) {
   };
 }
 
-function fakeClient(store: { rows: any[]; hashes: Array<{ workspaceId: string; uri: string; hash: string }> }) {
+function fakeClient(store: { rows: any[]; hashes: Array<{ workspaceId: string; uri: string; hash: string }>; stats?: boolean }) {
   const calls: Array<{ kind: string; scope?: string; workspaceId?: string }> = [];
   return {
     calls,
     client: {
+      // /v1/stats byKind: every kind the store holds, as the backend counts them.
+      ...(store.stats ? {
+        async stats() {
+          const kinds = [...new Set(store.rows.map((r) => r.kind as string))];
+          return { nodes: { total: store.rows.length, byKind: kinds.map((kind) => ({ kind, count: 1 })) } };
+        },
+      } : {}),
       async listByKind(kind: string, opts?: { scope?: string; workspaceId?: string }) {
         calls.push({ kind, scope: opts?.scope, workspaceId: opts?.workspaceId });
         return store.rows.filter((r) => r.kind === kind && r.provenance.sourceUri.includes(opts?.scope ?? ""));
@@ -241,7 +254,7 @@ describe("runVerify", () => {
     expect(report).toMatchObject({ graph: "unverified", reason: "extractor_changed", fix: "ix map" });
   });
 
-  it("clean, stale, and diverged (F-01: same bytes, nodes missing)", async () => {
+  it("clean, stale, and diverged (same bytes, nodes missing)", async () => {
     const root = nodePath.join(home, "repo");
     fs.mkdirSync(root);
     fs.writeFileSync(nodePath.join(root, "a.ts"), "export function a() { return 1; }\n");
@@ -292,6 +305,105 @@ describe("runVerify", () => {
     expect(report.graph).toBe("diverged");
     expect(report.files[0]).toMatchObject({ path: "a.ts", state: "diverged", missing: [] });
     expect(report.files[0].extra).toEqual([expect.objectContaining({ id: "ghost-node-id", name: "removedLongAgo" })]);
+  });
+
+  it("F-01 end to end: a recorded not-applied revert is diverged, an unrecorded one is only stale", async () => {
+    const root = nodePath.join(home, "repo");
+    fs.mkdirSync(root);
+    // On disk: the reverted bytes. In the graph: the edit in between, whose
+    // patch is still the newest, so its hash is the stored one.
+    fs.writeFileSync(nodePath.join(root, "a.ts"), "export function between() { return 2; }\n");
+    register(root);
+    const between = await ingestedRows(root, "a.ts", "ws1");
+    fs.writeFileSync(nodePath.join(root, "a.ts"), "export function a() { return 1; }\n");
+    const store = { rows: between.rows, hashes: [{ workspaceId: "ws1", uri: "a.ts", hash: between.hash }] };
+    const ingestedAt = new Date(Date.now() + 5_000); // after the revert's mtime
+    const files = new Map([[nodePath.join(root, "a.ts"), 1]]);
+
+    saveIngestBaseline(root, files, 3, ingestedAt, new Map(), between.extractor, { replayedFiles: ["a.ts"] });
+    const recorded = await runVerify(fakeClient(store).client, root, { sample: 5 });
+    expect(recorded.files[0]).toMatchObject({ path: "a.ts", state: "diverged", reason: "replayed_not_applied" });
+    expect(recorded.graph).toBe("diverged");
+
+    saveIngestBaseline(root, files, 3, ingestedAt, new Map(), between.extractor);
+    const unrecorded = await runVerify(fakeClient(store).client, root, { sample: 5 });
+    expect(unrecorded.files[0]).toMatchObject({ path: "a.ts", state: "stale", reason: "changed_since_ingest" });
+    expect(unrecorded.graph).toBe("clean");
+  });
+
+  it("reads every kind the workspace holds: a stored node of a kind the parse never produces is extra", async () => {
+    const root = nodePath.join(home, "repo");
+    fs.mkdirSync(root);
+    fs.writeFileSync(nodePath.join(root, "a.ts"), "export function a() { return 1; }\n");
+    register(root);
+    const a = await ingestedRows(root, "a.ts", "ws1");
+    saveIngestBaseline(root, new Map([[nodePath.join(root, "a.ts"), 1]]), 3, new Date(), new Map(), a.extractor);
+    // `section` is neither in VERIFY_DEFAULT_KINDS nor anything a .ts parse makes.
+    expect(VERIFY_DEFAULT_KINDS).not.toContain("section");
+    expect([...expectedNodes({ ops: [] }).values()]).toEqual([]);
+    const leftover = { id: "old-section-id", kind: "section", name: "Old heading", attrs: { start_line: 1, end_line: 1 },
+      provenance: { sourceUri: "a.ts", sourceHash: a.hash } };
+    const store = { rows: [...a.rows, leftover], hashes: [{ workspaceId: "ws1", uri: "a.ts", hash: a.hash }], stats: true };
+    const { client, calls } = fakeClient(store);
+    const report = await runVerify(client, root, { sample: 5 });
+    expect(calls.some((c) => c.kind === "section" && c.scope === "a.ts")).toBe(true);
+    expect(report.graph).toBe("diverged");
+    expect(report.files[0]).toMatchObject({ path: "a.ts", state: "diverged", missing: [] });
+    expect(report.files[0].extra).toEqual([{ id: "old-section-id", kind: "section", name: "Old heading" }]);
+  });
+
+  it("a named path whose parse timed out, or over ingest's size limit, is unverified and never parsed", async () => {
+    const root = nodePath.join(home, "repo");
+    fs.mkdirSync(root);
+    fs.writeFileSync(nodePath.join(root, "slow.ts"), "export function slow() { return 1; }\n");
+    fs.writeFileSync(nodePath.join(root, "big.ts"), `export const big = "${"x".repeat(1024 * 1024)}";\n`);
+    register(root);
+    const [parser, builder, languages] = await loadIngestionModules();
+    let parsed = 0;
+    const loadModules = async (): Promise<Awaited<ReturnType<typeof loadIngestionModules>>> => [
+      { ...parser, parseFile: (...args: Parameters<typeof parser.parseFile>) => { parsed++; return parser.parseFile(...args); } },
+      builder,
+      languages,
+    ];
+    saveIngestBaseline(root, new Map(), 3, new Date(), new Map(), builder.extractorName(), { parseTimeouts: ["slow.ts"] });
+    const report = await runVerify(fakeClient({ rows: [], hashes: [] }).client, root, { paths: ["slow.ts", "big.ts"], sample: 2, loadModules });
+    expect(report.files).toEqual([
+      expect.objectContaining({ path: "slow.ts", state: "unverified", reason: "parse_timed_out" }),
+      expect.objectContaining({ path: "big.ts", state: "unverified", reason: "too_large" }),
+    ]);
+    expect(parsed).toBe(0);
+  });
+
+  it("only a whole-root run saves the status record; named paths and record:false do not", async () => {
+    const root = nodePath.join(home, "repo");
+    fs.mkdirSync(root);
+    fs.writeFileSync(nodePath.join(root, "a.ts"), "export function a() { return 1; }\n");
+    register(root);
+    const a = await ingestedRows(root, "a.ts", "ws1");
+    saveIngestBaseline(root, new Map([[nodePath.join(root, "a.ts"), 1]]), 3, new Date(), new Map(), a.extractor);
+    const store = { rows: a.rows, hashes: [{ workspaceId: "ws1", uri: "a.ts", hash: a.hash }] };
+    await runVerify(fakeClient(store).client, root, { paths: ["a.ts"] });
+    await runVerify(fakeClient(store).client, root, { record: false });
+    expect(fs.existsSync(verifyRecordPath(root))).toBe(false);
+    await runVerify(fakeClient(store).client, root);
+    expect(loadVerifyRecord(root)).toMatchObject({ graph: "clean", files: 1 });
+  });
+
+  it("a non-canonical root (trailing slash, '.', a symlink) finds the canonical baseline and record", async () => {
+    const root = nodePath.join(home, "repo");
+    fs.mkdirSync(root);
+    fs.writeFileSync(nodePath.join(root, "a.ts"), "export function a() { return 1; }\n");
+    register(root);
+    const a = await ingestedRows(root, "a.ts", "ws1");
+    saveIngestBaseline(root, new Map([[nodePath.join(root, "a.ts"), 1]]), 3, new Date(), new Map(), a.extractor);
+    const link = nodePath.join(home, "link");
+    fs.symlinkSync(root, link);
+    const store = { rows: a.rows, hashes: [{ workspaceId: "ws1", uri: "a.ts", hash: a.hash }] };
+    for (const input of [`${root}/`, `${root}/.`, link]) {
+      const report = await runVerify(fakeClient(store).client, input);
+      expect(report).toMatchObject({ root, graph: "clean" });
+      expect(loadVerifyRecord(input)).toMatchObject({ root, graph: "clean" });
+    }
   });
 
   it("a failed list makes that file unverified, not a crash", async () => {
@@ -359,8 +471,33 @@ describe("verify record", () => {
     expect(loadVerifyRecord("/other")).toBeNull();
   });
 
+  it("is outdated once the workspace has been ingested after it ran", () => {
+    const record = recordFromReport(report);
+    expect(verifyRecordOutdated(record, report.lastIngestAt)).toBe(false);
+    expect(verifyRecordOutdated(record, "2026-10-12T00:00:00.000Z")).toBe(true);
+    expect(verifyRecordOutdated(record, null)).toBe(false);
+    expect(verifyRecordOutdated({ lastIngestAt: null }, "2026-10-12T00:00:00.000Z")).toBe(true);
+  });
+
   it("reads a corrupt record as null", () => {
     fs.writeFileSync(verifyRecordPath("/r"), "{not json");
     expect(loadVerifyRecord("/r")).toBeNull();
+  });
+});
+
+describe("docs/llm-format.md", () => {
+  // Every reason verify can emit is documented: a consumer branching on
+  // `reason=` must not meet an undocumented value (e.g. `no_files`).
+  it("lists every reason verify.ts emits", () => {
+    const here = nodePath.dirname(new URL(import.meta.url).pathname);
+    const src = fs.readFileSync(nodePath.join(here, "..", "verify.ts"), "utf-8");
+    const doc = fs.readFileSync(nodePath.join(here, "..", "..", "..", "..", "docs", "llm-format.md"), "utf-8");
+    const reasons = new Set<string>();
+    for (const re of [/reason: "([a-z_]+)"/g, /unverified\("([a-z_]+)"/g, /"(?:unverified|stale|diverged)", "([a-z_]+)"\)/g]) {
+      for (const m of src.matchAll(re)) reasons.add(m[1]);
+    }
+    expect(reasons).toContain("no_files");
+    expect(reasons).toContain("parse_timed_out");
+    for (const reason of reasons) expect(doc, reason).toMatch(new RegExp(`[\`=]${reason}\``));
   });
 });

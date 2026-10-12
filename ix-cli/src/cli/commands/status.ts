@@ -21,7 +21,7 @@ import {
   type GraphHealthScope,
 } from "../graph-health.js";
 import { detectSystem } from "../system.js";
-import { loadVerifyRecord, type VerifyRecord } from "../verify.js";
+import { loadVerifyRecord, verifyRecordOutdated, type VerifyRecord } from "../verify.js";
 
 interface StatusStaleInfo {
   graphCompleted: boolean;
@@ -46,7 +46,9 @@ interface StatusStaleInfo {
  * `last_ingest_at` stays ISO so the consumer can do its own arithmetic instead
  * of parsing prose. `map_complete` separately reports whether an architecture
  * hierarchy exists for that source revision. `verified_*` come from the last
- * `ix verify`, and are absent when there has been none.
+ * whole-root `ix verify`, and are absent when there has been none;
+ * `verified_outdated=true` says the workspace was ingested after it ran, so
+ * its counts describe an earlier graph.
  */
 export function renderStatusLlm(
   backend: string,
@@ -73,6 +75,7 @@ export function renderStatusLlm(
     ["verified_at", verified?.at ?? null],
     ["verified_files", verified ? String(verified.files) : null],
     ["verified_diverged", verified ? String(verified.diverged) : null],
+    ["verified_outdated", verified ? String(verifyRecordOutdated(verified, staleInfo?.lastIngestAt)) : null],
   ])];
   if (graph && isUnhealthy(graph)) lines.push(llmLine("graph", graphHealthLlmFields(graph)));
   for (const f of staleInfo?.sampleChangedFiles ?? []) {
@@ -144,8 +147,9 @@ export function registerStatusCommand(program: Command): void {
         }
 
         const graph = await graphCheck;
-        // The last `ix verify`, if any. Read only: status never runs one.
+        // The last whole-root `ix verify`, if any. Read only: status never runs one.
         const verified = loadVerifyRecord(root);
+        const verifiedOutdated = verified !== null && verifyRecordOutdated(verified, staleInfo?.lastIngestAt);
 
         if (opts.format === "llm") {
           printLlmLines(renderStatusLlm(health.status, getEndpoint(), staleInfo ?? null, graph, verified));
@@ -164,7 +168,7 @@ export function registerStatusCommand(program: Command): void {
             verify: verified
               ? { at: verified.at, graph: verified.graph, files: verified.files, diverged: verified.diverged,
                   stale: verified.stale, unverified: verified.unverified, lastIngestAt: verified.lastIngestAt,
-                  fix: verified.fix }
+                  outdated: verifiedOutdated, fix: verified.fix }
               : null,
           };
           printJson(result);
@@ -213,11 +217,14 @@ export function registerStatusCommand(program: Command): void {
           if (isUnhealthy(graph)) renderWarning(graphHealthProse(graph));
           if (verified) {
             // A verify from before the last ingest describes a graph that has
-            // since been written to; say so rather than drop it.
-            const before = staleInfo?.lastIngestAt && verified.lastIngestAt !== staleInfo.lastIngestAt
-              ? " (before last ingest)" : "";
+            // since been written to (perhaps by the very fix it suggested):
+            // show it, labelled, and ask for a new verify instead of a fix.
+            const before = verifiedOutdated ? " (before last ingest)" : "";
             renderKeyValue("Verified", `${timeSince(verified.at)}, ${verified.files} files, ${verified.diverged} diverged${before}`);
-            if (verified.diverged > 0) {
+            if (verified.diverged > 0 && verifiedOutdated) {
+              renderNote(`The last ix verify found ${verified.diverged} file(s) whose nodes did not match their source, ` +
+                "but the workspace has been ingested since. Run ix verify to check the graph as it is now.");
+            } else if (verified.diverged > 0) {
               renderWarning(`The last ix verify found ${verified.diverged} file(s) whose nodes do not match their source. ` +
                 `Fix: ${verified.fix ?? GRAPH_REBUILD_FIX}`);
             }

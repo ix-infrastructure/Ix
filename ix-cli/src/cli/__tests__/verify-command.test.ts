@@ -3,7 +3,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
@@ -32,6 +32,10 @@ beforeAll(async () => {
       };
       if (url.startsWith("/v1/health")) return send(200, { status: "ok" });
       if (url.startsWith("/v1/source-hashes")) return send(200, hashes);
+      if (url.startsWith("/v1/stats")) {
+        const kinds = [...new Set(rows.map((r) => r.kind))];
+        return send(200, { nodes: { total: rows.length, byKind: kinds.map((kind) => ({ kind, count: 1 })) }, edges: { total: 0 } });
+      }
       if (url.startsWith("/v1/list")) {
         if (listStatus !== 200) return send(listStatus, { error: "nope" });
         const q = JSON.parse(body || "{}");
@@ -174,6 +178,23 @@ describe("ix verify output", () => {
     await verify("--format", "llm");
     const { verifyRecordPath } = await import("../config.js");
     expect(JSON.parse(readFileSync(verifyRecordPath(repo), "utf-8"))).toMatchObject({ graph: "diverged", diverged: 1 });
+  });
+});
+
+describe("ix verify roots and the record", () => {
+  it("a named path does not replace the record ix status reads", async () => {
+    await mapped({ dropFunction: true });
+    await verify("a.ts", "--format", "llm");
+    const { verifyRecordPath } = await import("../config.js");
+    expect(existsSync(verifyRecordPath(repo))).toBe(false);
+  });
+
+  it("--root . and --root with a trailing slash find the mapped workspace", async () => {
+    await mapped();
+    for (const root of [".", `${repo}/`]) {
+      out.length = 0;
+      expect(await verify("--root", root, "--format", "llm")).toMatch(/^verify graph=clean files=1 clean=1/m);
+    }
   });
 });
 

@@ -4,7 +4,7 @@ import type { Command } from "commander";
 import * as nodePath from "node:path";
 import { renderSection, renderKeyValue, renderWarning, renderNote, renderSuccess } from "../ui.js";
 import { createClient } from "../../client/factory.js";
-import { getEndpoint, resolveWorkspaceRoot } from "../config.js";
+import { canonicalWorkspacePath, getEndpoint, resolveWorkspaceRoot } from "../config.js";
 import { llmError, llmLine, printLlmLines } from "../llm.js";
 import { backendUnreachableError, CliUsageError, isBackendUnreachable } from "../errors.js";
 import { printJson } from "../format.js";
@@ -94,7 +94,8 @@ function parseCount(flag: string, value: string | undefined, fallback: number, m
 
 /** A path the caller typed, as the workspace-relative POSIX path the graph stores. */
 function toWorkspaceRel(root: string, input: string): string {
-  const rel = normalizePathSeparators(nodePath.relative(root, nodePath.resolve(process.cwd(), input)));
+  // Canonical like the root, so a path typed through a symlink still lands inside it.
+  const rel = normalizePathSeparators(nodePath.relative(root, canonicalWorkspacePath(nodePath.resolve(process.cwd(), input))));
   if (rel === "" || rel === ".." || rel.startsWith("../") || nodePath.isAbsolute(rel)) {
     throw new CliUsageError(`'${input}' is not a file inside the workspace at ${root}.`);
   }
@@ -113,7 +114,9 @@ export function registerVerifyCommand(program: Command): void {
       const named = paths ?? [];
       const sample = parseCount("--sample", opts.sample, named.length > 0 ? named.length : DEFAULT_VERIFY_SAMPLE, 1);
       const seed = parseCount("--seed", opts.seed, DEFAULT_VERIFY_SEED, 0);
-      const root = resolveWorkspaceRoot(opts.root ? nodePath.resolve(opts.root) : undefined);
+      // Canonical, as ingest records it: `--root .`, `--root dir/` and a
+      // symlinked or registered non-canonical path all name the same root.
+      const root = canonicalWorkspacePath(resolveWorkspaceRoot(opts.root ? nodePath.resolve(opts.root) : undefined));
       const explicit = named.map((p) => toWorkspaceRel(root, p));
       const client = createClient();
       let report: VerifyReport;
