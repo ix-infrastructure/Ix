@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { Command } from "commander";
 
 import { registerMapCommand } from "../commands/map.js";
-import { mapResultCachePath, mapStalePath } from "../config.js";
+import { canonicalWorkspacePath, mapResultCachePath, mapStalePath } from "../config.js";
 import {
   ensureFreshMap,
   MAP_REFRESH_ARG,
@@ -298,7 +298,9 @@ describe("map refresh", () => {
       expect(r.stale).toBe(true);
       expect(r.out, "nothing on stdout").toBe("");
       expect(backend.mapRequests(), "no /v1/map from the reader").toBe(0);
-      expect(spawned).toEqual([repo]);
+      // The canonical root, which on Windows CI is the long form of the
+      // 8.3 temp path (RUNNER~1) that `realpathSync` leaves as it is.
+      expect(spawned).toEqual([canonicalWorkspacePath(repo)]);
       expect(r.err).toBe("ix: architecture map is stale (refreshing in background); regions shown may predate recent edits. Run ix map --remap to refresh.\n");
       expect(readMapStale(repo)?.lastAttemptAt, "the start is recorded for the debounce").toBe(1_000_000);
       expect(mapLockHeld(repo), "the reader does not keep the lock").toBe(false);
