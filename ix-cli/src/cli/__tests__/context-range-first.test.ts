@@ -6,15 +6,15 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { nextReads, renderBundle } from "../commands/context.js";
-import { readsOneSymbol } from "../commands/read.js";
+import { nextReads, renderBundle, renderedNextReads } from "../commands/context.js";
+import { readsOneSymbol, symbolReadChecker } from "../commands/read.js";
 
-// renderBundle vets each symbol read against the file on disk (readsOneSymbol).
+// renderBundle vets each symbol read against the file on disk (symbolReadChecker).
 // The bundles here name files that do not exist, so the check is stubbed for
 // the render tests; the real one is tested against a temp tree at the end.
 vi.mock("../commands/read.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../commands/read.js")>()),
-  readsOneSymbol: vi.fn(() => true),
+  symbolReadChecker: vi.fn(() => () => true),
 }));
 
 function bundleWith(evidence: Array<Record<string, unknown>>): never {
@@ -235,6 +235,18 @@ describe("renderBundle prints the stale flag on next rows", () => {
     ]);
   });
 
+  // A budget-fitting loop re-renders the same bundle; the on-disk check (file
+  // reads plus a workspace walk) must be built once for it, not per render.
+  it("builds the on-disk check once per bundle, however often it renders", () => {
+    const bundle = renderable();
+    vi.mocked(symbolReadChecker).mockClear();
+    for (let i = 0; i < 5; i++) captureLog(() => renderBundle(bundle, "llm"));
+    renderedNextReads(bundle);
+    expect(vi.mocked(symbolReadChecker)).toHaveBeenCalledTimes(1);
+    captureLog(() => renderBundle(renderable(), "llm"));
+    expect(vi.mocked(symbolReadChecker)).toHaveBeenCalledTimes(2);
+  });
+
   it("ends a stale row with the note in text", () => {
     const lines = captureLog(() => renderBundle(renderable(), "text"));
     expect(lines.find((l) => l.includes("ix read parse --path src/c.ts"))).toMatch(
@@ -259,7 +271,7 @@ describe("nextReads keeps the range form where the symbol read could miss", () =
   });
 
   it("renderBundle falls back when the file on disk does not vouch for the name", () => {
-    vi.mocked(readsOneSymbol).mockReturnValue(false);
+    vi.mocked(symbolReadChecker).mockReturnValue(() => false);
     try {
       const lines: string[] = [];
       const orig = console.log;
@@ -279,7 +291,7 @@ describe("nextReads keeps the range form where the symbol read could miss", () =
         'next cmd="ix read src/c.ts:4-9" stale=true',
       ]);
     } finally {
-      vi.mocked(readsOneSymbol).mockReturnValue(true);
+      vi.mocked(symbolReadChecker).mockReturnValue(() => true);
     }
   });
 });
@@ -363,5 +375,46 @@ describe("readsOneSymbol asks the file, not the bundle", () => {
     // A path that does not contain the suggested one is no collision.
     writeFileSync(join(root, "src/my-util.ts"), decl);
     expect(real(root, "parse", "src/util.ts")).toBe(true);
+  });
+
+  it("says no for a path that escapes the workspace with ..", () => {
+    const outside = mkdtempSync(join(tmpdir(), "ix-next-reads-outside-"));
+    try {
+      writeFileSync(join(outside, "x.ts"), "export function parse(s: string) {\n  return s;\n}\n");
+      const rel = join("..", outside.split(/[\\/]/).pop()!, "x.ts").replace(/\\/g, "/");
+      expect(real(root, "parse", rel)).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("walks the workspace once for every row it vets, and answers repeats from memory", async () => {
+    const actual = await vi.importActual<typeof import("../commands/read.js")>("../commands/read.js");
+    for (const n of ["a", "b", "c"]) {
+      writeFileSync(join(root, `src/${n}.ts`), `export function run_${n}(s: string) {\n  return s;\n}\n`);
+    }
+    let walks = 0;
+    const check = actual.symbolReadChecker(root, (r) => {
+      walks++;
+      return actual.listWorkspaceFiles(r);
+    });
+    for (let i = 0; i < 3; i++) {
+      for (const n of ["a", "b", "c"]) expect(check(`run_${n}`, `src/${n}.ts`)).toBe(true);
+    }
+    expect(walks).toBe(1);
+    // An answer is kept: a colliding file added afterwards is not seen by this checker.
+    writeFileSync(join(root, "src/run_a.ts"), "export {};\n");
+    expect(check("run_a", "src/a.ts")).toBe(true);
+    expect(actual.symbolReadChecker(root)("run_a", "src/a.ts")).toBe(false);
+  });
+});
+
+describe("sameFsPath", () => {
+  it("matches a Windows path whatever its drive-letter case and separators", async () => {
+    const actual = await vi.importActual<typeof import("../commands/read.js")>("../commands/read.js");
+    expect(actual.sameFsPath("C:\\Repo\\src\\x.ts", "c:/repo/src/X.ts", "win32")).toBe(true);
+    expect(actual.sameFsPath("C:\\Repo\\src\\x.ts", "C:\\Repo\\src\\y.ts", "win32")).toBe(false);
+    expect(actual.sameFsPath("/repo/src/x.ts", "/repo/src/../src/x.ts", "linux")).toBe(true);
+    expect(actual.sameFsPath("/repo/src/x.ts", "/repo/src/X.ts", "linux")).toBe(false);
   });
 });

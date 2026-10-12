@@ -641,24 +641,19 @@ function basenameMatcher(target: string): (entryName: string) => boolean {
   };
 }
 
+/** The workspace's files, from one walk; `exhaustive` is false when it ran out of budget. */
+export interface WorkspaceFiles {
+  paths: string[];
+  exhaustive: boolean;
+}
+
 /**
- * Whether the workspace holds a file that would turn `ix read <name> --path
- * <file>` away from the `name` declared in `file` (at `abs`):
- *
- * - a file named `name`: Step 3 above opens it before any symbol lookup, and
- *   --path does not stop it;
- * - another file whose path contains `file`: --path is a substring test on the
- *   graph's source path (resolve.ts), so `src/util.ts` also keeps
- *   `lib/src/util.ts` and `src/util.tsx`, and a `name` declared there too
- *   leaves the lookup to return candidates or the wrong one.
- *
- * Says yes when the walk runs out of budget, since then neither is ruled out.
- * Files outside the workspace (another repo in the same system) are not seen.
+ * Every file under `root`, by the walk `findLocalBasenameMatches` makes (same
+ * ignored directories, same entry budget, symlinks not followed). Listed once
+ * so one bundle's symbol suggestions share a single walk instead of one each.
  */
-function suggestionCollides(root: string, name: string, abs: string, file: string): boolean {
-  const named = basenameMatcher(name);
-  const self = path.resolve(abs);
-  const needle = file.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+export function listWorkspaceFiles(root: string): WorkspaceFiles {
+  const paths: string[] = [];
   const stack = [root];
   let budget = WALK_ENTRY_BUDGET;
   while (stack.length > 0) {
@@ -670,17 +665,53 @@ function suggestionCollides(root: string, name: string, abs: string, file: strin
       continue;
     }
     for (const entry of entries) {
-      if (--budget <= 0) return true;
+      if (--budget <= 0) return { paths, exhaustive: false };
       if (entry.isDirectory()) {
         if (entry.name.startsWith(".") || WALK_IGNORE_DIRS.has(entry.name)) continue;
         stack.push(path.join(current, entry.name));
         continue;
       }
       if (!entry.isFile()) continue;
-      if (named(entry.name)) return true;
-      const other = path.join(current, entry.name);
-      if (other !== self && other.replace(/\\/g, "/").toLowerCase().includes(needle)) return true;
+      paths.push(path.join(current, entry.name));
     }
+  }
+  return { paths, exhaustive: true };
+}
+
+/**
+ * Whether `a` and `b` name the same file. Resolved first, and compared without
+ * case on Windows, where `C:\Repo\x.ts` and `c:/repo/x.ts` are one file: a
+ * plain `!==` there made a file collide with itself, so the symbol form was
+ * never suggested.
+ */
+export function sameFsPath(a: string, b: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform === "win32") {
+    return path.win32.resolve(a).toLowerCase() === path.win32.resolve(b).toLowerCase();
+  }
+  return path.posix.resolve(a) === path.posix.resolve(b);
+}
+
+/**
+ * Whether the workspace holds a file that would turn `ix read <name> --path
+ * <file>` away from the `name` declared in `file` (at `abs`):
+ *
+ * - a file named `name`: Step 3 above opens it before any symbol lookup, and
+ *   --path does not stop it;
+ * - another file whose path contains `file`: --path is a substring test on the
+ *   graph's source path (resolve.ts), so `src/util.ts` also keeps
+ *   `lib/src/util.ts` and `src/util.tsx`, and a `name` declared there too
+ *   leaves the lookup to return candidates or the wrong one.
+ *
+ * Says yes when the walk ran out of budget, since then neither is ruled out.
+ * Files outside the workspace (another repo in the same system) are not seen.
+ */
+function suggestionCollides(files: WorkspaceFiles, name: string, abs: string, file: string): boolean {
+  if (!files.exhaustive) return true;
+  const named = basenameMatcher(name);
+  const needle = file.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+  for (const other of files.paths) {
+    if (named(path.basename(other))) return true;
+    if (other.replace(/\\/g, "/").toLowerCase().includes(needle) && !sameFsPath(other, abs)) return true;
   }
   return false;
 }
@@ -720,6 +751,8 @@ function mayBeTestOrFixture(file: string, source: string): boolean {
  * Whether `ix read <name> --path <file>` would show the one declaration of
  * `name` in `file`, so `ix context` may suggest it instead of a line range.
  *
+ * No when `file` resolves outside every readable workspace root (`ix read`
+ * would refuse it, and a `..` in a graph path must not make this open it).
  * No when a workspace file has `name` as its basename, or another workspace
  * file's path contains `file` (see `suggestionCollides`). No unless the
  * file on disk declares `name` exactly once: two (`save` in two classes) leave
@@ -729,16 +762,48 @@ function mayBeTestOrFixture(file: string, source: string): boolean {
  * fixture file: the resolver drops test and fixture symbols whenever a
  * production one shares the name, before --path is applied, so the read finds
  * nothing and exits 1. Unreadable, missing or oversized files say no.
+ *
+ * One-off; a caller vetting several rows should use `symbolReadChecker`, which
+ * walks the workspace once for all of them.
  */
 export function readsOneSymbol(root: string, name: string, file: string): boolean {
-  const abs = absoluteFromSourceUri(file, root);
-  // One open, fstat and read on the same handle (CodeQL js/file-system-race).
-  const text = readBoundedFile(abs, { maxBytes: SUGGEST_MAX_FILE_BYTES });
-  if (text === null) return false;
-  if (mayBeTestOrFixture(file, text)) return false;
-  if (countDeclarations(text.split("\n"), bareName(name)) !== 1) return false;
-  // Last: the file read above is cheaper than this walk of the workspace.
-  return !suggestionCollides(root, name, abs, file);
+  return symbolReadChecker(root)(name, file);
+}
+
+/**
+ * `readsOneSymbol` for many rows against one workspace: the workspace is
+ * walked at most once (lazily, only when a row gets past the per-file checks),
+ * and each (name, file) is answered once, so calling it again — from a
+ * budget-fitting loop that re-renders the same bundle — costs a map lookup.
+ * `listFiles` is injectable for tests.
+ */
+export function symbolReadChecker(
+  root: string,
+  listFiles: (root: string) => WorkspaceFiles = listWorkspaceFiles,
+): (name: string, file: string) => boolean {
+  let files: WorkspaceFiles | undefined;
+  const answers = new Map<string, boolean>();
+  const check = (name: string, file: string): boolean => {
+    const abs = absoluteFromSourceUri(file, root);
+    if (!isReadablePath(abs, root)) return false;
+    // One open, fstat and read on the same handle (CodeQL js/file-system-race).
+    const text = readBoundedFile(abs, { maxBytes: SUGGEST_MAX_FILE_BYTES });
+    if (text === null) return false;
+    if (mayBeTestOrFixture(file, text)) return false;
+    if (countDeclarations(text.split("\n"), bareName(name)) !== 1) return false;
+    // Last: the file read above is cheaper than the walk of the workspace.
+    files ??= listFiles(root);
+    return !suggestionCollides(files, name, abs, file);
+  };
+  return (name, file) => {
+    const key = `${name}\n${file}`;
+    let answer = answers.get(key);
+    if (answer === undefined) {
+      answer = check(name, file);
+      answers.set(key, answer);
+    }
+    return answer;
+  };
 }
 
 /** Filter nodes to those whose filename actually matches the target basename. */

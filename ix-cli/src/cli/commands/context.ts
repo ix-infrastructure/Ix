@@ -36,7 +36,7 @@ import {
   type StartingPoint,
   type SymbolHit,
 } from "../explain/issue.js";
-import { readsOneSymbol } from "./read.js";
+import { symbolReadChecker } from "./read.js";
 import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/related-files.js";
 import { cachedBm25Ranker } from "../explain/bm25-cache.js";
 import { collectTextReferences, gitRepoAccess, type TextSource } from "../explain/text-references.js";
@@ -2518,7 +2518,7 @@ export function renderBundle(bundle: ContextBundle, format: string): void {
       // Last, so it reads as the closing instruction it is.
       ...(forMcp()
         ? nextToolCalls(bundle).map((step) => llmLine("next", { cmd: step.cmd, why: step.why }))
-        : nextReads(bundle, 3, onDiskSymbolCheck()).map((row) => llmLine("next", { cmd: row.cmd, stale: row.stale || undefined }))),
+        : renderedNextReads(bundle).map((row) => llmLine("next", { cmd: row.cmd, stale: row.stale || undefined }))),
     ]);
     return;
   }
@@ -2563,7 +2563,7 @@ export function renderBundle(bundle: ContextBundle, format: string): void {
     }
   }
 
-  const reads = nextReads(bundle, 3, onDiskSymbolCheck());
+  const reads = renderedNextReads(bundle);
   if (reads.length > 0) {
     renderSection("Next");
     for (const row of reads) {
@@ -2748,10 +2748,26 @@ const SHELL_SAFE_PATH = /^[A-Za-z0-9_./][A-Za-z0-9_./-]*$/;
 /** Whether `ix read <name> --path <file>` reads `name` and nothing else; see `readsOneSymbol`. */
 export type SymbolReadCheck = (name: string, path: string) => boolean;
 
-/** `readsOneSymbol` against this workspace's files, as they are on disk now. */
-function onDiskSymbolCheck(): SymbolReadCheck {
-  const root = resolveWorkspaceRoot();
-  return (name, path) => readsOneSymbol(root, name, path);
+/**
+ * One on-disk check per bundle (`symbolReadChecker`: one workspace walk, each
+ * row's answer kept), so rendering the same bundle again — a budget-fitting
+ * loop re-measuring its lines — never repeats the file reads or the walk.
+ */
+const bundleSymbolChecks = new WeakMap<ContextBundle, SymbolReadCheck>();
+
+/** `readsOneSymbol` against this workspace's files, as they are on disk now, memoised per bundle. */
+function onDiskSymbolCheck(bundle: ContextBundle): SymbolReadCheck {
+  let check = bundleSymbolChecks.get(bundle);
+  if (!check) {
+    check = symbolReadChecker(resolveWorkspaceRoot());
+    bundleSymbolChecks.set(bundle, check);
+  }
+  return check;
+}
+
+/** The `next` rows renderBundle prints: `nextReads` with the on-disk check, cheap to call again. */
+export function renderedNextReads(bundle: ContextBundle): NextRead[] {
+  return nextReads(bundle, 3, onDiskSymbolCheck(bundle));
 }
 
 /**
@@ -2776,7 +2792,7 @@ function onDiskSymbolCheck(): SymbolReadCheck {
  * bundle shows twice in one file, and a name `symbolRead` rejects. The bundle's
  * entities are only the target's neighbours, so a second `save` in the same
  * file need not be among them: renderBundle passes `onDiskSymbolCheck`, which
- * asks the file itself (see `readsOneSymbol`).
+ * asks the file itself (see `readsOneSymbol`), once per bundle.
  *
  * Deduped, because a caller and a dependent are frequently the same function,
  * and taken in evidence order, which is already the ranking — the target first,
