@@ -324,4 +324,179 @@ describe("reconcileRemovedEntities", () => {
     ).rejects.toThrow("has no entity manifest");
     expect(entity).not.toHaveBeenCalled();
   });
+
+  describe("across the first two stored patches", () => {
+    const notFound = () => Object.assign(new Error("404: patch not found"), { status: 404 });
+    const ops = (...ids: string[]) => ({ data: { ops: ids.map(id => ({ type: "UpsertNode", id, kind: id.startsWith("h") ? "heading" : "function" })) } });
+    const liveEntity = () => vi.fn().mockResolvedValue({ node: { kind: "function" }, claims: [], edges: [] });
+    const deleted = (p: GraphPatchPayload) => p.ops.filter(o => o.type === "DeleteNode").map(o => o["id"]);
+
+    it("emits DeleteNode on an unchanged-hash rebuild for ids the old extractor's patch has and the new one lacks", async () => {
+      const getPatch = vi.fn(async (id: string) => {
+        if (id === "current@H") throw notFound();
+        return ops("a", "h1", "h2");
+      });
+      const entity = vi.fn().mockResolvedValue({
+        node: { kind: "heading" }, claims: [],
+        edges: [{ id: "e-h1", predicate: "CONTAINS", provenance: { sourceUri: "src/example.ts" } }],
+      });
+      const patch = patchWith([{ type: "UpsertNode", id: "a", kind: "function" }]);
+
+      const reconciled = await reconcileRemovedEntities({ getPatch, entity }, patch, ["current@H", "old@H", "legacy@H"]);
+
+      expect(deleted(reconciled)).toEqual(["h1", "h2"]);
+      expect(reconciled.ops.filter(o => o.type === "DeleteEdge").map(o => o["id"])).toEqual(["e-h1"]);
+      expect(entity.mock.calls.map(c => c[0])).toEqual(["h1", "h2"]);
+    });
+
+    it("merges the manifests of the first two existing candidates, primary order first", async () => {
+      const getPatch = vi.fn(async (id: string) => (id === "current@H" ? ops("a", "b") : ops("a", "b", "h1", "h2")));
+      const entity = liveEntity();
+      const patch = patchWith([{ type: "UpsertNode", id: "a", kind: "function" }]);
+
+      const reconciled = await reconcileRemovedEntities({ getPatch, entity }, patch, ["current@H", "old@H", "legacy@H"]);
+
+      expect(deleted(reconciled)).toEqual(["b", "h1", "h2"]);
+    });
+
+    it("gives an id only the second manifest names no DeleteNode when it is already gone, but still deletes an absent primary id", async () => {
+      const getPatch = vi.fn(async (id: string) => (id === "current@H" ? ops("b") : ops("b", "h1")));
+      const entity = vi.fn().mockRejectedValue(notFound());
+      const patch = patchWith([]);
+
+      const reconciled = await reconcileRemovedEntities({ getPatch, entity }, patch, ["current@H", "old@H"]);
+
+      expect(deleted(reconciled)).toEqual(["b"]);
+    });
+
+    it("reads no further than the window when a window candidate exists", async () => {
+      const ids = Array.from({ length: 30 }, (_, i) => `c${i}`);
+      const getPatch = vi.fn(async (id: string) => {
+        if (id === "c0") return ops("a");
+        throw notFound();
+      });
+      await reconcileRemovedEntities({ getPatch, entity: liveEntity() }, patchWith([]), ids);
+      expect(getPatch.mock.calls.map(c => c[0]).sort()).toEqual(["c0", "c1"]);
+    });
+
+    it("walks the rest of the candidates when neither window candidate exists", async () => {
+      const ids = ["c0", "c1", "c2", "c3"];
+      const getPatch = vi.fn(async (id: string) => {
+        if (id === "c2") return ops("a");
+        throw notFound();
+      });
+      const reconciled = await reconcileRemovedEntities({ getPatch, entity: liveEntity() }, patchWith([]), ids);
+      expect(deleted(reconciled)).toEqual(["a"]);
+      expect(getPatch.mock.calls.map(c => c[0])).toEqual(["c0", "c1", "c2"]);
+
+      await expect(
+        reconcileRemovedEntities({ getPatch: vi.fn().mockRejectedValue(notFound()), entity: liveEntity() }, patchWith([]), ids),
+      ).rejects.toThrow("Previous source patch was not found");
+    });
+
+    it("leaves chunks alone in map mode, across merged manifests", async () => {
+      const getPatch = vi.fn(async (id: string) => {
+        if (id === "current@H") return ops("a");
+        return { data: { ops: [
+          { type: "UpsertNode", id: "a", kind: "function" },
+          { type: "UpsertNode", id: "chunk-L9", kind: "chunk" },
+          { type: "UpsertNode", id: "h1", kind: "heading" },
+        ] } };
+      });
+      const entity = vi.fn().mockResolvedValue({
+        node: { kind: "heading" }, claims: [],
+        edges: [{ id: "chunk-edge", predicate: "NEXT", provenance: { sourceUri: "src/example.ts" } }],
+      });
+
+      const reconciled = await reconcileRemovedEntities({ getPatch, entity }, patchWith([]), ["current@H", "old@H"], undefined, true);
+
+      expect(entity.mock.calls.map(c => c[0]).sort()).toEqual(["a", "h1"]);
+      expect(deleted(reconciled).sort()).toEqual(["a", "h1"]);
+      expect(reconciled.ops.some(o => o["id"] === "chunk-L9")).toBe(false);
+      expect(reconciled.ops.filter(o => o.type === "DeleteEdge")).toEqual([]);
+    });
+
+    it("skips a second patch with no entity manifest or a failed read, but fails when the read before any found patch fails", async () => {
+      const entity = liveEntity();
+      const noManifest = vi.fn(async (id: string) => (id === "current@H" ? ops("a") : { data: {} }));
+      expect(deleted(await reconcileRemovedEntities({ getPatch: noManifest, entity }, patchWith([]), ["current@H", "old@H"]))).toEqual(["a"]);
+
+      // The patch found first is the one the first-hit walk always used; a
+      // backend error on the extra one only loses its extra ids, and says so.
+      const second5xx = vi.fn(async (id: string) => {
+        if (id === "current@H") return ops("a");
+        throw Object.assign(new Error("500"), { status: 500 });
+      });
+      const onWindowSkipped = vi.fn();
+      const reconciled = await reconcileRemovedEntities(
+        { getPatch: second5xx, entity }, patchWith([]), ["current@H", "old@H"], undefined, false, undefined, { onWindowSkipped },
+      );
+      expect(deleted(reconciled)).toEqual(["a"]);
+      expect(onWindowSkipped).toHaveBeenCalledTimes(1);
+      expect(String(onWindowSkipped.mock.calls[0]![0])).toContain("old@H");
+
+      // Nothing found before the failed read: the first-hit walk failed here too.
+      const firstMissingSecond5xx = vi.fn(async (id: string) => {
+        if (id === "current@H") throw notFound();
+        throw Object.assign(new Error("500"), { status: 500 });
+      });
+      await expect(reconcileRemovedEntities({ getPatch: firstMissingSecond5xx, entity }, patchWith([]), ["current@H", "old@H"])).rejects.toThrow("500");
+
+      const first5xx = vi.fn(async (id: string) => {
+        if (id === "current@H") throw Object.assign(new Error("500"), { status: 500 });
+        return ops("a");
+      });
+      await expect(reconcileRemovedEntities({ getPatch: first5xx, entity }, patchWith([]), ["current@H", "old@H"])).rejects.toThrow("500");
+    });
+
+    describe("on a same-hash reconcile (liveOnly)", () => {
+      const withDelete = (deletedId: string, ...ids: string[]) => ({ data: { ops: [
+        { type: "DeleteNode", id: deletedId },
+        ...ids.map(id => ({ type: "UpsertNode", id, kind: "function" })),
+      ] } });
+
+      it("emits no DeleteNode for an id an earlier reconcile already deleted, and does not look it up", async () => {
+        const getPatch = vi.fn(async (id: string) => {
+          if (id === "current@H") return withDelete("x", "a");
+          throw notFound();
+        });
+        const entity = vi.fn().mockRejectedValue(notFound());
+        const patch = patchWith([{ type: "UpsertNode", id: "a", kind: "function" }]);
+
+        const reconciled = await reconcileRemovedEntities(
+          { getPatch, entity }, patch, ["current@H", "old@H"], undefined, false, undefined, { liveOnly: true },
+        );
+
+        expect(deleted(reconciled)).toEqual([]);
+        expect(entity).not.toHaveBeenCalled();
+      });
+
+      it("deletes only live nodes an earlier patch created, not absent ones, across both manifests", async () => {
+        // x: deleted by the current patch, created by the old one, now gone.
+        // gone: created, already absent. live: created and still live.
+        const getPatch = vi.fn(async (id: string) => (id === "current@H" ? withDelete("x", "a", "gone") : ops("a", "x", "live")));
+        const entity = vi.fn().mockImplementation(async (id: string) => {
+          if (id === "live") return { node: { kind: "function" }, claims: [], edges: [] };
+          throw notFound();
+        });
+        const patch = patchWith([{ type: "UpsertNode", id: "a", kind: "function" }]);
+
+        const reconciled = await reconcileRemovedEntities(
+          { getPatch, entity }, patch, ["current@H", "old@H"], undefined, false, undefined, { liveOnly: true },
+        );
+
+        expect(deleted(reconciled)).toEqual(["live"]);
+      });
+
+      it("leaves the changed-hash path re-emitting an already-absent primary id, as before", async () => {
+        const getPatch = vi.fn(async (id: string) => {
+          if (id === "current@H") return withDelete("x", "a");
+          throw notFound();
+        });
+        const entity = vi.fn().mockRejectedValue(notFound());
+        const reconciled = await reconcileRemovedEntities({ getPatch, entity }, patchWith([]), ["current@H", "old@H"]);
+        expect(deleted(reconciled)).toEqual(["x", "a"]);
+      });
+    });
+  });
 });
