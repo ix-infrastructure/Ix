@@ -1407,6 +1407,23 @@ describe("ingestFiles against a fake backend", () => {
       expect(message).not.toContain("unchanged");
       expect(message).toContain("still empty");
     });
+
+    it("does not call the workspace's graph empty when a scoped run with no local baseline commits nothing", async () => {
+      // `ix ingest <new file>` in a repo mapped from another HOME or machine:
+      // no local baseline, and the lookup covers that one file only, so an
+      // empty answer says nothing about the rest of the graph.
+      fixture(2);
+      backend.refuseEverything = true;
+      let message = "";
+      try {
+        await ingestFiles(join(repo, "src", "m000.ts"), { format: "text", suppressOutput: true, printSummary: false });
+      } catch (err) {
+        message = String(err);
+      }
+      expect(message).toContain("committed nothing");
+      expect(message).not.toContain("still empty");
+      expect(message).toContain("may now be stale");
+    });
   });
 
   describe("a patch that deletes (IN-04)", () => {

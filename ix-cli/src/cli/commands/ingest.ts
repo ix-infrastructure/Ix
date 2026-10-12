@@ -2573,9 +2573,14 @@ export async function ingestFiles(
     // says nothing about the baseline, and not on a failed lookup, which
     // says nothing about the backend. Not on a workspace-id migration either:
     // the old id's graph is still there until the cleanup after this run.
+    // And not on a partial run (a file or directory scope, or --lang): its
+    // lookup covered only its own files, so an empty answer says nothing about
+    // the rest of the workspace -- `ix ingest <new file>` in a repo mapped from
+    // another machine has no local baseline but a full graph.
     graphStartedEmpty =
       dbResetDetected ||
-      (!opts.force && !workspaceMigrated && mtimeCache.size === 0 && hashLookupAnswered && knownHashes.size === 0);
+      (!opts.force && !workspaceMigrated && !scopedRun && !opts.lang &&
+        mtimeCache.size === 0 && hashLookupAnswered && knownHashes.size === 0);
     const hashed = performance.now();
     timings.hashMs = Math.round(hashed - discovered);
 
