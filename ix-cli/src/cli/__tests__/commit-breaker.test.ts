@@ -124,6 +124,26 @@ describe("createCommitBreaker", () => {
   });
 });
 
+describe("trip, which the database probe uses (IN-19C)", () => {
+  it("latches tripped and everTripped at once, and records the error", () => {
+    const b = createCommitBreaker(5);
+    const err = new Error("500: Connection refused: arangodb:8529");
+    b.trip(err);
+    expect(b.tripped()).toBe(true);
+    expect(b.everTripped()).toBe(true);
+    expect(b.lastError()).toBe(err);
+    expect(b.consecutiveFailures(), "no streak was spent").toBe(0);
+  });
+
+  it("is cleared by a success like any trip, and everTripped stays", () => {
+    const b = createCommitBreaker(5);
+    b.trip(new Error("x"));
+    b.recordSuccess();
+    expect(b.tripped()).toBe(false);
+    expect(b.everTripped()).toBe(true);
+  });
+});
+
 describe("everTripped", () => {
   it("is false until the limit is reached", () => {
     const b = createCommitBreaker(3);
@@ -596,6 +616,35 @@ describe("describeCommitCutoff", () => {
     expect(describeCommitCutoff(b, "e", 0, false)).toContain("400 patches were not sent");
   });
 
+  it("says the graph is still empty, not unchanged, when it held none of these files (IN-19C)", () => {
+    // After `ix reset` or `reset --ingest` there is no graph to be unchanged,
+    // and "The graph is unchanged" reads as "your old graph is still there".
+    const b = createCommitBreaker(1);
+    b.recordFailure(new Error("500: transaction begin timeout"));
+    b.recordSkipped(3);
+
+    const empty = describeCommitCutoff(b, "e", 0, false, { graphStartedEmpty: true });
+    expect(empty).not.toContain("unchanged");
+    expect(empty).toContain("this workspace's graph is still empty");
+    // Only with nothing landed: a partial run is described as before.
+    const partial = describeCommitCutoff(b, "e", 4, false, { graphStartedEmpty: true });
+    expect(partial).toContain("4 other patches did land");
+    // And the defaults keep the old text.
+    expect(describeCommitCutoff(b, "e", 0)).toContain("The graph is unchanged.");
+    expect(describeCommitCutoff(b, "e", 0, false, {})).toContain("The graph is unchanged.");
+  });
+
+  it("names the database, and drops the `ix doctor` still passes line, when the backend reported it down", () => {
+    const b = createCommitBreaker(1);
+    b.trip(new Error("500: Connection refused: arangodb:8529"));
+
+    const msg = describeCommitCutoff(b, "e", 0, false, { databaseUnreachable: true });
+    expect(msg).toContain("cannot reach its database (ArangoDB)");
+    expect(msg).not.toContain("still passes");
+    expect(msg).not.toContain("Either the database cannot keep up");
+    expect(describeCommitCutoff(b, "e", 0)).toContain("`ix doctor` still passes");
+  });
+
   it("says 'patch was' for one and 'patches were' for many", () => {
     const one = createCommitBreaker(1);
     one.recordFailure(new Error("x"));
@@ -612,5 +661,14 @@ describe("describeCommitCutoff", () => {
     const msg = describeCommitCutoff(b, "e");
     expect(msg.length).toBeLessThan(1000);
     expect(msg).toContain("…");
+  });
+});
+
+describe("trip() with the breaker disabled", () => {
+  it("does not latch when the limit is 0", () => {
+    const b = createCommitBreaker(0);
+    b.trip(new Error("db down"));
+    expect(b.tripped()).toBe(false);
+    expect(b.everTripped()).toBe(false);
   });
 });

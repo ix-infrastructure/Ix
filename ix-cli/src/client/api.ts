@@ -354,8 +354,8 @@ export class IxClient {
    * The body is the head's revision record when the backend has one, and the
    * bare revision number when it does not; both are returned as-is.
    */
-  async currentRevision(): Promise<unknown> {
-    return this.get("/v1/revisions/current");
+  async currentRevision(timeoutMs?: number): Promise<unknown> {
+    return this.get("/v1/revisions/current", timeoutMs);
   }
 
   async diff(
@@ -392,7 +392,7 @@ export class IxClient {
     });
     if (!resp.ok) {
       const text = await resp.text();
-      throw httpError(resp.status, text);
+      throw httpError(resp.status, text, resp.headers);
     }
     return resp.json() as Promise<PatchCommitResult>;
   }
@@ -474,7 +474,7 @@ export class IxClient {
     });
     if (!resp.ok) {
       const text = await resp.text();
-      throw httpError(resp.status, text);
+      throw httpError(resp.status, text, resp.headers);
     }
     return resp.json() as Promise<PatchCommitResult>;
   }
@@ -766,8 +766,9 @@ export class IxClient {
     return this.get(`/v1/stats${qs ? `?${qs}` : ""}`, opts?.timeoutMs);
   }
 
-  async health(): Promise<HealthResponse> {
-    return this.get("/v1/health");
+  /** `timeoutMs` bounds a probe that must answer in seconds; the default is unchanged. */
+  async health(timeoutMs?: number): Promise<HealthResponse> {
+    return this.get("/v1/health", timeoutMs);
   }
 
   async capabilities(): Promise<CapabilitiesResponse> {
@@ -885,15 +886,37 @@ export class LocalTokenRequiredError extends Error {
   }
 }
 
-/** The error for a non-2xx response: `<status>: <body>`, or a typed one we can explain. */
-export function httpError(status: number, body: string): Error {
+/** What `httpError` adds to its Error when it is handed the response headers. */
+export interface HttpErrorDetail {
+  /** The HTTP status, the same number the message starts with. */
+  readonly status?: number;
+  /** The raw `Retry-After` header, when the response carried one. */
+  readonly retryAfter?: string;
+}
+
+/**
+ * The error for a non-2xx response: `<status>: <body>`, or a typed one we can explain.
+ *
+ * With `headers`, the Error also carries `status` and, when the response had
+ * one, `retryAfter` (see `HttpErrorDetail`), both non-enumerable. The message
+ * is the same either way: many callers read the status and the error code back
+ * out of it, so it must not change shape. Only the commit routes pass headers,
+ * for the ingest's transient-status retry (`cli/commit-retry.ts`).
+ */
+export function httpError(status: number, body: string, headers?: Pick<Headers, "get">): Error {
   if (status === 401) {
     try {
       const parsed = JSON.parse(body) as { code?: unknown } | null;
       if (parsed?.code === "local_token_required") return new LocalTokenRequiredError(body);
     } catch { /* not the guard's JSON: a plain 401 */ }
   }
-  return new Error(`${status}: ${errorBodyForMessage(body)}`);
+  const err = new Error(`${status}: ${errorBodyForMessage(body)}`);
+  if (headers !== undefined) {
+    Object.defineProperty(err, "status", { value: status, enumerable: false });
+    const retryAfter = headers.get("retry-after");
+    if (retryAfter !== null) Object.defineProperty(err, "retryAfter", { value: retryAfter, enumerable: false });
+  }
+  return err;
 }
 
 /**

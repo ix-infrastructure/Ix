@@ -41,6 +41,7 @@ import { loadIngestBaseline } from "../ingest-baseline.js";
 import { isCloudReady } from "../remote.js";
 import { hasCompletedMapBaseline } from "../stale.js";
 import { printJson } from "../format.js";
+import { healthFromError } from "../database-probe.js";
 import type { CapabilitiesResponse, HealthResponse } from "../../client/types.js";
 
 interface CheckResult {
@@ -250,21 +251,8 @@ export function assessLocalAuth(
   };
 }
 
-/**
- * A health answer, including the 503 a backend sends while it cannot reach its
- * database: that is a server that answered, and the body says what is wrong.
- * Thrown for anything else.
- */
-export function healthFromError(err: unknown): HealthResponse | null {
-  const m = /^503:\s*(\{.*\})\s*$/s.exec((err as Error)?.message ?? "");
-  if (!m) return null;
-  try {
-    const body = JSON.parse(m[1]!) as HealthResponse;
-    return typeof body?.status === "string" ? body : null;
-  } catch {
-    return null;
-  }
-}
+// Shared with the ingest's database probe; re-exported for existing importers.
+export { healthFromError };
 
 /**
  * "Database reachable" from the health answer. A backend that reports

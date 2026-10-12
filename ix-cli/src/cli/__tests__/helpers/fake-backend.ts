@@ -119,6 +119,34 @@ export class FakeBackend {
   rememberHashes = false;
   /** Answer `/v1/source-hashes` with a 500, as a backend under load does. */
   failSourceHashes = false;
+  /**
+   * Answer the next commits (bulk or single) with these statuses, in order,
+   * before any other decision: a proxy or a restarting backend saying "not
+   * now" (IN-19C). `retryAfter` is sent as the `Retry-After` header.
+   */
+  transientCommitFailures: Array<{ status: number; retryAfter?: string }> = [];
+  /**
+   * ArangoDB is down: `/v1/health` answers 503 `degraded` with
+   * `database: "unreachable"` (Ix-memory 1.0.33+), every commit answers 500,
+   * and `/v1/revisions/current` answers 500.
+   */
+  databaseDown = false;
+  /**
+   * The status commits answer while `databaseDown`. 500 is what the backend
+   * sends; 503 is a backend (or a proxy in front of it) that reads a lost
+   * database as "not now", which the bulk sites would otherwise retry.
+   */
+  databaseDownCommitStatus = 500;
+  /**
+   * Whether `/v1/health` reports `database` at all. Off is a backend older
+   * than 1.0.33: health answers 200 `ok` whatever the database is doing, and
+   * only a read that needs it (`/v1/revisions/current`) can tell.
+   */
+  healthReportsDatabase = true;
+  /** `/v1/health` requests, in order. */
+  healthRequests = 0;
+  /** `/v1/revisions/current` requests, in order. */
+  revisionRequests = 0;
   private readonly hashes = new Map<string, { workspaceId: string | null; uri: string; hash: string }>();
 
   /**
@@ -379,7 +407,7 @@ export class FakeBackend {
 
   private route(url: string, body: string, res: ServerResponse): void {
     const path = new URL(url, "http://x").pathname;
-    const send = (code: number, payload: unknown): void => {
+    const send = (code: number, payload: unknown, headers: Record<string, string> = {}): void => {
       // Stamp the answer onto the request that produced it. Whether a bulk was
       // ACCEPTED or refused is the difference between two completely different
       // code paths in `ingestFiles`, and a test that assumes the wrong one is
@@ -387,7 +415,7 @@ export class FakeBackend {
       // went wrong.
       const last = this.requests[this.requests.length - 1];
       if (last !== undefined && last.code === undefined) last.code = code;
-      res.writeHead(code, { "Content-Type": "application/json" });
+      res.writeHead(code, { "Content-Type": "application/json", ...headers });
       res.end(JSON.stringify(payload));
     };
 
@@ -408,6 +436,19 @@ export class FakeBackend {
       }
       if (this.abortAfterCommits !== undefined && this.commitCount >= this.abortAfterCommits) {
         this.aborter.abort();
+      }
+
+      const transientFailure = this.transientCommitFailures.shift();
+      if (transientFailure !== undefined) {
+        return send(
+          transientFailure.status,
+          { error: `${transientFailure.status}: service unavailable` },
+          transientFailure.retryAfter !== undefined ? { "Retry-After": transientFailure.retryAfter } : {},
+        );
+      }
+      if (this.databaseDown) {
+        const status = this.databaseDownCommitStatus;
+        return send(status, { error: `${status}: Connection refused: arangodb:8529` });
       }
 
       if (path === "/v1/patches/bulk") this.bulkBodyBytes.push(Buffer.byteLength(body));
@@ -502,8 +543,17 @@ export class FakeBackend {
     }
 
     if (path === "/v1/health") {
+      this.healthRequests++;
       const release = this.releaseVersion !== undefined ? this.releaseVersion : this.semantics === "head" ? "1.0.34" : null;
-      return send(200, { status: "ok", version: "1.0.28", ...(release ? { release_version: release } : {}) });
+      const base = { version: "1.0.28", ...(release ? { release_version: release } : {}) };
+      if (!this.healthReportsDatabase) return send(200, { status: "ok", ...base });
+      if (this.databaseDown) return send(503, { status: "degraded", database: "unreachable", ...base });
+      return send(200, { status: "ok", database: "reachable", ...base });
+    }
+    if (path === "/v1/revisions/current") {
+      this.revisionRequests++;
+      if (this.databaseDown) return send(500, { error: "500: Connection refused: arangodb:8529" });
+      return send(200, { rev: this.rev });
     }
     if (path === "/v1/source-hashes") {
       if (this.failSourceHashes) return send(500, { error: "500: transaction begin timeout" });
