@@ -14,6 +14,7 @@ import {
   isWithinDiscoveryRoot,
   tryGitLsFiles,
 } from '../commands/ingest.js';
+import { discoverSourceFiles, emptyDiscoveryCounts, walkFiles } from '../file-discovery.js';
 
 describe('dedupeDiscoveredFilePaths', () => {
   it('collapses alternate discovered paths that point at the same canonical file', () => {
@@ -225,6 +226,77 @@ describe('discovery symlink containment', () => {
       const kept = canonical.filter((candidate) => isWithinDiscoveryRoot(repo, candidate));
 
       expect(kept).toContain(join(repo, 'shared', 'util.ts'));
+    },
+  );
+
+  // QA-07. A directory symlink to its parent is a loop. Guards: the Dirent
+  // checks in walkFiles (a link is neither isDirectory() nor isFile(), so the
+  // walk never descends), and the statSync(...).isFile() in tryGitLsFiles.
+  it.skipIf(process.platform === 'win32')(
+    'walkFiles does not follow a directory symlink to its parent',
+    () => {
+      const repo = scratchDir('ix-loop-');
+      mkdirSync(join(repo, 'src'), { recursive: true });
+      writeFileSync(join(repo, 'src', 'a.ts'), 'export const a = 1;\n');
+      writeFileSync(join(repo, 'src', 'b.ts'), 'export const b = 1;\n');
+      try {
+        symlinkSync('..', join(repo, 'src', 'up'), 'dir');
+      } catch {
+        return; // no permission to symlink — nothing to assert
+      }
+
+      const walked = [...walkFiles(repo, true)].map((p) => p.slice(repo.length + 1)).sort();
+
+      expect(walked).toEqual(['src/a.ts', 'src/b.ts']);
+      expect(walked.some((p) => p.includes('/up/'))).toBe(false);
+    },
+  );
+
+  // QA-07. The walk's other Dirent check: only a real file (entry.isFile())
+  // is yielded, so a file symlink with a source extension that points out of
+  // the repository is never read on the no-git path.
+  it.skipIf(process.platform === 'win32')(
+    'walkFiles does not yield a file symlink that leaves the repository',
+    () => {
+      const repo = scratchDir('ix-walk-leak-');
+      const outside = scratchDir('ix-walk-outside-');
+      const secret = join(outside, 'secret.ts');
+      writeFileSync(secret, 'export const token = "leaked";\n');
+      mkdirSync(join(repo, 'src'), { recursive: true });
+      writeFileSync(join(repo, 'src', 'a.ts'), 'export const a = 1;\n');
+      try {
+        symlinkSync(secret, join(repo, 'src', 'notes.ts'));
+      } catch {
+        return; // no permission to symlink — nothing to assert
+      }
+
+      const walked = [...walkFiles(repo, true)].map((p) => p.slice(repo.length + 1)).sort();
+
+      expect(walked).toEqual(['src/a.ts']);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'a git-tracked directory symlink is not discovered as a file',
+    () => {
+      const repo = scratchDir('ix-loop-git-');
+      mkdirSync(join(repo, 'src'), { recursive: true });
+      writeFileSync(join(repo, 'src', 'a.ts'), 'export const a = 1;\n');
+      writeFileSync(join(repo, 'src', 'b.ts'), 'export const b = 1;\n');
+      try {
+        // Named like a source file, so only the stat check can drop it.
+        symlinkSync('..', join(repo, 'src', 'up.ts'), 'dir');
+        execFileSync('git', ['init', '-q'], { cwd: repo });
+        execFileSync('git', ['add', '-A'], { cwd: repo });
+      } catch {
+        return; // no git, or no permission to symlink — nothing to assert
+      }
+
+      const counts = emptyDiscoveryCounts();
+      const files = discoverSourceFiles(repo, { counts });
+
+      expect(files.map((p) => p.slice(repo.length + 1)).sort()).toEqual(['src/a.ts', 'src/b.ts']);
+      expect(counts.unreadable).toBe(0);
     },
   );
 });
