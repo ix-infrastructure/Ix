@@ -1,6 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import type { Command } from "commander";
+import * as fs from "node:fs";
 import * as nodePath from "node:path";
 import { renderSection, renderKeyValue, renderWarning, renderNote, renderSuccess } from "../ui.js";
 import { createClient } from "../../client/factory.js";
@@ -92,10 +93,27 @@ function parseCount(flag: string, value: string | undefined, fallback: number, m
   return n;
 }
 
+/**
+ * `canonicalWorkspacePath` for a path that may no longer exist: realpath only
+ * resolves an existing path, so resolve the nearest existing ancestor and put
+ * the rest back. A deleted file is exactly what verify reports as stale.
+ */
+function canonicalMaybeMissing(abs: string): string {
+  const tail: string[] = [];
+  let dir = abs;
+  while (!fs.existsSync(dir)) {
+    const parent = nodePath.dirname(dir);
+    if (parent === dir) return abs;
+    tail.unshift(nodePath.basename(dir));
+    dir = parent;
+  }
+  return nodePath.join(canonicalWorkspacePath(dir), ...tail);
+}
+
 /** A path the caller typed, as the workspace-relative POSIX path the graph stores. */
 function toWorkspaceRel(root: string, input: string): string {
   // Canonical like the root, so a path typed through a symlink still lands inside it.
-  const rel = normalizePathSeparators(nodePath.relative(root, canonicalWorkspacePath(nodePath.resolve(process.cwd(), input))));
+  const rel = normalizePathSeparators(nodePath.relative(root, canonicalMaybeMissing(nodePath.resolve(process.cwd(), input))));
   if (rel === "" || rel === ".." || rel.startsWith("../") || nodePath.isAbsolute(rel)) {
     throw new CliUsageError(`'${input}' is not a file inside the workspace at ${root}.`);
   }

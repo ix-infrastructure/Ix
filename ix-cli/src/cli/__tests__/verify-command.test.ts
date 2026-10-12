@@ -3,7 +3,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
@@ -189,6 +189,17 @@ describe("ix verify roots and the record", () => {
     await verify("a.ts", "--format", "llm");
     const { verifyRecordPath } = await import("../config.js");
     expect(existsSync(verifyRecordPath(repo))).toBe(false);
+  });
+
+  it("a deleted file named through a symlinked path is stale, not outside the workspace", async () => {
+    await mapped();
+    rmSync(join(repo, "a.ts"));
+    // macOS's /tmp and /var are such links. realpath cannot resolve a path
+    // that no longer exists, so its existing parent has to be resolved instead.
+    const link = join(home, "link");
+    symlinkSync(repo, link, "junction");
+    expect(await verify(join(link, "a.ts"), "--format", "llm"))
+      .toMatch(/^file path=a\.ts state=stale reason=missing_on_disk/m);
   });
 
   it("--root . and --root with a trailing slash find the mapped workspace", async () => {
