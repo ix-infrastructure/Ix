@@ -61,7 +61,9 @@ let out: string[];
 
 beforeEach(() => {
   vi.resetModules();
-  home = realpathSync(mkdtempSync(join(tmpdir(), "ix-verify-cmd-")));
+  // realpathSync.native, as ingest canonicalizes its root: plain realpathSync
+  // keeps a Windows 8.3 name (RUNNER~1) that `ix verify` expands.
+  home = realpathSync.native(mkdtempSync(join(tmpdir(), "ix-verify-cmd-")));
   repo = join(home, "repo");
   mkdirSync(repo);
   saved = { IX_HOME: process.env.IX_HOME, IX_ENDPOINT: process.env.IX_ENDPOINT };

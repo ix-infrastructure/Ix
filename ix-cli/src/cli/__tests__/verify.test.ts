@@ -5,10 +5,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 import { saveIngestBaseline } from "../ingest-baseline.js";
 import { repoWorkspaceIdFor } from "../system.js";
-import { verifyRecordPath } from "../config.js";
+import { canonicalWorkspacePath, verifyRecordPath } from "../config.js";
 import { loadIngestionModules } from "../commands/ingestion-loader.js";
 import {
   classifyFile,
@@ -179,7 +180,10 @@ let home: string;
 let savedIxHome: string | undefined;
 
 beforeEach(() => {
-  home = fs.realpathSync(fs.mkdtempSync(nodePath.join(os.tmpdir(), "ix-verify-")));
+  // Canonical exactly as ingest makes its root (`canonicalWorkspacePath`, i.e.
+  // realpathSync.native): plain realpathSync keeps a Windows 8.3 name like
+  // RUNNER~1, which ingest -- and so verify -- expands.
+  home = canonicalWorkspacePath(fs.mkdtempSync(nodePath.join(os.tmpdir(), "ix-verify-")));
   savedIxHome = process.env.IX_HOME;
   process.env.IX_HOME = home;
 });
@@ -489,7 +493,7 @@ describe("docs/llm-format.md", () => {
   // Every reason verify can emit is documented: a consumer branching on
   // `reason=` must not meet an undocumented value (e.g. `no_files`).
   it("lists every reason verify.ts emits", () => {
-    const here = nodePath.dirname(new URL(import.meta.url).pathname);
+    const here = nodePath.dirname(fileURLToPath(import.meta.url));
     const src = fs.readFileSync(nodePath.join(here, "..", "verify.ts"), "utf-8");
     const doc = fs.readFileSync(nodePath.join(here, "..", "..", "..", "..", "docs", "llm-format.md"), "utf-8");
     const reasons = new Set<string>();

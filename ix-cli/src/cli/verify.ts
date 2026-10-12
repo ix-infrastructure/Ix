@@ -51,6 +51,7 @@ import { canonicalWorkspacePath, findWorkspaceForCwd, verifyRecordPath } from ".
 import { extractorChanged, loadIngestBaseline, type IngestBaseline } from "./ingest-baseline.js";
 import { detectSystem, repoWorkspaceIdFor } from "./system.js";
 import { normalizePathSeparators } from "./path-match.js";
+import { readBoundedBytes } from "./bounded-read.js";
 import { GRAPH_MAP_FIX, GRAPH_REBUILD_FIX } from "./graph-health.js";
 import { isBackendUnreachable } from "./errors.js";
 import { loadIngestionModules } from "./commands/ingestion-loader.js";
@@ -562,19 +563,26 @@ export async function runVerify(client: VerifyClient, rootInput: string, opts: R
     // Only a named path gets here: ingest gave up on its parse, so it is not in
     // the graph, and parsing it on this thread would have no budget at all.
     if (timedOut.has(rel)) { done.set(rel, fileResult(rel, "unverified", "parse_timed_out")); continue; }
-    let bytes: Buffer;
+    // One handle for the size check and the read (no stat-then-read race).
+    // Ingest's own size gate: such a file is not in the graph, and the cap
+    // bounds the in-process parse of a named one.
+    let read: ReturnType<typeof readBoundedBytes> | null;
     try {
-      const abs = nodePath.join(root, rel);
-      // Ingest's own size gate: such a file is not in the graph, and this
-      // bounds the in-process parse of a named one.
-      if (fs.statSync(abs).size > VERIFY_MAX_FILE_BYTES) { done.set(rel, fileResult(rel, "unverified", "too_large")); continue; }
-      bytes = fs.readFileSync(abs);
+      read = readBoundedBytes(nodePath.join(root, rel), VERIFY_MAX_FILE_BYTES);
     } catch {
+      read = null;
+    }
+    if (read && "refused" in read && read.refused === "too_large") {
+      done.set(rel, fileResult(rel, "unverified", "too_large"));
+      continue;
+    }
+    if (!read || !("bytes" in read)) {
       // In the baseline, gone from disk: the graph has not caught up with a
       // deletion, which is what `ix map` is for.
       done.set(rel, known.has(rel) ? fileResult(rel, "stale", "missing_on_disk") : fileResult(rel, "unverified", "missing_on_disk"));
       continue;
     }
+    const bytes = read.bytes;
     if (!supported(rel)) { done.set(rel, fileResult(rel, "unverified", "unsupported_language")); continue; }
     const hash = sha256(bytes);
     try {
