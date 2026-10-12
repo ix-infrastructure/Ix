@@ -82,14 +82,27 @@ afterEach(() => {
   }
   vi.restoreAllMocks();
   vi.doUnmock("../commands/ingestion-loader.js");
-  // maxRetries: on Windows the repo directory a doctor run just used can
-  // still be briefly busy (EBUSY), as in upgrade-backend-stamp.test.ts.
-  rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  vi.doUnmock("../backend-status.js");
+  rmSync(home, { recursive: true, force: true });
 });
 
 function registerRepo(): void {
   writeFileSync(join(home, "config.yaml"),
     `endpoint: ${endpoint}\nformat: text\nworkspaces:\n  - workspace_id: "ws1"\n    workspace_name: repo\n    root_path: ${repo}\n    default: true\n`);
+}
+
+/**
+ * A full `ix doctor` run asks docker about the backend container. On the
+ * Windows runner `docker ps` hangs until its 10 s timeout, and what it leaves
+ * running still has the test repo as its cwd, so the repo cannot be deleted
+ * (EBUSY). These tests are not about docker: answer "no container".
+ */
+function mockNoDocker(): void {
+  vi.doMock("../backend-status.js", async (orig) => ({
+    ...(await orig<typeof import("../backend-status.js")>()),
+    checkBackendImage: () => ({ kind: "not-running" }),
+    dockerAvailable: () => false,
+  }));
 }
 
 async function run(register: (p: Command) => void, args: string[]): Promise<string> {
@@ -336,6 +349,7 @@ describe("doctor checks", () => {
     writeFileSync(join(repo, "a.ts"), "export function a() { return 1; }\n");
     const { saveIngestBaseline } = await import("../ingest-baseline.js");
     saveIngestBaseline(repo, new Map([[join(repo, "a.ts"), 1]]), 3, new Date(), new Map(), extractorName());
+    mockNoDocker();
     const { registerDoctorCommand } = await import("../commands/doctor.js");
     const json = JSON.parse(await run(registerDoctorCommand, ["doctor", "--format", "json"]));
     const check = json.checks.find((c: { name: string }) => c.name === "Graph matches a re-parse");
@@ -352,6 +366,7 @@ describe("doctor checks", () => {
     writeFileSync(join(repo, "a.ts"), "export function a() { return 1; }\n");
     const { saveIngestBaseline } = await import("../ingest-baseline.js");
     saveIngestBaseline(repo, new Map([[join(repo, "a.ts"), 1]]), 3, new Date(), new Map(), extractorName());
+    mockNoDocker();
     const { registerDoctorCommand } = await import("../commands/doctor.js");
     const json = JSON.parse(await run(registerDoctorCommand, ["doctor", "--format", "json"]));
     const check = json.checks.find((c: { name: string }) => c.name === "Graph matches a re-parse");
