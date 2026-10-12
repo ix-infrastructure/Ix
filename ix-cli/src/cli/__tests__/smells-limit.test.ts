@@ -37,6 +37,8 @@ describe("isNonSourceOrphan shell dotfiles", () => {
   it("keeps .bashrc and .zshrc", () => {
     expect(isNonSourceOrphan(cand(".bashrc", 0.5))).toBe(false);
     expect(isNonSourceOrphan(cand("home/.zshrc", 0.5))).toBe(false);
+    // core-ingestion's languageFromPath parses .zshenv as Bash too.
+    expect(isNonSourceOrphan(cand("home/.zshenv", 0.5))).toBe(false);
     expect(isNonSourceOrphan(cand(".gitignore", 0.5))).toBe(true);
   });
 });

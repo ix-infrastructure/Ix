@@ -50,7 +50,7 @@ const EXTENSIONLESS_SOURCE = new Set([
   "fastfile", "guardfile", "berksfile", "capfile", "snakefile", "tiltfile",
   "build", "workspace",
   // shell dotfiles the ingester parses as Bash
-  ".bashrc", ".bash_profile", ".bash_aliases", ".bash_logout", ".zshrc", ".zprofile", ".profile",
+  ".bashrc", ".bash_profile", ".bash_aliases", ".bash_logout", ".zshrc", ".zprofile", ".zshenv", ".profile",
 ]);
 
 /**
