@@ -210,4 +210,61 @@ describe("ix smells command (mocked client)", () => {
     expect(lines.some(l => l.includes("README.md"))).toBe(true);
     expect(lines.some(l => l.includes("filtered_non_source"))).toBe(false);
   });
+
+  describe("--list", () => {
+    const claims = Array.from({ length: 6 }, (_, i) => ({
+      smell: "has_smell.orphan_file",
+      entity_id: `entity-${i}-0123456789`,
+      confidence: [0.2, 0.9, 0.5, 0.7, 0.1, 0.6][i],
+      inference_version: "smell_v1",
+    }));
+
+    beforeEach(() => {
+      fakeClient.listSmells.mockResolvedValue({ smells: claims });
+    });
+
+    it("without --limit prints every claim in stored order, unchanged", async () => {
+      const lines = await run("--list", "--format", "llm");
+      expect(lines[0]).toBe("smells count=6 version=smell_v1");
+      expect(lines.filter(l => l.startsWith("smell ")).length).toBe(6);
+      logs.length = 0;
+      await run("--list", "--format", "json");
+      const out = JSON.parse(logs.join("\n"));
+      expect(Object.keys(out)).toEqual(["count", "inference_version", "smells"]);
+      expect(out.smells.map((s: { confidence: number }) => s.confidence)).toEqual(claims.map(c => c.confidence));
+    });
+
+    it("llm: --limit keeps the highest-confidence claims and says so", async () => {
+      const lines = await run("--list", "--format", "llm", "--limit", "2");
+      expect(lines[0]).toBe("smells count=6 shown=2 version=smell_v1");
+      expect(lines[1]).toMatch(/^diagnostic code=results_truncated /);
+      const rows = lines.filter(l => l.startsWith("smell "));
+      expect(rows.length).toBe(2);
+      expect(rows[0]).toContain("confidence=0.9");
+      expect(rows[1]).toContain("confidence=0.7");
+    });
+
+    it("json: --limit cuts and keeps the total", async () => {
+      await run("--list", "--format", "json", "--limit", "3");
+      const out = JSON.parse(logs.join("\n"));
+      expect(out.count).toBe(6);
+      expect(out.shown).toBe(3);
+      expect(out.truncated).toBe(true);
+      expect(out.smells.map((s: { confidence: number }) => s.confidence)).toEqual([0.9, 0.7, 0.6]);
+    });
+
+    it("text: --limit prints that many rows with a header count and hint", async () => {
+      const lines = await run("--list", "--limit", "1");
+      expect(lines.some(l => l.includes("6 total · showing 1"))).toBe(true);
+      expect(lines.filter(l => l.includes("entity-")).length).toBe(1);
+      expect(lines.some(l => l.includes("Raise --limit"))).toBe(true);
+    });
+
+    it("--limit 0 lists everything", async () => {
+      await run("--list", "--format", "json", "--limit", "0");
+      const out = JSON.parse(logs.join("\n"));
+      expect(out.smells.length).toBe(6);
+      expect(out.truncated).toBe(false);
+    });
+  });
 });

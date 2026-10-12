@@ -117,7 +117,7 @@ export function registerSmellsCommand(program: Command): void {
     .option("--god-module-fan <n>",        "Min fan-in/out for god module",     "15")
     .option("--weak-max-neighbors <n>",    "Max neighbors for weak component",  "1")
     .option("--list",                      "List existing smell claims without rerunning")
-    .option("--limit <n>",                 "Max candidates to show, highest confidence first (0 = all, non-source orphans included; detection run only)")
+    .option("--limit <n>",                 "Max candidates to show, highest confidence first (0 = all, non-source orphans included; with --list, caps the stored claims)")
     .addHelpText("after", `
 Runs graph-query-based architecture smell detection and stores results as
 versioned claims (inference_version=smell_v1) on affected File nodes.
@@ -156,12 +156,21 @@ Examples:
           process.exitCode = 1;
           return;
         }
+        // Without --limit, --list prints every stored claim, as before. With
+        // one, it keeps the highest-confidence claims (0 = all). Claim rows
+        // carry only an entity id, so no path filter applies here.
+        const listLimit = opts.limit === undefined ? undefined : resolveLimit(opts.limit, opts.format);
+        const listSlice = sliceRanked<any>(
+          result.smells ?? [],
+          listLimit ?? Infinity,
+          listLimit === undefined ? undefined : (s) => -(Number(s.confidence) || 0),
+        );
         if (opts.format === "json") {
-          const smells = result.smells ?? [];
           printJson({
-            count: smells.length,
+            count: listSlice.total,
+            ...(listLimit === undefined ? {} : { shown: listSlice.shown, truncated: listSlice.truncated }),
             inference_version: "smell_v1",
-            smells: smells.map((s: any) => ({
+            smells: listSlice.rows.map((s: any) => ({
               smell: s.smell,
               entity_id: s.entity_id?.slice(0, 12),
               confidence: s.confidence,
@@ -169,20 +178,21 @@ Examples:
           });
           return;
         }
-        const smells = result.smells ?? [];
         if (opts.format === "llm") {
-          for (const line of renderSmellsListLlm(smells)) console.log(line);
+          for (const line of renderSmellsListLlm(listSlice.rows, listLimit === undefined ? undefined : listSlice)) console.log(line);
           return;
         }
-        if (smells.length === 0) {
+        if (listSlice.total === 0) {
           console.log(chalk.dim("No smell claims found. Run `ix smells` to detect."));
           return;
         }
-        console.log(`\n${chalk.bold("Smell Claims")}  ${chalk.dim(`(${smells.length} total)`)}\n`);
-        for (const s of smells) {
+        const shownNote = listSlice.truncated ? ` · showing ${listSlice.shown}` : "";
+        console.log(`\n${chalk.bold("Smell Claims")}  ${chalk.dim(`(${listSlice.total} total${shownNote})`)}\n`);
+        for (const s of listSlice.rows) {
           const label = SMELL_LABELS[s.smell] ?? s.smell;
           console.log(`  ${chalk.yellow(label.padEnd(20))} ${chalk.dim(s.entity_id?.slice(0, 8))}  ${chalk.dim(s.inference_version ?? "")}`);
         }
+        if (listSlice.truncated) console.log(chalk.dim(`\n${truncationHint(listSlice, "smell claims")}`));
         return;
       }
 
@@ -293,9 +303,23 @@ function confidenceBar(conf: number): string {
   return color(bar);
 }
 
-/** Render `ix smells --list` claims as llm records. */
-export function renderSmellsListLlm(smells: any[]): string[] {
-  const lines = [llmLine("smells", [["count", smells.length], ["version", "smell_v1"]])];
+/**
+ * Render `ix smells --list` claims as llm records. With a slice (an explicit
+ * --limit), the header carries the total and `shown`, plus a truncation
+ * diagnostic when rows were cut.
+ */
+export function renderSmellsListLlm(smells: any[], slice?: Slice<unknown>): string[] {
+  const lines = [llmLine("smells", [
+    ["count", slice ? slice.total : smells.length],
+    ["shown", slice ? slice.shown : undefined],
+    ["version", "smell_v1"],
+  ])];
+  if (slice?.truncated) {
+    lines.push(llmLine("diagnostic", [
+      ["code", "results_truncated"],
+      ["message", truncationHint(slice, "smell claims")],
+    ]));
+  }
   for (const s of smells) {
     lines.push(llmLine("smell", [
       ["kind", s.smell],
