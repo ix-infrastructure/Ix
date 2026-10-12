@@ -74,6 +74,17 @@ export function mapResultCachePath(projectRoot: string): string {
 }
 
 /**
+ * Path to the "architecture map is stale" marker for one project root: an
+ * `ix map` after an incremental edit left its `/v1/map` request for the next
+ * command that reads regions (see `map-freshness.ts`). Cleared with the map
+ * baseline, since it describes the same hierarchy.
+ */
+export function mapStalePath(projectRoot: string): string {
+  const key = rootKey(projectRoot);
+  return join(ixHome(), `map_stale_${key}.json`);
+}
+
+/**
  * Path to the cached answer to "is this workspace stitched into a System?".
  *
  * Kept beside the ingest mtime cache and keyed the same way. See
@@ -132,11 +143,13 @@ export function clearMapResultCache(projectRoot: string): void {
 
 /**
  * Remove the architecture-map completion marker, and the cached map response
- * with it: whatever made the marker wrong makes the cached hierarchy wrong too.
- * Leaves the source ingest baseline alone. Best-effort.
+ * and the stale marker with it: whatever made the marker wrong makes the
+ * cached hierarchy wrong too, and a map that is no longer recorded is not
+ * merely deferred. Leaves the source ingest baseline alone. Best-effort.
  */
 export function clearMapBaseline(projectRoot: string): void {
   try { rmSync(mapBaselinePath(projectRoot), { force: true }); } catch { /* non-critical */ }
+  try { rmSync(mapStalePath(projectRoot), { force: true }); } catch { /* non-critical */ }
   clearMapResultCache(projectRoot);
 }
 

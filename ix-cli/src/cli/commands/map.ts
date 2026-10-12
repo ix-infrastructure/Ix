@@ -15,9 +15,11 @@ import { acquireMapLock, requestMapRerun, takeMapRerun } from "../single-flight.
 import { canRenderProgress } from "../stderr.js";
 import { loadIngestBaseline } from "../ingest-baseline.js";
 import { saveMapBaseline } from "../map-baseline.js";
-import { loadCachedMap, resolveMapCacheSlot, saveCachedMap } from "../map-result-cache.js";
+import { loadCachedMap, loadLastMap, resolveMapCacheSlot, saveCachedMap } from "../map-result-cache.js";
+import { clearMapStale, markMapStale, readMapStale } from "../map-freshness.js";
 import { resolveMapRoot } from "../map-root.js";
 import { readBackendHealth } from "./upgrade.js";
+import type { IxClient } from "../../client/api.js";
 
 // Hard wall-clock budget for a single `ix map`. Past this, the shared deadline
 // signal aborts every in-flight request and the command exits, so a single
@@ -38,7 +40,7 @@ export function mapDeadlineMs(raw = process.env.IX_MAP_DEADLINE_MS): number | un
   return budget;
 }
 
-function mapDeadlineSignal(): AbortSignal | undefined {
+export function mapDeadlineSignal(): AbortSignal | undefined {
   const budget = mapDeadlineMs();
   return budget === undefined ? undefined : AbortSignal.timeout(budget);
 }
@@ -72,6 +74,43 @@ export function applyRequestedMapCoalesceExitCode(
   if (code === undefined) return false;
   apply(code);
   return true;
+}
+
+/**
+ * Whether `ix map` computes the map even after an incremental edit, as it did
+ * before CL-13. IX_MAP_EAGER=1 restores that for a caller that reads regions
+ * straight from `ix map` and cannot run a region view to refresh them.
+ */
+export function mapEager(raw = process.env.IX_MAP_EAGER): boolean {
+  return raw === "1";
+}
+
+/**
+ * The `/v1/map` request for `cwd`: workspace-scoped, or system-scoped when it
+ * is part of a multi-repo system. Shared by `ix map` and `ensureFreshMap`, so a
+ * lazily recomputed map asks for exactly what `ix map` would.
+ *
+ * A co-ingest system is found locally (`detectSystem`); a SEPARATELY-ingested
+ * repo that the stitcher joined into a system (Path-2 grouping, Ix#225 Half B)
+ * has no local marker, so its system_id is looked up from the backend, making
+ * `ix map <repo>` show the whole stitched system. That lookup is best-effort:
+ * an unanswered one leaves the map at workspace scope.
+ */
+export async function resolveMapScope(
+  client: Pick<IxClient, "workspaceSystem">,
+  cwd: string,
+  full: boolean | undefined,
+  systemId: string | undefined = detectSystem(cwd)?.systemId,
+): Promise<{ full?: boolean; workspaceId?: string; systemId?: string }> {
+  let effectiveSystemId = systemId;
+  if (!effectiveSystemId) {
+    const ws = resolveWorkspaceId(cwd);
+    if (ws) {
+      const looked = await client.workspaceSystem(ws).catch(() => ({ systemId: null }));
+      if (looked.systemId) effectiveSystemId = looked.systemId;
+    }
+  }
+  return { full, workspaceId: effectiveSystemId ? undefined : resolveWorkspaceId(cwd), systemId: effectiveSystemId };
 }
 
 /** Watch opts into full patches; ordinary `ix map` keeps its topology-only ingest. */
@@ -302,15 +341,17 @@ function emitDroppedFileWarning(
 
 /**
  * The one stderr line `ix map --silent` prints. `too_large=N` appears only
- * when files were left out for size, so a repo without any keeps the line it
- * always had. Exported for tests.
+ * when files were left out for size, and `map=stale` only when the map was
+ * deferred after an edit (CL-13), both after every other token, so a repo
+ * without either keeps the line it always had. Exported for tests.
  */
 export function silentSummaryLine(s: {
   files: number; systems: number; subsystems: number; modules: number; mapMs: number;
-  stitch: string; filesTooLarge?: number;
+  stitch: string; filesTooLarge?: number; mapStale?: boolean;
 }): string {
   const tooLarge = (s.filesTooLarge ?? 0) > 0 ? ` · too_large=${s.filesTooLarge}` : "";
-  return `map: ${s.files} files · ${s.systems}s/${s.subsystems}ss/${s.modules}m regions · ${s.mapMs}ms${s.stitch}${tooLarge}\n`;
+  const stale = s.mapStale ? " · map=stale" : "";
+  return `map: ${s.files} files · ${s.systems}s/${s.subsystems}ss/${s.modules}m regions · ${s.mapMs}ms${s.stitch}${tooLarge}${stale}\n`;
 }
 
 /**
@@ -404,6 +445,7 @@ export function registerMapCommand(program: Command): void {
     .option("--graph", "Render the hierarchy as a graph/tree view (default)")
     .option("--list", "Render the ranked list view instead of the default graph/tree view")
     .option("--full", "Force full local map, bypassing automatic safety limits (advanced/testing)")
+    .option("--remap", "Compute the map now, even after an edit that would defer it")
     .option("--verbose", "Show raw confidence/crosscut scores and signals, plus per-file ingest diagnostics (including why a patch failed to commit)")
     .option("--silent", "Suppress all output except a one-line summary (useful for LLM hooks)")
     .addHelpText(
@@ -425,11 +467,17 @@ Advanced:
   --silent  Skip the full map rendering. Prints one summary line to stderr and
             exits. Ideal for LLM hooks and automated workflows where the full
             output would waste context tokens.
+  --remap   Compute the map now. After an edit, \`ix map\` ingests it and
+            defers the map itself: it prints the last map's regions marked
+            stale (map=stale), and the next region view (overview, subsystems,
+            locate, impact, explain, view) recomputes it. IX_MAP_EAGER=1 always
+            computes, as before.
 
 Examples:
   ix map .
   ix map --format json
   ix map --silent
+  ix map --remap
   ix map --level 2
   ix map --min-confidence 0.5
   ix map --max-items 10
@@ -440,7 +488,7 @@ Examples:
   ix map . --full
   ix map . --full --verbose`
     )
-    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; verbose?: boolean; silent?: boolean }) => {
+    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remap?: boolean; verbose?: boolean; silent?: boolean }) => {
       const held: HeldMap = {};
       try {
         await runMapCommand(pathArg, opts, held);
@@ -448,6 +496,17 @@ Examples:
         if (held.root) await rerunIfRequested(held.root, held.local === true, opts);
       }
     });
+}
+
+/**
+ * What a deferred `ix map` (CL-13) adds to its output. `mapStale` says the
+ * map was not recomputed for this ingest; `regionsAsOf` names the last
+ * computed map that `file_count`, the regions, `region_count`, `levels`,
+ * `map_rev` and `outcome` all come from.
+ */
+export interface MapStaleState {
+  mapStale?: boolean;
+  regionsAsOf?: { map_rev: number; file_count: number };
 }
 
 /** `ix map --format json`. Exported for tests. */
@@ -458,6 +517,7 @@ export function mapJsonPayload(
     IngestFilesSummary,
     "parseErrors" | "commitErrors" | "stitchSkipped" | "stitchSkippedRule" | "filesTooLarge" | "filesTooLargePaths"
   > | undefined,
+  state: MapStaleState = {},
 ): Record<string, unknown> {
   return {
     file_count: result.file_count,
@@ -465,6 +525,13 @@ export function mapJsonPayload(
     levels: result.levels,
     map_rev: result.map_rev,
     outcome: result.outcome,
+    // CL-13. True when this run deferred the map after an edit: every field
+    // above and the regions below are the last computed map's, not this
+    // ingest's, until a region view or `ix map --remap` refreshes them.
+    // `regions_as_of` names that map ({map_rev, file_count}) and is null when
+    // the map is fresh. Both always present, like their siblings.
+    map_stale: state.mapStale === true,
+    regions_as_of: state.mapStale === true && state.regionsAsOf ? { ...state.regionsAsOf } : null,
     // Always present so a consumer can branch on them without a key check.
     // A dropped file is silent otherwise: the backend still answers with a
     // completed outcome, so `outcome` alone cannot distinguish a whole map
@@ -505,6 +572,7 @@ export function renderMapLlm(
     IngestFilesSummary,
     "parseErrors" | "commitErrors" | "stitchSkipped" | "stitchSkippedRule" | "filesTooLarge" | "filesTooLargePaths"
   >,
+  state: MapStaleState = {},
 ): void {
   console.log(llmLine("map", [
     ["files", result.file_count],
@@ -512,6 +580,12 @@ export function renderMapLlm(
     ["levels", result.levels],
     ["rev", result.map_rev],
     ["outcome", result.outcome],
+    // CL-13: the map was deferred after an edit, so the record and the region
+    // rows are the last computed map's; regions_as_of_rev/_files name that
+    // map. Only when stale, per the zero-drop rule.
+    ["map_stale", state.mapStale ? true : undefined],
+    ["regions_as_of_rev", state.mapStale ? state.regionsAsOf?.map_rev : undefined],
+    ["regions_as_of_files", state.mapStale ? state.regionsAsOf?.file_count : undefined],
     // The same signal the json payload carries as parse_errors/commit_errors.
     // Agents are told to pass --format llm unconditionally, so leaving it out
     // of this record hid the dropped files from the one consumer #554 is about.
@@ -912,7 +986,7 @@ function formatRegionLine(region: MapRegion, verbose: boolean, depth = 0): strin
 /** What a map that ran holds when it finishes: the workspace whose lock it took. */
 interface HeldMap { root?: string; local?: boolean }
 
-async function runMapCommand(pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; verbose?: boolean; silent?: boolean }, held: HeldMap): Promise<void> {
+async function runMapCommand(pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remap?: boolean; verbose?: boolean; silent?: boolean }, held: HeldMap): Promise<void> {
   let cwd: string;
   try {
     cwd = resolveMapRoot(pathArg);
@@ -1069,30 +1143,41 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
   const mapBarWidth = 25;
   const mapStart    = performance.now();
 
-  // Path-2 grouping (Ix#225 Half B): a co-ingest system is found by detectSystem
-  // above; a SEPARATELY-ingested repo that the stitcher joined into a system has
-  // no local marker, so look its system_id up from the backend and scope to it,
-  // making `ix map <repo>` show the whole stitched system.
-  let effectiveSystemId = systemId;
-  if (!effectiveSystemId) {
-    const ws = resolveWorkspaceId(cwd);
-    if (ws) {
-      // Best-effort, as before workspaceSystem started reporting failures:
-      // an unanswered lookup leaves the map at workspace scope.
-      const looked = await client.workspaceSystem(ws).catch(() => ({ systemId: null }));
-      if (looked.systemId) effectiveSystemId = looked.systemId;
-    }
-  }
-  const mapRequest = { full: opts.full, workspaceId: effectiveSystemId ? undefined : resolveWorkspaceId(cwd), systemId: effectiveSystemId };
+  // Scope: the co-ingest system found above, a stitched system the backend
+  // knows of, or the workspace (see `resolveMapScope`).
+  const mapRequest = await resolveMapScope(client, cwd, opts.full, systemId);
 
   // Reuse the last response when this run's ingest wrote nothing and the
   // backend's head revision has not moved since it was computed. Local
   // only: a cloud ingest reports no summary, so it cannot vouch for that.
   const cacheSlot = localIngest ? await resolveMapCacheSlot(client, mapRequest, () => readBackendHealth(client)) : undefined;
-  const cached = cacheSlot && localIngest?.graphUnchanged ? loadCachedMap(cwd, cacheSlot) : undefined;
+
+  // CL-13: after an incremental edit, leave `/v1/map` for the next command
+  // that reads regions (`ensureFreshMap`) and print the last map's regions,
+  // marked stale. The hooks that run this after every edit read none of them,
+  // and the request was most of the run. Not for the first map (nothing is
+  // stored), --full, --remap or IX_MAP_EAGER=1, a system scope (never
+  // stored), a cloud ingest, or an ingest that might have left the graph
+  // somewhere unexpected (`incremental` is false then). A run that changed
+  // nothing while the map is already stale stays deferred: computing it here
+  // would only move the cost to the next hook.
+  const staleBefore = localIngest ? readMapStale(cwd) : null;
+  const deferAllowed = !opts.full && !opts.remap && !mapEager() && !mapRequest.systemId;
+  const wantsDefer = deferAllowed && cacheSlot !== undefined && localIngest !== undefined
+    && (localIngest.incremental || (staleBefore !== null && localIngest.graphUnchanged));
+  const deferred = wantsDefer ? loadLastMap(cwd, cacheSlot!.key) : undefined;
+  // A stale map is never served from the no-change cache: its slot can still
+  // match after an edit that did not move the revision.
+  const cached = !deferred && staleBefore === null && cacheSlot && localIngest?.graphUnchanged
+    ? loadCachedMap(cwd, cacheSlot)
+    : undefined;
 
   let result: MapView;
-  if (cached) {
+  if (deferred) {
+    result = deferred;
+    // A new marker for a new edit; an unchanged run keeps the one it found.
+    if (localIngest?.incremental) markMapStale(cwd);
+  } else if (cached) {
     result = cached;
   } else {
     // Same gate as the ingest bar: --silent and the machine formats were the
@@ -1117,23 +1202,41 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
       return;
     }
     if (mapInterval) { clearInterval(mapInterval); process.stderr.write('\r' + ' '.repeat(60) + '\r'); }
+    // Computed: whatever was deferred before is not any more.
+    clearMapStale(cwd);
   }
   const mapMs = Math.round(performance.now() - mapStart);
 
-  const emptyMapError = invalidateBaselineForIncompleteCompletedMap(result, localIngest, cwd);
-  if (emptyMapError) {
-    emitError(emptyMapError);
-    process.exitCode = 1;
-    return;
+  // A deferred map records nothing: its regions are the last map's, already
+  // recorded when it was computed, and the completed-map marker must not
+  // claim them for this ingest's revision. `ensureFreshMap` records the map
+  // it computes.
+  if (!deferred) {
+    const emptyMapError = invalidateBaselineForIncompleteCompletedMap(result, localIngest, cwd);
+    if (emptyMapError) {
+      emitError(emptyMapError);
+      process.exitCode = 1;
+      return;
+    }
+    // The cache holds the latest response the backend gave, or nothing: a
+    // response that is not kept removes the one before it, so a later hit
+    // can never be older than a miss in between.
+    if (persistCompletedMapBaseline(result, cwd) && cacheSlot) {
+      if (!cached) saveCachedMap(cwd, cacheSlot, result);
+    } else {
+      clearMapResultCache(cwd);
+    }
   }
-  // The cache holds the latest response the backend gave, or nothing: a
-  // response that is not kept removes the one before it, so a later hit
-  // can never be older than a miss in between.
-  if (persistCompletedMapBaseline(result, cwd) && cacheSlot) {
-    if (!cached) saveCachedMap(cwd, cacheSlot, result);
-  } else {
-    clearMapResultCache(cwd);
-  }
+  const mapStale = deferred !== undefined;
+  // A deferred map's counts and regions are the last map's. They keep their
+  // fields, so a consumer reading them still parses, and the map they come
+  // from is named beside them, so none can be taken for this ingest's. The
+  // file count stays the last map's too: the backend's count is not one the
+  // CLI can work out locally (it leaves out files the ingest discovered and
+  // sent), and a guess would match neither map.
+  const staleState: MapStaleState = mapStale
+    ? { mapStale, regionsAsOf: { map_rev: result.map_rev, file_count: result.file_count } }
+    : {};
 
   // stderr, so it reaches a human on the text path and never contaminates
   // the JSON/llm payload on stdout. The exit code deliberately stays 0:
@@ -1173,14 +1276,18 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
         : ` · stitch_skipped_rule=${rule}`;
     process.stderr.write(silentSummaryLine({
       files: result.file_count, systems, subsystems, modules, mapMs, stitch,
-      filesTooLarge: localIngest?.filesTooLarge,
+      filesTooLarge: localIngest?.filesTooLarge, mapStale,
     }));
     return;
   }
 
   if (!machineFormat) {
-    const mapSec = (mapMs / 1000).toFixed(1);
-    process.stderr.write(chalk.dim(`  Mapped in ${mapSec}s\n`));
+    if (mapStale) {
+      process.stderr.write(chalk.dim(`  Map deferred: regions are from the last map (rev ${result.map_rev}, ${result.file_count} files), not this edit (run ix map --remap or any region view to refresh)\n`));
+    } else {
+      const mapSec = (mapMs / 1000).toFixed(1);
+      process.stderr.write(chalk.dim(`  Mapped in ${mapSec}s\n`));
+    }
   }
 
   const minConf = parseFloat(opts.minConfidence ?? "0");
@@ -1194,11 +1301,11 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
   if (minConf > 0) regions = regions.filter(r => r.confidence >= minConf);
 
   if (opts.format === "json") {
-    printJson(mapJsonPayload(result, regions, localIngest));
+    printJson(mapJsonPayload(result, regions, localIngest, staleState));
     return;
   }
   if (opts.format === "llm") {
-    renderMapLlm(result, regions, localIngest);
+    renderMapLlm(result, regions, localIngest, staleState);
     return;
   }
   renderMapText(result, cwd, opts);
@@ -1209,12 +1316,14 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
  * `requestMapRerun`), before the lock is let go. One pass at most: under a
  * stream of edits a rerun per request would never finish, and the next edit's
  * own map picks up whatever arrives after it. Ingest only -- this run's output
- * has already been printed, and the hierarchy is refreshed by the next map.
+ * has already been printed. When the ingest changed the graph, the map is
+ * marked stale, so the next region view refreshes the hierarchy (CL-13);
+ * it used to be left stale with nothing to say so.
  */
-async function rerunIfRequested(root: string, local: boolean, opts: { silent?: boolean; format: string }): Promise<void> {
+export async function rerunIfRequested(root: string, local: boolean, opts: { silent?: boolean; format: string }): Promise<void> {
   if (!local || !takeMapRerun(root)) return;
   try {
-    await ingestFiles(root, {
+    const summary = await ingestFiles(root, {
       recursive: true,
       format: "json",
       printSummary: false,
@@ -1224,6 +1333,7 @@ async function rerunIfRequested(root: string, local: boolean, opts: { silent?: b
       // run's may be all but spent.
       deadlineSignal: mapDeadlineSignal(),
     });
+    if (!summary.graphUnchanged) markMapStale(root);
   } catch (err: any) {
     if (opts.silent !== true && opts.format !== "json" && opts.format !== "llm") {
       process.stderr.write(chalk.dim(`  Re-run for a map that waited on this one failed: ${err?.message ?? err}\n`));

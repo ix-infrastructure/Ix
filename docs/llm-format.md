@@ -239,6 +239,21 @@ and `files_too_large_paths`, and has them on every map: zero and an empty list
 when no file was too large. `ix map --silent` adds `too_large=N` to its one
 line.
 
+After an edit, `ix map` ingests the change but defers the map itself: it
+prints the last computed map's regions and marks the `map` record
+`map_stale=true` (only when true, so a fresh map says nothing). `files`,
+`regions`, `levels`, `rev`, `outcome` and the `region` records are then the
+last map's, not this ingest's, and `regions_as_of_rev` and
+`regions_as_of_files` name that map (both only when stale). The next region
+view (`overview`, `subsystems`, `locate`, `impact`, `explain`, `view`)
+recomputes the map once, as does `ix map --remap`; `IX_MAP_EAGER=1` makes
+every `ix map` compute, as before. A region view that cannot refresh it
+(another `ix map` holds the lock, a refresh was tried moments ago, or it
+failed) answers from the last map and says so in one line on stderr.
+`--format json` carries `map_stale` on every map (`false` when fresh) and
+`regions_as_of` (`{map_rev, file_count}` of the last map, `null` when
+fresh); `ix map --silent` ends its line with `· map=stale`.
+
 `ix stats`:
 
 ```
@@ -452,6 +467,11 @@ Two deliberate exceptions remain:
   `subsystems` and region-scoped views may be empty or stale. `stale` follows
   `graph_complete`, not `map_complete`: it is a claim about files having
   changed, and a missing hierarchy does not make a file out of date.
+
+  `map_stale=true` (only when true) says why `map_complete` is false right
+  after an edit: the last `ix map` deferred the map, and the hierarchy is the
+  last computed one until the next region view or `ix map --remap` refreshes
+  it. `--format json` carries it as `mapStale`, always present.
 
   `graph_health` is a third, separate question: whether the graph the backend
   holds for this workspace is whole (`ok`), has nodes but lost their edges

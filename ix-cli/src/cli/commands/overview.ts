@@ -11,6 +11,7 @@ import { llmLine, type LlmValue } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { renderSection, renderKeyValue, renderNote, renderBreadcrumb } from "../ui.js";
 import { forMcp } from "../next-step.js";
+import { ensureFreshMap } from "../map-freshness.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "trait", "object", "interface"]);
 const STRUCTURAL_CONTAINER_KINDS = new Set(["class", "object", "trait", "interface"]);
@@ -63,6 +64,10 @@ Examples:
       if (!target) return;
 
       if (opts.format === "text") printResolved(target);
+
+      // An `ix map` after an edit may have left the map for this read (CL-13).
+      // Never throws and never moves the exit code.
+      await ensureFreshMap();
 
       const isContainer = CONTAINER_KINDS.has(target.kind);
       const isRegion = REGION_KINDS.has(target.kind);

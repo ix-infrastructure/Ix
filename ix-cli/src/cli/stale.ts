@@ -5,11 +5,19 @@ import * as path from "node:path";
 import { resolveWorkspaceRoot } from "./config.js";
 import { loadIngestBaseline } from "./ingest-baseline.js";
 import { hasCompletedMapFor } from "./map-baseline.js";
+import { readMapStale } from "./map-freshness.js";
 import { canonicalizeDiscoveredFilePath, discoverSourceFiles } from "./file-discovery.js";
 
 export interface StaleInfo {
   graphCompleted: boolean;
   mapCompleted: boolean;
+  /**
+   * The last `ix map` deferred the map after an edit (CL-13): regions are the
+   * last computed map's until a region view or `ix map --remap` refreshes
+   * them. `mapCompleted` keeps its strict meaning and reads false meanwhile;
+   * this says why.
+   */
+  mapStale: boolean;
   lastIngestAt: string | null;
   currentRev: number;
   staleFiles: number;
@@ -87,6 +95,7 @@ export function detectStaleFiles(
     return {
       graphCompleted: false,
       mapCompleted: false,
+      mapStale: false,
       lastIngestAt: null,
       currentRev: 0,
       staleFiles: 0,
@@ -156,6 +165,7 @@ export function detectStaleFiles(
   return {
     graphCompleted: true,
     mapCompleted: hasCompletedMapFor(workspaceRoot, baseline),
+    mapStale: readMapStale(workspaceRoot) !== null,
     lastIngestAt: baseline.lastIngestAt,
     currentRev: baseline.currentRev,
     staleFiles: changedFiles.length,

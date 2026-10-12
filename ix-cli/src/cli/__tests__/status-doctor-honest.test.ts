@@ -100,10 +100,18 @@ const HOLLOW = {
 
 describe("ix status", () => {
   async function status(...args: string[]): Promise<string> {
+    return statusWith({}, ...args);
+  }
+
+  async function statusWith(
+    info: { mapCompleted?: boolean; mapStale?: boolean },
+    ...args: string[]
+  ): Promise<string> {
     vi.doMock("../stale.js", async (orig) => ({
       ...(await orig<typeof import("../stale.js")>()),
       detectStaleFiles: () => ({
-        graphCompleted: true, mapCompleted: true, currentRev: 7, lastIngestAt: null,
+        graphCompleted: true, mapCompleted: info.mapCompleted ?? true, mapStale: info.mapStale ?? false,
+        currentRev: 7, lastIngestAt: null,
         staleFiles: 0, sampleChangedFiles: [], replayedFiles: [], parseTimeouts: [],
       }),
     }));
@@ -136,6 +144,41 @@ describe("ix status", () => {
     const llm = await status("--format", "llm");
     expect(llm).toMatch(/^status .*graph_health=empty/m);
     expect(llm).toMatch(/^graph status=empty reason=no_nodes/m);
+  });
+
+  it("reports a map deferred after an edit as stale, in every format (CL-13)", async () => {
+    registerRepo();
+    stats = { nodes: { total: 10 }, edges: { total: 10 } };
+    const stale = { mapCompleted: false, mapStale: true };
+    const json = JSON.parse(await statusWith(stale, "--format", "json"));
+    expect(json.mapCompleted).toBe(false);
+    expect(json.mapStale).toBe(true);
+
+    out.length = 0;
+    const llm = await statusWith(stale, "--format", "llm");
+    expect(llm).toMatch(/^status .*map_complete=false.*map_stale=true/m);
+
+    out.length = 0;
+    const text = await statusWith(stale);
+    expect(text).toMatch(/Map:\s+stale/);
+    expect(text).toMatch(/ix map --remap/);
+    expect(text).not.toMatch(/No completed architecture map/);
+  });
+
+  it("keeps the incomplete-map warning when the map is not merely stale", async () => {
+    registerRepo();
+    stats = { nodes: { total: 10 }, edges: { total: 10 } };
+    const json = JSON.parse(await statusWith({ mapCompleted: false }, "--format", "json"));
+    expect(json.mapStale).toBe(false);
+
+    out.length = 0;
+    const llm = await statusWith({ mapCompleted: false }, "--format", "llm");
+    expect(llm).not.toMatch(/map_stale/);
+
+    out.length = 0;
+    const text = await statusWith({ mapCompleted: false });
+    expect(text).toMatch(/No completed architecture map/);
+    expect(text).not.toMatch(/Map:\s+stale/);
   });
 
   it("says unverified, not ok, when the directory is in no workspace", async () => {
@@ -200,6 +243,41 @@ describe("doctor checks", () => {
     expect(assessConfigFile("c.yaml", () => "endpoint: http://localhost:8090\n")).toMatchObject({ ok: true });
     expect(assessConfigFile("c.yaml", () => "endpoint: [unclosed\n")).toMatchObject({ ok: false, detail: expect.stringMatching(/does not parse/) });
     expect(assessConfigFile("c.yaml", () => "- a\n- b\n")).toMatchObject({ ok: false });
+  });
+
+  it("Completed map: a map deferred after an edit warns, an incomplete one still fails (CL-13)", async () => {
+    const { assessMapCompletion } = await import("../commands/doctor.js");
+    const { persistIngestBaselineIfClean } = await import("../commands/ingest.js");
+    const { saveMapBaseline } = await import("../map-baseline.js");
+    const { markMapStale } = await import("../map-freshness.js");
+    const file = join(repo, "a.ts");
+    writeFileSync(file, "export const a = 1;\n");
+    const local = async () => false;
+
+    expect(await assessMapCompletion(repo, local)).toMatchObject({ ok: false });
+    expect((await assessMapCompletion(repo, local)).warn).toBeUndefined();
+
+    persistIngestBaselineIfClean(repo, new Map([[file, 1]]), 5, 0, 0, new Date());
+    expect(saveMapBaseline(repo, 5)).toBe(true);
+    expect(await assessMapCompletion(repo, local)).toMatchObject({ ok: true });
+
+    // An edit: the source moves on to revision 6 and `ix map` defers the map.
+    persistIngestBaselineIfClean(repo, new Map([[file, 2]]), 6, 0, 0, new Date());
+    const incomplete = await assessMapCompletion(repo, local);
+    expect(incomplete).toMatchObject({ ok: false, detail: expect.stringMatching(/revision 6/) });
+    expect(incomplete.warn, "not merely stale: still a failure").toBeUndefined();
+
+    markMapStale(repo);
+    expect(await assessMapCompletion(repo, local))
+      .toEqual({ ok: false, warn: true, detail: expect.stringMatching(/stale \(deferred after an edit\)/) });
+
+    // A refresh was tried for that deferral and did not clear it: a map that
+    // is not completing, which fails as it did before the deferral existed.
+    const { mapStalePath } = await import("../config.js");
+    writeFileSync(mapStalePath(repo), JSON.stringify({ since: 1, ingestRev: 6, lastAttemptAt: 2 }));
+    const failedRefresh = await assessMapCompletion(repo, local);
+    expect(failedRefresh).toMatchObject({ ok: false, detail: expect.stringMatching(/last refresh did not complete/) });
+    expect(failedRefresh.warn).toBeUndefined();
   });
 
   it("ripgrep on PATH warns, never fails", async () => {

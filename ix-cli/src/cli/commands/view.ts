@@ -17,6 +17,7 @@ import { resolveWorkspaceId } from "../bootstrap.js";
 import { findWorkspaceForCwd, getDefaultWorkspace, getLocalToken, loadWorkspaces } from "../config.js";
 import { detectSystem } from "../system.js";
 import { createClient } from "../../client/factory.js";
+import { ensureFreshMap } from "../map-freshness.js";
 
 const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
 const PID_FILE = join(IX_HOME, "compass.pid");
@@ -743,6 +744,11 @@ export function registerViewCommand(program: Command): void {
       const scopeLabel = systemId
         ? `system "${systemId}"`
         : (workspaceName ? `workspace "${workspaceName}"` : "all workspaces");
+
+      // An `ix map` after an edit may have left the map for whatever reads
+      // regions next (CL-13); the visualizer shows them. Not under --all,
+      // which has no one workspace to refresh. Never throws.
+      if (!opts.all) await ensureFreshMap(mapRoot ? { root: mapRoot } : {});
 
       const existing = readAlivePid();
       if (existing) {

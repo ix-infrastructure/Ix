@@ -98,6 +98,18 @@ describe("renderMapLlm", () => {
     const clean = captureLog(() => renderMapLlm(result, [], { parseErrors: 0, commitErrors: 0, filesTooLarge: 0, filesTooLargePaths: [] }));
     expect(clean).toEqual(["map files=1 regions=0 levels=1 rev=1 outcome=ok"]);
   });
+
+  it("says map_stale=true only for a deferred map (CL-13)", () => {
+    const result: MapResult = { file_count: 1, region_count: 1, levels: 1, map_rev: 1, outcome: "ok", regions: [], hierarchy: [] };
+    const stale = captureLog(() => renderMapLlm(result, [], { parseErrors: 0, commitErrors: 0 }, { mapStale: true }));
+    expect(stale[0]).toBe("map files=1 regions=0 levels=1 rev=1 outcome=ok map_stale=true");
+    const fresh = captureLog(() => renderMapLlm(result, [], { parseErrors: 0, commitErrors: 0 }, { mapStale: false }));
+    expect(fresh[0]).toBe("map files=1 regions=0 levels=1 rev=1 outcome=ok");
+    const named = captureLog(() => renderMapLlm(result, [], undefined, { mapStale: true, regionsAsOf: { map_rev: 1, file_count: 1 } }));
+    expect(named[0]).toBe("map files=1 regions=0 levels=1 rev=1 outcome=ok map_stale=true regions_as_of_rev=1 regions_as_of_files=1");
+    const notStale = captureLog(() => renderMapLlm(result, [], undefined, { regionsAsOf: { map_rev: 1, file_count: 1 } }));
+    expect(notStale[0]).toBe("map files=1 regions=0 levels=1 rev=1 outcome=ok");
+  });
 });
 
 describe("renderSubsystemScoreLlm", () => {
