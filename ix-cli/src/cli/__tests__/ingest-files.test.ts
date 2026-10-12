@@ -193,6 +193,7 @@ describe("ingestFiles against a fake backend", () => {
       "IX_COMMIT_HTTP_MAX_FILES",
       "IX_COMMIT_CONCURRENCY",
       "IX_COMMIT_CONFLICT_RETRIES",
+      "IX_COMMIT_TRANSIENT_RETRY_MS",
       "IX_STITCH_COOLDOWN_MS",
       "IX_STITCH_WAIT_MS",
       "IX_MAP_DEADLINE_MS",
@@ -1292,9 +1293,21 @@ describe("ingestFiles against a fake backend", () => {
       expect(backend.singleCount, "no per-file fallback").toBe(0);
     });
 
-    it("sends the bulk once with IX_COMMIT_CONFLICT_RETRIES=0, then falls back per file as before", async () => {
+    it("still re-sends a 503 bulk with IX_COMMIT_CONFLICT_RETRIES=0: that knob is for conflicts only", async () => {
       fixture(4);
       process.env.IX_COMMIT_CONFLICT_RETRIES = "0";
+      backend.transientCommitFailures = [{ status: 503, retryAfter: "0" }];
+
+      const summary = await run();
+
+      expect(summary.commitErrors).toBe(0);
+      expect(summary.patchesApplied).toBe(4);
+      expect(sequence()).toEqual(["/v1/patches/bulk 503", "/v1/patches/bulk 200"]);
+    });
+
+    it("sends the bulk once with IX_COMMIT_TRANSIENT_RETRY_MS=0, then falls back per file as before", async () => {
+      fixture(4);
+      process.env.IX_COMMIT_TRANSIENT_RETRY_MS = "0";
       backend.transientCommitFailures = [{ status: 503, retryAfter: "0" }];
 
       const summary = await run();
@@ -1310,7 +1323,7 @@ describe("ingestFiles against a fake backend", () => {
       ]);
     });
 
-    it("stops at once when the backend reports its database down, and says so", async () => {
+    it("trips at once when the backend reports its database down and says so, while the commits still decide the exit", async () => {
       fixture(30);
       backend.databaseDown = true;
 
@@ -1318,10 +1331,12 @@ describe("ingestFiles against a fake backend", () => {
 
       expect(message).toContain("30 of 30");
       expect(backend.healthRequests, "the probe asked").toBeGreaterThan(0);
-      // One bulk, and one per-file failure for the probe to follow. The drain
-      // then sends nothing: it asks first, and the database is still down.
-      expect(backend.bulkCount, "no drain bulk").toBe(1);
-      expect(backend.singleCount, "tripped on the first per-file failure").toBe(1);
+      // Tripped on the first per-file failure, so the fan-out holds the rest.
+      // The held patches are still sent afterwards, as on main, so the exit
+      // code comes from their failures, not from the health answer -- and the
+      // drain's failure budget still bounds them below one request per file.
+      expect(backend.bulkCount, "the held set was re-sent").toBeGreaterThan(1);
+      expect(backend.singleCount).toBeLessThan(30);
       const banner = written();
       expect(banner).toContain("cannot reach its database (ArangoDB)");
       expect(banner).not.toContain("still passes");
@@ -1335,15 +1350,28 @@ describe("ingestFiles against a fake backend", () => {
 
       await runFatal();
 
-      // Asked after the first 503, not after 30 s of backoff: the database is
-      // down, so the bulk is not re-sent, the chunk goes to the cutoff rather
-      // than the per-file fallback, and the drain sends nothing.
+      // Asked after the first 503, not after the backoff: the database is
+      // down, so the bulk is not retried and the chunk goes to the cutoff
+      // rather than the per-file fallback. The held set is then still sent,
+      // so the commits, not the probe, decide the exit.
       expect(Date.now() - started, "no transient backoff").toBeLessThan(5_000);
       expect(backend.healthRequests, "the probe asked").toBeGreaterThan(0);
-      expect(backend.bulkCount, "the 503 bulk was not re-sent").toBe(1);
-      expect(backend.singleCount, "no per-file fallback").toBe(0);
+      expect(backend.singleCount).toBeLessThan(30);
       const banner = written();
       expect(banner).toContain("cannot reach its database (ArangoDB)");
+    });
+
+    it("a health answer that wrongly says the database is down does not fail a run whose commits land", async () => {
+      fixture(30);
+      backend.healthSaysDatabaseDown = true;
+      backend.transientCommitFailures = [{ status: 503, retryAfter: "0" }];
+
+      const summary = await run();
+
+      expect(backend.healthRequests, "the probe asked, and was told 'unreachable'").toBeGreaterThan(0);
+      expect(summary.commitErrors, "the held patches were sent and landed").toBe(0);
+      expect(summary.patchesApplied).toBe(30);
+      expect(process.exitCode ?? 0).toBe(0);
     });
 
     it("does not trip on a 5xx from the current-revision fallback (an older backend proves nothing)", async () => {

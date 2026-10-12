@@ -12,8 +12,11 @@
 //   - a backend or proxy saying "not now": 502, 503, 504 and 429. These clear
 //     in seconds, and a 429 or 503 may say how many in `Retry-After`. They are
 //     retried only where the caller asks (`transient: true`), which is the
-//     ingest's BULK commits: one request per chunk, so a 30-second budget per
-//     bulk is bounded. On the per-file path it would be 30 seconds per patch.
+//     ingest's BULK commits: one request per chunk, at most three retries in
+//     a 5-second budget per bulk (`IX_COMMIT_TRANSIENT_RETRY_MS`). A
+//     `Retry-After` longer than what is left of the budget is cut to it. Hook
+//     runners give `ix map` about 30 s in all, so a long wait here would cost
+//     more than the retry can win back.
 //
 // Everything else is thrown at once. In particular 413 (the payload split owns
 // that), 409 (the partial-commit and plan-mismatch handling owns that) and 500
@@ -21,8 +24,9 @@
 // backend did apply comes back on the retry as a 409 naming the ids or as
 // `Idempotent`, and both are already handled by the caller.
 //
-// One attempt counter covers every class, so `IX_COMMIT_CONFLICT_RETRIES`
-// bounds the whole loop, and 0 means one attempt and no retries.
+// Each class has its own bound: `IX_COMMIT_CONFLICT_RETRIES` counts conflict
+// and transport retries only (0: none), and `IX_COMMIT_TRANSIENT_RETRY_MS`
+// bounds the transient waits (0: no transient retries).
 // ---------------------------------------------------------------------------
 
 /** Lock contention, as opposed to the transport failures below. Kept separate
@@ -143,24 +147,26 @@ async function giveUpSafely(
   }
 }
 
-/** Total waiting one call may spend on transient statuses. */
-export const TRANSIENT_RETRY_BUDGET_MS = 30_000;
+/** Total waiting one call may spend on transient statuses (the default of `IX_COMMIT_TRANSIENT_RETRY_MS`). */
+export const TRANSIENT_RETRY_BUDGET_MS = 5_000;
+/** Most transient retries one call makes, whatever the budget: a `Retry-After: 0` must not loop. */
+export const TRANSIENT_MAX_RETRIES = 3;
 /** First backoff for a transient status without `Retry-After`; doubles each time. */
 const TRANSIENT_BASE_DELAY_MS = 500;
 
 export interface RetryCommitOptions {
-  /** Retries after the first attempt, across every class. 0 means one attempt. */
+  /** Conflict and transport retries after the first attempt. 0 means none. Transient statuses are bounded by the budget instead. */
   maxRetries: number;
   /** Retry 502/503/504/429 too. Only the bulk commit sites set this. */
   transient: boolean;
-  /** Total waiting allowed for transient statuses. A wait past it is not taken. */
+  /** Total waiting allowed for transient statuses; a longer wait is cut to what is left. 0 means no transient retries. */
   transientBudgetMs?: number;
   /** The run's deadline. A wait it interrupts ends the loop with the last error. */
   signal?: AbortSignal;
   /**
    * Has the caller given up on the backend? Consulted before a TRANSIENT retry
    * only: a run whose cutoff has tripped, or whose backend reports its database
-   * down, should not spend 30 seconds waiting on it. Conflict and transport
+   * down, should not spend its transient budget waiting on it. Conflict and transport
    * retries keep their existing behaviour.
    *
    * It may be async, so a caller can ASK the backend (a short health probe)
@@ -194,34 +200,40 @@ export async function retryCommit<T>(fn: () => Promise<T>, options: RetryCommitO
   } = options;
   let transientWaitedMs = 0;
   let transientRetries = 0;
-  for (let attempt = 0; ; attempt++) {
+  let conflictRetries = 0;
+  for (;;) {
     try {
       return await fn();
     } catch (err) {
-      if (attempt >= maxRetries || signal?.aborted) throw err;
+      if (signal?.aborted) throw err;
       let delay: number;
       let kind: "conflict" | "transient";
       if (isRetryableCommitConflict(err)) {
+        if (conflictRetries >= maxRetries) throw err;
         // ArangoDB lock conflicts usually clear as soon as the competing transaction
         // commits. Transport errors may need a bit more breathing room under k8s load.
-        delay = 10 * (1 << attempt) + random() * 10;
+        delay = 10 * (1 << conflictRetries) + random() * 10;
+        conflictRetries++;
         kind = "conflict";
       } else if (transient && isTransientCommitStatus(err)) {
+        const remaining = transientBudgetMs - transientWaitedMs;
+        if (transientRetries >= TRANSIENT_MAX_RETRIES || remaining <= 0) throw err;
         if (shouldGiveUp && (await giveUpSafely(shouldGiveUp, err))) throw err;
         const asked = retryAfterMs(retryAfterOf(err), now());
         // Jittered by up to a quarter, so the chunks of one run that all met
-        // the same restart do not come back in lockstep.
-        delay = asked ?? TRANSIENT_BASE_DELAY_MS * 2 ** transientRetries * (1 + random() * 0.25);
-        // A wait that would overrun the budget is not started: sleeping most
-        // of it and then failing anyway only makes the failure later.
-        if (transientWaitedMs + delay > transientBudgetMs) throw err;
+        // the same restart do not come back in lockstep. Either wait is cut to
+        // what is left of the budget, so `Retry-After` is honoured only up to it.
+        delay = Math.min(
+          remaining,
+          asked ?? TRANSIENT_BASE_DELAY_MS * 2 ** transientRetries * (1 + random() * 0.25),
+        );
         transientWaitedMs += delay;
         transientRetries++;
         kind = "transient";
       } else {
         throw err;
       }
-      onRetry?.({ attempt: attempt + 1, delayMs: delay, error: err, kind });
+      onRetry?.({ attempt: conflictRetries + transientRetries, delayMs: delay, error: err, kind });
       try {
         await sleep(delay, signal);
       } catch {

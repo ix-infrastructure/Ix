@@ -43,7 +43,7 @@ import {
   drainInPasses,
   perFileAction,
 } from '../commit-breaker.js';
-import { retryCommit } from '../commit-retry.js';
+import { retryCommit, TRANSIENT_RETRY_BUDGET_MS } from '../commit-retry.js';
 import { createDatabaseProbe, probeDatabase } from '../database-probe.js';
 // Moved to commit-retry.ts with the retry loop that uses them; re-exported so
 // existing importers keep working.
@@ -682,7 +682,7 @@ export function commitFailureIndictsBackend(err: unknown, runDeadlineExpired: bo
  * The per-file commit's retry: lock conflicts and transport drops only.
  * Transient statuses (502/503/504/429) are retried at the BULK sites, which
  * call `retryCommit` themselves; retrying them per patch would multiply a
- * 30-second budget by the number of patches.
+ * per-bulk wait budget by the number of patches.
  */
 async function retryOnConflict<T>(fn: () => Promise<T>, maxRetries: number): Promise<T> {
   return retryCommit(fn, { maxRetries, transient: false });
@@ -2814,9 +2814,12 @@ export async function ingestFiles(
       return cutToLimits(items);
     };
     const COMMIT_CONCURRENCY     = parsePositiveIntEnv('IX_COMMIT_CONCURRENCY', 8); // parallel HTTP save requests
-    // Retries of one commit: lock conflicts and transport drops, and at the
-    // bulk sites 502/503/504/429 as well. 0 sends each commit once.
+    // Retries of one commit after a lock conflict or a transport drop. 0: none.
     const COMMIT_CONFLICT_RETRIES = parseNonNegativeIntEnv('IX_COMMIT_CONFLICT_RETRIES', 6);
+    // Total wait for re-sending a BULK the backend answered 502/503/504/429
+    // (at most three retries, `Retry-After` cut to it). 0: no such retries.
+    // Its own knob, so turning conflict retries off leaves these alone.
+    const COMMIT_TRANSIENT_RETRY_MS = parseNonNegativeIntEnv('IX_COMMIT_TRANSIENT_RETRY_MS', TRANSIENT_RETRY_BUDGET_MS);
     // Re-sends of a commit that lost the base-rev race to another writer; see retryOnBaseRevRace.
     const COMMIT_BASE_REV_RETRIES = parsePositiveIntEnv('IX_COMMIT_BASE_REV_RETRIES', 8);
     let baseRevRetries = 0;
@@ -3177,19 +3180,10 @@ export async function ingestFiles(
       /** Re-send the held set. What it cannot place is left on `deferredByCutoff`. */
       const commitIndividuallyAfterCutoff = async (itemsIn: PreparedPatch[]): Promise<void> => {
         let items = itemsIn;
-        // The backend has said its database is down: nothing here can land, so
-        // send nothing. Counted as an indicting failure so the drain gate
-        // reads it as the miss it is and stops re-probing every batch.
-        if (await checkDatabase()) {
-          backendIndictingFailures++;
-          for (const item of items) deferredByCutoff.push(item);
-          if (debug) {
-            process.stderr.write(
-              `\n  [cutoff] the backend reports its database unreachable; holding ${items.length} patches unsent\n`,
-            );
-          }
-          return;
-        }
+        // Re-sent even when the backend has reported its database down. The
+        // probe may hold patches back during the fan-out, but whether the run
+        // fails is decided by commits, as on main: a wrong or stale health
+        // answer must not turn a run whose patches would land into an exit 1.
         if (debug) {
           process.stderr.write(
             `\n  [cutoff] re-sending ${items.length} held-back patches with a fresh streak\n`,
@@ -3237,7 +3231,8 @@ export async function ingestFiles(
                 () => client.commitPatchBulk(chunk.map(item => item.patch)),
                 {
                   maxRetries: COMMIT_CONFLICT_RETRIES,
-                  transient: true,
+                  transient: COMMIT_TRANSIENT_RETRY_MS > 0,
+                  transientBudgetMs: COMMIT_TRANSIENT_RETRY_MS,
                   signal: runDeadlineSignal,
                   // Not the breaker: this bulk exists because the breaker
                   // tripped, so it would always say give up. Asked, not just
@@ -3389,10 +3384,8 @@ export async function ingestFiles(
         // tests, which previously asserted the stranding guarantee at a budget
         // the CLI never runs at and so could not see it fail.
         const leftover = await drainInPasses(items, async pending => {
-          // Asked before every pass: three passes that each send nothing end
-          // the drain with zero requests against a backend whose database is
-          // down, where they used to spend three failure budgets on it.
-          if (await checkDatabase()) return { placed: false, unreached: pending };
+          // No database probe here: the drain sends, as on main, so the exit
+          // code follows what the commits did, never a health answer.
           commitBreaker.reset();
           const tookBefore = patchesTheBackendTook;
           await commitItemsSerially(pending, recordDrainMs, undefined, {
@@ -3444,14 +3437,16 @@ export async function ingestFiles(
                   () => client.commitPatchBulk(items.map(item => item.patch)),
                   {
                     maxRetries: COMMIT_CONFLICT_RETRIES,
-                    // 502/503/504/429 too, honouring Retry-After, within about
-                    // 30 s per bulk. A 413 and a 409 are thrown at once, to the
-                    // payload split and the partial-commit handling below.
-                    transient: true,
+                    // 502/503/504/429 too, honouring Retry-After up to the
+                    // budget (5 s per bulk by default). A 413 and a 409 are
+                    // thrown at once, to the payload split and the
+                    // partial-commit handling below.
+                    transient: COMMIT_TRANSIENT_RETRY_MS > 0,
+                    transientBudgetMs: COMMIT_TRANSIENT_RETRY_MS,
                     signal: runDeadlineSignal,
                     // Asked, not just read. On the first bulk of a run nothing
                     // has probed yet, and a 503 from a backend whose database
-                    // is down would otherwise spend the whole 30 s budget
+                    // is down would otherwise spend the whole budget
                     // before anything asked it. A database reported down trips
                     // the breaker, so `shouldStop` hands the chunk to the
                     // cutoff instead of the per-file fallback.

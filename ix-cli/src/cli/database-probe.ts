@@ -16,6 +16,11 @@
 // Only an explicit answer counts. A probe that fails, times out, or is refused
 // for want of the local token is `unknown`, and the caller then does exactly
 // what it would have done without one.
+//
+// The answer only shortens the fan-out (the breaker trips, the rest is held)
+// and the transient waits. It never decides the exit code: the held patches
+// are still sent by the cutoff and the drain, as on main, so a wrong or stale
+// "unreachable" cannot fail a run whose commits would land.
 // ---------------------------------------------------------------------------
 
 import type { IxClient } from "../client/api.js";

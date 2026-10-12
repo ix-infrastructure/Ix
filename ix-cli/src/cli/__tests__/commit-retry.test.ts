@@ -113,7 +113,7 @@ describe("retryCommit", () => {
     expect(past.calls()).toBe(2);
   });
 
-  it("caps total waiting at about 30 s: repeated 503s give up when the next backoff would pass it", async () => {
+  it("caps transient retries at three, inside about 5 s by default", async () => {
     const waits: number[] = [];
     const always503 = vi.fn(async () => { throw statusError(503); });
     const result = retryCommit(always503, {
@@ -124,27 +124,55 @@ describe("retryCommit", () => {
     });
 
     await expect(result).rejects.toThrow(/^503:/);
-    // 500 + 1000 + 2000 + 4000 + 8000 = 15.5 s; the next, 16 s, would reach 31.5 s.
-    expect(waits).toEqual([500, 1000, 2000, 4000, 8000]);
-    expect(always503).toHaveBeenCalledTimes(6);
+    // 500 + 1000 + 2000 = 3.5 s, under the 5 s default; the cap of three stops it.
+    expect(waits).toEqual([500, 1000, 2000]);
+    expect(always503).toHaveBeenCalledTimes(4);
   });
 
-  it("a Retry-After longer than the budget fails at once, without sleeping", async () => {
+  it("cuts the last backoff to what is left of a smaller budget", async () => {
+    const waits: number[] = [];
+    const always503 = vi.fn(async () => { throw statusError(503); });
+    await expect(retryCommit(always503, {
+      maxRetries: 6,
+      transient: true,
+      transientBudgetMs: 2_000,
+      random: () => 0,
+      sleep: async ms => { waits.push(ms); },
+    })).rejects.toThrow(/^503:/);
+    expect(waits).toEqual([500, 1000, 500]);
+    expect(waits.reduce((a, b) => a + b, 0)).toBe(2_000);
+  });
+
+  it("honours a Retry-After only up to the budget, and never waits past it", async () => {
+    const waits: number[] = [];
+    const { fn, calls } = failing(statusError(503, "60"), statusError(503, "60"));
+    await expect(retryCommit(fn, { ...transient, sleep: async ms => { waits.push(ms); } })).rejects.toThrow(/^503:/);
+    expect(waits, "60 s cut to the 5 s budget, then nothing left").toEqual([5_000]);
+    expect(calls()).toBe(2);
+  });
+
+  it("a Retry-After of 0 still stops after three retries", async () => {
+    const always = vi.fn(async () => { throw statusError(429, "0"); });
+    await expect(retryCommit(always, { ...transient, sleep: async () => {} })).rejects.toThrow(/^429:/);
+    expect(always).toHaveBeenCalledTimes(4);
+  });
+
+  it("transientBudgetMs 0 makes exactly one attempt for a 503", async () => {
     const sleep = vi.fn(async () => {});
-    const { fn, calls } = failing(statusError(503, "60"));
-    await expect(retryCommit(fn, { ...transient, sleep })).rejects.toThrow(/^503:/);
+    const { fn, calls } = failing(statusError(503));
+    await expect(retryCommit(fn, { ...transient, transientBudgetMs: 0, sleep })).rejects.toThrow(/^503:/);
     expect(sleep).not.toHaveBeenCalled();
     expect(calls()).toBe(1);
   });
 
-  it("maxRetries 0 makes exactly one attempt, for a conflict and for a 503", async () => {
+  it("maxRetries 0 stops conflict retries only; a 503 is still retried on the transient budget", async () => {
     const conflict = failing(new Error("500: write-write conflict"));
     await expect(retryCommit(conflict.fn, { maxRetries: 0, transient: true })).rejects.toThrow(/write-write/);
     expect(conflict.calls()).toBe(1);
 
     const unavailable = failing(statusError(503, "0"));
-    await expect(retryCommit(unavailable.fn, { maxRetries: 0, transient: true })).rejects.toThrow(/^503:/);
-    expect(unavailable.calls()).toBe(1);
+    await expect(retryCommit(unavailable.fn, { maxRetries: 0, transient: true, sleep: async () => {} })).resolves.toBe("ok");
+    expect(unavailable.calls()).toBe(2);
   });
 
   it("still retries a lock conflict on its old short backoff", async () => {

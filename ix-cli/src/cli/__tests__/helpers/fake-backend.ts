@@ -143,6 +143,11 @@ export class FakeBackend {
    * only a read that needs it (`/v1/revisions/current`) can tell.
    */
   healthReportsDatabase = true;
+  /**
+   * `/v1/health` reports the database unreachable while it is in fact up and
+   * commits land: a wrong or stale health answer.
+   */
+  healthSaysDatabaseDown = false;
   /** `/v1/health` requests, in order. */
   healthRequests = 0;
   /** `/v1/revisions/current` requests, in order. */
@@ -547,7 +552,7 @@ export class FakeBackend {
       const release = this.releaseVersion !== undefined ? this.releaseVersion : this.semantics === "head" ? "1.0.34" : null;
       const base = { version: "1.0.28", ...(release ? { release_version: release } : {}) };
       if (!this.healthReportsDatabase) return send(200, { status: "ok", ...base });
-      if (this.databaseDown) return send(503, { status: "degraded", database: "unreachable", ...base });
+      if (this.databaseDown || this.healthSaysDatabaseDown) return send(503, { status: "degraded", database: "unreachable", ...base });
       return send(200, { status: "ok", database: "reachable", ...base });
     }
     if (path === "/v1/revisions/current") {
