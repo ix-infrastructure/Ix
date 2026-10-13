@@ -18,7 +18,7 @@ import {
 import { compactTreeNode, relativePath, printJson } from "../format.js";
 import { llmLine, llmShortId, type LlmValue } from "../llm.js";
 import { traversalHint } from "./depends.js";
-import { parsePickOption } from "../options.js";
+import { parseCountOption, parsePickOption } from "../options.js";
 import { createLimiter, EXPAND_CONCURRENCY, walkTree, type Limiter, type TreeWalkResult } from "../tree-walk.js";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -37,6 +37,10 @@ interface PathNode {
   id: string;
   name: string;
   kind: string;
+  /** Predicate of the edge that reached this step from the previous one; set only when the edge was found. */
+  via?: string;
+  /** True when that edge runs from this step back to the previous one (found walking "in"). */
+  reversed?: boolean;
 }
 
 // ── Constants ────────────────────────────────────────────────────────
@@ -45,8 +49,8 @@ interface PathNode {
  * What an unasked-for traversal is allowed to cost — the same bounds
  * `ix depends` uses, for the same reason: both were `Infinity`, and on a hub
  * that is thousands of nodes the caller pays for before seeing any of them.
- * `--depth` and `--cap` still take anything, and the output says when a bound
- * was reached.
+ * `--depth` and `--cap` must be non-negative integers, and the output says
+ * when a bound was reached.
  */
 const DEFAULT_MAX_DEPTH = 3;
 const MAX_NODES = 100;
@@ -231,6 +235,22 @@ export async function searchPath(
   if (maxNodes < 1) return { path: null, cut: true, cutReason: "node-cap" };
   if (fromId === toId) return { path: [{ id: fromId, name: "", kind: "" }], cut: false };
   const nodeMap = new Map<string, { name: string; kind: string }>();
+  // How each visited node was first reached from its BFS parent.
+  const linkMap = new Map<string, { via: string; reversed: boolean }>();
+  const predicateRank = (p: string) => {
+    const i = predicates.indexOf(p);
+    return i < 0 ? predicates.length : i;
+  };
+  // The predicate joining parent and child in the given orientation, first in
+  // request order when several do. Edges between two neighbours are ignored.
+  const linkPredicate = (edges: any[] | undefined, src: string, dst: string): string | undefined => {
+    let best: string | undefined;
+    for (const e of edges ?? []) {
+      if (e?.src !== src || e?.dst !== dst || typeof e.predicate !== "string") continue;
+      if (best === undefined || predicateRank(e.predicate) < predicateRank(best)) best = e.predicate;
+    }
+    return best;
+  };
 
   // Breadth-first as before, and still read one entry at a time in queue
   // order, so the route returned — the shortest, first-queued on a tie — does
@@ -259,7 +279,7 @@ export async function searchPath(
 
   try {
     for (let head = 0; head < queue.length; head++) {
-      const { path, next } = queue[head];
+      const { id, path, next } = queue[head];
       if (!next) {
         depthCut = true;
         continue;
@@ -267,13 +287,23 @@ export async function searchPath(
 
       const [outResult, inResult] = await next;
 
-      for (const n of [...outResult.nodes, ...inResult.nodes]) {
+      const outCount = outResult.nodes.length;
+      const found = [...outResult.nodes, ...inResult.nodes];
+      for (let k = 0; k < found.length; k++) {
+        const n = found[k];
         if (visited.has(n.id)) continue;
         if (visited.size >= maxNodes) return { path: null, cut: true, cutReason: "node-cap" };
         visited.add(n.id);
         const name = n.name || n.attrs?.name || n.id.slice(0, 8);
         if (!nodeMap.has(n.id)) {
           nodeMap.set(n.id, { name, kind: n.kind ?? "unknown" });
+        }
+        if (!linkMap.has(n.id)) {
+          const reversed = k >= outCount;
+          const via = reversed
+            ? linkPredicate(inResult.edges, n.id, id)
+            : linkPredicate(outResult.edges, id, n.id);
+          if (via) linkMap.set(n.id, { via, reversed });
         }
 
         if (n.id === toId) {
@@ -282,7 +312,13 @@ export async function searchPath(
             path: fullPath.map((nodeId) => {
               if (nodeId === fromId) return { id: nodeId, name: "", kind: "" }; // filled below
               const meta = nodeMap.get(nodeId) ?? { name: nodeId.slice(0, 8), kind: "unknown" };
-              return { id: nodeId, ...meta };
+              const link = linkMap.get(nodeId);
+              return {
+                id: nodeId,
+                ...meta,
+                ...(link ? { via: link.via } : {}),
+                ...(link?.reversed ? { reversed: true } : {}),
+              };
             }),
             cut: false,
           };
@@ -410,7 +446,13 @@ export function renderTracePathLlm(
     if (cutHint) lines.push(llmLine("diagnostic", [["code", cutHint.code], ["message", cutHint.message]]));
     return lines;
   }
-  for (const n of pathNodes) lines.push(llmLine("step", [["name", n.name], ["kind", n.kind]]));
+  for (const n of pathNodes) {
+    lines.push(llmLine("step", [
+      ["name", n.name], ["kind", n.kind],
+      ["via", n.via],
+      ["reversed", n.reversed ? true : undefined],
+    ]));
+  }
   return lines;
 }
 
@@ -518,8 +560,8 @@ export function registerTraceCommand(program: Command): void {
           testsOnly: opts.testsOnly,
         };
 
-        const maxDepth = opts.depth ? parseInt(opts.depth, 10) : DEFAULT_MAX_DEPTH;
-        const maxNodes = opts.cap ? parseInt(opts.cap, 10) : MAX_NODES;
+        const maxDepth = opts.depth !== undefined ? parseCountOption(opts.depth, "3") : DEFAULT_MAX_DEPTH;
+        const maxNodes = opts.cap !== undefined ? parseCountOption(opts.cap, "100") : MAX_NODES;
 
         // ── Path mode (--to) ────────────────────────────────────────
         if (opts.to) {
@@ -578,7 +620,12 @@ export function registerTraceCommand(program: Command): void {
               kind: relKind,
             };
             if (pathNodes.length > 0) {
-              const mapped = pathNodes.map((n) => ({ name: n.name, kind: n.kind }));
+              const mapped = pathNodes.map((n) => ({
+                name: n.name,
+                kind: n.kind,
+                ...(n.via ? { via: n.via } : {}),
+                ...(n.reversed ? { reversed: true } : {}),
+              }));
               output.path = mapped;
               output.summary = { path_length: pathNodes.length };
             } else {
@@ -622,6 +669,9 @@ export function registerTraceCommand(program: Command): void {
             const kindStr = colorizeKind(n.kind ?? "");
             if (i === 0) {
               console.log(`  ${kindStr} ${n.name}`);
+            } else if (n.via) {
+              const arrow = n.reversed ? `<--${n.via}--` : `--${n.via}-->`;
+              console.log(`  ${chalk.dim(arrow)} ${kindStr} ${n.name}`);
             } else {
               console.log(`  ${chalk.dim("→")} ${kindStr} ${n.name}`);
             }
