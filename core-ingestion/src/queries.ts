@@ -32,6 +32,9 @@ export const TYPESCRIPT_QUERIES = `
 (internal_module
   name: (identifier) @name) @definition.namespace
 
+(method_signature
+  name: (property_identifier) @name) @definition.method
+
 (abstract_method_signature
   name: (property_identifier) @name) @definition.method
 
@@ -119,13 +122,7 @@ export const TYPESCRIPT_QUERIES = `
 
 (call_expression
   function: (member_expression
-    property: (property_identifier) @call.name)) @call
-
-; this.method() — capture this as qualifier so index.ts can substitute the enclosing class.
-; Analogous to Python's self/cls substitution.
-(call_expression
-  function: (member_expression
-    object: (this) @_qualifier
+    object: (_) @_qualifier
     property: (property_identifier) @call.name)) @call
 
 ; Constructor calls: new Foo()
@@ -1516,6 +1513,7 @@ export const SCALA_QUERIES = `
 ; ── Calls: method call (obj.method()) ────────────────────────────────────────
 (call_expression
   function: (field_expression
+    value: (_) @_qualifier
     field: (identifier) @call.name)) @call
 
 ; ── Constructor: new Foo() ────────────────────────────────────────────────────

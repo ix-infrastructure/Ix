@@ -1,0 +1,212 @@
+[
+  {
+    "language": "scala",
+    "name": "constructor parameter",
+    "source": "class Target { def run() = () };\n class Other { def run() = () };\n class Use(dep: Target) { def use() = dep.run() }",
+    "expected": [
+      "Target.run"
+    ]
+  },
+  {
+    "language": "scala",
+    "name": "field",
+    "source": "class Target { def run() = () };\n class Other { def run() = () };\n class Use { val dep: Target = new Target();\n def use() = dep.run() }",
+    "expected": [
+      "Target.run"
+    ]
+  },
+  {
+    "language": "scala",
+    "name": "typed val",
+    "source": "class Target { def run() = () };\n class Other { def run() = () };\n object Use { def use() = { val dep: Target = new Target();\n dep.run() }\n}",
+    "expected": [
+      "Target.run"
+    ]
+  },
+  {
+    "language": "scala",
+    "name": "typed var",
+    "source": "class Target { def run() = () };\n class Other { def run() = () };\n object Use { def use() = { var dep: Target = new Target();\n dep.run() }\n}",
+    "expected": [
+      "Target.run"
+    ]
+  },
+  {
+    "language": "scala",
+    "name": "new",
+    "source": "class Target { def run() = () };\n class Other { def run() = () };\n object Use { def use() = { val dep = new Target();\n dep.run() }\n}",
+    "expected": [
+      "Target.run"
+    ]
+  },
+  {
+    "language": "scala",
+    "name": "typed parameter",
+    "source": "class Target { def run() = () };\n class Other { def run() = () };\n object Use { def use(dep: Target) = dep.run() }",
+    "expected": [
+      "Target.run"
+    ]
+  },
+  {
+    "language": "ts",
+    "name": "typed parameter",
+    "source": "class Target { run() {}\n}\nclass Other { run() {}\n}\nfunction use(dep: Target) { dep.run();\n }",
+    "expected": [
+      "Target.run"
+    ]
+  },
+  {
+    "language": "ts",
+    "name": "annotated const",
+    "source": "class Target { run() {}\n}\nclass Other { run() {}\n}\nfunction use() { const dep: Target = new Target();\n dep.run();\n }",
+    "expected": [
+      "Target.run"
+    ]
+  },
+  {
+    "language": "ts",
+    "name": "annotated let",
+    "source": "class Target { run() {}\n}\nclass Other { run() {}\n}\nfunction use() { let dep: Target = new Target();\n dep.run();\n }",
+    "expected": [
+      "Target.run"
+    ]
+  },
+  {
+    "language": "ts",
+    "name": "new",
+    "source": "class Target { run() {}\n}\nclass Other { run() {}\n}\nfunction use() { let dep = new Target();\n dep.run();\n }",
+    "expected": [
+      "Target.run"
+    ]
+  },
+  {
+    "language": "ts",
+    "name": "field",
+    "source": "class Target { run() {}\n}\nclass Other { run() {}\n}\nclass Use { dep: Target;\n use() { this.dep.run();\n }\n}",
+    "expected": [
+      "Target.run"
+    ]
+  },
+  {
+    "language": "ts",
+    "name": "initialized field",
+    "source": "class Target { run() {}\n}\nclass Other { run() {}\n}\nclass Use { dep = new Target();\n use() { this.dep.run();\n }\n}",
+    "expected": [
+      "Target.run"
+    ]
+  },
+  {
+    "language": "ts",
+    "name": "parameter property",
+    "source": "class Target { run() {}\n}\nclass Other { run() {}\n}\nclass Use { constructor(private dep: Target) {}\nuse() { this.dep.run();\n }\n}",
+    "expected": [
+      "Target.run"
+    ]
+  },
+  {
+    "language": "go",
+    "name": "literal",
+    "source": "package p\ntype Target struct{};\n type Other struct{};\n func (t Target) Run() {};\n func (o Other) Run() {};\n func use() { dep := Target{};\n dep.Run() }",
+    "expected": [
+      "Target.Run"
+    ]
+  },
+  {
+    "language": "go",
+    "name": "pointer literal",
+    "source": "package p\ntype Target struct{};\n type Other struct{};\n func (t Target) Run() {};\n func (o Other) Run() {};\n func use() { dep := &Target{};\n dep.Run() }",
+    "expected": [
+      "Target.Run"
+    ]
+  },
+  {
+    "language": "go",
+    "name": "var",
+    "source": "package p\ntype Target struct{};\n type Other struct{};\n func (t Target) Run() {};\n func (o Other) Run() {};\n func use() { var dep Target;\n dep.Run() }",
+    "expected": [
+      "Target.Run"
+    ]
+  },
+  {
+    "language": "go",
+    "name": "pointer var",
+    "source": "package p\ntype Target struct{};\n type Other struct{};\n func (t Target) Run() {};\n func (o Other) Run() {};\n func use() { var dep *Target;\n dep.Run() }",
+    "expected": [
+      "Target.Run"
+    ]
+  },
+  {
+    "language": "go",
+    "name": "factory",
+    "source": "package p\ntype Target struct{};\n type Other struct{};\n func (t Target) Run() {};\n func (o Other) Run() {};\n func NewTarget() *Target { return &Target{}\n};\n func use() { dep := NewTarget();\n dep.Run() }",
+    "expected": [
+      "Target.Run"
+    ]
+  },
+  {
+    "language": "scala",
+    "name": "shadow 18",
+    "source": "class Target { def run() = () };\n class Other { def run() = () };\n object Use { def use(dep: Target) = { { val dep = unknown();\n dep.run() }\n}\n}",
+    "expected": []
+  },
+  {
+    "language": "scala",
+    "name": "shadow 19",
+    "source": "class Target { def run() = () };\n class Other { def run() = () };\n class Use(dep: Target) { def use(dep: Any) = dep.run() }",
+    "expected": []
+  },
+  {
+    "language": "ts",
+    "name": "shadow 20",
+    "source": "class Target { run() {}\n}\nclass Other { run() {}\n}\nfunction use(dep: Target) { { const dep = unknown();\n dep.run();\n }\n}",
+    "expected": []
+  },
+  {
+    "language": "ts",
+    "name": "shadow 21",
+    "source": "class Target { run() {}\n}\nclass Other { run() {}\n}\nfunction use(dep: Target) { function nested(dep) { dep.run();\n }\n}",
+    "expected": []
+  },
+  {
+    "language": "ts",
+    "name": "shadow 22",
+    "source": "class Target { run() {}\n}\nclass Other { run() {}\n}\nfunction use(dep: Target) { const nested = dep => dep.run();\n }",
+    "expected": []
+  },
+  {
+    "language": "ts",
+    "name": "shadow 23",
+    "source": "class Target { run() {}\n}\nclass Other { run() {}\n}\nfunction use<Target>(dep: Target) { dep.run();\n }",
+    "expected": []
+  },
+  {
+    "language": "ts",
+    "name": "shadow 24",
+    "source": "class Target { run() {}\n}\nclass Other { run() {}\n}\nfunction use(dep: Target) { { dep.run();\n const dep = unknown();\n }\n}",
+    "expected": []
+  },
+  {
+    "language": "ts",
+    "name": "shadow 25",
+    "source": "class Target { run() {}\n}\nclass Other { run() {}\n}\nfunction use(dep: Target) { try {}\ncatch (dep) { dep.run();\n }\n}",
+    "expected": []
+  },
+  {
+    "language": "go",
+    "name": "shadow 26",
+    "source": "package p\ntype Target struct{};\n type Other struct{};\n func (t Target) Run() {};\n func (o Other) Run() {};\n func use(dep *Target) { { dep := unknown();\n dep.Run() }\n}",
+    "expected": []
+  },
+  {
+    "language": "go",
+    "name": "shadow 27",
+    "source": "package p\ntype Target struct{};\n type Other struct{};\n func (t Target) Run() {};\n func (o Other) Run() {};\n func use(dep *Target) { f := func(dep interface{}) { dep.Run() };\n _ = f }",
+    "expected": []
+  },
+  {
+    "language": "go",
+    "name": "shadow 28",
+    "source": "package p\ntype Target struct{};\n type Other struct{};\n func (t Target) Run() {};\n func (o Other) Run() {};\n func use(dep *Target) { for _, dep := range unknown() { dep.Run() }\n}",
+    "expected": []
+  }
+]

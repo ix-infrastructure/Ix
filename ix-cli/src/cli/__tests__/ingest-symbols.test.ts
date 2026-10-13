@@ -187,6 +187,37 @@ describe("dependents (IN-11)", () => {
   const summary = (filePath: string, fields: Record<string, unknown>) => ({ filePath, ...fields });
   const entry = (s: ReturnType<typeof summary>): SymbolEntry => ({ hash: "h", summary: s });
 
+  it("propagates changed superclass bindings to transitive subclass callers", () => {
+    const before = summary("mid.scala", { receiverHeritage: [["Mid", "A"]] });
+    const after = summary("mid.scala", { receiverHeritage: [["Mid", "B"]] });
+    const table = new Map([
+      ["mid.scala", entry(after)],
+      ["child.scala", entry(summary("child.scala", { receiverHeritage: [["Child", "Mid"]], refs: ["Mid"] }))],
+      ["leaf.scala", entry(summary("leaf.scala", { receiverHeritage: [["Leaf", "Child"]], refs: ["Child"] }))],
+      ["use.scala", entry(summary("use.scala", { refs: ["Leaf.run"] }))],
+      ["unrelated.scala", entry(summary("unrelated.scala", { refs: ["Other.run"] }))],
+    ]);
+    expect(findDependents(table, changedNames(before, after), [], new Set(["mid.scala"])))
+      .toEqual(["child.scala", "leaf.scala", "use.scala"]);
+  });
+
+  it("propagates inheritance through excluded files and terminates on cycles", () => {
+    const table = new Map([
+      ["a.scala", entry(summary("a.scala", { receiverHeritage: [["A", "B"]], refs: ["B"] }))],
+      ["b.scala", entry(summary("b.scala", { receiverHeritage: [["B", "A"]], refs: ["A"] }))],
+      ["use.scala", entry(summary("use.scala", { refs: ["B.run"] }))],
+    ]);
+    const names = new Set(["A"]);
+    expect(findDependents(table, names, [], new Set(["a.scala", "b.scala"]))).toEqual(["use.scala"]);
+    expect(names).toEqual(new Set(["A"]));
+  });
+
+  it.each(["receiverFactories", "receiverHeritage"])("invalidates dependents when %s changes", (field) => {
+    const before = summary("target", { sig: "before", [field]: [["Target", "Base"]] });
+    const after = summary("target", { sig: "after", [field]: [["Target", "Other"]] });
+    expect(changedNames(before, after)).toEqual(new Set(["Target"]));
+  });
+
   it("changes no names when the signature is the same, and the symmetric difference otherwise", () => {
     const before = summary("m.ts", { sig: "s1", qkeys: [["add", "add"], ["sub", "sub"]] });
     expect(changedNames(before, summary("m.ts", { sig: "s1", qkeys: [["add", "add"], ["sub", "sub"]] }))).toEqual(new Set());

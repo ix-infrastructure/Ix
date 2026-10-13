@@ -143,6 +143,27 @@ exports[`parseFile snapshots > snapshots Identifiers.scala 1`] = `
   "importAliases": undefined,
   "importBindings": undefined,
   "language": "scala",
+  "receiverFactories": [
+    [
+      "WorkspaceId",
+      "WorkspaceId",
+    ],
+    [
+      "NodeId",
+      "NodeId",
+    ],
+  ],
+  "receiverHeritage": [
+    [
+      "WorkspaceId",
+      "AnyVal",
+    ],
+    [
+      "NodeId",
+      "AnyVal",
+    ],
+  ],
+  "receiverPackage": "ix.sample.model",
   "relationships": [
     {
       "dstName": "WorkspaceId",
@@ -418,6 +439,31 @@ exports[`parseFile snapshots > snapshots Node.scala 1`] = `
   "importAliases": undefined,
   "importBindings": undefined,
   "language": "scala",
+  "receiverFactories": [
+    [
+      "Node",
+      "Node",
+    ],
+  ],
+  "receiverHeritage": [
+    [
+      "Module",
+      "NodeKind",
+    ],
+    [
+      "File",
+      "NodeKind",
+    ],
+    [
+      "Class",
+      "NodeKind",
+    ],
+    [
+      "Function",
+      "NodeKind",
+    ],
+  ],
+  "receiverPackage": "ix.sample.model",
   "relationships": [
     {
       "dstName": "NodeKind",
@@ -842,8 +888,9 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "srcName": "runChecks",
     },
     {
-      "dstName": "push",
+      "dstName": "results.push",
       "predicate": "CALLS",
+      "receiverUnresolved": true,
       "srcName": "runChecks",
     },
     {
@@ -858,7 +905,7 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "srcName": "runOne",
     },
     {
-      "dstName": "join",
+      "dstName": "path.join",
       "predicate": "CALLS",
       "srcName": "runOne",
     },
@@ -879,13 +926,15 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "srcName": "statusOf",
     },
     {
-      "dstName": "every",
+      "dstName": "results.every",
       "predicate": "CALLS",
+      "receiverUnresolved": true,
       "srcName": "statusOf",
     },
     {
-      "dstName": "some",
+      "dstName": "results.some",
       "predicate": "CALLS",
+      "receiverUnresolved": true,
       "srcName": "statusOf",
     },
     {
@@ -897,11 +946,6 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "dstName": "Loader",
       "predicate": "REFERENCES",
       "srcName": "CheckRunner.constructor",
-    },
-    {
-      "dstName": "loader",
-      "predicate": "CALLS",
-      "srcName": "CheckRunner.load",
     },
     {
       "dstName": "CheckRunner.loader",
