@@ -743,10 +743,10 @@ describe("ix context investigation state", () => {
       // must never be built with a template literal. Its endpoints are names:
       // the ids stay in the evidence id and in the `relationship` records.
       expect(lines).toContain(
-        'evidence change=added score=30 kind=relationship title="Widget --holds--> mount"',
+        'evidence change=added score=4000 kind=relationship title="Widget --holds--> mount"',
       );
       expect(lines).toContain(
-        'evidence change=removed score=30 kind=relationship title="Widget --calls--> render"',
+        'evidence change=removed score=4000 kind=relationship title="Widget --calls--> render"',
       );
 
       // One record per line — the wire format invariant.
@@ -795,7 +795,7 @@ describe("ix context investigation state", () => {
       }
       // The exact record `--diff` would emit for the same item, minus `change=`.
       expect(lines).toContain(
-        'evidence score=30 kind=relationship title="Widget --calls--> render"',
+        'evidence score=4000 kind=relationship title="Widget --calls--> render"',
       );
       // And the header is a record too, not fifteen bare `key=value` lines
       // built by interpolation — `target=${name}` breaks on any name with a

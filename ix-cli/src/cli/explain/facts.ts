@@ -8,7 +8,7 @@ import { isFileStale } from "../stale.js";
 import { buildDependencyTree } from "../commands/depends.js";
 import { getSystemPath } from "../hierarchy.js";
 import type { CommitRef } from "./history.js";
-import type { RelatedRef } from "./related-files.js";
+import { isTestPath, type RelatedRef } from "./related-files.js";
 import { forMcp, toolCall } from "../next-step.js";
 
 /** A related entity and where it is defined. */
@@ -26,6 +26,8 @@ export interface EntityLocation {
   usedBy?: number;
   /** How many of those live in a different file. */
   usedFromFiles?: number;
+  /** True when the probe hit `MEMBER_USE_CAP`: `usedBy` is a floor, not a count. */
+  usedByCapped?: boolean;
 }
 
 export interface EntityFacts {
@@ -72,6 +74,12 @@ export interface EntityFacts {
   /** The entities behind `topCallers` / `topDependents`, same order. */
   topCallerRefs?: EntityLocation[];
   topDependentRefs?: EntityLocation[];
+  /**
+   * Distinct entities among the callers and dependents together: the total the
+   * `topCallers` / `topDependents` samples are drawn from. The backend's own
+   * cap on an expand still applies, so this is what it returned, not a floor.
+   */
+  usedByCount?: number;
   /**
    * Files two steps out, ranked (`collectRelatedFiles`). Filled by `ix context`
    * only: the walk costs a second round of requests that `explain` does not need.
@@ -325,7 +333,9 @@ async function rankMembersByUse(client: IxClient, members: EntityLocation[]): Pr
           if (n?.id && n.id !== member.id) users.set(n.id, relativePath(n.provenance?.sourceUri ?? n.provenance?.source_uri));
         }
         const files = new Set([...users.values()].filter((p) => p && p !== member.path));
-        measured[index] = { ...member, usedBy: users.size, usedFromFiles: files.size };
+        // At the cap the count is where the probe stopped, not how many there are.
+        const capped = (result.nodes ?? []).length >= MEMBER_USE_CAP || (result.edges ?? []).length >= MEMBER_USE_CAP;
+        measured[index] = { ...member, usedBy: users.size, usedFromFiles: files.size, ...(capped ? { usedByCapped: true } : {}) };
       } catch {
         // Unmeasured, not zero: it keeps its structural place below.
         measured[index] = member;
@@ -342,6 +352,64 @@ async function rankMembersByUse(client: IxClient, members: EntityLocation[]): Pr
       a.index - b.index)
     .map(({ m }) => m);
   return [...ranked, ...structural.slice(MEMBER_USE_POOL)];
+}
+
+function uniqueById(nodes: any[] | undefined): any[] {
+  const seen = new Set<string>();
+  return (nodes ?? []).filter((n: any) => {
+    if (!n?.id || seen.has(n.id)) return false;
+    seen.add(n.id);
+    return true;
+  });
+}
+
+function dirOf(path: string | undefined): string | undefined {
+  if (!path) return undefined;
+  const at = path.lastIndexOf("/");
+  return at < 0 ? "" : path.slice(0, at);
+}
+
+/**
+ * Callers, dependents or callees, most useful first, whatever order the
+ * backend returned them in. Keys, in order: not a test; the first from its
+ * file before a second from any file; in the target's directory; most edges in
+ * this response (how many ways it is tied to the target); then path, name and
+ * id, so the order is total.
+ */
+function rankUsers(nodes: any[], edges: any[] | undefined, targetPath: string | undefined): any[] {
+  const degree = new Map<string, number>();
+  for (const e of edges ?? []) {
+    for (const end of new Set([e?.src, e?.dst])) {
+      if (typeof end === "string") degree.set(end, (degree.get(end) ?? 0) + 1);
+    }
+  }
+  const targetDir = dirOf(targetPath);
+  const keyed = nodes.map((n: any) => {
+    const path = relativePath(n.provenance?.sourceUri ?? n.provenance?.source_uri) ?? "";
+    return {
+      n, path,
+      name: String(n.name || n.attrs?.name || ""),
+      test: path ? isTestPath(path) : false,
+      sameDir: targetDir !== undefined && path !== "" && dirOf(path) === targetDir,
+      degree: degree.get(n.id) ?? 0,
+      fileRank: 0,
+    };
+  });
+  type Keyed = (typeof keyed)[number];
+  const str = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  const within = (a: Keyed, b: Keyed) =>
+    Number(b.sameDir) - Number(a.sameDir) || b.degree - a.degree ||
+    str(a.path, b.path) || str(a.name, b.name) || str(String(a.n.id), String(b.n.id));
+  // Which of its file's entries each one is, best first.
+  const perFile = new Map<string, number>();
+  for (const k of [...keyed].sort(within)) {
+    const rank = perFile.get(k.path) ?? 0;
+    k.fileRank = k.path ? rank : 0;
+    perFile.set(k.path, rank + 1);
+  }
+  return keyed
+    .sort((a, b) => Number(a.test) - Number(b.test) || a.fileRank - b.fileRank || within(a, b))
+    .map((k) => k.n);
 }
 
 /** The entity that contains the target, or undefined when it cannot be read. */
@@ -452,12 +520,9 @@ export async function collectFacts(
   );
 
   // Deduplicate dependents by node ID
-  const seenIds = new Set<string>();
-  const uniqueDependents = dependentsResult.nodes.filter((n: any) => {
-    if (seenIds.has(n.id)) return false;
-    seenIds.add(n.id);
-    return true;
-  });
+  const uniqueDependents = uniqueById(dependentsResult.nodes);
+  const uniqueCallers = uniqueById(callersResult.nodes);
+  const usedByCount = new Set([...uniqueCallers, ...uniqueDependents].map((n: any) => n.id)).size;
 
   // Named usage examples (up to 3 resolved names from callers/dependents)
   const extractRefs = (nodes: any[], limit: number): EntityLocation[] => {
@@ -469,8 +534,10 @@ export async function collectFacts(
     }
     return refs;
   };
-  const topCallerRefs = extractRefs(callersResult.nodes, 3);
-  const topDependentRefs = extractRefs(uniqueDependents, 3);
+  // Ranked before the cut: the backend returns them in id order, which chose
+  // the three an agent sees by uuid.
+  const topCallerRefs = extractRefs(rankUsers(uniqueCallers, callersResult.edges, path), 3);
+  const topDependentRefs = extractRefs(rankUsers(uniqueDependents, dependentsResult.edges, path), 3);
   // Where the target leads. Self-edges are dropped: a file that imports its own
   // directory index resolves back to itself and says nothing.
   const outward = (nodes: any[], limit: number): EntityLocation[] =>
@@ -485,7 +552,7 @@ export async function collectFacts(
     [...importsResult.nodes].sort((a: any, b: any) =>
       Number(a?.kind !== "file") - Number(b?.kind !== "file")),
     MAX_IMPORT_REFS);
-  const calleeRefs = outward(calleesResult.nodes, MAX_CALLEE_REFS);
+  const calleeRefs = outward(rankUsers(uniqueById(calleesResult.nodes), calleesResult.edges, path), MAX_CALLEE_REFS);
 
   // Build callList from outgoing CALLS edges (reuse logic from explain.ts)
   const calleeEdges = edges.filter(
@@ -583,6 +650,7 @@ export async function collectFacts(
     topDependents,
     topCallerRefs,
     topDependentRefs,
+    usedByCount,
     importRefs,
     calleeRefs,
     neighbourRefs,

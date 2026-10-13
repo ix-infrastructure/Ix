@@ -147,6 +147,14 @@ function buildSchemas(z: typeof Zod.z) {
             lineEnd: z.number().int().positive().optional(),
           })
           .optional(),
+        // The "used by" row's sample size and total. Optional and additive,
+        // listed for the same reason as `location`.
+        count: z
+          .object({
+            shown: z.number().int().nonnegative(),
+            total: z.number().int().nonnegative(),
+          })
+          .optional(),
       }),
     ),
     budgets: z.object({
