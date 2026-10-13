@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "repeats": 2,
+  "seed": 20261013,
+  "bootstrap_samples": 10000,
+  "dataset_export": "bench/agent-eval/local/verified.json",
+  "repo_cache": "bench/agent-eval/local/repos",
+  "agent": {
+    "family": "claude",
+    "version": "REPLACE_WITH_INSTALLED_VERSION",
+    "model": "REPLACE_WITH_EXACT_MODEL_ID",
+    "effort": "medium",
+    "telemetry": "claude",
+    "command": ["node", "bench/agent-eval/agent.mjs"],
+    "args": []
+  },
+  "budget": { "max_turns": 30, "max_tokens": 200000, "seconds": 1200 },
+  "environment": {
+    "plugin_revision": "REPLACE_WITH_40_HEX_IX_SOURCE_COMMIT",
+    "seconds": 600,
+    "source_path": ".",
+    "ix_cli": "ix-cli/dist/cli/main.js",
+    "ix_version": "REPLACE_WITH_BUILT_IX_VERSION",
+    "endpoint": "http://127.0.0.1:8090",
+    "setup": ["node", "bench/agent-eval/provision.mjs", "setup"],
+    "probe": ["node", "bench/agent-eval/provision.mjs", "probe"]
+  },
+  "evaluator": {
+    "kind": "swe-bench",
+    "revision": "REPLACE_WITH_40_HEX_SWE_BENCH_COMMIT",
+    "harness_path": "bench/agent-eval/local/SWE-bench",
+    "python": "bench/agent-eval/local/venv/bin/python",
+    "test_seconds": 900,
+    "seconds": 1800,
+    "command": ["node", "bench/agent-eval/swebench.mjs"]
+  }
+}
