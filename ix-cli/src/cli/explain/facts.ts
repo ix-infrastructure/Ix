@@ -81,6 +81,14 @@ export interface EntityFacts {
    */
   usedByCount?: number;
   /**
+   * The callers, dependents and callees the neighbour and related-file walks
+   * start from: the backend's first few, as before the display lists were
+   * ranked. Ranking picks one per file, and each distinct file is another
+   * walk, so seeding from the ranked lists grew `ix context IxClient` by a
+   * quarter of its bytes for rows the agent never sees. `ix context` only.
+   */
+  walkSeeds?: { callers: EntityLocation[]; dependents: EntityLocation[]; callees: EntityLocation[] };
+  /**
    * Files two steps out, ranked (`collectRelatedFiles`). Filled by `ix context`
    * only: the walk costs a second round of requests that `explain` does not need.
    */
@@ -553,6 +561,12 @@ export async function collectFacts(
       Number(a?.kind !== "file") - Number(b?.kind !== "file")),
     MAX_IMPORT_REFS);
   const calleeRefs = outward(rankUsers(uniqueById(calleesResult.nodes), calleesResult.edges, path), MAX_CALLEE_REFS);
+  // What the walks below fan out from: unranked, so they fetch what they did.
+  const walkSeeds = {
+    callers: extractRefs(callersResult.nodes, 3),
+    dependents: extractRefs(uniqueDependents, 3),
+    callees: outward(calleesResult.nodes, MAX_CALLEE_REFS),
+  };
 
   // Build callList from outgoing CALLS edges (reuse logic from explain.ts)
   const calleeEdges = edges.filter(
@@ -573,7 +587,7 @@ export async function collectFacts(
     // it, so it is not paid for there.
     forExplain
       ? Promise.resolve(undefined)
-      : collectNeighbourMembers(client, [...importRefs, ...topDependentRefs], targetId),
+      : collectNeighbourMembers(client, [...importRefs, ...walkSeeds.dependents], targetId),
     forExplain && calleeEdges.length > 0 && calleeEdges.length <= 20
       ? resolveCallList(client, calleeEdges)
       : Promise.resolve(undefined),
@@ -675,5 +689,5 @@ export async function collectFacts(
     moduleName: _moduleName,
     ...contextFacts
   } = facts;
-  return { ...contextFacts, provenance };
+  return { ...contextFacts, walkSeeds, provenance };
 }

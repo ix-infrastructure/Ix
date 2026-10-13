@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { IxClient } from "../../client/api.js";
 import { buildBundle, clampBudgets } from "../commands/context.js";
 import { collectFacts, type ContextFacts, type EntityLocation } from "../explain/facts.js";
+import { collectRelatedFiles } from "../explain/related-files.js";
 
 /**
  * Evidence order for `ix context`: tiers that do not interleave, callers and
@@ -266,5 +267,52 @@ describe("collectFacts caller ranking", () => {
     expect(facts.memberRefs?.[0]).toMatchObject({ usedBy: 50, usedByCapped: true });
     const under = await collectFacts(callerClient(CALLERS, EDGES, 7), TARGET, "rank", "function", "context");
     expect(under.memberRefs?.[0]?.usedByCapped).toBeUndefined();
+  });
+});
+
+// ------------------------------------------------------------- walk fan-out
+
+describe("walk seeds", () => {
+  // The backend's first three dependents are all in one test directory; the
+  // ranked list spreads over distinct non-test files. The walks must keep
+  // starting from the backend's three, so ranking adds no fetches (CL-07 perf).
+  const deps: Raw[] = [
+    { id: "d-1", name: "a.test.ts", kind: "file", path: "src/__tests__/a.test.ts" },
+    { id: "d-2", name: "b.test.ts", kind: "file", path: "src/__tests__/b.test.ts" },
+    { id: "d-3", name: "c.test.ts", kind: "file", path: "src/__tests__/c.test.ts" },
+    { id: "d-4", name: "x.ts", kind: "file", path: "src/x.ts" },
+    { id: "d-5", name: "y.ts", kind: "file", path: "src/y.ts" },
+    { id: "d-6", name: "z.ts", kind: "file", path: "src/z.ts" },
+  ];
+
+  function client(expanded: string[]): IxClient {
+    const node = (r: Raw) => ({ id: r.id, name: r.name, kind: r.kind, attrs: {}, provenance: { sourceUri: r.path } });
+    return {
+      async entity(id: string) {
+        return { node: { id, name: "rank", kind: "function", attrs: {}, provenance: { sourceUri: "src/rank.ts" } }, edges: [] };
+      },
+      async expand(id: string, opts?: { direction?: string; predicates?: string[] }) {
+        if (id === TARGET && opts?.direction === "in" && opts.predicates?.includes("REFERENCES")) {
+          return { nodes: deps.map(node), edges: [] };
+        }
+        if (id !== TARGET) expanded.push(id);
+        return { nodes: [], edges: [] };
+      },
+      async provenance(id: string) { return { entityId: id, chain: [] }; },
+    } as unknown as IxClient;
+  }
+
+  it("fans out from the backend's sample, not the ranked display list", async () => {
+    const expanded: string[] = [];
+    const facts = await collectFacts(client(expanded), TARGET, "rank", "function", "context");
+
+    expect(facts.topDependentRefs!.map((r) => r.id)).toEqual(["d-4", "d-5", "d-6"]);
+    expect(facts.walkSeeds?.dependents.map((r) => r.id)).toEqual(["d-1", "d-2", "d-3"]);
+    expect([...new Set(expanded)].sort()).toEqual(["d-1", "d-2", "d-3"]);
+
+    const walked: string[] = [];
+    await collectRelatedFiles(client(walked), { id: TARGET, kind: "function" }, facts);
+    for (const id of ["d-4", "d-5", "d-6"]) expect(walked).not.toContain(id);
+    for (const id of ["d-1", "d-2", "d-3"]) expect(walked).toContain(id);
   });
 });
