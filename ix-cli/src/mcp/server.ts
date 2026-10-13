@@ -1027,7 +1027,7 @@ async function runSmells(runIx: IxRunner, input: ToolInput): Promise<CallToolRes
 
   const path = typeof input.path === "string" ? normalizePath(input.path) : null;
   const limit = numberArg(input, "limit");
-  const candidates = parsed.candidates
+  const matched = parsed.candidates
     .filter((candidate) => {
       if (path === null || !isRecord(candidate) || typeof candidate.file !== "string") {
         return path === null;
@@ -1038,10 +1038,15 @@ async function runSmells(runIx: IxRunner, input: ToolInput): Promise<CallToolRes
       // architecture smells here" — for the `src` an agent had just used
       // successfully against ix_inventory on files stored as `ix-cli/src/...`.
       return normalizePath(candidate.file).includes(path);
-    })
-    .slice(0, limit);
+    });
+  const candidates = matched.slice(0, limit);
 
-  const payload = { ...parsed, count: candidates.length, candidates };
+  // shown/truncated describe this response, not the CLI's, so recompute them
+  // after the path filter and limit.
+  const meta = "shown" in parsed
+    ? { shown: candidates.length, truncated: parsed.truncated === true || matched.length > candidates.length }
+    : {};
+  const payload = { ...parsed, count: candidates.length, ...meta, candidates };
   // Compact, and the object once rather than twice. The indent was two spaces
   // per level of a list of smell candidates, and the structured copy was the
   // same bytes again.
