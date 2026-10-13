@@ -12,6 +12,7 @@ import { printJson } from "../format.js";
 import {
   checkGraphHealth,
   describeReplayedChanges,
+  GRAPH_REBUILD_FIX,
   graphHealthJson,
   graphHealthLlmFields,
   graphHealthProse,
@@ -20,6 +21,7 @@ import {
   type GraphHealthScope,
 } from "../graph-health.js";
 import { detectSystem } from "../system.js";
+import { loadVerifyRecord, verifyRecordOutdated, type VerifyRecord } from "../verify.js";
 
 interface StatusStaleInfo {
   graphCompleted: boolean;
@@ -43,13 +45,18 @@ interface StatusStaleInfo {
  * a sampled file list. The `stale` field answers it directly, and
  * `last_ingest_at` stays ISO so the consumer can do its own arithmetic instead
  * of parsing prose. `map_complete` separately reports whether an architecture
- * hierarchy exists for that source revision.
+ * hierarchy exists for that source revision. `verified_*` come from the last
+ * whole-root `ix verify`, and are absent when there has been none
+ * (`verified_graph` is its verdict: clean, diverged or unverified);
+ * `verified_outdated=true` says the workspace was ingested after it ran, so
+ * its counts describe an earlier graph.
  */
 export function renderStatusLlm(
   backend: string,
   endpoint: string,
   staleInfo: StatusStaleInfo | null,
   graph?: GraphHealth,
+  verified?: VerifyRecord | null,
 ): string[] {
   const lines = [llmLine("status", [
     ["backend", backend],
@@ -66,6 +73,12 @@ export function renderStatusLlm(
       ? (!staleInfo.graphCompleted || staleInfo.staleFiles > 0 || (staleInfo.replayedFiles?.length ?? 0) > 0
         || (staleInfo.parseTimeouts?.length ?? 0) > 0 ? "true" : "false")
       : null],
+    ["verified_at", verified?.at ?? null],
+    ["verified_files", verified ? String(verified.files) : null],
+    ["verified_diverged", verified ? String(verified.diverged) : null],
+    ["verified_outdated", verified ? String(verifyRecordOutdated(verified, staleInfo?.lastIngestAt)) : null],
+    // Last, so the fields before it keep their place.
+    ["verified_graph", verified?.graph ?? null],
   ])];
   if (graph && isUnhealthy(graph)) lines.push(llmLine("graph", graphHealthLlmFields(graph)));
   for (const f of staleInfo?.sampleChangedFiles ?? []) {
@@ -137,9 +150,12 @@ export function registerStatusCommand(program: Command): void {
         }
 
         const graph = await graphCheck;
+        // The last whole-root `ix verify`, if any. Read only: status never runs one.
+        const verified = loadVerifyRecord(root);
+        const verifiedOutdated = verified !== null && verifyRecordOutdated(verified, staleInfo?.lastIngestAt);
 
         if (opts.format === "llm") {
-          printLlmLines(renderStatusLlm(health.status, getEndpoint(), staleInfo ?? null, graph));
+          printLlmLines(renderStatusLlm(health.status, getEndpoint(), staleInfo ?? null, graph, verified));
         } else if (opts.format === "json") {
           const result: any = {
             backend: health.status,
@@ -152,6 +168,11 @@ export function registerStatusCommand(program: Command): void {
             replayedFiles: staleInfo?.replayedFiles ?? [],
             parseTimeouts: staleInfo?.parseTimeouts ?? [],
             graphHealth: { ...graphHealthJson(graph), status: graphHealthWord(graph) },
+            verify: verified
+              ? { at: verified.at, graph: verified.graph, files: verified.files, diverged: verified.diverged,
+                  stale: verified.stale, unverified: verified.unverified, lastIngestAt: verified.lastIngestAt,
+                  outdated: verifiedOutdated, fix: verified.fix }
+              : null,
           };
           printJson(result);
         } else {
@@ -197,6 +218,25 @@ export function registerStatusCommand(program: Command): void {
             }
           }
           if (isUnhealthy(graph)) renderWarning(graphHealthProse(graph));
+          if (verified) {
+            // A verify from before the last ingest describes a graph that has
+            // since been written to (perhaps by the very fix it suggested):
+            // show it, labelled, and ask for a new verify instead of a fix.
+            const before = verifiedOutdated ? " (before last ingest)" : "";
+            // An unverified record judged no file, so "0 diverged" would read
+            // as a pass: name the verdict instead.
+            const outcome = verified.graph === "unverified"
+              ? `unverified (${verified.files === 0 ? "no files sampled" : "no file verified"})`
+              : `${verified.diverged} diverged`;
+            renderKeyValue("Verified", `${timeSince(verified.at)}, ${verified.files} files, ${outcome}${before}`);
+            if (verified.diverged > 0 && verifiedOutdated) {
+              renderNote(`The last ix verify found ${verified.diverged} file(s) whose nodes did not match their source, ` +
+                "but the workspace has been ingested since. Run ix verify to check the graph as it is now.");
+            } else if (verified.diverged > 0) {
+              renderWarning(`The last ix verify found ${verified.diverged} file(s) whose nodes do not match their source. ` +
+                `Fix: ${verified.fix ?? GRAPH_REBUILD_FIX}`);
+            }
+          }
         }
       } catch (err) {
         // Only a transport failure is "not reachable". Anything else — a 500
