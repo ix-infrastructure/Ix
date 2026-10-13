@@ -133,7 +133,8 @@ function readFileRange(
  */
 function readablePath(filePath: string): string {
   const relative = relativePath(filePath);
-  if (relative && relative !== filePath) return relative;
+  // Home abbreviation is still an absolute location; try the canonical cwd first.
+  if (relative && relative !== filePath && !/^~[\\/]/.test(relative)) return relative;
   try {
     const fromCwd = path.relative(fs.realpathSync(process.cwd()), fs.realpathSync(filePath));
     if (fromCwd && !fromCwd.startsWith("..") && !path.isAbsolute(fromCwd)) {
