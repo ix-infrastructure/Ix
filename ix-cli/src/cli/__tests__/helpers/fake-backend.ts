@@ -119,6 +119,16 @@ export class FakeBackend {
   rememberHashes = false;
   /** Answer `/v1/source-hashes` with a 500, as a backend under load does. */
   failSourceHashes = false;
+  /**
+   * Answer `GET /v1/patches/{id}` with a 500, as a backend under load does:
+   * every read when true, or the reads the predicate picks (given the id and
+   * the stored ops, if any).
+   */
+  failPatchReads: boolean | ((patchId: string, ops: Array<Record<string, unknown>> | undefined) => boolean) = false;
+  /** Answer `GET /v1/patches/{id}` with a 404 for every id, as if nothing were stored. */
+  hidePatchReads = false;
+  /** `GET /v1/patches/{id}` requests served, whatever their answer. */
+  patchReads = 0;
   private readonly hashes = new Map<string, { workspaceId: string | null; uri: string; hash: string }>();
 
   /**
@@ -520,8 +530,17 @@ export class FakeBackend {
     if (path.startsWith("/v1/stitch/system/")) return send(200, { systemId: null });
     // Read by `reconcileRemovedEntities`, which only an incremental run against
     // a stored graph reaches.
-    if (this.semantics !== undefined && path.startsWith("/v1/patches/")) {
-      const record = this.stored.get(decodeURIComponent(path.slice("/v1/patches/".length)));
+    // Without semantics nothing is stored, so every patch is not found: what a
+    // forced or rebuilt file's reconcile sees, and survives.
+    if (path.startsWith("/v1/patches/")) {
+      const patchId = decodeURIComponent(path.slice("/v1/patches/".length));
+      this.patchReads++;
+      const record = this.stored.get(patchId);
+      const fail = typeof this.failPatchReads === "function"
+        ? this.failPatchReads(patchId, record?.ops)
+        : this.failPatchReads;
+      if (fail) return send(500, { error: "500: transaction begin timeout" });
+      if (this.hidePatchReads) return send(404, { error: "404: patch not found" });
       return record ? send(200, { data: { ops: record.ops } }) : send(404, { error: "404: patch not found" });
     }
     if (this.semantics !== undefined && path.startsWith("/v1/entity/")) {

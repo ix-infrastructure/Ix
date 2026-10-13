@@ -298,6 +298,16 @@ interface StoredPatchEntities {
   kinds: Map<string, string>;
   /** External package nodes (`attrs.external`) the stored patch wrote. */
   external: Set<string>;
+  /** Ids only a later window manifest named; an absent one gets no DeleteNode. */
+  extraOnly?: Set<string>;
+  /**
+   * Ids the stored patches only deleted (a DeleteNode from an earlier
+   * reconcile, no UpsertNode): not nodes they created. Known only for patches
+   * stored with their ops.
+   */
+  deletedOnly?: Set<string>;
+  /** Why a later window manifest was left out: a backend error reading it. */
+  extraSkipped?: string;
 }
 
 /**
@@ -320,18 +330,22 @@ function readStoredPatchEntities(raw: unknown): StoredPatchEntities | null {
     const ops = data.ops as Array<{ type?: unknown; id?: unknown; kind?: unknown; attrs?: unknown }>;
     const kinds = new Map<string, string>();
     const external = new Set<string>();
+    const upserted = new Set<string>();
     for (const op of ops) {
       if (op.type !== 'UpsertNode' || typeof op.id !== 'string') continue;
+      upserted.add(op.id);
       if (typeof op.kind === 'string') kinds.set(op.id, op.kind);
       if (isExternalNode(op)) external.add(op.id);
     }
+    const nodeIds = ops
+      .filter(op => op.type === 'UpsertNode' || op.type === 'DeleteNode')
+      .map(op => op.id)
+      .filter((id): id is string => typeof id === 'string');
     return {
-      nodeIds: ops
-        .filter(op => op.type === 'UpsertNode' || op.type === 'DeleteNode')
-        .map(op => op.id)
-        .filter((id): id is string => typeof id === 'string'),
+      nodeIds,
       kinds,
       external,
+      deletedOnly: new Set(nodeIds.filter(id => !upserted.has(id))),
     };
   }
   if (!Array.isArray(data.entityIds)) return null;
@@ -348,11 +362,74 @@ function readStoredPatchEntities(raw: unknown): StoredPatchEntities | null {
   };
 }
 
+/**
+ * How many leading candidates `loadStoredPatchEntities` reads and merges: the
+ * current extractor and the one before it. An extractor rebuild leaves its
+ * orphans in the previous extractor's patch, and a graph a pre-fix rebuild
+ * polluted holds them there too. There is no batch patch GET, so merging all
+ * ~30 candidates would cost ~30 reads per reconciled file.
+ */
+const RECONCILE_MANIFEST_WINDOW = 2;
+
 async function loadStoredPatchEntities(
   client: Pick<IxClient, 'getPatch'>,
   patchIds: string[],
+  window: number = RECONCILE_MANIFEST_WINDOW,
 ): Promise<StoredPatchEntities> {
-  for (const patchId of patchIds) {
+  const windowIds = patchIds.slice(0, window);
+  const windowResults = await Promise.all(windowIds.map(async patchId => {
+    try {
+      return { patchId, raw: await client.getPatch(patchId) as unknown, failed: false, error: undefined as unknown };
+    } catch (err) {
+      if (isNotFoundError(err)) return { patchId, raw: null, failed: false, error: undefined as unknown };
+      return { patchId, raw: null, failed: true, error: err };
+    }
+  }));
+
+  // Results are walked in candidate order. A backend error before any patch
+  // was found fails the reconcile, as the first-hit walk always did. One on a
+  // later window patch only loses its extra ids: the patch found first is the
+  // one a first-hit walk would have used, so the file reconciles at least as
+  // fully as it did before the merge, and the skip is reported, not fatal.
+  let primary: StoredPatchEntities | null = null;
+  for (const result of windowResults) {
+    if (result.failed) {
+      if (primary === null) throw result.error;
+      primary.extraSkipped = `patch ${result.patchId} unread: ${result.error instanceof Error ? result.error.message : String(result.error)}`;
+      continue;
+    }
+    if (result.raw === null) continue;
+    const entities = readStoredPatchEntities(result.raw);
+    if (primary === null) {
+      if (!entities) throw new Error(`Patch ${result.patchId} has no entity manifest`);
+      primary = {
+        nodeIds: [...entities.nodeIds],
+        kinds: new Map(entities.kinds),
+        external: new Set(entities.external),
+        extraOnly: new Set(),
+        deletedOnly: new Set(entities.deletedOnly),
+      };
+      continue;
+    }
+    if (!entities) continue;
+    const seen = new Set(primary.nodeIds);
+    for (const id of entities.nodeIds) {
+      if (seen.has(id)) {
+        // Deleted-only across the merge only if every manifest naming it only deleted it.
+        if (!entities.deletedOnly?.has(id)) primary.deletedOnly!.delete(id);
+        continue;
+      }
+      seen.add(id);
+      primary.nodeIds.push(id);
+      primary.extraOnly!.add(id);
+      if (entities.deletedOnly?.has(id)) primary.deletedOnly!.add(id);
+    }
+    for (const [id, kind] of entities.kinds) if (!primary.kinds.has(id)) primary.kinds.set(id, kind);
+    for (const id of entities.external) primary.external.add(id);
+  }
+  if (primary) return primary;
+
+  for (const patchId of patchIds.slice(window)) {
     try {
       const entities = readStoredPatchEntities(await client.getPatch(patchId));
       if (entities) return entities;
@@ -362,6 +439,24 @@ async function loadStoredPatchEntities(
     }
   }
   throw new Error('Previous source patch was not found');
+}
+
+interface ReconcileOptions {
+  /**
+   * The file's content is unchanged (extractor rebuild, --force): only nodes a
+   * stored patch created that are still live count as removed. An id a stored
+   * patch only deleted, or one already gone, is no orphan, and re-emitting its
+   * delete would make every later rebuild look like it had cleanup to do.
+   */
+  liveOnly?: boolean;
+  /** Told when a later stored manifest could not be read and was left out. */
+  onWindowSkipped?: (reason: string) => void;
+  /**
+   * How many leading candidates to read and merge (default
+   * RECONCILE_MANIFEST_WINDOW). 1 is the first-hit walk: one read when the
+   * current candidate exists, which is what an ordinary edit pays.
+   */
+  window?: number;
 }
 
 export async function reconcileRemovedEntities(
@@ -380,8 +475,11 @@ export async function reconcileRemovedEntities(
   // Bounds the entity lookups. One limiter shared by every file a run
   // reconciles keeps the whole run to its slots, however many files run at once.
   lookupLimit: Limiter = task => task(),
+  options: ReconcileOptions = {},
 ): Promise<GraphPatchPayload> {
-  const previous = await loadStoredPatchEntities(client, previousPatchIds);
+  const previous = await loadStoredPatchEntities(client, previousPatchIds, options.window);
+  if (previous.extraSkipped) options.onWindowSkipped?.(previous.extraSkipped);
+  const liveOnly = options.liveOnly === true;
   const currentNodeIds = new Set(
     patch.ops
       .filter(op => op.type === 'UpsertNode')
@@ -397,7 +495,8 @@ export async function reconcileRemovedEntities(
   // A chunk the stored patch names as one is skipped in map mode without a
   // lookup; patches stored without their ops still need the lookup for it.
   const candidateNodeIds = previous.nodeIds.filter(id =>
-    !currentNodeIds.has(id) && !(mapMode && previous.kinds.get(id) === 'chunk'));
+    !currentNodeIds.has(id) && !(mapMode && previous.kinds.get(id) === 'chunk')
+    && !(liveOnly && previous.deletedOnly?.has(id)));
   const removedNodeIds: string[] = [];
   const removedEdgeIds = new Set<string>();
   const CHUNK_PREDICATES = new Set(['CONTAINS_CHUNK', 'NEXT']);
@@ -415,6 +514,10 @@ export async function reconcileRemovedEntities(
 
   for (const { nodeId, entity } of lookups) {
     if (entity === null) {
+      // An id only the second window manifest named, or any id on a same-hash
+      // reconcile, already absent: nothing to delete, and the patch stays free
+      // of extra deletes.
+      if (liveOnly || previous.extraOnly?.has(nodeId)) continue;
       // Already absent. Emitting the delete anyway keeps the patch a complete
       // statement of intent and costs nothing.
       removedNodeIds.push(nodeId);
@@ -2376,6 +2479,18 @@ export async function ingestFiles(
       extractorRebuild = true;
       clearMapResultCache(projectRoot);
     }
+    // The same-hash orphan reconcile (IN-20) costs patch reads for every file
+    // it runs on, and only an extractor change leaves orphans behind. So it
+    // runs only when the baseline says this workspace's files were last
+    // written by another extractor -- whether this run was forced or not --
+    // and not on a plain --force at the current extractor. The baseline is
+    // the only signal that costs no read: the stored patch's own extractor
+    // is known only once it has been fetched. IX_RECONCILE_ON_FORCE=1 opts a
+    // --force run in, to repair a graph a pre-fix rebuild left polluted.
+    // The same flag widens an edited file's reconcile to the second stored
+    // patch; an ordinary edit reads only the first, as before IN-20.
+    const reconcileOrphans = extractorChanged(previousBaseline, currentExtractor)
+      || (Boolean(opts.force) && process.env.IX_RECONCILE_ON_FORCE === '1');
     const previousMtimes = previousBaseline?.files ?? new Map<string, number>();
     const {
       previousDeletedFiles,
@@ -2542,7 +2657,11 @@ export async function ingestFiles(
     //      entirely if nothing changed (common "ix map" re-run case).
     //   B) No baseline / force → load modules, parse + stream-commit all files.
 
-    type ParsedFile = { filePath: string; parsed: any; hash: string; previousHash: string | undefined };
+    type ParsedFile = {
+      filePath: string; parsed: any; hash: string; previousHash: string | undefined;
+      /** The hash the backend holds for the file, changed or not. Feeds only reconcile. */
+      knownHash?: string | undefined;
+    };
     let resolveEdgesFn: Function | null = null;
     let buildPatchFn: Function | null = null;
 
@@ -3539,10 +3658,13 @@ export async function ingestFiles(
       files: ParsedFile[],
       edgesByFile: Map<string, any[]>,
     ): Promise<PreparedPatch[]> => {
-      const built = await mapLimit(files, RECONCILE_CONCURRENCY, async ({ parsed: p, hash, previousHash }, j) => {
+      const built = await mapLimit(files, RECONCILE_CONCURRENCY, async ({ parsed: p, hash, previousHash, knownHash }, j) => {
         try {
           const fileWorkspace = fileWorkspaceId(p.filePath);
           let patch = buildPatchFn!(p, hash, fileWorkspace, edgesByFile.get(p.filePath) ?? emptyEdges, previousHash, fileMultiRepo(p.filePath));
+          const noteOrphanSkip = (reason: string) => {
+            if (debug) process.stderr.write(`\n  [orphan reconcile skipped] ${p.filePath}: ${reason}\n`);
+          };
           if (previousHash) {
             patch = await reconcileRemovedEntities(
               client,
@@ -3551,7 +3673,50 @@ export async function ingestFiles(
               undefined,
               mapMode,
               reconcileLookups,
+              { onWindowSkipped: noteOrphanSkip, window: reconcileOrphans ? RECONCILE_MANIFEST_WINDOW : 1 },
             );
+          } else if (knownHash && reconcileOrphans) {
+            // Same content, new extractor (or an opted-in --force): ids the old extractor
+            // wrote and this one does not are still live. Retiring them is
+            // best effort. Before this reconcile existed such a file made no
+            // patch reads and was always committed as built, so any failure
+            // here (no stored patch, no manifest, a backend error) leaves the
+            // built patch to commit as before, with no parse error and no
+            // change to the exit code. The orphans wait for the next rebuild.
+            const asBuilt = patch;
+            try {
+              const reconciled = await reconcileRemovedEntities(
+                client,
+                patch,
+                sourcePatchIdCandidates(p.filePath, knownHash, fileWorkspace),
+                undefined,
+                mapMode,
+                reconcileLookups,
+                { liveOnly: true, onWindowSkipped: noteOrphanSkip },
+              );
+              const isDelete = (op: { type: string }) => op.type === 'DeleteNode' || op.type === 'DeleteEdge';
+              const added = reconciled.ops.filter(isDelete).length - patch.ops.filter(isDelete).length;
+              patch = reconciled;
+              if (added > 0) {
+                // The patch id is derived from file, hash and extractor. If the
+                // backend already holds it, it answers Idempotent and drops
+                // these deletes, so they go under an id salted with them.
+                const exists = await client.getPatch(patch.patchId).then(() => true, err => {
+                  if (isNotFoundError(err)) return false;
+                  throw err;
+                });
+                if (exists) {
+                  // Salted with every delete, edges included: an edge-only
+                  // repair must not reuse another's id.
+                  const ids = patch.ops.filter(isDelete).map((op: Record<string, unknown>) => `${String(op['type'])}:${String(op['id'])}`).sort().join('\n');
+                  const salted = buildPatchFn!(p, hash, fileWorkspace, edgesByFile.get(p.filePath) ?? emptyEdges, undefined, fileMultiRepo(p.filePath), `orphans-${sha256(Buffer.from(ids)).slice(0, 12)}`);
+                  patch = { ...patch, patchId: salted.patchId };
+                }
+              }
+            } catch (err) {
+              patch = asBuilt;
+              noteOrphanSkip(err instanceof Error ? err.message : String(err));
+            }
           }
           if (mapMode) patch = stripMapModeOps(patch);
           noteResolution(p.filePath, patch);
@@ -3697,7 +3862,7 @@ export async function ingestFiles(
       // Path A: has baseline or all mtime-clean → pre-scan to detect changes before loading modules.
       // If nothing changed, module load is skipped entirely. A file with no
       // backend hash is new: it is parsed and sent with no reconcile.
-      const changedPaths: Array<{ filePath: string; bytes: Buffer; hash: string; previousHash: string | undefined }> = [];
+      const changedPaths: Array<{ filePath: string; bytes: Buffer; hash: string; previousHash: string | undefined; knownHash: string | undefined }> = [];
       for (const filePath of mtimeChangedPaths) {
         try {
           const bytes = fs.readFileSync(filePath);
@@ -3711,7 +3876,7 @@ export async function ingestFiles(
             continue;
           }
           const previousHash = knownHashes.get(filePath);
-          changedPaths.push({ filePath, bytes, hash, previousHash: previousHash !== hash ? previousHash : undefined });
+          changedPaths.push({ filePath, bytes, hash, previousHash: previousHash !== hash ? previousHash : undefined, knownHash: previousHash });
         } catch (err) {
           parseErrors++;
           progressCurrent++;
@@ -3730,8 +3895,8 @@ export async function ingestFiles(
         // filePath here is the workspace-relative path (what goes to parseFile
         // and downstream into buildPatch → source_uri). absFilePath is the
         // absolute path retained for any on-disk ops (reads already happened).
-        const parseable: Array<{ filePath: string; absFilePath: string; source: string; hash: string; previousHash: string | undefined }> = [];
-        for (const { filePath, bytes, hash, previousHash } of changedPaths) {
+        const parseable: Array<{ filePath: string; absFilePath: string; source: string; hash: string; previousHash: string | undefined; knownHash: string | undefined }> = [];
+        for (const { filePath, bytes, hash, previousHash, knownHash } of changedPaths) {
           const sourceText = bytes.toString('utf-8');
           if (isLikelyMinifiedSource(sourceText)) {
             minifiedLikely++;
@@ -3745,7 +3910,7 @@ export async function ingestFiles(
           // deterministic ID derived in buildPatch (node/edge/chunk/patch)
           // hashes relative paths. This makes graph IDs portable across
           // machines and removes backend dependence on host paths.
-          parseable.push({ filePath: toWorkspaceRelative(filePath), absFilePath: filePath, source: sourceText, hash, previousHash });
+          parseable.push({ filePath: toWorkspaceRelative(filePath), absFilePath: filePath, source: sourceText, hash, previousHash, knownHash });
         }
 
         progressPhase   = 'Parsing';
@@ -3781,7 +3946,7 @@ export async function ingestFiles(
             const parsed = parseResults[j] as any;
             if (!parsed) { filesSkipped++; filesSkippedUnparsed++; unparsedRel.add(chunk[j].filePath); continue; }
             entitiesParsed += parsed.entities.length;
-            batch.push({ filePath: chunk[j].filePath, parsed, hash: chunk[j].hash, previousHash: chunk[j].previousHash });
+            batch.push({ filePath: chunk[j].filePath, parsed, hash: chunk[j].hash, previousHash: chunk[j].previousHash, knownHash: chunk[j].knownHash });
             noteSummary(chunk[j].filePath, chunk[j].hash, parsed, currentMtimes.get(chunk[j].absFilePath));
             if (parsed.hasParseErrors) filesWithParseErrors++;
           }
@@ -3836,7 +4001,7 @@ export async function ingestFiles(
       let pendingFlushB: Promise<void> = Promise.resolve();
       for (let i = 0; i < filePaths.length; i += PARSE_STREAM_CHUNK) {
         const chunk = filePaths.slice(i, i + PARSE_STREAM_CHUNK);
-        type FileData = { filePath: string; source: string; hash: string; previousHash: string | undefined } | null;
+        type FileData = { filePath: string; source: string; hash: string; previousHash: string | undefined; knownHash: string | undefined } | null;
         const fileData: FileData[] = new Array(chunk.length).fill(null);
         const parsePromises: Promise<unknown>[] = new Array(chunk.length).fill(Promise.resolve(null));
 
@@ -3926,7 +4091,7 @@ export async function ingestFiles(
               return;
             }
             const relFilePath = toWorkspaceRelative(absFilePath);
-            const fd: NonNullable<FileData> = { filePath: relFilePath, source: sourceText, hash, previousHash: previousHash !== hash ? previousHash : undefined };
+            const fd: NonNullable<FileData> = { filePath: relFilePath, source: sourceText, hash, previousHash: previousHash !== hash ? previousHash : undefined, knownHash: previousHash };
             fileData[idx] = fd;
             parsePromises[idx] = ensureParsePool(filePaths.length).parse(fd.filePath, fd.source).then(r => { progressCurrent++; return r; });
           } catch (err) {
@@ -3944,7 +4109,7 @@ export async function ingestFiles(
           const parsed = parseResults[j] as any;
           if (!parsed) { filesSkipped++; filesSkippedUnparsed++; unparsedRel.add(f.filePath); continue; }
           entitiesParsed += parsed.entities.length;
-          batch.push({ filePath: f.filePath, parsed, hash: f.hash, previousHash: f.previousHash });
+          batch.push({ filePath: f.filePath, parsed, hash: f.hash, previousHash: f.previousHash, knownHash: f.knownHash });
           noteSummary(f.filePath, f.hash, parsed, currentMtimes.get(chunk[j]));
           if (parsed.hasParseErrors) filesWithParseErrors++;
         }
@@ -3998,6 +4163,11 @@ export async function ingestFiles(
             dependentSourceUris,
             mapMode,
             reconcileLookups,
+            {
+              onWindowSkipped: reason => {
+                if (debug) process.stderr.write(`\n  [orphan reconcile skipped] ${relFilePath}: ${reason}\n`);
+              },
+            },
           );
           if (mapMode) patch = stripMapModeOps(patch);
           deletedPatches.push(makePreparedPatch(patch, i + 1, relFilePath, true));
