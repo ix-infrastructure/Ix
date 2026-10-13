@@ -29,7 +29,10 @@ export interface ReadResult {
   warning?: string;
   /** Set when the default line cap stopped the read short of the file. */
   truncated?: boolean;
-  /** How many lines the file has, when the read was capped. */
+  /**
+   * How many lines the file has, when the read was capped. For a symbol it is
+   * the symbol's own line count, and `next` stays inside the symbol.
+   */
   totalLines?: number;
   /** The next page, ready to run: `path:401-800`. */
   next?: string;
@@ -146,25 +149,52 @@ function readablePath(filePath: string): string {
 }
 
 /** `src/a.ts:401-800`, or nothing when the cap landed on the last line. */
-function nextPage(filePath: string, lineEnd: number, totalLines: number): string | undefined {
-  if (lineEnd >= totalLines) return undefined;
+function nextPage(filePath: string, lineEnd: number, lastLine: number): string | undefined {
+  if (lineEnd >= lastLine) return undefined;
   const from = lineEnd + 1;
-  const to = Math.min(totalLines, lineEnd + READ_LINE_CAP);
+  const to = Math.min(lastLine, lineEnd + READ_LINE_CAP);
   return `${readablePath(filePath)}:${from}-${to}`;
 }
 
 /** Fold a capped read's cursor into the result the renderers see. */
 function withCursor(
   result: ReadResult,
-  capped: { truncated?: boolean; totalLines?: number },
+  capped: { truncated?: boolean; totalLines?: number; lastLine?: number },
 ): ReadResult {
   if (!capped.truncated || capped.totalLines === undefined) return result;
   return {
     ...result,
     truncated: true,
     totalLines: capped.totalLines,
-    next: nextPage(result.path, result.lineEnd, capped.totalLines),
+    next: nextPage(result.path, result.lineEnd, capped.lastLine ?? capped.totalLines),
   };
+}
+
+/**
+ * Cut a symbol's span at `cap` lines from its start. `lastLine` is where the
+ * symbol ends, so a `next=` cursor never pages past it; `totalLines` is the
+ * symbol's own line count. With no cap, or a span that fits, nothing is cut.
+ *
+ * The end is clamped to EOF first: a stale graph span that could not be
+ * re-anchored can claim lines the file no longer has, and an unclamped end
+ * would report `truncated` with a cursor that pages past the last line.
+ */
+export function capSpan(
+  lines: string[], start: number, rawEnd: number, cap?: number,
+): { content: string; lineStart: number; lineEnd: number; truncated?: boolean; totalLines?: number; lastLine?: number } {
+  const end = Math.max(start, Math.min(rawEnd, lines.length));
+  if (cap !== undefined && end - start + 1 > cap) {
+    const shownEnd = start + cap - 1;
+    return {
+      content: lines.slice(start - 1, shownEnd).join("\n"),
+      lineStart: start,
+      lineEnd: shownEnd,
+      truncated: true,
+      totalLines: end - start + 1,
+      lastLine: end,
+    };
+  }
+  return { content: lines.slice(start - 1, end).join("\n"), lineStart: start, lineEnd: end };
 }
 
 /**
@@ -275,9 +305,9 @@ export function outputResult(result: ReadResult, format: string): void {
     }
     if (result.truncated) {
       stderr(chalk.dim(
-        `\n  ${result.lineEnd} of ${result.totalLines} lines`
+        `\n  ${result.lineEnd - result.lineStart + 1} of ${result.totalLines} lines`
         + (result.next ? ` — next: ix read ${result.next}` : "")
-        + ", or --all for the whole file",
+        + `, or --all for the whole ${result.targetType === "symbol" ? "symbol" : "file"}`,
       ));
     }
   }
@@ -315,7 +345,7 @@ export function registerReadCommand(program: Command): void {
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--root <dir>", "Workspace root directory")
-    .option("--all", `Read the whole file, past the ${READ_LINE_CAP}-line default cap`)
+    .option("--all", `Read the whole file or symbol, past the ${READ_LINE_CAP}-line default cap`)
     .addHelpText("after", `\nResolution order:
   1. Exact file path          ix read src/main.ts
   2. File path with line range ix read src/main.ts:10-50
@@ -438,16 +468,16 @@ Examples:
             node.attrs?.lineEnd ?? node.attrs?.line_end,
             stale,
           );
-          const content = allLines.slice(range.lineStart - 1, range.lineEnd).join("\n");
-          const result: ReadResult = {
+          const span = capSpan(allLines, range.lineStart, range.lineEnd, cap);
+          const result: ReadResult = withCursor({
             targetType: "symbol",
             path: absSourceUri,
-            lineStart: range.lineStart,
-            lineEnd: range.lineEnd,
-            content,
+            lineStart: span.lineStart,
+            lineEnd: span.lineEnd,
+            content: span.content,
             symbol: node.name,
             kind: node.kind,
-          };
+          }, span);
           if (stale) {
             result.stale = true;
             result.warning = range.movedFrom
@@ -462,6 +492,9 @@ Examples:
         const attrContent = node.attrs?.content;
         if (attrContent) {
           const lines = String(attrContent).split("\n");
+          // Deliberately uncapped: there is no file on disk to page, so a cap
+          // would drop lines 401+ with no cursor and no way to recover them
+          // (the MCP tool has no --all).
           const result: ReadResult = {
             targetType: "symbol",
             path: absSourceUri ?? sourceUri ?? "(no source file)",
