@@ -128,8 +128,8 @@ describe("ix context --from-issue bundle", () => {
   it("renders both rows in llm and text output", () => {
     const b = build(issue());
     const llm = captureLog(() => renderBundle(b, "llm")).join("\n");
-    expect(llm).toMatch(/^evidence score=1 kind=target title="starting points: listByKind/m);
-    expect(llm).toMatch(/^evidence score=2 kind=structural title="ranked files: src\/client\/api.ts, /m);
+    expect(llm).toMatch(/^evidence score=1000 kind=target title="starting points: listByKind/m);
+    expect(llm).toMatch(/^evidence score=1001 kind=structural title="ranked files: src\/client\/api.ts, /m);
     expect(llm).not.toContain("issue_fallback");
 
     const text = captureLog(() => renderBundle(b, "text")).join("\n");

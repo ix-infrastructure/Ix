@@ -566,13 +566,19 @@ describe("ix context budget is charged against the emitted text", () => {
     expect(bundle.evidence.length).toBe(full.evidence.length);
   });
 
-  it("bounds json evidence by its serialization, within 10% when cut", () => {
+  it("bounds json evidence by its serialization, and cuts only where the next row would not fit", () => {
     const budgets = clampBudgets({ maxTokens: 600 }, "json");
     const bundle = buildBundle({ ...manyMembers(), budgets, format: "json" });
     expect(bundle.truncation.evidenceTruncated).toBeGreaterThan(0);
     const kept = bundle.evidence.reduce((n, e) => n + JSON.stringify(e).length, 0);
     expect(kept).toBeLessThanOrEqual(budgets.maxChars);
-    expect(kept).toBeGreaterThanOrEqual(0.9 * budgets.maxChars);
+    // The cut is a prefix, so how full it is depends on the size of the row at
+    // the boundary (here the one "used by" row, larger than a member row). What
+    // must hold is that the first dropped row did not fit.
+    const all = buildBundle({ ...manyMembers(), budgets: clampBudgets({ maxEvidence: 200, maxTokens: 200_000 }, "json"), format: "json" });
+    const next = all.evidence[bundle.evidence.length]!;
+    expect(kept + JSON.stringify(next).length).toBeGreaterThan(budgets.maxChars);
+    expect(kept).toBeGreaterThanOrEqual(0.8 * budgets.maxChars);
   });
 
   it("bounds text evidence by the lines it prints, leaving room for the header", () => {

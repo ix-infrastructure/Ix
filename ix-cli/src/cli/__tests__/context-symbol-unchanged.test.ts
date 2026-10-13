@@ -83,18 +83,19 @@ describe("ix context <symbol> is unchanged by --from-issue", () => {
   });
 });
 
+// CL-07: tier scores (tier * 1000 + place), the caller and dependent rows
+// merged into one "used by" row, and the `runRank --CALLS-->` relationship
+// dropped because the used-by row already names runRank.
 const RECORDED_LLM: string[] = [
-  "context target=listByKind target_kind=method target_path=src/client/api.ts stale=false classification=current entities=5 relationships=1 claims=0 decisions=0 conflicts=0 intents=0 evidence=9 truncated_entities=0 truncated_relationships=0 truncated_evidence=0 truncated_chars=0",
+  "context target=listByKind target_kind=method target_path=src/client/api.ts stale=false classification=current entities=5 relationships=1 claims=0 decisions=0 conflicts=0 intents=0 evidence=7 truncated_entities=0 truncated_relationships=0 truncated_evidence=0 truncated_chars=0",
   "evidence score=0 kind=target title=\"listByKind (method)\" path=src/client/api.ts lines=141-152",
-  "evidence score=10 kind=structural title=\"container IxClient (class)\" path=src/client/api.ts lines=20-400",
-  "evidence score=11 kind=structural title=\"related files: src/cli/commands/smells.ts\"",
-  "evidence score=12 kind=provenance title=\"recent commits to api.ts: abc1234 fix: scope listByKind\"",
-  "evidence score=13 kind=structural title=\"calls post\" path=src/client/api.ts lines=500-520",
-  "evidence score=14 kind=structural title=\"caller runRank\" path=src/cli/commands/rank.ts lines=30-90",
-  "evidence score=15 kind=structural title=\"dependent inventory.ts\" path=src/cli/commands/inventory.ts",
-  "evidence score=30 kind=relationship title=\"runRank --CALLS--> listByKind\"",
-  "evidence score=40 kind=provenance title=\"history length 3, introduced rev 7\"",
+  "evidence score=2000 kind=structural title=\"container IxClient (class)\" path=src/client/api.ts lines=20-400",
+  "evidence score=2001 kind=structural title=\"related files: src/cli/commands/smells.ts\"",
+  "evidence score=2002 kind=structural title=\"used by (2 of 2): runRank (rank.ts), inventory.ts\" path=src/cli/commands/rank.ts lines=30-90",
+  "evidence score=2003 kind=provenance title=\"recent commits to api.ts: abc1234 fix: scope listByKind\"",
+  "evidence score=2004 kind=structural title=\"calls post\" path=src/client/api.ts lines=500-520",
+  "evidence score=5000 kind=provenance title=\"history length 3, introduced rev 7\"",
   "next cmd=\"ix read src/client/api.ts:141-152\"",
   "next cmd=\"ix read src/client/api.ts:20-400\"",
-  "next cmd=\"ix read src/client/api.ts:500-520\"",
+  "next cmd=\"ix read src/cli/commands/rank.ts:30-90\"",
 ];

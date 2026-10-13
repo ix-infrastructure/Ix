@@ -85,7 +85,9 @@ describe("ix context evidence says where things are", () => {
       path: "src/cli/config.ts", lineStart: 322, lineEnd: 342,
     });
     expect(byTitle.get("member resolveWorkspaceRoot")?.refs).toEqual(["m-resolve"]);
-    expect(byTitle.get("dependent stats.ts")?.location).toEqual({ path: "src/cli/commands/stats.ts" });
+    const usedBy = b.evidence.find((e) => e.id === "used-by");
+    expect(usedBy?.title).toBe("used by (1 of 1): stats.ts");
+    expect(usedBy?.location).toEqual({ path: "src/cli/commands/stats.ts" });
   });
 
   it("keeps the members in the order the facts ranked them, and says why", () => {
@@ -156,7 +158,7 @@ describe("ix context evidence says where things are", () => {
     expect(b.entities).toHaveLength(50);
   });
 
-  it("says what the target imports and calls, ahead of what points back at it", () => {
+  it("says what the target imports and calls, after what uses it", () => {
     // The answer to a question asked from an entry point is most often in a
     // file that entry point imports. Before this the bundle only pointed
     // inward -- members, callers, dependents -- and never named it.
@@ -172,8 +174,10 @@ describe("ix context evidence says where things are", () => {
     const structural = b.evidence.filter((e) => e.kind === "structural").map((e) => e.title);
     expect(structural).toContain("imports resolve.ts");
     expect(structural).toContain("calls ensureReadScope");
-    expect(structural.indexOf("imports resolve.ts"))
-      .toBeLessThan(structural.indexOf("dependent stats.ts"));
+    // What uses the target goes first: after the imports and neighbours it
+    // missed the default budget on most file targets (CL-07).
+    expect(structural.indexOf("used by (1 of 1): stats.ts"))
+      .toBeLessThan(structural.indexOf("imports resolve.ts"));
 
     const imported = b.evidence.find((e) => e.title === "imports resolve.ts");
     expect(imported?.location).toEqual({ path: "src/cli/resolve.ts" });
@@ -244,7 +248,8 @@ describe("ix context evidence says where things are", () => {
     const titles = bundle({ nodes, edges }).evidence.filter((e) => e.kind === "relationship").map((e) => e.title);
 
     expect(titles).toContain("README.md (docs/README.md) --REFERENCES--> README.md (README.md)");
-    expect(titles).toContain("config.ts --CONTAINS--> resolveWorkspaceRoot");
+    // Restates the `member resolveWorkspaceRoot` row, so it is not repeated.
+    expect(titles).not.toContain("config.ts --CONTAINS--> resolveWorkspaceRoot");
     expect(titles).toContain("config.ts --IMPORTS--> not-in-bundle");
   });
 
@@ -263,7 +268,7 @@ describe("ix context evidence says where things are", () => {
     // structural facts: a file with many imports pushed all of its own members
     // out of the evidence budget when they came last.
     expect(llm).toContain(
-      'evidence score=10 kind=structural title="member resolveWorkspaceRoot" path=src/cli/config.ts lines=322-342',
+      'evidence score=2000 kind=structural title="member resolveWorkspaceRoot" path=src/cli/config.ts lines=322-342',
     );
   });
 
