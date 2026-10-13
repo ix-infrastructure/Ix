@@ -13,6 +13,7 @@ import { lineSpan, printJson, relativePath, rowLocation, sliceEdgeResults, strip
 import { forMcp, suggest, type Relation } from "../next-step.js";
 import { llmLine } from "../llm.js";
 import { parsePickOption } from "../options.js";
+import { ensureFreshMap } from "../map-freshness.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "object", "trait", "interface"]);
 
@@ -44,6 +45,10 @@ export function registerImpactCommand(program: Command): void {
         if (!target) return;
 
         if (opts.format === "text") printResolved(target);
+
+        // An `ix map` after an edit may have left the map for this read (CL-13).
+        // Never throws and never moves the exit code.
+        await ensureFreshMap();
 
         // A hollowed graph reports "low risk, no dependents" for anything:
         // the answer is only as good as the edges it counts. Said first, in

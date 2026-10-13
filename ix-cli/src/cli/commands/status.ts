@@ -24,6 +24,10 @@ import { detectSystem } from "../system.js";
 interface StatusStaleInfo {
   graphCompleted: boolean;
   mapCompleted: boolean;
+  /** The map was deferred after an edit (CL-13); see `StaleInfo.mapStale`. */
+  mapStale?: boolean;
+  /** Why the last background map refresh failed, while the map is stale; see `StaleInfo.mapRefreshError`. */
+  mapRefreshError?: string | null;
   currentRev: number;
   lastIngestAt: string | null;
   staleFiles: number;
@@ -57,6 +61,10 @@ export function renderStatusLlm(
     ["graph_health", graph ? graphHealthWord(graph) : null],
     ["graph_complete", staleInfo ? String(staleInfo.graphCompleted) : null],
     ["map_complete", staleInfo ? String(staleInfo.mapCompleted) : null],
+    // CL-13: why map_complete is false right after an edit. Only when true,
+    // per the zero-drop rule.
+    ["map_stale", staleInfo?.mapStale ? "true" : null],
+    ["map_refresh_error", staleInfo?.mapStale ? staleInfo.mapRefreshError ?? null : null],
     ["rev", staleInfo ? String(staleInfo.currentRev) : null],
     ["last_ingest_at", staleInfo?.lastIngestAt ?? null],
     ["stale_files", staleInfo ? String(staleInfo.staleFiles) : null],
@@ -145,6 +153,8 @@ export function registerStatusCommand(program: Command): void {
             backend: health.status,
             graphCompleted: staleInfo?.graphCompleted ?? null,
             mapCompleted: staleInfo?.mapCompleted ?? null,
+            mapStale: staleInfo?.mapStale ?? false,
+            mapRefreshError: staleInfo?.mapStale ? staleInfo.mapRefreshError ?? null : null,
             currentRev: staleInfo?.currentRev ?? null,
             lastIngestAt: staleInfo?.lastIngestAt ?? null,
             staleFiles: staleInfo?.staleFiles ?? 0,
@@ -191,7 +201,17 @@ export function registerStatusCommand(program: Command): void {
               // will not bring these files in, a larger budget will.
               renderWarning(describeStatusParseTimeouts(staleInfo.parseTimeouts));
             }
-            if (staleInfo.graphCompleted && !staleInfo.mapCompleted) {
+            if (staleInfo.graphCompleted && staleInfo.mapStale) {
+              // Deferred after an edit, not missing: the last map's regions
+              // stand until something reads them.
+              renderKeyValue("Map", "stale");
+              if (staleInfo.mapRefreshError) {
+                renderWarning(`The last background map refresh failed: ${staleInfo.mapRefreshError}`);
+                renderNote("run ix map --remap to recompute the map");
+              } else {
+                renderNote("a region view refreshes it in the background, or run ix map --remap");
+              }
+            } else if (staleInfo.graphCompleted && !staleInfo.mapCompleted) {
               renderWarning("No completed architecture map is recorded for this source revision.");
               renderNote("Source graph reads remain available, but hierarchy views may be incomplete.");
             }

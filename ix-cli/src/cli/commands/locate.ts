@@ -16,6 +16,7 @@ import { getEffectiveSystemPath, hasMapData } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
 import { renderSection, renderKeyValue, renderNote, renderWarning, renderBreadcrumb, reportAmbiguousTarget, reportResolutionNotices } from "../ui.js";
 import { forMcp } from "../next-step.js";
+import { ensureFreshMap } from "../map-freshness.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "trait", "object", "interface"]);
 const FILE_KINDS = new Set(["file"]);
@@ -106,6 +107,10 @@ export function registerLocateCommand(program: Command): void {
 
       const isContainer = CONTAINER_KINDS.has(target.kind);
       const isFile = FILE_KINDS.has(target.kind);
+
+      // An `ix map` after an edit may have left the map for this read (CL-13).
+      // Never throws and never moves the exit code.
+      await ensureFreshMap();
 
       // Parallel fetch: effective system path, parent container (for non-containers), entity details
       const [systemPath, containsResult, details] = await Promise.all([

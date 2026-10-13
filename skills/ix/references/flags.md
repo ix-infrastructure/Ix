@@ -560,6 +560,7 @@ Map the architectural hierarchy of a codebase.
 | `--graph` | — | off | Render the hierarchy as a graph/tree view (default) |
 | `--list` | — | off | Render the ranked list view instead of the default graph/tree view |
 | `--full` | — | off | Force full local map, bypassing automatic safety limits (advanced/testing) |
+| `--remap` | — | off | Compute the map now, even after an edit that would defer it |
 | `--verbose` | — | off | Show raw confidence/crosscut scores and signals, plus per-file ingest diagnostics (including why a patch failed to commit) |
 | `--silent` | — | off | Suppress all output except a one-line summary (useful for LLM hooks) |
 

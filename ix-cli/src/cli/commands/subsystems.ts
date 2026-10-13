@@ -10,6 +10,7 @@ import { roundFloat, printJson } from "../format.js";
 import { llmLine, llmError, llmShortId } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { renderMapText, renderMapLlm, type MapRegion, type MapResult } from "./map.js";
+import { ensureFreshMap } from "../map-freshness.js";
 import {
   renderSubsystemExplanationJson,
   renderSubsystemExplanationText,
@@ -160,6 +161,10 @@ Examples:
         process.exitCode = 1;
         return;
       }
+
+      // An `ix map` after an edit may have left the map for this read (CL-13).
+      // Never throws and never moves the exit code.
+      await ensureFreshMap();
 
       if (opts.list) {
         let result: SubsystemListResult;

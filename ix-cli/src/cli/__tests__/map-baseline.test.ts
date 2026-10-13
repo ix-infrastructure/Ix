@@ -59,6 +59,23 @@ describe("architecture map baseline", () => {
     expect(hasCompletedMapBaseline(root)).toBe(true);
   });
 
+  it("finds a map recorded under either spelling of its root, the given one or the canonical one", () => {
+    // macOS's /var -> /private/var and Windows's RUNNER~1 short names: a
+    // baseline stored as given must still be found as given, and one stored
+    // canonically (as `ix map` stores it) must be found from an alias.
+    const real = path.join(home, "real");
+    const alias = path.join(home, "alias");
+    fs.mkdirSync(real, { recursive: true });
+    fs.symlinkSync(real, alias, "junction");
+    for (const [stored, asked] of [[alias, alias], [fs.realpathSync.native(real), alias]] as const) {
+      const filePath = path.join(stored, "index.ts");
+      fs.writeFileSync(filePath, "export const one = 1;\n");
+      persistIngestBaselineIfClean(stored, new Map([[filePath, fs.statSync(filePath).mtimeMs]]), 3, 0, 0);
+      expect(persistCompletedMapBaseline({ file_count: 1, region_count: 1, regions: [], outcome: "full_local_completed" }, stored)).toBe(true);
+      expect(hasCompletedMapBaseline(asked), `stored under ${stored === alias ? "the alias" : "the real path"}`).toBe(true);
+    }
+  });
+
   it("records a one-file workspace that has no regions to build", () => {
     // The E2E fixture: one Python file, mapped as `1 files · 0s/0ss/0m
     // regions`. There is no hierarchy to build over a single file and no
@@ -202,6 +219,13 @@ describe("silentSummaryLine", () => {
     expect(line).toBe("map: 12 files · 1s/2ss/3m regions · 40ms · stitch_skipped_rule=cooling · too_large=2\n");
     expect(line.split("\n")).toHaveLength(2);
   });
+
+  it("ends with map=stale only when the map was deferred (CL-13)", () => {
+    expect(silentSummaryLine({ ...base, mapStale: false })).toBe("map: 12 files · 1s/2ss/3m regions · 40ms\n");
+    expect(silentSummaryLine({ ...base, mapMs: 0, mapStale: true })).toBe("map: 12 files · 1s/2ss/3m regions · 0ms · map=stale\n");
+    expect(silentSummaryLine({ ...base, stitch: " · stitch_skipped_rule=cooling", filesTooLarge: 2, mapStale: true }))
+      .toBe("map: 12 files · 1s/2ss/3m regions · 40ms · stitch_skipped_rule=cooling · too_large=2 · map=stale\n");
+  });
 });
 
 describe("mapJsonPayload", () => {
@@ -225,6 +249,27 @@ describe("mapJsonPayload", () => {
     expect(remote.files_too_large).toBe(0);
     expect(remote.files_too_large_paths).toEqual([]);
     expect(JSON.parse(JSON.stringify(remote))).toHaveProperty("files_too_large_paths");
+  });
+
+  it("always carries map_stale, false unless the map was deferred, beside every existing key (CL-13)", () => {
+    const keys = ["file_count", "region_count", "levels", "map_rev", "outcome", "parse_errors", "commit_errors",
+      "stitch_skipped", "stitch_skipped_rule", "files_too_large", "files_too_large_paths", "regions"];
+    const fresh = mapJsonPayload(result, [], undefined);
+    expect(fresh.map_stale).toBe(false);
+    for (const k of keys) expect(fresh).toHaveProperty(k);
+    expect(mapJsonPayload(result, [], undefined, { mapStale: false }).map_stale).toBe(false);
+    const stale = mapJsonPayload(result, [], undefined, { mapStale: true });
+    expect(stale.map_stale).toBe(true);
+    expect(stale).toMatchObject({ file_count: 3, map_rev: 9, outcome: "ok" });
+  });
+
+  it("names the map a deferred payload comes from in regions_as_of, null when fresh (CL-13)", () => {
+    const fresh = mapJsonPayload(result, [], undefined);
+    expect(JSON.parse(JSON.stringify(fresh))).toHaveProperty("regions_as_of", null);
+    const stale = mapJsonPayload(result, [], undefined, { mapStale: true, regionsAsOf: { map_rev: 9, file_count: 3 } });
+    expect(stale.regions_as_of).toEqual({ map_rev: 9, file_count: 3 });
+    // Never claimed without map_stale.
+    expect(mapJsonPayload(result, [], undefined, { regionsAsOf: { map_rev: 9, file_count: 3 } }).regions_as_of).toBeNull();
   });
 });
 

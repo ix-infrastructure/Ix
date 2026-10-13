@@ -45,7 +45,14 @@ try {
 // loads the graph code itself only when there is an edit to report.
 // `--help` still goes through the CLI, where the command is documented.
 const args = process.argv.slice(2);
-if (args[0] === "hook" && args[1] === "claude-post-edit" && !args.some((a) => a === "-h" || a === "--help")) {
+// `ix __map-refresh <root>` is the detached background map refresh a region
+// view starts (`map-freshness.ts`); it is not a command anyone types, so it
+// skips the command tree too. It exits when done, whatever is left pending.
+if (args[0] === "__map-refresh" && args[1] !== undefined) {
+  const { runBackgroundMapRefresh } = await import("./map-freshness.js");
+  try { await runBackgroundMapRefresh(args[1]); } catch { /* recorded where it could be */ }
+  process.exit(0);
+} else if (args[0] === "hook" && args[1] === "claude-post-edit" && !args.some((a) => a === "-h" || a === "--help")) {
   const { parseHookArgs, runHookProcess } = await import("./hook/entry.js");
   await runHookProcess(parseHookArgs(args.slice(2)));
 } else {

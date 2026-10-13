@@ -1382,6 +1382,19 @@ export interface IngestFilesSummary {
    */
   graphUnchanged: boolean;
   /**
+   * True only when this run was an ordinary incremental update of a graph
+   * whose baseline it trusted: a local baseline existed (Path A), nothing was
+   * forced or migrated, the DB-reset guard and an extractor rebuild did not
+   * fire, at least one file changed or was deleted, and nothing failed to
+   * parse or commit.
+   *
+   * `ix map` reads it to decide whether it may defer `/v1/map` to the next
+   * command that reads regions (CL-13). It errs towards false: a run that
+   * might have left the graph somewhere unexpected computes the map, so the
+   * completed-map diagnostics still see every run that had errors.
+   */
+  incremental: boolean;
+  /**
    * Files tree-sitter parsed with ERROR or MISSING nodes. They are in the
    * graph, but whatever sat in the broken region may not be. Not counted in
    * `parseErrors`, which is files that produced nothing.
@@ -2113,6 +2126,8 @@ export async function ingestFiles(
   let dbResetDetected = false;
   let extractorRebuild = false;
   let deletionsFound = false;
+  // Path A with a local baseline: the run updated a graph it already knew.
+  let baselineRun = false;
   let stitchSent = false;
   let filesSkipped = 0;
   /**
@@ -3693,6 +3708,7 @@ export async function ingestFiles(
     // calls as a whole-repository pass would.
     const hasBaseline = previousBaseline !== null && mtimeCache.size > 0;
     const incrementalRun = (hasBaseline || knownHashes.size > 0 || mtimeChangedPaths.length === 0) && !opts.force;
+    baselineRun = hasBaseline && incrementalRun;
     if (incrementalRun) {
       // Path A: has baseline or all mtime-clean → pre-scan to detect changes before loading modules.
       // If nothing changed, module load is skipped entirely. A file with no
@@ -4544,6 +4560,14 @@ export async function ingestFiles(
       parseErrors + crashedParses() === 0 &&
       commitErrors === 0 &&
       stitchErrors === 0,
+    incremental:
+      baselineRun &&
+      opts.force !== true &&
+      !workspaceMigrated &&
+      !dbResetDetected &&
+      !extractorRebuild &&
+      (filesChanged > 0 || deletionsFound) &&
+      parseErrors + crashedParses() + commitErrors === 0,
   };
   // `everTripped()` alone, and it is not a weakening: `recordFailure` has one
   // call site, in the per-file catch immediately after `commitErrors++`, so a
