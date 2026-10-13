@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import chalk from "chalk";
-import { llmLine, llmShortId } from "./llm.js";
+import { llmLine, llmShortId, type LlmValue } from "./llm.js";
 import { projectRow, requestedFields } from "./output-shape.js";
 import type { EdgeSite } from "./edge-sites.js";
 
@@ -83,9 +83,34 @@ function withResolutionNotices(value: unknown): unknown {
   };
 }
 
+/** Set while {@link captureJson} runs: payloads are collected instead of printed. */
+let jsonSink: unknown[] | undefined;
+
 /** Print a JSON payload on stdout, indented only when that helps someone. */
 export function printJson(value: unknown): void {
-  console.log(JSON.stringify(withResolutionNotices(value), null, jsonIndent()));
+  const payload = withResolutionNotices(value);
+  if (jsonSink) {
+    jsonSink.push(payload);
+    return;
+  }
+  console.log(JSON.stringify(payload, null, jsonIndent()));
+}
+
+/**
+ * Run `fn` and return the payloads it passed to `printJson`, unprinted. A
+ * multi-target command runs its one-target body per target and prints one
+ * object grouping them, rather than several JSON documents on one stream.
+ */
+export async function captureJson(fn: () => Promise<void>): Promise<unknown[]> {
+  const previous = jsonSink;
+  const sink: unknown[] = [];
+  jsonSink = sink;
+  try {
+    await fn();
+  } finally {
+    jsonSink = previous;
+  }
+  return sink;
 }
 
 // ── JSON optimization helpers ──────────────────────────────────────────────
@@ -872,9 +897,21 @@ export function formatLocateResults(results: LocateResult[], format: string): vo
  * llm records: a header line keyed by the relation, optional diagnostic lines,
  * then one `ref` row per related entity. Unresolved targets carry resolved=false.
  */
+/**
+ * The candidates an `--all` edge query ran over. Rows carry `candidate: <n>`,
+ * numbering into this list.
+ */
+export interface EdgeCandidate {
+  n: number;
+  id: string;
+  name: string;
+  kind: string;
+  path?: string;
+}
+
 export function renderEdgeResultsLlm(
   slice: Slice<any>, relation: string, symbol: string,
-  source?: ResultSource, diagnostics?: Diagnostic[]
+  source?: ResultSource, diagnostics?: Diagnostic[], candidates?: EdgeCandidate[],
 ): string[] {
   const refs = slice.rows.map((n: any) => {
     const name = n.name || n.attrs?.name || "";
@@ -884,6 +921,7 @@ export function renderEdgeResultsLlm(
       kind: n.kind ?? undefined,
       id: n.id ?? undefined,
       site: n.site as EdgeSite | undefined,
+      candidate: typeof n.candidate === "number" ? n.candidate as number : undefined,
       ...rowLocation(n),
     };
   });
@@ -901,7 +939,14 @@ export function renderEdgeResultsLlm(
     ["resolved", refs.length - unresolved],
     ["unresolved", unresolved > 0 ? unresolved : undefined],
     ["source", source && source !== "graph" ? source : undefined],
+    ["candidates", candidates ? candidates.length : undefined],
   ])];
+  for (const c of candidates ?? []) {
+    lines.push(llmLine("candidate", [
+      ["n", c.n], ["name", c.name], ["kind", c.kind],
+      ["path", c.path ? relativePath(c.path) ?? c.path : undefined], ["id", llmShortId(c.id)],
+    ]));
+  }
   if (slice.truncated) {
     lines.push(llmLine("diagnostic", [
       ["code", "results_truncated"],
@@ -918,16 +963,19 @@ export function renderEdgeResultsLlm(
     lines.push(llmLine("diagnostic", [["code", d.code], ["message", d.message]]));
   }
   refs.forEach((ref, i) => {
+    // Which `--all` candidate the row belongs to. Outside projectRow: a row
+    // that lost it under `--fields` could not be attributed at all.
+    const tag: Array<[string, LlmValue]> = ref.candidate !== undefined ? [["candidate", ref.candidate]] : [];
     // An unresolved row has no name to go by, so its id is all there is.
     lines.push(ref.resolved
-      ? llmLine("ref", projectRow([
+      ? llmLine("ref", [...projectRow([
           ["name", ref.name], ["kind", ref.kind], ["id", ids[i]],
           ["path", ref.path], ["lines", lineSpan(ref)],
           ["site", ref.site ? siteLabel(ref.site) : undefined],
           ["also", ref.site?.also?.join(",")],
           ["snippet", ref.site?.snippet],
-        ]))
-      : llmLine("ref", projectRow([["kind", ref.kind], ["id", llmShortId(ref.id)], ["resolved", false]])));
+        ]), ...tag])
+      : llmLine("ref", [...projectRow([["kind", ref.kind], ["id", llmShortId(ref.id)], ["resolved", false]]), ...tag]));
   });
   return lines;
 }
@@ -936,12 +984,13 @@ export function formatEdgeResults(
   slice: Slice<any>, relation: string, symbol: string, format: string,
   resolvedTarget?: { id: string; kind: string; name: string; resolutionMode?: string },
   source?: ResultSource,
-  diagnostics?: Diagnostic[]
+  diagnostics?: Diagnostic[],
+  candidates?: EdgeCandidate[],
 ): void {
   const nodes = slice.rows;
 
   if (format === "llm") {
-    for (const line of renderEdgeResultsLlm(slice, relation, symbol, source, diagnostics)) {
+    for (const line of renderEdgeResultsLlm(slice, relation, symbol, source, diagnostics, candidates)) {
       console.log(line);
     }
     return;
@@ -957,6 +1006,7 @@ export function formatEdgeResults(
         id: resolved ? n.id : undefined,
         ...rowLocation(n),
         ...(n.site ? { site: n.site } : {}),
+        ...(typeof n.candidate === "number" ? { candidate: n.candidate } : {}),
       };
       if (!resolved) {
         ref.resolved = false;
@@ -980,6 +1030,10 @@ export function formatEdgeResults(
       if (resolvedTarget.resolutionMode && resolvedTarget.resolutionMode !== "exact") {
         output.resolutionMode = resolvedTarget.resolutionMode;
       }
+    }
+    if (candidates) {
+      output.resolutionMode = "all";
+      output.candidates = candidates.map((c) => ({ ...c, path: relativePath(c.path) ?? c.path }));
     }
     if (nodes.length === 0) {
       output.diagnostics = isPastEnd(slice)
@@ -1028,6 +1082,10 @@ export function formatEdgeResults(
   if (source && source !== "graph") {
     console.log(chalk.dim(`Source: ${source}`));
   }
+  for (const c of candidates ?? []) {
+    const where = c.path ? ` in ${relativePath(c.path) ?? c.path}` : "";
+    console.log(chalk.dim(`  [${c.n}] ${c.kind} ${c.name}${where}`));
+  }
   for (const n of nodes) {
     const name = n.name || n.attrs?.name || "";
     const shortId = n.id?.slice(0, 8) ?? "";
@@ -1037,7 +1095,8 @@ export function formatEdgeResults(
       const where = locationLabel(rowLocation(n));
       console.log(
         `  ${chalk.cyan((n.kind ?? "").padEnd(10))}  ${chalk.dim(shortId)}  ${chalk.bold(name)}`
-        + (where ? `  ${chalk.dim(where)}` : ""),
+        + (where ? `  ${chalk.dim(where)}` : "")
+        + (typeof n.candidate === "number" ? `  ${chalk.dim(`[${n.candidate}]`)}` : ""),
       );
       const site = n.site as EdgeSite | undefined;
       if (site) console.log(`      ${chalk.dim(`at ${siteLabel(site)}`)}  ${site.snippet}`);
@@ -1101,7 +1160,8 @@ export type DiagnosticCode =
   | "text_fallback_used"
   | "stale_source"
   | "unfiltered_search"
-  | "graph_degraded";
+  | "graph_degraded"
+  | "candidates_truncated";
 
 export interface Diagnostic {
   code: DiagnosticCode;

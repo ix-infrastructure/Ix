@@ -21,6 +21,7 @@ vi.mock("../../client/factory.js", () => ({
 vi.mock("../resolve.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../resolve.js")>(),
   resolveFileOrReport: async () => ({ id: "11111111-0000-0000-0000-000000000000", kind: "class", name: "Big", resolutionMode: "exact" }),
+  resolveTargetSetOrReport: async () => ({ entities: [{ id: "11111111-0000-0000-0000-000000000000", kind: "class", name: "Big", resolutionMode: "exact" }] }),
   printResolved: () => {},
 }));
 

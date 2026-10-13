@@ -15,6 +15,7 @@ import { isQuiet } from "./output-shape.js";
 import type { AmbiguousResult, ResolutionNotice, ResolveResult, Suggestion } from "./resolve.js";
 import { forMcp } from "./next-step.js";
 import { graphHealthJson, graphHealthLlmFields, graphHealthProse, type GraphHealth } from "./graph-health.js";
+import { setOutcome } from "./outcome.js";
 
 // ── Brand palette ─────────────────────────────────────────────────────────────
 //
@@ -177,7 +178,7 @@ export function reportUnresolvedTarget(
   target: string | string[],
   format?: string,
   suggestions?: Suggestion[],
-  detail?: { reason?: string; message?: string; graph?: GraphHealth },
+  detail?: { reason?: string; message?: string; graph?: GraphHealth; files?: string[] },
 ): void {
   // A file target's miss says which of "not ingested" and "does not exist" it
   // is; the code stays `unresolved_target` so a consumer routes on one slug.
@@ -188,12 +189,16 @@ export function reportUnresolvedTarget(
       ...unresolvedTargetRecord(target),
       message,
       ...(detail?.reason ? { reason: detail.reason } : {}),
+      ...(detail?.files?.length ? { files: detail.files } : {}),
       ...(near.length ? { suggestions: near } : {}),
       ...(detail?.graph ? { graph: graphHealthJson(detail.graph) } : {}),
     });
   } else if (format === "llm") {
     const lines = [
-      llmError("unresolved_target", message, detail?.reason ? [["reason", detail.reason]] : []),
+      llmError("unresolved_target", message, [
+        ...(detail?.reason ? [["reason", detail.reason]] as Array<[string, string]> : []),
+        ...(detail?.files?.length ? [["files", detail.files.join(",")]] as Array<[string, string]> : []),
+      ]),
       ...(detail?.graph ? [llmLine("graph", graphHealthLlmFields(detail.graph))] : []),
       ...candidateLines(near, "suggestion"),
     ];
@@ -204,7 +209,7 @@ export function reportUnresolvedTarget(
   } else {
     if (detail?.graph) console.error(chalk.yellow(graphHealthProse(detail.graph)));
     if (!near.length) {
-      process.exitCode = 1;
+      setOutcome("not_found");
       return;
     }
     // The resolver already wrote the miss itself for a person; this adds the
@@ -214,7 +219,7 @@ export function reportUnresolvedTarget(
       console.error(`  ${chalk.cyan((s.kind || "").padEnd(10))} ${s.name}${s.path ? chalk.dim(` in ${s.path}`) : ""}`);
     }
   }
-  process.exitCode = 1;
+  setOutcome("not_found");
 }
 
 /**
@@ -244,7 +249,7 @@ export function reportAmbiguousTarget(
   target: string,
   result: AmbiguousResult,
   format?: string,
-  opts?: { kind?: string; path?: string },
+  opts?: { kind?: string; path?: string; offerAll?: boolean },
 ): void {
   const message = `Ambiguous symbol "${target}".`;
   if (format === "json") {
@@ -264,6 +269,7 @@ export function reportAmbiguousTarget(
     const hints = [mcp ? "pick=<n>" : "--pick <n>"];
     if (!opts?.kind) hints.push(mcp ? "kind=<kind>" : "--kind");
     if (!opts?.path) hints.push(mcp ? "path=<file substring>" : "--path");
+    if (opts?.offerAll && !mcp) hints.push("--all");
     const lines = [
       llmError("ambiguous_target", message, [
         ["count", String(result.candidates.length)],
@@ -292,7 +298,8 @@ export function reportAmbiguousTarget(
   const hints = ["--pick <n>"];
   if (!opts?.kind) hints.push("--kind");
   if (!opts?.path) hints.push("--path");
-  console.error(chalk.dim(`\nUse ${hints.join(" or ")} to disambiguate.`));
+  if (opts?.offerAll) hints.push("--all");
+  console.error(chalk.dim(`\nUse ${hints.join(" or ")} to disambiguate${opts?.offerAll ? " (--all answers for every candidate)" : ""}.`));
 }
 
 /**
@@ -367,9 +374,14 @@ export function reportResolutionFailure(
   target: string,
   result: Exclude<ResolveResult, { resolved: true }>,
   format?: string,
-  opts?: { kind?: string; path?: string },
+  opts?: { kind?: string; path?: string; offerAll?: boolean },
 ): void {
-  if (result.ambiguous) reportAmbiguousTarget(target, result.result, format, opts);
-  else reportUnresolvedTarget(target, format, result.suggestions, { reason: result.reason, message: result.message, graph: result.graph });
-  process.exitCode = 1;
+  if (result.ambiguous) {
+    reportAmbiguousTarget(target, result.result, format, opts);
+    setOutcome("ambiguous");
+  } else {
+    reportUnresolvedTarget(target, format, result.suggestions, {
+      reason: result.reason, message: result.message, graph: result.graph, files: result.files,
+    });
+  }
 }
