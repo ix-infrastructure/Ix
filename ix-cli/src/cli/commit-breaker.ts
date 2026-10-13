@@ -99,6 +99,15 @@ export interface CommitBreaker {
   /** A commit failed in a way that sending it again cannot fix. */
   recordFailure(error: unknown): void;
   /**
+   * Give up now, without waiting for a streak: the backend has said itself
+   * that it cannot reach its database (see `database-probe.ts`).
+   *
+   * The same latch a streak sets, and cleared the same way: a commit that lands
+   * is direct evidence the probe was stale, and `recordSuccess` un-trips.
+   * `everTripped()` stays set, so the banner still explains the run.
+   */
+  trip(error: unknown): void;
+  /**
    * A failure worth QUOTING, but not worth counting.
    *
    * A bulk commit that fails while the breaker is already tripped is abandoned
@@ -166,6 +175,13 @@ export function createCommitBreaker(limit = commitFailureLimit()): CommitBreaker
     everTripped: () => everLatched,
     recordSuccess: () => { consecutive = 0; latched = false; },
     noteError: (error) => { last = error; },
+    trip: (error) => {
+      last = error;
+      // limit 0 is the documented opt-out: this breaker never trips.
+      if (limit <= 0) return;
+      latched = true;
+      everLatched = true;
+    },
     recordFailure: (error) => {
       consecutive++;
       last = error;
@@ -474,6 +490,17 @@ export function describeCommitCutoff(
    * attribution of the count is not.
    */
   deadlineHit = false,
+  context: {
+    /**
+     * The backend held none of this run's files before it started: a first
+     * map, or one after `ix reset` (or `reset --ingest`). "The graph is
+     * unchanged" is then technically true and practically misleading -- it
+     * reads as "your old graph is still there", and there is none.
+     */
+    graphStartedEmpty?: boolean;
+    /** The backend reported during this run that it cannot reach its database. */
+    databaseUnreachable?: boolean;
+  } = {},
 ): string {
   const detail = String(breaker.lastError() ?? "unknown error");
   const trimmed = detail.length > 300 ? `${detail.slice(0, 300)}…` : detail;
@@ -488,8 +515,20 @@ export function describeCommitCutoff(
   // be true, which is also one less piece of run-scoped state to keep correct.
   const state =
     patchesApplied === 0
-      ? "The graph is unchanged."
+      ? context.graphStartedEmpty
+        ? "Nothing landed, and the backend held none of these files before this run (a first map, or a map after `ix reset`), so this workspace's graph is still empty."
+        : "The graph is unchanged."
       : `${patchesApplied} other ${patchesApplied === 1 ? "patch" : "patches"} did land, so the graph is partly updated.`;
+  // When the backend has SAID its database is unreachable there is nothing
+  // left to tell apart, and "`ix doctor` still passes" would be false: doctor
+  // reads the same health answer and fails its database check on it.
+  const cause = context.databaseUnreachable
+    ? [`  The backend reports that it cannot reach its database (ArangoDB); \`ix doctor\` shows it.`]
+    : [
+        `  Either the database cannot keep up — \`ix doctor\` still passes, since an ArangoDB that`,
+        `  cannot begin a transaction is reachable and consistent — or the backend is rejecting these`,
+        `  particular patches. The error above is the backend's own answer and says which.`,
+      ];
   // No failure count in this message at all, deliberately, and neither
   // `breaker.limit` nor the live streak is read here. The fan-out stops on a
   // streak, the drain on a per-pass budget, and the batch gate on two empty
@@ -529,9 +568,7 @@ export function describeCommitCutoff(
     // to `docker stats` and `/_api/query/current`, which is the wrong
     // subsystem entirely. The backend's own words are quoted above; let them
     // say which.
-    `  Either the database cannot keep up — \`ix doctor\` still passes, since an ArangoDB that`,
-    `  cannot begin a transaction is reachable and consistent — or the backend is rejecting these`,
-    `  particular patches. The error above is the backend's own answer and says which.`,
+    ...cause,
     `  Set IX_COMMIT_FAILURE_LIMIT=0 to send every patch regardless.`,
   ].join("\n");
 }

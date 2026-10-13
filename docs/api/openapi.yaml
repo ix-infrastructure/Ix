@@ -47,6 +47,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: The backend is up but cannot reach its database (status degraded, database unreachable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
 
   /v1/capabilities:
     get:
@@ -1028,6 +1034,10 @@ components:
         status: { type: string }
         schema_version: { type: integer, description: On-disk graph format version }
         release_version: { type: string, description: Backend release semver }
+        database:
+          type: string
+          enum: [reachable, unreachable]
+          description: Whether the backend can reach its database (1.0.33+). Absent on older backends
     CapabilitiesResponse:
       type: object
       properties:
