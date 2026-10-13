@@ -325,6 +325,7 @@ func (s *Scheme) start(opts *Options) {
     expect(rels).toContainEqual({
       srcName: 'handle',
       dstName: 'Options.Run',
+      receiverType: 'Options',
       predicate: 'CALLS',
     });
 
@@ -333,6 +334,7 @@ func (s *Scheme) start(opts *Options) {
     expect(rels).toContainEqual({
       srcName: 'Scheme.start',
       dstName: 'Scheme.Register',
+      receiverType: 'Scheme',
       predicate: 'CALLS',
     });
 
@@ -340,6 +342,7 @@ func (s *Scheme) start(opts *Options) {
     expect(rels).toContainEqual({
       srcName: 'Scheme.start',
       dstName: 'Options.Run',
+      receiverType: 'Options',
       predicate: 'CALLS',
     });
   });

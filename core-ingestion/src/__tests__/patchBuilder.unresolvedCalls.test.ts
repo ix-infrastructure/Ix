@@ -52,11 +52,11 @@ describe('unresolved callee names', () => {
   it('go on the function that makes the calls, not on its neighbours', () => {
     // The parser records a member call by its member name.
     expect(byName(ops, 'first', 'function').attrs).toMatchObject({
-      unresolved_calls: ['max'],
+      unresolved_calls: ['Math.max'],
       unresolved_call_count: 1,
     });
     expect(byName(ops, 'second', 'function').attrs).toMatchObject({
-      unresolved_calls: ['map', 'filter'],
+      unresolved_calls: ['xs.map', 'filter'],
       unresolved_call_count: 2,
     });
   });
@@ -85,7 +85,7 @@ describe('unresolved callee names', () => {
   it('are recorded the same way without cross-file resolution', () => {
     const plain = buildPatch(main, 'hash', 'ws').ops;
     expect(byName(plain, 'second', 'function').attrs).toMatchObject({
-      unresolved_calls: ['map', 'filter'],
+      unresolved_calls: ['xs.map', 'filter'],
       unresolved_call_count: 2,
     });
     expect(byName(plain, 'main.ts', 'file').attrs).toMatchObject({ unresolved_calls: ['setupGlobalThing'] });

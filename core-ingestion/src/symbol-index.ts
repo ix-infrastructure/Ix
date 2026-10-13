@@ -28,6 +28,11 @@ export interface FileSummary {
   imports: Array<{ dstName: string; importRaw?: string; importVia?: string }>;
   /** `[fqcn, typeName]` for unambiguous PHP types. */
   phpTypes?: Array<[string, string]>;
+  /** Receiver inference facts needed across incremental batches. */
+  receiverFactories?: Array<[string, string]>;
+  receiverHeritage?: Array<[string, string]>;
+  receiverPackage?: string;
+  importAliases?: Record<string, string>;
   /** Sorted unique names this file calls, references or extends (for IN-11). */
   refs: string[];
   /** Hash of what other files can resolve to here: qualified keys, exports, PHP types. */
@@ -35,11 +40,14 @@ export interface FileSummary {
 }
 
 /** The part of a summary other files depend on, hashed. */
-export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNames' | 'phpTypes'>): string {
+export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNames' | 'phpTypes' | 'receiverFactories' | 'receiverHeritage' | 'receiverPackage'>): string {
   const canonical = JSON.stringify([
     [...s.qkeys].map(([n, q]) => `${n}\0${q}`).sort(),
     [...(s.exportPublicNames ?? [])].map(([p, l]) => `${p}\0${l}`).sort(),
     [...(s.phpTypes ?? [])].map(([f, t]) => `${f}\0${t}`).sort(),
+    [...(s.receiverFactories ?? [])].map(([f, t]) => `${f}\0${t}`).sort(),
+    [...(s.receiverHeritage ?? [])].map(([f, t]) => `${f}\0${t}`).sort(),
+    s.receiverPackage ?? '',
   ]);
   return crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 32);
 }

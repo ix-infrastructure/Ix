@@ -1,0 +1,74 @@
+[
+  {
+    "srcFilePath": "ix-cli/src/cli/backend-version.ts",
+    "srcName": "fetchBackendHealth",
+    "dstFilePath": "ix-cli/src/client/api.ts",
+    "dstQualifiedKey": "IxClient.health"
+  },
+  {
+    "srcFilePath": "ix-cli/src/cli/commands/context.ts",
+    "srcName": "findFileNode",
+    "dstFilePath": "ix-cli/src/client/api.ts",
+    "dstQualifiedKey": "IxClient.search"
+  },
+  {
+    "srcFilePath": "ix-cli/src/cli/commands/depends.ts",
+    "srcName": "buildDependencyTree",
+    "dstFilePath": "ix-cli/src/client/api.ts",
+    "dstQualifiedKey": "IxClient.expand"
+  },
+  {
+    "srcFilePath": "ix-cli/src/cli/commands/diff.ts",
+    "srcName": "getRevisionTimestamp",
+    "dstFilePath": "ix-cli/src/client/api.ts",
+    "dstQualifiedKey": "IxClient.listPatches"
+  },
+  {
+    "srcFilePath": "ix-cli/src/cli/commands/explain.ts",
+    "srcName": "rawExplain",
+    "dstFilePath": "ix-cli/src/client/api.ts",
+    "dstQualifiedKey": "IxClient.entity"
+  },
+  {
+    "srcFilePath": "ix-cli/src/cli/commands/impact.ts",
+    "srcName": "containerImpact",
+    "dstFilePath": "ix-cli/src/client/api.ts",
+    "dstQualifiedKey": "IxClient.expand"
+  },
+  {
+    "srcFilePath": "ix-cli/src/cli/commands/overview.ts",
+    "srcName": "overviewContainer",
+    "dstFilePath": "ix-cli/src/client/api.ts",
+    "dstQualifiedKey": "IxClient.entity"
+  },
+  {
+    "srcFilePath": "ix-cli/src/cli/commands/rank.ts",
+    "srcName": "scoreAllCandidates",
+    "dstFilePath": "ix-cli/src/client/api.ts",
+    "dstQualifiedKey": "IxClient.expand"
+  },
+  {
+    "srcFilePath": "ix-cli/src/cli/commands/read.ts",
+    "srcName": "tryFilenameMatch",
+    "dstFilePath": "ix-cli/src/client/api.ts",
+    "dstQualifiedKey": "IxClient.search"
+  },
+  {
+    "srcFilePath": "ix-cli/src/cli/commands/subsystems.ts",
+    "srcName": "loadSubsystemScores",
+    "dstFilePath": "ix-cli/src/client/api.ts",
+    "dstQualifiedKey": "IxClient.listSubsystems"
+  },
+  {
+    "srcFilePath": "ix-cli/src/cli/commands/trace.ts",
+    "srcName": "traceEdgeScore",
+    "dstFilePath": "ix-cli/src/client/api.ts",
+    "dstQualifiedKey": "IxClient.expand"
+  },
+  {
+    "srcFilePath": "ix-cli/src/cli/commands/watch.ts",
+    "srcName": "flush",
+    "dstFilePath": "ix-cli/src/cli/commands/watch.ts",
+    "dstQualifiedKey": "WatchRefreshScheduler.request"
+  }
+]

@@ -132,17 +132,15 @@ function readFileRange(
  * of the tree is worse than a long one.
  */
 function readablePath(filePath: string): string {
-  const relative = relativePath(filePath);
-  if (relative && relative !== filePath) return relative;
   try {
     const fromCwd = path.relative(fs.realpathSync(process.cwd()), fs.realpathSync(filePath));
     if (fromCwd && !fromCwd.startsWith("..") && !path.isAbsolute(fromCwd)) {
       return fromCwd.split(path.sep).join("/");
     }
   } catch {
-    // An unreadable cwd or a file deleted under us: the absolute path stands.
+    // An unreadable cwd or a file deleted under us: use the display-path fallback.
   }
-  return filePath;
+  return relativePath(filePath) ?? filePath;
 }
 
 /** `src/a.ts:401-800`, or nothing when the cap landed on the last line. */

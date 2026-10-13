@@ -117,7 +117,7 @@ describe('call resolution respects lexical scope (JS/TS)', () => {
     const sample = parse('src/sample.ts', SAMPLE_COMMAND_SOURCE);
 
     expect(callsTo(resolveEdges([caller, sample]), 'src/sample.ts')).toEqual([
-      expect.objectContaining({ dstName: 'describe', dstQualifiedKey: 'CheckRunner.describe', confidence: 0.9 }),
+      expect.objectContaining({ dstName: 'CheckRunner.describe', dstQualifiedKey: 'CheckRunner.describe', confidence: 0.95 }),
     ]);
   });
 

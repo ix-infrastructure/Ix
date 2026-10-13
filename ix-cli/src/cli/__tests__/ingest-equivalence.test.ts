@@ -90,13 +90,17 @@ class World {
   /** Make the working tree match `repo`, and stage it so discovery sees it. */
   write(repo: Repo): void {
     const want = new Map([...repo].map(([p, fns]) => [p, render(p, fns)]));
+    this.writeSources(want);
+  }
+
+  writeSources(want: Map<string, string>): void {
     for (const p of this.onDisk.keys()) if (!want.has(p)) rmSync(join(this.repo, p));
     for (const [p, text] of want) {
       if (this.onDisk.get(p) === text) continue;
       mkdirSync(dirname(join(this.repo, p)), { recursive: true });
       writeFileSync(join(this.repo, p), text, "utf8");
     }
-    this.onDisk = want;
+    this.onDisk = new Map(want);
     execFileSync("git", ["add", "-A"], { cwd: this.repo, stdio: "ignore" });
   }
 
@@ -221,6 +225,32 @@ describe("incremental ix map equals a fresh map (fake backend)", () => {
 
   it("the harness: two fresh maps of one tree give one graph", async () => {
     await runSequence("head", []);
+  });
+
+  it("changing an intermediate Scala superclass re-resolves subclass callers", async () => {
+    const world = new World("head");
+    try {
+      await world.start();
+      const sources = new Map([
+        ["a.scala", "trait A { def run() = () }\n"],
+        ["b.scala", "trait B { def run() = () }\n"],
+        ["mid.scala", "class Mid extends A {}\n"],
+        ["child.scala", "class Child extends Mid {}\n"],
+        ["use.scala", "object Use { def use(x: Child) = x.run() }\n"],
+      ]);
+      world.writeSources(sources);
+      await world.map();
+      const before = world.backend.graphSignature();
+      sources.set("mid.scala", "class Mid extends B {}\n");
+      world.writeSources(sources);
+      await world.map();
+      const live = world.backend.graphSignature();
+      const fresh = await world.freshSignature();
+      expect(fresh.edges).not.toEqual(before.edges);
+      expect(signatureDiff(world, live, fresh)).toBe("");
+    } finally {
+      await world.stop();
+    }
   });
 
   it("a re-map with nothing changed commits nothing", async () => {

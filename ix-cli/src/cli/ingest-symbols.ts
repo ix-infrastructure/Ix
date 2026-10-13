@@ -304,6 +304,9 @@ type SummaryFields = {
   qkeys?: Array<[string, string]>;
   exportPublicNames?: Array<[string, string]>;
   phpTypes?: Array<[string, string]>;
+  receiverFactories?: Array<[string, string]>;
+  receiverHeritage?: Array<[string, string]>;
+  receiverPackage?: string;
   refs?: string[];
   imports?: Array<{ dstName?: string; importRaw?: string }>;
   sig?: string;
@@ -330,9 +333,11 @@ function bindings(summary: StoredSummary | undefined): Map<string, string[]> {
   const out = new Map<string, string[]>();
   if (!summary) return out;
   const s = summary as SummaryFields;
-  for (const [name, qkey] of s.qkeys ?? []) out.set(`q\0${name}\0${qkey}`, [name, qkey]);
+  for (const [name, qkey] of s.qkeys ?? []) out.set(`q\0${s.receiverPackage ?? ''}\0${name}\0${qkey}`, [name, qkey]);
   for (const [publicName, local] of s.exportPublicNames ?? []) out.set(`e\0${publicName}\0${local}`, [publicName]);
   for (const [fqcn, typeName] of s.phpTypes ?? []) out.set(`p\0${fqcn}\0${typeName}`, [fqcn, typeName]);
+  for (const [name, type] of s.receiverFactories ?? []) out.set(`f\0${name}\0${type}`, [name]);
+  for (const [name, base] of s.receiverHeritage ?? []) out.set(`h\0${name}\0${base}`, [name]);
   return out;
 }
 
@@ -400,16 +405,39 @@ export function findDependents(
     if (stem.length > 0 && stem !== ".") stems.add(stem);
   }
   if (names.size === 0 && stems.size === 0) return [];
+  // A changed superclass changes the members visible through every subclass,
+  // even when those subclass files were not edited (or were already sent).
+  const inheritors = new Map<string, Set<string>>();
+  for (const entry of table.values()) {
+    const s = entry.summary as SummaryFields;
+    for (const [child, parent] of s.receiverHeritage ?? []) {
+      for (const key of new Set([parent, parent.split(".").pop()!])) {
+        const children = inheritors.get(key) ?? new Set<string>();
+        children.add(child);
+        if (s.receiverPackage) children.add(`${s.receiverPackage}.${child}`);
+        inheritors.set(key, children);
+      }
+    }
+  }
+  const affectedNames = new Set(names);
+  const pending = [...affectedNames];
+  for (let i = 0; i < pending.length; i++) {
+    for (const child of inheritors.get(pending[i]) ?? []) {
+      if (affectedNames.has(child)) continue;
+      affectedNames.add(child);
+      pending.push(child);
+    }
+  }
   const out: string[] = [];
   for (const [rel, entry] of table) {
     if (exclude.has(rel)) continue;
     const s = entry.summary as SummaryFields;
-    const byName = names.size > 0 && (s.refs ?? []).some(ref => {
-      if (names.has(ref)) return true;
+    const byName = affectedNames.size > 0 && (s.refs ?? []).some(ref => {
+      if (affectedNames.has(ref)) return true;
       // Most refs are plain names; splitting each costs more than the rest of the scan.
       if (!REF_SEPARATOR.test(ref)) return false;
       const parts = ref.split(/::|->|\.|#|\\/).filter(Boolean);
-      return parts.length > 1 && (names.has(parts[0]) || names.has(parts[parts.length - 1]));
+      return parts.length > 1 && (affectedNames.has(parts[0]) || affectedNames.has(parts[parts.length - 1]));
     });
     // By path segment, not substring: an added `a.ts` must not match every
     // import with an "a" in it.
