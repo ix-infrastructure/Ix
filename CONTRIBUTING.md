@@ -97,6 +97,13 @@ Breaking changes: use `feat!:` or `fix!:` prefix.
 
 ### Exit codes
 
+The graph commands share one set of codes, defined in
+`ix-cli/src/cli/outcome.ts`: `0` results, `1` error, `2` ambiguous target,
+`3` target not found, `4` workspace not mapped (`IX_LEGACY_EXIT_CODES=1`
+collapses 2-4 to 1). Report a resolution failure through `resolveFileOrReport`
+or `reportResolutionFailure` rather than setting `process.exitCode` yourself,
+and the right code follows.
+
 Making a command exit non-zero is a **breaking change to every plugin and MCP
 client**, even when the payload it prints is an improvement. Both consumers
 throw stdout away on a failed run:

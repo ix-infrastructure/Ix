@@ -15,7 +15,7 @@ vi.mock("../bootstrap.js", async (orig) => ({
 /**
  * CL-19B: a target that matches several things no longer picks one silently.
  * It still resolves where it resolved before (exit 0) and reports what it
- * passed over; what was ambiguous (exit 1) stays so. No new non-zero exit.
+ * passed over; what was ambiguous (exit 2 now) stays so. No new non-zero exit.
  */
 
 type Node = ReturnType<typeof node>;
@@ -191,7 +191,7 @@ describe("a suffix not on a '/' boundary is labelled fuzzy (review round 5)", ()
   });
 });
 
-describe("acceptance 4: two functions named render stay ambiguous (exit 1)", () => {
+describe("acceptance 4: two functions named render stay ambiguous (exit 2)", () => {
   const nodes = [node("r2", "render", "function", "src/z.ts", 5), node("r1", "render", "function", "src/a.ts", 9)];
 
   it("json: path-sorted candidates with total, the same in both orders", async () => {
@@ -200,7 +200,7 @@ describe("acceptance 4: two functions named render stay ambiguous (exit 1)", () 
       logs.length = 0;
       process.exitCode = undefined;
       expect(await resolveFileOrReport(c, "render", {}, "json")).toBeNull();
-      expect(process.exitCode).toBe(1);
+      expect(process.exitCode).toBe(2);
       outs.push(JSON.parse(logs[0]));
     }
     expect(outs[0].error).toBe("ambiguous_target");
@@ -211,7 +211,7 @@ describe("acceptance 4: two functions named render stay ambiguous (exit 1)", () 
 
   it("llm: count= unchanged, shown= and total= added", async () => {
     await resolveFileOrReport(client(nodes), "render", {}, "llm");
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(2);
     expect(logs[0]).toMatch(/^error code=ambiguous_target .*count=2 shown=2 total=2/);
   });
 });
@@ -570,7 +570,7 @@ describe("acceptance 7: many methods named run", () => {
     const nodes = runs(40);
     logs.length = 0;
     expect(await resolveFileOrReport(client(nodes), "run", {}, "json")).toBeNull();
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(2);
     const out = JSON.parse(logs[0]);
     expect(out.error).toBe("ambiguous_target");
     expect(out.candidates).toHaveLength(8);

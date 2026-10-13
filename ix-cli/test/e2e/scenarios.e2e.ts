@@ -14,7 +14,7 @@
 
 import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterAll, beforeAll, beforeEach, describe, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   type Checkout,
   type E2eEnv,
@@ -23,6 +23,7 @@ import {
   e2eEnv,
   freshSignature,
   git,
+  ix,
   map,
   resetBackend,
   expectSameGraph,
@@ -208,5 +209,51 @@ describe("incremental equals fresh", () => {
     map(env, co);
 
     expectSameGraph("map twice", await signature(env, co), first);
+  });
+});
+
+// The outcome contract agents route on (ix-cli/src/cli/outcome.ts), against a
+// real backend: `clamp` is defined in app/utils.py and web/src/math.ts.
+describe("agent outcomes", () => {
+  it("exits 0 / 2 / 3 / 4 for results, ambiguity, a miss and an unmapped directory", () => {
+    const co = checkout("polyglot");
+    map(env, co);
+
+    expect(ix(env, co, ["locate", "slugify", "--format", "json"]).status).toBe(0);
+
+    const ambiguous = ix(env, co, ["callers", "clamp", "--format", "json"], true);
+    expect(ambiguous.status).toBe(2);
+    expect(JSON.parse(ambiguous.stdout).error).toBe("ambiguous_target");
+
+    const miss = ix(env, co, ["locate", "definitelyNotAName", "--format", "json"], true);
+    expect(miss.status).toBe(3);
+    expect(JSON.parse(miss.stdout).error).toBe("unresolved_target");
+
+    const unmapped = checkout("polyglot-b");
+    const notMapped = ix(env, unmapped, ["locate", "slugify", "--format", "json"], true);
+    expect(notMapped.status).toBe(4);
+    expect(JSON.parse(notMapped.stdout).error).toBe("workspace_not_mapped");
+
+    process.env.IX_LEGACY_EXIT_CODES = "1";
+    try {
+      expect(ix(env, co, ["callers", "clamp", "--format", "json"], true).status).toBe(1);
+    } finally {
+      delete process.env.IX_LEGACY_EXIT_CODES;
+    }
+  });
+
+  it("--all answers every candidate, and several targets answer in one call", () => {
+    const co = checkout("polyglot");
+    map(env, co);
+
+    const all = JSON.parse(ix(env, co, ["callers", "clamp", "--all", "--format", "json"]).stdout);
+    expect(all.resolutionMode).toBe("all");
+    expect(all.candidates.map((c: { path: string }) => c.path).sort()).toEqual(["app/utils.py", "web/src/math.ts"]);
+    expect(all.results.length).toBeGreaterThan(0);
+    for (const row of all.results) expect([1, 2]).toContain(row.candidate);
+
+    const many = ix(env, co, ["locate", "slugify", "clamp", "definitelyNotAName", "--format", "json"], true);
+    expect(many.status).toBe(3);
+    expect(JSON.parse(many.stdout).targets.map((t: { exitCode: number }) => t.exitCode)).toEqual([0, 2, 3]);
   });
 });

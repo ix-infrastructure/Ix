@@ -65,12 +65,30 @@ which value it ignored, on stderr, when a person is there to read it.
   `\r` / `\t`, so a record never spans more than one line.
 - **Errors:** a uniform `error code=<slug> message="..."` line in the same
   format as data lines; the process still exits non-zero. A graph target that
-  does not exist is always `unresolved_target`. `locate` is the remaining
-  exit-status exception tracked in #539.
+  does not exist is always `unresolved_target`.
+  The graph commands (`locate`, `callers`, `callees`, `impact`, `explain` and
+  the rest that resolve a target) exit with a code per outcome, and json's
+  `error` / llm's `error code=` carry the matching slug:
+
+  | Exit | Outcome | Slug |
+  |---|---|---|
+  | 0 | results | — |
+  | 2 | ambiguous: candidates listed, retry with `--pick <n>`, `--path` or `--all` | `ambiguous_target` |
+  | 3 | not found: suggestions and a reason when known | `unresolved_target` |
+  | 4 | workspace not mapped: run `ix map` | `workspace_not_mapped` |
+  | 1 | any other error (backend down, bad argument, ...) | its own slug |
+
+  `IX_LEGACY_EXIT_CODES=1` makes every non-zero exit `1`, for an integration
+  that compares the status against `1`.
   A file target's miss adds `reason=file_not_in_graph` (on disk, not ingested)
-  or `reason=file_not_found`, any miss may carry `suggestion` records with the
-  nearest names in the graph, and a miss on an empty or degraded graph carries
-  a `graph` record saying so.
+  or `reason=file_not_found`. A symbol's miss says why when the workspace's
+  text can: `reason=symbol_file_not_indexed` (the name is in a file the graph
+  does not have), `reason=symbol_not_extracted` (it is in indexed files, named
+  with their revision, but not as an entity) or `reason=symbol_not_in_source`
+  (it is nowhere in the workspace either), with `files=` naming up to three
+  files; `IX_MISS_PROBE=0` turns that lookup off. Any miss may carry
+  `suggestion` records with the nearest names in the graph (`locate` included),
+  and a miss on an empty or degraded graph carries a `graph` record saying so.
   A graph read from a directory no registered workspace covers is
   `workspace_not_mapped`, with `dir=` and a `hint=` naming the command that
   maps it.
@@ -84,6 +102,36 @@ which value it ignored, on stderr, when a person is there to read it.
   backend spells a missing target `unknown_target` in its own JSON bodies; that
   is a wire detail and is translated on the way out, so a consumer never sees
   both.)
+
+### Every candidate at once (`--all`)
+
+`callers`, `callees` and `impact` take `--all`: an ambiguous name is answered
+for every listed candidate (exit 0) instead of exiting 2. Edge rows are one
+union, paged by `--limit`/`--offset`, and each carries the candidate it belongs
+to; json has `resolutionMode: "all"`, a `candidates` list and `candidate` on
+each row:
+
+```
+callers target=handle shown=3 total=3 resolved=3 candidates=2
+candidate n=1 name=handle kind=function path=src/a.ts id=1111aaaa
+candidate n=2 name=handle kind=function path=src/b.ts id=2222bbbb
+ref name=route kind=function path=src/server.ts lines=10-30 candidate=1
+ref name=retry kind=function path=src/jobs.ts lines=4-9 candidate=2
+```
+
+`impact --all` prints one analysis per candidate, each after its `candidate`
+record (json: `results: [{ candidate, ... }]`). Only the listed candidates (at
+most 8) are covered; a `candidates_truncated` diagnostic says when there were
+more. `--pick` takes precedence over `--all`.
+
+### Several targets (`ix locate a b c`, `ix callers a b c`)
+
+Each target is answered as it would be alone, grouped: llm opens each group
+with `target n=<i> name=<t>` and ends with
+`targets total=<n> ok=<n> [ambiguous=<n>] [not_found=<n>] [failed=<n>]`; json
+is `{ targets: [{ target, exitCode, ...answer }], summary }`. The run exits
+with the worst target's code (error, then workspace not mapped, then not
+found, then ambiguous), so a partial answer never exits 0.
 
 ### Resolution notices (exit 0)
 

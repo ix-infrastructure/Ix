@@ -15,6 +15,7 @@ import { reportAmbiguousTarget, reportResolutionFailure, reportResolutionNotices
 import { relativePath } from "./format.js";
 import { isQuiet } from "./output-shape.js";
 import { disambiguationHint } from "./next-step.js";
+import { explainSymbolMiss } from "./miss-reason.js";
 import {
   candidateOrigin, isFileStemMatch, looksLikeCodeIdentifier, requestsNonCode,
 } from "./candidate-origin.js";
@@ -236,6 +237,8 @@ export interface ResolveOpts {
   format?: string;
   /** Internal: the caller reports the miss itself (a file target's miss). */
   silentMiss?: boolean;
+  /** The command takes `--all`, so an ambiguity's hint names it. */
+  offerAll?: boolean;
 }
 
 export interface Suggestion {
@@ -260,6 +263,8 @@ export type ResolveResult =
        */
       reason?: string;
       message?: string;
+      /** For a symbol miss with a `symbol_*` reason: the files the name appears in. */
+      files?: string[];
       /** Set by the reporter's caller when the graph itself is empty or degraded. */
       graph?: GraphHealth;
     };
@@ -689,7 +694,7 @@ function tieNotice(
   const lower = lowerCount > 0
     ? ` ${lowerCount} more scored lower and ${lowerCount === 1 ? "is" : "are"} not listed.`
     : "";
-  return {
+  const notice: ResolutionNotice = {
     code: "ambiguous_target",
     target: symbol,
     message: `"${symbol}" matches ${windowFull ? "at least " : ""}${tier.length} candidates equally; using ${chosen.name || symbol}${where ? ` (${where})` : ""}.${lower}`,
@@ -698,6 +703,8 @@ function tieNotice(
     total: tier.length,
     ...(windowFull ? { truncated: true } : {}),
   };
+  rememberAll(notice, amb.candidates, allCandidatesOf(amb));
+  return notice;
 }
 
 /**
@@ -918,6 +925,29 @@ function nodeToResolved(node: any, symbol: string, mode: ResolutionMode): Resolv
   };
 }
 
+/**
+ * Every tied candidate behind an ambiguous result or notice, not only the 8
+ * shown. Kept beside the object rather than on it, so no json or llm renderer
+ * that prints the result can leak a list of hundreds. `--all` reads it
+ * (`allCandidatesOf`): the shown 8 first, numbered as `--pick` numbers them,
+ * then the rest in display order.
+ */
+const fullCandidates = new WeakMap<object, AmbiguousResult["candidates"]>();
+
+function rememberAll(
+  owner: object,
+  shown: AmbiguousResult["candidates"],
+  all: AmbiguousResult["candidates"],
+): void {
+  const shownIds = new Set(shown.map((c) => c.id));
+  fullCandidates.set(owner, [...shown, ...all.filter((c) => !shownIds.has(c.id))]);
+}
+
+/** The full candidate list behind an ambiguous result or notice (falls back to the shown ones). */
+export function allCandidatesOf(owner: AmbiguousResult | ResolutionNotice): AmbiguousResult["candidates"] {
+  return fullCandidates.get(owner) ?? owner.candidates;
+}
+
 function buildAmbiguous(
   nodes: any[],
   scores?: number[],
@@ -947,7 +977,7 @@ function buildAmbiguous(
       rank,
     };
   });
-  return {
+  const result: AmbiguousResult = {
     resolutionMode: "ambiguous",
     candidates,
     ...(extra?.total != null ? { total: extra.total } : {}),
@@ -957,6 +987,9 @@ function buildAmbiguous(
       ...(extra?.diagnostics ?? []),
     ],
   };
+  const unique = nodes.filter((n: any, i) => n?.id && nodes.findIndex((m: any) => m?.id === n.id) === i);
+  rememberAll(result, candidates, [...unique].sort(displayOrder).map(candidateOf));
+  return result;
 }
 
 export function printAmbiguous(symbol: string, result: AmbiguousResult, opts?: { kind?: string; path?: string }): void {
@@ -1080,7 +1113,10 @@ export async function resolveFileOrEntityFull(
           resolutionMode: "exact",
         },
       };
-    } catch {
+    } catch (err) {
+      // Only "no such id" is a miss. A backend that is down, refusing or
+      // erroring is a real error (exit 1), not a missing symbol (exit 3).
+      if (!isLookupMiss(err)) throw err;
       missProse(opts, `Entity not found: ${target}`);
       return { resolved: false, ambiguous: false };
     }
@@ -1101,7 +1137,8 @@ export async function resolveFileOrEntityFull(
           resolutionMode: "exact",
         },
       };
-    } catch {
+    } catch (err) {
+      if (!isLookupMiss(err)) throw err;
       // Not a valid entity prefix — fall through to normal resolution
     }
   }
@@ -1343,19 +1380,17 @@ async function resolveInClasses(
       entity: { id: only.id, kind: only.kind, name: display, path: only.path, resolutionMode: "scored" },
     };
   }
-  const ambiguous: ResolveResult = {
-    resolved: false,
-    ambiguous: true,
-    result: {
-      resolutionMode: "ambiguous",
-      candidates: ordered.slice(0, 8).map((c, i) => ({ ...c, rank: i + 1 })),
-      total: ordered.length,
-      ...(truncated ? { truncated: true } : {}),
-      diagnostics: [
-        { code: "ambiguous_resolution", message: disambiguationHint("Use --pick <n> or --path to disambiguate.") },
-      ],
-    },
+  const qualifiedResult: AmbiguousResult = {
+    resolutionMode: "ambiguous",
+    candidates: ordered.slice(0, 8).map((c, i) => ({ ...c, rank: i + 1 })),
+    total: ordered.length,
+    ...(truncated ? { truncated: true } : {}),
+    diagnostics: [
+      { code: "ambiguous_resolution", message: disambiguationHint("Use --pick <n> or --path to disambiguate.") },
+    ],
   };
+  rememberAll(qualifiedResult, qualifiedResult.candidates, ordered);
+  const ambiguous: ResolveResult = { resolved: false, ambiguous: true, result: qualifiedResult };
   const picked = applyPick(ambiguous, opts);
   if (picked?.resolved) return { ...picked, entity: { ...picked.entity, name: display } };
   return picked ?? ambiguous;
@@ -1478,17 +1513,127 @@ export async function resolveFileOrReport(
     if (result.notices?.length) reportResolutionNotices(result.notices, format, opts);
     return result.entity;
   }
-  if (!result.ambiguous) {
-    // A miss on an empty or hollowed graph is not evidence the name does not
-    // exist. Only on this path, and cached per backend revision.
-    const graph = await checkGraphHealth(client, activeScope());
-    if (isUnhealthy(graph)) {
-      reportResolutionFailure(target, { ...result, graph }, format, opts);
-      return null;
-    }
-  }
-  reportResolutionFailure(target, result, format, opts);
+  await reportUnresolved(client, target, result, opts, format);
   return null;
+}
+
+/**
+ * Report a target that did not resolve, with the best "why" available: the
+ * graph is empty or degraded, or (for a symbol) what the workspace's text says
+ * about the name. Sets the exit code (outcome.ts).
+ */
+export async function reportUnresolved(
+  client: IxClient,
+  target: string,
+  result: Exclude<ResolveResult, { resolved: true }>,
+  opts: ResolveOpts | undefined,
+  format: string,
+): Promise<void> {
+  if (result.ambiguous) {
+    reportResolutionFailure(target, result, format, opts);
+    return;
+  }
+  // A miss on an empty or hollowed graph is not evidence the name does not
+  // exist. Only on this path, and cached per backend revision.
+  const graph = await checkGraphHealth(client, activeScope());
+  if (isUnhealthy(graph)) {
+    reportResolutionFailure(target, { ...result, graph }, format, opts);
+    return;
+  }
+  reportResolutionFailure(target, await withMissReason(client, target, result, opts, format), format, opts);
+}
+
+/**
+ * A symbol miss with the reason the workspace's text gives (miss-reason.ts).
+ * A file target already carries its own; a raw id has no text to look for.
+ */
+export async function withMissReason<T extends { reason?: string; message?: string }>(
+  client: IxClient,
+  target: string,
+  result: T,
+  opts: ResolveOpts | undefined,
+  format: string | undefined,
+): Promise<T> {
+  if (result.reason || isRawId(target) || looksFileLike(target)) return result;
+  const why = await explainSymbolMiss(client, target, { path: opts?.path, ...activeScope() });
+  if (!why) return result;
+  // The resolver already wrote the bare miss for a person; this is the part
+  // that says what to do about it. Machine formats get it in the record.
+  if (format !== "json" && format !== "llm") stderr(chalk.dim(why.message));
+  return { ...result, reason: why.reason, message: why.message, ...(why.files ? { files: why.files } : {}) };
+}
+
+/** The entities a command with `--all` runs over. */
+export interface TargetSet {
+  entities: ResolvedEntity[];
+  /** Present when `--all` expanded the target to its candidates. */
+  all?: { total: number; truncated?: boolean };
+}
+
+/**
+ * The one entity a target resolves to or, under `--all`, every listed
+ * candidate of an ambiguous one (and of a target that resolved by choosing
+ * among equal ties). `null` after reporting a miss.
+ *
+ * Without `--all`, or with `--pick`, this is `resolveFileOrReport`.
+ */
+export async function resolveTargetSetOrReport(
+  client: IxClient,
+  target: string,
+  opts: (ResolveOpts & { all?: boolean }) | undefined,
+  format: string,
+): Promise<TargetSet | null> {
+  const withAll = { ...opts, offerAll: true };
+  if (!opts?.all || opts.pick !== undefined) {
+    const entity = await resolveFileOrReport(client, target, withAll, format);
+    return entity ? { entities: [entity] } : null;
+  }
+  const result = await resolveFileOrEntityFull(client, target, { ...opts, format });
+  if (result.resolved) {
+    const tie = result.notices?.find((n) => n.code === "ambiguous_target");
+    if (!tie || tie.candidates.length <= 1) {
+      if (result.notices?.length) reportResolutionNotices(result.notices, format, opts);
+      return { entities: [result.entity] };
+    }
+    return candidateSet(allCandidatesOf(tie), tie.total, tie.truncated);
+  }
+  if (result.ambiguous) {
+    return candidateSet(allCandidatesOf(result.result), result.result.total, result.result.truncated);
+  }
+  await reportUnresolved(client, target, result, withAll, format);
+  return null;
+}
+
+/**
+ * Why an `--all` answer may not cover every candidate, or undefined when it
+ * does: the resolver's search window came back full, so names past it were
+ * never seen. Every candidate it did see is answered.
+ */
+export function candidatesCut(set: TargetSet, answered: number, verb: string): string | undefined {
+  if (!set.all) return undefined;
+  if (!set.all.truncated && set.all.total <= answered) return undefined;
+  return `${verb} ${answered} candidates, but the name search was cut off, so there may be more; ` +
+    "narrow with --kind or --path to cover the rest.";
+}
+
+function candidateSet(candidates: AmbiguousResult["candidates"], total?: number, truncated?: boolean): TargetSet {
+  return {
+    entities: candidates.map((c) => ({ id: c.id, kind: c.kind, name: c.name, path: c.path, resolutionMode: "ambiguous" })),
+    all: { total: Math.max(total ?? candidates.length, candidates.length), ...(truncated ? { truncated: true } : {}) },
+  };
+}
+
+/**
+ * Whether an id lookup failed because the id names nothing: the backend's
+ * 400/404/410 (`<status>: ...`, see `httpError`) or `resolvePrefix`'s own
+ * no-match and ambiguous-prefix errors. Anything else -- a refused
+ * connection, a 5xx, a 401 -- is not evidence about the id.
+ */
+export function isLookupMiss(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /^(400|404|410):/.test(message)
+    || message.startsWith("No entity found for prefix:")
+    || message.startsWith("Ambiguous prefix ");
 }
 
 /**
@@ -1626,6 +1771,7 @@ async function tryFileGraphMatch(
     total: tied.length,
     ...(truncated ? { truncated: true } : {}),
   };
+  rememberAll(notice, amb.candidates, allCandidatesOf(amb));
   const notices = fuzzy ? [notice, fuzzyNotice(target, chosen)] : [notice];
   return pickFromNotice({ resolved: true, entity: chosen, notices }, opts);
 }
