@@ -93,6 +93,21 @@ docker-compose>=2.0
 #   if you want its web UI:  services: { arangodb: { ports: ["127.0.0.1:8529:8529"] } })
 arangodb==3.12
 
+# Memory: ArangoDB would size its caches from the host's RAM (about 30% of
+#   it), so the backend compose caps them instead. These are caches, not a
+#   memory limit: a large repo is never killed for using more.
+#     IX_ARANGO_BLOCK_CACHE_SIZE           536870912 (512 MB)  RocksDB block cache
+#     IX_ARANGO_ENFORCE_BLOCK_CACHE_LIMIT  true                hold it to that size
+#     IX_ARANGO_WRITE_BUFFER_SIZE          268435456 (256 MB)  RocksDB write buffers
+#     IX_ARANGO_CACHE_SIZE                 134217728 (128 MB)  edge/document cache
+#   To change one, set it (in bytes) in ~/.ix/backend/.env, next to the
+#   compose file, e.g.  IX_ARANGO_BLOCK_CACHE_SIZE=2147483648
+#   It takes effect when the container is recreated: `ix docker stop` then
+#   `ix docker start` (`ix docker restart` keeps the old settings). The data
+#   volume is kept. An install whose ~/.ix/backend/docker-compose.yml predates
+#   these settings keeps it until it is moved aside; `ix docker start` then
+#   writes the one this CLI ships.
+
 # Ix Memory Layer — Scala/JVM HTTP API (Docker container on 127.0.0.1:8090)
 ix-memory-layer==latest
 
