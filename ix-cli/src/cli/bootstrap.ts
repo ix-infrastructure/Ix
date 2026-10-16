@@ -13,7 +13,6 @@ import { ixHome } from "./ix-home.js";
 import { stderr } from "./stderr.js";
 import { workspaceIdForPath } from "./system.js";
 import { IX_CALLER_ENV } from "./next-step.js";
-import { readBackendHealth } from "./commands/upgrade.js";
 import { isLocalEndpoint } from "./backend-version.js";
 
 export interface BootstrapResult {
@@ -245,6 +244,11 @@ export function canAutoStartBackend(endpoint: string): boolean {
 export async function ensureBackendAvailable(): Promise<void> {
   const endpoint = getEndpoint();
   const client = createClient({ endpoint });
+  // Loaded here, not at the top: every graph command imports this file, and
+  // `upgrade.js` (with the release-download code behind it) is needed only on
+  // this path. Outside the try, so a module that fails to load is not taken
+  // for a backend that is down.
+  const { readBackendHealth } = await import("./commands/upgrade.js");
   try {
     // Through readBackendHealth so this probe records the release the backend
     // reports, like every other health fetch. `ix init` never reaches the
