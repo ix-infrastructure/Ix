@@ -15,7 +15,7 @@ import { relativePath, printJson } from "../format.js";
 import { llmError, llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { disambiguationHint } from "../next-step.js";
-import { reportUnresolvedTarget } from "../ui.js";
+import { reportResolutionNotices, reportUnresolvedTarget } from "../ui.js";
 
 export interface ReadResult {
   targetType: "file" | "file-range" | "filename-match" | "symbol";
@@ -679,6 +679,7 @@ async function trySymbolMatch(
   const full = await resolveEntityFull(client, symbol, preferredKinds, opts);
 
   if (full.resolved) {
+    if (full.notices?.length) reportResolutionNotices(full.notices, opts.format, opts);
     const details = await client.entity(full.entity.id);
     const fullNode = details.node as any;
     const sourceUri = fullNode.provenance?.source_uri ?? fullNode.provenance?.sourceUri ?? null;

@@ -38,9 +38,54 @@ function jsonIndent(): number | undefined {
   return process.stdout.isTTY ? 2 : undefined;
 }
 
+// ── Resolution notices ─────────────────────────────────────────────────────
+
+/**
+ * Notices about a guessed target (`ambiguous_target`, `fuzzy_match`) waiting for
+ * the command's own json object. Module state: `ix mcp` runs commands in this
+ * process by default (see mcp/runner.ts), so its runner calls
+ * `resetResolutionNotices` before each command, and so should tests that call a
+ * command in-process.
+ */
+let pendingResolutionNotices: unknown[] = [];
+
+/** Queue notices for the next `printJson`. */
+export function noteResolutionNotices(list: readonly unknown[]): void {
+  pendingResolutionNotices.push(...list);
+}
+
+export function takeResolutionNotices(): unknown[] {
+  const taken = pendingResolutionNotices;
+  pendingResolutionNotices = [];
+  return taken;
+}
+
+export function resetResolutionNotices(): void {
+  pendingResolutionNotices = [];
+}
+
+/**
+ * Merge pending notices into a plain object that is not an error record.
+ * Anything else (an array, a scalar, an `{error}`) is printed untouched and the
+ * notices are dropped: an error is its own answer, and the exit code is the same.
+ */
+function withResolutionNotices(value: unknown): unknown {
+  const notices = takeResolutionNotices();
+  if (notices.length === 0) return value;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const obj = value as Record<string, unknown>;
+  if (typeof obj.error === "string") return value;
+  const fuzzy = notices.some((n) => (n as { code?: string })?.code === "fuzzy_match");
+  return {
+    ...obj,
+    ...(fuzzy && obj.resolutionMode === undefined ? { resolutionMode: "fuzzy" } : {}),
+    resolutionNotices: notices,
+  };
+}
+
 /** Print a JSON payload on stdout, indented only when that helps someone. */
 export function printJson(value: unknown): void {
-  console.log(JSON.stringify(value, null, jsonIndent()));
+  console.log(JSON.stringify(withResolutionNotices(value), null, jsonIndent()));
 }
 
 // ── JSON optimization helpers ──────────────────────────────────────────────
@@ -105,6 +150,17 @@ export interface Slice<T> {
   /** How many there were before the cut. */
   total: number;
   truncated: boolean;
+  /** How many ranked rows were skipped before `rows` (paging); absent means 0. */
+  offset?: number;
+  /** The `--offset` of the next page; set only when rows remain. */
+  nextOffset?: number;
+  /** The command that prints the next page, when the caller can build one. */
+  next?: string;
+  /**
+   * The server cut the list before this layer saw it, so `total` is a lower
+   * bound: more rows may exist past it, and no `--offset` can reach them.
+   */
+  capped?: boolean;
 }
 
 /**
@@ -123,10 +179,16 @@ export interface Slice<T> {
  * and the only claim made here is that rows the caller can act on should
  * survive the cut before rows it cannot.
  */
-export function sliceRanked<T>(all: T[], limit: number, priority?: (item: T) => number): Slice<T> {
+export function sliceRanked<T>(all: T[], limit: number, priority?: (item: T) => number, offset = 0): Slice<T> {
   const ranked = priority ? [...all].sort((a, b) => priority(a) - priority(b)) : all;
-  const rows = Number.isFinite(limit) ? ranked.slice(0, limit) : [...ranked];
-  return { rows, shown: rows.length, total: all.length, truncated: rows.length < all.length };
+  const rows = Number.isFinite(limit) ? ranked.slice(offset, offset + limit) : ranked.slice(offset);
+  const truncated = offset + rows.length < all.length;
+  const slice: Slice<T> = { rows, shown: rows.length, total: all.length, truncated };
+  if (offset > 0) slice.offset = offset;
+  // A page that printed nothing (`--limit 0`) has no next page to point at:
+  // `next_offset` would equal this offset and a caller following it would loop.
+  if (truncated && rows.length > 0) slice.nextOffset = offset + rows.length;
+  return slice;
 }
 
 /**
@@ -153,13 +215,85 @@ function edgeRowPriority(node: any): number {
  * caller a `locate` before it can be read. Neither should displace a row that
  * carries both.
  */
-export function sliceEdgeResults(nodes: any[], limit: number): Slice<any> {
-  return sliceRanked(nodes, limit, edgeRowPriority);
+export function sliceEdgeResults(nodes: any[], limit: number, offset = 0, capped = false): Slice<any> {
+  const slice = sliceRanked(nodes, limit, edgeRowPriority, offset);
+  if (capped) {
+    slice.capped = true;
+    // The list is not known to end here, whatever this page holds.
+    slice.truncated = true;
+  }
+  return slice;
 }
 
-/** What was left out, and the one flag that gets it. */
+/**
+ * The most edges one /v1/expand call returns. The backend clamps the request's
+ * `limit` to this (Ix-memory ArangoGraphQueryApi.expand / expandWith:
+ * `maxEdges = min(limit, 1000)`, and ExpandRoutes defaults `limit` to 1000).
+ */
+export const EXPAND_MAX_EDGES = 1000;
+
+/**
+ * Whether an expand result may have been cut by the server's edge cap. The
+ * server says so in `truncated` when it is new enough to; an older one only
+ * shows it by returning a full cap's worth of edges or nodes.
+ */
+export function expandCapped(result: { nodes?: unknown[]; edges?: unknown[]; truncated?: unknown }): boolean {
+  return result.truncated === true
+    || (result.edges?.length ?? 0) >= EXPAND_MAX_EDGES
+    || (result.nodes?.length ?? 0) >= EXPAND_MAX_EDGES;
+}
+
+/**
+ * Which rows a page printed: `51-100` past the first page, the bare count on
+ * it. A page that printed nothing is `0` — with `--limit 0 --offset 50` the
+ * range form would read `51-50`.
+ */
+function pageRange(slice: Slice<unknown>): string {
+  const offset = slice.offset ?? 0;
+  return offset > 0 && slice.shown > 0 ? `${offset + 1}-${offset + slice.shown}` : `${slice.shown}`;
+}
+
+/**
+ * What was left out, and the one flag that gets it.
+ *
+ * `next:` is printed only when the caller set `slice.next`: that is how a
+ * command says it takes `--offset`. `sliceRanked` sets `nextOffset` on every
+ * truncated slice, including slices cut by commands with no `--offset` (`ix
+ * impact`'s leaf rows), and pointing those at a flag they reject would send the
+ * reader into an unknown-option error.
+ */
 export function truncationHint(slice: Slice<unknown>, relation: string): string {
-  return `${slice.total} ${relation}; showing ${slice.shown}. Raise --limit to see the rest.`;
+  if (slice.capped) return cappedHint(slice, relation);
+  const range = pageRange(slice);
+  if (slice.nextOffset === undefined || slice.next === undefined) return `${slice.total} ${relation}; showing ${range}. Raise --limit to see them.`;
+  return `${slice.total} ${relation}; showing ${range}. next: ${slice.next}`;
+}
+
+/**
+ * The hint for a list the server cut at EXPAND_MAX_EDGES: the count is a
+ * floor, and paging stops where the server's rows do.
+ */
+function cappedHint(slice: Slice<unknown>, relation: string): string {
+  const offset = slice.offset ?? 0;
+  const head = `At least ${slice.total} ${relation} (the server returns at most ${EXPAND_MAX_EDGES} edges)`;
+  if (slice.nextOffset !== undefined) {
+    if (slice.next !== undefined) return `${head}; showing ${pageRange(slice)}. next: ${slice.next}`;
+    return `${head}; showing ${pageRange(slice)}. Raise --limit, or narrow the target with --kind or --path, to see the rest.`;
+  }
+  const where = slice.shown > 0
+    ? `showing ${pageRange(slice)}, the end of what it returned`
+    : offset > 0 ? `--offset ${offset} is beyond the rows it returned` : "showing 0";
+  return `${head}; ${where}. Narrow the target with --kind or --path to see the rest.`;
+}
+
+/** The message for a page that starts at or past the end of the list. */
+function pastEndMessage(slice: Slice<unknown>, relation: string): string {
+  return `${slice.total} ${relation}; --offset ${slice.offset ?? 0} is past the end.`;
+}
+
+function isPastEnd(slice: Slice<unknown>): boolean {
+  // A capped list has no known end, so no offset is known to be past it.
+  return !slice.capped && slice.total > 0 && (slice.offset ?? 0) >= slice.total;
 }
 
 // ── Row locations ──────────────────────────────────────────────────────────
@@ -588,22 +722,76 @@ export interface TextResult {
   symbol_hint?: string;
 }
 
+/** How `ix text` paged: whether the scan window filled before ripgrep ran out of matches. */
+export interface TextPaging {
+  /**
+   * More matches existed than the scan window kept. Pages are cut from that
+   * window, so the page that reaches its end has no next page even though the
+   * search does — the caller has to narrow the search instead.
+   */
+  windowFull?: boolean;
+}
+
+/**
+ * Whether a text page starts past the last match. Only when the scan window
+ * held every match: a full window is not the end of the search, so an offset
+ * beyond it is not past the end of anything the caller can know.
+ */
+function isTextPastEnd(slice: Slice<TextResult>, paging?: TextPaging): boolean {
+  return !paging?.windowFull && isPastEnd(slice);
+}
+
+/**
+ * What a text page left out, and how to get it: the next page while the scan
+ * window has rows left, a narrower search once the page reached the window's
+ * end. Undefined when nothing was left out.
+ */
+function textTruncationMessage(slice: Slice<TextResult>, paging?: TextPaging): string | undefined {
+  if (isTextPastEnd(slice, paging)) return undefined;
+  const range = pageRange(slice);
+  if (slice.nextOffset !== undefined) {
+    return `${slice.total} matches scanned; showing ${range}. next: ${slice.next ?? `--offset ${slice.nextOffset}`}`;
+  }
+  if (paging?.windowFull && slice.shown > 0) {
+    return `${slice.total} matches scanned; showing ${range}; the scan stops at ${slice.total}. Narrow with --path or --language, or raise --limit.`;
+  }
+  if (paging?.windowFull && (slice.offset ?? 0) >= slice.total) {
+    return `${slice.total} matches scanned; --offset ${slice.offset ?? 0} is past the scan window, which stops at ${slice.total}. Narrow with --path or --language, or raise --limit.`;
+  }
+  if (slice.truncated) {
+    return `${slice.total} matches scanned; showing ${range}. Narrow with --path or --language, or raise --limit.`;
+  }
+  return undefined;
+}
+
 /**
  * Render lexical search hits as llm `match` records (one per line).
  *
  * No `lang=`: the extension on `path` already says it, and on a 20-row answer
  * the field was ~80 tokens of nothing. `--format json` keeps `language`.
+ *
+ * `scanned` is the size of the ranked scan window, not the number of matches
+ * in the repo; pages (`--offset`) are cut from that window.
  */
-export function renderTextResultsLlm(slice: Slice<TextResult>): string[] {
+export function renderTextResultsLlm(slice: Slice<TextResult>, paging?: TextPaging): string[] {
+  const message = textTruncationMessage(slice, paging);
   const lines = [llmLine("text", [
+    ["offset", slice.offset ? slice.offset : undefined],
     ["shown", slice.shown],
     ["scanned", slice.total],
-    ["truncated", slice.truncated || undefined],
+    ["truncated", slice.truncated || message !== undefined || undefined],
   ])];
-  if (slice.truncated) {
+  if (message !== undefined) {
     lines.push(llmLine("diagnostic", [
       ["code", "results_truncated"],
-      ["message", `${slice.total} matches scanned; showing the ${slice.shown} highest-ranked. Narrow with --path or --language, or raise --limit.`],
+      ["next_offset", slice.nextOffset],
+      ["message", message],
+    ]));
+  }
+  if (slice.rows.length === 0 && isTextPastEnd(slice, paging)) {
+    lines.push(llmLine("diagnostic", [
+      ["code", "offset_past_end"],
+      ["message", pastEndMessage(slice, "matches scanned")],
     ]));
   }
   for (const r of slice.rows) {
@@ -617,9 +805,12 @@ export function renderTextResultsLlm(slice: Slice<TextResult>): string[] {
   return lines;
 }
 
-export function formatTextResults(slice: Slice<TextResult>, format: string): void {
+export function formatTextResults(slice: Slice<TextResult>, format: string, paging?: TextPaging): void {
   const results = slice.rows;
   if (format === "json") {
+    // A raw array on purpose: the plugin runners parse it as one. Paging state
+    // stays out of it; a JSON caller's next offset is its offset plus the
+    // array's length.
     const compact = results.map(r => ({
       ...r,
       path: relativePath(r.path) ?? r.path,
@@ -628,11 +819,13 @@ export function formatTextResults(slice: Slice<TextResult>, format: string): voi
     return;
   }
   if (format === "llm") {
-    for (const line of renderTextResultsLlm(slice)) console.log(line);
+    for (const line of renderTextResultsLlm(slice, paging)) console.log(line);
     return;
   }
   if (results.length === 0) {
-    console.log("No text matches found.");
+    console.log(isTextPastEnd(slice, paging)
+      ? pastEndMessage(slice, "matches scanned")
+      : textTruncationMessage(slice, paging) ?? "No text matches found.");
     return;
   }
   for (const r of results) {
@@ -642,6 +835,8 @@ export function formatTextResults(slice: Slice<TextResult>, format: string): voi
       `  ${lang}${chalk.dim(r.path)}${chalk.cyan(":" + r.line_start)}  ${sym}${r.snippet.trim()}`
     );
   }
+  const message = textTruncationMessage(slice, paging);
+  if (message !== undefined) console.log(chalk.dim(`  ${message}`));
 }
 
 export interface LocateResult {
@@ -700,6 +895,7 @@ export function renderEdgeResultsLlm(
   const unresolved = refs.filter((r) => !r.resolved).length;
   const lines = [llmLine(relation, [
     ["target", symbol],
+    ["offset", slice.offset ? slice.offset : undefined],
     ["shown", slice.shown],
     ["total", slice.total],
     ["resolved", refs.length - unresolved],
@@ -709,10 +905,13 @@ export function renderEdgeResultsLlm(
   if (slice.truncated) {
     lines.push(llmLine("diagnostic", [
       ["code", "results_truncated"],
+      ["next_offset", slice.nextOffset],
       ["message", truncationHint(slice, relation)],
     ]));
   }
-  if (refs.length === 0 && (!diagnostics || diagnostics.length === 0)) {
+  if (refs.length === 0 && isPastEnd(slice)) {
+    lines.push(llmLine("diagnostic", [["code", "offset_past_end"], ["message", pastEndMessage(slice, relation)]]));
+  } else if (refs.length === 0 && !slice.truncated && (!diagnostics || diagnostics.length === 0)) {
     lines.push(llmLine("diagnostic", [["code", "no_edges"], ["message", `No ${relation} edges found.`]]));
   }
   for (const d of diagnostics ?? []) {
@@ -783,7 +982,9 @@ export function formatEdgeResults(
       }
     }
     if (nodes.length === 0) {
-      output.diagnostics = diagnostics ?? [{ code: "no_edges", message: `No ${relation} edges found for resolved entity.` }];
+      output.diagnostics = isPastEnd(slice)
+        ? [{ code: "offset_past_end", message: pastEndMessage(slice, relation) }]
+        : diagnostics ?? (slice.truncated ? undefined : [{ code: "no_edges", message: `No ${relation} edges found for resolved entity.` }]);
     } else if (diagnostics && diagnostics.length > 0) {
       output.diagnostics = diagnostics;
     }
@@ -806,12 +1007,20 @@ export function formatEdgeResults(
       resolved: results.length - unresolvedCount,
       unresolved: unresolvedCount,
       truncated: slice.truncated,
+      offset: slice.offset ?? 0,
+      ...(slice.nextOffset !== undefined ? { nextOffset: slice.nextOffset } : {}),
+      // `total` is then a lower bound: the server stopped at its edge cap.
+      ...(slice.capped ? { capped: true } : {}),
     };
     printJson(output);
     return;
   }
   if (nodes.length === 0) {
-    const reason = diagnostics?.[0]?.message ?? `No ${relation} found for "${symbol}".`;
+    const reason = isPastEnd(slice)
+      ? pastEndMessage(slice, relation)
+      : slice.truncated
+        ? truncationHint(slice, relation)
+        : diagnostics?.[0]?.message ?? `No ${relation} found for "${symbol}".`;
     console.log(reason);
     return;
   }

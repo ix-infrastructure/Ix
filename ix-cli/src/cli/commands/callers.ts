@@ -6,17 +6,22 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { createClient } from "../../client/factory.js";
 import { resolveWorkspaceRoot } from "../config.js";
-import { formatEdgeResults, printJson, relativePath, sliceEdgeResults, type Diagnostic } from "../format.js";
+import { expandCapped, formatEdgeResults, printJson, relativePath, sliceEdgeResults, sliceRanked, truncationHint, type Diagnostic } from "../format.js";
 import { checkGraphHealth, graphHealthProse, isUnhealthy, type GraphHealth } from "../graph-health.js";
 import { parsePickOption } from "../options.js";
+import { nextPageCommand, OFFSET_FLAG, parseOffset } from "../paging.js";
 import { activeReadScope, resolveFileOrReport, printResolved } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { llmLine } from "../llm.js";
 import { edgeTargetFor, rankTextUses, withEdgeSites } from "../edge-sites.js";
 import { renderWarning } from "../ui.js";
 import { currentRunSignal } from "../../client/run-signal.js";
+import { clipSnippet } from "./text.js";
 
 const execFileAsync = promisify(execFile);
+
+/** Rows per page of the text fallback. --limit does not apply to it. */
+export const TEXT_FALLBACK_PAGE = 10;
 
 /**
  * rg's argv for the text fallback. -F and -e: the name is a literal pattern,
@@ -51,11 +56,13 @@ export function registerCallersCommand(program: Command): void {
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--limit <n>", "Max results to show", "50")
+    .option("--offset <n>", OFFSET_FLAG, "0")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
-    .addHelpText("after", "\nExamples:\n  ix callers verify_token\n  ix callers processPayment --format json\n  ix callers parse --kind method --limit 20")
-    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; limit: string; format: string }) => {
+    .addHelpText("after", "\nExamples:\n  ix callers verify_token\n  ix callers processPayment --format json\n  ix callers parse --kind method --limit 20\n  ix callers verify_token --offset 50")
+    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; limit: string; offset: string; format: string }, cmd: Command) => {
       const client = createClient();
       const limit = parseInt(opts.limit, 10);
+      const offset = parseOffset(opts.offset);
       const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
       const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
       if (!target) return;
@@ -73,7 +80,7 @@ export function registerCallersCommand(program: Command): void {
       const remedy = health.fix ?? "ix ingest --force --recursive .";
 
       if (result.nodes.length === 0) {
-        // Fallback to text search
+        // Fallback to text search: pages of TEXT_FALLBACK_PAGE rows, --offset honoured.
         try {
           const root = resolveWorkspaceRoot();
           // The timeout bounds a search that rg could otherwise run for ever.
@@ -95,7 +102,10 @@ export function registerCallersCommand(program: Command): void {
                   resolved: false,
                   path: relativePath(data.path?.text) ?? "",
                   line: data.line_number ?? 0,
-                  attrs: { snippet: data.lines?.text?.trim() ?? "" },
+                  // Capped like `ix text`: one minified line must not flood
+                  // the context. Ranking still reads the whole line.
+                  attrs: { snippet: clipSnippet(data.lines?.text ?? "", data.submatches).trim() },
+                  fullLine: data.lines?.text?.trim() ?? "",
                 });
               }
             } catch { /* skip malformed lines */ }
@@ -107,22 +117,36 @@ export function registerCallersCommand(program: Command): void {
           // Calls first and the definition out: an unranked fallback led with
           // import lines and the target's own signature.
           const ranked = rankTextUses(
-            allTextResults.map((r) => ({ ...r, snippet: r.attrs.snippet as string })),
+            allTextResults.map((r) => ({ ...r, snippet: r.fullLine as string })),
             target.name,
-          ).map(({ snippet: _snippet, ...r }) => r);
+          ).map(({ snippet: _snippet, fullLine: _fullLine, ...r }) => r);
           const candidatesFound = ranked.length;
-          const textResults = ranked.slice(0, 10);
+          // The ranking is a stable sort of a sorted list, so pages neither
+          // overlap nor skip a row.
+          const page = sliceRanked(ranked, TEXT_FALLBACK_PAGE, undefined, offset);
+          if (page.nextOffset !== undefined) page.next = nextPageCommand(cmd, [symbol], page.nextOffset);
+          const textResults = page.rows;
+          const pastEnd = candidatesFound > 0 && textResults.length === 0;
+          const pastEndMessage = `${candidatesFound} text candidates; --offset ${offset} is past the end.`;
+          const pageHint = page.truncated ? truncationHint(page, "text candidates") : undefined;
 
-          if (textResults.length > 0) {
+          if (candidatesFound > 0) {
             if (opts.format === "llm") {
               console.log(llmLine("callers", [
                 ["target", target.name], ["source", "text"],
+                ["offset", offset > 0 ? offset : undefined],
                 ["shown", textResults.length], ["total", candidatesFound],
               ]));
               console.log(llmLine("diagnostic", [
                 ["code", "text_fallback_used"],
                 ["message", "No graph-backed CALLS/REFERENCES edges; showing text matches."],
               ]));
+              if (pageHint) {
+                console.log(llmLine("diagnostic", [
+                  ["code", "results_truncated"], ["next_offset", page.nextOffset], ["message", pageHint],
+                ]));
+              }
+              if (pastEnd) console.log(llmLine("diagnostic", [["code", "offset_past_end"], ["message", pastEndMessage]]));
               for (const d of health.diagnostics ?? []) {
                 console.log(llmLine("diagnostic", [["code", d.code], ["message", d.message]]));
               }
@@ -139,12 +163,20 @@ export function registerCallersCommand(program: Command): void {
                 summary: {
                   candidatesFound,
                   candidatesReturned: textResults.length,
+                  ...(offset > 0 ? { offset } : {}),
+                  ...(page.truncated ? { truncated: true } : {}),
+                  ...(page.nextOffset !== undefined ? { nextOffset: page.nextOffset } : {}),
                 },
                 diagnostics: [{
                   code: "text_fallback_used",
                   message: `No graph-backed CALLS/REFERENCES edges found. If files were ingested before extraction was added, run: ${remedy}`,
-                }, ...(health.diagnostics ?? [])],
+                },
+                ...(pageHint ? [{ code: "results_truncated", message: pageHint }] : []),
+                ...(pastEnd ? [{ code: "offset_past_end", message: pastEndMessage }] : []),
+                ...(health.diagnostics ?? [])],
               });
+            } else if (pastEnd) {
+              console.log(pastEndMessage);
             } else {
               bannerOverRows(health, opts.format, textResults.length);
               stderr(chalk.dim("No graph-backed CALLS/REFERENCES edges found. Showing text-based candidate usages."));
@@ -153,18 +185,21 @@ export function registerCallersCommand(program: Command): void {
                 const snippet = r.attrs?.snippet ?? "";
                 console.log(`  ${chalk.dim(r.name)}  ${snippet}`);
               }
-              if (candidatesFound > 10) {
-                stderr(chalk.dim(`\n  (${candidatesFound} total candidates; showing 10)`));
+              if (page.truncated || offset > 0) {
+                const range = offset > 0 ? `${offset + 1}-${offset + textResults.length}` : `${textResults.length}`;
+                const next = page.next ?? (page.nextOffset !== undefined ? `--offset ${page.nextOffset}` : undefined);
+                stderr(chalk.dim(`\n  (${candidatesFound} total candidates; showing ${range})${next ? ` next: ${next}` : ""}`));
               }
             }
             return;
           }
         } catch { /* ripgrep not available or no matches */ }
 
-        // Both graph and text empty
+        // Both graph and text empty (also the health-gated path: --offset does not apply).
         formatEdgeResults(sliceEdgeResults([], limit), "callers", target.name, opts.format, target, "graph", health.diagnostics);
       } else {
-        const slice = sliceEdgeResults(result.nodes, limit);
+        const slice = sliceEdgeResults(result.nodes, limit, offset, expandCapped(result));
+        if (slice.nextOffset !== undefined) slice.next = nextPageCommand(cmd, [symbol], slice.nextOffset);
         const site = await edgeTargetFor(client, target, "callers");
         formatEdgeResults({ ...slice, rows: withEdgeSites(slice.rows, "callers", site) }, "callers", target.name, opts.format, target, "graph", health.diagnostics);
       }
@@ -177,11 +212,13 @@ export function registerCallersCommand(program: Command): void {
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--limit <n>", "Max results to show", "50")
+    .option("--offset <n>", OFFSET_FLAG, "0")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", "\nExamples:\n  ix callees processPayment\n  ix callees parse --format json")
-    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; limit: string; format: string }) => {
+    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; limit: string; offset: string; format: string }, cmd: Command) => {
       const client = createClient();
       const calleeLimit = parseInt(opts.limit, 10);
+      const calleeOffset = parseOffset(opts.offset);
       const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
       const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
       if (!target) return;
@@ -194,7 +231,8 @@ export function registerCallersCommand(program: Command): void {
       });
       const health = await healthDiagnostics(healthCheck);
       bannerOverRows(health, opts.format, result.nodes.length);
-      const slice = sliceEdgeResults(result.nodes, calleeLimit);
+      const slice = sliceEdgeResults(result.nodes, calleeLimit, calleeOffset, expandCapped(result));
+      if (slice.nextOffset !== undefined) slice.next = nextPageCommand(cmd, [symbol], slice.nextOffset);
       const site = await edgeTargetFor(client, target, "callees");
       formatEdgeResults({ ...slice, rows: withEdgeSites(slice.rows, "callees", site) }, "callees", target.name, opts.format, target, "graph", health.diagnostics);
     });

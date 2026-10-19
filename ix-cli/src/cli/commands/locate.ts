@@ -4,8 +4,8 @@ import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
 import {
-  resolveFileOrEntity, resolveEntityFull, printResolved, printAmbiguous,
-  looksFileLike, isRawId, type ResolvedEntity,
+  resolveFileOrEntityFull, resolveEntityFull, printResolved, printAmbiguous,
+  looksFileLike, isRawId, qualifiedSeparator, isFuzzyResult, type ResolvedEntity,
 } from "../resolve.js";
 import { isFileStale } from "../stale.js";
 import { stderr } from "../stderr.js";
@@ -14,7 +14,7 @@ import { llmLine, llmError, llmShortId } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { getEffectiveSystemPath, hasMapData } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
-import { renderSection, renderKeyValue, renderNote, renderWarning, renderBreadcrumb, reportAmbiguousTarget } from "../ui.js";
+import { renderSection, renderKeyValue, renderNote, renderWarning, renderBreadcrumb, reportAmbiguousTarget, reportResolutionNotices } from "../ui.js";
 import { forMcp } from "../next-step.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "trait", "object", "interface"]);
@@ -194,17 +194,34 @@ async function resolveWithAmbiguity(
   opts: { kind?: string; path?: string; pick?: number },
   format: string,
 ): Promise<{ target: ResolvedEntity | null; ambiguous: boolean }> {
-  // For raw IDs and file-like targets, delegate to resolveFileOrEntity (no ambiguity)
+  // For raw IDs and file-like targets, delegate to resolveFileOrEntityFull. A
+  // file target can tie, but it resolves (with a notice) rather than turn
+  // ambiguous; one that falls through to a symbol keeps the text report.
   if (isRawId(symbol) || looksFileLike(symbol)) {
-    const target = await resolveFileOrEntity(client, symbol, opts);
-    return { target, ambiguous: false };
+    const fileResult = await resolveFileOrEntityFull(client, symbol, opts);
+    if (fileResult.resolved) {
+      if (fileResult.notices?.length) reportResolutionNotices(fileResult.notices, format, opts);
+      return { target: fileResult.entity, ambiguous: false };
+    }
+    if (fileResult.ambiguous) printAmbiguous(symbol, fileResult.result, opts);
+    return { target: null, ambiguous: false };
   }
 
   // Symbol resolution — use full result to detect ambiguity
   const allKinds = ["file", "class", "object", "trait", "interface", "module", "function", "method", "constant"];
-  const result = await resolveEntityFull(client, symbol, allKinds, { ...opts, format });
+  const sep = qualifiedSeparator(symbol);
+  let result = await resolveEntityFull(client, symbol, allKinds, { ...opts, format, ...(sep ? { silentMiss: true } : {}) });
+  // `Class::method`, `Class.method` and `Class#method` are read as a qualified
+  // name only when the name as typed matches nothing, or (for `.`/`#`) matches
+  // only fuzzily; resolveFileOrEntityFull then keeps the literal result unless
+  // the qualified one keeps the exit code.
+  const missed = !result.resolved && !result.ambiguous;
+  if (sep && (missed || (sep !== "::" && isFuzzyResult(result)))) {
+    result = await resolveFileOrEntityFull(client, symbol, { ...opts, format });
+  }
 
   if (result.resolved) {
+    if (result.notices?.length) reportResolutionNotices(result.notices, format, opts);
     return { target: result.entity, ambiguous: false };
   }
 
@@ -214,6 +231,8 @@ async function resolveWithAmbiguity(
         resolvedTarget: null,
         resolutionMode: "ambiguous",
         candidates: result.result.candidates,
+        ...(result.result.total != null ? { total: result.result.total } : {}),
+        ...(result.result.truncated ? { truncated: true } : {}),
         systemPath: null,
         diagnostics: result.result.diagnostics ?? [],
       });

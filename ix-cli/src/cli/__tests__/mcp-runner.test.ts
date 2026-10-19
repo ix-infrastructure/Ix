@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { Command } from "commander";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { noteResolutionNotices, printJson } from "../format.js";
 import { acquireMapLock, lockPathForTest } from "../single-flight.js";
 import { createInProcessRunner, resolveDefaultRunner, runCurrentIx } from "../../mcp/runner.js";
 
@@ -95,6 +96,15 @@ function createTestProgram(): Command {
     });
 
   program.command("ingest").action(() => console.log("ingested"));
+
+  // A json command whose target resolved with a notice, then failed before it
+  // printed (a backend error after resolution).
+  program.command("resolve-then-fail").action(() => {
+    noteResolutionNotices([{ code: "fuzzy_match", target: "Old" }]);
+    throw new Error("backend went away");
+  });
+
+  program.command("emit-json").action(() => printJson({ ok: true }));
 
   // Never settles: a hung backend call, or a rejection that used to end the
   // process and is now only logged by the server's error handlers.
@@ -186,6 +196,15 @@ describe("in-process ix runner", () => {
     expect(result.ok).toBe(false);
     expect(result.stdout).toBe("error code=backend_error message=offline\n");
     expect(process.exitCode).toBeUndefined();
+  });
+
+  it("does not hand one command's resolution notices to the next json call", async () => {
+    const run = testRunner();
+
+    expect((await run(["resolve-then-fail"])).ok).toBe(false);
+    const next = await run(["emit-json"]);
+
+    expect(JSON.parse(next.stdout)).toEqual({ ok: true });
   });
 
   it("does not leak option values from one run into the next", async () => {

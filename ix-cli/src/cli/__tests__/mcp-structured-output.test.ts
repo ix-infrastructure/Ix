@@ -174,7 +174,10 @@ describe("ix mcp structured output", () => {
     // that number.
     // The full catalog's descriptions now say when to use each tool and when
     // not to, which is what a caller of `--tools=all` is choosing between.
-    expect(total).toBeLessThan(17_000);
+    // Raised from 17,000 for the undescribed `offset` on ix_text and
+    // ix_inventory (~64 bytes each), which print next_offset= and so have to
+    // take it back. Neither is in the core set.
+    expect(total).toBeLessThan(17_200);
   });
 
   it("attaches structuredContent only where an outputSchema was declared", async () => {

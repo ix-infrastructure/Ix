@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { describe, it, expect } from "vitest";
-import { applyPick, type ResolveResult, type AmbiguousResult } from "../resolve.js";
+import { applyPick, pickFromNotice, type ResolutionNotice, type ResolveResult, type AmbiguousResult } from "../resolve.js";
 
 function makeAmbiguousResult(count: number): ResolveResult & { resolved: false; ambiguous: true } {
   const candidates: AmbiguousResult["candidates"] = [];
@@ -107,5 +107,49 @@ describe("applyPick", () => {
   it("returns null for non-ambiguous not-found result", () => {
     const result: ResolveResult = { resolved: false, ambiguous: false };
     expect(applyPick(result, { pick: 1 })).toBeNull();
+  });
+});
+
+describe("pickFromNotice", () => {
+  const candidates: AmbiguousResult["candidates"] = [
+    { id: "id-0", name: "index.ts", kind: "file", path: "packages/a/src/index.ts", rank: 1 },
+    { id: "id-1", name: "index.ts", kind: "file", path: "packages/b/src/index.ts", rank: 2 },
+  ];
+  const notice: ResolutionNotice = {
+    code: "ambiguous_target",
+    target: "index.ts",
+    message: "tied",
+    chosen: candidates[0],
+    candidates,
+    total: 2,
+  };
+  const resolved: ResolveResult = {
+    resolved: true,
+    entity: { id: "id-0", kind: "file", name: "index.ts", path: "packages/a/src/index.ts", resolutionMode: "scored" },
+    notices: [notice],
+  };
+
+  it("leaves the result alone without --pick, a notice or a resolved result", () => {
+    expect(pickFromNotice(resolved, {})).toBe(resolved);
+    const plain: ResolveResult = { resolved: true, entity: { id: "x", kind: "file", name: "x", resolutionMode: "exact" } };
+    expect(pickFromNotice(plain, { pick: 2 })).toBe(plain);
+    const miss: ResolveResult = { resolved: false, ambiguous: false };
+    expect(pickFromNotice(miss, { pick: 2 })).toBe(miss);
+  });
+
+  it("resolves to the picked candidate, as scored, and drops the notice", () => {
+    const picked = pickFromNotice(resolved, { pick: 2 });
+    expect(picked.resolved && picked.entity.id).toBe("id-1");
+    expect(picked.resolved && picked.entity.resolutionMode).toBe("scored");
+    expect(picked.resolved && picked.notices).toEqual([]);
+  });
+
+  it("keeps the default and stays resolved when the pick is out of range", () => {
+    const picked = pickFromNotice(resolved, { pick: 7 });
+    expect(picked.resolved).toBe(true);
+    if (picked.resolved) {
+      expect(picked.entity.id).toBe("id-0");
+      expect(picked.notices?.[0].diagnostics?.[0].code).toBe("pick_out_of_range");
+    }
   });
 });

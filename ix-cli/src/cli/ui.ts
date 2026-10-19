@@ -10,9 +10,9 @@
 import chalk from "chalk";
 
 import { llmError, llmLine } from "./llm.js";
-import { printJson, relativePath } from "./format.js";
+import { noteResolutionNotices, printJson, relativePath } from "./format.js";
 import { isQuiet } from "./output-shape.js";
-import type { AmbiguousResult, ResolveResult, Suggestion } from "./resolve.js";
+import type { AmbiguousResult, ResolutionNotice, ResolveResult, Suggestion } from "./resolve.js";
 import { forMcp } from "./next-step.js";
 import { graphHealthJson, graphHealthLlmFields, graphHealthProse, type GraphHealth } from "./graph-health.js";
 
@@ -252,6 +252,8 @@ export function reportAmbiguousTarget(
       error: "ambiguous_target",
       message,
       candidates: result.candidates,
+      ...(result.total != null ? { total: result.total } : {}),
+      ...(result.truncated ? { truncated: true } : {}),
       diagnostics: result.diagnostics ?? [],
     });
     return;
@@ -263,7 +265,11 @@ export function reportAmbiguousTarget(
     if (!opts?.kind) hints.push(mcp ? "kind=<kind>" : "--kind");
     if (!opts?.path) hints.push(mcp ? "path=<file substring>" : "--path");
     const lines = [
-      llmError("ambiguous_target", message, [["count", String(result.candidates.length)]]),
+      llmError("ambiguous_target", message, [
+        ["count", String(result.candidates.length)],
+        ...(result.total != null ? [["shown", String(result.candidates.length)], ["total", String(result.total)]] as Array<[string, string]> : []),
+        ...(result.truncated ? [["truncated", "true"]] as Array<[string, string]> : []),
+      ]),
       ...candidateLines(result.candidates, "candidate"),
       llmLine("hint", [["text", `${mcp ? "Pass" : "Use"} ${hints.join(" or ")} to disambiguate.`]]),
       ...(result.diagnostics ?? []).map((d) => llmLine("diagnostic", [["code", d.code], ["message", d.message]])),
@@ -273,6 +279,9 @@ export function reportAmbiguousTarget(
   }
 
   console.error(`Ambiguous symbol "${target}":`);
+  if (result.total != null && (result.truncated || result.total > result.candidates.length)) {
+    console.error(chalk.dim(`  Showing ${result.candidates.length} of ${result.truncated ? ">=" : ""}${result.total}`));
+  }
   for (let index = 0; index < result.candidates.length; index += 1) {
     const candidate = result.candidates[index];
     const shortPath = candidate.path ? ` in ${candidate.path}` : "";
@@ -284,6 +293,74 @@ export function reportAmbiguousTarget(
   if (!opts?.kind) hints.push("--kind");
   if (!opts?.path) hints.push("--path");
   console.error(chalk.dim(`\nUse ${hints.join(" or ")} to disambiguate.`));
+}
+
+/**
+ * Report what a resolver guessed, for a target that DID resolve (exit 0).
+ *
+ * llm: `diagnostic` records on stdout before the command's own output, never
+ * `error code=` (plugin runners treat that as a failure). json: queued for
+ * `printJson`, which merges them into the command's object as
+ * `resolutionNotices`. text: a line on stderr.
+ */
+export function reportResolutionNotices(
+  notices: readonly ResolutionNotice[],
+  format?: string,
+  opts?: { kind?: string; path?: string },
+): void {
+  if (notices.length === 0) return;
+  if (format === "json") {
+    noteResolutionNotices(notices);
+    return;
+  }
+  if (format === "llm") {
+    const mcp = forMcp();
+    const lines: string[] = [];
+    for (const notice of notices) {
+      if (notice.code === "fuzzy_match") {
+        lines.push(llmLine("diagnostic", [
+          ["code", "fuzzy_match"],
+          ["resolution", "fuzzy"],
+          ["target", notice.target],
+          ["chosen", notice.chosen.name],
+          ["message", notice.message],
+        ]));
+        continue;
+      }
+      lines.push(llmLine("diagnostic", [
+        ["code", "ambiguous_target"],
+        ["target", notice.target],
+        ["chosen", notice.chosen.name],
+        ["shown", String(notice.candidates.length)],
+        ["total", String(notice.total)],
+        ...(notice.truncated ? [["truncated", "true"]] as Array<[string, string]> : []),
+        ["message", notice.message],
+      ]));
+      lines.push(...candidateLines(notice.candidates, "candidate"));
+      for (const d of notice.diagnostics ?? []) {
+        lines.push(llmLine("diagnostic", [["code", d.code], ["message", d.message]]));
+      }
+      const hints = [mcp ? "pick=<n>" : "--pick <n>"];
+      if (!opts?.path) hints.push(mcp ? "path=<file substring>" : "--path");
+      lines.push(llmLine("hint", [["text", `${mcp ? "Pass" : "Use"} ${hints.join(" or ")} to choose another.`]]));
+    }
+    console.log(lines.join("\n"));
+    return;
+  }
+  if (isQuiet()) return;
+  for (const notice of notices) {
+    console.error(chalk.dim(notice.message));
+    if (notice.code !== "ambiguous_target") continue;
+    for (let index = 0; index < notice.candidates.length; index += 1) {
+      const candidate = notice.candidates[index];
+      const where = candidate.path ? ` in ${candidate.path}` : "";
+      console.error(chalk.dim(`  ${index + 1}. ${(candidate.kind ?? "").padEnd(10)} ${candidate.id.slice(0, 8)}  ${candidate.name}${where}`));
+    }
+    if (notice.total > notice.candidates.length || notice.truncated) {
+      console.error(chalk.dim(`  Showing ${notice.candidates.length} of ${notice.truncated ? ">=" : ""}${notice.total}`));
+    }
+    console.error(chalk.dim(`  Use --pick <n>${opts?.path ? "" : " or --path"} to choose another.`));
+  }
 }
 
 export function reportResolutionFailure(

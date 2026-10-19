@@ -12,6 +12,7 @@ import { Command, CommanderError } from "commander";
 
 import { registerOssCommands, registerProStubs } from "../cli/register/oss.js";
 import { tryLoadProCommands } from "../cli/register/pro-loader.js";
+import { resetResolutionNotices } from "../cli/format.js";
 import { resetReadScope } from "../cli/resolve.js";
 import { releaseLocksOwnedBy, setLockOwnerResolver } from "../cli/single-flight.js";
 import { IX_CALLER_ENV } from "../cli/next-step.js";
@@ -407,6 +408,11 @@ async function executeInProcess(
   abortSettleMs: number = ABORT_SETTLE_MS,
 ): Promise<IxRunResult> {
   const program = throwOnUsageError(await createProgram(version));
+  // Resolution notices wait in module state for the command's printJson. A
+  // command that queued some and then failed before printing (a backend error
+  // or a timeout after its target resolved) would otherwise hand them to the
+  // next json call, attached to a different command's answer.
+  resetResolutionNotices();
   const run: ActiveRun = {
     stdout: [],
     stderr: [],

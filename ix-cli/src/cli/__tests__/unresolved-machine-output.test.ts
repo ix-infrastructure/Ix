@@ -206,6 +206,8 @@ describe("unresolved targets in machine formats", () => {
       // ...and the body still says what it always said. The exit code becomes
       // informative without the payload going away, which is #539's whole point.
       if (format === "json") expect(JSON.parse(result.stdout).resolutionMode).toBe("ambiguous");
+      // N-of-M (CL-19B): locate's own json body carries the same total.
+      if (format === "json") expect(JSON.parse(result.stdout).total).toBe(2);
       if (format === "llm") expect(result.stdout).toContain("ambiguous_target");
     }
   });

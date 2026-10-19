@@ -99,7 +99,7 @@ describe('discovery symlink containment', () => {
 
   it.skipIf(process.platform === 'win32')(
     'drops a committed symlink that leaves the repository',
-    () => {
+    (ctx) => {
       const repo = scratchDir('ix-repo-');
       const outside = scratchDir('ix-outside-');
       const secret = join(outside, 'secret.ts');
@@ -114,7 +114,7 @@ describe('discovery symlink containment', () => {
         execFileSync('git', ['init', '-q'], { cwd: repo });
         execFileSync('git', ['add', '-A'], { cwd: repo });
       } catch {
-        return; // no git, or no permission to symlink — nothing to assert
+        return ctx.skip('no git, or no permission to symlink');
       }
 
       const listed = tryGitLsFiles(repo, true);
@@ -135,7 +135,7 @@ describe('discovery symlink containment', () => {
     },
   );
 
-  it('skips generated dependency lockfiles that expand into oversized graph patches', () => {
+  it('skips generated dependency lockfiles that expand into oversized graph patches', (ctx) => {
     // Ix#523: a 646 KB `package-lock.json` is under MAX_FILE_BYTES but its
     // patch is over the proxy's body limit, so the commit 413s and the map
     // exits non-zero with no completion baseline.
@@ -156,7 +156,7 @@ describe('discovery symlink containment', () => {
     try {
       execFileSync('git', ['init', '-q'], { cwd: repo });
     } catch {
-      return; // no git — nothing to assert
+      return ctx.skip('no git');
     }
 
     const listed = tryGitLsFiles(repo, true);
@@ -172,7 +172,7 @@ describe('discovery symlink containment', () => {
 
   it.skipIf(process.platform === 'win32')(
     'still discovers everything when the root is reached through a symlink',
-    () => {
+    (ctx) => {
       // Resolving the file but not the root drops every file and reports the
       // repository as empty. No CI runner here has a symlinked root (the matrix
       // is ubuntu + windows), so this test is the only thing holding it down.
@@ -184,7 +184,7 @@ describe('discovery symlink containment', () => {
       try {
         symlinkSync(real, link, 'dir');
       } catch {
-        return; // no permission to symlink — nothing to assert
+        return ctx.skip('no permission to symlink');
       }
 
       const discovery = discoverIngestFilePaths([join(link, 'src', 'app.ts')], link);
@@ -206,7 +206,7 @@ describe('discovery symlink containment', () => {
 
   it.skipIf(process.platform === 'win32')(
     'keeps a symlink that stays inside the repository',
-    () => {
+    (ctx) => {
       // Monorepos link packages around inside the tree. Confinement must not
       // turn into "no symlinks at all".
       const repo = scratchDir('ix-repo-');
@@ -218,7 +218,7 @@ describe('discovery symlink containment', () => {
         execFileSync('git', ['init', '-q'], { cwd: repo });
         execFileSync('git', ['add', '-A'], { cwd: repo });
       } catch {
-        return; // no git, or no permission to symlink — nothing to assert
+        return ctx.skip('no git, or no permission to symlink');
       }
 
       const canonical = dedupeDiscoveredFilePaths(tryGitLsFiles(repo, true) ?? []);

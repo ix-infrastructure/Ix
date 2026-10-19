@@ -13,6 +13,7 @@ import {
   colorizeKind,
   reportResolutionFailure,
   reportUnresolvedTarget,
+  reportResolutionNotices,
 } from "../ui.js";
 import { compactTreeNode, relativePath, printJson } from "../format.js";
 import { llmLine, llmShortId, type LlmValue } from "../llm.js";
@@ -542,6 +543,9 @@ export function registerTraceCommand(program: Command): void {
           }
           const fromTarget = fromResult.entity;
           const toTarget = toResult.entity;
+          for (const r of [fromResult, toResult]) {
+            if (r.notices?.length) reportResolutionNotices(r.notices, opts.format, resolveOpts);
+          }
 
           const relKind = opts.kind ?? "mixed";
           const predicates = kindToPredicates(opts.kind);

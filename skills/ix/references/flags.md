@@ -48,14 +48,23 @@ surfaces (#575).
   --limit 50` exits with an error rather than a shorter list. `--detailed`
   auto-paginates on its own; `--offset` or `--regions` turns that off, and
   `--limit` only sets the page size.
-- **`ix context` budgets the evidence block in tokens, not characters.**
-  `--max-tokens` defaults to 3,000 and is converted at 2.14 characters per
-  token, measured across 41 recorded bundles. At 1,500 the evidence block held
-  about ten items, and for a file target those were its own members: ix-bench
-  agents were shown 0.59 of the expected files ix had found, against all of
-  them at 3,000, for about 320 more tokens. `--max-chars` is still there for
-  a caller who needs exact bytes and overrides it; passing both is refused
-  rather than silently ranked, because the output does not say which one won.
+- **`ix context` budgets the text it emits, in tokens.** `--max-tokens`
+  defaults to 3,000 and is converted at 2.14 characters per token, measured
+  across 41 recorded bundles, in every output format. At 1,500 the evidence
+  block held about ten items, and for a file target those were its own
+  members: ix-bench agents were shown 0.59 of the expected files ix had found,
+  against all of them at 3,000, for about 320 more tokens. For `--format llm`
+  the budget covers the whole output: header, diagnostics, evidence rows and
+  `next` lines. For `json` it bounds the serialized evidence list, and for text
+  the evidence lines plus a reserve for the header; entities and relationships
+  keep their own `--max-entities` and `--max-relationships` counts.
+  `--max-evidence` defaults to 25. cl100k counts about 3.7 characters per token
+  in llm output and 2.7 in JSON, so 2.14 keeps a bundle under its token budget;
+  larger defaults are deferred until they are measured on ix-bench. A saved
+  investigation records the format its budget was sized for, and `--diff`
+  rebuilds with it. `--max-chars` is still there for a caller who needs exact
+  bytes and overrides it; passing both is refused rather than silently ranked,
+  because the output does not say which one won.
 - **`ix mcp` advertises five tools by default**, not twenty-six:
   `ix_context`, `ix_search`, `ix_neighbors`, `ix_impact` and `ix_read`, one
   per question the graph answers better than Grep/Read. `ix_neighbors{relation}`
@@ -111,7 +120,10 @@ surfaces (#575).
   the caller's order, not the renderer's. It never touches a header, and a field
   no row carries is dropped rather than emitted empty.
 - **`--pick <n>` is 1-based** everywhere it appears, and is how you resolve an
-  ambiguous target without re-running with a longer name.
+  ambiguous target without re-running with a longer name. It indexes the list
+  in stable (path, line, id) order, and also selects among the candidates of a
+  resolution notice (a target that resolved by choosing among equal matches;
+  only the true ties are listed and numbered).
 - **`--no-recursive` and `--no-open` negate a default-on behaviour**, so their
   Default of `on` is the positive behaviour, and passing the flag turns it off.
 
@@ -149,6 +161,7 @@ Show methods/functions called by the given symbol (cross-file).
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
+| `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
@@ -164,6 +177,7 @@ Show methods/functions that call the given symbol (cross-file).
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
+| `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
@@ -224,6 +238,7 @@ Show members contained by the given entity (class, module, file).
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
+| `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
@@ -245,8 +260,8 @@ Build a bounded, deterministic context bundle for a symbol, file, or entity (or 
 | `--max-entities` | `<n>` | — | Maximum entities in the bundle (default: 50, clamped to 1-500) |
 | `--max-relationships` | `<n>` | — | Maximum relationships in the bundle (default: 100, clamped to 1-1000) |
 | `--max-evidence` | `<n>` | — | Maximum evidence items in the bundle (default: 25, clamped to 1-200) |
-| `--max-tokens` | `<n>` | `3000` | Maximum tokens of evidence output (clamped to 500-200000) |
-| `--max-chars` | `<n>` | — | Maximum characters of evidence output; overrides `--max-tokens` (clamped to 1000-1000000) |
+| `--max-tokens` | `<n>` | `3000` | Token budget for the printed output (llm: all of it; json and text: the evidence) (clamped to 500-200000) |
+| `--max-chars` | `<n>` | — | Character budget for the printed output (llm: all of it; json and text: the evidence); overrides `--max-tokens` (clamped to 1000-1000000) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
@@ -448,6 +463,7 @@ Show what imports the given entity.
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
+| `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
@@ -463,6 +479,7 @@ Show what the given entity imports.
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
+| `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
@@ -505,6 +522,7 @@ List entities by kind with optional path scoping.
 | `--kind` | `<kind>` | — | Entity kind to list (class, method, function, file, module, etc.) |
 | `--path` | `<path>` | — | Filter by source file path substring |
 | `--limit` | `<n>` | `50` | Max results |
+| `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
@@ -779,6 +797,7 @@ Fast lexical/text search across the codebase (uses ripgrep).
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--limit` | `<n>` | `20` | Max results |
+| `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--path` | `<dir>` | `.` | Restrict search to a workspace-relative directory |
 | `--language` | `<lang>` | — | Filter by language (python, typescript, scala, etc.) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
