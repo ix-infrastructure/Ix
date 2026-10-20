@@ -52,8 +52,19 @@ try {
 // git call. So the hook is dispatched here, before that tree is loaded, and
 // loads the graph code itself only when there is an edit to report.
 // `--help` still goes through the CLI, where the command is documented.
+//
+// Before either: on Linux and macOS, an agent-facing call (stdout and stderr
+// not a terminal, a read-only command) is answered by the warm per-user daemon
+// when one is running, with the same output and exit code -- see
+// `daemon/client.ts`. A call it does not answer runs below as it always has,
+// and the first such call starts the daemon for the next one. IX_DAEMON=off
+// turns it off.
 const args = process.argv.slice(2);
-if (args[0] === "hook" && args[1] === "claude-post-edit" && !args.some((a) => a === "-h" || a === "--help")) {
+const answered = process.platform !== "win32" && process.env.IX_DAEMON !== "off" &&
+  await (await import("./daemon/client.js")).answerFromDaemon(args);
+if (answered) {
+  // Written, and process.exitCode set: nothing more to load.
+} else if (args[0] === "hook" && args[1] === "claude-post-edit" && !args.some((a) => a === "-h" || a === "--help")) {
   const { parseHookArgs, runHookProcess } = await import("./hook/entry.js");
   await runHookProcess(parseHookArgs(args.slice(2)));
 } else {

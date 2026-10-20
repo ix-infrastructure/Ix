@@ -13,6 +13,11 @@
 // and p90 in milliseconds and the exit code of the last run: a command that
 // cannot reach a backend still pays its full start-up before it says so, which
 // is the part this measures.
+//
+// Each `ix` command is timed twice: with the warm daemon off (IX_DAEMON=off,
+// every call its own process) and on, once a daemon for this IX_HOME is
+// running. The daemon is stopped again at the end. Not on Windows, where the
+// CLI never uses one.
 
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -61,7 +66,7 @@ const hookInput = JSON.stringify({
   tool_input: { command: "true" },
 });
 
-const ix = (...args) => ({ cmd: process.execPath, args: [opts.cli, ...args] });
+const ix = (...args) => ({ cmd: process.execPath, args: [opts.cli, ...args], daemon: true });
 const cases = [
   { label: "node -e 0", ...{ cmd: process.execPath, args: ["-e", "0"] } },
   { label: "ix --version", ...ix("--version") },
@@ -82,11 +87,15 @@ const cases = [
 // No update check, no colour: neither is what an agent sees, and both vary.
 const env = { ...process.env, IX_NO_UPDATE_CHECK: "1", NO_COLOR: "1" };
 delete env.FORCE_COLOR;
+const coldEnv = { ...env, IX_DAEMON: "off" };
+const warmEnv = { ...env };
+delete warmEnv.IX_DAEMON;
+const useDaemon = process.platform !== "win32";
 
-function once(c) {
+function once(c, runEnv = coldEnv) {
   const started = process.hrtime.bigint();
   const child = spawnSync(c.cmd, c.args, {
-    cwd: opts.cwd, env, input: c.input ?? "", encoding: "utf-8", maxBuffer: 64 * 1024 * 1024,
+    cwd: opts.cwd, env: runEnv, input: c.input ?? "", encoding: "utf-8", maxBuffer: 64 * 1024 * 1024,
   });
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
   return { ms, status: child.error ? `error: ${child.error.code ?? child.error.message}` : child.status };
@@ -97,23 +106,52 @@ function percentile(sorted, p) {
   return sorted[index];
 }
 
-const rows = [];
-for (const c of cases) {
-  once(c);
+function measure(c, runEnv) {
+  once(c, runEnv);
   const times = [];
   let status;
   for (let i = 0; i < opts.runs; i++) {
-    const r = once(c);
+    const r = once(c, runEnv);
     times.push(r.ms);
     status = r.status;
   }
   times.sort((a, b) => a - b);
-  rows.push({ label: c.label, median: percentile(times, 50), p90: percentile(times, 90), status });
+  return { median: percentile(times, 50), p90: percentile(times, 90), status };
+}
+
+function daemonStatus() {
+  const r = spawnSync(process.execPath, [opts.cli, "daemon", "status", "--json"], { env: warmEnv, encoding: "utf-8" });
+  try { return JSON.parse(r.stdout); } catch { return { running: false }; }
+}
+
+/** Start this IX_HOME's daemon the way an agent's first call does, and wait for it. */
+function startDaemon() {
+  once(ix("text", opts.term), warmEnv);
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (daemonStatus().running) return true;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+  return false;
+}
+
+const rows = cases.map((c) => ({ label: c.label, cold: measure(c, coldEnv) }));
+const daemonUp = useDaemon && startDaemon();
+let served = 0;
+if (daemonUp) {
+  cases.forEach((c, i) => { if (c.daemon) rows[i].warm = measure(c, warmEnv); });
+  served = daemonStatus().served;
+  spawnSync(process.execPath, [opts.cli, "daemon", "stop"], { env: warmEnv, encoding: "utf-8" });
 }
 
 const fmt = (ms) => ms.toFixed(0);
-process.stdout.write(`Node ${process.version}, ${opts.runs} runs each, cwd ${opts.cwd}\n\n`);
-process.stdout.write("| Command | median ms | p90 ms | exit |\n|---|---:|---:|---:|\n");
+process.stdout.write(`Node ${process.version}, ${opts.runs} runs each, cwd ${opts.cwd}\n`);
+process.stdout.write(daemonUp
+  ? `Daemon on: ${served} calls answered by the daemon.\n\n`
+  : `Daemon on: not measured (${useDaemon ? "it did not start" : "not used on Windows"}).\n\n`);
+process.stdout.write("| Command | daemon off median ms | off p90 ms | daemon on median ms | on p90 ms | exit |\n|---|---:|---:|---:|---:|---:|\n");
 for (const r of rows) {
-  process.stdout.write(`| \`${r.label}\` | ${fmt(r.median)} | ${fmt(r.p90)} | ${r.status} |\n`);
+  const warm = r.warm ? `${fmt(r.warm.median)} | ${fmt(r.warm.p90)}` : "— | —";
+  const status = r.warm && r.warm.status !== r.cold.status ? `${r.cold.status} / ${r.warm.status}` : r.cold.status;
+  process.stdout.write(`| \`${r.label}\` | ${fmt(r.cold.median)} | ${fmt(r.cold.p90)} | ${warm} | ${status} |\n`);
 }

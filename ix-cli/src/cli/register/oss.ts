@@ -41,6 +41,7 @@ import { registerMcpCommand } from "../commands/mcp.js";
 import { registerContextCommand } from "../commands/context.js";
 import { registerAroundCommand } from "../commands/around.js";
 import { registerHookCommand } from "../commands/hook.js";
+import { registerDaemonCommand } from "../commands/daemon.js";
 import { applyOssSetup } from "./oss-setup.js";
 
 export { registerProStubs } from "./pro-stubs.js";
@@ -95,6 +96,7 @@ export function registerOssCommands(program: Command): void {
   registerContextCommand(program);
   registerAroundCommand(program);
   registerHookCommand(program);
+  registerDaemonCommand(program);
 
   applyOssSetup(program);
 }

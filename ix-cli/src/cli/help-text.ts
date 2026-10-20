@@ -46,6 +46,7 @@ const OSS_HELP = [
   `  doctor                Diagnose issues`,
   `  mcp [install|doctor]  Serve agent tools over MCP`,
   `  docker <action>       Manage backend`,
+  `  daemon <action>       Warm process for agents`,
   `  view                  Open visualizer`,
   `  reset                 Reset map`,
   `  savings               Show token savings`,

@@ -5,6 +5,8 @@
  * loaded on every hooked tool call, most of which change nothing.
  */
 
+import { commandStdin } from "../stdin-source.js";
+
 export const DEFAULT_HOOK_TIMEOUT_MS = 3000;
 
 /**
@@ -24,7 +26,10 @@ export function hookTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
 }
 
 /** All of stdin, or "" when there is none or it does not arrive in time. */
-export function readStdin(timeoutMs: number, stdin: NodeJS.ReadStream = process.stdin): Promise<string> {
+export function readStdin(
+  timeoutMs: number,
+  stdin: NodeJS.ReadableStream & { isTTY?: boolean } = commandStdin(),
+): Promise<string> {
   if (stdin.isTTY) return Promise.resolve("");
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
