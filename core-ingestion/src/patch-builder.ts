@@ -256,8 +256,8 @@ export function buildPatch(
   multiRepo?: MultiRepoContext,
 ): GraphPatchPayload {
   const { entities, chunks } = result;
-  // A typed receiver call needs resolveEdges even within one file: its exact
-  // member, or else its bare-name fallback.
+  // A typed receiver call is resolved even within one file: its exact member
+  // decides whether a receiver-only relationship becomes an edge at all.
   if (result.relationships.some(r => r.receiverType || r.receiverFactory)) {
     return buildPatchWithResolution(result, sourceHash, workspaceId, resolveEdges([result]), previousSourceHash, multiRepo);
   }
@@ -605,8 +605,15 @@ export function buildPatchWithResolution(
   const { entities, chunks } = result;
   // A helper-literal import (see ParsedRelationship.importVia) is inferred from a
   // string, so it is emitted only when resolveEdges tied it to exactly one file.
-  const relationships = result.relationships.filter(r =>
-    r.importVia !== 'helper' || edgeResolution.has(`${r.srcName}:${r.predicate}:${r.dstName}`));
+  const resolvedHere = (r: (typeof result.relationships)[number]): boolean =>
+    edgeResolution.has(`${r.srcName}:${r.predicate}:${r.dstName}`);
+  const relationships = [
+    ...result.relationships.filter(r => !r.receiverOnly && (r.importVia !== 'helper' || resolvedHere(r))),
+    // A receiver-only typed call (see ParsedRelationship.receiverOnly) exists only
+    // once resolved. Last, so an edge the call's own relationship already wrote
+    // keeps its id and only takes the type tier.
+    ...result.relationships.filter(r => r.receiverOnly && resolvedHere(r)),
+  ];
   // filePath = workspace-relative PROVENANCE (source_uri / file_uri / patch id);
   // idPath = member-relative IDENTITY (node / edge / chunk ids) so a member's ids are
   // byte-identical solo vs. co-ingested. Edge matching still keys on the full
@@ -738,7 +745,7 @@ export function buildPatchWithResolution(
   }
 
   const seenExternalNodes2 = new Set<string>();
-  const emittedEdgeIdentities = new Set<string>();
+  const emittedEdgeIdentities = new Map<string, PatchOp>();
   /** CALLS dropped for want of a destination node; recorded on their caller. */
   const unresolvedCalls = unresolvedCallRecorder(seenNodeIds2, fileNodeId2);
   const relationshipShapeCounts = new Map<string, number>();
@@ -798,17 +805,8 @@ export function buildPatchWithResolution(
     seenNodeIds2.has(srcNodeId) &&
     (dst.resolution !== null || dst.externalPkg !== null || seenNodeIds2.has(dst.dstNodeId));
 
-  /**
-   * A typed receiver call resolveEdges could not tie to an exact member falls
-   * back to its bare member name locally, as it resolved before inference.
-   */
-  const localDstName = (r: (typeof relationships)[number]): string =>
-    (r.receiverType || r.receiverFactory) && !edgeResolution.has(`${r.srcName}:${r.predicate}:${r.dstName}`)
-      ? r.dstName.slice(r.dstName.lastIndexOf('.') + 1)
-      : r.dstName;
-
   const relationshipDstKey = (r: (typeof relationships)[number]): string =>
-    r.predicate === 'CONTAINS' ? resolveKey(r.dstName, r.srcName) : resolveKey(localDstName(r));
+    r.predicate === 'CONTAINS' ? resolveKey(r.dstName, r.srcName) : resolveKey(r.dstName);
 
   const edgeIdTuple = (srcKey: string, edgeDstKey: string, predicate: string): string =>
     `${srcKey}\x00${edgeDstKey}\x00${predicate}`;
@@ -858,7 +856,7 @@ export function buildPatchWithResolution(
     const dst = resolveDst(r, dstKey);
     const { dstNodeId, externalPkg, resolution } = dst;
     if (!keepEdge(nodeId(idPath, srcKey), dst)) {
-      if (r.predicate === 'CALLS') unresolvedCalls.add(nodeId(idPath, srcKey), localDstName(r));
+      if (r.predicate === 'CALLS') unresolvedCalls.add(nodeId(idPath, srcKey), r.dstName);
       continue;
     }
     if (externalPkg && !seenExternalNodes2.has(dstNodeId)) {
@@ -881,14 +879,20 @@ export function buildPatchWithResolution(
     // keys on id, both commit. An edge is identified by (src, dst, predicate) —
     // two of those with empty attrs are indistinguishable in the graph.
     const edgeIdentity = `${nodeId(idPath, srcKey)}\x00${dstNodeId}\x00${r.predicate}`;
-    if (emittedEdgeIdentities.has(edgeIdentity)) continue;
-    emittedEdgeIdentities.add(edgeIdentity);
+    const emitted = emittedEdgeIdentities.get(edgeIdentity);
+    if (emitted) {
+      // A typed relationship confirming an edge the call already wrote.
+      if (r.receiverOnly && resolution) {
+        emitted.attrs = { confidence: resolution.confidence, ...(resolution.tier ? { tier: resolution.tier } : {}) };
+      }
+      continue;
+    }
     // Only a colliding tuple is salted, so every other edge keeps the id it
     // had before this change.
     const idDstKey = collidingIdTuples.has(edgeIdTuple(srcKey, edgeDstKey, r.predicate))
       ? `${edgeDstKey}\x00${dstNodeId}`
       : edgeDstKey;
-    ops.push({
+    const edgeOp: PatchOp = {
       type: 'UpsertEdge',
       id: edgeId(idPath, srcKey, idDstKey, r.predicate),
       src: nodeId(idPath, srcKey),
@@ -897,7 +901,9 @@ export function buildPatchWithResolution(
       attrs: resolution
         ? { confidence: resolution.confidence, ...(resolution.tier ? { tier: resolution.tier } : {}) }
         : {},
-    });
+    };
+    emittedEdgeIdentities.set(edgeIdentity, edgeOp);
+    ops.push(edgeOp);
   }
   unresolvedCalls.applyTo(ops);
 
@@ -906,6 +912,8 @@ export function buildPatchWithResolution(
   // not part of a claim, so nothing downstream can tell them apart.
   const emittedClaims = new Set<string>();
   for (const r of relationships) {
+    // A receiver-only typed call claims nothing the call's own relationship does not.
+    if (r.receiverOnly) continue;
     const srcKey = resolveKey(r.srcName);
     const entityId = nodeId(idPath, srcKey);
     const field = `${r.predicate.toLowerCase()}:${r.dstName}`;

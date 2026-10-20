@@ -19,8 +19,11 @@ interface ReceiverBinding extends ReceiverType {
 }
 
 const classes = new Set(['class_definition', 'trait_definition', 'object_definition', 'class_declaration', 'abstract_class_declaration', 'class']);
-const functions = new Set(['function_definition', 'function_declaration', 'method_declaration', 'method_definition', 'arrow_function', 'function_expression', 'function_literal', 'lambda_expression', 'method_signature', 'abstract_method_signature', 'function_signature']);
-const blocks = new Set(['block', 'statement_block', 'template_body', 'class_body', 'for_statement', 'for_in_statement', 'catch_clause']);
+const functions = new Set(['function_definition', 'function_declaration', 'method_declaration', 'method_definition', 'arrow_function', 'function_expression', 'func_literal', 'lambda_expression', 'method_signature', 'abstract_method_signature', 'function_signature']);
+// Also the statements that own a binding of their own: Go `if x := …;`,
+// `switch x := v.(type)`, Scala `case x: T =>` and `for (x <- xs)`.
+const blocks = new Set(['block', 'statement_block', 'template_body', 'class_body', 'for_statement', 'for_in_statement', 'catch_clause',
+  'if_statement', 'expression_switch_statement', 'type_switch_statement', 'case_clause', 'for_expression']);
 
 function typeName(node: any): string | undefined {
   if (!node) return;
@@ -70,6 +73,17 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
     return {};
   };
   const mutations: any[] = [];
+  // Every name a pattern binds. Scala pattern names start lowercase (an
+  // uppercase one, or a dotted path, refers to an existing value).
+  const bindPattern = (scope: any, pattern: any): void => {
+    const pending = pattern ? [pattern] : [];
+    while (pending.length) {
+      const p = pending.pop()!;
+      if (p.type === 'identifier' || p.type === 'shorthand_property_identifier_pattern') {
+        if (language !== 'scala' || (/^[a-z_]/.test(p.text) && p.parent?.type !== 'stable_identifier')) bind(scope, p.text, {});
+      } else pending.push(...p.namedChildren);
+    }
+  };
   const stack = [root];
   while (stack.length) {
     checkBudget();
@@ -139,6 +153,20 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
     if (node.type === 'range_clause') for (const id of node.childForFieldName('left')?.namedChildren ?? []) {
       if (id.type === 'identifier') bind(owner, id.text, {});
     }
+    // Binders whose type is not inferred still shadow an outer receiver.
+    if (node.type === 'for_in_statement') {
+      const declared = node.children.some((c: any) => ['const', 'let', 'var'].includes(c.type));
+      // `for (x of xs)` without a declaration assigns an existing binding.
+      if (!declared) mutations.push(node);
+      else bindPattern(node.children.some((c: any) => c.type === 'var') ? functionScope(node) : node, node.childForFieldName('left'));
+    }
+    if (node.type === 'lambda_expression') bindPattern(node, node.childForFieldName('parameters'));
+    if (node.type === 'case_clause') bindPattern(node, node.childForFieldName('pattern'));
+    if (node.type === 'enumerator') {
+      const forExpression = scopeOf(node);
+      if (forExpression.type === 'for_expression') bindPattern(forExpression, node.firstNamedChild);
+    }
+    if (node.type === 'type_switch_statement') bindPattern(node, node.childForFieldName('alias'));
     if (node.type === 'catch_clause') {
       const parameter = node.childForFieldName('parameter');
       if (parameter?.type === 'identifier') bind(node, parameter.text, {});
@@ -167,6 +195,8 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
   const lookupName = (node: any, name: string, field = false): ReceiverType | undefined => {
     for (let p = node; p; p = p.parent) {
       if (field && !classes.has(p.type) && !['template_body', 'class_body'].includes(p.type)) continue;
+      // A bare TypeScript name never refers to a field or parameter property.
+      if (!field && language === 'typescript' && (classes.has(p.type) || p.type === 'class_body')) continue;
       const bindings = scopes.get(p.id);
       if (bindings?.has(name)) {
         const info = bindings.get(name)!;
@@ -208,4 +238,22 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
       }
     },
   };
+}
+
+/**
+ * The inferred receiver of a member call, given the call's member-name node:
+ * `dep.run()` (TS), `dep.run()` (Scala), `dep.Run()` (Go). Only a receiver with
+ * an inferred type or factory counts; `receiver` is its source text.
+ */
+export function callReceiver(nameNode: any, facts: ReceiverFacts): (ReceiverType & { receiver: string }) | undefined {
+  const member = nameNode.parent;
+  const field = member?.type === 'member_expression' ? 'object'
+    : member?.type === 'field_expression' ? 'value'
+      : member?.type === 'selector_expression' ? 'operand' : undefined;
+  const call = member?.parent;
+  if (!field || call?.type !== 'call_expression' || call.childForFieldName('function')?.id !== member.id) return;
+  const receiver = member.childForFieldName(field);
+  if (!receiver || receiver.id === nameNode.id) return;
+  const info = facts.lookup(receiver);
+  return info?.type || info?.factory ? { type: info.type, factory: info.factory, receiver: receiver.text } : undefined;
 }

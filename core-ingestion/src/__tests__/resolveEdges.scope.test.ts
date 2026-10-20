@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { parseFile, type FileParseResult, type ResolvedEdge } from '../index.js';
+import { parseFile, resolveEdges as resolveEdgesWithTier, type FileParseResult, type ResolvedEdge } from '../index.js';
 import { resolveEdges } from './helpers/untiered.js';
 import { buildPatch, buildPatchWithResolution } from '../patch-builder.js';
 
@@ -116,9 +116,18 @@ describe('call resolution respects lexical scope (JS/TS)', () => {
     );
     const sample = parse('src/sample.ts', SAMPLE_COMMAND_SOURCE);
 
-    expect(callsTo(resolveEdges([caller, sample]), 'src/sample.ts')).toEqual([
+    const edges = resolveEdges([caller, sample]);
+    // The call's own edge as before, plus the typed receiver's exact member.
+    expect(callsTo(edges, 'src/sample.ts')).toEqual([
+      expect.objectContaining({ dstName: 'describe', dstQualifiedKey: 'CheckRunner.describe', confidence: 0.9 }),
       expect.objectContaining({ dstName: 'CheckRunner.describe', dstQualifiedKey: 'CheckRunner.describe', confidence: 0.95 }),
     ]);
+    // One graph edge: the call's own id, upgraded to the type tier.
+    const tiered = resolveEdgesWithTier([caller, sample]);
+    const calls = buildPatchWithResolution(caller, 'h', 'ws', tiered).ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS');
+    const untyped = buildPatchWithResolution(caller, 'h', 'ws', tiered.filter(e => e.dstName === 'describe')).ops
+      .filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS');
+    expect(calls).toEqual(untyped.map(op => ({ ...op, attrs: { confidence: 0.95, tier: 'type' } })));
   });
 
   it('resolves a bare call to the module-scope definition when a same-named member also exists', () => {

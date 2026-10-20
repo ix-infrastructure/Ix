@@ -128,13 +128,6 @@ export const TYPESCRIPT_QUERIES = `
     object: (this) @_qualifier
     property: (property_identifier) @call.name)) @call
 
-; dep.method() / this.dep.method() — the receiver a local or field type is
-; inferred from. index.ts drops the qualifier when nothing is inferred.
-(call_expression
-  function: (member_expression
-    object: [(identifier) (member_expression)] @_qualifier
-    property: (property_identifier) @call.name)) @call
-
 ; Constructor calls: new Foo()
 (new_expression
   constructor: (identifier) @call.name) @call
@@ -1523,7 +1516,6 @@ export const SCALA_QUERIES = `
 ; ── Calls: method call (obj.method()) ────────────────────────────────────────
 (call_expression
   function: (field_expression
-    value: (_) @_qualifier
     field: (identifier) @call.name)) @call
 
 ; ── Constructor: new Foo() ────────────────────────────────────────────────────

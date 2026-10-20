@@ -2248,7 +2248,7 @@ export async function ingestFiles(
   const resolveStats = {
     importLookups: 0, transitiveLookups: 0, globalFallbacks: 0,
     globalCandidateTotal: 0, resolvedImport: 0, resolvedTransitive: 0,
-    resolvedGlobal: 0, resolvedQualifier: 0, skippedSameFile: 0, skippedAmbiguous: 0,
+    resolvedGlobal: 0, resolvedQualifier: 0, resolvedType: 0, skippedSameFile: 0, skippedAmbiguous: 0,
   };
   // Per-language parse timing: language → { ms, files }
   const langParseMs = new Map<string, { ms: number; files: number }>();
@@ -4739,6 +4739,7 @@ export async function ingestFiles(
       console.log(chalk.dim(`    resolved transitive:${resolveStats.resolvedTransitive}`));
       console.log(chalk.dim(`    resolved global:    ${resolveStats.resolvedGlobal}`));
       console.log(chalk.dim(`    resolved qualifier: ${resolveStats.resolvedQualifier}`));
+      console.log(chalk.dim(`    resolved type:      ${resolveStats.resolvedType}`));
       console.log(chalk.dim(`    skipped same-file:  ${resolveStats.skippedSameFile}`));
       console.log(chalk.dim(`    skipped ambiguous:  ${resolveStats.skippedAmbiguous}`));
     }

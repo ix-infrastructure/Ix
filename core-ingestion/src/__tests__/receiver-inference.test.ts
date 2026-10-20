@@ -48,6 +48,13 @@ describe('typed local receivers', () => {
     expect(resolveEdges(files)).toContainEqual(expect.objectContaining({ dstFilePath: files[1].filePath, dstQualifiedKey: 'Target.Run', tier: 'type' }));
   });
 
+  it('counts type-tier resolutions separately from qualifier ones', () => {
+    const stats = { importLookups: 0, transitiveLookups: 0, globalFallbacks: 0, globalCandidateTotal: 0, resolvedImport: 0,
+      resolvedTransitive: 0, resolvedGlobal: 0, resolvedQualifier: 0, resolvedType: 0, skippedSameFile: 0, skippedAmbiguous: 0 };
+    resolveEdges([parse('ts', methods('ts', 'function use(dep: Target) { dep.run(); }'))], stats);
+    expect(stats).toMatchObject({ resolvedType: 1, resolvedQualifier: 0 });
+  });
+
   it('Go does not borrow methods from the external test package in the same directory', () => {
     const files = [
       parse('go', 'package p\ntype Target struct{}\n', 'types'),
@@ -201,6 +208,13 @@ describe('typed local receivers', () => {
     ['go', 'func use(dep *Target) { { dep := unknown(); dep.Run() } }'],
     ['go', 'func use(dep *Target) { f := func(dep interface{}) { dep.Run() }; _ = f }'],
     ['go', 'func use(dep *Target) { for _, dep := range unknown() { dep.Run() } }'],
+    ['ts', 'function use(dep: Target) { for (const dep of unknown()) { dep.run(); } }'],
+    ['ts', 'function use(dep: Target) { for (dep of unknown()) {} dep.run(); }'],
+    ['scala', 'object Use { def use(dep: Target) = unknown().foreach { dep => dep.run() } }'],
+    ['scala', 'object Use { def use(dep: Target) = unknown() match { case dep: Any => dep.run() } }'],
+    ['scala', 'object Use { def use(dep: Target) = for (dep <- unknown()) yield dep.run() }'],
+    ['go', 'func use(dep Target) { switch dep := unknown().(type) { default: dep.Run() } }'],
+    ['go', 'func use(dep Target) { if dep := unknown(); dep != nil { dep.Run() } }'],
   ])('%s unknown shadows do not borrow the outer receiver', (ext, body) => {
     const result = parse(ext, methods(ext, body));
     expect(result.relationships.filter(r => r.receiverType === 'Target')).toEqual([]);
@@ -252,6 +266,16 @@ describe('typed local receivers', () => {
     expect(resolveEdges([result])).toEqual([expect.objectContaining({ dstQualifiedKey: 'Target.run', tier: 'type' })]);
   });
 
+  it('TypeScript bare names never resolve through a same-named field or parameter property', () => {
+    const result = parse('ts', "import { logger } from './logger'; class AuditLog { info() {} } class Client { send() {} } class Other { send() {} } const client = new Other(); class Svc { private logger: AuditLog = new AuditLog(); constructor(private client: Client) {} run() { logger.info('x'); client.send(); this.logger.info('y'); } }");
+    expect(resolveEdges([result]).filter(e => e.tier === 'type').map(e => e.dstQualifiedKey)).toEqual(['Other.send', 'AuditLog.info']);
+  });
+
+  it('Go closure parameters stay inside the closure', () => {
+    const result = parse('go', methods('go', 'func use() { dep := Target{}; f := func(dep Other) { dep.Run() }; _ = f; dep.Run() }'));
+    expect(resolveEdges([result]).filter(e => e.tier === 'type').map(e => e.dstQualifiedKey)).toEqual(['Other.Run', 'Target.Run']);
+  });
+
   it.each(['extends Base', 'extends Empty with Base'])('Scala resolves inherited members: %s', (heritage) => {
     const base = parse('scala', 'trait Base { def run() = () }; trait Empty {}', 'base');
     const child = parse('scala', `class Child ${heritage} {}`, 'child');
@@ -261,6 +285,35 @@ describe('typed local receivers', () => {
     const summaries = new Map([base, child, caller].map(r => [r.filePath, summarizeParseResult(r)]));
     const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
     expect(resolveEdges([caller], undefined, index)).toEqual(fresh.filter(e => e.srcFilePath === caller.filePath));
+  });
+
+  it('TypeScript does not type a global or library receiver as a same-named repo class', () => {
+    const geo = parse('ts', 'export class Map { set() {} }', 'geo/map');
+    const use = parse('ts', 'function use() { const m = new Map<string, number>(); m.set("a", 1); }');
+    expect(resolveEdges([geo, use]).filter(e => e.tier === 'type')).toEqual([]);
+    const imported = parse('ts', "import { Map } from './geo/map'; function use() { const m = new Map(); m.set(); }");
+    expect(resolveEdges([geo, imported]).filter(e => e.tier === 'type')).toEqual([
+      expect.objectContaining({ dstFilePath: geo.filePath, dstQualifiedKey: 'Map.set' }),
+    ]);
+  });
+
+  it.each([
+    ['', []],
+    ['import mylib._\n', ['Option.get']],
+    ['import mylib.Option\n', ['Option.get']],
+  ])('Scala types a receiver only from a type in scope (%j)', (imports, expected) => {
+    const lib = parse('scala', 'package mylib\nclass Option { def get() = () }', 'option');
+    const use = parse('scala', `package app\n${imports}object Use { def use(o: Option) = o.get() }`);
+    expect(resolveEdges([lib, use]).filter(e => e.tier === 'type').map(e => e.dstQualifiedKey)).toEqual(expected);
+  });
+
+  it('Scala types a receiver from its own package without an import', () => {
+    const target = parse('scala', 'package app\nclass Target { def run() = () }', 'target');
+    const other = parse('scala', 'package other\nclass Target { def run() = () }', 'other');
+    const use = parse('scala', 'package app\nobject Use { def use(dep: Target) = dep.run() }');
+    expect(resolveEdges([target, other, use]).filter(e => e.tier === 'type')).toEqual([
+      expect.objectContaining({ dstFilePath: target.filePath, dstQualifiedKey: 'Target.run' }),
+    ]);
   });
 
   it('Scala imports disambiguate same-named types by declared package', () => {
@@ -357,6 +410,28 @@ describe('receiver inference is additive', () => {
   });
 });
 
+describe('summaries stored before receiver inference', () => {
+  it('Go incremental resolution keeps the edge it had, without receiver facts', () => {
+    const files = [
+      parse('go', 'package p\ntype Target struct{}\n', 'types'),
+      parse('go', 'package p\nfunc (t Target) Run() {}\n', 'methods'),
+      parse('go', 'package p\nfunc use(t Target) { t.Run() }\n'),
+    ];
+    const stale = new Map(files.map(r => {
+      const { receiverFactories: _f, receiverHeritage: _h, receiverPackage: _p, ...summary } = summarizeParseResult(r);
+      return [r.filePath, summary];
+    }));
+    const index = buildGlobalResolutionIndex([...stale.keys()], undefined, undefined, stale);
+    const edges = resolveEdges([files[2]], undefined, index).filter(e => e.predicate === 'CALLS');
+    expect(edges).toContainEqual(expect.objectContaining({ dstFilePath: files[1].filePath, dstQualifiedKey: 'Target.Run', tier: 'qualifier' }));
+    const fresh = resolveEdges(files).filter(e => e.predicate === 'CALLS' && e.srcFilePath === files[2].filePath);
+    expect(fresh).toContainEqual(expect.objectContaining({ dstFilePath: files[1].filePath, dstQualifiedKey: 'Target.Run', tier: 'type' }));
+    // Both land on the same graph edge; only its tier differs until the file is re-parsed.
+    const ids = (e: typeof edges) => buildPatchWithResolution(files[2], 'h', 'ws', e).ops.filter(op => op.type === 'UpsertEdge').map(op => op.id);
+    expect(ids(edges)).toEqual(ids(fresh));
+  });
+});
+
 describe('receiver summary signature', () => {
   const sig = (ext: string, source: string) => summarizeParseResult(parse(ext, source, 'child')).sig;
 
@@ -368,5 +443,41 @@ describe('receiver summary signature', () => {
   it('stays the same for a file without receiver facts when its imports change', () => {
     expect(sig('ts', "import { a } from './a'; export function f() {}"))
       .toBe(sig('ts', "import { a } from './b'; export function f() {}"));
+  });
+});
+
+describe('receiver inference only adds to a patch', () => {
+  const withoutInference = (r: ReturnType<typeof parse>) => ({
+    ...r,
+    relationships: r.relationships.filter(rel => !rel.receiverOnly)
+      .map(({ receiverType: _t, receiverFactory: _f, ...rel }) => rel),
+  });
+  it.each([
+    ['ts', "import { Target as T } from './t'; function use(dep: Target, o: T) { dep.run(); o.run(); this.x(); console.log(dep); }"],
+    ['scala', 'object Use { def use(dep: Target) = { dep.run(); List(1).map(x => x).filter(_ > 0) } }'],
+    ['go', 'import "example.com/m/yaml"\nfunc use(dep Target, n yaml.Node) { dep.Run(); n.Decode(); yaml.Helper(); d := NewTarget(); d.Run() }; func NewTarget() *Target { return &Target{} }'],
+  ])('%s keeps every claim and edge id of the uninferred patch', (ext, body) => {
+    const typed = parse(ext, methods(ext, body));
+    const plain = withoutInference(typed);
+    const typedOps = buildPatchWithResolution(typed, 'h', 'ws', resolveEdges([typed])).ops;
+    const plainOps = buildPatchWithResolution(plain, 'h', 'ws', resolveEdges([plain])).ops;
+    const claims = (ops: typeof typedOps) => ops.filter(op => op.type === 'AssertClaim');
+    expect(claims(typedOps)).toEqual(claims(plainOps));
+    const edges = (ops: typeof typedOps) => new Map(ops.filter(op => op.type === 'UpsertEdge').map(op => [op.id, op]));
+    const typedEdges = edges(typedOps);
+    for (const [id, op] of edges(plainOps)) {
+      expect(typedEdges.get(id)).toMatchObject({ src: op.src, dst: op.dst, predicate: op.predicate });
+    }
+    // Nodes are the same, except that a call resolved by type leaves unresolved_calls.
+    const nodes = (ops: typeof typedOps) => ops.filter(op => op.type !== 'UpsertEdge' && op.type !== 'AssertClaim');
+    const strip = (op: (typeof typedOps)[number]) => {
+      const { unresolved_calls: _c, unresolved_call_count: _n, ...attrs } = (op.attrs ?? {}) as Record<string, unknown>;
+      return { ...op, attrs };
+    };
+    expect(nodes(typedOps).map(strip)).toEqual(nodes(plainOps).map(strip));
+    nodes(typedOps).forEach((op, i) => {
+      const unresolved = (o: typeof op) => ((o.attrs as { unresolved_calls?: string[] } | undefined)?.unresolved_calls ?? []);
+      expect(unresolved(nodes(plainOps)[i])).toEqual(expect.arrayContaining(unresolved(op)));
+    });
   });
 });

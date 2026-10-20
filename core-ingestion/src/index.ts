@@ -153,7 +153,7 @@ import { SupportedLanguages, languageFromPath } from './languages.js';
 import { LANGUAGE_QUERIES } from './queries.js';
 import { classifyFileRole } from './role-classifier.js';
 import type { RoleClassification } from './role-classifier.js';
-import { collectReceiverFacts } from './receiver-types.js';
+import { callReceiver, collectReceiverFacts } from './receiver-types.js';
 import { summarySignature, type FileSummary } from './symbol-index.js';
 export type { FileSummary } from './symbol-index.js';
 
@@ -237,10 +237,16 @@ export interface ParsedRelationship {
   importVia?: 'helper';
   /**
    * Lexically inferred receiver. An exact member resolves at tier `type`;
-   * otherwise the call falls back to its bare member name, as before inference.
+   * otherwise the relationship resolves by its name, as without inference.
    */
   receiverType?: string;
   receiverFactory?: string;
+  /**
+   * Set on a typed relationship that only exists for its receiver (the call
+   * also has its own, unchanged relationship). Without an exact member it
+   * resolves to nothing: no edge, no claim, no unresolved-call entry.
+   */
+  receiverOnly?: true;
 }
 
 /**
@@ -2655,6 +2661,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       language === SupportedLanguages.Rust || language === SupportedLanguages.PHP;
     const jsTsCallBareOnly = new Map<string, boolean>();
     const jsTsCallRelationship = new Map<string, ParsedRelationship>();
+    // Every CALLS relationship by `${scope}\0${callKey}`, so a typed relationship
+    // can join the call relationship of the same name.
+    const callRelationships = new Map<string, ParsedRelationship>();
     // JS/TS: helper-literal module paths already emitted (see importVia).
     const jsTsHelperImports = new Set<string>();
     if (isJsTs) {
@@ -3193,30 +3202,18 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         // BUILTINS filtering is skipped for attribute calls: method names like
         // `filter` or `map` are Python builtins when called bare, but are valid
         // user-defined method calls when invoked as `query.filter(...)`.
-        let qualifierCapture = match.captures.find((c: any) => c.name === '_qualifier');
+        const qualifierCapture = match.captures.find((c: any) => c.name === '_qualifier');
         // R package-qualified calls (pkg::func) carry a distinct @_namespace
         // capture so the dstName can keep the :: separator (vs a plain dotted name).
         const namespaceCapture = match.captures.find((c: any) => c.name === '_namespace');
-        // Receiver inference is additive: only a receiver with an inferred type or
-        // factory changes the call. Any other TS/Scala member-call receiver is
-        // dropped so the call stays the bare name it was before (TS `this.` aside).
-        const receiverLookup = qualifierCapture ? receiverFacts?.lookup(qualifierCapture.node) : undefined;
-        const inferredReceiver = receiverLookup?.type || receiverLookup?.factory ? receiverLookup : undefined;
-        if (qualifierCapture && !inferredReceiver && match.captures.some((c: any) => c.name === 'call') && (
-          (language === SupportedLanguages.TypeScript && qualifierCapture.node.type !== 'this') ||
-          language === SupportedLanguages.Scala)) qualifierCapture = undefined;
-        // The Go catch-all selector and the TS member-call queries also match a
-        // receiver another pattern captures. When that match carries an inferred
-        // receiver it is authoritative (it falls back to the bare member itself);
-        // otherwise keep the bare call.
-        if (!qualifierCapture && receiverFacts && (
-          (language === SupportedLanguages.Go && callName.node.parent?.type === 'selector_expression') ||
-          (language === SupportedLanguages.TypeScript && callName.node.parent?.type === 'member_expression'))) {
-          const operand = callName.node.parent.childForFieldName(language === SupportedLanguages.Go ? 'operand' : 'object');
-          const operandReceiver = operand && ['identifier', 'member_expression'].includes(operand.type) ? receiverFacts.lookup(operand) : undefined;
-          if (operandReceiver?.type || operandReceiver?.factory) continue;
-        }
-        if (builtinsForLanguage(language).has(callee) && !qualifierCapture && !namespaceCapture) continue;
+        // A member call whose receiver has a lexically inferred type or factory
+        // also gets a typed relationship (below). The call's own relationship is
+        // unchanged, so inference only ever adds edges.
+        const typedReceiver = receiverFacts && match.captures.some((c: any) => c.name === 'call')
+          ? callReceiver(callName.node, receiverFacts) : undefined;
+        // A builtin-named call is still dropped; only its typed relationship stays.
+        const builtinCall = builtinsForLanguage(language).has(callee) && !qualifierCapture && !namespaceCapture;
+        if (builtinCall && !typedReceiver) continue;
 
         // For Python: skip calls that are decorator applications.
         // When a method is decorated (e.g. @util.deprecated(...)), the call sits at the
@@ -3268,7 +3265,6 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         const seen = seenCalls.get(scope)!;
 
         const effectiveCallee = (() => {
-          if (inferredReceiver?.type) return `${inferredReceiver.type}.${callee}`;
           // R package-qualified call (pkg::func / pkg:::func): keep the :: so the
           // patch builder can externalize it under external://<pkg> and split it
           // correctly even for multi-dot members (utils::write.csv).
@@ -3373,13 +3369,13 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           return `${qualifier}.${callee}`;
         })();
 
-        if (!qualifierCapture && !namespaceCapture && effectiveCallee === callee) {
+        if (!builtinCall && !qualifierCapture && !namespaceCapture && effectiveCallee === callee) {
           recordJsTsImportUse('CALLS', caller, effectiveCallee, callName.node, callee);
         }
 
         const callKey = phpCallKind ? `${phpCallKind}:${effectiveCallee}` : effectiveCallee;
         const bareKey = `${scope}\x00${callKey}`;
-        if (tracksBareCalls) {
+        if (!builtinCall && tracksBareCalls) {
           let isBare: boolean;
           if (isJsTs) {
             // `foo()` / `new Foo()`: the JS/TS queries capture the callee as an
@@ -3407,18 +3403,40 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           }
           jsTsCallBareOnly.set(bareKey, (jsTsCallBareOnly.get(bareKey) ?? true) && isBare);
         }
-        if (!seen.has(callKey)) {
+        if (builtinCall) {
+          // Only the typed relationship below.
+        } else if (!seen.has(callKey)) {
           seen.add(callKey);
           const rel: ParsedRelationship = {
             srcName: caller,
             dstName: effectiveCallee,
             predicate: 'CALLS',
             ...(phpCallKind ? { phpCallKind } : {}),
-            ...(inferredReceiver?.type ? { receiverType: inferredReceiver.type } : {}),
-            ...(inferredReceiver?.factory ? { receiverFactory: inferredReceiver.factory } : {}),
           };
           relationships.push(rel);
+          callRelationships.set(bareKey, rel);
           if (tracksBareCalls) jsTsCallRelationship.set(bareKey, rel);
+        } else {
+          // The call also names what an earlier typed relationship named: it is
+          // a call in its own right, so it keeps its name-based fallback.
+          delete callRelationships.get(bareKey)?.receiverOnly;
+        }
+        if (typedReceiver) {
+          // `Type.member`, or `receiver.member` for a factory-typed receiver.
+          const typedName = `${typedReceiver.type ?? typedReceiver.receiver}.${callee}`;
+          const typedKey = `${scope}\x00${typedName}`;
+          const receiver = typedReceiver.type ? { receiverType: typedReceiver.type } : { receiverFactory: typedReceiver.factory! };
+          const named = callRelationships.get(typedKey);
+          if (named) {
+            // Same name as the call's own relationship: try the type first, then
+            // fall back to that name as before.
+            if (!named.receiverType && !named.receiverFactory) Object.assign(named, receiver);
+          } else if (!seen.has(typedName)) {
+            seen.add(typedName);
+            const rel: ParsedRelationship = { srcName: caller, dstName: typedName, predicate: 'CALLS', ...receiver, receiverOnly: true };
+            relationships.push(rel);
+            callRelationships.set(typedKey, rel);
+          }
         }
         continue;
       }
@@ -4151,6 +4169,8 @@ export function resolveEdges(
     importLookups: number; transitiveLookups: number; globalFallbacks: number;
     globalCandidateTotal: number; resolvedImport: number; resolvedTransitive: number;
     resolvedGlobal: number; resolvedQualifier: number; skippedSameFile: number; skippedAmbiguous: number;
+    /** Exact members of an inferred receiver type (optional for older callers). */
+    resolvedType?: number;
   },
   globalIndex?: GlobalResolutionIndex,
   opts?: {
@@ -4954,6 +4974,15 @@ export function resolveEdges(
       if (parts.length) return candidates.filter(fp => summaries.get(fp)?.receiverPackage === parts.join('.')).map(fp => ({ fp, type }));
       const explicit = summary?.imports.filter(imp => imp.dstName.endsWith(`.${type}`)) ?? [];
       if (explicit.length) return candidates.filter(fp => explicit.some(imp => imp.dstName === `${summaries.get(fp)?.receiverPackage}.${type}`)).map(fp => ({ fp, type }));
+      if (fileHasSymbol.get(context)?.has(type)) return [{ fp: context, type }];
+      // Otherwise only a type in scope: this package's, or a wildcard-imported
+      // package's (`import p._` is summarized as `p`). Never a same-named type
+      // elsewhere, which is how `Option` would land on an unrelated class.
+      const wildcards = new Set(summary?.imports.map(imp => imp.dstName));
+      return candidates.filter(fp => {
+        const pkg = summaries.get(fp)?.receiverPackage;
+        return pkg === summary?.receiverPackage || (pkg !== undefined && wildcards.has(pkg));
+      }).map(fp => ({ fp, type }));
     }
     const binding = importBindingsByLocal.get(context)?.get(type);
     if (binding && parts.length === 0) {
@@ -4972,17 +5001,13 @@ export function resolveEdges(
     }
     // A namespace-qualified TS type must not degrade to an unrelated bare type.
     if (parts.length && language === SupportedLanguages.TypeScript) return [];
-    const compatible = (fp: string): boolean => importLanguageCompatible(language!, fileLanguage.get(fp) ?? languageFromPath(fp));
     if (!parts.length && fileHasSymbol.get(context)?.has(type)) return [{ fp: context, type }];
-    const imports = new Set<string>();
-    for (const imp of summary?.imports ?? []) {
-      for (const fp of resolveImportTargets(context, language!, imp.dstName, imp.importRaw)) imports.add(fp);
-    }
-    const candidates = (symbolToFiles.get(type) ?? []).filter(compatible);
-    if (language === SupportedLanguages.Go) return candidates.filter(fp => goPackageKey(fp) === goPackageKey(context)).map(fp => ({ fp, type }));
-    const imported = candidates.filter(fp => imports.has(fp));
-    if (imported.length) return imported.map(fp => ({ fp, type }));
-    return candidates.map(fp => ({ fp, type }));
+    // TypeScript: a type neither defined here nor imported is a global or
+    // library type (`Map`, `Response`), never a same-named class elsewhere.
+    if (language !== SupportedLanguages.Go) return [];
+    const compatible = (fp: string): boolean => importLanguageCompatible(language, fileLanguage.get(fp) ?? languageFromPath(fp));
+    return (symbolToFiles.get(type) ?? []).filter(compatible)
+      .filter(fp => goPackageKey(fp) === goPackageKey(context)).map(fp => ({ fp, type }));
   }
 
   const receiverProviderCache = new Map<string, Array<{ fp: string; type: string }>>();
@@ -5289,10 +5314,8 @@ export function resolveEdges(
         continue;
       }
 
-      // A typed receiver resolves to its exact member. When it cannot, the call
-      // falls back to its bare member name, exactly as it resolved before
-      // inference; the emitted edge keeps rel.dstName for the patch builder.
-      let origDstName = rel.dstName;
+      // A typed receiver resolves to its exact member. Otherwise a receiver-only
+      // relationship stops here, and any other resolves by its own name below.
       if (rel.predicate === 'CALLS' && (rel.receiverType || rel.receiverFactory)) {
         const receiver = rel.receiverType ? { context: srcFilePath, type: rel.receiverType }
           : factoryReceiver(srcFilePath, rel.receiverFactory!);
@@ -5301,15 +5324,16 @@ export function resolveEdges(
         if (targets.length === 1) {
           resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: targets[0].fp, dstName: rel.dstName,
             dstQualifiedKey: targets[0].key, predicate: 'CALLS', confidence: 0.95, tier: 'type' });
-          stats.resolvedQualifier++;
+          stats.resolvedType = (stats.resolvedType ?? 0) + 1;
           continue;
         }
-        origDstName = member;
+        if (rel.receiverOnly) continue;
       }
+      const origDstName = rel.dstName;
       // Z: resolve a renamed-import call by the provider's public symbol, but keep the
       // ORIGINAL local name on the emitted edge (buildPatchWithResolution maps the edge
       // back to the source call by name). No-op unless this is a renamed-import call.
-      const dstName = (rel.predicate === 'CALLS' ? callBindings.get(srcFilePath)?.get(origDstName) : undefined) ?? origDstName;
+      const dstName = (rel.predicate === 'CALLS' ? callBindings.get(srcFilePath)?.get(rel.dstName) : undefined) ?? rel.dstName;
       const srcName = rel.srcName;
       const binding = rel.importBinding === false
         ? undefined
@@ -5367,7 +5391,7 @@ export function resolveEdges(
                 srcFilePath,
                 srcName,
                 dstFilePath: fp,
-                dstName: rel.dstName,
+                dstName: origDstName,
                 dstQualifiedKey,
                 predicate: rel.predicate,
                 confidence: 0.9,
@@ -5395,7 +5419,7 @@ export function resolveEdges(
                 srcFilePath,
                 srcName,
                 dstFilePath: fp,
-                dstName: rel.dstName,
+                dstName: origDstName,
                 dstQualifiedKey,
                 predicate: rel.predicate,
                 confidence: 0.9,
@@ -5476,7 +5500,7 @@ export function resolveEdges(
               const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart, preferredQKey);
               if (dstQualifiedKey !== null) {
                 // dstName must match rel.dstName so buildPatchWithResolution can look it up
-                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: rel.dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9, tier: 'qualifier' });
+                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9, tier: 'qualifier' });
               }
             }
             continue;
@@ -5501,7 +5525,7 @@ export function resolveEdges(
             if (fileHasSymbol.get(qfp)?.has(memberPart)) {
               const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart, `${qualifierPart}.${memberPart}`);
               if (dstQualifiedKey !== null) {
-                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: rel.dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.7, tier: 'qualifier' });
+                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.7, tier: 'qualifier' });
               }
             }
           }
@@ -5517,7 +5541,7 @@ export function resolveEdges(
         const fp = narrowedImportMatches[0];
         const dstQualifiedKey = targetQKey(fp);
         if (dstQualifiedKey === null) continue; // ambiguous — do not emit bad nodeId
-        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: rel.dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9, tier: 'import' });
+        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9, tier: 'import' });
         continue;
       }
       if (unboundAmbientCall) continue;
@@ -5542,7 +5566,7 @@ export function resolveEdges(
         const fp = narrowedTransitiveMatches[0];
         const dstQualifiedKey = targetQKey(fp);
         if (dstQualifiedKey === null) continue;
-        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: rel.dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.8, tier: 'transitive' });
+        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.8, tier: 'transitive' });
         continue;
       }
       if (configuredBindingTargets?.length === 0) continue;
@@ -5585,7 +5609,7 @@ export function resolveEdges(
         if (bareCall && !definesAtModuleScope(fp)) continue; // only a member of that name
         const dstQualifiedKey = targetQKey(fp);
         if (dstQualifiedKey === null) continue; // ambiguous — do not emit bad nodeId
-        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: rel.dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.5, tier: 'global' });
+        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.5, tier: 'global' });
         stats.resolvedGlobal++;
         continue;
       }
