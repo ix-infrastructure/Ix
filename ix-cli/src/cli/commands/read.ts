@@ -30,11 +30,23 @@ export interface ReadResult {
   /** Set when the default line cap stopped the read short of the file. */
   truncated?: boolean;
   /**
-   * How many lines the file has, when the read was capped. For a symbol it is
-   * the symbol's own line count, and `next` stays inside the symbol.
+   * How many lines the read's whole target has, when the read was capped: the
+   * file's line count for a file, and the span's line count (`spanEnd` minus
+   * its first line, plus one) for a symbol or a paged range. It is a count,
+   * never a line number; `spanEnd` is where a symbol or paged range ends.
    */
   totalLines?: number;
-  /** The next page, ready to run: `path:401-800`. */
+  /**
+   * The last line of the symbol or paged range being paged, when the read was
+   * capped. Absent on plain file reads, where `totalLines` is already the last
+   * line.
+   */
+  spanEnd?: number;
+  /**
+   * The next page, ready to run. `path:401-800` for a file. For a symbol or a
+   * paged range it is `path:<first>-<last>@<from>`: the same span, read from
+   * `<from>` and capped again, so following it repeatedly reaches `spanEnd`.
+   */
   next?: string;
 }
 
@@ -78,7 +90,7 @@ function guardReadable(absPath: string, explicitRoot: string | undefined, what: 
 }
 
 function reportInvalidLineRange(target: string, format: string): void {
-  const message = `Invalid line range in "${target}". Line numbers must start at 1 and the end must not precede the start.`;
+  const message = `Invalid line range in "${target}". Line numbers must start at 1, the end must not precede the start, and a page start (@n) must fall inside the range.`;
   if (format === "json") {
     printJson({ error: "invalid_line_range", message });
   } else if (format === "llm") {
@@ -156,12 +168,32 @@ function nextPage(filePath: string, lineEnd: number, lastLine: number): string |
   return `${readablePath(filePath)}:${from}-${to}`;
 }
 
+/**
+ * A paged span's next page: `src/a.ts:10-1327@410`. A plain `path:a-b` is a
+ * range the caller typed and is never capped, so a symbol's cursor in that
+ * form ended the paging after one hop; this form is capped again and carries
+ * the span with it, so every page has a cursor until the span's last line.
+ */
+function nextSpanPage(filePath: string, spanStart: number, lineEnd: number, lastLine: number): string | undefined {
+  if (lineEnd >= lastLine) return undefined;
+  return `${readablePath(filePath)}:${spanStart}-${lastLine}@${lineEnd + 1}`;
+}
+
 /** Fold a capped read's cursor into the result the renderers see. */
 function withCursor(
   result: ReadResult,
-  capped: { truncated?: boolean; totalLines?: number; lastLine?: number },
+  capped: { truncated?: boolean; totalLines?: number; lastLine?: number; spanStart?: number },
 ): ReadResult {
   if (!capped.truncated || capped.totalLines === undefined) return result;
+  if (capped.lastLine !== undefined && capped.spanStart !== undefined) {
+    return {
+      ...result,
+      truncated: true,
+      totalLines: capped.totalLines,
+      spanEnd: capped.lastLine,
+      next: nextSpanPage(result.path, capped.spanStart, result.lineEnd, capped.lastLine),
+    };
+  }
   return {
     ...result,
     truncated: true,
@@ -171,30 +203,48 @@ function withCursor(
 }
 
 /**
- * Cut a symbol's span at `cap` lines from its start. `lastLine` is where the
- * symbol ends, so a `next=` cursor never pages past it; `totalLines` is the
- * symbol's own line count. With no cap, or a span that fits, nothing is cut.
+ * Cut a span at `cap` lines from `from` (its start, unless a paged cursor
+ * resumes it further in). `lastLine` is where the span ends, so a `next=`
+ * cursor never pages past it; `totalLines` is the whole span's line count,
+ * the same on every page. With no cap, or a remainder that fits, nothing is
+ * cut.
  *
  * The end is clamped to EOF first: a stale graph span that could not be
  * re-anchored can claim lines the file no longer has, and an unclamped end
  * would report `truncated` with a cursor that pages past the last line.
  */
 export function capSpan(
-  lines: string[], start: number, rawEnd: number, cap?: number,
-): { content: string; lineStart: number; lineEnd: number; truncated?: boolean; totalLines?: number; lastLine?: number } {
+  lines: string[], start: number, rawEnd: number, cap?: number, from: number = start,
+): { content: string; lineStart: number; lineEnd: number; truncated?: boolean; totalLines?: number; lastLine?: number; spanStart?: number } {
   const end = Math.max(start, Math.min(rawEnd, lines.length));
-  if (cap !== undefined && end - start + 1 > cap) {
-    const shownEnd = start + cap - 1;
+  const first = Math.min(Math.max(from, start), end);
+  if (cap !== undefined && end - first + 1 > cap) {
+    const shownEnd = first + cap - 1;
     return {
-      content: lines.slice(start - 1, shownEnd).join("\n"),
-      lineStart: start,
+      content: lines.slice(first - 1, shownEnd).join("\n"),
+      lineStart: first,
       lineEnd: shownEnd,
       truncated: true,
       totalLines: end - start + 1,
       lastLine: end,
+      spanStart: start,
     };
   }
-  return { content: lines.slice(start - 1, end).join("\n"), lineStart: start, lineEnd: end };
+  return { content: lines.slice(first - 1, end).join("\n"), lineStart: first, lineEnd: end };
+}
+
+/**
+ * Read a file target: the whole file (capped), a typed `path:a-b` range
+ * (never capped), or a paged `path:a-b@from` cursor (capped, inside a-b).
+ */
+function readFileTarget(
+  filePath: string, start: number | undefined, end: number | undefined, pageFrom: number | undefined, cap: number | undefined,
+): ReturnType<typeof capSpan> {
+  if (pageFrom !== undefined && start !== undefined && end !== undefined) {
+    const lines = fs.readFileSync(filePath, "utf-8").split("\n");
+    return capSpan(lines, start, end, cap, pageFrom);
+  }
+  return readFileRange(filePath, start, end, cap);
 }
 
 /**
@@ -246,6 +296,7 @@ export function renderReadLlm(result: ReadResult): string[] {
       // The three fields that make a capped read recoverable in one call.
       ["truncated", result.truncated ? "true" : null],
       ["total_lines", result.totalLines !== undefined ? String(result.totalLines) : null],
+      ["span_end", result.spanEnd !== undefined ? String(result.spanEnd) : null],
       ["next", result.next],
     ]),
     llmLine("content", [["lines", String(contentLines.length)], ["numbered", "true"]]),
@@ -307,7 +358,7 @@ export function outputResult(result: ReadResult, format: string): void {
       stderr(chalk.dim(
         `\n  ${result.lineEnd - result.lineStart + 1} of ${result.totalLines} lines`
         + (result.next ? ` — next: ix read ${result.next}` : "")
-        + `, or --all for the whole ${result.targetType === "symbol" ? "symbol" : "file"}`,
+        + `, or --all for the whole ${result.targetType === "symbol" ? "symbol" : result.spanEnd !== undefined ? "range" : "file"}`,
       ));
     }
   }
@@ -349,6 +400,7 @@ export function registerReadCommand(program: Command): void {
     .addHelpText("after", `\nResolution order:
   1. Exact file path          ix read src/main.ts
   2. File path with line range ix read src/main.ts:10-50
+     (a capped read's next= cursor, path:10-1327@410, pages within 10-1327)
   3. Unique filename match     ix read Node.scala
   4. Unique symbol match       ix read IngestionService
   5. Ambiguity candidates      (prompted to disambiguate)
@@ -368,11 +420,20 @@ Examples:
       const client = createClient();
 
       // --- Step 1: Parse line range if present ---
-      const lineRangeMatch = target.match(/^(.+?):(\d+)-(\d+)$/);
+      // `path:a-b` is a range the caller typed. `path:a-b@from` is a paged
+      // cursor (what a capped symbol read hands back as next=): lines a-b,
+      // read from `from` and capped like a whole file.
+      const lineRangeMatch = target.match(/^(.+?):(\d+)-(\d+)(?:@(\d+))?$/);
       const rawTarget = lineRangeMatch ? lineRangeMatch[1] : target;
       const rangeStart = lineRangeMatch ? parseInt(lineRangeMatch[2], 10) : undefined;
       const rangeEnd = lineRangeMatch ? parseInt(lineRangeMatch[3], 10) : undefined;
+      const pageFrom = lineRangeMatch?.[4] !== undefined ? parseInt(lineRangeMatch[4], 10) : undefined;
       if (rangeStart !== undefined && rangeEnd !== undefined && (rangeStart < 1 || rangeEnd < rangeStart)) {
+        reportInvalidLineRange(target, opts.format);
+        return;
+      }
+      if (pageFrom !== undefined && rangeStart !== undefined && rangeEnd !== undefined
+        && (pageFrom < rangeStart || pageFrom > rangeEnd)) {
         reportInvalidLineRange(target, opts.format);
         return;
       }
@@ -386,7 +447,7 @@ Examples:
       if (fs.existsSync(resolvedPath) && fs.statSync(resolvedPath).isFile()) {
         if (!guardReadable(resolvedPath, opts.root, "file", opts.format)) return;
         const stale = checkStale(resolvedPath);
-        const capped = readFileRange(resolvedPath, rangeStart, rangeEnd, cap);
+        const capped = readFileTarget(resolvedPath, rangeStart, rangeEnd, pageFrom, cap);
         const result: ReadResult = withCursor({
           targetType: lineRangeMatch ? "file-range" : "file",
           path: resolvedPath,
@@ -421,7 +482,7 @@ Examples:
             // guard is what stops a backend from naming a file off the disk.
             if (!guardReadable(matchPath, opts.root, "graph file match", opts.format)) return;
             const stale = checkStale(matchPath);
-            const capped = readFileRange(matchPath, rangeStart, rangeEnd, cap);
+            const capped = readFileTarget(matchPath, rangeStart, rangeEnd, pageFrom, cap);
             const result: ReadResult = withCursor({
               targetType: "filename-match",
               path: matchPath,

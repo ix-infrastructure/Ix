@@ -140,16 +140,23 @@ Two commands cannot know a true total and say so rather than inventing one:
   exist.
 
 `ix read` caps a read at 400 lines and marks the `file` record with
-`truncated=true total_lines=<n> next=<path>:<from>-<to>`. What `total_lines`
-counts depends on `target=`:
+`truncated=true total_lines=<n> next=<target>`. `total_lines` is always a
+count, never a line number:
 
-- `target=file`: the lines in the file.
-- `target=symbol`: the lines in the symbol's span (`line_end - line_start + 1`
-  of the whole symbol), not the file. `next=` never pages past the symbol's
-  end, and a span the graph places past EOF is clamped to the file first.
+- `target=file`: the lines in the file, and `next=<path>:<from>-<to>`.
+- `target=symbol`: the lines in the symbol's whole span, not the file. The
+  record also carries `span_end=<n>`, the symbol's last line, and
+  `next=<path>:<first>-<last>@<from>`: the symbol's span, resumed at `<from>`.
+  A span the graph places past EOF is clamped to the file first.
+
+A plain `path:a-b` is a range you typed and is never capped. A `path:a-b@from`
+cursor is capped again, and its record (`target=file-range`) repeats the same
+`total_lines`, `span_end` and a further `next=`, so following `next=` until it
+is absent reaches the symbol's last line:
 
 ```
-file path=src/big.ts line_start=10 line_end=409 target=symbol symbol=bigFn kind=function truncated=true total_lines=1318 next=src/big.ts:410-809
+file path=src/big.ts line_start=10 line_end=409 target=symbol symbol=bigFn kind=function truncated=true total_lines=1318 span_end=1327 next=src/big.ts:10-1327@410
+file path=src/big.ts line_start=410 line_end=809 target=file-range truncated=true total_lines=1318 span_end=1327 next=src/big.ts:10-1327@810
 ```
 
 ## Rows an agent acts on
