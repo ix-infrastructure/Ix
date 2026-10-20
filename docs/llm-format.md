@@ -123,7 +123,9 @@ ref name=retry kind=function path=src/jobs.ts lines=4-9 candidate=2
 record (json: `results: [{ candidate, ... }]`). Every tied candidate the name
 search returned is covered, not only the 8 an ambiguity error lists (those 8
 keep their `--pick` numbers; the rest follow), so a common name can mean many
-analyses. The search window is bounded (up to 200 names with `--path`, fewer
+analyses. An import of the name (`from app.utils import clamp`) is listed in
+an ambiguity but skipped by `--all` when a definition is listed too, so the
+numbers can skip it; when only imports are listed, they are answered. The search window is bounded (up to 200 names with `--path`, fewer
 without); a `candidates_truncated` diagnostic says when it was cut off. Narrow
 with `--kind` or `--path` to keep the run small. `--pick` takes precedence over
 `--all`.

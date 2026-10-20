@@ -79,12 +79,13 @@ async function edgesOfAll(
   cmd: Command,
 ): Promise<void> {
   const healthCheck = checkGraphHealth(client, activeReadScope());
-  const candidates: EdgeCandidate[] = set.entities.map((e, i) => ({ n: i + 1, id: e.id, name: e.name, kind: e.kind, path: e.path }));
+  // `n` is the candidate's `--pick` number (resolve.ts candidateSet).
+  const candidates: EdgeCandidate[] = set.entities.map((e, i) => ({ n: e.n ?? i + 1, id: e.id, name: e.name, kind: e.kind, path: e.path }));
   const expanded = await mapLimit(set.entities, ALL_CONCURRENCY, (e) => client.expand(e.id, {
     direction: relation === "callers" ? "in" : "out",
     predicates: ["CALLS", "REFERENCES"],
   }));
-  const rows = expanded.flatMap((result, i) => result.nodes.map((n: any) => ({ ...n, candidate: i + 1 })));
+  const rows = expanded.flatMap((result, i) => result.nodes.map((n: any) => ({ ...n, candidate: candidates[i].n })));
   const health = await healthDiagnostics(healthCheck);
   bannerOverRows(health, format, rows.length);
   const slice = sliceEdgeResults(rows, limit, offset, expanded.some((r) => expandCapped(r)));
@@ -92,7 +93,8 @@ async function edgesOfAll(
   // Call sites are looked up against the candidate the row belongs to.
   const sites = await mapLimit(set.entities, ALL_CONCURRENCY, (e) => edgeTargetFor(client, e, relation));
   const files = new SourceFiles();
-  const sited = slice.rows.map((row: any) => withEdgeSites([row], relation, sites[row.candidate - 1], { files })[0]);
+  const siteOf = new Map(candidates.map((c, i) => [c.n, sites[i]]));
+  const sited = slice.rows.map((row: any) => withEdgeSites([row], relation, siteOf.get(row.candidate)!, { files })[0]);
   const diagnostics = [...(health.diagnostics ?? [])];
   const cut = candidatesCut(set, candidates.length, "Answered for");
   if (cut) diagnostics.push({ code: "candidates_truncated", message: cut });

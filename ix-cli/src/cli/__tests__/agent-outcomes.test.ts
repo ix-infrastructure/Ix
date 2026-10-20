@@ -322,6 +322,40 @@ describe("--all on an ambiguous target", () => {
     expect(body.diagnostics.map((d: { code: string }) => d.code)).toContain("candidates_truncated");
   });
 
+  // `from app.utils import clamp` is a one-line `module` named clamp: an
+  // ambiguity lists it, but it is not a definition (candidate-origin.ts).
+  const CLAMP_IMPORT = { id: "import-id", kind: "module", name: "clamp", attrs: { line_start: 3, line_end: 3 }, provenance: { sourceUri: "app/pricing.py" } };
+  const CLAMP_DEFS = [
+    { id: "py-id", kind: "function", name: "clamp", attrs: { line_start: 22, line_end: 23 }, provenance: { sourceUri: "app/utils.py" } },
+    { id: "ts-id", kind: "function", name: "clamp", attrs: { line_start: 9, line_end: 11 }, provenance: { sourceUri: "web/src/math.ts" } },
+  ];
+
+  it("skips an import of the name when definitions are listed, keeping --pick numbers", async () => {
+    graph({ clamp: [CLAMP_IMPORT, ...CLAMP_DEFS] });
+    const plain = JSON.parse((await run(["callers", "clamp", "--format", "json"])).stdout);
+    expect(plain.candidates.map((c: { id: string; rank: number }) => [c.rank, c.id]))
+      .toEqual([[1, "import-id"], [2, "py-id"], [3, "ts-id"]]);
+
+    expand.mockClear();
+    const body = JSON.parse((await run(["callers", "clamp", "--all", "--format", "json"])).stdout);
+    expect(body.candidates.map((c: { n: number; path: string }) => [c.n, c.path]))
+      .toEqual([[2, "app/utils.py"], [3, "web/src/math.ts"]]);
+    expect(new Set(body.results.map((r: { candidate: number }) => r.candidate))).toEqual(new Set([2, 3]));
+    expect(expand.mock.calls.map(([id]) => id).sort()).toEqual(["py-id", "ts-id"]);
+    // The skipped import is not a candidate the search cut off.
+    expect((body.diagnostics ?? []).map((d: { code: string }) => d.code)).not.toContain("candidates_truncated");
+
+    const impact = JSON.parse((await run(["impact", "clamp", "--all", "--format", "json"])).stdout);
+    expect(impact.results.map((r: { candidate: number }) => r.candidate)).toEqual([2, 3]);
+  });
+
+  it("still answers for imports when no definition is listed", async () => {
+    const other = { ...CLAMP_IMPORT, id: "import-2", provenance: { sourceUri: "web/src/format.ts" } };
+    graph({ clamp: [CLAMP_IMPORT, other] });
+    const body = JSON.parse((await run(["callers", "clamp", "--all", "--format", "json"])).stdout);
+    expect(body.candidates.map((c: { n: number; id: string }) => [c.n, c.id])).toEqual([[1, "import-id"], [2, "import-2"]]);
+  });
+
   it("impact: one analysis per candidate, tagged (json and llm)", async () => {
     const json = await run(["impact", "Duplicate", "--all", "--format", "json"]);
     expect(json.exitCode).toBe(0);

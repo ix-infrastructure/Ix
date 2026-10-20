@@ -704,7 +704,7 @@ function tieNotice(
     total: tier.length,
     ...(windowFull ? { truncated: true } : {}),
   };
-  rememberAll(notice, amb.candidates, allCandidatesOf(amb));
+  rememberAll(notice, amb.candidates, allCandidatesOf(amb), importIdsOf(amb));
   return notice;
 }
 
@@ -931,22 +931,30 @@ function nodeToResolved(node: any, symbol: string, mode: ResolutionMode): Resolv
  * shown. Kept beside the object rather than on it, so no json or llm renderer
  * that prints the result can leak a list of hundreds. `--all` reads it
  * (`allCandidatesOf`): the shown 8 first, numbered as `--pick` numbers them,
- * then the rest in display order.
+ * then the rest in display order. `imports` holds the ids of the candidates
+ * that are imports of the name rather than definitions (candidate-origin.ts),
+ * which `--all` skips when a definition is listed too.
  */
-const fullCandidates = new WeakMap<object, AmbiguousResult["candidates"]>();
+const fullCandidates = new WeakMap<object, { all: AmbiguousResult["candidates"]; imports: Set<string> }>();
 
 function rememberAll(
   owner: object,
   shown: AmbiguousResult["candidates"],
   all: AmbiguousResult["candidates"],
+  imports: Set<string> = new Set(),
 ): void {
   const shownIds = new Set(shown.map((c) => c.id));
-  fullCandidates.set(owner, [...shown, ...all.filter((c) => !shownIds.has(c.id))]);
+  fullCandidates.set(owner, { all: [...shown, ...all.filter((c) => !shownIds.has(c.id))], imports });
 }
 
 /** The full candidate list behind an ambiguous result or notice (falls back to the shown ones). */
 export function allCandidatesOf(owner: AmbiguousResult | ResolutionNotice): AmbiguousResult["candidates"] {
-  return fullCandidates.get(owner) ?? owner.candidates;
+  return fullCandidates.get(owner)?.all ?? owner.candidates;
+}
+
+/** The ids among `allCandidatesOf(owner)` that are imports of the name, not definitions. */
+function importIdsOf(owner: object): Set<string> {
+  return fullCandidates.get(owner)?.imports ?? new Set();
 }
 
 function buildAmbiguous(
@@ -989,7 +997,8 @@ function buildAmbiguous(
     ],
   };
   const unique = nodes.filter((n: any, i) => n?.id && nodes.findIndex((m: any) => m?.id === n.id) === i);
-  rememberAll(result, candidates, [...unique].sort(displayOrder).map(candidateOf));
+  const imports = new Set(unique.filter((n: any) => candidateOrigin(n) === "import").map((n: any) => String(n.id)));
+  rememberAll(result, candidates, [...unique].sort(displayOrder).map(candidateOf), imports);
   return result;
 }
 
@@ -1569,7 +1578,11 @@ export async function withMissReason<T extends { reason?: string; message?: stri
 
 /** The entities a command with `--all` runs over. */
 export interface TargetSet {
-  entities: ResolvedEntity[];
+  /**
+   * Under `--all`, each entity's `n` is its `--pick` number in the ambiguity
+   * list, so numbers can skip a candidate `--all` leaves out (an import).
+   */
+  entities: Array<ResolvedEntity & { n?: number }>;
   /** Present when `--all` expanded the target to its candidates. */
   all?: { total: number; truncated?: boolean };
 }
@@ -1599,10 +1612,10 @@ export async function resolveTargetSetOrReport(
       if (result.notices?.length) reportResolutionNotices(result.notices, format, opts);
       return { entities: [result.entity] };
     }
-    return candidateSet(allCandidatesOf(tie), tie.total, tie.truncated);
+    return candidateSet(tie, tie.total, tie.truncated);
   }
   if (result.ambiguous) {
-    return candidateSet(allCandidatesOf(result.result), result.result.total, result.result.truncated);
+    return candidateSet(result.result, result.result.total, result.result.truncated);
   }
   await reportUnresolved(client, target, result, withAll, format);
   return null;
@@ -1620,10 +1633,26 @@ export function candidatesCut(set: TargetSet, answered: number, verb: string): s
     "narrow with --kind or --path to cover the rest.";
 }
 
-function candidateSet(candidates: AmbiguousResult["candidates"], total?: number, truncated?: boolean): TargetSet {
+/**
+ * The candidates `--all` answers for, each keeping its `--pick` number. An
+ * import of the name (`from app.utils import clamp`) is listed in an ambiguity
+ * but is not a definition: when a definition is listed too, the import is
+ * skipped, since its callers are the definition's. When only imports are
+ * listed they are still the answer (the same demotion-not-filter rule as
+ * `originPenalty`).
+ */
+function candidateSet(owner: AmbiguousResult | ResolutionNotice, total?: number, truncated?: boolean): TargetSet {
+  const numbered = allCandidatesOf(owner).map((c, i) => ({ c, n: i + 1 }));
+  const imports = importIdsOf(owner);
+  const definitions = numbered.filter(({ c }) => !imports.has(c.id));
+  const kept = definitions.length > 0 ? definitions : numbered;
+  const skipped = numbered.length - kept.length;
   return {
-    entities: candidates.map((c) => ({ id: c.id, kind: c.kind, name: c.name, path: c.path, resolutionMode: "ambiguous" })),
-    all: { total: Math.max(total ?? candidates.length, candidates.length), ...(truncated ? { truncated: true } : {}) },
+    entities: kept.map(({ c, n }) => ({ id: c.id, kind: c.kind, name: c.name, path: c.path, resolutionMode: "ambiguous", n })),
+    all: {
+      total: Math.max((total ?? numbered.length) - skipped, kept.length),
+      ...(truncated ? { truncated: true } : {}),
+    },
   };
 }
 
@@ -1775,7 +1804,7 @@ async function tryFileGraphMatch(
     total: tied.length,
     ...(truncated ? { truncated: true } : {}),
   };
-  rememberAll(notice, amb.candidates, allCandidatesOf(amb));
+  rememberAll(notice, amb.candidates, allCandidatesOf(amb), importIdsOf(amb));
   const notices = fuzzy ? [notice, fuzzyNotice(target, chosen)] : [notice];
   return pickFromNotice({ resolved: true, entity: chosen, notices }, opts);
 }

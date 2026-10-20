@@ -213,7 +213,9 @@ describe("incremental equals fresh", () => {
 });
 
 // The outcome contract agents route on (ix-cli/src/cli/outcome.ts), against a
-// real backend: `clamp` is defined in app/utils.py and web/src/math.ts.
+// real backend: `clamp` is defined in app/utils.py and web/src/math.ts, and
+// app/pricing.py imports it (`from app.utils import clamp`, a one-line module
+// entity the ambiguity lists as --pick 1 but --all skips).
 describe("agent outcomes", () => {
   it("exits 0 / 2 / 3 / 4 for results, ambiguity, a miss and an unmapped directory", () => {
     const co = checkout("polyglot");
@@ -250,7 +252,12 @@ describe("agent outcomes", () => {
     expect(all.resolutionMode).toBe("all");
     expect(all.candidates.map((c: { path: string }) => c.path).sort()).toEqual(["app/utils.py", "web/src/math.ts"]);
     expect(all.results.length).toBeGreaterThan(0);
-    for (const row of all.results) expect([1, 2]).toContain(row.candidate);
+    // Each candidate keeps the number --pick gives it in the ambiguity list.
+    const listed = JSON.parse(ix(env, co, ["callers", "clamp", "--format", "json"], true).stdout).candidates;
+    for (const c of all.candidates) {
+      expect(listed.find((l: { rank: number }) => l.rank === c.n)).toMatchObject({ id: c.id });
+    }
+    for (const row of all.results) expect(all.candidates.map((c: { n: number }) => c.n)).toContain(row.candidate);
 
     const many = ix(env, co, ["locate", "slugify", "clamp", "definitelyNotAName", "--format", "json"], true);
     expect(many.status).toBe(3);

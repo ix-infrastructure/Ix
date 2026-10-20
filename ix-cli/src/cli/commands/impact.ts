@@ -82,7 +82,8 @@ async function impactOfAll(
   format: string,
   analyse: (entity: ResolvedEntity) => Promise<void>,
 ): Promise<void> {
-  const candidates = set.entities.map((e, i) => ({ n: i + 1, id: e.id, name: e.name, kind: e.kind, path: relativePath(e.path) ?? e.path }));
+  // `n` is the candidate's `--pick` number (resolve.ts candidateSet).
+  const candidates = set.entities.map((e, i) => ({ n: e.n ?? i + 1, id: e.id, name: e.name, kind: e.kind, path: relativePath(e.path) ?? e.path }));
   const total = set.all?.total ?? candidates.length;
   const truncation = candidatesCut(set, candidates.length, "Analysed");
 
@@ -91,7 +92,7 @@ async function impactOfAll(
     for (let i = 0; i < set.entities.length; i += 1) {
       const payloads = await captureJson(() => analyse(set.entities[i]));
       const only = payloads.length === 1 && payloads[0] && typeof payloads[0] === "object" ? payloads[0] as Record<string, unknown> : { results: payloads };
-      results.push({ candidate: i + 1, ...only });
+      results.push({ candidate: candidates[i].n, ...only });
     }
     printJson({
       target: symbol,
