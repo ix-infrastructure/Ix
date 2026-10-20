@@ -82,6 +82,10 @@ which value it ignored, on stderr, when a person is there to read it.
 
   `IX_LEGACY_EXIT_CODES=1` makes every non-zero exit `1`, for an integration
   that compares the status against `1`.
+  One exception in json: `locate`'s ambiguity record carries the slug as
+  `code: "ambiguous_target"`, not `error` (it never was an `error` record, and
+  readers that treat any string `error` as a failure would drop its
+  candidates); it still exits 2.
   A file target's miss adds `reason=file_not_in_graph` (on disk, not ingested)
   or `reason=file_not_found`. A symbol's miss says why when the workspace's
   text can: `reason=symbol_file_not_indexed` (the name is only in source files

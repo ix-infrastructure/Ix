@@ -5,7 +5,7 @@ import {
   CliUsageError, WorkspaceNotMappedError, backendUnreachableError, formatFetchError, isBackendUnreachable,
   parseBackendError,
 } from "./errors.js";
-import { captureJson, printJson } from "./format.js";
+import { captureJson, printJson, resetResolutionNotices } from "./format.js";
 import { llmError, llmLine } from "./llm.js";
 import {
   EXIT_AMBIGUOUS, EXIT_ERROR, EXIT_NOT_FOUND, EXIT_NOT_MAPPED, EXIT_OK, exitCodeFor, runForOutcome, setOutcome,
@@ -47,6 +47,9 @@ export async function runPerTarget(
   if (format === "json") {
     const groups: Record<string, unknown>[] = [];
     for (const target of targets) {
+      // A target that throws after queueing a resolution notice must not
+      // hand it to the next target's json.
+      resetResolutionNotices();
       let payloads: unknown[] = [];
       let failure: TargetFailure | undefined;
       const own = await runForOutcome(async () => {
@@ -63,12 +66,15 @@ export async function runPerTarget(
         ? { target, exitCode, error: failure.code, message: failure.message, ...(failure.next ? { next: failure.next } : {}) }
         : { target, exitCode, ...groupBody(payloads) });
     }
+    // Nor may the last target's leftovers land on the grouping object.
+    resetResolutionNotices();
     printJson({ targets: groups, summary: summarize(codes) });
     return;
   }
 
   for (let index = 0; index < targets.length; index += 1) {
     const target = targets[index];
+    resetResolutionNotices();
     if (format === "llm") console.log(llmLine("target", [["n", index + 1], ["name", target]]));
     else console.log(`${index > 0 ? "\n" : ""}${chalk.bold(`── ${target} ──`)}`);
     codes.push(await runForOutcome(async () => {

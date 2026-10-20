@@ -237,9 +237,10 @@ async function resolveWithAmbiguity(
   if (result.ambiguous) {
     if (format === "json") {
       printJson({
-        // The slug every other command's ambiguity carries (outcome.ts), so
-        // one parser routes them all; the locate fields stay for old readers.
-        error: "ambiguous_target",
+        // Locate's ambiguity was never an `error` record, and integrations that
+        // treat any string `error` as a failure would drop the candidates: the
+        // shared slug rides in `code` instead (the exit code is 2, outcome.ts).
+        code: "ambiguous_target",
         message: `Ambiguous symbol "${symbol}".`,
         resolvedTarget: null,
         resolutionMode: "ambiguous",

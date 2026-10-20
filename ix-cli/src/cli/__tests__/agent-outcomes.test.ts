@@ -134,7 +134,14 @@ describe.each(COMMANDS)("ix %s outcome codes", (command) => {
     const json = await run([command, "Duplicate", "--format", "json"]);
     expect(json.exitCode).toBe(2);
     const body = JSON.parse(json.stdout);
-    expect(body.error).toBe("ambiguous_target");
+    // locate's record was never an `error` (string-`error` readers treat it as
+    // a failure and drop the candidates): its slug rides in `code`.
+    if (command === "locate") {
+      expect(body.code).toBe("ambiguous_target");
+      expect(body.error).toBeUndefined();
+    } else {
+      expect(body.error).toBe("ambiguous_target");
+    }
     expect(body.candidates.map((c: { id: string }) => c.id)).toEqual(["first-id", "second-id"]);
 
     const llm = await run([command, "Duplicate", "--format", "llm"]);
@@ -400,7 +407,8 @@ describe("several targets in one call", () => {
     expect(body.targets.map((t: { target: string; exitCode: number }) => [t.target, t.exitCode]))
       .toEqual([["Unique", 0], ["Duplicate", 2], ["Missing", 3]]);
     expect(body.targets[0].resolvedTarget).toMatchObject({ id: "only-id" });
-    expect(body.targets[1].error).toBe("ambiguous_target");
+    expect(body.targets[1].code).toBe("ambiguous_target");
+    expect(body.targets[1].error).toBeUndefined();
     expect(body.targets[2].error).toBe("unresolved_target");
     expect(body.summary).toEqual({ total: 3, ok: 1, ambiguous: 1, notFound: 1, notMapped: 0, failed: 0 });
   });
