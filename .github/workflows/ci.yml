@@ -599,7 +599,9 @@ jobs:
   # ── Link gate ────────────────────────────────────────────────────────────
   # Probes every external URL in the repo's markdown and fails on 404/410, so
   # a link that stops resolving cannot merge. Zero dependencies (Node fetch),
-  # so no npm ci — runs in seconds.
+  # so no npm ci — runs in seconds. The allowlist is self-cleaning: an entry
+  # that no longer appears in any scanned file fails the gate, so an allowed
+  # dead link forces its own removal once the fixing PR merges.
   links:
     name: Dead-link check
     runs-on: ubuntu-latest
