@@ -1275,8 +1275,13 @@ export function diffInvestigations(
   const removedRelationships = prev.relationships.filter(
     (p) => !fresh.relationships.some((r) => r.src === p.src && r.dst === p.dst && r.predicate === p.predicate),
   );
-  const addedEvidence = fresh.evidence.filter((e) => !prev.evidence.some((p) => p.id === e.id));
-  const removedEvidence = prev.evidence.filter((p) => !fresh.evidence.some((e) => e.id === p.id));
+  // Same id and same title. A row that summarises a set -- `used-by`,
+  // `recent-commits`, `related-files` -- keeps its id while what it says
+  // changes, and matched on id alone a new top caller or a total going from 3
+  // to 40 was no change at all. A changed row is reported as removed and added.
+  const sameEvidence = (a: EvidenceItem, b: EvidenceItem) => a.id === b.id && a.title === b.title;
+  const addedEvidence = fresh.evidence.filter((e) => !prev.evidence.some((p) => sameEvidence(p, e)));
+  const removedEvidence = prev.evidence.filter((p) => !fresh.evidence.some((e) => sameEvidence(p, e)));
   const addedClaims = fresh.claims.filter((c) => !prev.claims.some((p) => p.id === c.id));
   const removedClaims = prev.claims.filter((p) => !fresh.claims.some((c) => c.id === p.id));
 
@@ -2578,8 +2583,9 @@ function usedByRow(
     const file = ref.path?.split("/").pop();
     return file && file !== ref.name ? `${ref.name} (${file})` : ref.name;
   };
-  const where = (ref: EntityLocation) =>
-    ref.path ? `${ref.name} ${formatLocation(locationFields(ref) as EvidenceLocation)}` : ref.name;
+  // Locations only: the title already names each entry and its file, and the
+  // row is sized against the evidence budget like any other.
+  const where = picked.filter((ref) => ref.path).map((ref) => formatLocation(locationFields(ref) as EvidenceLocation));
   const anyCaller = picked.some((ref) => callers.includes(ref));
   return {
     id: "used-by",
@@ -2587,7 +2593,7 @@ function usedByRow(
     // names `ix callers` as the way back; `ix impact` for dependents alone.
     source: anyCaller ? "facts.callers" : "facts.dependents",
     title: `used by (${picked.length} of ${total}): ${picked.map(short).join(", ")}`,
-    reason: `calls, imports or references the target, most relevant first; ${picked.map(where).join("; ")}`,
+    reason: `calls, imports or references the target, most relevant first${where.length > 0 ? `; ${where.join(", ")}` : ""}`,
     refs: picked.flatMap((ref) => (ref.id ? [ref.id] : [])),
     count: { shown: picked.length, total },
     ...locationField(picked.find((ref) => ref.path)),

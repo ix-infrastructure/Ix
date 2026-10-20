@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { IxClient } from "../../client/api.js";
-import { buildBundle, clampBudgets } from "../commands/context.js";
+import { buildBundle, clampBudgets, diffInvestigations } from "../commands/context.js";
 import { collectFacts, type ContextFacts, type EntityLocation } from "../explain/facts.js";
 import { collectRelatedFiles } from "../explain/related-files.js";
 
@@ -314,5 +314,41 @@ describe("walk seeds", () => {
     await collectRelatedFiles(client(walked), { id: TARGET, kind: "function" }, facts);
     for (const id of ["d-4", "d-5", "d-6"]) expect(walked).not.toContain(id);
     for (const id of ["d-1", "d-2", "d-3"]) expect(walked).toContain(id);
+  });
+});
+
+describe("explain scope", () => {
+  it("keeps the backend's caller order for ix explain, and no used-by total", async () => {
+    const facts = await collectFacts(callerClient(CALLERS, EDGES), TARGET, "rank", "function");
+    expect(facts.topCallerRefs!.map((r) => r.id)).toEqual(["c-test", "c-far1", "c-far2"]);
+    expect(facts).not.toHaveProperty("usedByCount");
+  });
+});
+
+describe("--diff across a callers change", () => {
+  it("reports the used-by row as changed when its callers or total change", () => {
+    const before = bundleFor(baseFacts({
+      callerCount: 3, topCallers: ["main"], topCallerRefs: [loc("c-1", "main", "src/cli/main.ts", [10, 40])],
+      usedByCount: 3,
+    }));
+    const after = bundleFor(baseFacts({
+      callerCount: 40, topCallers: ["main", "run"],
+      topCallerRefs: [loc("c-1", "main", "src/cli/main.ts", [10, 40]), loc("c-2", "run", "src/cli/run.ts", [1, 9])],
+      usedByCount: 40,
+    }));
+    const diff = diffInvestigations({ id: "x", savedAt: "2026-01-01T00:00:00Z", bundle: before } as never, after);
+    expect(diff.removed.evidence.map((e) => e.title)).toEqual(["used by (1 of 3): main (main.ts)"]);
+    expect(diff.added.evidence.map((e) => e.title)).toEqual(["used by (2 of 40): main (main.ts), run (run.ts)"]);
+
+    const same = diffInvestigations({ id: "x", savedAt: "2026-01-01T00:00:00Z", bundle: before } as never, before);
+    expect(same.added.evidence).toEqual([]);
+    expect(same.removed.evidence).toEqual([]);
+  });
+
+  it("keeps the used-by reason to locations, not a second copy of the names", () => {
+    const b = bundleFor(bigFileFacts());
+    const row = b.evidence.find((e) => e.id === "used-by")!;
+    expect(row.reason).not.toContain("main ");
+    expect(row.reason).toContain("src/cli/main.ts:10-40");
   });
 });

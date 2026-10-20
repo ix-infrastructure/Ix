@@ -76,16 +76,18 @@ export interface EntityFacts {
   topDependentRefs?: EntityLocation[];
   /**
    * Distinct entities among the callers and dependents together: the total the
-   * `topCallers` / `topDependents` samples are drawn from. The backend's own
-   * cap on an expand still applies, so this is what it returned, not a floor.
+   * `topCallers` / `topDependents` samples are drawn from, as the backend
+   * returned them. The expands ask for no limit; should the backend cap one by
+   * default, this is a floor rather than a total (rendering it as one is
+   * CL-08). `ix context` only.
    */
   usedByCount?: number;
   /**
    * The callers, dependents and callees the neighbour and related-file walks
    * start from: the backend's first few, as before the display lists were
    * ranked. Ranking picks one per file, and each distinct file is another
-   * walk, so seeding from the ranked lists grew `ix context IxClient` by a
-   * quarter of its bytes for rows the agent never sees. `ix context` only.
+   * walk, so seeding from the ranked lists made `ix context` fetch noticeably
+   * more for rows the agent never sees. `ix context` only.
    */
   walkSeeds?: { callers: EntityLocation[]; dependents: EntityLocation[]; callees: EntityLocation[] };
   /**
@@ -544,8 +546,12 @@ export async function collectFacts(
   };
   // Ranked before the cut: the backend returns them in id order, which chose
   // the three an agent sees by uuid.
-  const topCallerRefs = extractRefs(rankUsers(uniqueCallers, callersResult.edges, path), 3);
-  const topDependentRefs = extractRefs(rankUsers(uniqueDependents, dependentsResult.edges, path), 3);
+  // `ix context` only: `ix explain` keeps the backend's order, so its prose
+  // ("called from X") and JSON are what they were.
+  const ranked = (nodes: any[], rankEdges: any[] | undefined) =>
+    forExplain ? nodes : rankUsers(nodes, rankEdges, path);
+  const topCallerRefs = extractRefs(forExplain ? callersResult.nodes : ranked(uniqueCallers, callersResult.edges), 3);
+  const topDependentRefs = extractRefs(ranked(uniqueDependents, dependentsResult.edges), 3);
   // Where the target leads. Self-edges are dropped: a file that imports its own
   // directory index resolves back to itself and says nothing.
   const outward = (nodes: any[], limit: number): EntityLocation[] =>
@@ -560,7 +566,8 @@ export async function collectFacts(
     [...importsResult.nodes].sort((a: any, b: any) =>
       Number(a?.kind !== "file") - Number(b?.kind !== "file")),
     MAX_IMPORT_REFS);
-  const calleeRefs = outward(rankUsers(uniqueById(calleesResult.nodes), calleesResult.edges, path), MAX_CALLEE_REFS);
+  const calleeRefs = outward(
+    forExplain ? calleesResult.nodes : ranked(uniqueById(calleesResult.nodes), calleesResult.edges), MAX_CALLEE_REFS);
   // What the walks below fan out from: unranked, so they fetch what they did.
   const walkSeeds = {
     callers: extractRefs(callersResult.nodes, 3),
@@ -664,7 +671,6 @@ export async function collectFacts(
     topDependents,
     topCallerRefs,
     topDependentRefs,
-    usedByCount,
     importRefs,
     calleeRefs,
     neighbourRefs,
@@ -689,5 +695,5 @@ export async function collectFacts(
     moduleName: _moduleName,
     ...contextFacts
   } = facts;
-  return { ...contextFacts, walkSeeds, provenance };
+  return { ...contextFacts, usedByCount, walkSeeds, provenance };
 }
