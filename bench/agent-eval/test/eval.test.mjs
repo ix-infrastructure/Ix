@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { after, test } from 'node:test';
 import { checkManifestSource, importVerified, loadManifest, sha256, validateManifest } from '../manifest.mjs';
 import { schedule, validateConfig, validateProbe } from '../config.mjs';
-import { commandCounts, parseMetrics, METRICS } from '../metrics.mjs';
+import { commandCounts, isIxMcpTool, parseMetrics, METRICS } from '../metrics.mjs';
 import { markdown, summarize } from '../stats.mjs';
 import { dryConfig, resolveConfigPaths, runBenchmark } from '../run.mjs';
 import { execute } from '../process.mjs';
@@ -92,6 +92,14 @@ test('Claude parses terminal usage including cache creation, deduplicated messag
   assert.equal(metrics.input_tokens, 80); assert.equal(metrics.cached_tokens, 30);
   assert.equal(metrics.turns, 1); assert.equal(metrics.tool_calls, 2); assert.equal(metrics.ix_calls, 2);
   assert.deepEqual(metrics.ix_errors_by_code, { UNMAPPED: 1 });
+});
+
+test('Claude Ix MCP calls count under both direct and plugin-scoped tool names', () => {
+  for (const name of ['mcp__ix-memory__locate', 'mcp__ix__search', 'mcp__plugin_ix-agent-eval_ix-memory__locate', 'mcp__plugin_ix_ix__explain']) assert.equal(isIxMcpTool(name), true, name);
+  for (const name of ['Bash', 'mcp__github__search', 'mcp__plugin_ix-agent-eval_github__search', 'mcp__plugin_tools_ixl__x', 'mcp__ixl__x']) assert.equal(isIxMcpTool(name), false, name);
+  const tool = { type: 'tool_use', id: 'p', name: 'mcp__plugin_ix-agent-eval_ix-memory__locate', input: {} };
+  const metrics = parseMetrics(ndjson([{ type: 'assistant', message: { id: 'a', content: [tool] } }, { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'p', is_error: true, content: [{ type: 'text', text: '{"error":{"code":"UNMAPPED"}}' }] }] } }, { type: 'result', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }]), 'claude');
+  assert.equal(metrics.ix_calls, 1); assert.deepEqual(metrics.ix_errors_by_code, { UNMAPPED: 1 });
 });
 
 test('Codex sums completed turn usage and captures command/MCP errors by code', () => {
@@ -311,7 +319,7 @@ integrationTest('shipped provisioner installs pinned local integrations and isol
     // This repository's skill is inert until installed in the agent-specific location.
     const request = { synthetic: true, arm, run_path, repo_path, home, task: { base_commit: revision, problem_statement: 'fixture' }, agent: { family, binary: fakeAgent, version: '1.0-fixture', model: 'fixture-model', effort: 'medium' }, budget: { max_turns: 2 },
       environment: { plugin_revision: revision, source_path: source, ix_cli: fakeIx, ix_version: '1.0-fixture', endpoint: 'http://127.0.0.1:8090', seconds: 10, tool_paths: [tools, '/usr/bin', '/bin'] } };
-    assert.throws(() => checkTaskIsolation({ ...request, synthetic: false }), /ancestor/);
+    assert.throws(() => checkTaskIsolation({ ...request, synthetic: false }), (error) => /ancestor/.test(error.message) && error.message.includes(resolve(root, '..', '..')));
     const env = armEnvironment(request, { ...process.env, IX_ENDPOINT: 'http://wrong.invalid', IX_WORKSPACE_ID: 'wrong', JARVIS_IX_SOCKET: 'wrong' });
     assert.equal(env.IX_WORKSPACE_ID, undefined); assert.equal(env.JARVIS_IX_SOCKET, undefined);
     assert.equal(env.IX_ENDPOINT, arm === 'ix' ? request.environment.endpoint : undefined);

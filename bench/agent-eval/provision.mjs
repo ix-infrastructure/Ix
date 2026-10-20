@@ -48,7 +48,8 @@ export function checkTaskIsolation(request) {
   if (!request.synthetic) {
     for (let parent = dirname(request.repo_path); ; parent = dirname(parent)) {
       for (const name of ['AGENTS.md', 'CLAUDE.md', '.claude', '.codex', '.agents', '.mcp.json']) {
-        if (existsSync(join(parent, name))) throw new Error('Ambient ancestor agent configuration; choose an output directory outside that project');
+        // Developer homes usually hold ~/.claude or ~/.codex, so name the culprit.
+        if (existsSync(join(parent, name))) throw new Error(`Ambient ancestor agent configuration at ${join(parent, name)}; choose an output directory outside that project and outside any home directory holding agent configuration`);
       }
       if (parent === dirname(parent)) break;
     }

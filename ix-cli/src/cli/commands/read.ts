@@ -133,7 +133,8 @@ function readFileRange(
  */
 function readablePath(filePath: string): string {
   const relative = relativePath(filePath);
-  // Home abbreviation is still an absolute location; try the canonical cwd first.
+  // Home abbreviation is still an absolute location; try the canonical cwd first
+  // and keep `~/` only for files outside the working tree.
   if (relative && relative !== filePath && !/^~[\\/]/.test(relative)) return relative;
   try {
     const fromCwd = path.relative(fs.realpathSync(process.cwd()), fs.realpathSync(filePath));
@@ -143,7 +144,7 @@ function readablePath(filePath: string): string {
   } catch {
     // An unreadable cwd or a file deleted under us: the absolute path stands.
   }
-  return filePath;
+  return relative || filePath;
 }
 
 /** `src/a.ts:401-800`, or nothing when the cap landed on the last line. */

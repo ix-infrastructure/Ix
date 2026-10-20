@@ -106,6 +106,19 @@ describe("ix read line cap", () => {
     expect(logs[0]).toContain("next=src/big.ts:401-800");
   });
 
+  it("keeps the home abbreviation for files outside the working tree", async () => {
+    const elsewhere = mkdtempSync(join(tmpdir(), "ix-read-cap-cwd-"));
+    try {
+      process.chdir(elsewhere);
+      vi.spyOn(format, "relativePath").mockReturnValue("~/example/src/big.ts");
+      await read(["src/big.ts", "--format", "llm"]);
+      expect(logs[0]).toContain("next=~/example/src/big.ts:401-800");
+    } finally {
+      process.chdir(root);
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the cursor relative when the root is reached through a symlink", async () => {
     // macOS resolves `/var` to `/private/var`, so `process.cwd()` and a path
     // built from `--root` disagree about a link on every temp-dir run there;

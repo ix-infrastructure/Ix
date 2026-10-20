@@ -48,6 +48,14 @@ export function commandCounts(command) {
   return counts;
 }
 
+/** Claude names MCP tools `mcp__<server>__<tool>`; plugin servers (our `--plugin-dir`
+ * arm) become `mcp__plugin_<plugin>_<server>__<tool>`. Plugin names are kebab-case.
+ */
+export function isIxMcpTool(name) {
+  const server = /^mcp__(.+?)__/.exec(name ?? '')?.[1] ?? '';
+  return /^(?:plugin_[a-z0-9-]+_)?ix(?:[._-]|$)/i.test(server);
+}
+
 function ixErrorCode(text) {
   try { return JSON.parse(text).error?.code; } catch {
     return String(text ?? '').match(/(?:^|\n)error\s+code=(?:"([\w.-]+)"|([\w.-]+))/)?.slice(1).find(Boolean);
@@ -101,7 +109,7 @@ export function parseMetrics(text, format, { allowIncomplete = false } = {}) {
         if (!event.message?.id) throw new Error('Assistant event missing message id');
         turns.add(event.message.id);
         for (const content of event.message.content ?? []) {
-          if (content.type === 'tool_use') tool(content.id, content.input?.command ?? '', /^mcp__ix(?:[._-]|__)/.test(content.name ?? ''));
+          if (content.type === 'tool_use') tool(content.id, content.input?.command ?? '', isIxMcpTool(content.name));
         }
       }
       if (event.type === 'result') {
