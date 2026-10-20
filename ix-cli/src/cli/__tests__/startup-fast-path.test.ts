@@ -33,6 +33,7 @@ function tempDir(prefix: string): string {
 let home: string;   // IX_HOME: exists, no config.yaml
 let work: string;   // cwd: not a git repository, not a mapped workspace
 let tracer: string; // --import module recording every module the CLI loads
+let ttyStderr: string; // --import module making process.stderr claim to be a terminal
 
 beforeAll(() => {
   home = tempDir("ix-fast-home-");
@@ -48,6 +49,9 @@ beforeAll(() => {
   writeFileSync(join(hooks, "register.mjs"),
     'import { register } from "node:module";\nregister(new URL("./hooks.mjs", import.meta.url));\n');
   tracer = pathToFileURL(join(hooks, "register.mjs")).href;
+  writeFileSync(join(hooks, "tty-stderr.mjs"),
+    'Object.defineProperty(process.stderr, "isTTY", { value: true, configurable: true });\n');
+  ttyStderr = pathToFileURL(join(hooks, "tty-stderr.mjs")).href;
 });
 
 afterAll(() => {
@@ -80,10 +84,12 @@ function runCli(args: string[], opts: { env?: NodeJS.ProcessEnv; cwd?: string; i
 }
 
 /** The `commands/*` modules a run loaded, by file name without extension. */
-async function commandModulesLoaded(args: string[], extraEnv: Record<string, string> = {}, input?: string): Promise<string[]> {
+async function commandModulesLoaded(
+  args: string[], extraEnv: Record<string, string> = {}, input?: string, imports: string[] = [],
+): Promise<string[]> {
   const trace = join(tempDir("ix-fast-trace-"), "modules.txt");
   writeFileSync(trace, "");
-  await runCli(args, { env: baseEnv({ IX_TEST_MODULE_TRACE: trace, ...extraEnv }), imports: [tracer], input });
+  await runCli(args, { env: baseEnv({ IX_TEST_MODULE_TRACE: trace, ...extraEnv }), imports: [tracer, ...imports], input });
   const urls = readFileSync(trace, "utf-8").split("\n").filter(Boolean);
   // Proves the tracer saw the CLI at all, so an empty answer means something.
   expect(urls.some((u) => /\/cli\/main\.ts$/.test(u))).toBe(true);
@@ -289,6 +295,33 @@ describe("the fast and full paths answer identically", () => {
 
   it.concurrent("--version prints the version and nothing else", async () => {
     expect(await runCli(["--version"])).toEqual({ stdout: `${VERSION}\n`, stderr: "", status: 0 });
+  }, 60_000);
+});
+
+describe("the update check", () => {
+  // Every other test runs with stderr piped, where `upgrade.js` is never
+  // loaded. A person's terminal is the one place it is, so fake one.
+  it.concurrent("is loaded only when stderr is a terminal", async () => {
+    expect(await commandModulesLoaded(["read", "a.txt", "--format", "json"])).toEqual(["read"]);
+    expect(await commandModulesLoaded(["read", "a.txt", "--format", "json"], {}, undefined, [ttyStderr]))
+      .toEqual(["read", "upgrade"]);
+  }, 60_000);
+
+  it.concurrent("still prints its notice on a terminal, the same on both paths", async () => {
+    // A fresh cached answer naming a newer release: the notice comes from the
+    // cache, so no request leaves the machine.
+    const own = tempDir("ix-update-home-");
+    writeFileSync(join(own, ".version-check.json"), JSON.stringify({ latest: "999.0.0", checkedAt: Date.now() }));
+    const env = baseEnv({ IX_HOME: own, IX_NO_UPDATE_CHECK: "" });
+    const args = ["read", "a.txt:1-1", "--format", "text"];
+    const [fast, full] = await Promise.all([
+      runCli(args, { env, imports: [ttyStderr] }),
+      runCli(args, { env: { ...env, [LOAD_ALL_COMMANDS_ENV]: "1" }, imports: [ttyStderr] }),
+    ]);
+    expect(fast.status).toBe(0);
+    expect(fast.stdout).toContain("first line");
+    expect(fast.stderr).toContain("999.0.0");
+    expect(fast).toEqual(full);
   }, 60_000);
 });
 
