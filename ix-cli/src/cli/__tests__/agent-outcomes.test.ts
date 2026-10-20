@@ -402,7 +402,30 @@ describe("several targets in one call", () => {
     expect(body.targets[0].resolvedTarget).toMatchObject({ id: "only-id" });
     expect(body.targets[1].error).toBe("ambiguous_target");
     expect(body.targets[2].error).toBe("unresolved_target");
-    expect(body.summary).toEqual({ total: 3, ok: 1, ambiguous: 1, notFound: 1, failed: 0 });
+    expect(body.summary).toEqual({ total: 3, ok: 1, ambiguous: 1, notFound: 1, notMapped: 0, failed: 0 });
+  });
+
+  it("the summary counts an unmapped target as not mapped, and a miss the same under the legacy switch", async () => {
+    const base = search.getMockImplementation()!;
+    search.mockImplementation(async (term: string, ...rest: unknown[]) => {
+      if (term === "Elsewhere") throw new WorkspaceNotMappedError("/tmp/elsewhere", "Run `ix map`.");
+      return base(term, ...rest);
+    });
+    const json = await run(["locate", "Unique", "Elsewhere", "Missing", "--format", "json"]);
+    expect(json.exitCode).toBe(4);
+    const body = JSON.parse(json.stdout);
+    expect(body.targets[1]).toMatchObject({ target: "Elsewhere", exitCode: 4, error: "workspace_not_mapped" });
+    expect(body.summary).toEqual({ total: 3, ok: 1, ambiguous: 0, notFound: 1, notMapped: 1, failed: 0 });
+    const llm = await run(["locate", "Unique", "Elsewhere", "--format", "llm"]);
+    expect(llm.stdout.split("\n").pop()).toBe("targets total=2 ok=1 not_mapped=1");
+
+    // Every miss exits 1 under the switch; the summary still tells them apart.
+    process.env[LEGACY_EXIT_CODES_ENV] = "1";
+    const legacy = await run(["locate", "Unique", "Duplicate", "Missing", "Elsewhere", "--format", "json"]);
+    expect(legacy.exitCode).toBe(1);
+    const legacyBody = JSON.parse(legacy.stdout);
+    expect(legacyBody.targets.map((t: { exitCode: number }) => t.exitCode)).toEqual([0, 1, 1, 1]);
+    expect(legacyBody.summary).toEqual({ total: 4, ok: 1, ambiguous: 1, notFound: 1, notMapped: 1, failed: 0 });
   });
 
   it("callers: llm opens each group with a target record and ends with a summary", async () => {
@@ -439,7 +462,7 @@ describe("several targets in one call", () => {
     expect(body.targets[0]).toMatchObject({ target: "Unique", exitCode: 1, error: "query_failed", message: "backend broke" });
     expect(body.targets[1]).toMatchObject({ target: "Other", exitCode: 0 });
     expect(body.targets[1].results.map((r: { name: string }) => r.name)).toContain("callerOf_other-id");
-    expect(body.summary).toEqual({ total: 2, ok: 1, ambiguous: 0, notFound: 0, failed: 1 });
+    expect(body.summary).toEqual({ total: 2, ok: 1, ambiguous: 0, notFound: 0, notMapped: 0, failed: 1 });
 
     const llm = await run(["callers", "Unique", "Other", "--format", "llm"]);
     expect(llm.exitCode).toBe(1);
@@ -532,5 +555,32 @@ describe("an id lookup the backend could not answer", () => {
     resolvePrefix.mockReset().mockRejectedValue(down);
     const { IxClient } = await import("../../client/api.js");
     await expect(resolveFileOrEntityFull(new (IxClient as any)(), "deadbeef", { format: "json" })).rejects.toThrow(/fetch failed/);
+  });
+});
+
+describe("subsystems and around carry the same outcome codes as their slugs", () => {
+  it("subsystems: an ambiguous region exits 2, an unknown one 3, any other error 1", async () => {
+    const { setSubsystemErrorExit } = await import("../commands/subsystems.js");
+    const exitFor = (body: unknown) => { process.exitCode = undefined; setSubsystemErrorExit(body); return Number(process.exitCode); };
+    expect(exitFor({ error: "ambiguous_target", target_query: "api", candidates: [] })).toBe(2);
+    expect(exitFor({ error: "unknown_target", message: "No region api", suggestions: [] })).toBe(3);
+    expect(exitFor({ error: "query_failed" })).toBe(1);
+    process.env[LEGACY_EXIT_CODES_ENV] = "1";
+    expect(exitFor({ error: "ambiguous_target", target_query: "api", candidates: [] })).toBe(1);
+  });
+
+  it("around: a file not in the graph exits 3, a bad argument 1", async () => {
+    const { reportError } = await import("../commands/around.js");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      process.exitCode = undefined;
+      reportError("unresolved_target", "not in the graph", "llm", [["reason", "file_not_in_graph"]]);
+      expect(process.exitCode).toBe(3);
+      process.exitCode = undefined;
+      reportError("invalid_line_range", "bad range", "llm");
+      expect(process.exitCode).toBe(1);
+    } finally {
+      log.mockRestore();
+    }
   });
 });

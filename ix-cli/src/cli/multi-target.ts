@@ -7,7 +7,10 @@ import {
 } from "./errors.js";
 import { captureJson, printJson } from "./format.js";
 import { llmError, llmLine } from "./llm.js";
-import { EXIT_AMBIGUOUS, EXIT_ERROR, EXIT_NOT_FOUND, EXIT_OK, exitCodeFor, runForExitCode } from "./outcome.js";
+import {
+  EXIT_AMBIGUOUS, EXIT_ERROR, EXIT_NOT_FOUND, EXIT_NOT_MAPPED, EXIT_OK, exitCodeFor, runForOutcome, setOutcome,
+  type MissOutcome,
+} from "./outcome.js";
 
 /**
  * Run a one-target command body for each of several targets and group the
@@ -40,21 +43,22 @@ export async function runPerTarget(
     return;
   }
 
-  const codes: number[] = [];
+  const codes: TargetCode[] = [];
   if (format === "json") {
     const groups: Record<string, unknown>[] = [];
     for (const target of targets) {
       let payloads: unknown[] = [];
       let failure: TargetFailure | undefined;
-      const exitCode = await runForExitCode(async () => {
+      const own = await runForOutcome(async () => {
         try {
           payloads = await captureJson(() => run(target));
         } catch (err) {
           failure = targetFailure(err);
-          process.exitCode = failure.exitCode;
+          recordFailure(failure);
         }
       });
-      codes.push(exitCode);
+      codes.push(own);
+      const exitCode = own.exitCode;
       groups.push(failure
         ? { target, exitCode, error: failure.code, message: failure.message, ...(failure.next ? { next: failure.next } : {}) }
         : { target, exitCode, ...groupBody(payloads) });
@@ -67,12 +71,12 @@ export async function runPerTarget(
     const target = targets[index];
     if (format === "llm") console.log(llmLine("target", [["n", index + 1], ["name", target]]));
     else console.log(`${index > 0 ? "\n" : ""}${chalk.bold(`── ${target} ──`)}`);
-    codes.push(await runForExitCode(async () => {
+    codes.push(await runForOutcome(async () => {
       try {
         await run(target);
       } catch (err) {
         const failure = targetFailure(err);
-        process.exitCode = failure.exitCode;
+        recordFailure(failure);
         if (format === "llm") {
           console.log(llmError(failure.code, failure.message, failure.next ? [["hint", failure.next]] : []));
         } else {
@@ -87,12 +91,20 @@ export async function runPerTarget(
     console.log(llmLine("targets", [
       ["total", summary.total], ["ok", summary.ok],
       ["ambiguous", summary.ambiguous || undefined], ["not_found", summary.notFound || undefined],
-      ["failed", summary.failed || undefined],
+      ["not_mapped", summary.notMapped || undefined], ["failed", summary.failed || undefined],
     ]));
   }
 }
 
-interface TargetFailure { code: string; message: string; next?: string; exitCode: number }
+interface TargetFailure { code: string; message: string; next?: string; exitCode: number; outcome?: MissOutcome }
+
+type TargetCode = { exitCode: number; outcome?: MissOutcome };
+
+/** A thrown target's status, recorded as its outcome when it has one. */
+function recordFailure(failure: TargetFailure): void {
+  if (failure.outcome) setOutcome(failure.outcome);
+  else process.exitCode = failure.exitCode;
+}
 
 /**
  * What one target's thrown error says, in the slugs and codes the
@@ -102,7 +114,7 @@ interface TargetFailure { code: string; message: string; next?: string; exitCode
 function targetFailure(err: unknown): TargetFailure {
   if (err instanceof CliUsageError) throw err;
   if (err instanceof WorkspaceNotMappedError) {
-    return { code: err.code, message: err.summary, next: err.hint, exitCode: exitCodeFor("not_mapped") };
+    return { code: err.code, message: err.summary, next: err.hint, exitCode: exitCodeFor("not_mapped"), outcome: "not_mapped" };
   }
   if (isBackendUnreachable(err)) {
     const unreachable = backendUnreachableError();
@@ -127,9 +139,26 @@ function groupBody(payloads: unknown[]): Record<string, unknown> {
   return payloads.length === 0 ? {} : { results: payloads };
 }
 
-function summarize(codes: readonly number[]) {
-  const ok = codes.filter((c) => c === EXIT_OK).length;
-  const ambiguous = codes.filter((c) => c === EXIT_AMBIGUOUS).length;
-  const notFound = codes.filter((c) => c === EXIT_NOT_FOUND).length;
-  return { total: codes.length, ok, ambiguous, notFound, failed: codes.length - ok - ambiguous - notFound };
+/**
+ * Which summary bucket a target falls in. By its code, or, when the legacy
+ * switch made a miss exit 1, by the outcome it recorded, so the summary says
+ * the same with or without `IX_LEGACY_EXIT_CODES`.
+ */
+function bucketOf({ exitCode, outcome }: TargetCode): "ok" | MissOutcome | "failed" {
+  switch (exitCode) {
+    case EXIT_OK: return "ok";
+    case EXIT_AMBIGUOUS: return "ambiguous";
+    case EXIT_NOT_FOUND: return "not_found";
+    case EXIT_NOT_MAPPED: return "not_mapped";
+  }
+  return outcome && exitCode === EXIT_ERROR && exitCodeFor(outcome) === EXIT_ERROR ? outcome : "failed";
+}
+
+function summarize(codes: readonly TargetCode[]) {
+  const buckets = codes.map(bucketOf);
+  const count = (b: ReturnType<typeof bucketOf>) => buckets.filter((x) => x === b).length;
+  return {
+    total: codes.length, ok: count("ok"), ambiguous: count("ambiguous"), notFound: count("not_found"),
+    notMapped: count("not_mapped"), failed: count("failed"),
+  };
 }

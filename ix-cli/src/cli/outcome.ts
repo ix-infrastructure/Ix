@@ -80,22 +80,45 @@ function currentExitCode(): number {
 }
 
 /**
+ * The worst outcome recorded since `runForOutcome` last reset it. The exit
+ * code alone cannot say which outcome a target had under the legacy switch,
+ * where every one of them is 1.
+ */
+let recorded: MissOutcome | undefined;
+
+function worseOutcome(a: MissOutcome | undefined, b: MissOutcome | undefined): MissOutcome | undefined {
+  if (!a || !b) return a ?? b;
+  return CODES[b] > CODES[a] ? b : a;
+}
+
+/**
  * Record an outcome on `process.exitCode`, keeping any worse status already
  * set: one target's ambiguity must not hide another's error.
  */
 export function setOutcome(outcome: MissOutcome): void {
+  recorded = worseOutcome(recorded, outcome);
   process.exitCode = worseExitCode(currentExitCode(), exitCodeFor(outcome));
 }
 
 /**
  * Run one target of a multi-target command and return the exit code it alone
- * would have had, leaving `process.exitCode` at the worst code so far.
+ * would have had, and the worst outcome it recorded, leaving
+ * `process.exitCode` at the worst code so far.
  */
-export async function runForExitCode(fn: () => Promise<void>): Promise<number> {
+export async function runForOutcome(fn: () => Promise<void>): Promise<{ exitCode: number; outcome?: MissOutcome }> {
   const before = currentExitCode();
+  const recordedBefore = recorded;
   process.exitCode = undefined;
+  recorded = undefined;
   await fn();
   const own = currentExitCode();
+  const outcome = recorded;
   process.exitCode = worseExitCode(before, own) || undefined;
-  return own;
+  recorded = worseOutcome(recordedBefore, outcome);
+  return { exitCode: own, ...(outcome ? { outcome } : {}) };
+}
+
+/** `runForOutcome`'s exit code alone. */
+export async function runForExitCode(fn: () => Promise<void>): Promise<number> {
+  return (await runForOutcome(fn)).exitCode;
 }

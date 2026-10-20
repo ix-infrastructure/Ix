@@ -67,8 +67,10 @@ which value it ignored, on stderr, when a person is there to read it.
   format as data lines; the process still exits non-zero. A graph target that
   does not exist is always `unresolved_target`.
   The graph commands (`locate`, `callers`, `callees`, `impact`, `explain` and
-  the rest that resolve a target) exit with a code per outcome, and json's
-  `error` / llm's `error code=` carry the matching slug:
+  the rest that resolve a target, `subsystems <region>` and `around` included)
+  exit with a code per outcome, and json's `error` / llm's `error code=` carry
+  the matching slug (`subsystems --format json` prints the backend's body, where
+  an unknown region is `unknown_target`):
 
   | Exit | Outcome | Slug |
   |---|---|---|
@@ -136,10 +138,11 @@ with `--kind` or `--path` to keep the run small. `--pick` takes precedence over
 
 Each target is answered as it would be alone, grouped: llm opens each group
 with `target n=<i> name=<t>` and ends with
-`targets total=<n> ok=<n> [ambiguous=<n>] [not_found=<n>] [failed=<n>]`; json
-is `{ targets: [{ target, exitCode, ...answer }], summary }`. The run exits
+`targets total=<n> ok=<n> [ambiguous=<n>] [not_found=<n>] [not_mapped=<n>] [failed=<n>]`;
+json is `{ targets: [{ target, exitCode, ...answer }], summary }`. The run exits
 with the worst target's code (error, then workspace not mapped, then not
-found, then ambiguous), so a partial answer never exits 0.
+found, then ambiguous), so a partial answer never exits 0. The summary counts
+each target by its outcome, so it reads the same under `IX_LEGACY_EXIT_CODES=1`.
 
 ### Resolution notices (exit 0)
 
