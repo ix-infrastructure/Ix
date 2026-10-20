@@ -3,6 +3,7 @@
 import { readFileSync } from "node:fs";
 import { posix } from "node:path";
 
+import { commandStdin } from "../stdin-source.js";
 import { isTestPath } from "./related-files.js";
 import { resolveToken, type RepoAccess } from "./text-references.js";
 
@@ -663,7 +664,7 @@ export function rankIssueFiles(
  */
 export async function readIssueText(
   arg: string,
-  stdin: AsyncIterable<unknown> = process.stdin,
+  stdin: AsyncIterable<unknown> = commandStdin(),
 ): Promise<string> {
   if (arg !== "-") return decodeIssue(readFileSync(arg));
   const chunks: Buffer[] = [];

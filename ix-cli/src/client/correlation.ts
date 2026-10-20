@@ -22,8 +22,18 @@ export const CORRELATION_ID_HEADER = "X-Correlation-Id";
 /** What the backend accepts as an inbound id (Ix-memory CorrelationIdMiddleware). */
 export const ACCEPTED_CORRELATION_ID = /^[A-Za-z0-9._-]{1,64}$/;
 
-const invocationId = randomUUID();
+let invocationId = randomUUID();
 let sequence = 0;
+
+/**
+ * Start a new invocation: a fresh prefix, numbered from 1 again. The warm
+ * daemon (`cli/daemon/`) answers many `ix` runs from one process and calls
+ * this before each, so every run still has a prefix of its own.
+ */
+export function beginInvocation(): void {
+  invocationId = randomUUID();
+  sequence = 0;
+}
 
 /** This process's prefix: every request id it sends starts with it. */
 export function invocationCorrelationId(): string {

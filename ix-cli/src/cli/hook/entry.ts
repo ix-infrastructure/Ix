@@ -2,6 +2,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { currentRunSignal } from "../../client/run-signal.js";
 import { hookTimeoutMs, readStdin, withDeadline } from "./io.js";
 import {
   fingerprint, gitDiffHead, gitTopLevel, loadState, parseUnifiedDiff, saveState, statePath,
@@ -40,6 +41,18 @@ export function appendHookLog(file: string | undefined, record: Record<string, u
   try { fs.appendFileSync(file, `${JSON.stringify(record)}\n`); } catch { /* never fail the hook over its log */ }
 }
 
+/**
+ * True once the call this work belongs to has ended without it: the hook's own
+ * deadline passed, or the warm daemon (`cli/daemon/`) gave up on the run. In
+ * its own process the hook exits at its deadline and nothing after that runs;
+ * in the daemon its work carries on and finds out here. Work that is no longer
+ * wanted must not write session state: a fingerprint saved for a report nobody
+ * saw would keep every later call in the session silent.
+ */
+function abandoned(): boolean {
+  return currentRunSignal()?.aborted === true;
+}
+
 /** Never throws; undefined means print nothing. */
 export async function runPostEditHook(raw: string, opts: HookOptions = {}, deps: EntryDeps = {}): Promise<string | undefined> {
   const env = opts.env ?? process.env;
@@ -55,7 +68,8 @@ export async function runPostEditHook(raw: string, opts: HookOptions = {}, deps:
     output = await runPostEditHookInner(raw, opts, deps, env, record, notes);
     return output;
   } finally {
-    if (logFile) {
+    // An abandoned call was already logged as a timeout by `answerWithin`.
+    if (logFile && !abandoned()) {
       appendHookLog(logFile, {
         ...record, ms: Date.now() - started, chars: output?.length ?? 0, notes,
       });
@@ -85,7 +99,7 @@ async function runPostEditHookInner(
       const outcome = await heavy.reportToolEdit(input, new Set(state.reported), opts, deps);
       record.path = "tool-edit";
       notes.push(...(outcome.notes ?? []));
-      if (outcome.reported.length > 0) saveState(file, { ...state, reported: [...state.reported, ...outcome.reported] });
+      if (outcome.reported.length > 0 && !abandoned()) saveState(file, { ...state, reported: [...state.reported, ...outcome.reported] });
       return outcome.output;
     }
 
@@ -102,6 +116,7 @@ async function runPostEditHookInner(
     record.path = outcome.output ? "reported" : "silent";
     record.files = files.length;
     notes.push(...(outcome.notes ?? []));
+    if (abandoned()) return undefined;
     saveState(file, {
       // Keep the old fingerprint while edited symbols wait behind the cap, so
       // the next call -- even one that edits nothing -- reports them.
@@ -135,6 +150,21 @@ export async function answerWithin(raw: string, opts: HookOptions, ms: number, d
   return out;
 }
 
+/**
+ * What a hook that got no answer by its deadline leaves behind -- the same
+ * `IX_HOOK_LOG` record and `IX_HOOK_DEBUG` lines as `answerWithin` and
+ * `runHookProcess` write -- for a caller that ran out of time before the hook
+ * could run: the warm daemon's client, when the daemon did not answer in time.
+ */
+export function reportHookTimeout(started: number, ms: number, env: NodeJS.ProcessEnv = process.env): void {
+  appendHookLog(env.IX_HOOK_LOG || undefined, {
+    ts: new Date(started).toISOString(), path: "timeout", ms: Date.now() - started, chars: 0, notes: [],
+  });
+  if (env.IX_HOOK_DEBUG === "1") {
+    process.stderr.write(`[ix hook] no answer within ${ms} ms\n[ix hook] nothing in ${Date.now() - started} ms\n`);
+  }
+}
+
 /** `--graph-root <dir>`, `--worktree=<dir>`, `--budget <n>`; anything else is ignored. */
 export function parseHookArgs(argv: string[]): HookOptions {
   const opts: HookOptions = {};
@@ -155,15 +185,19 @@ export function parseHookArgs(argv: string[]): HookOptions {
  * The whole process: read stdin, answer within the deadline, print, exit 0.
  * Exits at once so a request still in flight past the deadline can neither
  * hold the agent nor surface later as an unhandled rejection.
+ *
+ * The deadline runs from `startedAt`: now, for a hook in its own process; when
+ * the warm daemon answers, the moment the caller's `ix` started, so time spent
+ * reaching the daemon comes out of the same budget.
  */
-export async function runHookProcess(opts: HookOptions): Promise<void> {
-  const started = Date.now();
+export async function runHookProcess(opts: HookOptions, startedAt: number = Date.now()): Promise<void> {
+  const started = Math.min(startedAt, Date.now());
   const timeout = hookTimeoutMs();
   const debugOn = process.env.IX_HOOK_DEBUG === "1";
   const debug = (msg: string) => { if (debugOn) process.stderr.write(`[ix hook] ${msg}\n`); };
   let out: string | undefined;
   try {
-    const raw = await readStdin(timeout);
+    const raw = await readStdin(Math.max(0, timeout - (Date.now() - started)));
     const left = Math.max(0, timeout - (Date.now() - started));
     out = await answerWithin(raw, opts, left, { debug });
   } catch (err) {

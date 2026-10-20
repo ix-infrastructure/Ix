@@ -99,6 +99,7 @@ mapped one, pass `--graph-root <mapped>` and `--worktree <agent checkout>`.
 | Backend health | `ix status` | `ix status` |
 | System doctor | `ix doctor` | `ix doctor` |
 | Start backend | `ix docker start` | `ix docker start` |
+| Warm daemon (agents' read calls) | `ix daemon status` / `ix daemon stop` | `ix daemon status --json` |
 | Graph statistics | `ix stats` | `ix stats` |
 
 ## Session Metrics
@@ -214,7 +215,7 @@ ix inventory --kind function --path auth.py
   degraded graph.
 
 - **The OSS↔Pro command boundary is derived at runtime, not declared.**
-  `run-cli.ts` (which `main.ts` loads) snapshots `ossCmdNames` immediately after `registerOssCommands()`;
+  `cli-invocation.ts` (which `run-cli.ts` runs) snapshots `ossCmdNames` immediately after `registerOssCommands()`;
   the Pro probe (`tryLoadProCommands`) then diffs whatever commands exist
   against that set to decide which count as "Pro". Consequences:
   - Adding a `register*Command` call in `oss.ts` silently reclassifies that

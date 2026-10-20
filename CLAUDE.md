@@ -45,7 +45,7 @@ ix map --silent                             # refresh the graph after code chang
   `ix reset --workspace` (the registered workspace containing cwd, nothing
   else). After a global reset, re-map each workspace.
 - **The OSS↔Pro command boundary is derived at runtime, not declared.**
-  `run-cli.ts` snapshots `ossCmdNames` right after registering the OSS
+  `cli-invocation.ts` snapshots `ossCmdNames` right after registering the OSS
   commands; the Pro probe diffs against it. Adding a command to `oss.ts`
   silently makes it OSS; removing one makes Pro own it. `registerProCommands`
   is async and MUST be awaited.
@@ -55,6 +55,21 @@ ix map --silent                             # refresh the graph after code chang
   run. A command missing from the table still works (it takes the full path),
   but `startup-fast-path.test.ts` fails until it is added. The shared
   per-command setup is in `register/oss-setup.ts`.
+- **Agent-facing reads may be answered by a warm daemon** (`src/cli/daemon/`).
+  On Linux/macOS, `text`/`locate`/`read`/`explain`/`callers`/`search`/
+  `context`/`impact`/`around`/`hook` with stdout and stderr not a terminal go
+  to a per-IX_HOME daemon that runs them in-process and must answer
+  byte-identically to a cold run. It runs only from `dist/` (rebuild before
+  trusting it), and module state a command keeps across calls must be reset
+  per run in `daemon/run.ts`. A command that starts reading stdin must be
+  listed in `stdinUse` (`daemon/protocol.ts`) and read through
+  `stdin-source.ts`. Tests run with `IX_DAEMON=off` (`vitest.setup.ts`);
+  `IX_DAEMON=off` is also the first thing to try when a read misbehaves.
+  Work a run abandons (deadline, client gone) keeps going in the daemon:
+  anything it would write after that must check `currentRunSignal()?.aborted`
+  first, as the hook's state save does. A sandboxed (`no_new_privs`) caller
+  never uses it unless `IX_DAEMON_ALLOW_CONFINED=1`, so it never runs in an
+  agent sandbox like this one without that.
 - **`ix patches` is OSS, not Pro** (#371). It is implemented here and registered
   in `oss.ts`. `@ix/pro` also registers a `patches`; commander throws on the
   duplicate and Pro's `tryRegister` swallows the throw, so the OSS one — which

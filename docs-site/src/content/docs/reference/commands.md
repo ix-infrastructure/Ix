@@ -88,6 +88,7 @@ before it exits: `ix map` re-ingests the workspace, and so does `ix ingest` when
 | `ix docker start` / `stop` / `restart` | Starts, stops or restarts the local backend containers |
 | `ix docker start --local-token` | Makes the local backend require a bearer token, which the CLI stores and sends (`--no-local-token` turns it off). See [Local token](/reference/configuration/#local-token) |
 | `ix docker status` / `logs` | Shows container health, or tails the backend's logs |
+| `ix daemon status` / `stop` | Shows or stops the warm daemon that answers agents' read commands (`--json` for status). It starts itself and exits when idle; see `IX_DAEMON` in [configuration](/reference/configuration/#environment-variables) |
 | `ix view` | Opens the [Compass](/guides/compass/) visualizer |
 | `ix mcp` | Runs the [MCP server](/integrations/mcp/). `ix mcp install` registers it with your clients |
 | `ix config show` / `get` / `set` | Reads and writes [configuration](/reference/configuration/) |

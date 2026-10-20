@@ -163,6 +163,9 @@ export function ix(env: E2eEnv, co: Checkout, args: string[], allowFail = false)
       IX_ENDPOINT: env.endpoint,
       IX_NO_UPDATE_CHECK: "1",
       NO_COLOR: "1",
+      // Every call its own process, as before the warm daemon: no daemon per
+      // checkout left running after the suite.
+      IX_DAEMON: "off",
     },
   });
   const out = { status: res.status ?? -1, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };

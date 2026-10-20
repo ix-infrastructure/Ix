@@ -272,6 +272,28 @@ Build a bounded, deterministic context bundle for a symbol, file, or entity (or 
 | `--diff` | `<id>` | — | Diff a saved investigation against a fresh build of the same target |
 | `--list` | — | off | List saved investigations (no target, no backend) |
 
+### `ix daemon`
+
+The warm background process that answers agents' read commands. On Linux and macOS, a call to `text`, `locate`, `read`, `explain`, `callers`, `search`, `context`, `impact`, `around` or `hook` whose stdout and stderr are not a terminal is answered by a per-user daemon (one per Ix home) when one is running, with the same output and exit code as running it alone. The first such call runs as usual and starts the daemon; it exits after `IX_DAEMON_IDLE_MINUTES` (default 15) without a request. A call the daemon cannot take (busy with one call and another waiting, a wait over 150 ms, a hook call while it is busy, output over 16 MB, another build after an upgrade, any error) runs on its own, and so does every call from a sandboxed process (Linux `no_new_privs`) unless `IX_DAEMON_ALLOW_CONFINED=1`. `IX_DAEMON=off` turns it off. It logs to `<IX_HOME>/daemon/daemon.log`.
+
+Subcommands: `status`, `stop`.
+
+No flags.
+
+#### `ix daemon status`
+
+Show whether the daemon is running: pid, build, uptime, runs served, memory, and its socket.
+
+| Flag | Value | Default | Effect |
+|---|---|---|---|
+| `--json` | — | off | Print the status as one JSON object |
+
+#### `ix daemon stop`
+
+Stop the daemon. The next agent call starts a fresh one unless `IX_DAEMON=off`.
+
+No flags.
+
 ### `ix depends <symbol>`
 
 Show upstream dependents of the given entity (full tree by default).

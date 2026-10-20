@@ -97,7 +97,8 @@ function measure(base, co, args, log) {
     cwd: co.dir,
     encoding: "utf8",
     timeout: 600_000,
-    env: { ...process.env, IX_HOME: co.ixHome, IX_ENDPOINT: base, IX_NO_UPDATE_CHECK: "1", NO_COLOR: "1", IX_FETCH_LOG: log },
+    // IX_DAEMON=off: the fetch log only sees requests made in this process.
+    env: { ...process.env, IX_HOME: co.ixHome, IX_ENDPOINT: base, IX_NO_UPDATE_CHECK: "1", NO_COLOR: "1", IX_FETCH_LOG: log, IX_DAEMON: "off" },
   });
   const wallMs = Math.round(performance.now() - t0);
   const lines = existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
