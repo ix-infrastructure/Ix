@@ -8,6 +8,7 @@ import { registerImpactCommand } from "../commands/impact.js";
 import { registerLocateCommand } from "../commands/locate.js";
 import { WorkspaceNotMappedError, renderCliError, setErrorFormat } from "../errors.js";
 import { LEGACY_EXIT_CODES_ENV, exitCodeFor, worseExitCode } from "../outcome.js";
+import { ALL_CANDIDATE_CAP } from "../resolve.js";
 
 // The outcome contract an agent routes on (outcome.ts): 0 results, 2 ambiguous
 // (candidates returned), 3 not found (suggestions), 4 workspace not mapped,
@@ -340,6 +341,25 @@ describe("--all on an ambiguous target", () => {
     const body = JSON.parse((await run(["callers", "Many", "--all", "--limit", "500", "--format", "json"])).stdout);
     expect(body.candidates.length).toBeGreaterThan(8);
     expect(body.diagnostics.map((d: { code: string }) => d.code)).toContain("candidates_truncated");
+  });
+
+  it("answers at most ALL_CANDIDATE_CAP candidates and says so", async () => {
+    graph({ Many: manyNamed(ALL_CANDIDATE_CAP + 5) });
+    expand.mockClear();
+    const body = JSON.parse((await run(["callers", "Many", "--all", "--limit", "500", "--format", "json"])).stdout);
+    expect(body.candidates).toHaveLength(ALL_CANDIDATE_CAP);
+    expect(body.candidates.map((c: { n: number }) => c.n)).toEqual(Array.from({ length: ALL_CANDIDATE_CAP }, (_, i) => i + 1));
+    expect(new Set(expand.mock.calls.map(([id]) => id)).size).toBe(ALL_CANDIDATE_CAP);
+    const cut = body.diagnostics.find((d: { code: string }) => d.code === "candidates_truncated");
+    expect(cut.message).toContain(`first ${ALL_CANDIDATE_CAP} of ${ALL_CANDIDATE_CAP + 5}`);
+
+    const impact = JSON.parse((await run(["impact", "Many", "--all", "--format", "json"])).stdout);
+    expect(impact.results).toHaveLength(ALL_CANDIDATE_CAP);
+    expect(impact.diagnostics.map((d: { code: string }) => d.code)).toContain("candidates_truncated");
+
+    // A candidate past the cap is still reachable by its number.
+    const picked = JSON.parse((await run(["callers", "Many", "--pick", String(ALL_CANDIDATE_CAP + 3), "--format", "json"])).stdout);
+    expect(picked.resolvedTarget).toMatchObject({ id: `dup-${ALL_CANDIDATE_CAP + 2}` });
   });
 
   // `from app.utils import clamp` is a one-line `module` named clamp: an

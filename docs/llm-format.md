@@ -128,13 +128,14 @@ ref name=retry kind=function path=src/jobs.ts lines=4-9 candidate=2
 ```
 
 `impact --all` prints one analysis per candidate, each after its `candidate`
-record (json: `results: [{ candidate, ... }]`). Every tied candidate the name
-search returned is covered, not only the 8 an ambiguity error lists (those 8
-keep their `--pick` numbers; the rest follow, and `--pick <n>` reaches them by
-the same numbers), so a common name can mean many analyses. An import of the name (`from app.utils import clamp`) is listed in
+record (json: `results: [{ candidate, ... }]`). Tied candidates past the 8 an
+ambiguity error lists are covered too (those 8 keep their `--pick` numbers; the
+rest follow, and `--pick <n>` reaches them by the same numbers), up to 25 per
+call: past that, only the first 25 are answered and a `candidates_truncated`
+diagnostic says so. An import of the name (`from app.utils import clamp`) is listed in
 an ambiguity but skipped by `--all` when a definition is listed too, so the
 numbers can skip it; when only imports are listed, they are answered. The search window is bounded (up to 200 names with `--path`, fewer
-without); a `candidates_truncated` diagnostic says when it was cut off. Narrow
+without); the same diagnostic says when it was cut off. Narrow
 with `--kind` or `--path` to keep the run small. `--pick` takes precedence over
 `--all`.
 

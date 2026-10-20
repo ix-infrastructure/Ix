@@ -127,12 +127,12 @@ surfaces (#575).
 - **`--all` answers an ambiguous name for every candidate** (`callers`,
   `callees`, `impact`), instead of exiting 2 with the candidate list. Each row
   (or, for `impact`, each analysis) carries `candidate=<n>`, numbering the
-  `candidate` records printed with it. It covers every tied candidate the name
+  `candidate` records printed with it. It covers the tied candidates the name
   search returned, not only the 8 an ambiguity lists (numbered as `--pick`
   numbers them; an import of the name is skipped when a definition is listed
-  too), so narrow with `--kind`
+  too), up to 25 per call, so narrow with `--kind`
   or `--path` for a common name; a `candidates_truncated` diagnostic says when
-  the search was cut off. `--pick` takes precedence over it.
+  the cap or the search cut it off. `--pick` takes precedence over it.
 - **Exit codes** for the graph commands: `0` results, `2` ambiguous
   (candidates listed), `3` not found (suggestions and a reason when known),
   `4` workspace not mapped, `1` any other error. `IX_LEGACY_EXIT_CODES=1` makes

@@ -1589,8 +1589,12 @@ export interface TargetSet {
    * list, so numbers can skip a candidate `--all` leaves out (an import).
    */
   entities: Array<ResolvedEntity & { n?: number }>;
-  /** Present when `--all` expanded the target to its candidates. */
-  all?: { total: number; truncated?: boolean };
+  /**
+   * Present when `--all` expanded the target to its candidates. `capped`:
+   * more candidates were listed than `ALL_CANDIDATE_CAP`, so only the first
+   * ones are answered.
+   */
+  all?: { total: number; truncated?: boolean; capped?: boolean };
 }
 
 /**
@@ -1628,12 +1632,24 @@ export async function resolveTargetSetOrReport(
 }
 
 /**
+ * The most candidates one `--all` call answers for. Each is at least one
+ * backend query (`impact` runs a whole analysis per candidate, one after
+ * another), so a common name must not turn one call into hundreds of round
+ * trips; past the cap, `--kind`/`--path` or `--pick` reach the rest.
+ */
+export const ALL_CANDIDATE_CAP = 25;
+
+/**
  * Why an `--all` answer may not cover every candidate, or undefined when it
- * does: the resolver's search window came back full, so names past it were
- * never seen. Every candidate it did see is answered.
+ * does: `ALL_CANDIDATE_CAP` stopped it, or the resolver's search window came
+ * back full, so names past it were never seen.
  */
 export function candidatesCut(set: TargetSet, answered: number, verb: string): string | undefined {
   if (!set.all) return undefined;
+  if (set.all.capped) {
+    return `${verb} the first ${answered} of ${set.all.total}${set.all.truncated ? "+" : ""} candidates ` +
+      `(--all answers at most ${ALL_CANDIDATE_CAP}); narrow with --kind or --path, or reach one with --pick <n>.`;
+  }
   if (!set.all.truncated && set.all.total <= answered) return undefined;
   return `${verb} ${answered} candidates, but the name search was cut off, so there may be more; ` +
     "narrow with --kind or --path to cover the rest.";
@@ -1653,11 +1669,13 @@ function candidateSet(owner: AmbiguousResult | ResolutionNotice, total?: number,
   const definitions = numbered.filter(({ c }) => !imports.has(c.id));
   const kept = definitions.length > 0 ? definitions : numbered;
   const skipped = numbered.length - kept.length;
+  const answered = kept.slice(0, ALL_CANDIDATE_CAP);
   return {
-    entities: kept.map(({ c, n }) => ({ id: c.id, kind: c.kind, name: c.name, path: c.path, resolutionMode: "ambiguous", n })),
+    entities: answered.map(({ c, n }) => ({ id: c.id, kind: c.kind, name: c.name, path: c.path, resolutionMode: "ambiguous", n })),
     all: {
       total: Math.max((total ?? numbered.length) - skipped, kept.length),
       ...(truncated ? { truncated: true } : {}),
+      ...(kept.length > answered.length ? { capped: true } : {}),
     },
   };
 }
