@@ -17,6 +17,9 @@ const methods = (ext: string, body: string) => ext === 'scala'
     ? `class Target { run() {} } class Other { run() {} } ${body}`
     : `package p\ntype Target struct{}; type Other struct{}; func (t Target) Run() {}; func (o Other) Run() {}; ${body}`;
 
+const typedEdgeOps = (ops: Array<{ type: string; attrs?: unknown }>) =>
+  ops.filter(op => op.type === 'UpsertEdge' && (op.attrs as { tier?: string } | undefined)?.tier === 'type');
+
 describe('typed local receivers', () => {
   it('Go resolves a receiver method declared in another package file', () => {
     const files = [
@@ -200,10 +203,9 @@ describe('typed local receivers', () => {
     ['go', 'func use(dep *Target) { for _, dep := range unknown() { dep.Run() } }'],
   ])('%s unknown shadows do not borrow the outer receiver', (ext, body) => {
     const result = parse(ext, methods(ext, body));
+    expect(result.relationships.filter(r => r.receiverType === 'Target')).toEqual([]);
     expect(resolveEdges([result]).filter(e => e.predicate === 'CALLS')).toEqual([]);
-    const patch = buildPatchWithResolution(result, 'hash', 'workspace', []);
-    expect(patch.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS')).toEqual([]);
-    expect(buildPatch(result, 'hash', 'workspace').ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS')).toEqual([]);
+    expect(typedEdgeOps(buildPatch(result, 'hash', 'workspace').ops)).toEqual([]);
   });
 
   it.each([
@@ -234,14 +236,20 @@ describe('typed local receivers', () => {
 
   it.each([
     ['scala', 'class Target { def run(x: Int) = (); def run(x: String) = () }; object Use { def use(dep: Target) = dep.run(1) }'],
-    ['ts', 'class Target { run(x: number): void; run(x: string): void; run(x: any) {} } function use(dep: Target) { dep.run(1); }'],
     ['go', 'package p\ntype Target struct{}; func (t Target) Run() {}; func (t Target) Run() {}; func use(dep Target) { dep.Run() }'],
-  ])('%s ambiguous member definitions are left unresolved', (ext, source) => {
+  ])('%s ambiguous member definitions do not guess a type-tier signature', (ext, source) => {
     const result = parse(ext, source);
     expect(resolveEdges([result]).filter(e => e.predicate === 'CALLS')).toEqual([]);
-    const patch = buildPatchWithResolution(result, 'hash', 'workspace', []);
-    expect(patch.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS')).toEqual([]);
-    expect(buildPatch(result, 'hash', 'workspace').ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS')).toEqual([]);
+    // The call falls back to its bare member name, as it resolved before inference.
+    const ops = buildPatch(result, 'hash', 'workspace').ops;
+    expect(typedEdgeOps(ops)).toEqual([]);
+    expect(ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS')).toHaveLength(1);
+  });
+
+  it('TypeScript overload signatures share their one implementation node', () => {
+    const result = parse('ts', 'class Target { run(x: number): void; run(x: string): void; run(x: any) {} } function use(dep: Target) { dep.run(1); }');
+    expect(result.entities.filter(e => e.name === 'run')).toHaveLength(1);
+    expect(resolveEdges([result])).toEqual([expect.objectContaining({ dstQualifiedKey: 'Target.run', tier: 'type' })]);
   });
 
   it.each(['extends Base', 'extends Empty with Base'])('Scala resolves inherited members: %s', (heritage) => {
@@ -281,5 +289,84 @@ describe('typed local receivers', () => {
     const summaries = new Map(files.map(r => [r.filePath, summarizeParseResult(r)]));
     const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
     expect(resolveEdges([caller], undefined, index)).toEqual(fresh);
+  });
+});
+
+describe('receiver inference is additive', () => {
+  const callsFrom = (edges: ReturnType<typeof resolveEdges>, srcName: string) =>
+    edges.filter(e => e.predicate === 'CALLS' && e.srcName === srcName);
+
+  it('Go keeps calls through an unaliased package import and types its factory', () => {
+    const svc = parse('go', 'package svc\ntype Store struct{}\nfunc NewStore() *Store { return &Store{} }\nfunc (s *Store) Save() {}\nfunc Helper() {}\n', 'pkg/svc/store');
+    const app = parse('go', 'package main\nimport "example.com/m/pkg/svc"\nfunc main() { svc.Helper(); s := svc.NewStore(); s.Save() }\n', 'cmd/app/main');
+    const calls = callsFrom(resolveEdges([svc, app]), 'main');
+    expect(calls).toContainEqual(expect.objectContaining({ dstFilePath: svc.filePath, dstQualifiedKey: 'Helper', tier: 'import' }));
+    expect(calls).toContainEqual(expect.objectContaining({ dstFilePath: svc.filePath, dstQualifiedKey: 'NewStore', tier: 'import' }));
+    expect(calls).toContainEqual(expect.objectContaining({ dstFilePath: svc.filePath, dstQualifiedKey: 'Store.Save', tier: 'type' }));
+  });
+
+  it('TypeScript namespace-import calls resolve by their bare name, as before', () => {
+    const util = parse('ts', 'export function helper() {}', 'util');
+    const lib = parse('ts', 'export function boot() {}', 'lib');
+    const main = parse('ts', "import * as U from './util'; import * as lib from './lib'; function main() { U.helper(); lib.boot(); }", 'main');
+    expect(main.relationships.filter(r => r.predicate === 'CALLS').map(r => r.dstName)).toEqual(['helper', 'boot']);
+    const calls = callsFrom(resolveEdges([util, lib, main]), 'main');
+    expect(calls).toContainEqual(expect.objectContaining({ dstFilePath: util.filePath, dstQualifiedKey: 'helper', tier: 'import' }));
+    expect(calls).toContainEqual(expect.objectContaining({ dstFilePath: lib.filePath, dstQualifiedKey: 'boot', tier: 'import' }));
+  });
+
+  it('a receiver whose type is not inferred falls back to its bare member name', () => {
+    const client = parse('ts', 'export class IxClient { stats() {} } export function createClient(): IxClient { return new IxClient(); }', 'client');
+    const cmd = parse('ts', "import { IxClient, createClient } from './client'; function run() { const client = createClient(); client.stats(); } function check(c: Pick<IxClient, 'stats'>) { c.stats(); }", 'cmd');
+    const edges = resolveEdges([client, cmd]);
+    for (const caller of ['run', 'check']) {
+      expect(callsFrom(edges, caller)).toContainEqual(expect.objectContaining({ dstFilePath: client.filePath, dstQualifiedKey: 'IxClient.stats', tier: 'import' }));
+    }
+    // The fallback edge is written under the relationship's own name.
+    const ops = buildPatchWithResolution(cmd, 'hash', 'workspace', edges).ops;
+    // run -> createClient, run -> stats, check -> stats.
+    expect(ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS').map(op => op.attrs))
+      .toEqual([{ confidence: 0.9, tier: 'binding' }, { confidence: 0.9, tier: 'import' }, { confidence: 0.9, tier: 'import' }]);
+  });
+
+  it('Scala falls back to the bare member when a factory return is unknown', () => {
+    const repo = parse('scala', 'class Repo { def find() = () }; object Factory { def makeRepo() = new Repo() }', 'repo');
+    const use = parse('scala', 'object Use { def use() = { val r = makeRepo(); r.find() } }');
+    expect(callsFrom(resolveEdges([repo, use]), 'Use.use')).toContainEqual(expect.objectContaining({ dstFilePath: repo.filePath, dstQualifiedKey: 'Repo.find' }));
+  });
+
+  it('Scala chained calls keep bare callee names, never receiver source text', () => {
+    const result = parseFile('/repo/use.scala', 'object Use {\n  def use(xs: Seq[Int]) = {\n    xs.map { x =>\n      x + 1\n    }.filter(_ > 2).foreach(println)\n    Option(1).getOrElse(0)\n  }\n}\n')!;
+    const names = result.relationships.filter(r => r.predicate === 'CALLS').map(r => r.dstName);
+    expect(names).toEqual(expect.arrayContaining(['filter', 'foreach', 'getOrElse']));
+    expect(names.filter(n => /[^\w.$]/.test(n))).toEqual([]);
+  });
+
+  it('an unresolved typed call is recorded under its bare member name, as before', () => {
+    const result = parse('ts', 'function main() { const seen = new Registry(); seen.lookup(1); }', 'main');
+    expect(result.relationships).toContainEqual(expect.objectContaining({ dstName: 'Registry.lookup', receiverType: 'Registry' }));
+    const main = buildPatch(result, 'hash', 'workspace').ops.find(op => op.type === 'UpsertNode' && op.name === 'main');
+    expect((main as { attrs?: Record<string, unknown> } | undefined)?.attrs?.unresolved_calls).toEqual(['Registry', 'lookup']);
+  });
+
+  it('builtin member calls on an uninferred receiver stay filtered', () => {
+    const result = parse('ts', "function main() { console.log('x'); }", 'main');
+    expect(result.relationships.filter(r => r.predicate === 'CALLS')).toEqual([]);
+    const file = buildPatch(result, 'hash', 'workspace').ops.find(op => op.type === 'UpsertNode' && op.name === 'main');
+    expect((file as { attrs?: Record<string, unknown> } | undefined)?.attrs?.unresolved_calls).toBeUndefined();
+  });
+});
+
+describe('receiver summary signature', () => {
+  const sig = (ext: string, source: string) => summarizeParseResult(parse(ext, source, 'child')).sig;
+
+  it('changes when only a Scala subclass file re-imports its superclass', () => {
+    expect(sig('scala', 'import p1.Parent\nclass Child extends Parent {}'))
+      .not.toBe(sig('scala', 'import p2.Parent\nclass Child extends Parent {}'));
+  });
+
+  it('stays the same for a file without receiver facts when its imports change', () => {
+    expect(sig('ts', "import { a } from './a'; export function f() {}"))
+      .toBe(sig('ts', "import { a } from './b'; export function f() {}"));
   });
 });

@@ -218,6 +218,12 @@ describe("dependents (IN-11)", () => {
     expect(changedNames(before, after)).toEqual(new Set(["Target"]));
   });
 
+  it("invalidates a subclass when only its file's imports pick a different superclass", () => {
+    const before = summary("child.scala", { sig: "before", receiverHeritage: [["Child", "Parent"]], imports: [{ dstName: "p1.Parent" }] });
+    const after = summary("child.scala", { sig: "after", receiverHeritage: [["Child", "Parent"]], imports: [{ dstName: "p2.Parent" }] });
+    expect(changedNames(before, after)).toEqual(new Set(["Child"]));
+  });
+
   it("changes no names when the signature is the same, and the symmetric difference otherwise", () => {
     const before = summary("m.ts", { sig: "s1", qkeys: [["add", "add"], ["sub", "sub"]] });
     expect(changedNames(before, summary("m.ts", { sig: "s1", qkeys: [["add", "add"], ["sub", "sub"]] }))).toEqual(new Set());

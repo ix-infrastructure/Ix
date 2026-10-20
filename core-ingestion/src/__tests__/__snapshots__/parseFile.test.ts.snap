@@ -888,9 +888,8 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "srcName": "runChecks",
     },
     {
-      "dstName": "results.push",
+      "dstName": "push",
       "predicate": "CALLS",
-      "receiverUnresolved": true,
       "srcName": "runChecks",
     },
     {
@@ -905,7 +904,7 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "srcName": "runOne",
     },
     {
-      "dstName": "path.join",
+      "dstName": "join",
       "predicate": "CALLS",
       "srcName": "runOne",
     },
@@ -926,15 +925,13 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "srcName": "statusOf",
     },
     {
-      "dstName": "results.every",
+      "dstName": "every",
       "predicate": "CALLS",
-      "receiverUnresolved": true,
       "srcName": "statusOf",
     },
     {
-      "dstName": "results.some",
+      "dstName": "some",
       "predicate": "CALLS",
-      "receiverUnresolved": true,
       "srcName": "statusOf",
     },
     {
@@ -946,6 +943,11 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "dstName": "Loader",
       "predicate": "REFERENCES",
       "srcName": "CheckRunner.constructor",
+    },
+    {
+      "dstName": "loader",
+      "predicate": "CALLS",
+      "srcName": "CheckRunner.load",
     },
     {
       "dstName": "CheckRunner.loader",

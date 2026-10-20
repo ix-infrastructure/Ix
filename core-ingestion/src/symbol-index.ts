@@ -40,14 +40,29 @@ export interface FileSummary {
 }
 
 /** The part of a summary other files depend on, hashed. */
-export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNames' | 'phpTypes' | 'receiverFactories' | 'receiverHeritage' | 'receiverPackage'>): string {
-  const canonical = JSON.stringify([
+export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNames' | 'phpTypes' | 'receiverFactories' | 'receiverHeritage' | 'receiverPackage'> & Partial<Pick<FileSummary, 'imports'>>): string {
+  const parts: unknown[] = [
     [...s.qkeys].map(([n, q]) => `${n}\0${q}`).sort(),
     [...(s.exportPublicNames ?? [])].map(([p, l]) => `${p}\0${l}`).sort(),
     [...(s.phpTypes ?? [])].map(([f, t]) => `${f}\0${t}`).sort(),
-    [...(s.receiverFactories ?? [])].map(([f, t]) => `${f}\0${t}`).sort(),
-    [...(s.receiverHeritage ?? [])].map(([f, t]) => `${f}\0${t}`).sort(),
-    s.receiverPackage ?? '',
-  ]);
+  ];
+  // Receiver facts only when present, so other files keep their signature.
+  if (s.receiverFactories?.length || s.receiverHeritage?.length || s.receiverPackage) {
+    parts.push(
+      [...(s.receiverFactories ?? [])].map(([f, t]) => `${f}\0${t}`).sort(),
+      // A superclass resolves through this file's imports.
+      [...(s.receiverHeritage ?? [])].map(([f, t]) => `${f}\0${t}\0${heritageImportsKey(s.imports)}`).sort(),
+      s.receiverPackage ?? '',
+    );
+  }
+  const canonical = JSON.stringify(parts);
   return crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 32);
+}
+
+/**
+ * The imports a Scala superclass resolves through, as one key. Any import can
+ * pick the parent (wildcards included), so all of them count.
+ */
+export function heritageImportsKey(imports: Array<{ dstName: string }> | undefined): string {
+  return [...new Set((imports ?? []).map(i => i.dstName))].sort().join('\0');
 }

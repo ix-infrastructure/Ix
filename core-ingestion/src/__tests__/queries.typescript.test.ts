@@ -49,7 +49,7 @@ describe('TypeScript queries', () => {
     });
     expect(result!.relationships).toContainEqual({
       srcName: 'Example.method',
-      dstName: 'foo.bar',
+      dstName: 'bar',
       predicate: 'CALLS',
     });
   });

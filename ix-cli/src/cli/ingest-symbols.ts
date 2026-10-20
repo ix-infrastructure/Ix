@@ -337,7 +337,9 @@ function bindings(summary: StoredSummary | undefined): Map<string, string[]> {
   for (const [publicName, local] of s.exportPublicNames ?? []) out.set(`e\0${publicName}\0${local}`, [publicName]);
   for (const [fqcn, typeName] of s.phpTypes ?? []) out.set(`p\0${fqcn}\0${typeName}`, [fqcn, typeName]);
   for (const [name, type] of s.receiverFactories ?? []) out.set(`f\0${name}\0${type}`, [name]);
-  for (const [name, base] of s.receiverHeritage ?? []) out.set(`h\0${name}\0${base}`, [name]);
+  // A superclass resolves through this file's imports, so they are part of the key.
+  const heritageImports = [...new Set((s.imports ?? []).map(i => i.dstName ?? ""))].sort().join("\0");
+  for (const [name, base] of s.receiverHeritage ?? []) out.set(`h\0${name}\0${base}\0${heritageImports}`, [name]);
   return out;
 }
 

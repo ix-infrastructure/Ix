@@ -140,8 +140,7 @@ function deduplicateUpsertEdges(ops: PatchOp[]): PatchOp[] {
  * cross-file edges carry `confidence` and `tier`. 1.29: cross-file resolution
  * no longer depends on how files are split into batches, TypeScript gaps
  * (overload signatures, generic type references) are extracted, and files
- * carry `parse_errors` and their role. 1.30: lexical Scala, TypeScript and Go
- * receiver types resolve exact members, with factory and heritage summaries.
+ * carry `parse_errors` and their role.
  *
  * `ix map` skips files whose mtime or source hash is unchanged, which would
  * keep the old extractor's edges on them, so the ingest baseline records this
@@ -159,11 +158,11 @@ export function patchActor(): string {
 }
 
 export function extractorName(): string {
-  return `tree-sitter/1.30`;
+  return `tree-sitter/1.29`;
 }
 
 /** Previous extractor versions — their patches are superseded when re-ingesting. */
-export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.29', 'tree-sitter/1.28', 'tree-sitter/1.27', 'tree-sitter/1.26', 'tree-sitter/1.25', 'tree-sitter/1.24', 'tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
+export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.28', 'tree-sitter/1.27', 'tree-sitter/1.26', 'tree-sitter/1.25', 'tree-sitter/1.24', 'tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
 
 /** Patch ids that may own the active graph entities for a stored source hash. */
 export function sourcePatchIdCandidates(
@@ -257,11 +256,13 @@ export function buildPatch(
   multiRepo?: MultiRepoContext,
 ): GraphPatchPayload {
   const { entities, chunks } = result;
-  // A helper-literal import is inferred and only means something once resolved
-  // to a tracked file; without resolution it would be a dangling edge.
-  if (result.relationships.some(r => r.receiverType || r.receiverFactory || r.receiverUnresolved)) {
+  // A typed receiver call needs resolveEdges even within one file: its exact
+  // member, or else its bare-name fallback.
+  if (result.relationships.some(r => r.receiverType || r.receiverFactory)) {
     return buildPatchWithResolution(result, sourceHash, workspaceId, resolveEdges([result]), previousSourceHash, multiRepo);
   }
+  // A helper-literal import is inferred and only means something once resolved
+  // to a tracked file; without resolution it would be a dangling edge.
   const relationships = result.relationships.filter(r => r.importVia !== 'helper');
   // Two paths, deliberately distinct (see toMemberRelativePath):
   //  - filePath (workspace-relative, repo-prefixed in a co-ingest) is PROVENANCE:
@@ -758,9 +759,6 @@ export function buildPatchWithResolution(
     /** Set when resolveEdges tied the edge to another file. */
     resolution: { confidence: number; tier: ResolutionTier | undefined } | null;
   } => {
-    if (r.receiverUnresolved || ((r.receiverType || r.receiverFactory) && !edgeResolution.has(`${r.srcName}:${r.predicate}:${r.dstName}`))) {
-      return { dstNodeId: '', externalPkg: null, resolution: null };
-    }
     const baseKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
     const salted = r.phpCallKind ? `${baseKey}:${r.phpCallKind}` : baseKey;
     const matched = edgeResolution.has(salted) ? salted : baseKey;
@@ -800,8 +798,17 @@ export function buildPatchWithResolution(
     seenNodeIds2.has(srcNodeId) &&
     (dst.resolution !== null || dst.externalPkg !== null || seenNodeIds2.has(dst.dstNodeId));
 
+  /**
+   * A typed receiver call resolveEdges could not tie to an exact member falls
+   * back to its bare member name locally, as it resolved before inference.
+   */
+  const localDstName = (r: (typeof relationships)[number]): string =>
+    (r.receiverType || r.receiverFactory) && !edgeResolution.has(`${r.srcName}:${r.predicate}:${r.dstName}`)
+      ? r.dstName.slice(r.dstName.lastIndexOf('.') + 1)
+      : r.dstName;
+
   const relationshipDstKey = (r: (typeof relationships)[number]): string =>
-    r.predicate === 'CONTAINS' ? resolveKey(r.dstName, r.srcName) : resolveKey(r.dstName);
+    r.predicate === 'CONTAINS' ? resolveKey(r.dstName, r.srcName) : resolveKey(localDstName(r));
 
   const edgeIdTuple = (srcKey: string, edgeDstKey: string, predicate: string): string =>
     `${srcKey}\x00${edgeDstKey}\x00${predicate}`;
@@ -845,15 +852,13 @@ export function buildPatchWithResolution(
 
   for (const r of relationships) {
     const srcKey = resolveKey(r.srcName);
-    const dstKey = r.predicate === 'CONTAINS'
-      ? resolveKey(r.dstName, r.srcName)
-      : resolveKey(r.dstName);
+    const dstKey = relationshipDstKey(r);
 
     const baseResolutionKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
     const dst = resolveDst(r, dstKey);
     const { dstNodeId, externalPkg, resolution } = dst;
     if (!keepEdge(nodeId(idPath, srcKey), dst)) {
-      if (r.predicate === 'CALLS') unresolvedCalls.add(nodeId(idPath, srcKey), r.dstName);
+      if (r.predicate === 'CALLS') unresolvedCalls.add(nodeId(idPath, srcKey), localDstName(r));
       continue;
     }
     if (externalPkg && !seenExternalNodes2.has(dstNodeId)) {

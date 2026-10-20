@@ -235,10 +235,12 @@ export interface ParsedRelationship {
    * it becomes an edge only when it resolves to exactly one tracked file.
    */
   importVia?: 'helper';
-  /** Lexically inferred receiver; unknown bindings must never resolve by name. */
+  /**
+   * Lexically inferred receiver. An exact member resolves at tier `type`;
+   * otherwise the call falls back to its bare member name, as before inference.
+   */
   receiverType?: string;
   receiverFactory?: string;
-  receiverUnresolved?: true;
 }
 
 /**
@@ -3191,15 +3193,29 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         // BUILTINS filtering is skipped for attribute calls: method names like
         // `filter` or `map` are Python builtins when called bare, but are valid
         // user-defined method calls when invoked as `query.filter(...)`.
-        const qualifierCapture = match.captures.find((c: any) => c.name === '_qualifier');
+        let qualifierCapture = match.captures.find((c: any) => c.name === '_qualifier');
         // R package-qualified calls (pkg::func) carry a distinct @_namespace
         // capture so the dstName can keep the :: separator (vs a plain dotted name).
         const namespaceCapture = match.captures.find((c: any) => c.name === '_namespace');
-        // The Go catch-all selector query also matches identifier receivers. Its
-        // qualified match is authoritative; a second bare call could create a false edge.
-        if (language === SupportedLanguages.Go && !qualifierCapture &&
-            callName.node.parent?.type === 'selector_expression' &&
-            callName.node.parent.childForFieldName('operand')?.type === 'identifier') continue;
+        // Receiver inference is additive: only a receiver with an inferred type or
+        // factory changes the call. Any other TS/Scala member-call receiver is
+        // dropped so the call stays the bare name it was before (TS `this.` aside).
+        const receiverLookup = qualifierCapture ? receiverFacts?.lookup(qualifierCapture.node) : undefined;
+        const inferredReceiver = receiverLookup?.type || receiverLookup?.factory ? receiverLookup : undefined;
+        if (qualifierCapture && !inferredReceiver && match.captures.some((c: any) => c.name === 'call') && (
+          (language === SupportedLanguages.TypeScript && qualifierCapture.node.type !== 'this') ||
+          language === SupportedLanguages.Scala)) qualifierCapture = undefined;
+        // The Go catch-all selector and the TS member-call queries also match a
+        // receiver another pattern captures. When that match carries an inferred
+        // receiver it is authoritative (it falls back to the bare member itself);
+        // otherwise keep the bare call.
+        if (!qualifierCapture && receiverFacts && (
+          (language === SupportedLanguages.Go && callName.node.parent?.type === 'selector_expression') ||
+          (language === SupportedLanguages.TypeScript && callName.node.parent?.type === 'member_expression'))) {
+          const operand = callName.node.parent.childForFieldName(language === SupportedLanguages.Go ? 'operand' : 'object');
+          const operandReceiver = operand && ['identifier', 'member_expression'].includes(operand.type) ? receiverFacts.lookup(operand) : undefined;
+          if (operandReceiver?.type || operandReceiver?.factory) continue;
+        }
         if (builtinsForLanguage(language).has(callee) && !qualifierCapture && !namespaceCapture) continue;
 
         // For Python: skip calls that are decorator applications.
@@ -3251,7 +3267,6 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         if (!seenCalls.has(scope)) seenCalls.set(scope, new Set());
         const seen = seenCalls.get(scope)!;
 
-        const inferredReceiver = qualifierCapture ? receiverFacts?.lookup(qualifierCapture.node) : undefined;
         const effectiveCallee = (() => {
           if (inferredReceiver?.type) return `${inferredReceiver.type}.${callee}`;
           // R package-qualified call (pkg::func / pkg:::func): keep the :: so the
@@ -3285,10 +3300,6 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
             }
             return callee;
           }
-          // Keep opaque TS expression receivers as bare names, as before.
-          // Only identifiers, this and inferred fields provide useful qualifiers.
-          if (language === SupportedLanguages.TypeScript && !inferredReceiver &&
-              !['identifier', 'this'].includes(qualifierCapture.node.type)) return callee;
           let qualifier = qualifierCapture.node.text;
           let phpPropertyOnThis = false;
           let phpReceiverIsSupported = true;
@@ -3405,7 +3416,6 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
             ...(phpCallKind ? { phpCallKind } : {}),
             ...(inferredReceiver?.type ? { receiverType: inferredReceiver.type } : {}),
             ...(inferredReceiver?.factory ? { receiverFactory: inferredReceiver.factory } : {}),
-            ...(inferredReceiver && !inferredReceiver.type && !inferredReceiver.factory ? { receiverUnresolved: true as const } : {}),
           };
           relationships.push(rel);
           if (tracksBareCalls) jsTsCallRelationship.set(bareKey, rel);
@@ -4924,8 +4934,16 @@ export function resolveEdges(
     return narrowed;
   }
 
-  // Receiver types use exact members, never the bare-name fallback. Resolve in
-  // the defining file's import context as well (factory returns and inheritance).
+  // Receiver types resolve exact members, in the defining file's import context
+  // as well (factory returns and inheritance).
+  // A Go qualifier names an aliased import, or an unaliased one by its last path element.
+  function goImportForQualifier(summary: FileSummary | undefined, qualifier: string): string | undefined {
+    const aliased = summary?.importAliases?.[qualifier];
+    if (aliased) return aliased;
+    const named = [...new Set((summary?.imports ?? []).map(imp => imp.dstName)
+      .filter(dst => dst.split('/').pop() === qualifier))];
+    return named.length === 1 ? named[0] : undefined;
+  }
   function findReceiverProviders(context: string, rawType: string): Array<{ fp: string; type: string }> {
     const summary = summaries.get(context);
     const language = summary?.language ?? languageFromPath(context);
@@ -4947,7 +4965,7 @@ export function resolveEdges(
     }
     if (parts.length && language === SupportedLanguages.Go) {
       const prefix = parts.join('.');
-      const alias = summary?.importAliases?.[prefix];
+      const alias = goImportForQualifier(summary, prefix);
       if (!alias) return [];
       return resolveImportQualifierTargets(context, language, alias)
         .filter(fp => fileHasSymbol.get(fp)?.has(type)).map(fp => ({ fp, type }));
@@ -5015,7 +5033,7 @@ export function resolveEdges(
       const dot = factory.lastIndexOf('.');
       if (dot >= 0) {
         name = factory.slice(dot + 1);
-        const alias = summary?.importAliases?.[factory.slice(0, dot)];
+        const alias = goImportForQualifier(summary, factory.slice(0, dot));
         pool = alias ? resolveImportQualifierTargets(context, language, alias) : [];
       } else pool = goReceiverFiles.get(goPackageKey(context)) ?? [];
     } else {
@@ -5271,11 +5289,27 @@ export function resolveEdges(
         continue;
       }
 
-      const origDstName = rel.dstName;
+      // A typed receiver resolves to its exact member. When it cannot, the call
+      // falls back to its bare member name, exactly as it resolved before
+      // inference; the emitted edge keeps rel.dstName for the patch builder.
+      let origDstName = rel.dstName;
+      if (rel.predicate === 'CALLS' && (rel.receiverType || rel.receiverFactory)) {
+        const receiver = rel.receiverType ? { context: srcFilePath, type: rel.receiverType }
+          : factoryReceiver(srcFilePath, rel.receiverFactory!);
+        const member = rel.dstName.slice(rel.dstName.lastIndexOf('.') + 1);
+        const targets = receiver ? receiverMembers(receiver.context, receiver.type, member) : [];
+        if (targets.length === 1) {
+          resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: targets[0].fp, dstName: rel.dstName,
+            dstQualifiedKey: targets[0].key, predicate: 'CALLS', confidence: 0.95, tier: 'type' });
+          stats.resolvedQualifier++;
+          continue;
+        }
+        origDstName = member;
+      }
       // Z: resolve a renamed-import call by the provider's public symbol, but keep the
       // ORIGINAL local name on the emitted edge (buildPatchWithResolution maps the edge
       // back to the source call by name). No-op unless this is a renamed-import call.
-      const dstName = (rel.predicate === 'CALLS' ? callBindings.get(srcFilePath)?.get(rel.dstName) : undefined) ?? rel.dstName;
+      const dstName = (rel.predicate === 'CALLS' ? callBindings.get(srcFilePath)?.get(origDstName) : undefined) ?? origDstName;
       const srcName = rel.srcName;
       const binding = rel.importBinding === false
         ? undefined
@@ -5290,20 +5324,6 @@ export function resolveEdges(
               rel.predicate === 'CALLS' ? 'runtime' : 'types',
             )
           : undefined;
-
-      if (rel.receiverUnresolved) continue;
-      if (rel.predicate === 'CALLS' && (rel.receiverType || rel.receiverFactory)) {
-        const receiver = rel.receiverType ? { context: srcFilePath, type: rel.receiverType }
-          : factoryReceiver(srcFilePath, rel.receiverFactory!);
-        const member = origDstName.slice(origDstName.lastIndexOf('.') + 1);
-        const targets = receiver ? receiverMembers(receiver.context, receiver.type, member) : [];
-        if (targets.length === 1) {
-          resolved.push({ srcFilePath, srcName, dstFilePath: targets[0].fp, dstName: origDstName,
-            dstQualifiedKey: targets[0].key, predicate: 'CALLS', confidence: 0.95, tier: 'type' });
-          stats.resolvedQualifier++;
-        } else stats.skippedAmbiguous++;
-        continue;
-      }
 
       // Tier 1: same-file — already correct in buildPatch, skip here. Check the
       // call-site name before any import binding rewrite so a local shadow wins.
@@ -5347,7 +5367,7 @@ export function resolveEdges(
                 srcFilePath,
                 srcName,
                 dstFilePath: fp,
-                dstName: origDstName,
+                dstName: rel.dstName,
                 dstQualifiedKey,
                 predicate: rel.predicate,
                 confidence: 0.9,
@@ -5375,7 +5395,7 @@ export function resolveEdges(
                 srcFilePath,
                 srcName,
                 dstFilePath: fp,
-                dstName: origDstName,
+                dstName: rel.dstName,
                 dstQualifiedKey,
                 predicate: rel.predicate,
                 confidence: 0.9,
@@ -5456,7 +5476,7 @@ export function resolveEdges(
               const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart, preferredQKey);
               if (dstQualifiedKey !== null) {
                 // dstName must match rel.dstName so buildPatchWithResolution can look it up
-                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9, tier: 'qualifier' });
+                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: rel.dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9, tier: 'qualifier' });
               }
             }
             continue;
@@ -5481,7 +5501,7 @@ export function resolveEdges(
             if (fileHasSymbol.get(qfp)?.has(memberPart)) {
               const dstQualifiedKey = bestQKey(fileQKeys, qfp, memberPart, `${qualifierPart}.${memberPart}`);
               if (dstQualifiedKey !== null) {
-                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.7, tier: 'qualifier' });
+                resolved.push({ srcFilePath, srcName, dstFilePath: qfp, dstName: rel.dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.7, tier: 'qualifier' });
               }
             }
           }
@@ -5497,7 +5517,7 @@ export function resolveEdges(
         const fp = narrowedImportMatches[0];
         const dstQualifiedKey = targetQKey(fp);
         if (dstQualifiedKey === null) continue; // ambiguous — do not emit bad nodeId
-        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9, tier: 'import' });
+        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: rel.dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.9, tier: 'import' });
         continue;
       }
       if (unboundAmbientCall) continue;
@@ -5522,7 +5542,7 @@ export function resolveEdges(
         const fp = narrowedTransitiveMatches[0];
         const dstQualifiedKey = targetQKey(fp);
         if (dstQualifiedKey === null) continue;
-        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.8, tier: 'transitive' });
+        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: rel.dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.8, tier: 'transitive' });
         continue;
       }
       if (configuredBindingTargets?.length === 0) continue;
@@ -5565,7 +5585,7 @@ export function resolveEdges(
         if (bareCall && !definesAtModuleScope(fp)) continue; // only a member of that name
         const dstQualifiedKey = targetQKey(fp);
         if (dstQualifiedKey === null) continue; // ambiguous — do not emit bad nodeId
-        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.5, tier: 'global' });
+        resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: rel.dstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.5, tier: 'global' });
         stats.resolvedGlobal++;
         continue;
       }
