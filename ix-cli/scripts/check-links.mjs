@@ -32,21 +32,42 @@
 // pages are MDX, and their markdown links and component href attributes were
 // invisible to this gate while the filter was `.md` only.
 //
-// Fenced code blocks are scanned like prose: install instructions and
-// documented endpoints live in fences (docs/prerequisites.md carries the
-// egress allowlist entirely inside one), so dropping them hid exactly the
-// URLs that matter. Genuine illustrations that die get an allowlist entry,
-// and the stale-entry check removes it once the URL leaves the tree.
+// In `.mdx` files a root-relative href on a component or HTML tag
+// (`<LinkCard href="/reference/commands/">`, `<a href="/…">`) is an ERROR:
+// MDX parses those tags as JSX, which base-links-plugin.mjs cannot rewrite,
+// so the link would ship without the site's /oss base. Use a page-relative
+// link there instead.
+//
+// Fenced code blocks are scanned like prose for absolute URLs: install
+// instructions and documented endpoints live in fences
+// (docs/prerequisites.md carries the egress allowlist entirely inside one),
+// so dropping them hid exactly the URLs that matter. Genuine illustrations
+// that die get an allowlist entry, and the stale-entry check removes it once
+// the URL leaves the tree. Relative links and anchors are different: in a
+// fence or an inline code span they are example text, not links, so they
+// are not checked there.
 //
 // Allowlist: only links known-dead with a tracked replacement. Keys are
 // normalized through the same URL normalization the extractor uses, so a
 // trailing-slash variant of an allowed URL cannot false-fail. An allow entry
 // that no longer appears in any scanned file is itself an ERROR — a stale
 // allowlist must not rot silently.
+//
+// Usage: node ix-cli/scripts/check-links.mjs [--offline]   (from the repo root)
+//   --offline  skip the external-URL probes; relative links, routes and
+//              anchors are still checked. For local runs and tests, not CI.
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+
+// Arguments first, so a bad invocation fails before any network probe runs.
+const USAGE = 'usage: check-links.mjs [--offline]';
+let offline = false;
+for (const arg of process.argv.slice(2)) {
+  if (arg === '--offline') offline = true;
+  else { console.error(`unknown argument: ${arg}\n${USAGE}`); process.exit(2); }
+}
 
 // Empty, and that is the intended steady state.
 //
@@ -99,16 +120,24 @@ function extractUrls(text) {
 // of the project while this gate stayed green. Absolute URLs inside these
 // attributes were always covered — extractUrls() matches on `https?://`
 // wherever it appears — so this closes the relative half only.
+//
+// Only prose is read: fenced blocks and inline code spans are example text,
+// so a `[x](y)` or `<a href>` shown there is not a link (see proseLines).
+// A markdown link's optional title — `[x](path "title")` — and the
+// `<path>` angle-bracket form are stripped, leaving the target alone.
+// `tag` marks the HTML/JSX attribute form, which the .mdx base rule needs.
 function extractRelativeTargets(text) {
+  const prose = proseLines(text).map(stripCodeSpans).join('\n');
   const targets = [];
-  const take = (raw, image = false) => {
-    const t = raw.trim();
+  const take = (raw, image = false, tag = false) => {
+    const t = raw.trim().replace(/^<([^>]*)>$/, '$1');
     if (isExternal(t)) return;
-    targets.push({ target: t, image });
+    targets.push({ target: t, image, tag });
   };
-  for (const m of text.matchAll(/(!?)\[[^\]]*\]\(([^)]+)\)/g)) take(m[2], m[1] === '!');
-  for (const m of text.matchAll(/^\[[^\]]*\]:\s*(\S+)/gm)) take(m[1].replace(/^<|>$/g, ''));
-  for (const m of text.matchAll(/<[a-zA-Z][^>]*?\s(src|href)\s*=\s*["']([^"']+)["']/g)) take(m[2], m[1] === 'src');
+  const LINK_TITLE = /\s+(?:"[^"]*"|'[^']*'|\([^)]*\))\s*$/;
+  for (const m of prose.matchAll(/(!?)\[[^\]]*\]\(([^)]+)\)/g)) take(m[2].trim().replace(LINK_TITLE, ''), m[1] === '!');
+  for (const m of prose.matchAll(/^\[[^\]]*\]:\s*(\S+)/gm)) take(m[1]);
+  for (const m of prose.matchAll(/<[a-zA-Z][^>]*?\s(src|href)\s*=\s*["']([^"']+)["']/g)) take(m[2], m[1] === 'src', true);
   return targets;
 }
 function isExternal(t) {
@@ -184,39 +213,56 @@ if (allSet.has('docs-site/.gitignore')) {
     if (m) docsRoutes.add(docsRouteOf(m[1] + '.md'));
   }
 }
+// Every route under /api/endpoints/ is accepted. starlight-openapi generates
+// those pages from docs/api/openapi.yaml at build time, and their slugs come
+// from its own operation naming, which this script does not reproduce; so a
+// typo in an endpoint slug, or in an anchor on one of those pages, is not
+// caught here. A wrong prefix still is.
 const docsRouteExists = (route) => docsRoutes.has(route) || route.startsWith(OPENAPI_ROUTE_PREFIX);
+// Starlight gives every page a `#_top` anchor (the page title / "Overview"
+// entry in the table of contents), which has no heading in the source.
+const STARLIGHT_TOP = '_top';
 
 // ---- one anchor universe ---------------------------------------------------
-// Heading slugs for the anchor check. GitHub drops punctuation, lowercases,
-// and turns each space into a dash — `## Authentication & Scoping` becomes
-// `#authentication--scoping`, the dropped ampersand leaving two dashes — and
-// Starlight renders the same slugs. Fences are skipped so headings inside
-// examples do not count.
+// Heading slugs for the anchor check, computed the way github-slugger does it
+// — GitHub and Starlight both use it — on the RENDERED heading text, not the
+// markdown source:
 //
-// Every surface goes through slugifyHeading() so the source pass and the
-// built-dist pass cannot drift, and every anchor a page exposes is collected
-// here: heading slugs AND explicit id/name attributes. Three things the first
-// cut of this check got wrong, each one a false CI failure on a valid anchor:
+//   * inline code is unwrapped to its literal content, kept as-is:
+//     `## \`ix callers <symbol>\`` is `#ix-callers-symbol` (the `<symbol>` is
+//     code, not a tag) and `## \`IX_HOME\`` is `#ix_home`;
+//   * a link contributes its text only: `## See [Foo](bar.md)` is `#see-foo`;
+//     an image contributes nothing;
+//   * emphasis delimiters go, and only those: `*`, and `_` when it opens or
+//     closes emphasis. An underscore inside a word is text — `## max_tokens`
+//     is `#max_tokens`;
+//   * raw HTML tags go (stripTags);
+//   * then lowercase, drop every character outside github-slugger's alphabet
+//     (letters, marks, numbers, connector punctuation, space, `-`), and turn
+//     each space into a dash. `## Authentication & Scoping` is
+//     `#authentication--scoping`: the dropped ampersand leaves two dashes, and
+//     runs are not collapsed. Nothing is trimmed after the drop, so a heading
+//     that starts with an emoji keeps its leading dash, as GitHub renders it.
+//
+// Fences are skipped so headings inside examples do not count, and every
+// anchor a page exposes is collected here: heading slugs AND explicit id/name
+// attributes. Two more things the first cut of this check got wrong, each one
+// a false CI failure on a valid anchor:
 //
 //   * a repeated heading. GitHub suffixes duplicates per base slug, so a second
 //     `## Setup` renders as `#setup-1` — and `#setup-1` is a real anchor, not a
 //     typo.
 //   * an explicit HTML anchor. `<a id="custom-anchor"></a>` has no heading at
 //     all, so slug-matching alone could never see it.
-//   * collapsing whitespace runs. Each space is its own dash, so `A & B` is
-//     `a--b`, not `a-b`.
 //
 // stripTags is a single left-to-right scan, never a regex that deletes
 // `<[^>]+>` and hopes nothing survives it. Deleting a match can CREATE the
 // pattern it was matching — `<scr<script>ipt>` loses `<scr<script>` in one pass
-// and leaves `<script>` behind, which is exactly the
-// js/incomplete-multi-character-sanitization finding this replaced. The scan has
-// no second pass to miss and no fixed point to reach: a `<` that opens a tag
-// drops the whole region through the next `>`, nesting and overlap included. A
-// `<` that cannot open a tag (`a < b` in prose) or that never closes is literal
-// text and is kept — truncating there would silently mangle a valid slug. The
-// allowlist alphabet in slugifyHeading then admits only letters, digits,
-// whitespace, `-` and `_`, so no markup can reach a slug key even in principle.
+// and leaves `<script>` behind (js/incomplete-multi-character-sanitization).
+// The scan has no second pass to miss: a `<` that opens a tag drops the whole
+// region through the next `>`. A `<` that cannot open a tag (`a < b` in prose)
+// or that never closes is literal text and is kept. The slug alphabet then
+// admits no markup characters at all, so none can reach a slug key.
 function stripTags(s) {
   let out = '';
   let i = 0;
@@ -235,9 +281,41 @@ function stripTags(s) {
   return out;
 }
 
+// A CommonMark code span: a run of N backticks, then everything up to the next
+// run of exactly N. One leading and one trailing space are stripped when both
+// are there and the content is not all spaces.
+const CODE_SPAN = /(?<!`)(`+)(?!`)([\s\S]*?[^`])\1(?!`)/g;
+const codeSpanText = (body) => (/^ [\s\S]*[^ ][\s\S]* $/.test(body) ? body.slice(1, -1) : body);
+function stripCodeSpans(line) {
+  return line.replace(CODE_SPAN, '');
+}
+
+// `_` emphasis: an opening run not preceded by a letter/digit/underscore and
+// followed by non-space, closed by the same run preceded by non-space and not
+// followed by a letter/digit/underscore. Intraword underscores never match, and
+// an unpaired one stays literal. Repeated so nested emphasis unwraps.
+const UNDERSCORE_EMPHASIS = /(^|[^\p{L}\p{N}_])(_{1,3})(?=\S)([\s\S]*?\S)\2(?![\p{L}\p{N}_])/gu;
+
+// The text a heading renders as, from its markdown source.
+function renderedHeadingText(md) {
+  // Code and backslash-escaped characters are literal: hold them out of every
+  // later step behind private-use placeholders, then put them back last.
+  const held = [];
+  const hold = (s) => `${held.push(s) - 1}`;
+  let s = md.replace(CODE_SPAN, (_, _ticks, body) => hold(codeSpanText(body)));
+  s = s.replace(/\\([!-/:-@[-`{-~])/g, (_, c) => hold(c));
+  s = s.replace(/!\[[^\]]*\](?:\([^)]*\)|\[[^\]]*\])/g, ''); // images: no text
+  s = s.replace(/\[([^\]]*)\](?:\([^)]*\)|\[[^\]]*\])/g, '$1'); // links: their text
+  s = stripTags(s);
+  s = s.replace(/\*+/g, '');
+  for (let prev = null; prev !== s;) { prev = s; s = s.replace(UNDERSCORE_EMPHASIS, '$1$3'); }
+  return s.replace(/(\d+)/g, (_, i) => held[Number(i)]);
+}
+
 function slugifyHeading(raw) {
-  return stripTags(raw).replace(/[*_`]/g, '').toLowerCase()
-    .replace(/[^\p{L}\p{N}\s_-]/gu, '').trim().replace(/\s/g, '-');
+  return renderedHeadingText(raw.trim()).toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}\p{Pc} -]/gu, '')
+    .replace(/ /g, '-');
 }
 
 // GitHub's per-page duplicate numbering: the slugs added are `setup`, `setup-1`,
@@ -260,20 +338,17 @@ function slugAdder(into) {
 // Fragment targets that are not headings. `<a id="x">` and `<h2 id="x">` are
 // the obvious ones; the trap is that `\b(?:id|name)\s*=` also matches attributes
 // that are not anchors at all — `<meta name="description">`, `data-id="…"`, and a
-// form control's `name` — which quietly made `#description` a valid anchor on
-// every built page. So the attributes are read off parsed open tags, with two
-// rules:
+// form control's `name`. So the attributes are read off parsed open tags, with
+// two rules:
 //
 //   * `id` counts on any element: in HTML, any element with an id is a fragment
 //     target.
 //   * `name` counts only on `<a>`. That is the legacy anchor form there, and a
-//     form field's name everywhere else — precisely the class of non-target this
-//     replaced.
+//     form field's name everywhere else.
 //
 // `(?<![\w-])` keeps `data-id=` and `data-name=` out: a word character or `-`
 // immediately before the attribute name means it is a different attribute. `<meta>`
-// and `<link>` describe the document rather than its content, so their ids are not
-// anchors anyone links to, and they are skipped.
+// and `<link>` describe the document rather than its content, so they are skipped.
 const OPEN_TAG = /<([a-zA-Z][a-zA-Z0-9-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g;
 const ID_ATTR = /(?<![\w-])id\s*=\s*["']([^"']+)["']/g;
 const NAME_ATTR = /(?<![\w-])name\s*=\s*["']([^"']+)["']/g;
@@ -287,20 +362,16 @@ function tagAnchors(text, into) {
   }
 }
 
-function collectAnchors(text) {
-  const anchors = new Set();
-  const addHeading = slugAdder(anchors);
-  const body = [];
-  // Fenced blocks, by CommonMark's rule: a block opens with a run of three or
-  // more backticks or tildes and is closed only by a run of the SAME character
-  // at least as long as the opening one, with nothing after it. Flipping a
-  // boolean on any delimiter instead treated a shorter run inside a longer one as
-  // the end of the block — and a longer fence quoting a shorter one is how docs
-  // show a fence at all — so the block state inverted and everything after it was
-  // read backwards: a real heading reported as broken (the false CI failure this
-  // check exists to avoid) while a heading-shaped line of code was accepted as an
-  // anchor. The built page is rendered by a CommonMark parser, so the source pass
-  // has to apply the same rule or the two surfaces disagree about what is code.
+// The page's lines with every fenced block blanked out (same line count), by
+// CommonMark's rule: a block opens with a run of three or more backticks or
+// tildes and is closed only by a run of the SAME character at least as long as
+// the opening one, with nothing after it. Flipping a boolean on any delimiter
+// instead treated a shorter run inside a longer one as the end of the block —
+// and a longer fence quoting a shorter one is how docs show a fence at all — so
+// everything after it was read backwards. One owner, used by both the anchor
+// collector and the link extractor, so they agree about what is code.
+function proseLines(text) {
+  const out = [];
   let fenceChar = null; // null = not inside a fence
   let fenceLen = 0;
   for (const line of text.split(/\r?\n/)) {
@@ -311,15 +382,25 @@ function collectAnchors(text) {
       if (delims && !(delims[1][0] === '`' && delims[2].includes('`'))) {
         fenceChar = delims[1][0];
         fenceLen = delims[1].length;
+        out.push('');
         continue;
       }
     } else if (delims && delims[1][0] === fenceChar
       && delims[1].length >= fenceLen && delims[2].trim() === '') {
       fenceChar = null;
+      out.push('');
       continue;
     }
-    if (fenceChar !== null) continue;
-    body.push(line);
+    out.push(fenceChar === null ? line : '');
+  }
+  return out;
+}
+
+function collectAnchors(text) {
+  const anchors = new Set();
+  const addHeading = slugAdder(anchors);
+  const body = proseLines(text);
+  for (const line of body) {
     const m = line.match(/^#{1,6}\s+(.+?)\s*#*\s*$/);
     if (m) addHeading(slugifyHeading(m[1]));
   }
@@ -341,18 +422,20 @@ function anchorsOf(file) {
 }
 
 // Returns an error string for a reference that cannot resolve, or null.
-function checkReference(raw, image, file, text) {
+function checkReference(raw, image, file) {
   const hashAt = raw.indexOf('#');
   const pathPart = hashAt === -1 ? raw : raw.slice(0, hashAt);
   const frag = hashAt === -1 ? null : raw.slice(hashAt + 1);
 
+  const docsPage = file.startsWith(DOCS_CONTENT);
+
   // A pure fragment is an anchor within this page.
   if (!pathPart) {
-    if (!frag) return null;
+    if (!frag || (docsPage && frag === STARLIGHT_TOP)) return null;
     return anchorsOf(file).has(frag) ? null : `${raw} (anchor, in ${file})`;
   }
 
-  if (file.startsWith(DOCS_CONTENT) && !image) {
+  if (docsPage && !image) {
     // Site surface: root-relative is a site route, anything else resolves
     // against the page's route directory.
     const base = docsRouteOf(file.slice(DOCS_CONTENT.length)).replace(/^\//, '').replace(/\/$/, '');
@@ -365,7 +448,7 @@ function checkReference(raw, image, file, text) {
     route = route.replace(/\/+$/, '') || '/';
     if (route !== '/') route += '/';
     if (!docsRouteExists(route)) return `${raw} (docs-site route, in ${file})`;
-    if (frag) {
+    if (frag && frag !== STARLIGHT_TOP) {
       const targetFile = docsRouteFile.get(route);
       // Generated routes have no committed file here; their fragments belong
       // to the source page sync-reference.mjs copies from.
@@ -409,6 +492,7 @@ function checkReference(raw, image, file, text) {
 const errors = [];
 const warnings = [];
 let checked = 0;
+let unprobed = 0;
 let allContent = '';
 
 for (const file of mdFiles) {
@@ -418,6 +502,7 @@ for (const file of mdFiles) {
   anchorsCache.set(file, collectAnchors(text)); // parse each page once
 
   for (const url of extractUrls(text)) {
+    if (offline) { unprobed++; continue; }
     checked++;
     const res = await probe(url);
     const allowed = ALLOW_NORM.has(normUrl(url));
@@ -428,9 +513,17 @@ for (const file of mdFiles) {
     }
   }
 
-  for (const { target, image } of extractRelativeTargets(text)) {
+  const mdx = file.endsWith('.mdx');
+  for (const { target, image, tag } of extractRelativeTargets(text)) {
     checked++;
-    const problem = checkReference(target, image, file, text);
+    // MDX parses an HTML or component tag as JSX, which base-links-plugin.mjs
+    // cannot rewrite, so a root-relative href there ships without the /oss base
+    // and 404s on the live site even though the route exists.
+    if (mdx && tag && !image && /^\/(?!\/)/.test(target)) {
+      errors.push(`${target} (root-relative href in a tag, in ${file}) — base-links-plugin.mjs cannot add the /oss base to a JSX/component attribute; use a page-relative link`);
+      continue;
+    }
+    const problem = checkReference(target, image, file);
     if (problem) errors.push(problem);
   }
 }
@@ -441,6 +534,8 @@ for (const [url] of ALLOW) {
     errors.push(`stale allowlist entry ${url} no longer appears in any scanned file — remove it (${ALLOW.get(url)})`);
   }
 }
+
+if (offline) console.log(`offline: ${unprobed} external URL references not probed`);
 
 for (const e of errors) console.log(`ERROR  ${e}`);
 for (const w of warnings) console.log(`warn   ${w}`);
