@@ -89,8 +89,10 @@ function guardReadable(absPath: string, explicitRoot: string | undefined, what: 
   return false;
 }
 
-function reportInvalidLineRange(target: string, format: string): void {
-  const message = `Invalid line range in "${target}". Line numbers must start at 1, the end must not precede the start, and a page start (@n) must fall inside the range.`;
+function reportInvalidLineRange(target: string, format: string, paged = false): void {
+  const message = paged
+    ? `Invalid line range in "${target}". Line numbers must start at 1, the end must not precede the start, and a page start (@n) must fall inside the range.`
+    : `Invalid line range in "${target}". Line numbers must start at 1 and the end must not precede the start.`;
   if (format === "json") {
     printJson({ error: "invalid_line_range", message });
   } else if (format === "llm") {
@@ -134,38 +136,43 @@ function readFileRange(
 }
 
 /**
- * The shortest path that still names this file from where the caller stands.
+ * The path a `next=` cursor names its file by: relative to the workspace root,
+ * because that is what `ix read` resolves a relative target against.
  *
- * `relativePath` is a prefix match against `process.cwd()`, which misses in two
- * ordinary cases: a cwd and a target that disagree about a symlink (macOS
- * resolves `/var` to `/private/var`, and any repo under a `~/code` link does
- * the same), and Windows, where the stored separator is `\` and the match is
- * written for `/`. A `next=` that comes back absolute still works when pasted,
- * but it is the token cost the cursor exists to avoid.
+ * It used to be relative to the cwd (`relativePath`). From a subdirectory of
+ * the workspace that cursor did not round-trip: `big.ts` printed from `src/`
+ * resolved to `<root>/big.ts`, which is a miss, a basename match, or a
+ * different file with the same name. A symbol's file is often outside the
+ * cwd's subtree, so symbol cursors hit this far more than file cursors did.
+ * Run from the root, the cursor is the same as before.
  *
- * Falls back to the absolute path rather than to `..` — a cursor pointing out
- * of the tree is worse than a long one.
+ * Both sides are compared through `realpath` as a fallback, since a root
+ * reached through a symlink (macOS `/var` -> `/private/var`, a `~/code` link)
+ * fails a plain prefix match. Falls back to the absolute path rather than to
+ * `..`: a file outside the root is named the one way every cwd agrees on.
  */
-function readablePath(filePath: string): string {
-  const relative = relativePath(filePath);
-  if (relative && relative !== filePath) return relative;
+function cursorPath(filePath: string, root: string): string {
+  const inside = (from: string, to: string): string | undefined => {
+    const rel = path.relative(from, to);
+    return rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel.split(path.sep).join("/") : undefined;
+  };
+  const direct = inside(path.resolve(root), path.resolve(filePath));
+  if (direct) return direct;
   try {
-    const fromCwd = path.relative(fs.realpathSync(process.cwd()), fs.realpathSync(filePath));
-    if (fromCwd && !fromCwd.startsWith("..") && !path.isAbsolute(fromCwd)) {
-      return fromCwd.split(path.sep).join("/");
-    }
+    const real = inside(fs.realpathSync(root), fs.realpathSync(filePath));
+    if (real) return real;
   } catch {
-    // An unreadable cwd or a file deleted under us: the absolute path stands.
+    // An unreadable root or a file deleted under us: the absolute path stands.
   }
   return filePath;
 }
 
 /** `src/a.ts:401-800`, or nothing when the cap landed on the last line. */
-function nextPage(filePath: string, lineEnd: number, lastLine: number): string | undefined {
+function nextPage(filePath: string, root: string, lineEnd: number, lastLine: number): string | undefined {
   if (lineEnd >= lastLine) return undefined;
   const from = lineEnd + 1;
   const to = Math.min(lastLine, lineEnd + READ_LINE_CAP);
-  return `${readablePath(filePath)}:${from}-${to}`;
+  return `${cursorPath(filePath, root)}:${from}-${to}`;
 }
 
 /**
@@ -174,15 +181,16 @@ function nextPage(filePath: string, lineEnd: number, lastLine: number): string |
  * form ended the paging after one hop; this form is capped again and carries
  * the span with it, so every page has a cursor until the span's last line.
  */
-function nextSpanPage(filePath: string, spanStart: number, lineEnd: number, lastLine: number): string | undefined {
+function nextSpanPage(filePath: string, root: string, spanStart: number, lineEnd: number, lastLine: number): string | undefined {
   if (lineEnd >= lastLine) return undefined;
-  return `${readablePath(filePath)}:${spanStart}-${lastLine}@${lineEnd + 1}`;
+  return `${cursorPath(filePath, root)}:${spanStart}-${lastLine}@${lineEnd + 1}`;
 }
 
 /** Fold a capped read's cursor into the result the renderers see. */
 function withCursor(
   result: ReadResult,
   capped: { truncated?: boolean; totalLines?: number; lastLine?: number; spanStart?: number },
+  root: string,
 ): ReadResult {
   if (!capped.truncated || capped.totalLines === undefined) return result;
   if (capped.lastLine !== undefined && capped.spanStart !== undefined) {
@@ -191,14 +199,14 @@ function withCursor(
       truncated: true,
       totalLines: capped.totalLines,
       spanEnd: capped.lastLine,
-      next: nextSpanPage(result.path, capped.spanStart, result.lineEnd, capped.lastLine),
+      next: nextSpanPage(result.path, root, capped.spanStart, result.lineEnd, capped.lastLine),
     };
   }
   return {
     ...result,
     truncated: true,
     totalLines: capped.totalLines,
-    next: nextPage(result.path, result.lineEnd, capped.lastLine ?? capped.totalLines),
+    next: nextPage(result.path, root, result.lineEnd, capped.lastLine ?? capped.totalLines),
   };
 }
 
@@ -358,7 +366,12 @@ export function outputResult(result: ReadResult, format: string): void {
       stderr(chalk.dim(
         `\n  ${result.lineEnd - result.lineStart + 1} of ${result.totalLines} lines`
         + (result.next ? ` — next: ix read ${result.next}` : "")
-        + `, or --all for the whole ${result.targetType === "symbol" ? "symbol" : result.spanEnd !== undefined ? "range" : "file"}`,
+        + (result.targetType === "symbol"
+          ? ", or --all for the whole symbol"
+          : result.spanEnd !== undefined
+            // A cursor page starts at its @from, and so does --all on it.
+            ? ", or --all for the rest of the range"
+            : ", or --all for the whole file"),
       ));
     }
   }
@@ -429,12 +442,12 @@ Examples:
       const rangeEnd = lineRangeMatch ? parseInt(lineRangeMatch[3], 10) : undefined;
       const pageFrom = lineRangeMatch?.[4] !== undefined ? parseInt(lineRangeMatch[4], 10) : undefined;
       if (rangeStart !== undefined && rangeEnd !== undefined && (rangeStart < 1 || rangeEnd < rangeStart)) {
-        reportInvalidLineRange(target, opts.format);
+        reportInvalidLineRange(target, opts.format, pageFrom !== undefined);
         return;
       }
       if (pageFrom !== undefined && rangeStart !== undefined && rangeEnd !== undefined
         && (pageFrom < rangeStart || pageFrom > rangeEnd)) {
-        reportInvalidLineRange(target, opts.format);
+        reportInvalidLineRange(target, opts.format, true);
         return;
       }
 
@@ -454,7 +467,7 @@ Examples:
           lineStart: capped.lineStart,
           lineEnd: capped.lineEnd,
           content: capped.content,
-        }, capped);
+        }, capped, root);
         if (stale) { result.stale = true; result.warning = "Results may be stale; file has changed since last ingest."; }
         outputResult(result, opts.format);
         return;
@@ -489,7 +502,7 @@ Examples:
               lineStart: capped.lineStart,
               lineEnd: capped.lineEnd,
               content: capped.content,
-            }, capped);
+            }, capped, root);
             if (stale) { result.stale = true; result.warning = "Results may be stale; file has changed since last ingest."; }
             outputResult(result, opts.format);
             return;
@@ -538,7 +551,7 @@ Examples:
             content: span.content,
             symbol: node.name,
             kind: node.kind,
-          }, span);
+          }, span, root);
           if (stale) {
             result.stale = true;
             result.warning = range.movedFrom

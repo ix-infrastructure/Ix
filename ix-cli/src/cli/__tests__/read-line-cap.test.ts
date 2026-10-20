@@ -141,6 +141,18 @@ describe("ix read line cap", () => {
     }
   });
 
+  it("names a file cursor from the workspace root when run from a subdirectory", async () => {
+    mkdirSync(join(root, "lib"), { recursive: true });
+    writeFileSync(join(root, "lib", "big.ts"), BIG);
+    writeFileSync(join(root, "big.ts"), "decoy");
+    process.chdir(join(root, "lib"));
+    await read(["lib/big.ts", "--format", "llm"]);
+    expect(logs[0]).toContain("next=lib/big.ts:401-800");
+    logs = [];
+    await read(["lib/big.ts:401-800", "--format", "llm"]);
+    expect(logs[2]).toBe("401\tline 401");
+  });
+
   it("does not offer a next page from the last one", async () => {
     await read(["src/big.ts:1400-1734", "--format", "llm"]);
     expect(logs[0]).not.toContain("next=");
@@ -339,7 +351,60 @@ describe("ix read symbol cap", () => {
     registerReadCommand(p);
     await p.parseAsync(["read", "src/big.ts:10-1327@5", "--format", "llm", "--root", root], { from: "user" });
     expect(logs[0]).toContain("invalid_line_range");
+    expect(logs[0]).toContain("@n");
     process.exitCode = 0;
+  });
+
+  it("keeps the old message for an ordinary invalid range", async () => {
+    const p = new Command();
+    p.name("ix").exitOverride();
+    registerReadCommand(p);
+    await p.parseAsync(["read", "src/big.ts:20-10", "--format", "llm", "--root", root], { from: "user" });
+    expect(logs[0]).toContain("Line numbers must start at 1 and the end must not precede the start.");
+    expect(logs[0]).not.toContain("@n");
+    process.exitCode = 0;
+  });
+
+  it("says --all on a cursor page reads the rest of the range", async () => {
+    const p = new Command();
+    p.name("ix").exitOverride();
+    registerReadCommand(p);
+    await p.parseAsync(["read", "src/big.ts:10-1327@410", "--root", root], { from: "user" });
+    const note = errs.join("");
+    expect(note).toContain("400 of 1318 lines");
+    expect(note).toContain("ix read src/big.ts:10-1327@810");
+    expect(note).toContain("--all for the rest of the range");
+  });
+
+  it("names the cursor from the workspace root, so it round-trips from a subdirectory", async () => {
+    // The symbol lives in lib/big.ts; <root>/big.ts is a different file with
+    // the same basename. A cwd-relative cursor (`big.ts:...`) printed from
+    // lib/ resolved against the root and read the decoy.
+    mkdirSync(join(root, "lib"), { recursive: true });
+    writeFileSync(join(root, "lib", "big.ts"), BIG);
+    writeFileSync(join(root, "big.ts"), Array.from({ length: 1734 }, (_, i) => `decoy ${i + 1}`).join("\n"));
+    graph.node = {
+      name: "bigFn",
+      kind: "function",
+      attrs: { line_start: 10, line_end: 1327 },
+      provenance: { source_uri: join(root, "lib", "big.ts") },
+    };
+    process.chdir(join(root, "lib"));
+    await read(["--format", "json"]);
+    const pages: Array<Record<string, unknown>> = [JSON.parse(logs.join("\n"))];
+    expect(pages[0].next).toBe("lib/big.ts:10-1327@410");
+    for (let hops = 0; pages[pages.length - 1].next && hops < 10; hops++) {
+      logs = [];
+      const program = new Command();
+      program.name("ix").exitOverride();
+      registerReadCommand(program);
+      await program.parseAsync(
+        ["read", String(pages[pages.length - 1].next), "--format", "json", "--root", root], { from: "user" });
+      pages.push(JSON.parse(logs.join("\n")));
+    }
+    expect(pages.map((p) => p.lineEnd)).toEqual([409, 809, 1209, 1327]);
+    for (const p of pages) expect(String(p.content)).not.toContain("decoy");
+    expect(String(pages[3].content).split("\n").pop()).toBe("line 1327");
   });
 
   it("capSpan returns an uncapped span unchanged", () => {
