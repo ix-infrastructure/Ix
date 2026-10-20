@@ -19,9 +19,13 @@ import { llmLine } from "../llm.js";
 import { edgeTargetFor, rankTextUses, SourceFiles, withEdgeSites } from "../edge-sites.js";
 import { renderWarning } from "../ui.js";
 import { currentRunSignal } from "../../client/run-signal.js";
+import { mapLimit } from "../../client/request-memo.js";
 import { clipSnippet } from "./text.js";
 
 const execFileAsync = promisify(execFile);
+
+/** Edge queries `--all` keeps in flight at once: a 200-way tie is not a 400-request burst. */
+export const ALL_CONCURRENCY = 4;
 
 /** Rows per page of the text fallback. --limit does not apply to it. */
 export const TEXT_FALLBACK_PAGE = 10;
@@ -76,17 +80,17 @@ async function edgesOfAll(
 ): Promise<void> {
   const healthCheck = checkGraphHealth(client, activeReadScope());
   const candidates: EdgeCandidate[] = set.entities.map((e, i) => ({ n: i + 1, id: e.id, name: e.name, kind: e.kind, path: e.path }));
-  const expanded = await Promise.all(set.entities.map((e) => client.expand(e.id, {
+  const expanded = await mapLimit(set.entities, ALL_CONCURRENCY, (e) => client.expand(e.id, {
     direction: relation === "callers" ? "in" : "out",
     predicates: ["CALLS", "REFERENCES"],
-  })));
+  }));
   const rows = expanded.flatMap((result, i) => result.nodes.map((n: any) => ({ ...n, candidate: i + 1 })));
   const health = await healthDiagnostics(healthCheck);
   bannerOverRows(health, format, rows.length);
   const slice = sliceEdgeResults(rows, limit, offset, expanded.some((r) => expandCapped(r)));
   if (slice.nextOffset !== undefined) slice.next = nextPageCommand(cmd, [symbol], slice.nextOffset);
   // Call sites are looked up against the candidate the row belongs to.
-  const sites = await Promise.all(set.entities.map((e) => edgeTargetFor(client, e, relation)));
+  const sites = await mapLimit(set.entities, ALL_CONCURRENCY, (e) => edgeTargetFor(client, e, relation));
   const files = new SourceFiles();
   const sited = slice.rows.map((row: any) => withEdgeSites([row], relation, sites[row.candidate - 1], { files })[0]);
   const diagnostics = [...(health.diagnostics ?? [])];

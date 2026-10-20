@@ -120,9 +120,13 @@ ref name=retry kind=function path=src/jobs.ts lines=4-9 candidate=2
 ```
 
 `impact --all` prints one analysis per candidate, each after its `candidate`
-record (json: `results: [{ candidate, ... }]`). Only the listed candidates (at
-most 8) are covered; a `candidates_truncated` diagnostic says when there were
-more. `--pick` takes precedence over `--all`.
+record (json: `results: [{ candidate, ... }]`). Every tied candidate the name
+search returned is covered, not only the 8 an ambiguity error lists (those 8
+keep their `--pick` numbers; the rest follow), so a common name can mean many
+analyses. The search window is bounded (up to 200 names with `--path`, fewer
+without); a `candidates_truncated` diagnostic says when it was cut off. Narrow
+with `--kind` or `--path` to keep the run small. `--pick` takes precedence over
+`--all`.
 
 ### Several targets (`ix locate a b c`, `ix callers a b c`)
 

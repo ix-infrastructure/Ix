@@ -16,6 +16,7 @@ import { relativePath } from "./format.js";
 import { isQuiet } from "./output-shape.js";
 import { disambiguationHint } from "./next-step.js";
 import { explainSymbolMiss } from "./miss-reason.js";
+import { isBackendUnreachable } from "./errors.js";
 import {
   candidateOrigin, isFileStemMatch, looksLikeCodeIdentifier, requestsNonCode,
 } from "./candidate-origin.js";
@@ -1138,8 +1139,11 @@ export async function resolveFileOrEntityFull(
         },
       };
     } catch (err) {
-      if (!isLookupMiss(err)) throw err;
-      // Not a valid entity prefix — fall through to normal resolution
+      // A hex-looking target can still be a symbol name (`deadbeef`), so any
+      // answer short of an unreachable backend falls through to the name
+      // search rather than failing a symbol that exists. Unreachable is
+      // rethrown only because the name search would fail the same way.
+      if (isBackendUnreachable(err)) throw err;
     }
   }
 

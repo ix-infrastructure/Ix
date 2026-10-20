@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
-import { registerCallersCommand } from "../commands/callers.js";
+import { ALL_CONCURRENCY, registerCallersCommand } from "../commands/callers.js";
 import { registerExplainCommand } from "../commands/explain.js";
 import { registerImpactCommand } from "../commands/impact.js";
 import { registerLocateCommand } from "../commands/locate.js";
@@ -19,13 +19,14 @@ vi.mock("../bootstrap.js", async (orig) => ({
   resolveWorkspaceId: () => "ws-test",
 }));
 
-const { search, expand } = vi.hoisted(() => ({ search: vi.fn(), expand: vi.fn() }));
+const { search, expand, resolvePrefix } = vi.hoisted(() => ({ search: vi.fn(), expand: vi.fn(), resolvePrefix: vi.fn() }));
 
 vi.mock("../../client/api.js", () => ({
   IxClient: class {
     async workspaceSystem() { return { systemId: null }; }
     async search(...args: unknown[]) { return search(...args); }
     async expand(...args: unknown[]) { return expand(...args); }
+    async resolvePrefix(...args: unknown[]) { return resolvePrefix(...args); }
     async entity(id: string) {
       return { node: { id, kind: "function", name: id, attrs: { line_start: 1, line_end: 2 }, provenance: { sourceUri: `src/${id}.ts` } } };
     }
@@ -297,6 +298,23 @@ describe("--all on an ambiguous target", () => {
     expect((body.diagnostics ?? []).map((d: { code: string }) => d.code)).not.toContain("candidates_truncated");
   });
 
+  it("keeps at most ALL_CONCURRENCY edge queries in flight", async () => {
+    graph({ Many: manyNamed(12) });
+    const base = expand.getMockImplementation()!;
+    let inFlight = 0;
+    let peak = 0;
+    expand.mockImplementation(async (...args: unknown[]) => {
+      peak = Math.max(peak, ++inFlight);
+      await new Promise((r) => setTimeout(r, 2));
+      inFlight--;
+      return base(...(args as [string, { direction: string }]));
+    });
+    const result = await run(["callers", "Many", "--all", "--format", "json"]);
+    expect(result.exitCode).toBe(0);
+    expect(expand).toHaveBeenCalledTimes(12);
+    expect(peak).toBeLessThanOrEqual(ALL_CONCURRENCY);
+  });
+
   it("says when the name search itself was cut off", async () => {
     graph({ Many: manyNamed(60) });
     const body = JSON.parse((await run(["callers", "Many", "--all", "--limit", "500", "--format", "json"])).stdout);
@@ -361,6 +379,29 @@ describe("several targets in one call", () => {
     expect(body.targets[1].results.map((r: { name: string }) => r.name)).toContain("callerOf_other-id");
   });
 
+  it("a target whose query throws gets its own error group; the others still answer", async () => {
+    graph({ Unique: UNIQUE, Other: [{ id: "other-id", kind: "function", name: "Other", provenance: { sourceUri: "src/other.ts" } }] });
+    const base = expand.getMockImplementation()!;
+    expand.mockImplementation(async (...args: unknown[]) => {
+      if (args[0] === "only-id") throw new Error('500: {"error":"query_failed","message":"backend broke"}');
+      return base(...(args as [string, { direction: string }]));
+    });
+    const json = await run(["callers", "Unique", "Other", "--format", "json"]);
+    expect(json.exitCode).toBe(1);
+    const body = JSON.parse(json.stdout);
+    expect(body.targets[0]).toMatchObject({ target: "Unique", exitCode: 1, error: "query_failed", message: "backend broke" });
+    expect(body.targets[1]).toMatchObject({ target: "Other", exitCode: 0 });
+    expect(body.targets[1].results.map((r: { name: string }) => r.name)).toContain("callerOf_other-id");
+    expect(body.summary).toEqual({ total: 2, ok: 1, ambiguous: 0, notFound: 0, failed: 1 });
+
+    const llm = await run(["callers", "Unique", "Other", "--format", "llm"]);
+    expect(llm.exitCode).toBe(1);
+    const lines = llm.stdout.split("\n");
+    expect(lines[1]).toMatch(/^error code=query_failed /);
+    expect(lines).toContain("target n=2 name=Other");
+    expect(lines[lines.length - 1]).toBe("targets total=2 ok=1 failed=1");
+  });
+
   it("text: a header per target", async () => {
     const result = await run(["locate", "Unique", "Missing"]);
     expect(result.exitCode).toBe(3);
@@ -421,5 +462,20 @@ describe("an id lookup the backend could not answer", () => {
     expect(await resolveFileOrEntityFull(absent as never, RAW_ID, { format: "json" })).toEqual({ resolved: false, ambiguous: false });
     expect(isLookupMiss(new Error("No entity found for prefix: abcd1234"))).toBe(true);
     expect(isLookupMiss(new Error("401: unauthorized"))).toBe(false);
+  });
+
+  it("a hex-looking name falls through to the name search whatever the prefix lookup answers", async () => {
+    graph({ deadbeef: [{ id: "beef-id", kind: "function", name: "deadbeef", provenance: { sourceUri: "src/beef.ts" } }] });
+    const { resolveFileOrEntityFull } = await import("../resolve.js");
+    for (const status of ["403: forbidden", "405: method not allowed", "502: <html>bad gateway</html>"]) {
+      resolvePrefix.mockReset().mockRejectedValue(new Error(status));
+      const { IxClient } = await import("../../client/api.js");
+      const result = await resolveFileOrEntityFull(new (IxClient as any)(), "deadbeef", { format: "json" });
+      expect(result).toMatchObject({ resolved: true, entity: { id: "beef-id" } });
+    }
+    const down = Object.assign(new Error("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+    resolvePrefix.mockReset().mockRejectedValue(down);
+    const { IxClient } = await import("../../client/api.js");
+    await expect(resolveFileOrEntityFull(new (IxClient as any)(), "deadbeef", { format: "json" })).rejects.toThrow(/fetch failed/);
   });
 });

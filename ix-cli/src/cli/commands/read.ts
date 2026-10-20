@@ -133,9 +133,7 @@ function readFileRange(
  */
 function readablePath(filePath: string): string {
   const relative = relativePath(filePath);
-  // A `~/...` shortening is only the fallback: under a home directory it
-  // would otherwise win before the symlink-resolved comparison below runs.
-  if (relative && relative !== filePath && !relative.startsWith("~")) return relative;
+  if (relative && relative !== filePath) return relative;
   try {
     const fromCwd = path.relative(fs.realpathSync(process.cwd()), fs.realpathSync(filePath));
     if (fromCwd && !fromCwd.startsWith("..") && !path.isAbsolute(fromCwd)) {
@@ -144,7 +142,7 @@ function readablePath(filePath: string): string {
   } catch {
     // An unreadable cwd or a file deleted under us: the absolute path stands.
   }
-  return relative ?? filePath;
+  return filePath;
 }
 
 /** `src/a.ts:401-800`, or nothing when the cap landed on the last line. */
