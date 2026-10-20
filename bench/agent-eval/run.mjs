@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { validateConfig, validateProbe, schedule } from './config.mjs';
 import { checkManifestSource, loadManifest, sha256 } from './manifest.mjs';
-import { parseMetrics } from './metrics.mjs';
+import { budgetTokens, parseMetrics } from './metrics.mjs';
 import { execute } from './process.mjs';
 import { markdown, summarize } from './stats.mjs';
 import { checkResolution } from './evaluation.mjs';
@@ -100,7 +100,7 @@ export async function runBenchmark({ manifestPath, config, out, dryRun = false }
       const metrics = parseMetrics(agent.stdout, config.agent.telemetry, { allowIncomplete: agent.timed_out || agent.exit_code !== 0 });
       const overTurns = metrics.turns > config.budget.max_turns;
       const usage = metrics.observed_usage;
-      const overTokens = usage && usage.input_tokens + usage.output_tokens > config.budget.max_tokens;
+      const overTokens = usage && budgetTokens(usage) > config.budget.max_tokens;
       const termination = agent.timed_out ? 'time_budget' : overTokens ? 'token_budget' : (overTurns ? 'turn_budget' : metrics.budget_reason ?? 'completed');
       if (agent.exit_code !== 0 && termination === 'completed') throw new Error('Agent stage failed without a recognized budget outcome');
       if (job.arm === 'baseline' && metrics.ix_calls) throw new Error('Baseline invoked ix; inspect isolation before comparing arms');
@@ -110,10 +110,12 @@ export async function runBenchmark({ manifestPath, config, out, dryRun = false }
         patch = (await execute(['git', 'diff', '--binary', job.task.base_commit, '--', '.', ':(exclude).claude', ':(exclude).agents', ':(exclude).codex', ':(exclude).ix', ':(exclude).mcp.json'], { cwd: repoPath, env, seconds: 10 })).stdout;
       }
       writeFileSync(join(runPath, 'prediction.patch'), patch);
+      let hookSeconds = 0;
       if (existsSync(hookLog)) {
         const hooks = readFileSync(hookLog, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
         for (const hook of hooks) {
-          if (!Number.isSafeInteger(hook.ix_calls) || hook.ix_calls < 0) throw new Error('Invalid hook telemetry');
+          if (!Number.isSafeInteger(hook.ix_calls) || hook.ix_calls < 0 || !(Number.isFinite(hook.seconds) && hook.seconds >= 0)) throw new Error('Invalid hook telemetry');
+          hookSeconds += hook.seconds;
           metrics.ix_calls += hook.ix_calls;
           if (hook.type === 'ix_error') { metrics.ix_errors++; metrics.ix_errors_by_code[hook.code] = (metrics.ix_errors_by_code[hook.code] ?? 0) + 1; }
         }
@@ -129,7 +131,7 @@ export async function runBenchmark({ manifestPath, config, out, dryRun = false }
         const official = JSON.parse(readFileSync(reportPath, 'utf8'));
         checkResolution(official, result, job.task.instance_id, patch);
       }
-      const run = { instance_id: job.task.instance_id, repo: job.task.repo, base_commit: job.task.base_commit, repeat: job.repeat, arm: job.arm, ...metrics, termination, official_resolved: Number(result.resolved), resolved: Number(result.resolved && !overTurns && !overTokens), wall_seconds: agent.seconds, setup_seconds: setupSeconds, eval_seconds: evaluation.seconds, total_wall_seconds: (performance.now() - setupStart) / 1000 };
+      const run = { instance_id: job.task.instance_id, repo: job.task.repo, base_commit: job.task.base_commit, repeat: job.repeat, arm: job.arm, ...metrics, termination, official_resolved: Number(result.resolved), resolved: Number(result.resolved && !overTurns && !overTokens), wall_seconds: agent.seconds, hook_seconds: hookSeconds, setup_seconds: setupSeconds, eval_seconds: evaluation.seconds, total_wall_seconds: (performance.now() - setupStart) / 1000 };
       json(join(runPath, 'result.json'), run); runs.push(run);
       writeFileSync(join(out, 'runs.jsonl'), runs.map((r) => JSON.stringify(r)).join('\n') + '\n');
     } catch (error) {

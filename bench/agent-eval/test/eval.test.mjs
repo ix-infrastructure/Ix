@@ -1,18 +1,18 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, test } from 'node:test';
 import { checkManifestSource, importVerified, loadManifest, sha256, validateManifest } from '../manifest.mjs';
 import { schedule, validateConfig, validateProbe } from '../config.mjs';
-import { commandCounts, isIxMcpTool, parseMetrics, METRICS } from '../metrics.mjs';
+import { budgetTokens, commandCounts, isIxMcpTool, parseMetrics, METRICS } from '../metrics.mjs';
 import { markdown, summarize } from '../stats.mjs';
 import { dryConfig, resolveConfigPaths, runBenchmark } from '../run.mjs';
 import { execute } from '../process.mjs';
-import { checkResolution } from '../evaluation.mjs';
+import { checkResolution, evaluationError } from '../evaluation.mjs';
 import { armEnvironment } from '../isolation.mjs';
 import { assertMapped, checkTaskIsolation, integrationFiles } from '../provision.mjs';
 
@@ -102,6 +102,19 @@ test('Claude Ix MCP calls count under both direct and plugin-scoped tool names',
   assert.equal(metrics.ix_calls, 1); assert.deepEqual(metrics.ix_errors_by_code, { UNMAPPED: 1 });
 });
 
+test('token ceiling counts uncached input and output, not cache reads', () => {
+  // A long Claude session re-reads its cached context every turn; that must not exhaust the ceiling.
+  assert.equal(budgetTokens({ input_tokens: 250_000, cached_tokens: 240_000, output_tokens: 5_000 }), 15_000);
+  assert.equal(budgetTokens({ input_tokens: 10, cached_tokens: 0, output_tokens: 2 }), 12);
+});
+
+test('example config grants the native agent edit and shell permissions', () => {
+  const { agent } = JSON.parse(readFileSync(join(root, 'config.example.json'), 'utf8'));
+  // Claude --print denies anything that would prompt, so an empty argv cannot edit files.
+  assert.deepEqual(agent.args, ['--permission-mode', 'acceptEdits', '--allowedTools', 'Bash']);
+  assert.ok(!agent.args.some((arg) => /plugin|mcp|settings|notify|CODEX_HOME|CLAUDE_CONFIG_DIR/.test(arg)));
+});
+
 test('Codex sums completed turn usage and captures command/MCP errors by code', () => {
   const usage = { type: 'turn.completed', usage: { input_tokens: 100, output_tokens: 20, cached_input_tokens: 50 } };
   const metrics = parseMetrics(ndjson([{ type: 'turn.started' }, { type: 'item.completed', item: { id: 't', type: 'command_execution', command: 'rg foo; ix locate Foo', exit_code: 1, aggregated_output: '{"error":{"code":"NOT_FOUND"}}' } }, usage, { type: 'turn.started' }, { type: 'item.completed', item: { id: 'm', type: 'mcp_tool_call', server: 'ix-memory', error: { code: 'DOWN' } } }, usage]), 'codex');
@@ -156,6 +169,7 @@ integrationTest('budget exhaustion retains outcomes and completes the comparison
   const runs = readFileSync(join(out, 'runs.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(runs.length, 12);
   assert.ok(runs.every((run) => run.termination === 'token_budget' && run.resolved === 0 && run.official_resolved === 1));
+  assert.ok(runs.every((run) => Number.isFinite(run.hook_seconds)));
   assert.equal(report.metrics.resolved.baseline.mean, 0);
   assert.ok(existsSync(join(out, 'summary.md')));
 });
@@ -179,6 +193,46 @@ test('empty solutions need explicit official summary evidence, never a guessed f
   assert.throws(() => checkResolution({ empty_patch_ids: [] }, receipt, 'fixture', ''), /evidence/);
   assert.throws(() => checkResolution({ empty_patch_ids: ['fixture'] }, receipt, 'fixture', 'nonempty'), /evidence/);
   assert.throws(() => checkResolution({}, { resolved: false }, 'fixture', ''), /differs/);
+});
+
+test('patch-apply and test-timeout evaluation errors score unresolved; other errors stay fatal', () => {
+  const receipt = { report_kind: 'error-summary', resolved: false, evaluation_error: 'patch_apply_failed' };
+  checkResolution({ error_ids: ['fixture'] }, receipt, 'fixture', 'diff');
+  assert.throws(() => checkResolution({ error_ids: [] }, receipt, 'fixture', 'diff'), /evidence/);
+  assert.throws(() => checkResolution({ error_ids: ['fixture'] }, receipt, 'fixture', ''), /evidence/);
+  assert.throws(() => checkResolution({ error_ids: ['fixture'] }, { ...receipt, resolved: true }, 'fixture', 'diff'), /evidence/);
+  assert.throws(() => checkResolution({ error_ids: ['fixture'] }, { ...receipt, evaluation_error: 'docker' }, 'fixture', 'diff'), /evidence/);
+  assert.equal(evaluationError('x\n>>>>> Patch Apply Failed:\nerror: corrupt patch'), 'patch_apply_failed');
+  assert.equal(evaluationError('EvaluationError: Evaluation error in fixture: Test timed out after 900 seconds.'), 'test_timeout');
+  assert.throws(() => evaluationError('BuildImageError: docker daemon unavailable'), /inspect the harness logs/);
+});
+
+integrationTest('SWE-bench adapter turns a logged patch-apply error into an unresolved receipt', () => {
+  const harness = join(scratch, 'swe-harness'), python = join(scratch, 'fake-python.cjs');
+  mkdirSync(harness, { recursive: true });
+  execFileSync('git', ['init', '-q', harness]); writeFileSync(join(harness, 'README'), 'fixture');
+  execFileSync('git', ['-C', harness, 'add', '.']); execFileSync('git', ['-C', harness, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'fixture']);
+  const revision = execFileSync('git', ['-C', harness, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  // Mimics the official harness: no task report, the instance listed in error_ids, the cause in run_instance.log.
+  writeFileSync(python, `#!${process.execPath}
+    const { mkdirSync, writeFileSync } = require('node:fs');
+    const id = process.argv[process.argv.indexOf('--instance_ids') + 1], dir = 'logs/run_evaluation/agent-eval/agent-eval/' + id;
+    mkdirSync(dir, { recursive: true }); writeFileSync(dir + '/run_instance.log', process.env.FAKE_INSTANCE_LOG);
+    writeFileSync('agent-eval.agent-eval.json', JSON.stringify({ error_ids: [id], empty_patch_ids: [], resolved_ids: [] }));
+  `.replace(/^\s+/gm, ''), { mode: 0o755 });
+  const evaluate = (name, log) => {
+    const run_path = join(scratch, `swe-${name}`); mkdirSync(run_path, { recursive: true });
+    writeFileSync(join(run_path, 'prediction.patch'), 'diff --git a/x b/x\n');
+    const request = { synthetic: false, dataset_export: 'fixture.json', run_path, task: { instance_id: 'fixture__repo-1' }, evaluator: { kind: 'swe-bench', revision, harness_path: harness, python, seconds: 30 } };
+    writeFileSync(join(run_path, 'request.json'), JSON.stringify(request));
+    return spawnSync(process.execPath, [join(root, 'swebench.mjs'), join(run_path, 'request.json')], { encoding: 'utf8', env: { ...process.env, FAKE_INSTANCE_LOG: log } });
+  };
+  const applied = evaluate('apply', '>>>>> Patch Apply Failed:\npatch: **** malformed patch');
+  assert.equal(applied.status, 0, applied.stderr);
+  const receipt = JSON.parse(applied.stdout);
+  assert.equal(receipt.resolved, false); assert.equal(receipt.report_kind, 'error-summary'); assert.equal(receipt.evaluation_error, 'patch_apply_failed');
+  const docker = evaluate('docker', 'BuildImageError: docker daemon unavailable');
+  assert.notEqual(docker.status, 0); assert.match(docker.stderr, /inspect the harness logs/);
 });
 
 integrationTest('real-run plumbing checks dataset pins and official evidence and includes new solution files', async () => {
@@ -340,6 +394,10 @@ integrationTest('shipped provisioner installs pinned local integrations and isol
     } else {
       for (const evidence of result.evidence) assert.equal(sha256(readFileSync(evidence.path)), evidence.sha256);
       const files = integrationFiles(request), first = Object.keys(files)[0];
+      if (family === 'claude') {
+        const hooks = JSON.parse(files[join(run_path, 'plugin', 'hooks', 'hooks.json')]).hooks.PostToolUse[0].hooks[0];
+        assert.equal(hooks.timeout, 2 * request.environment.seconds + 30); // Outlasts both ix stage deadlines.
+      }
       writeFileSync(first, 'tampered');
       await assert.rejects(execute([process.execPath, provision, 'probe', requestPath], { env }), /exited/);
       writeFileSync(first, files[first]);

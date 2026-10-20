@@ -1,10 +1,15 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-export const METRICS = ['resolved', 'input_tokens', 'output_tokens', 'cached_tokens', 'turns', 'tool_calls', 'search_calls', 'rg_calls', 'grep_calls', 'find_calls', 'ix_calls', 'ix_errors', 'wall_seconds', 'setup_seconds', 'eval_seconds', 'total_wall_seconds'];
+export const METRICS = ['resolved', 'input_tokens', 'output_tokens', 'cached_tokens', 'turns', 'tool_calls', 'search_calls', 'rg_calls', 'grep_calls', 'find_calls', 'ix_calls', 'ix_errors', 'wall_seconds', 'hook_seconds', 'setup_seconds', 'eval_seconds', 'total_wall_seconds'];
 const counter = (value, label) => {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error(`Missing or invalid ${label}`);
   return value;
 };
+
+/** Token ceiling usage: uncached input plus output, comparable across Claude and Codex.
+ * Cache reads re-send context already counted and would otherwise dominate long sessions.
+ */
+export const budgetTokens = (usage) => usage.input_tokens - usage.cached_tokens + usage.output_tokens;
 
 /** Tokenize direct shell commands, preserving quoted separators as argument text.
  * Scripts, aliases and dynamic expansions require normalized tool telemetry.

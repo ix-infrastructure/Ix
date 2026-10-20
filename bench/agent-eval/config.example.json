@@ -12,7 +12,7 @@
     "effort": "medium",
     "telemetry": "claude",
     "command": ["node", "bench/agent-eval/agent.mjs"],
-    "args": []
+    "args": ["--permission-mode", "acceptEdits", "--allowedTools", "Bash"]
   },
   "budget": { "max_turns": 30, "max_tokens": 200000, "seconds": 1200 },
   "environment": {

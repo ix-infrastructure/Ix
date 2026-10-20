@@ -15,10 +15,12 @@ const run = (request, argv, input) => execute(argv, { cwd: request.repo_path, se
 export function integrationFiles(request) {
   const plugin = join(request.run_path, 'plugin');
   const hook = [process.execPath, join(root, 'hook.mjs')];
+  // Map refresh and claude-post-edit each have an environment.seconds deadline; Claude's default hook timeout is shorter.
+  const hookTimeout = 2 * request.environment.seconds + 30;
   if (request.agent.family === 'claude') return {
     [join(plugin, '.claude-plugin', 'plugin.json')]: json({ name: 'ix-agent-eval', version: '1.0.0', description: 'Pinned local Ix benchmark integration' }),
     [join(plugin, '.mcp.json')]: json({ mcpServers: { 'ix-memory': { command: 'ix', args: ['mcp'] } } }),
-    [join(plugin, 'hooks', 'hooks.json')]: json({ hooks: { PostToolUse: [{ matcher: 'Edit|MultiEdit|Write|Bash', hooks: [{ type: 'command', command: hook.map(shellQuote).join(' ') + ' claude' }] }] } }),
+    [join(plugin, 'hooks', 'hooks.json')]: json({ hooks: { PostToolUse: [{ matcher: 'Edit|MultiEdit|Write|Bash', hooks: [{ type: 'command', command: hook.map(shellQuote).join(' ') + ' claude', timeout: hookTimeout }] }] } }),
   };
   if (request.agent.family === 'codex') return {
     [join(request.home, '.codex', 'config.toml')]: `notify = ${JSON.stringify([...hook, 'codex'])}\n[mcp_servers.ix-memory]\ncommand = "ix"\nargs = ["mcp"]\n`,

@@ -21,6 +21,6 @@ try {
   }
   appendFileSync(join(request.run_path, 'hooks.jsonl'), JSON.stringify({ type: 'hook', mode, ix_calls: calls, seconds: (performance.now() - started) / 1000 }) + '\n');
 } catch {
-  appendFileSync(join(request.run_path, 'hooks.jsonl'), JSON.stringify({ type: 'ix_error', code: 'HOOK_FAILED', ix_calls: calls }) + '\n');
+  appendFileSync(join(request.run_path, 'hooks.jsonl'), JSON.stringify({ type: 'ix_error', code: 'HOOK_FAILED', ix_calls: calls, seconds: (performance.now() - started) / 1000 }) + '\n');
   process.exitCode = 1;
 }

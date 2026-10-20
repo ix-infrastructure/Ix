@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { execute } from './process.mjs';
 import { sha256 } from './manifest.mjs';
-import { checkResolution } from './evaluation.mjs';
+import { checkResolution, evaluationError } from './evaluation.mjs';
 
 const request = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 if (request.synthetic || request.evaluator.kind !== 'swe-bench') throw new Error('Official evaluator requires real SWE-bench tasks');
@@ -23,12 +23,22 @@ await execute([python, '-m', 'swebench.harness.run_evaluation', '--dataset_name'
   cwd: run_path, seconds: evaluator.seconds,
   env: { ...process.env, PYTHONPATH: evaluator.harness_path }, log: join(run_path, 'official-harness'),
 });
-let reportPath = join(run_path, 'logs', 'run_evaluation', runId, 'agent-eval', task.instance_id, 'report.json');
-let reportKind = 'task';
-if (!existsSync(reportPath)) { reportPath = join(run_path, 'agent-eval.agent-eval.json'); reportKind = 'empty-patch-summary'; }
+const instanceLogs = join(run_path, 'logs', 'run_evaluation', runId, 'agent-eval', task.instance_id);
+const patch = readFileSync(join(run_path, 'prediction.patch'), 'utf8');
+let reportPath = join(instanceLogs, 'report.json');
+let reportKind = 'task', failure = {};
+if (!existsSync(reportPath)) {
+  // No task report: the run summary lists the instance as an empty patch or an evaluation error.
+  reportPath = join(run_path, 'agent-eval.agent-eval.json');
+  reportKind = patch === '' ? 'empty-patch-summary' : 'error-summary';
+  if (reportKind === 'error-summary') {
+    const log = readFileSync(join(instanceLogs, 'run_instance.log'), 'utf8');
+    failure = { evaluation_error: evaluationError(log), log_sha256: sha256(log) };
+  }
+}
 const text = readFileSync(reportPath, 'utf8'), report = JSON.parse(text);
 const resolved = reportKind === 'task' ? report[task.instance_id]?.resolved : false;
 if (typeof resolved !== 'boolean') throw new Error('Official report absent or missing resolution');
-const receipt = { instance_id: task.instance_id, resolved, evaluator: 'swe-bench', revision, report_kind: reportKind, report_path: reportPath, report_sha256: sha256(text) };
-checkResolution(report, receipt, task.instance_id, readFileSync(join(run_path, 'prediction.patch'), 'utf8'));
+const receipt = { instance_id: task.instance_id, resolved, evaluator: 'swe-bench', revision, report_kind: reportKind, report_path: reportPath, report_sha256: sha256(text), ...failure };
+checkResolution(report, receipt, task.instance_id, patch);
 console.log(JSON.stringify(receipt));
