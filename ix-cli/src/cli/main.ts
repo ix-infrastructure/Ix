@@ -6,10 +6,7 @@
 // below could not live in `run-cli.ts`: by the time its first line ran, the
 // ~200 modules behind the command registry would already be loaded.
 
-import { existsSync, mkdirSync } from "node:fs";
 import * as nodeModule from "node:module";
-import { isAbsolute, join } from "node:path";
-import { ixHome } from "./ix-home.js";
 
 // Runtime Node version guard. Runs before any command work so users on an
 // unsupported Node get an actionable message instead of a cryptic "fetch
@@ -30,22 +27,18 @@ const MIN_NODE_MAJOR = 22;
 // V8's code cache for every module loaded from here on. Compiling the CLI's
 // modules is most of its start-up: measured at ~40 ms of ~180 ms before the
 // first request on a warm machine. Node >= 22.1 keys the cache by file content
-// and Node version, so an upgrade can never run stale code. It lives with the
-// rest of Ix's state, under `$IX_HOME/cache` (as the BM25 cache does), and only
-// once that home exists: a first `ix --version` on a new machine does not get
-// to create `~/.ix`, at whatever mode Node's mkdir would give it. Never in the
-// directory the command runs in -- a relative IX_HOME would put it there, so
-// then there is no cache. NODE_COMPILE_CACHE, which Node applies before this
-// line runs, still moves it and NODE_DISABLE_COMPILE_CACHE=1 turns it off.
-// Absent on 22.0: then a no-op. A directory that cannot be created or written
-// is reported in the return value, which is ignored: it only costs speed.
+// and Node version, so an upgrade can never run stale code, and keeps it in
+// its default place under the OS temp directory, which the OS cleans: caches
+// left behind by older Node versions do not pile up in Ix's own state.
+// Node's own settings win, and then this calls nothing: NODE_COMPILE_CACHE has
+// already been applied before this line runs, and NODE_DISABLE_COMPILE_CACHE
+// (any value, as Node reads it) turns the cache off. Absent on 22.0: then a
+// no-op. A directory that cannot be created or written is reported in the
+// return value, which is ignored: it only costs speed.
 try {
-  const { enableCompileCache } = nodeModule as { enableCompileCache?: (dir: string) => unknown };
-  const home = ixHome();
-  if (enableCompileCache && isAbsolute(home) && existsSync(home)) {
-    const cacheDir = join(home, "cache", "node-compile-cache");
-    mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
-    enableCompileCache(cacheDir);
+  const { enableCompileCache } = nodeModule as { enableCompileCache?: () => unknown };
+  if (enableCompileCache && process.env.NODE_COMPILE_CACHE === undefined && process.env.NODE_DISABLE_COMPILE_CACHE === undefined) {
+    enableCompileCache();
   }
 } catch {
   // A cache that cannot be opened only costs speed.

@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import * as nodeModule from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -295,41 +295,56 @@ describe("the fast and full paths answer identically", () => {
 describe("the compile cache", () => {
   const supported = typeof (nodeModule as { enableCompileCache?: unknown }).enableCompileCache === "function";
 
-  it.skipIf(!supported)("lives under IX_HOME/cache, private to the user", async () => {
-    const own = tempDir("ix-cc-home-");
-    expect(await runCli(["--version"], { env: baseEnv({ IX_HOME: own }) })).toEqual({ stdout: `${VERSION}\n`, stderr: "", status: 0 });
-    const dir = join(own, "cache", "node-compile-cache");
-    expect(statSync(dir).isDirectory()).toBe(true);
-    if (process.platform !== "win32") expect(statSync(dir).mode & 0o777).toBe(0o700);
+  /** A scratch OS temp dir (TMPDIR on POSIX, TEMP/TMP on Windows), an empty IX_HOME and a cwd. */
+  function sandbox(extra: Record<string, string> = {}) {
+    const tmp = tempDir("ix-cc-tmp-");
+    const ixHomeDir = tempDir("ix-cc-home-");
+    const cwd = tempDir("ix-cc-cwd-");
+    const env = baseEnv({ IX_HOME: ixHomeDir, TMPDIR: tmp, TMP: tmp, TEMP: tmp, ...extra });
+    return { tmp, ixHomeDir, cwd, env };
+  }
+  const versionOnly = { stdout: `${VERSION}\n`, stderr: "", status: 0 };
+
+  it.skipIf(!supported)("lives in Node's default place under the OS temp dir, never under IX_HOME or the cwd", async () => {
+    const box = sandbox();
+    expect(await runCli(["--version"], { cwd: box.cwd, env: box.env })).toEqual(versionOnly);
+    expect(statSync(join(box.tmp, "node-compile-cache")).isDirectory()).toBe(true);
+    expect(readdirSync(box.ixHomeDir)).toEqual([]);
+    expect(readdirSync(box.cwd)).toEqual([]);
   }, 60_000);
 
-  it("does not create IX_HOME to hold it", async () => {
+  it("creates nothing when NODE_DISABLE_COMPILE_CACHE is set", async () => {
+    const box = sandbox({ NODE_DISABLE_COMPILE_CACHE: "1" });
+    expect(await runCli(["--version"], { cwd: box.cwd, env: box.env })).toEqual(versionOnly);
+    expect(existsSync(join(box.tmp, "node-compile-cache"))).toBe(false);
+    expect(readdirSync(box.ixHomeDir)).toEqual([]);
+    expect(readdirSync(box.cwd)).toEqual([]);
+  }, 60_000);
+
+  it("leaves NODE_COMPILE_CACHE to Node", async () => {
+    const elsewhere = join(tempDir("ix-cc-elsewhere-"), "cache");
+    const box = sandbox({ NODE_COMPILE_CACHE: elsewhere });
+    expect(await runCli(["--version"], { cwd: box.cwd, env: box.env })).toEqual(versionOnly);
+    expect(existsSync(join(box.tmp, "node-compile-cache"))).toBe(false);
+    expect(readdirSync(box.ixHomeDir)).toEqual([]);
+  }, 60_000);
+
+  it("does not create IX_HOME", async () => {
+    const box = sandbox();
     const missing = join(tempDir("ix-cc-parent-"), "home");
-    expect(await runCli(["--version"], { env: baseEnv({ IX_HOME: missing }) })).toEqual({ stdout: `${VERSION}\n`, stderr: "", status: 0 });
+    expect(await runCli(["--version"], { cwd: box.cwd, env: { ...box.env, IX_HOME: missing } })).toEqual(versionOnly);
     expect(existsSync(missing)).toBe(false);
   }, 60_000);
 
   it("is silently skipped when its directory cannot be created", async () => {
-    // A regular file where a directory has to go fails for every user,
+    // A regular file where the directory has to go fails for every user,
     // root included, on every platform.
-    const fileHome = join(tempDir("ix-cc-file-"), "home");
-    writeFileSync(fileHome, "");
-    expect(await runCli(["--version"], { env: baseEnv({ IX_HOME: fileHome }) })).toEqual({ stdout: `${VERSION}\n`, stderr: "", status: 0 });
-
-    const blocked = tempDir("ix-cc-blocked-");
-    writeFileSync(join(blocked, "cache"), "");
-    expect(await runCli(["--version"], { env: baseEnv({ IX_HOME: blocked }) })).toEqual({ stdout: `${VERSION}\n`, stderr: "", status: 0 });
-    const read = await runCli(["read", "a.txt", "--format", "json"], { env: baseEnv({ IX_HOME: blocked }) });
+    const box = sandbox();
+    writeFileSync(join(box.tmp, "node-compile-cache"), "");
+    expect(await runCli(["--version"], { cwd: box.cwd, env: box.env })).toEqual(versionOnly);
+    const read = await runCli(["read", "a.txt", "--format", "json"], { env: box.env });
     expect(read.status).toBe(0);
     expect(read.stderr).toBe("");
-  }, 60_000);
-
-  it("never writes into the directory the command runs in", async () => {
-    const cwd = tempDir("ix-cc-cwd-");
-    mkdirSync(join(cwd, "rel-home"));
-    const run = await runCli(["--version"], { cwd, env: baseEnv({ IX_HOME: "rel-home" }) });
-    expect(run).toEqual({ stdout: `${VERSION}\n`, stderr: "", status: 0 });
-    expect(readdirSync(join(cwd, "rel-home"))).toEqual([]);
-    expect(readdirSync(cwd)).toEqual(["rel-home"]);
+    expect(statSync(join(box.tmp, "node-compile-cache")).isFile()).toBe(true);
   }, 60_000);
 });
