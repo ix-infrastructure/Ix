@@ -9,8 +9,8 @@ import { proIsAbsent } from "./pro-loader.js";
  * being run.
  *
  * `registerOssCommands()` (`register/oss.ts`) imports all ~40 command modules
- * and everything they depend on: ~100 ms on every call, `--version` included,
- * before the command does anything. Agents and plugin hooks call `ix` far more
+ * and everything they depend on, on every call, `--version` included, before
+ * the command does anything. Agents and plugin hooks call `ix` far more
  * often than a person does, and compare it with `rg`, which has answered by
  * then. So `run-cli.ts` asks `planStartup` first and, where it can, registers
  * the one command instead.

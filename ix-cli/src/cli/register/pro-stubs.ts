@@ -10,7 +10,8 @@ const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "goal", desc: "Manage project goals" },
   { name: "goals", desc: "List all goals" },
   // `patches` is deliberately absent: ix-cli owns the real implementation
-  // (commands/patches.ts, registered above). It sat in this list while never
+  // (commands/patches.ts, registered by `registerOssCommands` in oss.ts and
+  // listed in oss-table.ts). It sat in this list while never
   // being registered, so `ix patches` answered "requires Ix Pro" on OSS and
   // shadowed a working command — see #371.
   { name: "plan", desc: "Manage plans and plan tasks" },
