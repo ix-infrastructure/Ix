@@ -82,11 +82,13 @@ which value it ignored, on stderr, when a person is there to read it.
   that compares the status against `1`.
   A file target's miss adds `reason=file_not_in_graph` (on disk, not ingested)
   or `reason=file_not_found`. A symbol's miss says why when the workspace's
-  text can: `reason=symbol_file_not_indexed` (the name is in a file the graph
-  does not have), `reason=symbol_not_extracted` (it is in indexed files, named
+  text can: `reason=symbol_file_not_indexed` (the name is only in source files
+  the graph does not have), `reason=symbol_not_extracted` (it is in indexed files, named
   with their revision, but not as an entity) or `reason=symbol_not_in_source`
   (it is nowhere in the workspace either), with `files=` naming up to three
-  files; `IX_MISS_PROBE=0` turns that lookup off. Any miss may carry
+  files. Only files `ix map` parses count, so a name that appears only in, say,
+  a `.txt` is a plain miss; a command spends at most 5 seconds on these lookups,
+  then reports later misses plainly; `IX_MISS_PROBE=0` turns them off. Any miss may carry
   `suggestion` records with the nearest names in the graph (`locate` included),
   and a miss on an empty or degraded graph carries a `graph` record saying so.
   A graph read from a directory no registered workspace covers is
@@ -122,8 +124,8 @@ ref name=retry kind=function path=src/jobs.ts lines=4-9 candidate=2
 `impact --all` prints one analysis per candidate, each after its `candidate`
 record (json: `results: [{ candidate, ... }]`). Every tied candidate the name
 search returned is covered, not only the 8 an ambiguity error lists (those 8
-keep their `--pick` numbers; the rest follow), so a common name can mean many
-analyses. An import of the name (`from app.utils import clamp`) is listed in
+keep their `--pick` numbers; the rest follow, and `--pick <n>` reaches them by
+the same numbers), so a common name can mean many analyses. An import of the name (`from app.utils import clamp`) is listed in
 an ambiguity but skipped by `--all` when a definition is listed too, so the
 numbers can skip it; when only imports are listed, they are answered. The search window is bounded (up to 200 names with `--path`, fewer
 without); a `candidates_truncated` diagnostic says when it was cut off. Narrow
@@ -157,7 +159,8 @@ The candidates are only the true ties: the ones that scored the same as the
 chosen target. `shown=`, `total=` and `--pick <n>` all count that same list.
 Candidates that scored close but lower are not listed as equal; the message
 only counts them ("2 more scored lower and are not listed"). `--pick <n>`
-selects among the listed candidates; an out-of-range pick keeps the
+selects among the tied candidates, the listed ones first and the rest in the
+order `--all` numbers them; an out-of-range pick keeps the
 default and adds a `pick_out_of_range` diagnostic, still exiting 0.
 
 `Class.method` and `Class#method` resolve only to a member of that class: one

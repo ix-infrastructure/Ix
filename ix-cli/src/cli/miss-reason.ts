@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import type { IxClient } from "../client/api.js";
 import { currentRunSignal } from "../client/run-signal.js";
 import { resolveWorkspaceRoot } from "./config.js";
+import { isGeneratedFile, isSupportedSourceFile } from "./file-discovery.js";
 import { isFileStale } from "./stale.js";
 
 const execFileAsync = promisify(execFile);
@@ -15,6 +16,33 @@ const FILES_CHECKED = 3;
 
 /** `IX_MISS_PROBE=0` skips the probe (a tree too large for even one bounded rg). */
 export const MISS_PROBE_ENV = "IX_MISS_PROBE";
+
+/**
+ * Wall time one run may spend on miss probes, all misses together. A
+ * multi-target call with several misses in a large tree would otherwise pay
+ * the rg walk once per miss; once the budget is spent, later misses are
+ * reported plainly. Kept per run (`ix mcp` runs many in one process), and per
+ * process outside one, where a process is one command.
+ */
+const PROBE_BUDGET_MS = 5_000;
+const spentByRun = new WeakMap<AbortSignal, number>();
+let spentOutsideRun = 0;
+
+function probeTimeSpent(): number {
+  const run = currentRunSignal();
+  return run ? spentByRun.get(run) ?? 0 : spentOutsideRun;
+}
+
+function chargeProbeTime(ms: number): void {
+  const run = currentRunSignal();
+  if (run) spentByRun.set(run, (spentByRun.get(run) ?? 0) + ms);
+  else spentOutsideRun += ms;
+}
+
+/** A file `ix map` would hand to the parser: the only kind the graph can lack for a reason `ix map` fixes. */
+function isParsedFile(file: string): boolean {
+  return isSupportedSourceFile(file) && !isGeneratedFile(path.posix.basename(file));
+}
 
 function normalizeForPathMatch(value: string): string {
   return value.toLowerCase().replace(/\\/g, "/");
@@ -51,6 +79,8 @@ export async function explainSymbolMiss(
   scope: { path?: string; workspaceId?: string; systemId?: string },
 ): Promise<SymbolMissReason | null> {
   if (process.env[MISS_PROBE_ENV] === "0") return null;
+  const left = PROBE_BUDGET_MS - probeTimeSpent();
+  if (left <= 0) return null;
   // The last segment of `Class.method` / `pkg::name`: that is the token in the text.
   const name = symbol.split(/::|[.#]/).filter(Boolean).pop() ?? "";
   if (!/^[A-Za-z_$][\w$]*$/.test(name)) return null;
@@ -58,31 +88,56 @@ export async function explainSymbolMiss(
   let root: string;
   try { root = resolveWorkspaceRoot(); } catch { return null; }
 
-  const files = await filesMentioning(name, root, scope.path);
-  if (files === null) return null;
-  if (files.length === 0) {
+  const started = Date.now();
+  try {
+    return await probe(client, symbol, name, root, scope, left);
+  } finally {
+    chargeProbeTime(Date.now() - started);
+  }
+}
+
+async function probe(
+  client: Pick<IxClient, "search">,
+  symbol: string,
+  name: string,
+  root: string,
+  scope: { path?: string; workspaceId?: string; systemId?: string },
+  timeoutMs: number,
+): Promise<SymbolMissReason | null> {
+  const hits = await filesMentioning(name, root, scope.path, timeoutMs);
+  if (hits === null) return null;
+  if (hits.length === 0) {
     return {
       reason: "symbol_not_in_source",
       message: `No entity found matching "${symbol}", and "${name}" does not appear in any file under ${scope.path ? `paths matching "${scope.path}"` : "the workspace"} either.`,
     };
   }
 
+  // A README or a .txt that mentions the name is no file the graph lacks:
+  // `ix map` never parses it. Only the name in no parsed file at all is left
+  // as a plain miss.
+  const files = hits.filter(isParsedFile);
+  if (files.length === 0) return null;
+
+  // Every checked file is looked up before judging: one unindexed file among
+  // indexed ones does not make re-mapping the answer.
   const checked = files.slice(0, FILES_CHECKED);
+  const nodes = await Promise.all(checked.map((file) => graphFile(client, file, scope)));
   const indexed: Array<{ file: string; rev?: number; stale: boolean }> = [];
-  for (const file of checked) {
-    const node = await graphFile(client, file, scope);
-    if (node === undefined) return null;
-    if (node === null) {
-      return {
-        reason: "symbol_file_not_indexed",
-        message: `"${symbol}" is not in the graph, but it appears in ${file}, which has not been indexed: ` +
-          "run `ix map`, or the file is ignored or of a type Ix does not parse.",
-        files: checked,
-      };
-    }
+  checked.forEach((file, i) => {
+    if (!nodes[i]) return;
     let stale = false;
     try { stale = isFileStale(path.join(root, file)); } catch { /* unknown is not stale */ }
-    indexed.push({ file, rev: revOf(node), stale });
+    indexed.push({ file, rev: revOf(nodes[i]), stale });
+  });
+  if (indexed.length === 0) {
+    if (nodes.some((n) => n === undefined)) return null;
+    return {
+      reason: "symbol_file_not_indexed",
+      message: `"${symbol}" is not in the graph, but it appears in ${checked[0]}, which has not been indexed: ` +
+        "run `ix map`, or the file is ignored.",
+      files: checked,
+    };
   }
 
   const first = indexed[0];
@@ -100,11 +155,11 @@ export async function explainSymbolMiss(
 }
 
 /** Workspace-relative files containing `name` as a word, sorted; null when rg could not answer. */
-async function filesMentioning(name: string, root: string, pathFilter?: string): Promise<string[] | null> {
+async function filesMentioning(name: string, root: string, pathFilter: string | undefined, timeoutMs: number): Promise<string[] | null> {
   let stdout: string;
   try {
     ({ stdout } = await execFileAsync("rg", ["-l", "-F", "-w", "-e", name, "--", root], {
-      maxBuffer: 1024 * 1024, timeout: 5_000, signal: currentRunSignal(),
+      maxBuffer: 1024 * 1024, timeout: Math.min(5_000, timeoutMs), signal: currentRunSignal(),
     }));
   } catch (err) {
     const failure = err as { code?: unknown; stdout?: string };

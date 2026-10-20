@@ -827,7 +827,9 @@ export function applyPick(
   if (result.resolved) return null; // already resolved, no need to pick
   if (!result.ambiguous) return null;
 
-  const candidates = result.result.candidates;
+  // Every tied candidate, the shown 8 first: `--all` numbers past 8 (n=9...)
+  // and `--pick` must reach them by the same numbers.
+  const candidates = allCandidatesOf(result.result);
   const idx = opts.pick - 1; // convert 1-based to 0-based
 
   if (idx < 0 || idx >= candidates.length) {
@@ -872,15 +874,16 @@ export function pickFromNotice(
   const at = result.notices.findIndex((n) => n.code === "ambiguous_target");
   if (at < 0) return result;
   const notice = result.notices[at];
+  const candidates = allCandidatesOf(notice);
   const idx = opts.pick - 1;
-  if (idx < 0 || idx >= notice.candidates.length) {
-    const message = `--pick ${opts.pick} is out of range (1-${notice.candidates.length}).`;
+  if (idx < 0 || idx >= candidates.length) {
+    const message = `--pick ${opts.pick} is out of range (1-${candidates.length}).`;
     stderr(message);
     const notices = result.notices.slice();
     notices[at] = { ...notice, diagnostics: [{ code: "pick_out_of_range", message }, ...(notice.diagnostics ?? [])] };
     return { ...result, notices };
   }
-  const picked = notice.candidates[idx];
+  const picked = candidates[idx];
   const keepFuzzy = result.entity.resolutionMode === "fuzzy";
   return {
     ...result,
@@ -1111,25 +1114,28 @@ export async function resolveFileOrEntityFull(
 ): Promise<ResolveResult> {
   // 1. Raw UUID
   if (isRawId(target)) {
+    let n: any;
     try {
-      const details = await client.entity(target);
-      const n = details.node as any;
-      return {
-        resolved: true,
-        entity: {
-          id: target,
-          kind: n.kind || "unknown",
-          name: n.name || target,
-          resolutionMode: "exact",
-        },
-      };
+      n = (await client.entity(target))?.node;
     } catch (err) {
       // Only "no such id" is a miss. A backend that is down, refusing or
       // erroring is a real error (exit 1), not a missing symbol (exit 3).
       if (!isLookupMiss(err)) throw err;
+    }
+    // A 200 without a node names nothing too: a miss, not a cli_error.
+    if (!n || typeof n !== "object") {
       missProse(opts, `Entity not found: ${target}`);
       return { resolved: false, ambiguous: false };
     }
+    return {
+      resolved: true,
+      entity: {
+        id: target,
+        kind: n.kind || "unknown",
+        name: n.name || target,
+        resolutionMode: "exact",
+      },
+    };
   }
 
   // 1.5 Short ID prefix (8–31 hex chars, e.g. "aacc3359" from CLI output)

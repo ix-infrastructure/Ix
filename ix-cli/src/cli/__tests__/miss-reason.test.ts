@@ -14,6 +14,7 @@ vi.mock("../config.js", async (importOriginal) => ({
 }));
 
 const { explainSymbolMiss, MISS_PROBE_ENV } = await import("../miss-reason.js");
+const { runWithSignal } = await import("../../client/run-signal.js");
 
 const hasRipgrep = (() => {
   try { execFileSync("rg", ["--version"], { stdio: "ignore" }); return true; } catch { return false; }
@@ -36,6 +37,11 @@ describe.skipIf(!hasRipgrep)("explainSymbolMiss", () => {
     mkdirSync(join(workspace.root, "src"));
     writeFileSync(join(workspace.root, "src", "indexed.ts"), "export const x = 1;\nfunction helper() { return parseWidget; }\n");
     writeFileSync(join(workspace.root, "src", "skipped.go"), "package main\nfunc renderGadget() {}\n");
+    // Sorted ahead of src/: an unindexed source file, and a file Ix never parses.
+    mkdirSync(join(workspace.root, "aaa"));
+    writeFileSync(join(workspace.root, "aaa", "early.go"), "package aaa\n// see frobnicate\n");
+    writeFileSync(join(workspace.root, "aaa", "notes.txt"), "frobnicate and onlyInProse\n");
+    writeFileSync(join(workspace.root, "src", "late.ts"), "const s = \"frobnicate\";\n");
   });
 
   afterAll(() => {
@@ -100,6 +106,38 @@ describe.skipIf(!hasRipgrep)("explainSymbolMiss", () => {
     const all = client(crowd);
     const windowed = { search: vi.fn(async (term: string, opts?: { limit?: number }) => (await all.search(term)).slice(0, opts?.limit)) };
     expect(await explainSymbolMiss(windowed, "renderGadget", {})).toBeNull();
+  });
+
+  it("does not send an agent to `ix map` when an indexed file has the name and an earlier one is unindexed", async () => {
+    const why = await explainSymbolMiss(client([{ uri: "src/late.ts", rev: 3 }]), "frobnicate", {});
+    expect(why).toMatchObject({ reason: "symbol_not_extracted", files: ["aaa/early.go", "src/late.ts"] });
+    expect(why?.message).toContain("src/late.ts (indexed at rev 3)");
+  });
+
+  it("ignores files Ix does not parse: the name only there is a plain miss", async () => {
+    expect(await explainSymbolMiss(client([]), "onlyInProse", {})).toBeNull();
+  });
+
+  it("stops probing once a run has spent its time budget, per run", async () => {
+    let clock = 1_000_000;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    try {
+      // Each graph lookup "takes" 6 s: one probe spends the whole budget.
+      const slow = client([{ uri: "src/indexed.ts", rev: 7 }]);
+      const base = slow.search.getMockImplementation()!;
+      slow.search.mockImplementation(async (term: string) => { clock += 6_000; return base(term); });
+      const spent = new AbortController().signal;
+      await runWithSignal(spent, async () => {
+        expect((await explainSymbolMiss(slow, "parseWidget", {}))?.reason).toBe("symbol_not_extracted");
+        expect(await explainSymbolMiss(slow, "parseWidget", {})).toBeNull();
+      });
+      // Another run (another `ix mcp` call) has its own budget.
+      await runWithSignal(new AbortController().signal, async () => {
+        expect((await explainSymbolMiss(slow, "parseWidget", {}))?.reason).toBe("symbol_not_extracted");
+      });
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("gives up (null) when the graph lookup fails, rather than guessing", async () => {

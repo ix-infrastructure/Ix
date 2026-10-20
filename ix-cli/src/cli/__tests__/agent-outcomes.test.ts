@@ -298,6 +298,19 @@ describe("--all on an ambiguous target", () => {
     expect((body.diagnostics ?? []).map((d: { code: string }) => d.code)).not.toContain("candidates_truncated");
   });
 
+  it("lets --pick reach a candidate past the 8 listed by the number --all gave it", async () => {
+    graph({ Many: manyNamed(12) });
+    const all = JSON.parse((await run(["callers", "Many", "--all", "--format", "json"])).stdout);
+    const eleventh = all.candidates.find((c: { n: number }) => c.n === 11);
+    expect(eleventh).toBeDefined();
+
+    const picked = JSON.parse((await run(["callers", "Many", "--pick", "11", "--format", "json"])).stdout);
+    expect(picked.resolvedTarget).toMatchObject({ id: eleventh.id });
+
+    const out = await run(["callers", "Many", "--pick", "13", "--format", "json"]);
+    expect(out.stdout).toContain("--pick 13 is out of range (1-12).");
+  });
+
   it("keeps at most ALL_CONCURRENCY edge queries in flight", async () => {
     graph({ Many: manyNamed(12) });
     const base = expand.getMockImplementation()!;
@@ -496,6 +509,14 @@ describe("an id lookup the backend could not answer", () => {
     expect(await resolveFileOrEntityFull(absent as never, RAW_ID, { format: "json" })).toEqual({ resolved: false, ambiguous: false });
     expect(isLookupMiss(new Error("No entity found for prefix: abcd1234"))).toBe(true);
     expect(isLookupMiss(new Error("401: unauthorized"))).toBe(false);
+  });
+
+  it("is a miss when the backend answers 200 without a node", async () => {
+    const { resolveFileOrEntityFull } = await import("../resolve.js");
+    for (const body of [{ node: null }, {}, null]) {
+      const empty = { entity: async () => body };
+      expect(await resolveFileOrEntityFull(empty as never, RAW_ID, { format: "json" })).toEqual({ resolved: false, ambiguous: false });
+    }
   });
 
   it("a hex-looking name falls through to the name search whatever the prefix lookup answers", async () => {
