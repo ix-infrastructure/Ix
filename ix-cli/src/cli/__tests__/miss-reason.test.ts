@@ -43,6 +43,11 @@ describe.skipIf(!hasRipgrep)("explainSymbolMiss", () => {
     writeFileSync(join(workspace.root, "aaa", "early.go"), "package aaa\n// see frobnicate\n");
     writeFileSync(join(workspace.root, "aaa", "notes.txt"), "frobnicate and onlyInProse\n");
     writeFileSync(join(workspace.root, "src", "late.ts"), "const s = \"frobnicate\";\n");
+    // A dot-directory `ix map` parses, and one it skips (file-discovery.ts SKIPPED_DIRS).
+    mkdirSync(join(workspace.root, ".storybook"));
+    writeFileSync(join(workspace.root, ".storybook", "preview.ts"), "export const storybookOnlyName = 1;\n");
+    mkdirSync(join(workspace.root, ".venv", "lib"), { recursive: true });
+    writeFileSync(join(workspace.root, ".venv", "lib", "site.py"), "venvOnlyName = 1\n");
   });
 
   afterAll(() => {
@@ -86,6 +91,12 @@ describe.skipIf(!hasRipgrep)("explainSymbolMiss", () => {
   it("reads the last segment of a qualified name, and honours --path", async () => {
     expect((await explainSymbolMiss(client([]), "Widget.renderGadget", {}))?.reason).toBe("symbol_file_not_indexed");
     expect((await explainSymbolMiss(client([]), "renderGadget", { path: "lib/" }))?.reason).toBe("symbol_not_in_source");
+  });
+
+  it("searches the dot-directories ix map parses, not the ones it skips", async () => {
+    const why = await explainSymbolMiss(client([]), "storybookOnlyName", {});
+    expect(why).toMatchObject({ reason: "symbol_file_not_indexed", files: [".storybook/preview.ts"] });
+    expect((await explainSymbolMiss(client([]), "venvOnlyName", {}))?.reason).toBe("symbol_not_in_source");
   });
 
   it("is skipped by IX_MISS_PROBE=0, and for a target that is not a name", async () => {
@@ -185,6 +196,36 @@ describe.skipIf(!hasRipgrep)("explainSymbolMiss", () => {
         const out = await withMissReason(graphWith(false) as any, "parseWidget", miss(), { kind: "class" }, "json");
         expect(out).toMatchObject({ reason: "symbol_not_extracted" });
       });
+    });
+
+    it("spends no search on the filter check when the probe would not run", async () => {
+      await inRun(async () => {
+        const graph = graphWith(true);
+        process.env[MISS_PROBE_ENV] = "0";
+        expect(await withMissReason(graph as any, "parseWidget", miss(), { kind: "class" }, "json")).toEqual(miss());
+        process.env[MISS_PROBE_ENV] = "1";
+        expect(await withMissReason(graph as any, "not a name", miss(), { kind: "class" }, "json")).toEqual(miss());
+        expect(graph.search).not.toHaveBeenCalled();
+      });
+    });
+
+    it("spends no search on the filter check once the run's budget is spent", async () => {
+      let clock = 1_000_000;
+      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      try {
+        await inRun(async () => {
+          const slow = graphWith(false);
+          const base = slow.search.getMockImplementation()!;
+          slow.search.mockImplementation(async (...args: Parameters<typeof base>) => { clock += 6_000; return base(...args); });
+          // No filter: straight to the probe, whose lookup spends the budget.
+          expect(await withMissReason(slow as any, "parseWidget", miss(), {}, "json")).toMatchObject({ reason: "symbol_not_extracted" });
+          slow.search.mockClear();
+          expect(await withMissReason(slow as any, "parseWidget", miss(), { kind: "class" }, "json")).toEqual(miss());
+          expect(slow.search).not.toHaveBeenCalled();
+        });
+      } finally {
+        now.mockRestore();
+      }
     });
 
     it("skips the probe when the unfiltered lookup fails", async () => {

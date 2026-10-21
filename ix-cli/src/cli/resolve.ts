@@ -15,7 +15,7 @@ import { reportAmbiguousTarget, reportResolutionFailure, reportResolutionNotices
 import { relativePath } from "./format.js";
 import { isQuiet } from "./output-shape.js";
 import { disambiguationHint } from "./next-step.js";
-import { explainSymbolMiss } from "./miss-reason.js";
+import { explainSymbolMiss, missProbeWouldRun } from "./miss-reason.js";
 import { isBackendUnreachable } from "./errors.js";
 import {
   candidateOrigin, isFileStemMatch, looksLikeCodeIdentifier, requestsNonCode,
@@ -1574,6 +1574,8 @@ export async function withMissReason<T extends { reason?: string; message?: stri
   format: string | undefined,
 ): Promise<T> {
   if (result.reason || isRawId(target) || looksFileLike(target)) return result;
+  // filteredOut costs a search: not for a probe that is off or out of budget.
+  if (!missProbeWouldRun(target)) return result;
   if (await filteredOut(client, target, result, opts)) return result;
   const why = await explainSymbolMiss(client, target, { path: opts?.path, ...activeScope() });
   if (!why) return result;

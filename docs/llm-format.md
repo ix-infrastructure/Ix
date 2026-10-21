@@ -81,7 +81,10 @@ which value it ignored, on stderr, when a person is there to read it.
   | 1 | any other error (backend down, bad argument, ...) | its own slug |
 
   `IX_LEGACY_EXIT_CODES=1` makes every non-zero exit `1`, for an integration
-  that compares the status against `1`.
+  that compares the status against `1`. A hook must not pass ix's status
+  through as its own: Claude Code reads a hook's exit `2` as "block this
+  action", so an ambiguous name would block the tool call. End the hook with
+  its own status (the shipped hooks exit 0), or set `IX_LEGACY_EXIT_CODES=1`.
   One exception in json: `locate`'s ambiguity record carries the slug as
   `code: "ambiguous_target"`, not `error` (it never was an `error` record, and
   readers that treat any string `error` as a failure would drop its

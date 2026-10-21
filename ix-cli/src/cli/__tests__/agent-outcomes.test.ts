@@ -50,6 +50,7 @@ vi.mock("../hierarchy.js", async (importOriginal) => ({
 // The probe itself is covered by miss-reason.test.ts; here, only that its
 // answer reaches every command's miss.
 vi.mock("../miss-reason.js", () => ({
+  missProbeWouldRun: () => true,
   explainSymbolMiss: async (_client: unknown, symbol: string) => symbol === "NotIndexed"
     ? {
         reason: "symbol_file_not_indexed",

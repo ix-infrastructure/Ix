@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import type { IxClient } from "../client/api.js";
 import { currentRunSignal } from "../client/run-signal.js";
 import { resolveWorkspaceRoot } from "./config.js";
-import { isGeneratedFile, isSupportedSourceFile } from "./file-discovery.js";
+import { SKIPPED_DIRS, isGeneratedFile, isSupportedSourceFile } from "./file-discovery.js";
 import { isFileStale } from "./stale.js";
 
 const execFileAsync = promisify(execFile);
@@ -78,12 +78,9 @@ export async function explainSymbolMiss(
   symbol: string,
   scope: { path?: string; workspaceId?: string; systemId?: string },
 ): Promise<SymbolMissReason | null> {
-  if (process.env[MISS_PROBE_ENV] === "0") return null;
+  if (!missProbeWouldRun(symbol)) return null;
   const left = PROBE_BUDGET_MS - probeTimeSpent();
-  if (left <= 0) return null;
-  // The last segment of `Class.method` / `pkg::name`: that is the token in the text.
-  const name = symbol.split(/::|[.#]/).filter(Boolean).pop() ?? "";
-  if (!/^[A-Za-z_$][\w$]*$/.test(name)) return null;
+  const name = probedName(symbol);
 
   let root: string;
   try { root = resolveWorkspaceRoot(); } catch { return null; }
@@ -95,6 +92,32 @@ export async function explainSymbolMiss(
     chargeProbeTime(Date.now() - started);
   }
 }
+
+/** The last segment of `Class.method` / `pkg::name`: that is the token in the text. */
+function probedName(symbol: string): string {
+  return symbol.split(/::|[.#]/).filter(Boolean).pop() ?? "";
+}
+
+/**
+ * Whether `explainSymbolMiss` would look at all: the probe is on, this run's
+ * budget is not spent, and the target is a name rg can search for. A caller
+ * that pays for its own lookup before the probe checks this first.
+ */
+export function missProbeWouldRun(symbol: string): boolean {
+  if (process.env[MISS_PROBE_ENV] === "0") return false;
+  if (PROBE_BUDGET_MS - probeTimeSpent() <= 0) return false;
+  return /^[A-Za-z_$][\w$]*$/.test(probedName(symbol));
+}
+
+/**
+ * rg skips dot-directories unless told otherwise, but `ix map` parses
+ * `.storybook/`, `.github/scripts/` and the like; only the dot-directories it
+ * skips too (`.git`, `.venv`, `.next`, ...) stay out of the search.
+ */
+const RG_SCOPE_ARGS: readonly string[] = [
+  "--hidden",
+  ...[...SKIPPED_DIRS].filter((dir) => dir.startsWith(".")).flatMap((dir) => ["-g", `!${dir}/`]),
+];
 
 async function probe(
   client: Pick<IxClient, "search">,
@@ -158,7 +181,7 @@ async function probe(
 async function filesMentioning(name: string, root: string, pathFilter: string | undefined, timeoutMs: number): Promise<string[] | null> {
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync("rg", ["-l", "-F", "-w", "-e", name, "--", root], {
+    ({ stdout } = await execFileAsync("rg", ["-l", "-F", "-w", ...RG_SCOPE_ARGS, "-e", name, "--", root], {
       maxBuffer: 1024 * 1024, timeout: Math.min(5_000, timeoutMs), signal: currentRunSignal(),
     }));
   } catch (err) {
