@@ -657,6 +657,15 @@ jobs:
           cache-dependency-path: docs-site/package-lock.json
       - run: npm ci
       - run: npm run build
+      # Crawl the OUTPUT, not the sources: every href/src in every built page
+      # must resolve inside dist/ (or to a _redirects source), and every
+      # #fragment must match an id or a heading slug on the target page. A route
+      # the build dropped, a fragment a page does not expose, or an href the base
+      # plugin failed to rewrite fails here with the file and line named.
+      # --dist-only keeps this step scoped to what ships; the tracked-source
+      # pass is the `links` job's job, so this one cannot inherit its state.
+      - name: Crawl the built site (every built href must resolve)
+        run: node ../ix-cli/scripts/check-links.mjs --dist dist --dist-only
 
   # One stable required-status-check context. Branch protection requires only
   # this job, so the matrix can be reshaped without orphaning required checks.
