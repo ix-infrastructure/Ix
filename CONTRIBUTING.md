@@ -102,7 +102,9 @@ The graph commands share one set of codes, defined in
 `3` target not found, `4` workspace not mapped (`IX_LEGACY_EXIT_CODES=1`
 collapses 2-4 to 1). Report a resolution failure through `resolveFileOrReport`
 or `reportResolutionFailure` rather than setting `process.exitCode` yourself,
-and the right code follows.
+and the right code follows. `ix read`'s ambiguity is the one exception: it
+exits 0 with its own `ambiguous` record, as it always has (see below for why
+adding a non-zero exit is not free).
 
 Making a command exit non-zero is a **breaking change to every plugin and MCP
 client**, even when the payload it prints is an improvement. Both consumers

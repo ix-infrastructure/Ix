@@ -134,6 +134,29 @@ describe("unresolved targets in machine formats", () => {
     });
   });
 
+  // `ix read`'s ambiguity is the one exception (docs/llm-format.md): it has
+  // always exited 0 with an `ambiguous` record, and plugins that drop stdout
+  // on a non-zero exit would lose the candidates. Its miss still exits 3.
+  it("keeps ix read's ambiguity at exit 0 with its own ambiguous record", async () => {
+    search.mockResolvedValue([
+      { id: "first-id", kind: "function", name: "Duplicate", provenance: { sourceUri: "src/first.ts" } },
+      { id: "second-id", kind: "function", name: "Duplicate", provenance: { sourceUri: "src/second.ts" } },
+    ]);
+    const register = (await import("../commands/read.js")).registerReadCommand;
+
+    const json = await run(register, ["read", "Duplicate", "--format", "json"]);
+    expect(process.exitCode ?? 0).toBe(0);
+    const body = JSON.parse(json.stdout);
+    expect(body).toMatchObject({ targetType: "ambiguous-symbol" });
+    expect(body.error).toBeUndefined();
+    expect(body.candidates).toHaveLength(2);
+
+    process.exitCode = undefined;
+    const llm = await run(register, ["read", "Duplicate", "--format", "llm"]);
+    expect(process.exitCode ?? 0).toBe(0);
+    expect(llm.stdout).toMatch(/^ambiguous kind=symbol target=Duplicate /);
+  });
+
   it("keeps an out-of-range pick classified as ambiguity and exits non-zero", async () => {
     search.mockResolvedValue([
       { id: "first-id", kind: "function", name: "Duplicate", provenance: { sourceUri: "src/first.ts" } },

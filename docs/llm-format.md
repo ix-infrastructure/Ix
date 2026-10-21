@@ -86,6 +86,12 @@ which value it ignored, on stderr, when a person is there to read it.
   `code: "ambiguous_target"`, not `error` (it never was an `error` record, and
   readers that treat any string `error` as a failure would drop its
   candidates); it still exits 2.
+  One exception in exit code: `read`'s ambiguity (a file or symbol name that
+  matches several) exits 0 with its own record, `ambiguous kind=<file|symbol>
+  target=... count=<n>` and its candidates (json: `targetType:
+  "ambiguous-file"` / `"ambiguous-symbol"`, `candidates`, no `error`), as it
+  always has. Retry with `--pick <n>` or `--path`. Its miss exits 3 like the
+  rest.
   A file target's miss adds `reason=file_not_in_graph` (on disk, not ingested)
   or `reason=file_not_found`. A symbol's miss says why when the workspace's
   text can: `reason=symbol_file_not_indexed` (the name is only in source files
@@ -94,7 +100,10 @@ which value it ignored, on stderr, when a person is there to read it.
   (it is nowhere in the workspace either), with `files=` naming up to three
   files. Only files `ix map` parses count, so a name that appears only in, say,
   a `.txt` is a plain miss; a command spends at most 5 seconds on these lookups,
-  then reports later misses plainly; `IX_MISS_PROBE=0` turns them off. Any miss may carry
+  then reports later misses plainly; `IX_MISS_PROBE=0` turns them off. A miss
+  under `--kind`, `--path` or the test filter, where an entity of that name
+  exists outside the filter, is a plain miss too (no `reason`): drop or change
+  the filter. Any miss may carry
   `suggestion` records with the nearest names in the graph (`locate` included),
   and a miss on an empty or degraded graph carries a `graph` record saying so.
   A graph read from a directory no registered workspace covers is

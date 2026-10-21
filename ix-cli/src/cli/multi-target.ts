@@ -63,7 +63,10 @@ export async function runPerTarget(
       codes.push(own);
       const exitCode = own.exitCode;
       groups.push(failure
-        ? { target, exitCode, error: failure.code, message: failure.message, ...(failure.next ? { next: failure.next } : {}) }
+        ? {
+          target, exitCode, error: failure.code, message: failure.message,
+          ...(failure.dir ? { dir: failure.dir } : {}), ...(failure.next ? { next: failure.next } : {}),
+        }
         : { target, exitCode, ...groupBody(payloads) });
     }
     // Nor may the last target's leftovers land on the grouping object.
@@ -84,7 +87,10 @@ export async function runPerTarget(
         const failure = targetFailure(err);
         recordFailure(failure);
         if (format === "llm") {
-          console.log(llmError(failure.code, failure.message, failure.next ? [["hint", failure.next]] : []));
+          console.log(llmError(failure.code, failure.message, [
+            ...(failure.dir ? [["dir", failure.dir] as [string, string]] : []),
+            ...(failure.next ? [["hint", failure.next] as [string, string]] : []),
+          ]));
         } else {
           process.stderr.write(chalk.red(`Error: ${failure.message}\n`));
           if (failure.next) process.stderr.write(chalk.dim(`${failure.next}\n`));
@@ -102,7 +108,15 @@ export async function runPerTarget(
   }
 }
 
-interface TargetFailure { code: string; message: string; next?: string; exitCode: number; outcome?: MissOutcome }
+interface TargetFailure {
+  code: string;
+  message: string;
+  next?: string;
+  /** The unmapped directory, as the one-target `workspace_not_mapped` record carries it. */
+  dir?: string;
+  exitCode: number;
+  outcome?: MissOutcome;
+}
 
 type TargetCode = { exitCode: number; outcome?: MissOutcome };
 
@@ -120,7 +134,9 @@ function recordFailure(failure: TargetFailure): void {
 function targetFailure(err: unknown): TargetFailure {
   if (err instanceof CliUsageError) throw err;
   if (err instanceof WorkspaceNotMappedError) {
-    return { code: err.code, message: err.summary, next: err.hint, exitCode: exitCodeFor("not_mapped"), outcome: "not_mapped" };
+    return {
+      code: err.code, message: err.summary, next: err.hint, dir: err.dir, exitCode: exitCodeFor("not_mapped"), outcome: "not_mapped",
+    };
   }
   if (isBackendUnreachable(err)) {
     const unreachable = backendUnreachableError();

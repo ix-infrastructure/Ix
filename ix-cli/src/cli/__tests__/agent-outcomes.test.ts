@@ -442,9 +442,11 @@ describe("several targets in one call", () => {
     const json = await run(["locate", "Unique", "Elsewhere", "Missing", "--format", "json"]);
     expect(json.exitCode).toBe(4);
     const body = JSON.parse(json.stdout);
-    expect(body.targets[1]).toMatchObject({ target: "Elsewhere", exitCode: 4, error: "workspace_not_mapped" });
+    // The same fields as the one-target record (errors.ts renderCliError), `dir` included.
+    expect(body.targets[1]).toMatchObject({ target: "Elsewhere", exitCode: 4, error: "workspace_not_mapped", dir: "/tmp/elsewhere", next: "Run `ix map`." });
     expect(body.summary).toEqual({ total: 3, ok: 1, ambiguous: 0, notFound: 1, notMapped: 1, failed: 0 });
     const llm = await run(["locate", "Unique", "Elsewhere", "--format", "llm"]);
+    expect(llm.stdout).toMatch(/^error code=workspace_not_mapped .* dir=\/tmp\/elsewhere hint=/m);
     expect(llm.stdout.split("\n").pop()).toBe("targets total=2 ok=1 not_mapped=1");
 
     // Every miss exits 1 under the switch; the summary still tells them apart.

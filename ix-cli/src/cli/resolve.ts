@@ -1566,7 +1566,7 @@ export async function reportUnresolved(
  * A symbol miss with the reason the workspace's text gives (miss-reason.ts).
  * A file target already carries its own; a raw id has no text to look for.
  */
-export async function withMissReason<T extends { reason?: string; message?: string }>(
+export async function withMissReason<T extends { reason?: string; message?: string; hiddenTestCount?: number }>(
   client: IxClient,
   target: string,
   result: T,
@@ -1574,12 +1574,38 @@ export async function withMissReason<T extends { reason?: string; message?: stri
   format: string | undefined,
 ): Promise<T> {
   if (result.reason || isRawId(target) || looksFileLike(target)) return result;
+  if (await filteredOut(client, target, result, opts)) return result;
   const why = await explainSymbolMiss(client, target, { path: opts?.path, ...activeScope() });
   if (!why) return result;
   // The resolver already wrote the bare miss for a person; this is the part
   // that says what to do about it. Machine formats get it in the record.
   if (format !== "json" && format !== "llm") stderr(chalk.dim(why.message));
   return { ...result, reason: why.reason, message: why.message, ...(why.files ? { files: why.files } : {}) };
+}
+
+/**
+ * Whether the miss is the filters' doing: `--kind`, `--path` or the test
+ * filter set aside an entity that does carry the name. The probe judges by
+ * the text alone, so it would call such a name never extracted and send the
+ * agent to `ix text`; the plain miss, with its suggestions, is the true
+ * answer. One unfiltered search, and only when a filter was in play. A failed
+ * search counts as filtered out: it is no evidence the entity is missing.
+ */
+async function filteredOut(
+  client: IxClient,
+  target: string,
+  result: { hiddenTestCount?: number },
+  opts: ResolveOpts | undefined,
+): Promise<boolean> {
+  if (!opts?.kind && !opts?.path && !opts?.testsOnly && !result.hiddenTestCount) return false;
+  const name = target.split(/::|[.#]/).filter(Boolean).pop() ?? target;
+  const { workspaceId, systemId } = activeScope();
+  try {
+    const nodes = await client.search(name, { limit: 50, nameOnly: true, workspaceId, systemId });
+    return (nodes as any[]).some((n) => (n?.name || n?.attrs?.name || "") === name);
+  } catch {
+    return true;
+  }
 }
 
 /** The entities a command with `--all` runs over. */

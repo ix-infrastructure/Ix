@@ -71,7 +71,9 @@ A non-zero exit from a graph command is usually an answer, not a breakage:
 json carries the same outcome in `error` (`ambiguous_target`,
 `unresolved_target`, `workspace_not_mapped`); llm in `error code=`. One
 exception: `ix locate`'s json ambiguity carries it as `code: "ambiguous_target"`
-(with its candidates), not `error`. Ask about
+(with its candidates), not `error`; and `ix read`'s ambiguity exits 0 with an
+`ambiguous` record (json `targetType: "ambiguous-symbol"`) and its candidates.
+Ask about
 several names in one call: `ix locate a b c`, `ix callers a b c`.
 
 ## How to spend calls

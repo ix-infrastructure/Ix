@@ -691,6 +691,10 @@ Read raw file content, line ranges, or symbol source code.
 | `--root` | `<dir>` | — | Workspace root directory |
 | `--all` | — | off | Read the whole file, past the 400-line default cap |
 
+An ambiguous file or symbol name exits 0 with an `ambiguous` record and its
+candidates (unlike the graph commands' exit 2); retry with `--pick <n>` or
+`--path`. A miss exits 3.
+
 ### `ix reset`
 
 Wipe graph data.

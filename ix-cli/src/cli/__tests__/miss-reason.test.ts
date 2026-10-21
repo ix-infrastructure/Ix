@@ -15,6 +15,7 @@ vi.mock("../config.js", async (importOriginal) => ({
 
 const { explainSymbolMiss, MISS_PROBE_ENV } = await import("../miss-reason.js");
 const { runWithSignal } = await import("../../client/run-signal.js");
+const { withMissReason } = await import("../resolve.js");
 
 const hasRipgrep = (() => {
   try { execFileSync("rg", ["--version"], { stdio: "ignore" }); return true; } catch { return false; }
@@ -143,5 +144,54 @@ describe.skipIf(!hasRipgrep)("explainSymbolMiss", () => {
   it("gives up (null) when the graph lookup fails, rather than guessing", async () => {
     const failing = { search: vi.fn(async (): Promise<any[]> => { throw new Error("backend down"); }) };
     expect(await explainSymbolMiss(failing, "renderGadget", {})).toBeNull();
+  });
+
+  describe("withMissReason under --kind, --path or the test filter", () => {
+    /** The graph has src/indexed.ts and, when `entity` is set, a function named parseWidget. */
+    function graphWith(entity: boolean) {
+      return {
+        search: vi.fn(async (term: string, opts?: { kind?: string }): Promise<any[]> => {
+          if (opts?.kind === "file") {
+            return term === "indexed.ts" ? [{ id: "id-file", kind: "file", name: term, provenance: { sourceUri: "src/indexed.ts" } }] : [];
+          }
+          return entity && term === "parseWidget"
+            ? [{ id: "id-fn", kind: "function", name: "parseWidget", provenance: { sourceUri: "src/indexed.ts" } }]
+            : [];
+        }),
+      };
+    }
+    type Miss = { resolved: false; ambiguous: false; reason?: string; hiddenTestCount?: number };
+    const miss = (extra: Partial<Miss> = {}): Miss => ({ resolved: false, ambiguous: false, ...extra });
+    const inRun = <T>(fn: () => Promise<T>) => runWithSignal(new AbortController().signal, fn);
+
+    it("does not call a name never extracted when a filter set its entity aside", async () => {
+      await inRun(async () => {
+        const graph = graphWith(true);
+        const cases: Array<[Record<string, unknown>, Miss]> = [
+          [{ kind: "class" }, miss()],
+          [{ path: "src/" }, miss()],
+          [{ testsOnly: true }, miss()],
+          [{}, miss({ hiddenTestCount: 1 })],
+        ];
+        for (const [opts, result] of cases) {
+          const out = await withMissReason(graph as any, "parseWidget", result, opts, "json");
+          expect(out).toEqual(result);
+        }
+      });
+    });
+
+    it("still explains a filtered miss when no entity carries the name", async () => {
+      await inRun(async () => {
+        const out = await withMissReason(graphWith(false) as any, "parseWidget", miss(), { kind: "class" }, "json");
+        expect(out).toMatchObject({ reason: "symbol_not_extracted" });
+      });
+    });
+
+    it("skips the probe when the unfiltered lookup fails", async () => {
+      await inRun(async () => {
+        const failing = { search: vi.fn(async (): Promise<any[]> => { throw new Error("backend down"); }) };
+        expect(await withMissReason(failing as any, "parseWidget", miss(), { kind: "class" }, "json")).toEqual(miss());
+      });
+    });
   });
 });
