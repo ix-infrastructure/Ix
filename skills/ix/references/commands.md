@@ -214,11 +214,18 @@ ix inventory --kind function --path auth.py
   degraded graph.
 
 - **The OSS↔Pro command boundary is derived at runtime, not declared.**
-  `run-cli.ts` (which `main.ts` loads) snapshots `ossCmdNames` immediately after `registerOssCommands()`;
-  the Pro probe (`tryLoadProCommands`) then diffs whatever commands exist
-  against that set to decide which count as "Pro". Consequences:
+  `run-cli.ts` (which `main.ts` loads) snapshots `ossCmdNames` immediately
+  after registering the OSS commands; the Pro probe (`tryLoadProCommands`)
+  then diffs whatever commands exist against that set to decide which count
+  as "Pro". Consequences:
   - Adding a `register*Command` call in `oss.ts` silently reclassifies that
     command as OSS — it vanishes from the Pro help diff.
+  - A new OSS command also needs an entry in `OSS_COMMAND_TABLE`
+    (`register/oss-table.ts`): with Pro absent, `run-cli.ts` loads only the
+    table's module for the command being run. Without the entry the command
+    still works (it takes the full path), but `startup-fast-path.test.ts`
+    fails until it is added. The shared per-command setup is in
+    `register/oss-setup.ts`.
   - Removing one from `oss.ts` makes Pro own it, or — without the license — a
     Pro stub replaces it (stubs skip any name already registered, so an OSS
     command left in place blocks its stub).
@@ -226,7 +233,8 @@ ix inventory --kind function --path auth.py
     and MUST be awaited; skipping the await makes every `ix <pro-cmd>` fail
     with "unknown command".
   - Real example: `registerPatchesCommand` was defined but never called in
-    `oss.ts`, so a `patches` entry in `PRO_COMMANDS` shadowed it and `ix
+    `oss.ts`, so a `patches` entry in `PRO_COMMANDS` (now in
+    `register/pro-stubs.ts`) shadowed it and `ix
     patches` answered "requires Ix Pro" (#371). #390 wired the call in and
     dropped the stub, so `ix patches` is an OSS command today.
 
