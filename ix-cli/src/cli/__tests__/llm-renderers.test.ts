@@ -187,7 +187,7 @@ describe("renderSmellsLlm", () => {
         { file_id: "b", file: "big.ts", smell: "has_smell.god_module", confidence: 0.9, signals: { chunks: 0, fan_in: 23, fan_out: 2 }, inference_version: "smell_v1" },
       ],
     });
-    expect(lines[0]).toBe("smells rev=9 count=2 version=smell_v1");
+    expect(lines[0]).toBe("smells rev=9 count=2 shown=2 version=smell_v1");
     expect(lines[1]).toBe("smell kind=has_smell.god_module file=big.ts confidence=0.9 fan_in=23 fan_out=2");
     expect(lines[1]).not.toContain("chunks=");
     expect(lines[2]).toBe("smell kind=has_smell.orphan_file file=low.py confidence=0.5 connections=0");

@@ -258,17 +258,6 @@ function isLikelyMinifiedSource(source: string): boolean {
   return maxLineLength >= MINIFIED_MAX_LINE_THRESHOLD || (lineCount <= 50 && averageLineLength >= MINIFIED_AVG_LINE_THRESHOLD);
 }
 
-function stripChunkOps(patch: GraphPatchPayload): GraphPatchPayload {
-  return {
-    ...patch,
-    ops: patch.ops.filter(op => {
-      if (op.type === 'UpsertNode' && op['kind'] === 'chunk') return false;
-      if (op.type === 'UpsertEdge' && (op['predicate'] === 'CONTAINS_CHUNK' || op['predicate'] === 'NEXT')) return false;
-      return true;
-    }),
-  };
-}
-
 /**
  * Strip chunks and claims from patches — mapMode only needs nodes + edges.
  *
@@ -2254,9 +2243,7 @@ export async function ingestFiles(
   const timings = {
     moduleLoadMs: 0, discoverMs: 0, hashMs: 0, parseMs: 0,
     goIndexMs: 0,        // time to build Go global resolution index
-    parseOnlyMs: 0,      // sum of just parseFile() call durations
     resolveMs: 0, buildPatchMs: 0, commitMs: 0,
-    stripChunkOpsMs: 0,  // sum of stripChunkOps() durations (mapMode only)
     bulkCommitMs: 0,     // time in successful commitPatchBulk() calls
     fallbackCommitMs: 0, // time in per-file fallback commitPatch() calls
   };
@@ -2276,7 +2263,6 @@ export async function ingestFiles(
     files: number,
     resolveEdgesMs: number,
     buildPatchMs: number,
-    stripMs: number,
     commitMs: number,
     totalSaveMs: number,
     nodes: number,
@@ -2286,7 +2272,6 @@ export async function ingestFiles(
     if (!debug) return;
     process.stderr.write(
       `\n[ingest-save] files=${files} resolveEdgesMs=${resolveEdgesMs} buildPatchMs=${buildPatchMs}` +
-      (mapMode ? ` stripChunkOpsMs=${stripMs}` : '') +
       ` commitMs=${commitMs} totalSaveMs=${totalSaveMs} nodes=${nodes} edges=${edges} claims=${claims}\n`
     );
   };
@@ -2549,9 +2534,6 @@ export async function ingestFiles(
     // resolveEdges runs on that batch and patches are committed before the next
     // batch is parsed. This keeps heap usage at O(chunk) instead of O(total).
     //
-    // YIELD_EVERY yields the Node.js event loop so the progress bar timer can
-    // fire even during the synchronous tree-sitter parse calls.
-    //
     // Two paths:
     //   A) Has baseline or mtime-changed files → pre-scan first, skip module load
     //      entirely if nothing changed (common "ix map" re-run case).
@@ -2702,11 +2684,10 @@ export async function ingestFiles(
     };
     let globalIndex: any = undefined;
 
-    // Larger chunks for big repos: fewer resolve+commit cycles, better edge resolution per batch.
     // Smaller chunks pipeline better: resolve(N) overlaps with commit(N-1) + parse(N+1).
     // With 2000-file chunks, resolve takes 68s and dominates. With 500, resolve ~17s
     // and overlaps well with commit (~5s) + parse (~5s).
-    const PARSE_STREAM_CHUNK     = filePaths.length > 10_000 ? 500 : 500;
+    const PARSE_STREAM_CHUNK     = 500;
     const COMMIT_HTTP_MAX_FILES  = parsePositiveIntEnv('IX_COMMIT_HTTP_MAX_FILES', 1000); // files per HTTP request to the backend
     // Ops per HTTP request; see DEFAULT_COMMIT_MAX_OPS.
     const COMMIT_MAX_OPS         = parsePositiveIntEnv('IX_COMMIT_MAX_OPS', DEFAULT_COMMIT_MAX_OPS);
@@ -2781,7 +2762,6 @@ export async function ingestFiles(
       baseRevRetries++;
       if (debug) process.stderr.write(`\n  [base-rev race] another writer moved the rev; re-sending\n`);
     };
-    const YIELD_EVERY            = 100;              // yield event loop every N files during parse
 
     if (debug) {
       process.stderr.write(
@@ -3589,7 +3569,6 @@ export async function ingestFiles(
       const saveStart = performance.now();
       let resolveEdgesMs = 0;
       let buildPatchMs = 0;
-      const localStripMs = 0;
       let commitMs = 0;
       let batchNodes = 0;
       let batchEdges = 0;
@@ -3626,73 +3605,13 @@ export async function ingestFiles(
         const totalSaveMs = Math.round(performance.now() - saveStart);
         timings.resolveMs += resolveEdgesMs;
         timings.buildPatchMs += buildPatchMs;
-        timings.stripChunkOpsMs += localStripMs;
         timings.commitMs += commitMs;
         totalNodesEmitted += batchNodes;
         totalEdgesEmitted += batchEdges;
         totalClaimsEmitted += batchClaims;
-        logSaveTiming(batch.length, resolveEdgesMs, buildPatchMs, localStripMs, commitMs, totalSaveMs, batchNodes, batchEdges, batchClaims);
+        logSaveTiming(batch.length, resolveEdgesMs, buildPatchMs, commitMs, totalSaveMs, batchNodes, batchEdges, batchClaims);
         progressPhase = 'Parsing';
         progressStart = performance.now();
-      }
-    };
-
-    /** Parse-all-first commit: resolve edges over full set, then commit in HTTP-sized batches. */
-    const flushAll = async (allParsed: ParsedFile[]): Promise<void> => {
-      if (allParsed.length === 0) return;
-      filesChanged += allParsed.length;
-      const previousPhase = progressPhase;
-      const saveStart = performance.now();
-      let resolveEdgesMs = 0;
-      let buildPatchMs = 0;
-      const localStripMs = 0;
-      let commitMs = 0;
-      let batchNodes = 0;
-      let batchEdges = 0;
-      let batchClaims = 0;
-      progressPhase   = 'Saving';
-      progressTotal   = allParsed.length;
-      progressCurrent = 0;
-      try {
-        setCurrentWork(`resolve ${allParsed.length} files`);
-        const resolveStart = performance.now();
-        const resolvedEdges = resolveEdgesFn!(allParsed.map(f => f.parsed), resolveStats, globalIndex, resolveOpts);
-        resolveEdgesMs = Math.round(performance.now() - resolveStart);
-        if (stitchEnabled) collectStitch(allParsed.map(f => f.parsed));
-        const edgesByFile = new Map<string, any[]>();
-        for (const edge of resolvedEdges) {
-          let arr = edgesByFile.get(edge.srcFilePath);
-          if (!arr) { arr = []; edgesByFile.set(edge.srcFilePath, arr); }
-          arr.push(edge);
-        }
-        setCurrentWork(`build commit payloads ending ${nodePath.basename(allParsed[allParsed.length - 1].filePath)}`);
-        const buildStart = performance.now();
-        const preparedPatches = await buildFilePatches(allParsed, edgesByFile);
-        buildPatchMs += Math.round(performance.now() - buildStart);
-        for (const pp of preparedPatches) {
-          for (const op of pp.patch.ops) {
-            if (op.type === 'UpsertNode') batchNodes++;
-            else if (op.type === 'UpsertEdge') batchEdges++;
-            else if (op.type === 'AssertClaim') batchClaims++;
-          }
-        }
-        if (preparedPatches.length === 0) {
-          progressCurrent = allParsed.length;
-          return;
-        }
-        commitMs += await commitPreparedPatches(preparedPatches, allParsed.length, { updateProgress: true, onCommitted: noteRebuilt });
-      } finally {
-        const totalSaveMs = Math.round(performance.now() - saveStart);
-        timings.resolveMs += resolveEdgesMs;
-        timings.buildPatchMs += buildPatchMs;
-        timings.stripChunkOpsMs += localStripMs;
-        timings.commitMs += commitMs;
-        totalNodesEmitted += batchNodes;
-        totalEdgesEmitted += batchEdges;
-        totalClaimsEmitted += batchClaims;
-        logSaveTiming(allParsed.length, resolveEdgesMs, buildPatchMs, localStripMs, commitMs, totalSaveMs, batchNodes, batchEdges, batchClaims);
-        progressPhase   = previousPhase;
-        progressStart   = performance.now();
       }
     };
 
@@ -4671,11 +4590,7 @@ export async function ingestFiles(
       stitchSkipped: stitchSkipped ?? null,
       stitchSkippedRule: stitchSkippedRule ?? null,
       elapsedSeconds: parseFloat(elapsed),
-      timings: {
-        ...timings,
-        parseOnlyMs: Math.round(timings.parseOnlyMs),
-        stripChunkOpsMs: Math.round(timings.stripChunkOpsMs),
-      },
+      timings,
       emitted: { nodes: totalNodesEmitted, edges: totalEdgesEmitted, claims: totalClaimsEmitted },
       langParseMs: Object.fromEntries(
         [...langParseMs.entries()].map(([lang, s]) => [lang, { ms: Math.round(s.ms), files: s.files }])
@@ -4734,12 +4649,8 @@ export async function ingestFiles(
       console.log(chalk.dim(`    hash:        ${timings.hashMs}ms`));
       console.log(chalk.dim(`    go index:    ${timings.goIndexMs}ms`));
       console.log(chalk.dim(`    parse total: ${timings.parseMs}ms`));
-      console.log(chalk.dim(`    parse only:  ${Math.round(timings.parseOnlyMs)}ms`));
       console.log(chalk.dim(`    resolve:     ${timings.resolveMs}ms`));
       console.log(chalk.dim(`    build:       ${timings.buildPatchMs}ms`));
-      if (mapMode) {
-        console.log(chalk.dim(`    stripChunk:  ${Math.round(timings.stripChunkOpsMs)}ms`));
-      }
       console.log(chalk.dim(`    commit:      ${timings.commitMs}ms`));
       console.log(chalk.dim(`      bulk:      ${timings.bulkCommitMs}ms`));
       console.log(chalk.dim(`      fallback:  ${timings.fallbackCommitMs}ms`));

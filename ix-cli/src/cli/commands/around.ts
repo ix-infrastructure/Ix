@@ -9,6 +9,7 @@ import { resolveWorkspaceRoot } from "../config.js";
 import { printJson } from "../format.js";
 import { llmError, printLlmLines } from "../llm.js";
 import { parseBudgetOption } from "../options.js";
+import { setOutcome } from "../outcome.js";
 import { isQuiet } from "../output-shape.js";
 import { stderr } from "../stderr.js";
 import { SourceFiles } from "../edge-sites.js";
@@ -19,11 +20,14 @@ import {
 } from "../around.js";
 import { aroundJson, renderAroundLlm, renderAroundText } from "../around-render.js";
 
-function reportError(code: string, message: string, format: string, extra: Array<[string, string]> = []): void {
+export function reportError(code: string, message: string, format: string, extra: Array<[string, string]> = []): void {
   if (format === "json") printJson({ error: code, message, ...Object.fromEntries(extra) });
   else if (format === "llm") console.log(llmError(code, message, extra));
   else stderr(chalk.red(message));
-  process.exitCode = 1;
+  // A file that is not in the graph is a miss (3), as for every graph command
+  // that resolves a target (outcome.ts); a bad argument is an error (1).
+  if (code === "unresolved_target") setOutcome("not_found");
+  else process.exitCode = 1;
 }
 
 /** The file's lines, or none when it is not on disk (the graph's spans then stand as recorded). */

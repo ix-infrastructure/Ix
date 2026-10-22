@@ -138,7 +138,8 @@ function render(fixture: Fixture): { lines: string[]; bundle: ReturnType<typeof 
     } as never,
     provenance: {},
     // The budgets a caller gets by default, not generous ones.
-    budgets: clampBudgets({}),
+    budgets: clampBudgets({}, "llm"),
+    format: "llm",
     isStale: () => false,
   });
 
@@ -178,6 +179,14 @@ describe("ix context usefulness", () => {
         const evidenceChars = bundle.evidence.reduce((n, e) => n + JSON.stringify(e).length, 0);
         expect(evidenceChars).toBeLessThanOrEqual(bundle.budgets.maxChars);
         expect(bundle.evidence.length).toBeLessThanOrEqual(bundle.budgets.maxEvidence);
+      });
+
+      it("emits within 10% of maxChars when evidence was cut", () => {
+        const { lines, bundle } = render(fixture);
+        if (bundle.truncation.evidenceTruncated === 0) return;
+        const out = lines.join("\n").length;
+        expect(out).toBeLessThanOrEqual(bundle.budgets.maxChars);
+        expect(out).toBeGreaterThanOrEqual(0.9 * bundle.budgets.maxChars);
       });
 
       it("ends with a read the caller can run", () => {

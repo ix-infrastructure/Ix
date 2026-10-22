@@ -115,7 +115,7 @@ const STRUCTURAL_KINDS = new Set([
  *   4 — provenance/claim/decision match
  *   5 — fuzzy/incidental match
  */
-function rankScore(
+export function rankScore(
   node: any,
   term: string,
   requestedKind: string | undefined,
@@ -129,7 +129,7 @@ function rankScore(
   return { tier: rank.tier, score: rank.score, matchSource: rank.matchSource };
 }
 
-function baseRank(
+export function baseRank(
   node: any,
   term: string,
   requestedKind: string | undefined,
@@ -173,9 +173,9 @@ function baseRank(
 }
 
 /**
- * Full sort key: (tier, sub-score, structural-boost, name).
+ * Full sort key: (tier, sub-score, structural-boost, name, id).
  */
-function searchSort(
+export function searchSort(
   a: { node: any; rank: { tier: number; score: number; matchSource: string } },
   b: { node: any; rank: { tier: number; score: number; matchSource: string } }
 ): number {
@@ -187,7 +187,13 @@ function searchSort(
   if (aStructural !== bStructural) return aStructural - bStructural;
   const aName = (a.node.name || a.node.attrs?.name || "").toLowerCase();
   const bName = (b.node.name || b.node.attrs?.name || "").toLowerCase();
-  return aName.localeCompare(bName);
+  const byName = aName.localeCompare(bName);
+  if (byName !== 0) return byName;
+  // Last resort: node id (plain compare, locale-independent) so fully tied rows
+  // sort the same whatever order the backend returned them in.
+  const aId = String(a.node.id ?? "");
+  const bId = String(b.node.id ?? "");
+  return aId < bId ? -1 : aId > bId ? 1 : 0;
 }
 
 /** Tier 0 through tier 5 — see `rankScore`. */

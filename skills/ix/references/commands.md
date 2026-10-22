@@ -189,6 +189,13 @@ ix inventory --kind function --path auth.py
 - Always use `--limit` to cap result sets. Not on `ix diff --summary` or
   `ix diff --full`, though: each already fixes the volume, so `--limit`
   alongside either is refused rather than silently ignored.
+- Page `callers`, `callees`, `imports`, `imported-by`, `contains`,
+  `inventory` and `text` with `--offset`, following the `next:` hint (or
+  `next_offset=` in llm output). Keep `--limit` the same while paging. `text`
+  pages stop at its 500-row scan window; past that, narrow with `--path` or
+  `--language`. `inventory` lists newest first, so its pages are stable only
+  between ingests. The server returns at most 1000 edges and 5000 `inventory`
+  rows; past those caps the output stays truncated and says to narrow.
 - Use `--path` or `--language` to restrict text searches.
 - Reuse exact entity IDs from previous JSON results when chaining commands.
 - Decompose large questions into multiple targeted calls.

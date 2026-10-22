@@ -4,6 +4,7 @@ import chalk from "chalk";
 import { PRE_CONNECTION_CODES, RESET_RECONCILIATION_ERROR } from "../client/transport.js";
 
 import { llmError } from "./llm.js";
+import { exitCodeFor } from "./outcome.js";
 
 // ── Answering in the format the caller asked for ───────────────────────────
 
@@ -387,7 +388,8 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string): 
     } else if (!emitLlmError(err.code, err.summary, err.hint, [["dir", err.dir]])) {
       renderStructuredError({ error: err.code, message: err.summary, next: err.hint });
     }
-    process.exit(1);
+    // Its own code, so an agent knows to map rather than retry (outcome.ts).
+    process.exit(exitCodeFor("not_mapped"));
   }
 
   const e = err as any;

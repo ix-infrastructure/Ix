@@ -21,3 +21,10 @@ delete process.env.IX_HOME;
 // whenever a deferred map is stale; with this they only say so. The tests of
 // that path turn it back on and inject the spawner.
 process.env.IX_MAP_BACKGROUND_REFRESH = "0";
+
+// A target that resolves to nothing runs one bounded `rg` over the workspace to
+// say why (`cli/miss-reason.ts`). Under test the "workspace" is this checkout,
+// whose sources and fixtures mention every name a test misses on, so the
+// reason would depend on the repository's contents. Off by default here; the
+// tests for the probe turn it back on.
+process.env.IX_MISS_PROBE = "0";
