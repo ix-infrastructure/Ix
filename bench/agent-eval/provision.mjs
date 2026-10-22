@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execute } from './process.mjs';
 import { sha256 } from './manifest.mjs';
 import { findBinary, shellQuote } from './isolation.mjs';
+import { MCP_SERVER, PLUGIN_NAME } from './integration.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const json = (value) => JSON.stringify(value, null, 2) + '\n';
@@ -18,13 +19,13 @@ export function integrationFiles(request) {
   // Map refresh and claude-post-edit each have an environment.seconds deadline; Claude's default hook timeout is shorter.
   const hookTimeout = 2 * request.environment.seconds + 30;
   if (request.agent.family === 'claude') return {
-    [join(plugin, '.claude-plugin', 'plugin.json')]: json({ name: 'ix-agent-eval', version: '1.0.0', description: 'Pinned local Ix benchmark integration' }),
-    [join(plugin, '.mcp.json')]: json({ mcpServers: { 'ix-memory': { command: 'ix', args: ['mcp'] } } }),
+    [join(plugin, '.claude-plugin', 'plugin.json')]: json({ name: PLUGIN_NAME, version: '1.0.0', description: 'Pinned local Ix benchmark integration' }),
+    [join(plugin, '.mcp.json')]: json({ mcpServers: { [MCP_SERVER]: { command: 'ix', args: ['mcp'] } } }),
     [join(plugin, 'hooks', 'hooks.json')]: json({ hooks: { PostToolUse: [{ matcher: 'Edit|MultiEdit|Write|Bash', hooks: [{ type: 'command', command: hook.map(shellQuote).join(' ') + ' claude', timeout: hookTimeout }] }] } }),
   };
   if (request.agent.family === 'codex') return {
-    [join(request.home, '.codex', 'config.toml')]: `notify = ${JSON.stringify([...hook, 'codex'])}\n[mcp_servers.ix-memory]\ncommand = "ix"\nargs = ["mcp"]\n`,
-    [join(plugin, 'plugin.json')]: json({ name: 'ix-agent-eval', family: 'codex', source_revision: request.environment.plugin_revision, transport: 'ix mcp', hook: 'notify:agent-turn-complete' }),
+    [join(request.home, '.codex', 'config.toml')]: `notify = ${JSON.stringify([...hook, 'codex'])}\n[mcp_servers.${MCP_SERVER}]\ncommand = "ix"\nargs = ["mcp"]\n`,
+    [join(plugin, 'plugin.json')]: json({ name: PLUGIN_NAME, family: 'codex', source_revision: request.environment.plugin_revision, transport: 'ix mcp', hook: 'notify:agent-turn-complete' }),
   };
   throw new Error('Local provisioning requires Claude Code or Codex');
 }

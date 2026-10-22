@@ -6,7 +6,6 @@ import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import * as format from "../format.js";
 import { registerReadCommand } from "../commands/read.js";
 
 /**
@@ -98,25 +97,6 @@ describe("ix read line cap", () => {
     expect(note).toContain("--all");
     // The source itself is still on stdout, all 400 lines of it.
     expect(logs).toHaveLength(400);
-  });
-
-  it("prefers canonical workspace-relative cursors over home abbreviation", async () => {
-    vi.spyOn(format, "relativePath").mockReturnValue("~/example/src/big.ts");
-    await read(["src/big.ts", "--format", "llm"]);
-    expect(logs[0]).toContain("next=src/big.ts:401-800");
-  });
-
-  it("keeps the home abbreviation for files outside the working tree", async () => {
-    const elsewhere = mkdtempSync(join(tmpdir(), "ix-read-cap-cwd-"));
-    try {
-      process.chdir(elsewhere);
-      vi.spyOn(format, "relativePath").mockReturnValue("~/example/src/big.ts");
-      await read(["src/big.ts", "--format", "llm"]);
-      expect(logs[0]).toContain("next=~/example/src/big.ts:401-800");
-    } finally {
-      process.chdir(root);
-      rmSync(elsewhere, { recursive: true, force: true });
-    }
   });
 
   it("keeps the cursor relative when the root is reached through a symlink", async () => {

@@ -15,6 +15,7 @@ import { execute } from '../process.mjs';
 import { checkResolution, evaluationError } from '../evaluation.mjs';
 import { armEnvironment } from '../isolation.mjs';
 import { assertMapped, checkTaskIsolation, integrationFiles } from '../provision.mjs';
+import { CLAUDE_IX_MCP_RULE, MCP_SERVER, PLUGIN_NAME, nativeArgs } from '../integration.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 // Worktree-local scratch also keeps the CI smoke independent of machine config.
@@ -108,11 +109,38 @@ test('token ceiling counts uncached input and output, not cache reads', () => {
   assert.equal(budgetTokens({ input_tokens: 10, cached_tokens: 0, output_tokens: 2 }), 12);
 });
 
-test('example config grants the native agent edit and shell permissions', () => {
-  const { agent } = JSON.parse(readFileSync(join(root, 'config.example.json'), 'utf8'));
-  // Claude --print denies anything that would prompt, so an empty argv cannot edit files.
-  assert.deepEqual(agent.args, ['--permission-mode', 'acceptEdits', '--allowedTools', 'Bash']);
-  assert.ok(!agent.args.some((arg) => /plugin|mcp|settings|notify|CODEX_HOME|CLAUDE_CONFIG_DIR/.test(arg)));
+test('example config grants edits and shell; only the ix arm is allowed the Ix MCP server', () => {
+  const { agent, budget } = JSON.parse(readFileSync(join(root, 'config.example.json'), 'utf8'));
+  // Claude --print denies anything that would prompt, so both arms need explicit tool permissions.
+  const argv = (arm) => nativeArgs({ arm, run_path: '/run', agent, budget });
+  const allowed = (args) => args.filter((arg, i) => args[i - 1] === '--allowedTools');
+  assert.deepEqual(allowed(argv('ix')), [`Bash,${CLAUDE_IX_MCP_RULE}`]);
+  assert.deepEqual(allowed(argv('baseline')), ['Bash']);
+  assert.ok(argv('ix').includes('acceptEdits'));
+  // The rule must match the provisioned plugin/server names and the telemetry matcher.
+  assert.equal(CLAUDE_IX_MCP_RULE, `mcp__plugin_${PLUGIN_NAME}_${MCP_SERVER}`);
+  assert.ok(isIxMcpTool(`${CLAUDE_IX_MCP_RULE}__locate`));
+  const files = integrationFiles({ agent, run_path: '/run', home: '/home', environment: { seconds: 1 } });
+  assert.deepEqual(Object.keys(JSON.parse(files['/run/plugin/.mcp.json']).mcpServers), [MCP_SERVER]);
+  assert.equal(JSON.parse(files['/run/plugin/.claude-plugin/plugin.json']).name, PLUGIN_NAME);
+  // Shared args and tool rules cannot grant or override integrations.
+  for (const args of [['--allowedTools', 'Bash'], ['--allowed-tools=Bash'], ['--mcp-config', '{}']]) assert.throws(() => nativeArgs({ arm: 'ix', run_path: '/run', agent: { ...agent, args }, budget }), /override/);
+  assert.throws(() => nativeArgs({ arm: 'baseline', run_path: '/run', agent: { ...agent, allowed_tools: [CLAUDE_IX_MCP_RULE] }, budget }), /MCP/);
+  assert.throws(() => nativeArgs({ arm: 'ix', run_path: '/run', agent: { ...agent, family: 'codex', allowed_tools: ['Bash'] }, budget }), /Claude Code only/);
+  assert.equal(nativeArgs({ arm: 'ix', run_path: '/run', agent: { ...agent, family: 'codex', allowed_tools: [] }, budget }).includes('--allowedTools'), false);
+});
+
+test('Claude Ix permission denials are reported separately from Ix errors', () => {
+  const tool = { type: 'tool_use', id: 'p', name: `${CLAUDE_IX_MCP_RULE}__locate`, input: {} };
+  const denied = { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'p', is_error: true, content: `Claude requested permissions to use ${CLAUDE_IX_MCP_RULE}__locate, but you haven't granted it yet.` }] } };
+  const result = (extra) => ({ type: 'result', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, ...extra });
+  const assistant = { type: 'assistant', message: { id: 'a', content: [tool] } };
+  let metrics = parseMetrics(ndjson([assistant, denied, result({ permission_denials: [{ tool_name: tool.name, tool_use_id: 'p', tool_input: {} }] })]), 'claude');
+  assert.equal(metrics.ix_permission_denials, 1); assert.equal(metrics.ix_errors, 0);
+  metrics = parseMetrics(ndjson([assistant, result({ permission_denials: [{ tool_name: 'Bash', tool_use_id: 'b', tool_input: { command: 'ix locate Foo' } }, { tool_name: 'WebFetch', tool_use_id: 'w', tool_input: {} }] })]), 'claude');
+  assert.equal(metrics.ix_permission_denials, 1);
+  metrics = parseMetrics(ndjson([assistant, result({ permission_denials: [] })]), 'claude');
+  assert.equal(metrics.ix_permission_denials, 0);
 });
 
 test('Codex sums completed turn usage and captures command/MCP errors by code', () => {

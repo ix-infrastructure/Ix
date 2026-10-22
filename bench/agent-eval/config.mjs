@@ -2,6 +2,7 @@
 
 import { positiveInteger } from './manifest.mjs';
 import { random, shuffled } from './stats.mjs';
+import { allowedTools, extraArgs } from './integration.mjs';
 
 export function command(value, name) {
   if (!Array.isArray(value) || !value.length || value.some((v) => typeof v !== 'string' || !v.length)) throw new Error(`${name} must be a nonempty argv array`);
@@ -16,6 +17,7 @@ export function validateConfig(config, synthetic = false) {
   if (!agent || !['claude', 'codex', ...(synthetic ? ['stub'] : [])].includes(agent.family)) throw new Error('Invalid agent family');
   for (const field of ['model', 'effort', 'version']) if (typeof agent[field] !== 'string' || !agent[field].trim()) throw new Error(`Missing agent.${field}`);
   command(agent.command, 'agent.command');
+  extraArgs(agent); allowedTools(agent);
   if (!['normalized', 'claude', 'codex'].includes(agent.telemetry)) throw new Error('Invalid telemetry format');
   for (const key of ['max_turns', 'max_tokens', 'seconds']) positiveInteger(config.budget?.[key], `budget.${key}`);
   for (const stage of ['setup', 'probe']) command(config.environment?.[stage], `environment.${stage}`);

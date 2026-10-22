@@ -61,6 +61,9 @@ export function isIxMcpTool(name) {
   return /^(?:plugin_[a-z0-9-]+_)?ix(?:[._-]|$)/i.test(server);
 }
 
+// Claude's tool_result text when --print denies a tool that was not allowed.
+const CLAUDE_DENIAL = /requested permissions to use .*(?:haven't|have not) granted/is;
+
 function ixErrorCode(text) {
   try { return JSON.parse(text).error?.code; } catch {
     return String(text ?? '').match(/(?:^|\n)error\s+code=(?:"([\w.-]+)"|([\w.-]+))/)?.slice(1).find(Boolean);
@@ -78,7 +81,7 @@ export function parseMetrics(text, format, { allowIncomplete = false } = {}) {
   }
   if (!['normalized', 'claude', 'codex'].includes(format)) throw new Error('Unknown telemetry format');
   let usage;
-  const turns = new Set(), tools = new Set(), ixTools = new Set(), failedTools = new Set(), errors = Object.create(null);
+  const turns = new Set(), tools = new Set(), ixTools = new Set(), failedTools = new Set(), ixDenied = new Set(), errors = Object.create(null);
   let search_calls = 0, rg_calls = 0, grep_calls = 0, find_calls = 0, ix_calls = 0;
   const tool = (id, command = '', isIx = false) => {
     if (!id) throw new Error('Tool event missing id');
@@ -106,8 +109,10 @@ export function parseMetrics(text, format, { allowIncomplete = false } = {}) {
     if (format === 'claude') {
       if (event.type === 'user') for (const content of event.message?.content ?? []) {
         if (content.type === 'tool_result' && content.is_error && ixTools.has(content.tool_use_id)) {
-          const code = ixErrorCode(typeof content.content === 'string' ? content.content : content.content?.[0]?.text);
-          toolError(content.tool_use_id, code);
+          const text = typeof content.content === 'string' ? content.content : content.content?.[0]?.text;
+          // A permission denial is a harness misconfiguration, not an Ix failure.
+          if (CLAUDE_DENIAL.test(text ?? '')) ixDenied.add(content.tool_use_id);
+          else toolError(content.tool_use_id, ixErrorCode(text));
         }
       }
       if (event.type === 'assistant') {
@@ -119,6 +124,9 @@ export function parseMetrics(text, format, { allowIncomplete = false } = {}) {
       }
       if (event.type === 'result') {
         if (event.subtype === 'error_max_turns') budgetReason = 'turn_budget';
+        for (const denial of event.permission_denials ?? []) {
+          if (isIxMcpTool(denial.tool_name) || commandCounts(denial.tool_input?.command ?? '').ix_calls) ixDenied.add(denial.tool_use_id ?? denial.tool_name);
+        }
         if (budgetReason && !event.usage) { completed = true; continue; }
         if (usage) throw new Error('Duplicate Claude result');
         const u = event.usage ?? {};
@@ -164,6 +172,6 @@ export function parseMetrics(text, format, { allowIncomplete = false } = {}) {
   // Partial usage is a lower bound, never silently billed as a complete total.
   const tokens = complete ? usage : { input_tokens: null, output_tokens: null, cached_tokens: null };
   return { ...tokens, usage_complete: complete, telemetry_complete: complete, observed_usage: usage ?? null, budget_reason: budgetReason ?? null,
-    turns: turns.size, tool_calls: tools.size, search_calls, rg_calls, grep_calls, find_calls, ix_calls,
+    turns: turns.size, tool_calls: tools.size, ix_permission_denials: ixDenied.size, search_calls, rg_calls, grep_calls, find_calls, ix_calls,
     ix_errors: Object.values(errors).reduce((a, b) => a + b, 0), ix_errors_by_code: { ...errors } };
 }
