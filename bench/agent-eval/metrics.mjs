@@ -15,7 +15,7 @@ export const budgetTokens = (usage) => usage.input_tokens - usage.cached_tokens 
  * Scripts, aliases and dynamic expansions require normalized tool telemetry.
  */
 function shellCommands(text) {
-  const commands = []; let words = [], word = '', quote = '', active = false;
+  const commands = [], heredocs = []; let words = [], word = '', quote = '', active = false;
   const flush = () => { if (active) words.push(word); word = ''; active = false; };
   const boundary = () => { flush(); if (words.length) commands.push(words); words = []; };
   for (let i = 0; i < text.length; i++) {
@@ -25,7 +25,29 @@ function shellCommands(text) {
     } else if (quote) {
       if (c === quote) quote = ''; else word += c;
     } else if (c === "'" || c === '"') { quote = c; active = true; }
-    else if (c === '#' && !active) { while (i < text.length && text[i] !== '\n') i++; boundary(); }
+    else if (c === '#' && !active) { while (i < text.length && text[i] !== '\n') i++; i--; }
+    else if (text.startsWith('<<<', i)) { flush(); i += 2; } // A here-string is a single word of input.
+    else if (text.startsWith('<<', i)) {
+      // Heredoc bodies are data (scripts, fixtures), never commands; skip them at the next newline.
+      flush(); i += 2;
+      const strip = text[i] === '-'; if (strip) i++;
+      while (text[i] === ' ' || text[i] === '\t') i++;
+      let delimiter = '';
+      for (; i < text.length && !/[\s;&|()<>]/.test(text[i]); i++) if (!`'"\\`.includes(text[i])) delimiter += text[i];
+      i--;
+      if (delimiter) heredocs.push({ delimiter, strip });
+    } else if (c === '\n' && heredocs.length) {
+      boundary();
+      for (const { delimiter, strip } of heredocs.splice(0)) {
+        let end = i;
+        do {
+          const start = end + 1; end = text.indexOf('\n', start); if (end < 0) end = text.length;
+          const line = text.slice(start, end);
+          if ((strip ? line.replace(/^\t+/, '') : line) === delimiter) break;
+        } while (end < text.length);
+        i = end;
+      }
+    }
     else if (';&|\n()'.includes(c)) boundary();
     else if (/\s/.test(c)) flush();
     else { word += c; active = true; }
@@ -172,6 +194,8 @@ export function parseMetrics(text, format, { allowIncomplete = false } = {}) {
   // Partial usage is a lower bound, never silently billed as a complete total.
   const tokens = complete ? usage : { input_tokens: null, output_tokens: null, cached_tokens: null };
   return { ...tokens, usage_complete: complete, telemetry_complete: complete, observed_usage: usage ?? null, budget_reason: budgetReason ?? null,
+    // Ix calls without an observed failure; normalized telemetry has no per-call outcome, so all count.
+    ix_succeeded: [...ixTools].filter((id) => !failedTools.has(id) && !ixDenied.has(id)).length,
     turns: turns.size, tool_calls: tools.size, ix_permission_denials: ixDenied.size, search_calls, rg_calls, grep_calls, find_calls, ix_calls,
     ix_errors: Object.values(errors).reduce((a, b) => a + b, 0), ix_errors_by_code: { ...errors } };
 }

@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, test } from 'node:test';
-import { checkManifestSource, importVerified, loadManifest, sha256, validateManifest } from '../manifest.mjs';
+import { checkManifestSource, importVerified, loadManifest, parseExport, sha256, validateManifest } from '../manifest.mjs';
 import { schedule, validateConfig, validateProbe } from '../config.mjs';
 import { budgetTokens, commandCounts, isIxMcpTool, parseMetrics, METRICS } from '../metrics.mjs';
 import { markdown, summarize } from '../stats.mjs';
@@ -144,6 +144,9 @@ test('Claude Ix permission denials are reported separately from Ix errors', () =
 });
 
 test('Codex sums completed turn usage and captures command/MCP errors by code', () => {
+  // One `codex exec` prompt is normally one turn; `turns` counts exec turns, not model requests.
+  const single = parseMetrics(ndjson([{ type: 'thread.started' }, { type: 'turn.started' }, { type: 'item.completed', item: { id: 'a', type: 'command_execution', command: 'rg foo', exit_code: 0 } }, { type: 'item.completed', item: { id: 'b', type: 'file_change' } }, { type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 2, cached_input_tokens: 4 } }]), 'codex');
+  assert.equal(single.turns, 1); assert.equal(single.tool_calls, 2); assert.equal(single.input_tokens, 10);
   const usage = { type: 'turn.completed', usage: { input_tokens: 100, output_tokens: 20, cached_input_tokens: 50 } };
   const metrics = parseMetrics(ndjson([{ type: 'turn.started' }, { type: 'item.completed', item: { id: 't', type: 'command_execution', command: 'rg foo; ix locate Foo', exit_code: 1, aggregated_output: '{"error":{"code":"NOT_FOUND"}}' } }, usage, { type: 'turn.started' }, { type: 'item.completed', item: { id: 'm', type: 'mcp_tool_call', server: 'ix-memory', error: { code: 'DOWN' } } }, usage]), 'codex');
   assert.equal(metrics.input_tokens, 200); assert.equal(metrics.cached_tokens, 100); assert.equal(metrics.turns, 2);
@@ -340,6 +343,79 @@ test('quote-aware command counting handles shell wrappers, escapes and comments'
   assert.equal(commandCounts('echo "a|grep x"; "grep" needle').grep_calls, 1);
 });
 
+test('heredoc bodies are data, not ix or search commands', () => {
+  // A typical agent repro script: Python names like `ix` and lines starting with grep are file content.
+  const repro = "cat > reproduce.py << 'EOF'\nimport numpy as np\nix = np.arange(3)\nprint(ix)\ngrep = \"don't\"\ngrep foo bar\nEOF\npython reproduce.py && rg needle";
+  assert.deepEqual(commandCounts(repro), { search_calls: 1, rg_calls: 1, grep_calls: 0, find_calls: 0, ix_calls: 0 });
+  assert.equal(commandCounts('cat <<-EOF > x\n\tix locate A\n\tEOF\nix locate B').ix_calls, 1);
+  assert.equal(commandCounts('cat <<A <<B\nix 1\nA\nix 2\nB\nix locate C').ix_calls, 1);
+  assert.equal(commandCounts('python - <<EOF\nix\n').ix_calls, 0);
+  assert.equal(commandCounts('cat <<EOF; ix locate same-line\nix body\nEOF').ix_calls, 1);
+  assert.equal(commandCounts('echo a <<< "ix locate x"; ix locate y').ix_calls, 1);
+  assert.equal(commandCounts('bash -lc "cat > f <<EOF\nix bad\nEOF\nix good"').ix_calls, 1);
+  const tool = { type: 'tool_use', id: 'h', name: 'Bash', input: { command: repro } };
+  const metrics = parseMetrics(ndjson([{ type: 'assistant', message: { id: 'a', content: [tool] } }, { type: 'result', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }]), 'claude');
+  assert.equal(metrics.ix_calls, 0); assert.equal(metrics.grep_calls, 0);
+});
+
+// Emits a Claude stream-json transcript; the mode argument picks the arm-specific Ix behaviour.
+function claudeTranscriptAgent() {
+  const script = join(scratch, 'claude-transcript-agent.mjs');
+  writeFileSync(script, `
+    import { readFileSync, writeFileSync } from 'node:fs';
+    import { join } from 'node:path';
+    const [mode, file] = process.argv.slice(2), r = JSON.parse(readFileSync(file, 'utf8'));
+    writeFileSync(join(r.repo_path, 'solution.txt'), 'synthetic solution\\n');
+    const bash = { type: 'tool_use', id: 'b', name: 'Bash', input: { command: 'ix locate Foo' } };
+    const mcp = { type: 'tool_use', id: 'm', name: ${JSON.stringify(CLAUDE_IX_MCP_RULE + '__locate')}, input: {} };
+    const events = [], result = { type: 'result', usage: { input_tokens: 10, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } };
+    if (mode === 'denied' && r.arm === 'ix') {
+      events.push({ type: 'assistant', message: { id: 'a', content: [mcp] } });
+      result.permission_denials = [{ tool_name: mcp.name, tool_use_id: 'm', tool_input: {} }];
+    } else if (mode.startsWith('baseline') && r.arm === 'baseline') {
+      events.push({ type: 'assistant', message: { id: 'a', content: [bash] } });
+      const failed = mode === 'baseline-attempt';
+      events.push({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'b', is_error: failed, content: failed ? 'bash: ix: command not found' : 'Foo src/foo.ts:1' }] } });
+    } else events.push({ type: 'assistant', message: { id: 'a', content: [{ type: 'text', text: 'done' }] } });
+    for (const event of [...events, result]) console.log(JSON.stringify(event));
+  `);
+  return (mode) => { const config = dryConfig(); config.agent = { ...config.agent, telemetry: 'claude', command: [process.execPath, script, mode] }; return config; };
+}
+
+integrationTest('an Ix permission denial fails the run; a failed baseline ix attempt does not, a working one does', async () => {
+  const config = claudeTranscriptAgent();
+  await assert.rejects(runBenchmark({ manifestPath: smoke, config: config('denied'), out: join(scratch, 'ix-denied'), dryRun: true }), /denied Ix tools/);
+  const out = join(scratch, 'baseline-attempt');
+  await runBenchmark({ manifestPath: smoke, config: config('baseline-attempt'), out, dryRun: true });
+  const runs = readFileSync(join(out, 'runs.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.ok(runs.filter((run) => run.arm === 'baseline').every((run) => run.ix_calls === 1 && run.ix_errors === 1 && run.ix_succeeded === 0));
+  await assert.rejects(runBenchmark({ manifestPath: smoke, config: config('baseline-leak'), out: join(scratch, 'baseline-leak'), dryRun: true }), /Baseline ix call succeeded/);
+});
+
+integrationTest('agent.mjs gives each Claude arm its own --allowedTools through the native binary', async () => {
+  const fake = join(scratch, 'fake-claude.cjs');
+  writeFileSync(fake, `#!${process.execPath}
+    const { writeFileSync } = require('node:fs');
+    if (process.argv[2] === '--version') console.log('9.9.9-fixture (Claude Code)');
+    else { writeFileSync(process.env.FAKE_CLAUDE_ARGV, JSON.stringify(process.argv.slice(2))); process.stdin.resume(); }
+  `.replace(/^\s+/gm, ''), { mode: 0o755 });
+  const argv = {};
+  for (const arm of ['baseline', 'ix']) {
+    const run_path = join(scratch, `allowed-${arm}`); mkdirSync(run_path, { recursive: true });
+    const request = { arm, run_path, task: { problem_statement: 'fixture' }, budget: { max_turns: 3 },
+      agent: { family: 'claude', binary: fake, version: '9.9.9-fixture', model: 'fixture-model', effort: 'medium', args: ['--permission-mode', 'acceptEdits'], allowed_tools: ['Bash'] } };
+    writeFileSync(join(run_path, 'request.json'), JSON.stringify(request));
+    const out = join(run_path, 'argv.json');
+    await execute([process.execPath, join(root, 'agent.mjs'), join(run_path, 'request.json')], { env: { ...process.env, FAKE_CLAUDE_ARGV: out }, seconds: 20 });
+    argv[arm] = JSON.parse(readFileSync(out, 'utf8'));
+  }
+  const allowed = (args) => args.filter((arg, i) => args[i - 1] === '--allowedTools');
+  assert.deepEqual(allowed(argv.ix), [`Bash,${CLAUDE_IX_MCP_RULE}`]);
+  assert.deepEqual(allowed(argv.baseline), ['Bash']);
+  assert.ok(argv.ix.includes('--plugin-dir') && !argv.baseline.includes('--plugin-dir'));
+  assert.ok(argv.baseline.includes('--strict-mcp-config'));
+});
+
 test('mapping probe rejects successful-but-empty, stale and partial maps', () => {
   const status = { graphCompleted: true, mapCompleted: true, staleFiles: 0, graphHealth: { status: 'ok' } };
   const stats = { nodes: { total: 3 } };
@@ -442,6 +518,13 @@ integrationTest('shipped provisioner installs pinned local integrations and isol
 test('manifest pins agree with the hash-verified source export', () => {
   const text = JSON.stringify(rows), manifest = importVerified(text);
   checkManifestSource(manifest, text);
+  // The official evaluator picks its parser by extension, so a named export must match its format.
+  const jsonl = rows.map((row) => JSON.stringify(row)).join('\n');
+  assert.equal(parseExport(text, 'local/verified.json').length, rows.length);
+  assert.equal(parseExport(jsonl, 'local/verified.jsonl').length, rows.length);
+  assert.throws(() => parseExport(jsonl, 'local/verified.json'), /JSONL export must be named \*\.jsonl/);
+  assert.throws(() => checkManifestSource(manifest, text, 'local/verified.jsonl'), /JSON array export must be named \*\.json/);
+  assert.throws(() => importVerified(jsonl, { path: 'local/verified.json' }), /\.jsonl/);
   for (const field of ['repo', 'base_commit', 'problem_statement']) {
     const changed = structuredClone(manifest); changed.tasks[0][field] = 'drifted';
     assert.throws(() => checkManifestSource(changed, text), /differs from source/);

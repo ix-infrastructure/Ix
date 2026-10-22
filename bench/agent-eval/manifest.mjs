@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { extname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export const sha256 = (text) => createHash('sha256').update(text).digest('hex');
@@ -29,11 +29,18 @@ export function validateManifest(manifest) {
 }
 export const loadManifest = (file) => validateManifest(JSON.parse(readFileSync(file, 'utf8')));
 
-export function checkManifestSource(manifest, text) {
-  if (sha256(text) !== manifest.source_sha256) throw new Error('Dataset export hash mismatch');
-  let rows;
-  try { rows = JSON.parse(text); } catch { rows = text.trim().split(/\r?\n/).map((line) => JSON.parse(line)); }
+/** SWE-bench's loader picks its parser by file extension, so a named export must match its format. */
+export function parseExport(text, path) {
+  let rows, format = 'json';
+  try { rows = JSON.parse(text); } catch { rows = text.trim().split(/\r?\n/).map((line) => JSON.parse(line)); format = 'jsonl'; }
   if (!Array.isArray(rows)) throw new Error('Export must be a JSON array or JSONL');
+  if (path && extname(path) !== `.${format}`) throw new Error(`A ${format === 'json' ? 'JSON array' : 'JSONL'} export must be named *.${format}; the official evaluator picks its parser by extension`);
+  return rows;
+}
+
+export function checkManifestSource(manifest, text, path) {
+  if (sha256(text) !== manifest.source_sha256) throw new Error('Dataset export hash mismatch');
+  const rows = parseExport(text, path);
   const byId = new Map(rows.map((row) => [row.instance_id, row]));
   if (byId.size !== rows.length) throw new Error('Duplicate source task ids');
   for (const task of manifest.tasks) {
@@ -43,12 +50,10 @@ export function checkManifestSource(manifest, text) {
 }
 
 /** Stable hash ordering avoids dependence on export row order or JS sort/random versions. */
-export function importVerified(text, { count = 50, minRepos = 5, seed = 20261013 } = {}) {
+export function importVerified(text, { count = 50, minRepos = 5, seed = 20261013, path } = {}) {
   positiveInteger(count, 'count'); positiveInteger(minRepos, 'minRepos');
   if (!Number.isSafeInteger(seed) || minRepos > count) throw new Error('Invalid seed or repository coverage');
-  let rows;
-  try { rows = JSON.parse(text); } catch { rows = text.trim().split(/\r?\n/).map((line) => JSON.parse(line)); }
-  if (!Array.isArray(rows)) throw new Error('Export must be a JSON array or JSONL');
+  const rows = parseExport(text, path);
   const tasks = rows.map(({ instance_id, repo, base_commit, problem_statement }) => ({ instance_id, repo, base_commit, problem_statement }));
   validateManifest({ version: 1, dataset: 'swe-bench-verified', source_sha256: sha256(text), tasks });
   const ranked = tasks.sort((a, b) => sha256(`${seed}:${a.instance_id}`).localeCompare(sha256(`${seed}:${b.instance_id}`)));
@@ -64,7 +69,7 @@ export function importVerified(text, { count = 50, minRepos = 5, seed = 20261013
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
     const [input, output, count = '50', minRepos = '5', seed = '20261013'] = process.argv.slice(2);
-    if (!input || !output) throw new Error('Usage: node manifest.mjs EXPORT.json MANIFEST.json [count=50] [minRepos=5] [seed=20261013]');
-    writeFileSync(output, JSON.stringify(importVerified(readFileSync(input, 'utf8'), { count: Number(count), minRepos: Number(minRepos), seed: Number(seed) }), null, 2) + '\n', { flag: 'wx' });
+    if (!input || !output) throw new Error('Usage: node manifest.mjs EXPORT.json|EXPORT.jsonl MANIFEST.json [count=50] [minRepos=5] [seed=20261013]');
+    writeFileSync(output, JSON.stringify(importVerified(readFileSync(input, 'utf8'), { count: Number(count), minRepos: Number(minRepos), seed: Number(seed), path: input }), null, 2) + '\n', { flag: 'wx' });
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

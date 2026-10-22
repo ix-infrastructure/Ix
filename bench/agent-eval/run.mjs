@@ -55,7 +55,7 @@ export async function runBenchmark({ manifestPath, config, out, dryRun = false }
   if (existsSync(out)) throw new Error('Output directory already exists; choose a fresh path');
   if (!dryRun) {
     const dataset = readFileSync(config.dataset_export, 'utf8');
-    checkManifestSource(manifest, dataset);
+    checkManifestSource(manifest, dataset, config.dataset_export);
   }
   mkdirSync(out, { recursive: true });
   const jobs = schedule(manifest.tasks, config.repeats, config.seed);
@@ -104,7 +104,8 @@ export async function runBenchmark({ manifestPath, config, out, dryRun = false }
       const termination = agent.timed_out ? 'time_budget' : overTokens ? 'token_budget' : (overTurns ? 'turn_budget' : metrics.budget_reason ?? 'completed');
       if (agent.exit_code !== 0 && termination === 'completed') throw new Error('Agent stage failed without a recognized budget outcome');
       if (metrics.ix_permission_denials) throw new Error('Agent was denied Ix tools; the comparison would be biased against Ix. Check the ix arm --allowedTools integration');
-      if (job.arm === 'baseline' && metrics.ix_calls) throw new Error('Baseline invoked ix; inspect isolation before comparing arms');
+      // The probe proved the baseline PATH has no launcher, so a failed `ix` attempt is an observation; a working one is a leak.
+      if (job.arm === 'baseline' && metrics.ix_succeeded) throw new Error('Baseline ix call succeeded; inspect isolation before comparing arms');
       let patch = '';
       if (!dryRun) {
         await execute(['git', 'add', '-N', '--', '.'], { cwd: repoPath, env, seconds: 10 });
