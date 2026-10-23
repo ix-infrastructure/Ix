@@ -471,7 +471,7 @@ System risk analysis — what behavior is at risk if this changes.
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--all` | — | off | When the target is ambiguous, analyse every candidate; each analysis is tagged with its candidate |
 | `--depth` | `<n>` | `1` | Expansion depth for callers/importers (default 1, max 3) |
-| `--limit` | `<n>` | `10` | Max top-impacted members to show |
+| `--limit` | `<n>` | `10` | Max top-impacted members (and llm caller/callee rows) to show; JSON lists are not cut |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |

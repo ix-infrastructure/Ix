@@ -1,6 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import type { IxClient } from "../client/api.js";
+import { rowLocation, stripNulls } from "./format.js";
 
 export type SystemPath = Array<{ name: string; kind: string; id?: string }>;
 
@@ -99,6 +100,9 @@ export async function getEffectiveSystemPath(
 /** A node to bucket: its id, or the node itself when the caller already holds it. */
 export type BucketInput = string | { id: string; name?: string; kind?: string; attrs?: { name?: string } };
 
+/** A bucketed node: its name and kind, and where it is when the node says. */
+export type BucketMember = { name: string; kind: string; path?: string; lineStart?: number; lineEnd?: number };
+
 /**
  * Group a set of nodes by their containing region (IN_REGION).
  *
@@ -110,11 +114,14 @@ export type BucketInput = string | { id: string; name?: string; kind?: string; a
  * Buckets, and the members in each, are in input order. They used to be in
  * the order the lookups finished, so the same graph printed differently from
  * one run to the next.
+ *
+ * Each member carries the node's location (`rowLocation`), read off the node
+ * already in hand: no request is made for it.
  */
 export async function bucketByHierarchy(
   client: IxClient,
   nodes: BucketInput[],
-): Promise<Array<{ region: { name: string; kind: string }; members: Array<{ name: string; kind: string }> }>> {
+): Promise<Array<{ region: { name: string; kind: string }; members: BucketMember[] }>> {
   if (nodes.length === 0) return [];
 
   // For each node, find its immediate region
@@ -138,7 +145,7 @@ export async function bucketByHierarchy(
         return {
           key: region.id,
           region: { name: (region as any).name || region.attrs?.name || "(unnamed)", kind: (region as any).kind || "region" },
-          member: { name: memberName, kind: memberKind },
+          member: { name: memberName, kind: memberKind, ...stripNulls(rowLocation(node)) } as BucketMember,
         };
       } catch {
         return undefined; /* skip nodes that can't be expanded */
@@ -146,7 +153,7 @@ export async function bucketByHierarchy(
     }),
   );
 
-  const buckets = new Map<string, { region: { name: string; kind: string }; members: Array<{ name: string; kind: string }> }>();
+  const buckets = new Map<string, { region: { name: string; kind: string }; members: BucketMember[] }>();
   for (const p of placed) {
     if (!p) continue;
     if (!buckets.has(p.key)) buckets.set(p.key, { region: p.region, members: [] });
