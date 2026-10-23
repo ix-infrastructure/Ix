@@ -191,6 +191,58 @@ export interface WorkspaceConfig {
   workspace_name: string;
   root_path: string;
   default: boolean;
+  /**
+   * The workspace_id is pinned on purpose (e.g. shared by a team from clones at
+   * different paths): silences the warning about it differing from the
+   * path-derived id, and makes `--prune-stale-workspace` refuse to re-key the
+   * root. Set by hand; the CLI never writes or removes it.
+   */
+  pinned?: boolean;
+  /**
+   * Old workspace ids `--prune-stale-workspace` re-keyed this root away from and
+   * has not deleted yet (the re-ingest was not clean, or the delete failed), each
+   * with the endpoint it was re-keyed against. The next `--prune-stale-workspace`
+   * run against that endpoint retries the deletion.
+   */
+  pending_prune_of?: PendingPrune[];
+}
+
+/** One old workspace id awaiting an opted-in deletion; see WorkspaceConfig.pending_prune_of. */
+export interface PendingPrune { workspace_id: string; endpoint: string }
+
+// Roots already warned about for malformed pending_prune_of markers, so a
+// process that re-reads config.yaml says it once.
+const warnedMalformedPrunes = new Set<string>();
+
+/**
+ * The markers of a hand-edited `pending_prune_of` that name a workspace id and an
+ * endpoint as strings. Anything else is skipped, never coerced: `String()` on a
+ * missing id is "undefined", and on an unquoted all-digit id YAML has already
+ * dropped its leading zeros -- either would aim a deletion at the wrong id.
+ * Skipped markers are not written back on the next config save.
+ */
+function wellFormedPendingPrunes(raw: unknown, root: unknown): PendingPrune[] {
+  const list = Array.isArray(raw) ? raw : [raw];
+  const ok = list.filter((p): p is PendingPrune =>
+    typeof p === "object" && p !== null &&
+    typeof (p as PendingPrune).workspace_id === "string" && (p as PendingPrune).workspace_id !== "" &&
+    typeof (p as PendingPrune).endpoint === "string" && (p as PendingPrune).endpoint !== "")
+    .map((p) => ({ workspace_id: p.workspace_id, endpoint: p.endpoint }));
+  const skipped = list.length - ok.length;
+  const key = String(root);
+  if (skipped > 0 && !warnedMalformedPrunes.has(key)) {
+    warnedMalformedPrunes.add(key);
+    process.stderr.write(
+      `Ignoring ${skipped} malformed pending_prune_of entr${skipped === 1 ? "y" : "ies"} for workspace ${key} in config.yaml ` +
+      `(each needs a quoted workspace_id and an endpoint); nothing is deleted for ${skipped === 1 ? "it" : "them"}.\n`,
+    );
+  }
+  return ok;
+}
+
+/** @internal Test hook: forget which roots were warned about malformed markers. */
+export function resetMalformedPruneWarningsForTests(): void {
+  warnedMalformedPrunes.clear();
 }
 
 export interface IxConfig {
@@ -275,7 +327,11 @@ export function loadConfig(): IxConfig {
   // which then silently breaks string id comparisons (e.g. migration detection
   // would re-key a workspace that is already on the correct id).
   if (Array.isArray(parsed.workspaces)) {
-    parsed.workspaces = parsed.workspaces.map((w) => ({ ...w, workspace_id: String(w.workspace_id) }));
+    parsed.workspaces = parsed.workspaces.map((w) => ({
+      ...w,
+      workspace_id: String(w.workspace_id),
+      ...(w.pending_prune_of !== undefined ? { pending_prune_of: wellFormedPendingPrunes(w.pending_prune_of, w.root_path) } : {}),
+    }));
   }
   const config = { ...defaultConfig, ...parsed };
   configMemo = { path: configPath, mtimeMs: stat.mtimeMs, size: stat.size, config: structuredClone(config) };
