@@ -4964,6 +4964,37 @@ export function resolveEdges(
       .filter(dst => dst.split('/').pop() === qualifier))];
     return named.length === 1 ? named[0] : undefined;
   }
+  /**
+   * The names a Scala file's imports bring into scope. Imports are summarized
+   * as written per selector: `a.b.X`, `a.b` (from `a.b._`), and from braces or
+   * Scala 3 `a.b.X => Y` / `a.b.X as Y` (renamed), `a.b.X => _` (hidden),
+   * `a.b._` / `a.b.*` (wildcard).
+   */
+  function scalaImportScope(summary: FileSummary | undefined): {
+    named: Map<string, string[]>; wildcards: Set<string>; excluded: Set<string>;
+  } {
+    const named = new Map<string, string[]>();
+    const wildcards = new Set<string>();
+    const excluded = new Set<string>();
+    const bind = (local: string, fq: string) => named.set(local, [...(named.get(local) ?? []), fq]);
+    for (const { dstName } of summary?.imports ?? []) {
+      const renamed = /^(\S+?)\s*=>\s*(\S+)$/.exec(dstName) ?? /^(\S+)\s+as\s+(\S+)$/.exec(dstName);
+      if (renamed) {
+        // The original name is not imported, not even by a wildcard beside it.
+        excluded.add(renamed[1]);
+        if (renamed[2] !== '_') bind(renamed[2], renamed[1]);
+        continue;
+      }
+      if (dstName.endsWith('._') || dstName.endsWith('.*')) {
+        wildcards.add(dstName.slice(0, -2));
+        continue;
+      }
+      // `a.b.X`, or the package of a top-level wildcard (`import a.b._`).
+      wildcards.add(dstName);
+      if (dstName.includes('.')) bind(dstName.slice(dstName.lastIndexOf('.') + 1), dstName);
+    }
+    return { named, wildcards, excluded };
+  }
   function findReceiverProviders(context: string, rawType: string): Array<{ fp: string; type: string }> {
     const summary = summaries.get(context);
     const language = summary?.language ?? languageFromPath(context);
@@ -4972,16 +5003,28 @@ export function resolveEdges(
     if (language === SupportedLanguages.Scala) {
       const candidates = (symbolToFiles.get(type) ?? []).filter(fp => summaries.get(fp)?.language === language);
       if (parts.length) return candidates.filter(fp => summaries.get(fp)?.receiverPackage === parts.join('.')).map(fp => ({ fp, type }));
-      const explicit = summary?.imports.filter(imp => imp.dstName.endsWith(`.${type}`)) ?? [];
-      if (explicit.length) return candidates.filter(fp => explicit.some(imp => imp.dstName === `${summaries.get(fp)?.receiverPackage}.${type}`)).map(fp => ({ fp, type }));
+      const scope = scalaImportScope(summary);
+      // An explicit import binds the name, renamed (`{Target => T}`) or not, to
+      // that type only: never a same-named type of this package.
+      const named = scope.named.get(type);
+      if (named) {
+        return named.flatMap(fq => {
+          const dot = fq.lastIndexOf('.');
+          const original = fq.slice(dot + 1);
+          return (symbolToFiles.get(original) ?? [])
+            .filter(fp => summaries.get(fp)?.language === language && dot > 0 && summaries.get(fp)?.receiverPackage === fq.slice(0, dot))
+            .map(fp => ({ fp, type: original }));
+        });
+      }
       if (fileHasSymbol.get(context)?.has(type)) return [{ fp: context, type }];
       // Otherwise only a type in scope: this package's, or a wildcard-imported
-      // package's (`import p._` is summarized as `p`). Never a same-named type
-      // elsewhere, which is how `Option` would land on an unrelated class.
-      const wildcards = new Set(summary?.imports.map(imp => imp.dstName));
+      // package's (`import p._` is summarized as `p`) unless the import renamed
+      // or hid it (`{Target => T, _}`, `{Target => _, _}`). Never a same-named
+      // type elsewhere, which is how `Option` would land on an unrelated class.
       return candidates.filter(fp => {
         const pkg = summaries.get(fp)?.receiverPackage;
-        return pkg === summary?.receiverPackage || (pkg !== undefined && wildcards.has(pkg));
+        if (pkg === summary?.receiverPackage) return true;
+        return pkg !== undefined && scope.wildcards.has(pkg) && !scope.excluded.has(`${pkg}.${type}`);
       }).map(fp => ({ fp, type }));
     }
     const binding = importBindingsByLocal.get(context)?.get(type);

@@ -420,6 +420,35 @@ describe('typed local receivers', () => {
   });
 
   it.each([
+    ['renamed', 'import other.{Target => T}\n', 'T', 'other'],
+    ['Scala 3 renamed', 'import other.Target as T\n', 'T', 'other'],
+    ['renamed beside a wildcard', 'import other.{Target => T, _}\n', 'T', 'other'],
+    ['renamed away from a wildcard', 'import other.{Target => Renamed, _}\n', 'Target', undefined],
+    ['hidden from a wildcard', 'import other.{Target => _, _}\n', 'Target', undefined],
+    ['wildcard in braces', 'import other.{_}\n', 'Target', 'other'],
+  ])('Scala %s import binds the receiver type it names', (_name, imports, local, expected) => {
+    const target = parse('scala', 'package other\nclass Target { def run() = () }', 'other/Target');
+    const sameName = parse('scala', `package app\nclass ${local === 'T' ? 'T' : 'Unrelated'} { def run() = () }`, 'app/Local');
+    const use = parse('scala', `package app\n${imports}object Use { def use(dep: ${local}) = dep.run() }`, 'app/Use');
+    const files = [target, sameName, use];
+    const fresh = resolveEdges(files).filter(e => e.tier === 'type');
+    expect(fresh).toEqual(expected ? [expect.objectContaining({ dstFilePath: target.filePath, dstQualifiedKey: 'Target.run' })] : []);
+    const summaries = new Map(files.map(r => [r.filePath, summarizeParseResult(r)]));
+    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
+    expect(resolveEdges([use], undefined, index).filter(e => e.tier === 'type')).toEqual(fresh);
+  });
+
+  it('Scala renamed import also names a factory return type', () => {
+    const target = parse('scala', 'package other\nclass Target { def run() = () }', 'other/Target');
+    const sameName = parse('scala', 'package app\nclass T { def run() = () }', 'app/T');
+    const mk = parse('scala', 'package app\nimport other.{Target => T}\nobject Mk { def apply(): T = new T() }', 'app/Mk');
+    const use = parse('scala', 'package app\nobject Use { def use() = { val x = Mk(); x.run() } }', 'app/Use');
+    expect(resolveEdges([target, sameName, mk, use]).filter(e => e.tier === 'type' && e.srcFilePath === use.filePath)).toEqual([
+      expect.objectContaining({ dstFilePath: target.filePath, dstQualifiedKey: 'Target.run' }),
+    ]);
+  });
+
+  it.each([
     ['ts', "import { Target as Alias } from './target'; function use(dep: Alias) { dep.run(); }", 'export class Target { run() {} }'],
     ['scala', 'import model.Target\nobject Use { def use(dep: Target) = dep.run() }', 'package model\nclass Target { def run() = () }'],
     ['go', 'package p\nfunc use() { dep := NewTarget(); dep.Run() }', 'package p\ntype Target struct{}; func (t Target) Run() {}; func NewTarget() *Target { return &Target{} }'],
