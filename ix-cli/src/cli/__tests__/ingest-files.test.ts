@@ -1373,6 +1373,10 @@ describe("ingestFiles against a fake backend", () => {
       expect(summary.commitErrors, "the held patches were sent and landed").toBe(0);
       expect(summary.patchesApplied).toBe(30);
       expect(process.exitCode ?? 0).toBe(0);
+      // Every patch landed, so no cutoff banner: it would tell the user the
+      // graph is "partly updated" and to re-run, which is false.
+      expect(written()).not.toContain("kept failing");
+      expect(written()).not.toContain("partly updated");
     });
 
     it("does not trip on a 5xx from the current-revision fallback (an older backend proves nothing)", async () => {

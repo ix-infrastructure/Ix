@@ -3134,7 +3134,10 @@ export async function ingestFiles(
                   commitErrors++;
                   if (indicts) {
                     commitBreaker.recordFailure(commitErr);
-                    await tripIfDatabaseDown(commitErr);
+                    // Not in the drain (the only caller with a failure
+                    // budget): it ignores `tripped`, so a probe there would
+                    // only add health requests and latency.
+                    if (fallbackOpts?.failureBudget === undefined) await tripIfDatabaseDown(commitErr);
                   }
                 }
                 if (debug) {
@@ -3383,8 +3386,9 @@ export async function ingestFiles(
         // tests, which previously asserted the stranding guarantee at a budget
         // the CLI never runs at and so could not see it fail.
         const leftover = await drainInPasses(items, async pending => {
-          // No database probe here: the drain sends, as on main, so the exit
-          // code follows what the commits did, never a health answer.
+          // No database probe here (the per-file loop skips it when given a
+          // failure budget): the drain sends, as on main, so the exit code
+          // follows what the commits did, never a health answer.
           commitBreaker.reset();
           const tookBefore = patchesTheBackendTook;
           await commitItemsSerially(pending, recordDrainMs, undefined, {
@@ -4545,6 +4549,14 @@ export async function ingestFiles(
   // left the agent believing the graph was current while `ix search` and
   // `ix impact` answered from a stale one. A wrong answer nobody can see is
   // worse than a failed command.
+  // A trip alone is not enough: the database probe can trip the breaker on a
+  // bulk failure with no `commitErrors++` (a health answer of "unreachable"
+  // that turns out wrong), and the cutoff and drain may then land every patch.
+  // Printing the cutoff banner then would say the graph is "partly updated"
+  // and ask for a re-run when nothing is missing. A skipped patch is counted
+  // in `commitErrors`, so this still fires whenever the cutoff held anything
+  // back that did not land.
+  const cutoffFired = commitBreaker.everTripped() && commitErrors > 0;
   const commitReport = describeCommitOutcome(
     commitErrors,
     patchesApplied,
@@ -4554,7 +4566,7 @@ export async function ingestFiles(
     commitBreaker.skipped(),
     // The same expression the banner is gated on, so this can never say "See
     // the cutoff above" with no cutoff above it.
-    commitBreaker.everTripped(),
+    cutoffFired,
     graphStartedEmpty === true
   );
   const summary: IngestFilesSummary = {
@@ -4593,15 +4605,7 @@ export async function ingestFiles(
       commitErrors === 0 &&
       stitchErrors === 0,
   };
-  // `everTripped()` alone, and it is not a weakening: `recordFailure` has one
-  // call site, in the per-file catch immediately after `commitErrors++`, so a
-  // trip already implies a real commit failure. A `commitLoopErrors` counter
-  // guarded this for two rounds against a scenario that no longer exists --
-  // replay failures were moved off `recordFailure` onto a local counter, and a
-  // deletion patch that fails to BUILD never reaches the breaker at all. A dead
-  // conjunct defended by a comment describing an impossible case is the exact
-  // shape this PR has spent rounds removing.
-  if (commitBreaker.everTripped()) {
+  if (cutoffFired) {
     // Gated on the cutoff having FIRED, not on what was left unsent. A patch
     // that was never sent produces no `[commit error]` line even under
     // --verbose, so this has to print for those -- but gating on them alone
