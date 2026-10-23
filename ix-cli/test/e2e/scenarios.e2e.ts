@@ -12,7 +12,8 @@
 // earlier takes its own id out of the title and the list. Any other error (a
 // crashed map, an unreachable database) fails the run either way.
 
-import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -28,7 +29,10 @@ import {
   resetBackend,
   expectSameGraph,
   signature,
+  workspaceId,
 } from "./harness.js";
+import { IxClient } from "../../src/client/api.js";
+import { loadIngestionModules } from "../../src/cli/commands/ingestion-loader.js";
 
 let env: E2eEnv;
 
@@ -262,5 +266,76 @@ describe("agent outcomes", () => {
     const many = ix(env, co, ["locate", "slugify", "clamp", "definitelyNotAName", "--format", "json"], true);
     expect(many.status).toBe(3);
     expect(JSON.parse(many.stdout).targets.map((t: { exitCode: number }) => t.exitCode)).toEqual([0, 2, 3]);
+  });
+});
+
+describe("an extractor upgrade over a real backend (IN-20)", () => {
+  // The orphan sweep decides ownership from what POST /v1/nodes returns
+  // (provenance.sourceUri, attrs.external, deletedRev). The unit suite proves
+  // it against a hand-written fake; this proves the real route's answer.
+  const uuidOf = (text: string): string => {
+    const h = createHash("sha256").update(text).digest("hex");
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
+  };
+
+  it("retires a node the previous extractor wrote and the current one does not, and keeps an external one", async () => {
+    const co = checkout("polyglot");
+    const fresh = await freshSignature(env, co);
+    map(env, co);
+
+    // What the previous extractor left for app/pricing.py at its current
+    // bytes: a stored patch, under that extractor's patch id, upserting a
+    // node the current extractor does not write, an external package node and
+    // an edge between them. Committed through the bulk route, as the CLI does.
+    const [, patchBuilder] = await loadIngestionModules();
+    const previous = (patchBuilder as unknown as { PREVIOUS_EXTRACTORS: string[] }).PREVIOUS_EXTRACTORS[0]!;
+    const file = "app/pricing.py";
+    const hash = createHash("sha256").update(readFileSync(join(co.dir, file))).digest("hex");
+    const ws = workspaceId(co);
+    const ghost = uuidOf(`e2e-ghost-${ws}`);
+    const external = uuidOf(`e2e-ghost-external-${ws}`);
+    const client = new IxClient(env.endpoint);
+    await client.commitPatchBulk([{
+      patchId: patchBuilder.sourcePatchIdCandidates(file, hash, ws)[1]!,
+      actor: "ix-e2e",
+      timestamp: new Date().toISOString(),
+      baseRev: 0,
+      source: { uri: file, sourceHash: hash, extractor: previous, sourceType: "code", workspaceId: ws },
+      ops: [
+        { type: "UpsertNode", id: ghost, kind: "function", name: "e2e_ghost", attrs: {} },
+        { type: "UpsertNode", id: external, kind: "module", name: "e2e-ghost-external", attrs: { external: true } },
+        { type: "UpsertEdge", id: uuidOf(`e2e-ghost-edge-${ws}`), src: ghost, dst: external, predicate: "CALLS", attrs: {} },
+      ],
+      replaces: [],
+      intent: "e2e: a previous extractor's output",
+    }]);
+    const before = await client.nodes([ghost, external], "full");
+    expect(before.nodes.map((n) => n.id).sort()).toEqual([ghost, external].sort());
+    // The fields the sweep reads, as the real route names them.
+    const ghostNode = before.nodes.find((n) => n.id === ghost)!;
+    expect((ghostNode.provenance as { sourceUri?: string }).sourceUri).toBe(file);
+    expect((before.nodes.find((n) => n.id === external)!.attrs as { external?: boolean }).external).toBe(true);
+
+    // The baseline says the workspace was last mapped by the previous extractor.
+    const baselineFile = readdirSync(co.ixHome).find((f) => f.startsWith("ingest_mtimes_"));
+    expect(baselineFile).toBeDefined();
+    const baselinePath = join(co.ixHome, baselineFile!);
+    const baseline = JSON.parse(readFileSync(baselinePath, "utf8")) as { extractor?: string };
+    baseline.extractor = previous;
+    writeFileSync(baselinePath, JSON.stringify(baseline));
+
+    const res = map(env, co);
+    expect(res.stderr).not.toContain("[orphans kept]");
+
+    const after = await client.nodes([ghost, external], "full");
+    expect(after.missing).toContain(ghost);
+    expect(after.nodes.map((n) => n.id)).toEqual([external]);
+    // Everything else, the ghost's edge included, matches a fresh ingest.
+    const actual = await signature(env, co);
+    expectSameGraph(
+      "extractor upgrade retires the dropped node",
+      { nodes: actual.nodes.filter((line) => !line.includes("e2e-ghost-external")), edges: actual.edges },
+      fresh,
+    );
   });
 });

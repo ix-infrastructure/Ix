@@ -22,6 +22,7 @@ import {
 import {
   clearRebuildProgress, extractorChanged, isRev, loadIngestBaseline, loadRebuildProgress,
   saveIngestBaseline, saveRebuildProgress, type BaselineFileNotes,
+  loadOrphanSweepPending, saveOrphanSweepPending, type OrphanSweepPending,
 } from '../ingest-baseline.js';
 import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
@@ -596,11 +597,17 @@ export function orphanSweepBudget(env: NodeJS.ProcessEnv = process.env): OrphanS
 export interface OrphanSweepFile {
   /** The file's patch as built, before map mode strips it. */
   patch: GraphPatchPayload;
-  /** The old extractor's patch id for the file's (unchanged) hash. */
-  previousPatchId: string;
+  /**
+   * The stored patch ids, one per earlier extractor, that may name the file's
+   * orphans for its (unchanged) hash: usually just the previous extractor's.
+   */
+  previousPatchIds: string[];
 }
 
-/** The backend does not serve `POST /v1/nodes`: the sweep is off for the run. */
+/**
+ * The backend does not serve `POST /v1/nodes`, or answers it without the
+ * provenance the ownership check needs: the sweep is off for the run.
+ */
 export class BatchNodeReadsUnsupported extends Error {}
 
 /** `POST /v1/nodes` takes at most this many ids. */
@@ -636,6 +643,12 @@ function storedUpserts(raw: unknown): { ids: string[]; kinds: Map<string, string
   return manifest ? { ids: manifest.nodeIds, kinds: manifest.kinds, external: manifest.external } : null;
 }
 
+/** The file that last wrote a node, from the provenance the backend keeps. */
+function nodeSourceUri(node: GraphNode): unknown {
+  const provenance = node.provenance as { sourceUri?: unknown; source_uri?: unknown } | undefined;
+  return provenance?.sourceUri ?? provenance?.source_uri;
+}
+
 function isUnsupportedRouteError(error: unknown): boolean {
   return /^(?:Error:\s*)?(?:404|405|501):/.test(String(error));
 }
@@ -657,6 +670,11 @@ export async function sweepOrphanNodes(
     batchUpserts?: Set<string>;
     concurrency?: number;
     onSkip?: (file: OrphanSweepFile, reason: string) => void;
+    /**
+     * Told of each file the sweep did not finish: past the budget, or a read
+     * failed. Every other file was swept (or had nothing to sweep).
+     */
+    onUnswept?: (file: OrphanSweepFile) => void;
     now?: () => number;
   },
 ): Promise<string[][]> {
@@ -667,29 +685,42 @@ export async function sweepOrphanNodes(
   const result: string[][] = files.map(() => []);
   try {
     const candidates = await mapLimit(files, opts.concurrency ?? RECONCILE_CONCURRENCY, async (file): Promise<string[] | null> => {
+      if (file.previousPatchIds.length === 0) return null;
       if (budget.requests >= budget.maxRequests || spent() >= budget.maxMs) {
         budget.skipped++;
+        opts.onUnswept?.(file);
         return null;
       }
-      budget.requests++;
-      let raw: unknown;
-      try {
-        raw = await client.getPatch(file.previousPatchId);
-      } catch (err) {
-        if (!isNotFoundError(err)) opts.onSkip?.(file, err instanceof Error ? err.message : String(err));
+      budget.requests += file.previousPatchIds.length;
+      const reads = await Promise.all(file.previousPatchIds.map(async patchId => {
+        try {
+          return { raw: await client.getPatch(patchId) as unknown, error: null as string | null };
+        } catch (err) {
+          return { raw: null, error: isNotFoundError(err) ? null : (err instanceof Error ? err.message : String(err)) };
+        }
+      }));
+      const failed = reads.find(r => r.error !== null);
+      if (failed) {
+        opts.onSkip?.(file, failed.error!);
+        opts.onUnswept?.(file);
         return null;
       }
-      const stored = storedUpserts(raw);
-      if (!stored) return null;
       const current = new Set(
         file.patch.ops.filter(op => op.type === 'UpsertNode').map(op => op['id']).filter((id): id is string => typeof id === 'string'),
       );
-      return stored.ids.filter(id =>
-        !current.has(id)
-        && !opts.batchUpserts?.has(id)
-        && NODE_ID_SHAPE.test(id)
-        && !stored.external.has(id)
-        && !(opts.mapMode && stored.kinds.get(id) === 'chunk'));
+      const ids = new Set<string>();
+      for (const { raw } of reads) {
+        const stored = raw === null ? null : storedUpserts(raw);
+        if (!stored) continue;
+        for (const id of stored.ids) {
+          if (!current.has(id)
+            && !opts.batchUpserts?.has(id)
+            && NODE_ID_SHAPE.test(id)
+            && !stored.external.has(id)
+            && !(opts.mapMode && stored.kinds.get(id) === 'chunk')) ids.add(id);
+        }
+      }
+      return [...ids];
     });
 
     const unique = [...new Set(candidates.flatMap(c => c ?? []))];
@@ -706,9 +737,20 @@ export async function sweepOrphanNodes(
           if (node && typeof node.id === 'string') live.set(node.id, node);
         }
       } catch (err) {
-        if (isUnsupportedRouteError(err)) throw new BatchNodeReadsUnsupported(String(err));
+        if (isUnsupportedRouteError(err)) {
+          throw new BatchNodeReadsUnsupported('the backend does not serve the batched node read (POST /v1/nodes)');
+        }
         for (const id of ids) unread.add(id);
         unreadReason = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    // Ownership is read from each node's provenance. A backend whose batched
+    // read leaves it out would make every candidate look foreign, and the
+    // sweep a silent no-op; say so and turn it off instead.
+    for (const node of live.values()) {
+      if (typeof nodeSourceUri(node) !== 'string') {
+        throw new BatchNodeReadsUnsupported('the batched node read (POST /v1/nodes) returned nodes without provenance.sourceUri');
       }
     }
 
@@ -717,6 +759,7 @@ export async function sweepOrphanNodes(
       if (!ids || ids.length === 0) return;
       if (ids.some(id => unread.has(id))) {
         opts.onSkip?.(file, `node read failed: ${unreadReason}`);
+        opts.onUnswept?.(file);
         return;
       }
       result[i] = ids.filter(id => {
@@ -724,8 +767,7 @@ export async function sweepOrphanNodes(
         if (!node || (node.deletedRev !== undefined && node.deletedRev !== null)) return false;
         if (isExternalNode(node)) return false;
         if (opts.mapMode && node.kind === 'chunk') return false;
-        const provenance = node.provenance as { sourceUri?: unknown; source_uri?: unknown } | undefined;
-        return (provenance?.sourceUri ?? provenance?.source_uri) === file.patch.source.uri;
+        return nodeSourceUri(node) === file.patch.source.uri;
       });
     });
     return result;
@@ -2686,29 +2728,67 @@ export async function ingestFiles(
     // reads only the first, as before IN-20.
     const reconcileOrphans = extractorChanged(previousBaseline, currentExtractor)
       || (Boolean(opts.force) && process.env.IX_RECONCILE_ON_FORCE === '1');
-    // The same-hash sweep reads one stored patch per file: the one the
-    // previous extractor wrote for the file's hash. On an extractor change that
-    // is the extractor the baseline recorded; on an opted-in --force at the
-    // current extractor (a repair) it is the one before the current.
+    // The same-hash sweep reads, per file, the stored patch an earlier
+    // extractor wrote for the file's hash. On an extractor change that is the
+    // extractor the baseline recorded. On an opted-in --force at the current
+    // extractor (a repair) it is whatever an earlier run recorded as left
+    // unswept (`loadOrphanSweepPending`: a sweep the backend could not run, or
+    // one that ran out of budget), for only the files it recorded; with
+    // nothing recorded, the extractor before the current, for every file. An
+    // extractor change also reads what is recorded, for the files recorded.
     const orphanRepair = reconcileOrphans && !extractorChanged(previousBaseline, currentExtractor);
-    const orphanPreviousIndex: number | null = (() => {
-      if (!reconcileOrphans) return null;
-      if (orphanRepair) return 1;
-      const at = (PREVIOUS_EXTRACTORS ?? []).indexOf(previousBaseline?.extractor ?? '');
+    const knownPreviousExtractors: readonly string[] = PREVIOUS_EXTRACTORS ?? [];
+    const orphanCandidateIndex = (extractor: string): number | null => {
+      const at = knownPreviousExtractors.indexOf(extractor);
       return at < 0 ? null : at + 1;
+    };
+    const orphanPending: OrphanSweepPending = reconcileOrphans && !workspaceMigrated
+      ? loadOrphanSweepPending(projectRoot)
+      : new Map();
+    for (const extractor of [...orphanPending.keys()]) {
+      if (extractor === currentExtractor || orphanCandidateIndex(extractor) === null) orphanPending.delete(extractor);
+    }
+    const orphanBaseExtractor: string | null = (() => {
+      if (!reconcileOrphans) return null;
+      const base = orphanRepair
+        ? (orphanPending.size > 0 ? null : knownPreviousExtractors[0] ?? null)
+        : previousBaseline?.extractor ?? null;
+      return base !== null && orphanCandidateIndex(base) !== null ? base : null;
     })();
+    /** The earlier extractors whose stored patch for this file the sweep reads. */
+    const orphanSourcesFor = (filePath: string): string[] => {
+      const sources = orphanBaseExtractor === null ? [] : [orphanBaseExtractor];
+      for (const [extractor, files] of orphanPending) {
+        if (!sources.includes(extractor) && (files === null || files.has(filePath))) sources.push(extractor);
+      }
+      return sources;
+    };
     const orphanSweep = {
-      blocker: orphanSweepBlocker ?? (orphanPreviousIndex === null
+      blocker: orphanSweepBlocker ?? (reconcileOrphans && !orphanRepair && orphanBaseExtractor === null && orphanPending.size === 0
         ? `the previous extractor (${previousBaseline?.extractor ?? 'unrecorded'}) is not one this CLI knows`
         : null),
       budget: orphanSweepBudget(),
       noticed: false,
+      // Only a whole-workspace run records what it left unswept. A partial
+      // extractor-change run keeps the old extractor in the baseline, so the
+      // next full map sweeps its files anyway.
+      track: reconcileOrphans && !partialRun && !workspaceMigrated,
+      /** Per extractor read this run, the files it did not finish. */
+      unswept: new Map<string, Set<string>>(),
+      /** Recorded "every file" entries this run read for every file. */
+      allAtStart: new Set([...orphanPending].filter(([, files]) => files === null).map(([extractor]) => extractor)),
     };
     // One line per run when the sweep is wanted and cannot run: the orphans
-    // stay, and nothing else about the run changes.
+    // stay, and nothing else about the run changes. A whole-workspace
+    // extractor change records the previous extractor for every file, so a
+    // repair after a backend upgrade reads the patch that names them.
     const noteOrphanSweepBlocked = (): void => {
       if (orphanSweep.noticed || orphanSweep.blocker === null) return;
       orphanSweep.noticed = true;
+      if (orphanSweep.track && !orphanRepair && orphanBaseExtractor !== null) {
+        orphanPending.set(orphanBaseExtractor, null);
+        saveOrphanSweepPending(projectRoot, orphanPending);
+      }
       process.stderr.write(
         `\n  [orphans kept] nodes the previous extractor wrote and this one does not were not removed: ` +
         `${orphanSweep.blocker}.` +
@@ -3900,12 +3980,18 @@ export async function ingestFiles(
           // below may retire. Without a backend that takes deletes in bulk
           // and serves the batched node read the file is committed exactly as
           // built, as before IN-20.
-          let previousPatchId: string | undefined;
+          let orphanSources: string[] | undefined;
+          let previousPatchIds: string[] | undefined;
           if (!previousHash && knownHash && reconcileOrphans) {
             if (orphanSweep.blocker !== null) noteOrphanSweepBlocked();
-            else previousPatchId = sourcePatchIdCandidates(p.filePath, knownHash, fileWorkspace)[orphanPreviousIndex!];
+            else {
+              orphanSources = orphanSourcesFor(p.filePath);
+              const candidates = sourcePatchIdCandidates(p.filePath, knownHash, fileWorkspace);
+              previousPatchIds = orphanSources.map(extractor => candidates[orphanCandidateIndex(extractor)!]!);
+              if (previousPatchIds.length === 0) previousPatchIds = undefined;
+            }
           }
-          return { p, hash, j, previousHash, patch: patch as GraphPatchPayload, previousPatchId };
+          return { p, hash, j, previousHash, patch: patch as GraphPatchPayload, previousPatchIds, orphanSources };
         } catch (err) {
           parseErrors++;
           process.stderr.write(`\n  [patch build error] ${p.filePath}: ${err}\n`);
@@ -3917,23 +4003,26 @@ export async function ingestFiles(
       // per file and one batched node read. Best effort -- whatever fails here
       // leaves the patches to commit as built, with no parse error and no
       // change to the exit code.
-      const sweepable = built.filter((b): b is NonNullable<typeof b> & { previousPatchId: string } =>
-        b !== null && b.previousPatchId !== undefined);
+      const sweepable = built.filter((b): b is NonNullable<typeof b> & { previousPatchIds: string[]; orphanSources: string[] } =>
+        b !== null && b.previousPatchIds !== undefined);
       if (sweepable.length > 0 && orphanSweep.blocker === null) {
         const batchUpserts = new Set<string>();
         for (const b of built) {
           if (b === null) continue;
           for (const op of b.patch.ops) if (op.type === 'UpsertNode' && typeof op['id'] === 'string') batchUpserts.add(op['id']);
         }
+        const unswept = new Set<number>();
         try {
+          const sweepFiles = sweepable.map(b => ({ patch: b.patch, previousPatchIds: b.previousPatchIds }));
           const orphans = await sweepOrphanNodes(
             client,
-            sweepable.map(b => ({ patch: b.patch, previousPatchId: b.previousPatchId })),
+            sweepFiles,
             {
               mapMode,
               budget: orphanSweep.budget,
               batchUpserts,
               onSkip: (file, reason) => noteOrphanSkip(file.patch.source.uri, reason),
+              onUnswept: file => unswept.add(sweepFiles.indexOf(file)),
             },
           );
           sweepable.forEach((b, i) => {
@@ -3952,11 +4041,34 @@ export async function ingestFiles(
           });
         } catch (err) {
           if (err instanceof BatchNodeReadsUnsupported) {
-            orphanSweep.blocker = 'the backend does not serve the batched node read (POST /v1/nodes)';
+            orphanSweep.blocker = err.message;
             noteOrphanSweepBlocked();
           } else {
             for (const b of sweepable) noteOrphanSkip(b.p.filePath, err instanceof Error ? err.message : String(err));
           }
+          sweepable.forEach((_, i) => unswept.add(i));
+        }
+        // What this batch left unswept stays recorded for a repair run, and
+        // what it finished comes off the record. Saved per batch, so a run cut
+        // short keeps what it learned.
+        if (orphanSweep.track) {
+          let changed = false;
+          sweepable.forEach((b, i) => {
+            for (const extractor of b.orphanSources) {
+              const files = orphanPending.get(extractor);
+              if (unswept.has(i)) {
+                let mine = orphanSweep.unswept.get(extractor);
+                if (!mine) orphanSweep.unswept.set(extractor, mine = new Set());
+                mine.add(b.p.filePath);
+                if (files === undefined) orphanPending.set(extractor, new Set([b.p.filePath]));
+                else files?.add(b.p.filePath);
+                changed = true;
+              } else if (files?.delete(b.p.filePath)) {
+                changed = true;
+              }
+            }
+          });
+          if (changed) saveOrphanSweepPending(projectRoot, orphanPending);
         }
       }
 
@@ -4307,11 +4419,22 @@ export async function ingestFiles(
     timings.parseMs = Math.round(parsed - hashed);
     // Clear the parse bar
     if (interval) process.stderr.write('\r' + ' '.repeat(PROG_LINE_WIDTH) + '\r');
+    // A recorded "every file" entry this run swept file by file now holds
+    // only the files it left.
+    if (orphanSweep.track && orphanSweep.blocker === null && orphanSweep.allAtStart.size > 0) {
+      for (const extractor of orphanSweep.allAtStart) {
+        if (orphanPending.get(extractor) === null) orphanPending.set(extractor, orphanSweep.unswept.get(extractor) ?? new Set());
+      }
+      saveOrphanSweepPending(projectRoot, orphanPending);
+    }
     if (orphanSweep.budget.skipped > 0) {
       process.stderr.write(
         `\n  [orphans kept] the orphan cleanup reached its budget (${Math.round(orphanSweep.budget.maxMs / 1000)}s / ` +
         `${orphanSweep.budget.maxRequests} requests); ${orphanSweep.budget.skipped} file(s) were committed without it. ` +
-        `Run IX_RECONCILE_ON_FORCE=1 ix map --force to finish.\n`,
+        (orphanSweep.track
+          ? `Run IX_RECONCILE_ON_FORCE=1 ix map --force to continue: it sweeps only the files left, and each run picks up where the last stopped. ` +
+            `IX_ORPHAN_SWEEP_MAX_MS and IX_ORPHAN_SWEEP_MAX_REQUESTS raise the budget.\n`
+          : orphanRepair ? `Run the same command again to retry them.\n` : `The next full ix map sweeps them.\n`),
       );
     }
 

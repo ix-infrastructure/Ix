@@ -475,7 +475,7 @@ describe("sweepOrphanNodes (IN-20 same-hash sweep)", () => {
   }) as unknown as GraphNode;
   const fileWith = (ops: GraphPatchPayload["ops"], uri = "src/example.ts") => {
     const patch = patchWith(ops);
-    return { patch: { ...patch, source: { ...patch.source, uri } }, previousPatchId: `old@${uri}` };
+    return { patch: { ...patch, source: { ...patch.source, uri } }, previousPatchIds: [`old@${uri}`] };
   };
 
   it("derives orphans from the stored node list with one patch read per file and one batched node read, no entity reads", async () => {
@@ -577,6 +577,44 @@ describe("sweepOrphanNodes (IN-20 same-hash sweep)", () => {
     const nodes = vi.fn().mockRejectedValue(new Error("404: no such endpoint /v1/nodes"));
     await expect(sweepOrphanNodes({ getPatch, nodes }, [fileWith([])], { mapMode: false, budget: orphanSweepBudget({}) }))
       .rejects.toBeInstanceOf(BatchNodeReadsUnsupported);
+  });
+
+  it("turns itself off, not silently empty, when the batched read leaves out provenance", async () => {
+    const getPatch = vi.fn(async () => ({ data: { nodeIds: [A] } }));
+    const nodes = vi.fn(async (ids: string[], _fields?: "full") => ({
+      rev: 1, nodes: ids.map(i => node(i, { provenance: undefined })), missing: [],
+    }));
+    await expect(sweepOrphanNodes({ getPatch, nodes }, [fileWith([])], { mapMode: false, budget: orphanSweepBudget({}) }))
+      .rejects.toThrow(/provenance/);
+    const snake = vi.fn(async (ids: string[], _fields?: "full") => ({
+      rev: 1, nodes: ids.map(i => node(i, { provenance: { source_uri: "src/example.ts" } })), missing: [],
+    }));
+    expect(await sweepOrphanNodes({ getPatch, nodes: snake }, [fileWith([])], { mapMode: false, budget: orphanSweepBudget({}) }))
+      .toEqual([[A]]);
+  });
+
+  it("reads every stored patch a file names, merging their candidates, and reports the files it did not finish", async () => {
+    const getPatch = vi.fn(async (pid: string) => {
+      if (pid === "older@src/example.ts") return { data: { nodeIds: [B, C] } };
+      if (pid === "old@src/bad.ts") throw new Error("500: busy");
+      if (pid === "older@src/gone.ts") throw notFound();
+      return { data: { nodeIds: [A, B] } };
+    });
+    const nodes = vi.fn(async (ids: string[], _fields?: "full") => ({ rev: 1, nodes: ids.map(i => node(i)), missing: [] }));
+    const two = { ...fileWith([]), previousPatchIds: ["old@src/example.ts", "older@src/example.ts"] };
+    const bad = fileWith([], "src/bad.ts");
+    const gone = { ...fileWith([], "src/gone.ts"), previousPatchIds: ["older@src/gone.ts"] };
+    const late = fileWith([]);
+    const budget = orphanSweepBudget({ IX_ORPHAN_SWEEP_MAX_REQUESTS: "4" });
+    const onUnswept = vi.fn();
+    const orphans = await sweepOrphanNodes(
+      { getPatch, nodes }, [two, bad, gone, late], { mapMode: false, budget, concurrency: 1, onUnswept },
+    );
+    expect(orphans[0]!.sort()).toEqual([A, B, C]);
+    expect(orphans.slice(1)).toEqual([[], [], []]);
+    // bad: its read failed. late: past the budget. gone: not found, nothing to sweep.
+    expect(onUnswept.mock.calls.map(c => c[0])).toEqual([bad, late]);
+    expect(budget.skipped).toBe(1);
   });
 
   it("reads at most 1000 ids per node read", async () => {

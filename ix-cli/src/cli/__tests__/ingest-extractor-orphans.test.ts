@@ -34,7 +34,8 @@ function uuidOf(text: string): string {
 }
 const SHARED = uuidOf("shared-node");
 
-const old = vi.hoisted(() => ({ on: false }));
+// `index` picks which earlier extractor plays the old one: PREVIOUS_EXTRACTORS[index].
+const old = vi.hoisted(() => ({ on: false, index: 0 }));
 const shared = vi.hoisted(() => ({ on: false }));
 
 vi.mock("../commands/ingestion-loader.js", async (importOriginal) => {
@@ -55,7 +56,7 @@ vi.mock("../commands/ingestion-loader.js", async (importOriginal) => {
           },
         }, languages];
       }
-      const previous = (patchBuilder as unknown as { PREVIOUS_EXTRACTORS: string[] }).PREVIOUS_EXTRACTORS[0]!;
+      const previous = (patchBuilder as unknown as { PREVIOUS_EXTRACTORS: string[] }).PREVIOUS_EXTRACTORS[old.index]!;
       const asOldExtractor = {
         ...patchBuilder,
         extractorName: () => previous,
@@ -63,7 +64,7 @@ vi.mock("../commands/ingestion-loader.js", async (importOriginal) => {
           const patch = (patchBuilder.buildPatchWithResolution as any)(parsed, hash, workspaceId, ...rest);
           patch.ops.push({ type: "UpsertNode", id: uuidOf(`ghost-${parsed.filePath}`), kind: GHOST, name: `ghost ${parsed.filePath}`, attrs: {} });
           if (shared.on) patch.ops.push(sharedNode);
-          patch.patchId = patchBuilder.sourcePatchIdCandidates(parsed.filePath, hash, workspaceId)[1];
+          patch.patchId = patchBuilder.sourcePatchIdCandidates(parsed.filePath, hash, workspaceId)[old.index + 1];
           return patch;
         },
       };
@@ -489,6 +490,75 @@ describe.each(["head", "legacy"] as const)("an extractor change over the %s back
       expect(ghosts(backend)).toHaveLength(FILES.length - 1);
       expect(backend.acceptedPatches()).toBeGreaterThanOrEqual(FILES.length);
       expect(lastExitCode ?? 0).toBe(0);
+    } finally {
+      await backend.stop();
+    }
+  });
+
+  it("a repair after a budget-cut sweep reads only the files left, and each run picks up where the last stopped", async () => {
+    const backend = newBackend();
+    const home = join(root, `home-budget-resume-${semantics}`);
+    restoreAll();
+    const withBudget = async (requests: number, extra: Parameters<typeof run>[2] = {}): Promise<string> => {
+      process.env.IX_ORPHAN_SWEEP_MAX_REQUESTS = String(requests);
+      try {
+        return await run(home, endpoint, extra);
+      } finally {
+        delete process.env.IX_ORPHAN_SWEEP_MAX_REQUESTS;
+      }
+    };
+    let endpoint = "";
+    try {
+      endpoint = await backend.start();
+      await mapAsOld(home, endpoint);
+      const log = await withBudget(1);
+      expect(sweepNotices(log)[0]).toContain("picks up where the last stopped");
+      expect(ghosts(backend)).toHaveLength(FILES.length - 1);
+
+      // Each repair under the same budget reads only a file still left.
+      for (let left = FILES.length - 2; left >= 0; left--) {
+        backend.patchReads = 0;
+        await withBudget(1, { force: true, reconcileOnForce: true });
+        expect(backend.patchReads).toBe(1);
+        expect(ghosts(backend)).toHaveLength(left);
+      }
+
+      // Nothing left on record: a repair reads the extractor before the current, for every file.
+      backend.patchReads = 0;
+      await run(home, endpoint, { force: true, reconcileOnForce: true });
+      expect(backend.patchReads).toBe(FILES.length);
+      expect(lastExitCode ?? 0).toBe(0);
+    } finally {
+      await backend.stop();
+    }
+  });
+
+  it("a repair after a backend upgrade reaches orphans an extractor more than one version back left", async () => {
+    const backend = new FakeBackend({ semantics });
+    backend.releaseVersion = "1.0.31";
+    const home = join(root, `home-two-back-${semantics}`);
+    restoreAll();
+    try {
+      const endpoint = await backend.start();
+      old.index = 1;
+      try {
+        await mapAsOld(home, endpoint);
+      } finally {
+        old.index = 0;
+      }
+      expect(ghosts(backend)).toHaveLength(FILES.length);
+
+      const log = await run(home, endpoint);
+      expect(sweepNotices(log)).toHaveLength(1);
+      expect(sweepNotices(log)[0]).toContain("After upgrading the backend");
+      expect(ghosts(backend)).toHaveLength(FILES.length);
+
+      backend.releaseVersion = "1.0.34";
+      backend.patchReads = 0;
+      await run(home, endpoint, { force: true, reconcileOnForce: true });
+      expect(ghosts(backend)).toEqual([]);
+      // One read per file: the patch the recorded extractor wrote, not every candidate.
+      expect(backend.patchReads).toBe(FILES.length);
     } finally {
       await backend.stop();
     }
