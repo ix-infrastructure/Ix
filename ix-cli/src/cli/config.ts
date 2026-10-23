@@ -191,7 +191,23 @@ export interface WorkspaceConfig {
   workspace_name: string;
   root_path: string;
   default: boolean;
+  /**
+   * The workspace_id is pinned on purpose (e.g. shared by a team from clones at
+   * different paths): silences the warning about it differing from the
+   * path-derived id. Set by hand; the CLI never writes it.
+   */
+  pinned?: boolean;
+  /**
+   * Old workspace ids `--prune-stale-workspace` re-keyed this root away from and
+   * has not deleted yet (the re-ingest was not clean, or the delete failed), each
+   * with the endpoint it was re-keyed against. The next `--prune-stale-workspace`
+   * run against that endpoint retries the deletion.
+   */
+  pending_prune_of?: PendingPrune[];
 }
+
+/** One old workspace id awaiting an opted-in deletion; see WorkspaceConfig.pending_prune_of. */
+export interface PendingPrune { workspace_id: string; endpoint: string }
 
 export interface IxConfig {
   endpoint: string;
@@ -275,7 +291,13 @@ export function loadConfig(): IxConfig {
   // which then silently breaks string id comparisons (e.g. migration detection
   // would re-key a workspace that is already on the correct id).
   if (Array.isArray(parsed.workspaces)) {
-    parsed.workspaces = parsed.workspaces.map((w) => ({ ...w, workspace_id: String(w.workspace_id) }));
+    parsed.workspaces = parsed.workspaces.map((w) => ({
+      ...w,
+      workspace_id: String(w.workspace_id),
+      ...(Array.isArray(w.pending_prune_of)
+        ? { pending_prune_of: w.pending_prune_of.map((p) => ({ workspace_id: String(p?.workspace_id), endpoint: String(p?.endpoint) })) }
+        : {}),
+    }));
   }
   const config = { ...defaultConfig, ...parsed };
   configMemo = { path: configPath, mtimeMs: stat.mtimeMs, size: stat.size, config: structuredClone(config) };

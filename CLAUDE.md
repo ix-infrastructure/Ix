@@ -42,8 +42,9 @@ ix map --silent                             # refresh the graph after code chang
 - **`ix reset` is GLOBAL.** `ix reset` / `ix reset --code` take no workspace_id
   and wipe **every** workspace's graph in the shared backend (Ix + packwise +
   any other). The only scoped variant is `/v1/reset/workspace`, exposed as
-  `ix reset --workspace` (the registered workspace containing cwd, nothing
-  else). After a global reset, re-map each workspace.
+  `ix reset --workspace` (the id of the registered workspace containing cwd,
+  no other id -- a shared, pinned id is wiped for everyone using it). After a
+  global reset, re-map each workspace.
 - **The OSS↔Pro command boundary is derived at runtime, not declared.**
   `run-cli.ts` snapshots `ossCmdNames` right after registering the OSS
   commands; the Pro probe diffs against it. Adding a command to `oss.ts`

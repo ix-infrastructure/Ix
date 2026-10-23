@@ -116,14 +116,29 @@ surfaces (#575).
   from the id the root's absolute path derives (sha256 of `repo:<path>`, 8 hex
   chars) -- a team sharing one graph from clones at different paths, or a tool
   that keys on the id, pins it on purpose. The mismatch is one stderr warning
-  per run. `--prune-stale-workspace` is the only way to switch to the
-  path-derived id: it re-keys, re-ingests the whole workspace, and after a clean
-  ingest deletes the old id's graph. It is refused unless the endpoint is
-  loopback (`localhost`, `127.0.0.0/8`, `[::1]`), because nothing on a shared
-  backend records who owns a workspace id; it also keeps the old graph when
-  another root in your config still uses that id or the ingest was not clean.
-  Before this, a mismatched id was re-keyed silently and the old id's whole
-  workspace deleted after the next clean ingest, on any backend.
+  per run, skipped under `--silent` and the machine formats; `pinned: true` on
+  the workspace entry silences it for good.
+  `--prune-stale-workspace` is the only way to switch to the path-derived id: it
+  re-keys, re-ingests the whole workspace, and after a clean ingest deletes the
+  old id's graph. Before this, a mismatched id was re-keyed silently and the old
+  id's whole workspace deleted after the next clean ingest, on any backend.
+  - **Loopback only, and loopback is the URL, not ownership.** The flag is
+    refused unless the configured endpoint is loopback (`localhost`,
+    `127.0.0.0/8`, `[::1]`, `0.0.0.0`), because nothing on a backend records who
+    owns a workspace id. The check cannot tell your own backend from a shared one
+    reached through an `ssh -L` tunnel, `kubectl port-forward` or a local proxy:
+    those pass it. Never use the flag through one.
+  - **The old id stays recorded until it is deleted.** The re-key writes the old
+    id and the endpoint to the workspace's `pending_prune_of` in `config.yaml`. If
+    the re-ingest is not clean or the delete fails, the next run with the flag
+    against that endpoint re-ingests and retries the deletion; nothing is
+    orphaned. It also keeps the old graph while another root in your config still
+    uses that id. The delete refuses a redirect rather than following it.
+  - **Multi-repo systems use path ids per member.** When the mapped directory
+    holds two or more member repos, each member's files are keyed by that
+    member's path-derived id, so a pinned id on the system root does not apply
+    to them. A repo mapped both on its own (under a pinned id) and as a member of
+    a system (under its path id) is therefore stored twice.
 - **`ix ingest` honours `--exclude <glob>` and a `.ixignore` at the workspace
   root**, matched relative to that root. A deliberate subset of `.gitignore`: `#` comments, `*`, `?`, `**`, a
   leading `/` to anchor at the root, a trailing `/` for directories only, and a
@@ -543,7 +558,7 @@ Ingest source files or GitHub data into the knowledge graph.
 | `--debug` | — | `false` | Show phase timing breakdown |
 | `--lang` | `<langs>` | — | Comma-separated languages to include (e.g. cpp,c or typescript). Aliases: c++=cpp, c#=csharp, py=python, ts=typescript, js=javascript |
 | `--exclude` | `<glob>` | — | Exclude paths matching this glob (repeatable; same syntax as `.ixignore`) |
-| `--prune-stale-workspace` | — | off | Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest (local backend only) |
+| `--prune-stale-workspace` | — | off | Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest. Loopback endpoints only -- and loopback is the URL, not ownership: never use it through a tunnel or proxy to a shared backend |
 
 ### `ix init`
 
@@ -601,7 +616,7 @@ Map the architectural hierarchy of a codebase.
 | `--full` | — | off | Force full local map, bypassing automatic safety limits (advanced/testing) |
 | `--verbose` | — | off | Show raw confidence/crosscut scores and signals, plus per-file ingest diagnostics (including why a patch failed to commit) |
 | `--silent` | — | off | Suppress all output except a one-line summary (useful for LLM hooks) |
-| `--prune-stale-workspace` | — | off | Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest (local backend only) |
+| `--prune-stale-workspace` | — | off | Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest. Loopback endpoints only -- and loopback is the URL, not ownership: never use it through a tunnel or proxy to a shared backend |
 
 ### `ix mcp`
 
@@ -725,7 +740,7 @@ Wipe graph data.
 | `--yes` / `-y` | — | off | Skip confirmation prompt |
 | `--code` | — | off | Reset only code graph (files, functions, classes, regions); preserve goals, plans, tasks, bugs, and decisions |
 | `--ingest` | — | off | Re-run ix map after wiping (rebuilds the code graph) |
-| `--workspace` | — | off | Reset only the registered workspace containing cwd (`/v1/reset/workspace`); every other workspace is left alone. The fix for a hollowed graph, with `--ingest` |
+| `--workspace` | — | off | Reset only the workspace id the registered workspace containing cwd uses (`/v1/reset/workspace`); other ids are left alone, but anyone else who registered the same id (a shared, pinned workspace) loses that graph too. The fix for a hollowed graph, with `--ingest` |
 
 ### `ix savings`
 

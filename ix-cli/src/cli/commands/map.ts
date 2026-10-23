@@ -406,7 +406,7 @@ export function registerMapCommand(program: Command): void {
     .option("--full", "Force full local map, bypassing automatic safety limits (advanced/testing)")
     .option("--verbose", "Show raw confidence/crosscut scores and signals, plus per-file ingest diagnostics (including why a patch failed to commit)")
     .option("--silent", "Suppress all output except a one-line summary (useful for LLM hooks)")
-    .option("--prune-stale-workspace", "Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest (local backend only)")
+    .option("--prune-stale-workspace", "Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest. Loopback endpoints only -- and loopback is the URL, not ownership: never use it through a tunnel or proxy to a shared backend")
     .addHelpText(
       "after",
       `
@@ -431,7 +431,12 @@ Advanced:
             path derives keeps that id (it may be pinned on purpose, e.g. a
             team sharing one graph). This flag switches it to the path-derived
             id and, after a clean re-ingest, deletes the old id's graph. Refused
-            unless the backend is loopback; nothing is ever deleted otherwise.
+            unless the configured endpoint is loopback; nothing is ever deleted
+            otherwise. Loopback describes the URL, not who owns the backend: an
+            ssh -L tunnel, kubectl port-forward or local proxy to a shared
+            backend passes the check, so never use this flag through one. An
+            old id whose re-ingest was not clean stays recorded in config.yaml
+            (pending_prune_of) and the next run with this flag retries it.
 
 Examples:
   ix map .
@@ -960,7 +965,8 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
   if (!mapLock && opts.pruneStaleWorkspace) {
     // The holder would not prune: coalescing would drop the request silently.
     const msg = "Another ix map is running for this workspace; run ix map --prune-stale-workspace again once it finishes.";
-    if (opts.format === "llm") console.log(llmError("map_in_progress", msg));
+    if (opts.format === "json") printJson({ error: "map_in_progress", message: msg });
+    else if (opts.format === "llm") console.log(llmError("map_in_progress", msg));
     else console.error(chalk.red("Error:"), msg);
     process.exitCode = 1;
     return;
@@ -1058,7 +1064,7 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
     }
   } else {
     try {
-      await bootstrap(cwd, { adoptPathId: opts.pruneStaleWorkspace === true });
+      await bootstrap(cwd, { adoptPathId: opts.pruneStaleWorkspace === true, quiet: silent || machineFormat });
     } catch (err: any) {
       emitError(err.message);
       process.exitCode = 1;

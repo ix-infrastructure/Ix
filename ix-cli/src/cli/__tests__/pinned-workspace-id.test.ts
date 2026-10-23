@@ -9,8 +9,18 @@ import * as path from "node:path";
 import { Command } from "commander";
 import { parse } from "yaml";
 
+// `ix map` routes to a cloud runner when Pro reports one ready; the default
+// here is local, and one test flips it.
+const cloud = vi.hoisted(() => ({ ready: false, ran: false }));
+vi.mock("../remote.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../remote.js")>()),
+  isCloudReady: async () => cloud.ready,
+  getRemoteRunner: () => ({ runIngestion: async () => { cloud.ran = true; } }),
+}));
+
 import {
   assertStaleWorkspacePruneAllowed,
+  bootstrap,
   ensureWorkspaceIdState,
   pinnedWorkspaceIdWarning,
   resetWorkspaceIdMemosForTests,
@@ -18,7 +28,10 @@ import {
   workspaceStateFor,
 } from "../bootstrap.js";
 import { registerIngestCommand } from "../commands/ingest.js";
+import { registerMapCommand } from "../commands/map.js";
+import { acquireMapLock } from "../single-flight.js";
 import { workspaceIdForPath } from "../system.js";
+import { createClient } from "../../client/factory.js";
 
 /**
  * A registered workspace_id that differs from the path-derived one is honoured.
@@ -31,8 +44,10 @@ import { workspaceIdForPath } from "../system.js";
  * against a loopback endpoint.
  */
 
-// ── A fake backend: answers the ingest path, records every request ──────────
+// ── A fake backend: answers the ingest + map path, records every request ────
 const requests: { method: string; url: string; body: string }[] = [];
+// Per-test behaviour of the fake backend.
+const mode = { failCommits: false, reset: "ok" as "ok" | "fail" | "redirect" };
 let server: http.Server;
 let baseUrl: string;
 
@@ -43,7 +58,14 @@ beforeAll(async () => {
     req.on("end", () => {
       requests.push({ method: req.method ?? "", url: req.url ?? "", body });
       const url = (req.url ?? "").split("?")[0];
-      const json = (v: unknown) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(v)); };
+      const json = (v: unknown, status = 200) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(v)); };
+      if (mode.failCommits && url.startsWith("/v1/patch")) return json({ error: "rejected" }, 422);
+      if (url === "/v1/reset/workspace" && mode.reset === "redirect") {
+        res.writeHead(307, { location: `${baseUrl}/redirected` });
+        return res.end();
+      }
+      if (url === "/v1/reset/workspace" && mode.reset === "fail") return json({ error: "boom" }, 500);
+      if (url === "/v1/map") return json({ file_count: 1, regions: [], levels: 0, map_rev: 1, outcome: "completed" });
       if (url === "/v1/patches/batch") {
         const n = (() => { try { return (JSON.parse(body) as unknown[]).length; } catch { return 0; } })();
         return json(Array.from({ length: n }, (_, i) => ({ status: "Ok", rev: i + 1 })));
@@ -66,6 +88,7 @@ afterAll(async () => {
 });
 
 const deletes = () => requests.filter((r) => r.url.startsWith("/v1/reset"));
+const deletedIds = () => deletes().map((d) => (JSON.parse(d.body) as { workspaceId: string }).workspaceId);
 
 // ── Per-test IX_HOME and workspace ──────────────────────────────────────────
 let t: string;
@@ -77,7 +100,9 @@ const savedEnv = { IX_HOME: process.env.IX_HOME, IX_ENDPOINT: process.env.IX_END
 // Quoted: an 8-hex id can read as a number to YAML (see bootstrap-migration.test.ts).
 const PINNED = "abcd1234";
 
-function writeConfig(endpoint: string, workspaces: { id: string; root: string; name: string }[]): void {
+interface WsFixture { id: string; root: string; name: string; pinned?: boolean }
+
+function writeConfig(endpoint: string, workspaces: WsFixture[]): void {
   fs.writeFileSync(configPath, [
     `endpoint: ${endpoint}`,
     "format: text",
@@ -87,14 +112,21 @@ function writeConfig(endpoint: string, workspaces: { id: string; root: string; n
       `    workspace_name: ${w.name}`,
       `    root_path: ${w.root}`,
       `    default: ${i === 0}`,
+      ...(w.pinned ? ["    pinned: true"] : []),
     ]),
     "",
   ].join("\n"));
 }
 
+interface CfgWs { root_path: string; workspace_id: string; pending_prune_of?: { workspace_id: string; endpoint: string }[] }
+function configWorkspaces(): CfgWs[] {
+  return ((parse(fs.readFileSync(configPath, "utf8")) as { workspaces?: CfgWs[] }).workspaces ?? []);
+}
 function registeredIds(): Record<string, string> {
-  const cfg = parse(fs.readFileSync(configPath, "utf8")) as { workspaces?: { root_path: string; workspace_id: string }[] };
-  return Object.fromEntries((cfg.workspaces ?? []).map((w) => [w.root_path, String(w.workspace_id)]));
+  return Object.fromEntries(configWorkspaces().map((w) => [w.root_path, String(w.workspace_id)]));
+}
+function pendingFor(root: string): { workspace_id: string; endpoint: string }[] | undefined {
+  return configWorkspaces().find((w) => w.root_path === root)?.pending_prune_of;
 }
 
 beforeEach(() => {
@@ -109,6 +141,10 @@ beforeEach(() => {
   savedCwd = process.cwd();
   process.chdir(ws);
   requests.length = 0;
+  mode.failCommits = false;
+  mode.reset = "ok";
+  cloud.ready = false;
+  cloud.ran = false;
   resetWorkspaceIdMemosForTests();
   // Sanity: the pinned id is not what this clone's path derives.
   expect(workspaceIdForPath(ws)).not.toBe(PINNED);
@@ -125,7 +161,9 @@ afterEach(() => {
   fs.rmSync(t, { recursive: true, force: true });
 });
 
-async function runIngest(args: string[]): Promise<{ out: string; err: string; exitCode: number }> {
+type Run = { out: string; err: string; exitCode: number; fetches: number };
+
+async function run(register: (p: Command) => void, args: string[]): Promise<Run> {
   const out: string[] = [];
   const err: string[] = [];
   vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { out.push(a.join(" ")); });
@@ -133,22 +171,27 @@ async function runIngest(args: string[]): Promise<{ out: string; err: string; ex
   vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => { err.push(String(chunk)); return true; });
   vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => { out.push(String(chunk)); return true; });
   vi.spyOn(process, "exit").mockImplementation(((code?: number) => { throw new Error(`exit ${code ?? 0}`); }) as never);
+  // Every request the CLI makes, to any host -- not only the fake backend.
+  const fetchSpy = vi.spyOn(globalThis, "fetch");
   process.exitCode = undefined;
   const program = new Command().exitOverride();
-  registerIngestCommand(program);
+  register(program);
   let exitCode: number;
   try {
-    await program.parseAsync(["ingest", ...args], { from: "user" });
+    await program.parseAsync(args, { from: "user" });
     exitCode = Number(process.exitCode ?? 0);
   } catch (thrown) {
     const m = /^exit (\d+)$/.exec((thrown as Error).message);
     if (!m) err.push((thrown as Error).message);
     exitCode = m ? Number(m[1]) : 1;
   }
+  const fetches = fetchSpy.mock.calls.length;
   process.exitCode = undefined;
   vi.restoreAllMocks();
-  return { out: out.join("\n"), err: err.join("\n"), exitCode };
+  return { out: out.join("\n"), err: err.join("\n"), exitCode, fetches };
 }
+const runIngest = (args: string[]) => run(registerIngestCommand, ["ingest", ...args]);
+const runMap = (args: string[]) => run(registerMapCommand, ["map", ...args]);
 
 describe("a pinned workspace_id is honoured", () => {
   it("keeps the pinned id for a clone at a different path, and warns once", () => {
@@ -167,17 +210,41 @@ describe("a pinned workspace_id is honoured", () => {
     expect(warnings[0]).toContain(pinnedWorkspaceIdWarning(ws, PINNED, workspaceIdForPath(ws)));
   });
 
-  it("re-keys only when asked (adoptPathId), reporting the previous id", () => {
+  it("does not warn when quiet, or when the workspace says pinned: true", () => {
+    const errs: string[] = [];
+    vi.spyOn(process.stderr, "write").mockImplementation((c: unknown) => { errs.push(String(c)); return true; });
+    writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
+    ensureWorkspaceIdState(ws, { quiet: true });
+    writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone", pinned: true }]);
+    resetWorkspaceIdMemosForTests();
+    ensureWorkspaceIdState(ws);
+    expect(errs.filter((e) => e.includes("Keeping"))).toEqual([]);
+  });
+
+  it("re-keys only when asked (adoptPathId), recording the previous id for the prune", () => {
     writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
     vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const state = ensureWorkspaceIdState(ws, { adoptPathId: true });
     expect(state).toEqual(expect.objectContaining({ workspaceId: workspaceIdForPath(ws), migrated: true, previousWorkspaceId: PINNED }));
     expect(registeredIds()[ws]).toBe(workspaceIdForPath(ws));
+    expect(pendingFor(ws)).toEqual([{ workspace_id: PINNED, endpoint: baseUrl }]);
+  });
+
+  it("bootstrap's re-key is still seen by the ingest's later lookup in the same run", async () => {
+    writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    await bootstrap(ws, { adoptPathId: true });
+    expect(registeredIds()[ws]).toBe(workspaceIdForPath(ws));
+    // The config already holds the path id now; the memo carries the re-key.
+    expect(workspaceStateFor(ws, { adoptPathId: true })).toEqual(expect.objectContaining({
+      workspaceId: workspaceIdForPath(ws), migrated: true, previousWorkspaceId: PINNED,
+      pendingPrune: [{ workspace_id: PINNED, endpoint: baseUrl }],
+    }));
   });
 
   it("ix ingest: a pinned id is neither re-keyed nor deleted after a clean ingest", async () => {
     writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
-    const r = await runIngest([ws, "--format", "json"]);
+    const r = await runIngest([ws]);
 
     expect(r.exitCode, r.err).toBe(0);
     expect(r.err).toContain(`Keeping ${PINNED}`);
@@ -189,27 +256,85 @@ describe("a pinned workspace_id is honoured", () => {
     expect(committed).not.toContain(workspaceIdForPath(ws));
   }, 60_000);
 
+  it("ix ingest --format json: no warning on stderr for a machine consumer", async () => {
+    writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
+    const r = await runIngest([ws, "--format", "json"]);
+    expect(r.exitCode, r.err).toBe(0);
+    expect(r.err).not.toContain("Keeping");
+    expect(deletes()).toEqual([]);
+  }, 60_000);
+
   it("ix ingest: an ordinary single-user workspace is unchanged -- no warning, no re-key, no delete", async () => {
     writeConfig(baseUrl, [{ id: workspaceIdForPath(ws), root: ws, name: "clone" }]);
-    const r = await runIngest([ws, "--format", "json"]);
+    const r = await runIngest([ws]);
 
     expect(r.exitCode, r.err).toBe(0);
     expect(r.err).not.toContain("Keeping");
     expect(r.err).not.toContain("Re-keyed");
     expect(registeredIds()[ws]).toBe(workspaceIdForPath(ws));
+    expect(pendingFor(ws)).toBeUndefined();
     expect(deletes()).toEqual([]);
   }, 60_000);
 });
 
-describe("--prune-stale-workspace", () => {
+describe("ix ingest --prune-stale-workspace", () => {
   it("re-keys and deletes the old id's graph on a loopback backend after a clean ingest", async () => {
     writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
     const r = await runIngest([ws, "--format", "json", "--prune-stale-workspace"]);
 
     expect(r.exitCode, r.err).toBe(0);
     expect(registeredIds()[ws]).toBe(workspaceIdForPath(ws));
-    expect(deletes().map((d) => JSON.parse(d.body))).toEqual([{ workspaceId: PINNED }]);
+    expect(deletedIds()).toEqual([PINNED]);
+    expect(pendingFor(ws)).toBeUndefined();
     expect(r.err).toContain(`Deleted the previous workspace graph ${PINNED}`);
+  }, 60_000);
+
+  it("after an unclean re-ingest keeps the old id recorded, and the next run deletes it", async () => {
+    writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
+    mode.failCommits = true;
+    const first = await runIngest([ws, "--prune-stale-workspace"]);
+
+    expect(registeredIds()[ws]).toBe(workspaceIdForPath(ws));
+    expect(deletes()).toEqual([]);
+    expect(pendingFor(ws)).toEqual([{ workspace_id: PINNED, endpoint: baseUrl }]);
+    expect(first.err).toContain(`Kept the previous workspace graph ${PINNED}`);
+    expect(first.err).toContain("the next ix map --prune-stale-workspace retries the deletion");
+
+    // Without the flag nothing is deleted, and the record survives.
+    mode.failCommits = false;
+    resetWorkspaceIdMemosForTests();
+    await runIngest([ws]);
+    expect(deletes()).toEqual([]);
+    expect(pendingFor(ws)).toHaveLength(1);
+
+    resetWorkspaceIdMemosForTests();
+    const retry = await runIngest([ws, "--prune-stale-workspace"]);
+    expect(retry.exitCode, retry.err).toBe(0);
+    expect(retry.err).toContain(`Retrying the deletion of previous workspace graph ${PINNED}`);
+    expect(deletedIds()).toEqual([PINNED]);
+    expect(pendingFor(ws)).toBeUndefined();
+  }, 60_000);
+
+  it("a failed delete stays recorded and is retried", async () => {
+    writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
+    mode.reset = "fail";
+    const first = await runIngest([ws, "--prune-stale-workspace"]);
+    expect(first.err).toContain(`Could not delete the previous workspace graph ${PINNED}`);
+    expect(pendingFor(ws)).toHaveLength(1);
+
+    mode.reset = "ok";
+    resetWorkspaceIdMemosForTests();
+    await runIngest([ws, "--prune-stale-workspace"]);
+    expect(pendingFor(ws)).toBeUndefined();
+  }, 60_000);
+
+  it("does not follow a redirect on the delete", async () => {
+    writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
+    mode.reset = "redirect";
+    const r = await runIngest([ws, "--prune-stale-workspace"]);
+    expect(r.err).toContain(`Could not delete the previous workspace graph ${PINNED}`);
+    expect(requests.filter((q) => q.url === "/redirected")).toEqual([]);
+    expect(pendingFor(ws)).toHaveLength(1);
   }, 60_000);
 
   it("keeps the old graph when another registered root still uses that id", async () => {
@@ -220,11 +345,10 @@ describe("--prune-stale-workspace", () => {
 
     expect(r.exitCode, r.err).toBe(0);
     expect(deletes()).toEqual([]);
-    expect(r.err).toContain(`Kept the previous workspace graph ${PINNED}`);
+    expect(r.err).toContain(`Kept the previous workspace graph ${PINNED}: another registered workspace still uses that id`);
   }, 60_000);
 
   it("is refused on a non-loopback endpoint before anything changes or is sent", async () => {
-    // Never contacted: the refusal comes first.
     process.env.IX_ENDPOINT = "https://ix.example.com";
     writeConfig("https://ix.example.com", [{ id: PINNED, root: ws, name: "clone" }]);
     const before = fs.readFileSync(configPath, "utf8");
@@ -233,22 +357,118 @@ describe("--prune-stale-workspace", () => {
     expect(r.exitCode).toBe(1);
     expect(r.err).toContain("only runs against a local (loopback) backend");
     expect(fs.readFileSync(configPath, "utf8")).toBe(before);
+    expect(r.fetches).toBe(0);
     expect(requests).toEqual([]);
+  });
+
+  it("is refused while another map or ingest holds the workspace, instead of coalescing", async () => {
+    writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
+    const lock = acquireMapLock(ws, "test holder");
+    expect(lock).not.toBeNull();
+    try {
+      const r = await runIngest([ws, "--prune-stale-workspace"]);
+      expect(r.exitCode).toBe(1);
+      expect(r.err).toContain("run --prune-stale-workspace again once it finishes");
+      expect(registeredIds()[ws]).toBe(PINNED);
+      expect(r.fetches).toBe(0);
+    } finally {
+      lock!.release();
+    }
+  });
+
+  it("is rejected with --github rather than ignored", async () => {
+    const r = await runIngest(["--github", "owner/repo", "--prune-stale-workspace"]);
+    expect(r.exitCode).toBe(1);
+    expect(r.err).toContain("--prune-stale-workspace applies to a path ingest, not --github");
+    expect(r.fetches).toBe(0);
+  });
+});
+
+describe("ix map --prune-stale-workspace", () => {
+  it("re-keys in bootstrap, re-ingests, and deletes the old id on a loopback backend", async () => {
+    writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
+    const r = await runMap([ws, "--format", "json", "--prune-stale-workspace"]);
+
+    expect(r.exitCode, r.err).toBe(0);
+    expect(registeredIds()[ws]).toBe(workspaceIdForPath(ws));
+    expect(deletedIds()).toEqual([PINNED]);
+    expect(pendingFor(ws)).toBeUndefined();
+    // The re-ingest went out under the new id.
+    const committed = requests.filter((q) => q.url.startsWith("/v1/patch")).map((q) => q.body).join("");
+    expect(committed).toContain(workspaceIdForPath(ws));
+  }, 60_000);
+
+  it("without the flag: keeps the pinned id and deletes nothing", async () => {
+    writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
+    const r = await runMap([ws, "--format", "json"]);
+    expect(r.exitCode, r.err).toBe(0);
+    expect(registeredIds()[ws]).toBe(PINNED);
+    expect(deletes()).toEqual([]);
+    // json is a machine format: no warning.
+    expect(r.err).not.toContain("Keeping");
+  }, 60_000);
+
+  it("is refused on a non-loopback endpoint before anything changes or is sent", async () => {
+    process.env.IX_ENDPOINT = "https://ix.example.com";
+    writeConfig("https://ix.example.com", [{ id: PINNED, root: ws, name: "clone" }]);
+    const before = fs.readFileSync(configPath, "utf8");
+    const r = await runMap([ws, "--prune-stale-workspace"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.err).toContain("only runs against a local (loopback) backend");
+    expect(fs.readFileSync(configPath, "utf8")).toBe(before);
+    expect(r.fetches).toBe(0);
+  });
+
+  it("is refused when the active backend is a remote cloud runner", async () => {
+    cloud.ready = true;
+    writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
+    const before = fs.readFileSync(configPath, "utf8");
+    const r = await runMap([ws, "--prune-stale-workspace"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.err).toContain("the active backend is remote");
+    expect(cloud.ran).toBe(false);
+    expect(fs.readFileSync(configPath, "utf8")).toBe(before);
+    expect(r.fetches).toBe(0);
+  });
+
+  it("is refused while another map holds the workspace, with a JSON record for --format json", async () => {
+    writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
+    const lock = acquireMapLock(ws, "test holder");
+    expect(lock).not.toBeNull();
+    try {
+      const r = await runMap([ws, "--format", "json", "--prune-stale-workspace"]);
+      expect(r.exitCode).toBe(1);
+      expect(JSON.parse(r.out)).toEqual(expect.objectContaining({ error: "map_in_progress" }));
+      expect(registeredIds()[ws]).toBe(PINNED);
+      expect(r.fetches).toBe(0);
+    } finally {
+      lock!.release();
+    }
+  });
+});
+
+describe("deleteWorkspace", () => {
+  it("refuses a redirect instead of following it", async () => {
+    mode.reset = "redirect";
+    await expect(createClient({ endpoint: baseUrl }).deleteWorkspace("ws")).rejects.toThrow(/redirected \(307/);
+    expect(requests.map((q) => q.url)).toEqual(["/v1/reset/workspace"]);
   });
 });
 
 describe("staleWorkspaceCleanup: the deletion rule", () => {
+  const local = "http://localhost:8090";
   const base = {
-    migrated: true,
-    previousWorkspaceId: PINNED,
+    prune: { workspace_id: PINNED, endpoint: local },
     currentWorkspaceId: "11112222",
     pruneOptIn: true,
-    endpoint: "http://localhost:8090",
+    endpoint: local,
     ingestClean: true,
     otherRegisteredIds: [] as string[],
   };
 
-  it("deletes only when opted in, re-keyed, clean, unshared and loopback", () => {
+  it("deletes only when opted in, recorded here, clean, unshared and loopback", () => {
     expect(staleWorkspaceCleanup(base)).toEqual({ action: "delete", workspaceId: PINNED });
   });
 
@@ -264,19 +484,20 @@ describe("staleWorkspaceCleanup: the deletion rule", () => {
     "http://team-graph:8090",
     "not a url",
   ])("never deletes on a non-loopback endpoint (%s), even opted in", (endpoint) => {
-    expect(staleWorkspaceCleanup({ ...base, endpoint })).toEqual(expect.objectContaining({ action: "keep", reason: "non_local_endpoint" }));
+    expect(staleWorkspaceCleanup({ ...base, endpoint, prune: { workspace_id: PINNED, endpoint } }))
+      .toEqual(expect.objectContaining({ action: "keep", reason: "non_local_endpoint" }));
     expect(() => assertStaleWorkspacePruneAllowed(endpoint)).toThrow(/loopback/);
   });
 
-  it.each(["http://localhost:8090", "http://127.0.0.1:9999", "http://[::1]:8090"])("allows loopback %s", (endpoint) => {
-    expect(staleWorkspaceCleanup({ ...base, endpoint }).action).toBe("delete");
+  it.each(["http://localhost:8090", "http://127.0.0.1:9999", "http://[::1]:8090", "http://0.0.0.0:8090"])("allows loopback %s", (endpoint) => {
+    expect(staleWorkspaceCleanup({ ...base, endpoint, prune: { workspace_id: PINNED, endpoint } }).action).toBe("delete");
     expect(() => assertStaleWorkspacePruneAllowed(endpoint)).not.toThrow();
   });
 
-  it("keeps the graph after an unclean ingest, a shared id, or no re-key", () => {
+  it("keeps the graph for another endpoint, an unclean ingest, a shared id, or the current id", () => {
+    expect(staleWorkspaceCleanup({ ...base, endpoint: "http://localhost:9999" })).toEqual(expect.objectContaining({ reason: "endpoint_changed" }));
     expect(staleWorkspaceCleanup({ ...base, ingestClean: false })).toEqual(expect.objectContaining({ reason: "ingest_unclean" }));
     expect(staleWorkspaceCleanup({ ...base, otherRegisteredIds: [PINNED] })).toEqual(expect.objectContaining({ reason: "shared_in_config" }));
-    expect(staleWorkspaceCleanup({ ...base, migrated: false })).toEqual(expect.objectContaining({ reason: "not_migrated" }));
-    expect(staleWorkspaceCleanup({ ...base, previousWorkspaceId: base.currentWorkspaceId })).toEqual(expect.objectContaining({ reason: "not_migrated" }));
+    expect(staleWorkspaceCleanup({ ...base, currentWorkspaceId: PINNED })).toEqual(expect.objectContaining({ reason: "current_id" }));
   });
 });

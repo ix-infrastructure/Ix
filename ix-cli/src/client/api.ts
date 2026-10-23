@@ -567,11 +567,31 @@ export class IxClient {
     );
   }
 
-  // Delete all nodes/edges/patches under a single workspace_id (Ix#225 gap 2: clean up
-  // the orphans left when a workspace's id is migrated to the path-based id). Scoped to
-  // exactly that id server-side; other workspaces are untouched.
+  // Delete all nodes/edges/patches under a single workspace_id (`ix reset --workspace`,
+  // and the opted-in cleanup after `--prune-stale-workspace`). Scoped to exactly that id
+  // server-side -- but an id can be shared: anyone who registers the same id for their
+  // clone writes to the same workspace, and loses it too.
+  //
+  // `redirect: "manual"`, like the other reset routes (runResetSync): a destructive
+  // request must reach the endpoint the caller checked, never wherever a proxy in
+  // front of it points. A 3xx is refused, not followed.
   async deleteWorkspace(workspaceId: string): Promise<void> {
-    await this.post("/v1/reset/workspace", { workspaceId });
+    const path = "/v1/reset/workspace";
+    const payload = JSON.stringify({ workspaceId });
+    await this.read<unknown>("POST", path, payload, async () => {
+      const resp = await fetch(`${this.endpoint}${path}`, {
+        method: "POST",
+        redirect: "manual",
+        headers: this.headers(true, "POST", path),
+        body: payload,
+        signal: this.signalFor(2 * 60 * 1000),
+      });
+      if (resp.status >= 300 && resp.status < 400) {
+        await resp.body?.cancel().catch(() => {});
+        throw this.resetRedirectError("workspace reset route", resp);
+      }
+      return resp;
+    });
   }
 
   // True when the configured endpoint is a local memory-layer. A local
