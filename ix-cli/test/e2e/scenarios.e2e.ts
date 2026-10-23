@@ -225,7 +225,7 @@ describe("ix verify (CL-24A)", () => {
     edit(co, "app/services.py", (t) => t + "\n\ndef added_after_map():\n    return 1\n");
     const stale = ix(env, co, ["verify", "app/services.py", "--format", "llm"]);
     expect(stale.status).toBe(0);
-    expect(stale.stdout).toMatch(/^verify graph=clean .*stale=1 .*diverged=0/m);
+    expect(stale.stdout).toMatch(/^verify graph=stale .*stale=1 .*diverged=0/m);
     expect(stale.stdout).toMatch(/^file path=app\/services\.py state=stale/m);
   });
 

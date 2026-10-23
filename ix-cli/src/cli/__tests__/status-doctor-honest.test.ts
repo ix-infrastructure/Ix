@@ -226,6 +226,23 @@ describe("ix status", () => {
     expect(await status("--format", "llm")).toMatch(/^status .*verified_graph=unverified/m);
   });
 
+  it("a stale record does not read as a pass", async () => {
+    registerRepo();
+    stats = HOLLOW;
+    const { saveVerifyRecord, loadVerifyRecord } = await import("../verify.js");
+    saveVerifyRecord({
+      root: repo, at: new Date().toISOString(), lastIngestAt: null, graph: "stale",
+      files: 20, stale: 20, diverged: 0, unverified: 0, divergedFiles: [], fix: "ix map",
+    });
+    expect(loadVerifyRecord(repo)).toMatchObject({ graph: "stale", stale: 20 });
+    const text = await status();
+    expect(text).toMatch(/Verified:?\s+\d+s ago, 20 files, 0 diverged, 20 stale \(not verified clean\)/);
+    out.length = 0;
+    expect(await status("--format", "llm")).toMatch(/^status .*verified_graph=stale/m);
+    out.length = 0;
+    expect(JSON.parse(await status("--format", "json")).verify).toMatchObject({ graph: "stale", stale: 20, fix: "ix map" });
+  });
+
   it("has verify: null and no Verified line without a record", async () => {
     registerRepo();
     stats = HOLLOW;
@@ -305,8 +322,13 @@ describe("doctor checks", () => {
       counts: { files: 20, clean: 0, stale: 0, diverged: 0, unverified: 0, ...counts }, ...extra,
     }) as any;
     expect(await assessGraphVerify(report("clean", { clean: 20 }))).toMatchObject({ ok: true });
-    expect(await assessGraphVerify(report("clean", { clean: 19, stale: 1 })))
-      .toMatchObject({ ok: true, detail: expect.stringMatching(/ix map/) });
+    // Stale is a note, never "N sampled files match": no file was vouched for.
+    const stale = await assessGraphVerify(report("stale", { clean: 19, stale: 1 }));
+    expect(stale).toEqual({ ok: true, detail: "not verified: 1 of 20 sampled files changed since the last ingest — run `ix map`" });
+    expect((await assessGraphVerify(report("stale", { stale: 20 }))).detail).not.toMatch(/match/);
+    // Only the files judged clean are said to match.
+    expect(await assessGraphVerify(report("clean", { clean: 1, unverified: 19 })))
+      .toEqual({ ok: true, detail: "1 of 20 sampled files match a re-parse (nodes only)" });
     const diverged = await assessGraphVerify(report("diverged", { clean: 19, diverged: 1 }, {
       fix: "ix reset --workspace --yes --ingest",
       files: [{ path: "src/a.ts", state: "diverged" }],

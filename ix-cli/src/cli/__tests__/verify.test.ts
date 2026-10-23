@@ -168,10 +168,30 @@ describe("classifyFile", () => {
 });
 
 describe("graphVerdict", () => {
-  it("does not call stale files divergence", () => {
-    expect(graphVerdict({ files: 3, clean: 2, stale: 1, diverged: 0, unverified: 0 })).toEqual({ graph: "clean", fix: "ix map" });
-    expect(graphVerdict({ files: 3, clean: 1, stale: 1, diverged: 1, unverified: 0 }).graph).toBe("diverged");
-    expect(graphVerdict({ files: 2, clean: 0, stale: 0, diverged: 0, unverified: 2 }).graph).toBe("unverified");
+  const map = "ix map";
+  const rebuild = "ix reset --workspace --yes --ingest";
+  // [clean, stale, diverged, unverified] -> verdict. `clean` only when some
+  // file verified clean and none is stale or diverged.
+  const cases: Array<[number, number, number, number, ReturnType<typeof graphVerdict>]> = [
+    [0, 0, 0, 0, { graph: "unverified", fix: null, reason: "no_files" }],
+    [20, 0, 0, 0, { graph: "clean", fix: null }],
+    [1, 0, 0, 19, { graph: "clean", fix: null }],
+    [0, 0, 0, 20, { graph: "unverified", fix: null, reason: "no_file_verified" }],
+    // The two shapes from the review: nothing verified clean, nothing diverged.
+    [0, 20, 0, 0, { graph: "stale", fix: map }],
+    [0, 1, 0, 19, { graph: "stale", fix: map }],
+    // A clean file beside a stale one still does not vouch for the stale one.
+    [2, 1, 0, 0, { graph: "stale", fix: map }],
+    [18, 1, 0, 1, { graph: "stale", fix: map }],
+    // Stale files alone are not divergence; any diverged file is.
+    [1, 1, 1, 0, { graph: "diverged", fix: rebuild }],
+    [0, 0, 1, 19, { graph: "diverged", fix: rebuild }],
+    [0, 5, 1, 0, { graph: "diverged", fix: rebuild }],
+    [0, 0, 20, 0, { graph: "diverged", fix: rebuild }],
+  ];
+  it.each(cases)("clean=%i stale=%i diverged=%i unverified=%i", (clean, stale, diverged, unverified, want) => {
+    const files = clean + stale + diverged + unverified;
+    expect(graphVerdict({ files, clean, stale, diverged, unverified })).toEqual(want);
   });
 });
 
@@ -333,7 +353,7 @@ describe("runVerify", () => {
     saveIngestBaseline(root, files, 3, ingestedAt, new Map(), between.extractor);
     const unrecorded = await runVerify(fakeClient(store).client, root, { sample: 5 });
     expect(unrecorded.files[0]).toMatchObject({ path: "a.ts", state: "stale", reason: "changed_since_ingest" });
-    expect(unrecorded.graph).toBe("clean");
+    expect(unrecorded.graph).toBe("stale");
   });
 
   it("reads every kind the workspace holds: a stored node of a kind the parse never produces is extra", async () => {

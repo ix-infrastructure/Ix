@@ -73,7 +73,14 @@ const VERIFY_MAX_FILE_BYTES = 1024 * 1024;
 const VERIFY_STATS_TIMEOUT_MS = 15_000;
 
 export type VerifyFileState = "clean" | "stale" | "diverged" | "unverified";
-export type VerifyGraphVerdict = "clean" | "diverged" | "unverified";
+/**
+ * The graph's verdict from its sampled files. `stale` (no file diverged, at
+ * least one changed since the last ingest) is not divergence, and not a pass
+ * either: the sample cannot vouch for files whose graph is behind the disk.
+ */
+export type VerifyGraphVerdict = "clean" | "stale" | "diverged" | "unverified";
+/** Every graph verdict, for validating a saved record. */
+export const VERIFY_GRAPH_VERDICTS: readonly VerifyGraphVerdict[] = ["clean", "stale", "diverged", "unverified"];
 
 export interface VerifyNode {
   kind: string;
@@ -362,12 +369,24 @@ export function countStates(files: readonly VerifyFileResult[]): VerifyCounts {
   return counts;
 }
 
-/** The graph's verdict from its files. Stale files alone are not divergence. */
+/**
+ * The graph's verdict from its files, first match wins:
+ *  - diverged: any file diverged (stale files alone are not divergence);
+ *  - unverified (`no_files`): nothing was sampled;
+ *  - stale: any file changed since the last ingest. Even beside clean files:
+ *    a stale file's nodes could not be compared with its source, so the
+ *    sample does not show the graph matches it. `ix map` is the fix;
+ *  - unverified (`no_file_verified`): no file was judged clean;
+ *  - clean: at least one file verified clean and none stale or diverged.
+ *    Unverified files beside them (an unsupported language, a file ingest
+ *    skips) do not stop a clean verdict; they are counted.
+ */
 export function graphVerdict(counts: VerifyCounts): { graph: VerifyGraphVerdict; fix: string | null; reason?: string } {
   if (counts.diverged > 0) return { graph: "diverged", fix: GRAPH_REBUILD_FIX };
   if (counts.files === 0) return { graph: "unverified", fix: null, reason: "no_files" };
-  if (counts.unverified === counts.files) return { graph: "unverified", fix: null, reason: "no_file_verified" };
-  return { graph: "clean", fix: counts.stale > 0 ? GRAPH_MAP_FIX : null };
+  if (counts.stale > 0) return { graph: "stale", fix: GRAPH_MAP_FIX };
+  if (counts.clean === 0) return { graph: "unverified", fix: null, reason: "no_file_verified" };
+  return { graph: "clean", fix: null };
 }
 
 // ── Record ───────────────────────────────────────────────────────────────
@@ -395,13 +414,13 @@ export function loadVerifyRecord(projectRoot: string): VerifyRecord | null {
     // Canonical on both sides: `--root .`, a trailing slash or a symlinked
     // path names the same root as the canonical one `ix verify` saved.
     if (canonicalWorkspacePath(data.root) !== canonicalWorkspacePath(projectRoot)) return null;
-    if (data.graph !== "clean" && data.graph !== "diverged" && data.graph !== "unverified") return null;
+    if (!VERIFY_GRAPH_VERDICTS.includes(data.graph as VerifyGraphVerdict)) return null;
     const count = (v: unknown): number => (typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : 0);
     return {
       root: data.root,
       at: data.at,
       lastIngestAt: typeof data.lastIngestAt === "string" ? data.lastIngestAt : null,
-      graph: data.graph,
+      graph: data.graph as VerifyGraphVerdict,
       files: count(data.files),
       stale: count(data.stale),
       diverged: count(data.diverged),

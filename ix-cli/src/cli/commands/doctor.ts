@@ -397,7 +397,7 @@ export async function assessGraphVerify(run: () => Promise<VerifyReport>, budget
         timer.unref?.();
       }),
     ]);
-    const { files, diverged, stale } = report.counts;
+    const { files, clean, diverged, stale } = report.counts;
     // "partial: 3 of 5" — a run that ran out of budget says how much it saw.
     const partial = report.partial ? ` (partial: ${files} of ${report.sample} files checked within ${Math.round((budgetMs ?? 0) / 1000)} s)` : "";
     if (report.graph === "diverged") {
@@ -412,10 +412,14 @@ export async function assessGraphVerify(run: () => Promise<VerifyReport>, budget
     if (report.graph === "unverified") {
       return { ok: true, detail: `not checked: ${(report.reason ?? "nothing to compare").replace(/_/g, " ")}${partial}` };
     }
-    if (stale > 0) {
-      return { ok: true, detail: `${files} sampled files match${partial}; ${stale} changed since the last ingest — run \`ix map\`` };
+    // Stale is not a pass, but it is what any edit since the last map looks
+    // like, so it stays a note (as `ix status` treats changed files).
+    if (report.graph === "stale") {
+      return { ok: true, detail: `not verified: ${stale} of ${files} sampled files changed since the last ingest${partial} — run \`ix map\`` };
     }
-    return { ok: true, detail: `${files} sampled files match a re-parse (nodes only)${partial}` };
+    // Only files judged clean "match"; unverified ones are not counted as such.
+    const of = clean === files ? `${files}` : `${clean} of ${files}`;
+    return { ok: true, detail: `${of} sampled files match a re-parse (nodes only)${partial}` };
   } catch (e: any) {
     return { ok: true, detail: `not checked: ${e?.message ?? String(e)}` };
   } finally {

@@ -47,7 +47,7 @@ interface StatusStaleInfo {
  * of parsing prose. `map_complete` separately reports whether an architecture
  * hierarchy exists for that source revision. `verified_*` come from the last
  * whole-root `ix verify`, and are absent when there has been none
- * (`verified_graph` is its verdict: clean, diverged or unverified);
+ * (`verified_graph` is its verdict: clean, stale, diverged or unverified);
  * `verified_outdated=true` says the workspace was ingested after it ran, so
  * its counts describe an earlier graph.
  */
@@ -227,7 +227,9 @@ export function registerStatusCommand(program: Command): void {
             // as a pass: name the verdict instead.
             const outcome = verified.graph === "unverified"
               ? `unverified (${verified.files === 0 ? "no files sampled" : "no file verified"})`
-              : `${verified.diverged} diverged`;
+              : verified.graph === "stale"
+                ? `0 diverged, ${verified.stale} stale (not verified clean)`
+                : `${verified.diverged} diverged`;
             renderKeyValue("Verified", `${timeSince(verified.at)}, ${verified.files} files, ${outcome}${before}`);
             if (verified.diverged > 0 && verifiedOutdated) {
               renderNote(`The last ix verify found ${verified.diverged} file(s) whose nodes did not match their source, ` +

@@ -71,8 +71,8 @@ function renderVerifyText(report: VerifyReport): void {
     renderWarning(`${c.diverged} file(s) hold nodes that do not match their own source. Fix: ${report.fix}`);
   } else if (report.graph === "unverified") {
     renderNote(report.fix ? `Not verified. Run ${report.fix} first.` : "Not verified: nothing could be compared.");
-  } else if (c.stale > 0) {
-    renderNote(`${c.stale} file(s) changed since the last ingest. Run ${report.fix} to update.`);
+  } else if (report.graph === "stale") {
+    renderNote(`Not verified clean: ${c.stale} file(s) changed since the last ingest. Run ${report.fix}, then ix verify again.`);
   } else {
     renderSuccess("Every checked file's nodes match a re-parse.");
   }

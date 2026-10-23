@@ -658,8 +658,8 @@ Two deliberate exceptions remain:
   When a whole-root `ix verify` (no paths) has run for this workspace, the
   `status` record ends with what it found: `verified_at` (ISO),
   `verified_files`, `verified_diverged`, `verified_outdated` and
-  `verified_graph` (`clean`, `diverged` or `unverified`; an unverified record
-  judged no file, so its `verified_diverged=0` is not a pass). Only that
+  `verified_graph` (`clean`, `stale`, `diverged` or `unverified`; a stale or
+  unverified record's `verified_diverged=0` is not a pass). Only that
   command saves the record: `ix verify <path>` and `ix doctor` do not.
   `verified_outdated=true` means the workspace was ingested after that verify
   ran, so its counts describe an earlier graph; run `ix verify` again rather
@@ -675,7 +675,10 @@ file path=src/a.ts state=stale reason=changed_since_ingest missing=0 extra=1 cha
 file path=src/b.ts state=diverged missing=3 extra=0 changed=0
 ```
 
-`graph` is `clean`, `diverged` or `unverified` (with a `reason`: `not_mapped`,
+`graph` is the first of these that holds: `diverged` when any file diverged;
+`stale` (fix `ix map`) when any file is stale, even beside clean ones, since a
+stale file's nodes could not be checked against its source; `clean` when at
+least one file was judged clean; otherwise `unverified` (with a `reason`: `not_mapped`,
 `extractor_changed`, `parser_unavailable`, `no_files` when nothing could be
 sampled, `no_file_verified` when nothing sampled could be judged, `timed_out`
 when `ix doctor`'s time budget ran out before any file was judged).
@@ -702,8 +705,10 @@ is the hash of the file's newest stored patch:
   `no_parse`, `list_failed`, `truncated`, `hash_unknown` (the hash lookup
   failed and the nodes differ), `no_comparison`.
 
-A stale file does not make the graph diverged. Nodes only: edges are not
-compared. The command exits 0 for every verdict.
+A stale file does not make the graph diverged, and does not let it be clean.
+Unverified files beside clean ones do not stop a `clean` verdict; they are
+counted. Nodes only: edges are not compared. The command exits 0 for every
+verdict.
 
 Still routing to `text`: `diff --content` (verbatim hunks) and `ingest`, a
 hidden implementation-detail command whose output is a completion summary.

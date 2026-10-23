@@ -131,10 +131,10 @@ describe("ix verify output", () => {
     expect(process.exitCode ?? 0).toBe(0);
   });
 
-  it("stale: the file is listed, the graph is not diverged", async () => {
+  it("stale: the file is listed, the graph is stale -- not diverged, not clean", async () => {
     await mapped({ staleHash: true });
     const llm = await verify("--format", "llm");
-    expect(llm).toMatch(/^verify graph=clean .*stale=1 .*fix="ix map"/m);
+    expect(llm).toMatch(/^verify graph=stale files=1 clean=0 stale=1 diverged=0 unverified=0 fix="ix map"$/m);
     expect(llm).toMatch(/^file path=a\.ts state=stale/m);
     expect(process.exitCode ?? 0).toBe(0);
   });
