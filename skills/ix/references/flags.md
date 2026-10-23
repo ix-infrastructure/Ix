@@ -191,7 +191,9 @@ Show methods/functions called by the given symbol (cross-file).
 ### `ix callers <symbols...>`
 
 Show methods/functions that call the given symbols (cross-file). Several
-symbols answer in one call, grouped per symbol.
+symbols answer in one call, grouped per symbol. For a Java method, callers
+through a superclass or interface follow the direct ones, tagged
+`via=<Supertype>.<method>` (json: `via`).
 
 | Flag | Value | Default | Effect |
 |---|---|---|---|

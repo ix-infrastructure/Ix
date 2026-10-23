@@ -62,6 +62,43 @@ const SCENARIOS: Array<[string, Sources, Sources]> = [
     { "third/Target.scala": "package third\nclass Target { def stop() = () }\n" }],
 ];
 
+// Java: `get()` is declared by both URL and URI; only the caller's receiver
+// type picks one. Every scenario edits a provider, never the caller.
+const JAVA_TYPES: Sources = {
+  "src/common/URL.java": "package common;\npublic class URL {\n  public String get() { return \"url\"; }\n}\n",
+  "src/common/URI.java": "package common;\npublic class URI {\n  public String get() { return \"uri\"; }\n}\n",
+};
+const JAVA_INVOKER = (result: string, parent = "") =>
+  `package rpc;\nimport common.URL;\nimport common.URI;\npublic interface Invoker${parent} {\n${result ? `  ${result} getUrl();\n` : ""}}\n`;
+
+const JAVA_SCENARIOS: Array<[string, Sources, Sources]> = [
+  ["a Java method's declared return type changes", {
+    ...JAVA_TYPES,
+    "src/rpc/Invoker.java": JAVA_INVOKER("URL"),
+    "src/rpc/Use.java": "package rpc;\npublic class Use {\n  void use(Invoker invoker) {\n    invoker.getUrl().get();\n  }\n}\n",
+  }, { "src/rpc/Invoker.java": JAVA_INVOKER("URI") }],
+  ["an inherited Java method's declared return type changes", {
+    ...JAVA_TYPES,
+    "src/rpc/Base.java": JAVA_INVOKER("URL").replace("Invoker", "Base"),
+    "src/rpc/Invoker.java": JAVA_INVOKER("", " extends Base"),
+    "src/rpc/Use.java": "package rpc;\npublic class Use {\n  void use(Invoker invoker) {\n    invoker.getUrl().get();\n  }\n}\n",
+  }, { "src/rpc/Base.java": JAVA_INVOKER("URI").replace("Invoker", "Base") }],
+  ["a Java class changes its superclass", {
+    ...JAVA_TYPES,
+    "src/rpc/Sub.java": "package rpc;\nimport common.*;\npublic class Sub extends URL {\n}\n",
+    "src/rpc/Use.java": "package rpc;\npublic class Use {\n  void use(Sub sub) {\n    sub.get();\n  }\n}\n",
+  }, { "src/rpc/Sub.java": "package rpc;\nimport common.*;\npublic class Sub extends URI {\n}\n" }],
+  ["a Java field changes its declared type", {
+    ...JAVA_TYPES,
+    "src/rpc/Holder.java": "package rpc;\nimport common.*;\npublic class Holder {\n  private URL target;\n  public String ping() {\n    return target.get();\n  }\n}\n",
+    "src/rpc/Use.java": "package rpc;\npublic class Use {\n  void use(Holder holder) {\n    holder.ping();\n  }\n}\n",
+  }, { "src/rpc/Holder.java": "package rpc;\nimport common.*;\npublic class Holder {\n  private URI target;\n  public String ping() {\n    return target.get();\n  }\n}\n" }],
+  ["a same-package Java class appears and shadows an on-demand import", {
+    ...JAVA_TYPES,
+    "src/rpc/Use.java": "package rpc;\nimport common.*;\npublic class Use {\n  void use(URL url) {\n    url.get();\n  }\n}\n",
+  }, { "src/rpc/URL.java": "package rpc;\npublic class URL {\n  public String get() { return \"rpc\"; }\n}\n" }],
+];
+
 describe("incremental map follows factory return types (fake backend)", () => {
   vi.setConfig({ testTimeout: 120_000 });
 
@@ -123,6 +160,32 @@ describe("incremental map follows factory return types (fake backend)", () => {
       await map(repoDir, join(dir, "home"), endpoint);
       await map(repoDir, join(dir, "fresh-home"), await fresh.start());
       expect(fresh.edgesOfTier("type"), "the edit moves or drops the typed edge").not.toEqual(before);
+      expect(live.edgesOfTier("type")).toEqual(fresh.edgesOfTier("type"));
+      expect(live.graphSignature()).toEqual(fresh.graphSignature());
+    } finally {
+      await live.stop();
+      await fresh.stop();
+    }
+  });
+
+  it.each(JAVA_SCENARIOS)("%s", async (_name, base, edit) => {
+    const dir = join(root, `run-${run++}`);
+    const repoDir = join(dir, "repo");
+    mkdirSync(repoDir, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: repoDir, stdio: "ignore" });
+    const live = new FakeBackend({ semantics: "head" });
+    const fresh = new FakeBackend({ semantics: "head" });
+    try {
+      const endpoint = await live.start();
+      write(repoDir, base);
+      await map(repoDir, join(dir, "home"), endpoint);
+      const before = live.edgesOfTier("type");
+      expect(before.length, "typed edges before the edit").toBeGreaterThan(0);
+
+      write(repoDir, edit);
+      await map(repoDir, join(dir, "home"), endpoint);
+      await map(repoDir, join(dir, "fresh-home"), await fresh.start());
+      expect(fresh.edgesOfTier("type"), "the edit moves a typed edge").not.toEqual(before);
       expect(live.edgesOfTier("type")).toEqual(fresh.edgesOfTier("type"));
       expect(live.graphSignature()).toEqual(fresh.graphSignature());
     } finally {
