@@ -10,6 +10,7 @@ const groupAlive = (pid) => {
 
 /** One deadline, no retries. Only the agent caller opts into retaining timeout/exit receipts.
  * drainSeconds lets descendants that outlive the adapter (a Codex notify hook) finish before the group is reaped.
+ * The deadline and stage time end when the adapter exits, even if a descendant still holds its stdout open.
  */
 export function execute(argv, { cwd, env = process.env, seconds = 60, log, input, allowTimeout = false, captureExit = false, drainSeconds = 0 } = {}) {
   return new Promise((resolve, reject) => {
@@ -17,7 +18,7 @@ export function execute(argv, { cwd, env = process.env, seconds = 60, log, input
     const detached = process.platform !== 'win32' && process.env.AGENT_EVAL_CHILD !== '1';
     const child = spawn(argv[0], argv.slice(1), { cwd, env: { ...env, AGENT_EVAL_CHILD: '1' }, detached, stdio: ['pipe', 'pipe', 'pipe'] });
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
-    let stdout = '', stderr = '', failure, timedOut = false;
+    let stdout = '', stderr = '', failure, timedOut = false, exitedAt, drainTimer;
     const kill = () => {
       try { if (detached) process.kill(-child.pid, 'SIGKILL'); else child.kill('SIGKILL'); } catch { /* already exited */ }
     };
@@ -31,11 +32,17 @@ export function execute(argv, { cwd, env = process.env, seconds = 60, log, input
     child.stdin.on('error', () => {});
     child.stdin.end(input);
     child.on('error', (error) => { clearTimeout(timer); reject(error); });
+    child.on('exit', () => {
+      exitedAt = performance.now(); clearTimeout(timer);
+      // A descendant that inherited stdout keeps 'close' from firing; reap it once the drain ends. Buffered output is still read.
+      if (!timedOut) drainTimer = setTimeout(kill, drainSeconds * 1000);
+    });
     child.on('close', async (code) => {
-      clearTimeout(timer);
-      const elapsed = (performance.now() - started) / 1000; // Excludes the drain.
+      clearTimeout(timer); clearTimeout(drainTimer);
+      exitedAt ??= performance.now();
+      const elapsed = (exitedAt - started) / 1000; // Excludes the drain.
       if (detached && !timedOut && drainSeconds > 0) {
-        const deadline = performance.now() + drainSeconds * 1000;
+        const deadline = exitedAt + drainSeconds * 1000;
         while (groupAlive(child.pid) && performance.now() < deadline) await new Promise((done) => setTimeout(done, 100));
       }
       if (detached) kill(); // Also reap descendants that outlived their adapter (and the drain).

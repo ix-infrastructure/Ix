@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { after, test } from 'node:test';
 import { checkManifestSource, importVerified, loadManifest, parseExport, sha256, validateManifest } from '../manifest.mjs';
 import { schedule, validateConfig, validateProbe } from '../config.mjs';
-import { budgetTokens, commandCounts, isIxMcpTool, parseMetrics, METRICS } from '../metrics.mjs';
+import { budgetTokens, commandCounts, isIxMcpTool, ixExitScope, parseMetrics, METRICS } from '../metrics.mjs';
 import { markdown, summarize } from '../stats.mjs';
 import { dryConfig, resolveConfigPaths, runBenchmark } from '../run.mjs';
 import { execute } from '../process.mjs';
@@ -191,12 +191,52 @@ test('Ix failures hidden behind a zero exit status still count as failures, not 
   const piped = claude('ix search foo --format llm 2>&1 | head', [{ type: 'text', text: 'notice' }, { type: 'text', text: 'error code=unmapped message="run ix map"' }]);
   assert.equal(piped.ix_succeeded, 0); assert.deepEqual(piped.ix_errors_by_code, { unmapped: 1 });
   const ok = claude('ix search foo | head', 'Foo src/foo.ts:1');
-  assert.equal(ok.ix_succeeded, 1); assert.equal(ok.ix_errors, 0);
+  // A pipeline's status is head's, so it cannot prove ix ran: not an error, not a confirmed success either.
+  assert.equal(ok.ix_succeeded, 0); assert.equal(ok.ix_errors, 0); assert.equal(ok.ix_calls, 1);
   const codex = (command, aggregated_output) => parseMetrics(ndjson([{ type: 'turn.started' }, { type: 'item.completed', item: { id: 'c', type: 'command_execution', command, exit_code: 0, aggregated_output } },
     { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } }]), 'codex');
   const fallback = codex('bash -lc "ix search foo || rg foo"', 'bash: line 1: ix: command not found\nsrc/foo.ts:1:foo');
   assert.equal(fallback.ix_succeeded, 0); assert.deepEqual(fallback.ix_errors_by_code, { COMMAND_NOT_FOUND: 1 });
-  assert.equal(codex('bash -lc "ix search foo || rg foo"', 'src/foo.ts:1:foo').ix_succeeded, 1);
+  assert.equal(codex('bash -lc "ix search foo || rg foo"', 'src/foo.ts:1:foo').ix_succeeded, 0);
+  assert.equal(codex('bash -lc "cd src && ix search foo"', 'Foo src/foo.ts:1').ix_succeeded, 1);
+});
+
+test('only an ix call that certainly ran counts as a success; only a lone ix call owns its exit status', () => {
+  const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  const claude = (command, is_error, content) => parseMetrics(ndjson([{ type: 'assistant', message: { id: 'a', content: [{ type: 'tool_use', id: 't', name: 'Bash', input: { command } }] } },
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't', is_error, content }] } }, { type: 'result', usage }]), 'claude');
+  // Baseline probes and fallbacks that exit 0 whether or not ix exists are not isolation leaks.
+  for (const command of ['ix --version 2>/dev/null || echo "no ix"', 'command -v ix || ix search foo', 'rg foo src || ix text foo', 'ls; ix status 2>/dev/null; echo done', 'ix status &', 'ix search foo | head']) {
+    const metrics = claude(command, false, 'no ix');
+    assert.equal(metrics.ix_succeeded, 0, command); assert.equal(metrics.ix_errors, 0, command);
+  }
+  // A lone ix call, or an && chain containing one, that exits 0 proves ix ran.
+  for (const command of ['ix search foo', 'ix search foo 2>&1', 'cd src &&\n  ix search foo', 'env A=b ix map && ix search foo > out.txt', '(ix search foo)']) {
+    assert.equal(claude(command, false, 'Foo src/foo.ts:1').ix_succeeded, 1, command);
+  }
+  // A failing compound command is not an Ix error unless its output shows one.
+  for (const command of ['ix map && npm test', 'ix map; npm test', 'cd src && ix search foo']) {
+    const metrics = claude(command, true, '1 failing test');
+    assert.equal(metrics.ix_errors, 0, command); assert.equal(metrics.ix_succeeded, 0, command);
+  }
+  assert.deepEqual(claude('ix map && npm test', true, 'error code=STALE_MAP message="x"').ix_errors_by_code, { STALE_MAP: 1 });
+  assert.deepEqual(claude('ix search foo 2>&1', true, 'boom').ix_errors_by_code, { unknown: 1 });
+  const codex = (command, exit_code) => parseMetrics(ndjson([{ type: 'turn.started' }, { type: 'item.completed', item: { id: 'c', type: 'command_execution', command, exit_code, aggregated_output: 'failed' } },
+    { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } }]), 'codex');
+  assert.equal(codex("/bin/bash -lc 'ix map && npm test'", 1).ix_errors, 0);
+  assert.equal(codex("/bin/bash -lc 'ix search foo'", 1).ix_errors, 1);
+  assert.deepEqual(ixExitScope('ix a; echo $\'x && y\''), { sole: false, confirmed: false });
+  assert.deepEqual(ixExitScope('bash -lc "ix a"'), { sole: true, confirmed: true });
+  assert.deepEqual(ixExitScope('rg x && bash -lc "ix a || true"'), { sole: false, confirmed: false });
+});
+
+test('Claude built-in Grep and Glob calls count as searches; permission denials are counted', () => {
+  const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  const content = [{ type: 'tool_use', id: 'g', name: 'Grep', input: { pattern: 'foo' } }, { type: 'tool_use', id: 'l', name: 'Glob', input: { pattern: '**/*.ts' } }, { type: 'tool_use', id: 'r', name: 'Bash', input: { command: 'rg foo' } }, { type: 'tool_use', id: 'e', name: 'Read', input: { file_path: 'a' } }];
+  const metrics = parseMetrics(ndjson([{ type: 'assistant', message: { id: 'a', content } }, { type: 'result', usage, permission_denials: [{ tool_name: 'WebFetch', tool_use_id: 'w', tool_input: {} }] }]), 'claude');
+  assert.deepEqual([metrics.search_calls, metrics.native_search_calls, metrics.rg_calls, metrics.grep_calls, metrics.find_calls, metrics.tool_calls], [3, 2, 1, 0, 0, 4]);
+  assert.equal(metrics.permission_denials, 1); assert.equal(metrics.ix_permission_denials, 0);
+  assert.ok(METRICS.includes('native_search_calls'));
 });
 
 test('shell telemetry handles ANSI-C quotes and never aborts on an unbalanced quote', () => {
@@ -492,6 +532,21 @@ integrationTest('a drained stage lets an outliving descendant finish before the 
   const started = performance.now();
   await execute(late(marker('capped'), 30_000), { seconds: 10, drainSeconds: 0.5 });
   assert.ok(performance.now() - started < 5000, 'the drain is capped');
+});
+
+integrationTest('a descendant holding the stage stdout open is neither stage time nor a deadline overrun', async () => {
+  const marker = (name) => join(scratch, `inherit-${name}`);
+  // Like a notify hook spawned with inherited stdio: the adapter exits, the hook keeps the stdout pipe open.
+  const late = (file, ms) => [process.execPath, '-e', `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => { console.log('hook'); require('node:fs').writeFileSync(${JSON.stringify(file)}, 'x'); }, ${ms})`)}], { stdio: 'inherit' }).unref(); console.log('agent')`];
+  const drained = await execute(late(marker('drained'), 1500), { seconds: 1, drainSeconds: 10, allowTimeout: true });
+  assert.equal(drained.timed_out, false); assert.ok(drained.seconds < 1, 'stage time ends when the adapter exits');
+  assert.ok(existsSync(marker('drained'))); assert.match(drained.stdout, /agent/);
+  const started = performance.now();
+  const reaped = await execute(late(marker('reaped'), 3000), { seconds: 10, drainSeconds: 0.5 });
+  assert.equal(reaped.timed_out, false); assert.ok(performance.now() - started < 2500, 'the drain is capped');
+  assert.match(reaped.stdout, /agent/);
+  await new Promise((done) => setTimeout(done, 3200));
+  assert.ok(!existsSync(marker('reaped')), 'the descendant is reaped when the drain ends');
 });
 
 integrationTest('an ix-arm hook that outlives the agent is counted; one killed mid-run fails the run', async () => {
