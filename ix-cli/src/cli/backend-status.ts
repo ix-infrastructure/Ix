@@ -16,14 +16,12 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import type { IxClient } from "../client/api.js";
 import { fetchBackendHealth, isLocalEndpoint } from "./backend-version.js";
 import { getEndpoint } from "./config.js";
+import { ixHome } from "./ix-home.js";
 
 export const BACKEND_IMAGE = "ghcr.io/ix-infrastructure/ix-memory-layer";
-const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
-const STANDARD_BACKEND_DIR = join(IX_HOME, "backend");
 
 // On-disk graph format this CLI expects. MUST stay in sync with the backend's
 // reported schema_version; a mismatch forces a full re-ingest (see ingest.ts,
@@ -295,7 +293,8 @@ export function checkBackendImage(endpoint: string = getEndpoint()): BackendImag
 export function isNonStandardBackend(container: BackendContainer): boolean {
   const cfg = container.composeConfigFiles;
   if (!cfg) return false;
-  return !cfg.split(",").some((p) => p.trim().startsWith(STANDARD_BACKEND_DIR));
+  const standardBackendDir = join(ixHome(), "backend");
+  return !cfg.split(",").some((p) => p.trim().startsWith(standardBackendDir));
 }
 
 export interface BackendSchemaStatus {

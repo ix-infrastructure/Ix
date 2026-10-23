@@ -10,6 +10,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     setupFiles: ["./vitest.setup.ts"],
+    globalSetup: ["./vitest.home-guard.ts"],
     include: ["src/**/*.slow.test.ts"],
     fileParallelism: false,
     sequence: { concurrent: false },

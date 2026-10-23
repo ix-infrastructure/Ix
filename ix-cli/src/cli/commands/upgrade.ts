@@ -12,19 +12,20 @@ import { canRenderProgress } from "../stderr.js";
 import { ChecksumError, attestationCommand, downloadVerified, verifyAttestation } from "../integrity.js";
 import type { IxClient } from "../../client/api.js";
 import {
-  BACKEND_VERSION_FILE,
   VERSION_RE,
+  backendVersionFile,
   fetchBackendHealth,
   getTrackedVersion,
   writeVersionStamp,
 } from "../backend-version.js";
 import { backendComposeArgs } from "../backend-compose.js";
+import { ixHome } from "../ix-home.js";
 
 // Re-exported for the existing importers of this module (tests and call sites
 // that predate backend-version.ts). recordBackendRelease is deliberately NOT
 // among them: it is reached only through fetchBackendHealth, and re-exporting
 // it here would advertise a second way in.
-export { BACKEND_VERSION_FILE, VERSION_RE, writeVersionStamp } from "../backend-version.js";
+export { VERSION_RE, backendVersionFile, writeVersionStamp } from "../backend-version.js";
 
 /**
  * Fetch health and record what the backend says it is running.
@@ -53,10 +54,11 @@ const GITHUB_ORG = "ix-infrastructure";
 const GITHUB_REPO = "Ix";
 const COMPASS_DIST_REPO = "ix-compass-dist";
 const MEMORY_LAYER_DIST_REPO = "ix-memory-layer-dist";
-const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
-const VERSION_CACHE = join(IX_HOME, ".version-check.json");
-const COMPASS_DIR = join(IX_HOME, "cli", "compass");
-const COMPASS_VERSION_FILE = join(COMPASS_DIR, ".version");
+// State paths are functions, not consts, so they follow IX_HOME as it is when
+// a command runs rather than when this module was imported -- see `ixHome()`.
+const versionCacheFile = (): string => join(ixHome(), ".version-check.json");
+const compassDir = (): string => join(ixHome(), "cli", "compass");
+const compassVersionFile = (): string => join(compassDir(), ".version");
 
 interface VersionCache {
   latest: string;
@@ -115,8 +117,8 @@ async function fetchLatestRelease(
 
 function readCache(): VersionCache | null {
   try {
-    if (!existsSync(VERSION_CACHE)) return null;
-    const parsed = JSON.parse(readFileSync(VERSION_CACHE, "utf-8"));
+    if (!existsSync(versionCacheFile())) return null;
+    const parsed = JSON.parse(readFileSync(versionCacheFile(), "utf-8"));
     // JSON.parse only proves it is JSON, not that it is *this* shape. A cache
     // file holding `{"latest": 123}` used to reach isNewer() and throw
     // "latest.split is not a function", which surfaced as a successful command
@@ -139,11 +141,11 @@ function readCache(): VersionCache | null {
 
 function writeCache(latest: string, compassLatest?: string, backendLatest?: string): void {
   try {
-    mkdirSync(IX_HOME, { recursive: true });
+    mkdirSync(ixHome(), { recursive: true });
     const data: VersionCache = { latest, checkedAt: Date.now() };
     if (compassLatest) data.compassLatest = compassLatest;
     if (backendLatest) data.backendLatest = backendLatest;
-    writeFileSync(VERSION_CACHE, JSON.stringify(data));
+    writeFileSync(versionCacheFile(), JSON.stringify(data));
   } catch {
     // non-critical
   }
@@ -267,7 +269,7 @@ function getInstalledCompassVersion(): string {
  * is half the answer, and reading the file once keeps the two from disagreeing.
  */
 function installedCompass(): CompassStamp & { present: boolean } {
-  const present = existsSync(join(COMPASS_DIR, "index.html"));
+  const present = existsSync(join(compassDir(), "index.html"));
   if (!present) return { source: "dist", version: "0.0.0", present };
   return { ...readCompassStamp(), present };
 }
@@ -342,8 +344,8 @@ export function parseCompassStamp(raw: string): CompassStamp {
 
 function readCompassStamp(): CompassStamp {
   try {
-    if (!existsSync(COMPASS_VERSION_FILE)) return { source: "dist", version: "0.0.0" };
-    return parseCompassStamp(readFileSync(COMPASS_VERSION_FILE, "utf-8"));
+    if (!existsSync(compassVersionFile())) return { source: "dist", version: "0.0.0" };
+    return parseCompassStamp(readFileSync(compassVersionFile(), "utf-8"));
   } catch {
     return { source: "dist", version: "0.0.0" };
   }
@@ -430,7 +432,7 @@ function stampFailureMessage(): string {
   // "until it is writable" would be a guess — and a wrong one for the case the
   // tests actually reproduce, a directory sitting where the file belongs, which
   // no permission change fixes.
-  return `[!!] Could not record the version in ${BACKEND_VERSION_FILE}; until it can be written, backend update notices will be wrong.`;
+  return `[!!] Could not record the version in ${backendVersionFile()}; until it can be written, backend update notices will be wrong.`;
 }
 
 /**
@@ -549,7 +551,7 @@ export async function stampBackendVersionAfterPull(composeFile: string): Promise
     // `latest` first: it decides whether there is anything to write at all, so
     // it reads in the order it applies and does not lean on the writer's own
     // falsy check to make a null call a no-op.
-    if (latest && !writeVersionStamp(BACKEND_VERSION_FILE, latest)) {
+    if (latest && !writeVersionStamp(backendVersionFile(), latest)) {
       // Must not fail the start, and only worth saying when the file really is
       // wrong: a root-owned stamp already holding what we just pulled fails to
       // write on every cold start with nothing actually out of date.
@@ -558,7 +560,7 @@ export async function stampBackendVersionAfterPull(composeFile: string): Promise
       // fetched": a stamp stuck AHEAD is also wrong and also cannot be
       // corrected here, and the notice this warns about is computed from the
       // CACHED release, which can be up to an hour out of step with `latest`.
-      if (stampDisagreesWithPull(getTrackedVersion(BACKEND_VERSION_FILE), latest)) {
+      if (stampDisagreesWithPull(getTrackedVersion(backendVersionFile()), latest)) {
         console.error(chalk.yellow(stampFailureMessage()));
       }
     }
@@ -803,7 +805,7 @@ export function resolveStagedRoot(stagingDir: string, isWindows: boolean): strin
  * site, because that choice was the bug. The upgrade path resolved the staged
  * root to read the CLI entry point out of it, then handed `swapInStagedTree`
  * the *outer* staging directory — reproducing inside `cli\` exactly the nesting
- * it had just seen through. COMPASS_DIR and findCompassDist read `cli\compass`
+ * it had just seen through. compassDir() and findCompassDist read `cli\compass`
  * and nothing else, so `ix view` broke.
  *
  * Keeping the composition in one function is what makes it testable. A test
@@ -1032,11 +1034,11 @@ export function sweepUpgradeOrphans(ixHome: string, installDir: string): void {
   };
 
   recover(".cli-backup-", installDir, join("cli", "dist", "cli", "main.js"), "install");
-  // join(installDir, "compass"), not the module-level COMPASS_DIR: that constant
-  // is bound to the real IX_HOME, and this function takes ixHome as an argument
-  // precisely so it can be pointed elsewhere. Using the constant would make a
-  // test sweeping a temp directory rename its fixture into the developer's own
-  // ~/.ix/cli/compass. Recovered second because the restore above may be what
+  // join(installDir, "compass"), not compassDir(): that follows the process's
+  // IX_HOME, and this function takes ixHome as an argument precisely so it can
+  // be pointed elsewhere. Using compassDir() would make a test sweeping a temp
+  // directory rename its fixture into whatever IX_HOME is current -- the
+  // developer's own ~/.ix/cli/compass, outside the test setup. Recovered second because the restore above may be what
   // creates the parent directory it needs.
   recover(".compass-backup-", join(installDir, "compass"), "index.html", "compass");
 
@@ -1166,7 +1168,7 @@ function refreshLaunchers(installDir: string, installedRoot: string, isWindows: 
   const entryPath = join(installedRoot, "cli", "dist", "cli", "main.js");
 
   {
-    const cmdShim = join(IX_HOME, "bin", "ix.cmd");
+    const cmdShim = join(ixHome(), "bin", "ix.cmd");
     // Mirror install.ps1's *relative* form (`%~dp0..\cli\<dir>\ix.cmd`) rather
     // than embedding an absolute path. %~dp0 is expanded by cmd.exe at run
     // time, so the user's profile directory never has to survive a round trip
@@ -1307,7 +1309,7 @@ export async function checkForUpdate(): Promise<void> {
     const hasCompassUpdate = shouldOfferCompassUpgrade(cache.compassLatest);
     const hasBackendUpdate = backendUpdateAvailable(
       cache.backendLatest,
-      getTrackedVersion(BACKEND_VERSION_FILE),
+      getTrackedVersion(backendVersionFile()),
     );
     if (hasCliUpdate || hasCompassUpdate || hasBackendUpdate) {
       printUpdateNotice(current, cache.latest, !!hasCompassUpdate, !!hasBackendUpdate);
@@ -1337,7 +1339,7 @@ export async function checkForUpdate(): Promise<void> {
     const hasCompassUpdate = shouldOfferCompassUpgrade(compassLatest ?? undefined);
     const hasBackendUpdate = backendUpdateAvailable(
       backendLatest ?? undefined,
-      getTrackedVersion(BACKEND_VERSION_FILE),
+      getTrackedVersion(backendVersionFile()),
     );
     if (hasCliUpdate || hasCompassUpdate || hasBackendUpdate) {
       printUpdateNotice(current, latest, !!hasCompassUpdate, !!hasBackendUpdate);
@@ -1444,7 +1446,7 @@ export function registerUpgradeCommand(program: Command): void {
       // Cheap when there is nothing to do: one readdir of ~/.ix. The calls
       // inside prepareDownloadDir stay, because that is where the
       // sweep-before-scratch ordering is enforced; they simply find nothing.
-      if (!opts.check) sweepUpgradeOrphans(IX_HOME, join(IX_HOME, "cli"));
+      if (!opts.check) sweepUpgradeOrphans(ixHome(), join(ixHome(), "cli"));
 
       // ── CLI upgrade ──────────────────────────────────────────────────
       // What is still outstanding when the command ends. Only meaningful under
@@ -1479,7 +1481,7 @@ export function registerUpgradeCommand(program: Command): void {
             ? `ix-${latest}-${platform}.zip`
             : `ix-${latest}-${platform}.tar.gz`;
           const url = `https://github.com/${GITHUB_ORG}/${GITHUB_REPO}/releases/download/v${latest}/${archiveName}`;
-          const installDir = join(IX_HOME, "cli");
+          const installDir = join(ixHome(), "cli");
 
           // Under IX_HOME, not os.tmpdir(). #349 is a Windows install that died
           // because TEMP arrived in 8.3 short form (`C:\Users\WIN10\~1\...`) on
@@ -1492,7 +1494,7 @@ export function registerUpgradeCommand(program: Command): void {
           // IX_HOME comes from USERPROFILE in its long form. prepareDownloadDir
           // also reclaims anything an interrupted upgrade left behind, and must
           // do so before the scratch exists — see its docstring.
-          const tmpDirRaw = prepareDownloadDir(IX_HOME, installDir, ".cli-download-");
+          const tmpDirRaw = prepareDownloadDir(ixHome(), installDir, ".cli-download-");
           const tmpFile = join(tmpDirRaw, archiveName);
 
           console.log(`Downloading ix ${latest} for ${platform}...`);
@@ -1544,7 +1546,7 @@ export function registerUpgradeCommand(program: Command): void {
           // default case, because the extractor it called (`unzip`) is not
           // present on a stock Windows box. Staging lives under IX_HOME rather
           // than the temp dir so the swap is a same-filesystem rename.
-          const stagingDir = join(IX_HOME, `.cli-staging-${process.pid}`);
+          const stagingDir = join(ixHome(), `.cli-staging-${process.pid}`);
           const cleanupStaging = () => {
             rmQuiet(stagingDir);
             rmQuiet(tmpDirRaw);
@@ -1604,12 +1606,12 @@ export function registerUpgradeCommand(program: Command): void {
           // Move the old install aside rather than deleting it outright, so a
           // failure part-way through the swap can put it back instead of
           // leaving the user with nothing.
-          const backupDir = join(IX_HOME, `.cli-backup-${process.pid}`);
+          const backupDir = join(ixHome(), `.cli-backup-${process.pid}`);
           try {
             // installStagedTree owns the staged-root resolution. It swaps in the
             // *inner* directory on Windows, so the zip's ix-<version>-<platform>/
             // wrapper does not get reproduced inside cli\ — which is what put
-            // compass at cli\ix-<version>-<platform>\compass while COMPASS_DIR
+            // compass at cli\ix-<version>-<platform>\compass while compassDir()
             // and findCompassDist only ever read cli\compass. One shape on every
             // platform, and one function a test can hold to that.
             installStagedTree(installDir, stagingDir, backupDir, isWindows);
@@ -1661,7 +1663,7 @@ export function registerUpgradeCommand(program: Command): void {
       //   - dev symlink present    -> leave it (the dev rebuilds their own repo)
       //   - absent (OSS users)     -> do nothing, print nothing; Pro stays invisible
       if (!opts.check) {
-        const proDir = join(IX_HOME, "node_modules", "@ix", "pro");
+        const proDir = join(ixHome(), "node_modules", "@ix", "pro");
         let proPresent = false;
         let proIsLink = false;
         try {
@@ -1671,7 +1673,7 @@ export function registerUpgradeCommand(program: Command): void {
         if (proPresent && !proIsLink) {
           try {
             console.log("Refreshing @ix/pro...");
-            execFileSync("npm", ["update", "--prefix", IX_HOME, "@ix/pro"], {
+            execFileSync("npm", ["update", "--prefix", ixHome(), "@ix/pro"], {
               stdio: "ignore",
               timeout: 120000,
             });
@@ -1684,8 +1686,8 @@ export function registerUpgradeCommand(program: Command): void {
       }
 
       // ── Backend (memory-layer) upgrade ───────────────────────────────
-      const backendCurrent = getTrackedVersion(BACKEND_VERSION_FILE);
-      const backendComposeFile = join(IX_HOME, "backend", "docker-compose.yml");
+      const backendCurrent = getTrackedVersion(backendVersionFile());
+      const backendComposeFile = join(ixHome(), "backend", "docker-compose.yml");
       let backendImageChanged = false;
       const backendUpgradeNeeded = !!backendLatest && backendUpdateAvailable(backendLatest, backendCurrent);
       const backendUpgradeSkipped = !opts.check && !backendComposeAllowsUpgrade(backendComposeFile);
@@ -1728,7 +1730,7 @@ export function registerUpgradeCommand(program: Command): void {
             // the real cause.
             backendImageChanged = true;
             console.log(`[ok] Backend image updated to ${backendLatest}`);
-            if (!writeVersionStamp(BACKEND_VERSION_FILE, backendLatest)) {
+            if (!writeVersionStamp(backendVersionFile(), backendLatest)) {
               console.error(chalk.yellow(stampFailureMessage()));
             }
           } catch {
@@ -1826,14 +1828,14 @@ export function registerUpgradeCommand(program: Command): void {
           // CLI release, which is the one moment the user cannot wait for: the
           // backup may hold their only compass. Idempotent when the CLI branch
           // already ran, since it finds nothing left. (installDir is scoped to
-          // that branch; COMPASS_DIR's parent is the same directory.)
+          // that branch; compassDir()'s parent is the same directory.)
           //
           // Under IX_HOME for the same reason as the CLI download above (#349),
           // and swept before the scratch exists for the same reason too.
           const compassUrl = `https://github.com/${GITHUB_ORG}/${COMPASS_DIST_REPO}/releases/download/v${compassLatest}/compass-${compassLatest}.tar.gz`;
           const compassTmp = prepareDownloadDir(
-            IX_HOME,
-            dirname(COMPASS_DIR),
+            ixHome(),
+            dirname(compassDir()),
             ".compass-download-",
           );
           const compassTar = join(compassTmp, `compass-${compassLatest}.tar.gz`);
@@ -1844,8 +1846,8 @@ export function registerUpgradeCommand(program: Command): void {
           // Windows investigation at the wrong half — and `tar` ran with stdio
           // "ignore", so the only step that had actually failed was also the
           // one that printed nothing at all.
-          const compassStaging = join(IX_HOME, `.compass-staging-${process.pid}`);
-          const compassBackup = join(IX_HOME, `.compass-backup-${process.pid}`);
+          const compassStaging = join(ixHome(), `.compass-staging-${process.pid}`);
+          const compassBackup = join(ixHome(), `.compass-backup-${process.pid}`);
           let stage = "download";
           try {
             try {
@@ -1855,7 +1857,7 @@ export function registerUpgradeCommand(program: Command): void {
               throw err;
             }
             stage = "extract";
-            installCompassBundle(compassTar, COMPASS_DIR, compassStaging, compassBackup);
+            installCompassBundle(compassTar, compassDir(), compassStaging, compassBackup);
             // Its own stage: a failure here is a bundle that installed fine and
             // did not get stamped, which is not an extract problem and should
             // not be reported as one.
@@ -1865,7 +1867,7 @@ export function registerUpgradeCommand(program: Command): void {
             // here, and this number really is in the ix-compass-dist series —
             // which is the series the next run will compare it against
             // (parseCompassStamp, #376).
-            writeFileSync(COMPASS_VERSION_FILE, `${compassLatest}\n`);
+            writeFileSync(compassVersionFile(), `${compassLatest}\n`);
             console.log(`[ok] Compass upgraded to ${compassLatest}`);
           } catch (err) {
             failures.push(`compass ${stage}`);
@@ -1874,19 +1876,19 @@ export function registerUpgradeCommand(program: Command): void {
             // on what survived, and only the second is worth alarming about.
             // getInstalledCompassVersion reports "0.0.0" for a bundle with no
             // stamp beside it, so read the disk rather than quoting a version.
-            if (existsSync(join(COMPASS_DIR, "index.html"))) {
+            if (existsSync(join(compassDir(), "index.html"))) {
               console.error(`     ix view keeps working on the compass already installed (source: ${compassUrl})`);
             } else if (existsSync(compassBackup)) {
               // swapInStagedTree moved the old compass aside and then could not
               // put it back, so this is the only copy left. Name it rather than
               // letting the cleanup below take it, exactly as the CLI swap does.
               console.error(`     Your previous compass is still at: ${compassBackup}`);
-              console.error(`     Rename that directory to ${COMPASS_DIR} to restore ix view, or re-run ix upgrade.`);
+              console.error(`     Rename that directory to ${compassDir()} to restore ix view, or re-run ix upgrade.`);
             } else {
               console.error(`     ix view stays unavailable until this succeeds (source: ${compassUrl})`);
             }
           }
-          cleanupCompassSwap(COMPASS_DIR, compassStaging, compassBackup);
+          cleanupCompassSwap(compassDir(), compassStaging, compassBackup);
           // rmQuiet, not a bare rmSync — same reason as the CLI download above,
           // and this one runs on the *success* path. A throw here escapes the
           // action, so writeCache() below never runs and the "update available"

@@ -5,16 +5,17 @@ import { execFileSync, spawn } from "child_process";
 import { createInterface } from "readline";
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { dirname, join } from "path";
-import { homedir } from "os";
 import { fileURLToPath } from "url";
 import { stampBackendVersionAfterPull } from "./upgrade.js";
 import { clearLocalToken, ensureLocalToken } from "../config.js";
+import { ixHome } from "../ix-home.js";
 import { createClient } from "../../client/factory.js";
 import { backendComposeArgs, composeSupportsLocalToken, handSetLocalToken, parseArangoHealth } from "../backend-compose.js";
 
-const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
-const COMPOSE_DIR = join(IX_HOME, "backend");
-const LOCAL_COMPOSE = join(COMPOSE_DIR, "docker-compose.yml");
+// Functions, not consts, so they follow IX_HOME as it is when a command runs
+// rather than when this module was imported -- see `ixHome()`.
+const composeDir = (): string => join(ixHome(), "backend");
+const localCompose = (): string => join(composeDir(), "docker-compose.yml");
 const HEALTH_URL = "http://localhost:8090/v1/health";
 
 /**
@@ -48,13 +49,14 @@ function bundledComposeFile(): string | null {
  * the installed CLI.
  */
 function findComposeFile(): string | null {
-  if (existsSync(LOCAL_COMPOSE)) return LOCAL_COMPOSE;
+  const local = localCompose();
+  if (existsSync(local)) return local;
   const bundled = bundledComposeFile();
   if (!bundled) return null;
   try {
-    mkdirSync(COMPOSE_DIR, { recursive: true });
-    copyFileSync(bundled, LOCAL_COMPOSE);
-    return LOCAL_COMPOSE;
+    mkdirSync(composeDir(), { recursive: true });
+    copyFileSync(bundled, local);
+    return local;
   } catch {
     return null;
   }
@@ -73,7 +75,7 @@ function arangoHealth(composeFile: string | null): ReturnType<typeof parseArango
 }
 
 function reportMissingCompose(): void {
-  console.error(`[error] No backend compose file at ${LOCAL_COMPOSE}, and this CLI install does not ship one.`);
+  console.error(`[error] No backend compose file at ${localCompose()}, and this CLI install does not ship one.`);
   console.error("  Reinstall or run 'ix upgrade' to restore it.");
 }
 
@@ -200,10 +202,10 @@ export function registerDockerCommand(program: Command): void {
         let composeText = "";
         try { composeText = composeFile ? readFileSync(composeFile, "utf-8") : ""; } catch { /* reported below */ }
         if (!composeSupportsLocalToken(composeText)) {
-          console.error(`[error] ${composeFile ?? LOCAL_COMPOSE} does not pass IX_LOCAL_TOKEN to the backend.`);
+          console.error(`[error] ${composeFile ?? localCompose()} does not pass IX_LOCAL_TOKEN to the backend.`);
           console.error("  It predates token support, and 'ix upgrade' does not replace it. Move it aside and");
           console.error("  run this again: 'ix docker start' then writes the compose file this CLI ships.");
-          console.error(`    mv ${LOCAL_COMPOSE} ${LOCAL_COMPOSE}.old`);
+          console.error(`    mv ${localCompose()} ${localCompose()}.old`);
           process.exit(1);
         }
         // A token already set by hand in .env is adopted rather than replaced,
