@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -65,6 +65,7 @@ vi.mock("../commands/ingestion-loader.js", async (importOriginal) => {
           patch.ops.push({ type: "UpsertNode", id: uuidOf(`ghost-${parsed.filePath}`), kind: GHOST, name: `ghost ${parsed.filePath}`, attrs: {} });
           if (shared.on) patch.ops.push(sharedNode);
           patch.patchId = patchBuilder.sourcePatchIdCandidates(parsed.filePath, hash, workspaceId)[old.index + 1];
+          patch.source.extractor = previous;
           return patch;
         },
       };
@@ -271,6 +272,61 @@ describe.each(["head", "legacy"] as const)("an extractor change over the %s back
 
       await run(home, endpoint, { force: true, reconcileOnForce: true });
       expect(ghosts(backend)).toEqual([]);
+    } finally {
+      await backend.stop();
+    }
+  });
+
+  it("lands the deletes for a file an earlier run already committed at the new extractor, under a salted id, idempotently", async () => {
+    const backend = newBackend();
+    const home = join(root, `home-precommitted-${semantics}`);
+    const PY = FILES.filter((f) => f.endsWith(".py"));
+    restoreAll();
+    try {
+      const endpoint = await backend.start();
+      await mapAsOld(home, endpoint);
+      // A partial run at the new extractor commits the Python files under
+      // their deterministic ids without the deletes (here its sweep finds no
+      // stored patch), and keeps the old extractor in the baseline.
+      backend.hidePatchReads = true;
+      await run(home, endpoint, { lang: "python" } as Parameters<typeof run>[2]);
+      backend.hidePatchReads = false;
+      expect(ghosts(backend)).toHaveLength(FILES.length);
+      const deterministic = new Map(PY.map((f) => [f, backend.lastPatchIds.get(f)!]));
+
+      // The next full run is an extractor change, not a repair. Its deletes
+      // for the Python files must not go under the ids the backend holds.
+      const before = join(root, `home-precommitted-${semantics}-before`);
+      cpSync(home, before, { recursive: true });
+      process.env.IX_COMMIT_HTTP_MAX_FILES = "1";
+      try {
+        const log = await run(home, endpoint);
+        expect(log).toContain("[extractor changed]");
+        expect(ghosts(backend)).toEqual([]);
+        for (const f of PY) {
+          expect(backend.lastOps.get(f)?.some((op) => op["type"] === "DeleteNode" && op["id"] === uuidOf(`ghost-${f}`))).toBe(true);
+          expect(backend.lastPatchIds.get(f)).not.toBe(deterministic.get(f));
+        }
+        // A file no earlier run committed: its deletes go under its deterministic id.
+        const math = backend.lastPatchIds.get("web/math.ts");
+        expect(backend.lastOps.get("web/math.ts")?.some((op) => op["type"] === "DeleteNode")).toBe(true);
+        const graph = backend.graphSignature();
+
+        // The same extractor-change run again, from the same local state: the
+        // sweep finds nothing left to delete, no file is salted, and the graph
+        // does not change.
+        rmSync(home, { recursive: true, force: true });
+        cpSync(before, home, { recursive: true });
+        await run(home, endpoint);
+        for (const f of FILES) {
+          expect(backend.lastOps.get(f)?.filter((op) => op["type"] === "DeleteNode")).toEqual([]);
+        }
+        for (const f of PY) expect(backend.lastPatchIds.get(f)).toBe(deterministic.get(f));
+        expect(backend.lastPatchIds.get("web/math.ts")).toBe(math);
+        expect(backend.graphSignature()).toEqual(graph);
+      } finally {
+        delete process.env.IX_COMMIT_HTTP_MAX_FILES;
+      }
     } finally {
       await backend.stop();
     }

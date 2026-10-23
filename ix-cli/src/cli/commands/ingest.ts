@@ -649,6 +649,36 @@ function nodeSourceUri(node: GraphNode): unknown {
   return provenance?.sourceUri ?? provenance?.source_uri;
 }
 
+/**
+ * One node the file's patch upserts, read beside the orphan candidates to tell
+ * whether a patch for these very bytes and this extractor already landed: the
+ * file node if there is one, else the first other non-chunk node.
+ */
+function currentPatchProbe(patch: GraphPatchPayload): string | undefined {
+  let fallback: string | undefined;
+  for (const op of patch.ops) {
+    if (op.type !== 'UpsertNode' || typeof op['id'] !== 'string' || !NODE_ID_SHAPE.test(op['id'])) continue;
+    if (op['kind'] === 'chunk' || isExternalNode(op)) continue;
+    if (op['kind'] === 'file') return op['id'];
+    fallback ??= op['id'];
+  }
+  return fallback;
+}
+
+/**
+ * Whether the backend reports `node` last written by a patch for `patch`'s
+ * file, hash and extractor. The bulk route rewrites every node a patch
+ * upserts with that patch's provenance, so this holds once such a patch has
+ * landed -- under its deterministic id or a salted one.
+ */
+function writtenBy(node: GraphNode | undefined, patch: GraphPatchPayload): boolean {
+  if (!node || (node.deletedRev !== undefined && node.deletedRev !== null)) return false;
+  const provenance = node.provenance as { extractor?: unknown; sourceHash?: unknown; source_hash?: unknown } | undefined;
+  return nodeSourceUri(node) === patch.source.uri
+    && provenance?.extractor === patch.source.extractor
+    && (provenance?.sourceHash ?? provenance?.source_hash) === patch.source.sourceHash;
+}
+
 function isUnsupportedRouteError(error: unknown): boolean {
   return /^(?:Error:\s*)?(?:404|405|501):/.test(String(error));
 }
@@ -675,6 +705,15 @@ export async function sweepOrphanNodes(
      * failed. Every other file was swept (or had nothing to sweep).
      */
     onUnswept?: (file: OrphanSweepFile) => void;
+    /**
+     * Told of each file given orphans whose current patch the backend may
+     * already hold: one node of it (`currentPatchProbe`, read in the same
+     * batched node read) was last written by this file at this hash and
+     * extractor, or could not be read. A patch id the backend already holds
+     * is answered `Idempotent` and its deletes dropped, so such a file's
+     * deletes need a salted id.
+     */
+    onWrittenBefore?: (file: OrphanSweepFile) => void;
     now?: () => number;
   },
 ): Promise<string[][]> {
@@ -725,6 +764,15 @@ export async function sweepOrphanNodes(
 
     const unique = [...new Set(candidates.flatMap(c => c ?? []))];
     if (unique.length === 0) return result;
+    const probes = files.map((file, i) =>
+      opts.onWrittenBefore && candidates[i] && candidates[i]!.length > 0 ? currentPatchProbe(file.patch) : undefined);
+    const seen = new Set(unique);
+    for (const probe of probes) {
+      if (probe !== undefined && !seen.has(probe)) {
+        seen.add(probe);
+        unique.push(probe);
+      }
+    }
     const live = new Map<string, GraphNode>();
     const unread = new Set<string>();
     let unreadReason = '';
@@ -769,6 +817,10 @@ export async function sweepOrphanNodes(
         if (opts.mapMode && node.kind === 'chunk') return false;
         return nodeSourceUri(node) === file.patch.source.uri;
       });
+      const probe = probes[i];
+      if (result[i]!.length > 0 && probe !== undefined && (unread.has(probe) || writtenBy(live.get(probe), file.patch))) {
+        opts.onWrittenBefore?.(file);
+      }
     });
     return result;
   } finally {
@@ -4012,6 +4064,7 @@ export async function ingestFiles(
           for (const op of b.patch.ops) if (op.type === 'UpsertNode' && typeof op['id'] === 'string') batchUpserts.add(op['id']);
         }
         const unswept = new Set<number>();
+        const writtenBefore = new Set<number>();
         try {
           const sweepFiles = sweepable.map(b => ({ patch: b.patch, previousPatchIds: b.previousPatchIds }));
           const orphans = await sweepOrphanNodes(
@@ -4023,17 +4076,22 @@ export async function ingestFiles(
               batchUpserts,
               onSkip: (file, reason) => noteOrphanSkip(file.patch.source.uri, reason),
               onUnswept: file => unswept.add(sweepFiles.indexOf(file)),
+              onWrittenBefore: file => writtenBefore.add(sweepFiles.indexOf(file)),
             },
           );
           sweepable.forEach((b, i) => {
             const ids = orphans[i]!;
             if (ids.length === 0) return;
             b.patch = { ...b.patch, ops: [...ids.map(id => ({ type: 'DeleteNode', id })), ...b.patch.ops] };
-            if (orphanRepair) {
-              // A repair runs at the current extractor, whose patch id the
-              // backend already holds: sent under it the deletes would be
-              // answered Idempotent and dropped, so they go under an id
-              // salted with them.
+            if (orphanRepair || writtenBefore.has(i)) {
+              // The backend already holds this file's patch id: a repair runs
+              // at the current extractor, and an extractor-change run may
+              // follow an earlier one (a partial run, a run cut short) that
+              // committed the file without the deletes. Sent under that id
+              // the deletes would be answered Idempotent and dropped, so they
+              // go under an id salted with them. Every other patch keeps its
+              // deterministic id, the one a later edit, deletion or sweep
+              // reads back.
               const salt = `orphans-${sha256(Buffer.from([...ids].sort().join('\n'))).slice(0, 12)}`;
               const salted = buildPatchFn!(b.p, b.hash, fileWorkspaceId(b.p.filePath), edgesByFile.get(b.p.filePath) ?? emptyEdges, undefined, fileMultiRepo(b.p.filePath), salt);
               b.patch = { ...b.patch, patchId: salted.patchId };

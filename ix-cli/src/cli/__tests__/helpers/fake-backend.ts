@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 
 type SentPatch = {
   patchId?: string;
-  source?: { uri?: string; sourceHash?: string; workspaceId?: string };
+  source?: { uri?: string; sourceHash?: string; workspaceId?: string; extractor?: string };
   ops?: Array<Record<string, unknown>>;
 };
 
@@ -175,7 +175,7 @@ export class FakeBackend {
    * report none, as a pre-#157 backend does. `null` reports none in any mode.
    */
   releaseVersion: string | null | undefined = undefined;
-  private readonly nodes = new Map<string, { kind: unknown; name: unknown; attrs?: unknown; uri?: string; live: boolean }>();
+  private readonly nodes = new Map<string, { kind: unknown; name: unknown; attrs?: unknown; uri?: string; hash?: string; extractor?: string; live: boolean }>();
   private readonly edges = new Map<string, {
     src: unknown; dst: unknown; predicate: unknown; workspaceId: string; uri: string; live: boolean;
   }>();
@@ -251,7 +251,10 @@ export class FakeBackend {
     if (!deletesApplied) this.applyDeletes(patch);
     for (const op of patch.ops ?? []) {
       const id = String(op.id);
-      if (op.type === "UpsertNode") this.nodes.set(id, { kind: op.kind, name: op.name, attrs: op.attrs, uri, live: true });
+      if (op.type === "UpsertNode") {
+        // As the bulk route does, every upsert takes the patch's provenance.
+        this.nodes.set(id, { kind: op.kind, name: op.name, attrs: op.attrs, uri, hash: patch.source?.sourceHash, extractor: patch.source?.extractor, live: true });
+      }
       else if (op.type === "UpsertEdge") {
         this.edges.set(id, { src: op.src, dst: op.dst, predicate: op.predicate, workspaceId, uri, live: true });
       }
@@ -585,7 +588,7 @@ export class FakeBackend {
       const nodes = ids.flatMap((id) => {
         const n = this.nodes.get(id);
         return n?.live
-          ? [{ id, kind: n.kind, name: n.name, attrs: n.attrs ?? {}, provenance: { sourceUri: n.uri ?? "" } }]
+          ? [{ id, kind: n.kind, name: n.name, attrs: n.attrs ?? {}, provenance: { sourceUri: n.uri ?? "", sourceHash: n.hash, extractor: n.extractor } }]
           : [];
       });
       const found = new Set(nodes.map((n) => n.id));
