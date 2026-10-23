@@ -3437,7 +3437,8 @@ export async function ingestFiles(
                   {
                     maxRetries: COMMIT_CONFLICT_RETRIES,
                     // 502/503/504/429 too, honouring Retry-After up to the
-                    // budget (5 s per bulk by default). A 413 and a 409 are
+                    // budget (5 s per bulk by default, requests included; a
+                    // slow bulk is not sent again). A 413 and a 409 are
                     // thrown at once, to the payload split and the
                     // partial-commit handling below.
                     transient: COMMIT_TRANSIENT_RETRY_MS > 0,

@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { isTransientCommitStatus, retryAfterMs, retryCommit } from "../commit-retry.js";
+import { GATEWAY_TIMEOUT_MAX_RETRIES, isTransientCommitStatus, retryAfterMs, retryCommit, TRANSIENT_RETRY_BUDGET_MS } from "../commit-retry.js";
 import { httpError } from "../../client/api.js";
 
 /** An error shaped the way `httpError` builds one for a commit route. */
@@ -246,5 +246,107 @@ describe("retryCommit", () => {
     await vi.advanceTimersByTimeAsync(1000);
     await result;
     expect(onRetry).toHaveBeenCalledWith(expect.objectContaining({ attempt: 1, delayMs: 1000, kind: "transient" }));
+  });
+});
+
+// F1 of the #845 review: the budget used to bound only the sleeps, so a 504 on
+// a bulk that took minutes could be sent three more times. It now bounds the
+// requests too, and a 504 gets at most one re-send.
+describe("retryCommit: the transient budget bounds total time", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  /** `fn` whose every attempt takes `ms` on the (fake) clock, then fails with `failures` in turn, then answers `answer`. */
+  function slow<T>(ms: number, failures: unknown[], answer: T): { fn: () => Promise<T>; calls: () => number } {
+    let n = 0;
+    return {
+      fn: () => new Promise<T>((resolve, reject) => {
+        const failure = failures[n++];
+        setTimeout(() => (failure !== undefined ? reject(failure) : resolve(answer)), ms);
+      }),
+      calls: () => n,
+    };
+  }
+
+  /** Run `retryCommit` to completion on the fake clock; the outcome and the time it took. */
+  async function run<T>(fn: () => Promise<T>, budget = TRANSIENT_RETRY_BUDGET_MS) {
+    const start = Date.now();
+    const settled = retryCommit(fn, { maxRetries: 6, transient: true, transientBudgetMs: budget, random: () => 0 })
+      .then(value => ({ value, error: undefined as unknown }), (error: unknown) => ({ value: undefined, error }))
+      .then(outcome => ({ ...outcome, elapsed: Date.now() - start }));
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    return settled;
+  }
+
+  it("never re-sends a slow 504 bulk: one request, then straight to the caller's fallback", async () => {
+    // A proxy timing out a five-minute bulk. The backend is likely still applying it.
+    const { fn, calls } = slow(300_000, [statusError(504), statusError(504), statusError(504), statusError(504)], "ok");
+    const outcome = await run(fn);
+    expect(String(outcome.error)).toMatch(/^Error: 504:/);
+    expect(calls(), "no full re-send of a slow bulk").toBe(1);
+    expect(outcome.elapsed).toBe(300_000);
+  });
+
+  it("re-sends a fast 504 at most once, with budget left for more", async () => {
+    expect(GATEWAY_TIMEOUT_MAX_RETRIES).toBe(1);
+    const { fn, calls } = slow(10, [statusError(504), statusError(504), statusError(504)], "ok");
+    const outcome = await run(fn);
+    expect(String(outcome.error)).toMatch(/^Error: 504:/);
+    expect(calls()).toBe(2);
+  });
+
+  it("a 503 after a 504 is still bounded by the one-504 rule only for 504s", async () => {
+    const { fn, calls } = slow(10, [statusError(504), statusError(503)], "ok");
+    const outcome = await run(fn);
+    expect(outcome.value).toBe("ok");
+    expect(calls()).toBe(3);
+  });
+
+  it("a 504 the backend applied comes back Idempotent on the re-send, and that is the answer", async () => {
+    const { fn, calls } = slow(10, [statusError(504)], { rev: 7, status: "Idempotent" });
+    const outcome = await run(fn);
+    expect(outcome.value).toEqual({ rev: 7, status: "Idempotent" });
+    expect(calls()).toBe(2);
+  });
+
+  it("a 504 the backend partly applied comes back 409 on the re-send, which is thrown to the partial-commit handling", async () => {
+    const partial = httpError(409, JSON.stringify({
+      error: "conflict",
+      message: "bulk request is partially committed (1/2 patch IDs)",
+      committed_patch_ids: ["a"],
+    }), new Headers());
+    const { fn, calls } = slow(10, [statusError(504), partial], "ok");
+    const outcome = await run(fn);
+    expect(outcome.error).toBe(partial);
+    expect(calls()).toBe(2);
+  });
+
+  it("charges each request to the budget: two 1.5 s attempts and a wait, not four", async () => {
+    const { fn, calls } = slow(1_500, Array(10).fill(statusError(503)), "ok");
+    const outcome = await run(fn);
+    expect(String(outcome.error)).toMatch(/^Error: 503:/);
+    // 1.5 s + 0.5 s wait + 1.5 s = 3.5 s; a third attempt would end at 6.5 s.
+    expect(calls()).toBe(2);
+    expect(outcome.elapsed).toBe(3_500);
+  });
+
+  it.each([0, 50, 400, 900, 1_500, 2_400, 3_000, 4_999, 5_000, 20_000, 300_000])(
+    "never runs past the budget once a retry is involved (attempts of %i ms)",
+    async attemptMs => {
+      const { fn, calls } = slow(attemptMs, Array(10).fill(statusError(503)), "ok");
+      const outcome = await run(fn);
+      expect(outcome.error).toBeDefined();
+      // A single attempt is whatever the request takes; anything retried fits the budget.
+      if (calls() > 1) expect(outcome.elapsed).toBeLessThanOrEqual(TRANSIENT_RETRY_BUDGET_MS);
+      else expect(outcome.elapsed).toBe(attemptMs);
+      expect(calls()).toBeLessThanOrEqual(4);
+    },
+  );
+
+  it("a request longer than the whole budget is never re-sent, even for a 503", async () => {
+    const { fn, calls } = slow(TRANSIENT_RETRY_BUDGET_MS, [statusError(503, "0")], "ok");
+    const outcome = await run(fn);
+    expect(outcome.error).toBeDefined();
+    expect(calls()).toBe(1);
   });
 });

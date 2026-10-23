@@ -18,6 +18,17 @@
 //     runners give `ix map` about 30 s in all, so a long wait here would cost
 //     more than the retry can win back.
 //
+// The budget bounds TOTAL time, not just the sleeps: every attempt's own
+// duration is charged to it, and a re-send is made only when the time spent so
+// far, the wait, and one more attempt as long as the one that just failed all
+// fit. A bulk that took longer than the budget to fail is therefore never sent
+// again here; it goes straight to the caller's per-file fallback. A 504 gets at
+// most ONE re-send on top of that: a gateway timeout means the request was
+// slow, and the backend may still be applying it. Re-sending is safe either
+// way -- the backend keys every patch by its id, so a bulk it already applied
+// answers `Idempotent`, and one it partly applied answers a 409 naming the ids
+// that landed -- but it is not free, so it is kept rare.
+//
 // Everything else is thrown at once. In particular 413 (the payload split owns
 // that), 409 (the partial-commit and plan-mismatch handling owns that) and 500
 // (a backend that answered and refused; the cutoff owns that). A 504 that the
@@ -147,10 +158,12 @@ async function giveUpSafely(
   }
 }
 
-/** Total waiting one call may spend on transient statuses (the default of `IX_COMMIT_TRANSIENT_RETRY_MS`). */
+/** Total time one call may spend on transient statuses, attempts and waits together (the default of `IX_COMMIT_TRANSIENT_RETRY_MS`). */
 export const TRANSIENT_RETRY_BUDGET_MS = 5_000;
 /** Most transient retries one call makes, whatever the budget: a `Retry-After: 0` must not loop. */
 export const TRANSIENT_MAX_RETRIES = 3;
+/** Most re-sends after a 504: the backend may still be working on the first one. */
+export const GATEWAY_TIMEOUT_MAX_RETRIES = 1;
 /** First backoff for a transient status without `Retry-After`; doubles each time. */
 const TRANSIENT_BASE_DELAY_MS = 500;
 
@@ -159,7 +172,11 @@ export interface RetryCommitOptions {
   maxRetries: number;
   /** Retry 502/503/504/429 too. Only the bulk commit sites set this. */
   transient: boolean;
-  /** Total waiting allowed for transient statuses; a longer wait is cut to what is left. 0 means no transient retries. */
+  /**
+   * Total time allowed for transient retries: every attempt's duration plus the
+   * waits. A re-send is made only if one more attempt as long as the last one
+   * still fits; a longer wait is cut to what is left. 0 means no transient retries.
+   */
   transientBudgetMs?: number;
   /** The run's deadline. A wait it interrupts ends the loop with the last error. */
   signal?: AbortSignal;
@@ -198,13 +215,19 @@ export async function retryCommit<T>(fn: () => Promise<T>, options: RetryCommitO
     now = Date.now,
     onRetry,
   } = options;
-  let transientWaitedMs = 0;
+  // Time charged to the transient budget: every attempt's own duration and
+  // every transient wait.
+  let transientSpentMs = 0;
   let transientRetries = 0;
+  let gatewayTimeoutRetries = 0;
   let conflictRetries = 0;
   for (;;) {
+    const attemptStart = now();
     try {
       return await fn();
     } catch (err) {
+      const attemptMs = Math.max(0, now() - attemptStart);
+      transientSpentMs += attemptMs;
       if (signal?.aborted) throw err;
       let delay: number;
       let kind: "conflict" | "transient";
@@ -216,8 +239,12 @@ export async function retryCommit<T>(fn: () => Promise<T>, options: RetryCommitO
         conflictRetries++;
         kind = "conflict";
       } else if (transient && isTransientCommitStatus(err)) {
-        const remaining = transientBudgetMs - transientWaitedMs;
+        // What is left once the re-send itself is paid for, estimated as
+        // long as the attempt that just failed. Nothing left: no re-send.
+        const remaining = transientBudgetMs - transientSpentMs - attemptMs;
         if (transientRetries >= TRANSIENT_MAX_RETRIES || remaining <= 0) throw err;
+        const gatewayTimeout = statusOf(err) === 504;
+        if (gatewayTimeout && gatewayTimeoutRetries >= GATEWAY_TIMEOUT_MAX_RETRIES) throw err;
         if (shouldGiveUp && (await giveUpSafely(shouldGiveUp, err))) throw err;
         const asked = retryAfterMs(retryAfterOf(err), now());
         // Jittered by up to a quarter, so the chunks of one run that all met
@@ -227,8 +254,9 @@ export async function retryCommit<T>(fn: () => Promise<T>, options: RetryCommitO
           remaining,
           asked ?? TRANSIENT_BASE_DELAY_MS * 2 ** transientRetries * (1 + random() * 0.25),
         );
-        transientWaitedMs += delay;
+        transientSpentMs += delay;
         transientRetries++;
+        if (gatewayTimeout) gatewayTimeoutRetries++;
         kind = "transient";
       } else {
         throw err;

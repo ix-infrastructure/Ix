@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   commitBulkWithPayloadSplit,
   commitFailureIndictsBackend,
@@ -672,5 +672,41 @@ describe('commitBulkWithPayloadSplit under retryCommit', () => {
     expect(committed).toEqual([1, 2, 3, 4, 5]);
     expect(sleep, 'a 413 is never waited on').not.toHaveBeenCalled();
     expect(commitIndividually).not.toHaveBeenCalled();
+  });
+});
+
+// F1 of the #845 review: a 504 on a long bulk used to buy up to three more
+// full re-sends before the per-file fallback. Now the bulk is sent once, and
+// the fallback gets the group at once.
+describe('a slow 504 bulk under retryCommit', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('is sent once and falls back to the per-file path, without three full re-sends', async () => {
+    const bulkCalls: number[][] = [];
+    const commitIndividually = vi.fn(async (_items: number[], _err?: unknown) => {});
+    const start = Date.now();
+
+    const done = commitBulkWithPayloadSplit([1, 2, 3], {
+      commitBulk: batch => retryCommit(
+        () => new Promise<number>((_resolve, reject) => {
+          bulkCalls.push([...batch]);
+          // The gateway gives up after two minutes; the backend may still be at it.
+          setTimeout(() => reject(httpError(504, '<html>Gateway Timeout</html>', new Headers())), 120_000);
+        }),
+        { maxRetries: 6, transient: true },
+      ),
+      onBulkCommitted: vi.fn(),
+      commitIndividually,
+    }).then(() => Date.now() - start);
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    const elapsed = await done;
+
+    expect(bulkCalls).toEqual([[1, 2, 3]]);
+    expect(elapsed, 'one request, no waits').toBe(120_000);
+    expect(commitIndividually).toHaveBeenCalledOnce();
+    const [items, err] = commitIndividually.mock.calls[0];
+    expect(items).toEqual([1, 2, 3]);
+    expect(String(err)).toMatch(/^Error: 504:/);
   });
 });
