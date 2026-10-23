@@ -7,13 +7,13 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { nextReads, renderBundle, renderedNextReads } from "../commands/context.js";
-import { readsOneSymbol, symbolReadChecker } from "../commands/read.js";
+import { readsOneSymbol, symbolReadChecker } from "../symbol-read-check.js";
 
 // renderBundle vets each symbol read against the file on disk (symbolReadChecker).
 // The bundles here name files that do not exist, so the check is stubbed for
 // the render tests; the real one is tested against a temp tree at the end.
-vi.mock("../commands/read.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../commands/read.js")>()),
+vi.mock("../symbol-read-check.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../symbol-read-check.js")>()),
   symbolReadChecker: vi.fn(() => () => true),
 }));
 
@@ -336,7 +336,7 @@ describe("readsOneSymbol asks the file, not the bundle", () => {
   beforeEach(async () => {
     root = mkdtempSync(join(tmpdir(), "ix-next-reads-"));
     mkdirSync(join(root, "src"));
-    real = (await vi.importActual<typeof import("../commands/read.js")>("../commands/read.js")).readsOneSymbol;
+    real = (await vi.importActual<typeof import("../symbol-read-check.js")>("../symbol-read-check.js")).readsOneSymbol;
   });
 
   afterEach(() => rmSync(root, { recursive: true, force: true }));
@@ -422,7 +422,7 @@ describe("readsOneSymbol asks the file, not the bundle", () => {
   });
 
   it("walks the workspace once for every row it vets, and answers repeats from memory", async () => {
-    const actual = await vi.importActual<typeof import("../commands/read.js")>("../commands/read.js");
+    const actual = await vi.importActual<typeof import("../symbol-read-check.js")>("../symbol-read-check.js");
     for (const n of ["a", "b", "c"]) {
       writeFileSync(join(root, `src/${n}.ts`), `export function run_${n}(s: string) {\n  return s;\n}\n`);
     }
@@ -444,7 +444,7 @@ describe("readsOneSymbol asks the file, not the bundle", () => {
 
 describe("sameFsPath", () => {
   it("matches a Windows path whatever its drive-letter case and separators", async () => {
-    const actual = await vi.importActual<typeof import("../commands/read.js")>("../commands/read.js");
+    const actual = await vi.importActual<typeof import("../symbol-read-check.js")>("../symbol-read-check.js");
     expect(actual.sameFsPath("C:\\Repo\\src\\x.ts", "c:/repo/src/X.ts", "win32")).toBe(true);
     expect(actual.sameFsPath("C:\\Repo\\src\\x.ts", "C:\\Repo\\src\\y.ts", "win32")).toBe(false);
     expect(actual.sameFsPath("/repo/src/x.ts", "/repo/src/../src/x.ts", "linux")).toBe(true);
