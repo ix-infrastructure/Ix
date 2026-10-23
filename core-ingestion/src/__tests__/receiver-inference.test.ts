@@ -560,6 +560,13 @@ describe('receiver summary signature', () => {
       .not.toBe(sig('scala', 'import p2.Parent\nclass Child extends Parent {}'));
   });
 
+  it.each([
+    ['scala', 'import other.Target\nobject Mk { def apply(): Target = new Target() }', 'import third.Target\nobject Mk { def apply(): Target = new Target() }'],
+    ['go', 'package app\nimport m "example.com/x/other"\nfunc NewThing() m.Target { return m.Target{} }', 'package app\nimport m "example.com/x/third"\nfunc NewThing() m.Target { return m.Target{} }'],
+  ])('changes when only a %s factory file re-imports its return type', (ext, before, after) => {
+    expect(sig(ext, before)).not.toBe(sig(ext, after));
+  });
+
   it('stays the same for a file without receiver facts when its imports change', () => {
     expect(sig('ts', "import { a } from './a'; export function f() {}"))
       .toBe(sig('ts', "import { a } from './b'; export function f() {}"));

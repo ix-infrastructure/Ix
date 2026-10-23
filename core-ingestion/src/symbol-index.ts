@@ -40,7 +40,7 @@ export interface FileSummary {
 }
 
 /** The part of a summary other files depend on, hashed. */
-export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNames' | 'phpTypes' | 'receiverFactories' | 'receiverHeritage' | 'receiverPackage'> & Partial<Pick<FileSummary, 'imports'>>): string {
+export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNames' | 'phpTypes' | 'receiverFactories' | 'receiverHeritage' | 'receiverPackage'> & Partial<Pick<FileSummary, 'imports' | 'importAliases'>>): string {
   const parts: unknown[] = [
     [...s.qkeys].map(([n, q]) => `${n}\0${q}`).sort(),
     [...(s.exportPublicNames ?? [])].map(([p, l]) => `${p}\0${l}`).sort(),
@@ -49,7 +49,8 @@ export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNam
   // Receiver facts only when present, so other files keep their signature.
   if (s.receiverFactories?.length || s.receiverHeritage?.length || s.receiverPackage) {
     parts.push(
-      [...(s.receiverFactories ?? [])].map(([f, t]) => `${f}\0${t}`).sort(),
+      // A factory's return type resolves through this file's imports (and Go aliases).
+      [...(s.receiverFactories ?? [])].map(([f, t]) => `${f}\0${t}\0${heritageImportsKey(s.imports, s.importAliases)}`).sort(),
       // A superclass resolves through this file's imports.
       [...(s.receiverHeritage ?? [])].map(([f, t]) => `${f}\0${t}\0${heritageImportsKey(s.imports)}`).sort(),
       s.receiverPackage ?? '',
@@ -60,9 +61,12 @@ export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNam
 }
 
 /**
- * The imports a Scala superclass resolves through, as one key. Any import can
- * pick the parent (wildcards included), so all of them count.
+ * The imports a Scala superclass or a factory's return type resolves through,
+ * as one key. Any import can pick the type (wildcards included), so all of
+ * them count, and so do Go import aliases when given.
  */
-export function heritageImportsKey(imports: Array<{ dstName: string }> | undefined): string {
-  return [...new Set((imports ?? []).map(i => i.dstName))].sort().join('\0');
+export function heritageImportsKey(imports: Array<{ dstName: string }> | undefined, aliases?: Record<string, string>): string {
+  const key = [...new Set((imports ?? []).map(i => i.dstName))].sort().join('\0');
+  const named = Object.entries(aliases ?? {}).map(([a, m]) => `${a}=${m}`).sort().join('\0');
+  return named ? `${key}\0\0${named}` : key;
 }

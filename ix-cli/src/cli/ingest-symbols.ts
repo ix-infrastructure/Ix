@@ -313,6 +313,7 @@ type SummaryFields = {
   receiverFactories?: Array<[string, string]>;
   receiverHeritage?: Array<[string, string]>;
   receiverPackage?: string;
+  importAliases?: Record<string, string>;
   refs?: string[];
   imports?: Array<{ dstName?: string; importRaw?: string }>;
   sig?: string;
@@ -342,9 +343,11 @@ function bindings(summary: StoredSummary | undefined): Map<string, string[]> {
   for (const [name, qkey] of s.qkeys ?? []) out.set(`q\0${s.receiverPackage ?? ''}\0${name}\0${qkey}`, [name, qkey]);
   for (const [publicName, local] of s.exportPublicNames ?? []) out.set(`e\0${publicName}\0${local}`, [publicName]);
   for (const [fqcn, typeName] of s.phpTypes ?? []) out.set(`p\0${fqcn}\0${typeName}`, [fqcn, typeName]);
-  for (const [name, type] of s.receiverFactories ?? []) out.set(`f\0${name}\0${type}`, [name]);
-  // A superclass resolves through this file's imports, so they are part of the key.
+  // A superclass and a factory's return type resolve through this file's
+  // imports (and Go import aliases), so they are part of the key.
   const heritageImports = [...new Set((s.imports ?? []).map(i => i.dstName ?? ""))].sort().join("\0");
+  const aliases = Object.entries(s.importAliases ?? {}).map(([a, m]) => `${a}=${m}`).sort().join("\0");
+  for (const [name, type] of s.receiverFactories ?? []) out.set(`f\0${name}\0${type}\0${heritageImports}\0\0${aliases}`, [name]);
   for (const [name, base] of s.receiverHeritage ?? []) out.set(`h\0${name}\0${base}\0${heritageImports}`, [name]);
   return out;
 }
@@ -415,17 +418,23 @@ export function findDependents(
   if (names.size === 0 && stems.size === 0) return [];
   // A changed superclass changes the members visible through every subclass,
   // even when those subclass files were not edited (or were already sent).
+  // Likewise a changed type changes what every factory returning it gives a
+  // caller's receiver (a Scala `apply`, a Go `NewX`), so the factory counts too.
   const inheritors = new Map<string, Set<string>>();
+  const dependsOn = (type: string, name: string) => {
+    for (const key of new Set([type, type.split(".").pop()!])) {
+      const children = inheritors.get(key) ?? new Set<string>();
+      children.add(name);
+      inheritors.set(key, children);
+    }
+  };
   for (const entry of table.values()) {
     const s = entry.summary as SummaryFields;
     for (const [child, parent] of s.receiverHeritage ?? []) {
-      for (const key of new Set([parent, parent.split(".").pop()!])) {
-        const children = inheritors.get(key) ?? new Set<string>();
-        children.add(child);
-        if (s.receiverPackage) children.add(`${s.receiverPackage}.${child}`);
-        inheritors.set(key, children);
-      }
+      dependsOn(parent, child);
+      if (s.receiverPackage) dependsOn(parent, `${s.receiverPackage}.${child}`);
     }
+    for (const [factory, type] of s.receiverFactories ?? []) if (type) dependsOn(type, factory);
   }
   const affectedNames = new Set(names);
   const pending = [...affectedNames];
