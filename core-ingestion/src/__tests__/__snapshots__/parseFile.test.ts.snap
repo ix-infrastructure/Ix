@@ -143,6 +143,27 @@ exports[`parseFile snapshots > snapshots Identifiers.scala 1`] = `
   "importAliases": undefined,
   "importBindings": undefined,
   "language": "scala",
+  "receiverFactories": [
+    [
+      "WorkspaceId",
+      "WorkspaceId",
+    ],
+    [
+      "NodeId",
+      "NodeId",
+    ],
+  ],
+  "receiverHeritage": [
+    [
+      "WorkspaceId",
+      "AnyVal",
+    ],
+    [
+      "NodeId",
+      "AnyVal",
+    ],
+  ],
+  "receiverPackage": "ix.sample.model",
   "relationships": [
     {
       "dstName": "WorkspaceId",
@@ -418,6 +439,31 @@ exports[`parseFile snapshots > snapshots Node.scala 1`] = `
   "importAliases": undefined,
   "importBindings": undefined,
   "language": "scala",
+  "receiverFactories": [
+    [
+      "Node",
+      "Node",
+    ],
+  ],
+  "receiverHeritage": [
+    [
+      "Module",
+      "NodeKind",
+    ],
+    [
+      "File",
+      "NodeKind",
+    ],
+    [
+      "Class",
+      "NodeKind",
+    ],
+    [
+      "Function",
+      "NodeKind",
+    ],
+  ],
+  "receiverPackage": "ix.sample.model",
   "relationships": [
     {
       "dstName": "NodeKind",

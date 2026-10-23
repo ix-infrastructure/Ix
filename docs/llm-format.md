@@ -655,6 +655,61 @@ Two deliberate exceptions remain:
   backend, a slow stats read). `stale=false` says no file changed since the
   last ingest; it does not vouch for the graph.
 
+  When a whole-root `ix verify` (no paths) has run for this workspace, the
+  `status` record ends with what it found: `verified_at` (ISO),
+  `verified_files`, `verified_diverged`, `verified_outdated` and
+  `verified_graph` (`clean`, `stale`, `diverged` or `unverified`; a stale or
+  unverified record's `verified_diverged=0` is not a pass). Only that
+  command saves the record: `ix verify <path>` and `ix doctor` do not.
+  `verified_outdated=true` means the workspace was ingested after that verify
+  ran, so its counts describe an earlier graph; run `ix verify` again rather
+  than act on them. `status` only reads the record; it never runs a verify.
+  With no record the five fields are absent and the line is unchanged.
+
+`verify` answers whether the graph's nodes match the source they came from. One
+`verify` record, then one `file` record per file that is not clean:
+
+```
+verify graph=diverged files=20 clean=18 stale=1 diverged=1 unverified=0 fix="ix reset --workspace --yes --ingest"
+file path=src/a.ts state=stale reason=changed_since_ingest missing=0 extra=1 changed=2
+file path=src/b.ts state=diverged missing=3 extra=0 changed=0
+```
+
+`graph` is the first of these that holds: `diverged` when any file diverged;
+`stale` (fix `ix map`) when any file is stale, even beside clean ones, since a
+stale file's nodes could not be checked against its source; `clean` when at
+least one file was judged clean; otherwise `unverified` (with a `reason`: `not_mapped`,
+`extractor_changed`, `parser_unavailable`, `no_files` when nothing could be
+sampled, `no_file_verified` when nothing sampled could be judged, `timed_out`
+when `ix doctor`'s time budget ran out before any file was judged).
+
+A file is judged by its nodes and by the backend's source hash for it, which
+is the hash of the file's newest stored patch:
+
+- `diverged`: the nodes do not match a re-parse, and the graph claims these
+  bytes: the stored hash equals the disk hash (nodes left behind or lost), or
+  the last map listed the file as not applied (`not_applied` in `status`, F-01:
+  a revert the backend answered `Idempotent`, so the newest patch is still the
+  edit in between) and it has not changed since (`reason=replayed_not_applied`).
+- `stale` (`reason=changed_since_ingest`): the stored hash is not the disk hash.
+  Usually an edit since the last map, fixed by `ix map`. An F-01 revert that the
+  last map did not record as not applied looks exactly like this, so verify
+  reports it as stale, not diverged. `missing_on_disk` is a deleted file the
+  graph still has; `not_file` is a path the graph has that is now a
+  directory or another non-regular file.
+- `unverified`, with a `reason`: `not_in_graph` (no stored hash and no nodes:
+  ingest skips some files), `parse_timed_out` (the last map's parse ran out of
+  budget), `too_large` (over ingest's 1 MB limit), `missing_on_disk` (a named
+  path that does not exist), `not_file` (a named path that is a directory or
+  another non-regular file), `unsupported_language`,
+  `no_parse`, `list_failed`, `truncated`, `hash_unknown` (the hash lookup
+  failed and the nodes differ), `no_comparison`.
+
+A stale file does not make the graph diverged, and does not let it be clean.
+Unverified files beside clean ones do not stop a `clean` verdict; they are
+counted. Nodes only: edges are not compared. The command exits 0 for every
+verdict.
+
 Still routing to `text`: `diff --content` (verbatim hunks) and `ingest`, a
 hidden implementation-detail command whose output is a completion summary.
 

@@ -53,6 +53,11 @@ const MAX_REPO_FILE_BYTES = 1024 * 1024;
  * point.
  */
 export function readCapped(handle: number, maxBytes: number): string | null {
+  return readCappedBytes(handle, maxBytes)?.toString("utf8") ?? null;
+}
+
+/** {@link readCapped} without the decode: the bytes, or null when the file holds more. */
+function readCappedBytes(handle: number, maxBytes: number): Buffer | null {
   const chunks: Buffer[] = [];
   const chunk = Buffer.allocUnsafe(64 * 1024);
   let total = 0;
@@ -63,7 +68,7 @@ export function readCapped(handle: number, maxBytes: number): string | null {
     if (total > maxBytes) return null;
     chunks.push(Buffer.from(chunk.subarray(0, bytes)));
   }
-  return Buffer.concat(chunks, total).toString("utf8");
+  return Buffer.concat(chunks, total);
 }
 
 /**
@@ -104,5 +109,30 @@ export function readBoundedFile(
     }
   } catch {
     return null;
+  }
+}
+
+/**
+ * A bounded read that says why it refused: the bytes, or `too_large` / `not_file`.
+ *
+ * For a caller that hashes raw bytes and must tell "too big to judge" from
+ * "not there" (`ix verify`). The same single handle as {@link readBoundedFile}
+ * -- `O_NONBLOCK` open, `fstat` on the handle, `isFile()`, the size check and a
+ * capped read -- but a failed open, fstat or read (a missing file, say) throws
+ * instead of returning null, so the caller can tell it apart.
+ */
+export function readBoundedBytes(
+  filePath: string,
+  maxBytes: number = MAX_REPO_FILE_BYTES,
+): { bytes: Buffer } | { refused: "too_large" | "not_file" } {
+  const handle = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+  try {
+    const stats = fs.fstatSync(handle);
+    if (!stats.isFile()) return { refused: "not_file" };
+    if (stats.size > maxBytes) return { refused: "too_large" };
+    const bytes = readCappedBytes(handle, maxBytes);
+    return bytes === null ? { refused: "too_large" } : { bytes };
+  } finally {
+    fs.closeSync(handle);
   }
 }

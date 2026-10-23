@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "dataset": "synthetic",
+  "description": "Synthetic placeholders for orchestration only. These are not SWE-bench tasks or real repository SHAs.",
+  "tasks": [
+    { "instance_id": "synthetic-one", "repo": "synthetic/one", "base_commit": "1111111111111111111111111111111111111111", "problem_statement": "Write the synthetic solution fixture." },
+    { "instance_id": "synthetic-two", "repo": "synthetic/two", "base_commit": "2222222222222222222222222222222222222222", "problem_statement": "Write the synthetic solution fixture." },
+    { "instance_id": "synthetic-three", "repo": "synthetic/three", "base_commit": "3333333333333333333333333333333333333333", "problem_statement": "Write the synthetic solution fixture." }
+  ]
+}

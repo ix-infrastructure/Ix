@@ -85,6 +85,16 @@ export function mapBaselinePath(projectRoot: string): string {
 }
 
 /**
+ * Path to the last `ix verify` result for one project root (see `verify.ts`).
+ * Deliberately not cleared with the baselines: `ix status` labels a record
+ * older than the last ingest instead of losing it.
+ */
+export function verifyRecordPath(projectRoot: string): string {
+  const key = rootKey(projectRoot);
+  return join(ixHome(), `verify_${key}.json`);
+}
+
+/**
  * Path to the last `/v1/map` response for one project root, which a map that
  * ingested nothing reuses instead of asking again (see `map-result-cache.ts`).
  * Cleared with the map baseline, since both describe the same hierarchy.

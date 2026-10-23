@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { afterEach, describe, expect, it } from "vitest";
-import { parsePositiveIntEnv } from "../commands/ingest.js";
+import { parseNonNegativeIntEnv, parsePositiveIntEnv } from "../commands/ingest.js";
 import { mapDeadlineMs } from "../commands/map.js";
 
 // `Number.parseInt` reads any numeric prefix, so a unit suffix or an exponent
@@ -40,6 +40,31 @@ describe("parsePositiveIntEnv", () => {
     for (const raw of ["1e3", "2k", "10ms", "-5", "0"]) {
       process.env[name] = raw;
       expect(parsePositiveIntEnv(name, 7), raw).toBe(7);
+    }
+  });
+});
+
+// A count of retries, where 0 is an instruction and not "unset":
+// IX_COMMIT_CONFLICT_RETRIES=0 used to retry six times (IN-19C).
+describe("parseNonNegativeIntEnv", () => {
+  const name = "IX_TEST_NON_NEGATIVE_INT_ENV";
+  afterEach(() => { delete process.env[name]; });
+
+  it("reads 0 as 0", () => {
+    process.env[name] = "0";
+    expect(parseNonNegativeIntEnv(name, 6)).toBe(0);
+  });
+
+  it("reads a plain positive integer", () => {
+    process.env[name] = "3";
+    expect(parseNonNegativeIntEnv(name, 6)).toBe(3);
+  });
+
+  it("falls back for unset, empty, a suffix, an exponent or a sign", () => {
+    expect(parseNonNegativeIntEnv(name, 6)).toBe(6);
+    for (const raw of ["", "1e3", "-1", "2k"]) {
+      process.env[name] = raw;
+      expect(parseNonNegativeIntEnv(name, 6), raw).toBe(6);
     }
   });
 });

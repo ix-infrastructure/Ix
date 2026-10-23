@@ -41,6 +41,8 @@ import { loadIngestBaseline } from "../ingest-baseline.js";
 import { isCloudReady } from "../remote.js";
 import { hasCompletedMapBaseline } from "../stale.js";
 import { printJson } from "../format.js";
+import { runVerify, type VerifyReport } from "../verify.js";
+import { healthFromError } from "../database-probe.js";
 import type { CapabilitiesResponse, HealthResponse } from "../../client/types.js";
 
 interface CheckResult {
@@ -250,21 +252,8 @@ export function assessLocalAuth(
   };
 }
 
-/**
- * A health answer, including the 503 a backend sends while it cannot reach its
- * database: that is a server that answered, and the body says what is wrong.
- * Thrown for anything else.
- */
-export function healthFromError(err: unknown): HealthResponse | null {
-  const m = /^503:\s*(\{.*\})\s*$/s.exec((err as Error)?.message ?? "");
-  if (!m) return null;
-  try {
-    const body = JSON.parse(m[1]!) as HealthResponse;
-    return typeof body?.status === "string" ? body : null;
-  } catch {
-    return null;
-  }
-}
+// Shared with the ingest's database probe; re-exported for existing importers.
+export { healthFromError };
 
 /**
  * "Database reachable" from the health answer. A backend that reports
@@ -367,6 +356,62 @@ export function checkRipgrep(run: () => string = () => execFileSync("rg", ["--ve
     return { ok: true, detail: first || "rg found" };
   } catch {
     return { ok: false, warn: true, detail: "rg not found on PATH — 'ix text' needs ripgrep" };
+  }
+}
+
+/**
+ * "Graph matches a re-parse": the last line of defence for a graph whose
+ * counts look fine and whose nodes do not (see `verify.ts`).
+ *
+ * Never a failure. A diverged sample is a warning with the fix, and anything
+ * that stops the comparison -- no workspace, an old backend that 404s, a
+ * parser that will not load, any throw at all -- is "not checked", so this
+ * check cannot give `ix doctor` an exit code it did not have.
+ */
+/** `ix doctor`'s verify: a few files, and never more than about this long. */
+export const DOCTOR_VERIFY_SAMPLE = 5;
+export const DOCTOR_VERIFY_BUDGET_MS = 5_000;
+/** Past the budget, how long an in-flight read may still take before doctor gives up. */
+const DOCTOR_VERIFY_GRACE_MS = 2_000;
+
+export async function assessGraphVerify(run: () => Promise<VerifyReport>, budgetMs?: number): Promise<CheckResult> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // The budget stops new work; this stops a read that never returns.
+    const report = budgetMs === undefined ? await run() : await Promise.race([
+      run(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${Math.round(budgetMs / 1000)} s`)), budgetMs + DOCTOR_VERIFY_GRACE_MS);
+        timer.unref?.();
+      }),
+    ]);
+    const { files, clean, diverged, stale } = report.counts;
+    // "partial: 3 of 5" — a run that ran out of budget says how much it saw.
+    const partial = report.partial ? ` (partial: ${files} of ${report.sample} files checked within ${Math.round((budgetMs ?? 0) / 1000)} s)` : "";
+    if (report.graph === "diverged") {
+      const paths = report.files.filter((f) => f.state === "diverged").map((f) => f.path);
+      const shown = paths.slice(0, 3).join(", ") + (paths.length > 3 ? `, and ${paths.length - 3} more` : "");
+      return {
+        ok: false,
+        warn: true,
+        detail: `${diverged} of ${files} sampled files diverged (${shown})${partial}. Fix: ${report.fix}`,
+      };
+    }
+    if (report.graph === "unverified") {
+      return { ok: true, detail: `not checked: ${(report.reason ?? "nothing to compare").replace(/_/g, " ")}${partial}` };
+    }
+    // Stale is not a pass, but it is what any edit since the last map looks
+    // like, so it stays a note (as `ix status` treats changed files).
+    if (report.graph === "stale") {
+      return { ok: true, detail: `not verified: ${stale} of ${files} sampled files changed since the last ingest${partial} — run \`ix map\`` };
+    }
+    // Only files judged clean "match"; unverified ones are not counted as such.
+    const of = clean === files ? `${files}` : `${clean} of ${files}`;
+    return { ok: true, detail: `${of} sampled files match a re-parse (nodes only)${partial}` };
+  } catch (e: any) {
+    return { ok: true, detail: `not checked: ${e?.message ?? String(e)}` };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -630,6 +675,29 @@ export function registerDoctorCommand(program: Command): void {
               if (isConfigParseError(e)) return CONFIG_NOT_CHECKED;
               return { ok: false, detail: e.message ?? "stats failed" };
             }
+          },
+        },
+        {
+          // Counts can all be healthy while a file's nodes are not what its
+          // source says (F-01). A small sampled re-parse; see verify.ts.
+          name: "Graph matches a re-parse",
+          run: async () => {
+            if (configBroken) return CONFIG_NOT_CHECKED;
+            if (!matchedWorkspace) return { ok: true, detail: "not checked: no local workspace" };
+            // Parsing costs nothing to report when nobody can answer the
+            // reads, so ask the (already memoized) health first.
+            try {
+              const h = await health();
+              if (h.status !== "ok") return { ok: true, detail: `not checked: backend ${h.status}` };
+            } catch {
+              return { ok: true, detail: "not checked: backend not reachable" };
+            }
+            return assessGraphVerify(
+              () => runVerify(client, resolvePath(matchedWorkspace.root_path), {
+                sample: DOCTOR_VERIFY_SAMPLE, record: false, budgetMs: DOCTOR_VERIFY_BUDGET_MS,
+              }),
+              DOCTOR_VERIFY_BUDGET_MS,
+            );
           },
         },
         {

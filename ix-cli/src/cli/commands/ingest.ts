@@ -33,7 +33,7 @@ import {
   changedNames, findDependents, importsChanged, loadIngestSymbols, resolutionHash, saveIngestSymbols,
   type StoredSummary, type SymbolEntry,
 } from '../ingest-symbols.js';
-import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
+import { detectSystem, fileIdentity, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
 import { admitStitchWaiting, connectionNeverEstablished, type StitchRefusal } from '../stitch-guard.js';
 import {
@@ -44,6 +44,11 @@ import {
   drainInPasses,
   perFileAction,
 } from '../commit-breaker.js';
+import { retryCommit, TRANSIENT_RETRY_BUDGET_MS } from '../commit-retry.js';
+import { createDatabaseProbe, probeDatabase } from '../database-probe.js';
+// Moved to commit-retry.ts with the retry loop that uses them; re-exported so
+// existing importers keep working.
+export { isAbortError, isRetryableCommitConflict } from '../commit-retry.js';
 import { readBackendHealth } from './upgrade.js';
 import {
   createIgnoreMatcher, parseIgnoreFile, parseIgnorePattern, type IgnorePattern,
@@ -133,6 +138,19 @@ export function parsePositiveIntEnv(name: string, fallback: number): number {
   if (!/^\d+$/.test(raw)) return fallback;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * `parsePositiveIntEnv`, but 0 is a value rather than "unset". For a count of
+ * RETRIES, where 0 means "do not retry" and reading it as the default made the
+ * setting impossible to turn off (IX_COMMIT_CONFLICT_RETRIES=0 retried 6 times).
+ */
+export function parseNonNegativeIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  if (!/^\d+$/.test(raw)) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isSafeInteger(parsed) ? parsed : fallback;
 }
 
 
@@ -950,32 +968,6 @@ export function planDeletedFileRecovery(
   return { previousDeletedFiles, nextDeletedFiles, recreatedPaths, forceReingestPaths };
 }
 
-/** Lock contention, as opposed to the transport failures below. Kept separate
-  * only so each group's reason for being retryable stays readable. */
-const COMMIT_CONFLICT_RETRY_PATTERNS = [
-  // ArangoDB lock conflicts. These were briefly split into their own constant
-  // so `commitFailureIndictsBackend` could exclude them; that exclusion was
-  // reverted in round 3 -- it made the cutoff inert in a real saturation mode --
-  // and the split had no consumer left, so it is inlined.
-  'write-write conflict',
-  'timeout waiting to lock key',
-  'error: 1200',
-  // Transport-level failures (k8s ingress reset, socket drop under load).
-  //
-  // These are retried because the request usually never reached the server --
-  // but "usually" is the whole of Ix#495. A bulk commit is chunked and writes
-  // its idempotency keys as each chunk lands, so a socket that drops after the
-  // server started work leaves part of the group committed. Retrying then
-  // re-sends a set the server has partly seen, and because the bulk group id is
-  // a hash of the patch ids, the retry reproduces the same group and is refused
-  // with a 409 that no further retry can clear.
-  //
-  // The retry stays (it is right far more often than not); what changed is that
-  // the resulting 409 is now recoverable — see isBulkPartiallyCommittedError.
-  'fetch failed',
-  'econnreset',
-  'econnrefused',
-];
 
 /**
  * A bulk commit the server accepted only in part, or whose patches all landed
@@ -1027,23 +1019,6 @@ export function parseBulkCommittedPatchIds(err: unknown): Set<string> | undefine
   }
 }
 
-// An abort from the shared wall-clock deadline (or a per-request timeout) must
-// NOT be retried — the whole point of the deadline is to stop work. Retrying
-// here would defeat it and add 6 more backed-off requests to an already-late
-// run. AbortSignal.timeout raises a TimeoutError; an aborted deadline raises an
-// AbortError; both also stringify with "aborted".
-export function isAbortError(err: unknown): boolean {
-  const name = (err as { name?: string } | null)?.name;
-  if (name === "AbortError" || name === "TimeoutError") return true;
-  return String(err).toLowerCase().includes("aborted");
-}
-
-export function isRetryableCommitConflict(err: unknown): boolean {
-  if (isAbortError(err)) return false;
-  const message = String(err).toLowerCase();
-  return COMMIT_CONFLICT_RETRY_PATTERNS.some(pattern => message.includes(pattern));
-}
-
 /**
  * Does this commit failure say anything about the BACKEND? (Ix#560)
  *
@@ -1080,18 +1055,14 @@ export function commitFailureIndictsBackend(err: unknown, runDeadlineExpired: bo
   return true;
 }
 
+/**
+ * The per-file commit's retry: lock conflicts and transport drops only.
+ * Transient statuses (502/503/504/429) are retried at the BULK sites, which
+ * call `retryCommit` themselves; retrying them per patch would multiply a
+ * per-bulk wait budget by the number of patches.
+ */
 async function retryOnConflict<T>(fn: () => Promise<T>, maxRetries: number): Promise<T> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      if (attempt >= maxRetries || !isRetryableCommitConflict(err)) throw err;
-      // ArangoDB lock conflicts usually clear as soon as the competing transaction
-      // commits. Transport errors may need a bit more breathing room under k8s load.
-      const delay = 10 * (1 << attempt) + Math.random() * 10;
-      await new Promise<void>(r => setTimeout(r, delay));
-    }
-  }
+  return retryCommit(fn, { maxRetries, transient: false });
 }
 
 /**
@@ -2007,7 +1978,13 @@ export function describeCommitOutcome(
    * patches? When it did, the banner above has already given the reason, and
    * this line must not send the reader back to a flag that adds nothing.
    */
-  cutoffFired: boolean = cutoffSkipped > 0
+  cutoffFired: boolean = cutoffSkipped > 0,
+  /**
+   * The backend held none of this run's files before it started (a first map,
+   * or one after `ix reset`). With nothing landed, "the graph is unchanged"
+   * would read as "the old graph is still there", and there is none.
+   */
+  graphStartedEmpty: boolean = false
 ): CommitOutcome {
   if (commitErrors <= 0) return { kind: "ok" };
   const attempted = commitErrors + patchesApplied;
@@ -2112,7 +2089,10 @@ export function describeCommitOutcome(
       kind: "fatal",
       message:
         `Ingest committed nothing: all ${commitErrors} ${patches} failed to commit. ` +
-        `The graph is unchanged and may now be stale. Re-run with ${debugFlag} to see why.`,
+        (graphStartedEmpty
+          ? `The backend held none of these files before this run, so this workspace's graph is still empty. `
+          : `The graph is unchanged and may now be stale. `) +
+        `Re-run with ${debugFlag} to see why.`,
     };
   }
   return {
@@ -2121,6 +2101,24 @@ export function describeCommitOutcome(
       `Warning: ${commitErrors} of ${attempted} file patches failed to commit; ` +
       `the graph is missing those files. Re-run 'ix map' to retry, or ${debugFlag} to see why.`,
   };
+}
+
+// Builtin instance-method names that are never a real cross-repo call target.
+const STITCH_COMMODITY = new Set(['map', 'forEach', 'reduce', 'reduceRight', 'flatMap', 'flat', 'push', 'pop', 'shift', 'unshift', 'splice', 'slice', 'concat', 'get', 'set', 'has', 'keys', 'values', 'entries', 'then', 'catch', 'finally', 'resolve', 'race', 'allSettled', 'bind', 'call', 'apply', 'stringify', 'toString', 'valueOf', 'hasOwnProperty']);
+
+/**
+ * The cross-repo stitch entry a parsed relationship contributes, if any. A
+ * receiver-only typed call (ParsedRelationship.receiverOnly) names a target
+ * inferred from a local receiver's type; it is written only when it resolves
+ * in this workspace, so it is never a cross-repo call candidate.
+ */
+export function stitchCallEntry(
+  rel: { predicate?: unknown; dstName?: unknown; srcName?: unknown; receiverOnly?: unknown },
+  filePath: string,
+): { symbol: string; caller: string; callerFilePath: string } | undefined {
+  if (rel.predicate !== 'CALLS' || rel.receiverOnly || typeof rel.dstName !== 'string' || typeof rel.srcName !== 'string') return undefined;
+  if (STITCH_COMMODITY.has(rel.dstName)) return undefined;
+  return { symbol: rel.dstName, caller: rel.srcName, callerFilePath: filePath };
 }
 
 /**
@@ -2259,22 +2257,17 @@ export async function ingestFiles(
   // system_id, and each file carries its repoId. A cross-repo edge's dst id is
   // resolved in the dst repo's workspace namespace by core-ingestion.
   const detectedSystem = detectSystem(workspaceRoot);
-  const systemId: string | undefined = detectedSystem?.systemId;
-  const repoOf = (relPath: string): string => (relPath.split('/')[0] || '.');
-  const repoWsCache = new Map<string, string>();
-  const repoWorkspaceId = (repo: string): string => {
-    let ws = repoWsCache.get(repo);
-    if (!ws) { ws = repoWorkspaceIdFor(workspaceRoot, repo); repoWsCache.set(repo, ws); }
-    return ws;
-  };
-  const repoWorkspaceOf = systemId ? (relPath: string) => repoWorkspaceId(repoOf(relPath)) : undefined;
   // Per-file workspace id + multi-repo context fed to buildPatchWithResolution.
-  const fileWorkspaceId = (relPath: string): string => systemId ? repoWorkspaceId(repoOf(relPath)) : workspaceId;
+  // Shared with `ix verify` (system.ts fileIdentity), which must agree exactly.
+  const {
+    systemId,
+    repoOf,
+    fileWorkspaceId,
+    fileMultiRepo,
+  } = fileIdentity(workspaceRoot, workspaceId, detectedSystem?.systemId);
   // The workspace_id a file's nodes are folded under (same value the patch builder
   // stamps on source.workspaceId) — used to scope the baseline hash lookup per file.
   const sourceWorkspaceIdOf = (absPath: string): string => fileWorkspaceId(toWorkspaceRelative(absPath));
-  const fileMultiRepo = (relPath: string) =>
-    systemId ? { systemId, repoId: repoOf(relPath), repoWorkspaceOf } : undefined;
   // Cross-repo dependency gate: map an import module name to the member repo that
   // publishes that package (exact, or prefix at a package boundary for scoped /
   // sub-module / sub-path imports like "@babel/types/lib/x", "tokio::sync",
@@ -2316,8 +2309,6 @@ export async function ingestFiles(
   // {filePath, local entity name, public name} -> add an export entry by public name.
   const stitchExportAliases: Array<{ filePath: string; local: string; pub: string }> = [];
   const stitchExportAliasSeen = new Set<string>();
-  // Builtin instance-method names that are never a real cross-repo call target.
-  const STITCH_COMMODITY = new Set(['map', 'forEach', 'reduce', 'reduceRight', 'flatMap', 'flat', 'push', 'pop', 'shift', 'unshift', 'splice', 'slice', 'concat', 'get', 'set', 'has', 'keys', 'values', 'entries', 'then', 'catch', 'finally', 'resolve', 'race', 'allSettled', 'bind', 'call', 'apply', 'stringify', 'toString', 'valueOf', 'hasOwnProperty']);
   const specToPkg = (spec: string | undefined): string | null => {
     if (!spec || spec.startsWith('.') || spec.startsWith('/')) return null;
     if (spec.startsWith('@')) { const parts = spec.split('/'); return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : null; }
@@ -2348,9 +2339,8 @@ export async function ingestFiles(
         stitchExportAliases.push({ filePath: p.filePath, local: x.local, pub: x.public });
       }
       for (const rel of (p.relationships ?? [])) {
-        if (rel.predicate === 'CALLS' && typeof rel.dstName === 'string' && typeof rel.srcName === 'string' && !STITCH_COMMODITY.has(rel.dstName)) {
-          stitchCalls.push({ symbol: rel.dstName, caller: rel.srcName, callerFilePath: p.filePath });
-        }
+        const call = stitchCallEntry(rel, p.filePath);
+        if (call) stitchCalls.push(call);
         if (rel.predicate !== 'IMPORTS') continue;
         const pkg = specToPkg(typeof rel.importRaw === 'string' ? rel.importRaw : rel.dstName);
         if (!pkg || !stitchProdDeps.has(pkg)) continue;
@@ -2507,6 +2497,14 @@ export async function ingestFiles(
   // a way this run can have written to the graph, or have found it not where
   // the last run left it, without a patch being counted.
   let dbResetDetected = false;
+  /**
+   * The backend held none of this run's files when it started: the DB-reset
+   * guard fired, or a lookup over the whole file set found no hashes (a first
+   * map, or one after `ix reset` / `reset --ingest`). Only the failure messages
+   * read it: "the graph is unchanged" is misleading when there was no graph.
+   * Unset on any path that ends before the lookup.
+   */
+  let graphStartedEmpty: boolean | undefined;
   let extractorRebuild = false;
   let deletionsFound = false;
   let stitchSent = false;
@@ -2614,6 +2612,60 @@ export async function ingestFiles(
    * raises TimeoutError too, and that is a saturation signal, not our clock.
    */
   const runDeadlineExpired = (): boolean => opts.deadlineSignal?.aborted === true;
+  /** The same deadline, for the commit retries' waits to abort on. */
+  const runDeadlineSignal = opts.deadlineSignal;
+  /**
+   * The backend's own word on its database, asked only once commits are
+   * failing (IN-19C). The cutoff judges by a streak, which with ArangoDB down
+   * costs a streak of doomed requests here and a failure budget per drain
+   * pass; the backend can simply say so. One probe answers every caller for a
+   * few seconds, under a 2 s timeout, and only `unreachable` changes anything
+   * -- see `database-probe.ts`.
+   */
+  const newDatabaseProbe = () => createDatabaseProbe(() => probeDatabase({
+    // Through the one place health is fetched and its release recorded.
+    readHealth: timeoutMs => readBackendHealth(client, timeoutMs),
+    currentRevision: timeoutMs => client.currentRevision(timeoutMs),
+  }), 3_000);
+  let askDatabase = newDatabaseProbe();
+  /** `patchesTheBackendTook` when `askDatabase`'s cache was started; a landed patch is newer evidence than any cached verdict. */
+  let askedAtPatches = 0;
+  /** `patchesTheBackendTook` when the backend last reported its database down; undefined since it reported it up. */
+  let databaseDownAsOf: number | undefined;
+  /** The last answer was "unreachable", and nothing has landed since to say otherwise. */
+  const databaseKnownDown = (): boolean =>
+    databaseDownAsOf !== undefined && databaseDownAsOf === patchesTheBackendTook;
+  /** Ask (or reuse a recent answer) and record it. True when the database is down. */
+  const checkDatabase = async (): Promise<boolean> => {
+    // IX_COMMIT_FAILURE_LIMIT=0 opts out of giving up; the probe never stops a run then.
+    if (commitBreaker.limit <= 0) return false;
+    if (runDeadlineExpired()) return databaseKnownDown();
+    if (askedAtPatches !== patchesTheBackendTook) {
+      askDatabase = newDatabaseProbe();
+      askedAtPatches = patchesTheBackendTook;
+    }
+    const verdict = await askDatabase();
+    if (verdict === 'unreachable') databaseDownAsOf = patchesTheBackendTook;
+    else if (verdict === 'reachable') databaseDownAsOf = undefined;
+    return verdict === 'unreachable';
+  };
+  /**
+   * After a commit failure that indicts the backend: if its database is down,
+   * give up now rather than after a streak. A later commit landing clears the
+   * trip, as it clears one a streak set.
+   */
+  const tripIfDatabaseDown = async (err: unknown): Promise<void> => {
+    if (commitBreaker.tripped()) return;
+    if ((await checkDatabase()) && !commitBreaker.tripped()) commitBreaker.trip(err);
+  };
+  const noteCommitRetry = (where: string) =>
+    (info: { attempt: number; delayMs: number; error: unknown; kind: string }): void => {
+      if (!debug) return;
+      const msg = String(info.error);
+      process.stderr.write(
+        `\n  [${where} retry ${info.attempt}, ${info.kind}] waiting ${Math.round(info.delayMs)} ms: ${msg.length > 200 ? `${msg.slice(0, 200)}…` : msg}\n`,
+      );
+    };
   let tooLarge = 0;
   /** The stat loop's record of empty and oversized files, once it exists; `tooLarge` counts its oversized ones. */
   let skippedForSize: ReadonlyMap<string, 'empty' | 'tooLarge'> | undefined;
@@ -2642,7 +2694,7 @@ export async function ingestFiles(
   const resolveStats = {
     importLookups: 0, transitiveLookups: 0, globalFallbacks: 0,
     globalCandidateTotal: 0, resolvedImport: 0, resolvedTransitive: 0,
-    resolvedGlobal: 0, resolvedQualifier: 0, skippedSameFile: 0, skippedAmbiguous: 0,
+    resolvedGlobal: 0, resolvedQualifier: 0, resolvedType: 0, skippedSameFile: 0, skippedAmbiguous: 0,
   };
   // Per-language parse timing: language → { ms, files }
   const langParseMs = new Map<string, { ms: number; files: number }>();
@@ -2974,6 +3026,10 @@ export async function ingestFiles(
     // file, so the next run's baseline did not name them, they were never
     // found deleted again, and their nodes stayed in the graph for good.
     const deferredDeletions: string[] = [];
+    // Whether the lookup ANSWERED. Thrown every time now, rather than only with
+    // deletions pending, so an empty answer can be told from a failed one; the
+    // catch below does what `loadExistingHashes` did with a swallowed failure.
+    let hashLookupAnswered = false;
     if (hashLookupPaths.length > 0) {
       try {
         knownHashes = await loadExistingHashes(
@@ -2982,10 +3038,11 @@ export async function ingestFiles(
           toWorkspaceRelative,
           sourceWorkspaceIdOf,
           debug,
-          deletedPaths.length > 0,
+          true,
         );
+        hashLookupAnswered = true;
       } catch (err) {
-        if (debug) process.stderr.write(`\n  [deletion cleanup skipped] hash lookup failed: ${err}\n`);
+        if (debug && deletedPaths.length > 0) process.stderr.write(`\n  [deletion cleanup skipped] hash lookup failed: ${err}\n`);
         deferredDeletions.push(...deletedPaths);
         deletedPaths.length = 0;
         knownHashes = new Map();
@@ -2996,6 +3053,19 @@ export async function ingestFiles(
       knownHashes = new Map();
       if (debug) process.stderr.write(`\n  All ${filePaths.length} files mtime-clean — skipping hash lookup\n`);
     }
+    // With no local baseline every file was looked up, so an answer naming
+    // none of them means the backend holds none. Not under --force, which
+    // says nothing about the baseline, and not on a failed lookup, which
+    // says nothing about the backend. Not on a workspace-id migration either:
+    // the old id's graph is still there until the cleanup after this run.
+    // And not on a partial run (a file or directory scope, or --lang): its
+    // lookup covered only its own files, so an empty answer says nothing about
+    // the rest of the workspace -- `ix ingest <new file>` in a repo mapped from
+    // another machine has no local baseline but a full graph.
+    graphStartedEmpty =
+      dbResetDetected ||
+      (!opts.force && !workspaceMigrated && !scopedRun && !opts.lang &&
+        mtimeCache.size === 0 && hashLookupAnswered && knownHashes.size === 0);
     const hashed = performance.now();
     timings.hashMs = Math.round(hashed - discovered);
 
@@ -3162,7 +3232,9 @@ export async function ingestFiles(
     // Smaller chunks pipeline better: resolve(N) overlaps with commit(N-1) + parse(N+1).
     // With 2000-file chunks, resolve takes 68s and dominates. With 500, resolve ~17s
     // and overlaps well with commit (~5s) + parse (~5s).
-    const PARSE_STREAM_CHUNK     = 500;
+    // IX_PARSE_STREAM_CHUNK is for tests: it lets a run of a hundred files
+    // cross the same batch boundaries as a run of a thousand. Unset, 500.
+    const PARSE_STREAM_CHUNK     = parsePositiveIntEnv('IX_PARSE_STREAM_CHUNK', 500);
     const COMMIT_HTTP_MAX_FILES  = parsePositiveIntEnv('IX_COMMIT_HTTP_MAX_FILES', 1000); // files per HTTP request to the backend
     // Ops per HTTP request; see DEFAULT_COMMIT_MAX_OPS.
     const COMMIT_MAX_OPS         = parsePositiveIntEnv('IX_COMMIT_MAX_OPS', DEFAULT_COMMIT_MAX_OPS);
@@ -3229,7 +3301,12 @@ export async function ingestFiles(
       return cutToLimits(items);
     };
     const COMMIT_CONCURRENCY     = parsePositiveIntEnv('IX_COMMIT_CONCURRENCY', 8); // parallel HTTP save requests
-    const COMMIT_CONFLICT_RETRIES = parsePositiveIntEnv('IX_COMMIT_CONFLICT_RETRIES', 6); // retry transient Arango lock conflicts
+    // Retries of one commit after a lock conflict or a transport drop. 0: none.
+    const COMMIT_CONFLICT_RETRIES = parseNonNegativeIntEnv('IX_COMMIT_CONFLICT_RETRIES', 6);
+    // Total wait for re-sending a BULK the backend answered 502/503/504/429
+    // (at most three retries, `Retry-After` cut to it). 0: no such retries.
+    // Its own knob, so turning conflict retries off leaves these alone.
+    const COMMIT_TRANSIENT_RETRY_MS = parseNonNegativeIntEnv('IX_COMMIT_TRANSIENT_RETRY_MS', TRANSIENT_RETRY_BUDGET_MS);
     // Re-sends of a commit that lost the base-rev race to another writer; see retryOnBaseRevRace.
     const COMMIT_BASE_REV_RETRIES = parsePositiveIntEnv('IX_COMMIT_BASE_REV_RETRIES', 8);
     let baseRevRetries = 0;
@@ -3542,7 +3619,13 @@ export async function ingestFiles(
                   }
                 } else {
                   commitErrors++;
-                  if (indicts) commitBreaker.recordFailure(commitErr);
+                  if (indicts) {
+                    commitBreaker.recordFailure(commitErr);
+                    // Not in the drain (the only caller with a failure
+                    // budget): it ignores `tripped`, so a probe there would
+                    // only add health requests and latency.
+                    if (fallbackOpts?.failureBudget === undefined) await tripIfDatabaseDown(commitErr);
+                  }
                 }
                 if (debug) {
                   const errMsg = String(commitErr);
@@ -3586,6 +3669,10 @@ export async function ingestFiles(
       /** Re-send the held set. What it cannot place is left on `deferredByCutoff`. */
       const commitIndividuallyAfterCutoff = async (itemsIn: PreparedPatch[]): Promise<void> => {
         let items = itemsIn;
+        // Re-sent even when the backend has reported its database down. The
+        // probe may hold patches back during the fan-out, but whether the run
+        // fails is decided by commits, as on main: a wrong or stale health
+        // answer must not turn a run whose patches would land into an exit 1.
         if (debug) {
           process.stderr.write(
             `\n  [cutoff] re-sending ${items.length} held-back patches with a fresh streak\n`,
@@ -3629,9 +3716,19 @@ export async function ingestFiles(
           const bulkStart = performance.now();
           try {
             const result = await retryOnBaseRevRace(
-              () => retryOnConflict(
+              () => retryCommit(
                 () => client.commitPatchBulk(chunk.map(item => item.patch)),
-                COMMIT_CONFLICT_RETRIES,
+                {
+                  maxRetries: COMMIT_CONFLICT_RETRIES,
+                  transient: COMMIT_TRANSIENT_RETRY_MS > 0,
+                  transientBudgetMs: COMMIT_TRANSIENT_RETRY_MS,
+                  signal: runDeadlineSignal,
+                  // Not the breaker: this bulk exists because the breaker
+                  // tripped, so it would always say give up. Asked, not just
+                  // read: a 503 here may be the database going down.
+                  shouldGiveUp: () => checkDatabase(),
+                  onRetry: noteCommitRetry('cutoff bulk'),
+                },
               ),
               COMMIT_BASE_REV_RETRIES,
               noteBaseRevRetry,
@@ -3776,6 +3873,9 @@ export async function ingestFiles(
         // tests, which previously asserted the stranding guarantee at a budget
         // the CLI never runs at and so could not see it fail.
         const leftover = await drainInPasses(items, async pending => {
+          // No database probe here (the per-file loop skips it when given a
+          // failure budget): the drain sends, as on main, so the exit code
+          // follows what the commits did, never a health answer.
           commitBreaker.reset();
           const tookBefore = patchesTheBackendTook;
           await commitItemsSerially(pending, recordDrainMs, undefined, {
@@ -3823,9 +3923,31 @@ export async function ingestFiles(
               );
               const commitStart = performance.now();
               const result = await retryOnBaseRevRace(
-                () => retryOnConflict(
+                () => retryCommit(
                   () => client.commitPatchBulk(items.map(item => item.patch)),
-                  COMMIT_CONFLICT_RETRIES,
+                  {
+                    maxRetries: COMMIT_CONFLICT_RETRIES,
+                    // 502/503/504/429 too, honouring Retry-After up to the
+                    // budget (5 s per bulk by default, requests included; a
+                    // slow bulk is not sent again). A 413 and a 409 are
+                    // thrown at once, to the payload split and the
+                    // partial-commit handling below.
+                    transient: COMMIT_TRANSIENT_RETRY_MS > 0,
+                    transientBudgetMs: COMMIT_TRANSIENT_RETRY_MS,
+                    signal: runDeadlineSignal,
+                    // Asked, not just read. On the first bulk of a run nothing
+                    // has probed yet, and a 503 from a backend whose database
+                    // is down would otherwise spend the whole budget
+                    // before anything asked it. A database reported down trips
+                    // the breaker, so `shouldStop` hands the chunk to the
+                    // cutoff instead of the per-file fallback.
+                    shouldGiveUp: async err => {
+                      if (commitBreaker.tripped()) return true;
+                      await tripIfDatabaseDown(err);
+                      return commitBreaker.tripped() || databaseKnownDown();
+                    },
+                    onRetry: noteCommitRetry('bulk'),
+                  },
                 ),
                 COMMIT_BASE_REV_RETRIES,
                 noteBaseRevRetry,
@@ -5049,6 +5171,14 @@ export async function ingestFiles(
   // left the agent believing the graph was current while `ix search` and
   // `ix impact` answered from a stale one. A wrong answer nobody can see is
   // worse than a failed command.
+  // A trip alone is not enough: the database probe can trip the breaker on a
+  // bulk failure with no `commitErrors++` (a health answer of "unreachable"
+  // that turns out wrong), and the cutoff and drain may then land every patch.
+  // Printing the cutoff banner then would say the graph is "partly updated"
+  // and ask for a re-run when nothing is missing. A skipped patch is counted
+  // in `commitErrors`, so this still fires whenever the cutoff held anything
+  // back that did not land.
+  const cutoffFired = commitBreaker.everTripped() && commitErrors > 0;
   const commitReport = describeCommitOutcome(
     commitErrors,
     patchesApplied,
@@ -5058,7 +5188,8 @@ export async function ingestFiles(
     commitBreaker.skipped(),
     // The same expression the banner is gated on, so this can never say "See
     // the cutoff above" with no cutoff above it.
-    commitBreaker.everTripped()
+    cutoffFired,
+    graphStartedEmpty === true
   );
   const summary: IngestFilesSummary = {
     filesDiscovered,
@@ -5096,15 +5227,7 @@ export async function ingestFiles(
       commitErrors === 0 &&
       stitchErrors === 0,
   };
-  // `everTripped()` alone, and it is not a weakening: `recordFailure` has one
-  // call site, in the per-file catch immediately after `commitErrors++`, so a
-  // trip already implies a real commit failure. A `commitLoopErrors` counter
-  // guarded this for two rounds against a scenario that no longer exists --
-  // replay failures were moved off `recordFailure` onto a local counter, and a
-  // deletion patch that fails to BUILD never reaches the breaker at all. A dead
-  // conjunct defended by a comment describing an impossible case is the exact
-  // shape this PR has spent rounds removing.
-  if (commitBreaker.everTripped()) {
+  if (cutoffFired) {
     // Gated on the cutoff having FIRED, not on what was left unsent. A patch
     // that was never sent produces no `[commit error]` line even under
     // --verbose, so this has to print for those -- but gating on them alone
@@ -5116,7 +5239,10 @@ export async function ingestFiles(
     //
     // Before the stitch line and before the commit report: this is the cause,
     // and everything else printed about this run is its consequence.
-    process.stderr.write(`${describeCommitCutoff(commitBreaker, client.endpoint, patchesApplied, opts.deadlineSignal?.aborted === true)}\n`);
+    process.stderr.write(`${describeCommitCutoff(commitBreaker, client.endpoint, patchesApplied, opts.deadlineSignal?.aborted === true, {
+      graphStartedEmpty: graphStartedEmpty === true,
+      databaseUnreachable: databaseKnownDown(),
+    })}\n`);
   }
   if (stitchErrors > 0) {
     process.stderr.write(`  ${describeStitchFailure(stitchError)}\n`);
@@ -5282,6 +5408,7 @@ export async function ingestFiles(
       console.log(chalk.dim(`    resolved transitive:${resolveStats.resolvedTransitive}`));
       console.log(chalk.dim(`    resolved global:    ${resolveStats.resolvedGlobal}`));
       console.log(chalk.dim(`    resolved qualifier: ${resolveStats.resolvedQualifier}`));
+      console.log(chalk.dim(`    resolved type:      ${resolveStats.resolvedType}`));
       console.log(chalk.dim(`    skipped same-file:  ${resolveStats.skippedSameFile}`));
       console.log(chalk.dim(`    skipped ambiguous:  ${resolveStats.skippedAmbiguous}`));
     }
