@@ -28,6 +28,7 @@ ix config set format llm      # set a value
 | `IX_PARSE_BUDGET_MS=<ms>` | How long `ix map` / `ix ingest` may spend parsing one file before skipping it and naming it in the summary (default 10000). A skipped file is tried again on every run, and `ix status` warns about it until it is in the graph. `0` turns the budget off |
 | `IX_PARSE_WORKERS=<n>` | Most parse workers `ix map` / `ix ingest` starts (default 8, never more than the cores less one). Workers start as files need them, one per 50 files |
 | `IX_PATCH_ACTOR=<actor>` | The `actor` stamped on each graph patch `ix map` / `ix ingest` sends (default `ix/ingestion`; `ix ingest --github` uses `ix/github-ingest`). Set it to empty (`IX_PATCH_ACTOR=`) for a backend that authenticates writers and stamps the verified principal itself: such a backend rejects a non-empty actor that differs from the principal with 403 `body actor ... conflicts with verified principal`. Any other value is sent as the actor |
+| `IX_LOAD_ALL_COMMANDS=1` | Loads every command module on each call, as releases before the start-up fast path did. Without Ix Pro installed, `ix <command>` normally loads only that command; with Ix Pro installed every call already loads everything, so this changes nothing there. If a command misbehaves on an install without Pro, try it again with this set: a difference between the two is a bug worth reporting |
 
 ### Bootstrap script variables
 

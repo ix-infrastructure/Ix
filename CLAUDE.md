@@ -45,16 +45,23 @@ ix map --silent                             # refresh the graph after code chang
   `ix reset --workspace` (the registered workspace containing cwd, nothing
   else). After a global reset, re-map each workspace.
 - **The OSS↔Pro command boundary is derived at runtime, not declared.**
-  `run-cli.ts` snapshots `ossCmdNames` right after `registerOssCommands()`; the
-  Pro probe diffs against it. Adding a command to `oss.ts` silently makes it
-  OSS; removing one makes Pro own it. `registerProCommands` is async and MUST
-  be awaited.
+  `run-cli.ts` snapshots `ossCmdNames` right after registering the OSS
+  commands; the Pro probe diffs against it. Adding a command to `oss.ts`
+  silently makes it OSS; removing one makes Pro own it. `registerProCommands`
+  is async and MUST be awaited.
+- **A new OSS command goes in two places:** `registerOssCommands()` in
+  `register/oss.ts` and `OSS_COMMAND_TABLE` in `register/oss-table.ts`. With
+  Pro absent, `run-cli.ts` loads only the table entry for the command being
+  run. A command missing from the table still works (it takes the full path),
+  but `startup-fast-path.test.ts` fails until it is added. The shared
+  per-command setup is in `register/oss-setup.ts`.
 - **`ix patches` is OSS, not Pro** (#371). It is implemented here and registered
   in `oss.ts`. `@ix/pro` also registers a `patches`; commander throws on the
   duplicate and Pro's `tryRegister` swallows the throw, so the OSS one — which
   registers first — wins on a Kartr install too. Do not re-add it to
-  `PRO_COMMANDS`: a stub for a command that exists in OSS shadows the real
-  implementation, and the failure is silent rather than a crash.
+  `PRO_COMMANDS` (`register/pro-stubs.ts`): a stub for a command that exists
+  in OSS shadows the real implementation, and the failure is silent rather
+  than a crash.
 - **`ix upgrade` wipes `~/.ix/cli/compass`.** The Compass assets ship only via
   `ix upgrade`, and re-running the installer re-extracts over them, so a
   re-install can leave `ix view` with no UI. `bootstrap.sh` re-runs `ix upgrade`

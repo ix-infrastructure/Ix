@@ -19,6 +19,21 @@ function proPackageIsAbsent(): boolean {
   }
 }
 
+/**
+ * True exactly when `tryLoadProCommands` would return false without loading
+ * anything: neither `@ix/pro/register` nor the package itself resolves. An
+ * installed-but-broken Pro counts as present, so a caller that skips the
+ * loader on this answer still leaves the broken case to the loader's error.
+ */
+export function proIsAbsent(): boolean {
+  try {
+    import.meta.resolve("@ix/pro/register");
+    return false;
+  } catch {
+    return proPackageIsAbsent();
+  }
+}
+
 export async function tryLoadProCommands(program: Command): Promise<boolean> {
   let specifier: string;
   try {
