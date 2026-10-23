@@ -7,7 +7,7 @@ import type { HealthResponse } from "../../client/types.js";
 
 /** A client whose health and revision reads answer as told. */
 function client(health: () => Promise<HealthResponse>, revision: () => Promise<unknown> = async () => 1) {
-  return { health: vi.fn(health), currentRevision: vi.fn(revision) };
+  return { readHealth: vi.fn(health), currentRevision: vi.fn(revision) };
 }
 
 describe("probeDatabase", () => {
@@ -30,7 +30,7 @@ describe("probeDatabase", () => {
   it("passes its short timeout to both requests", async () => {
     const c = client(async () => ({ status: "ok" }));
     await probeDatabase(c, { timeoutMs: 1234 });
-    expect(c.health).toHaveBeenCalledWith(1234);
+    expect(c.readHealth).toHaveBeenCalledWith(1234);
     expect(c.currentRevision).toHaveBeenCalledWith(1234);
   });
 

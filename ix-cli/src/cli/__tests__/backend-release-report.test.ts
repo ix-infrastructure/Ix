@@ -280,6 +280,21 @@ describe("fetchBackendHealth records what it read", () => {
     expect(tracked()).toBe("1.0.16");
   });
 
+  it("passes a probe's timeout through readBackendHealth, and still records", async () => {
+    // The ingest's database probe needs a short timeout. It reaches health
+    // through here rather than calling client.health(ms) itself.
+    writeFileSync(stamp(), "1.0.13");
+    writeFileSync(
+      join(home, ".version-check.json"),
+      JSON.stringify({ latest: "0.9.3", backendLatest: "1.0.16", checkedAt: Date.now() }),
+    );
+    const health = vi.fn(async (_timeoutMs?: number) => ({ status: "ok", release_version: "1.0.16" }));
+    const { readBackendHealth } = await import("../commands/upgrade.js");
+    await readBackendHealth({ endpoint: "http://localhost:8090", health } as unknown as IxClient, 1234);
+    expect(health).toHaveBeenCalledWith(1234);
+    expect(tracked()).toBe("1.0.16");
+  });
+
   it("applies the ceiling through readBackendHealth, the path commands take", async () => {
     // The JOIN, not the pieces. backendCeiling() is pinned on its own and
     // fetchBackendHealth's use of knownLatest is pinned on its own — but
@@ -492,7 +507,9 @@ describe("health is fetched in exactly one place", () => {
     // comments are left alone for the same reason: a `**/*.ts` glob literal ate
     // from the string to the next `*/` and dropped the chokepoint itself.
     .map((f) => ({ ...f, src: f.src.replace(/^\s*(\/\/|\*|\/\*).*$/gm, "") }))
-    .filter((f) => /\.health\s*\(\s*\)/.test(f.src))
+    // Any arguments: `client.health(timeoutMs)` is as much a health read as
+    // `client.health()`, and an empty-parens-only pattern let one slip past.
+    .filter((f) => /\.health\s*\(/.test(f.src))
     .map((f) => f.file.slice(SRC.length + 1).replace(/\\/g, "/"));
 
   it("finds the health callers at all", () => {

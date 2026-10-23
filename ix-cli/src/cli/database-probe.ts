@@ -23,8 +23,18 @@
 // "unreachable" cannot fail a run whose commits would land.
 // ---------------------------------------------------------------------------
 
-import type { IxClient } from "../client/api.js";
 import type { HealthResponse } from "../client/types.js";
+
+/**
+ * The two reads a probe makes. `readHealth` is the caller's way to fetch
+ * health, which in the CLI is `readBackendHealth`: health is fetched, and the
+ * release it reports recorded, in exactly one place (backend-version.ts), and
+ * this probe goes through it like every other reader.
+ */
+export interface DatabaseProbeReads {
+  readHealth(timeoutMs: number): Promise<HealthResponse>;
+  currentRevision(timeoutMs: number): Promise<unknown>;
+}
 
 /**
  * A health answer, including the 503 a backend sends while it cannot reach its
@@ -56,13 +66,13 @@ export const DATABASE_PROBE_TIMEOUT_MS = 2_000;
  * `unknown`.
  */
 export async function probeDatabase(
-  client: Pick<IxClient, "health" | "currentRevision">,
+  reads: DatabaseProbeReads,
   opts: { timeoutMs?: number } = {},
 ): Promise<DatabaseVerdict> {
   const timeoutMs = opts.timeoutMs ?? DATABASE_PROBE_TIMEOUT_MS;
   let health: HealthResponse;
   try {
-    health = await client.health(timeoutMs);
+    health = await reads.readHealth(timeoutMs);
   } catch (err) {
     const degraded = healthFromError(err);
     if (!degraded) return "unknown";
@@ -72,7 +82,7 @@ export async function probeDatabase(
   if (health.database === "reachable") return "reachable";
   // A backend older than 1.0.33: health says nothing about the database.
   try {
-    await client.currentRevision(timeoutMs);
+    await reads.currentRevision(timeoutMs);
     return "reachable";
   } catch {
     // A failed read proves nothing about the database: a 5xx may be a saturated

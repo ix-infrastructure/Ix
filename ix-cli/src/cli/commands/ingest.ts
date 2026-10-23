@@ -2220,7 +2220,11 @@ export async function ingestFiles(
    * few seconds, under a 2 s timeout, and only `unreachable` changes anything
    * -- see `database-probe.ts`.
    */
-  const newDatabaseProbe = () => createDatabaseProbe(() => probeDatabase(client), 3_000);
+  const newDatabaseProbe = () => createDatabaseProbe(() => probeDatabase({
+    // Through the one place health is fetched and its release recorded.
+    readHealth: timeoutMs => readBackendHealth(client, timeoutMs),
+    currentRevision: timeoutMs => client.currentRevision(timeoutMs),
+  }), 3_000);
   let askDatabase = newDatabaseProbe();
   /** `patchesTheBackendTook` when `askDatabase`'s cache was started; a landed patch is newer evidence than any cached verdict. */
   let askedAtPatches = 0;
