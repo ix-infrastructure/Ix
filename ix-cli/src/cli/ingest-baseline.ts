@@ -2,7 +2,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { ingestMtimeCachePath, ingestRebuildPath } from "./config.js";
+import { ingestMtimeCachePath, ingestOrphanSweepPath, ingestRebuildPath } from "./config.js";
 
 interface SerializedIngestBaseline {
   root: string;
@@ -246,4 +246,51 @@ export function saveRebuildProgress(projectRoot: string, extractor: string, file
 
 export function clearRebuildProgress(projectRoot: string): void {
   try { fs.rmSync(ingestRebuildPath(projectRoot), { force: true }); } catch { /* non-critical */ }
+}
+
+/**
+ * Orphan sweeps (IN-20) an earlier run left unfinished, by the extractor whose
+ * stored patches name the orphans: the workspace-relative files still to
+ * sweep, or null for every file. An extractor change whose sweep could not run
+ * (a backend without bulk deletes or the batched node read) records the
+ * previous extractor for every file; one that ran out of budget records the
+ * files it skipped. A repair run (`IX_RECONCILE_ON_FORCE=1 ix map --force`)
+ * then reads only these patches, for only these files, so it reaches orphans
+ * more than one extractor back and picks up where the last run stopped.
+ */
+export type OrphanSweepPending = Map<string, Set<string> | null>;
+
+export function loadOrphanSweepPending(projectRoot: string): OrphanSweepPending {
+  const pending: OrphanSweepPending = new Map();
+  try {
+    const data = JSON.parse(fs.readFileSync(ingestOrphanSweepPath(projectRoot), "utf-8")) as {
+      root?: unknown; pending?: Record<string, unknown>;
+    };
+    if (data.root !== projectRoot || !data.pending || typeof data.pending !== "object") return pending;
+    for (const [extractor, files] of Object.entries(data.pending)) {
+      if (files === null) pending.set(extractor, null);
+      else if (Array.isArray(files)) pending.set(extractor, new Set(stringList(files)));
+    }
+  } catch {
+    // None recorded, or unreadable: a repair falls back to its default.
+  }
+  return pending;
+}
+
+export function saveOrphanSweepPending(projectRoot: string, pending: OrphanSweepPending): void {
+  try {
+    const target = ingestOrphanSweepPath(projectRoot);
+    const entries = [...pending].filter(([, files]) => files === null || files.size > 0);
+    if (entries.length === 0) {
+      fs.rmSync(target, { force: true });
+      return;
+    }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const tmp = `${target}.${process.pid}.tmp`;
+    const serialized = Object.fromEntries(entries.map(([extractor, files]) => [extractor, files === null ? null : [...files].sort()]));
+    fs.writeFileSync(tmp, JSON.stringify({ root: projectRoot, pending: serialized }));
+    fs.renameSync(tmp, target);
+  } catch {
+    // Losing it costs a repair that reads the default patch, not data.
+  }
 }

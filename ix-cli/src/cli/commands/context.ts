@@ -36,7 +36,7 @@ import {
   type StartingPoint,
   type SymbolHit,
 } from "../explain/issue.js";
-import { symbolReadChecker } from "./read.js";
+import { symbolReadChecker } from "../symbol-read-check.js";
 import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/related-files.js";
 import { cachedBm25Ranker } from "../explain/bm25-cache.js";
 import { collectTextReferences, gitRepoAccess, type TextSource } from "../explain/text-references.js";
