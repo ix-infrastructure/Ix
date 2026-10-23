@@ -71,14 +71,46 @@ function noteRelocatedConfig(configPath: string): void {
 // mapped to the OLD (pre-migration) id. getOrCreateWorkspace is called more than once
 // per `ix map` (bootstrap() registers, then ingest resolves the id); the first call
 // does the actual re-key, so without this the second call would report migrated=false
-// (and ingest would skip the forced re-ingest + the old-id cleanup). Keyed by resolved
-// root path. The old id is what ingest deletes to clean up the migration's orphans.
+// (and ingest would skip the forced re-ingest + the opted-in old-id cleanup). Keyed by
+// resolved root path. A re-key only happens on `--prune-stale-workspace` (adoptPathId).
 const migratedRootsThisRun = new Map<string, string>();
 
-/** `setDefault: false` keeps a new registration from becoming the default workspace (ingest). */
-export interface RegisterOptions { setDefault?: boolean }
+// Roots already warned about in this process for a registered workspace_id that
+// differs from the path-derived one, so a run that resolves the id several times
+// prints the warning once.
+const warnedPinnedRoots = new Set<string>();
+
+/**
+ * `setDefault: false` keeps a new registration from becoming the default workspace (ingest).
+ *
+ * `adoptPathId: true` (`--prune-stale-workspace`) re-keys a registered workspace whose
+ * workspace_id differs from its path-derived id. Without it the registered id is kept:
+ * it may be pinned on purpose (a team sharing one graph from clones at different
+ * absolute paths, or a tool that keys on it), and re-keying it silently made the next
+ * clean ingest delete that id's whole workspace for everyone on the backend.
+ */
+export interface RegisterOptions { setDefault?: boolean; adoptPathId?: boolean }
 
 interface WorkspaceState { ws: WorkspaceConfig; created: boolean; migrated: boolean; previousWorkspaceId?: string }
+
+/** The one-line warning for a registered id that is not the path-derived one. */
+export function pinnedWorkspaceIdWarning(rootPath: string, pinnedId: string, pathId: string): string {
+  return `Workspace ${rootPath} is registered with workspace_id ${pinnedId}, not the path-derived ${pathId}. ` +
+    `Keeping ${pinnedId}. If it is not pinned on purpose and the backend is local, ` +
+    `ix map --prune-stale-workspace switches to ${pathId} and deletes ${pinnedId}'s graph.`;
+}
+
+function warnPinnedOnce(rootPath: string, pinnedId: string, pathId: string): void {
+  if (warnedPinnedRoots.has(rootPath)) return;
+  warnedPinnedRoots.add(rootPath);
+  stderr(chalk.yellow(pinnedWorkspaceIdWarning(rootPath, pinnedId, pathId)));
+}
+
+/** @internal Test hook: forget the per-process re-key and warning memos. */
+export function resetWorkspaceIdMemosForTests(): void {
+  migratedRootsThisRun.clear();
+  warnedPinnedRoots.clear();
+}
 
 /**
  * Ensure the current directory (or given path) is registered as a workspace.
@@ -86,10 +118,12 @@ interface WorkspaceState { ws: WorkspaceConfig; created: boolean; migrated: bool
  */
 function getOrCreateWorkspace(cwd: string, opts: RegisterOptions = {}): WorkspaceState {
   const rootPath = canonicalWorkspacePath(resolve(cwd));
-  // The common case, already registered under its path id, needs no write and
-  // so no lock.
-  const known = (loadConfig().workspaces ?? []).find(w => w.root_path === rootPath && w.workspace_id === workspaceIdForPath(rootPath));
-  if (known) {
+  const pathId = workspaceIdForPath(rootPath);
+  // The common case, already registered under its own root, needs no write and
+  // so no lock -- whatever its id, unless the caller asked to re-key it.
+  const known = (loadConfig().workspaces ?? []).find(w => w.root_path === rootPath);
+  if (known && (known.workspace_id === pathId || !opts.adoptPathId)) {
+    if (known.workspace_id !== pathId) warnPinnedOnce(rootPath, known.workspace_id, pathId);
     const previousWorkspaceId = migratedRootsThisRun.get(rootPath);
     return { ws: known, created: false, migrated: previousWorkspaceId !== undefined, previousWorkspaceId };
   }
@@ -97,23 +131,33 @@ function getOrCreateWorkspace(cwd: string, opts: RegisterOptions = {}): Workspac
   // each see the one before (see updateConfig).
   return updateConfig((config) => {
     let save: typeof config | undefined;
-    const state = registerIn(config, rootPath, () => { save = config; }, opts.setDefault ?? true);
+    const state = registerIn(config, rootPath, () => { save = config; }, opts.setDefault ?? true, opts.adoptPathId === true);
     return { save, result: state };
   });
 }
 
 /** The registration itself, on a config read under the lock; `changed` marks it for saving. */
-function registerIn(config: IxConfig, rootPath: string, changed: () => void, setDefault: boolean): WorkspaceState {
+function registerIn(config: IxConfig, rootPath: string, changed: () => void, setDefault: boolean, adoptPathId: boolean): WorkspaceState {
   const pathId = workspaceIdForPath(rootPath);
   const existing = (config.workspaces ?? []).find(w => canonicalWorkspacePath(w.root_path) === rootPath);
   if (existing) {
     const pathChanged = existing.root_path !== rootPath;
     existing.root_path = rootPath;
-    // Migrate a legacy random workspace_id to the path-based id (Ix#225 gap 2) so
-    // an already-registered repo converges with co-ingest. This changes the
-    // workspace_id that node identity folds, so the next map must re-ingest under
-    // the new id (the caller forces that) and delete the old id's orphaned nodes.
     if (existing.workspace_id !== pathId) {
+      if (!adoptPathId) {
+        // A registered id that is not the path-derived one is honoured: it is
+        // either pinned on purpose or a legacy random id, and the CLI cannot
+        // tell which. Re-keying is `--prune-stale-workspace`, never automatic.
+        warnPinnedOnce(rootPath, existing.workspace_id, pathId);
+        if (pathChanged) changed();
+        const previousWorkspaceId = migratedRootsThisRun.get(rootPath);
+        return { ws: existing, created: false, migrated: previousWorkspaceId !== undefined, previousWorkspaceId };
+      }
+      // Opted in: migrate to the path-based id (Ix#225 gap 2) so the repo
+      // converges with co-ingest. This changes the workspace_id that node
+      // identity folds, so the next map must re-ingest under the new id (the
+      // caller forces that); deleting the old id's graph is gated separately
+      // (see staleWorkspaceCleanup in commands/ingest.ts).
       const previousWorkspaceId = existing.workspace_id;
       existing.workspace_id = pathId;
       changed();
@@ -141,16 +185,68 @@ function registerIn(config: IxConfig, rootPath: string, changed: () => void, set
   return { ws, created: true, migrated: false };
 }
 
-export function ensureWorkspaceRegistered(cwd = process.cwd()): { registered: boolean; name: string } {
-  const { ws, created } = getOrCreateWorkspace(cwd);
+/**
+ * The rule for deleting a stale workspace id, which only `--prune-stale-workspace` asks for.
+ *
+ * A workspace_id is a key on a backend that other people may share, and nothing on the
+ * backend records who owns one. So the CLI deletes one only when all of these hold:
+ *
+ * - the user opted in for this run (`--prune-stale-workspace`); nothing deletes on its own;
+ * - this run re-keyed the root, so the old id is the one THIS config registered for THIS root;
+ * - no other workspace in this config still uses the old id;
+ * - the ingest under the new id completed cleanly;
+ * - the endpoint is loopback (`isLocalEndpoint`). On any other endpoint the CLI cannot
+ *   establish that the id is the caller's own -- a teammate may have it pinned -- so it
+ *   never deletes there, flag or no flag.
+ */
+export type StaleWorkspaceCleanup =
+  | { action: "delete"; workspaceId: string }
+  | { action: "keep"; reason: "not_migrated" | "not_opted_in" | "shared_in_config" | "ingest_unclean" | "non_local_endpoint"; workspaceId?: string };
+
+export function staleWorkspaceCleanup(input: {
+  migrated: boolean;
+  previousWorkspaceId: string | undefined;
+  currentWorkspaceId: string;
+  pruneOptIn: boolean;
+  endpoint: string;
+  ingestClean: boolean;
+  /** Workspace ids the caller's config registers for roots OTHER than this one. */
+  otherRegisteredIds: readonly string[];
+}): StaleWorkspaceCleanup {
+  const old = input.previousWorkspaceId;
+  if (!input.migrated || !old || old === input.currentWorkspaceId) return { action: "keep", reason: "not_migrated" };
+  if (!input.pruneOptIn) return { action: "keep", reason: "not_opted_in", workspaceId: old };
+  if (!isLocalEndpoint(input.endpoint)) return { action: "keep", reason: "non_local_endpoint", workspaceId: old };
+  if (input.otherRegisteredIds.includes(old)) return { action: "keep", reason: "shared_in_config", workspaceId: old };
+  if (!input.ingestClean) return { action: "keep", reason: "ingest_unclean", workspaceId: old };
+  return { action: "delete", workspaceId: old };
+}
+
+/**
+ * Refuse `--prune-stale-workspace` up front against a non-loopback endpoint, before
+ * anything is re-keyed: the deletion it exists for is never allowed there (see
+ * {@link staleWorkspaceCleanup}), and re-keying without it would leave the old id's
+ * graph behind with nothing in this config pointing at it.
+ */
+export function assertStaleWorkspacePruneAllowed(endpoint: string): void {
+  if (isLocalEndpoint(endpoint)) return;
+  throw new Error(
+    "--prune-stale-workspace deletes a workspace's graph and only runs against a local (loopback) backend; " +
+    "the configured endpoint is not one. Nothing was changed.",
+  );
+}
+
+export function ensureWorkspaceRegistered(cwd = process.cwd(), opts: RegisterOptions = {}): { registered: boolean; name: string } {
+  const { ws, created } = getOrCreateWorkspace(cwd, opts);
   return { registered: created, name: ws.workspace_name };
 }
 
 /**
  * Like ensureWorkspaceId, but also reports whether the workspace_id was just migrated
- * from a legacy random id to the path-based id (and, if so, the previous id). The
- * map/ingest flow uses `migrated` to force a full re-ingest under the new id and
- * `previousWorkspaceId` to delete the old id's orphaned nodes afterward.
+ * to the path-based id (and, if so, the previous id). That only happens with
+ * `adoptPathId` (`--prune-stale-workspace`). The map/ingest flow uses `migrated`
+ * to force a full re-ingest under the new id and `previousWorkspaceId` for the
+ * opted-in, local-only cleanup of the old id afterward.
  */
 export function ensureWorkspaceIdState(cwd = process.cwd(), opts: RegisterOptions = {}): { workspaceId: string; migrated: boolean; previousWorkspaceId?: string; created: boolean; name: string } {
   const { ws, migrated, previousWorkspaceId, created } = getOrCreateWorkspace(cwd, opts);
@@ -170,12 +266,12 @@ export function ensureWorkspaceIdState(cwd = process.cwd(), opts: RegisterOption
  * { setDefault })` once a commit has landed -- `setDefault: false` for a loose
  * directory, so it never becomes the default -- and never for a loose file.
  */
-export function workspaceStateFor(root: string): {
+export function workspaceStateFor(root: string, opts: Pick<RegisterOptions, "adoptPathId"> = {}): {
   workspaceId: string; migrated: boolean; previousWorkspaceId?: string; created: boolean; name: string; pending: boolean;
 } {
   const rootPath = canonicalWorkspacePath(resolve(root));
   const registered = (loadConfig().workspaces ?? []).some(w => canonicalWorkspacePath(w.root_path) === rootPath);
-  if (registered) return { ...ensureWorkspaceIdState(rootPath), pending: false };
+  if (registered) return { ...ensureWorkspaceIdState(rootPath, { adoptPathId: opts.adoptPathId }), pending: false };
   return { workspaceId: workspaceIdForPath(rootPath), migrated: false, created: true, name: basename(rootPath), pending: true };
 }
 
@@ -303,9 +399,9 @@ export function emitSetupNotice(createdConfig: boolean, registered: boolean, nam
  * Full lazy bootstrap. Call at the top of map/watch actions.
  * Prints user-friendly output only on first run (when something was created).
  */
-export async function bootstrap(cwd = process.cwd()): Promise<void> {
+export async function bootstrap(cwd = process.cwd(), opts: Pick<RegisterOptions, "adoptPathId"> = {}): Promise<void> {
   const createdConfig = ensureLocalConfig();
-  const { registered, name } = ensureWorkspaceRegistered(cwd);
+  const { registered, name } = ensureWorkspaceRegistered(cwd, { adoptPathId: opts.adoptPathId });
 
   emitSetupNotice(createdConfig, registered, name);
 

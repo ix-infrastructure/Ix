@@ -12,7 +12,7 @@ import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
 import { combineSignals, currentRunSignal } from '../../client/run-signal.js';
 import type { GraphNode, GraphPatchPayload } from '../../client/types.js';
-import { canonicalWorkspacePath, isPathInside, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
+import { canonicalWorkspacePath, getEndpoint, isPathInside, loadWorkspaces, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
 import { resolveIngestRootWithSource } from '../map-root.js';
 import { acquireMapLock, requestMapRerun, takeMapRerun } from '../single-flight.js';
 import { applyRequestedMapCoalesceExitCode } from './map.js';
@@ -28,7 +28,7 @@ import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
 import { loadIngestionModules } from './ingestion-loader.js';
 import { declaredPackageDirs } from '../package-dirs.js';
-import { ensureWorkspaceIdState, workspaceStateFor } from '../bootstrap.js';
+import { assertStaleWorkspacePruneAllowed, ensureWorkspaceIdState, staleWorkspaceCleanup, workspaceStateFor, type StaleWorkspaceCleanup } from '../bootstrap.js';
 import {
   changedNames, findDependents, importsChanged, loadIngestSymbols, resolutionHash, saveIngestSymbols,
   type StoredSummary, type SymbolEntry,
@@ -1540,6 +1540,10 @@ export async function ingestPathSingleFlight(target: string, opts: PathIngestOpt
   }
   const { root, looseFile } = lockRoot;
   const lock = acquireMapLock(root, `ix ingest ${root}`);
+  if (lock === null && opts.pruneStaleWorkspace) {
+    // The holder would not prune: coalescing would drop the request silently.
+    throw new Error('Another ix map or ix ingest is running for this workspace; run --prune-stale-workspace again once it finishes.');
+  }
   if (lock === null) {
     requestMapRerun(root);
     if (opts.format === 'json') {
@@ -1592,6 +1596,7 @@ export function registerIngestCommand(program: Command): void {
     .option('--format <fmt>', 'Output format (text|json|llm)', 'text')
     .option('--root <dir>', 'Workspace root directory')
     .option('--debug', 'Show phase timing breakdown', false)
+    .option('--prune-stale-workspace', "Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest (local backend only)")
     .option('--lang <langs>', 'Comma-separated languages to include (e.g. cpp,c or typescript). Aliases: c++=cpp, c#=csharp, py=python, ts=typescript, js=javascript')
     .option(
       '--exclude <glob>',
@@ -1603,7 +1608,7 @@ export function registerIngestCommand(program: Command): void {
     .action(async (positionalPath: string | undefined, opts: {
       path?: string; recursive?: boolean; force?: boolean; github?: string; token?: string;
       since?: string; limit: string; format: string; root?: string; debug?: boolean; lang?: string;
-      exclude?: string[];
+      exclude?: string[]; pruneStaleWorkspace?: boolean;
     }) => {
       const effectivePath = positionalPath ?? opts.path;
       if (opts.github) {
@@ -2150,9 +2155,18 @@ export function ingestCompletedCleanly(parseErrors: number, commitErrors: number
 // File ingestion — parse locally, send via /v1/patch
 // ---------------------------------------------------------------------------
 
+/** Why an opted-in stale-id cleanup kept the old graph, for the one stderr line. */
+const STALE_KEEP_REASON: Record<Extract<StaleWorkspaceCleanup, { action: 'keep' }>['reason'], string> = {
+  not_migrated: 'the workspace was not re-keyed',
+  not_opted_in: 'deletion needs --prune-stale-workspace',
+  non_local_endpoint: 'the backend is not local, so no workspace is deleted',
+  shared_in_config: 'another registered workspace still uses that id',
+  ingest_unclean: 'the re-ingest did not complete cleanly',
+};
+
 export async function ingestFiles(
   path: string,
-  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean; exclude?: string[]; deadlineSignal?: AbortSignal; neverRegister?: boolean }
+  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean; exclude?: string[]; deadlineSignal?: AbortSignal; neverRegister?: boolean; pruneStaleWorkspace?: boolean }
 ): Promise<IngestFilesSummary> {
   // Under `ix mcp` the tool call's deadline is this run's deadline too. The
   // client would see it anyway (createClient combines it), but the commit loop,
@@ -2162,6 +2176,9 @@ export async function ingestFiles(
   opts = { ...opts, deadlineSignal: combineSignals(opts.deadlineSignal, currentRunSignal()) };
   const debug = opts.debug || process.env.IX_DEBUG === '1';
   const mapMode = opts.mapMode === true;
+  const pruneStaleWorkspace = opts.pruneStaleWorkspace === true;
+  // Before anything is re-keyed: the prune is local-only.
+  if (pruneStaleWorkspace) assertStaleWorkspacePruneAllowed(getEndpoint());
   const trueStart = performance.now();
 
   const [
@@ -2226,7 +2243,7 @@ export async function ingestFiles(
     previousWorkspaceId,
     name: workspaceName,
     pending: registrationPending,
-  } = workspaceStateFor(workspaceRoot);
+  } = workspaceStateFor(workspaceRoot, { adoptPathId: pruneStaleWorkspace });
   // What this run discovers. A migrated workspace is widened to its root: the
   // re-key below re-ingests everything under the new id and then deletes the
   // old id's graph, which after a scoped run would leave the rest of the
@@ -2235,12 +2252,12 @@ export async function ingestFiles(
   const scopedRun = scopePath !== workspaceRoot;
   const inScope = (absPath: string): boolean => !scopedRun || isPathInside(scopePath, absPath);
   if (workspaceMigrated) {
-    // Legacy random workspace_id was just re-keyed to the path-based id (Ix#225
-    // gap 2). Node identity folds the workspace_id, so the previously-ingested
+    // `--prune-stale-workspace` just re-keyed the workspace to its path-based id
+    // (Ix#225 gap 2). Node identity folds the workspace_id, so the previously-ingested
     // nodes live under the old id; force a full re-ingest under the new id (below)
-    // and delete the old id's orphaned nodes after that succeeds.
+    // and delete the old id's graph after that succeeds (staleWorkspaceCleanup).
     process.stderr.write(
-      `Migrated workspace to a stable path-based id; re-ingesting this workspace once.\n`,
+      `Re-keyed workspace ${previousWorkspaceId} to its path-based id ${workspaceId}; re-ingesting this workspace once.\n`,
     );
     clearMapResultCache(workspaceRoot);
   }
@@ -4930,9 +4947,11 @@ export async function ingestFiles(
       else saveRebuildProgress(projectRoot, currentExtractor, rebuildProgress);
     }
 
-    // Migration cleanup (Ix#225 gap 2): the re-ingest under the new path-based id has
-    // committed, so delete the OLD id's now-orphaned nodes/edges/patches. Best-effort —
-    // a failure here is non-fatal (orphans are harmless dead storage, cleanable later).
+    // Stale-id cleanup (Ix#225 gap 2): only after an opted-in re-key
+    // (`--prune-stale-workspace`), only on a loopback endpoint, and only once the
+    // re-ingest under the new id has committed cleanly. Nothing deletes a
+    // workspace on its own: on a shared backend the old id may be a teammate's
+    // pinned workspace, and auto-deleting it wiped the graph for everyone.
     // `+ crashedParses()`, exactly as the baseline guard below. This one
     // DELETES the old workspace's graph, so it must be at least as strict: a
     // run whose parse pool died resolves every later file as null without
@@ -4941,17 +4960,26 @@ export async function ingestFiles(
     // complete old one permanently. The two adjacent guards must not disagree
     // about whether the run was clean, and the destructive one certainly must
     // not be the laxer of the pair.
-    if (
-      workspaceMigrated &&
-      previousWorkspaceId &&
-      ingestCompletedCleanly(parseErrors + crashedParses(), commitErrors)
-    ) {
+    const cleanup = staleWorkspaceCleanup({
+      migrated: workspaceMigrated,
+      previousWorkspaceId,
+      currentWorkspaceId: workspaceId,
+      pruneOptIn: pruneStaleWorkspace,
+      endpoint: client.endpoint,
+      ingestClean: ingestCompletedCleanly(parseErrors + crashedParses(), commitErrors),
+      otherRegisteredIds: loadWorkspaces()
+        .filter(w => canonicalWorkspacePath(w.root_path) !== workspaceRoot)
+        .map(w => w.workspace_id),
+    });
+    if (cleanup.action === 'delete') {
       try {
-        await client.deleteWorkspace(previousWorkspaceId);
-        if (debug) process.stderr.write(`  Cleaned up pre-migration nodes under ${previousWorkspaceId}.\n`);
+        await client.deleteWorkspace(cleanup.workspaceId);
+        process.stderr.write(`Deleted the previous workspace graph ${cleanup.workspaceId}.\n`);
       } catch (err) {
-        if (debug) process.stderr.write(`  [migration cleanup skipped] ${err}\n`);
+        process.stderr.write(`Could not delete the previous workspace graph ${cleanup.workspaceId}; it is left in place.${debug ? ` ${String(err)}` : ''}\n`);
       }
+    } else if (cleanup.workspaceId) {
+      process.stderr.write(`Kept the previous workspace graph ${cleanup.workspaceId}: ${STALE_KEEP_REASON[cleanup.reason]}.\n`);
     }
 
     // Path-2 stitch (Ix#225 Half A): register this repo's provides/consumes and

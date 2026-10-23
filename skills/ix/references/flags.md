@@ -111,6 +111,19 @@ surfaces (#575).
   holder runs the extra pass before it exits: `ix map` re-ingests the
   workspace, and so does `ix ingest` once the workspace has a baseline
   (otherwise it re-ingests only its own path).
+- **A registered `workspace_id` is never re-keyed on its own.** `ix map` and
+  `ix ingest` use the id `config.yaml` registers for a root, even when it differs
+  from the id the root's absolute path derives (sha256 of `repo:<path>`, 8 hex
+  chars) -- a team sharing one graph from clones at different paths, or a tool
+  that keys on the id, pins it on purpose. The mismatch is one stderr warning
+  per run. `--prune-stale-workspace` is the only way to switch to the
+  path-derived id: it re-keys, re-ingests the whole workspace, and after a clean
+  ingest deletes the old id's graph. It is refused unless the endpoint is
+  loopback (`localhost`, `127.0.0.0/8`, `[::1]`), because nothing on a shared
+  backend records who owns a workspace id; it also keeps the old graph when
+  another root in your config still uses that id or the ingest was not clean.
+  Before this, a mismatched id was re-keyed silently and the old id's whole
+  workspace deleted after the next clean ingest, on any backend.
 - **`ix ingest` honours `--exclude <glob>` and a `.ixignore` at the workspace
   root**, matched relative to that root. A deliberate subset of `.gitignore`: `#` comments, `*`, `?`, `**`, a
   leading `/` to anchor at the root, a trailing `/` for directories only, and a
@@ -530,6 +543,7 @@ Ingest source files or GitHub data into the knowledge graph.
 | `--debug` | — | `false` | Show phase timing breakdown |
 | `--lang` | `<langs>` | — | Comma-separated languages to include (e.g. cpp,c or typescript). Aliases: c++=cpp, c#=csharp, py=python, ts=typescript, js=javascript |
 | `--exclude` | `<glob>` | — | Exclude paths matching this glob (repeatable; same syntax as `.ixignore`) |
+| `--prune-stale-workspace` | — | off | Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest (local backend only) |
 
 ### `ix init`
 
@@ -587,6 +601,7 @@ Map the architectural hierarchy of a codebase.
 | `--full` | — | off | Force full local map, bypassing automatic safety limits (advanced/testing) |
 | `--verbose` | — | off | Show raw confidence/crosscut scores and signals, plus per-file ingest diagnostics (including why a patch failed to commit) |
 | `--silent` | — | off | Suppress all output except a one-line summary (useful for LLM hooks) |
+| `--prune-stale-workspace` | — | off | Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest (local backend only) |
 
 ### `ix mcp`
 
