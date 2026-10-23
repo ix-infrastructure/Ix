@@ -269,9 +269,9 @@ describe("retryCommit: the transient budget bounds total time", () => {
   }
 
   /** Run `retryCommit` to completion on the fake clock; the outcome and the time it took. */
-  async function run<T>(fn: () => Promise<T>, budget = TRANSIENT_RETRY_BUDGET_MS) {
+  async function run<T>(fn: () => Promise<T>, budget = TRANSIENT_RETRY_BUDGET_MS, shouldGiveUp?: () => Promise<boolean>) {
     const start = Date.now();
-    const settled = retryCommit(fn, { maxRetries: 6, transient: true, transientBudgetMs: budget, random: () => 0 })
+    const settled = retryCommit(fn, { maxRetries: 6, transient: true, transientBudgetMs: budget, random: () => 0, shouldGiveUp })
       .then(value => ({ value, error: undefined as unknown }), (error: unknown) => ({ value: undefined, error }))
       .then(outcome => ({ ...outcome, elapsed: Date.now() - start }));
     await vi.advanceTimersByTimeAsync(10 * 60_000);
@@ -342,6 +342,26 @@ describe("retryCommit: the transient budget bounds total time", () => {
       expect(calls()).toBeLessThanOrEqual(4);
     },
   );
+
+  /** A give-up check that takes `ms` on the (fake) clock and then says "keep going". */
+  const slowProbe = (ms: number) => () => new Promise<boolean>(resolve => setTimeout(() => resolve(false), ms));
+
+  it("charges the give-up check to the budget: 100 ms attempts and a 2 s probe stay inside 5 s", async () => {
+    const { fn, calls } = slow(100, Array(10).fill(statusError(503)), "ok");
+    const outcome = await run(fn, TRANSIENT_RETRY_BUDGET_MS, slowProbe(2_000));
+    expect(String(outcome.error)).toMatch(/^Error: 503:/);
+    // 0.1 + 2 probe + 0.5 wait + 0.1 + 2 probe + 0.2 wait (all that is left) + 0.1 = 5 s.
+    expect(calls()).toBe(3);
+    expect(outcome.elapsed).toBeLessThanOrEqual(TRANSIENT_RETRY_BUDGET_MS);
+  });
+
+  it("a give-up check slower than what is left of the budget is cut off there, with no re-send", async () => {
+    const { fn, calls } = slow(100, Array(10).fill(statusError(503)), "ok");
+    const outcome = await run(fn, TRANSIENT_RETRY_BUDGET_MS, slowProbe(60_000));
+    expect(String(outcome.error)).toMatch(/^Error: 503:/);
+    expect(calls()).toBe(1);
+    expect(outcome.elapsed).toBe(TRANSIENT_RETRY_BUDGET_MS - 100);
+  });
 
   it("a request longer than the whole budget is never re-sent, even for a 503", async () => {
     const { fn, calls } = slow(TRANSIENT_RETRY_BUDGET_MS, [statusError(503, "0")], "ok");

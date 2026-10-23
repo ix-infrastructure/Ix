@@ -19,7 +19,7 @@
 //     more than the retry can win back.
 //
 // The budget bounds TOTAL time, not just the sleeps: every attempt's own
-// duration is charged to it, and a re-send is made only when the time spent so
+// duration and every give-up check (a health probe) is charged to it, and a re-send is made only when the time spent so
 // far, the wait, and one more attempt as long as the one that just failed all
 // fit. A bulk that took longer than the budget to fail is therefore never sent
 // again here; it goes straight to the caller's per-file fallback. A 504 gets at
@@ -158,6 +158,16 @@ async function giveUpSafely(
   }
 }
 
+/**
+ * `promise`'s answer, or undefined if it has not answered within `ms`. The
+ * promise is left to settle on its own; `giveUpSafely` never rejects.
+ */
+function withinBudget<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 /** Total time one call may spend on transient statuses, attempts and waits together (the default of `IX_COMMIT_TRANSIENT_RETRY_MS`). */
 export const TRANSIENT_RETRY_BUDGET_MS = 5_000;
 /** Most transient retries one call makes, whatever the budget: a `Retry-After: 0` must not loop. */
@@ -173,8 +183,8 @@ export interface RetryCommitOptions {
   /** Retry 502/503/504/429 too. Only the bulk commit sites set this. */
   transient: boolean;
   /**
-   * Total time allowed for transient retries: every attempt's duration plus the
-   * waits. A re-send is made only if one more attempt as long as the last one
+   * Total time allowed for transient retries: every attempt's duration, every
+   * give-up check and the waits. A re-send is made only if one more attempt as long as the last one
    * still fits; a longer wait is cut to what is left. 0 means no transient retries.
    */
   transientBudgetMs?: number;
@@ -215,7 +225,7 @@ export async function retryCommit<T>(fn: () => Promise<T>, options: RetryCommitO
     now = Date.now,
     onRetry,
   } = options;
-  // Time charged to the transient budget: every attempt's own duration and
+  // Time charged to the transient budget: every attempt's own duration, every give-up check and
   // every transient wait.
   let transientSpentMs = 0;
   let transientRetries = 0;
@@ -241,11 +251,24 @@ export async function retryCommit<T>(fn: () => Promise<T>, options: RetryCommitO
       } else if (transient && isTransientCommitStatus(err)) {
         // What is left once the re-send itself is paid for, estimated as
         // long as the attempt that just failed. Nothing left: no re-send.
-        const remaining = transientBudgetMs - transientSpentMs - attemptMs;
+        let remaining = transientBudgetMs - transientSpentMs - attemptMs;
         if (transientRetries >= TRANSIENT_MAX_RETRIES || remaining <= 0) throw err;
         const gatewayTimeout = statusOf(err) === 504;
         if (gatewayTimeout && gatewayTimeoutRetries >= GATEWAY_TIMEOUT_MAX_RETRIES) throw err;
-        if (shouldGiveUp && (await giveUpSafely(shouldGiveUp, err))) throw err;
+        if (shouldGiveUp) {
+          // The give-up check may be a health probe that takes seconds. Its
+          // time is charged to the budget like an attempt's, it may take no
+          // longer than what is left (a check that has not answered by then
+          // leaves no room for a re-send anyway), and what is left is worked
+          // out again after it.
+          const probeStart = now();
+          const giveUp = await withinBudget(giveUpSafely(shouldGiveUp, err), remaining);
+          transientSpentMs += Math.max(0, now() - probeStart);
+          if (giveUp !== false) throw err;
+          if (signal?.aborted) throw err;
+          remaining = transientBudgetMs - transientSpentMs - attemptMs;
+          if (remaining <= 0) throw err;
+        }
         const asked = retryAfterMs(retryAfterOf(err), now());
         // Jittered by up to a quarter, so the chunks of one run that all met
         // the same restart do not come back in lockstep. Either wait is cut to
