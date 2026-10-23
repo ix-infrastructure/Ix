@@ -103,6 +103,7 @@ export async function collectRelatedFiles(
     topDependentRefs?: EntityLocation[];
     importRefs?: EntityLocation[];
     neighbourRefs?: EntityLocation[];
+    walkSeeds?: { callers: EntityLocation[]; dependents: EntityLocation[]; callees: EntityLocation[] };
   },
   limit = MAX_RELATED,
 ): Promise<RelatedRef[]> {
@@ -125,7 +126,11 @@ export async function collectRelatedFiles(
   if (target.kind !== "file") {
     const near = [
       target.id,
-      ...[...(facts.topCallerRefs ?? []), ...(facts.topDependentRefs ?? []), ...(facts.calleeRefs ?? [])]
+      // Seeded from the unranked samples when the collector kept them: see
+      // `walkSeeds`. The ranked lists are for display.
+      ...(facts.walkSeeds
+        ? [...facts.walkSeeds.callers, ...facts.walkSeeds.dependents, ...facts.walkSeeds.callees]
+        : [...(facts.topCallerRefs ?? []), ...(facts.topDependentRefs ?? []), ...(facts.calleeRefs ?? [])])
         .slice(0, MAX_NEIGHBOUR_SEEDS)
         .map((ref) => ref.id),
     ];

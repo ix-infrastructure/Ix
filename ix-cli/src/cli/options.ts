@@ -89,6 +89,21 @@ export function validateCliOptions(command: Command): void {
   }
 }
 
+/**
+ * Parse a count flag read inside a command's action, such as `ix trace
+ * --depth`/`--cap`: a non-negative integer.
+ *
+ * The root `validateCliOptions` hook already refuses a malformed `<n>` value
+ * before the action runs; this is the same rule at the point of use, so a
+ * command registered without that hook (the test harnesses) still cannot turn
+ * `abc` into NaN the way `parseInt` did. It is not a commander option parser
+ * on purpose: that path prints commander's plain error, not the formatted
+ * `cli_error` record.
+ */
+export function parseCountOption(value: string, example: string): number {
+  return parseNonNegativeInt(value, example);
+}
+
 export function parsePickOption(value: string): number {
   return parsePositiveInt(value, "1 or 2");
 }

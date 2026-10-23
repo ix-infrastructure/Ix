@@ -15,3 +15,10 @@
 // -- vitest re-runs setupFiles for each file, and `process.env` is per worker
 // under the default forks pool, so no file can leak an IX_HOME to the next.
 delete process.env.IX_HOME;
+
+// A target that resolves to nothing runs one bounded `rg` over the workspace to
+// say why (`cli/miss-reason.ts`). Under test the "workspace" is this checkout,
+// whose sources and fixtures mention every name a test misses on, so the
+// reason would depend on the repository's contents. Off by default here; the
+// tests for the probe turn it back on.
+process.env.IX_MISS_PROBE = "0";

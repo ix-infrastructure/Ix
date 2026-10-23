@@ -78,8 +78,12 @@ surfaces (#575).
   (`ix_neighbors symbol=X relation=callers`), never as CLI flags.
 - **`ix read <file>` stops at 400 lines.** The header then carries
   `truncated=true total_lines=<n> next=<path>:401-800`, so the next page is one
-  command away. A line range you typed (`ix read a.ts:1-900`) is never capped,
-  a symbol target is its own span, and `--all` reads the whole file.
+  command away. A line range you typed (`ix read a.ts:1-900`) is never capped.
+  A symbol longer than 400 lines is capped the same way. Its header adds
+  `span_end=<last line>`, `total_lines` is the symbol's span length (a count,
+  not the file's), and `next=<path>:10-1327@410` resumes the symbol's span, is
+  capped again and carries its own `next=` until the symbol's last line.
+  `--all` reads the whole file or symbol.
 - **`ix depends` and `ix trace` stop at depth 3 and 100 nodes.** Both were
   unbounded, which on a hub is thousands of nodes the caller pays for before
   seeing any. The output distinguishes the two ways a walk ends:
@@ -87,17 +91,19 @@ surfaces (#575).
   the walk stopped descending and there may or may not be more. JSON carries
   them per direction in each `summary`. When `ix trace --to` finds no route, a
   search a bound cut short adds the same code after `no_path`; a bare `no_path`
-  means the whole reachable graph was searched. `--depth` and `--cap` take
-  anything. When the cap cuts a `depends` or directional `trace` walk, the
-  nodes kept are the shallowest: every node at depth d before any at depth
-  d+1, so the first level is complete before the second begins. (The walk
+  means the whole reachable graph was searched. `ix trace` rejects a
+  `--depth` or `--cap` that is not a non-negative integer as a usage error.
+  When the cap cuts a `depends` or directional `trace` walk, the nodes kept
+  are the shallowest: every node at depth d before any at depth d+1, so the
+  first level is complete before the second begins. (The walk
   used to be depth-first, and could spend the whole cap down its first
   branch.) A walk the cap does not cut is the same tree it always was.
 - **`ix ingest <path>` writes to the workspace the path belongs to** -- the
   registered workspace containing it, else its git repository -- and a file or
   directory inside it refreshes just that part, leaving the rest of the
-  workspace alone. Only a path in no workspace and no repository becomes a
-  workspace of its own.
+  workspace alone. Only a directory in no workspace and no repository becomes
+  a workspace of its own (never the default); a loose file there is ingested
+  but registers nothing, so `ix read` cannot open its neighbours.
 - **`ix ingest <path>` coalesces with a running `ix map` or `ix ingest` of the
   same workspace**, as `ix map` does: it does not run beside the holder, asks
   it for one more pass, and exits 0 (or `IX_MAP_COALESCE_EXIT_CODE`). With
@@ -124,6 +130,20 @@ surfaces (#575).
   in stable (path, line, id) order, and also selects among the candidates of a
   resolution notice (a target that resolved by choosing among equal matches;
   only the true ties are listed and numbered).
+- **`--all` answers an ambiguous name for every candidate** (`callers`,
+  `callees`, `impact`), instead of exiting 2 with the candidate list. Each row
+  (or, for `impact`, each analysis) carries `candidate=<n>`, numbering the
+  `candidate` records printed with it. It covers the tied candidates the name
+  search returned, not only the 8 an ambiguity lists (numbered as `--pick`
+  numbers them; an import of the name is skipped when a definition is listed
+  too), up to 25 per call, so narrow with `--kind`
+  or `--path` for a common name; a `candidates_truncated` diagnostic says when
+  the cap or the search cut it off. `--pick` takes precedence over it.
+- **Exit codes** for the graph commands: `0` results, `2` ambiguous
+  (candidates listed), `3` not found (suggestions and a reason when known),
+  `4` workspace not mapped, `1` any other error. `IX_LEGACY_EXIT_CODES=1` makes
+  every non-zero exit `1` again. With several targets (`ix locate a b c`) the
+  run exits with the worst target's code and each group carries its own.
 - **`--no-recursive` and `--no-open` negate a default-on behaviour**, so their
   Default of `on` is the positive behaviour, and passing the flag turns it off.
 
@@ -160,6 +180,7 @@ Show methods/functions called by the given symbol (cross-file).
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--all` | — | off | When the symbol is ambiguous, answer for every candidate; rows are tagged with their candidate |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
@@ -167,15 +188,17 @@ Show methods/functions called by the given symbol (cross-file).
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
-### `ix callers <symbol>`
+### `ix callers <symbols...>`
 
-Show methods/functions that call the given symbol (cross-file).
+Show methods/functions that call the given symbols (cross-file). Several
+symbols answer in one call, grouped per symbol.
 
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--all` | — | off | When the symbol is ambiguous, answer for every candidate; rows are tagged with their candidate |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
@@ -446,6 +469,7 @@ System risk analysis — what behavior is at risk if this changes.
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--all` | — | off | When the target is ambiguous, analyse every candidate; each analysis is tagged with its candidate |
 | `--depth` | `<n>` | `1` | Expansion depth for callers/importers (default 1, max 3) |
 | `--limit` | `<n>` | `10` | Max top-impacted members to show |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
@@ -528,9 +552,10 @@ List entities by kind with optional path scoping.
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
-### `ix locate <symbol>`
+### `ix locate <symbols...>`
 
-Resolve a symbol to its position in the codebase and system hierarchy.
+Resolve symbols to their position in the codebase and system hierarchy.
+Several symbols answer in one call, grouped per symbol.
 
 | Flag | Value | Default | Effect |
 |---|---|---|---|
@@ -670,7 +695,11 @@ Read raw file content, line ranges, or symbol source code.
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--root` | `<dir>` | — | Workspace root directory |
-| `--all` | — | off | Read the whole file, past the 400-line default cap |
+| `--all` | — | off | Read the whole file or symbol, past the 400-line default cap |
+
+An ambiguous file or symbol name exits 0 with an `ambiguous` record and its
+candidates (unlike the graph commands' exit 2); retry with `--pick <n>` or
+`--path`. A miss exits 3.
 
 ### `ix reset`
 
@@ -738,6 +767,7 @@ Detect architecture smells in the codebase.
 | `--god-module-fan` | `<n>` | `15` | Min fan-in/out for god module |
 | `--weak-max-neighbors` | `<n>` | `1` | Max neighbors for weak component |
 | `--list` | — | off | List existing smell claims without rerunning |
+| `--limit` | `<n>` | 50 (text/llm); all (json) | Max candidates, highest confidence first; 0 = all, unfiltered. Otherwise non-source orphan files (docs, templates, data) are dropped before the cut. With `--list`, caps the stored claims (all when omitted) |
 
 ### `ix stats`
 

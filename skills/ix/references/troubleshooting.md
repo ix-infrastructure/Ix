@@ -68,6 +68,13 @@ again.
 - `IX_PARSE_WORKERS=N` — the most parse workers `ix map` / `ix ingest` starts
   (default 8, never more than the cores less one). Each loads every grammar,
   so a small edit starts one; raise it for a faster first map on a large machine.
+- `IX_LEGACY_EXIT_CODES=1` — exit `1` for every failure, as before the graph
+  commands split ambiguous (`2`), not found (`3`) and workspace not mapped (`4`)
+  out of it. For an integration that compares the status against `1`.
+- `IX_MISS_PROBE=0` — skip the bounded `rg -l` a graph command runs when a
+  symbol is not in the graph (at most 5 seconds per command, all misses together), to say whether the name is in a file that was
+  never indexed, in an indexed file as something the parser does not extract,
+  or nowhere at all.
 - `IX_PATCH_ACTOR=<actor>` — the `actor` on each graph patch `ix map` / `ix ingest`
   sends (default `ix/ingestion`; GitHub ingest uses `ix/github-ingest`). Set it
   empty (`IX_PATCH_ACTOR=`) for a backend that authenticates writers and stamps

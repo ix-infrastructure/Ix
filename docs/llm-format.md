@@ -65,12 +65,50 @@ which value it ignored, on stderr, when a person is there to read it.
   `\r` / `\t`, so a record never spans more than one line.
 - **Errors:** a uniform `error code=<slug> message="..."` line in the same
   format as data lines; the process still exits non-zero. A graph target that
-  does not exist is always `unresolved_target`. `locate` is the remaining
-  exit-status exception tracked in #539.
+  does not exist is always `unresolved_target`.
+  The graph commands (`locate`, `callers`, `callees`, `impact`, `explain` and
+  the rest that resolve a target, `subsystems <region>` and `around` included)
+  exit with a code per outcome, and json's `error` / llm's `error code=` carry
+  the matching slug (`subsystems --format json` prints the backend's body, where
+  an unknown region is `unknown_target`):
+
+  | Exit | Outcome | Slug |
+  |---|---|---|
+  | 0 | results | — |
+  | 2 | ambiguous: candidates listed, retry with `--pick <n>`, `--path` or `--all` | `ambiguous_target` |
+  | 3 | not found: suggestions and a reason when known | `unresolved_target` |
+  | 4 | workspace not mapped: run `ix map` | `workspace_not_mapped` |
+  | 1 | any other error (backend down, bad argument, ...) | its own slug |
+
+  `IX_LEGACY_EXIT_CODES=1` makes every non-zero exit `1`, for an integration
+  that compares the status against `1`. A hook must not pass ix's status
+  through as its own: Claude Code reads a hook's exit `2` as "block this
+  action", so an ambiguous name would block the tool call. End the hook with
+  its own status (the shipped hooks exit 0), or set `IX_LEGACY_EXIT_CODES=1`.
+  One exception in json: `locate`'s ambiguity record carries the slug as
+  `code: "ambiguous_target"`, not `error` (it never was an `error` record, and
+  readers that treat any string `error` as a failure would drop its
+  candidates); it still exits 2.
+  One exception in exit code: `read`'s ambiguity (a file or symbol name that
+  matches several) exits 0 with its own record, `ambiguous kind=<file|symbol>
+  target=... count=<n>` and its candidates (json: `targetType:
+  "ambiguous-file"` / `"ambiguous-symbol"`, `candidates`, no `error`), as it
+  always has. Retry with `--pick <n>` or `--path`. Its miss exits 3 like the
+  rest.
   A file target's miss adds `reason=file_not_in_graph` (on disk, not ingested)
-  or `reason=file_not_found`, any miss may carry `suggestion` records with the
-  nearest names in the graph, and a miss on an empty or degraded graph carries
-  a `graph` record saying so.
+  or `reason=file_not_found`. A symbol's miss says why when the workspace's
+  text can: `reason=symbol_file_not_indexed` (the name is only in source files
+  the graph does not have), `reason=symbol_not_extracted` (it is in indexed files, named
+  with their revision, but not as an entity) or `reason=symbol_not_in_source`
+  (it is nowhere in the workspace either), with `files=` naming up to three
+  files. Only files `ix map` parses count, so a name that appears only in, say,
+  a `.txt` is a plain miss; a command spends at most 5 seconds on these lookups,
+  then reports later misses plainly; `IX_MISS_PROBE=0` turns them off. A miss
+  under `--kind`, `--path` or the test filter, where an entity of that name
+  exists outside the filter, is a plain miss too (no `reason`): drop or change
+  the filter. Any miss may carry
+  `suggestion` records with the nearest names in the graph (`locate` included),
+  and a miss on an empty or degraded graph carries a `graph` record saying so.
   A graph read from a directory no registered workspace covers is
   `workspace_not_mapped`, with `dir=` and a `hint=` naming the command that
   maps it.
@@ -84,6 +122,44 @@ which value it ignored, on stderr, when a person is there to read it.
   backend spells a missing target `unknown_target` in its own JSON bodies; that
   is a wire detail and is translated on the way out, so a consumer never sees
   both.)
+
+### Every candidate at once (`--all`)
+
+`callers`, `callees` and `impact` take `--all`: an ambiguous name is answered
+for every listed candidate (exit 0) instead of exiting 2. Edge rows are one
+union, paged by `--limit`/`--offset`, and each carries the candidate it belongs
+to; json has `resolutionMode: "all"`, a `candidates` list and `candidate` on
+each row:
+
+```
+callers target=handle shown=3 total=3 resolved=3 candidates=2
+candidate n=1 name=handle kind=function path=src/a.ts id=1111aaaa
+candidate n=2 name=handle kind=function path=src/b.ts id=2222bbbb
+ref name=route kind=function path=src/server.ts lines=10-30 candidate=1
+ref name=retry kind=function path=src/jobs.ts lines=4-9 candidate=2
+```
+
+`impact --all` prints one analysis per candidate, each after its `candidate`
+record (json: `results: [{ candidate, ... }]`). Tied candidates past the 8 an
+ambiguity error lists are covered too (those 8 keep their `--pick` numbers; the
+rest follow, and `--pick <n>` reaches them by the same numbers), up to 25 per
+call: past that, only the first 25 are answered and a `candidates_truncated`
+diagnostic says so. An import of the name (`from app.utils import clamp`) is listed in
+an ambiguity but skipped by `--all` when a definition is listed too, so the
+numbers can skip it; when only imports are listed, they are answered. The search window is bounded (up to 200 names with `--path`, fewer
+without); the same diagnostic says when it was cut off. Narrow
+with `--kind` or `--path` to keep the run small. `--pick` takes precedence over
+`--all`.
+
+### Several targets (`ix locate a b c`, `ix callers a b c`)
+
+Each target is answered as it would be alone, grouped: llm opens each group
+with `target n=<i> name=<t>` and ends with
+`targets total=<n> ok=<n> [ambiguous=<n>] [not_found=<n>] [not_mapped=<n>] [failed=<n>]`;
+json is `{ targets: [{ target, exitCode, ...answer }], summary }`. The run exits
+with the worst target's code (error, then workspace not mapped, then not
+found, then ambiguous), so a partial answer never exits 0. The summary counts
+each target by its outcome, so it reads the same under `IX_LEGACY_EXIT_CODES=1`.
 
 ### Resolution notices (exit 0)
 
@@ -103,7 +179,8 @@ The candidates are only the true ties: the ones that scored the same as the
 chosen target. `shown=`, `total=` and `--pick <n>` all count that same list.
 Candidates that scored close but lower are not listed as equal; the message
 only counts them ("2 more scored lower and are not listed"). `--pick <n>`
-selects among the listed candidates; an out-of-range pick keeps the
+selects among the tied candidates, the listed ones first and the rest in the
+order `--all` numbers them; an out-of-range pick keeps the
 default and adds a `pick_out_of_range` diagnostic, still exiting 0.
 
 `Class.method` and `Class#method` resolve only to a member of that class: one
@@ -217,6 +294,28 @@ Two commands cannot know a true total and say so rather than inventing one:
   `--language` instead, and so does a page past a full window (it is not
   `offset_past_end`: more matches exist). `--format json` stays a bare array of matches with no
   paging fields; the next offset is the offset plus its length.
+
+`ix read` caps a read at 400 lines and marks the `file` record with
+`truncated=true total_lines=<n> next=<target>`. `total_lines` is always a
+count, never a line number:
+
+- `target=file`: the lines in the file, and `next=<path>:<from>-<to>`.
+- `target=symbol`: the lines in the symbol's whole span, not the file. The
+  record also carries `span_end=<n>`, the symbol's last line, and
+  `next=<path>:<first>-<last>@<from>`: the symbol's span, resumed at `<from>`.
+  A span the graph places past EOF is clamped to the file first.
+
+A plain `path:a-b` is a range you typed and is never capped. A `path:a-b@from`
+cursor is capped again, and its record (`target=file-range`) repeats the same
+`total_lines`, `span_end` and a further `next=`, so following `next=` until it
+is absent reaches the symbol's last line. A cursor's path is relative to the
+workspace root, which is what `ix read` resolves it against, so it works from
+any directory inside the workspace:
+
+```
+file path=src/big.ts line_start=10 line_end=409 target=symbol symbol=bigFn kind=function truncated=true total_lines=1318 span_end=1327 next=src/big.ts:10-1327@410
+file path=src/big.ts line_start=410 line_end=809 target=file-range truncated=true total_lines=1318 span_end=1327 next=src/big.ts:10-1327@810
+```
 
 ## Rows an agent acts on
 
@@ -336,10 +435,15 @@ region id=ingestion-parsers label="Ingestion / Parsers" kind=subsystem level=2 f
 `ix smells`:
 
 ```
-smells rev=42 count=2 version=smell_v1
+smells rev=42 count=2 shown=2 version=smell_v1
 smell kind=has_smell.god_module file=Region.scala confidence=0.91 chunks=42 fan_in=18 fan_out=9
 smell kind=has_smell.orphan_file file=tmp.py confidence=0.8 connections=0
 ```
+
+`count` is the number of candidates after non-source orphan files (docs,
+templates, data/config) are dropped; `filtered_non_source=<k>` appears when any
+were. Output stops at `--limit` (default 50, highest confidence first); when it
+cuts, a `diagnostic code=results_truncated` record follows the header.
 
 `ix impact <leaf>`:
 
@@ -370,12 +474,18 @@ item name=parseFile kind=method
 ```
 context target=Widget target_kind=class target_path=src/widget.ts stale=false classification=current entities=2 relationships=1 claims=1 decisions=0 conflicts=0 intents=0 evidence=7 truncated_entities=0 truncated_relationships=0 truncated_evidence=0 truncated_chars=0
 evidence score=0 kind=target title="Widget (class)" path=src/widget.ts
-evidence score=10 kind=structural title="member render" path=src/widget.ts lines=12-40
-evidence score=20 kind=claim title="renders to DOM"
-evidence score=30 kind=relationship title="Widget --calls--> render"
+evidence score=2000 kind=structural title="member render" path=src/widget.ts lines=12-40
+evidence score=3000 kind=claim title="renders to DOM"
+evidence score=4000 kind=relationship title="Widget --calls--> mount"
 ```
 
-One header record, then the ranked evidence. The entity, relationship and claim
+One header record, then the ranked evidence. `score` is `tier * 1000` plus the
+row's place in its tier, tiers in order target, issue, structural, claims,
+relationships, provenance, so a tier never runs into the next. Each entity gets
+one row: a relationship that restates a member, import or caller row is left
+out. A target's callers and dependents share one row, titled with how many of
+how many (`used by (3 of 214): ...`); `--format json` carries the two numbers
+as `count: { shown, total }`. The entity, relationship and claim
 lists stay counts here — `llm` is the token-minimal surface and the ranked
 evidence is what it exists to deliver; `--format json` carries the rest.
 
@@ -396,7 +506,7 @@ budgets scope=effective entities=50 relationships=100 evidence=25 chars=12000
 count added_entities=1 removed_entities=0 added_relationships=1 removed_relationships=1 added_evidence=2 removed_evidence=1 added_claims=1 removed_claims=0
 entity change=added id=entity-3 kind=method name=mount path=src/widget.ts
 relationship change=removed src=entity-1 pred=calls dst=entity-2
-evidence change=added score=30 kind=relationship title="Widget --holds--> mount"
+evidence change=added score=4000 kind=relationship title="Widget --holds--> mount"
 claim change=added id=c-8f31a2 entity=entity-1 status=active statement="mounts to DOM"
 ```
 

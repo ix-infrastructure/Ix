@@ -22,6 +22,9 @@ jobs:
     name: Lint & Typecheck
     runs-on: ubuntu-latest
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -89,8 +92,8 @@ jobs:
       # Pinned by version and checksum, like every action here is pinned by SHA,
       # because this runs a downloaded binary. Dependabot's github-actions
       # ecosystem updates `uses:` refs and not `run:` downloads, so the bump is
-      # manual — same as the `pipx install zizmor` next door, which pins nothing
-      # at all.
+      # manual — same as the pinned `pipx install zizmor==...` in
+      # actions-lint.yml.
       - name: Workflows are wired up (actionlint)
         env:
           ACTIONLINT_VERSION: 1.7.7
@@ -160,6 +163,10 @@ jobs:
       run:
         shell: bash
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        if: runner.os == 'Linux'
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -240,6 +247,9 @@ jobs:
     name: E2E (real backend)
     runs-on: ubuntu-latest
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -364,6 +374,9 @@ jobs:
     name: API-reference parity
     runs-on: ubuntu-latest
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -395,6 +408,7 @@ jobs:
     name: Harness install smoke
     runs-on: ubuntu-latest
     container: node:22-bookworm
+    # No harden-runner: it runs on the host and does not support container jobs.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -606,6 +620,9 @@ jobs:
     name: Dead-link check
     runs-on: ubuntu-latest
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -627,6 +644,9 @@ jobs:
       run:
         working-directory: docs-site
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -653,6 +673,9 @@ jobs:
     name: Flag-reference parity
     runs-on: ubuntu-latest
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -677,6 +700,9 @@ jobs:
     needs: [static, test, e2e, api-parity, doc-parity, links, docs-site, harness-install-smoke, harness-install-smoke-windows]
     runs-on: ubuntu-latest
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
       - name: Verify all required jobs succeeded
         run: |
           echo "static=${{ needs.static.result }}"

@@ -89,6 +89,6 @@ describe("ix diff — unresolved target", () => {
   it("exits non-zero for an unresolved target", async () => {
     await run(["diff", "3", "5", "DefinitelyMissing", "--format", "json"]);
 
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(3);
   });
 });

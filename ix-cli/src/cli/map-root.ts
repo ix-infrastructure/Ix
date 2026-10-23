@@ -68,7 +68,10 @@ export function localRootFor(dir: string): string | undefined {
  *   2. the registered workspace containing the path
  *   3. the path's git root, unless that is the home directory
  *   4. the path itself for a directory, its directory for a file -- a path
- *      in no workspace and no repository is ingested as its own workspace.
+ *      in no workspace and no repository is ingested under its own path id.
+ *      A directory is then registered after the commit (the user named it); a
+ *      loose FILE is never registered, so ingesting one file cannot make its
+ *      whole directory readable. Over MCP a loose path is refused outright.
  *
  * Step 3 skips a git root at `$HOME` (a dotfiles repo): registering the whole
  * home directory as a workspace would route every later read under it there.
@@ -82,6 +85,16 @@ export function localRootFor(dir: string): string | undefined {
  * `ingestFiles`. Returned canonical (realpath'd), like the path ingest hands in.
  */
 export function resolveIngestRoot(target: string, isDirectory: boolean, explicitRoot?: string): string {
+  return resolveIngestRootWithSource(target, isDirectory, explicitRoot).root;
+}
+
+/** Which step of {@link resolveIngestRootWithSource} chose the root; 'loose' is step 4 (and a git root at $HOME). */
+export type IngestRootSource = 'explicit' | 'workspace' | 'git' | 'loose';
+
+/** {@link resolveIngestRoot}, also saying which step chose the root. */
+export function resolveIngestRootWithSource(
+  target: string, isDirectory: boolean, explicitRoot?: string,
+): { root: string; source: IngestRootSource } {
   const canonicalTarget = canonicalWorkspacePath(target);
   if (explicitRoot) {
     const root = canonicalWorkspacePath(explicitRoot);
@@ -91,14 +104,14 @@ export function resolveIngestRoot(target: string, isDirectory: boolean, explicit
     if (!isPathInside(root, canonicalTarget)) {
       throw new Error(`${canonicalTarget} is outside --root ${root}. Pass a path inside the root, or drop --root.`);
     }
-    return root;
+    return { root, source: 'explicit' };
   }
   const probe = isDirectory ? canonicalTarget : dirname(canonicalTarget);
   const registered = findWorkspaceForCwd(probe)?.root_path;
-  if (registered) return canonicalWorkspacePath(registered);
+  if (registered) return { root: canonicalWorkspacePath(registered), source: 'workspace' };
   const gitRoot = gitRootFor(probe);
   if (gitRoot && canonicalWorkspacePath(gitRoot) !== canonicalWorkspacePath(homedir())) {
-    return canonicalWorkspacePath(gitRoot);
+    return { root: canonicalWorkspacePath(gitRoot), source: 'git' };
   }
-  return probe;
+  return { root: probe, source: 'loose' };
 }

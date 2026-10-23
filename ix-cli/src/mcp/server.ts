@@ -5,10 +5,12 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve as resolvePath } from "node:path";
+import { statSync } from "node:fs";
+import { isAbsolute, join, resolve as resolvePath } from "node:path";
 
 import { z } from "zod";
-import { isReadablePath } from "../cli/config.js";
+import { isReadablePath, resolveWorkspaceRoot } from "../cli/config.js";
+import { resolveIngestRootWithSource } from "../cli/map-root.js";
 
 import {
   createProtocolStdout,
@@ -484,7 +486,7 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
   registerTool(
     ctx,
     "ix_read",
-    "Use when you have a symbol name but not its file or lines. Returns exactly that definition's source; also takes a path or path:start-end. Not needed when you already know path and range: Read does that.",
+    "Use when you have a symbol name but not its file or lines. Returns that definition's source, 400 lines a page (pass each next= back as symbol until none is given); also takes a path or path:start-end. Not needed when you already know path and range: Read does that.",
     {
       symbol: z.string().min(1).describe("a symbol, a path, or `path:start-end`"),
       kind: z.string().min(1).optional(),
@@ -672,15 +674,35 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       // Confined like ix_read. An ingested path's workspace becomes a root
       // ix_read may open files from, so an unconfined path let a caller turn
       // any directory into a readable one (ix_ingest, then ix_read).
-      if (typeof input.path === "string" && !isReadablePath(resolvePath(process.cwd(), input.path))) {
-        return textResult(
-          JSON.stringify({
-            error: "path_outside_workspace",
-            message: `Refusing to ingest a path outside the workspace: ${input.path}. Run ix map in that directory to make it a workspace.`,
-            tool: "ix_ingest",
-          }),
-          true,
-        );
+      // Resolved against the workspace root, as ingestFiles does, not cwd:
+      // from <ws>/a, "../outside/x" is <ws>/outside for cwd but outside for the CLI.
+      if (typeof input.path === "string") {
+        const abs = isAbsolute(input.path) ? input.path : resolvePath(resolveWorkspaceRoot(), input.path);
+        if (!isReadablePath(abs)) {
+          return textResult(
+            JSON.stringify({
+              error: "path_outside_workspace",
+              message: `Refusing to ingest a path outside the workspace: ${input.path}. Run ix map in that directory to make it a workspace.`,
+              tool: "ix_ingest",
+            }),
+            true,
+          );
+        }
+        // A path in no workspace and no repository would be ingested as a
+        // workspace of its own; over MCP that is refused. A path that does not
+        // exist falls through: the CLI reports it and registers nothing.
+        let isDir: boolean | undefined;
+        try { isDir = statSync(abs).isDirectory(); } catch { /* the CLI reports it */ }
+        if (isDir !== undefined && resolveIngestRootWithSource(abs, isDir).source === "loose") {
+          return textResult(
+            JSON.stringify({
+              error: "path_outside_workspace",
+              message: `Refusing to ingest ${input.path}: it is in no mapped workspace and no git repository. Run ix map in that directory to make it a workspace.`,
+              tool: "ix_ingest",
+            }),
+            true,
+          );
+        }
       }
       const options: string[] = [];
       pushOption(options, "--github", input.github);
@@ -927,7 +949,9 @@ function declaresOutputSchema(tool: string): boolean {
  * its own versioned schema (`ix-context-bundle/1`), so the structured copy is
  * stable across releases; when the output does not parse into a usable object
  * we omit structured content and keep the text result authoritative rather
- * than throwing.
+ * than throwing. The copy leaves out `generatedAt`, the bundle's one per-call
+ * field, so identical calls return identical bytes and a prompt cache or dedup
+ * can match; `--save` / `--out` files and CLI stdout keep it.
  */
 async function runJsonStructured(
   runIx: IxRunner,
@@ -948,9 +972,10 @@ async function runJsonStructured(
   if (!isRecord(parsed) || Object.keys(parsed).length === 0) {
     return textResult(text || JSON.stringify({ error: `${argv.command} produced no parseable JSON`, tool }), true);
   }
+  const { generatedAt: _perCall, ...stable } = parsed;
   return {
-    content: [{ type: "text", text }],
-    structuredContent: parsed,
+    content: [{ type: "text", text: JSON.stringify(stable) }],
+    structuredContent: stable,
   };
 }
 
@@ -1027,7 +1052,7 @@ async function runSmells(runIx: IxRunner, input: ToolInput): Promise<CallToolRes
 
   const path = typeof input.path === "string" ? normalizePath(input.path) : null;
   const limit = numberArg(input, "limit");
-  const candidates = parsed.candidates
+  const matched = parsed.candidates
     .filter((candidate) => {
       if (path === null || !isRecord(candidate) || typeof candidate.file !== "string") {
         return path === null;
@@ -1038,10 +1063,15 @@ async function runSmells(runIx: IxRunner, input: ToolInput): Promise<CallToolRes
       // architecture smells here" — for the `src` an agent had just used
       // successfully against ix_inventory on files stored as `ix-cli/src/...`.
       return normalizePath(candidate.file).includes(path);
-    })
-    .slice(0, limit);
+    });
+  const candidates = matched.slice(0, limit);
 
-  const payload = { ...parsed, count: candidates.length, candidates };
+  // shown/truncated describe this response, not the CLI's, so recompute them
+  // after the path filter and limit.
+  const meta = "shown" in parsed
+    ? { shown: candidates.length, truncated: parsed.truncated === true || matched.length > candidates.length }
+    : {};
+  const payload = { ...parsed, count: candidates.length, ...meta, candidates };
   // Compact, and the object once rather than twice. The indent was two spaces
   // per level of a list of smell candidates, and the structured copy was the
   // same bytes again.
