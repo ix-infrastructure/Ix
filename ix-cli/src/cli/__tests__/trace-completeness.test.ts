@@ -161,3 +161,63 @@ describe('searchPath cut semantics', () => {
     expect(cycle).toEqual({ path: null, cut: false });
   });
 });
+
+// ---------------------------------------------------------------------------
+// searchPath — the predicate each step was reached by
+// ---------------------------------------------------------------------------
+
+describe('searchPath step predicates', () => {
+  function edgeClient(responses: Record<string, Record<string, { nodes: any[]; edges: any[] }>>) {
+    return {
+      async expand(id: string, opts?: { direction?: string }) {
+        return responses[id]?.[opts?.direction ?? 'out'] ?? { nodes: [], edges: [] };
+      },
+    };
+  }
+
+  it('picks the first predicate in request order when several join the same pair', async () => {
+    const client = edgeClient({
+      A: { out: { nodes: [n('b')], edges: [
+        { src: 'A', dst: 'b', predicate: 'IMPORTS' },
+        { src: 'A', dst: 'b', predicate: 'CALLS' },
+      ] } },
+    });
+    const found = await searchPath(client as any, 'A', 'b', ['CALLS', 'IMPORTS'], 10, 10);
+    expect(found.path?.[1]).toEqual({ id: 'b', name: 'B', kind: 'file', via: 'CALLS' });
+  });
+
+  it('marks a step reached against its edge direction as reversed', async () => {
+    const client = edgeClient({
+      A: { in: { nodes: [n('b')], edges: [{ src: 'b', dst: 'A', predicate: 'IMPORTS' }] } },
+    });
+    const found = await searchPath(client as any, 'A', 'b', ['CALLS', 'IMPORTS'], 10, 10);
+    expect(found.path?.[1]).toEqual({ id: 'b', name: 'B', kind: 'file', via: 'IMPORTS', reversed: true });
+  });
+
+  it('ignores a stray edge that does not touch the expanded node', async () => {
+    const client = edgeClient({
+      A: { out: { nodes: [n('x'), n('b')], edges: [
+        { src: 'x', dst: 'b', predicate: 'CALLS' },
+        { src: 'A', dst: 'x', predicate: 'CALLS' },
+      ] } },
+    });
+    const found = await searchPath(client as any, 'A', 'b', ['CALLS'], 10, 10);
+    expect(found.path?.map((p) => p.id)).toEqual(['A', 'b']);
+    expect(found.path?.[1]).toEqual({ id: 'b', name: 'B', kind: 'file' });
+    expect(found.path?.[0].via).toBeUndefined();
+  });
+
+  it('keeps the old result shape, with no via key, when the expansion carries no edges', async () => {
+    const client = makeClient({ A: { out: [n('b')] }, b: { in: [n('c')] } });
+    const found = await searchPath(client as any, 'A', 'c', ['CALLS'], 10, 10);
+    expect(found).toEqual({
+      path: [
+        { id: 'A', name: '', kind: '' },
+        { id: 'b', name: 'B', kind: 'file' },
+        { id: 'c', name: 'C', kind: 'file' },
+      ],
+      cut: false,
+    });
+    expect(found.path?.some((p) => 'via' in p || 'reversed' in p)).toBe(false);
+  });
+});

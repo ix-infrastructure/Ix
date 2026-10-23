@@ -48,14 +48,23 @@ surfaces (#575).
   --limit 50` exits with an error rather than a shorter list. `--detailed`
   auto-paginates on its own; `--offset` or `--regions` turns that off, and
   `--limit` only sets the page size.
-- **`ix context` budgets the evidence block in tokens, not characters.**
-  `--max-tokens` defaults to 3,000 and is converted at 2.14 characters per
-  token, measured across 41 recorded bundles. At 1,500 the evidence block held
-  about ten items, and for a file target those were its own members: ix-bench
-  agents were shown 0.59 of the expected files ix had found, against all of
-  them at 3,000, for about 320 more tokens. `--max-chars` is still there for
-  a caller who needs exact bytes and overrides it; passing both is refused
-  rather than silently ranked, because the output does not say which one won.
+- **`ix context` budgets the text it emits, in tokens.** `--max-tokens`
+  defaults to 3,000 and is converted at 2.14 characters per token, measured
+  across 41 recorded bundles, in every output format. At 1,500 the evidence
+  block held about ten items, and for a file target those were its own
+  members: ix-bench agents were shown 0.59 of the expected files ix had found,
+  against all of them at 3,000, for about 320 more tokens. For `--format llm`
+  the budget covers the whole output: header, diagnostics, evidence rows and
+  `next` lines. For `json` it bounds the serialized evidence list, and for text
+  the evidence lines plus a reserve for the header; entities and relationships
+  keep their own `--max-entities` and `--max-relationships` counts.
+  `--max-evidence` defaults to 25. cl100k counts about 3.7 characters per token
+  in llm output and 2.7 in JSON, so 2.14 keeps a bundle under its token budget;
+  larger defaults are deferred until they are measured on ix-bench. A saved
+  investigation records the format its budget was sized for, and `--diff`
+  rebuilds with it. `--max-chars` is still there for a caller who needs exact
+  bytes and overrides it; passing both is refused rather than silently ranked,
+  because the output does not say which one won.
 - **`ix mcp` advertises five tools by default**, not twenty-six:
   `ix_context`, `ix_search`, `ix_neighbors`, `ix_impact` and `ix_read`, one
   per question the graph answers better than Grep/Read. `ix_neighbors{relation}`
@@ -69,8 +78,12 @@ surfaces (#575).
   (`ix_neighbors symbol=X relation=callers`), never as CLI flags.
 - **`ix read <file>` stops at 400 lines.** The header then carries
   `truncated=true total_lines=<n> next=<path>:401-800`, so the next page is one
-  command away. A line range you typed (`ix read a.ts:1-900`) is never capped,
-  a symbol target is its own span, and `--all` reads the whole file.
+  command away. A line range you typed (`ix read a.ts:1-900`) is never capped.
+  A symbol longer than 400 lines is capped the same way. Its header adds
+  `span_end=<last line>`, `total_lines` is the symbol's span length (a count,
+  not the file's), and `next=<path>:10-1327@410` resumes the symbol's span, is
+  capped again and carries its own `next=` until the symbol's last line.
+  `--all` reads the whole file or symbol.
 - **`ix depends` and `ix trace` stop at depth 3 and 100 nodes.** Both were
   unbounded, which on a hub is thousands of nodes the caller pays for before
   seeing any. The output distinguishes the two ways a walk ends:
@@ -78,17 +91,19 @@ surfaces (#575).
   the walk stopped descending and there may or may not be more. JSON carries
   them per direction in each `summary`. When `ix trace --to` finds no route, a
   search a bound cut short adds the same code after `no_path`; a bare `no_path`
-  means the whole reachable graph was searched. `--depth` and `--cap` take
-  anything. When the cap cuts a `depends` or directional `trace` walk, the
-  nodes kept are the shallowest: every node at depth d before any at depth
-  d+1, so the first level is complete before the second begins. (The walk
+  means the whole reachable graph was searched. `ix trace` rejects a
+  `--depth` or `--cap` that is not a non-negative integer as a usage error.
+  When the cap cuts a `depends` or directional `trace` walk, the nodes kept
+  are the shallowest: every node at depth d before any at depth d+1, so the
+  first level is complete before the second begins. (The walk
   used to be depth-first, and could spend the whole cap down its first
   branch.) A walk the cap does not cut is the same tree it always was.
 - **`ix ingest <path>` writes to the workspace the path belongs to** -- the
   registered workspace containing it, else its git repository -- and a file or
   directory inside it refreshes just that part, leaving the rest of the
-  workspace alone. Only a path in no workspace and no repository becomes a
-  workspace of its own.
+  workspace alone. Only a directory in no workspace and no repository becomes
+  a workspace of its own (never the default); a loose file there is ingested
+  but registers nothing, so `ix read` cannot open its neighbours.
 - **`ix ingest <path>` coalesces with a running `ix map` or `ix ingest` of the
   same workspace**, as `ix map` does: it does not run beside the holder, asks
   it for one more pass, and exits 0 (or `IX_MAP_COALESCE_EXIT_CODE`). With
@@ -111,7 +126,24 @@ surfaces (#575).
   the caller's order, not the renderer's. It never touches a header, and a field
   no row carries is dropped rather than emitted empty.
 - **`--pick <n>` is 1-based** everywhere it appears, and is how you resolve an
-  ambiguous target without re-running with a longer name.
+  ambiguous target without re-running with a longer name. It indexes the list
+  in stable (path, line, id) order, and also selects among the candidates of a
+  resolution notice (a target that resolved by choosing among equal matches;
+  only the true ties are listed and numbered).
+- **`--all` answers an ambiguous name for every candidate** (`callers`,
+  `callees`, `impact`), instead of exiting 2 with the candidate list. Each row
+  (or, for `impact`, each analysis) carries `candidate=<n>`, numbering the
+  `candidate` records printed with it. It covers the tied candidates the name
+  search returned, not only the 8 an ambiguity lists (numbered as `--pick`
+  numbers them; an import of the name is skipped when a definition is listed
+  too), up to 25 per call, so narrow with `--kind`
+  or `--path` for a common name; a `candidates_truncated` diagnostic says when
+  the cap or the search cut it off. `--pick` takes precedence over it.
+- **Exit codes** for the graph commands: `0` results, `2` ambiguous
+  (candidates listed), `3` not found (suggestions and a reason when known),
+  `4` workspace not mapped, `1` any other error. `IX_LEGACY_EXIT_CODES=1` makes
+  every non-zero exit `1` again. With several targets (`ix locate a b c`) the
+  run exits with the worst target's code and each group carries its own.
 - **`--no-recursive` and `--no-open` negate a default-on behaviour**, so their
   Default of `on` is the positive behaviour, and passing the flag turns it off.
 
@@ -148,22 +180,27 @@ Show methods/functions called by the given symbol (cross-file).
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--all` | — | off | When the symbol is ambiguous, answer for every candidate; rows are tagged with their candidate |
 | `--limit` | `<n>` | `50` | Max results to show |
+| `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
-### `ix callers <symbol>`
+### `ix callers <symbols...>`
 
-Show methods/functions that call the given symbol (cross-file).
+Show methods/functions that call the given symbols (cross-file). Several
+symbols answer in one call, grouped per symbol.
 
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--all` | — | off | When the symbol is ambiguous, answer for every candidate; rows are tagged with their candidate |
 | `--limit` | `<n>` | `50` | Max results to show |
+| `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
@@ -224,6 +261,7 @@ Show members contained by the given entity (class, module, file).
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
+| `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
@@ -245,8 +283,8 @@ Build a bounded, deterministic context bundle for a symbol, file, or entity (or 
 | `--max-entities` | `<n>` | — | Maximum entities in the bundle (default: 50, clamped to 1-500) |
 | `--max-relationships` | `<n>` | — | Maximum relationships in the bundle (default: 100, clamped to 1-1000) |
 | `--max-evidence` | `<n>` | — | Maximum evidence items in the bundle (default: 25, clamped to 1-200) |
-| `--max-tokens` | `<n>` | `3000` | Maximum tokens of evidence output (clamped to 500-200000) |
-| `--max-chars` | `<n>` | — | Maximum characters of evidence output; overrides `--max-tokens` (clamped to 1000-1000000) |
+| `--max-tokens` | `<n>` | `3000` | Token budget for the printed output (llm: all of it; json and text: the evidence) (clamped to 500-200000) |
+| `--max-chars` | `<n>` | — | Character budget for the printed output (llm: all of it; json and text: the evidence); overrides `--max-tokens` (clamped to 1000-1000000) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
@@ -431,6 +469,7 @@ System risk analysis — what behavior is at risk if this changes.
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--all` | — | off | When the target is ambiguous, analyse every candidate; each analysis is tagged with its candidate |
 | `--depth` | `<n>` | `1` | Expansion depth for callers/importers (default 1, max 3) |
 | `--limit` | `<n>` | `10` | Max top-impacted members to show |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
@@ -448,6 +487,7 @@ Show what imports the given entity.
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
+| `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
@@ -463,6 +503,7 @@ Show what the given entity imports.
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--limit` | `<n>` | `50` | Max results to show |
+| `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
@@ -505,14 +546,16 @@ List entities by kind with optional path scoping.
 | `--kind` | `<kind>` | — | Entity kind to list (class, method, function, file, module, etc.) |
 | `--path` | `<path>` | — | Filter by source file path substring |
 | `--limit` | `<n>` | `50` | Max results |
+| `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
-### `ix locate <symbol>`
+### `ix locate <symbols...>`
 
-Resolve a symbol to its position in the codebase and system hierarchy.
+Resolve symbols to their position in the codebase and system hierarchy.
+Several symbols answer in one call, grouped per symbol.
 
 | Flag | Value | Default | Effect |
 |---|---|---|---|
@@ -652,7 +695,11 @@ Read raw file content, line ranges, or symbol source code.
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--root` | `<dir>` | — | Workspace root directory |
-| `--all` | — | off | Read the whole file, past the 400-line default cap |
+| `--all` | — | off | Read the whole file or symbol, past the 400-line default cap |
+
+An ambiguous file or symbol name exits 0 with an `ambiguous` record and its
+candidates (unlike the graph commands' exit 2); retry with `--pick <n>` or
+`--path`. A miss exits 3.
 
 ### `ix reset`
 
@@ -720,6 +767,7 @@ Detect architecture smells in the codebase.
 | `--god-module-fan` | `<n>` | `15` | Min fan-in/out for god module |
 | `--weak-max-neighbors` | `<n>` | `1` | Max neighbors for weak component |
 | `--list` | — | off | List existing smell claims without rerunning |
+| `--limit` | `<n>` | 50 (text/llm); all (json) | Max candidates, highest confidence first; 0 = all, unfiltered. Otherwise non-source orphan files (docs, templates, data) are dropped before the cut. With `--list`, caps the stored claims (all when omitted) |
 
 ### `ix stats`
 
@@ -779,6 +827,7 @@ Fast lexical/text search across the codebase (uses ripgrep).
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--limit` | `<n>` | `20` | Max results |
+| `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--path` | `<dir>` | `.` | Restrict search to a workspace-relative directory |
 | `--language` | `<lang>` | — | Filter by language (python, typescript, scala, etc.) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |

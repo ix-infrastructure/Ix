@@ -6,7 +6,8 @@ on:
   pull_request:
     branches: [main]
 
-# Least privilege at the top; the scanning job elevates to upload SARIF.
+# Least privilege. Nothing here uploads SARIF (findings fail the job instead),
+# so no job needs security-events: write.
 permissions:
   contents: read
 
@@ -14,9 +15,6 @@ jobs:
   trivy-repo:
     name: Trivy (repo)
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write # upload SARIF to code scanning
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -28,6 +26,8 @@ jobs:
           scan-ref: .
           severity: CRITICAL,HIGH
           exit-code: 1
-          scanners: vuln,misconfig
+          # vuln only: the misconfig scan runs once, in config-security.yml
+          # (trivy-misconfig).
+          scanners: vuln
 
   # Docker image scanning is handled in the private Ix-memory repo

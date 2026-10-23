@@ -90,6 +90,33 @@ describe("an ambiguous target in llm format", () => {
     expect(JSON.parse(stdout).candidates[0].id).toBe("1111aaaa-0000-0000-0000-000000000000");
   });
 
+  it("says how many tied, in llm, after the unchanged count=", async () => {
+    const { stdout } = await run(["overview", "Duplicate", "--format", "llm"]);
+    expect(stdout.split("\n")[0]).toMatch(/error code=ambiguous_target .*count=2 shown=2 total=2$/);
+  });
+
+  it("says how many tied in json, and whether the list was cut off", async () => {
+    const payload = JSON.parse((await run(["overview", "Duplicate", "--format", "json"])).stdout);
+    expect(payload.total).toBe(2);
+    expect(payload.truncated).toBeUndefined();
+    expect(payload.error).toBe("ambiguous_target");
+  });
+
+  it("shows N of M in text when only some candidates are listed", async () => {
+    const { reportAmbiguousTarget } = await import("../ui.js");
+    const candidates = Array.from({ length: 8 }, (_, i) => ({ id: `id-${i}000000`, name: "run", kind: "method", path: `src/m${i}.ts` }));
+    const lines: string[] = [];
+    const error = vi.spyOn(console, "error").mockImplementation((...parts) => lines.push(parts.join(" ")));
+    try {
+      reportAmbiguousTarget("run", { resolutionMode: "ambiguous", candidates, total: 30, truncated: true }, "text");
+      reportAmbiguousTarget("run", { resolutionMode: "ambiguous", candidates, total: 12 }, "text");
+    } finally {
+      error.mockRestore();
+    }
+    expect(lines.join("\n")).toContain("Showing 8 of >=30");
+    expect(lines.join("\n")).toContain("Showing 8 of 12");
+  });
+
   it("drops the flags it was already given from the hint", async () => {
     // Called directly: which flags are worth suggesting is the reporter's
     // decision, and reaching it through a command means first arranging for
