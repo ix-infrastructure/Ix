@@ -63,7 +63,7 @@ describe("docker-compose.standalone.yml: ArangoDB cache caps", () => {
 
   it("keeps the image, the data volume and the service names", () => {
     expect(Object.keys(compose.services)).toEqual(["arangodb", "memory-layer"]);
-    expect(arango.image).toBe("arangodb:3.12.11");
+    expect(arango.image).toBe("arangodb:3.12.12");
     expect(arango.volumes).toEqual(["arangodb-data:/var/lib/arangodb3"]);
     expect(Object.keys(compose.volumes)).toEqual(["arangodb-data"]);
     expect(arango.environment).toEqual({ ARANGO_NO_AUTH: "1" });
