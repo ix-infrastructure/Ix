@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
 import { registerMapCommand } from "../commands/map.js";
-import { canonicalMapRoot, resolveIngestRoot, resolveMapRoot } from "../map-root.js";
+import { canonicalMapRoot, resolveIngestRoot, resolveIngestRootWithSource, resolveMapRoot } from "../map-root.js";
 import { findWorkspaceForCwd, loadConfig } from "../config.js";
 import { lockPathForTest } from "../single-flight.js";
 
@@ -344,6 +344,30 @@ describe("ingest root resolution", () => {
     // A workspace the user registered at $HOME on purpose is still used.
     writeWorkspaces(realHome);
     expect(resolveIngestRoot(join(realHome, "notes", "dir"), true)).toBe(realHome);
+  });
+
+  it("says which step chose the root", () => {
+    const repo = realpathSync.native(fixture());
+    const gitRepo = realpathSync.native(fixture());
+    const loose = realpathSync.native(fixture());
+    mkdirSync(join(repo, "src"), { recursive: true });
+    mkdirSync(join(gitRepo, "src"), { recursive: true });
+    writeFileSync(join(loose, "x.ts"), "export {};\n");
+    execFileSync("git", ["init", "-q"], { cwd: gitRepo });
+    writeWorkspaces(repo);
+
+    expect(resolveIngestRootWithSource(join(repo, "src"), true, join(repo, "src"))).toEqual({ root: join(repo, "src"), source: "explicit" });
+    expect(resolveIngestRootWithSource(join(repo, "src"), true)).toEqual({ root: repo, source: "workspace" });
+    expect(resolveIngestRootWithSource(join(gitRepo, "src"), true)).toEqual({ root: gitRepo, source: "git" });
+    expect(resolveIngestRootWithSource(loose, true)).toEqual({ root: loose, source: "loose" });
+    expect(resolveIngestRootWithSource(join(loose, "x.ts"), false)).toEqual({ root: loose, source: "loose" });
+  });
+
+  it("calls a git root at $HOME loose", () => {
+    const realHome = realpathSync.native(home);
+    mkdirSync(join(realHome, "notes"), { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: realHome });
+    expect(resolveIngestRootWithSource(join(realHome, "notes"), true).source).toBe("loose");
   });
 
   it("takes --root first, and refuses a path outside it", () => {

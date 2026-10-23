@@ -13,7 +13,7 @@ import { IxClient } from '../../client/api.js';
 import { combineSignals, currentRunSignal } from '../../client/run-signal.js';
 import type { GraphPatchPayload } from '../../client/types.js';
 import { canonicalWorkspacePath, isPathInside, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
-import { resolveIngestRoot } from '../map-root.js';
+import { resolveIngestRootWithSource } from '../map-root.js';
 import { acquireMapLock, requestMapRerun, takeMapRerun } from '../single-flight.js';
 import { applyRequestedMapCoalesceExitCode } from './map.js';
 import {
@@ -1141,11 +1141,17 @@ function renderProgressLine(phase: string, current: number, total: number): stri
 
 type PathIngestOpts = Parameters<typeof ingestFiles>[1];
 
-/** The workspace root `target` ingests into, or undefined when it cannot be resolved. */
-function ingestLockRoot(target: string, explicitRoot?: string): string | undefined {
+/**
+ * The workspace root `target` ingests into, or undefined when it cannot be
+ * resolved. `looseFile`: the target is a file in no workspace and no
+ * repository, which is never registered (see ingestFiles).
+ */
+function ingestLockRoot(target: string, explicitRoot?: string): { root: string; looseFile: boolean } | undefined {
   try {
     const resolved = nodePath.resolve(target);
-    return resolveIngestRoot(resolved, fs.statSync(resolved).isDirectory(), explicitRoot);
+    const isDirectory = fs.statSync(resolved).isDirectory();
+    const { root, source } = resolveIngestRootWithSource(resolved, isDirectory, explicitRoot);
+    return { root, looseFile: source === 'loose' && !isDirectory };
   } catch {
     // `ingestFiles` reports a missing or unreadable path itself.
     return undefined;
@@ -1168,11 +1174,12 @@ function ingestLockRoot(target: string, explicitRoot?: string): string | undefin
  * workspace, so it re-ingests only its own path then.
  */
 export async function ingestPathSingleFlight(target: string, opts: PathIngestOpts): Promise<void> {
-  const root = ingestLockRoot(target, opts.root);
-  if (root === undefined) {
+  const lockRoot = ingestLockRoot(target, opts.root);
+  if (lockRoot === undefined) {
     await ingestFiles(target, opts);
     return;
   }
+  const { root, looseFile } = lockRoot;
   const lock = acquireMapLock(root, `ix ingest ${root}`);
   if (lock === null) {
     requestMapRerun(root);
@@ -1195,8 +1202,11 @@ export async function ingestPathSingleFlight(target: string, opts: PathIngestOpt
       // known here, so this is a plain incremental pass.
       const rerunTarget = loadIngestBaseline(root) !== null ? root : target;
       try {
+        // The rerun may widen a loose file to its whole directory; that must
+        // not register the directory the file's own ingest would not have.
         await ingestFiles(rerunTarget, {
           recursive: true, format: 'json', printSummary: false, suppressOutput: true, root: opts.root,
+          neverRegister: looseFile,
         });
       } catch (err: any) {
         if (opts.format !== 'json') {
@@ -1230,7 +1240,7 @@ export function registerIngestCommand(program: Command): void {
       (value: string, previous: string[] = []) => [...previous, value],
       [] as string[],
     )
-    .addHelpText('after', '\nExamples:\n  ix ingest ./src\n  ix ingest --path ./src --force\n  ix ingest --path ./rocksdb --lang cpp,c\n  ix ingest --github owner/repo\n  ix ingest --github owner/repo --since 2026-01-01 --limit 20 --format json\n  ix ingest --github owner/repo --token ghp_xxxx\n\nA path inside a mapped workspace (or a git repo) refreshes just that part of it, under that\nworkspace; a path outside every workspace and repo is ingested as a workspace of its own.')
+    .addHelpText('after', '\nExamples:\n  ix ingest ./src\n  ix ingest --path ./src --force\n  ix ingest --path ./rocksdb --lang cpp,c\n  ix ingest --github owner/repo\n  ix ingest --github owner/repo --since 2026-01-01 --limit 20 --format json\n  ix ingest --github owner/repo --token ghp_xxxx\n\nA path inside a mapped workspace (or a git repo) refreshes just that part of it, under that\nworkspace; a directory outside every workspace and repo becomes a workspace of its own (never the\ndefault). A loose file outside them is ingested but registers nothing, so ix read cannot open its neighbours.')
     .action(async (positionalPath: string | undefined, opts: {
       path?: string; recursive?: boolean; force?: boolean; github?: string; token?: string;
       since?: string; limit: string; format: string; root?: string; debug?: boolean; lang?: string;
@@ -1756,7 +1766,7 @@ export function ingestCompletedCleanly(parseErrors: number, commitErrors: number
 
 export async function ingestFiles(
   path: string,
-  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean; exclude?: string[]; deadlineSignal?: AbortSignal }
+  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean; exclude?: string[]; deadlineSignal?: AbortSignal; neverRegister?: boolean }
 ): Promise<IngestFilesSummary> {
   // Under `ix mcp` the tool call's deadline is this run's deadline too. The
   // client would see it anyway (createClient combines it), but the commit loop,
@@ -1815,7 +1825,12 @@ export async function ingestFiles(
   // `resolveIngestRoot`. A path strictly inside that root is a scoped run --
   // discovery, deletion and the stitch are limited to it, and the rest of the
   // workspace's baseline is carried forward untouched.
-  const workspaceRoot = resolveIngestRoot(resolvedPath, fs.statSync(resolvedPath).isDirectory(), opts.root);
+  const targetIsDirectory = fs.statSync(resolvedPath).isDirectory();
+  const { root: workspaceRoot, source: rootSource } = resolveIngestRootWithSource(resolvedPath, targetIsDirectory, opts.root);
+  // A file in no workspace and no repository is ingested under its directory's
+  // id but never registered: that would make the whole directory readable.
+  // `neverRegister`: a coalesced rerun on behalf of such a file ingest.
+  const registerAfterCommit = opts.neverRegister !== true && !(rootSource === 'loose' && !targetIsDirectory);
   // A new workspace is only registered once a commit lands (below, before the
   // summary): see workspaceStateFor.
   const {
@@ -4396,10 +4411,17 @@ export async function ingestFiles(
 
   // A new workspace is registered only now, and only if the backend took
   // something: see workspaceStateFor.
-  if (registrationPending && patchesTheBackendTook > 0) {
-    ensureWorkspaceIdState(workspaceRoot);
+  if (registrationPending && patchesTheBackendTook > 0 && registerAfterCommit) {
+    // A repository (or --root) ingest may become the default when none exists, as
+    // before CL-05; a loose directory never does: an ingest of a stray directory
+    // must not pick the workspace other commands fall back to.
+    ensureWorkspaceIdState(workspaceRoot, { setDefault: rootSource !== 'loose' });
     if (!opts.suppressOutput && opts.format === 'text') {
       process.stderr.write(chalk.dim(`Registered workspace "${workspaceName}" (${workspaceRoot}).\n`));
+    }
+  } else if (registrationPending && patchesTheBackendTook > 0) {
+    if (!opts.suppressOutput && opts.format === 'text') {
+      process.stderr.write(chalk.dim(`Not registered as a workspace: ${workspaceRoot} (a file outside every workspace and repository). Run ix map ${workspaceRoot} to query and read it.\n`));
     }
   }
 

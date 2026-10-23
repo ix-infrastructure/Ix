@@ -68,7 +68,8 @@ These commands combine several graph queries into one bounded answer. Reach for 
 
 `ix ingest <path>` writes to the workspace the path belongs to: the registered workspace containing it, else its
 git repository. A file or directory inside that workspace refreshes just that part of it, and the rest of the
-workspace is left alone. A path outside every workspace and repository is ingested as a workspace of its own.
+workspace is left alone. A directory outside every workspace and repository becomes a workspace of its own (never
+the default). A loose file there is ingested but registers nothing, so `ix read` cannot open its neighbours.
 
 `ix ingest` honors `--exclude <glob>` and an `.ixignore` file at the workspace root. `.ixignore` supports a subset of
 `.gitignore` syntax: `#` comments, `*`, `?`, `**`, a leading `/` to anchor to the root, a trailing `/` for
