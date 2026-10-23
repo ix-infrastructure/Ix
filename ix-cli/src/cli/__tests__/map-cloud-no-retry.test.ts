@@ -70,7 +70,9 @@ describe("ix map on the cloud path", () => {
     await program.parseAsync(["node", "ix", "map", root, "--silent"]);
 
     expect(calls, "one upload, no re-send").toHaveLength(1);
-    expect(calls[0]).toMatchObject({ cwd: root });
+    // `ix map` uploads the canonical root (realpath): /var -> /private/var on
+    // macOS, 8.3 short names expanded on Windows.
+    expect(calls[0]).toMatchObject({ cwd: fs.realpathSync.native(root) });
     expect(bulk).not.toHaveBeenCalled();
     expect(single).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(1);
