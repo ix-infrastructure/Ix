@@ -3021,7 +3021,13 @@ const symbolChecksByRoot = new Map<string, { check: SymbolReadCheck; at: number 
 
 /** `readsOneSymbol` against this workspace's files, as they are on disk now, memoised per root. */
 function onDiskSymbolCheck(): SymbolReadCheck {
-  const root = resolveWorkspaceRoot();
+  // Lazy: the workspace root is resolved only when a stale row asks, so a
+  // bundle with no stale rows never loads workspace config for this.
+  let check: SymbolReadCheck | undefined;
+  return (name, path) => (check ??= checkerForRoot(resolveWorkspaceRoot()))(name, path);
+}
+
+function checkerForRoot(root: string): SymbolReadCheck {
   const now = Date.now();
   const cached = symbolChecksByRoot.get(root);
   if (cached && now - cached.at < SYMBOL_CHECK_TTL_MS) return cached.check;
