@@ -5,9 +5,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { clearIngestMtimeCache, ingestMtimeCachePath, ingestRebuildPath } from "../config.js";
+import { clearIngestMtimeCache, ingestMtimeCachePath, ingestOrphanSweepPath, ingestRebuildPath } from "../config.js";
 import {
   clearRebuildProgress, extractorChanged, loadIngestBaseline, loadRebuildProgress, saveIngestBaseline, saveRebuildProgress,
+  loadOrphanSweepPending, saveOrphanSweepPending,
 } from "../ingest-baseline.js";
 import { advanceRev } from "../commands/ingest.js";
 
@@ -176,5 +177,34 @@ describe("ingest baseline atomic write", () => {
     saveIngestBaseline(root, new Map([["a.ts", 1_000]]), 3);
 
     expect(fs.readdirSync(path.dirname(target)).filter(name => name.endsWith(".tmp"))).toEqual([]);
+  });
+});
+
+describe("unfinished orphan sweeps", () => {
+  it("round-trip per root, drop empty entries, and go with the mtime cache", () => {
+    const root = path.join(home, "p");
+    expect(loadOrphanSweepPending(root).size).toBe(0);
+    saveOrphanSweepPending(root, new Map<string, Set<string> | null>([
+      ["tree-sitter/9.8", null],
+      ["tree-sitter/9.7", new Set(["b.ts", "a.ts"])],
+      ["tree-sitter/9.6", new Set()],
+    ]));
+    expect(loadOrphanSweepPending(root)).toEqual(new Map([
+      ["tree-sitter/9.8", null],
+      ["tree-sitter/9.7", new Set(["a.ts", "b.ts"])],
+    ]));
+    expect(loadOrphanSweepPending(path.join(home, "q")).size).toBe(0);
+
+    // Nothing left: the file goes.
+    saveOrphanSweepPending(root, new Map([["tree-sitter/9.7", new Set<string>()]]));
+    expect(fs.existsSync(ingestOrphanSweepPath(root))).toBe(false);
+
+    saveOrphanSweepPending(root, new Map([["tree-sitter/9.8", null]]));
+    fs.writeFileSync(ingestOrphanSweepPath(root), "{\"root\":");
+    expect(loadOrphanSweepPending(root).size).toBe(0);
+
+    saveOrphanSweepPending(root, new Map([["tree-sitter/9.8", null]]));
+    clearIngestMtimeCache(root);
+    expect(fs.existsSync(ingestOrphanSweepPath(root))).toBe(false);
   });
 });

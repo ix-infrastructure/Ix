@@ -393,6 +393,35 @@ paths:
                   claims: { type: array, items: { type: object } }
                   edges: { type: array, items: { $ref: "#/components/schemas/GraphEdge" } }
 
+  /v1/nodes:
+    post:
+      tags: [entities]
+      summary: Fetch many live nodes in one read (Ix-memory 1.0.33+)
+      operationId: getNodes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids: { type: array, items: { type: string }, maxItems: 1000, description: Node ids (UUIDs) }
+                fields: { type: string, enum: [full], description: "full returns whole nodes, attrs and provenance included" }
+      responses:
+        "200":
+          description: The live nodes, and the ids that are not live
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rev: { type: integer }
+                  nodes: { type: array, items: { $ref: "#/components/schemas/GraphNode" } }
+                  missing: { type: array, items: { type: string } }
+        "413":
+          description: More than 1000 ids
+
   /v1/resolve-prefix/{prefix}:
     get:
       tags: [entities]
