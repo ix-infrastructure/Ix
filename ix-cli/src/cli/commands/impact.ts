@@ -8,7 +8,7 @@ import { createClient } from "../../client/factory.js";
 import { activeReadScope, candidatesCut, resolveTargetSetOrReport, printResolved, type ResolvedEntity, type TargetSet } from "../resolve.js";
 import { EXIT_CODES_HELP } from "../outcome.js";
 import { checkGraphHealth, graphHealthJson, graphHealthLlmFields, graphHealthProse, isUnhealthy } from "../graph-health.js";
-import { bucketByHierarchy, getSystemPath, formatSystemPath, hasMapData, type SystemPath } from "../hierarchy.js";
+import { bucketByHierarchy, getSystemPath, formatSystemPath, hasMapData, type BucketMember, type SystemPath } from "../hierarchy.js";
 import { inferRiskSemantics, humanizeLabel, type ImpactFacts, type RiskSemantics } from "../impact/risk-semantics.js";
 import { captureJson, lineSpan, printJson, relativePath, rowLocation, sliceEdgeResults, stripNulls, type Slice } from "../format.js";
 import { forMcp, suggest, type Relation } from "../next-step.js";
@@ -414,10 +414,16 @@ async function containerImpact(
 
   // Bucket all dependents by hierarchy. First occurrence of each id wins, as
   // the id list this replaced did; the nodes go in whole so their names and
-  // kinds need no second read.
+  // kinds need no second read. `via` remembers which expand that first
+  // occurrence came from, for the JSON `dependentList`.
   const uniqueDependents = new Map<string, any>();
-  for (const n of [...directImporters, ...directDependents]) {
-    if (!uniqueDependents.has(n.id)) uniqueDependents.set(n.id, n);
+  const dependentVia = new Map<string, "importer" | "dependent">();
+  for (const [nodes, via] of [[directImporters, "importer"], [directDependents, "dependent"]] as const) {
+    for (const n of nodes) {
+      if (uniqueDependents.has(n.id)) continue;
+      uniqueDependents.set(n.id, n);
+      dependentVia.set(n.id, via);
+    }
   }
   // Independent of the member counts, so the two run together.
   const [callerResults, propagationBuckets] = await Promise.all([
@@ -479,8 +485,13 @@ async function containerImpact(
           region: b.region.name,
           regionKind: b.region.kind,
           count: b.members.length,
-          members: b.members.slice(0, 5).map((m) => ({ name: m.name, kind: m.kind })),
+          members: b.members.slice(0, 5).map(bucketMemberJson),
         })) : undefined,
+        // Every direct importer and dependent, located. Not cut by --limit:
+        // JSON keeps every row, as callerList does.
+        dependentList: uniqueDependents.size > 0
+          ? [...uniqueDependents.values()].map((n: any) => ({ ...impactRowJson(n), via: dependentVia.get(n.id) }))
+          : undefined,
         decisions: decisions.length > 0 ? decisions : undefined,
         tasks: tasks.length > 0 ? tasks : undefined,
         bugs: bugs.length > 0 ? bugs : undefined,
@@ -534,6 +545,31 @@ async function containerImpact(
       renderNote(`Diagnostics: ${diagnostics.join("; ")}`);
     }
   }
+}
+
+// ── JSON rows ────────────────────────────────────────────────────────────────
+
+/** The location fields a JSON row adds, each left out when unknown (never null). */
+function locationJson(loc: { path?: string; lineStart?: number; lineEnd?: number }): { path?: string; lineStart?: number; lineEnd?: number } {
+  return stripNulls({ path: loc.path, lineStart: loc.lineStart, lineEnd: loc.lineEnd });
+}
+
+/**
+ * One caller, callee or dependent row in `--format json`: `kind` and `name`
+ * first, as they always were, then where the node is (`rowLocation`), the same
+ * fields `topImpactedMembers` carries.
+ */
+export function impactRowJson(node: any): { kind: string; name: string; path?: string; lineStart?: number; lineEnd?: number } {
+  return {
+    kind: node.kind,
+    name: node.name || node.attrs?.name || "(unnamed)",
+    ...locationJson(rowLocation(node)),
+  };
+}
+
+/** A propagation bucket member in `--format json`: `name`, `kind`, then its location. */
+function bucketMemberJson(m: BucketMember): BucketMember {
+  return { name: m.name, kind: m.kind, ...locationJson(m) };
 }
 
 // ── Leaf impact ──────────────────────────────────────────────────────────────
@@ -648,19 +684,13 @@ async function leafImpact(
           callers: callersResult.nodes.length,
           callees: calleesResult.nodes.length,
         },
-        callerList: callersResult.nodes.length > 0 ? callersResult.nodes.map((n: any) => ({
-          kind: n.kind,
-          name: n.name || n.attrs?.name || "(unnamed)",
-        })) : undefined,
-        calleeList: calleesResult.nodes.length > 0 ? calleesResult.nodes.map((n: any) => ({
-          kind: n.kind,
-          name: n.name || n.attrs?.name || "(unnamed)",
-        })) : undefined,
+        callerList: callersResult.nodes.length > 0 ? callersResult.nodes.map(impactRowJson) : undefined,
+        calleeList: calleesResult.nodes.length > 0 ? calleesResult.nodes.map(impactRowJson) : undefined,
         propagationBuckets: propagationBuckets.length > 0 ? propagationBuckets.map((b) => ({
           region: b.region.name,
           regionKind: b.region.kind,
           count: b.members.length,
-          members: b.members.slice(0, 5).map((m) => ({ name: m.name, kind: m.kind })),
+          members: b.members.slice(0, 5).map(bucketMemberJson),
         })) : undefined,
         decisions: decisions.length > 0 ? decisions : undefined,
         tasks: tasks.length > 0 ? tasks : undefined,

@@ -460,6 +460,9 @@ diagnostic code=results_truncated message="14 callers; showing 10. Raise --limit
 printed after the `--limit` cut (the two lists share one header, so `shown`/`total` are split by list).
 `ix impact` has no `--offset`, so its truncation diagnostic carries no `next_offset=`; it points at
 `ix callers`/`ix callees` (over MCP, `ix_neighbors`), which page.
+In `--format json` the same rows (`callerList`, `calleeList`, bucket `members`) carry `path`,
+`lineStart` and `lineEnd`, and a container target's JSON adds `dependentList`, its located
+importers and dependents.
 
 `ix overview <container>`:
 

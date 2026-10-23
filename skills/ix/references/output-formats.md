@@ -47,6 +47,37 @@ command substitution, an agent's tool result — and indents only when you are
 reading it on screen. Indentation is whitespace a parser throws away, and it is
 about a fifth of the payload. `--pretty` forces the indented shape anywhere.
 
+### `ix impact` JSON
+
+One object per target (under `--all`, one per candidate in `results`). Top-level
+keys, each omitted when empty: `resolvedTarget`, `graph` (only on a degraded
+graph), `depth`, `systemPath`, `riskSummary`, `riskLevel`, `riskCategory`,
+`atRiskBehavior`, `nextStep`, `flowPropagation`, `summary`, then
+
+- leaf targets (functions, methods, ...): `callerList`, `calleeList`,
+  `propagationBuckets`;
+- container targets (`class`, `module`, `file`, `object`, `trait`,
+  `interface`): `topImpactedMembers`, `propagationBuckets`, `dependentList`;
+
+then `decisions`, `tasks`, `bugs` (and `diagnostics` on containers).
+
+Rows say where their entity is: `callerList[]`, `calleeList[]`,
+`propagationBuckets[].members[]`, `topImpactedMembers[]` and `dependentList[]`
+carry `path` (workspace-relative), `lineStart` and `lineEnd` next to `kind`
+and `name`. A `file` row has `path` only; a field the graph does not know is
+left out, never `null`. The span is the entity's own, not the line of the call.
+
+`dependentList` is every direct importer and dependent of a container, each
+once, importers first: `{ kind, name, path?, lineStart?, lineEnd?, via }`, with
+`via: "importer"` for a node reached over `IMPORTS` and `via: "dependent"` for
+one reached over `CALLS`/`REFERENCES` (a node reached both ways is an
+`importer`). `summary.directImporters` and `summary.directDependents` count the
+two expands before that dedup.
+
+`--limit` cuts `topImpactedMembers` and the `llm` caller/callee rows only.
+`callerList`, `calleeList` and `dependentList` are never cut;
+`propagationBuckets[].members` lists the first five of each bucket's `count`.
+
 ### Commands that accept `--format` but route `llm` to `text`
 
 The deprecated `query` takes `text|json` only. `diff --content` (verbatim hunks)
