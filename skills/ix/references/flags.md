@@ -117,7 +117,9 @@ surfaces (#575).
   chars) -- a team sharing one graph from clones at different paths, or a tool
   that keys on the id, pins it on purpose. The mismatch is one stderr warning
   per run, skipped under `--silent` and the machine formats; `pinned: true` on
-  the workspace entry silences it for good.
+  the workspace entry silences it for good and makes `--prune-stale-workspace`
+  refuse to re-key that root (remove it first if you mean to). The CLI never
+  writes or removes `pinned`.
   `--prune-stale-workspace` is the only way to switch to the path-derived id: it
   re-keys, re-ingests the whole workspace, and after a clean ingest deletes the
   old id's graph. Before this, a mismatched id was re-keyed silently and the old
@@ -133,7 +135,9 @@ surfaces (#575).
     the re-ingest is not clean or the delete fails, the next run with the flag
     against that endpoint re-ingests and retries the deletion; nothing is
     orphaned. It also keeps the old graph while another root in your config still
-    uses that id. The delete refuses a redirect rather than following it.
+    uses that id. The delete refuses a redirect rather than following it. A
+    hand-edited marker without a quoted `workspace_id` and an `endpoint` is
+    skipped with a one-time warning, never guessed at.
   - **Multi-repo systems use path ids per member.** When the mapped directory
     holds two or more member repos, each member's files are keyed by that
     member's path-derived id, so a pinned id on the system root does not apply

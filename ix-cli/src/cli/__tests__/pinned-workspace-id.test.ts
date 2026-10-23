@@ -31,6 +31,7 @@ import { registerIngestCommand } from "../commands/ingest.js";
 import { registerMapCommand } from "../commands/map.js";
 import { acquireMapLock } from "../single-flight.js";
 import { workspaceIdForPath } from "../system.js";
+import { loadWorkspaces, resetMalformedPruneWarningsForTests } from "../config.js";
 import { createClient } from "../../client/factory.js";
 
 /**
@@ -100,7 +101,7 @@ const savedEnv = { IX_HOME: process.env.IX_HOME, IX_ENDPOINT: process.env.IX_END
 // Quoted: an 8-hex id can read as a number to YAML (see bootstrap-migration.test.ts).
 const PINNED = "abcd1234";
 
-interface WsFixture { id: string; root: string; name: string; pinned?: boolean }
+interface WsFixture { id: string; root: string; name: string; pinned?: boolean; extra?: string[] }
 
 function writeConfig(endpoint: string, workspaces: WsFixture[]): void {
   fs.writeFileSync(configPath, [
@@ -113,12 +114,13 @@ function writeConfig(endpoint: string, workspaces: WsFixture[]): void {
       `    root_path: ${w.root}`,
       `    default: ${i === 0}`,
       ...(w.pinned ? ["    pinned: true"] : []),
+      ...(w.extra ?? []),
     ]),
     "",
   ].join("\n"));
 }
 
-interface CfgWs { root_path: string; workspace_id: string; pending_prune_of?: { workspace_id: string; endpoint: string }[] }
+interface CfgWs { root_path: string; workspace_id: string; pinned?: boolean; pending_prune_of?: { workspace_id: string; endpoint: string }[] }
 function configWorkspaces(): CfgWs[] {
   return ((parse(fs.readFileSync(configPath, "utf8")) as { workspaces?: CfgWs[] }).workspaces ?? []);
 }
@@ -146,6 +148,7 @@ beforeEach(() => {
   cloud.ready = false;
   cloud.ran = false;
   resetWorkspaceIdMemosForTests();
+  resetMalformedPruneWarningsForTests();
   // Sanity: the pinned id is not what this clone's path derives.
   expect(workspaceIdForPath(ws)).not.toBe(PINNED);
 });
@@ -348,6 +351,43 @@ describe("ix ingest --prune-stale-workspace", () => {
     expect(r.err).toContain(`Kept the previous workspace graph ${PINNED}: another registered workspace still uses that id`);
   }, 60_000);
 
+  it("keeps an old id recorded against another endpoint, even when this one is loopback too", async () => {
+    // Recorded against loopback endpoint A; this run talks to loopback endpoint B.
+    const endpointA = "http://127.0.0.1:1";
+    writeConfig(baseUrl, [{
+      id: workspaceIdForPath(ws), root: ws, name: "clone",
+      extra: ["    pending_prune_of:", `      - workspace_id: "${PINNED}"`, `        endpoint: ${endpointA}`],
+    }]);
+    const r = await runIngest([ws, "--prune-stale-workspace"]);
+
+    expect(r.exitCode, r.err).toBe(0);
+    expect(deletes()).toEqual([]);
+    expect(r.err).toContain(`Kept the previous workspace graph ${PINNED}: it was recorded against a different endpoint`);
+    expect(pendingFor(ws)).toEqual([{ workspace_id: PINNED, endpoint: endpointA }]);
+  }, 60_000);
+
+  it("refuses to re-key a root marked pinned: true, and keeps the marker", async () => {
+    writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone", pinned: true }]);
+    const before = fs.readFileSync(configPath, "utf8");
+    const r = await runIngest([ws, "--prune-stale-workspace"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.err).toContain('is marked "pinned: true"');
+    expect(r.err).toContain("Nothing was changed");
+    expect(fs.readFileSync(configPath, "utf8")).toBe(before);
+    expect(r.fetches).toBe(0);
+  });
+
+  it("ix map refuses it the same way for a pinned root", async () => {
+    writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone", pinned: true }]);
+    const before = fs.readFileSync(configPath, "utf8");
+    const r = await runMap([ws, "--prune-stale-workspace"]);
+    expect(r.exitCode).toBe(1);
+    expect(r.err).toContain('is marked "pinned: true"');
+    expect(fs.readFileSync(configPath, "utf8")).toBe(before);
+    expect(r.fetches).toBe(0);
+  });
+
   it("is refused on a non-loopback endpoint before anything changes or is sent", async () => {
     process.env.IX_ENDPOINT = "https://ix.example.com";
     writeConfig("https://ix.example.com", [{ id: PINNED, root: ws, name: "clone" }]);
@@ -500,4 +540,44 @@ describe("staleWorkspaceCleanup: the deletion rule", () => {
     expect(staleWorkspaceCleanup({ ...base, otherRegisteredIds: [PINNED] })).toEqual(expect.objectContaining({ reason: "shared_in_config" }));
     expect(staleWorkspaceCleanup({ ...base, currentWorkspaceId: PINNED })).toEqual(expect.objectContaining({ reason: "current_id" }));
   });
+});
+
+describe("config.yaml markers", () => {
+  it("keeps pinned: true across a config rewrite", () => {
+    writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone", pinned: true }]);
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const other = path.join(t, "other");
+    fs.mkdirSync(other);
+    ensureWorkspaceIdState(other); // registers a second workspace: a full rewrite
+    expect(configWorkspaces().map((w) => w.root_path)).toContain(other);
+    expect(configWorkspaces().find((w) => w.root_path === ws)?.pinned).toBe(true);
+  });
+
+  it("skips malformed pending_prune_of markers with one warning, never coercing them", async () => {
+    writeConfig(baseUrl, [{
+      id: workspaceIdForPath(ws), root: ws, name: "clone",
+      extra: [
+        "    pending_prune_of:",
+        `      - endpoint: ${baseUrl}`, // no workspace_id
+        `      - workspace_id: 12345678`, // unquoted: YAML reads a number
+        `        endpoint: ${baseUrl}`,
+        `      - workspace_id: "${PINNED}"`, // well-formed
+        `        endpoint: ${baseUrl}`,
+      ],
+    }]);
+    const errs: string[] = [];
+    vi.spyOn(process.stderr, "write").mockImplementation((c: unknown) => { errs.push(String(c)); return true; });
+    const first = loadWorkspaces().find((w) => w.root_path === ws);
+    expect(first?.pending_prune_of).toEqual([{ workspace_id: PINNED, endpoint: baseUrl }]);
+    fs.appendFileSync(configPath, "\n"); // defeat the read memo
+    loadWorkspaces();
+    expect(errs.filter((e) => e.includes("malformed pending_prune_of"))).toHaveLength(1);
+    vi.restoreAllMocks();
+
+    // End to end: only the well-formed marker is acted on.
+    const r = await runIngest([ws, "--prune-stale-workspace"]);
+    expect(r.exitCode, r.err).toBe(0);
+    expect(deletedIds()).toEqual([PINNED]);
+    expect(deletedIds()).not.toContain("undefined");
+  }, 60_000);
 });

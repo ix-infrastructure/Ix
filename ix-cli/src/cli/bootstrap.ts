@@ -90,7 +90,8 @@ const warnedPinnedRoots = new Set<string>();
  * clean ingest delete that id's whole workspace for everyone on the backend.
  *
  * `quiet: true` suppresses the warning about such an id (`--silent`, machine formats:
- * a hook would print it on every run). `pinned: true` on the workspace does so always.
+ * a hook would print it on every run). `pinned: true` on the workspace does so always,
+ * and also makes `adoptPathId` refuse to re-key it.
  */
 export interface RegisterOptions { setDefault?: boolean; adoptPathId?: boolean; quiet?: boolean }
 
@@ -104,7 +105,8 @@ export function pendingPrunesOf(ws: Pick<WorkspaceConfig, "pending_prune_of"> | 
 /** The one-line warning for a registered id that is not the path-derived one. */
 export function pinnedWorkspaceIdWarning(rootPath: string, pinnedId: string, pathId: string): string {
   return `Workspace ${rootPath} is registered with workspace_id ${pinnedId}, not the path-derived ${pathId}. ` +
-    `Keeping ${pinnedId}. If it is pinned on purpose, add "pinned: true" to it in config.yaml to silence this. ` +
+    `Keeping ${pinnedId}. If it is pinned on purpose, add "pinned: true" to it in config.yaml: that silences this ` +
+    `and makes --prune-stale-workspace refuse to re-key it. ` +
     `If not, and the backend is your own local one, ix map --prune-stale-workspace switches to ${pathId} ` +
     `and deletes ${pinnedId}'s graph.`;
 }
@@ -170,6 +172,14 @@ function registerIn(config: IxConfig, rootPath: string, changed: () => void, set
       // or the delete fails, the next `--prune-stale-workspace` retries it,
       // rather than leaving a graph nothing in this config points at any more.
       // Deleting it is gated separately (staleWorkspaceCleanup).
+      if (existing.pinned === true) {
+        // Thrown before anything is written or sent (map and ingest resolve the
+        // workspace before they contact the backend).
+        throw new Error(
+          `Workspace ${rootPath} is marked "pinned: true" in config.yaml, so --prune-stale-workspace will not re-key ` +
+          `its workspace_id ${existing.workspace_id}. Remove "pinned: true" from that entry first if you mean to. Nothing was changed.`,
+        );
+      }
       const previousWorkspaceId = existing.workspace_id;
       const endpoint = getEndpoint();
       const pending = pendingPrunesOf(existing);
@@ -177,7 +187,6 @@ function registerIn(config: IxConfig, rootPath: string, changed: () => void, set
         existing.pending_prune_of = [...pending, { workspace_id: previousWorkspaceId, endpoint }];
       }
       existing.workspace_id = pathId;
-      delete existing.pinned;
       changed();
       migratedRootsThisRun.set(rootPath, previousWorkspaceId);
       return { ws: existing, created: false, migrated: true, previousWorkspaceId };
