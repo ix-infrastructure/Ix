@@ -268,6 +268,28 @@ describe('typed local receivers', () => {
     expect(resolveEdges([result])).toContainEqual(expect.objectContaining({ dstQualifiedKey: 'Target.run', tier: 'type' }));
   });
 
+  it.each([
+    ['ts', 'class Use { dep: Target = new Target(); use() { return { dep: 1, go() { this.dep.run(); } }; } }'],
+    ['ts', 'class Use { dep: Target = new Target(); use() { const f = function (this: any) { this.dep.run(); }; } }'],
+    ['ts', 'class Use { dep: Target = new Target(); use() { function f(this: any) { this.dep.run(); } } }'],
+    ['ts', 'class Use { dep: Target = new Target(); use() { const g = function* (this: any) { this.dep.run(); }; } }'],
+    ['ts', 'class Use { dep: Target = new Target(); f = function (this: any) { this.dep.run(); }; }'],
+    ['ts', 'class Use { dep: Target = new Target(); use() { return { go() { const a = () => this.dep.run(); } }; } }'],
+    ['scala', 'class Use(val dep: Target) { def use() = new Runnable { def run() = this.dep.run() } }'],
+  ])('%s `this` rebound by a nested function or object does not reach the class field', (ext, body) => {
+    const result = parse(ext, methods(ext, body));
+    expect(resolveEdges([result]).filter(e => e.tier === 'type')).toEqual([]);
+    expect(typedEdgeOps(buildPatch(result, 'hash', 'workspace').ops)).toEqual([]);
+  });
+
+  it.each([
+    ['ts', 'class Use { dep: Target = new Target(); use() { const a = () => this.dep.run(); } }'],
+    ['scala', 'class Use { def use() = new Runnable { val dep = new Target(); def run() = this.dep.run() } }'],
+  ])('%s `this` in an arrow function or its own anonymous class keeps the field type', (ext, body) => {
+    const result = parse(ext, methods(ext, body));
+    expect(resolveEdges([result])).toContainEqual(expect.objectContaining({ dstQualifiedKey: 'Target.run', tier: 'type' }));
+  });
+
   it('Scala leaves conflicting inherited members unresolved', () => {
     const result = parse('scala', 'trait A { def run() = () }; trait B { def run() = () }; class Target extends A with B {}; object Use { def use(dep: Target) = dep.run() }');
     expect(resolveEdges([result]).filter(e => e.tier === 'type')).toEqual([]);

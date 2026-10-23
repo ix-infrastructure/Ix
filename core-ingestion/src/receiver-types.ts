@@ -24,6 +24,8 @@ const classes = new Set(['class_definition', 'trait_definition', 'object_definit
 const functions = new Set(['function_definition', 'function_declaration', 'method_declaration', 'method_definition', 'arrow_function', 'function_expression', 'func_literal', 'lambda_expression', 'method_signature', 'abstract_method_signature', 'function_signature']);
 // Also the statements that own a binding of their own: Go `if x := …;`,
 // `switch x := v.(type)`, Scala `case x: T =>` and `for (x <- xs)`.
+// TypeScript functions that bind their own `this` (arrow functions do not).
+const thisFunctions = new Set(['function_declaration', 'function_expression', 'generator_function', 'generator_function_declaration']);
 const blocks = new Set(['block', 'statement_block', 'template_body', 'class_body', 'for_statement', 'for_in_statement', 'catch_clause',
   'if_statement', 'expression_switch_statement', 'type_switch_statement', 'case_clause', 'for_expression']);
 
@@ -231,6 +233,9 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
   }
   const lookupName = (node: any, name: string, field = false): ReceiverType | undefined => {
     for (let p = node; p; p = p.parent) {
+      // A non-arrow function or an object-literal method gives `this` a
+      // value of its own, not the enclosing class instance.
+      if (field && (thisFunctions.has(p.type) || (p.type === 'method_definition' && p.parent?.type !== 'class_body'))) return;
       if (field && !classes.has(p.type) && !['template_body', 'class_body'].includes(p.type)) continue;
       // A bare TypeScript name never refers to a field or parameter property.
       if (!field && language === 'typescript' && (classes.has(p.type) || p.type === 'class_body')) continue;
@@ -243,7 +248,8 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
         }
         return info;
       }
-      if (field && classes.has(p.type)) return;
+      // A Scala anonymous class (`new T { … }`) is its own `this`.
+      if (field && (classes.has(p.type) || (p.type === 'template_body' && !classes.has(p.parent?.type)))) return;
     }
   };
   // Package/companion return facts apply only when the call still names that
