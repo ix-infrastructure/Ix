@@ -238,7 +238,7 @@ describe("the CLI loads only the command it runs", () => {
     [["explain", "x"], ["depends", "explain"]],   // explain/facts.ts uses depends' tree
     [["callers", "x"], ["callers", "text"]],      // the text fallback's snippet clipper
     [["search", "x"], ["search"]],
-    [["context", "x"], ["context", "depends", "read"]], // stale next rows: read's symbolReadChecker
+    [["context", "x"], ["context", "depends"]],
     [["impact", "x"], ["impact"]],
     [["around", "a.txt"], ["around"]],
     [["hook", "--help"], ["hook"]],
