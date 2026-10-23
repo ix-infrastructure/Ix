@@ -234,6 +234,32 @@ describe('typed local receivers', () => {
     expect(edges.some(e => e.dstQualifiedKey === (ext === 'go' ? 'Target.Run' : 'Target.run'))).toBe(false);
   });
 
+  it.each([
+    ['ts', 'function use() { let dep = new Target(); [dep] = [new Other()]; dep.run(); }'],
+    ['ts', 'function use() { let dep = new Target(); ({ dep } = unknown()); dep.run(); }'],
+    ['ts', 'function use() { let dep = new Target(); ({ a: dep } = unknown()); dep.run(); }'],
+    ['ts', 'function use() { let dep = new Target(); [, ...[dep]] = unknown(); dep.run(); }'],
+    ['ts', 'function use(c: Other) { let dep = new Target(); dep ||= c; dep.run(); }'],
+    ['ts', 'function use(c: Other) { let dep = new Target(); dep ??= c; dep.run(); }'],
+    ['ts', 'function use() { let dep = new Target(); dep += unknown(); dep.run(); }'],
+    ['scala', 'object Use { def use() = { var dep = new Target(); dep += 1; dep.run() } }'],
+    ['go', 'func use() { dep := Target{}; dep, ok := unknown(); dep.Run(); _ = ok }'],
+  ])('%s destructuring and compound assignments make a binding unknown', (ext, body) => {
+    const result = parse(ext, methods(ext, body));
+    const key = ext === 'go' ? 'Target.Run' : 'Target.run';
+    expect(resolveEdges([result]).filter(e => e.tier === 'type' && e.dstQualifiedKey === key)).toEqual([]);
+    expect(typedEdgeOps(buildPatch(result, 'hash', 'workspace').ops)).toEqual([]);
+  });
+
+  it.each([
+    ['ts', 'function use() { let dep = new Target(); [other] = [unknown()]; dep.run(); }'],
+    ['ts', 'function use() { let dep = new Target(); dep.x ||= unknown(); dep.run(); }'],
+    ['scala', 'object Use { def use() = { var dep = new Target(); if (dep <= 1) dep.run() } }'],
+  ])('%s assignments to other targets keep the binding typed', (ext, body) => {
+    const result = parse(ext, methods(ext, body));
+    expect(resolveEdges([result])).toContainEqual(expect.objectContaining({ dstQualifiedKey: 'Target.run', tier: 'type' }));
+  });
+
   it('Scala leaves conflicting inherited members unresolved', () => {
     const result = parse('scala', 'trait A { def run() = () }; trait B { def run() = () }; class Target extends A with B {}; object Use { def use(dep: Target) = dep.run() }');
     expect(resolveEdges([result]).filter(e => e.tier === 'type')).toEqual([]);
@@ -287,6 +313,12 @@ describe('typed local receivers', () => {
     expect(resolveEdges([caller], undefined, index)).toEqual(fresh.filter(e => e.srcFilePath === caller.filePath));
   });
 
+  it('TypeScript does not type a receiver through an import a namespace class shadows', () => {
+    const dep = parse('ts', 'export class Dep { run() {} }', 'dep');
+    const use = parse('ts', "import { Dep } from './dep'; namespace N { class Dep { run() {} } export function f(d: Dep) { d.run(); } }");
+    expect(resolveEdges([dep, use]).filter(e => e.tier === 'type')).toEqual([]);
+  });
+
   it('TypeScript does not type a global or library receiver as a same-named repo class', () => {
     const geo = parse('ts', 'export class Map { set() {} }', 'geo/map');
     const use = parse('ts', 'function use() { const m = new Map<string, number>(); m.set("a", 1); }');
@@ -314,6 +346,18 @@ describe('typed local receivers', () => {
     expect(resolveEdges([target, other, use]).filter(e => e.tier === 'type')).toEqual([
       expect.objectContaining({ dstFilePath: target.filePath, dstQualifiedKey: 'Target.run' }),
     ]);
+  });
+
+  it.each([
+    ['package a\n', []],
+    ['package a.b\n', ['Dep.run']],
+    ['package a\npackage b\n', ['Dep.run']],
+    ['package a\nimport a.b.Dep\n', ['Dep.run']],
+  ])('Scala chained package clauses declare the joined package (%j)', (header, expected) => {
+    const dep = parse('scala', 'package a\npackage b\nclass Dep { def run() = () }', 'dep');
+    const use = parse('scala', `${header}object Use { def use(d: Dep) = d.run() }`);
+    expect(summarizeParseResult(dep).receiverPackage).toBe('a.b');
+    expect(resolveEdges([dep, use]).filter(e => e.tier === 'type').map(e => e.dstQualifiedKey)).toEqual(expected);
   });
 
   it('Scala imports disambiguate same-named types by declared package', () => {

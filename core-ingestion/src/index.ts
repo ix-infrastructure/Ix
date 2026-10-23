@@ -4985,6 +4985,9 @@ export function resolveEdges(
       }).map(fp => ({ fp, type }));
     }
     const binding = importBindingsByLocal.get(context)?.get(type);
+    // A same-named declaration in the importing file can only be a nested
+    // shadow (a `namespace` class); without scope facts, guess neither.
+    if (binding && parts.length === 0 && fileHasSymbol.get(context)?.has(type)) return [];
     if (binding && parts.length === 0) {
       const files = resolveImportTargets(context, language!, binding.pkg, binding.pkg, 'types');
       type = binding.imported === 'default'

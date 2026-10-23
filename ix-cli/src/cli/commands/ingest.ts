@@ -1736,6 +1736,24 @@ export function describeCommitOutcome(
   };
 }
 
+// Builtin instance-method names that are never a real cross-repo call target.
+const STITCH_COMMODITY = new Set(['map', 'forEach', 'reduce', 'reduceRight', 'flatMap', 'flat', 'push', 'pop', 'shift', 'unshift', 'splice', 'slice', 'concat', 'get', 'set', 'has', 'keys', 'values', 'entries', 'then', 'catch', 'finally', 'resolve', 'race', 'allSettled', 'bind', 'call', 'apply', 'stringify', 'toString', 'valueOf', 'hasOwnProperty']);
+
+/**
+ * The cross-repo stitch entry a parsed relationship contributes, if any. A
+ * receiver-only typed call (ParsedRelationship.receiverOnly) names a target
+ * inferred from a local receiver's type; it is written only when it resolves
+ * in this workspace, so it is never a cross-repo call candidate.
+ */
+export function stitchCallEntry(
+  rel: { predicate?: unknown; dstName?: unknown; srcName?: unknown; receiverOnly?: unknown },
+  filePath: string,
+): { symbol: string; caller: string; callerFilePath: string } | undefined {
+  if (rel.predicate !== 'CALLS' || rel.receiverOnly || typeof rel.dstName !== 'string' || typeof rel.srcName !== 'string') return undefined;
+  if (STITCH_COMMODITY.has(rel.dstName)) return undefined;
+  return { symbol: rel.dstName, caller: rel.srcName, callerFilePath: filePath };
+}
+
 /**
  * Did the run finish with the graph fully matching what it set out to ingest?
  *
@@ -1923,8 +1941,6 @@ export async function ingestFiles(
   // {filePath, local entity name, public name} -> add an export entry by public name.
   const stitchExportAliases: Array<{ filePath: string; local: string; pub: string }> = [];
   const stitchExportAliasSeen = new Set<string>();
-  // Builtin instance-method names that are never a real cross-repo call target.
-  const STITCH_COMMODITY = new Set(['map', 'forEach', 'reduce', 'reduceRight', 'flatMap', 'flat', 'push', 'pop', 'shift', 'unshift', 'splice', 'slice', 'concat', 'get', 'set', 'has', 'keys', 'values', 'entries', 'then', 'catch', 'finally', 'resolve', 'race', 'allSettled', 'bind', 'call', 'apply', 'stringify', 'toString', 'valueOf', 'hasOwnProperty']);
   const specToPkg = (spec: string | undefined): string | null => {
     if (!spec || spec.startsWith('.') || spec.startsWith('/')) return null;
     if (spec.startsWith('@')) { const parts = spec.split('/'); return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : null; }
@@ -1955,9 +1971,8 @@ export async function ingestFiles(
         stitchExportAliases.push({ filePath: p.filePath, local: x.local, pub: x.public });
       }
       for (const rel of (p.relationships ?? [])) {
-        if (rel.predicate === 'CALLS' && typeof rel.dstName === 'string' && typeof rel.srcName === 'string' && !STITCH_COMMODITY.has(rel.dstName)) {
-          stitchCalls.push({ symbol: rel.dstName, caller: rel.srcName, callerFilePath: p.filePath });
-        }
+        const call = stitchCallEntry(rel, p.filePath);
+        if (call) stitchCalls.push(call);
         if (rel.predicate !== 'IMPORTS') continue;
         const pkg = specToPkg(typeof rel.importRaw === 'string' ? rel.importRaw : rel.dstName);
         if (!pkg || !stitchProdDeps.has(pkg)) continue;

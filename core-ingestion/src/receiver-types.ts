@@ -25,6 +25,14 @@ const functions = new Set(['function_definition', 'function_declaration', 'metho
 const blocks = new Set(['block', 'statement_block', 'template_body', 'class_body', 'for_statement', 'for_in_statement', 'catch_clause',
   'if_statement', 'expression_switch_statement', 'type_switch_statement', 'case_clause', 'for_expression']);
 
+const bindingTypes = ['variable_declarator', 'public_field_definition', 'var_spec', 'val_definition', 'var_definition', 'val_declaration', 'var_declaration'];
+const parameterTypes = ['required_parameter', 'optional_parameter', 'parameter', 'class_parameter', 'parameter_declaration'];
+const mutationTypes = ['assignment_expression', 'augmented_assignment_expression', 'assignment_statement', 'assignment', 'update_expression'];
+// Node types whose `name` field is read, and every non-scope type visited.
+const named = new Set(['type_alias_declaration', ...classes, ...functions, ...bindingTypes, ...parameterTypes]);
+const visited = new Set([...named, ...mutationTypes, 'short_var_declaration', 'range_clause', 'for_in_statement', 'case_clause', 'enumerator',
+  'type_switch_statement', 'catch_clause', 'infix_expression']);
+
 function typeName(node: any): string | undefined {
   if (!node) return;
   if (node.type === 'type_annotation' || node.type === 'pointer_type') return typeName(node.firstNamedChild);
@@ -41,16 +49,21 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
   const typeParameters = new Map<number, Set<string>>();
   const factories: Array<[string, string]> = [];
   const heritage: Array<[string, string]> = [];
-  const scopeOf = (node: any, classOnly = false): any => {
-    for (let p = node.parent; p; p = p.parent) {
-      if (classes.has(p.type) || (!classOnly && (functions.has(p.type) || blocks.has(p.type)))) return p;
+  // Scope ancestors of the node being visited, innermost last. Tracking them
+  // during the walk avoids a parent-chain walk per node.
+  const frames: Array<{ node: any; type: string; depth: number }> = [];
+  const scopeOf = (classOnly = false): any => {
+    for (let i = frames.length - 1; i >= 0; i--) {
+      const type = frames[i].type;
+      if (classes.has(type) || (!classOnly && (functions.has(type) || blocks.has(type)))) return frames[i].node;
     }
     return root;
   };
-  const functionScope = (node: any): any => {
+  const functionScope = (): any => {
     // Static blocks and TypeScript namespaces also own their var declarations.
-    for (let p = node.parent; p; p = p.parent) {
-      if (functions.has(p.type) || p.type === 'class_static_block' || p.type === 'internal_module') return p;
+    for (let i = frames.length - 1; i >= 0; i--) {
+      const type = frames[i].type;
+      if (functions.has(type) || type === 'class_static_block' || type === 'internal_module') return frames[i].node;
     }
     return root;
   };
@@ -84,38 +97,35 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
       } else pending.push(...p.namedChildren);
     }
   };
-  const stack = [root];
-  while (stack.length) {
-    checkBudget();
-    const node = stack.pop()!;
-    const name = node.childForFieldName('name');
-    if (node.type === 'type_alias_declaration' && name) {
-      const scope = scopeOf(node);
+  const visit = (node: any, type: string): void => {
+    const name = named.has(type) ? node.childForFieldName('name') : null;
+    if (type === 'type_alias_declaration' && name) {
+      const scope = scopeOf();
       const names = typeParameters.get(scope.id) ?? new Set<string>();
       names.add(name.text);
       typeParameters.set(scope.id, names);
     }
-    if (classes.has(node.type) || functions.has(node.type)) {
+    if (classes.has(type) || functions.has(type)) {
       const generics = node.childForFieldName('type_parameters');
       if (generics) typeParameters.set(node.id, new Set(generics.namedChildren
         .map((p: any) => p.childForFieldName('name')?.text ?? p.firstNamedChild?.text)));
       const singleParameter = node.childForFieldName('parameter');
       if (singleParameter?.type === 'identifier') bind(node, singleParameter.text, {});
     }
-    if (language === 'scala' && classes.has(node.type)) {
+    if (language === 'scala' && classes.has(type)) {
       const extend = node.childForFieldName('extend');
       for (const parent of extend?.namedChildren ?? []) {
-        const type = typeName(parent);
-        if (name && type) heritage.push([name.text, type]);
+        const parentType = typeName(parent);
+        if (name && parentType) heritage.push([name.text, parentType]);
       }
-      if (node.type === 'class_definition' && /^(?:(?:final|sealed|private|protected|abstract)\s+)*case\s+class\b/.test(node.text)) factories.push([name.text, name.text]);
+      if (type === 'class_definition' && /^(?:(?:final|sealed|private|protected|abstract)\s+)*case\s+class\b/.test(node.text)) factories.push([name.text, name.text]);
     }
-    if (language === 'go' && node.type === 'function_declaration') {
+    if (language === 'go' && type === 'function_declaration') {
       const result = typeName(node.childForFieldName('result'));
       if (name && result) factories.push([name.text, result]);
     }
-    if (language === 'scala' && node.type === 'function_definition' && name?.text === 'apply') {
-      const owner = scopeOf(node, true);
+    if (language === 'scala' && type === 'function_definition' && name?.text === 'apply') {
+      const owner = scopeOf(true);
       const body = node.childForFieldName('body');
       const result = typeName(node.childForFieldName('return_type')) ?? valueType(body).type;
       const ownerName = owner.childForFieldName('name')?.text;
@@ -126,54 +136,55 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
       }
     }
     let binding: any;
-    let owner = scopeOf(node);
-    if (language === 'typescript' && node.type === 'variable_declarator' && node.parent?.type === 'variable_declaration') {
-      owner = functionScope(node);
+    let owner = scopeOf();
+    if (language === 'typescript' && type === 'variable_declarator' && node.parent?.type === 'variable_declaration') {
+      owner = functionScope();
     }
-    if (['function_definition', 'function_declaration'].includes(node.type) && name && owner !== root && !classes.has(owner.type) && !['template_body', 'class_body'].includes(owner.type)) {
+    if (['function_definition', 'function_declaration'].includes(type) && name && owner !== root && !classes.has(owner.type) && !['template_body', 'class_body'].includes(owner.type)) {
       bind(owner, name.text, {});
     }
-    let annotation = node.childForFieldName('type');
-    let value = node.childForFieldName('value');
-    if (['variable_declarator', 'public_field_definition', 'var_spec'].includes(node.type)) binding = name;
-    if (['val_definition', 'var_definition', 'val_declaration', 'var_declaration'].includes(node.type) && language === 'scala') binding = node.childForFieldName('pattern');
-    if (['required_parameter', 'optional_parameter', 'parameter', 'class_parameter', 'parameter_declaration'].includes(node.type)) {
+    const declares = bindingTypes.includes(type) || parameterTypes.includes(type);
+    const annotation = declares ? node.childForFieldName('type') : null;
+    const value = declares ? node.childForFieldName('value') : null;
+    if (['variable_declarator', 'public_field_definition', 'var_spec'].includes(type)) binding = name;
+    if (['val_definition', 'var_definition', 'val_declaration', 'var_declaration'].includes(type) && language === 'scala') binding = node.childForFieldName('pattern');
+    if (parameterTypes.includes(type)) {
       binding = name ?? node.childForFieldName('pattern');
       // Parameter-list nodes are not scopes; owner is their enclosing function/class.
-      owner = scopeOf(node, node.type === 'class_parameter');
+      owner = scopeOf(type === 'class_parameter');
       if (language === 'typescript' && node.children.some((n: any) => n.type === 'accessibility_modifier' || n.type === 'readonly')) {
-        if (binding?.type === 'identifier') bind(scopeOf(node, true), binding.text, { type: typeName(annotation) });
+        if (binding?.type === 'identifier') bind(scopeOf(true), binding.text, { type: typeName(annotation) });
       }
     }
-    if (node.type === 'short_var_declaration') {
+    if (type === 'short_var_declaration') {
       const left = node.childForFieldName('left')?.namedChildren ?? [];
       const right = node.childForFieldName('right')?.namedChildren ?? [];
       for (let i = 0; i < left.length; i++) if (left[i].type === 'identifier') bind(owner, left[i].text, { ...(left.length === right.length ? valueType(right[i]) : {}), available: node.endIndex });
     }
-    if (node.type === 'range_clause') for (const id of node.childForFieldName('left')?.namedChildren ?? []) {
+    if (type === 'range_clause') for (const id of node.childForFieldName('left')?.namedChildren ?? []) {
       if (id.type === 'identifier') bind(owner, id.text, {});
     }
     // Binders whose type is not inferred still shadow an outer receiver.
-    if (node.type === 'for_in_statement') {
+    if (type === 'for_in_statement') {
       const declared = node.children.some((c: any) => ['const', 'let', 'var'].includes(c.type));
       // `for (x of xs)` without a declaration assigns an existing binding.
       if (!declared) mutations.push(node);
-      else bindPattern(node.children.some((c: any) => c.type === 'var') ? functionScope(node) : node, node.childForFieldName('left'));
+      else bindPattern(node.children.some((c: any) => c.type === 'var') ? functionScope() : node, node.childForFieldName('left'));
     }
-    if (node.type === 'lambda_expression') bindPattern(node, node.childForFieldName('parameters'));
-    if (node.type === 'case_clause') bindPattern(node, node.childForFieldName('pattern'));
-    if (node.type === 'enumerator') {
-      const forExpression = scopeOf(node);
+    if (type === 'lambda_expression') bindPattern(node, node.childForFieldName('parameters'));
+    if (type === 'case_clause') bindPattern(node, node.childForFieldName('pattern'));
+    if (type === 'enumerator') {
+      const forExpression = scopeOf();
       if (forExpression.type === 'for_expression') bindPattern(forExpression, node.firstNamedChild);
     }
-    if (node.type === 'type_switch_statement') bindPattern(node, node.childForFieldName('alias'));
-    if (node.type === 'catch_clause') {
+    if (type === 'type_switch_statement') bindPattern(node, node.childForFieldName('alias'));
+    if (type === 'catch_clause') {
       const parameter = node.childForFieldName('parameter');
       if (parameter?.type === 'identifier') bind(node, parameter.text, {});
     }
     if (binding) {
       const info = typeName(annotation) ? { type: typeName(annotation) } : valueType(value);
-      const local = ['variable_declarator', 'val_definition', 'var_definition', 'var_spec'].includes(node.type) &&
+      const local = ['variable_declarator', 'val_definition', 'var_definition', 'var_spec'].includes(type) &&
         !['template_body', 'class_body'].includes(owner.type);
       if (local) Object.assign(info, { available: node.endIndex });
       if (binding.type === 'identifier' || binding.type === 'property_identifier') bind(owner, binding.text, info);
@@ -189,8 +200,31 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
       // Go permits several names with a single annotation.
       if (language === 'go') for (const child of node.childrenForFieldName('name')) bind(owner, child.text, info);
     }
-    if (['assignment_expression', 'assignment_statement', 'assignment', 'update_expression'].includes(node.type)) mutations.push(node);
-    stack.push(...[...node.namedChildren].reverse());
+    if (mutationTypes.includes(type)) mutations.push(node);
+    // Scala `x += y` on a var is `x = x + y` (comparisons are not assignments).
+    if (type === 'infix_expression' && /^[^=]*[^=<>!]=$/.test(node.childForFieldName('operator')?.text ?? '')) mutations.push(node);
+  };
+  // Only these node types (and scopes) carry facts; the rest are walked with a
+  // cursor without materializing a node or reading its fields.
+  const cursor = root.walk();
+  let depth = 0;
+  walk: for (;;) {
+    while (frames.length && frames[frames.length - 1].depth >= depth) frames.pop();
+    if (cursor.nodeIsNamed) {
+      checkBudget();
+      const type = cursor.nodeType;
+      const scope = classes.has(type) || functions.has(type) || blocks.has(type) || type === 'class_static_block' || type === 'internal_module';
+      if (scope || visited.has(type)) {
+        const node = cursor.currentNode;
+        visit(node, type);
+        if (scope) frames.push({ node, type, depth });
+      }
+    }
+    if (cursor.gotoFirstChild()) { depth++; continue; }
+    while (!cursor.gotoNextSibling()) {
+      if (!cursor.gotoParent()) break walk;
+      depth--;
+    }
   }
   const lookupName = (node: any, name: string, field = false): ReceiverType | undefined => {
     for (let p = node; p; p = p.parent) {
@@ -216,17 +250,26 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
   }
   // Without dataflow, a reassigned binding is unknown throughout its scope.
   for (const node of mutations) {
-    const left = node.childForFieldName('left') ?? node.childForFieldName('argument');
-    for (const id of left?.type === 'expression_list' ? left.namedChildren : [left]) {
-      if (id?.type !== 'identifier') continue;
-      const info = lookupName(node, id.text);
-      if (info) { delete info.type; delete info.factory; }
+    // Every name the target assigns: `x`, Go `x, y`, and destructuring
+    // `[x] = …` / `({ a: x, y } = …)`. A member or index target (`o.x = …`)
+    // assigns no binding.
+    const pending = [node.childForFieldName('left') ?? node.childForFieldName('argument')];
+    while (pending.length) {
+      const id = pending.pop();
+      if (!id || ['member_expression', 'subscript_expression', 'field_expression', 'selector_expression', 'index_expression'].includes(id.type)) continue;
+      if (id.type === 'identifier' || id.type === 'shorthand_property_identifier_pattern') {
+        const info = lookupName(node, id.text);
+        if (info) { delete info.type; delete info.factory; }
+      } else if (id.type === 'pair_pattern') pending.push(id.childForFieldName('value'));
+      else pending.push(...id.namedChildren);
     }
   }
   return {
     factories, heritage,
+    // Chained Scala clauses (`package a` then `package b`) declare package `a.b`.
     package: language === 'scala'
-      ? root.namedChildren.find((node: any) => node.type === 'package_clause')?.childForFieldName('name')?.text
+      ? root.namedChildren.filter((node: any) => node.type === 'package_clause')
+        .map((node: any) => node.childForFieldName('name')?.text).filter(Boolean).join('.') || undefined
       : language === 'go' ? root.namedChildren.find((node: any) => node.type === 'package_clause')?.firstNamedChild?.text : undefined,
     lookup(node: any): ReceiverType | undefined {
       if (node.type === 'identifier') return lookupName(node, node.text);

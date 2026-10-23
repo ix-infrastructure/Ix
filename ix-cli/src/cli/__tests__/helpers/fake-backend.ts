@@ -153,7 +153,7 @@ export class FakeBackend {
   releaseVersion: string | null | undefined = undefined;
   private readonly nodes = new Map<string, { kind: unknown; name: unknown; attrs?: unknown; live: boolean }>();
   private readonly edges = new Map<string, {
-    src: unknown; dst: unknown; predicate: unknown; workspaceId: string; uri: string; live: boolean;
+    src: unknown; dst: unknown; predicate: unknown; attrs?: unknown; workspaceId: string; uri: string; live: boolean;
   }>();
   /** Every committed patch by id, with the rev it last landed at. */
   private readonly stored = new Map<string, {
@@ -178,6 +178,12 @@ export class FakeBackend {
     const edges = [...this.edges].filter(([, e]) => e.live)
       .map(([id, e]) => `${id} ${String(e.src)} ${String(e.dst)} ${String(e.predicate)}`).sort();
     return { nodes, edges };
+  }
+
+  /** Live edges whose `tier` attr is `tier`, as `graphSignature` lines. */
+  edgesOfTier(tier: string): string[] {
+    return [...this.edges].filter(([, e]) => e.live && (e.attrs as { tier?: unknown } | undefined)?.tier === tier)
+      .map(([id, e]) => `${id} ${String(e.src)} ${String(e.dst)} ${String(e.predicate)}`).sort();
   }
 
   /** Names of the live nodes, to make a signature diff readable. */
@@ -229,7 +235,7 @@ export class FakeBackend {
       const id = String(op.id);
       if (op.type === "UpsertNode") this.nodes.set(id, { kind: op.kind, name: op.name, attrs: op.attrs, live: true });
       else if (op.type === "UpsertEdge") {
-        this.edges.set(id, { src: op.src, dst: op.dst, predicate: op.predicate, workspaceId, uri, live: true });
+        this.edges.set(id, { src: op.src, dst: op.dst, predicate: op.predicate, attrs: op.attrs, workspaceId, uri, live: true });
       }
     }
     if (patch.patchId === undefined) return;
