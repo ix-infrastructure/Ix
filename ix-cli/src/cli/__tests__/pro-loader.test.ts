@@ -75,3 +75,31 @@ it("does not treat an installed plugin with no exports map and no entry as absen
   expect(r.stderr).toMatch(/^Installed Ix Pro could not (be resolved|initialize)\./);
   expect(r.stderr).toContain("Reinstall the reviewed CLI/Pro pair");
 });
+
+// `run-cli.ts` skips `tryLoadProCommands` -- and registers only the command
+// being run -- when `proIsAbsent()` says so. So it must say "absent" for
+// exactly the install the loader itself reports as absent, and never for an
+// installed Pro in any state, broken ones included.
+function proIsAbsentIn(setup: (pro: string) => void | undefined): boolean {
+  const root = mkdtempSync(join(tmpdir(), "ix-pro-loader-")); roots.push(root);
+  writeFileSync(join(root, "loader.mjs"), loader);
+  writeFileSync(join(root, "probe.mjs"), "import {proIsAbsent} from './loader.mjs'; console.log(JSON.stringify(proIsAbsent()));\n");
+  setup(join(root, "node_modules", "@ix", "pro"));
+  const r = spawnSync(process.execPath, [join(root, "probe.mjs")], { cwd: root, encoding: "utf8", timeout: 15000 });
+  expect(r.error).toBeUndefined(); expect(r.status, r.stderr).toBe(0);
+  return JSON.parse(r.stdout) as boolean;
+}
+function installPro(exports: unknown, code: string | undefined) {
+  return (pro: string) => {
+    mkdirSync(pro, { recursive: true });
+    writeFileSync(join(pro, "package.json"), JSON.stringify({ name: "@ix/pro", type: "module", ...(exports === undefined ? {} : { exports }) }));
+    if (code !== undefined) writeFileSync(join(pro, "register.js"), code);
+  };
+}
+it("proIsAbsent is true only where tryLoadProCommands reports absence", () => {
+  expect(proIsAbsentIn(() => undefined)).toBe(true);
+  expect(proIsAbsentIn(installPro({ "./register": "./register.js" }, "export function registerProCommands(){}"))).toBe(false);
+  expect(proIsAbsentIn(installPro({ "./register": "./register.js" }, "export const unrelated=true;"))).toBe(false);
+  expect(proIsAbsentIn(installPro({ ".": "./register.js" }, "export const unrelated=true;"))).toBe(false);
+  expect(proIsAbsentIn(installPro(undefined, undefined))).toBe(false);
+});

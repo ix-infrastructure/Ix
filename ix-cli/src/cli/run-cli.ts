@@ -3,13 +3,15 @@
 // The CLI proper. `main.ts` is the entry point: it checks the Node version and
 // turns on the compile cache, then imports this module, so everything below
 // -- every command module and its dependencies -- loads through the cache.
+// Which command modules load at all is `planStartup`'s call
+// (`register/oss-table.ts`): usually just the one being run.
 
 import { Command } from "commander";
-import { registerOssCommands, registerProStubs } from "./register/oss.js";
+import { registerProStubs } from "./register/pro-stubs.js";
+import { planStartup, registerForPlan } from "./register/oss-table.js";
 import { tryLoadProCommands } from "./register/pro-loader.js";
 import { isRepairInvocation } from "./register/pro-failure.js";
 import { buildHelpText } from "./help-text.js";
-import { checkForUpdate, updateCheckEnabled } from "./commands/upgrade.js";
 import { stderrIsTerminal } from "./stderr.js";
 import { detectRequestedFormat, renderCliError, setErrorFormat } from "./errors.js";
 import { getEndpoint } from "./config.js";
@@ -63,7 +65,9 @@ program
 // Start with OSS-only help; updated after Pro probe.
 program.helpInformation = () => buildHelpText();
 
-registerOssCommands(program);
+// Every OSS command, or only the one this invocation runs. The second happens
+// only with Pro absent, so `lazy` also means there is no Pro to load.
+const lazy = await registerForPlan(program, planStartup(process.argv.slice(2)));
 
 (async () => {
   const ossCmdNames = new Set(program.commands.map((c: Command) => c.name()));
@@ -79,7 +83,7 @@ registerOssCommands(program);
   // registers.
   const isHook = process.argv[2] === "hook";
   try {
-    if (!isHook) proLoaded = await tryLoadProCommands(program);
+    if (!isHook && !lazy) proLoaded = await tryLoadProCommands(program);
   } catch (err) {
     if (!isRepairInvocation(process.argv)) {
       renderCliError(err, debug, safeEndpoint()); // exits 1
@@ -107,14 +111,17 @@ registerOssCommands(program);
   // Check for updates (non-blocking, cached 1hr). Only when a person is
   // watching stderr — see updateCheckEnabled for why, and for the
   // IX_NO_UPDATE_CHECK opt-out.
+  // `updateCheckEnabled` is false whenever stderr is not a terminal, which is
+  // every agent and hook call, so only a person's pays for loading it.
   const args = process.argv.slice(2);
-  if (updateCheckEnabled(args, process.env, stderrIsTerminal())) {
+  const updates = stderrIsTerminal() ? await import("./commands/upgrade.js") : undefined;
+  if (updates?.updateCheckEnabled(args, process.env, true)) {
     // Deliberately not awaited — but it must still be caught here. The catch
     // inside checkForUpdate only guards its inner fetch chain; the function's
     // own promise covers the synchronous cached-read path, and a corrupt
     // ~/.ix/.version-check.json makes that throw. Uncaught, the new
     // unhandledRejection handler then aborts a command that already succeeded.
-    checkForUpdate().catch(() => {});
+    updates.checkForUpdate().catch(() => {});
   }
 
   // parseAsync (not parse) so rejections from async action handlers surface
