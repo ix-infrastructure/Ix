@@ -54,7 +54,7 @@ they cut:
 
 - `ix depends` and `ix trace` stop at depth 3 and 100 nodes. `truncated=true` means the node cap dropped nodes, and
   `depth_limited=true` means the walk stopped descending.
-- `ix read <file>` stops at 400 lines and tells you the range of the next page.
+- `ix read` stops at 400 lines, for a file or a symbol, and gives the next page as a `next=` target to read.
 - `ix context` budgets its evidence in tokens (3,000 by default).
 
 Every limit can be raised with a flag. See the [flag reference](/reference/flags/).

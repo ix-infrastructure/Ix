@@ -13,7 +13,7 @@ import { IxClient } from '../../client/api.js';
 import { combineSignals, currentRunSignal } from '../../client/run-signal.js';
 import type { GraphPatchPayload } from '../../client/types.js';
 import { canonicalWorkspacePath, isPathInside, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
-import { resolveIngestRoot } from '../map-root.js';
+import { resolveIngestRootWithSource } from '../map-root.js';
 import { acquireMapLock, requestMapRerun, takeMapRerun } from '../single-flight.js';
 import { applyRequestedMapCoalesceExitCode } from './map.js';
 import {
@@ -274,17 +274,6 @@ function isLikelyMinifiedSource(source: string): boolean {
 
   const averageLineLength = source.length / Math.max(lineCount, 1);
   return maxLineLength >= MINIFIED_MAX_LINE_THRESHOLD || (lineCount <= 50 && averageLineLength >= MINIFIED_AVG_LINE_THRESHOLD);
-}
-
-function stripChunkOps(patch: GraphPatchPayload): GraphPatchPayload {
-  return {
-    ...patch,
-    ops: patch.ops.filter(op => {
-      if (op.type === 'UpsertNode' && op['kind'] === 'chunk') return false;
-      if (op.type === 'UpsertEdge' && (op['predicate'] === 'CONTAINS_CHUNK' || op['predicate'] === 'NEXT')) return false;
-      return true;
-    }),
-  };
 }
 
 /**
@@ -1123,11 +1112,17 @@ function renderProgressLine(phase: string, current: number, total: number): stri
 
 type PathIngestOpts = Parameters<typeof ingestFiles>[1];
 
-/** The workspace root `target` ingests into, or undefined when it cannot be resolved. */
-function ingestLockRoot(target: string, explicitRoot?: string): string | undefined {
+/**
+ * The workspace root `target` ingests into, or undefined when it cannot be
+ * resolved. `looseFile`: the target is a file in no workspace and no
+ * repository, which is never registered (see ingestFiles).
+ */
+function ingestLockRoot(target: string, explicitRoot?: string): { root: string; looseFile: boolean } | undefined {
   try {
     const resolved = nodePath.resolve(target);
-    return resolveIngestRoot(resolved, fs.statSync(resolved).isDirectory(), explicitRoot);
+    const isDirectory = fs.statSync(resolved).isDirectory();
+    const { root, source } = resolveIngestRootWithSource(resolved, isDirectory, explicitRoot);
+    return { root, looseFile: source === 'loose' && !isDirectory };
   } catch {
     // `ingestFiles` reports a missing or unreadable path itself.
     return undefined;
@@ -1150,11 +1145,12 @@ function ingestLockRoot(target: string, explicitRoot?: string): string | undefin
  * workspace, so it re-ingests only its own path then.
  */
 export async function ingestPathSingleFlight(target: string, opts: PathIngestOpts): Promise<void> {
-  const root = ingestLockRoot(target, opts.root);
-  if (root === undefined) {
+  const lockRoot = ingestLockRoot(target, opts.root);
+  if (lockRoot === undefined) {
     await ingestFiles(target, opts);
     return;
   }
+  const { root, looseFile } = lockRoot;
   const lock = acquireMapLock(root, `ix ingest ${root}`);
   if (lock === null) {
     requestMapRerun(root);
@@ -1177,8 +1173,11 @@ export async function ingestPathSingleFlight(target: string, opts: PathIngestOpt
       // known here, so this is a plain incremental pass.
       const rerunTarget = loadIngestBaseline(root) !== null ? root : target;
       try {
+        // The rerun may widen a loose file to its whole directory; that must
+        // not register the directory the file's own ingest would not have.
         await ingestFiles(rerunTarget, {
           recursive: true, format: 'json', printSummary: false, suppressOutput: true, root: opts.root,
+          neverRegister: looseFile,
         });
       } catch (err: any) {
         if (opts.format !== 'json') {
@@ -1212,7 +1211,7 @@ export function registerIngestCommand(program: Command): void {
       (value: string, previous: string[] = []) => [...previous, value],
       [] as string[],
     )
-    .addHelpText('after', '\nExamples:\n  ix ingest ./src\n  ix ingest --path ./src --force\n  ix ingest --path ./rocksdb --lang cpp,c\n  ix ingest --github owner/repo\n  ix ingest --github owner/repo --since 2026-01-01 --limit 20 --format json\n  ix ingest --github owner/repo --token ghp_xxxx\n\nA path inside a mapped workspace (or a git repo) refreshes just that part of it, under that\nworkspace; a path outside every workspace and repo is ingested as a workspace of its own.')
+    .addHelpText('after', '\nExamples:\n  ix ingest ./src\n  ix ingest --path ./src --force\n  ix ingest --path ./rocksdb --lang cpp,c\n  ix ingest --github owner/repo\n  ix ingest --github owner/repo --since 2026-01-01 --limit 20 --format json\n  ix ingest --github owner/repo --token ghp_xxxx\n\nA path inside a mapped workspace (or a git repo) refreshes just that part of it, under that\nworkspace; a directory outside every workspace and repo becomes a workspace of its own (never the\ndefault). A loose file outside them is ingested but registers nothing, so ix read cannot open its neighbours.')
     .action(async (positionalPath: string | undefined, opts: {
       path?: string; recursive?: boolean; force?: boolean; github?: string; token?: string;
       since?: string; limit: string; format: string; root?: string; debug?: boolean; lang?: string;
@@ -1747,7 +1746,7 @@ export function ingestCompletedCleanly(parseErrors: number, commitErrors: number
 
 export async function ingestFiles(
   path: string,
-  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean; exclude?: string[]; deadlineSignal?: AbortSignal }
+  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean; exclude?: string[]; deadlineSignal?: AbortSignal; neverRegister?: boolean }
 ): Promise<IngestFilesSummary> {
   // Under `ix mcp` the tool call's deadline is this run's deadline too. The
   // client would see it anyway (createClient combines it), but the commit loop,
@@ -1806,7 +1805,12 @@ export async function ingestFiles(
   // `resolveIngestRoot`. A path strictly inside that root is a scoped run --
   // discovery, deletion and the stitch are limited to it, and the rest of the
   // workspace's baseline is carried forward untouched.
-  const workspaceRoot = resolveIngestRoot(resolvedPath, fs.statSync(resolvedPath).isDirectory(), opts.root);
+  const targetIsDirectory = fs.statSync(resolvedPath).isDirectory();
+  const { root: workspaceRoot, source: rootSource } = resolveIngestRootWithSource(resolvedPath, targetIsDirectory, opts.root);
+  // A file in no workspace and no repository is ingested under its directory's
+  // id but never registered: that would make the whole directory readable.
+  // `neverRegister`: a coalesced rerun on behalf of such a file ingest.
+  const registerAfterCommit = opts.neverRegister !== true && !(rootSource === 'loose' && !targetIsDirectory);
   // A new workspace is only registered once a commit lands (below, before the
   // summary): see workspaceStateFor.
   const {
@@ -2277,9 +2281,7 @@ export async function ingestFiles(
   const timings = {
     moduleLoadMs: 0, discoverMs: 0, hashMs: 0, parseMs: 0,
     goIndexMs: 0,        // time to build Go global resolution index
-    parseOnlyMs: 0,      // sum of just parseFile() call durations
     resolveMs: 0, buildPatchMs: 0, commitMs: 0,
-    stripChunkOpsMs: 0,  // sum of stripChunkOps() durations (mapMode only)
     bulkCommitMs: 0,     // time in successful commitPatchBulk() calls
     fallbackCommitMs: 0, // time in per-file fallback commitPatch() calls
   };
@@ -2299,7 +2301,6 @@ export async function ingestFiles(
     files: number,
     resolveEdgesMs: number,
     buildPatchMs: number,
-    stripMs: number,
     commitMs: number,
     totalSaveMs: number,
     nodes: number,
@@ -2309,7 +2310,6 @@ export async function ingestFiles(
     if (!debug) return;
     process.stderr.write(
       `\n[ingest-save] files=${files} resolveEdgesMs=${resolveEdgesMs} buildPatchMs=${buildPatchMs}` +
-      (mapMode ? ` stripChunkOpsMs=${stripMs}` : '') +
       ` commitMs=${commitMs} totalSaveMs=${totalSaveMs} nodes=${nodes} edges=${edges} claims=${claims}\n`
     );
   };
@@ -2590,9 +2590,6 @@ export async function ingestFiles(
     // resolveEdges runs on that batch and patches are committed before the next
     // batch is parsed. This keeps heap usage at O(chunk) instead of O(total).
     //
-    // YIELD_EVERY yields the Node.js event loop so the progress bar timer can
-    // fire even during the synchronous tree-sitter parse calls.
-    //
     // Two paths:
     //   A) Has baseline or mtime-changed files → pre-scan first, skip module load
     //      entirely if nothing changed (common "ix map" re-run case).
@@ -2743,11 +2740,10 @@ export async function ingestFiles(
     };
     let globalIndex: any = undefined;
 
-    // Larger chunks for big repos: fewer resolve+commit cycles, better edge resolution per batch.
     // Smaller chunks pipeline better: resolve(N) overlaps with commit(N-1) + parse(N+1).
     // With 2000-file chunks, resolve takes 68s and dominates. With 500, resolve ~17s
     // and overlaps well with commit (~5s) + parse (~5s).
-    const PARSE_STREAM_CHUNK     = filePaths.length > 10_000 ? 500 : 500;
+    const PARSE_STREAM_CHUNK     = 500;
     const COMMIT_HTTP_MAX_FILES  = parsePositiveIntEnv('IX_COMMIT_HTTP_MAX_FILES', 1000); // files per HTTP request to the backend
     // Ops per HTTP request; see DEFAULT_COMMIT_MAX_OPS.
     const COMMIT_MAX_OPS         = parsePositiveIntEnv('IX_COMMIT_MAX_OPS', DEFAULT_COMMIT_MAX_OPS);
@@ -2827,7 +2823,6 @@ export async function ingestFiles(
       baseRevRetries++;
       if (debug) process.stderr.write(`\n  [base-rev race] another writer moved the rev; re-sending\n`);
     };
-    const YIELD_EVERY            = 100;              // yield event loop every N files during parse
 
     if (debug) {
       process.stderr.write(
@@ -3675,7 +3670,6 @@ export async function ingestFiles(
       const saveStart = performance.now();
       let resolveEdgesMs = 0;
       let buildPatchMs = 0;
-      const localStripMs = 0;
       let commitMs = 0;
       let batchNodes = 0;
       let batchEdges = 0;
@@ -3712,73 +3706,13 @@ export async function ingestFiles(
         const totalSaveMs = Math.round(performance.now() - saveStart);
         timings.resolveMs += resolveEdgesMs;
         timings.buildPatchMs += buildPatchMs;
-        timings.stripChunkOpsMs += localStripMs;
         timings.commitMs += commitMs;
         totalNodesEmitted += batchNodes;
         totalEdgesEmitted += batchEdges;
         totalClaimsEmitted += batchClaims;
-        logSaveTiming(batch.length, resolveEdgesMs, buildPatchMs, localStripMs, commitMs, totalSaveMs, batchNodes, batchEdges, batchClaims);
+        logSaveTiming(batch.length, resolveEdgesMs, buildPatchMs, commitMs, totalSaveMs, batchNodes, batchEdges, batchClaims);
         progressPhase = 'Parsing';
         progressStart = performance.now();
-      }
-    };
-
-    /** Parse-all-first commit: resolve edges over full set, then commit in HTTP-sized batches. */
-    const flushAll = async (allParsed: ParsedFile[]): Promise<void> => {
-      if (allParsed.length === 0) return;
-      filesChanged += allParsed.length;
-      const previousPhase = progressPhase;
-      const saveStart = performance.now();
-      let resolveEdgesMs = 0;
-      let buildPatchMs = 0;
-      const localStripMs = 0;
-      let commitMs = 0;
-      let batchNodes = 0;
-      let batchEdges = 0;
-      let batchClaims = 0;
-      progressPhase   = 'Saving';
-      progressTotal   = allParsed.length;
-      progressCurrent = 0;
-      try {
-        setCurrentWork(`resolve ${allParsed.length} files`);
-        const resolveStart = performance.now();
-        const resolvedEdges = resolveEdgesFn!(allParsed.map(f => f.parsed), resolveStats, globalIndex, resolveOpts);
-        resolveEdgesMs = Math.round(performance.now() - resolveStart);
-        if (stitchEnabled) collectStitch(allParsed.map(f => f.parsed));
-        const edgesByFile = new Map<string, any[]>();
-        for (const edge of resolvedEdges) {
-          let arr = edgesByFile.get(edge.srcFilePath);
-          if (!arr) { arr = []; edgesByFile.set(edge.srcFilePath, arr); }
-          arr.push(edge);
-        }
-        setCurrentWork(`build commit payloads ending ${nodePath.basename(allParsed[allParsed.length - 1].filePath)}`);
-        const buildStart = performance.now();
-        const preparedPatches = await buildFilePatches(allParsed, edgesByFile);
-        buildPatchMs += Math.round(performance.now() - buildStart);
-        for (const pp of preparedPatches) {
-          for (const op of pp.patch.ops) {
-            if (op.type === 'UpsertNode') batchNodes++;
-            else if (op.type === 'UpsertEdge') batchEdges++;
-            else if (op.type === 'AssertClaim') batchClaims++;
-          }
-        }
-        if (preparedPatches.length === 0) {
-          progressCurrent = allParsed.length;
-          return;
-        }
-        commitMs += await commitPreparedPatches(preparedPatches, allParsed.length, { updateProgress: true, onCommitted: noteRebuilt });
-      } finally {
-        const totalSaveMs = Math.round(performance.now() - saveStart);
-        timings.resolveMs += resolveEdgesMs;
-        timings.buildPatchMs += buildPatchMs;
-        timings.stripChunkOpsMs += localStripMs;
-        timings.commitMs += commitMs;
-        totalNodesEmitted += batchNodes;
-        totalEdgesEmitted += batchEdges;
-        totalClaimsEmitted += batchClaims;
-        logSaveTiming(allParsed.length, resolveEdgesMs, buildPatchMs, localStripMs, commitMs, totalSaveMs, batchNodes, batchEdges, batchClaims);
-        progressPhase   = previousPhase;
-        progressStart   = performance.now();
       }
     };
 
@@ -4583,10 +4517,17 @@ export async function ingestFiles(
 
   // A new workspace is registered only now, and only if the backend took
   // something: see workspaceStateFor.
-  if (registrationPending && patchesTheBackendTook > 0) {
-    ensureWorkspaceIdState(workspaceRoot);
+  if (registrationPending && patchesTheBackendTook > 0 && registerAfterCommit) {
+    // A repository (or --root) ingest may become the default when none exists, as
+    // before CL-05; a loose directory never does: an ingest of a stray directory
+    // must not pick the workspace other commands fall back to.
+    ensureWorkspaceIdState(workspaceRoot, { setDefault: rootSource !== 'loose' });
     if (!opts.suppressOutput && opts.format === 'text') {
       process.stderr.write(chalk.dim(`Registered workspace "${workspaceName}" (${workspaceRoot}).\n`));
+    }
+  } else if (registrationPending && patchesTheBackendTook > 0) {
+    if (!opts.suppressOutput && opts.format === 'text') {
+      process.stderr.write(chalk.dim(`Not registered as a workspace: ${workspaceRoot} (a file outside every workspace and repository). Run ix map ${workspaceRoot} to query and read it.\n`));
     }
   }
 
@@ -4752,11 +4693,7 @@ export async function ingestFiles(
       stitchSkipped: stitchSkipped ?? null,
       stitchSkippedRule: stitchSkippedRule ?? null,
       elapsedSeconds: parseFloat(elapsed),
-      timings: {
-        ...timings,
-        parseOnlyMs: Math.round(timings.parseOnlyMs),
-        stripChunkOpsMs: Math.round(timings.stripChunkOpsMs),
-      },
+      timings,
       emitted: { nodes: totalNodesEmitted, edges: totalEdgesEmitted, claims: totalClaimsEmitted },
       langParseMs: Object.fromEntries(
         [...langParseMs.entries()].map(([lang, s]) => [lang, { ms: Math.round(s.ms), files: s.files }])
@@ -4815,12 +4752,8 @@ export async function ingestFiles(
       console.log(chalk.dim(`    hash:        ${timings.hashMs}ms`));
       console.log(chalk.dim(`    go index:    ${timings.goIndexMs}ms`));
       console.log(chalk.dim(`    parse total: ${timings.parseMs}ms`));
-      console.log(chalk.dim(`    parse only:  ${Math.round(timings.parseOnlyMs)}ms`));
       console.log(chalk.dim(`    resolve:     ${timings.resolveMs}ms`));
       console.log(chalk.dim(`    build:       ${timings.buildPatchMs}ms`));
-      if (mapMode) {
-        console.log(chalk.dim(`    stripChunk:  ${Math.round(timings.stripChunkOpsMs)}ms`));
-      }
       console.log(chalk.dim(`    commit:      ${timings.commitMs}ms`));
       console.log(chalk.dim(`      bulk:      ${timings.bulkCommitMs}ms`));
       console.log(chalk.dim(`      fallback:  ${timings.fallbackCommitMs}ms`));

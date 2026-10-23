@@ -153,3 +153,130 @@ describe("trace completeness in command output", () => {
     expect(codes(out)).toEqual(["truncated"]);
   });
 });
+
+describe("trace --depth/--cap validation", () => {
+  beforeEach(() => {
+    expand.mockReset().mockResolvedValue({ nodes: [], edges: [] });
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  // These harnesses register the command without the root preAction hook, so
+  // the action's own parse is what stands between a typo and a NaN bound.
+  it.each([
+    ["--depth", "abc"],
+    ["--cap", "1e3"],
+    ["--depth", "-1"],
+    ["--cap", "10abc"],
+  ])("rejects %s %s in --to mode before any expansion", async (flag, value) => {
+    await expect(run([flag, value])).rejects.toThrow(/must be a non-negative integer/);
+    expect(expand).not.toHaveBeenCalled();
+  });
+
+  it("rejects a bad --depth in directional mode before any expansion", async () => {
+    await expect(runTrace(["--depth", "abc"])).rejects.toThrow(/must be a non-negative integer/);
+    expect(expand).not.toHaveBeenCalled();
+  });
+});
+
+describe("trace --to predicate labels", () => {
+  async function runPath(args: string[], format = "json") {
+    const program = new Command().name("ix").exitOverride();
+    registerTraceCommand(program);
+    const output: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...parts) => { output.push(parts.join(" ")); });
+    await program.parseAsync(["trace", "A", "--to", "C", ...args, "--format", format], { from: "user" });
+    return output.join("\n");
+  }
+
+  // A --CALLS--> B, and C --IMPORTS--> B (so C is reached walking "in" from B).
+  // B's in-expansion also carries a stray CONTAINS edge between two of its
+  // neighbours, which must not label either step.
+  beforeEach(() => {
+    expand.mockReset().mockImplementation(async (id: string, opts: { direction: string }) => {
+      const fn = (name: string) => ({ id: name, name, kind: "function" });
+      if (id === "A" && opts.direction === "out") {
+        return { nodes: [fn("B")], edges: [{ src: "A", dst: "B", predicate: "CALLS" }] };
+      }
+      if (id === "B" && opts.direction === "in") {
+        return {
+          nodes: [fn("A"), fn("C")],
+          edges: [
+            { src: "A", dst: "C", predicate: "CONTAINS" },
+            { src: "A", dst: "B", predicate: "CALLS" },
+            { src: "C", dst: "B", predicate: "IMPORTS" },
+          ],
+        };
+      }
+      return { nodes: [], edges: [] };
+    });
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("labels each text step with the predicate and its direction", async () => {
+    const out = await runPath([], "text");
+    expect(out).toContain("--CALLS-->");
+    expect(out).toContain("<--IMPORTS--");
+    expect(out).not.toContain("CONTAINS");
+  });
+
+  it("adds via and reversed to llm step rows", async () => {
+    const out = await runPath([], "llm");
+    expect(out).toContain("step name=A kind=function\n");
+    expect(out).toContain("step name=B kind=function via=CALLS");
+    expect(out).toContain("step name=C kind=function via=IMPORTS reversed=true");
+  });
+
+  it("adds via and reversed to json path items", async () => {
+    const out = JSON.parse(await runPath([]));
+    expect(out.path[0]).toEqual({ name: "A", kind: "function" });
+    expect(out.path[1].via).toBe("CALLS");
+    expect(out.path[1].reversed).toBeUndefined();
+    expect(out.path[2].via).toBe("IMPORTS");
+    expect(out.path[2].reversed).toBe(true);
+    expect(out.kind).toBe("mixed");
+  });
+
+  // The default --to search follows all six predicates, as before: a route
+  // that exists only over one of the non-call relationships is still found.
+  it.each(["REFERENCES", "EXTENDS", "CONTAINS"])(
+    "without --kind, finds a route that exists only over %s",
+    async (predicate) => {
+      expand.mockImplementation(async (id: string, opts: { direction: string; predicates: string[] }) => {
+        if (id === "A" && opts.direction === "out" && opts.predicates.includes(predicate)) {
+          return { nodes: [{ id: "C", name: "C", kind: "function" }], edges: [{ src: "A", dst: "C", predicate }] };
+        }
+        return { nodes: [], edges: [] };
+      });
+
+      const json = JSON.parse(await runPath([]));
+      expect(json.path.map((n: { name: string; via?: string }) => [n.name, n.via])).toEqual([["A", undefined], ["C", predicate]]);
+      expect(json.kind).toBe("mixed");
+      expect(expand.mock.calls[0][1].predicates).toEqual(
+        ["CALLS", "IMPORTS", "REFERENCES", "EXTENDS", "IMPLEMENTS", "CONTAINS"],
+      );
+    },
+  );
+
+  it("keeps all six predicates for a directional walk without --kind", async () => {
+    const program = new Command().name("ix").exitOverride();
+    registerTraceCommand(program);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await program.parseAsync(["trace", "A", "--downstream", "--depth", "1", "--format", "json"], { from: "user" });
+    expect(expand.mock.calls.map(([, o]) => o.predicates).flat()).toEqual(
+      ["CALLS", "IMPORTS", "REFERENCES", "EXTENDS", "IMPLEMENTS", "CONTAINS"],
+    );
+  });
+
+  it("falls back to a bare arrow when the expansion carries no edges", async () => {
+    expand.mockImplementation(async (id: string, opts: { direction: string }) => {
+      const adjacent: Record<string, string[]> = opts.direction === "out"
+        ? { A: ["B"], B: ["C"] } : { B: ["A"], C: ["B"] };
+      return { nodes: (adjacent[id] ?? []).map(name => ({ id: name, name, kind: "function" })), edges: [] };
+    });
+    const out = await runPath([], "text");
+    expect(out).toContain("→");
+    expect(out).not.toContain("-->");
+    const json = JSON.parse(await runPath([]));
+    expect(json.path.every((n: { via?: string }) => n.via === undefined)).toBe(true);
+  });
+});

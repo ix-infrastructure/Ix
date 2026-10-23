@@ -38,11 +38,51 @@ function vitestShaped(n: number): string {
   return lines.join('\n');
 }
 
-function timed(source: string): { ms: number; parsed: ReturnType<typeof parseFile> } {
+function timed(source: string, budgetMs = 0): { ms: number; parsed: ReturnType<typeof parseFile> } {
   const start = performance.now();
-  const parsed = parseFile('a/b.test.ts', source, { budgetMs: 0 });
+  const parsed = parseFile('a/b.test.ts', source, { budgetMs });
   return { ms: performance.now() - start, parsed };
 }
+
+/**
+ * Fit how time grows with `n`: one warmup run per size, then the best of
+ * `samples` timed runs per size, and the least-squares slope of ln(ms) against
+ * ln(n). Linear growth fits about 1, quadratic about 2. The clock is
+ * injectable so the fit can be tested without wall time.
+ */
+function growthExponent(
+  sizes: number[],
+  run: (n: number) => void,
+  opts: { samples?: number; now?: () => number } = {},
+): { exponent: number; ms: number[] } {
+  const samples = opts.samples ?? 5;
+  const now = opts.now ?? (() => performance.now());
+  const ms = sizes.map((n) => {
+    run(n); // warmup, not counted
+    let best = Infinity;
+    for (let i = 0; i < samples; i++) {
+      const start = now();
+      run(n);
+      best = Math.min(best, now() - start);
+    }
+    return best;
+  });
+  const xs = sizes.map((n) => Math.log(n));
+  const ys = ms.map((t) => Math.log(t));
+  const mean = (v: number[]) => v.reduce((a, b) => a + b, 0) / v.length;
+  const mx = mean(xs);
+  const my = mean(ys);
+  let num = 0;
+  let den = 0;
+  for (let i = 0; i < xs.length; i++) {
+    num += (xs[i] - mx) * (ys[i] - my);
+    den += (xs[i] - mx) ** 2;
+  }
+  return { exponent: num / den, ms };
+}
+
+/** The bound on the fitted exponent: linear fits about 1, quadratic about 2. */
+const MAX_EXPONENT = 1.5;
 
 describe('parseFile scales linearly with uses of an imported name', () => {
   it('parses a 4,000-call file in seconds, not minutes', () => {
@@ -57,16 +97,60 @@ describe('parseFile scales linearly with uses of an imported name', () => {
     expect(ms).toBeLessThan(BOUND_MS);
   }, TEST_TIMEOUT_MS);
 
-  it('roughly quadruples in time when the file quadruples', () => {
+  // The growth exponent fitted over 2k, 4k and 8k calls: linear growth fits
+  // about 1, the old unmemoised shadow scan about 2. Per-call cost steps up
+  // about 1.3x between 1k and 3k calls (tree-sitter node marshalling), so the
+  // old 4k/1k ratio was about 5 to 6 locally and up to 8.6 on CI; these sizes
+  // start above that step. Best of five after a warmup, fitted over three
+  // sizes, so a single slow sample cannot fail the bound. Each parse also gets
+  // a budget of BOUND_MS: the test timeout cannot interrupt a synchronous
+  // parse, so without it the quadratic version would run for most of an hour
+  // across these 19 parses. With it, the first parse past the budget fails
+  // the test.
+  it('grows linearly, not quadratically, with uses of an imported name', () => {
     timed(importedCalls(500)); // warm the parser and query cache
-    // Best of three each, so one scheduling hiccup cannot fail the ratio. A
-    // factor of 4 rather than 2 keeps linear (about 4) and quadratic (about 16)
-    // far apart, so load on a shared runner cannot push one across the bound.
-    const best = (n: number) => Math.min(...[0, 1, 2].map(() => timed(importedCalls(n)).ms));
-    const small = best(1000);
-    const large = best(4000);
-    expect(large / small).toBeLessThan(8);
+    const sources = new Map([2000, 4000, 8000].map((n) => [n, importedCalls(n)]));
+    const { exponent, ms } = growthExponent([...sources.keys()], (n) => {
+      expect(timed(sources.get(n)!, BOUND_MS).parsed, `${n} calls ran past ${BOUND_MS} ms`).not.toBeNull();
+    });
+    expect(exponent, `times ${ms.map((t) => t.toFixed(1)).join('/')} ms`).toBeLessThan(MAX_EXPONENT);
   }, TEST_TIMEOUT_MS);
+});
+
+describe('growthExponent', () => {
+  /** A fake clock that each run advances by `cost(n, call)`, where `call` counts runs per size from 0. */
+  function fit(cost: (n: number, call: number) => number) {
+    let clock = 0;
+    const calls = new Map<number, number>();
+    return growthExponent(
+      [2000, 4000, 8000],
+      (n) => {
+        const call = calls.get(n) ?? 0;
+        calls.set(n, call + 1);
+        clock += cost(n, call);
+      },
+      { now: () => clock },
+    );
+  }
+
+  it('fits about 1 for linear growth', () => {
+    expect(fit((n) => n).exponent).toBeCloseTo(1, 5);
+  });
+
+  it('fits about 2 for quadratic growth, which fails the bound', () => {
+    const { exponent } = fit((n) => (n * n) / 1000);
+    expect(exponent).toBeCloseTo(2, 5);
+    expect(exponent).not.toBeLessThan(MAX_EXPONENT);
+  });
+
+  it('ignores one inflated sample per size (best of five)', () => {
+    // Call 0 is the warmup; call 2 is a timed sample, slowed 10x.
+    expect(fit((n, call) => (call === 2 ? 10 * n : n)).exponent).toBeCloseTo(1, 5);
+  });
+
+  it('does not count the warmup run', () => {
+    expect(fit((n, call) => (call === 0 ? 100 * n * n : n)).exponent).toBeCloseTo(1, 5);
+  });
 });
 
 describe('parseFile budget', () => {

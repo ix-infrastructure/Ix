@@ -30,6 +30,8 @@ export class FakeBackend {
   readonly sourceWorkspaceIds: Array<string | undefined> = [];
   /** The ops of the last patch sent for each `source.uri`. */
   readonly lastOps = new Map<string, Array<Record<string, unknown>>>();
+  /** The `patchId` of the last patch sent for each `source.uri`. */
+  readonly lastPatchIds = new Map<string, string>();
   /** Paths this fake does not implement. Asserted empty after every test. */
   readonly unknownPaths: string[] = [];
 
@@ -433,11 +435,12 @@ export class FakeBackend {
         /* a body we cannot read is still a request */
       }
       this.requests.push({ path, patches: patches.length });
-      for (const { source, ops } of patches) {
+      for (const { source, ops, patchId } of patches) {
         if (!source?.uri) continue;
         this.sourceUris.push(source.uri);
         this.sourceWorkspaceIds.push(source.workspaceId);
         this.lastOps.set(source.uri, ops ?? []);
+        if (patchId !== undefined) this.lastPatchIds.set(source.uri, patchId);
       }
       if (this.abortAfterCommits !== undefined && this.commitCount >= this.abortAfterCommits) {
         this.aborter.abort();
