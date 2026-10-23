@@ -89,6 +89,23 @@ describe("describeCommitOutcome", () => {
   });
 });
 
+describe("describeCommitOutcome after `ix reset` (IN-19C)", () => {
+  it("is still fatal, and says the graph is still empty rather than unchanged", () => {
+    const outcome = describeCommitOutcome(12, 0, "--verbose", false, 0, false, true);
+    expect(outcome.kind).toBe("fatal");
+    const message = outcome.kind === "fatal" ? outcome.message : "";
+    expect(message).not.toContain("unchanged");
+    expect(message).toContain("this workspace's graph is still empty");
+    expect(message).toContain("--verbose");
+  });
+
+  it("keeps the old text without the flag, and warns the same on a partial run", () => {
+    const old = describeCommitOutcome(12, 0, "--verbose", false, 0, false);
+    expect(old.kind === "fatal" && old.message).toContain("The graph is unchanged");
+    expect(describeCommitOutcome(3, 9, "--verbose", false, 0, false, true).kind).toBe("warn");
+  });
+});
+
 describe("ingestCompletedCleanly", () => {
   it("is false when patches failed to commit", () => {
     // The guard the PR calls load-bearing, and the one nothing pinned: it
