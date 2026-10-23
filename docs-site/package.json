@@ -13,7 +13,7 @@
     "preview": "astro preview"
   },
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.22.0"
   },
   "dependencies": {
     "@astrojs/markdown-satteri": "^0.4.4",
