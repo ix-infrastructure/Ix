@@ -36,6 +36,7 @@ import {
   type StartingPoint,
   type SymbolHit,
 } from "../explain/issue.js";
+import { symbolReadChecker } from "./read.js";
 import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/related-files.js";
 import { cachedBm25Ranker } from "../explain/bm25-cache.js";
 import { collectTextReferences, gitRepoAccess, type TextSource } from "../explain/text-references.js";
@@ -264,12 +265,21 @@ interface EvidenceItem {
    * `config.ts`, first work out which of several `config.ts` files it was.
    */
   location?: EvidenceLocation;
+  /**
+   * How many of how many, for a row that samples a larger set (the "used by"
+   * row). Structured so the number can be rendered as a floor where the backend
+   * capped it, without parsing the title.
+   */
+  count?: { shown: number; total: number };
 }
 
 interface ContextBundle {
   schema: typeof BUNDLE_SCHEMA;
-  /** The one explicitly declared time-dependent field. */
-  generatedAt: string;
+  /**
+   * The one explicitly declared time-dependent field. Absent from the MCP
+   * structured copy so identical calls are byte-identical.
+   */
+  generatedAt?: string;
   target: { id: string; name: string; kind: string; resolutionMode: string; path?: string };
   /**
    * Where an issue's bundle starts, and what in the issue did not resolve.
@@ -1269,8 +1279,13 @@ export function diffInvestigations(
   const removedRelationships = prev.relationships.filter(
     (p) => !fresh.relationships.some((r) => r.src === p.src && r.dst === p.dst && r.predicate === p.predicate),
   );
-  const addedEvidence = fresh.evidence.filter((e) => !prev.evidence.some((p) => p.id === e.id));
-  const removedEvidence = prev.evidence.filter((p) => !fresh.evidence.some((e) => e.id === p.id));
+  // Same id and same title. A row that summarises a set -- `used-by`,
+  // `recent-commits`, `related-files` -- keeps its id while what it says
+  // changes, and matched on id alone a new top caller or a total going from 3
+  // to 40 was no change at all. A changed row is reported as removed and added.
+  const sameEvidence = (a: EvidenceItem, b: EvidenceItem) => a.id === b.id && a.title === b.title;
+  const addedEvidence = fresh.evidence.filter((e) => !prev.evidence.some((p) => sameEvidence(p, e)));
+  const removedEvidence = prev.evidence.filter((p) => !fresh.evidence.some((e) => sameEvidence(p, e)));
   const addedClaims = fresh.claims.filter((c) => !prev.claims.some((p) => p.id === c.id));
   const removedClaims = prev.claims.filter((p) => !fresh.claims.some((c) => c.id === p.id));
 
@@ -2291,6 +2306,15 @@ export function buildBundle(input: BuildInput): ContextBundle {
   return bundle;
 }
 
+/**
+ * Evidence tiers. A row's score is `tier * TIER_WIDTH + its place in the tier`,
+ * so no tier can run into the next: structural rows were `10 + index`, and from
+ * the eleventh on they interleaved with claims (20) and relationships (30+).
+ */
+const TIER = { target: 0, issue: 1, structural: 2, claims: 3, relationships: 4, provenance: 5 } as const;
+const TIER_WIDTH = 1000;
+const tierScore = (tier: number, index = 0): number => tier * TIER_WIDTH + Math.min(index, TIER_WIDTH - 1);
+
 /** Deterministic evidence ranking: tier, then a stable id tiebreaker. */
 function rankEvidence(input: {
   resolved: { id: string; name: string; kind: string };
@@ -2319,17 +2343,35 @@ function rankEvidence(input: {
   // these two rows are what `--from-issue` exists to deliver.
   if (input.issue) items.push(...issueEvidence(input.issue));
 
+  // Each entity gets one row. The rows below are pushed in rank order, and a
+  // row about something already shown is dropped (or, for a row that lists
+  // several, loses that entry): the same file as an import and a dependent, or
+  // a member restated by its CONTAINS edge, cost the budget twice for one fact.
+  // The target is exempt -- every edge in the bundle touches it.
+  const shown = new Set<string>([target.id]);
+  for (const s of input.issue?.startingPoints ?? []) if (s.id) shown.add(s.id);
+  const fresh = (id: string | undefined): boolean => id === undefined || !shown.has(id);
+  const show = (ids: string[]) => { for (const id of ids) shown.add(id); };
+
   type Structural = Omit<EvidenceItem, "kind" | "score">;
   const structural: Structural[] = [];
+  const pushOne = (item: Structural, ref: EntityLocation | undefined) => {
+    if (!fresh(ref?.id)) return;
+    if (ref) show([ref.id]);
+    structural.push(item);
+  };
+  // Keyed by entity id, not name: two members called `render` were one id.
+  const rowId = (prefix: string, name: string, ref: EntityLocation | undefined) => `${prefix}:${ref?.id ?? name}`;
   if (input.facts.container) {
-    structural.push({
-      id: `container:${input.facts.container.name}`,
+    const container = input.facts.container;
+    pushOne({
+      id: rowId("container", container.name, container),
       source: "facts.container",
-      title: `container ${input.facts.container.name} (${input.facts.container.kind})`,
+      title: `container ${container.name} (${container.kind})`,
       reason: "contains the target",
-      refs: [input.facts.container.id],
-      ...locationField(input.facts.container),
-    });
+      refs: [container.id],
+      ...locationField(container),
+    }, container);
   }
   // Names alone when the facts carry no locations, so a caller that builds its
   // own facts (or an older collector) still gets the structural evidence.
@@ -2343,10 +2385,10 @@ function rankEvidence(input: {
   const leadingMembers = related(input.facts.members, input.facts.memberRefs, LEADING_MEMBERS);
   const pushMembers = (members: typeof leadingMembers) => {
     for (const { name, ref } of members) {
-      structural.push({
-        id: `member:${name}`, source: "facts.members", title: `member ${name}`,
+      pushOne({
+        id: rowId("member", name, ref), source: "facts.members", title: `member ${name}`,
         reason: ref ? memberReason(ref) : "defined in the target", refs: ref ? [ref.id] : [], ...locationField(ref),
-      });
+      }, ref);
     }
   };
   // The most-used members first, the rest last. A file target's evidence at
@@ -2363,14 +2405,24 @@ function rankEvidence(input: {
   // of the evidence budget as five imports, and at the default budget the
   // imports then fell off the end instead: the files moved, the count the
   // agent could see did not.
-  const relatedRefs = input.facts.relatedRefs ?? [];
+  const relatedRefs = (input.facts.relatedRefs ?? []).filter((ref) => fresh(ref.id));
   if (relatedRefs.length > 0) {
+    show(relatedRefs.map((ref) => ref.id));
     structural.push({
       id: "related-files", source: "facts.related",
       title: `related files: ${relatedRefs.map((ref) => ref.path ?? ref.name).join(", ")}`,
       reason: `two steps from the target, ranked; ${relatedRefs.map(relatedClause).join("; ")}`,
       refs: relatedRefs.map((ref) => ref.id),
     });
+  }
+  // What uses the target: callers, then the dependents not already among them,
+  // as one row whose title carries the total. Ahead of the imports and the
+  // neighbours: as a row each, after them, they missed the default budget on
+  // nearly every file target -- and they are what an edit has to keep working.
+  const usedBy = usedByRow(input.facts, fresh);
+  if (usedBy) {
+    show(usedBy.refs);
+    structural.push(usedBy);
   }
   // What happened to the target's file lately. The subjects carry what a
   // one-hop bundle cannot: that the sibling commands were already fixed for
@@ -2392,51 +2444,45 @@ function rankEvidence(input: {
   // items, and a file with many imports (resolve.ts) pushed all 27 of its own
   // members out of the bundle entirely.
   for (const ref of (input.facts.importRefs ?? []).slice(0, SHOWN_IMPORTS)) {
-    structural.push({
-      id: `imports:${ref.name}`, source: "facts.imports", title: `imports ${ref.name}`,
+    pushOne({
+      id: rowId("imports", ref.name, ref), source: "facts.imports", title: `imports ${ref.name}`,
       reason: "the target imports this", refs: [ref.id], ...locationField(ref),
-    });
+    }, ref);
   }
   for (const ref of input.facts.calleeRefs ?? []) {
-    structural.push({
-      id: `calls:${ref.name}`, source: "facts.callees", title: `calls ${ref.name}`,
+    pushOne({
+      id: rowId("calls", ref.name, ref), source: "facts.callees", title: `calls ${ref.name}`,
       reason: "the target calls this", refs: [ref.id], ...locationField(ref),
-    });
+    }, ref);
   }
   for (const ref of (input.facts.neighbourRefs ?? []).slice(0, SHOWN_NEIGHBOUR_MEMBERS)) {
     const where = ref.path ? ref.path.split("/").pop() : undefined;
-    structural.push({
-      id: `defines:${ref.path ?? ""}:${ref.name}`, source: "facts.neighbours",
+    pushOne({
+      id: rowId("defines", ref.name, ref), source: "facts.neighbours",
       title: `${where ?? "a neighbouring file"} defines ${ref.name}`,
       reason: "defined in a file next to the target", refs: [ref.id], ...locationField(ref),
-    });
-  }
-  for (const { name, ref } of related(input.facts.topCallers, input.facts.topCallerRefs, 3)) {
-    structural.push({
-      id: `caller:${name}`, source: "facts.callers", title: `caller ${name}`,
-      reason: "calls the target", refs: ref ? [ref.id] : [], ...locationField(ref),
-    });
-  }
-  for (const { name, ref } of related(input.facts.topDependents, input.facts.topDependentRefs, 3)) {
-    structural.push({
-      id: `dependent:${name}`, source: "facts.dependents", title: `dependent ${name}`,
-      reason: "calls, imports or references the target", refs: ref ? [ref.id] : [], ...locationField(ref),
-    });
+    }, ref);
   }
   pushMembers(leadingMembers.slice(MEMBERS_BEFORE_OUTWARD));
   structural.forEach((item, index) => {
     // Recent commits are provenance -- where the file's current shape came
     // from -- and keep to the stable kinds consumers already route on.
-    items.push({ ...item, kind: item.source === "git.history" ? "provenance" : "structural", score: 10 + index });
+    items.push({
+      ...item,
+      kind: item.source === "git.history" ? "provenance" : "structural",
+      score: tierScore(TIER.structural, index),
+    });
   });
 
+  // Claims, decisions and intents share a tier, in that order; within each,
+  // the id tiebreaker below orders them.
   for (const scored of input.context.claims) {
     items.push({
       id: `claim:${scored.claim.id}`,
       kind: "claim",
       source: "context.claims",
       title: scored.claim.statement,
-      score: 20,
+      score: tierScore(TIER.claims, 0),
       reason: `context claim (relevance ${scored.relevance}, confidence ${scored.confidence?.score ?? "n/a"})`,
       refs: [scored.claim.entityId],
     });
@@ -2447,54 +2493,115 @@ function rankEvidence(input: {
       kind: "decision",
       source: "context.decisions",
       title: decision.title,
-      score: 21,
+      score: tierScore(TIER.claims, 1),
       reason: decision.rationale,
       refs: decision.entityId ? [decision.entityId] : [],
     });
   }
   // Conflicts are deliberately NOT evidence. A report names its two claims by
-  // uuid, which is nothing an agent can act on, and at score 22 they outranked
-  // every relationship: on recorded bundles they were taking 12 to 17 of the 25
-  // slots and truncating away the members and imports that answer the question.
-  // The count is carried in the bundle header and the reports themselves stay
-  // in `conflicts[]` for a caller that wants them; `ix conflicts` renders them.
+  // uuid, which is nothing an agent can act on, and ranked between decisions
+  // and intents they outranked every relationship: on recorded bundles they
+  // were taking 12 to 17 of the 25 slots and truncating away the members and
+  // imports that answer the question. The count is carried in the bundle
+  // header and the reports themselves stay in `conflicts[]` for a caller that
+  // wants them; `ix conflicts` renders them.
   for (const intent of input.context.intents) {
     items.push({
       id: `intent:${intent.id}`,
       kind: "intent",
       source: "context.intents",
       title: intent.statement,
-      score: 23,
+      score: tierScore(TIER.claims, 2),
       reason: `intent status ${intent.status}`,
       refs: [],
     });
   }
 
+  // A relationship row is kept only when it names something no earlier row
+  // does: `config.ts --CONTAINS--> getEndpoint` under a `member getEndpoint`
+  // row restates it, and so does an edge to an entity an earlier edge named.
   const label = entityLabeller(input.entities);
-  input.relationships.slice(0, 50).forEach((edge, index) => {
+  let relationshipIndex = 0;
+  for (const edge of input.relationships.slice(0, 50)) {
+    const ends = [...new Set([edge.src, edge.dst])].filter((id) => id !== target.id);
+    if (ends.length === 0 || !ends.every((id) => fresh(id))) continue;
+    show(ends);
     items.push({
       id: `relationship:${edge.src}:${edge.dst}:${edge.predicate}`,
       kind: "relationship",
       source: "context.edges",
       title: `${label(edge.src)} --${edge.predicate}--> ${label(edge.dst)}`,
-      score: 30 + Math.min(index, 10),
+      score: tierScore(TIER.relationships, relationshipIndex++),
       reason: "graph relationship from the context service",
       refs: [edge.src, edge.dst],
     });
-  });
+  }
 
   items.push({
     id: `provenance:${target.id}`,
     kind: "provenance",
     source: "provenance + facts.history",
     title: `history length ${input.facts.historyLength}, introduced rev ${input.facts.introducedRev ?? "unknown"}`,
-    score: 40,
+    score: tierScore(TIER.provenance),
     reason: `provenance ${input.prov.sourceType ?? "unknown"}, extractor ${input.prov.extractor ?? "unknown"}`,
     refs: [target.id],
   });
 
   // Stable full ordering: score, then id.
   return items.sort((a, b) => a.score - b.score || cmp(a.id, b.id));
+}
+
+/** Named callers and dependents shown in the "used by" row, at most. */
+const SHOWN_USED_BY = 6;
+
+/**
+ * The one "used by" row: the target's callers, then its dependents that are not
+ * already among them, each list ranked by the facts collector. The title says
+ * how many of how many; `count` carries the same two numbers for a caller that
+ * wants them without parsing.
+ */
+function usedByRow(
+  facts: ContextFacts, fresh: (id: string | undefined) => boolean,
+): Omit<EvidenceItem, "kind" | "score"> | undefined {
+  const named = (names: string[], refs: EntityLocation[] | undefined) =>
+    refs ?? names.map((name) => ({ id: "", name, kind: "unknown" }) as EntityLocation);
+  const callers = named(facts.topCallers, facts.topCallerRefs);
+  const dependents = named(facts.topDependents, facts.topDependentRefs);
+  const picked: EntityLocation[] = [];
+  const ids = new Set<string>();
+  const names = new Set<string>();
+  for (const ref of [...callers, ...dependents]) {
+    if (picked.length >= SHOWN_USED_BY) break;
+    // A name-only entry (no ref) is matched by name; a located one by id.
+    if (ref.id ? ids.has(ref.id) || !fresh(ref.id) : names.has(ref.name)) continue;
+    if (ref.id) ids.add(ref.id);
+    names.add(ref.name);
+    picked.push(ref);
+  }
+  if (picked.length === 0) return undefined;
+  const total = Math.max(
+    facts.usedByCount ?? Math.max(facts.callerCount, facts.dependentCount),
+    picked.length,
+  );
+  const short = (ref: EntityLocation) => {
+    const file = ref.path?.split("/").pop();
+    return file && file !== ref.name ? `${ref.name} (${file})` : ref.name;
+  };
+  // Locations only: the title already names each entry and its file, and the
+  // row is sized against the evidence budget like any other.
+  const where = picked.filter((ref) => ref.path).map((ref) => formatLocation(locationFields(ref) as EvidenceLocation));
+  const anyCaller = picked.some((ref) => callers.includes(ref));
+  return {
+    id: "used-by",
+    // `facts.callers` when the row holds a caller, so a budget that cuts it
+    // names `ix callers` as the way back; `ix impact` for dependents alone.
+    source: anyCaller ? "facts.callers" : "facts.dependents",
+    title: `used by (${picked.length} of ${total}): ${picked.map(short).join(", ")}`,
+    reason: `calls, imports or references the target, most relevant first${where.length > 0 ? `; ${where.join(", ")}` : ""}`,
+    refs: picked.flatMap((ref) => (ref.id ? [ref.id] : [])),
+    count: { shown: picked.length, total },
+    ...locationField(picked.find((ref) => ref.path)),
+  };
 }
 
 /** Ranked files named in the evidence row; the JSON bundle carries the rest. */
@@ -2517,7 +2624,7 @@ function issueEvidence(issue: IssueBundleInput): EvidenceItem[] {
       kind: "target",
       source: "issue.starts",
       title: `starting points: ${starts.map((s) => `${s.name} (${formatLocation(locationFields(s) as EvidenceLocation)})`).join(", ")}`,
-      score: 1,
+      score: tierScore(TIER.issue, 0),
       reason: (issue.fallback
         ? "no code name in the issue resolved to a definition; starting from the file BM25 ranks first against the issue text; "
         : "") + why + unresolved,
@@ -2532,7 +2639,7 @@ function issueEvidence(issue: IssueBundleInput): EvidenceItem[] {
       kind: "structural",
       source: "issue.ranking",
       title: `ranked files: ${shown.map((f) => f.path).join(", ")}`,
-      score: 2,
+      score: tierScore(TIER.issue, 1),
       reason: `starting points first, then bm25 against the issue text, graph neighbours of a starting point boosted up to ${Math.round(CLOSENESS_BOOST * 100)}%; `
         + shown.map((f) => `${f.path.split("/").pop()} (${f.reason})`).join("; "),
       refs: [],
@@ -2548,8 +2655,9 @@ function issueEvidence(issue: IssueBundleInput): EvidenceItem[] {
  */
 export function llmNextLines(bundle: ContextBundle): string[] {
   return forMcp()
-    ? nextToolCalls(bundle).map((step) => llmLine("next", { cmd: step.cmd, why: step.why }))
-    : nextReads(bundle).map((cmd) => llmLine("next", { cmd }));
+    ? nextToolCalls(bundle, onDiskSymbolCheck())
+      .map((step) => llmLine("next", { cmd: step.cmd, why: step.why, stale: step.stale, reanchor: step.reanchor }))
+    : renderedNextReads(bundle).map((row) => llmLine("next", { cmd: row.cmd, stale: row.stale || undefined }));
 }
 
 /**
@@ -2715,10 +2823,12 @@ export function renderBundle(bundle: ContextBundle, format: string): void {
     }
   }
 
-  const reads = nextReads(bundle);
+  const reads = renderedNextReads(bundle);
   if (reads.length > 0) {
     renderSection("Next");
-    for (const cmd of reads) console.log(`  ${cmd}`);
+    for (const row of reads) {
+      console.log(`  ${row.cmd}${row.stale ? "  (stale: changed since last ingest; ix map to update)" : ""}`);
+    }
   }
 
   const trunc = bundle.truncation;
@@ -2881,6 +2991,56 @@ function targetLocation(facts: ContextFacts): Located | undefined {
   return { path: facts.path, lineStart: facts.lineStart, lineEnd: facts.lineEnd };
 }
 
+/** One suggested read: the command, and whether its file changed since the last ingest. */
+export interface NextRead {
+  cmd: string;
+  stale: boolean;
+}
+
+/**
+ * A name or path a shell passes through unquoted and unsplit. No `$` (it
+ * expands), no leading `#` (it starts a comment) and no leading `-` (it reads
+ * as an option); anything else falls back to the range form.
+ */
+const SHELL_SAFE_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
+const SHELL_SAFE_PATH = /^[A-Za-z0-9_./][A-Za-z0-9_./-]*$/;
+
+/** Whether `ix read <name> --path <file>` reads `name` and nothing else; see `readsOneSymbol`. */
+export type SymbolReadCheck = (name: string, path: string) => boolean;
+
+/**
+ * One on-disk check per workspace root (`symbolReadChecker`: one workspace
+ * walk, each row's answer kept), shared by every bundle rendered against that
+ * root within SYMBOL_CHECK_TTL_MS. Keyed on the root, not the bundle object,
+ * so a render that sizes several copies of a bundle (a budget-fitting loop
+ * measuring prefixes) still walks once. The short lifetime keeps a long-lived
+ * `ix mcp` process from answering from a stale walk after files change.
+ */
+const SYMBOL_CHECK_TTL_MS = 5_000;
+const symbolChecksByRoot = new Map<string, { check: SymbolReadCheck; at: number }>();
+
+/** `readsOneSymbol` against this workspace's files, as they are on disk now, memoised per root. */
+function onDiskSymbolCheck(): SymbolReadCheck {
+  // Lazy: the workspace root is resolved only when a stale row asks, so a
+  // bundle with no stale rows never loads workspace config for this.
+  let check: SymbolReadCheck | undefined;
+  return (name, path) => (check ??= checkerForRoot(resolveWorkspaceRoot()))(name, path);
+}
+
+function checkerForRoot(root: string): SymbolReadCheck {
+  const now = Date.now();
+  const cached = symbolChecksByRoot.get(root);
+  if (cached && now - cached.at < SYMBOL_CHECK_TTL_MS) return cached.check;
+  const check = symbolReadChecker(root);
+  symbolChecksByRoot.set(root, { check, at: now });
+  return check;
+}
+
+/** The `next` rows renderBundle prints: `nextReads` with the on-disk check, cheap to call again. */
+export function renderedNextReads(bundle: ContextBundle): NextRead[] {
+  return nextReads(bundle, 3, onDiskSymbolCheck());
+}
+
 /**
  * The reads worth making next, most valuable first.
  *
@@ -2891,23 +3051,97 @@ function targetLocation(facts: ContextFacts): Located | undefined {
  * byte the bundle spends, and an agent handed a path with no range opens the
  * file.
  *
+ * `stale` says the row's file changed since the last ingest, from the flags
+ * the bundle already carries. There the range is from the last ingest and
+ * points at the wrong lines, so a stale row that names a symbol is suggested
+ * as `ix read <name> --path <file>`, which re-anchors to where the name is
+ * declared on disk now. A fresh row keeps the range: it is exact, and it never
+ * fails, where a symbol read can (live, `ix read add --path
+ * core-ingestion/src/role-classifier.ts` exited 1: the resolver's name search
+ * never returned that `add`). The range form also stays for a row with no
+ * named symbol, a file or module, a name the shell would split, a name the
+ * bundle shows twice in one file, and a name `symbolRead` rejects. The bundle's
+ * entities are only the target's neighbours, so a second `save` in the same
+ * file need not be among them: renderBundle passes `onDiskSymbolCheck`, which
+ * asks the file itself (see `readsOneSymbol`), once per workspace root.
+ *
  * Deduped, because a caller and a dependent are frequently the same function,
  * and taken in evidence order, which is already the ranking — the target first,
  * then its members, what it reaches, and what reaches it.
  */
-export function nextReads(bundle: ContextBundle, limit = 3): string[] {
+export function nextReads(
+  bundle: ContextBundle,
+  limit = 3,
+  symbolRead: SymbolReadCheck = () => true,
+): NextRead[] {
+  const rows = rowFreshness(bundle);
   const seen = new Set<string>();
-  const reads: string[] = [];
+  const reads: NextRead[] = [];
   for (const item of bundle.evidence) {
     const loc = item.location;
     if (!loc?.path || loc.lineStart === undefined || loc.lineEnd === undefined) continue;
     const range = `${loc.path}:${loc.lineStart}-${loc.lineEnd}`;
     if (seen.has(range)) continue;
     seen.add(range);
-    reads.push(`ix read ${range}`);
+    const { stale, symbol } = rows(item, loc.path, symbolRead);
+    reads.push({ cmd: symbol ? `ix read ${symbol} --path ${loc.path}` : `ix read ${range}`, stale });
     if (reads.length === limit) break;
   }
   return reads;
+}
+
+/**
+ * For one evidence row at `path`: whether its file changed since the last
+ * ingest, and, for a stale row, the symbol name `read <name> --path <path>`
+ * re-anchors to — undefined wherever the range form must stand (see
+ * {@link nextReads} for each condition). Shared by the CLI and MCP closes.
+ */
+function rowFreshness(
+  bundle: ContextBundle,
+): (item: EvidenceItem, path: string, symbolRead: SymbolReadCheck) => { stale: boolean; symbol?: string } {
+  // `?? []`: a bundle restored from an older save, or built by hand, may carry
+  // evidence alone.
+  const entities = bundle.entities ?? [];
+  const byId = new Map<string, { id: string; name: string; kind: string; path?: string; stale?: boolean }>();
+  for (const e of entities) byId.set(e.id, e);
+  const target = bundle.target;
+  if (target?.id && !byId.has(target.id)) byId.set(target.id, target);
+  const stalePaths = new Set<string>();
+  for (const e of entities) if (e.stale && e.path) stalePaths.add(e.path);
+  const sameNameInFile = new Map<string, number>();
+  for (const e of byId.values()) {
+    if (!e.path) continue;
+    const key = `${e.path}\n${e.name}`;
+    sameNameInFile.set(key, (sameNameInFile.get(key) ?? 0) + 1);
+  }
+  return (item, path, symbolRead) => {
+    const ref = item.refs?.[0];
+    const entity = ref ? byId.get(ref) : undefined;
+    const stale = entity?.stale === true
+      || stalePaths.has(path)
+      || (path === target?.path && bundle.freshness?.stale === true);
+    const kind = entity?.kind.toLowerCase();
+    const named = stale
+      && entity !== undefined
+      && entity.name !== ""
+      && kind !== "file"
+      && kind !== "module"
+      && entity.path === path
+      && SHELL_SAFE_NAME.test(entity.name)
+      && SHELL_SAFE_PATH.test(path)
+      && sameNameInFile.get(`${path}\n${entity.name}`) === 1
+      // Last: the only check that may touch the disk.
+      && symbolRead(entity.name, path);
+    return named ? { stale, symbol: entity.name } : { stale };
+  };
+}
+
+/** One MCP next step; `stale` and `reanchor` appear only on a stale read (see {@link nextToolCalls}). */
+export interface NextToolCall {
+  cmd: string;
+  why: string;
+  stale?: true;
+  reanchor?: string;
 }
 
 /** Longest range a suggested read may span; past it the read covers its head only. */
@@ -2926,10 +3160,18 @@ export const NEXT_READ_MAX_LINES = 120;
  *
  * Every call names core tools only, and pins the target's file with `path=` so
  * an ambiguous name resolves to the entity this bundle was built for.
+ *
+ * The read step carries `stale: true` when its file changed since the last
+ * ingest (its range is from the last ingest), and then, if the symbol re-anchors
+ * safely (the same checks as {@link nextReads}), `reanchor`: an `ix_read
+ * symbol=<name> path=<file>` call that lands on where the name is now.
  */
-export function nextToolCalls(bundle: ContextBundle): Array<{ cmd: string; why: string }> {
+export function nextToolCalls(
+  bundle: ContextBundle,
+  symbolRead: SymbolReadCheck = () => true,
+): NextToolCall[] {
   const { name, kind, path } = bundle.target;
-  const steps: Array<{ cmd: string; why: string }> = [];
+  const steps: NextToolCall[] = [];
   const isFile = kind.toLowerCase() === "file";
   // A file resolves by its path; a symbol by name, pinned to its file.
   const symbol = isFile ? (path ?? name) : name;
@@ -2942,16 +3184,22 @@ export function nextToolCalls(bundle: ContextBundle): Array<{ cmd: string; why: 
   );
   steps.push({ cmd: suggest.impact(symbol, pin), why: "what a change here reaches, before you edit it" });
 
-  const read = bundle.evidence.find(
+  const readItem = bundle.evidence.find(
     (item) => item.location?.path && item.location.lineStart !== undefined && item.location.lineEnd !== undefined,
-  )?.location;
-  if (read?.lineStart !== undefined && read.lineEnd !== undefined) {
+  );
+  const read = readItem?.location;
+  if (readItem && read?.lineStart !== undefined && read.lineEnd !== undefined) {
     const end = Math.min(read.lineEnd, read.lineStart + NEXT_READ_MAX_LINES - 1);
+    // Additive: the range call is unchanged; a stale file adds `stale` and,
+    // where the name re-anchors safely, the symbol form beside it.
+    const { stale, symbol } = rowFreshness(bundle)(readItem, read.path, symbolRead);
     steps.push({
       cmd: toolCall("ix_read", { symbol: `${read.path}:${read.lineStart}-${end}` }),
       why: end < read.lineEnd
         ? `first ${NEXT_READ_MAX_LINES} of ${read.lineEnd - read.lineStart + 1} lines of the top-ranked evidence`
         : "the top-ranked evidence",
+      ...(stale ? { stale: true as const } : {}),
+      ...(symbol ? { reanchor: toolCall("ix_read", { symbol, path: read.path }) } : {}),
     });
   }
   return steps;
@@ -2985,7 +3233,7 @@ function memberReason(ref: EntityLocation): string {
   if (ref.usedBy === 0) return "defined in the target; no recorded uses";
   const files = ref.usedFromFiles ?? 0;
   const where = files > 0 ? ` across ${files} other file${files === 1 ? "" : "s"}` : " within this file";
-  return `defined in the target; used by ${ref.usedBy}${where}`;
+  return `defined in the target; used by ${ref.usedBy}${ref.usedByCapped ? "+" : ""}${where}`;
 }
 
 /**

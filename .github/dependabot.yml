@@ -74,3 +74,23 @@ updates:
         dependency-type: development
       production-dependencies:
         dependency-type: production
+
+  - package-ecosystem: npm
+    directory: /docs-site
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dev-dependencies:
+        dependency-type: development
+      production-dependencies:
+        dependency-type: production
+
+  # docker-compose.standalone.yml (shipped in the release tarball, backs
+  # `ix docker start`). Only arangodb:3.12.12 gets bumps; memory-layer is
+  # `:latest`. Bump PRs are exercised by ci.yml's e2e job and by release.yml's
+  # PR dry-run, whose paths include that file.
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly

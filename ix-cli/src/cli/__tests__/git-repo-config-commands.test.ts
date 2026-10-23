@@ -2,7 +2,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { tryGitLsFiles } from "../commands/ingest.js";
@@ -34,6 +34,9 @@ describe.skipIf(process.platform === "win32")("git calls do not run commands fro
     writeFileSync(join(repo, ".gitattributes"), "*.txt diff=conv\n");
     git("add", ".");
     git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init");
+    // Untracked under a SKIPPED_DIRS name: makes ingest's file listing also run gitUntracked.
+    mkdirSync(join(repo, "build"));
+    writeFileSync(join(repo, "build", "gen.ts"), "export const x = 1;\n");
     git("config", "core.fsmonitor", hook);
     git("config", "diff.conv.textconv", hook);
     writeFileSync(join(repo, "a.txt"), "needle\nmore\n");

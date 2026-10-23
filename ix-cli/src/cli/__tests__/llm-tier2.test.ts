@@ -84,6 +84,19 @@ describe("trace llm renderers", () => {
     ]);
   });
 
+  it("renderTracePathLlm labels steps with the predicate that reached them", () => {
+    const lines = renderTracePathLlm({ name: "A", kind: "function" }, { name: "C", kind: "function" }, "mixed", [
+      { id: "a", name: "A", kind: "function" },
+      { id: "b", name: "B", kind: "function", via: "CALLS" },
+      { id: "c", name: "C", kind: "function", via: "IMPORTS", reversed: true },
+    ]);
+    expect(lines.slice(1)).toEqual([
+      "step name=A kind=function",
+      "step name=B kind=function via=CALLS",
+      "step name=C kind=function via=IMPORTS reversed=true",
+    ]);
+  });
+
   it("renderTracePathLlm emits a no_path diagnostic when empty", () => {
     const lines = renderTracePathLlm({ name: "A", kind: "function" }, { name: "B", kind: "function" }, "mixed", []);
     expect(lines[1]).toBe('diagnostic code=no_path message="No route found from A to B."');

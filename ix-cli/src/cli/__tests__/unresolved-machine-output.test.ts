@@ -88,7 +88,7 @@ describe("unresolved targets in machine formats", () => {
   it.each(UNRESOLVED_COMMANDS)("returns JSON and a non-zero status from ix %s", async (_command, args, loadRegister) => {
     const result = await run(await loadRegister(), [...args, "--format", "json"]);
 
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(3);
     expect(JSON.parse(result.stdout)).toEqual({
       error: "unresolved_target",
       message: 'No entity found matching "DefinitelyMissing".',
@@ -98,7 +98,7 @@ describe("unresolved targets in machine formats", () => {
   it.each(UNRESOLVED_COMMANDS)("returns LLM output and a non-zero status from ix %s", async (_command, args, loadRegister) => {
     const result = await run(await loadRegister(), [...args, "--format", "llm"]);
 
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(3);
     expect(result.stdout).toBe(
       'error code=unresolved_target message="No entity found matching \\"DefinitelyMissing\\"."',
     );
@@ -107,7 +107,7 @@ describe("unresolved targets in machine formats", () => {
   it.each(UNRESOLVED_COMMANDS)("keeps text stdout clean and exits non-zero from ix %s", async (_command, args, loadRegister) => {
     const result = await run(await loadRegister(), [...args, "--format", "text"]);
 
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(3);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain('No entity found matching "DefinitelyMissing".');
   });
@@ -123,7 +123,7 @@ describe("unresolved targets in machine formats", () => {
       ["overview", "Duplicate", "--format", "json"],
     );
 
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(2);
     expect(JSON.parse(result.stdout)).toMatchObject({
       error: "ambiguous_target",
       message: 'Ambiguous symbol "Duplicate".',
@@ -132,6 +132,29 @@ describe("unresolved targets in machine formats", () => {
         { id: "second-id", name: "Duplicate" },
       ],
     });
+  });
+
+  // `ix read`'s ambiguity is the one exception (docs/llm-format.md): it has
+  // always exited 0 with an `ambiguous` record, and plugins that drop stdout
+  // on a non-zero exit would lose the candidates. Its miss still exits 3.
+  it("keeps ix read's ambiguity at exit 0 with its own ambiguous record", async () => {
+    search.mockResolvedValue([
+      { id: "first-id", kind: "function", name: "Duplicate", provenance: { sourceUri: "src/first.ts" } },
+      { id: "second-id", kind: "function", name: "Duplicate", provenance: { sourceUri: "src/second.ts" } },
+    ]);
+    const register = (await import("../commands/read.js")).registerReadCommand;
+
+    const json = await run(register, ["read", "Duplicate", "--format", "json"]);
+    expect(process.exitCode ?? 0).toBe(0);
+    const body = JSON.parse(json.stdout);
+    expect(body).toMatchObject({ targetType: "ambiguous-symbol" });
+    expect(body.error).toBeUndefined();
+    expect(body.candidates).toHaveLength(2);
+
+    process.exitCode = undefined;
+    const llm = await run(register, ["read", "Duplicate", "--format", "llm"]);
+    expect(process.exitCode ?? 0).toBe(0);
+    expect(llm.stdout).toMatch(/^ambiguous kind=symbol target=Duplicate /);
   });
 
   it("keeps an out-of-range pick classified as ambiguity and exits non-zero", async () => {
@@ -145,7 +168,7 @@ describe("unresolved targets in machine formats", () => {
       ["overview", "Duplicate", "--pick", "3", "--format", "json"],
     );
 
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(2);
     const output = JSON.parse(result.stdout);
     expect(output.error).toBe("ambiguous_target");
     expect(output.diagnostics[0]).toEqual({
@@ -160,7 +183,7 @@ describe("unresolved targets in machine formats", () => {
       ["trace", "MissingFrom", "--to", "MissingTo", "--format", "json"],
     );
 
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(3);
     expect(JSON.parse(result.stdout)).toEqual({
       error: "unresolved_target",
       message: 'No entities found matching "MissingFrom" or "MissingTo".',
@@ -168,20 +191,23 @@ describe("unresolved targets in machine formats", () => {
     });
   });
 
-  // locate joins the same contract (#539) but deliberately keeps its own body
-  // rather than adopting reportUnresolvedTarget's `{error, message}` shape:
+  // locate joins the same contract (#539) and keeps its own body, with the
+  // shared `{error, message}` fields added rather than substituted:
   // shipped plugins read `diagnostics` off it, and the point of #539 is that
   // the exit code becomes informative without the payload going away.
   it("returns a non-zero status from ix locate while keeping its result body", async () => {
     const { registerLocateCommand } = await import("../commands/locate.js");
     const result = await run(registerLocateCommand, ["locate", "DefinitelyMissing", "--format", "json"]);
 
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(3);
     expect(JSON.parse(result.stdout)).toEqual({
       resolvedTarget: null,
       resolutionMode: "none",
       systemPath: null,
       diagnostics: ["No graph entity found."],
+      // The slug and message every other command's miss carries.
+      error: "unresolved_target",
+      message: 'No graph entity found for "DefinitelyMissing".',
     });
   });
 
@@ -202,7 +228,7 @@ describe("unresolved targets in machine formats", () => {
     for (const format of ["json", "llm", "text"] as const) {
       process.exitCode = undefined;
       const result = await run(registerLocateCommand, ["locate", "Duplicate", "--format", format]);
-      expect(process.exitCode, `format=${format}`).toBe(1);
+      expect(process.exitCode, `format=${format}`).toBe(2);
       // ...and the body still says what it always said. The exit code becomes
       // informative without the payload going away, which is #539's whole point.
       if (format === "json") expect(JSON.parse(result.stdout).resolutionMode).toBe("ambiguous");
@@ -216,7 +242,7 @@ describe("unresolved targets in machine formats", () => {
     const { registerLocateCommand } = await import("../commands/locate.js");
     const result = await run(registerLocateCommand, ["locate", "DefinitelyMissing", "--format", "llm"]);
 
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(3);
     // This record was already being emitted -- while exiting 0, which is the
     // contradiction #539 opens with.
     expect(result.stdout).toContain("unresolved_target");

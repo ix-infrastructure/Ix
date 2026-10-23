@@ -10,7 +10,8 @@ import { absoluteFromSourceUri, isReadablePath, readableRoots, resolveWorkspaceR
 import { resolveEntityFull, activeReadScope, ensureReadScope } from "../resolve.js";
 import { stderr } from "../stderr.js";
 import { isFileStale } from "../stale.js";
-import { anchorSpan, bareName } from "../edge-sites.js";
+import { anchorSpan, bareName, countDeclarations } from "../edge-sites.js";
+import { readBoundedFile } from "../bounded-read.js";
 import { relativePath, printJson } from "../format.js";
 import { llmError, llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { parsePickOption } from "../options.js";
@@ -29,9 +30,24 @@ export interface ReadResult {
   warning?: string;
   /** Set when the default line cap stopped the read short of the file. */
   truncated?: boolean;
-  /** How many lines the file has, when the read was capped. */
+  /**
+   * How many lines the read's whole target has, when the read was capped: the
+   * file's line count for a file, and the span's line count (`spanEnd` minus
+   * its first line, plus one) for a symbol or a paged range. It is a count,
+   * never a line number; `spanEnd` is where a symbol or paged range ends.
+   */
   totalLines?: number;
-  /** The next page, ready to run: `path:401-800`. */
+  /**
+   * The last line of the symbol or paged range being paged, when the read was
+   * capped. Absent on plain file reads, where `totalLines` is already the last
+   * line.
+   */
+  spanEnd?: number;
+  /**
+   * The next page, ready to run. `path:401-800` for a file. For a symbol or a
+   * paged range it is `path:<first>-<last>@<from>`: the same span, read from
+   * `<from>` and capped again, so following it repeatedly reaches `spanEnd`.
+   */
   next?: string;
 }
 
@@ -74,8 +90,10 @@ function guardReadable(absPath: string, explicitRoot: string | undefined, what: 
   return false;
 }
 
-function reportInvalidLineRange(target: string, format: string): void {
-  const message = `Invalid line range in "${target}". Line numbers must start at 1 and the end must not precede the start.`;
+function reportInvalidLineRange(target: string, format: string, paged = false): void {
+  const message = paged
+    ? `Invalid line range in "${target}". Line numbers must start at 1, the end must not precede the start, and a page start (@n) must fall inside the range.`
+    : `Invalid line range in "${target}". Line numbers must start at 1 and the end must not precede the start.`;
   if (format === "json") {
     printJson({ error: "invalid_line_range", message });
   } else if (format === "llm") {
@@ -119,52 +137,123 @@ function readFileRange(
 }
 
 /**
- * The shortest path that still names this file from where the caller stands.
+ * The path a `next=` cursor names its file by: relative to the workspace root,
+ * because that is what `ix read` resolves a relative target against.
  *
- * `relativePath` is a prefix match against `process.cwd()`, which misses in two
- * ordinary cases: a cwd and a target that disagree about a symlink (macOS
- * resolves `/var` to `/private/var`, and any repo under a `~/code` link does
- * the same), and Windows, where the stored separator is `\` and the match is
- * written for `/`. A `next=` that comes back absolute still works when pasted,
- * but it is the token cost the cursor exists to avoid.
+ * It used to be relative to the cwd (`relativePath`). From a subdirectory of
+ * the workspace that cursor did not round-trip: `big.ts` printed from `src/`
+ * resolved to `<root>/big.ts`, which is a miss, a basename match, or a
+ * different file with the same name. A symbol's file is often outside the
+ * cwd's subtree, so symbol cursors hit this far more than file cursors did.
+ * Run from the root, the cursor is the same as before.
  *
- * Falls back to the absolute path rather than to `..` — a cursor pointing out
- * of the tree is worse than a long one.
+ * Both sides are compared through `realpath` as a fallback, since a root
+ * reached through a symlink (macOS `/var` -> `/private/var`, a `~/code` link)
+ * fails a plain prefix match. Falls back to the absolute path rather than to
+ * `..`: a file outside the root is named the one way every cwd agrees on.
  */
-function readablePath(filePath: string): string {
-  const relative = relativePath(filePath);
-  if (relative && relative !== filePath) return relative;
+function cursorPath(filePath: string, root: string): string {
+  const inside = (from: string, to: string): string | undefined => {
+    const rel = path.relative(from, to);
+    return rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel.split(path.sep).join("/") : undefined;
+  };
+  const direct = inside(path.resolve(root), path.resolve(filePath));
+  if (direct) return direct;
   try {
-    const fromCwd = path.relative(fs.realpathSync(process.cwd()), fs.realpathSync(filePath));
-    if (fromCwd && !fromCwd.startsWith("..") && !path.isAbsolute(fromCwd)) {
-      return fromCwd.split(path.sep).join("/");
-    }
+    const real = inside(fs.realpathSync(root), fs.realpathSync(filePath));
+    if (real) return real;
   } catch {
-    // An unreadable cwd or a file deleted under us: the absolute path stands.
+    // An unreadable root or a file deleted under us: the absolute path stands.
   }
   return filePath;
 }
 
 /** `src/a.ts:401-800`, or nothing when the cap landed on the last line. */
-function nextPage(filePath: string, lineEnd: number, totalLines: number): string | undefined {
-  if (lineEnd >= totalLines) return undefined;
+function nextPage(filePath: string, root: string, lineEnd: number, lastLine: number): string | undefined {
+  if (lineEnd >= lastLine) return undefined;
   const from = lineEnd + 1;
-  const to = Math.min(totalLines, lineEnd + READ_LINE_CAP);
-  return `${readablePath(filePath)}:${from}-${to}`;
+  const to = Math.min(lastLine, lineEnd + READ_LINE_CAP);
+  return `${cursorPath(filePath, root)}:${from}-${to}`;
+}
+
+/**
+ * A paged span's next page: `src/a.ts:10-1327@410`. A plain `path:a-b` is a
+ * range the caller typed and is never capped, so a symbol's cursor in that
+ * form ended the paging after one hop; this form is capped again and carries
+ * the span with it, so every page has a cursor until the span's last line.
+ */
+function nextSpanPage(filePath: string, root: string, spanStart: number, lineEnd: number, lastLine: number): string | undefined {
+  if (lineEnd >= lastLine) return undefined;
+  return `${cursorPath(filePath, root)}:${spanStart}-${lastLine}@${lineEnd + 1}`;
 }
 
 /** Fold a capped read's cursor into the result the renderers see. */
 function withCursor(
   result: ReadResult,
-  capped: { truncated?: boolean; totalLines?: number },
+  capped: { truncated?: boolean; totalLines?: number; lastLine?: number; spanStart?: number },
+  root: string,
 ): ReadResult {
   if (!capped.truncated || capped.totalLines === undefined) return result;
+  if (capped.lastLine !== undefined && capped.spanStart !== undefined) {
+    return {
+      ...result,
+      truncated: true,
+      totalLines: capped.totalLines,
+      spanEnd: capped.lastLine,
+      next: nextSpanPage(result.path, root, capped.spanStart, result.lineEnd, capped.lastLine),
+    };
+  }
   return {
     ...result,
     truncated: true,
     totalLines: capped.totalLines,
-    next: nextPage(result.path, result.lineEnd, capped.totalLines),
+    next: nextPage(result.path, root, result.lineEnd, capped.lastLine ?? capped.totalLines),
   };
+}
+
+/**
+ * Cut a span at `cap` lines from `from` (its start, unless a paged cursor
+ * resumes it further in). `lastLine` is where the span ends, so a `next=`
+ * cursor never pages past it; `totalLines` is the whole span's line count,
+ * the same on every page. With no cap, or a remainder that fits, nothing is
+ * cut.
+ *
+ * The end is clamped to EOF first: a stale graph span that could not be
+ * re-anchored can claim lines the file no longer has, and an unclamped end
+ * would report `truncated` with a cursor that pages past the last line.
+ */
+export function capSpan(
+  lines: string[], start: number, rawEnd: number, cap?: number, from: number = start,
+): { content: string; lineStart: number; lineEnd: number; truncated?: boolean; totalLines?: number; lastLine?: number; spanStart?: number } {
+  const end = Math.max(start, Math.min(rawEnd, lines.length));
+  const first = Math.min(Math.max(from, start), end);
+  if (cap !== undefined && end - first + 1 > cap) {
+    const shownEnd = first + cap - 1;
+    return {
+      content: lines.slice(first - 1, shownEnd).join("\n"),
+      lineStart: first,
+      lineEnd: shownEnd,
+      truncated: true,
+      totalLines: end - start + 1,
+      lastLine: end,
+      spanStart: start,
+    };
+  }
+  return { content: lines.slice(first - 1, end).join("\n"), lineStart: first, lineEnd: end };
+}
+
+/**
+ * Read a file target: the whole file (capped), a typed `path:a-b` range
+ * (never capped), or a paged `path:a-b@from` cursor (capped, inside a-b).
+ */
+function readFileTarget(
+  filePath: string, start: number | undefined, end: number | undefined, pageFrom: number | undefined, cap: number | undefined,
+): ReturnType<typeof capSpan> {
+  if (pageFrom !== undefined && start !== undefined && end !== undefined) {
+    const lines = fs.readFileSync(filePath, "utf-8").split("\n");
+    return capSpan(lines, start, end, cap, pageFrom);
+  }
+  return readFileRange(filePath, start, end, cap);
 }
 
 /**
@@ -216,6 +305,7 @@ export function renderReadLlm(result: ReadResult): string[] {
       // The three fields that make a capped read recoverable in one call.
       ["truncated", result.truncated ? "true" : null],
       ["total_lines", result.totalLines !== undefined ? String(result.totalLines) : null],
+      ["span_end", result.spanEnd !== undefined ? String(result.spanEnd) : null],
       ["next", result.next],
     ]),
     llmLine("content", [["lines", String(contentLines.length)], ["numbered", "true"]]),
@@ -275,9 +365,14 @@ export function outputResult(result: ReadResult, format: string): void {
     }
     if (result.truncated) {
       stderr(chalk.dim(
-        `\n  ${result.lineEnd} of ${result.totalLines} lines`
+        `\n  ${result.lineEnd - result.lineStart + 1} of ${result.totalLines} lines`
         + (result.next ? ` — next: ix read ${result.next}` : "")
-        + ", or --all for the whole file",
+        + (result.targetType === "symbol"
+          ? ", or --all for the whole symbol"
+          : result.spanEnd !== undefined
+            // A cursor page starts at its @from, and so does --all on it.
+            ? ", or --all for the rest of the range"
+            : ", or --all for the whole file"),
       ));
     }
   }
@@ -315,10 +410,11 @@ export function registerReadCommand(program: Command): void {
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--root <dir>", "Workspace root directory")
-    .option("--all", `Read the whole file, past the ${READ_LINE_CAP}-line default cap`)
+    .option("--all", `Read the whole file or symbol, past the ${READ_LINE_CAP}-line default cap`)
     .addHelpText("after", `\nResolution order:
   1. Exact file path          ix read src/main.ts
   2. File path with line range ix read src/main.ts:10-50
+     (a capped read's next= cursor, path:10-1327@410, pages within 10-1327)
   3. Unique filename match     ix read Node.scala
   4. Unique symbol match       ix read IngestionService
   5. Ambiguity candidates      (prompted to disambiguate)
@@ -338,12 +434,21 @@ Examples:
       const client = createClient();
 
       // --- Step 1: Parse line range if present ---
-      const lineRangeMatch = target.match(/^(.+?):(\d+)-(\d+)$/);
+      // `path:a-b` is a range the caller typed. `path:a-b@from` is a paged
+      // cursor (what a capped symbol read hands back as next=): lines a-b,
+      // read from `from` and capped like a whole file.
+      const lineRangeMatch = target.match(/^(.+?):(\d+)-(\d+)(?:@(\d+))?$/);
       const rawTarget = lineRangeMatch ? lineRangeMatch[1] : target;
       const rangeStart = lineRangeMatch ? parseInt(lineRangeMatch[2], 10) : undefined;
       const rangeEnd = lineRangeMatch ? parseInt(lineRangeMatch[3], 10) : undefined;
+      const pageFrom = lineRangeMatch?.[4] !== undefined ? parseInt(lineRangeMatch[4], 10) : undefined;
       if (rangeStart !== undefined && rangeEnd !== undefined && (rangeStart < 1 || rangeEnd < rangeStart)) {
-        reportInvalidLineRange(target, opts.format);
+        reportInvalidLineRange(target, opts.format, pageFrom !== undefined);
+        return;
+      }
+      if (pageFrom !== undefined && rangeStart !== undefined && rangeEnd !== undefined
+        && (pageFrom < rangeStart || pageFrom > rangeEnd)) {
+        reportInvalidLineRange(target, opts.format, true);
         return;
       }
 
@@ -356,14 +461,14 @@ Examples:
       if (fs.existsSync(resolvedPath) && fs.statSync(resolvedPath).isFile()) {
         if (!guardReadable(resolvedPath, opts.root, "file", opts.format)) return;
         const stale = checkStale(resolvedPath);
-        const capped = readFileRange(resolvedPath, rangeStart, rangeEnd, cap);
+        const capped = readFileTarget(resolvedPath, rangeStart, rangeEnd, pageFrom, cap);
         const result: ReadResult = withCursor({
           targetType: lineRangeMatch ? "file-range" : "file",
           path: resolvedPath,
           lineStart: capped.lineStart,
           lineEnd: capped.lineEnd,
           content: capped.content,
-        }, capped);
+        }, capped, root);
         if (stale) { result.stale = true; result.warning = "Results may be stale; file has changed since last ingest."; }
         outputResult(result, opts.format);
         return;
@@ -391,14 +496,14 @@ Examples:
             // guard is what stops a backend from naming a file off the disk.
             if (!guardReadable(matchPath, opts.root, "graph file match", opts.format)) return;
             const stale = checkStale(matchPath);
-            const capped = readFileRange(matchPath, rangeStart, rangeEnd, cap);
+            const capped = readFileTarget(matchPath, rangeStart, rangeEnd, pageFrom, cap);
             const result: ReadResult = withCursor({
               targetType: "filename-match",
               path: matchPath,
               lineStart: capped.lineStart,
               lineEnd: capped.lineEnd,
               content: capped.content,
-            }, capped);
+            }, capped, root);
             if (stale) { result.stale = true; result.warning = "Results may be stale; file has changed since last ingest."; }
             outputResult(result, opts.format);
             return;
@@ -438,16 +543,16 @@ Examples:
             node.attrs?.lineEnd ?? node.attrs?.line_end,
             stale,
           );
-          const content = allLines.slice(range.lineStart - 1, range.lineEnd).join("\n");
-          const result: ReadResult = {
+          const span = capSpan(allLines, range.lineStart, range.lineEnd, cap);
+          const result: ReadResult = withCursor({
             targetType: "symbol",
             path: absSourceUri,
-            lineStart: range.lineStart,
-            lineEnd: range.lineEnd,
-            content,
+            lineStart: span.lineStart,
+            lineEnd: span.lineEnd,
+            content: span.content,
             symbol: node.name,
             kind: node.kind,
-          };
+          }, span, root);
           if (stale) {
             result.stale = true;
             result.warning = range.movedFrom
@@ -462,6 +567,9 @@ Examples:
         const attrContent = node.attrs?.content;
         if (attrContent) {
           const lines = String(attrContent).split("\n");
+          // Deliberately uncapped: there is no file on disk to page, so a cap
+          // would drop lines 401+ with no cursor and no way to recover them
+          // (the MCP tool has no --all).
           const result: ReadResult = {
             targetType: "symbol",
             path: absSourceUri ?? sourceUri ?? "(no source file)",
@@ -600,8 +708,7 @@ interface LocalMatches {
  * that distinction to decide whether it may skip the backend fallback.
  */
 function findLocalBasenameMatches(root: string, target: string, limit = 25): LocalMatches {
-  const wanted = path.basename(target);
-  const wantedNoExt = wanted.replace(/\.[^.]+$/, "");
+  const matches = basenameMatcher(target);
   const paths: string[] = [];
   const stack = [root];
   let budget = WALK_ENTRY_BUDGET;
@@ -622,14 +729,188 @@ function findLocalBasenameMatches(root: string, target: string, limit = 25): Loc
         continue;
       }
       if (!entry.isFile()) continue; // symlinks are not followed
-      const nameNoExt = entry.name.replace(/\.[^.]+$/, "");
-      if (entry.name === wanted || nameNoExt === wanted || nameNoExt === wantedNoExt) {
+      if (matches(entry.name)) {
         paths.push(path.join(current, entry.name));
         if (paths.length >= limit) return { paths, exhaustive: true };
       }
     }
   }
   return { paths, exhaustive: stack.length === 0 };
+}
+
+/** Whether a file named `entryName` is one `read` would open for `target`. */
+function basenameMatcher(target: string): (entryName: string) => boolean {
+  const wanted = path.basename(target);
+  const wantedNoExt = wanted.replace(/\.[^.]+$/, "");
+  return (entryName) => {
+    const nameNoExt = entryName.replace(/\.[^.]+$/, "");
+    return entryName === wanted || nameNoExt === wanted || nameNoExt === wantedNoExt;
+  };
+}
+
+/** The workspace's files, from one walk; `exhaustive` is false when it ran out of budget. */
+export interface WorkspaceFiles {
+  paths: string[];
+  exhaustive: boolean;
+}
+
+/**
+ * Every file under `root`, by the walk `findLocalBasenameMatches` makes (same
+ * ignored directories, same entry budget, symlinks not followed). Listed once
+ * so one bundle's symbol suggestions share a single walk instead of one each.
+ */
+export function listWorkspaceFiles(root: string): WorkspaceFiles {
+  const paths: string[] = [];
+  const stack = [root];
+  let budget = WALK_ENTRY_BUDGET;
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (--budget <= 0) return { paths, exhaustive: false };
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith(".") || WALK_IGNORE_DIRS.has(entry.name)) continue;
+        stack.push(path.join(current, entry.name));
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      paths.push(path.join(current, entry.name));
+    }
+  }
+  return { paths, exhaustive: true };
+}
+
+/**
+ * Whether `a` and `b` name the same file. Resolved first, and compared without
+ * case on Windows, where `C:\Repo\x.ts` and `c:/repo/x.ts` are one file: a
+ * plain `!==` there made a file collide with itself, so the symbol form was
+ * never suggested.
+ */
+export function sameFsPath(a: string, b: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform === "win32") {
+    return path.win32.resolve(a).toLowerCase() === path.win32.resolve(b).toLowerCase();
+  }
+  return path.posix.resolve(a) === path.posix.resolve(b);
+}
+
+/**
+ * Whether the workspace holds a file that would turn `ix read <name> --path
+ * <file>` away from the `name` declared in `file` (at `abs`):
+ *
+ * - a file named `name`: Step 3 above opens it before any symbol lookup, and
+ *   --path does not stop it;
+ * - another file whose path contains `file`: --path is a substring test on the
+ *   graph's source path (resolve.ts), so `src/util.ts` also keeps
+ *   `lib/src/util.ts` and `src/util.tsx`, and a `name` declared there too
+ *   leaves the lookup to return candidates or the wrong one.
+ *
+ * Says yes when the walk ran out of budget, since then neither is ruled out.
+ * Files outside the workspace (another repo in the same system) are not seen.
+ */
+function suggestionCollides(files: WorkspaceFiles, name: string, abs: string, file: string): boolean {
+  if (!files.exhaustive) return true;
+  const named = basenameMatcher(name);
+  const needle = file.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+  for (const other of files.paths) {
+    if (named(path.basename(other))) return true;
+    if (other.replace(/\\/g, "/").toLowerCase().includes(needle) && !sameFsPath(other, abs)) return true;
+  }
+  return false;
+}
+
+/** Past this a file is not read just to vet a suggestion; the range form stands. */
+const SUGGEST_MAX_FILE_BYTES = 2 * 1024 * 1024;
+
+/**
+ * A superset of what ingest's role classifier (core-ingestion
+ * role-classifier.ts) calls test or fixture: any one signal counts here, where
+ * the classifier weighs them. Too broad only costs a symbol suggestion.
+ */
+const TEST_LIKE_DIR = /(?:^|\/)(?:__tests__|__fixtures__|tests?|specs?|fixtures?|testdata|[^/]*\.tests?)(?:\/)/i;
+const TEST_LIKE_FILE = /(?:^|[._-])(?:tests?|spec|fixtures?|mocks?|stubs?|fakes?|samples?|conftest)(?:[._-]|$)/i;
+/** Case-sensitive, as in the classifier: `FooTest.java`, `FakeClock.java`, but not `latest.ts`. */
+const TEST_LIKE_CLASS_FILE = /(?:Tests?|Spec)\.[^.]+$|^(?:Stub|Fake|Mock)[A-Z]/;
+const TEST_LIKE_IMPORT = new RegExp([
+  /from ['"](?:jest|vitest|mocha|chai|sinon|jasmine|@testing-library)/.source,
+  /require\(['"](?:jest|vitest|mocha|chai|sinon|jasmine)['"]\)/.source,
+  /(?:import|from)\s+(?:unittest|pytest)/.source,
+  /import\s+(?:org\.junit|org\.testng|io\.mockk|org\.mockito|org\.scalatest|munit|zio\.test)/.source,
+  /require\s+['"](?:rspec|minitest)['"]/.source,
+  /using\s+(?:NUnit\.Framework|Xunit|Microsoft\.VisualStudio\.TestTools\.UnitTesting)/.source,
+  /^import\s*(?:\([^)]*"testing"|"testing")/.source,
+].join("|"), "m");
+
+/** Whether ingest may have filed `file` as a test or a fixture. */
+function mayBeTestOrFixture(file: string, source: string): boolean {
+  const normalized = file.replace(/\\/g, "/");
+  return TEST_LIKE_DIR.test(normalized)
+    || TEST_LIKE_FILE.test(path.posix.basename(normalized))
+    || TEST_LIKE_CLASS_FILE.test(path.posix.basename(normalized))
+    || TEST_LIKE_IMPORT.test(source);
+}
+
+/**
+ * Whether `ix read <name> --path <file>` would show the one declaration of
+ * `name` in `file`, so `ix context` may suggest it instead of a line range.
+ *
+ * No when `file` resolves outside every readable workspace root (`ix read`
+ * would refuse it, and a `..` in a graph path must not make this open it).
+ * No when a workspace file has `name` as its basename, or another workspace
+ * file's path contains `file` (see `suggestionCollides`). No unless the
+ * file on disk declares `name` exactly once: two (`save` in two classes) leave
+ * the lookup to return candidates or the other one, and none leaves the stale
+ * re-anchor nothing to find. A bundle's entities are only the target's graph
+ * neighbours, so they cannot answer this; the file can. No for a test or
+ * fixture file: the resolver drops test and fixture symbols whenever a
+ * production one shares the name, before --path is applied, so the read finds
+ * nothing and exits 1. Unreadable, missing or oversized files say no.
+ *
+ * One-off; a caller vetting several rows should use `symbolReadChecker`, which
+ * walks the workspace once for all of them.
+ */
+export function readsOneSymbol(root: string, name: string, file: string): boolean {
+  return symbolReadChecker(root)(name, file);
+}
+
+/**
+ * `readsOneSymbol` for many rows against one workspace: the workspace is
+ * walked at most once (lazily, only when a row gets past the per-file checks),
+ * and each (name, file) is answered once, so calling it again — from a
+ * budget-fitting loop that re-renders the same bundle — costs a map lookup.
+ * `listFiles` is injectable for tests.
+ */
+export function symbolReadChecker(
+  root: string,
+  listFiles: (root: string) => WorkspaceFiles = listWorkspaceFiles,
+): (name: string, file: string) => boolean {
+  let files: WorkspaceFiles | undefined;
+  const answers = new Map<string, boolean>();
+  const check = (name: string, file: string): boolean => {
+    const abs = absoluteFromSourceUri(file, root);
+    if (!isReadablePath(abs, root)) return false;
+    // One open, fstat and read on the same handle (CodeQL js/file-system-race).
+    const text = readBoundedFile(abs, { maxBytes: SUGGEST_MAX_FILE_BYTES });
+    if (text === null) return false;
+    if (mayBeTestOrFixture(file, text)) return false;
+    if (countDeclarations(text.split("\n"), bareName(name)) !== 1) return false;
+    // Last: the file read above is cheaper than the walk of the workspace.
+    files ??= listFiles(root);
+    return !suggestionCollides(files, name, abs, file);
+  };
+  return (name, file) => {
+    const key = `${name}\n${file}`;
+    let answer = answers.get(key);
+    if (answer === undefined) {
+      answer = check(name, file);
+      answers.set(key, answer);
+    }
+    return answer;
+  };
 }
 
 /** Filter nodes to those whose filename actually matches the target basename. */

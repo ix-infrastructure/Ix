@@ -1,12 +1,16 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import type { Command } from "commander";
+import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
 import {
   resolveFileOrEntityFull, resolveEntityFull, printResolved, printAmbiguous,
-  looksFileLike, isRawId, qualifiedSeparator, isFuzzyResult, type ResolvedEntity,
+  looksFileLike, isRawId, qualifiedSeparator, isFuzzyResult, withMissReason,
+  type ResolvedEntity, type ResolveResult, type Suggestion,
 } from "../resolve.js";
+import { EXIT_CODES_HELP, setOutcome } from "../outcome.js";
+import { runPerTarget } from "../multi-target.js";
 import { isFileStale } from "../stale.js";
 import { stderr } from "../stderr.js";
 import { relativePath, printJson } from "../format.js";
@@ -32,12 +36,18 @@ interface LocateOutput {
   hasMapData?: boolean;
   stale?: boolean;
   diagnostics: string[];
+  /** A miss: the `unresolved_target` record fields every graph command's miss carries. */
+  error?: "unresolved_target";
+  message?: string;
+  reason?: string;
+  files?: string[];
+  suggestions?: Suggestion[];
 }
 
 export function registerLocateCommand(program: Command): void {
   program
-    .command("locate <symbol>")
-    .description("Resolve a symbol to its position in the codebase and system hierarchy")
+    .command("locate <symbols...>")
+    .description("Resolve symbols to their position in the codebase and system hierarchy")
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to results from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
@@ -46,178 +56,177 @@ export function registerLocateCommand(program: Command): void {
   ix locate IngestionService
   ix locate verify_token --kind function
   ix locate ArangoClient --format json
-  ix locate scoreCandidate --pick 2`)
-    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; format: string }) => {
+  ix locate scoreCandidate --pick 2
+  ix locate parseConfig loadConfig writeConfig --format llm
+
+Several symbols answer in one call, grouped per symbol (json: {targets: [...]}).
+${EXIT_CODES_HELP}`)
+    .action(async (symbols: string[], opts: { kind?: string; path?: string; pick?: number; format: string }) => {
       const client = createClient();
-      const diagnostics: string[] = [];
-      const isJson = opts.format === "json";
-
-      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
-
-      // Resolution with ambiguity detection
-      const { target, ambiguous } = await resolveWithAmbiguity(client, symbol, resolveOpts, opts.format);
-
-      if (!target) {
-        if (ambiguous) {
-          // Printed above, in whichever format was asked for -- and exits 1,
-          // like every other resolution failure.
-          //
-          // This was exit 0 in the first draft of #539, reasoned as "it
-          // resolved to several candidates, which is an answer, not a miss".
-          // #547 settled it the other way for the eight graph commands, and
-          // being the one command that disagrees is worse than either rule:
-          // `ix overview Duplicate` and `ix locate Duplicate` would report the
-          // same condition with different statuses.
-          //
-          // It is also the same contradiction #539 opens with, one level up.
-          // The llm branch above already prints `error code=ambiguous_target`,
-          // and the json branch a record whose `resolvedTarget` is null -- a
-          // machine caller that trusts the exit code is told the command
-          // succeeded while being handed an error record. A `--pick <n>` that
-          // is out of range lands here too, and that is a plain bad argument.
-          process.exitCode = 1;
-          return;
-        }
-        const output: LocateOutput = {
-          resolvedTarget: null,
-          resolutionMode: "none",
-          systemPath: null,
-          diagnostics: ["No graph entity found."],
-        };
-        outputLocate(output, symbol, opts.format);
-        // #539: a machine caller could not tell this from a successful command
-        // that intentionally returned nothing. `context`, `explain`, `read`,
-        // `trace` and `subsystems` all exit 1 here (#526, #532); locate was the
-        // odd one out, and its llm output even emitted an `error` record while
-        // exiting 0.
-        //
-        // The body is deliberately left as it is rather than replaced with
-        // `reportUnresolvedTarget`'s `{error, message}` shape: shipped plugins
-        // read `diagnostics` from it, and #539's whole point is that the exit
-        // code should become informative without the payload going away.
-        //
-        // Ambiguity keeps its own path above -- a different message and a
-        // different record -- but the same exit code, per #547.
-        process.exitCode = 1;
-        return;
-      }
-
-      if (opts.format === "text") printResolved(target);
-
-      const isContainer = CONTAINER_KINDS.has(target.kind);
-      const isFile = FILE_KINDS.has(target.kind);
-
-      // Parallel fetch: effective system path, parent container (for non-containers), entity details
-      const [systemPath, containsResult, details] = await Promise.all([
-        getEffectiveSystemPath(client, target.id),
-        isContainer
-          ? Promise.resolve({ nodes: [] })
-          : client.expand(target.id, { direction: "in", predicates: ["CONTAINS"] }),
-        client.entity(target.id),
-      ]);
-
-      const node = details.node as any;
-      const nodePath = node.provenance?.source_uri ?? node.provenance?.sourceUri ?? undefined;
-
-      // Extract line range from attrs
-      const lineStart = node.attrs?.line_start ?? node.attrs?.lineStart;
-      const lineEnd = node.attrs?.line_end ?? node.attrs?.lineEnd;
-      const lineRange = lineStart != null && lineEnd != null
-        ? { start: Number(lineStart), end: Number(lineEnd) }
-        : undefined;
-
-      // Check staleness
-      let stale = false;
-      if (nodePath) {
-        try { stale = isFileStale(nodePath); } catch {}
-      }
-
-      // Container context (parent for callables)
-      let container: LocateOutput["container"];
-      if (!isContainer && containsResult.nodes.length > 0) {
-        const c = containsResult.nodes[0] as any;
-        container = {
-          kind: c.kind || "unknown",
-          name: c.name || c.attrs?.name || "(unknown)",
-          id: c.id,
-        };
-      }
-
-      // Sub-file entities (table, view, function, etc.) have no IN_REGION edges of their
-      // own — those belong to the containing file. Walk up via CONTAINS to inherit the
-      // parent file's system path so hasMapData returns true after `ix map`.
-      // Diagnostic for missing map data
-      const hasMap = hasMapData(systemPath);
-      if (!hasMap) {
-        diagnostics.push(`No system map. Run ${forMcp() ? "ix_map" : "`ix map`"} to see hierarchy.`);
-      }
-
-      // Build system path: append resolved symbol for non-file targets
-      let systemPathMapped = systemPath.map((n) => ({ name: n.name, kind: n.kind }));
-      if (!isFile) {
-        const lastInPath = systemPathMapped[systemPathMapped.length - 1];
-        if (!lastInPath || lastInPath.name !== target.name) {
-          systemPathMapped = [...systemPathMapped, { name: target.name, kind: target.kind }];
-        }
-      }
-
-      // Make path repo-relative
-      const displayPath = nodePath ? toRepoRelative(nodePath) : undefined;
-
-      const output: LocateOutput = {
-        resolvedTarget: {
-          id: target.id,
-          kind: target.kind,
-          name: target.name,
-          path: displayPath,
-        },
-        resolutionMode: target.resolutionMode === "exact" ? undefined as any : target.resolutionMode,
-        lineRange,
-        container,
-        systemPath: systemPathMapped,
-        hasMapData: hasMap,
-        diagnostics: diagnostics.length > 0 ? diagnostics : [] as string[],
-      };
-      if (stale) {
-        output.stale = true;
-      }
-
-      outputLocate(output, symbol, opts.format);
+      await runPerTarget(symbols, opts.format, (symbol) => locateOne(client, symbol, opts));
     });
 }
 
+async function locateOne(
+  client: IxClient,
+  symbol: string,
+  opts: { kind?: string; path?: string; pick?: number; format: string },
+): Promise<void> {
+  const diagnostics: string[] = [];
+
+  const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
+
+  // Resolution with ambiguity detection
+  const { target, ambiguous, miss } = await resolveWithAmbiguity(client, symbol, resolveOpts, opts.format);
+
+  if (!target) {
+    if (ambiguous) {
+      // Printed above, in whichever format was asked for. Exits 2, like
+      // every other ambiguous graph target (outcome.ts): the candidates
+      // are the answer, and `--pick <n>` is the retry.
+      //
+      // #547 settled that locate and the other graph commands report this
+      // condition with one status; `ix overview Duplicate` and
+      // `ix locate Duplicate` must agree. A `--pick <n>` that is out of
+      // range lands here too, with its candidates.
+      setOutcome("ambiguous");
+      return;
+    }
+    // The body keeps its shape (shipped plugins read `diagnostics` from
+    // it) and gains the `error` slug, reason and suggestions every other
+    // command's miss carries, so one parser reads them all.
+    const reason = miss ? await withMissReason(client, symbol, miss, resolveOpts, opts.format) : undefined;
+    const output: LocateOutput = {
+      resolvedTarget: null,
+      resolutionMode: "none",
+      systemPath: null,
+      diagnostics: ["No graph entity found."],
+      error: "unresolved_target",
+      message: reason?.message ?? `No graph entity found for "${symbol}".`,
+      ...(reason?.reason ? { reason: reason.reason } : {}),
+      ...(reason?.files?.length ? { files: reason.files } : {}),
+      ...(miss?.suggestions?.length ? { suggestions: miss.suggestions } : {}),
+    };
+    outputLocate(output, symbol, opts.format);
+    // #539: a machine caller could not tell this from a successful command
+    // that intentionally returned nothing. Exits 3, the not-found code
+    // `context`, `explain`, `read` and `trace` share.
+    setOutcome("not_found");
+    return;
+  }
+
+  if (opts.format === "text") printResolved(target);
+
+  const isContainer = CONTAINER_KINDS.has(target.kind);
+  const isFile = FILE_KINDS.has(target.kind);
+
+  // Parallel fetch: effective system path, parent container (for non-containers), entity details
+  const [systemPath, containsResult, details] = await Promise.all([
+    getEffectiveSystemPath(client, target.id),
+    isContainer
+      ? Promise.resolve({ nodes: [] })
+      : client.expand(target.id, { direction: "in", predicates: ["CONTAINS"] }),
+    client.entity(target.id),
+  ]);
+
+  const node = details.node as any;
+  const nodePath = node.provenance?.source_uri ?? node.provenance?.sourceUri ?? undefined;
+
+  // Extract line range from attrs
+  const lineStart = node.attrs?.line_start ?? node.attrs?.lineStart;
+  const lineEnd = node.attrs?.line_end ?? node.attrs?.lineEnd;
+  const lineRange = lineStart != null && lineEnd != null
+    ? { start: Number(lineStart), end: Number(lineEnd) }
+    : undefined;
+
+  // Check staleness
+  let stale = false;
+  if (nodePath) {
+    try { stale = isFileStale(nodePath); } catch {}
+  }
+
+  // Container context (parent for callables)
+  let container: LocateOutput["container"];
+  if (!isContainer && containsResult.nodes.length > 0) {
+    const c = containsResult.nodes[0] as any;
+    container = {
+      kind: c.kind || "unknown",
+      name: c.name || c.attrs?.name || "(unknown)",
+      id: c.id,
+    };
+  }
+
+  // Sub-file entities (table, view, function, etc.) have no IN_REGION edges of their
+  // own — those belong to the containing file. Walk up via CONTAINS to inherit the
+  // parent file's system path so hasMapData returns true after `ix map`.
+  // Diagnostic for missing map data
+  const hasMap = hasMapData(systemPath);
+  if (!hasMap) {
+    diagnostics.push(`No system map. Run ${forMcp() ? "ix_map" : "`ix map`"} to see hierarchy.`);
+  }
+
+  // Build system path: append resolved symbol for non-file targets
+  let systemPathMapped = systemPath.map((n) => ({ name: n.name, kind: n.kind }));
+  if (!isFile) {
+    const lastInPath = systemPathMapped[systemPathMapped.length - 1];
+    if (!lastInPath || lastInPath.name !== target.name) {
+      systemPathMapped = [...systemPathMapped, { name: target.name, kind: target.kind }];
+    }
+  }
+
+  // Make path repo-relative
+  const displayPath = nodePath ? toRepoRelative(nodePath) : undefined;
+
+  const output: LocateOutput = {
+    resolvedTarget: {
+      id: target.id,
+      kind: target.kind,
+      name: target.name,
+      path: displayPath,
+    },
+    resolutionMode: target.resolutionMode === "exact" ? undefined as any : target.resolutionMode,
+    lineRange,
+    container,
+    systemPath: systemPathMapped,
+    hasMapData: hasMap,
+    diagnostics: diagnostics.length > 0 ? diagnostics : [] as string[],
+  };
+  if (stale) {
+    output.stale = true;
+  }
+
+  outputLocate(output, symbol, opts.format);
+}
+
 // ── Ambiguity-aware resolution ──────────────────────────────────────────────
+
+type Miss = Extract<ResolveResult, { resolved: false; ambiguous: false }>;
 
 async function resolveWithAmbiguity(
   client: IxClient,
   symbol: string,
   opts: { kind?: string; path?: string; pick?: number },
   format: string,
-): Promise<{ target: ResolvedEntity | null; ambiguous: boolean }> {
+): Promise<{ target: ResolvedEntity | null; ambiguous: boolean; miss?: Miss }> {
+  let result: ResolveResult;
   // For raw IDs and file-like targets, delegate to resolveFileOrEntityFull. A
   // file target can tie, but it resolves (with a notice) rather than turn
-  // ambiguous; one that falls through to a symbol keeps the text report.
+  // ambiguous.
   if (isRawId(symbol) || looksFileLike(symbol)) {
-    const fileResult = await resolveFileOrEntityFull(client, symbol, opts);
-    if (fileResult.resolved) {
-      if (fileResult.notices?.length) reportResolutionNotices(fileResult.notices, format, opts);
-      return { target: fileResult.entity, ambiguous: false };
-    }
-    if (fileResult.ambiguous) printAmbiguous(symbol, fileResult.result, opts);
-    return { target: null, ambiguous: false };
-  }
-
-  // Symbol resolution — use full result to detect ambiguity
-  const allKinds = ["file", "class", "object", "trait", "interface", "module", "function", "method", "constant"];
-  const sep = qualifiedSeparator(symbol);
-  let result = await resolveEntityFull(client, symbol, allKinds, { ...opts, format, ...(sep ? { silentMiss: true } : {}) });
-  // `Class::method`, `Class.method` and `Class#method` are read as a qualified
-  // name only when the name as typed matches nothing, or (for `.`/`#`) matches
-  // only fuzzily; resolveFileOrEntityFull then keeps the literal result unless
-  // the qualified one keeps the exit code.
-  const missed = !result.resolved && !result.ambiguous;
-  if (sep && (missed || (sep !== "::" && isFuzzyResult(result)))) {
     result = await resolveFileOrEntityFull(client, symbol, { ...opts, format });
+  } else {
+    // Symbol resolution — use full result to detect ambiguity
+    const allKinds = ["file", "class", "object", "trait", "interface", "module", "function", "method", "constant"];
+    const sep = qualifiedSeparator(symbol);
+    result = await resolveEntityFull(client, symbol, allKinds, { ...opts, format, ...(sep ? { silentMiss: true } : {}) });
+    // `Class::method`, `Class.method` and `Class#method` are read as a qualified
+    // name only when the name as typed matches nothing, or (for `.`/`#`) matches
+    // only fuzzily; resolveFileOrEntityFull then keeps the literal result unless
+    // the qualified one keeps the exit code.
+    const missed = !result.resolved && !result.ambiguous;
+    if (sep && (missed || (sep !== "::" && isFuzzyResult(result)))) {
+      result = await resolveFileOrEntityFull(client, symbol, { ...opts, format });
+    }
   }
 
   if (result.resolved) {
@@ -228,6 +237,11 @@ async function resolveWithAmbiguity(
   if (result.ambiguous) {
     if (format === "json") {
       printJson({
+        // Locate's ambiguity was never an `error` record, and integrations that
+        // treat any string `error` as a failure would drop the candidates: the
+        // shared slug rides in `code` instead (the exit code is 2, outcome.ts).
+        code: "ambiguous_target",
+        message: `Ambiguous symbol "${symbol}".`,
         resolvedTarget: null,
         resolutionMode: "ambiguous",
         candidates: result.result.candidates,
@@ -247,7 +261,7 @@ async function resolveWithAmbiguity(
     return { target: null, ambiguous: true };
   }
 
-  return { target: null, ambiguous: false };
+  return { target: null, ambiguous: false, miss: result };
 }
 
 // ── Repo-relative path ──────────────────────────────────────────────────────
@@ -272,7 +286,16 @@ function humanizeBreadcrumb(nodes: Array<{ name: string; kind: string }>): strin
 export function renderLocateLlm(output: LocateOutput, symbol: string): string[] {
   const t = output.resolvedTarget;
   if (!t) {
-    return [llmError("unresolved_target", `No graph entity found for "${symbol}".`)];
+    const near = output.suggestions ?? [];
+    return [
+      llmError("unresolved_target", output.message ?? `No graph entity found for "${symbol}".`,
+        [["reason", output.reason], ["files", output.files?.join(",")]]),
+      ...near.map((c, i) => llmLine("suggestion", [
+        ["n", i + 1], ["name", c.name], ["kind", c.kind],
+        ["path", c.path ? relativePath(c.path) ?? c.path : undefined], ["id", llmShortId(c.id)],
+      ])),
+      ...(near.length ? [llmLine("hint", [["text", "Re-run with one of these names, or narrow with --path."]])] : []),
+    ];
   }
   const lines = [llmLine("locate", [
     ["target", t.name],
@@ -304,6 +327,12 @@ function outputLocate(output: LocateOutput, symbol: string, format: string): voi
 
   if (!output.resolvedTarget) {
     stderr(`No graph entity found for "${symbol}".`);
+    if (output.suggestions?.length) {
+      stderr(chalk.dim("Did you mean:"));
+      for (const c of output.suggestions) {
+        stderr(`  ${chalk.cyan((c.kind || "").padEnd(10))} ${c.name}${c.path ? chalk.dim(` in ${c.path}`) : ""}`);
+      }
+    }
     console.log("No matches found.");
     return;
   }

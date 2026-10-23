@@ -79,14 +79,14 @@ describe.each(["impact", "callers", "callees", "imports", "imported-by"])("%s pa
 
   it("does not silently select a candidate outside --path", async () => {
     const output = await run(command, ["--path", "missing.ts"]);
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(3);
     expect(output.error).toBe("unresolved_target");
     expect(expand).not.toHaveBeenCalled();
   });
 
   it("preserves ambiguity when no filter is supplied", async () => {
     const output = await run(command, []);
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(2);
     expect(output.error).toBe("ambiguous_target");
     expect(expand).not.toHaveBeenCalled();
   });

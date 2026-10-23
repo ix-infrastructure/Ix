@@ -13,7 +13,6 @@ import { ixHome } from "./ix-home.js";
 import { stderr } from "./stderr.js";
 import { workspaceIdForPath } from "./system.js";
 import { IX_CALLER_ENV } from "./next-step.js";
-import { readBackendHealth } from "./commands/upgrade.js";
 import { isLocalEndpoint } from "./backend-version.js";
 
 export interface BootstrapResult {
@@ -76,13 +75,16 @@ function noteRelocatedConfig(configPath: string): void {
 // root path. The old id is what ingest deletes to clean up the migration's orphans.
 const migratedRootsThisRun = new Map<string, string>();
 
+/** `setDefault: false` keeps a new registration from becoming the default workspace (ingest). */
+export interface RegisterOptions { setDefault?: boolean }
+
 interface WorkspaceState { ws: WorkspaceConfig; created: boolean; migrated: boolean; previousWorkspaceId?: string }
 
 /**
  * Ensure the current directory (or given path) is registered as a workspace.
  * Returns the workspace name. Does nothing if already registered.
  */
-function getOrCreateWorkspace(cwd: string): WorkspaceState {
+function getOrCreateWorkspace(cwd: string, opts: RegisterOptions = {}): WorkspaceState {
   const rootPath = canonicalWorkspacePath(resolve(cwd));
   // The common case, already registered under its path id, needs no write and
   // so no lock.
@@ -95,13 +97,13 @@ function getOrCreateWorkspace(cwd: string): WorkspaceState {
   // each see the one before (see updateConfig).
   return updateConfig((config) => {
     let save: typeof config | undefined;
-    const state = registerIn(config, rootPath, () => { save = config; });
+    const state = registerIn(config, rootPath, () => { save = config; }, opts.setDefault ?? true);
     return { save, result: state };
   });
 }
 
 /** The registration itself, on a config read under the lock; `changed` marks it for saving. */
-function registerIn(config: IxConfig, rootPath: string, changed: () => void): WorkspaceState {
+function registerIn(config: IxConfig, rootPath: string, changed: () => void, setDefault: boolean): WorkspaceState {
   const pathId = workspaceIdForPath(rootPath);
   const existing = (config.workspaces ?? []).find(w => canonicalWorkspacePath(w.root_path) === rootPath);
   if (existing) {
@@ -132,7 +134,7 @@ function registerIn(config: IxConfig, rootPath: string, changed: () => void): Wo
     workspace_id: pathId,
     workspace_name: basename(rootPath),
     root_path: rootPath,
-    default: !hasDefault,
+    default: setDefault && !hasDefault,
   };
   config.workspaces = [...workspaces, ws];
   changed();
@@ -150,8 +152,8 @@ export function ensureWorkspaceRegistered(cwd = process.cwd()): { registered: bo
  * map/ingest flow uses `migrated` to force a full re-ingest under the new id and
  * `previousWorkspaceId` to delete the old id's orphaned nodes afterward.
  */
-export function ensureWorkspaceIdState(cwd = process.cwd()): { workspaceId: string; migrated: boolean; previousWorkspaceId?: string; created: boolean; name: string } {
-  const { ws, migrated, previousWorkspaceId, created } = getOrCreateWorkspace(cwd);
+export function ensureWorkspaceIdState(cwd = process.cwd(), opts: RegisterOptions = {}): { workspaceId: string; migrated: boolean; previousWorkspaceId?: string; created: boolean; name: string } {
+  const { ws, migrated, previousWorkspaceId, created } = getOrCreateWorkspace(cwd, opts);
   return { workspaceId: ws.workspace_id, migrated, previousWorkspaceId, created, name: ws.workspace_name };
 }
 
@@ -164,8 +166,9 @@ export function ensureWorkspaceIdState(cwd = process.cwd()): { workspaceId: stri
  * was actually ingested into it. Every registered workspace is a root `ix read`
  * may open files from, so registering first let a failed ingest of any path --
  * the backend down, or a path nobody meant to ingest -- widen what reads can
- * open, permanently. The caller registers with ensureWorkspaceIdState once a
- * commit has landed.
+ * open, permanently. The caller registers with `ensureWorkspaceIdState(root,
+ * { setDefault })` once a commit has landed -- `setDefault: false` for a loose
+ * directory, so it never becomes the default -- and never for a loose file.
  */
 export function workspaceStateFor(root: string): {
   workspaceId: string; migrated: boolean; previousWorkspaceId?: string; created: boolean; name: string; pending: boolean;
@@ -245,6 +248,11 @@ export function canAutoStartBackend(endpoint: string): boolean {
 export async function ensureBackendAvailable(): Promise<void> {
   const endpoint = getEndpoint();
   const client = createClient({ endpoint });
+  // Loaded here, not at the top: every graph command imports this file, and
+  // `upgrade.js` (with the release-download code behind it) is needed only on
+  // this path. Outside the try, so a module that fails to load is not taken
+  // for a backend that is down.
+  const { readBackendHealth } = await import("./commands/upgrade.js");
   try {
     // Through readBackendHealth so this probe records the release the backend
     // reports, like every other health fetch. `ix init` never reaches the

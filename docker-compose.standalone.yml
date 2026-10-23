@@ -16,7 +16,7 @@ services:
     #                 Invalid argument: Column families not opened: VectorIndex
     # -- which with `restart: unless-stopped` is a fatal loop, not a degraded
     # start, and takes memory-layer down with it via `service_healthy`. Ix#614.
-    image: arangodb:3.12.11
+    image: arangodb:3.12.12
     networks:
       - backend
     # No host port. ArangoDB runs without authentication, so a published port
@@ -30,7 +30,32 @@ services:
     # before 3.12.11, which still accepts the old spelling but only as a renamed
     # alias and warns. Pinning the image above is what makes it safe to state
     # one spelling here.
-    command: ["arangod", "--server.endpoint", "tcp://0.0.0.0:8529", "--vector-index", "true"]
+    #
+    # Cache caps. Left alone, arangod sizes its caches from the host's RAM (on
+    # a 30 GB machine: a ~9 GB block cache, not enforced by default, a ~7.6 GB
+    # edge/document cache and ~12 GB of write buffers), fills them, and keeps
+    # the memory after workspaces are dropped. The defaults below served repos
+    # up to ~30k files with no slowdown in `ix map`. They cap caches only, not
+    # the process: there is deliberately no container memory limit or query
+    # memory limit, which could kill the backend on a large repo.
+    #   --rocksdb.block-cache-size                512 MB  RocksDB block cache
+    #   --rocksdb.enforce-block-cache-size-limit  true    hold it to that size
+    #   --rocksdb.total-write-buffer-size         256 MB  all memtables together
+    #   --cache.size                              128 MB  edge/document cache
+    # To raise one, set its IX_ARANGO_* variable (bytes) in the .env next to
+    # this file, e.g. IX_ARANGO_BLOCK_CACHE_SIZE=2147483648, then run
+    # `ix docker stop` and `ix docker start` to recreate the container. The
+    # data volume is kept. See docs/prerequisites.md.
+    command:
+      - arangod
+      - --server.endpoint
+      - tcp://0.0.0.0:8529
+      - --vector-index
+      - "true"
+      - --rocksdb.block-cache-size=${IX_ARANGO_BLOCK_CACHE_SIZE:-536870912}
+      - --rocksdb.enforce-block-cache-size-limit=${IX_ARANGO_ENFORCE_BLOCK_CACHE_LIMIT:-true}
+      - --rocksdb.total-write-buffer-size=${IX_ARANGO_WRITE_BUFFER_SIZE:-268435456}
+      - --cache.size=${IX_ARANGO_CACHE_SIZE:-134217728}
     volumes:
       - arangodb-data:/var/lib/arangodb3
     healthcheck:

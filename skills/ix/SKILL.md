@@ -56,6 +56,26 @@ tool calls; an ambiguous name answers with candidates and `pick=`/`path=` to
 choose one. No health check is needed first. `ix mcp --tools=all` serves
 every command as a tool.
 
+## Reading the exit code
+
+A non-zero exit from a graph command is usually an answer, not a breakage:
+
+| Exit | Means | Do |
+|---|---|---|
+| 0 | results | use them |
+| 2 | ambiguous: candidates listed | re-run with `--pick <n>` or `--path`, or `--all` (`callers`/`callees`/`impact`) for every candidate at once |
+| 3 | not found | read `reason` / `suggestion`: a file not indexed means `ix map`; a near name means retry with it |
+| 4 | workspace not mapped | `ix map` |
+| 1 | a real error | read the `error` record |
+
+json carries the same outcome in `error` (`ambiguous_target`,
+`unresolved_target`, `workspace_not_mapped`); llm in `error code=`. One
+exception: `ix locate`'s json ambiguity carries it as `code: "ambiguous_target"`
+(with its candidates), not `error`; and `ix read`'s ambiguity exits 0 with an
+`ambiguous` record (json `targetType: "ambiguous-symbol"`) and its candidates.
+Ask about
+several names in one call: `ix locate a b c`, `ix callers a b c`.
+
 ## How to spend calls
 
 1. **Start with `ix context <file-or-symbol>`** — one bounded call that names the
