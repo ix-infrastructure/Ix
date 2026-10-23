@@ -250,8 +250,44 @@ describe("ix mcp", () => {
     const result = await client.callTool({ name: "ix_context", arguments: { target: "Widget", structured: true } });
 
     expect(calls).toEqual([["context", "--format=json", "--", "Widget"]]);
-    expect(result.structuredContent).toEqual(bundle);
-    expect(result.content).toEqual([{ type: "text", text: JSON.stringify(bundle) }]);
+    const { generatedAt: _volatile, ...stable } = bundle;
+    expect(result.structuredContent).toEqual(stable);
+    expect(result.content).toEqual([{ type: "text", text: JSON.stringify(stable) }]);
+  });
+
+  it("two structured ix_context renders of the same input are byte-identical", async () => {
+    const stamps = ["2026-01-01T00:00:00Z", "2026-01-01T00:00:05Z"];
+    let n = 0;
+    const client = await connect(async () => ({
+      ok: true,
+      stdout: JSON.stringify({ ...contextBundle(), generatedAt: stamps[n++] }),
+      stderr: "",
+    }));
+
+    const args = { name: "ix_context", arguments: { target: "Widget", structured: true } };
+    const r1 = await client.callTool(args);
+    const r2 = await client.callTool(args);
+
+    expect(JSON.stringify(r1)).toBe(JSON.stringify(r2));
+    expect("generatedAt" in (r1.structuredContent as object)).toBe(false);
+    expect(JSON.stringify(r1.content)).not.toContain("generatedAt");
+  });
+
+  it("keeps the structured text twin stable when stdout has a leading notice", async () => {
+    const bundle = contextBundle();
+    const outs = [
+      `notice: update available\n${JSON.stringify({ ...bundle, generatedAt: "2026-01-01T00:00:00Z" })}`,
+      JSON.stringify({ ...bundle, generatedAt: "2026-01-01T00:00:05Z" }),
+    ];
+    let n = 0;
+    const client = await connect(async () => ({ ok: true, stdout: outs[n++], stderr: "" }));
+
+    const args = { name: "ix_context", arguments: { target: "Widget", structured: true } };
+    const r1 = await client.callTool(args);
+    const r2 = await client.callTool(args);
+
+    expect(r1.isError).toBeFalsy();
+    expect(JSON.stringify(r1)).toBe(JSON.stringify(r2));
   });
 
   it("marks an unparseable bundle as an MCP error, on the structured path", async () => {

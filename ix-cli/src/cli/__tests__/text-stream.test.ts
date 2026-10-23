@@ -93,6 +93,100 @@ describe("text ripgrep stream lifecycle", () => {
     await rejected;
     expect(log).not.toHaveBeenCalled();
   });
+  function matchAt(file: string, line: number) {
+    return JSON.stringify({ type: "match", data: {
+      path: { text: file }, line_number: line, lines: { text: `${file}:${line}` },
+    } }) + "\n";
+  }
+  async function runArgs(argv: string[], records: string[]): Promise<string[]> {
+    const program = new Command();
+    registerTextCommand(program);
+    const pending = program.parseAsync(["text", "--root", process.cwd(), ...argv], { from: "user" });
+    for (const r of records) child.stdout.write(r);
+    close(0);
+    await pending;
+    return log.mock.calls.map((c: unknown[]) => String(c[0]));
+  }
+  it("is byte-stable across arrival orders and keeps the best rows, not the first", async () => {
+    // --limit 1 scans a window of 5; twelve matches overflow it, and the one
+    // code match arrives last, after a full window of prose.
+    const records = [
+      ...Array.from({ length: 6 }, (_, i) => matchAt(`docs/d${i}.md`, i + 1)),
+      ...Array.from({ length: 5 }, (_, i) => matchAt(`tests/t${i}.ts`, 1)),
+      matchAt("src/code.ts", 7),
+    ];
+    const first = await runArgs(["needle", "--limit", "1", "--format", "json"], records);
+    log.mockClear();
+    child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(() => true),
+    });
+    spawn.mockReturnValue(child);
+    const second = await runArgs(["needle", "--limit", "1", "--format", "json"], [...records].reverse());
+    expect(second).toEqual(first);
+    expect(JSON.parse(first[0]).map((r: { path: string }) => r.path)).toEqual(["src/code.ts"]);
+  });
+  it("asks ripgrep for one match per file past --limit, to tell a full file from a cut-off one", async () => {
+    await runArgs(["needle", "--limit", "5", "--format", "llm"], []);
+    const argv = spawn.mock.calls[0][1] as string[];
+    expect(argv.slice(0, argv.indexOf("--"))).toEqual(["--json", "--max-count", "6"]);
+  });
+  it("reports a file with more matches than ripgrep's per-file cap as a truncated scan", async () => {
+    // --limit 5 caps each file at 5; the sixth match is ripgrep's probe and is not shown.
+    const out = await runArgs(["needle", "--limit", "5", "--format", "llm"],
+      Array.from({ length: 6 }, (_, i) => matchAt("src/a.ts", i + 1)));
+    expect(out[0]).toBe("text shown=5 scanned=5 truncated=true");
+    expect(out[1]).toContain("Narrow with --path or --language");
+    expect(out.slice(2).map((l) => l.match(/line=(\d+)/)?.[1])).toEqual(["1", "2", "3", "4", "5"]);
+  });
+  it.each(["1", "5"])("does not call a file with exactly --limit %s matches truncated", async (limit) => {
+    const n = Number(limit);
+    const out = await runArgs(["needle", "--limit", limit, "--format", "llm"],
+      Array.from({ length: n }, (_, i) => matchAt("src/a.ts", i + 1)));
+    expect(out[0]).toBe(`text shown=${n} scanned=${n}`);
+    expect(out.some((l) => l.startsWith("diagnostic"))).toBe(false);
+  });
+  it("pages inside the scan window and repeats --limit in the next command", async () => {
+    const records = Array.from({ length: 5 }, (_, i) => matchAt(`src/f${i}.ts`, i + 1));
+    const out = await runArgs(["needle", "--limit", "2", "--offset", "2", "--format", "llm"], records);
+    expect(out[0]).toBe("text offset=2 shown=2 scanned=5 truncated=true");
+    expect(out[1]).toContain("next_offset=4");
+    expect(out[1]).toContain("next: ix text --limit 2 --format llm --root ");
+    expect(out[1]).toMatch(/--offset 4 needle"$/);
+    expect(out.slice(2).map((l) => l.match(/line=(\d+)/)?.[1])).toEqual(["3", "4"]);
+  });
+  it("pages past the first page's scan window: --offset widens the window", async () => {
+    // --limit 1 scans 5 rows at offset 0. Twelve code matches, one per file.
+    const records = Array.from({ length: 12 }, (_, i) => matchAt(`src/f${String(i).padStart(2, "0")}.ts`, 1));
+    const out = await runArgs(["needle", "--limit", "1", "--offset", "7", "--format", "llm"], records);
+    expect(out[0]).toBe("text offset=7 shown=1 scanned=12 truncated=true");
+    expect(out[1]).toContain("next_offset=8");
+    expect(out.slice(2).map((l) => l.match(/path=(\S+)/)?.[1])).toEqual(["src/f07.ts"]);
+  });
+  it("ranks a match record whose fields come in another order the same way", async () => {
+    const reordered = JSON.stringify({ data: { line_number: 2, lines: { text: "late" }, path: { text: "src/a.ts" } }, type: "match" }) + "\n";
+    const out = await runArgs(["needle", "--limit", "5", "--format", "json"], [matchAt("src/b.ts", 1), reordered, matchAt("src/a.ts", 1)]);
+    expect(JSON.parse(out[0]).map((r: { path: string; line_start: number }) => `${r.path}:${r.line_start}`))
+      .toEqual(["src/a.ts:1", "src/a.ts:2", "src/b.ts:1"]);
+  });
+  it("counts and names files whose paths are not UTF-8 (ripgrep sends them as bytes)", async () => {
+    const bytesMatch = (raw: Buffer, line: number) => JSON.stringify({ type: "match", data: {
+      path: { bytes: raw.toString("base64") }, line_number: line, lines: { text: "foo" },
+    } }) + "\n";
+    const a = Buffer.concat([Buffer.from("a"), Buffer.from([0xff]), Buffer.from(".txt")]);
+    const b = Buffer.concat([Buffer.from("b"), Buffer.from([0xfe]), Buffer.from(".txt")]);
+    const records = [1, 2, 3].flatMap((n) => [bytesMatch(a, n), bytesMatch(b, n)]).concat(matchAt("c.txt", 1));
+    // Seven matches, at most three per file: under the per-file cap of 4, so nothing is cut.
+    const out = await runArgs(["needle", "--limit", "4", "--format", "llm"], records);
+    expect(out[0]).toBe("text shown=4 scanned=7 truncated=true");
+    expect(out[1]).toContain("next_offset=4");
+    expect(out.slice(2).map((l) => l.match(/path=(\S+) line=(\d+)/)?.slice(1).join(":")))
+      .toEqual(["a�.txt:1", "a�.txt:2", "a�.txt:3", "b�.txt:1"]);
+  });
+  it("guards a term starting with a dash in the next command", async () => {
+    const records = Array.from({ length: 5 }, (_, i) => matchAt(`src/f${i}.ts`, i + 1));
+    const out = await runArgs(["--limit", "2", "--format", "llm", "--", "-x"], records);
+    expect(out[1]).toMatch(/--offset 2 -- -x"$/);
+  });
   it("preserves the missing-ripgrep error", async () => {
     const pending = run();
     const rejected = expect(pending).rejects.toThrow("exit 1");

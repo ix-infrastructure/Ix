@@ -435,11 +435,14 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       limit: z.number().int().min(1).max(100).default(20),
       path: z.string().min(1).optional(),
       language: z.string().min(1).optional(),
+      // Takes back next_offset= (see EDGE_TOOL_INPUT); no description, same budget.
+      offset: z.number().int().min(0).max(100000).optional(),
     },
     async (input) => {
       const options = [`--limit=${numberArg(input, "limit")}`];
       pushOption(options, "--path", input.path);
       pushOption(options, "--language", input.language);
+      if (typeof input.offset === "number") options.push(`--offset=${numberArg(input, "offset")}`);
       return runFormatted(runIx, "ix_text", ix("text", [stringArg(input, "pattern")], options));
     },
   );
@@ -454,9 +457,11 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       kind: SYMBOL_TOOL_INPUT.kind,
       path: SYMBOL_TOOL_INPUT.path,
       pick: SYMBOL_TOOL_INPUT.pick,
+      // Caps the top-impacted members and the leaf caller/callee rows. The CLI
+      // default is 10, so the hint's "Raise --limit" needs this to be reachable.
+      limit: z.number().int().min(0).max(500).optional(),
     },
-    async (input) =>
-      runFormatted(runIx, "ix_impact", ix("impact", [stringArg(input, "target")], symbolOptions(input, { limit: false }))),
+    async (input) => runFormatted(runIx, "ix_impact", ix("impact", [stringArg(input, "target")], symbolOptions(input))),
   );
   registerTool(
     ctx,
@@ -479,7 +484,7 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
   registerTool(
     ctx,
     "ix_read",
-    "Use when you have a symbol name but not its file or lines. Returns exactly that definition's source; also takes a path or path:start-end. Not needed when you already know path and range: Read does that.",
+    "Use when you have a symbol name but not its file or lines. Returns that definition's source, 400 lines a page (pass each next= back as symbol until none is given); also takes a path or path:start-end. Not needed when you already know path and range: Read does that.",
     {
       symbol: z.string().min(1).describe("a symbol, a path, or `path:start-end`"),
       kind: z.string().min(1).optional(),
@@ -516,7 +521,7 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
     "ix_neighbors",
     "Use when you need who calls X, what X calls, what X imports, or which files import X, across the repo. Returns one row per resolved edge with path:lines, where grep finds every same-named symbol too. For transitive reach use ix_impact.",
     {
-      ...SYMBOL_TOOL_INPUT,
+      ...EDGE_TOOL_INPUT,
       relation: z
         .enum(["callers", "callees", "imports", "imported_by"])
         .describe("callers = who calls it; callees = what it calls"),
@@ -528,14 +533,14 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       return runFormatted(
         runIx,
         "ix_neighbors",
-        ix(command, [stringArg(input, "symbol")], symbolOptions(input)),
+        ix(command, [stringArg(input, "symbol")], symbolOptions(input, { offset: true })),
       );
     },
   );
-  registerSymbolTool(ctx, runIx, "ix_callers", "Who calls this. Rows carry path:lines. Prefer ix_neighbors relation=callers.", "callers");
-  registerSymbolTool(ctx, runIx, "ix_callees", "What this calls. Rows carry path:lines. Prefer ix_neighbors relation=callees.", "callees");
-  registerSymbolTool(ctx, runIx, "ix_imported_by", "What imports this. Rows carry path:lines. Prefer ix_neighbors relation=imported_by.", "imported-by");
-  registerSymbolTool(ctx, runIx, "ix_imports", "What this imports. Rows carry path:lines. Prefer ix_neighbors relation=imports.", "imports");
+  registerSymbolTool(ctx, runIx, "ix_callers", "Who calls this, with path:lines. Prefer ix_neighbors.", "callers", EDGE_TOOL_INPUT);
+  registerSymbolTool(ctx, runIx, "ix_callees", "What this calls, with path:lines. Prefer ix_neighbors.", "callees", EDGE_TOOL_INPUT);
+  registerSymbolTool(ctx, runIx, "ix_imported_by", "What imports this, with path:lines. Prefer ix_neighbors.", "imported-by", EDGE_TOOL_INPUT);
+  registerSymbolTool(ctx, runIx, "ix_imports", "What this imports, with path:lines. Prefer ix_neighbors.", "imports", EDGE_TOOL_INPUT);
   registerTool(
     ctx,
     "ix_depends",
@@ -610,10 +615,13 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       kind: z.string().min(1).default("file"),
       path: z.string().min(1).optional(),
       limit: z.number().int().min(1).max(500).default(50),
+      // Takes back next_offset= (see EDGE_TOOL_INPUT); no description, same budget.
+      offset: z.number().int().min(0).max(100000).optional(),
     },
     async (input) => {
       const options = [`--kind=${stringArg(input, "kind")}`, `--limit=${numberArg(input, "limit")}`];
       pushOption(options, "--path", input.path);
+      if (typeof input.offset === "number") options.push(`--offset=${numberArg(input, "offset")}`);
       return runFormatted(runIx, "ix_inventory", ix("inventory", [], options));
     },
   );
@@ -747,14 +755,33 @@ const SYMBOL_TOOL_INPUT = {
   limit: z.number().int().min(1).max(500).optional(),
 } as const;
 
+/**
+ * The edge tools (ix_neighbors and the four single-relation tools) page with
+ * `offset`, following `next_offset=` on a results_truncated diagnostic: every
+ * tool that can print that diagnostic has to be able to take the offset back.
+ * Kept out of SYMBOL_TOOL_INPUT so ix_impact, ix_read and ix_explain do not
+ * grow a flag their commands lack. No description: five copies would push the
+ * full catalog past its tools/list budget (mcp-structured-output.test.ts), and
+ * for the same reason the four single-relation descriptions no longer spell
+ * out the ix_neighbors relation their own name already gives. An offset past
+ * the end is answered with an offset_past_end diagnostic, not an error.
+ */
+const EDGE_TOOL_INPUT = {
+  ...SYMBOL_TOOL_INPUT,
+  offset: z.number().int().min(0).max(100000).optional(),
+} as const;
+
 /** Turn the shared disambiguation input into CLI flags. */
-function symbolOptions(input: ToolInput, opts: { limit?: boolean } = {}): string[] {
+function symbolOptions(input: ToolInput, opts: { limit?: boolean; offset?: boolean } = {}): string[] {
   const options: string[] = [];
   pushOption(options, "--kind", input.kind);
   pushOption(options, "--path", input.path);
   if (typeof input.pick === "number") options.push(`--pick=${numberArg(input, "pick")}`);
   if (opts.limit !== false && typeof input.limit === "number") {
     options.push(`--limit=${numberArg(input, "limit")}`);
+  }
+  if (opts.offset === true && typeof input.offset === "number") {
+    options.push(`--offset=${numberArg(input, "offset")}`);
   }
   return options;
 }
@@ -767,8 +794,9 @@ function registerSymbolTool(
   command: string,
   input: z.ZodRawShape = SYMBOL_TOOL_INPUT,
 ): void {
+  const offset = "offset" in input;
   registerTool(ctx, name, description, input, async (args) =>
-    runFormatted(runIx, name, ix(command, [stringArg(args, "symbol")], symbolOptions(args))),
+    runFormatted(runIx, name, ix(command, [stringArg(args, "symbol")], symbolOptions(args, { offset }))),
   );
 }
 
@@ -899,7 +927,9 @@ function declaresOutputSchema(tool: string): boolean {
  * its own versioned schema (`ix-context-bundle/1`), so the structured copy is
  * stable across releases; when the output does not parse into a usable object
  * we omit structured content and keep the text result authoritative rather
- * than throwing.
+ * than throwing. The copy leaves out `generatedAt`, the bundle's one per-call
+ * field, so identical calls return identical bytes and a prompt cache or dedup
+ * can match; `--save` / `--out` files and CLI stdout keep it.
  */
 async function runJsonStructured(
   runIx: IxRunner,
@@ -920,9 +950,10 @@ async function runJsonStructured(
   if (!isRecord(parsed) || Object.keys(parsed).length === 0) {
     return textResult(text || JSON.stringify({ error: `${argv.command} produced no parseable JSON`, tool }), true);
   }
+  const { generatedAt: _perCall, ...stable } = parsed;
   return {
-    content: [{ type: "text", text }],
-    structuredContent: parsed,
+    content: [{ type: "text", text: JSON.stringify(stable) }],
+    structuredContent: stable,
   };
 }
 
@@ -999,7 +1030,7 @@ async function runSmells(runIx: IxRunner, input: ToolInput): Promise<CallToolRes
 
   const path = typeof input.path === "string" ? normalizePath(input.path) : null;
   const limit = numberArg(input, "limit");
-  const candidates = parsed.candidates
+  const matched = parsed.candidates
     .filter((candidate) => {
       if (path === null || !isRecord(candidate) || typeof candidate.file !== "string") {
         return path === null;
@@ -1010,10 +1041,15 @@ async function runSmells(runIx: IxRunner, input: ToolInput): Promise<CallToolRes
       // architecture smells here" — for the `src` an agent had just used
       // successfully against ix_inventory on files stored as `ix-cli/src/...`.
       return normalizePath(candidate.file).includes(path);
-    })
-    .slice(0, limit);
+    });
+  const candidates = matched.slice(0, limit);
 
-  const payload = { ...parsed, count: candidates.length, candidates };
+  // shown/truncated describe this response, not the CLI's, so recompute them
+  // after the path filter and limit.
+  const meta = "shown" in parsed
+    ? { shown: candidates.length, truncated: parsed.truncated === true || matched.length > candidates.length }
+    : {};
+  const payload = { ...parsed, count: candidates.length, ...meta, candidates };
   // Compact, and the object once rather than twice. The indent was two spaces
   // per level of a list of smell candidates, and the structured copy was the
   // same bytes again.

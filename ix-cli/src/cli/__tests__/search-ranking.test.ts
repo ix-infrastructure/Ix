@@ -1,7 +1,8 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { describe, it, expect, vi } from "vitest";
-import { resolveEntityFull, scoreCandidate } from "../resolve.js";
+import { baseScore, resolveEntityFull, scoreCandidate } from "../resolve.js";
+import { rankScore, searchSort } from "../commands/search.js";
 
 // Graph reads refuse a directory no workspace covers (workspace_not_mapped),
 // and this suite runs from a checkout that is not registered anywhere. It is
@@ -12,63 +13,13 @@ vi.mock("../bootstrap.js", async (orig) => ({
 }));
 
 
-/**
- * Verify that search ranking correctly incorporates backend _search_weight.
- *
- * We replicate the rankScore logic here to test tier assignment
- * without needing a running backend.
- */
-
-/** Minimal scoreCandidate replica for rankScore tests (exact name = 0, prefix = 15, fuzzy = 30). */
-function scoreCandidateSimple(node: any, term: string, opts?: { kind?: string; path?: string }): number {
-  const name: string = (node.name || "").toLowerCase();
-  const kind: string = (node.kind || "").toLowerCase();
-  const symbolLower = term.toLowerCase();
-  let score = 50;
-  if (name === symbolLower) score = 0;
-  else if (name.startsWith(symbolLower)) score = 15;
-  else score = 30;
-  if (opts?.kind && kind === opts.kind.toLowerCase()) score -= 5;
-  if (["class", "trait", "object", "interface", "module", "file"].includes(kind)) score -= 3;
-  else if (["function", "method"].includes(kind)) score -= 1;
-  return score;
-}
-
-/** Replicate the production rankScore logic for testing. */
-function rankScore(
-  node: any,
-  term: string,
-  requestedKind: string | undefined,
-  pathFilter: string | undefined,
-): { tier: number; score: number; matchSource: string } {
-  // Weight comes through attrs (embedded by AQL into attrs JSON)
-  const backendWeight: number = node.attrs?._search_weight ?? node._search_weight ?? 0;
-  const resolverScore = scoreCandidateSimple(node, term, { kind: requestedKind, path: pathFilter });
-
-  if (backendWeight >= 100) {
-    if (resolverScore <= -3) return { tier: 0, score: -backendWeight + resolverScore, matchSource: "name_exact" };
-    if (resolverScore <= 0) return { tier: 1, score: -backendWeight + resolverScore, matchSource: "name_exact" };
-    return { tier: 2, score: -backendWeight + resolverScore, matchSource: "name_exact" };
-  }
-  if (backendWeight >= 60) {
-    return { tier: 3, score: -backendWeight + resolverScore, matchSource: "name_partial" };
-  }
-  if (backendWeight >= 40) return { tier: 4, score: -backendWeight, matchSource: "provenance" };
-  if (backendWeight >= 20) return { tier: 4, score: -backendWeight, matchSource: "claim_or_decision" };
-
-  if (resolverScore <= -8) return { tier: 0, score: resolverScore, matchSource: "resolver" };
-  if (resolverScore <= -3) return { tier: 0, score: resolverScore, matchSource: "resolver" };
-  if (resolverScore <= 0) return { tier: 1, score: resolverScore, matchSource: "resolver" };
-  if (resolverScore <= 2) return { tier: 2, score: resolverScore, matchSource: "resolver" };
-  return { tier: 5, score: resolverScore, matchSource: "attrs" };
-}
-
 describe("search ranking with backend weight", () => {
   it("assigns tier 0-1 for exact name match with backend weight 100", () => {
     // Weight comes through attrs (as it does from real backend after parseNode)
     const node = { name: "IngestionService", kind: "class", attrs: { _search_weight: 100 } };
     const result = rankScore(node, "IngestionService", "class", undefined);
-    expect(result.tier).toBeLessThanOrEqual(1);
+    // nameScore: exact 0, --kind -5, container -3, type-like -4 = -12
+    expect(result.tier).toBe(0);
     expect(result.matchSource).toBe("name_exact");
   });
 
@@ -120,10 +71,177 @@ describe("search ranking with backend weight", () => {
     const r3 = rankScore(nodeWithNoWeight, "Node", undefined, undefined);
 
     // Both attrs and top-level paths should work (fallback chain)
-    expect(r1.tier).toBeLessThanOrEqual(2);
-    expect(r2.tier).toBeLessThanOrEqual(2);
+    expect(r1.tier).toBe(0);
+    expect(r1.matchSource).toBe("name_exact");
+    expect(r2.tier).toBe(0);
+    expect(r2.matchSource).toBe("name_exact");
     // No weight → falls through to resolver
     expect(r3.matchSource).toBe("resolver");
+  });
+});
+
+describe("rankScore thresholds", () => {
+  const w = (weight: number) => ({ _search_weight: weight });
+  const rank = (node: any, term: string, kind?: string, path?: string) => rankScore(node, term, kind, path);
+
+  it("weight 100: nameScore <= -3 is tier 0", () => {
+    const r = rank({ name: "widget", kind: "class", attrs: w(100) }, "widget");
+    expect(r).toMatchObject({ tier: 0, score: -103, matchSource: "name_exact" });
+  });
+
+  it("weight 100: nameScore -1 is tier 1", () => {
+    const r = rank({ name: "parse", kind: "function", attrs: w(100) }, "parse");
+    expect(r).toMatchObject({ tier: 1, score: -101, matchSource: "name_exact" });
+  });
+
+  // Each nameScore cut is pinned from both sides: -3 is tier 0 but -2 is not,
+  // 0 is tier 1 but 1 is not, 2 is tier 2 but 3 is not.
+  const halfPathChunk = { name: "parse", kind: "chunk", provenance: { sourceUri: "src/abcd" } };
+
+  it("weight 100: nameScore -2 (chunk, half-length path match) is tier 1", () => {
+    expect(baseScore(halfPathChunk, "parse", { path: "src/" })).toBe(-2);
+    const r = rank({ ...halfPathChunk, attrs: w(100) }, "parse", undefined, "src/");
+    expect(r).toMatchObject({ tier: 1, score: -102, matchSource: "name_exact" });
+  });
+
+  it("weight 100: nameScore 0 (exact name, no kind boost) is tier 1", () => {
+    expect(baseScore({ name: "parse", kind: "variable" }, "parse")).toBe(0);
+    const r = rank({ name: "parse", kind: "variable", attrs: w(100) }, "parse");
+    expect(r).toMatchObject({ tier: 1, score: -100, matchSource: "name_exact" });
+  });
+
+  it("weight 100: nameScore 1 (chunk, weak path match) is tier 2", () => {
+    const node = {
+      name: "parse",
+      kind: "chunk",
+      provenance: { sourceUri: "src/some/deeply/nested/directory/structure/file.ts" },
+      attrs: w(100),
+    };
+    expect(baseScore(node, "parse", { path: "src" })).toBe(1);
+    const r = rank(node, "parse", undefined, "src");
+    expect(r).toMatchObject({ tier: 2, score: -99, matchSource: "name_exact" });
+  });
+
+  it("weight 100: nameScore 5 is tier 2", () => {
+    const r = rank({ name: "parse", kind: "chunk", attrs: w(100) }, "parse");
+    expect(r).toMatchObject({ tier: 2, score: -95, matchSource: "name_exact" });
+  });
+
+  it("weights 99 and 60 are tier 3 name_partial", () => {
+    for (const weight of [99, 60]) {
+      const r = rank({ name: "widgetFactory", kind: "class", attrs: w(weight) }, "widget");
+      expect(r.tier).toBe(3);
+      expect(r.matchSource).toBe("name_partial");
+    }
+  });
+
+  it("weights 59 and 40 are tier 4 provenance", () => {
+    for (const weight of [59, 40]) {
+      const r = rank({ name: "other", kind: "file", attrs: w(weight) }, "widget");
+      expect(r).toMatchObject({ tier: 4, score: -weight, matchSource: "provenance" });
+    }
+  });
+
+  it("weights 39 and 20 are tier 4 claim_or_decision", () => {
+    for (const weight of [39, 20]) {
+      const r = rank({ name: "other", kind: "decision", attrs: w(weight) }, "widget");
+      expect(r).toMatchObject({ tier: 4, score: -weight, matchSource: "claim_or_decision" });
+    }
+  });
+
+  it("weight 19 falls through to the resolver", () => {
+    const r = rank({ name: "widget", kind: "class", attrs: w(19) }, "widget");
+    expect(r).toMatchObject({ tier: 0, score: -3, matchSource: "resolver" });
+  });
+
+  it("no weight: exact function (nameScore -1) is tier 1", () => {
+    const r = rank({ name: "parse", kind: "function" }, "parse");
+    expect(r).toMatchObject({ tier: 1, score: -1, matchSource: "resolver" });
+  });
+
+  it("no weight: nameScore -2 is tier 1", () => {
+    const r = rank(halfPathChunk, "parse", undefined, "src/");
+    expect(r).toMatchObject({ tier: 1, score: -2, matchSource: "resolver" });
+  });
+
+  it("no weight: nameScore 0 is tier 1", () => {
+    const r = rank({ name: "parse", kind: "variable" }, "parse");
+    expect(r).toMatchObject({ tier: 1, score: 0, matchSource: "resolver" });
+  });
+
+  it("no weight: nameScore 1 (chunk with a weak path match) is tier 2", () => {
+    const node = {
+      name: "parse",
+      kind: "chunk",
+      provenance: { sourceUri: "src/some/deeply/nested/directory/structure/file.ts" },
+    };
+    const r = rank(node, "parse", undefined, "src");
+    expect(r).toMatchObject({ tier: 2, score: 1, matchSource: "resolver" });
+  });
+
+  it("no weight: nameScore 2 is tier 2 and nameScore 3 is tier 5", () => {
+    // Prefix 15, --kind class -5, container -3, path bonus -4 minus 1 or 0.
+    const near = { name: "widgetFactory", kind: "class", provenance: { sourceUri: "lib/widgets/widgetFactory.ts" } };
+    const far = { name: "widgetFactory", kind: "class", provenance: { sourceUri: "lib/widgets/factory/deeply/nested/widgetFactory.ts" } };
+    expect(baseScore(near, "widget", { kind: "class", path: "lib/" })).toBe(2);
+    expect(baseScore(far, "widget", { kind: "class", path: "l" })).toBe(3);
+    expect(rank(near, "widget", "class", "lib/")).toMatchObject({ tier: 2, score: 2, matchSource: "resolver" });
+    expect(rank(far, "widget", "class", "l")).toMatchObject({ tier: 5, score: 3, matchSource: "attrs" });
+  });
+
+  it("no weight: exact chunk with no path (nameScore 5) is tier 5", () => {
+    const r = rank({ name: "parse", kind: "chunk" }, "parse");
+    expect(r).toMatchObject({ tier: 5, score: 5, matchSource: "attrs" });
+  });
+
+  it("promotes a defining file whose stem matches the term (file_stem)", () => {
+    const node = {
+      name: "borderStylesReset.js",
+      kind: "file",
+      provenance: { sourceUri: "src/borderStylesReset.js" },
+      attrs: w(60),
+    };
+    const r = rank(node, "borderStylesReset");
+    expect(r.matchSource).toBe("file_stem");
+    expect(r.tier).toBeLessThanOrEqual(2);
+  });
+
+  it("caps a demoted exact-name row (build output) at tier 2", () => {
+    const node = {
+      name: "widget",
+      kind: "class",
+      provenance: { sourceUri: "dist/widget.js" },
+      attrs: { ...w(100), language: "javascript" },
+    };
+    const r = rank(node, "widget");
+    expect(r.tier).toBe(2);
+    expect(r.matchSource).toBe("name_exact");
+  });
+});
+
+describe("searchSort tiebreak", () => {
+  const row = (id: string, kind = "function") => {
+    const node = { id, name: "twin", kind, attrs: { _search_weight: 100 } };
+    return { node, rank: rankScore(node, "twin", undefined, undefined) };
+  };
+
+  it("orders fully tied rows by id whatever the input order", () => {
+    const a = row("a-id");
+    const b = row("b-id");
+    expect([b, a].sort(searchSort).map((r) => r.node.id)).toEqual(["a-id", "b-id"]);
+    expect([a, b].sort(searchSort).map((r) => r.node.id)).toEqual(["a-id", "b-id"]);
+  });
+
+  it("still ranks by tier before id", () => {
+    const strong = { node: { id: "z-id", name: "twin", kind: "function" }, rank: { tier: 0, score: -1, matchSource: "x" } };
+    const weak = { node: { id: "a-id", name: "twin", kind: "function" }, rank: { tier: 1, score: -1, matchSource: "x" } };
+    expect([weak, strong].sort(searchSort).map((r) => r.node.id)).toEqual(["z-id", "a-id"]);
+  });
+
+  it("still ranks by name before id", () => {
+    const x = { node: { id: "z-id", name: "alpha", kind: "function" }, rank: { tier: 1, score: -1, matchSource: "x" } };
+    const y = { node: { id: "a-id", name: "beta", kind: "function" }, rank: { tier: 1, score: -1, matchSource: "x" } };
+    expect([y, x].sort(searchSort).map((r) => r.node.id)).toEqual(["z-id", "a-id"]);
   });
 });
 

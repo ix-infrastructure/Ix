@@ -9,6 +9,7 @@ import { resolveReadSystemId } from "../resolve.js";
 import { roundFloat, printJson } from "../format.js";
 import { llmLine, llmError, llmShortId } from "../llm.js";
 import { parsePickOption } from "../options.js";
+import { setOutcome } from "../outcome.js";
 import { renderMapText, renderMapLlm, type MapRegion, type MapResult } from "./map.js";
 import {
   renderSubsystemExplanationJson,
@@ -224,18 +225,10 @@ Examples:
       } catch (err: any) {
         const body = parseErrorBody(err);
         if (body) {
-          if (opts.format === "json") {
-            printJson(body);
-            process.exitCode = 1;
-            return;
-          }
-          if (opts.format === "llm") {
-            console.log(renderSubsystemErrorLlm(body));
-            process.exitCode = 1;
-            return;
-          }
-          renderSubsystemError(body, Boolean(opts.explain));
-          process.exitCode = 1;
+          if (opts.format === "json") printJson(body);
+          else if (opts.format === "llm") console.log(renderSubsystemErrorLlm(body));
+          else renderSubsystemError(body, Boolean(opts.explain));
+          setSubsystemErrorExit(body);
           return;
         }
         console.error(chalk.red("Error:"), err.message);
@@ -362,6 +355,17 @@ export function renderScopedSubsystemLlm(result: ScopedSubsystemResult): string[
   };
   for (const child of result.children) emit(child);
   return lines;
+}
+
+/**
+ * The exit code for a backend error body, matching the slug it prints: an
+ * ambiguous region is 2 and an unknown one 3, as for every graph command that
+ * resolves a target (outcome.ts); anything else is 1.
+ */
+export function setSubsystemErrorExit(body: unknown): void {
+  if (isAmbiguousSubsystemResult(body)) setOutcome("ambiguous");
+  else if (isUnknownSubsystemTargetResult(body)) setOutcome("not_found");
+  else process.exitCode = 1;
 }
 
 export function renderSubsystemErrorLlm(body: unknown): string {

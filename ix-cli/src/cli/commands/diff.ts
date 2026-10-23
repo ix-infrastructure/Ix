@@ -112,30 +112,6 @@ function renderDiffSummaryLlm(result: any): string {
 
 const execFileAsync = promisify(execFile);
 
-// ── Line-level diff (legacy, kept for backward compat) ─────────────
-
-/** Simple sequential line diff producing `+ `, `- `, `  ` prefixed lines. */
-export function computeLineDiff(before: string, after: string): string[] {
-  const beforeLines = before.split("\n");
-  const afterLines = after.split("\n");
-  const result: string[] = [];
-  const maxLen = Math.max(beforeLines.length, afterLines.length);
-
-  for (let i = 0; i < maxLen; i++) {
-    const bLine = i < beforeLines.length ? beforeLines[i] : undefined;
-    const aLine = i < afterLines.length ? afterLines[i] : undefined;
-
-    if (bLine === aLine) {
-      result.push(`  ${bLine}`);
-    } else {
-      if (bLine !== undefined) result.push(`- ${bLine}`);
-      if (aLine !== undefined) result.push(`+ ${aLine}`);
-    }
-  }
-
-  return result;
-}
-
 // ── JSON compaction ────────────────────────────────────────────────
 
 /** Compact a node snapshot from a diff change — drop timestamps, null deletedRev, member_files UUIDs. */

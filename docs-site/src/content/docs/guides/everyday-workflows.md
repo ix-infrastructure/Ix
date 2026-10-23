@@ -37,7 +37,7 @@ Pass `--kind` to `ix search`, which keeps results focused. A module-level consta
 ## "Show me the code"
 
 ```bash
-ix read verify_token            # a symbol's own span
+ix read verify_token            # a symbol's own span (paged at 400 lines)
 ix read src/auth.py:10-50       # a line range
 ix read src/auth.py --all       # a whole file (otherwise paged at 400 lines)
 ```

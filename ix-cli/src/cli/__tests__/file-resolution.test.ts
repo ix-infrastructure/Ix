@@ -1,149 +1,312 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { describe, it, expect } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { Command } from "commander";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 /**
- * Verify that the shared file-first resolution helper exists
- * and that all graph navigation commands use it consistently.
+ * The shared file-first resolution helper, and the commands that take a file
+ * or entity target, checked by what they do: which file a target resolves to,
+ * in which order the graph is asked, and which id reaches the backend.
  */
 
-const resolveTsPath = path.resolve(__dirname, "../resolve.ts");
-const resolveContent = fs.readFileSync(resolveTsPath, "utf-8");
+// Graph reads refuse a directory no workspace covers (workspace_not_mapped),
+// and this suite runs from a tmp directory that is not registered anywhere. It
+// is about resolution, not scoping, so the directory counts as mapped here.
+vi.mock("../bootstrap.js", async (orig) => ({
+  ...(await orig<typeof import("../bootstrap.js")>()),
+  resolveWorkspaceId: () => "ws-test",
+}));
 
-const historyTsPath = path.resolve(__dirname, "../commands/history.ts");
-const historyContent = fs.readFileSync(historyTsPath, "utf-8");
+const client = vi.hoisted(() => ({
+  search: vi.fn(),
+  entity: vi.fn(),
+  expand: vi.fn(),
+  provenance: vi.fn(),
+  diff: vi.fn(),
+  listPatches: vi.fn(),
+  resolvePrefix: vi.fn(),
+}));
 
-const diffTsPath = path.resolve(__dirname, "../commands/diff.ts");
-const diffContent = fs.readFileSync(diffTsPath, "utf-8");
+vi.mock("../../client/api.js", () => ({
+  IxClient: class {
+    async workspaceSystem() { return { systemId: null }; }
+    async search(...args: unknown[]) { return client.search(...args); }
+    async entity(...args: unknown[]) { return client.entity(...args); }
+    async expand(...args: unknown[]) { return client.expand(...args); }
+    async provenance(...args: unknown[]) { return client.provenance(...args); }
+    async diff(...args: unknown[]) { return client.diff(...args); }
+    async listPatches(...args: unknown[]) { return client.listPatches(...args); }
+    async resolvePrefix(...args: unknown[]) { return client.resolvePrefix(...args); }
+  },
+}));
 
-/** Commands that should all use resolveFileOrEntity for consistent file-path support. */
-const COMMANDS_USING_FILE_RESOLUTION = [
-  "overview", "callers", "contains", "imports", "depends", "locate", "impact", "explain",
-];
+vi.mock("../config.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../config.js")>(),
+  readStitchScope: () => undefined,
+  writeStitchScope: vi.fn(),
+}));
 
-const commandContents: Record<string, string> = {};
-for (const cmd of COMMANDS_USING_FILE_RESOLUTION) {
-  const cmdPath = path.resolve(__dirname, `../commands/${cmd}.ts`);
-  commandContents[cmd] = fs.readFileSync(cmdPath, "utf-8");
+vi.mock("../hierarchy.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../hierarchy.js")>(),
+  getSystemPath: async () => [],
+  getEffectiveSystemPath: async () => [],
+  bucketByHierarchy: async () => [],
+}));
+
+import { looksFileLike, resetReadScope, resolveFileOrEntityFull } from "../resolve.js";
+import { registerHistoryCommand } from "../commands/history.js";
+import { registerDiffCommand } from "../commands/diff.js";
+
+function node(id: string, name: string, kind: string, sourceUri: string) {
+  return { id, name, kind, attrs: {}, provenance: { sourceUri } };
 }
 
+/** A client whose search answers from a fixed list by case-insensitive substring, like the backend. */
+function graph(nodes: ReturnType<typeof node>[]) {
+  const search = vi.fn(async (term: string, opts?: { kind?: string }) =>
+    nodes.filter((n) => n.name.toLowerCase().includes(term.toLowerCase()) && (!opts?.kind || n.kind === opts.kind)));
+  return { search, workspaceSystem: async () => ({ systemId: null }) } as never as Parameters<typeof resolveFileOrEntityFull>[0] & { search: typeof search };
+}
+
+/** A client whose file search returns these files whatever the term, as a fuzzy backend window might. */
+function fileWindow(files: ReturnType<typeof node>[]) {
+  const search = vi.fn(async (_term: string, opts?: { kind?: string }) => (opts?.kind === "file" ? files : []));
+  return { search, workspaceSystem: async () => ({ systemId: null }) } as never as Parameters<typeof resolveFileOrEntityFull>[0];
+}
+
+async function run(register: (program: Command) => void, args: string[]): Promise<{ stdout: string; command: Command }> {
+  const program = new Command().name("ix").exitOverride();
+  register(program);
+  const stdout: string[] = [];
+  const log = vi.spyOn(console, "log").mockImplementation((...parts) => { stdout.push(parts.join(" ")); });
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  const write = vi.spyOn(process.stderr, "write").mockImplementation((() => true) as never);
+  try {
+    await program.parseAsync(args, { from: "user" });
+  } finally {
+    log.mockRestore();
+    error.mockRestore();
+    write.mockRestore();
+  }
+  return { stdout: stdout.join("\n"), command: program.commands[0] };
+}
+
+const FILE_A = node("file-a-id", "a.ts", "file", "src/a.ts");
+
+let dir: string;
+let savedCwd: string;
+let savedExitCode: typeof process.exitCode;
+let savedIxHome: string | undefined;
+
+beforeEach(() => {
+  // A non-git directory of its own: nothing here touches the real checkout or
+  // ~/.ix, and git has no repository to answer from.
+  dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ix-file-res-")));
+  savedIxHome = process.env.IX_HOME;
+  process.env.IX_HOME = path.join(dir, ".ix");
+  savedCwd = process.cwd();
+  process.chdir(dir);
+  resetReadScope();
+  savedExitCode = process.exitCode;
+  process.exitCode = undefined;
+  for (const fn of Object.values(client)) fn.mockReset();
+  client.search.mockImplementation(async (term: string, opts?: { kind?: string }) =>
+    [FILE_A].filter((n) => n.name.toLowerCase().includes(term.toLowerCase()) && (!opts?.kind || n.kind === opts.kind)));
+  client.entity.mockImplementation(async (id: string) => ({ node: { ...FILE_A, id } }));
+  client.expand.mockResolvedValue({ nodes: [], edges: [] });
+  client.provenance.mockResolvedValue([]);
+  client.diff.mockResolvedValue({ fromRev: 3, toRev: 5, changes: [], total: 0 });
+  client.listPatches.mockResolvedValue([]);
+  client.resolvePrefix.mockRejectedValue(new Error("not a prefix"));
+});
+
+afterEach(() => {
+  process.exitCode = savedExitCode;
+  process.chdir(savedCwd);
+  if (savedIxHome === undefined) delete process.env.IX_HOME;
+  else process.env.IX_HOME = savedIxHome;
+  resetReadScope();
+  fs.rmSync(dir, { recursive: true, force: true });
+  vi.restoreAllMocks();
+});
+
 describe("file-first resolution helper", () => {
-  it("resolve.ts exports looksFileLike", () => {
-    expect(resolveContent).toContain("export function looksFileLike");
+  it("looksFileLike recognises paths and known extensions, not symbols", () => {
+    for (const target of ["src/a.ts", "a\\b", "parser.py", "index.tsx"]) {
+      expect(looksFileLike(target), target).toBe(true);
+    }
+    for (const target of ["Widget", "a.unknownext", "CompactionJob::Run"]) {
+      expect(looksFileLike(target), target).toBe(false);
+    }
   });
 
-  it("resolve.ts exports resolveFileOrEntity", () => {
-    expect(resolveContent).toContain("export async function resolveFileOrEntity");
+  it("resolveFileOrEntity tries file graph match before symbol resolution", async () => {
+    const nodes = [node("f-parser", "parser.py", "file", "src/parser.py"), node("fn-parser", "parser", "function", "src/parser.py")];
+
+    const asFile = graph(nodes);
+    const fileResult = await resolveFileOrEntityFull(asFile, "parser.py", { format: "json" });
+    expect(fileResult.resolved && fileResult.entity.id).toBe("f-parser");
+    expect(asFile.search.mock.calls[0][1]).toMatchObject({ kind: "file", nameOnly: true });
+
+    const asSymbol = graph(nodes);
+    const symbolResult = await resolveFileOrEntityFull(asSymbol, "parser", { format: "json" });
+    expect(symbolResult.resolved && symbolResult.entity.id).toBe("fn-parser");
   });
 
-  it("resolveFileOrEntity tries file graph match before symbol resolution", () => {
-    // The function should check looksFileLike first, then fall through to structured symbol resolution
-    expect(resolveContent).toContain("looksFileLike(target)");
-    expect(resolveContent).toContain("tryFileGraphMatch(client, target,");
-    expect(resolveContent).toContain("resolveEntityFull(client, target,");
-  });
+  it("tryFileGraphMatch scores exact path matches higher than basename matches", async () => {
+    // Exact filename (quality 1) beats a bare-name match (quality 2), even at a longer uri.
+    const byFilename = await resolveFileOrEntityFull(fileWindow([
+      node("bare", "score.js", "file", "score.js"),
+      node("exact-name", "score.ts", "file", "src/deep/ranking/score.ts"),
+    ]), "score.ts", { format: "json" });
+    expect(byFilename.resolved && byFilename.entity.id).toBe("exact-name");
 
-  it("tryFileGraphMatch scores exact path matches higher than basename matches", () => {
-    expect(resolveContent).toContain("quality: 0"); // exact path
-    expect(resolveContent).toContain("quality: 1"); // exact filename
-    expect(resolveContent).toContain("quality: 2"); // bare name
+    // Exact path (quality 0) beats an exact filename elsewhere, and says it was exact.
+    const byPath = await resolveFileOrEntityFull(fileWindow([
+      node("root-score", "score.ts", "file", "score.ts"),
+      node("path-score", "score.ts", "file", "src/ranking/score.ts"),
+    ]), "src/ranking/score.ts", { format: "json" });
+    expect(byPath.resolved && byPath.entity).toMatchObject({ id: "path-score", resolutionMode: "exact" });
+
+    // CL-19 touchpoint: two files of the same name at the same quality resolve
+    // to the shorter uri today. CL-19 fix 1 makes this case ambiguous on
+    // purpose; update this expectation with it rather than working around it.
+    const byLength = await resolveFileOrEntityFull(fileWindow([
+      node("deep-score", "score.ts", "file", "src/deep/score.ts"),
+      node("short-score", "score.ts", "file", "a/score.ts"),
+    ]), "score.ts", { format: "json" });
+    expect(byLength.resolved && byLength.entity).toMatchObject({ id: "short-score", resolutionMode: "scored" });
   });
 });
 
 describe("history command uses file-first resolution", () => {
-  it("imports resolveFileOrReport", () => {
-    expect(historyContent).toContain("resolveFileOrReport");
+  it("accepts a target argument, not entityId", async () => {
+    const program = new Command();
+    registerHistoryCommand(program);
+    const [target] = program.commands[0].registeredArguments;
+    expect(target.name()).toBe("target");
+    expect(target.required).toBe(true);
   });
 
-  it("accepts a target argument, not entityId", () => {
-    expect(historyContent).toContain('command("history <target>")');
-  });
-
-  it("supports --kind option", () => {
-    expect(historyContent).toContain("--kind");
+  it("asks for the provenance of the resolved file", async () => {
+    const { stdout } = await run(registerHistoryCommand, ["history", "src/a.ts", "--format", "json"]);
+    expect(client.provenance).toHaveBeenCalledWith("file-a-id");
+    expect(JSON.parse(stdout).resolvedTarget.kind).toBe("file");
   });
 });
 
 describe("diff command supports scoped target", () => {
   it("accepts optional third positional argument", () => {
-    expect(diffContent).toContain('command("diff <fromRev> <toRev> [target]")');
+    const program = new Command();
+    registerDiffCommand(program);
+    const target = program.commands[0].registeredArguments[2];
+    expect(target.name()).toBe("target");
+    expect(target.required).toBe(false);
   });
 
-  it("uses resolveFileOrReport for target resolution", () => {
-    expect(diffContent).toContain("resolveFileOrReport");
+  it("passes resolved entity ID to diff API", async () => {
+    await run(registerDiffCommand, ["diff", "3", "5", "src/a.ts", "--format", "json"]);
+    expect(client.diff).toHaveBeenCalled();
+    expect(client.diff.mock.calls.every(([, , opts]) => opts.entityId === "file-a-id")).toBe(true);
   });
 
-  it("passes resolved entity ID to diff API", () => {
-    expect(diffContent).toContain("entityId");
+  it("sends no entity ID without a target", async () => {
+    await run(registerDiffCommand, ["diff", "3", "5", "--format", "json"]);
+    expect(client.diff).toHaveBeenCalled();
+    expect(client.diff.mock.calls.every(([, , opts]) => opts.entityId === undefined)).toBe(true);
   });
 
-  it("supports --content flag for detailed attribute diffs", () => {
-    expect(diffContent).toContain('"--content"');
-    expect(diffContent).toContain("formatDiffContent");
-  });
+  it("--content reads source from disk using line spans into sourceContent", async () => {
+    const file = path.join(dir, "f.ts");
+    fs.writeFileSync(file, "line one\nline two\nline three\n");
+    client.diff.mockResolvedValue({
+      fromRev: 3,
+      toRev: 5,
+      total: 1,
+      changes: [{
+        changeType: "added",
+        entityId: "fn-id",
+        atToRev: { name: "added", kind: "function", attrs: { line_start: 2, line_end: 3 }, provenance: { source_uri: file } },
+      }],
+    });
+    // The from side has a timestamp, and git has no repository here to read it
+    // from, so the textual diff gives up and the graph-driven fallback answers.
+    client.listPatches.mockResolvedValue([{ rev: 3, timestamp: "2026-01-01T00:00:00Z" }]);
 
-  it("--content reads source from disk using line spans", () => {
-    expect(diffContent).toContain("readSourceSpan");
-    expect(diffContent).toContain("line_start");
-    expect(diffContent).toContain("line_end");
-    expect(diffContent).toContain("fs.readFileSync");
-  });
-
-  it("--content augments JSON output with sourceContent", () => {
-    expect(diffContent).toContain("sourceContent");
+    const { stdout } = await run(registerDiffCommand, ["diff", "3", "5", "--content", "--format", "json"]);
+    expect(JSON.parse(stdout).changes[0].sourceContent).toBe("line two\nline three");
   });
 });
 
+type LoadRegister = () => Promise<(program: Command) => void>;
+
+/** Graph commands that take a file or entity target. */
+const COMMANDS_USING_FILE_RESOLUTION: ReadonlyArray<readonly [string, LoadRegister]> = [
+  ["overview", async () => (await import("../commands/overview.js")).registerOverviewCommand],
+  ["callers", async () => (await import("../commands/callers.js")).registerCallersCommand],
+  ["contains", async () => (await import("../commands/contains.js")).registerContainsCommand],
+  ["imports", async () => (await import("../commands/imports.js")).registerImportsCommand],
+  ["depends", async () => (await import("../commands/depends.js")).registerDependsCommand],
+  ["locate", async () => (await import("../commands/locate.js")).registerLocateCommand],
+  ["impact", async () => (await import("../commands/impact.js")).registerImpactCommand],
+  ["explain", async () => (await import("../commands/explain.js")).registerExplainCommand],
+];
+
+/** Every entity id a command asked the backend about, after resolution. */
+function requestedIds(): string[] {
+  return [
+    ...client.entity.mock.calls.map(([id]) => id),
+    ...client.expand.mock.calls.map(([id]) => id),
+  ].filter((id): id is string => typeof id === "string");
+}
+
 describe("all graph commands use resolveFileOrEntity consistently", () => {
-  for (const cmd of COMMANDS_USING_FILE_RESOLUTION) {
-    it(`${cmd} uses file-first resolution`, () => {
-      const helper = cmd === "locate" ? "resolveFileOrEntity" : "resolveFileOrReport";
-      expect(commandContents[cmd]).toContain(helper);
-    });
-  }
+  it.each(COMMANDS_USING_FILE_RESOLUTION)("%s resolves a file path to the file entity", async (command, loadRegister) => {
+    await run(await loadRegister(), [command, "src/a.ts", "--format", "json"]);
+    expect(requestedIds()).toContain("file-a-id");
+  });
 });
 
 describe("--pick support", () => {
-  it("resolve.ts exports applyPick", () => {
-    expect(resolveContent).toContain("export function applyPick");
+  // --pick through each command is pick-option-validation.test.ts and
+  // resolver-consistency.test.ts; applyPick on its own is pick-resolution.test.ts.
+  it("--pick selects among ambiguous candidates by 1-based rank", async () => {
+    const result = await resolveFileOrEntityFull(graph([
+      node("first-id", "Duplicate", "function", "src/first.ts"),
+      node("second-id", "Duplicate", "function", "src/second.ts"),
+    ]), "Duplicate", { format: "json", pick: 2 });
+    expect(result.resolved && result.entity.id).toBe("second-id");
   });
-
-  it("resolve.ts delegates ambiguity output to the shared reporter", () => {
-    expect(resolveContent).toContain("reportAmbiguousTarget(symbol, result, \"text\", opts)");
-  });
-
-  it("overview.ts declares --path option", () => {
-    expect(commandContents["overview"]).toContain('"--path');
-  });
-
-  it("overview.ts declares --pick option", () => {
-    expect(commandContents["overview"]).toContain('"--pick');
-  });
-
-  const PICK_COMMANDS = ["overview", "callers", "contains", "imports", "depends", "locate", "impact", "explain"];
-  for (const cmd of PICK_COMMANDS) {
-    it(`${cmd} declares --pick option`, () => {
-      expect(commandContents[cmd]).toContain("--pick");
-    });
-  }
 });
 
 describe("ambiguous result structure", () => {
-  it("resolve.ts AmbiguousResult includes rank field", () => {
-    expect(resolveContent).toContain("rank?:");
+  it("ranks candidates 1..n and carries the ambiguous_resolution diagnostic", async () => {
+    const result = await resolveFileOrEntityFull(graph([
+      node("first-id", "Duplicate", "function", "src/first.ts"),
+      node("second-id", "Duplicate", "function", "src/second.ts"),
+    ]), "Duplicate", { format: "json" });
+    expect(result.resolved).toBe(false);
+    if (result.resolved || !result.ambiguous) throw new Error("expected an ambiguous result");
+    expect(result.result.candidates.map((c) => c.rank)).toEqual([1, 2]);
+    expect(result.result.diagnostics?.[0].code).toBe("ambiguous_resolution");
   });
+});
 
-  it("resolve.ts AmbiguousResult includes diagnostics field", () => {
-    expect(resolveContent).toContain("diagnostics?:");
+describe("test isolation", () => {
+  // afterEach must put back an IX_HOME the worker already had, not delete it.
+  const ambient = path.join(os.tmpdir(), "ix-file-res-ambient-ix-home");
+  beforeAll(() => {
+    process.env.IX_HOME = ambient;
   });
-
-  it("buildAmbiguous sets rank on candidates", () => {
-    expect(resolveContent).toContain("rank,");
+  afterAll(() => {
+    const after = process.env.IX_HOME;
+    delete process.env.IX_HOME;
+    expect(after).toBe(ambient);
   });
-
-  it("buildAmbiguous sets diagnostics with ambiguous_resolution code", () => {
-    expect(resolveContent).toContain("ambiguous_resolution");
+  it("points IX_HOME at the per-test temp dir while a test runs", () => {
+    expect(process.env.IX_HOME).toBe(path.join(dir, ".ix"));
   });
 });

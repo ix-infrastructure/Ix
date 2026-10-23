@@ -246,3 +246,56 @@ describe("ix verify (CL-24A)", () => {
     expect(out.stdout).toMatch(/^verify graph=clean files=1 clean=1 .*diverged=0/m);
   });
 });
+
+// The outcome contract agents route on (ix-cli/src/cli/outcome.ts), against a
+// real backend: `clamp` is defined in app/utils.py and web/src/math.ts, and
+// app/pricing.py imports it (`from app.utils import clamp`, a one-line module
+// entity the ambiguity lists as --pick 1 but --all skips).
+describe("agent outcomes", () => {
+  it("exits 0 / 2 / 3 / 4 for results, ambiguity, a miss and an unmapped directory", () => {
+    const co = checkout("polyglot");
+    map(env, co);
+
+    expect(ix(env, co, ["locate", "slugify", "--format", "json"]).status).toBe(0);
+
+    const ambiguous = ix(env, co, ["callers", "clamp", "--format", "json"], true);
+    expect(ambiguous.status).toBe(2);
+    expect(JSON.parse(ambiguous.stdout).error).toBe("ambiguous_target");
+
+    const miss = ix(env, co, ["locate", "definitelyNotAName", "--format", "json"], true);
+    expect(miss.status).toBe(3);
+    expect(JSON.parse(miss.stdout).error).toBe("unresolved_target");
+
+    const unmapped = checkout("polyglot-b");
+    const notMapped = ix(env, unmapped, ["locate", "slugify", "--format", "json"], true);
+    expect(notMapped.status).toBe(4);
+    expect(JSON.parse(notMapped.stdout).error).toBe("workspace_not_mapped");
+
+    process.env.IX_LEGACY_EXIT_CODES = "1";
+    try {
+      expect(ix(env, co, ["callers", "clamp", "--format", "json"], true).status).toBe(1);
+    } finally {
+      delete process.env.IX_LEGACY_EXIT_CODES;
+    }
+  });
+
+  it("--all answers every candidate, and several targets answer in one call", () => {
+    const co = checkout("polyglot");
+    map(env, co);
+
+    const all = JSON.parse(ix(env, co, ["callers", "clamp", "--all", "--format", "json"]).stdout);
+    expect(all.resolutionMode).toBe("all");
+    expect(all.candidates.map((c: { path: string }) => c.path).sort()).toEqual(["app/utils.py", "web/src/math.ts"]);
+    expect(all.results.length).toBeGreaterThan(0);
+    // Each candidate keeps the number --pick gives it in the ambiguity list.
+    const listed = JSON.parse(ix(env, co, ["callers", "clamp", "--format", "json"], true).stdout).candidates;
+    for (const c of all.candidates) {
+      expect(listed.find((l: { rank: number }) => l.rank === c.n)).toMatchObject({ id: c.id });
+    }
+    for (const row of all.results) expect(all.candidates.map((c: { n: number }) => c.n)).toContain(row.candidate);
+
+    const many = ix(env, co, ["locate", "slugify", "clamp", "definitelyNotAName", "--format", "json"], true);
+    expect(many.status).toBe(3);
+    expect(JSON.parse(many.stdout).targets.map((t: { exitCode: number }) => t.exitCode)).toEqual([0, 2, 3]);
+  });
+});

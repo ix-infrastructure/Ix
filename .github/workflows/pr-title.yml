@@ -31,3 +31,13 @@ jobs:
             perf
             chore
             revert
+          # Jarvis (the agent that opens PRs) prefixes its titles with a status tag:
+          # "[jarvis] ", "[jarvis][review-blocked] ", "[jarvis][blocked: <reason>] ", ...
+          # The pattern below is the action's default conventional header pattern
+          # with an optional leading "[jarvis]" tag (plus further [...] groups and
+          # whitespace). Everything after the tag is judged exactly as before; other
+          # bracket prefixes still fail. The tag only lives on the PR title: when a
+          # Jarvis PR is squash-merged it may be dropped from (or carried into) the
+          # commit title depending on merge settings, so check the squash title.
+          headerPattern: '^(?:\[jarvis\](?:\[[^\]]*\])*\s+)?(\w*)(?:\((.*)\))?!?: (.*)$'
+          headerPatternCorrespondence: type, scope, subject

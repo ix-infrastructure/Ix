@@ -224,6 +224,43 @@ describe("ix context investigation state", () => {
     expect(loaded?.bundle.evidence).toEqual(bundle.evidence);
   });
 
+  it("keeps generatedAt in the saved file, and resumes it", () => {
+    const bundle = bundleWith([makeClaim("renders to DOM", 0.9)]);
+    saveInvestigation("widget-check", bundle);
+
+    const onDisk = JSON.parse(readFileSync(join(investigationsDir(), "widget-check.json"), "utf8"));
+    expect(typeof bundle.generatedAt).toBe("string");
+    expect(onDisk.bundle.generatedAt).toBe(bundle.generatedAt);
+    expect(loadInvestigation("widget-check")?.bundle.generatedAt).toBe(bundle.generatedAt);
+  });
+
+  it("loads and renders a saved bundle that lacks generatedAt", () => {
+    const { generatedAt: _omit, ...bundle } = bundleWith([makeClaim("renders to DOM", 0.9)]);
+    writeState("no-stamp", envelope("no-stamp", bundle));
+
+    expect(loadInvestigation("no-stamp")?.bundle.target.name).toBe("Widget");
+    for (const format of ["json", "llm"] as const) {
+      const lines = captureLog(() => renderSavedInvestigation("no-stamp", format));
+      expect(lines.length).toBeGreaterThan(0);
+    }
+    expect(process.exitCode).toBe(priorExitCode);
+  });
+
+  it("round-trips the format the budget was sized for, and loads a save without one", () => {
+    const sized = bundleWith([makeClaim("renders to DOM", 0.9)]);
+    sized.budgets = { ...sized.budgets, format: "llm" };
+    saveInvestigation("sized-llm", sized);
+    expect(loadInvestigation("sized-llm")?.bundle.budgets.format).toBe("llm");
+
+    // A bundle saved before the field existed has none, and --diff sizes it as json.
+    const legacy = bundleWith([makeClaim("renders to DOM", 0.9)]);
+    delete (legacy.budgets as { format?: string }).format;
+    saveInvestigation("sized-legacy", legacy);
+    const loaded = loadInvestigation("sized-legacy");
+    expect(loaded).toBeDefined();
+    expect(loaded?.bundle.budgets.format).toBeUndefined();
+  });
+
   it("writes into an investigations subdirectory of IX_HOME, not its root", () => {
     // IX_HOME is the Ix home itself — it holds config.yaml, bin/, cli/ and
     // dotfiles like .version-check.json. Saved state belongs in a subdirectory
@@ -491,7 +528,7 @@ describe("ix context investigation state", () => {
     saveInvestigation("widget-check", saved);
     const stored = loadInvestigation("widget-check")!;
     const fresh = bundleWith([makeClaim("renders to DOM", 0.9)]);
-    expect(fresh.budgets).toEqual({ maxEntities: 50, maxRelationships: 100, maxEvidence: 25, maxTokens: 1500, maxChars: 12000 });
+    expect(fresh.budgets).toEqual({ maxEntities: 50, maxRelationships: 100, maxEvidence: 25, maxTokens: 1500, maxChars: 12000, format: "json" });
 
     const baselineDiff = diffInvestigations(stored, fresh);
     expect(baselineDiff.budgets.saved).toEqual({ maxEntities: 5, maxRelationships: 1, maxEvidence: 2, maxTokens: 1500, maxChars: 12000 });
@@ -728,10 +765,10 @@ describe("ix context investigation state", () => {
       // must never be built with a template literal. Its endpoints are names:
       // the ids stay in the evidence id and in the `relationship` records.
       expect(lines).toContain(
-        'evidence change=added score=30 kind=relationship title="Widget --holds--> mount"',
+        'evidence change=added score=4000 kind=relationship title="Widget --holds--> mount"',
       );
       expect(lines).toContain(
-        'evidence change=removed score=30 kind=relationship title="Widget --calls--> render"',
+        'evidence change=removed score=4000 kind=relationship title="Widget --calls--> render"',
       );
 
       // One record per line — the wire format invariant.
@@ -780,7 +817,7 @@ describe("ix context investigation state", () => {
       }
       // The exact record `--diff` would emit for the same item, minus `change=`.
       expect(lines).toContain(
-        'evidence score=30 kind=relationship title="Widget --calls--> render"',
+        'evidence score=4000 kind=relationship title="Widget --calls--> render"',
       );
       // And the header is a record too, not fifteen bare `key=value` lines
       // built by interpolation — `target=${name}` breaks on any name with a
