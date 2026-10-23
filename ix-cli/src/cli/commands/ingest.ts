@@ -11,7 +11,7 @@ import { ParsePool } from './parse-pool.js';
 import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
 import { combineSignals, currentRunSignal } from '../../client/run-signal.js';
-import type { GraphPatchPayload } from '../../client/types.js';
+import type { GraphNode, GraphPatchPayload } from '../../client/types.js';
 import { canonicalWorkspacePath, isPathInside, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
 import { resolveIngestRootWithSource } from '../map-root.js';
 import { acquireMapLock, requestMapRerun, takeMapRerun } from '../single-flight.js';
@@ -289,12 +289,6 @@ interface StoredPatchEntities {
   external: Set<string>;
   /** Ids only a later window manifest named; an absent one gets no DeleteNode. */
   extraOnly?: Set<string>;
-  /**
-   * Ids the stored patches only deleted (a DeleteNode from an earlier
-   * reconcile, no UpsertNode): not nodes they created. Known only for patches
-   * stored with their ops.
-   */
-  deletedOnly?: Set<string>;
   /** Why a later window manifest was left out: a backend error reading it. */
   extraSkipped?: string;
 }
@@ -319,22 +313,18 @@ function readStoredPatchEntities(raw: unknown): StoredPatchEntities | null {
     const ops = data.ops as Array<{ type?: unknown; id?: unknown; kind?: unknown; attrs?: unknown }>;
     const kinds = new Map<string, string>();
     const external = new Set<string>();
-    const upserted = new Set<string>();
     for (const op of ops) {
       if (op.type !== 'UpsertNode' || typeof op.id !== 'string') continue;
-      upserted.add(op.id);
       if (typeof op.kind === 'string') kinds.set(op.id, op.kind);
       if (isExternalNode(op)) external.add(op.id);
     }
-    const nodeIds = ops
-      .filter(op => op.type === 'UpsertNode' || op.type === 'DeleteNode')
-      .map(op => op.id)
-      .filter((id): id is string => typeof id === 'string');
     return {
-      nodeIds,
+      nodeIds: ops
+        .filter(op => op.type === 'UpsertNode' || op.type === 'DeleteNode')
+        .map(op => op.id)
+        .filter((id): id is string => typeof id === 'string'),
       kinds,
       external,
-      deletedOnly: new Set(nodeIds.filter(id => !upserted.has(id))),
     };
   }
   if (!Array.isArray(data.entityIds)) return null;
@@ -396,22 +386,16 @@ async function loadStoredPatchEntities(
         kinds: new Map(entities.kinds),
         external: new Set(entities.external),
         extraOnly: new Set(),
-        deletedOnly: new Set(entities.deletedOnly),
       };
       continue;
     }
     if (!entities) continue;
     const seen = new Set(primary.nodeIds);
     for (const id of entities.nodeIds) {
-      if (seen.has(id)) {
-        // Deleted-only across the merge only if every manifest naming it only deleted it.
-        if (!entities.deletedOnly?.has(id)) primary.deletedOnly!.delete(id);
-        continue;
-      }
+      if (seen.has(id)) continue;
       seen.add(id);
       primary.nodeIds.push(id);
       primary.extraOnly!.add(id);
-      if (entities.deletedOnly?.has(id)) primary.deletedOnly!.add(id);
     }
     for (const [id, kind] of entities.kinds) if (!primary.kinds.has(id)) primary.kinds.set(id, kind);
     for (const id of entities.external) primary.external.add(id);
@@ -431,13 +415,6 @@ async function loadStoredPatchEntities(
 }
 
 interface ReconcileOptions {
-  /**
-   * The file's content is unchanged (extractor rebuild, --force): only nodes a
-   * stored patch created that are still live count as removed. An id a stored
-   * patch only deleted, or one already gone, is no orphan, and re-emitting its
-   * delete would make every later rebuild look like it had cleanup to do.
-   */
-  liveOnly?: boolean;
   /** Told when a later stored manifest could not be read and was left out. */
   onWindowSkipped?: (reason: string) => void;
   /**
@@ -468,7 +445,6 @@ export async function reconcileRemovedEntities(
 ): Promise<GraphPatchPayload> {
   const previous = await loadStoredPatchEntities(client, previousPatchIds, options.window);
   if (previous.extraSkipped) options.onWindowSkipped?.(previous.extraSkipped);
-  const liveOnly = options.liveOnly === true;
   const currentNodeIds = new Set(
     patch.ops
       .filter(op => op.type === 'UpsertNode')
@@ -484,8 +460,7 @@ export async function reconcileRemovedEntities(
   // A chunk the stored patch names as one is skipped in map mode without a
   // lookup; patches stored without their ops still need the lookup for it.
   const candidateNodeIds = previous.nodeIds.filter(id =>
-    !currentNodeIds.has(id) && !(mapMode && previous.kinds.get(id) === 'chunk')
-    && !(liveOnly && previous.deletedOnly?.has(id)));
+    !currentNodeIds.has(id) && !(mapMode && previous.kinds.get(id) === 'chunk'));
   const removedNodeIds: string[] = [];
   const removedEdgeIds = new Set<string>();
   const CHUNK_PREDICATES = new Set(['CONTAINS_CHUNK', 'NEXT']);
@@ -503,10 +478,9 @@ export async function reconcileRemovedEntities(
 
   for (const { nodeId, entity } of lookups) {
     if (entity === null) {
-      // An id only the second window manifest named, or any id on a same-hash
-      // reconcile, already absent: nothing to delete, and the patch stays free
-      // of extra deletes.
-      if (liveOnly || previous.extraOnly?.has(nodeId)) continue;
+      // An id only the second window manifest named, already absent: nothing
+      // to delete, and the patch stays free of extra deletes.
+      if (previous.extraOnly?.has(nodeId)) continue;
       // Already absent. Emitting the delete anyway keeps the patch a complete
       // statement of intent and costs nothing.
       removedNodeIds.push(nodeId);
@@ -579,6 +553,188 @@ export async function reconcileRemovedEntities(
 }
 
 /**
+ * The same-hash orphan sweep (IN-20). An extractor change rebuilds every file
+ * with unchanged bytes, and the nodes the old extractor wrote and the new one
+ * does not stay live. The sweep finds them from the old extractor's stored
+ * patch for the file -- one read per file -- and checks every candidate of a
+ * batch with one batched node read, then adds a DeleteNode for each that is
+ * still live, was last written by this file, and is neither an external
+ * package node (shared by every file calling into the package) nor, under
+ * `ix map`, a chunk. It costs nothing per node, and a run's budget bounds it.
+ */
+export interface OrphanSweepBudget {
+  maxMs: number;
+  maxRequests: number;
+  /** Wall time the sweep has spent so far in this run. */
+  usedMs: number;
+  /** Stored-patch and batched node reads made so far in this run. */
+  requests: number;
+  /** Files the sweep skipped because the budget ran out. */
+  skipped: number;
+}
+
+/** Default time budget of a run's orphan sweep (`IX_ORPHAN_SWEEP_MAX_MS`). */
+export const ORPHAN_SWEEP_MAX_MS = 60_000;
+/** Default request budget of a run's orphan sweep (`IX_ORPHAN_SWEEP_MAX_REQUESTS`). */
+export const ORPHAN_SWEEP_MAX_REQUESTS = 25_000;
+
+export function orphanSweepBudget(env: NodeJS.ProcessEnv = process.env): OrphanSweepBudget {
+  const read = (raw: string | undefined, fallback: number): number => {
+    if (raw === undefined || raw.trim() === '') return fallback;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
+  };
+  return {
+    maxMs: read(env.IX_ORPHAN_SWEEP_MAX_MS, ORPHAN_SWEEP_MAX_MS),
+    maxRequests: read(env.IX_ORPHAN_SWEEP_MAX_REQUESTS, ORPHAN_SWEEP_MAX_REQUESTS),
+    usedMs: 0,
+    requests: 0,
+    skipped: 0,
+  };
+}
+
+export interface OrphanSweepFile {
+  /** The file's patch as built, before map mode strips it. */
+  patch: GraphPatchPayload;
+  /** The old extractor's patch id for the file's (unchanged) hash. */
+  previousPatchId: string;
+}
+
+/** The backend does not serve `POST /v1/nodes`: the sweep is off for the run. */
+export class BatchNodeReadsUnsupported extends Error {}
+
+/** `POST /v1/nodes` takes at most this many ids. */
+const NODES_PER_READ = 1000;
+/** Node ids are UUIDs; the batched read refuses the whole request over one that is not. */
+const NODE_ID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The node ids a stored patch upserted, with the kinds and external flags it
+ * recorded. A patch stored with its ops (`/v1/patch`) has all three; a bulk
+ * patch keeps only ids (`nodeIds`, or the older `entityIds` manifest), which
+ * is why the batched read checks kind and ownership.
+ */
+function storedUpserts(raw: unknown): { ids: string[]; kinds: Map<string, string>; external: Set<string> } | null {
+  const data = (raw as { data?: unknown } | null)?.data as { ops?: unknown; nodeIds?: unknown } | undefined;
+  if (!data) return null;
+  if (Array.isArray(data.ops)) {
+    const ids: string[] = [];
+    const kinds = new Map<string, string>();
+    const external = new Set<string>();
+    for (const op of data.ops as Array<{ type?: unknown; id?: unknown; kind?: unknown; attrs?: unknown }>) {
+      if (op.type !== 'UpsertNode' || typeof op.id !== 'string') continue;
+      ids.push(op.id);
+      if (typeof op.kind === 'string') kinds.set(op.id, op.kind);
+      if (isExternalNode(op)) external.add(op.id);
+    }
+    return { ids, kinds, external };
+  }
+  if (Array.isArray(data.nodeIds)) {
+    return { ids: data.nodeIds.filter((id): id is string => typeof id === 'string'), kinds: new Map(), external: new Set() };
+  }
+  const manifest = readStoredPatchEntities(raw);
+  return manifest ? { ids: manifest.nodeIds, kinds: manifest.kinds, external: manifest.external } : null;
+}
+
+function isUnsupportedRouteError(error: unknown): boolean {
+  return /^(?:Error:\s*)?(?:404|405|501):/.test(String(error));
+}
+
+/**
+ * The orphan node ids to delete for each file, in `files` order. Never one a
+ * patch of this batch upserts (`batchUpserts`), and never one the backend does
+ * not report live, last written by this very file, non-external and (in map
+ * mode) not a chunk. A file whose reads fail, or that the budget no longer
+ * covers, gets none: the sweep is best effort and the file commits as built.
+ * Throws `BatchNodeReadsUnsupported` when the backend has no batched node read.
+ */
+export async function sweepOrphanNodes(
+  client: Pick<IxClient, 'getPatch' | 'nodes'>,
+  files: OrphanSweepFile[],
+  opts: {
+    mapMode: boolean;
+    budget: OrphanSweepBudget;
+    batchUpserts?: Set<string>;
+    concurrency?: number;
+    onSkip?: (file: OrphanSweepFile, reason: string) => void;
+    now?: () => number;
+  },
+): Promise<string[][]> {
+  const now = opts.now ?? (() => performance.now());
+  const { budget } = opts;
+  const started = now();
+  const spent = (): number => budget.usedMs + (now() - started);
+  const result: string[][] = files.map(() => []);
+  try {
+    const candidates = await mapLimit(files, opts.concurrency ?? RECONCILE_CONCURRENCY, async (file): Promise<string[] | null> => {
+      if (budget.requests >= budget.maxRequests || spent() >= budget.maxMs) {
+        budget.skipped++;
+        return null;
+      }
+      budget.requests++;
+      let raw: unknown;
+      try {
+        raw = await client.getPatch(file.previousPatchId);
+      } catch (err) {
+        if (!isNotFoundError(err)) opts.onSkip?.(file, err instanceof Error ? err.message : String(err));
+        return null;
+      }
+      const stored = storedUpserts(raw);
+      if (!stored) return null;
+      const current = new Set(
+        file.patch.ops.filter(op => op.type === 'UpsertNode').map(op => op['id']).filter((id): id is string => typeof id === 'string'),
+      );
+      return stored.ids.filter(id =>
+        !current.has(id)
+        && !opts.batchUpserts?.has(id)
+        && NODE_ID_SHAPE.test(id)
+        && !stored.external.has(id)
+        && !(opts.mapMode && stored.kinds.get(id) === 'chunk'));
+    });
+
+    const unique = [...new Set(candidates.flatMap(c => c ?? []))];
+    if (unique.length === 0) return result;
+    const live = new Map<string, GraphNode>();
+    const unread = new Set<string>();
+    let unreadReason = '';
+    for (let i = 0; i < unique.length; i += NODES_PER_READ) {
+      const ids = unique.slice(i, i + NODES_PER_READ);
+      budget.requests++;
+      try {
+        const answer = await client.nodes(ids, 'full');
+        for (const node of answer?.nodes ?? []) {
+          if (node && typeof node.id === 'string') live.set(node.id, node);
+        }
+      } catch (err) {
+        if (isUnsupportedRouteError(err)) throw new BatchNodeReadsUnsupported(String(err));
+        for (const id of ids) unread.add(id);
+        unreadReason = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    files.forEach((file, i) => {
+      const ids = candidates[i];
+      if (!ids || ids.length === 0) return;
+      if (ids.some(id => unread.has(id))) {
+        opts.onSkip?.(file, `node read failed: ${unreadReason}`);
+        return;
+      }
+      result[i] = ids.filter(id => {
+        const node = live.get(id);
+        if (!node || (node.deletedRev !== undefined && node.deletedRev !== null)) return false;
+        if (isExternalNode(node)) return false;
+        if (opts.mapMode && node.kind === 'chunk') return false;
+        const provenance = node.provenance as { sourceUri?: unknown; source_uri?: unknown } | undefined;
+        return (provenance?.sourceUri ?? provenance?.source_uri) === file.patch.source.uri;
+      });
+    });
+    return result;
+  } finally {
+    budget.usedMs += now() - started;
+  }
+}
+
+/**
  * Files reconciled at once, and entity lookups in flight across all of them:
  * the graph walkers' cap (`EXPAND_CONCURRENCY`), for the same reason.
  */
@@ -615,17 +771,52 @@ export function backendAppliesBulkDeletes(
   const forced = env.IX_BULK_DELETES;
   if (forced === '1') return true;
   if (forced === '0') return false;
+  return releaseAtLeast(health, BULK_DELETES_SINCE) === true;
+}
+
+/**
+ * Whether the release the backend reports is at least `min`: null when it
+ * reports none, or one that does not parse.
+ */
+function releaseAtLeast(health: { release_version?: unknown } | null | undefined, min: string): boolean | null {
   const release = health?.release_version;
-  if (typeof release !== 'string') return false;
+  if (typeof release !== 'string') return null;
   const parse = (v: string): number[] | null => {
     const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(v.trim());
     return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
   };
   const have = parse(release);
-  const need = parse(BULK_DELETES_SINCE)!;
-  if (have === null) return false;
+  const need = parse(min)!;
+  if (have === null) return null;
   for (let i = 0; i < 3; i++) if (have[i] !== need[i]) return have[i] > need[i];
   return true;
+}
+
+/** The first release that serves `POST /v1/nodes` (Ix-memory batch reads). */
+export const BATCH_NODE_READS_SINCE = '1.0.33';
+
+/**
+ * Why the same-hash orphan sweep (IN-20) cannot run against this backend, or
+ * null when it can. The sweep adds DeleteNode ops to rebuild patches, which
+ * only the bulk route of a backend that applies deletes takes without falling
+ * back to one `/v1/patch` per file, and it checks its candidates with one
+ * batched `POST /v1/nodes`. A backend that reports no release but is forced
+ * onto bulk deletes (`IX_BULK_DELETES=1`) is tried; if it does not serve the
+ * batch read, the sweep turns itself off for the run.
+ */
+export function orphanSweepUnsupportedReason(
+  health: { release_version?: unknown } | null | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const release = health?.release_version;
+  const described = typeof release === 'string' ? `release ${release}` : 'unversioned';
+  if (!backendAppliesBulkDeletes(health, env)) {
+    return `the backend (${described}) is older than ${BATCH_NODE_READS_SINCE} or does not apply deletes in bulk`;
+  }
+  if (releaseAtLeast(health, BATCH_NODE_READS_SINCE) === false) {
+    return `the backend (${described}) is older than ${BATCH_NODE_READS_SINCE}`;
+  }
+  return null;
 }
 
 export function planDeletedFileRecovery(
@@ -1890,6 +2081,7 @@ export async function ingestFiles(
       fileNodeId,
       symbolNodeId,
       extractorName,
+      PREVIOUS_EXTRACTORS,
     },
     { languageFromPath },
   ] = await loadIngestionModules();
@@ -2110,10 +2302,13 @@ export async function ingestFiles(
   // Read from the same health answer. Unknown (the check failed) keeps the
   // per-file route for delete-bearing patches.
   let bulkDeletes = false;
+  // Why the same-hash orphan sweep cannot run here; null when it can.
+  let orphanSweepBlocker: string | null = 'the backend release could not be read';
   const reconcileLookups = createLimiter(RECONCILE_CONCURRENCY);
   try {
     const health = await readBackendHealth(client);
     bulkDeletes = backendAppliesBulkDeletes(health);
+    orphanSweepBlocker = orphanSweepUnsupportedReason(health);
     if (debug) process.stderr.write(`\n  [commit] delete-bearing patches via ${bulkDeletes ? 'bulk' : '/v1/patch'}\n`);
     const serverVersion = (health as any)?.schema_version;
     if (typeof serverVersion === 'number' && serverVersion !== CLIENT_EXPECTED_SCHEMA_VERSION) {
@@ -2479,18 +2674,47 @@ export async function ingestFiles(
       extractorRebuild = true;
       clearMapResultCache(projectRoot);
     }
-    // The same-hash orphan reconcile (IN-20) costs patch reads for every file
-    // it runs on, and only an extractor change leaves orphans behind. So it
-    // runs only when the baseline says this workspace's files were last
-    // written by another extractor -- whether this run was forced or not --
-    // and not on a plain --force at the current extractor. The baseline is
-    // the only signal that costs no read: the stored patch's own extractor
-    // is known only once it has been fetched. IX_RECONCILE_ON_FORCE=1 opts a
-    // --force run in, to repair a graph a pre-fix rebuild left polluted.
-    // The same flag widens an edited file's reconcile to the second stored
-    // patch; an ordinary edit reads only the first, as before IN-20.
+    // The same-hash orphan sweep (IN-20, `sweepOrphanNodes`) costs one
+    // stored-patch read per file, and only an extractor change leaves orphans
+    // behind. So it runs only when the baseline says this workspace's files
+    // were last written by another extractor -- whether this run was forced
+    // or not -- and not on a plain --force at the current extractor. The
+    // baseline is the only signal that costs no read. IX_RECONCILE_ON_FORCE=1
+    // opts a --force run in, to repair a graph a pre-fix rebuild left
+    // polluted. On a backend that takes deletes in bulk, the same runs widen
+    // an edited file's reconcile to the second stored patch; an ordinary edit
+    // reads only the first, as before IN-20.
     const reconcileOrphans = extractorChanged(previousBaseline, currentExtractor)
       || (Boolean(opts.force) && process.env.IX_RECONCILE_ON_FORCE === '1');
+    // The same-hash sweep reads one stored patch per file: the one the
+    // previous extractor wrote for the file's hash. On an extractor change that
+    // is the extractor the baseline recorded; on an opted-in --force at the
+    // current extractor (a repair) it is the one before the current.
+    const orphanRepair = reconcileOrphans && !extractorChanged(previousBaseline, currentExtractor);
+    const orphanPreviousIndex: number | null = (() => {
+      if (!reconcileOrphans) return null;
+      if (orphanRepair) return 1;
+      const at = (PREVIOUS_EXTRACTORS ?? []).indexOf(previousBaseline?.extractor ?? '');
+      return at < 0 ? null : at + 1;
+    })();
+    const orphanSweep = {
+      blocker: orphanSweepBlocker ?? (orphanPreviousIndex === null
+        ? `the previous extractor (${previousBaseline?.extractor ?? 'unrecorded'}) is not one this CLI knows`
+        : null),
+      budget: orphanSweepBudget(),
+      noticed: false,
+    };
+    // One line per run when the sweep is wanted and cannot run: the orphans
+    // stay, and nothing else about the run changes.
+    const noteOrphanSweepBlocked = (): void => {
+      if (orphanSweep.noticed || orphanSweep.blocker === null) return;
+      orphanSweep.noticed = true;
+      process.stderr.write(
+        `\n  [orphans kept] nodes the previous extractor wrote and this one does not were not removed: ` +
+        `${orphanSweep.blocker}.` +
+        (orphanSweepBlocker !== null ? ' After upgrading the backend, run IX_RECONCILE_ON_FORCE=1 ix map --force to remove them.' : '') + '\n',
+      );
+    };
     const previousMtimes = previousBaseline?.files ?? new Map<string, number>();
     const {
       previousDeletedFiles,
@@ -3649,6 +3873,9 @@ export async function ingestFiles(
      * file at a time it was a serial chain of entity lookups per batch. The
      * patches come back in file order, without the ones that failed to build.
      */
+    const noteOrphanSkip = (filePath: string, reason: string): void => {
+      if (debug) process.stderr.write(`\n  [orphan reconcile skipped] ${filePath}: ${reason}\n`);
+    };
     const buildFilePatches = async (
       files: ParsedFile[],
       edgesByFile: Map<string, any[]>,
@@ -3657,9 +3884,6 @@ export async function ingestFiles(
         try {
           const fileWorkspace = fileWorkspaceId(p.filePath);
           let patch = buildPatchFn!(p, hash, fileWorkspace, edgesByFile.get(p.filePath) ?? emptyEdges, previousHash, fileMultiRepo(p.filePath));
-          const noteOrphanSkip = (reason: string) => {
-            if (debug) process.stderr.write(`\n  [orphan reconcile skipped] ${p.filePath}: ${reason}\n`);
-          };
           if (previousHash) {
             patch = await reconcileRemovedEntities(
               client,
@@ -3668,63 +3892,89 @@ export async function ingestFiles(
               undefined,
               mapMode,
               reconcileLookups,
-              { onWindowSkipped: noteOrphanSkip, window: reconcileOrphans ? RECONCILE_MANIFEST_WINDOW : 1 },
+              { onWindowSkipped: reason => noteOrphanSkip(p.filePath, reason), window: reconcileOrphans && orphanSweepBlocker === null ? RECONCILE_MANIFEST_WINDOW : 1 },
             );
-          } else if (knownHash && reconcileOrphans) {
-            // Same content, new extractor (or an opted-in --force): ids the old extractor
-            // wrote and this one does not are still live. Retiring them is
-            // best effort. Before this reconcile existed such a file made no
-            // patch reads and was always committed as built, so any failure
-            // here (no stored patch, no manifest, a backend error) leaves the
-            // built patch to commit as before, with no parse error and no
-            // change to the exit code. The orphans wait for the next rebuild.
-            const asBuilt = patch;
-            try {
-              const reconciled = await reconcileRemovedEntities(
-                client,
-                patch,
-                sourcePatchIdCandidates(p.filePath, knownHash, fileWorkspace),
-                undefined,
-                mapMode,
-                reconcileLookups,
-                { liveOnly: true, onWindowSkipped: noteOrphanSkip },
-              );
-              const isDelete = (op: { type: string }) => op.type === 'DeleteNode' || op.type === 'DeleteEdge';
-              const added = reconciled.ops.filter(isDelete).length - patch.ops.filter(isDelete).length;
-              patch = reconciled;
-              if (added > 0) {
-                // The patch id is derived from file, hash and extractor. If the
-                // backend already holds it, it answers Idempotent and drops
-                // these deletes, so they go under an id salted with them.
-                const exists = await client.getPatch(patch.patchId).then(() => true, err => {
-                  if (isNotFoundError(err)) return false;
-                  throw err;
-                });
-                if (exists) {
-                  // Salted with every delete, edges included: an edge-only
-                  // repair must not reuse another's id.
-                  const ids = patch.ops.filter(isDelete).map((op: Record<string, unknown>) => `${String(op['type'])}:${String(op['id'])}`).sort().join('\n');
-                  const salted = buildPatchFn!(p, hash, fileWorkspace, edgesByFile.get(p.filePath) ?? emptyEdges, undefined, fileMultiRepo(p.filePath), `orphans-${sha256(Buffer.from(ids)).slice(0, 12)}`);
-                  patch = { ...patch, patchId: salted.patchId };
-                }
-              }
-            } catch (err) {
-              patch = asBuilt;
-              noteOrphanSkip(err instanceof Error ? err.message : String(err));
-            }
           }
-          if (mapMode) patch = stripMapModeOps(patch);
-          noteResolution(p.filePath, patch);
-          // source.uri (workspace-relative) and source.workspaceId are set
-          // inside buildPatch; the backend stores both as opaque attributes.
-          return makePreparedPatch(patch, j + 1, p.filePath, previousHash !== undefined || isForced(p.filePath));
+          // Same content, new extractor (or an opted-in --force): the
+          // previous extractor's patch for this hash names what the sweep
+          // below may retire. Without a backend that takes deletes in bulk
+          // and serves the batched node read the file is committed exactly as
+          // built, as before IN-20.
+          let previousPatchId: string | undefined;
+          if (!previousHash && knownHash && reconcileOrphans) {
+            if (orphanSweep.blocker !== null) noteOrphanSweepBlocked();
+            else previousPatchId = sourcePatchIdCandidates(p.filePath, knownHash, fileWorkspace)[orphanPreviousIndex!];
+          }
+          return { p, hash, j, previousHash, patch: patch as GraphPatchPayload, previousPatchId };
         } catch (err) {
           parseErrors++;
           process.stderr.write(`\n  [patch build error] ${p.filePath}: ${err}\n`);
           return null;
         }
       });
-      return built.filter((pp): pp is PreparedPatch => pp !== null);
+
+      // The orphan sweep, for the whole batch at once: one stored-patch read
+      // per file and one batched node read. Best effort -- whatever fails here
+      // leaves the patches to commit as built, with no parse error and no
+      // change to the exit code.
+      const sweepable = built.filter((b): b is NonNullable<typeof b> & { previousPatchId: string } =>
+        b !== null && b.previousPatchId !== undefined);
+      if (sweepable.length > 0 && orphanSweep.blocker === null) {
+        const batchUpserts = new Set<string>();
+        for (const b of built) {
+          if (b === null) continue;
+          for (const op of b.patch.ops) if (op.type === 'UpsertNode' && typeof op['id'] === 'string') batchUpserts.add(op['id']);
+        }
+        try {
+          const orphans = await sweepOrphanNodes(
+            client,
+            sweepable.map(b => ({ patch: b.patch, previousPatchId: b.previousPatchId })),
+            {
+              mapMode,
+              budget: orphanSweep.budget,
+              batchUpserts,
+              onSkip: (file, reason) => noteOrphanSkip(file.patch.source.uri, reason),
+            },
+          );
+          sweepable.forEach((b, i) => {
+            const ids = orphans[i]!;
+            if (ids.length === 0) return;
+            b.patch = { ...b.patch, ops: [...ids.map(id => ({ type: 'DeleteNode', id })), ...b.patch.ops] };
+            if (orphanRepair) {
+              // A repair runs at the current extractor, whose patch id the
+              // backend already holds: sent under it the deletes would be
+              // answered Idempotent and dropped, so they go under an id
+              // salted with them.
+              const salt = `orphans-${sha256(Buffer.from([...ids].sort().join('\n'))).slice(0, 12)}`;
+              const salted = buildPatchFn!(b.p, b.hash, fileWorkspaceId(b.p.filePath), edgesByFile.get(b.p.filePath) ?? emptyEdges, undefined, fileMultiRepo(b.p.filePath), salt);
+              b.patch = { ...b.patch, patchId: salted.patchId };
+            }
+          });
+        } catch (err) {
+          if (err instanceof BatchNodeReadsUnsupported) {
+            orphanSweep.blocker = 'the backend does not serve the batched node read (POST /v1/nodes)';
+            noteOrphanSweepBlocked();
+          } else {
+            for (const b of sweepable) noteOrphanSkip(b.p.filePath, err instanceof Error ? err.message : String(err));
+          }
+        }
+      }
+
+      return built.map(b => {
+        if (b === null) return null;
+        try {
+          let patch = b.patch;
+          if (mapMode) patch = stripMapModeOps(patch);
+          noteResolution(b.p.filePath, patch);
+          // source.uri (workspace-relative) and source.workspaceId are set
+          // inside buildPatch; the backend stores both as opaque attributes.
+          return makePreparedPatch(patch, b.j + 1, b.p.filePath, b.previousHash !== undefined || isForced(b.p.filePath));
+        } catch (err) {
+          parseErrors++;
+          process.stderr.write(`\n  [patch build error] ${b.p.filePath}: ${err}\n`);
+          return null;
+        }
+      }).filter((pp): pp is PreparedPatch => pp !== null);
     };
 
     /** Resolve edges within a batch, build patches, and commit in sub-chunks. */
@@ -4057,6 +4307,13 @@ export async function ingestFiles(
     timings.parseMs = Math.round(parsed - hashed);
     // Clear the parse bar
     if (interval) process.stderr.write('\r' + ' '.repeat(PROG_LINE_WIDTH) + '\r');
+    if (orphanSweep.budget.skipped > 0) {
+      process.stderr.write(
+        `\n  [orphans kept] the orphan cleanup reached its budget (${Math.round(orphanSweep.budget.maxMs / 1000)}s / ` +
+        `${orphanSweep.budget.maxRequests} requests); ${orphanSweep.budget.skipped} file(s) were committed without it. ` +
+        `Run IX_RECONCILE_ON_FORCE=1 ix map --force to finish.\n`,
+      );
+    }
 
     if (deletedPaths.length > 0) {
       progressPhase = 'Saving';
@@ -4098,9 +4355,11 @@ export async function ingestFiles(
             mapMode,
             reconcileLookups,
             {
-              onWindowSkipped: reason => {
-                if (debug) process.stderr.write(`\n  [orphan reconcile skipped] ${relFilePath}: ${reason}\n`);
-              },
+              onWindowSkipped: reason => noteOrphanSkip(relFilePath, reason),
+              // The second stored patch (a graph a pre-fix rebuild left
+              // polluted) is merged only where its extra deletes can go in
+              // bulk; elsewhere the first-hit walk, as before IN-20.
+              window: orphanSweepBlocker === null ? RECONCILE_MANIFEST_WINDOW : 1,
             },
           );
           if (mapMode) patch = stripMapModeOps(patch);

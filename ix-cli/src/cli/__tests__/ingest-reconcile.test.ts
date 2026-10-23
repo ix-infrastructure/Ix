@@ -3,13 +3,18 @@
 import { describe, expect, it, vi } from "vitest";
 import * as nodePath from "node:path";
 
-import type { GraphPatchPayload } from "../../client/types.js";
+import type { GraphNode, GraphPatchPayload } from "../../client/types.js";
 import {
+  BATCH_NODE_READS_SINCE,
   BULK_DELETES_SINCE,
+  BatchNodeReadsUnsupported,
   backendAppliesBulkDeletes,
+  orphanSweepBudget,
+  orphanSweepUnsupportedReason,
   patchRequiresPerFileCommit,
   planDeletedFileRecovery,
   reconcileRemovedEntities,
+  sweepOrphanNodes,
 } from "../commands/ingest.js";
 import { createLimiter } from "../tree-walk.js";
 
@@ -449,54 +454,178 @@ describe("reconcileRemovedEntities", () => {
       await expect(reconcileRemovedEntities({ getPatch: first5xx, entity }, patchWith([]), ["current@H", "old@H"])).rejects.toThrow("500");
     });
 
-    describe("on a same-hash reconcile (liveOnly)", () => {
-      const withDelete = (deletedId: string, ...ids: string[]) => ({ data: { ops: [
-        { type: "DeleteNode", id: deletedId },
-        ...ids.map(id => ({ type: "UpsertNode", id, kind: "function" })),
-      ] } });
-
-      it("emits no DeleteNode for an id an earlier reconcile already deleted, and does not look it up", async () => {
-        const getPatch = vi.fn(async (id: string) => {
-          if (id === "current@H") return withDelete("x", "a");
-          throw notFound();
-        });
-        const entity = vi.fn().mockRejectedValue(notFound());
-        const patch = patchWith([{ type: "UpsertNode", id: "a", kind: "function" }]);
-
-        const reconciled = await reconcileRemovedEntities(
-          { getPatch, entity }, patch, ["current@H", "old@H"], undefined, false, undefined, { liveOnly: true },
-        );
-
-        expect(deleted(reconciled)).toEqual([]);
-        expect(entity).not.toHaveBeenCalled();
+    it("leaves the changed-hash path re-emitting an already-absent primary id, as before", async () => {
+      const getPatch = vi.fn(async (id: string) => {
+        if (id === "current@H") return { data: { ops: [{ type: "DeleteNode", id: "x" }, { type: "UpsertNode", id: "a", kind: "function" }] } };
+        throw notFound();
       });
-
-      it("deletes only live nodes an earlier patch created, not absent ones, across both manifests", async () => {
-        // x: deleted by the current patch, created by the old one, now gone.
-        // gone: created, already absent. live: created and still live.
-        const getPatch = vi.fn(async (id: string) => (id === "current@H" ? withDelete("x", "a", "gone") : ops("a", "x", "live")));
-        const entity = vi.fn().mockImplementation(async (id: string) => {
-          if (id === "live") return { node: { kind: "function" }, claims: [], edges: [] };
-          throw notFound();
-        });
-        const patch = patchWith([{ type: "UpsertNode", id: "a", kind: "function" }]);
-
-        const reconciled = await reconcileRemovedEntities(
-          { getPatch, entity }, patch, ["current@H", "old@H"], undefined, false, undefined, { liveOnly: true },
-        );
-
-        expect(deleted(reconciled)).toEqual(["live"]);
-      });
-
-      it("leaves the changed-hash path re-emitting an already-absent primary id, as before", async () => {
-        const getPatch = vi.fn(async (id: string) => {
-          if (id === "current@H") return withDelete("x", "a");
-          throw notFound();
-        });
-        const entity = vi.fn().mockRejectedValue(notFound());
-        const reconciled = await reconcileRemovedEntities({ getPatch, entity }, patchWith([]), ["current@H", "old@H"]);
-        expect(deleted(reconciled)).toEqual(["x", "a"]);
-      });
+      const entity = vi.fn().mockRejectedValue(notFound());
+      const reconciled = await reconcileRemovedEntities({ getPatch, entity }, patchWith([]), ["current@H", "old@H"]);
+      expect(deleted(reconciled)).toEqual(["x", "a"]);
     });
+  });
+});
+
+describe("sweepOrphanNodes (IN-20 same-hash sweep)", () => {
+  const notFound = () => Object.assign(new Error("404: patch not found"), { status: 404 });
+  const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const A = id(1), B = id(2), C = id(3), D = id(4), E = id(5), F = id(6), G = id(7);
+  const node = (nid: string, over: Record<string, unknown> = {}): GraphNode => ({
+    id: nid, kind: "function", name: nid, attrs: {}, provenance: { sourceUri: "src/example.ts" }, ...over,
+  }) as unknown as GraphNode;
+  const fileWith = (ops: GraphPatchPayload["ops"], uri = "src/example.ts") => {
+    const patch = patchWith(ops);
+    return { patch: { ...patch, source: { ...patch.source, uri } }, previousPatchId: `old@${uri}` };
+  };
+
+  it("derives orphans from the stored node list with one patch read per file and one batched node read, no entity reads", async () => {
+    // Bulk-stored manifests: ids only, no kinds.
+    const getPatch = vi.fn(async (pid: string) => (pid === "old@src/example.ts"
+      ? { data: { nodeIds: [A, B, C] } }
+      : { data: { nodeIds: [D, E] } }));
+    const nodes = vi.fn(async (ids: string[], _fields?: "full") => ({
+      rev: 1,
+      nodes: [node(B), node(C, { attrs: { external: true } }), node(E, { provenance: { sourceUri: "src/other.ts" } })]
+        .filter(n => ids.includes(n.id)),
+      missing: [],
+    }));
+    const budget = orphanSweepBudget({});
+    const files = [
+      fileWith([{ type: "UpsertNode", id: A, kind: "function" }]),
+      fileWith([{ type: "UpsertNode", id: D, kind: "function" }], "src/other.ts"),
+    ];
+
+    const orphans = await sweepOrphanNodes({ getPatch, nodes }, files, { mapMode: false, budget });
+
+    // B: live, written by this file -> deleted. C: external -> kept.
+    // E: live and written by src/other.ts -> deleted for that file.
+    expect(orphans).toEqual([[B], [E]]);
+    expect(getPatch).toHaveBeenCalledTimes(2);
+    expect(nodes).toHaveBeenCalledTimes(1);
+    expect(nodes.mock.calls[0]![1]).toBe("full");
+    expect(budget.requests).toBe(3);
+  });
+
+  it("never deletes a node another file wrote last, one a patch of the batch upserts, an absent one, or a chunk in map mode", async () => {
+    const getPatch = vi.fn(async () => ({ data: { nodeIds: [A, B, C, D, E] } }));
+    const nodes = vi.fn(async (_ids: string[], _fields?: "full") => ({
+      rev: 1,
+      nodes: [
+        node(A, { provenance: { sourceUri: "src/elsewhere.ts" } }),
+        node(B),
+        node(D, { kind: "chunk" }),
+        node(E),
+      ],
+      missing: [C],
+    }));
+    const orphans = await sweepOrphanNodes(
+      { getPatch, nodes }, [fileWith([])], { mapMode: true, budget: orphanSweepBudget({}), batchUpserts: new Set([E]) },
+    );
+    expect(orphans).toEqual([[B]]);
+    // E is upserted by the batch: not even looked up.
+    expect((nodes.mock.calls[0] as unknown as [string[]])[0]).not.toContain(E);
+  });
+
+  it("uses the kinds a stored patch with ops recorded: no lookup for its externals or, in map mode, its chunks", async () => {
+    const getPatch = vi.fn(async () => ({ data: { ops: [
+      { type: "UpsertNode", id: A, kind: "function" },
+      { type: "UpsertNode", id: B, kind: "chunk" },
+      { type: "UpsertNode", id: C, kind: "function", attrs: { external: true } },
+      { type: "DeleteNode", id: D },
+    ] } }));
+    const nodes = vi.fn(async (ids: string[], _fields?: "full") => ({ rev: 1, nodes: ids.map(i => node(i)), missing: [] }));
+    const orphans = await sweepOrphanNodes({ getPatch, nodes }, [fileWith([])], { mapMode: true, budget: orphanSweepBudget({}) });
+    // D was only deleted by the stored patch: not a node it wrote.
+    expect(orphans).toEqual([[A]]);
+    expect((nodes.mock.calls[0] as unknown as [string[]])[0]).toEqual([A]);
+  });
+
+  it("makes no node read when no file has a candidate, and skips a file whose patch is not found", async () => {
+    const getPatch = vi.fn(async (pid: string) => {
+      if (pid === "old@src/gone.ts") throw notFound();
+      return { data: { nodeIds: [A] } };
+    });
+    const nodes = vi.fn();
+    const onSkip = vi.fn();
+    const orphans = await sweepOrphanNodes(
+      { getPatch, nodes },
+      [fileWith([{ type: "UpsertNode", id: A, kind: "function" }]), fileWith([], "src/gone.ts")],
+      { mapMode: false, budget: orphanSweepBudget({}), onSkip },
+    );
+    expect(orphans).toEqual([[], []]);
+    expect(nodes).not.toHaveBeenCalled();
+    expect(onSkip).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed patch or node read for the files it covers and deletes nothing for them", async () => {
+    const getPatch = vi.fn(async (pid: string) => {
+      if (pid === "old@src/bad.ts") throw new Error("500: transaction begin timeout");
+      return { data: { nodeIds: [A] } };
+    });
+    const onSkip = vi.fn();
+    const failingNodes = vi.fn().mockRejectedValue(new Error("500: busy"));
+    const orphans = await sweepOrphanNodes(
+      { getPatch, nodes: failingNodes }, [fileWith([]), fileWith([], "src/bad.ts")],
+      { mapMode: false, budget: orphanSweepBudget({}), onSkip },
+    );
+    expect(orphans).toEqual([[], []]);
+    expect(onSkip.mock.calls.map(c => String(c[1]))).toEqual(["500: transaction begin timeout", "node read failed: 500: busy"]);
+  });
+
+  it("throws BatchNodeReadsUnsupported when the backend has no batched node read", async () => {
+    const getPatch = vi.fn(async () => ({ data: { nodeIds: [A] } }));
+    const nodes = vi.fn().mockRejectedValue(new Error("404: no such endpoint /v1/nodes"));
+    await expect(sweepOrphanNodes({ getPatch, nodes }, [fileWith([])], { mapMode: false, budget: orphanSweepBudget({}) }))
+      .rejects.toBeInstanceOf(BatchNodeReadsUnsupported);
+  });
+
+  it("reads at most 1000 ids per node read", async () => {
+    const many = Array.from({ length: 2500 }, (_, i) => id(100 + i));
+    const getPatch = vi.fn(async () => ({ data: { nodeIds: many } }));
+    const nodes = vi.fn(async (ids: string[], _fields?: "full") => ({ rev: 1, nodes: [], missing: ids }));
+    await sweepOrphanNodes({ getPatch, nodes }, [fileWith([])], { mapMode: false, budget: orphanSweepBudget({}) });
+    expect(nodes.mock.calls.map(c => (c[0] as string[]).length)).toEqual([1000, 1000, 500]);
+  });
+
+  it("stops at its request budget and counts the files it skipped, across batches", async () => {
+    const getPatch = vi.fn(async () => ({ data: { nodeIds: [F] } }));
+    const nodes = vi.fn(async (ids: string[], _fields?: "full") => ({ rev: 1, nodes: ids.map(i => node(i)), missing: [] }));
+    const budget = orphanSweepBudget({ IX_ORPHAN_SWEEP_MAX_REQUESTS: "3" });
+    const batch = () => [fileWith([]), fileWith([]), fileWith([])];
+    const first = await sweepOrphanNodes({ getPatch, nodes }, batch(), { mapMode: false, budget, concurrency: 1 });
+    expect(first.filter(ids => ids.length > 0)).toHaveLength(3);
+    expect(budget.requests).toBe(4);
+    const second = await sweepOrphanNodes({ getPatch, nodes }, batch(), { mapMode: false, budget, concurrency: 1 });
+    expect(second).toEqual([[], [], []]);
+    expect(budget.skipped).toBe(3);
+    expect(getPatch).toHaveBeenCalledTimes(3);
+  });
+
+  it("stops at its time budget", async () => {
+    let clock = 0;
+    const getPatch = vi.fn(async () => { clock += 40; return { data: { nodeIds: [G] } }; });
+    const nodes = vi.fn(async (ids: string[], _fields?: "full") => ({ rev: 1, nodes: ids.map(i => node(i)), missing: [] }));
+    const budget = orphanSweepBudget({ IX_ORPHAN_SWEEP_MAX_MS: "100" });
+    const orphans = await sweepOrphanNodes(
+      { getPatch, nodes }, [fileWith([]), fileWith([]), fileWith([]), fileWith([])],
+      { mapMode: false, budget, concurrency: 1, now: () => clock },
+    );
+    expect(orphans.filter(ids => ids.length > 0)).toHaveLength(3);
+    expect(budget.skipped).toBe(1);
+    expect(budget.usedMs).toBe(120);
+  });
+});
+
+describe("orphanSweepUnsupportedReason", () => {
+  it("allows the sweep from the release that serves batched node reads, and not before", () => {
+    expect(orphanSweepUnsupportedReason({ release_version: "1.0.34" }, {})).toBeNull();
+    expect(orphanSweepUnsupportedReason({ release_version: BATCH_NODE_READS_SINCE }, {})).toBeNull();
+    expect(orphanSweepUnsupportedReason({ release_version: "1.0.32" }, {})).toContain("older than 1.0.33");
+    expect(orphanSweepUnsupportedReason({ release_version: "1.0.31" }, {})).toContain("release 1.0.31");
+    expect(orphanSweepUnsupportedReason({}, {})).toContain("unversioned");
+    expect(orphanSweepUnsupportedReason(null, {})).toContain("unversioned");
+    // Forced onto bulk deletes: tried, and turned off at run time if /v1/nodes is missing.
+    expect(orphanSweepUnsupportedReason({}, { IX_BULK_DELETES: "1" })).toBeNull();
+    expect(orphanSweepUnsupportedReason({ release_version: "1.0.34" }, { IX_BULK_DELETES: "0" })).not.toBeNull();
   });
 });

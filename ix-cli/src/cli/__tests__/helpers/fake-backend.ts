@@ -131,6 +131,18 @@ export class FakeBackend {
   hidePatchReads = false;
   /** `GET /v1/patches/{id}` requests served, whatever their answer. */
   patchReads = 0;
+  /** `GET /v1/entity/{id}` requests served, whatever their answer. */
+  entityReads = 0;
+  /** `POST /v1/nodes` requests served, whatever their answer. */
+  nodesReads = 0;
+  /** Serve `POST /v1/nodes` (Ix-memory 1.0.33+); false answers 404, as an older backend does. */
+  serveNodes = true;
+  /**
+   * Answer `GET /v1/patches/{id}` for a patch committed in bulk as the real
+   * bulk route stores it -- an id manifest (`entityIds`, `nodeIds`,
+   * `nodeOpCount`), no ops -- instead of with its ops.
+   */
+  bulkManifests = false;
   private readonly hashes = new Map<string, { workspaceId: string | null; uri: string; hash: string }>();
 
   /**
@@ -163,7 +175,7 @@ export class FakeBackend {
    * report none, as a pre-#157 backend does. `null` reports none in any mode.
    */
   releaseVersion: string | null | undefined = undefined;
-  private readonly nodes = new Map<string, { kind: unknown; name: unknown; attrs?: unknown; live: boolean }>();
+  private readonly nodes = new Map<string, { kind: unknown; name: unknown; attrs?: unknown; uri?: string; live: boolean }>();
   private readonly edges = new Map<string, {
     src: unknown; dst: unknown; predicate: unknown; workspaceId: string; uri: string; live: boolean;
   }>();
@@ -239,7 +251,7 @@ export class FakeBackend {
     if (!deletesApplied) this.applyDeletes(patch);
     for (const op of patch.ops ?? []) {
       const id = String(op.id);
-      if (op.type === "UpsertNode") this.nodes.set(id, { kind: op.kind, name: op.name, attrs: op.attrs, live: true });
+      if (op.type === "UpsertNode") this.nodes.set(id, { kind: op.kind, name: op.name, attrs: op.attrs, uri, live: true });
       else if (op.type === "UpsertEdge") {
         this.edges.set(id, { src: op.src, dst: op.dst, predicate: op.predicate, workspaceId, uri, live: true });
       }
@@ -544,9 +556,43 @@ export class FakeBackend {
         : this.failPatchReads;
       if (fail) return send(500, { error: "500: transaction begin timeout" });
       if (this.hidePatchReads) return send(404, { error: "404: patch not found" });
-      return record ? send(200, { data: { ops: record.ops } }) : send(404, { error: "404: patch not found" });
+      if (!record) return send(404, { error: "404: patch not found" });
+      if (this.bulkManifests && record.bulkGroup !== null) {
+        // BulkWriteApi.patchDocument: ids in op order, no ops.
+        const entityIds: string[] = [];
+        const nodeIds: string[] = [];
+        let nodeOpCount = 0;
+        for (const op of record.ops) {
+          const opId = String(op["id"] ?? op["entityId"]);
+          if (op["type"] === "UpsertNode" || op["type"] === "DeleteNode") nodeOpCount++;
+          if (op["type"] === "UpsertNode" && !nodeIds.includes(opId)) nodeIds.push(opId);
+          if (!entityIds.includes(opId)) entityIds.push(opId);
+        }
+        return send(200, { data: { entityIds, nodeIds, nodeOpCount } });
+      }
+      return send(200, { data: { ops: record.ops } });
+    }
+    if (path === "/v1/nodes") {
+      this.nodesReads++;
+      if (!this.serveNodes) {
+        return send(404, { error: `404: no such endpoint ${path}` });
+      }
+      let ids: string[] = [];
+      try {
+        ({ ids = [] } = JSON.parse(body) as { ids?: string[] });
+      } catch { /* none */ }
+      if (ids.length > 1000) return send(413, { error: "payload_too_large" });
+      const nodes = ids.flatMap((id) => {
+        const n = this.nodes.get(id);
+        return n?.live
+          ? [{ id, kind: n.kind, name: n.name, attrs: n.attrs ?? {}, provenance: { sourceUri: n.uri ?? "" } }]
+          : [];
+      });
+      const found = new Set(nodes.map((n) => n.id));
+      return send(200, { rev: this.rev, nodes, missing: ids.filter((id) => !found.has(id)) });
     }
     if (this.semantics !== undefined && path.startsWith("/v1/entity/")) {
+      this.entityReads++;
       const id = decodeURIComponent(path.slice("/v1/entity/".length));
       const node = this.nodes.get(id);
       if (!node?.live) return send(404, { error: "404: entity not found" });
