@@ -4,7 +4,7 @@ import { Command } from "commander";
 import { describe, expect, it } from "vitest";
 
 import {
-  BUNDLE_CHARS_PER_TOKEN,
+  CHARS_PER_TOKEN,
   clampBudgets,
   detectContextModeConflict,
   registerContextCommand,
@@ -14,13 +14,20 @@ describe("--max-tokens", () => {
   it("is what bounds a default bundle, not 12,000 characters", () => {
     const budgets = clampBudgets({});
     expect(budgets.maxTokens).toBe(3000);
-    expect(budgets.maxChars).toBe(Math.round(3000 * BUNDLE_CHARS_PER_TOKEN));
+    // The default size is main's, in every format: what the budget is charged
+    // against changed, not how big it is. Larger defaults wait on a re-measure.
+    for (const format of ["json", "llm", "text"] as const) {
+      expect(clampBudgets({}, format).maxChars, format).toBe(6420);
+      expect(clampBudgets({}, format).maxEvidence, format).toBe(25);
+    }
     // The old character default was nearly twice this.
     expect(budgets.maxChars).toBeLessThan(12_000);
   });
 
   it("moves the character budget with it", () => {
-    expect(clampBudgets({ maxTokens: 3000 }).maxChars).toBe(Math.round(3000 * BUNDLE_CHARS_PER_TOKEN));
+    expect(clampBudgets({ maxTokens: 3000 }, "json").maxChars).toBe(Math.round(3000 * CHARS_PER_TOKEN.json));
+    expect(clampBudgets({ maxTokens: 3000 }, "llm").maxChars).toBe(Math.round(3000 * CHARS_PER_TOKEN.llm));
+    expect(clampBudgets({ maxTokens: 500 }, "llm").maxChars).toBe(1070);
     expect(clampBudgets({ maxTokens: 500 }).maxChars).toBe(1070);
   });
 
@@ -33,8 +40,9 @@ describe("--max-tokens", () => {
   });
 
   it("gives way to an explicit --max-chars", () => {
-    const budgets = clampBudgets({ maxChars: 40_000 });
+    const budgets = clampBudgets({ maxChars: 40_000 }, "llm");
     expect(budgets.maxChars).toBe(40_000);
+    expect(clampBudgets({ maxChars: 40_000 }, "json").maxChars).toBe(40_000);
     // The token field still reports what it would have been, so --diff can say
     // which budget the caller had in force.
     expect(budgets.maxTokens).toBe(3000);

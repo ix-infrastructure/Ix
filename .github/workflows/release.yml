@@ -69,10 +69,13 @@ jobs:
       # system-compass's package.json version is not maintained against the
       # ix-compass-dist release series (it read 0.2.0 while dist was on v0.3.0),
       # so the commit is the only reliable identity the bundle has.
-      sha: ${{ steps.build-compass.outputs.sha }}
+      sha: ${{ steps.fetch-compass.outputs.sha }}
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22.14"
 
@@ -80,12 +83,15 @@ jobs:
       # the explicit ::error:: guard below, so an expired COMPASS_TOKEN produced
       # a fully green release that shipped an empty compass/ directory and a
       # broken `ix view` for every user. A compass failure must fail the release.
-      - name: Build System Compass
-        id: build-compass
+      # The token lives only in this step. It is used as a one-off fetch URL
+      # rather than a remote, so it is never written to system-compass/.git/config
+      # where the build's npm install scripts could read it. It fetches the
+      # default branch's HEAD, as the earlier `git clone` did.
+      - name: Fetch System Compass
+        id: fetch-compass
         env:
           COMPASS_TOKEN: ${{ secrets.COMPASS_TOKEN }}
         run: |
-          mkdir -p compass-dist
           if [ -z "$COMPASS_TOKEN" ]; then
             echo "::error::COMPASS_TOKEN is not set. It is required to build System Compass from the private ix-infrastructure/system-compass repo. Add a fine-grained PAT with Contents:read on that repo as the COMPASS_TOKEN secret."
             exit 1
@@ -96,23 +102,37 @@ jobs:
           # output, or an App token minted in-job, the automatic mask silently
           # stops applying. This line does not care about the source.
           echo "::add-mask::$COMPASS_TOKEN"
-          # Do not pipe this clone through a redaction filter. This job runs on
+          # Do not pipe this fetch through a redaction filter. This job runs on
           # the runner's default `bash -e {0}`, which has no `pipefail`, so the
           # pipeline would exit with the filter's status (0) and the guard below
-          # could never fire — the failure would surface as a confusing `cd:
-          # system-compass: No such file or directory` two lines down instead of
-          # the message telling you to rotate the token. Git withholds the
+          # could never fire — the failure would surface as a confusing `git
+          # checkout` error about a missing FETCH_HEAD instead of the message
+          # telling you to rotate the token. Git withholds the
           # credential from its own error output regardless, and the mask above
           # covers the value if anything else ever echoes it.
-          git clone "https://x-access-token:${COMPASS_TOKEN}@github.com/ix-infrastructure/system-compass.git" 2>&1 \
+          git init -q system-compass
+          git -C system-compass fetch -q --depth 1 "https://x-access-token:${COMPASS_TOKEN}@github.com/ix-infrastructure/system-compass.git" HEAD 2>&1 \
             || {
-              echo "::error::Could not clone ix-infrastructure/system-compass. COMPASS_TOKEN is set but was rejected — it is most likely expired or lacks Contents:read on that repo. Rotate it and re-run."
+              echo "::error::Could not fetch ix-infrastructure/system-compass. COMPASS_TOKEN is set but was rejected — it is most likely expired or lacks Contents:read on that repo. Rotate it and re-run."
               exit 1
             }
+          git -C system-compass checkout -q --detach FETCH_HEAD
+          # The token must not have been persisted anywhere under .git (config,
+          # FETCH_HEAD, logs) where the next step's npm install scripts could
+          # read it.
+          if grep -rqF -e "$COMPASS_TOKEN" -e x-access-token system-compass/.git; then
+            echo "::error::COMPASS_TOKEN was written under system-compass/.git"
+            exit 1
+          fi
+          # Record the source commit so the stamp written in the package job can
+          # identify this bundle (see the job's `outputs`).
+          echo "sha=$(git -C system-compass rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      # No token in this step's environment: npm install scripts run here.
+      - name: Build System Compass
+        run: |
+          mkdir -p compass-dist
           cd system-compass
-          # Capture the source commit before building, so the stamp written in
-          # the package job can identify this bundle (see the job's `outputs`).
-          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           npm ci --legacy-peer-deps
           npm run build
           if [ ! -f dist/index.html ]; then
@@ -127,7 +147,7 @@ jobs:
           echo "compass bundle: $(find "$GITHUB_WORKSPACE/compass-dist" -type f | wc -l) files"
 
       - name: Upload compass bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: compass-dist
           path: compass-dist
@@ -164,6 +184,10 @@ jobs:
       run:
         shell: bash
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        if: runner.os == 'Linux'
+        with:
+          egress-policy: audit
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -201,7 +225,7 @@ jobs:
           fi
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22.14"
           cache: "npm"
@@ -278,7 +302,7 @@ jobs:
       # asserts the bundle is present in the packaging step below.
       - name: Download compass bundle
         continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: compass-dist
           path: compass-dist
@@ -441,7 +465,7 @@ jobs:
           artifact-name: sbom-${{ matrix.target }}.spdx.json
 
       - name: Upload tarball
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ix-${{ matrix.target }}
           path: |
@@ -468,6 +492,9 @@ jobs:
       id-token: write # keyless signing for provenance attestation
       attestations: write # record the build provenance attestation
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
       - name: Checkout
         # Credentials are intentionally persisted here: the Homebrew step pushes a
         # branch and opens a PR with this token (see .github/zizmor.yml).
@@ -533,7 +560,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Download all platform tarballs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: _artifacts
           pattern: ix-*

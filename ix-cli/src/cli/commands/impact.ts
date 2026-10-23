@@ -5,12 +5,14 @@ import chalk from "chalk";
 import { renderSection, renderKeyValue, renderNote, renderResolvedHeader, renderWarning, colorizeKind } from "../ui.js";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
-import { activeReadScope, resolveFileOrReport, printResolved } from "../resolve.js";
+import { activeReadScope, candidatesCut, resolveTargetSetOrReport, printResolved, type ResolvedEntity, type TargetSet } from "../resolve.js";
+import { EXIT_CODES_HELP } from "../outcome.js";
 import { checkGraphHealth, graphHealthJson, graphHealthLlmFields, graphHealthProse, isUnhealthy } from "../graph-health.js";
 import { bucketByHierarchy, getSystemPath, formatSystemPath, hasMapData, type SystemPath } from "../hierarchy.js";
 import { inferRiskSemantics, humanizeLabel, type ImpactFacts, type RiskSemantics } from "../impact/risk-semantics.js";
-import { lineSpan, printJson, relativePath, rowLocation, stripNulls } from "../format.js";
-import { llmLine } from "../llm.js";
+import { captureJson, lineSpan, printJson, relativePath, rowLocation, sliceEdgeResults, stripNulls, type Slice } from "../format.js";
+import { forMcp, suggest, type Relation } from "../next-step.js";
+import { llmLine, llmShortId } from "../llm.js";
 import { parsePickOption } from "../options.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "object", "trait", "interface"]);
@@ -22,27 +24,30 @@ export function registerImpactCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .option("--all", "When the target is ambiguous, analyse every candidate; each analysis is tagged with its candidate")
     .option("--depth <n>", "Expansion depth for callers/importers (default 1, max 3)", "1")
-    .option("--limit <n>", "Max top-impacted members to show", "10")
+    .option("--limit <n>", "Max top-impacted members (and llm caller/callee rows) to show", "10")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText(
       "after",
-      "\nExamples:\n  ix impact IngestionService\n  ix impact IngestionService --kind class\n  ix impact verify_token --format json\n  ix impact AuthProvider --limit 5"
+      "\nExamples:\n  ix impact IngestionService\n  ix impact IngestionService --kind class\n  ix impact verify_token --format json\n  ix impact AuthProvider --limit 5\n  ix impact handle --all --format llm\n" +
+        EXIT_CODES_HELP
     )
     .action(
       async (
         symbol: string,
-        opts: { kind?: string; path?: string; pick?: number; depth: string; limit: string; format: string }
+        opts: { kind?: string; path?: string; pick?: number; all?: boolean; depth: string; limit: string; format: string }
       ) => {
         const client = createClient({ query: true });
         const limit = parseInt(opts.limit, 10);
         const depth = Math.min(Math.max(parseInt(opts.depth, 10) || 1, 1), 3);
 
-        const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
-        const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
-        if (!target) return;
+        const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, all: opts.all };
+        const set = await resolveTargetSetOrReport(client, symbol, resolveOpts, opts.format);
+        if (!set) return;
+        const target = set.entities[0];
 
-        if (opts.format === "text") printResolved(target);
+        if (opts.format === "text" && !set.all) printResolved(target);
 
         // A hollowed graph reports "low risk, no dependents" for anything:
         // the answer is only as good as the edges it counts. Said first, in
@@ -52,13 +57,68 @@ export function registerImpactCommand(program: Command): void {
         if (graph && opts.format === "llm") console.log(llmLine("graph", graphHealthLlmFields(health)));
         if (graph && opts.format === "text") renderWarning(graphHealthProse(health));
 
-        if (CONTAINER_KINDS.has(target.kind)) {
-          await containerImpact(client, target, limit, depth, opts.format, graph);
-        } else {
-          await leafImpact(client, target, depth, opts.format, graph);
-        }
+        const analyse = (entity: ResolvedEntity) => CONTAINER_KINDS.has(entity.kind)
+          ? containerImpact(client, entity, limit, depth, opts.format, graph)
+          : leafImpact(client, entity, depth, limit, opts.format, graph);
+
+        if (set.all) await impactOfAll(symbol, set, opts.format, analyse);
+        else await analyse(target);
       }
     );
+}
+
+/**
+ * `--all`: the impact of every candidate of an ambiguous target, one
+ * analysis each, in candidate order. Grouped rather than merged: risk and
+ * propagation are properties of one entity and do not add up across several.
+ *
+ *   json  `{ target, resolutionMode: "all", candidates, results: [{ candidate, ...impact }] }`
+ *   llm   a `candidate n=<i> ...` record before each candidate's impact records
+ *   text  a header per candidate
+ */
+async function impactOfAll(
+  symbol: string,
+  set: TargetSet,
+  format: string,
+  analyse: (entity: ResolvedEntity) => Promise<void>,
+): Promise<void> {
+  // `n` is the candidate's `--pick` number (resolve.ts candidateSet).
+  const candidates = set.entities.map((e, i) => ({ n: e.n ?? i + 1, id: e.id, name: e.name, kind: e.kind, path: relativePath(e.path) ?? e.path }));
+  const total = set.all?.total ?? candidates.length;
+  const truncation = candidatesCut(set, candidates.length, "Analysed");
+
+  if (format === "json") {
+    const results: Record<string, unknown>[] = [];
+    for (let i = 0; i < set.entities.length; i += 1) {
+      const payloads = await captureJson(() => analyse(set.entities[i]));
+      const only = payloads.length === 1 && payloads[0] && typeof payloads[0] === "object" ? payloads[0] as Record<string, unknown> : { results: payloads };
+      results.push({ candidate: candidates[i].n, ...only });
+    }
+    printJson({
+      target: symbol,
+      resolutionMode: "all",
+      candidates,
+      results,
+      ...(truncation ? { diagnostics: [{ code: "candidates_truncated", message: truncation }] } : {}),
+    });
+    return;
+  }
+
+  if (format === "llm") {
+    console.log(llmLine("impact_all", [["target", symbol], ["candidates", candidates.length], ["total", total]]));
+    if (truncation) console.log(llmLine("diagnostic", [["code", "candidates_truncated"], ["message", truncation]]));
+  } else if (truncation) {
+    renderWarning(truncation);
+  }
+  for (let i = 0; i < set.entities.length; i += 1) {
+    const c = candidates[i];
+    if (format === "llm") {
+      console.log(llmLine("candidate", [["n", c.n], ["name", c.name], ["kind", c.kind], ["path", c.path], ["id", llmShortId(c.id)]]));
+    } else {
+      console.log(`${i > 0 ? "\n" : ""}${chalk.bold(`── [${c.n}] ${c.kind} ${c.name}${c.path ? ` in ${c.path}` : ""} ──`)}`);
+    }
+    await analyse(set.entities[i]);
+  }
 }
 
 /**
@@ -478,10 +538,43 @@ async function containerImpact(
 
 // ── Leaf impact ──────────────────────────────────────────────────────────────
 
+/** One caller or callee row, located the way member rows are: `path` and `lines`. */
+export function leafRowLlm(kind: string, node: any): string {
+  const loc = rowLocation(node);
+  return llmLine(kind, [
+    ["name", node.name || node.attrs?.name || "(unnamed)"],
+    ["kind", node.kind],
+    ["path", loc.path],
+    ["lines", lineSpan(loc)],
+  ]);
+}
+
+/**
+ * The honest-cut record for a leaf list, or nothing when the list fit.
+ *
+ * Its own message, not `truncationHint`: `ix impact` has no `--offset`, so it
+ * must never print a `next:` page or a `next_offset`, whatever the shared
+ * slice helpers grow. The rest of the list is one `--limit` away, or pageable
+ * through the edge command for the same relation.
+ */
+export function leafTruncationLlm(relation: Relation, slice: Slice<unknown>, target: string): string[] {
+  if (!slice.truncated) return [];
+  const head = `${slice.total} ${relation}; showing ${slice.shown}.`;
+  const page = suggest.neighbors(target, relation);
+  const message = forMcp()
+    ? `${head} To page them: ${page}`
+    : `${head} Raise --limit to see them, or page them with ${page}`;
+  return [llmLine("diagnostic", [
+    ["code", "results_truncated"],
+    ["message", message],
+  ])];
+}
+
 async function leafImpact(
   client: IxClient,
   target: { id: string; kind: string; name: string; resolutionMode: string; path?: string },
   depth: number,
+  limit: number,
   format: string,
   graph?: Record<string, unknown>,
 ): Promise<void> {
@@ -575,17 +668,21 @@ async function leafImpact(
       }),
     );
   } else if (format === "llm") {
-    const toRef = (kind: string) => (n: any) =>
-      llmLine(kind, [["name", n.name || n.attrs?.name || "(unnamed)"], ["kind", n.kind]]);
+    const callerSlice = sliceEdgeResults(callersResult.nodes, limit);
+    const calleeSlice = sliceEdgeResults(calleesResult.nodes, limit);
     const lines = [
       ...impactHeaderLlm(target, risk, systemPathMapped),
       llmLine("counts", [
-        ["callers", callersResult.nodes.length],
-        ["callees", calleesResult.nodes.length],
+        ["callers", callerSlice.total],
+        ["callees", calleeSlice.total],
+        ["shown_callers", callerSlice.shown],
+        ["shown_callees", calleeSlice.shown],
       ]),
       ...impactPropagationLlm(propagationBuckets, risk.flowPropagation),
-      ...callersResult.nodes.map(toRef("caller")),
-      ...calleesResult.nodes.map(toRef("callee")),
+      ...callerSlice.rows.map((n: any) => leafRowLlm("caller", n)),
+      ...calleeSlice.rows.map((n: any) => leafRowLlm("callee", n)),
+      ...leafTruncationLlm("callers", callerSlice, target.name),
+      ...leafTruncationLlm("callees", calleeSlice, target.name),
       ...impactTailLlm(risk, decisions, tasks, bugs),
     ];
     for (const line of lines) console.log(line);

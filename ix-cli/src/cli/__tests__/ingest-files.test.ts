@@ -10,6 +10,7 @@ import { ingestFiles, ingestPathSingleFlight } from "../commands/ingest.js";
 import { acquireMapLock, takeMapRerun } from "../single-flight.js";
 import { ingestMtimeCachePath, ingestRebuildPath, ingestSymbolsJournalPath, ingestSymbolsPath, loadConfig } from "../config.js";
 import { workspaceIdForPath } from "../system.js";
+import { ensureWorkspaceRegistered } from "../bootstrap.js";
 import { FakeBackend } from "./helpers/fake-backend.js";
 import { runWithSignal } from "../../client/run-signal.js";
 import { loadIngestBaseline } from "../ingest-baseline.js";
@@ -1472,23 +1473,100 @@ describe("ingestFiles against a fake backend", () => {
     fixture(2);
     await ingestFiles(join(repo, "src"), { ...quiet, force: true });
 
-    expect(registered()).toEqual([{ root: repo, id: workspaceIdForPath(repo), isDefault: true }]);
+    expect(registered(), "registered, and the default since none existed").toEqual([{ root: repo, id: workspaceIdForPath(repo), isDefault: true }]);
     expect([...new Set(sent().map(s => `${s.workspaceId} ${s.uri}`))].sort()).toEqual([
       `${workspaceIdForPath(repo)} src/m000.ts`,
       `${workspaceIdForPath(repo)} src/m001.ts`,
     ]);
   });
 
-  it("still gives a path in no workspace and no repository a workspace of its own", async () => {
+  it("ingests a loose FILE under its directory's id but registers nothing", async () => {
     // `repo` here is a plain directory: no `fixture()`, so no `git init`.
     const outside = join(repo, "loose");
     mkdirSync(outside, { recursive: true });
     writeFileSync(join(outside, "x.ts"), "export const x = 1;\n", "utf8");
+    const configPath = join(home, ".ix", "config.yaml");
+    const before = existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined;
 
     await ingestFiles(join(outside, "x.ts"), { ...quiet, force: true });
 
-    expect(registered()).toEqual([{ root: outside, id: workspaceIdForPath(outside), isDefault: true }]);
     expect(sent()).toEqual([{ uri: "x.ts", workspaceId: workspaceIdForPath(outside) }]);
+    expect(registered()).toEqual([]);
+    expect(existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined).toBe(before);
+  });
+
+  it("a coalesced rerun for a loose FILE ingest does not register the file's directory either", async () => {
+    // The holder's rerun widens a loose file to its whole directory once that
+    // directory has a baseline; registering it would make the directory readable.
+    const outside = join(repo, "loose");
+    mkdirSync(outside, { recursive: true });
+    const first = join(outside, "x.ts");
+    const second = join(outside, "y.ts");
+    writeFileSync(first, "export const x = 1;\n", "utf8");
+    // The directory was ingested once and its registration since dropped from
+    // config.yaml by hand: unregistered, but it keeps its baseline.
+    await ingestFiles(outside, quiet);
+    register();
+    expect(registered()).toEqual([]);
+    expect(loadIngestBaseline(outside), "the loose directory has a baseline, so the rerun covers all of it").not.toBeNull();
+    writeFileSync(first, "export const x = 2;\n", "utf8");
+    writeFileSync(second, "export const y = 2;\n", "utf8");
+    const configPath = join(home, ".ix", "config.yaml");
+    const before = existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined;
+    const stdout = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      // The lock is taken before the first await, so the waiter coalesces.
+      const holder = ingestPathSingleFlight(first, { format: "json" });
+      const waiter = ingestPathSingleFlight(second, { format: "json" });
+      await Promise.all([holder, waiter]);
+    } finally {
+      stdout.mockRestore();
+    }
+
+    expect(loadIngestBaseline(outside)!.files.get(second), "the rerun ran").toBe(statSync(second).mtimeMs);
+    expect(registered()).toEqual([]);
+    expect(existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined).toBe(before);
+  });
+
+  it("registers a loose DIRECTORY after a successful ingest, but never as the default", async () => {
+    const outside = join(repo, "loose");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "x.ts"), "export const x = 1;\n", "utf8");
+
+    await ingestFiles(outside, { ...quiet, force: true });
+
+    expect(registered()).toEqual([{ root: outside, id: workspaceIdForPath(outside), isDefault: false }]);
+    expect(sent()).toEqual([{ uri: "x.ts", workspaceId: workspaceIdForPath(outside) }]);
+  });
+
+  it("a git-repo ingest that set the default stays the default through a later map's registration", async () => {
+    fixture(2);
+    await ingestFiles(join(repo, "src", "m000.ts"), { ...quiet, force: true });
+    // `ix map` registers through bootstrap -> ensureWorkspaceRegistered first.
+    ensureWorkspaceRegistered(repo);
+    expect(registered()).toEqual([{ root: repo, id: workspaceIdForPath(repo), isDefault: true }]);
+  });
+
+  it("an explicit --root ingest of a non-repository directory may become the default", async () => {
+    const outside = join(repo, "rooted");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "x.ts"), "export const x = 1;\n", "utf8");
+
+    await ingestFiles(outside, { ...quiet, force: true, root: outside });
+
+    expect(registered()).toEqual([{ root: realpathSync.native(outside), id: workspaceIdForPath(realpathSync.native(outside)), isDefault: true }]);
+  });
+
+  it("leaves an existing default workspace the only default", async () => {
+    fixture(2);
+    const other = join(repo, "..", `${repo.split(/[\\/]/).pop()}-default`);
+    mkdirSync(other, { recursive: true });
+    register({ root: realpathSync.native(other), isDefault: true });
+
+    await ingestFiles(join(repo, "src"), { ...quiet, force: true });
+
+    expect(registered().filter(w => w.isDefault).map(w => w.root)).toEqual([realpathSync.native(other)]);
+    expect(registered().map(w => w.root)).toContain(repo);
   });
 
   it("leaves everything outside a subdirectory run alone: deletions, baseline, extractor, stitch", async () => {
@@ -1691,5 +1769,146 @@ describe("ingestFiles against a fake backend", () => {
     await ingestFiles(join(alpha, "alpha.ts"), { ...quiet, force: true });
     expect(sent()).toEqual([{ uri: "alpha/alpha.ts", workspaceId: alphaId }]);
     expect(registered().map(w => w.root)).toEqual([repo]);
+  });
+  describe("QA-07: behaviours the matrix was missing", () => {
+    const incremental = () =>
+      ingestFiles(repo, { format: "json", suppressOutput: true, printSummary: false });
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+
+    // Guard: ingest.ts `deletedPatches.push(...)` for a path that left the tree.
+    it("a file renamed between runs sends a tombstone for the old path and a patch for the new", async () => {
+      backend.semantics = "head";
+      backend.releaseVersion = "1.0.32";
+      mkdirSync(join(repo, "src"), { recursive: true });
+      writeFileSync(join(repo, "src", "a.ts"), "export function fa(): number { return 1; }\n", "utf8");
+      writeFileSync(join(repo, "src", "b.ts"), "export function fb(): number { return 2; }\n", "utf8");
+      git("init", "-q");
+      git("add", "-A");
+      await incremental();
+      expect(backend.graphSignature().nodes.some(n => n.includes("a.ts"))).toBe(true);
+
+      git("mv", "src/a.ts", "src/c.ts");
+      backend.resetRequests();
+      backend.sourceUris.length = 0;
+      await incremental();
+
+      expect(backend.sourceUris.filter(u => u === "src/a.ts"), "one patch for the old path").toHaveLength(1);
+      expect(backend.sourceUris.filter(u => u === "src/c.ts"), "one patch for the new path").toHaveLength(1);
+      expect(backend.sourceUris, "an untouched file is not re-sent").not.toContain("src/b.ts");
+
+      const oldOps = backend.lastOps.get("src/a.ts")!;
+      expect(oldOps.length).toBeGreaterThan(0);
+      expect(oldOps.every(op => op.type === "DeleteNode" || op.type === "DeleteEdge"), "the tombstone only deletes").toBe(true);
+      expect(oldOps.some(op => op.type === "DeleteNode"), "and removes nodes").toBe(true);
+      expect(backend.lastOps.get("src/c.ts")!.some(op => op.type === "UpsertNode")).toBe(true);
+
+      const names = backend.graphSignature().nodes.join("\n");
+      expect(names).not.toContain("a.ts");
+      expect(names).toContain("c.ts");
+
+      // Head semantics: the incremental graph is the one a fresh map builds.
+      const incrementalGraph = backend.graphSignature();
+      const fresh = new FakeBackend({ semantics: "head" });
+      const endpoint = process.env.IX_ENDPOINT;
+      process.env.IX_ENDPOINT = await fresh.start();
+      try {
+        await ingestFiles(repo, { format: "json", force: true, suppressOutput: true, printSummary: false });
+        expect(incrementalGraph).toEqual(fresh.graphSignature());
+      } finally {
+        process.env.IX_ENDPOINT = endpoint;
+        await fresh.stop();
+      }
+    });
+
+    // The failing-capable proof for the walk is the walkFiles case in
+    // ingest-discovery.test.ts: discoverSourceFiles' canonical dedupe hides a
+    // walk that follows the link at this level. This is the end-to-end run.
+    for (const mode of ["git", "no-git"] as const) {
+      it(`a directory symlink to its parent ends the run with each file sent once (${mode})`, async () => {
+        fixture(3);
+        try {
+          symlinkSync("..", join(repo, "src", "up"), "dir");
+        } catch {
+          return; // no permission to symlink — nothing to assert
+        }
+        if (mode === "no-git") rmSync(join(repo, ".git"), { recursive: true, force: true });
+        else git("add", "-A");
+
+        await incremental();
+
+        for (const n of ["m000", "m001", "m002"]) {
+          expect(backend.sourceUris.filter(u => u === `src/${n}.ts`), n).toHaveLength(1);
+        }
+        expect(backend.sourceUris.some(u => u.includes("up/"))).toBe(false);
+      });
+    }
+
+    it("a .ts file with NUL bytes and invalid UTF-8 does not stop the ingest", async () => {
+      fixture(3);
+      // Escapes only: no raw NUL in this source.
+      writeFileSync(
+        join(repo, "src", "bin.ts"),
+        Buffer.concat([
+          Buffer.from("export function before(): number { return 1; }\n"),
+          Buffer.from([0x00, 0x00, 0xff, 0xfe, 0xc3, 0x28]),
+          Buffer.from("\nexport function after(): number { return 2; }\n"),
+        ]),
+      );
+      git("add", "-A");
+
+      const summary = await incremental();
+
+      for (const n of ["m000", "m001", "m002"]) {
+        expect(backend.sourceUris, n).toContain(`src/${n}.ts`);
+      }
+      // Observed today: it lands AND is counted in filesWithParseErrors. Either
+      // alone is acceptable; neither is a silent drop.
+      const landed = backend.sourceUris.includes("src/bin.ts");
+      const counted = summary.parseErrors + summary.filesWithParseErrors > 0;
+      expect(landed || counted, "bin.ts landed or was counted as a parse error").toBe(true);
+    });
+
+    // Guards the id inputs: a run-varying value in workspaceIdForPath
+    // (system.ts) or computePatchId (core-ingestion patch-builder.ts) turns it
+    // red. It cannot see a dropped .sort(): both runs discover the same files
+    // in the same order, so an unsorted list is still the same list twice.
+    it("two fresh ingests of one tree send byte-identical patch ids and ops", async () => {
+      fixture(30);
+      for (let i = 0; i < 30; i += 3) {
+        const target = (i + 1) % 30;
+        writeFileSync(
+          join(repo, "src", `m${String(i).padStart(3, "0")}.ts`),
+          `import { f${target} } from "./m${String(target).padStart(3, "0")}.js";\n` +
+            `export function f${i}(): number { return f${target}() + ${i}; }\n`,
+          "utf8",
+        );
+      }
+      git("add", "-A");
+      const snapshot = (b: FakeBackend) =>
+        [...b.lastOps.keys()].sort().map(uri => [uri, b.lastPatchIds.get(uri), JSON.stringify(b.lastOps.get(uri))]);
+
+      await incremental();
+      const first = snapshot(backend);
+      expect(first).toHaveLength(30);
+      expect(first.every(([, id]) => typeof id === "string" && id.length > 0)).toBe(true);
+
+      const second = new FakeBackend();
+      const homeB = realpathSync.native(mkdtempSync(join(tmpdir(), "ix-ingest-home-b-")));
+      const keep = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, IX_ENDPOINT: process.env.IX_ENDPOINT, IX_LOCK_DIR: process.env.IX_LOCK_DIR };
+      try {
+        process.env.IX_ENDPOINT = await second.start();
+        process.env.HOME = homeB;
+        process.env.USERPROFILE = homeB;
+        process.env.IX_LOCK_DIR = join(homeB, "locks");
+        await incremental();
+        expect(snapshot(second)).toEqual(first);
+      } finally {
+        for (const [k, v] of Object.entries(keep)) {
+          if (v === undefined) delete process.env[k]; else process.env[k] = v;
+        }
+        await second.stop();
+        removeTree(homeB);
+      }
+    });
   });
 });

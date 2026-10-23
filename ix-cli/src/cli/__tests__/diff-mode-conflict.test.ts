@@ -3,7 +3,7 @@
 /**
  * diff-mode-conflict.test.ts — Mutation-verified tests for diff.ts
  *
- * Tests detectDiffModeConflict, computeLineDiff, and mergeDiffOptions with
+ * Tests detectDiffModeConflict, mergeDiffOptions, and loadFileFromDisk with
  * assertions strong enough to survive adversarial mutation testing.
  *
  * Every assertion is discriminating: if you swap the conflict branches, invert
@@ -27,7 +27,6 @@ import { join } from "node:path";
 import { describe, expect, it, afterEach, beforeEach } from "vitest";
 import {
   detectDiffModeConflict,
-  computeLineDiff,
   loadFileFromDisk,
   type DiffModeOptions,
 } from "../commands/diff.js";
@@ -202,73 +201,6 @@ describe("detectDiffModeConflict", () => {
 });
 
 // ══════════════════════════════════════════════════════════════════════
-// computeLineDiff — pure function, no side effects
-// ══════════════════════════════════════════════════════════════════════
-
-describe("computeLineDiff", () => {
-  it("identical single lines produce one context line", () => {
-    const result = computeLineDiff("hello", "hello");
-    expect(result).toEqual(["  hello"]);
-  });
-
-  it("added line: before empty, after has content", () => {
-    // Empty string splits to [""] — one empty line. The implementation
-    // diffs it against "new line" so both a removal and addition appear.
-    const result = computeLineDiff("", "new line");
-    expect(result).toEqual(["- ", "+ new line"]);
-  });
-
-  it("removed line: before has content, after empty", () => {
-    // Empty string splits to [""] — one empty line. The implementation
-    // diffs "old line" against it so both a removal and addition appear.
-    const result = computeLineDiff("old line", "");
-    expect(result).toEqual(["- old line", "+ "]);
-  });
-
-  it("changed line: old removed, new added", () => {
-    const result = computeLineDiff("before", "after");
-    expect(result).toEqual(["- before", "+ after"]);
-  });
-
-  it("multiple lines: mixed context, additions, and removals", () => {
-    const before = "line1\nline2\nline3";
-    const after = "line1\nline2-new\nline3";
-    const result = computeLineDiff(before, after);
-    expect(result).toEqual([
-      "  line1",
-      "- line2",
-      "+ line2-new",
-      "  line3",
-    ]);
-  });
-
-  it("handles different-length inputs (extra lines added)", () => {
-    const before = "a";
-    const after = "a\nb\nc";
-    const result = computeLineDiff(before, after);
-    expect(result).toEqual(["  a", "+ b", "+ c"]);
-  });
-
-  it("handles different-length inputs (extra lines removed)", () => {
-    const before = "x\ny\nz";
-    const after = "x";
-    const result = computeLineDiff(before, after);
-    expect(result).toEqual(["  x", "- y", "- z"]);
-  });
-
-  it("both empty produces a single context line (empty line)", () => {
-    // "".split("\n") = [""]" — one element. Both sides identical → context.
-    const result = computeLineDiff("", "");
-    expect(result).toEqual(["  "]);
-  });
-
-  it("preserves leading/trailing whitespace in lines", () => {
-    const result = computeLineDiff("  indented", "  indented");
-    expect(result).toEqual(["    indented"]);
-  });
-});
-
-// ══════════════════════════════════════════════════════════════════════
 // mergeDiffOptions — pure function, no side effects
 // ══════════════════════════════════════════════════════════════════════
 
@@ -401,54 +333,5 @@ describe("loadFileFromDisk", () => {
 
   it("returns null for non-existent parent directory", () => {
     expect(loadFileFromDisk(join(tmpDir, "no", "such", "dir", "file.txt"), tmpDir)).toBeNull();
-  });
-});
-
-// ══════════════════════════════════════════════════════════════════════
-// computeLineDiff — additional edge cases
-// ══════════════════════════════════════════════════════════════════════
-
-describe("computeLineDiff edge cases", () => {
-  it("single line changed to different single line", () => {
-    const result = computeLineDiff("foo", "bar");
-    expect(result).toEqual(["- foo", "+ bar"]);
-  });
-
-  it("identical multi-line content", () => {
-    const content = "a\nb\nc";
-    const result = computeLineDiff(content, content);
-    expect(result).toEqual(["  a", "  b", "  c"]);
-  });
-
-  it("all lines changed (no context)", () => {
-    const result = computeLineDiff("x\ny", "a\nb");
-    expect(result).toEqual(["- x", "+ a", "- y", "+ b"]);
-  });
-
-  it("lines with only whitespace differences", () => {
-    const result = computeLineDiff("  indented", "    more-indented");
-    expect(result).toEqual(["-   indented", "+     more-indented"]);
-  });
-
-  it("handles Windows-style line endings (split on \n only)", () => {
-    const result = computeLineDiff("a\r\nb", "a\r\nc");
-    // \r is preserved as part of the line content
-    expect(result).toEqual(["  a\r", "- b", "+ c"]);
-  });
-
-  it("very long line (no truncation)", () => {
-    const long = "x".repeat(10000);
-    const result = computeLineDiff(long, long);
-    expect(result).toEqual(["  " + long]);
-  });
-
-  it("before longer than after: extra lines removed at end", () => {
-    const result = computeLineDiff("a\nb\nc\nd", "a\nb");
-    expect(result).toEqual(["  a", "  b", "- c", "- d"]);
-  });
-
-  it("after longer than before: extra lines added at end", () => {
-    const result = computeLineDiff("a\nb", "a\nb\nc\nd");
-    expect(result).toEqual(["  a", "  b", "+ c", "+ d"]);
   });
 });

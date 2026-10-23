@@ -86,6 +86,7 @@ describe("common CLI option validation", () => {
     [["inventory", "--kind", "file", "--limit", "1e3"], "--limit"],
     [["rank", "--by", "dependents", "--kind", "class", "--top", "10abc"], "--top"],
     [["patches", "--limit", "-1"], "--limit"],
+    [["smells", "--limit", "abc"], "--limit"],
     [["search", "term", "--as-of", "abc"], "--as-of"],
     [["search", "term", "--as-of", "1e3"], "--as-of"],
     [["map", "--level", "nope"], "--level"],

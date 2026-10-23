@@ -51,6 +51,63 @@ describe("resolving an ambiguous symbol over MCP", () => {
     ]);
   });
 
+  it("forwards --offset on ix_neighbors", async () => {
+    const { calls, runIx } = recorder();
+    const client = await connect(runIx);
+    await client.callTool({ name: "ix_neighbors", arguments: { symbol: "config", relation: "imported_by", limit: 20, offset: 50 } });
+    expect(calls).toEqual([
+      ["imported-by", "--limit=20", "--offset=50", "--format=llm", "--", "config"],
+    ]);
+  });
+
+  it("forwards --offset on the single-relation tools too", async () => {
+    // Their truncation diagnostic carries next_offset=, so each one has to be
+    // able to take it back; a hint the tool cannot act on is no hint.
+    const { calls, runIx } = recorder();
+    const client = await connect(runIx);
+    await client.callTool({ name: "ix_callers", arguments: { symbol: "config", limit: 20, offset: 50 } });
+    expect(calls).toEqual([
+      ["callers", "--limit=20", "--offset=50", "--format=llm", "--", "config"],
+    ]);
+  });
+
+  it("offers offset only on the edge tools", async () => {
+    const client = await connect(async () => ({ ok: true, stdout: "ok", stderr: "" }));
+    const tools = (await client.listTools()).tools;
+    const has = (name: string) =>
+      "offset" in (((tools.find((t) => t.name === name)!.inputSchema) as { properties?: Record<string, unknown> }).properties ?? {});
+    for (const name of ["ix_neighbors", "ix_callers", "ix_callees", "ix_imports", "ix_imported_by", "ix_text", "ix_inventory"]) {
+      expect(has(name), name).toBe(true);
+    }
+    for (const name of ["ix_impact", "ix_read", "ix_explain"]) {
+      expect(has(name), name).toBe(false);
+    }
+  });
+
+  it("forwards --offset on ix_text and ix_inventory, which print next_offset= too", async () => {
+    const { calls, runIx } = recorder();
+    const client = await connect(runIx);
+    await client.callTool({ name: "ix_text", arguments: { pattern: "needle", offset: 20 } });
+    await client.callTool({ name: "ix_inventory", arguments: { kind: "class", offset: 50 } });
+    await client.callTool({ name: "ix_text", arguments: { pattern: "needle" } });
+    await client.callTool({ name: "ix_inventory", arguments: { kind: "class" } });
+    expect(calls[0]).toContain("--offset=20");
+    expect(calls[1]).toContain("--offset=50");
+    expect(calls[2].some((a) => a.startsWith("--offset"))).toBe(false);
+    expect(calls[3].some((a) => a.startsWith("--offset"))).toBe(false);
+  });
+
+  it("rejects a negative offset on ix_text and ix_inventory", async () => {
+    const { calls, runIx } = recorder();
+    const client = await connect(runIx);
+    for (const [name, args] of [["ix_text", { pattern: "needle" }], ["ix_inventory", { kind: "class" }]] as const) {
+      const result = await client.callTool({ name, arguments: { ...args, offset: -1 } })
+        .then((r) => (r as CallToolResult).isError === true, () => true);
+      expect(result, name).toBe(true);
+    }
+    expect(calls).toEqual([]);
+  });
+
   it("sends nothing for the flags the caller left out", async () => {
     const { calls, runIx } = recorder();
     const client = await connect(runIx);
@@ -70,6 +127,22 @@ describe("resolving an ambiguous symbol over MCP", () => {
     const client = await connect(runIx);
     await client.callTool({ name: "ix_read", arguments: { symbol: "config", pick: 1 } });
     expect(calls).toEqual([["read", "--pick=1", "--format=llm", "--", "config"]]);
+  });
+});
+
+describe("ix_impact limit", () => {
+  it("forwards limit as --limit, so the CLI's 'Raise --limit' hint can be acted on", async () => {
+    const { calls, runIx } = recorder();
+    const client = await connect(runIx);
+    await client.callTool({ name: "ix_impact", arguments: { target: "verify", limit: 25 } });
+    expect(calls).toEqual([["impact", "--limit=25", "--format=llm", "--", "verify"]]);
+  });
+
+  it("leaves argv unchanged when limit is omitted", async () => {
+    const { calls, runIx } = recorder();
+    const client = await connect(runIx);
+    await client.callTool({ name: "ix_impact", arguments: { target: "verify" } });
+    expect(calls).toEqual([["impact", "--format=llm", "--", "verify"]]);
   });
 });
 
