@@ -576,22 +576,25 @@ export class IxClient {
   // request must reach the endpoint the caller checked, never wherever a proxy in
   // front of it points. A 3xx is refused, not followed.
   async deleteWorkspace(workspaceId: string): Promise<void> {
-    const path = "/v1/reset/workspace";
-    const payload = JSON.stringify({ workspaceId });
-    await this.read<unknown>("POST", path, payload, async () => {
-      const resp = await fetch(`${this.endpoint}${path}`, {
+    try {
+      const resp = await fetch(`${this.endpoint}/v1/reset/workspace`, {
         method: "POST",
         redirect: "manual",
-        headers: this.headers(true, "POST", path),
-        body: payload,
+        headers: this.headers(true, "POST", "/v1/reset/workspace"),
+        body: JSON.stringify({ workspaceId }),
         signal: this.signalFor(2 * 60 * 1000),
       });
       if (resp.status >= 300 && resp.status < 400) {
         await resp.body?.cancel().catch(() => {});
         throw this.resetRedirectError("workspace reset route", resp);
       }
-      return resp;
-    });
+      const text = await resp.text();
+      // A write: never retried, whatever the status.
+      if (!resp.ok) throw httpError(resp.status, text);
+    } finally {
+      // The reads after a write get the whole read deadline again (as in `read`).
+      if (this.readDeadlineMs !== undefined) this.readDeadlineAt = Date.now() + this.readDeadlineMs;
+    }
   }
 
   // True when the configured endpoint is a local memory-layer. A local
