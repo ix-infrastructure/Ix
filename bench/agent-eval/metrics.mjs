@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-export const METRICS = ['resolved', 'input_tokens', 'output_tokens', 'cached_tokens', 'turns', 'tool_calls', 'search_calls', 'rg_calls', 'grep_calls', 'find_calls', 'ix_calls', 'ix_errors', 'wall_seconds', 'hook_seconds', 'setup_seconds', 'eval_seconds', 'total_wall_seconds'];
+export const METRICS = ['resolved', 'input_tokens', 'output_tokens', 'cached_tokens', 'turns', 'tool_calls', 'search_calls', 'rg_calls', 'grep_calls', 'find_calls', 'ix_calls', 'ix_errors', 'hook_ix_calls', 'hook_ix_errors', 'wall_seconds', 'hook_seconds', 'setup_seconds', 'eval_seconds', 'total_wall_seconds'];
 const counter = (value, label) => {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error(`Missing or invalid ${label}`);
   return value;
@@ -13,6 +13,7 @@ export const budgetTokens = (usage) => usage.input_tokens - usage.cached_tokens 
 
 /** Tokenize direct shell commands, preserving quoted separators as argument text.
  * Scripts, aliases and dynamic expansions require normalized tool telemetry.
+ * Never throws: an unbalanced quote keeps what was parsed, so one malformed agent command cannot stop a run.
  */
 function shellCommands(text) {
   const commands = [], heredocs = []; let words = [], word = '', quote = '', active = false;
@@ -23,8 +24,10 @@ function shellCommands(text) {
     if (c === '\\' && quote !== "'") {
       if (text[i + 1] !== '\n') { word += text[++i] ?? ''; active = true; } else i++;
     } else if (quote) {
-      if (c === quote) quote = ''; else word += c;
-    } else if (c === "'" || c === '"') { quote = c; active = true; }
+      // ANSI-C `$'...'` closes on a single quote but, unlike '...', honours backslash escapes (above).
+      if (c === quote.at(-1)) quote = ''; else word += c;
+    } else if (c === '$' && text[i + 1] === "'") { quote = "$'"; active = true; i++; }
+    else if (c === "'" || c === '"') { quote = c; active = true; }
     else if (c === '#' && !active) { while (i < text.length && text[i] !== '\n') i++; i--; }
     else if (text.startsWith('<<<', i)) { flush(); i += 2; } // A here-string is a single word of input.
     else if (text.startsWith('<<', i)) {
@@ -52,7 +55,6 @@ function shellCommands(text) {
     else if (/\s/.test(c)) flush();
     else { word += c; active = true; }
   }
-  if (quote) throw new Error('Unterminated shell quote in tool telemetry');
   boundary(); return commands;
 }
 export function commandCounts(command) {
@@ -85,12 +87,19 @@ export function isIxMcpTool(name) {
 
 // Claude's tool_result text when --print denies a tool that was not allowed.
 const CLAUDE_DENIAL = /requested permissions to use .*(?:haven't|have not) granted/is;
+// bash/dash/zsh/env messages for an `ix` that could not be started.
+const IX_MISSING = /(?:^|[\s'"/])ix'?: (?:(?:command )?not found|No such file or directory)|command not found: ix(?:\s|$)/m;
 
 function ixErrorCode(text) {
   try { return JSON.parse(text).error?.code; } catch {
     return String(text ?? '').match(/(?:^|\n)error\s+code=(?:"([\w.-]+)"|([\w.-]+))/)?.slice(1).find(Boolean);
   }
 }
+/** An Ix failure visible in the output, even when `2>&1 | head` or `|| fallback` made the command exit 0. */
+function ixFailureCode(text) {
+  return ixErrorCode(text) ?? (IX_MISSING.test(String(text ?? '')) ? 'COMMAND_NOT_FOUND' : undefined);
+}
+const resultText = (content) => typeof content === 'string' ? content : Array.isArray(content) ? content.map((part) => part?.text ?? '').join('\n') : '';
 
 /** Strict by default; budget-interrupted totals remain unknown, never fabricated zeroes. */
 export function parseMetrics(text, format, { allowIncomplete = false } = {}) {
@@ -130,11 +139,11 @@ export function parseMetrics(text, format, { allowIncomplete = false } = {}) {
     }
     if (format === 'claude') {
       if (event.type === 'user') for (const content of event.message?.content ?? []) {
-        if (content.type === 'tool_result' && content.is_error && ixTools.has(content.tool_use_id)) {
-          const text = typeof content.content === 'string' ? content.content : content.content?.[0]?.text;
+        if (content.type === 'tool_result' && ixTools.has(content.tool_use_id)) {
+          const text = resultText(content.content), code = ixFailureCode(text);
           // A permission denial is a harness misconfiguration, not an Ix failure.
-          if (CLAUDE_DENIAL.test(text ?? '')) ixDenied.add(content.tool_use_id);
-          else toolError(content.tool_use_id, ixErrorCode(text));
+          if (content.is_error && CLAUDE_DENIAL.test(text)) ixDenied.add(content.tool_use_id);
+          else if (content.is_error || code) toolError(content.tool_use_id, code);
         }
       }
       if (event.type === 'assistant') {
@@ -165,10 +174,8 @@ export function parseMetrics(text, format, { allowIncomplete = false } = {}) {
         const item = event.item;
         if (item?.type === 'command_execution') {
           tool(item.id, item.command);
-          if (ixTools.has(item.id) && item.exit_code !== 0 && item.exit_code != null) {
-            const code = ixErrorCode(item.aggregated_output);
-            toolError(item.id, code);
-          }
+          const code = ixFailureCode(item.aggregated_output);
+          if (ixTools.has(item.id) && ((item.exit_code !== 0 && item.exit_code != null) || code)) toolError(item.id, code);
         }
         if (item?.type === 'mcp_tool_call') tool(item.id, '', /^ix(?:[._-]|$)/.test(item.server ?? ''));
         if (['file_change', 'web_search'].includes(item?.type)) tool(item.id);

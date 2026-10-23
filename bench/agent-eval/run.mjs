@@ -113,13 +113,15 @@ export async function runBenchmark({ manifestPath, config, out, dryRun = false }
       }
       writeFileSync(join(runPath, 'prediction.patch'), patch);
       let hookSeconds = 0;
+      // Hook calls follow tool-call volume, not the agent's choice to use Ix, so they stay out of ix_calls/ix_errors.
+      metrics.hook_ix_calls = 0; metrics.hook_ix_errors = 0;
       if (existsSync(hookLog)) {
         const hooks = readFileSync(hookLog, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
         for (const hook of hooks) {
           if (!Number.isSafeInteger(hook.ix_calls) || hook.ix_calls < 0 || !(Number.isFinite(hook.seconds) && hook.seconds >= 0)) throw new Error('Invalid hook telemetry');
           hookSeconds += hook.seconds;
-          metrics.ix_calls += hook.ix_calls;
-          if (hook.type === 'ix_error') { metrics.ix_errors++; metrics.ix_errors_by_code[hook.code] = (metrics.ix_errors_by_code[hook.code] ?? 0) + 1; }
+          metrics.hook_ix_calls += hook.ix_calls;
+          if (hook.type === 'ix_error') metrics.hook_ix_errors++;
         }
       }
       if (!dryRun && job.arm === 'ix' && config.environment.setup.includes(join(root, 'provision.mjs')) && termination === 'completed' && patch && (!existsSync(hookLog) || !readFileSync(hookLog, 'utf8').trim())) throw new Error('Agent changed code without firing the configured Ix hook');

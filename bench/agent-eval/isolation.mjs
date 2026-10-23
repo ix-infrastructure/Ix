@@ -11,6 +11,9 @@ export function findBinary(binary, searchPath = process.env.PATH) {
   throw new Error(`Executable unavailable: ${binary}`);
 }
 
+// Claude Code authentication and provider routing; identical in both arms. Other CLAUDE_CODE_* (parent session, IDE) is dropped.
+const CLAUDE_AUTH = /^CLAUDE_CODE_(?:OAUTH_TOKEN|USE_(?:BEDROCK|VERTEX|FOUNDRY)|SKIP_(?:BEDROCK|VERTEX|FOUNDRY)_AUTH|CLIENT_(?:CERT|KEY|KEY_PASSPHRASE))$/;
+
 /** A private executable directory, rather than a setup process attempting to export PATH. */
 export function armEnvironment(request, inherited = process.env) {
   if (process.platform === 'win32') throw new Error('Arm isolation currently requires POSIX; use Linux for SWE-bench');
@@ -31,7 +34,7 @@ export function armEnvironment(request, inherited = process.env) {
     CLAUDE_CONFIG_DIR: join(home, '.claude'), IX_HOME: join(home, '.ix'), XDG_CONFIG_HOME: join(home, '.config'),
     XDG_CACHE_HOME: join(home, '.cache'), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(home, '.gitconfig'),
     AGENT_EVAL_REQUEST: join(run_path, 'request.json') };
-  for (const key of Object.keys(env)) if (/^(IX_|JARVIS_IX_|CLAUDE_CODE_|CLAUDE_PROJECT_|CODEX_THREAD_)/.test(key) && key !== 'IX_HOME') delete env[key];
+  for (const key of Object.keys(env)) if (/^(IX_|JARVIS_IX_|CLAUDE_CODE_|CLAUDE_PROJECT_|CODEX_THREAD_)/.test(key) && key !== 'IX_HOME' && !CLAUDE_AUTH.test(key)) delete env[key];
   if (arm === 'ix' && environment.ix_cli) {
     env.IX_ENDPOINT = environment.endpoint;
     const launcher = `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(environment.ix_cli)} "$@"\n`;

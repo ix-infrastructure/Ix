@@ -23,10 +23,15 @@ export function integrationFiles(request) {
     [join(plugin, '.mcp.json')]: json({ mcpServers: { [MCP_SERVER]: { command: 'ix', args: ['mcp'] } } }),
     [join(plugin, 'hooks', 'hooks.json')]: json({ hooks: { PostToolUse: [{ matcher: 'Edit|MultiEdit|Write|Bash', hooks: [{ type: 'command', command: hook.map(shellQuote).join(' ') + ' claude', timeout: hookTimeout }] }] } }),
   };
-  if (request.agent.family === 'codex') return {
-    [join(request.home, '.codex', 'config.toml')]: `notify = ${JSON.stringify([...hook, 'codex'])}\n[mcp_servers.${MCP_SERVER}]\ncommand = "ix"\nargs = ["mcp"]\n`,
-    [join(plugin, 'plugin.json')]: json({ name: PLUGIN_NAME, family: 'codex', source_revision: request.environment.plugin_revision, transport: 'ix mcp', hook: 'notify:agent-turn-complete' }),
-  };
+  if (request.agent.family === 'codex') {
+    const endpoint = request.environment.endpoint;
+    if (typeof endpoint !== 'string' || !endpoint) throw new Error('Codex provisioning requires environment.endpoint');
+    // Codex starts stdio MCP servers with an allowlisted environment, so the endpoint is passed explicitly.
+    return {
+      [join(request.home, '.codex', 'config.toml')]: `notify = ${JSON.stringify([...hook, 'codex'])}\n[mcp_servers.${MCP_SERVER}]\ncommand = "ix"\nargs = ["mcp"]\nenv = { IX_ENDPOINT = ${JSON.stringify(endpoint)} }\n`,
+      [join(plugin, 'plugin.json')]: json({ name: PLUGIN_NAME, family: 'codex', source_revision: request.environment.plugin_revision, transport: 'ix mcp', hook: 'notify:agent-turn-complete' }),
+    };
+  }
   throw new Error('Local provisioning requires Claude Code or Codex');
 }
 

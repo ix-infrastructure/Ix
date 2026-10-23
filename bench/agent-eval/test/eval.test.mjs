@@ -123,6 +123,7 @@ test('example config grants edits and shell; only the ix arm is allowed the Ix M
   const files = integrationFiles({ agent, run_path: '/run', home: '/home', environment: { seconds: 1 } });
   assert.deepEqual(Object.keys(JSON.parse(files['/run/plugin/.mcp.json']).mcpServers), [MCP_SERVER]);
   assert.equal(JSON.parse(files['/run/plugin/.claude-plugin/plugin.json']).name, PLUGIN_NAME);
+  assert.throws(() => integrationFiles({ agent: { family: 'codex' }, run_path: '/run', home: '/home', environment: { seconds: 1 } }), /endpoint/);
   // Shared args and tool rules cannot grant or override integrations.
   for (const args of [['--allowedTools', 'Bash'], ['--allowed-tools=Bash'], ['--mcp-config', '{}']]) assert.throws(() => nativeArgs({ arm: 'ix', run_path: '/run', agent: { ...agent, args }, budget }), /override/);
   assert.throws(() => nativeArgs({ arm: 'baseline', run_path: '/run', agent: { ...agent, allowed_tools: [CLAUDE_IX_MCP_RULE] }, budget }), /MCP/);
@@ -154,6 +155,36 @@ test('Codex sums completed turn usage and captures command/MCP errors by code', 
   assert.deepEqual(metrics.ix_errors_by_code, { NOT_FOUND: 1, DOWN: 1 });
   assert.throws(() => parseMetrics(ndjson([{ type: 'turn.started' }, { type: 'turn.failed' }]), 'codex'), /failed/);
   assert.throws(() => parseMetrics(ndjson([{ type: 'turn.started' }, usage, { type: 'turn.started' }]), 'codex'), /Incomplete/);
+});
+
+test('Ix failures hidden behind a zero exit status still count as failures, not successes', () => {
+  const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  const claude = (command, content) => parseMetrics(ndjson([{ type: 'assistant', message: { id: 'a', content: [{ type: 'tool_use', id: 't', name: 'Bash', input: { command } }] } },
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't', is_error: false, content }] } }, { type: 'result', usage }]), 'claude');
+  for (const text of ['sh: 1: ix: not found', 'bash: line 1: ix: command not found', 'zsh: command not found: ix', "env: 'ix': No such file or directory", 'bash: /usr/local/bin/ix: No such file or directory']) {
+    const metrics = claude('ix search foo 2>&1 | head -5', text);
+    assert.equal(metrics.ix_succeeded, 0, text); assert.deepEqual(metrics.ix_errors_by_code, { COMMAND_NOT_FOUND: 1 }, text);
+  }
+  // Ix arm: `--format llm` errors piped through head are still Ix errors; array content is read in full.
+  const piped = claude('ix search foo --format llm 2>&1 | head', [{ type: 'text', text: 'notice' }, { type: 'text', text: 'error code=unmapped message="run ix map"' }]);
+  assert.equal(piped.ix_succeeded, 0); assert.deepEqual(piped.ix_errors_by_code, { unmapped: 1 });
+  const ok = claude('ix search foo | head', 'Foo src/foo.ts:1');
+  assert.equal(ok.ix_succeeded, 1); assert.equal(ok.ix_errors, 0);
+  const codex = (command, aggregated_output) => parseMetrics(ndjson([{ type: 'turn.started' }, { type: 'item.completed', item: { id: 'c', type: 'command_execution', command, exit_code: 0, aggregated_output } },
+    { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } }]), 'codex');
+  const fallback = codex('bash -lc "ix search foo || rg foo"', 'bash: line 1: ix: command not found\nsrc/foo.ts:1:foo');
+  assert.equal(fallback.ix_succeeded, 0); assert.deepEqual(fallback.ix_errors_by_code, { COMMAND_NOT_FOUND: 1 });
+  assert.equal(codex('bash -lc "ix search foo || rg foo"', 'src/foo.ts:1:foo').ix_succeeded, 1);
+});
+
+test('shell telemetry handles ANSI-C quotes and never aborts on an unbalanced quote', () => {
+  assert.equal(commandCounts("echo $'it\\'s'; ix locate A").ix_calls, 1);
+  assert.equal(commandCounts("echo $'a; ix b'").ix_calls, 0);
+  for (const command of ["echo 'unterminated; ix x", 'echo "open', "rg x; echo $'tail"]) assert.doesNotThrow(() => commandCounts(command), command);
+  assert.equal(commandCounts("rg x; echo 'open; ix y").rg_calls, 1);
+  const metrics = parseMetrics(ndjson([{ type: 'assistant', message: { id: 'a', content: [{ type: 'tool_use', id: 't', name: 'Bash', input: { command: "grep -r 'oops" } }] } },
+    { type: 'result', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }]), 'claude');
+  assert.equal(metrics.tool_calls, 1); assert.equal(metrics.grep_calls, 1);
 });
 
 function fixtureRuns() {
@@ -241,9 +272,11 @@ test('patch-apply and test-timeout evaluation errors score unresolved; other err
 integrationTest('SWE-bench adapter turns a logged patch-apply error into an unresolved receipt', () => {
   const harness = join(scratch, 'swe-harness'), python = join(scratch, 'fake-python.cjs');
   mkdirSync(harness, { recursive: true });
-  execFileSync('git', ['init', '-q', harness]); writeFileSync(join(harness, 'README'), 'fixture');
-  execFileSync('git', ['-C', harness, 'add', '.']); execFileSync('git', ['-C', harness, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'fixture']);
-  const revision = execFileSync('git', ['-C', harness, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  // Isolated from developer signing/hooks config, like the other fixtures.
+  const git = (...args) => execFileSync('git', ['-C', harness, ...args], { encoding: 'utf8', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(scratch, 'no-global-config') } });
+  git('init', '-q'); writeFileSync(join(harness, 'README'), 'fixture');
+  git('add', '.'); git('-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture');
+  const revision = git('rev-parse', 'HEAD').trim();
   // Mimics the official harness: no task report, the instance listed in error_ids, the cause in run_instance.log.
   writeFileSync(python, `#!${process.execPath}
     const { mkdirSync, writeFileSync } = require('node:fs');
@@ -374,8 +407,9 @@ function claudeTranscriptAgent() {
       result.permission_denials = [{ tool_name: mcp.name, tool_use_id: 'm', tool_input: {} }];
     } else if (mode.startsWith('baseline') && r.arm === 'baseline') {
       events.push({ type: 'assistant', message: { id: 'a', content: [bash] } });
-      const failed = mode === 'baseline-attempt';
-      events.push({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'b', is_error: failed, content: failed ? 'bash: ix: command not found' : 'Foo src/foo.ts:1' }] } });
+      const failed = mode === 'baseline-attempt', masked = mode === 'baseline-masked';
+      if (masked) bash.input.command = 'ix locate Foo 2>&1 | head -5';
+      events.push({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'b', is_error: failed, content: failed ? 'bash: ix: command not found' : masked ? 'sh: 1: ix: not found' : 'Foo src/foo.ts:1' }] } });
     } else events.push({ type: 'assistant', message: { id: 'a', content: [{ type: 'text', text: 'done' }] } });
     for (const event of [...events, result]) console.log(JSON.stringify(event));
   `);
@@ -389,7 +423,31 @@ integrationTest('an Ix permission denial fails the run; a failed baseline ix att
   await runBenchmark({ manifestPath: smoke, config: config('baseline-attempt'), out, dryRun: true });
   const runs = readFileSync(join(out, 'runs.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.ok(runs.filter((run) => run.arm === 'baseline').every((run) => run.ix_calls === 1 && run.ix_errors === 1 && run.ix_succeeded === 0));
+  // A pipeline exiting 0 still shows the shell's not-found message; that is an attempt, not a leak.
+  const masked = join(scratch, 'baseline-masked');
+  await runBenchmark({ manifestPath: smoke, config: config('baseline-masked'), out: masked, dryRun: true });
+  const maskedRuns = readFileSync(join(masked, 'runs.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter((run) => run.arm === 'baseline');
+  assert.ok(maskedRuns.every((run) => run.ix_succeeded === 0 && run.ix_errors_by_code.COMMAND_NOT_FOUND === 1));
   await assert.rejects(runBenchmark({ manifestPath: smoke, config: config('baseline-leak'), out: join(scratch, 'baseline-leak'), dryRun: true }), /Baseline ix call succeeded/);
+});
+
+integrationTest('hook-driven Ix calls are reported apart from the agent\'s own Ix calls', async () => {
+  const script = join(scratch, 'hook-agent.mjs');
+  writeFileSync(script, `
+    import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+    import { join } from 'node:path';
+    const r = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+    writeFileSync(join(r.repo_path, 'solution.txt'), 'synthetic solution\\n');
+    if (r.arm === 'ix') for (const hook of [{ type: 'hook', mode: 'claude', ix_calls: 2, seconds: 0.5 }, { type: 'ix_error', code: 'HOOK_FAILED', ix_calls: 1, seconds: 0.25 }]) appendFileSync(join(r.run_path, 'hooks.jsonl'), JSON.stringify(hook) + '\\n');
+    for (const e of [{ type: 'turn', id: 't' }, { type: 'tool', id: 'x', command: r.arm === 'ix' ? 'ix locate A' : 'rg A' }, { type: 'usage', input_tokens: 10, output_tokens: 1, cached_tokens: 0 }, { type: 'done' }]) console.log(JSON.stringify(e));
+  `);
+  const config = dryConfig(); config.agent.command = [process.execPath, script];
+  const out = join(scratch, 'hook-split');
+  const report = await runBenchmark({ manifestPath: smoke, config, out, dryRun: true });
+  const runs = readFileSync(join(out, 'runs.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  for (const run of runs.filter((r) => r.arm === 'ix')) assert.deepEqual([run.ix_calls, run.ix_errors, run.hook_ix_calls, run.hook_ix_errors, run.hook_seconds], [1, 0, 3, 1, 0.75]);
+  for (const run of runs.filter((r) => r.arm === 'baseline')) assert.deepEqual([run.ix_calls, run.hook_ix_calls, run.hook_ix_errors], [0, 0, 0]);
+  assert.equal(report.metrics.hook_ix_calls.mean_difference.estimate, 3);
 });
 
 integrationTest('agent.mjs gives each Claude arm its own --allowedTools through the native binary', async () => {
@@ -478,8 +536,11 @@ integrationTest('shipped provisioner installs pinned local integrations and isol
     const request = { synthetic: true, arm, run_path, repo_path, home, task: { base_commit: revision, problem_statement: 'fixture' }, agent: { family, binary: fakeAgent, version: '1.0-fixture', model: 'fixture-model', effort: 'medium' }, budget: { max_turns: 2 },
       environment: { plugin_revision: revision, source_path: source, ix_cli: fakeIx, ix_version: '1.0-fixture', endpoint: 'http://127.0.0.1:8090', seconds: 10, tool_paths: [tools, '/usr/bin', '/bin'] } };
     assert.throws(() => checkTaskIsolation({ ...request, synthetic: false }), (error) => /ancestor/.test(error.message) && error.message.includes(resolve(root, '..', '..')));
-    const env = armEnvironment(request, { ...process.env, IX_ENDPOINT: 'http://wrong.invalid', IX_WORKSPACE_ID: 'wrong', JARVIS_IX_SOCKET: 'wrong' });
+    const env = armEnvironment(request, { ...process.env, IX_ENDPOINT: 'http://wrong.invalid', IX_WORKSPACE_ID: 'wrong', JARVIS_IX_SOCKET: 'wrong',
+      CLAUDE_CODE_OAUTH_TOKEN: 'fixture-not-a-token', CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_ENTRYPOINT: 'parent-session' });
     assert.equal(env.IX_WORKSPACE_ID, undefined); assert.equal(env.JARVIS_IX_SOCKET, undefined);
+    // Native CLI auth/provider routing survives isolation in both arms; parent-session variables do not.
+    assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, 'fixture-not-a-token'); assert.equal(env.CLAUDE_CODE_USE_BEDROCK, '1'); assert.equal(env.CLAUDE_CODE_ENTRYPOINT, undefined);
     assert.equal(env.IX_ENDPOINT, arm === 'ix' ? request.environment.endpoint : undefined);
     const requestPath = join(run_path, 'request.json'); writeFileSync(requestPath, JSON.stringify(request));
     const provision = join(root, 'provision.mjs');
@@ -498,6 +559,7 @@ integrationTest('shipped provisioner installs pinned local integrations and isol
     } else {
       for (const evidence of result.evidence) assert.equal(sha256(readFileSync(evidence.path)), evidence.sha256);
       const files = integrationFiles(request), first = Object.keys(files)[0];
+      if (family === 'codex') assert.ok(files[join(home, '.codex', 'config.toml')].endsWith('[mcp_servers.ix-memory]\ncommand = "ix"\nargs = ["mcp"]\nenv = { IX_ENDPOINT = "http://127.0.0.1:8090" }\n'));
       if (family === 'claude') {
         const hooks = JSON.parse(files[join(run_path, 'plugin', 'hooks', 'hooks.json')]).hooks.PostToolUse[0].hooks[0];
         assert.equal(hooks.timeout, 2 * request.environment.seconds + 30); // Outlasts both ix stage deadlines.
