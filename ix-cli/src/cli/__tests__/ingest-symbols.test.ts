@@ -269,11 +269,21 @@ describe("dependents (IN-11)", () => {
     expect(findDependents(table, new Set(), ["web/a.ts"], new Set())).toEqual(["uses-a.ts", "uses-pkg-a.py"]);
   });
 
-  it("hashes a patch's edges and their targets, in any order, and nothing else", () => {
+  it("hashes a patch's edges and their targets, in any order, and no other op", () => {
     const a = { type: "UpsertEdge", id: "e1", dst: "n1" };
     const b = { type: "UpsertEdge", id: "e2", dst: "n2" };
     const node = { type: "UpsertNode", id: "n9" };
     expect(resolutionHash([a, b, node])).toBe(resolutionHash([b, a]));
     expect(resolutionHash([a, b])).not.toBe(resolutionHash([a, { ...b, dst: "n3" }]));
+  });
+
+  it("hashes an edge's tier and confidence, so a re-tiered edge with the same id and target counts", () => {
+    const typed = { type: "UpsertEdge", id: "e1", dst: "n1", attrs: { confidence: 0.95, tier: "type" } };
+    const global = { ...typed, attrs: { confidence: 0.5, tier: "global" } };
+    expect(resolutionHash([typed])).not.toBe(resolutionHash([global]));
+    expect(resolutionHash([typed])).toBe(resolutionHash([{ ...typed, attrs: { tier: "type", confidence: 0.95, other: 1 } }]));
+    // An edge with no resolution attrs hashes as it always has.
+    expect(resolutionHash([{ type: "UpsertEdge", id: "e1", dst: "n1", attrs: {} }]))
+      .toBe(resolutionHash([{ type: "UpsertEdge", id: "e1", dst: "n1" }]));
   });
 });

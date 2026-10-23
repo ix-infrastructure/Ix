@@ -50,8 +50,8 @@ export interface SymbolEntry {
   summary: StoredSummary;
   /**
    * What the file's patch resolved its edges to, recorded when the patch is
-   * built from these bytes: a hash of its edge ids and their targets
-   * (`resolutionHash`). A re-resolution's re-send records it only once it lands. An unchanged file is
+   * built from these bytes: a hash of its edge ids, their targets and their
+   * tier/confidence (`resolutionHash`). A re-resolution's re-send records it only once it lands. An unchanged file is
    * re-sent when names it uses change elsewhere, and only if this differs.
    */
   res?: string;
@@ -65,14 +65,20 @@ export interface SymbolEntry {
 }
 
 /**
- * A hash of a patch's edges and where they point. Same bytes resolved against
- * the same names gives the same value, so it changes exactly when something
- * the file refers to moved, appeared or went away.
+ * A hash of a patch's edges, where they point and how they were resolved.
+ * Same bytes resolved against the same names gives the same value, so it
+ * changes exactly when something the file refers to moved, appeared or went
+ * away -- or when an edge keeps its id and target but its `tier`/`confidence`
+ * changes (a receiver's type learned or lost through another file).
  */
-export function resolutionHash(ops: ReadonlyArray<{ type?: unknown; id?: unknown; dst?: unknown }>): string {
+export function resolutionHash(ops: ReadonlyArray<{ type?: unknown; id?: unknown; dst?: unknown; attrs?: unknown }>): string {
   const pairs = ops
     .filter(op => op.type === "UpsertEdge")
-    .map(op => `${String(op.id)}>${String(op.dst)}`)
+    .map(op => {
+      const { tier, confidence } = (op.attrs ?? {}) as { tier?: unknown; confidence?: unknown };
+      const how = tier === undefined && confidence === undefined ? "" : ` ${String(tier)}/${String(confidence)}`;
+      return `${String(op.id)}>${String(op.dst)}${how}`;
+    })
     .sort();
   return createHash("sha256").update(pairs.join("\n")).digest("hex");
 }

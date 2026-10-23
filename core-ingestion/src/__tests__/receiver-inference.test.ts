@@ -111,6 +111,14 @@ describe('typed local receivers', () => {
     expect(buildPatchWithResolution(result, 'hash', 'workspace', edges).ops.filter(op => op.type === 'UpsertEdge' && op.attrs?.tier === 'type')).toEqual([]);
   });
 
+  it('TypeScript leaves a block at its end, even when the next node starts there', () => {
+    // `}{` and `}function`: the next node starts at the block's end index.
+    const result = parse('ts', methods('ts', 'function use() { {let dep = new Other();}{let dep = new Target();dep.run();}{dep.run();} }; function shadowed(dep: Target) { {}function dep() {} dep.run(); }'));
+    expect(resolveEdges([result]).filter(e => e.tier === 'type')).toEqual([
+      expect.objectContaining({ srcName: 'use', dstQualifiedKey: 'Target.run' }),
+    ]);
+  });
+
   it('TypeScript infers function-scoped var after a block without confusing let shadows', () => {
     const result = parse('ts', methods('ts', 'function fromVar() { if (true) { var dep = new Target(); } dep.run(); }; function fromLet(dep: Target) { if (true) { let dep = { run() {} }; } dep.run(); }'));
     expect(resolveEdges([result]).filter(e => e.tier === 'type')).toEqual([

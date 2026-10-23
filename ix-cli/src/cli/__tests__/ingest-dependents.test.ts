@@ -53,9 +53,9 @@ async function liveVsFresh(steps: Step[], predicate: string): Promise<{ live: st
   };
   const edges = (backend: FakeBackend): string[] =>
     backend.graphSignature().edges
-      .filter((line) => line.endsWith(` ${predicate}`))
-      .map((line) => {
-        const [, src, dst] = line.split(" ");
+      .map((line) => line.split(" "))
+      .filter(([, , , pred]) => pred === predicate)
+      .map(([, src, dst]) => {
         // The target's id too: `x.foo` and `y.foo` share a name.
         return `${backend.nodeName(src!)} -> ${backend.nodeName(dst!)} ${dst}`;
       })

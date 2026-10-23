@@ -10,6 +10,8 @@ export interface ReceiverFacts {
   factories: Array<[string, string]>;
   heritage: Array<[string, string]>;
   package?: string;
+  /** Names some binding in the file gives a type or factory; no other name can resolve to one. */
+  typedNames: ReadonlySet<string>;
   lookup(node: any): ReceiverType | undefined;
 }
 
@@ -32,6 +34,10 @@ const mutationTypes = ['assignment_expression', 'augmented_assignment_expression
 const named = new Set(['type_alias_declaration', ...classes, ...functions, ...bindingTypes, ...parameterTypes]);
 const visited = new Set([...named, ...mutationTypes, 'short_var_declaration', 'range_clause', 'for_in_statement', 'case_clause', 'enumerator',
   'type_switch_statement', 'catch_clause', 'infix_expression']);
+const isScope = (type: string): boolean =>
+  classes.has(type) || functions.has(type) || blocks.has(type) || type === 'class_static_block' || type === 'internal_module';
+// Every node type the walk stops at: the scopes and the visited types.
+const walkedTypes = [...new Set([...classes, ...functions, ...blocks, 'class_static_block', 'internal_module', ...visited])];
 
 function typeName(node: any): string | undefined {
   if (!node) return;
@@ -51,7 +57,7 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
   const heritage: Array<[string, string]> = [];
   // Scope ancestors of the node being visited, innermost last. Tracking them
   // during the walk avoids a parent-chain walk per node.
-  const frames: Array<{ node: any; type: string; depth: number }> = [];
+  const frames: Array<{ node: any; type: string; end: number }> = [];
   const scopeOf = (classOnly = false): any => {
     for (let i = frames.length - 1; i >= 0; i--) {
       const type = frames[i].type;
@@ -204,27 +210,24 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
     // Scala `x += y` on a var is `x = x + y` (comparisons are not assignments).
     if (type === 'infix_expression' && /^[^=]*[^=<>!]=$/.test(node.childForFieldName('operator')?.text ?? '')) mutations.push(node);
   };
-  // Only these node types (and scopes) carry facts; the rest are walked with a
-  // cursor without materializing a node or reading its fields.
-  const cursor = root.walk();
-  let depth = 0;
-  walk: for (;;) {
-    while (frames.length && frames[frames.length - 1].depth >= depth) frames.pop();
-    if (cursor.nodeIsNamed) {
-      checkBudget();
-      const type = cursor.nodeType;
-      const scope = classes.has(type) || functions.has(type) || blocks.has(type) || type === 'class_static_block' || type === 'internal_module';
-      if (scope || visited.has(type)) {
-        const node = cursor.currentNode;
-        visit(node, type);
-        if (scope) frames.push({ node, type, depth });
-      }
-    }
-    if (cursor.gotoFirstChild()) { depth++; continue; }
-    while (!cursor.gotoNextSibling()) {
-      if (!cursor.gotoParent()) break walk;
-      depth--;
-    }
+  // Only scopes and the node types in `visited` carry facts. tree-sitter finds
+  // them natively, in document order, so no other node is ever materialized.
+  // A node after a scope in that order is inside it unless it starts at or
+  // past the scope's end; only a zero-width node at the end is ambiguous.
+  const within = (frame: { node: any; end: number }, node: any): boolean => {
+    if (node.startIndex !== frame.end) return node.startIndex < frame.end;
+    if (node.endIndex !== frame.end) return false;
+    for (let p = node.parent; p; p = p.parent) if (p.id === frame.node.id) return true;
+    return false;
+  };
+  for (const node of root.descendantsOfType(walkedTypes)) {
+    // Types are matched by name, and `class` is also a keyword.
+    if (!node.isNamed) continue;
+    checkBudget();
+    while (frames.length && !within(frames[frames.length - 1], node)) frames.pop();
+    const type: string = node.type;
+    visit(node, type);
+    if (isScope(type)) frames.push({ node, type, end: node.endIndex });
   }
   const lookupName = (node: any, name: string, field = false): ReceiverType | undefined => {
     for (let p = node; p; p = p.parent) {
@@ -264,20 +267,29 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
       else pending.push(...id.namedChildren);
     }
   }
+  const typedNames = new Set<string>();
+  for (const bindings of scopes.values()) for (const [name, info] of bindings) if (info.type || info.factory) typedNames.add(name);
   return {
-    factories, heritage,
+    factories, heritage, typedNames,
     // Chained Scala clauses (`package a` then `package b`) declare package `a.b`.
     package: language === 'scala'
       ? root.namedChildren.filter((node: any) => node.type === 'package_clause')
         .map((node: any) => node.childForFieldName('name')?.text).filter(Boolean).join('.') || undefined
       : language === 'go' ? root.namedChildren.find((node: any) => node.type === 'package_clause')?.firstNamedChild?.text : undefined,
+    // A name no binding gives a type or factory skips the scope walk: it
+    // cannot resolve to one, whatever binds it.
     lookup(node: any): ReceiverType | undefined {
-      if (node.type === 'identifier') return lookupName(node, node.text);
+      if (node.type === 'identifier') {
+        const name = node.text;
+        return typedNames.has(name) ? lookupName(node, name) : {};
+      }
       if (node.type === 'member_expression' && node.childForFieldName('object')?.type === 'this') {
-        return lookupName(node, node.childForFieldName('property')?.text, true) ?? {};
+        const name = node.childForFieldName('property')?.text;
+        return (typedNames.has(name) ? lookupName(node, name, true) : undefined) ?? {};
       }
       if (node.type === 'field_expression' && node.childForFieldName('value')?.text === 'this') {
-        return lookupName(node, node.childForFieldName('field')?.text, true) ?? {};
+        const name = node.childForFieldName('field')?.text;
+        return (typedNames.has(name) ? lookupName(node, name, true) : undefined) ?? {};
       }
     },
   };
@@ -289,6 +301,7 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
  * an inferred type or factory counts; `receiver` is its source text.
  */
 export function callReceiver(nameNode: any, facts: ReceiverFacts): (ReceiverType & { receiver: string }) | undefined {
+  if (facts.typedNames.size === 0) return;
   const member = nameNode.parent;
   const field = member?.type === 'member_expression' ? 'object'
     : member?.type === 'field_expression' ? 'value'
