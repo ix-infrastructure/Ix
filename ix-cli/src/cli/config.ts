@@ -55,6 +55,16 @@ export function ingestRebuildPath(projectRoot: string): string {
 }
 
 /**
+ * Path to the orphan sweeps an earlier run could not finish (see
+ * `loadOrphanSweepPending`). Cleared with the mtime cache, since it describes
+ * the same graph.
+ */
+export function ingestOrphanSweepPath(projectRoot: string): string {
+  const key = rootKey(projectRoot);
+  return join(ixHome(), `ingest_orphans_${key}.json`);
+}
+
+/**
  * Path to the per-file symbol summaries an incremental map resolves against
  * (see `ingest-symbols.ts`). Cleared, with its journal, with the mtime cache.
  */
@@ -160,6 +170,7 @@ export function clearMapBaseline(projectRoot: string): void {
 export function clearIngestMtimeCache(projectRoot: string): void {
   try { rmSync(ingestMtimeCachePath(projectRoot), { force: true }); } catch { /* non-critical */ }
   try { rmSync(ingestRebuildPath(projectRoot), { force: true }); } catch { /* non-critical */ }
+  try { rmSync(ingestOrphanSweepPath(projectRoot), { force: true }); } catch { /* non-critical */ }
   try { rmSync(ingestSymbolsPath(projectRoot), { force: true }); } catch { /* non-critical */ }
   try { rmSync(ingestSymbolsJournalPath(projectRoot), { force: true }); } catch { /* non-critical */ }
   clearMapBaseline(projectRoot);

@@ -347,6 +347,19 @@ export class IxClient {
   }
 
   /**
+   * Many nodes in one read, at the latest revision (Ix-memory 1.0.33+). Only
+   * live nodes come back; `missing` names the other ids. At most 1000 ids per
+   * call (the backend answers 413 above that). `fields: "full"` returns whole
+   * nodes, attrs and provenance included.
+   */
+  async nodes(
+    ids: string[],
+    fields?: "full",
+  ): Promise<{ rev: number; nodes: GraphNode[]; missing: string[] }> {
+    return this.post("/v1/nodes", fields ? { ids, fields } : { ids });
+  }
+
+  /**
    * The backend's head revision: every committed patch, in any workspace,
    * advances it. One indexed lookup on the backend, so it is cheap enough to
    * ask on every `ix map`.
