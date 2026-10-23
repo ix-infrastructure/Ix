@@ -31,6 +31,7 @@ ix config set format llm      # set a value
 | `IX_ORPHAN_SWEEP_MAX_MS=<ms>` | Time budget of that cleanup in one run (default 60000). Files past it are committed without the cleanup and named for the next `IX_RECONCILE_ON_FORCE=1` run |
 | `IX_ORPHAN_SWEEP_MAX_REQUESTS=<n>` | Request budget of that cleanup in one run (default 25000): one stored-patch read per file, one node read per 1000 candidates |
 | `IX_PATCH_ACTOR=<actor>` | The `actor` stamped on each graph patch `ix map` / `ix ingest` sends (default `ix/ingestion`; `ix ingest --github` uses `ix/github-ingest`). Set it to empty (`IX_PATCH_ACTOR=`) for a backend that authenticates writers and stamps the verified principal itself: such a backend rejects a non-empty actor that differs from the principal with 403 `body actor ... conflicts with verified principal`. Any other value is sent as the actor |
+| `IX_LOAD_ALL_COMMANDS=1` | Loads every command module on each call, as releases before the start-up fast path did. Without Ix Pro installed, `ix <command>` normally loads only that command; with Ix Pro installed every call already loads everything, so this changes nothing there. If a command misbehaves on an install without Pro, try it again with this set: a difference between the two is a bug worth reporting |
 
 ### Bootstrap script variables
 

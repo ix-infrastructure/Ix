@@ -11,6 +11,7 @@ import { promisify } from "node:util";
 
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createRequire } from "node:module";
 import { parse } from "yaml";
 
 /**
@@ -218,13 +219,16 @@ describe("a config that does not parse", () => {
 describe("loadConfig is parsed once per change", () => {
   it("answers from the memo, hands out copies, and sees saves and outside writes", async () => {
     writeFileSync(configPath(), "endpoint: http://localhost:8090\nformat: text\nworkspaces: []\n");
-    const parseSpy = vi.fn();
-    vi.doMock("yaml", async (orig) => {
-      const real = await orig<typeof import("yaml")>();
-      return { ...real, parse: (...args: Parameters<typeof real.parse>) => { parseSpy(); return real.parse(...args); } };
-    });
-    const { loadConfig, saveConfig } = await import("../config.js");
+    // config.ts loads yaml with `require` on first use, so an ESM mock of
+    // "yaml" never reaches it. Spy on the CommonJS exports it actually calls
+    // (one module, one require cache per worker) instead.
+    const yamlExports = createRequire(import.meta.url)("yaml") as typeof import("yaml");
+    const parseSpy = vi.spyOn(yamlExports, "parse");
+    const { loadConfig, saveConfig, resetConfigMemo } = await import("../config.js");
+    resetConfigMemo();
     const first = loadConfig();
+    // The spy sees the parse at all, so the "no new parses" check below means something.
+    expect(parseSpy).toHaveBeenCalledTimes(1);
     first.workspaces!.push({ workspace_id: "x", workspace_name: "x", root_path: "/x", default: true });
     const second = loadConfig();
     expect(second.workspaces).toEqual([]); // the caller's edit did not reach the memo
@@ -239,7 +243,7 @@ describe("loadConfig is parsed once per change", () => {
     // Another process writes: a different size is seen at once.
     writeFileSync(configPath(), "endpoint: http://localhost:8190\nformat: text\n");
     expect(loadConfig().endpoint).toBe("http://localhost:8190");
-    vi.doUnmock("yaml");
+    parseSpy.mockRestore();
   });
 });
 
