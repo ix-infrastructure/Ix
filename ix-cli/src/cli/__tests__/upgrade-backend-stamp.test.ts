@@ -363,10 +363,11 @@ describe("composeTracksLatestBackend", () => {
 /**
  * `stampBackendVersionAfterPull` against a real, isolated IX_HOME.
  *
- * The module resolves BACKEND_VERSION_FILE and VERSION_CACHE from IX_HOME at
- * load, so IX_HOME is set and the module re-imported — without that, a
- * regression in the early return would have this reaching api.github.com and
- * overwriting the developer's own ~/.ix/.backend-version.
+ * The module used to resolve the stamp and the version cache from IX_HOME at
+ * load (both follow IX_HOME per call now), so IX_HOME is set and the module
+ * re-imported — without that, a regression in the early return would have
+ * this reaching api.github.com and overwriting the developer's own
+ * ~/.ix/.backend-version.
  */
 describe("stampBackendVersionAfterPull, isolated", () => {
   let home: string;

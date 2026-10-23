@@ -10,21 +10,24 @@ import {
   mkdirSync,
 } from "fs";
 import { join, dirname } from "path";
-import { homedir, platform } from "os";
+import { platform } from "os";
 import { fileURLToPath } from "url";
 import { createConnection } from "net";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { findWorkspaceForCwd, getDefaultWorkspace, getLocalToken, loadWorkspaces } from "../config.js";
 import { detectSystem } from "../system.js";
 import { createClient } from "../../client/factory.js";
+import { ixHome } from "../ix-home.js";
 
-const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
-const PID_FILE = join(IX_HOME, "compass.pid");
+// The paths below are functions, not consts, so they follow IX_HOME as it is
+// when a command runs rather than when this module was imported -- see
+// `ixHome()`.
+const pidFile = (): string => join(ixHome(), "compass.pid");
 // Records the workspace scope (id, or "*all*") of the running visualizer, so a second
 // `ix view` launched from a different workspace can warn instead of silently showing the
 // already-running (differently-scoped) instance.
-const SCOPE_FILE = join(IX_HOME, "compass.scope");
-const PORT_FILE = join(IX_HOME, "compass.port");
+const scopeFile = (): string => join(ixHome(), "compass.scope");
+const portFile = (): string => join(ixHome(), "compass.port");
 /**
  * `.cjs`, not `.js`.
  *
@@ -36,13 +39,13 @@ const PORT_FILE = join(IX_HOME, "compass.port");
  * neither the cause nor the fix. `.cjs` is CommonJS whatever any ancestor
  * says. (`$HOME/package.json` is rare but real — this box has one.)
  */
-const SERVER_SCRIPT_FILE = join(IX_HOME, "tmp", "compass-server.cjs");
+const serverScriptFile = (): string => join(ixHome(), "tmp", "compass-server.cjs");
 const BACKEND_URL = "http://localhost:8090";
 
 /** Resolve the compass dist directory — installed path first, then dev fallback. */
 function findCompassDist(): string | null {
   // Installed: $IX_HOME/cli/compass/
-  const installed = join(IX_HOME, "cli", "compass");
+  const installed = join(ixHome(), "cli", "compass");
   if (existsSync(join(installed, "index.html"))) return installed;
 
   // Dev / repo: relative to this file → ../../compass/dist/
@@ -54,7 +57,7 @@ function findCompassDist(): string | null {
 }
 
 function removeCompassState(): void {
-  for (const path of [PID_FILE, SCOPE_FILE, PORT_FILE]) {
+  for (const path of [pidFile(), scopeFile(), portFile()]) {
     try { unlinkSync(path); } catch { /* ignore */ }
   }
 }
@@ -97,7 +100,7 @@ function readTextIfPresent(path: string): string | null {
  */
 function readRunningPort(): number | null {
   try {
-    const raw = readTextIfPresent(PORT_FILE);
+    const raw = readTextIfPresent(portFile());
     const port = raw === null ? null : parsePort(raw);
     if (port !== null) return port;
   } catch {
@@ -105,11 +108,11 @@ function readRunningPort(): number | null {
   }
 
   try {
-    const match = readTextIfPresent(SERVER_SCRIPT_FILE)?.match(/^const PORT = (\d+);$/m);
+    const match = readTextIfPresent(serverScriptFile())?.match(/^const PORT = (\d+);$/m);
     const port = match?.[1] ? parsePort(match[1]) : null;
     if (port !== null) {
       // Best-effort migration for a visualizer started before compass.port existed.
-      try { writeFileSync(PORT_FILE, String(port)); } catch { /* ignore */ }
+      try { writeFileSync(portFile(), String(port)); } catch { /* ignore */ }
     }
     return port;
   } catch {
@@ -165,7 +168,7 @@ export function runningInstanceLines(
  * read would delete a live server's only record, or orphan a fresh one.
  */
 function readAlivePid(): number | null {
-  const raw = readTextIfPresent(PID_FILE);
+  const raw = readTextIfPresent(pidFile());
   if (raw === null) {
     removeCompassState();
     return null;
@@ -756,7 +759,7 @@ export function registerViewCommand(program: Command): void {
         // below and quietly hand back another workspace's graph, which is the
         // exact confusion the scope file exists to prevent. Empty counts as
         // unknown too, not as a scope literally named "".
-        const runningKey = readTextIfPresent(SCOPE_FILE)?.trim() || null;
+        const runningKey = readTextIfPresent(scopeFile())?.trim() || null;
         if (runningKey !== null && runningKey !== scopeKey) {
           const runningLabel = runningKey === "*all*"
             ? "all workspaces"
@@ -792,16 +795,16 @@ export function registerViewCommand(program: Command): void {
       }
 
       // Write server script to temp location
-      const scriptDir = dirname(SERVER_SCRIPT_FILE);
+      const scriptDir = dirname(serverScriptFile());
       mkdirSync(scriptDir, { recursive: true });
       // The file is deliberately invariant: systemId can be returned by the
       // backend and must never flow into JavaScript that is written and then
       // executed. Runtime values travel as argv instead.
-      writeFileSync(SERVER_SCRIPT_FILE, serverScript());
+      writeFileSync(serverScriptFile(), serverScript());
 
       // Spawn detached process
       const child = spawn(process.execPath, [
-        SERVER_SCRIPT_FILE,
+        serverScriptFile(),
         ...serverRuntimeArgs(distDir, port, workspaceId, systemId, mapRoot),
       ], {
         detached: true,
@@ -819,10 +822,10 @@ export function registerViewCommand(program: Command): void {
       const ready = await waitForServer(port);
 
       // Save PID, scope, and port for subsequent start/status/stop commands.
-      mkdirSync(dirname(PID_FILE), { recursive: true });
-      writeFileSync(PID_FILE, String(child.pid));
-      writeFileSync(SCOPE_FILE, scopeKey);
-      writeFileSync(PORT_FILE, String(port));
+      mkdirSync(dirname(pidFile()), { recursive: true });
+      writeFileSync(pidFile(), String(child.pid));
+      writeFileSync(scopeFile(), scopeKey);
+      writeFileSync(portFile(), String(port));
 
       // One URL, printed and opened. They used to differ: only the opened
       // one carried the cache bust, so --no-open, a copied URL, a bookmark

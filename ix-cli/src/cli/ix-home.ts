@@ -22,10 +22,11 @@ import { join } from "node:path";
  * makes isolation a module-registry problem rather than an environment one:
  * a test that sets IX_HOME in `beforeEach` is isolated when its file runs
  * alone and not when another file imported the module first. That is exactly
- * how #498 wrote a bogus `99.0.0` upgrade notice into a real `~/.ix`. Five
- * modules still bind it that way (`backend-status`, `backend-version`,
- * `docker`, `upgrade`, `view`); each derives further path constants from it,
- * so converting them is a wider change than this one and is left as follow-up.
+ * how #498 wrote a bogus `99.0.0` upgrade notice into a real `~/.ix`. The last
+ * five modules that bound it that way (`backend-status`, `backend-version`,
+ * `docker`, `upgrade`, `view`) now derive their paths from this on each call;
+ * `__tests__/backend-version-home.test.ts` pins that. Do not reintroduce a
+ * module-level path built from it.
  */
 export function ixHome(): string {
   return process.env.IX_HOME || join(homedir(), ".ix");
