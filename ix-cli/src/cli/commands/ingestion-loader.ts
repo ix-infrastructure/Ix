@@ -24,6 +24,8 @@ type PatchBuilderModule = {
   fileNodeId: (workspaceId: string, filePath: string) => string;
   symbolNodeId: (workspaceId: string, filePath: string, qualifiedKey: string) => string;
   extractorName: () => string;
+  /** Earlier extractor names, newest first: `sourcePatchIdCandidates` order after the current one. */
+  PREVIOUS_EXTRACTORS?: readonly string[];
 };
 
 type LanguagesModule = {
