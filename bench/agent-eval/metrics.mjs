@@ -191,7 +191,9 @@ export function parseMetrics(text, format, { allowIncomplete = false } = {}) {
       }
       if (event.type === 'assistant') {
         if (!event.message?.id) throw new Error('Assistant event missing message id');
-        turns.add(event.message.id);
+        // A subagent's messages (Task/Explore) carry the id of the tool call that started it. They are not turns of the
+        // main agent, which is what --max-turns limits; their tool calls still count below.
+        if (!event.parent_tool_use_id && event.isSidechain !== true) turns.add(event.message.id);
         for (const content of event.message.content ?? []) {
           if (content.type === 'tool_use') tool(content.id, content.input?.command ?? '', isIxMcpTool(content.name), CLAUDE_SEARCH_TOOLS.has(content.name));
         }

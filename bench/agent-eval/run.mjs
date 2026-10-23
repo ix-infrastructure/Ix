@@ -11,7 +11,7 @@ import { execute } from './process.mjs';
 import { markdown, summarize } from './stats.mjs';
 import { checkResolution } from './evaluation.mjs';
 import { armEnvironment, findBinary } from './isolation.mjs';
-import { PENDING, hookTimeoutSeconds } from './integration.mjs';
+import { PENDING, hookTimeoutSeconds, isHookProcess } from './integration.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const json = (file, value) => writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
@@ -109,7 +109,9 @@ export async function runBenchmark({ manifestPath, config, out, dryRun = false }
       if (existsSync(hookLog)) writeFileSync(hookLog, ''); // Exclude setup/probe hook calls.
       rmSync(pending, { recursive: true, force: true });
       // A Codex notify hook can still be refreshing the map when the native CLI exits; let it finish before reaping.
-      const agent = await stage('agent', config.agent.command, config.budget.seconds, { allowTimeout: true, captureExit: true, drainSeconds: job.arm === 'ix' ? hookTimeoutSeconds(config.environment) : 0 });
+      // Both arms are reaped alike: when the agent exits, every leftover process except Ix hooks is killed at once, so
+      // nothing the agent started can change the checkout after exit in either arm. The baseline has no hooks to wait for.
+      const agent = await stage('agent', config.agent.command, config.budget.seconds, { allowTimeout: true, captureExit: true, drainSeconds: hookTimeoutSeconds(config.environment), keep: isHookProcess });
       if (!agent.timed_out && existsSync(pending) && readdirSync(pending).length) throw new Error('An Ix hook was still running when the agent stage was reaped; its telemetry is incomplete');
       const metrics = parseMetrics(agent.stdout, config.agent.telemetry, { allowIncomplete: agent.timed_out || agent.exit_code !== 0 });
       const overTurns = metrics.turns > config.budget.max_turns;

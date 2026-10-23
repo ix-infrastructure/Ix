@@ -2,20 +2,19 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { execute } from './process.mjs';
 import { sha256 } from './manifest.mjs';
 import { findBinary, shellQuote } from './isolation.mjs';
-import { MCP_SERVER, PLUGIN_NAME, hookTimeoutSeconds } from './integration.mjs';
+import { HOOK_SCRIPT, MCP_SERVER, PLUGIN_NAME, hookTimeoutSeconds } from './integration.mjs';
 
-const root = dirname(fileURLToPath(import.meta.url));
 const json = (value) => JSON.stringify(value, null, 2) + '\n';
 const write = (path, text) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, text); };
 const run = (request, argv, input) => execute(argv, { cwd: request.repo_path, seconds: request.environment.seconds, input });
 
 export function integrationFiles(request) {
   const plugin = join(request.run_path, 'plugin');
-  const hook = [process.execPath, join(root, 'hook.mjs')];
+  const hook = [process.execPath, HOOK_SCRIPT];
   // Claude's default hook timeout is shorter than the two ix deadlines the hook runs.
   const hookTimeout = hookTimeoutSeconds(request.environment);
   if (request.agent.family === 'claude') return {
@@ -142,7 +141,7 @@ export async function probe(request) {
       throw new Error('Codex does not list the installed Ix skill (codex debug prompt-input)');
     }
     // Exercise the configured hook executable; config presence alone is insufficient.
-    await run(request, [process.execPath, join(root, 'hook.mjs'), 'probe']);
+    await run(request, [process.execPath, HOOK_SCRIPT, 'probe']);
     const status = JSON.parse((await run(request, ['ix', 'status', '--format', 'json', '--root', request.repo_path])).stdout);
     const stats = JSON.parse((await run(request, ['ix', 'stats', '--format', 'json'])).stdout);
     assertMapped(status, stats);

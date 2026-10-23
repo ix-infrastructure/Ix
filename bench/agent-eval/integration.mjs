@@ -1,6 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // Names shared by provisioning, the native agent argv and telemetry.
 export const PLUGIN_NAME = 'ix-agent-eval';
@@ -13,6 +14,13 @@ export const PENDING = 'hooks.pending';
 // File (under the run path) holding the checkout fingerprint the last hook map refresh saw.
 export const MAP_STATE = 'hooks.map-state';
 export const hookTimeoutSeconds = (environment) => 2 * environment.seconds + 30;
+// The script both agents' Ix hooks run (Claude PostToolUse, Codex notify), as `node <HOOK_SCRIPT> <mode>`.
+export const HOOK_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'hook.mjs');
+/** A command line (`ps` args) that runs the hook script. When the agent exits, only these and their children may
+ * keep running; they read the checkout but never write it. A shell wrapping the hook does not match, which is fine:
+ * the hook it started keeps running without it.
+ */
+export const isHookProcess = (args) => args === HOOK_SCRIPT || args.includes(` ${HOOK_SCRIPT} `) || args.endsWith(` ${HOOK_SCRIPT}`);
 
 // Arm integrations (plugins, MCP, settings, hooks, tool permissions) belong to the harness, never to shared args.
 const OVERRIDES = /plugin|mcp|settings|notify|allowed-?tools|CODEX_HOME|CLAUDE_CONFIG_DIR/i;

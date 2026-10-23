@@ -16,7 +16,7 @@ import { execute } from '../process.mjs';
 import { checkResolution, evaluationError } from '../evaluation.mjs';
 import { armEnvironment, shellQuote } from '../isolation.mjs';
 import { assertMapped, checkLoginShells, checkTaskIsolation, codexSkillListed, integrationFiles } from '../provision.mjs';
-import { CLAUDE_IX_MCP_RULE, MCP_SERVER, PLUGIN_NAME, nativeArgs } from '../integration.mjs';
+import { CLAUDE_IX_MCP_RULE, HOOK_SCRIPT, MCP_SERVER, PLUGIN_NAME, isHookProcess, nativeArgs } from '../integration.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 // Worktree-local scratch also keeps the CI smoke independent of machine config.
@@ -116,6 +116,25 @@ test('Claude parses terminal usage including cache creation, deduplicated messag
   assert.equal(metrics.input_tokens, 80); assert.equal(metrics.cached_tokens, 30);
   assert.equal(metrics.turns, 1); assert.equal(metrics.tool_calls, 2); assert.equal(metrics.ix_calls, 2);
   assert.deepEqual(metrics.ix_errors_by_code, { UNMAPPED: 1 });
+});
+
+test('only a command line that runs hook.mjs counts as an Ix hook process', () => {
+  for (const args of [`${process.execPath} ${HOOK_SCRIPT} claude`, `node ${HOOK_SCRIPT} codex {"type":"agent-turn-complete"}`, `node ${HOOK_SCRIPT}`]) assert.ok(isHookProcess(args), args);
+  for (const args of ['node build.mjs', `node ${HOOK_SCRIPT}x claude`, `node /elsewhere/hook.mjs claude`, `node ${HOOK_SCRIPT.slice(0, -1)}`]) assert.ok(!isHookProcess(args), args);
+});
+
+test('Claude turns count only the main agent: subagent (sidechain) messages do not reach max_turns', () => {
+  const usage = { type: 'result', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } };
+  const task = { type: 'tool_use', id: 'task', name: 'Task', input: { prompt: 'explore' } };
+  const sub = (id, extra = {}) => ({ type: 'assistant', parent_tool_use_id: 'task', ...extra, message: { id, content: [{ type: 'tool_use', id: `g-${id}`, name: 'Grep', input: {} }] } });
+  const events = [{ type: 'assistant', parent_tool_use_id: null, message: { id: 'main-1', content: [task] } },
+    sub('sub-1'), sub('sub-2'), sub('sub-3', { isSidechain: true }), { type: 'assistant', isSidechain: true, message: { id: 'side-4', content: [] } },
+    { type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'tool_result', tool_use_id: 'task', content: 'found' }] } },
+    { type: 'assistant', message: { id: 'main-2', content: [{ type: 'text', text: 'done' }] } }, usage];
+  const metrics = parseMetrics(ndjson(events), 'claude');
+  assert.equal(metrics.turns, 2, 'only the two main-agent messages are turns');
+  // The subagent's work is still the agent's work: its tool calls and searches count.
+  assert.equal(metrics.tool_calls, 4); assert.equal(metrics.native_search_calls, 3);
 });
 
 test('Claude Ix MCP calls count under both direct and plugin-scoped tool names', () => {
@@ -392,6 +411,7 @@ integrationTest('real-run plumbing checks dataset pins and official evidence and
   const manifestPath = join(scratch, 'real-fixture-manifest.json');
   writeFileSync(manifestPath, JSON.stringify(importVerified(text, { count: 1, minRepos: 1 })));
   const adapter = join(scratch, 'fixture-adapter.mjs');
+  const lateWriter = `const [parent, file] = process.argv.slice(1); const wait = () => { try { process.kill(Number(parent), 0); setTimeout(wait, 20); } catch { setTimeout(() => require('node:fs').writeFileSync(file, 'late\\n'), 300); } }; wait();`;
   writeFileSync(adapter, `
     import {mkdirSync, readFileSync, writeFileSync} from 'node:fs';
     import {join} from 'node:path';
@@ -412,6 +432,9 @@ integrationTest('real-run plumbing checks dataset pins and official evidence and
       execFileSync('git', ['add', 'source.txt', 'added.txt']);
       execFileSync('git', ['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','-c','commit.gpgsign=false','commit','-qm','agent fix']);
       for(const e of [{type:'turn',id:'a'}, {type:'tool',id:'t',command:'rg fixture'}, {type:'usage',input_tokens:10,output_tokens:10,cached_tokens:0}, {type:'done'}]) console.log(JSON.stringify(e));
+      // A background process the agent leaves behind: it edits the checkout once the agent has exited.
+      const {spawn} = await import('node:child_process');
+      spawn(process.execPath, ['-e', ${JSON.stringify(lateWriter)}, String(process.pid), join(r.repo_path, 'late.txt')], {stdio: 'ignore'}).unref();
     } else if(stage === 'evaluate') {
       if (r.dataset_export !== ${JSON.stringify(exportPath)} || !OUTS.some((out) => r.run_path.startsWith(out))) process.exit(9);
       const report_path = join(r.run_path,'fixture-official-report.json');
@@ -431,6 +454,12 @@ integrationTest('real-run plumbing checks dataset pins and official evidence and
   const first = jobs[0], runPath = join(out, `0000-${first.instance_id}-${first.repeat}-${first.arm}`);
   const patch = readFileSync(join(runPath, 'prediction.patch'), 'utf8');
   assert.match(patch, /source.txt/); assert.match(patch, /added.txt/); assert.doesNotMatch(patch, /settings.json/);
+  // Nothing the agent left running may change the checkout after it exits, in either arm: the recorded patch is the agent's.
+  for (const [index, job] of jobs.entries()) {
+    const recorded = readFileSync(join(out, `${String(index).padStart(4, '0')}-${job.instance_id}-${job.repeat}-${job.arm}`, 'prediction.patch'), 'utf8');
+    assert.match(recorded, /added.txt/); assert.doesNotMatch(recorded, /late.txt/, `${job.arm} patch includes a post-exit write`);
+  }
+  assert.deepEqual(new Set(jobs.map((job) => job.arm)), new Set(['baseline', 'ix']));
   // Each solver worked outside the output tree, in a work directory removed once its run was recorded.
   const agentRequest = JSON.parse(readFileSync(join(runPath, 'agent-request.json'), 'utf8'));
   assert.ok(!agentRequest.run_path.startsWith(out) && !existsSync(agentRequest.run_path));
@@ -596,40 +625,63 @@ integrationTest('the probe fails when a login shell profile resets PATH and undo
 // The adapter spawns a descendant (same process group, like a Codex notify hook) and exits at once. The descendant
 // waits for the adapter to exit, then `ms`, then writes `file`. Timing is relative to the adapter's exit rather than
 // to process start-up, so a loaded machine (the full CI suite runs alongside) does not change the outcome.
-const lateDescendant = (file, ms, stdio = 'ignore') => {
+// The descendant's command line ends with `tag`; `keep` matches the hook-fixture tag, as isHookProcess matches hook.mjs.
+const lateDescendant = (file, ms, stdio = 'ignore', tag = 'hook-fixture') => {
   const child = `const parent = Number(process.argv[1]); const wait = () => { try { process.kill(parent, 0); setTimeout(wait, 20); } catch { setTimeout(() => { console.log('hook'); require('node:fs').writeFileSync(${JSON.stringify(file)}, 'x'); }, ${ms}); } }; wait();`;
-  return [process.execPath, '-e', `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(child)}, String(process.pid)], { stdio: ${JSON.stringify(stdio)} }).unref(); console.log('agent')`];
+  return [process.execPath, '-e', `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(child)}, String(process.pid), ${JSON.stringify(tag)}], { stdio: ${JSON.stringify(stdio)} }).unref(); console.log('agent')`];
 };
+const keep = (args) => args.endsWith(' hook-fixture');
 const timed = async (promise) => { const started = performance.now(); const result = await promise; return { result, seconds: (performance.now() - started) / 1000 }; };
 
 integrationTest('a drained stage lets an outliving descendant finish before the group is reaped, within a cap', async () => {
   const marker = (name) => join(scratch, `drain-${name}`);
-  const drained = await timed(execute(lateDescendant(marker('drained'), 1000), { seconds: 10, drainSeconds: 10 }));
+  const drained = await timed(execute(lateDescendant(marker('drained'), 1000), { seconds: 10, drainSeconds: 10, keep }));
   assert.ok(existsSync(marker('drained')));
   // The descendant finished at least 1s after the adapter exited; none of that is stage time.
   assert.ok(drained.seconds - drained.result.seconds >= 0.5, 'stage time excludes the drain');
   await execute(lateDescendant(marker('reaped'), 1000), { seconds: 10 });
   await new Promise((done) => setTimeout(done, 2000));
   assert.ok(!existsSync(marker('reaped')), 'without a drain, descendants are still reaped');
-  const capped = await timed(execute(lateDescendant(marker('capped'), 30_000), { seconds: 10, drainSeconds: 0.5 }));
+  const capped = await timed(execute(lateDescendant(marker('capped'), 30_000), { seconds: 10, drainSeconds: 0.5, keep }));
   assert.ok(capped.seconds < 15, 'the drain is capped');
   assert.ok(!existsSync(marker('capped')));
+});
+
+integrationTest('only kept (hook) processes and their children outlive the adapter; anything else is killed at its exit', async () => {
+  const marker = (name) => join(scratch, `cut-${name}`);
+  // A leftover that is not a hook gets no drain, even when the stage drains for hooks.
+  const other = await timed(execute(lateDescendant(marker('other'), 300, 'ignore', 'agent-leftover'), { seconds: 10, drainSeconds: 10, keep }));
+  assert.ok(other.seconds < 5, 'nothing kept, so no drain');
+  await new Promise((done) => setTimeout(done, 1000));
+  assert.ok(!existsSync(marker('other')), 'a non-hook leftover never writes after the adapter exits');
+  // One adapter leaves a hook (whose own child does the work, like the hook's `ix map`) and a leftover beside it.
+  const grandchild = `setTimeout(() => require('node:fs').writeFileSync(process.argv[1], 'x'), 300)`;
+  const hook = `const parent = Number(process.argv[1]); const wait = () => { try { process.kill(parent, 0); setTimeout(wait, 20); } catch { require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}, ${JSON.stringify(marker('hook-child'))}], { stdio: 'ignore' }); } }; wait();`;
+  const leftover = `const parent = Number(process.argv[1]); const wait = () => { try { process.kill(parent, 0); setTimeout(wait, 20); } catch { setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker('leftover'))}, 'x'), 300); } }; wait();`;
+  const spawnBoth = `const { spawn } = require('node:child_process');
+    spawn(process.execPath, ['-e', ${JSON.stringify(hook)}, String(process.pid), 'hook-fixture'], { stdio: 'ignore' }).unref();
+    spawn(process.execPath, ['-e', ${JSON.stringify(leftover)}, String(process.pid), 'agent-leftover'], { stdio: 'ignore' }).unref();`;
+  await execute([process.execPath, '-e', spawnBoth], { seconds: 10, drainSeconds: 10, keep });
+  await new Promise((done) => setTimeout(done, 1000));
+  assert.ok(existsSync(marker('hook-child')), 'the hook and the child it starts run to completion');
+  assert.ok(!existsSync(marker('leftover')), 'the leftover beside the hook was killed at the adapter exit');
 });
 
 integrationTest('a descendant holding the stage stdout open is neither stage time nor a deadline overrun', async () => {
   const marker = (name) => join(scratch, `inherit-${name}`);
   // Like a notify hook spawned with inherited stdio: the adapter exits, the hook keeps the stdout pipe open past the deadline.
-  const drained = await execute(lateDescendant(marker('drained'), 2500, 'inherit'), { seconds: 2, drainSeconds: 10, allowTimeout: true });
+  const drained = await execute(lateDescendant(marker('drained'), 2500, 'inherit'), { seconds: 2, drainSeconds: 10, allowTimeout: true, keep });
   assert.equal(drained.timed_out, false); assert.ok(drained.seconds < 2, 'stage time ends when the adapter exits');
   assert.ok(existsSync(marker('drained'))); assert.match(drained.stdout, /agent/);
   // The descendant would hold stdout for 6s after the adapter exits; the stage closing well before that means it was reaped.
-  const reaped = await timed(execute(lateDescendant(marker('reaped'), 6000, 'inherit'), { seconds: 10, drainSeconds: 0.5 }));
+  const reaped = await timed(execute(lateDescendant(marker('reaped'), 6000, 'inherit'), { seconds: 10, drainSeconds: 0.5, keep }));
   assert.equal(reaped.result.timed_out, false); assert.ok(reaped.seconds - reaped.result.seconds < 4, 'the drain is capped');
   assert.match(reaped.result.stdout, /agent/); assert.doesNotMatch(reaped.result.stdout, /hook/, 'the descendant is reaped when the drain ends');
 });
 
 integrationTest('an ix-arm hook that outlives the agent is counted; one killed mid-run fails the run', async () => {
-  const script = join(scratch, 'late-hook-agent.mjs');
+  const script = join(scratch, 'late-hook-agent.mjs'), leftovers = join(scratch, 'late-hook-leftovers');
+  mkdirSync(leftovers);
   writeFileSync(script, `
     import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
     import { join } from 'node:path';
@@ -638,8 +690,11 @@ integrationTest('an ix-arm hook that outlives the agent is counted; one killed m
     writeFileSync(join(r.repo_path, 'solution.txt'), 'synthetic solution\\n');
     if (r.arm === 'ix' && mode === 'late') {
       const record = JSON.stringify({ type: 'hook', mode: 'codex', ix_calls: 1, seconds: 0.5 }) + '\\n';
-      spawn(process.execPath, ['-e', 'setTimeout(() => require("node:fs").appendFileSync(process.argv[1], process.argv[2]), 500)', join(r.run_path, 'hooks.jsonl'), record], { stdio: 'ignore' }).unref();
+      // The command line names hook.mjs, as a real hook's does; that is what lets it outlive the agent.
+      spawn(process.execPath, ['-e', 'setTimeout(() => require("node:fs").appendFileSync(process.argv[1], process.argv[2]), 500)', join(r.run_path, 'hooks.jsonl'), record, ${JSON.stringify(HOOK_SCRIPT)}], { stdio: 'ignore' }).unref();
     }
+    // In both arms, a leftover that is not a hook must be gone by the time the drain ends.
+    if (mode === 'late') spawn(process.execPath, ['-e', 'setTimeout(() => require("node:fs").writeFileSync(process.argv[1], "x"), 500)', join(${JSON.stringify(leftovers)}, r.arm + '-' + r.repeat)], { stdio: 'ignore' }).unref();
     if (r.arm === 'ix' && mode === 'killed') { mkdirSync(join(r.run_path, 'hooks.pending'), { recursive: true }); writeFileSync(join(r.run_path, 'hooks.pending', '1'), 'codex'); }
     for (const e of [{ type: 'turn', id: 't' }, { type: 'usage', input_tokens: 10, output_tokens: 1, cached_tokens: 0 }, { type: 'done' }]) console.log(JSON.stringify(e));
   `);
@@ -648,6 +703,8 @@ integrationTest('an ix-arm hook that outlives the agent is counted; one killed m
   await runBenchmark({ manifestPath: smoke, config: config('late'), out, dryRun: true });
   const runs = readFileSync(join(out, 'runs.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.ok(runs.filter((r) => r.arm === 'ix').every((r) => r.hook_ix_calls === 1));
+  await new Promise((done) => setTimeout(done, 1000));
+  assert.deepEqual(readdirSync(leftovers), [], 'non-hook leftovers were killed at agent exit in both arms');
   await assert.rejects(runBenchmark({ manifestPath: smoke, config: config('killed'), out: join(scratch, 'killed-hook'), dryRun: true }), /hook was still running/);
 });
 
@@ -926,6 +983,26 @@ integrationTest('turn-budget overshoots are retained conservatively as unresolve
   assert.ok(existsSync(join(out, 'summary.md')));
 });
 
+
+integrationTest('subagent messages do not push a completed Claude run over max_turns', async () => {
+  const adapter = join(scratch, 'subagent-agent.mjs');
+  writeFileSync(adapter, `
+    import {readFileSync,writeFileSync} from 'node:fs'; import {join} from 'node:path';
+    const r=JSON.parse(readFileSync(process.argv[2],'utf8'));
+    writeFileSync(join(r.repo_path,'solution.txt'),'synthetic solution\\n');
+    const events=[{type:'assistant',parent_tool_use_id:null,message:{id:'main-1',content:[{type:'tool_use',id:'task',name:'Task',input:{}}]}}];
+    for (const id of ['s1','s2','s3','s4']) events.push({type:'assistant',parent_tool_use_id:'task',message:{id,content:[]}});
+    events.push({type:'assistant',parent_tool_use_id:null,message:{id:'main-2',content:[]}});
+    events.push({type:'result',usage:{input_tokens:1,output_tokens:1,cache_read_input_tokens:0,cache_creation_input_tokens:0}});
+    for (const e of events) console.log(JSON.stringify(e));
+  `);
+  const config = dryConfig(); config.repeats = 1; config.budget.max_turns = 2; config.agent.telemetry = 'claude';
+  config.agent.command = [process.execPath, adapter];
+  const out = join(scratch, 'subagent-turns');
+  await runBenchmark({ manifestPath: smoke, config, out, dryRun: true });
+  const runs = readFileSync(join(out,'runs.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
+  assert.ok(runs.every((r) => r.turns === 2 && r.termination === 'completed' && r.resolved === r.official_resolved));
+});
 
 integrationTest('native turn-limit exit receipts remain evaluable and ordinary crashes remain fatal', async () => {
   const adapter = join(scratch, 'native-turn-limit.mjs');
