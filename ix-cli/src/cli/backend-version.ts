@@ -176,8 +176,10 @@ export async function fetchBackendHealth(
   client: IxClient,
   knownLatest: string | null | undefined,
   isNewer: (a: string, b: string) => boolean,
+  /** Bounds a probe that must answer in seconds; the client's default otherwise. */
+  timeoutMs?: number,
 ): Promise<HealthResponse> {
-  const health = await client.health();
+  const health = await client.health(timeoutMs);
   // From the client the request actually went to. Taking it as a second
   // argument reintroduced exactly the "a call site can get it wrong" mistake
   // this module exists to make impossible.

@@ -193,6 +193,8 @@ describe("ingestFiles against a fake backend", () => {
       "IX_COMMIT_FAILURE_LIMIT",
       "IX_COMMIT_HTTP_MAX_FILES",
       "IX_COMMIT_CONCURRENCY",
+      "IX_COMMIT_CONFLICT_RETRIES",
+      "IX_COMMIT_TRANSIENT_RETRY_MS",
       "IX_STITCH_COOLDOWN_MS",
       "IX_STITCH_WAIT_MS",
       "IX_MAP_DEADLINE_MS",
@@ -1265,6 +1267,196 @@ describe("ingestFiles against a fake backend", () => {
     expect(summary.patchesApplied).toBe(12);
     expect(backend.bulkCount).toBe(1);
     expect(backend.singleCount, "the fan-out is for failures only").toBe(0);
+  });
+
+  describe("commit retries and the database probe (IN-19C)", () => {
+    let stderr: ReturnType<typeof vi.spyOn>;
+    const written = (): string => stderr.mock.calls.map((call: unknown[]) => String(call[0])).join("");
+    const sequence = (): string[] =>
+      backend.requests.filter(r => r.path !== "/v1/stitch").map(r => `${r.path} ${r.code}`);
+    beforeEach(() => {
+      stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    });
+    afterEach(() => {
+      stderr.mockRestore();
+      process.exitCode = undefined;
+    });
+
+    it("re-sends a bulk the backend answered 503, and lands everything with no fan-out", async () => {
+      fixture(12);
+      backend.transientCommitFailures = [{ status: 503, retryAfter: "0" }];
+
+      const summary = await run();
+
+      expect(summary.commitErrors).toBe(0);
+      expect(summary.patchesApplied).toBe(12);
+      expect(sequence()).toEqual(["/v1/patches/bulk 503", "/v1/patches/bulk 200"]);
+      expect(backend.singleCount, "no per-file fallback").toBe(0);
+    });
+
+    it("still re-sends a 503 bulk with IX_COMMIT_CONFLICT_RETRIES=0: that knob is for conflicts only", async () => {
+      fixture(4);
+      process.env.IX_COMMIT_CONFLICT_RETRIES = "0";
+      backend.transientCommitFailures = [{ status: 503, retryAfter: "0" }];
+
+      const summary = await run();
+
+      expect(summary.commitErrors).toBe(0);
+      expect(summary.patchesApplied).toBe(4);
+      expect(sequence()).toEqual(["/v1/patches/bulk 503", "/v1/patches/bulk 200"]);
+    });
+
+    it("sends the bulk once with IX_COMMIT_TRANSIENT_RETRY_MS=0, then falls back per file as before", async () => {
+      fixture(4);
+      process.env.IX_COMMIT_TRANSIENT_RETRY_MS = "0";
+      backend.transientCommitFailures = [{ status: 503, retryAfter: "0" }];
+
+      const summary = await run();
+
+      expect(summary.commitErrors).toBe(0);
+      expect(summary.patchesApplied).toBe(4);
+      expect(sequence()).toEqual([
+        "/v1/patches/bulk 503",
+        "/v1/patch 200",
+        "/v1/patch 200",
+        "/v1/patch 200",
+        "/v1/patch 200",
+      ]);
+    });
+
+    it("trips at once when the backend reports its database down and says so, while the commits still decide the exit", async () => {
+      fixture(30);
+      backend.databaseDown = true;
+
+      const message = await runFatal();
+
+      expect(message).toContain("30 of 30");
+      expect(backend.healthRequests, "the probe asked").toBeGreaterThan(0);
+      // Tripped on the first per-file failure, so the fan-out holds the rest.
+      // The held patches are still sent afterwards, as on main, so the exit
+      // code comes from their failures, not from the health answer -- and the
+      // drain's failure budget still bounds them below one request per file.
+      expect(backend.bulkCount, "the held set was re-sent").toBeGreaterThan(1);
+      expect(backend.singleCount).toBeLessThan(30);
+      const banner = written();
+      expect(banner).toContain("cannot reach its database (ArangoDB)");
+      expect(banner).not.toContain("still passes");
+    });
+
+    it("asks about the database before waiting out a 503 on the first bulk", async () => {
+      fixture(30);
+      backend.databaseDown = true;
+      backend.databaseDownCommitStatus = 503;
+      const started = Date.now();
+
+      await runFatal();
+
+      // Asked after the first 503, not after the backoff: the database is
+      // down, so the bulk is not retried and the chunk goes to the cutoff
+      // rather than the per-file fallback. The held set is then still sent,
+      // so the commits, not the probe, decide the exit.
+      expect(Date.now() - started, "no transient backoff").toBeLessThan(5_000);
+      expect(backend.healthRequests, "the probe asked").toBeGreaterThan(0);
+      expect(backend.singleCount).toBeLessThan(30);
+      const banner = written();
+      expect(banner).toContain("cannot reach its database (ArangoDB)");
+    });
+
+    it("a health answer that wrongly says the database is down does not fail a run whose commits land", async () => {
+      fixture(30);
+      backend.healthSaysDatabaseDown = true;
+      backend.transientCommitFailures = [{ status: 503, retryAfter: "0" }];
+
+      const summary = await run();
+
+      expect(backend.healthRequests, "the probe asked, and was told 'unreachable'").toBeGreaterThan(0);
+      expect(summary.commitErrors, "the held patches were sent and landed").toBe(0);
+      expect(summary.patchesApplied).toBe(30);
+      expect(process.exitCode ?? 0).toBe(0);
+      // Every patch landed, so no cutoff banner: it would tell the user the
+      // graph is "partly updated" and to re-run, which is false.
+      expect(written()).not.toContain("kept failing");
+      expect(written()).not.toContain("partly updated");
+    });
+
+    it("does not trip on a 5xx from the current-revision fallback (an older backend proves nothing)", async () => {
+      fixture(30);
+      backend.databaseDown = true;
+      backend.healthReportsDatabase = false;
+
+      await runFatal();
+
+      expect(backend.revisionRequests).toBeGreaterThan(0);
+      expect(written()).not.toContain("cannot reach its database (ArangoDB)");
+    });
+
+    it("changes nothing on a backend that refuses every commit while its database is reachable", async () => {
+      fixture(30);
+      backend.refuseEverything = true;
+
+      const message = await runFatal();
+
+      expect(backend.healthRequests, "the probe asked").toBeGreaterThan(0);
+      expect(message).toContain("30 of 30");
+      // The streak, not the probe, tripped it: five per-file failures, as before.
+      expect(backend.singleCount).toBeGreaterThanOrEqual(5);
+      expect(backend.commitCount, "well under main's 31").toBeLessThan(25);
+      expect(written()).toContain("`ix doctor` still passes");
+    });
+
+    it("does not call a graph wiped under it 'unchanged' when nothing lands", async () => {
+      // A baseline from an earlier map, then a backend that holds none of it:
+      // the DB-reset guard fires, as it does after `ix reset` from another dir.
+      fixture(8);
+      const incremental = () =>
+        ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
+      await incremental();
+      backend.refuseEverything = true;
+
+      let message = "";
+      try {
+        await incremental();
+      } catch (err) {
+        message = String(err);
+      }
+
+      expect(message, "still fatal").toContain("8 of 8");
+      const out = `${written()}\n${message}`;
+      expect(out).toContain("kept failing");
+      expect(out).not.toContain("unchanged");
+      expect(out).toContain("this workspace's graph is still empty");
+    });
+
+    it("does not call it 'unchanged' after a first map that committed nothing, below the cutoff", async () => {
+      fixture(2);
+      backend.refuseEverything = true;
+      let message = "";
+      try {
+        await ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
+      } catch (err) {
+        message = String(err);
+      }
+      expect(message).toContain("committed nothing");
+      expect(message).not.toContain("unchanged");
+      expect(message).toContain("still empty");
+    });
+
+    it("does not call the workspace's graph empty when a scoped run with no local baseline commits nothing", async () => {
+      // `ix ingest <new file>` in a repo mapped from another HOME or machine:
+      // no local baseline, and the lookup covers that one file only, so an
+      // empty answer says nothing about the rest of the graph.
+      fixture(2);
+      backend.refuseEverything = true;
+      let message = "";
+      try {
+        await ingestFiles(join(repo, "src", "m000.ts"), { format: "text", suppressOutput: true, printSummary: false });
+      } catch (err) {
+        message = String(err);
+      }
+      expect(message).toContain("committed nothing");
+      expect(message).not.toContain("still empty");
+      expect(message).toContain("may now be stale");
+    });
   });
 
   describe("a patch that deletes (IN-04)", () => {

@@ -31,8 +31,11 @@ Set `IX_DEBUG=1` to see full stack traces on any error.
 
 ## `ix map` stops with "Commits against … kept failing"
 
-After several consecutive failed commits, `ix map` stops instead of sending one doomed request per file. Read the
-`Last error` line it prints. The backend returns the same error for two different causes:
+After several consecutive failed commits, `ix map` stops instead of sending one doomed request per file. It stops
+after the first failure if the backend's health check reports that it cannot reach its database (ArangoDB); the message
+then says so, and `ix doctor` shows the same. Start the database, or wait for it to come back, and re-map.
+
+Otherwise, read the `Last error` line it prints. The backend returns the same error for two different causes:
 
 - **The database is saturated.** `ix doctor` can still pass. Check `docker stats`, wait for ArangoDB to go idle, and
   re-map.
