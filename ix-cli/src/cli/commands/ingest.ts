@@ -3222,7 +3222,9 @@ export async function ingestFiles(
     // Smaller chunks pipeline better: resolve(N) overlaps with commit(N-1) + parse(N+1).
     // With 2000-file chunks, resolve takes 68s and dominates. With 500, resolve ~17s
     // and overlaps well with commit (~5s) + parse (~5s).
-    const PARSE_STREAM_CHUNK     = 500;
+    // IX_PARSE_STREAM_CHUNK is for tests: it lets a run of a hundred files
+    // cross the same batch boundaries as a run of a thousand. Unset, 500.
+    const PARSE_STREAM_CHUNK     = parsePositiveIntEnv('IX_PARSE_STREAM_CHUNK', 500);
     const COMMIT_HTTP_MAX_FILES  = parsePositiveIntEnv('IX_COMMIT_HTTP_MAX_FILES', 1000); // files per HTTP request to the backend
     // Ops per HTTP request; see DEFAULT_COMMIT_MAX_OPS.
     const COMMIT_MAX_OPS         = parsePositiveIntEnv('IX_COMMIT_MAX_OPS', DEFAULT_COMMIT_MAX_OPS);

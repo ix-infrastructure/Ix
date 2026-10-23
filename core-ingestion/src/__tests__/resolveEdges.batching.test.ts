@@ -125,23 +125,30 @@ describe('resolveEdges scales with the repository', () => {
     return out;
   }
 
-  it('doubling the files keeps the time well under quadratic', () => {
-    // Best of seven on sizes large enough that one scheduler hiccup can't swing
-    // the ratio. Linear doubling is ~2x and quadratic ~4x; shared CI runners sit
-    // well above linear, so the bound is 3.5x, which still catches quadratic.
-    const time = (results: FileParseResult[]) => {
-      const index = indexOf(results);
-      return Math.min(...Array.from({ length: 7 }, () => {
-        const t = performance.now();
-        resolveEdges(results, undefined, index);
-        return performance.now() - t;
-      }));
-    };
-    const small = synthetic(2000);
+  it('quadrupling the files keeps the time well under quadratic', () => {
+    // 1,000 files against 4,000. Linear is ~4x and quadratic ~16x, so the
+    // bound sits at 10x (about n^1.66), with room on both sides. It used to
+    // double, 2,000 against 4,000, with a bound of 3.5x: linear ~2x and
+    // quadratic ~4x left so little between them that one slow stretch on a
+    // shared runner put a linear run at 3.5x.
+    //
+    // The two sizes are timed in turn, seven rounds of each, and each keeps
+    // its best. Timed in two blocks, a runner that slowed down for the second
+    // block charged all of it to the large size; interleaved, a slow stretch
+    // lands on both.
+    const small = synthetic(1000);
     const large = synthetic(4000);
-    time(small); // warm up
-    time(large);
-    expect(time(large) / time(small)).toBeLessThan(3.5);
+    const sizes = [small, large].map((results) => ({ results, index: indexOf(results), best: Infinity }));
+    const timeOnce = (s: (typeof sizes)[number]) => {
+      const t = performance.now();
+      resolveEdges(s.results, undefined, s.index);
+      return performance.now() - t;
+    };
+    for (const s of sizes) timeOnce(s); // warm up
+    for (let round = 0; round < 7; round++) {
+      for (const s of sizes) s.best = Math.min(s.best, timeOnce(s));
+    }
+    expect(sizes[1].best / sizes[0].best).toBeLessThan(10);
   }, 60_000);
 });
 
