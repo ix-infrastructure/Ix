@@ -49,7 +49,7 @@ import type { GraphNode } from "../client/types.js";
 import { mapLimit } from "../client/request-memo.js";
 import { canonicalWorkspacePath, findWorkspaceForCwd, verifyRecordPath } from "./config.js";
 import { extractorChanged, loadIngestBaseline, type IngestBaseline } from "./ingest-baseline.js";
-import { detectSystem, repoWorkspaceIdFor } from "./system.js";
+import { fileIdentity } from "./system.js";
 import { normalizePathSeparators } from "./path-match.js";
 import { readBoundedBytes } from "./bounded-read.js";
 import { GRAPH_MAP_FIX, GRAPH_REBUILD_FIX } from "./graph-health.js";
@@ -440,40 +440,6 @@ export function saveVerifyRecord(record: VerifyRecord): boolean {
   } catch {
     return false;
   }
-}
-
-// ── Identity ─────────────────────────────────────────────────────────────
-
-export interface MultiRepoContext {
-  systemId: string;
-  repoId: string;
-  repoWorkspaceOf: (relPath: string) => string;
-}
-
-/**
- * The per-file workspace id and multi-repo context ingest stamps on a file's
- * patch. A copy of the block in `ingestFiles` (ingest.ts, "Multi-repo
- * co-ingest"), not a shared helper, so this change does not touch ingest; the
- * two must agree or a system workspace reads as diverged everywhere, which is
- * what the two-repo test pins.
- */
-export function fileIdentity(workspaceRoot: string, workspaceId: string): {
-  fileWorkspaceId: (relPath: string) => string;
-  fileMultiRepo: (relPath: string) => MultiRepoContext | undefined;
-} {
-  const systemId = detectSystem(workspaceRoot)?.systemId;
-  const repoOf = (relPath: string): string => (relPath.split("/")[0] || ".");
-  const repoWsCache = new Map<string, string>();
-  const repoWorkspaceId = (repo: string): string => {
-    let ws = repoWsCache.get(repo);
-    if (!ws) { ws = repoWorkspaceIdFor(workspaceRoot, repo); repoWsCache.set(repo, ws); }
-    return ws;
-  };
-  const repoWorkspaceOf = (relPath: string): string => repoWorkspaceId(repoOf(relPath));
-  return {
-    fileWorkspaceId: (relPath) => (systemId ? repoWorkspaceId(repoOf(relPath)) : workspaceId),
-    fileMultiRepo: (relPath) => (systemId ? { systemId, repoId: repoOf(relPath), repoWorkspaceOf } : undefined),
-  };
 }
 
 // ── Run ──────────────────────────────────────────────────────────────────

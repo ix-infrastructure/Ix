@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
@@ -8,14 +8,15 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { saveIngestBaseline } from "../ingest-baseline.js";
-import { repoWorkspaceIdFor } from "../system.js";
+import { fileIdentity, repoWorkspaceIdFor } from "../system.js";
 import { canonicalWorkspacePath, verifyRecordPath } from "../config.js";
 import { loadIngestionModules } from "../commands/ingestion-loader.js";
+import { ingestFiles } from "../commands/ingest.js";
+import { FakeBackend } from "./helpers/fake-backend.js";
 import {
   classifyFile,
   diffNodes,
   expectedNodes,
-  fileIdentity,
   graphVerdict,
   loadVerifyRecord,
   pickVerifyFiles,
@@ -543,5 +544,86 @@ describe("docs/llm-format.md", () => {
     expect(reasons).toContain("no_files");
     expect(reasons).toContain("parse_timed_out");
     for (const reason of reasons) expect(doc, reason).toMatch(new RegExp(`[\`=]${reason}\``));
+  });
+});
+
+// ── Against a real ingest ───────────────────────────────────────────────
+
+describe("runVerify after a real ingestFiles run", () => {
+  // A real ingest: discovery, the parse pool and HTTP commits to a fake backend.
+  vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+  const envKeys = ["HOME", "USERPROFILE", "IX_ENDPOINT", "IX_LOCK_DIR"] as const;
+  const savedEnv: Record<string, string | undefined> = {};
+  let backend: FakeBackend;
+  let endpoint: string;
+
+  beforeEach(async () => {
+    for (const k of envKeys) savedEnv[k] = process.env[k];
+    backend = new FakeBackend();
+    backend.rememberHashes = true;
+    endpoint = await backend.start();
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    process.env.IX_ENDPOINT = endpoint;
+    process.env.IX_LOCK_DIR = nodePath.join(home, "locks");
+  });
+
+  afterEach(async () => {
+    for (const k of envKeys) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+    await backend.stop();
+  });
+
+  /** What the fake backend holds after the run, as verify's client reads it. */
+  async function storedByIngest() {
+    const uris = [...backend.lastOps.keys()];
+    const res = await fetch(`${endpoint}/v1/source-hashes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uris }),
+    });
+    const hashes = (await res.json()) as Array<{ workspaceId: string; uri: string; hash: string }>;
+    const hashOf = new Map(hashes.map((h) => [h.uri, h.hash]));
+    const rows = uris.flatMap((uri) => (backend.lastOps.get(uri) ?? [])
+      .filter((o) => o.type === "UpsertNode")
+      .map((o) => ({ id: o.id, kind: o.kind, name: o.name, attrs: o.attrs, provenance: { sourceUri: uri, sourceHash: hashOf.get(uri) } })));
+    return { rows, hashes };
+  }
+
+  // Not built from verify's own identity code: the rows are what ingestFiles
+  // actually committed, so verify and ingest drifting apart on a system
+  // workspace (per-repo workspace id, repoId, systemId) turns this red.
+  it("multi-repo: every file ingest committed verifies clean, under its member repo's workspace id", async () => {
+    const root = nodePath.join(home, "system");
+    const files = { "repo-a": "src/alpha.ts", "repo-b": "src/beta.ts" } as const;
+    for (const [repo, rel] of Object.entries(files)) {
+      fs.mkdirSync(nodePath.join(root, repo, ".git"), { recursive: true });
+      fs.mkdirSync(nodePath.join(root, repo, "src"), { recursive: true });
+      fs.writeFileSync(nodePath.join(root, repo, "package.json"), `{"name":"${repo}"}`);
+      fs.writeFileSync(nodePath.join(root, repo, rel),
+        `export function ${repo.replace("-", "_")}() { return 1; }\nexport class C${repo.slice(-1)} {}\n`);
+    }
+
+    await ingestFiles(root, { format: "text", force: true, suppressOutput: true, printSummary: false, mapMode: true });
+    const store = await storedByIngest();
+    const sourceFiles = Object.entries(files).map(([repo, rel]) => `${repo}/${rel}`);
+    expect([...backend.lastOps.keys()]).toEqual(expect.arrayContaining(sourceFiles));
+    // The premise: ingest really did key each member under its own workspace.
+    for (const repo of Object.keys(files)) {
+      expect(store.hashes).toContainEqual(expect.objectContaining({
+        uri: `${repo}/${files[repo as keyof typeof files]}`, workspaceId: repoWorkspaceIdFor(root, repo),
+      }));
+    }
+
+    const { client, calls } = fakeClient(store);
+    const report = await runVerify(client, root, { paths: sourceFiles, sample: sourceFiles.length, record: false });
+    expect(report.files.map((f) => [f.path, f.state]).sort()).toEqual(sourceFiles.map((p) => [p, "clean"]).sort());
+    expect(report.graph).toBe("clean");
+    for (const repo of Object.keys(files)) {
+      expect(calls.some((c) => c.workspaceId === repoWorkspaceIdFor(root, repo))).toBe(true);
+    }
   });
 });

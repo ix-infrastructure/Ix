@@ -462,3 +462,61 @@ export function workspaceIdForPath(absPath: string): string {
 export function repoWorkspaceIdFor(rootPath: string, repoDir: string): string {
   return workspaceIdForPath(nodePath.resolve(rootPath, repoDir));
 }
+
+/** The multi-repo context a member file's patch is built with. */
+export interface MultiRepoContext {
+  systemId: string;
+  repoId: string;
+  repoWorkspaceOf: (relPath: string) => string;
+}
+
+/** Per-file identity for one ingest root; see {@link fileIdentity}. */
+export interface FileIdentity {
+  /** The system id when the root holds two or more member repos, else undefined. */
+  systemId: string | undefined;
+  /** The member repo a workspace-relative path belongs to (its first segment). */
+  repoOf: (relPath: string) => string;
+  /** A member file's repo workspace id; undefined outside a system. */
+  repoWorkspaceOf: ((relPath: string) => string) | undefined;
+  /** The workspace_id a file's nodes are folded under (its patch's source.workspaceId). */
+  fileWorkspaceId: (relPath: string) => string;
+  /** The multi-repo context passed to buildPatchWithResolution; undefined outside a system. */
+  fileMultiRepo: (relPath: string) => MultiRepoContext | undefined;
+}
+
+/**
+ * The workspace id and multi-repo context each file of `workspaceRoot` is
+ * ingested under (Ix#225 Path 1). Inside a system every member repo keeps its
+ * OWN stable workspace id, so its node ids match whether it is ingested alone
+ * or in the system; outside one every file uses `workspaceId`.
+ *
+ * Shared by `ix map`/`ix ingest` and `ix verify`: verify re-builds each file's
+ * patch to compare with the graph, and any disagreement here would read as
+ * divergence on every file of a system workspace.
+ */
+export function fileIdentity(
+  workspaceRoot: string,
+  workspaceId: string,
+  systemId: string | undefined = detectSystem(workspaceRoot)?.systemId,
+): FileIdentity {
+  const repoOf = (relPath: string): string => (relPath.split("/")[0] || ".");
+  const repoWsCache = new Map<string, string>();
+  const repoWorkspaceId = (repo: string): string => {
+    let ws = repoWsCache.get(repo);
+    if (!ws) { ws = repoWorkspaceIdFor(workspaceRoot, repo); repoWsCache.set(repo, ws); }
+    return ws;
+  };
+  if (!systemId) {
+    return {
+      systemId: undefined, repoOf, repoWorkspaceOf: undefined,
+      fileWorkspaceId: () => workspaceId,
+      fileMultiRepo: () => undefined,
+    };
+  }
+  const repoWorkspaceOf = (relPath: string): string => repoWorkspaceId(repoOf(relPath));
+  return {
+    systemId, repoOf, repoWorkspaceOf,
+    fileWorkspaceId: repoWorkspaceOf,
+    fileMultiRepo: (relPath) => ({ systemId, repoId: repoOf(relPath), repoWorkspaceOf }),
+  };
+}

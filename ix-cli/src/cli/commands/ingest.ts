@@ -32,7 +32,7 @@ import {
   changedNames, findDependents, importsChanged, loadIngestSymbols, resolutionHash, saveIngestSymbols,
   type StoredSummary, type SymbolEntry,
 } from '../ingest-symbols.js';
-import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
+import { detectSystem, fileIdentity, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
 import { admitStitchWaiting, connectionNeverEstablished, type StitchRefusal } from '../stitch-guard.js';
 import {
@@ -1855,22 +1855,17 @@ export async function ingestFiles(
   // system_id, and each file carries its repoId. A cross-repo edge's dst id is
   // resolved in the dst repo's workspace namespace by core-ingestion.
   const detectedSystem = detectSystem(workspaceRoot);
-  const systemId: string | undefined = detectedSystem?.systemId;
-  const repoOf = (relPath: string): string => (relPath.split('/')[0] || '.');
-  const repoWsCache = new Map<string, string>();
-  const repoWorkspaceId = (repo: string): string => {
-    let ws = repoWsCache.get(repo);
-    if (!ws) { ws = repoWorkspaceIdFor(workspaceRoot, repo); repoWsCache.set(repo, ws); }
-    return ws;
-  };
-  const repoWorkspaceOf = systemId ? (relPath: string) => repoWorkspaceId(repoOf(relPath)) : undefined;
   // Per-file workspace id + multi-repo context fed to buildPatchWithResolution.
-  const fileWorkspaceId = (relPath: string): string => systemId ? repoWorkspaceId(repoOf(relPath)) : workspaceId;
+  // Shared with `ix verify` (system.ts fileIdentity), which must agree exactly.
+  const {
+    systemId,
+    repoOf,
+    fileWorkspaceId,
+    fileMultiRepo,
+  } = fileIdentity(workspaceRoot, workspaceId, detectedSystem?.systemId);
   // The workspace_id a file's nodes are folded under (same value the patch builder
   // stamps on source.workspaceId) — used to scope the baseline hash lookup per file.
   const sourceWorkspaceIdOf = (absPath: string): string => fileWorkspaceId(toWorkspaceRelative(absPath));
-  const fileMultiRepo = (relPath: string) =>
-    systemId ? { systemId, repoId: repoOf(relPath), repoWorkspaceOf } : undefined;
   // Cross-repo dependency gate: map an import module name to the member repo that
   // publishes that package (exact, or prefix at a package boundary for scoped /
   // sub-module / sub-path imports like "@babel/types/lib/x", "tokio::sync",
