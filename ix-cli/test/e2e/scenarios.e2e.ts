@@ -338,4 +338,52 @@ describe("an extractor upgrade over a real backend (IN-20)", () => {
       fresh,
     );
   });
+
+  it("retires the orphan of a file whose patch at the current extractor already landed without the delete", async () => {
+    const co = checkout("polyglot");
+    const fresh = await freshSignature(env, co);
+    const [, patchBuilder] = await loadIngestionModules();
+    const previous = (patchBuilder as unknown as { PREVIOUS_EXTRACTORS: string[] }).PREVIOUS_EXTRACTORS[0]!;
+    const file = "app/pricing.py";
+    const hash = createHash("sha256").update(readFileSync(join(co.dir, file))).digest("hex");
+    map(env, co);
+    const ws = workspaceId(co);
+    const ghost = uuidOf(`e2e-precommitted-ghost-${ws}`);
+    const client = new IxClient(env.endpoint);
+
+    // The previous extractor's output, then a forced ingest of the file at
+    // the current extractor that commits it again under its deterministic
+    // patch id with no sweep: the current patch is the head and the ghost is
+    // still live.
+    await client.commitPatchBulk([{
+      patchId: patchBuilder.sourcePatchIdCandidates(file, hash, ws)[1]!,
+      actor: "ix-e2e",
+      timestamp: new Date().toISOString(),
+      baseRev: 0,
+      source: { uri: file, sourceHash: hash, extractor: previous, sourceType: "code", workspaceId: ws },
+      ops: [{ type: "UpsertNode", id: ghost, kind: "function", name: "e2e_precommitted_ghost", attrs: {} }],
+      replaces: [],
+      intent: "e2e: a previous extractor's output",
+    }]);
+    ix(env, co, ["ingest", "--path", join(co.dir, file), "--force"]);
+    expect((await client.nodes([ghost], "full")).nodes.map((n) => n.id)).toEqual([ghost]);
+
+    // The baseline says the previous extractor: the next map is an extractor
+    // change, not a repair. Its delete for app/pricing.py must not go under
+    // the patch id the backend already holds, or it is answered Idempotent.
+    const baselineFile = readdirSync(co.ixHome).find((f) => f.startsWith("ingest_mtimes_"));
+    const baselinePath = join(co.ixHome, baselineFile!);
+    const baseline = JSON.parse(readFileSync(baselinePath, "utf8")) as { extractor?: string };
+    baseline.extractor = previous;
+    writeFileSync(baselinePath, JSON.stringify(baseline));
+    const res = map(env, co);
+    expect(res.stderr).not.toContain("[orphans kept]");
+
+    expect((await client.nodes([ghost], "full")).missing).toContain(ghost);
+    // The forced ingest wrote chunk nodes a map does not; everything else
+    // matches a fresh map.
+    const actual = await signature(env, co);
+    const noChunks = (sig: typeof actual) => ({ nodes: sig.nodes.filter((line) => !line.startsWith("chunk|")), edges: sig.edges });
+    expectSameGraph("a precommitted file's orphan is retired", noChunks(actual), noChunks(fresh));
+  });
 });
