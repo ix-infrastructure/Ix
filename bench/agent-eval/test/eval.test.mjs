@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, normalize, resolve, sep } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { after, test } from 'node:test';
 import { checkManifestSource, importVerified, loadManifest, parseExport, sha256, validateManifest } from '../manifest.mjs';
@@ -20,7 +21,13 @@ import { CLAUDE_IX_MCP_RULE, MCP_SERVER, PLUGIN_NAME, nativeArgs } from '../inte
 const root = fileURLToPath(new URL('../', import.meta.url));
 // Worktree-local scratch also keeps the CI smoke independent of machine config.
 const scratch = mkdtempSync(join(root, 'results-test-'));
-after(() => rmSync(scratch, { recursive: true, force: true }));
+// Run work directories default to os.tmpdir(); failed runs keep theirs, so point it at a private, removed root.
+const workRoot = mkdtempSync(join(tmpdir(), 'agent-eval-tests-'));
+const inheritedTmp = process.env.TMPDIR; process.env.TMPDIR = workRoot;
+after(() => {
+  if (inheritedTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = inheritedTmp;
+  rmSync(scratch, { recursive: true, force: true }); rmSync(workRoot, { recursive: true, force: true });
+});
 const smoke = join(root, 'smoke.json');
 const rows = Array.from({ length: 60 }, (_, i) => ({ instance_id: `fixture__repo-${i}`, repo: `fixture/repo-${i % 6}`, base_commit: sha256(`fixture-${i}`).slice(0, 40), problem_statement: `Synthetic export fixture ${i}`, patch: 'HIDDEN GOLD', test_patch: 'HIDDEN TESTS' }));
 const integrationTest = (name, fn) => test(name, { skip: process.platform === 'win32' || process.env.AGENT_EVAL_PORTABLE_ONLY === '1' }, fn);
