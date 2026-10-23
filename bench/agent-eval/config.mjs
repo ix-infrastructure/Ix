@@ -23,9 +23,13 @@ export function validateConfig(config, synthetic = false) {
   for (const stage of ['setup', 'probe']) command(config.environment?.[stage], `environment.${stage}`);
   positiveInteger(config.environment?.seconds, 'environment.seconds');
   if (!synthetic && !/^[a-f0-9]{40}$/.test(config.environment?.plugin_revision ?? '')) throw new Error('Pin environment.plugin_revision to a commit SHA');
-  if (config.environment.setup.some((arg) => arg.endsWith('/provision.mjs'))) {
-    for (const key of ['source_path', 'ix_cli', 'ix_version']) if (typeof config.environment[key] !== 'string' || !config.environment[key]) throw new Error(`Missing environment.${key}`);
-    const endpoint = new URL(config.environment.endpoint);
+  // Checked before paths are resolved, so `provision.mjs` with or without a directory counts.
+  const provisioned = config.environment.setup.some((arg) => /(^|[\\/])provision\.mjs$/.test(arg));
+  if (provisioned) for (const key of ['source_path', 'ix_cli', 'ix_version']) if (typeof config.environment[key] !== 'string' || !config.environment[key]) throw new Error(`Missing environment.${key}`);
+  // The ix arm's launcher exports IX_ENDPOINT whenever ix_cli is set, whichever setup runs.
+  if (provisioned || config.environment.ix_cli !== undefined || config.environment.endpoint !== undefined) {
+    let endpoint;
+    try { endpoint = new URL(config.environment.endpoint); } catch { throw new Error('Local provisioning requires a loopback Ix endpoint without credentials'); }
     if (!['http:', 'https:'].includes(endpoint.protocol) || !['127.0.0.1', 'localhost', '[::1]'].includes(endpoint.hostname) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error('Local provisioning requires a loopback Ix endpoint without credentials');
   }
   if (config.environment.tool_paths && (!Array.isArray(config.environment.tool_paths) || config.environment.tool_paths.some((path) => typeof path !== 'string' || !path))) throw new Error('tool_paths must be an array of directories');

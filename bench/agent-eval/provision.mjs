@@ -88,6 +88,27 @@ export function assertMapped(status, stats) {
   }
 }
 
+/**
+ * Isolation is a PATH; a login shell (Codex runs `bash -lc`, Claude Code starts from the user's $SHELL) may reset it in
+ * /etc/profile. Only the shells those agents launch are probed: Claude Code runs bash or zsh, so a `$SHELL` such as
+ * /bin/sh is never used and its profile does not matter.
+ */
+export async function checkLoginShells(request, env = process.env) {
+  const launcher = request.arm === 'ix' ? join(request.run_path, 'bin', 'ix') : '';
+  const shells = new Set();
+  for (const name of ['bash', env.SHELL]) {
+    if (!name || !/(^|\/)(ba|z)sh$/.test(name)) continue;
+    try { shells.add(findBinary(name, env.PATH)); } catch { /* not installed */ }
+  }
+  for (const shell of shells) {
+    // The marker keeps login banners or profile output out of the answer.
+    const { stdout: out, stderr, exit_code } = await execute([shell, '-lc', 'printf "\\nix-path=%s\\n" "$(command -v ix)"'], { cwd: request.repo_path, env, seconds: request.environment.seconds, captureExit: true });
+    if (exit_code !== 0) throw new Error(`A login shell (${shell} -l) exited ${exit_code} under the ${request.arm} arm's PATH, so the agent's commands would fail too: ${stderr.trim().split('\n').slice(-5).join(' | ') || 'no stderr'}`);
+    const found = out.match(/^ix-path=(.*)$/m)?.[1];
+    if (found !== launcher) throw new Error(`A login shell (${shell} -l) resolves ix to ${found ? found : 'nothing'}, expected ${launcher || 'nothing'}; its profile resets PATH and undoes the ${request.arm} arm's isolation`);
+  }
+}
+
 export async function setup(request) {
   checkTaskIsolation(request);
   if (request.arm === 'baseline') return;
@@ -106,6 +127,7 @@ export async function probe(request) {
   try { findBinary('ix'); available = true; } catch { /* baseline must have no launcher */ }
   const ix = request.arm === 'ix';
   if (available !== ix) throw new Error('Ix PATH isolation is incorrect');
+  await checkLoginShells(request);
   const evidence = [];
   if (ix) {
     const ixVersion = (await run(request, ['ix', '--version'])).stdout.trim();

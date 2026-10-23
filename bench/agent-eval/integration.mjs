@@ -10,6 +10,8 @@ export const CLAUDE_IX_MCP_RULE = `mcp__plugin_${PLUGIN_NAME}_${MCP_SERVER}`;
 // Map refresh and claude-post-edit each have an environment.seconds deadline; the hook must outlast both.
 // Directory (under the run path) of markers for Ix hooks that have started but not finished.
 export const PENDING = 'hooks.pending';
+// File (under the run path) holding the checkout fingerprint the last hook map refresh saw.
+export const MAP_STATE = 'hooks.map-state';
 export const hookTimeoutSeconds = (environment) => 2 * environment.seconds + 30;
 
 // Arm integrations (plugins, MCP, settings, hooks, tool permissions) belong to the harness, never to shared args.

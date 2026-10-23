@@ -142,7 +142,9 @@ export async function runBenchmark({ manifestPath, config, out, dryRun = false }
       json(join(runPath, 'prediction.json'), [{ instance_id: job.task.instance_id, model_name_or_path: 'agent-eval', model_patch: patch }]);
       // Only the evaluator gets the dataset export; it runs after the solver has exited.
       json(evaluateRequestPath, { ...request, run_path: runPath, evaluator: config.evaluator, dataset_export: config.dataset_export && resolve(config.dataset_export) });
-      const evaluation = await stage('evaluate', config.evaluator.command, config.evaluator.seconds, { cwd: runPath, file: evaluateRequestPath });
+      // The evaluator is the same for both arms and needs the host's Docker client configuration (~/.docker contexts), so it
+      // runs with the inherited environment rather than the solver's isolated HOME and PATH.
+      const evaluation = await stage('evaluate', config.evaluator.command, config.evaluator.seconds, { cwd: runPath, file: evaluateRequestPath, env: process.env });
       const result = JSON.parse(evaluation.stdout);
       if (result.instance_id !== job.task.instance_id || typeof result.resolved !== 'boolean' || result.evaluator !== config.evaluator.kind || (!dryRun && result.revision !== config.evaluator.revision)) throw new Error('Invalid official evaluation receipt');
       if (!dryRun) {

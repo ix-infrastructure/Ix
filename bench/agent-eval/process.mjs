@@ -49,7 +49,7 @@ export function execute(argv, { cwd, env = process.env, seconds = 60, log, input
       if (log) { writeFileSync(`${log}.stdout`, stdout); writeFileSync(`${log}.stderr`, stderr); }
       if (failure && !(allowTimeout && timedOut && failure.message.startsWith('Stage deadline'))) return reject(failure);
       if (code !== 0 && !captureExit && !(allowTimeout && timedOut)) return reject(new Error(`Stage exited ${code}; inspect stage logs`));
-      resolve({ stdout, seconds: elapsed, timed_out: timedOut, exit_code: code });
+      resolve({ stdout, stderr, seconds: elapsed, timed_out: timedOut, exit_code: code });
     });
   });
 }

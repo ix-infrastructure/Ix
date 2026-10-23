@@ -2,8 +2,8 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join, normalize, resolve, sep } from 'node:path';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { delimiter, join, normalize, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { after, test } from 'node:test';
@@ -14,8 +14,8 @@ import { markdown, summarize } from '../stats.mjs';
 import { dryConfig, resolveConfigPaths, runBenchmark } from '../run.mjs';
 import { execute } from '../process.mjs';
 import { checkResolution, evaluationError } from '../evaluation.mjs';
-import { armEnvironment } from '../isolation.mjs';
-import { assertMapped, checkTaskIsolation, codexSkillListed, integrationFiles } from '../provision.mjs';
+import { armEnvironment, shellQuote } from '../isolation.mjs';
+import { assertMapped, checkLoginShells, checkTaskIsolation, codexSkillListed, integrationFiles } from '../provision.mjs';
 import { CLAUDE_IX_MCP_RULE, MCP_SERVER, PLUGIN_NAME, nativeArgs } from '../integration.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -72,6 +72,22 @@ test('shared arm configuration and randomized schedule are reproducible and bala
   const paths = resolveConfigPaths({ agent: { command: ['node', 'bench/agent-eval/agent.mjs'] }, evaluator: { python: 'local/python', harness_path: 'local/harness' } }, scratch);
   assert.equal(paths.agent.command[1], resolve(scratch, 'bench/agent-eval/agent.mjs'));
   assert.equal(paths.evaluator.python, resolve(scratch, 'local/python'));
+});
+
+test('the loopback endpoint check applies to every provision.mjs spelling and to any config that routes the ix launcher', () => {
+  const example = JSON.parse(readFileSync(join(root, 'config.example.json'), 'utf8'));
+  example.environment.plugin_revision = 'a'.repeat(40); example.evaluator.revision = 'b'.repeat(40);
+  validateConfig(example);
+  const variant = (environment) => { const c = structuredClone(example); Object.assign(c.environment, environment); return c; };
+  for (const script of ['bench/agent-eval/provision.mjs', 'provision.mjs', './provision.mjs', resolve(root, 'provision.mjs')]) {
+    assert.throws(() => validateConfig(variant({ endpoint: 'https://ix.example.com', setup: ['node', script, 'setup'] })), /loopback/, script);
+  }
+  assert.throws(() => validateConfig(variant({ endpoint: undefined })), /loopback/);
+  // A custom setup still gets the launcher (and IX_ENDPOINT) from ix_cli.
+  const custom = { setup: ['./my-setup.sh'], source_path: undefined, ix_version: undefined };
+  assert.throws(() => validateConfig(variant({ ...custom, endpoint: 'https://ix.example.com' })), /loopback/);
+  assert.throws(() => validateConfig(variant({ ...custom, endpoint: undefined })), /loopback/);
+  validateConfig(variant({ ...custom, ix_cli: undefined, endpoint: undefined }));
 });
 
 test('probe rejects unmapped ix, stale maps, plugin drift and baseline contamination', () => {
@@ -520,33 +536,96 @@ integrationTest('hook-driven Ix calls are reported apart from the agent\'s own I
   assert.equal(report.metrics.hook_ix_calls.mean_difference.estimate, 3);
 });
 
+integrationTest('the ix hook re-maps only after the checkout changed; the probe always maps', async () => {
+  const run_path = join(scratch, 'hook-refresh'), repo_path = join(run_path, 'repo'), home = join(run_path, 'home'), log = join(run_path, 'ix.log');
+  mkdirSync(repo_path, { recursive: true }); mkdirSync(home);
+  const git = (...args) => execFileSync('git', ['-C', repo_path, ...args], { encoding: 'utf8' });
+  git('init', '-q'); writeFileSync(join(repo_path, 'a.txt'), 'a\n'); git('add', '.');
+  git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture');
+  const fakeIx = join(run_path, 'fake-ix.mjs');
+  writeFileSync(fakeIx, `import { appendFileSync } from 'node:fs'; appendFileSync(${JSON.stringify(log)}, process.argv[2] + '\\n'); if (process.argv[2] === 'hook') console.log('{}');`);
+  const request = { arm: 'ix', run_path, repo_path, home, environment: { seconds: 10, ix_cli: fakeIx, endpoint: 'http://127.0.0.1:8090', tool_paths: ['/usr/bin', '/bin'] } };
+  const env = armEnvironment(request); writeFileSync(env.AGENT_EVAL_REQUEST, JSON.stringify(request));
+  const hook = async (mode) => {
+    writeFileSync(log, '');
+    await execute([process.execPath, join(root, 'hook.mjs'), mode], { cwd: repo_path, env, input: '{}' });
+    return readFileSync(log, 'utf8').trim().split('\n');
+  };
+  assert.deepEqual(await hook('probe'), ['map']);
+  assert.deepEqual(await hook('claude'), ['hook'], 'a read-only call on the probed checkout does not map');
+  writeFileSync(join(repo_path, 'a.txt'), 'b\n');
+  assert.deepEqual(await hook('claude'), ['map', 'hook']);
+  assert.deepEqual(await hook('claude'), ['hook']);
+  writeFileSync(join(repo_path, 'new.txt'), 'new\n');
+  assert.deepEqual(await hook('claude'), ['map', 'hook'], 'a new untracked file maps');
+  assert.deepEqual(await hook('claude'), ['hook']);
+  writeFileSync(join(repo_path, 'new.txt'), 'changed again\n');
+  assert.deepEqual(await hook('claude'), ['map', 'hook'], 'an edited untracked file maps');
+  assert.deepEqual(await hook('probe'), ['map'], 'the probe maps even when nothing changed');
+  const records = readFileSync(join(run_path, 'hooks.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.deepEqual(records.map((r) => [r.mapped, r.ix_calls]), [[true, 1], [false, 1], [true, 2], [false, 1], [true, 2], [false, 1], [true, 2], [true, 1]]);
+});
+
+integrationTest('the probe fails when a login shell profile resets PATH and undoes arm isolation', async () => {
+  const dir = join(scratch, 'login-shell'), ambient = join(dir, 'ambient'), keeps = join(dir, 'keeps'), resets = join(dir, 'resets'), broken = join(dir, 'broken');
+  for (const d of [ambient, keeps, resets, broken]) mkdirSync(d, { recursive: true });
+  writeFileSync(join(ambient, 'ix'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  // Stand-ins for `bash -l`: one keeps the inherited PATH, one resets it the way a distro /etc/profile can.
+  writeFileSync(join(keeps, 'bash'), '#!/bin/sh\n[ "$1" = -lc ] || exit 2\necho "profile banner"\nexec /bin/sh -c "$2"\n', { mode: 0o755 });
+  writeFileSync(join(resets, 'bash'), `#!/bin/sh\n[ "$1" = -lc ] || exit 2\nPATH=${shellQuote(ambient)}:/usr/bin:/bin; export PATH\nexec /bin/sh -c "$2"\n`, { mode: 0o755 });
+  copyFileSync(join(resets, 'bash'), join(resets, 'zsh'));
+  // Stand-in for a profile.d script written for another shell, as dash reports it.
+  const failing = '#!/bin/sh\necho \'profile.d/tool.sh: 5: eval: Syntax error: "(" unexpected\' >&2\nexit 2\n';
+  for (const name of ['bash', 'sh']) writeFileSync(join(broken, name), failing, { mode: 0o755 });
+  for (const arm of ['baseline', 'ix']) {
+    const run_path = join(dir, arm), bin = join(run_path, 'bin'); mkdirSync(bin, { recursive: true });
+    if (arm === 'ix') writeFileSync(join(bin, 'ix'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const request = { arm, run_path, repo_path: dir, environment: { seconds: 10 } };
+    // The shells are found on the arm's PATH, as in a run; SHELL is unset so only `bash` is checked.
+    const env = (shells) => ({ ...process.env, SHELL: '', PATH: [bin, shells].join(delimiter) });
+    await checkLoginShells(request, env(keeps));
+    await assert.rejects(checkLoginShells(request, env(resets)), /login shell .*resets PATH/, arm);
+    // Claude Code only runs bash or zsh: a $SHELL of zsh is probed, while sh (whose profile may not even parse) is not.
+    await assert.rejects(checkLoginShells(request, { ...env(keeps), SHELL: join(resets, 'zsh') }), /zsh -l\) resolves ix/, arm);
+    await checkLoginShells(request, { ...env(keeps), SHELL: join(broken, 'sh') });
+    // A profile that fails under the arm's PATH reports the shell's own error instead of a bare exit status.
+    await assert.rejects(checkLoginShells(request, env(broken)), /bash -l\) exited 2 .*eval: Syntax error/, arm);
+  }
+});
+
+// The adapter spawns a descendant (same process group, like a Codex notify hook) and exits at once. The descendant
+// waits for the adapter to exit, then `ms`, then writes `file`. Timing is relative to the adapter's exit rather than
+// to process start-up, so a loaded machine (the full CI suite runs alongside) does not change the outcome.
+const lateDescendant = (file, ms, stdio = 'ignore') => {
+  const child = `const parent = Number(process.argv[1]); const wait = () => { try { process.kill(parent, 0); setTimeout(wait, 20); } catch { setTimeout(() => { console.log('hook'); require('node:fs').writeFileSync(${JSON.stringify(file)}, 'x'); }, ${ms}); } }; wait();`;
+  return [process.execPath, '-e', `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(child)}, String(process.pid)], { stdio: ${JSON.stringify(stdio)} }).unref(); console.log('agent')`];
+};
+const timed = async (promise) => { const started = performance.now(); const result = await promise; return { result, seconds: (performance.now() - started) / 1000 }; };
+
 integrationTest('a drained stage lets an outliving descendant finish before the group is reaped, within a cap', async () => {
   const marker = (name) => join(scratch, `drain-${name}`);
-  // The adapter exits at once; its child (same process group, like a Codex notify hook) finishes later.
-  const late = (file, ms) => [process.execPath, '-e', `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(file)}, 'x'), ${ms})`)}], { stdio: 'ignore' }).unref()`];
-  const drained = await execute(late(marker('drained'), 700), { seconds: 10, drainSeconds: 10 });
-  assert.ok(existsSync(marker('drained'))); assert.ok(drained.seconds < 0.7, 'stage time excludes the drain');
-  await execute(late(marker('reaped'), 700), { seconds: 10 });
-  await new Promise((done) => setTimeout(done, 1200));
+  const drained = await timed(execute(lateDescendant(marker('drained'), 1000), { seconds: 10, drainSeconds: 10 }));
+  assert.ok(existsSync(marker('drained')));
+  // The descendant finished at least 1s after the adapter exited; none of that is stage time.
+  assert.ok(drained.seconds - drained.result.seconds >= 0.5, 'stage time excludes the drain');
+  await execute(lateDescendant(marker('reaped'), 1000), { seconds: 10 });
+  await new Promise((done) => setTimeout(done, 2000));
   assert.ok(!existsSync(marker('reaped')), 'without a drain, descendants are still reaped');
-  const started = performance.now();
-  await execute(late(marker('capped'), 30_000), { seconds: 10, drainSeconds: 0.5 });
-  assert.ok(performance.now() - started < 5000, 'the drain is capped');
+  const capped = await timed(execute(lateDescendant(marker('capped'), 30_000), { seconds: 10, drainSeconds: 0.5 }));
+  assert.ok(capped.seconds < 15, 'the drain is capped');
+  assert.ok(!existsSync(marker('capped')));
 });
 
 integrationTest('a descendant holding the stage stdout open is neither stage time nor a deadline overrun', async () => {
   const marker = (name) => join(scratch, `inherit-${name}`);
-  // Like a notify hook spawned with inherited stdio: the adapter exits, the hook keeps the stdout pipe open.
-  const late = (file, ms) => [process.execPath, '-e', `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => { console.log('hook'); require('node:fs').writeFileSync(${JSON.stringify(file)}, 'x'); }, ${ms})`)}], { stdio: 'inherit' }).unref(); console.log('agent')`];
-  const drained = await execute(late(marker('drained'), 1500), { seconds: 1, drainSeconds: 10, allowTimeout: true });
-  assert.equal(drained.timed_out, false); assert.ok(drained.seconds < 1, 'stage time ends when the adapter exits');
+  // Like a notify hook spawned with inherited stdio: the adapter exits, the hook keeps the stdout pipe open past the deadline.
+  const drained = await execute(lateDescendant(marker('drained'), 2500, 'inherit'), { seconds: 2, drainSeconds: 10, allowTimeout: true });
+  assert.equal(drained.timed_out, false); assert.ok(drained.seconds < 2, 'stage time ends when the adapter exits');
   assert.ok(existsSync(marker('drained'))); assert.match(drained.stdout, /agent/);
-  const started = performance.now();
-  const reaped = await execute(late(marker('reaped'), 3000), { seconds: 10, drainSeconds: 0.5 });
-  assert.equal(reaped.timed_out, false); assert.ok(performance.now() - started < 2500, 'the drain is capped');
-  assert.match(reaped.stdout, /agent/);
-  await new Promise((done) => setTimeout(done, 3200));
-  assert.ok(!existsSync(marker('reaped')), 'the descendant is reaped when the drain ends');
+  // The descendant would hold stdout for 6s after the adapter exits; the stage closing well before that means it was reaped.
+  const reaped = await timed(execute(lateDescendant(marker('reaped'), 6000, 'inherit'), { seconds: 10, drainSeconds: 0.5 }));
+  assert.equal(reaped.result.timed_out, false); assert.ok(reaped.seconds - reaped.result.seconds < 4, 'the drain is capped');
+  assert.match(reaped.result.stdout, /agent/); assert.doesNotMatch(reaped.result.stdout, /hook/, 'the descendant is reaped when the drain ends');
 });
 
 integrationTest('an ix-arm hook that outlives the agent is counted; one killed mid-run fails the run', async () => {
@@ -615,6 +694,14 @@ integrationTest('shipped provisioner installs pinned local integrations and isol
   const revision = git('rev-parse', 'HEAD').trim();
   const tools = join(scratch, 'ambient-bin'); mkdirSync(tools);
   writeFileSync(join(tools, 'ix'), '#!/bin/sh\nexit 99\n', { mode: 0o755 });
+  // A profile-free `bash -l`: the host's /etc/profile is not under test here (the login-shell probe test covers profiles).
+  writeFileSync(join(tools, 'bash'), '#!/bin/sh\n[ "$1" = -lc ] && exec /bin/sh -c "$2"\nexec /bin/bash "$@"\n', { mode: 0o755 });
+  // execute() reports only the exit status; the provisioner's own message on stderr is the diagnosis.
+  const stage = async (argv, options) => {
+    const result = await execute(argv, { ...options, captureExit: true });
+    assert.equal(result.exit_code, 0, `${argv.slice(1, 3).join(' ')} exited ${result.exit_code}: ${result.stderr.trim() || 'no stderr'}`);
+    return result;
+  };
   const fakeIx = join(scratch, 'fake-ix.mjs');
   writeFileSync(fakeIx, `
     import {existsSync,mkdirSync,writeFileSync} from 'node:fs';
@@ -664,7 +751,8 @@ integrationTest('shipped provisioner installs pinned local integrations and isol
     const request = { synthetic: true, arm, run_path, repo_path, home, task: { base_commit: revision, problem_statement: 'fixture' }, agent: { family, binary: fakeAgent, version: '1.0-fixture', model: 'fixture-model', effort: 'medium' }, budget: { max_turns: 2 },
       environment: { plugin_revision: revision, source_path: source, ix_cli: fakeIx, ix_version: '1.0-fixture', endpoint: 'http://127.0.0.1:8090', seconds: 10, tool_paths: [tools, '/usr/bin', '/bin'] } };
     assert.throws(() => checkTaskIsolation({ ...request, synthetic: false }), (error) => /ancestor/.test(error.message) && error.message.includes(resolve(root, '..', '..')));
-    const env = armEnvironment(request, { ...process.env, IX_ENDPOINT: 'http://wrong.invalid', IX_WORKSPACE_ID: 'wrong', JARVIS_IX_SOCKET: 'wrong',
+    // SHELL is cleared so the outcome does not depend on the caller's login shell; `bash -l` is the profile-free stand-in.
+    const env = armEnvironment(request, { ...process.env, SHELL: '', IX_ENDPOINT: 'http://wrong.invalid', IX_WORKSPACE_ID: 'wrong', JARVIS_IX_SOCKET: 'wrong',
       CLAUDE_CODE_OAUTH_TOKEN: 'fixture-not-a-token', CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_ENTRYPOINT: 'parent-session' });
     assert.equal(env.IX_WORKSPACE_ID, undefined); assert.equal(env.JARVIS_IX_SOCKET, undefined);
     // Native CLI auth/provider routing survives isolation in both arms; parent-session variables do not.
@@ -672,10 +760,10 @@ integrationTest('shipped provisioner installs pinned local integrations and isol
     assert.equal(env.IX_ENDPOINT, arm === 'ix' ? request.environment.endpoint : undefined);
     const requestPath = join(run_path, 'request.json'); writeFileSync(requestPath, JSON.stringify(request));
     const provision = join(root, 'provision.mjs');
-    await execute([process.execPath, provision, 'setup', requestPath], { cwd: repo_path, env });
-    const result = JSON.parse((await execute([process.execPath, provision, 'probe', requestPath], { cwd: repo_path, env })).stdout);
+    await stage([process.execPath, provision, 'setup', requestPath], { cwd: repo_path, env });
+    const result = JSON.parse((await stage([process.execPath, provision, 'probe', requestPath], { cwd: repo_path, env })).stdout);
     validateProbe(result, request);
-    const transcript = await execute([process.execPath, join(root, 'agent.mjs'), requestPath], { cwd: repo_path, env });
+    const transcript = await stage([process.execPath, join(root, 'agent.mjs'), requestPath], { cwd: repo_path, env });
     assert.equal(parseMetrics(transcript.stdout, 'normalized').turns, 1);
     const args = JSON.parse(readFileSync(join(run_path, 'native-args.json'), 'utf8'));
     assert.ok(args.includes('fixture-model'));
@@ -773,9 +861,29 @@ test('missing usage keeps resolution denominators and reports complete-pair cove
 });
 
 test('agent deadlines can preserve output while other subprocess deadlines remain strict', async () => {
-  const result = await execute([process.execPath, '-e', 'console.log("observed"); setInterval(() => {}, 1000)'], { seconds: 1, allowTimeout: true });
+  const result = await execute([process.execPath, '-e', 'console.log("observed"); setInterval(() => {}, 1000)'], { seconds: 3, allowTimeout: true });
   assert.equal(result.timed_out, true); assert.match(result.stdout, /observed/);
   await assert.rejects(execute([process.execPath, '-e', 'process.exit(7)'], { allowTimeout: true }), /exited 7/);
+});
+
+integrationTest('the evaluator runs with the inherited HOME and PATH, not the solver isolation', async () => {
+  const script = join(scratch, 'env-evaluator.mjs');
+  writeFileSync(script, `
+    import { readFileSync, writeFileSync } from 'node:fs';
+    import { join } from 'node:path';
+    const r = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+    writeFileSync(join(r.run_path, 'evaluator-env.json'), JSON.stringify({ HOME: process.env.HOME, PATH: process.env.PATH }));
+    console.log(JSON.stringify({ instance_id: r.task.instance_id, resolved: true, evaluator: 'synthetic' }));
+  `);
+  const config = dryConfig(); config.repeats = 1; config.evaluator.command = [process.execPath, script];
+  const out = join(scratch, 'evaluator-env');
+  await runBenchmark({ manifestPath: smoke, config, out, dryRun: true });
+  const runs = readdirSync(out).filter((name) => existsSync(join(out, name, 'evaluator-env.json')));
+  assert.equal(runs.length, 6);
+  for (const name of runs) {
+    assert.deepEqual(JSON.parse(readFileSync(join(out, name, 'evaluator-env.json'), 'utf8')), { HOME: process.env.HOME, PATH: process.env.PATH });
+    assert.notEqual(JSON.parse(readFileSync(join(out, name, 'agent-request.json'), 'utf8')).home, process.env.HOME, 'the solver home stays private');
+  }
 });
 
 integrationTest('time-budget outcome evaluates its retained solution and continues subsequent jobs', async () => {
