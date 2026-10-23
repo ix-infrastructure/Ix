@@ -87,7 +87,7 @@ updates:
         dependency-type: production
 
   # docker-compose.standalone.yml (shipped in the release tarball, backs
-  # `ix docker start`). Only arangodb:3.12.11 gets bumps; memory-layer is
+  # `ix docker start`). Only arangodb:3.12.12 gets bumps; memory-layer is
   # `:latest`. Bump PRs are exercised by ci.yml's e2e job and by release.yml's
   # PR dry-run, whose paths include that file.
   - package-ecosystem: docker-compose

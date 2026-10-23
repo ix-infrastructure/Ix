@@ -156,3 +156,52 @@ describe("scoreCandidate", () => {
     expect(mod).toBeLessThan(fn);
   });
 });
+
+describe("resolver: --path finds a common name past a full window", () => {
+  /** A fake backend: weight order is array order; `scope` (if honoured) filters source_uri before `limit`. */
+  function scopedClient(nodes: ReturnType<typeof n>[], honoursScope: boolean) {
+    return {
+      search: vi.fn(async (_term: string, opts: { limit?: number; kind?: string; scope?: string }) => {
+        let matching = opts.kind ? nodes.filter((x) => x.kind === opts.kind) : nodes;
+        if (honoursScope && opts.scope) {
+          const want = opts.scope.toLowerCase();
+          matching = matching.filter((x) => x.provenance.sourceUri.toLowerCase().includes(want));
+        }
+        return matching.slice(0, opts.limit);
+      }),
+      workspaceSystem: vi.fn(async () => null),
+    } as any;
+  }
+
+  // 250 other files each declare an `add` that outweighs the one under --path,
+  // so the 200-row window is full before it arrives (the CL-20F stale `next`
+  // row `ix read add --path core-ingestion/src/role-classifier.ts`).
+  const crowd = Array.from({ length: 250 }, (_, i) => n(`other${i}`, "add", "function", `src/m${i}/util.ts`));
+  const wanted = n("wanted", "add", "function", "core-ingestion/src/role-classifier.ts");
+  const nodes = [...crowd, wanted];
+
+  it("resolves the declaration under --path when the backend applies scope before its limit", async () => {
+    const c = scopedClient(nodes, true);
+    const result = await resolveEntityFull(c, "add", ALL_KINDS, {
+      format: "json", path: "core-ingestion/src/role-classifier.ts",
+    } as any);
+    expect(result.resolved && result.entity.id).toBe("wanted");
+    expect(c.search).toHaveBeenCalledWith("add", expect.objectContaining({ scope: "core-ingestion/src/role-classifier.ts" }));
+  });
+
+  it("still misses cleanly on a backend that ignores scope", async () => {
+    const result = await resolveEntityFull(scopedClient(nodes, false), "add", ALL_KINDS, {
+      format: "json", path: "core-ingestion/src/role-classifier.ts",
+    } as any);
+    expect(result.resolved).toBe(false);
+  });
+
+  it("asks only once when the window is not full", async () => {
+    const c = scopedClient([crowd[0], wanted], true);
+    const result = await resolveEntityFull(c, "add", ALL_KINDS, {
+      format: "json", path: "core-ingestion/src/role-classifier.ts",
+    } as any);
+    expect(result.resolved && result.entity.id).toBe("wanted");
+    expect(c.search).toHaveBeenCalledTimes(1);
+  });
+});
