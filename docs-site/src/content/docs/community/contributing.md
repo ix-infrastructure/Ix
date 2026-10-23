@@ -8,7 +8,7 @@ Issues and pull requests are welcome. This page summarizes
 
 ## Local setup
 
-You need Node.js 22+ and Docker with Docker Compose.
+You need Node.js 22+ (22.22 or newer to build this docs site) and Docker with Docker Compose.
 
 ```bash
 git clone https://github.com/ix-infrastructure/Ix.git

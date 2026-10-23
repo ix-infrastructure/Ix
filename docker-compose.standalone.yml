@@ -16,7 +16,7 @@ services:
     #                 Invalid argument: Column families not opened: VectorIndex
     # -- which with `restart: unless-stopped` is a fatal loop, not a degraded
     # start, and takes memory-layer down with it via `service_healthy`. Ix#614.
-    image: arangodb:3.12.11
+    image: arangodb:3.12.12
     networks:
       - backend
     # No host port. ArangoDB runs without authentication, so a published port

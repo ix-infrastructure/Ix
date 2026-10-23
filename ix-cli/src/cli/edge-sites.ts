@@ -107,6 +107,18 @@ function declRe(name: string): RegExp {
   );
 }
 
+/**
+ * How many lines look like they declare `name`, by the same test `anchorSpan`
+ * re-anchors with. More than one means a re-anchor could land on the wrong
+ * one; none means it has nothing to land on.
+ */
+export function countDeclarations(lines: string[], name: string): number {
+  const def = declRe(name);
+  let count = 0;
+  for (const line of lines) if (def.test(line)) count++;
+  return count;
+}
+
 const COMMENT_ONLY = /^\s*(?:\/\/|\/\*|\*|#(?!include|import)|--|;)/;
 
 /** The site's text: its line, plus the lines of a call left open across them. */
