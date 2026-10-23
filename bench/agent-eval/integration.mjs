@@ -1,10 +1,16 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import { join } from 'node:path';
+
 // Names shared by provisioning, the native agent argv and telemetry.
 export const PLUGIN_NAME = 'ix-agent-eval';
 export const MCP_SERVER = 'ix-memory';
 // Claude names plugin MCP tools `mcp__plugin_<plugin>_<server>__<tool>`; a server-level rule allows all of them.
 export const CLAUDE_IX_MCP_RULE = `mcp__plugin_${PLUGIN_NAME}_${MCP_SERVER}`;
+// Map refresh and claude-post-edit each have an environment.seconds deadline; the hook must outlast both.
+// Directory (under the run path) of markers for Ix hooks that have started but not finished.
+export const PENDING = 'hooks.pending';
+export const hookTimeoutSeconds = (environment) => 2 * environment.seconds + 30;
 
 // Arm integrations (plugins, MCP, settings, hooks, tool permissions) belong to the harness, never to shared args.
 const OVERRIDES = /plugin|mcp|settings|notify|allowed-?tools|CODEX_HOME|CLAUDE_CONFIG_DIR/i;
@@ -34,7 +40,7 @@ export function nativeArgs(request) {
   if (agent.family !== 'claude') throw new Error('Unsupported native agent');
   const ix = request.arm === 'ix';
   const tools = [...allowedTools(agent), ...(ix ? [CLAUDE_IX_MCP_RULE] : [])];
-  const integration = ['--setting-sources', '', ...(ix ? ['--plugin-dir', request.run_path + '/plugin'] : ['--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'])];
+  const integration = ['--setting-sources', '', ...(ix ? ['--plugin-dir', join(request.run_path, 'plugin')] : ['--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'])];
   return ['--print', '--verbose', '--output-format', 'stream-json', '--model', agent.model, '--effort', agent.effort, '--max-turns', String(budget.max_turns),
     ...integration, ...(tools.length ? ['--allowedTools', tools.join(',')] : []), ...extra];
 }

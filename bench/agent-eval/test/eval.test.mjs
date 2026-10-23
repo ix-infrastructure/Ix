@@ -2,8 +2,8 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, test } from 'node:test';
 import { checkManifestSource, importVerified, loadManifest, parseExport, sha256, validateManifest } from '../manifest.mjs';
@@ -14,7 +14,7 @@ import { dryConfig, resolveConfigPaths, runBenchmark } from '../run.mjs';
 import { execute } from '../process.mjs';
 import { checkResolution, evaluationError } from '../evaluation.mjs';
 import { armEnvironment } from '../isolation.mjs';
-import { assertMapped, checkTaskIsolation, integrationFiles } from '../provision.mjs';
+import { assertMapped, checkTaskIsolation, codexSkillListed, integrationFiles } from '../provision.mjs';
 import { CLAUDE_IX_MCP_RULE, MCP_SERVER, PLUGIN_NAME, nativeArgs } from '../integration.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -120,15 +120,30 @@ test('example config grants edits and shell; only the ix arm is allowed the Ix M
   // The rule must match the provisioned plugin/server names and the telemetry matcher.
   assert.equal(CLAUDE_IX_MCP_RULE, `mcp__plugin_${PLUGIN_NAME}_${MCP_SERVER}`);
   assert.ok(isIxMcpTool(`${CLAUDE_IX_MCP_RULE}__locate`));
-  const files = integrationFiles({ agent, run_path: '/run', home: '/home', environment: { seconds: 1 } });
-  assert.deepEqual(Object.keys(JSON.parse(files['/run/plugin/.mcp.json']).mcpServers), [MCP_SERVER]);
-  assert.equal(JSON.parse(files['/run/plugin/.claude-plugin/plugin.json']).name, PLUGIN_NAME);
+  // Keys are platform paths (backslashes on Windows), so look them up with path.join, not POSIX literals.
+  const runPath = resolve('/run'), files = integrationFiles({ agent, run_path: runPath, home: resolve('/home'), environment: { seconds: 1 } });
+  const file = (...parts) => { const text = files[join(runPath, ...parts)]; assert.equal(typeof text, 'string', `missing ${join(...parts)}`); return JSON.parse(text); };
+  assert.deepEqual(Object.keys(file('plugin', '.mcp.json').mcpServers), [MCP_SERVER]);
+  assert.equal(file('plugin', '.claude-plugin', 'plugin.json').name, PLUGIN_NAME);
+  assert.ok(Object.keys(files).every((key) => key === normalize(key) && key.startsWith(join(runPath, 'plugin'))));
+  const ixArgs = argv('ix');
+  assert.equal(normalize(ixArgs[ixArgs.indexOf('--plugin-dir') + 1]), join('/run', 'plugin'));
   assert.throws(() => integrationFiles({ agent: { family: 'codex' }, run_path: '/run', home: '/home', environment: { seconds: 1 } }), /endpoint/);
   // Shared args and tool rules cannot grant or override integrations.
   for (const args of [['--allowedTools', 'Bash'], ['--allowed-tools=Bash'], ['--mcp-config', '{}']]) assert.throws(() => nativeArgs({ arm: 'ix', run_path: '/run', agent: { ...agent, args }, budget }), /override/);
   assert.throws(() => nativeArgs({ arm: 'baseline', run_path: '/run', agent: { ...agent, allowed_tools: [CLAUDE_IX_MCP_RULE] }, budget }), /MCP/);
   assert.throws(() => nativeArgs({ arm: 'ix', run_path: '/run', agent: { ...agent, family: 'codex', allowed_tools: ['Bash'] }, budget }), /Claude Code only/);
   assert.equal(nativeArgs({ arm: 'ix', run_path: '/run', agent: { ...agent, family: 'codex', allowed_tools: [] }, budget }).includes('--allowedTools'), false);
+});
+
+test('Codex skill discovery reads the model-visible skill list from codex debug prompt-input', () => {
+  // Shape recorded from codex-cli 0.162.1 `debug prompt-input` with a skill in $CODEX_HOME/skills (no model call).
+  const prompt = (skills) => JSON.stringify([{ type: 'message', role: 'developer', content: [{ type: 'input_text', text: `<skills_instructions>\n## Skills\n${skills}\n</skills_instructions>` }] }, { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Mention - ix: in prose' }] }]);
+  const installer = '- skill-installer: Install Codex skills into $CODEX_HOME/skills from a curated list. (file: r1/skill-installer/SKILL.md)';
+  assert.equal(codexSkillListed(prompt(`${installer}\n- ix: Answer structural questions about a codebase (file: r0/ix/SKILL.md)`), 'ix'), true);
+  assert.equal(codexSkillListed(prompt(`${installer}\n- ixproj: Fixture (file: r2/ixproj/SKILL.md)`), 'ix'), false);
+  assert.equal(codexSkillListed(prompt(installer), 'ix'), false);
+  assert.throws(() => codexSkillListed('not json', 'ix'));
 });
 
 test('Claude Ix permission denials are reported separately from Ix errors', () => {
@@ -320,18 +335,22 @@ integrationTest('real-run plumbing checks dataset pins and official evidence and
     import {createHash} from 'node:crypto';
     const [stage,file] = process.argv.slice(2), r = JSON.parse(readFileSync(file, 'utf8'));
     const hash = text => createHash('sha256').update(text).digest('hex');
-    const ix = r.arm === 'ix', evidence = join(r.home, 'fixture-evidence.json');
+    const ix = r.arm === 'ix', evidence = join(r.home, 'fixture-evidence.json'), OUTS = ${JSON.stringify(['real-fixture', 'bad-official', 'bad-hash'].map((name) => join(scratch, name) + sep))};
     if(stage === 'setup') {
       writeFileSync(evidence, '{}'); mkdirSync(join(r.repo_path, '.claude'));
       writeFileSync(join(r.repo_path, '.claude', 'settings.json'), '{}');
     } else if(stage === 'probe') console.log(JSON.stringify({version:1, repo_path:r.repo_path, base_commit:r.task.base_commit, agent_version:r.agent.version, ix_available:ix, mapped:ix, plugin_installed:ix, skills_installed:ix, hooks_enabled:ix, mapped_commit:r.task.base_commit, plugin_revision:r.environment.plugin_revision, evidence:ix ? [{path:evidence, sha256:hash('{}')}] : []}));
     else if(stage === 'agent') {
+      // The solver must not see the gold-patch export, the evaluator config or the output tree with earlier runs.
+      const visible = readFileSync(file, 'utf8') + readFileSync(process.env.AGENT_EVAL_REQUEST, 'utf8') + JSON.stringify(process.env);
+      if (visible.includes(${JSON.stringify(exportPath)}) || OUTS.some((out) => visible.includes(out)) || 'dataset_export' in r || 'evaluator' in r) process.exit(9);
       writeFileSync(join(r.repo_path, 'source.txt'), 'after\\n'); writeFileSync(join(r.repo_path, 'added.txt'), 'new solution\\n');
       const {execFileSync} = await import('node:child_process');
       execFileSync('git', ['add', 'source.txt', 'added.txt']);
       execFileSync('git', ['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','-c','commit.gpgsign=false','commit','-qm','agent fix']);
       for(const e of [{type:'turn',id:'a'}, {type:'tool',id:'t',command:'rg fixture'}, {type:'usage',input_tokens:10,output_tokens:10,cached_tokens:0}, {type:'done'}]) console.log(JSON.stringify(e));
     } else if(stage === 'evaluate') {
+      if (r.dataset_export !== ${JSON.stringify(exportPath)} || !OUTS.some((out) => r.run_path.startsWith(out))) process.exit(9);
       const report_path = join(r.run_path,'fixture-official-report.json');
       const report = JSON.stringify({[r.task.instance_id]:{resolved:true}}); writeFileSync(report_path,report);
       console.log(JSON.stringify({instance_id:r.task.instance_id,resolved:!r.evaluator.mismatch,evaluator:'swe-bench',revision:r.evaluator.revision,report_path,report_sha256:hash(report)}));
@@ -349,6 +368,10 @@ integrationTest('real-run plumbing checks dataset pins and official evidence and
   const first = jobs[0], runPath = join(out, `0000-${first.instance_id}-${first.repeat}-${first.arm}`);
   const patch = readFileSync(join(runPath, 'prediction.patch'), 'utf8');
   assert.match(patch, /source.txt/); assert.match(patch, /added.txt/); assert.doesNotMatch(patch, /settings.json/);
+  // Each solver worked outside the output tree, in a work directory removed once its run was recorded.
+  const agentRequest = JSON.parse(readFileSync(join(runPath, 'agent-request.json'), 'utf8'));
+  assert.ok(!agentRequest.run_path.startsWith(out) && !existsSync(agentRequest.run_path));
+  await assert.rejects(runBenchmark({ manifestPath, config: { ...config, work_root: scratch }, out: join(scratch, 'inside-work-root') }), /inside the agent work root/);
   config.evaluator.mismatch = true;
   await assert.rejects(runBenchmark({ manifestPath, config, out: join(scratch, 'bad-official') }), /differs from official/);
   writeFileSync(exportPath, text + '\n');
@@ -450,6 +473,43 @@ integrationTest('hook-driven Ix calls are reported apart from the agent\'s own I
   assert.equal(report.metrics.hook_ix_calls.mean_difference.estimate, 3);
 });
 
+integrationTest('a drained stage lets an outliving descendant finish before the group is reaped, within a cap', async () => {
+  const marker = (name) => join(scratch, `drain-${name}`);
+  // The adapter exits at once; its child (same process group, like a Codex notify hook) finishes later.
+  const late = (file, ms) => [process.execPath, '-e', `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(file)}, 'x'), ${ms})`)}], { stdio: 'ignore' }).unref()`];
+  const drained = await execute(late(marker('drained'), 700), { seconds: 10, drainSeconds: 10 });
+  assert.ok(existsSync(marker('drained'))); assert.ok(drained.seconds < 0.7, 'stage time excludes the drain');
+  await execute(late(marker('reaped'), 700), { seconds: 10 });
+  await new Promise((done) => setTimeout(done, 1200));
+  assert.ok(!existsSync(marker('reaped')), 'without a drain, descendants are still reaped');
+  const started = performance.now();
+  await execute(late(marker('capped'), 30_000), { seconds: 10, drainSeconds: 0.5 });
+  assert.ok(performance.now() - started < 5000, 'the drain is capped');
+});
+
+integrationTest('an ix-arm hook that outlives the agent is counted; one killed mid-run fails the run', async () => {
+  const script = join(scratch, 'late-hook-agent.mjs');
+  writeFileSync(script, `
+    import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+    import { join } from 'node:path';
+    import { spawn } from 'node:child_process';
+    const [mode, file] = process.argv.slice(2), r = JSON.parse(readFileSync(file, 'utf8'));
+    writeFileSync(join(r.repo_path, 'solution.txt'), 'synthetic solution\\n');
+    if (r.arm === 'ix' && mode === 'late') {
+      const record = JSON.stringify({ type: 'hook', mode: 'codex', ix_calls: 1, seconds: 0.5 }) + '\\n';
+      spawn(process.execPath, ['-e', 'setTimeout(() => require("node:fs").appendFileSync(process.argv[1], process.argv[2]), 500)', join(r.run_path, 'hooks.jsonl'), record], { stdio: 'ignore' }).unref();
+    }
+    if (r.arm === 'ix' && mode === 'killed') { mkdirSync(join(r.run_path, 'hooks.pending'), { recursive: true }); writeFileSync(join(r.run_path, 'hooks.pending', '1'), 'codex'); }
+    for (const e of [{ type: 'turn', id: 't' }, { type: 'usage', input_tokens: 10, output_tokens: 1, cached_tokens: 0 }, { type: 'done' }]) console.log(JSON.stringify(e));
+  `);
+  const config = (mode) => { const c = dryConfig(); c.repeats = 1; c.agent.command = [process.execPath, script, mode]; return c; };
+  const out = join(scratch, 'late-hook');
+  await runBenchmark({ manifestPath: smoke, config: config('late'), out, dryRun: true });
+  const runs = readFileSync(join(out, 'runs.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.ok(runs.filter((r) => r.arm === 'ix').every((r) => r.hook_ix_calls === 1));
+  await assert.rejects(runBenchmark({ manifestPath: smoke, config: config('killed'), out: join(scratch, 'killed-hook'), dryRun: true }), /hook was still running/);
+});
+
 integrationTest('agent.mjs gives each Claude arm its own --allowedTools through the native binary', async () => {
   const fake = join(scratch, 'fake-claude.cjs');
   writeFileSync(fake, `#!${process.execPath}
@@ -507,10 +567,16 @@ integrationTest('shipped provisioner installs pinned local integrations and isol
   `);
   const fakeAgent = join(scratch, 'fake-native');
   writeFileSync(fakeAgent, `#!${process.execPath}
-    import {readFileSync,writeFileSync} from 'node:fs';
+    import {existsSync,readdirSync,readFileSync,writeFileSync} from 'node:fs';
     import {join} from 'node:path';
     import {execFileSync} from 'node:child_process';
     if(process.argv[2]==='--version') console.log('agent 1.0-fixture');
+    else if(process.argv[2]==='debug') {
+      // Mirrors codex debug prompt-input: the model-visible skill list for $CODEX_HOME/skills.
+      const dir=join(process.env.CODEX_HOME,'skills');
+      const skills=process.env.FAKE_CODEX_HIDE_SKILLS||!existsSync(dir)?[]:readdirSync(dir).map((name)=>'- '+readFileSync(join(dir,name,'SKILL.md'),'utf8').match(/^name: (.*)$/m)[1]+': Fixture (file: r0/'+name+'/SKILL.md)');
+      console.log(JSON.stringify([{type:'message',role:'developer',content:[{type:'input_text',text:'<skills_instructions>\\n'+skills.join('\\n')+'\\n</skills_instructions>'}]}]));
+    }
     else {
       const r=JSON.parse(readFileSync(process.env.AGENT_EVAL_REQUEST,'utf8'));
       const args=process.argv.slice(2); writeFileSync(join(r.run_path,'native-args.json'),JSON.stringify(args));
@@ -559,6 +625,14 @@ integrationTest('shipped provisioner installs pinned local integrations and isol
     } else {
       for (const evidence of result.evidence) assert.equal(sha256(readFileSync(evidence.path)), evidence.sha256);
       const files = integrationFiles(request), first = Object.keys(files)[0];
+      assert.deepEqual(readdirSync(join(run_path, 'hooks.pending')), []); // The probe's hook finished and cleared its marker.
+      if (family === 'codex') {
+        // Skills install where the product installer puts them, never into the task checkout.
+        assert.ok(existsSync(join(home, '.codex', 'skills', 'ix', 'SKILL.md'))); assert.ok(!existsSync(join(repo_path, '.agents')));
+        const log = join(run_path, 'hidden-skill-probe');
+        await assert.rejects(execute([process.execPath, provision, 'probe', requestPath], { env: { ...env, FAKE_CODEX_HIDE_SKILLS: '1' }, log }), /exited/);
+        assert.match(readFileSync(`${log}.stderr`, 'utf8'), /does not list the installed Ix skill/);
+      }
       if (family === 'codex') assert.ok(files[join(home, '.codex', 'config.toml')].endsWith('[mcp_servers.ix-memory]\ncommand = "ix"\nargs = ["mcp"]\nenv = { IX_ENDPOINT = "http://127.0.0.1:8090" }\n'));
       if (family === 'claude') {
         const hooks = JSON.parse(files[join(run_path, 'plugin', 'hooks', 'hooks.json')]).hooks.PostToolUse[0].hooks[0];

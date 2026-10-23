@@ -1,12 +1,12 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execute } from './process.mjs';
 import { sha256 } from './manifest.mjs';
 import { findBinary, shellQuote } from './isolation.mjs';
-import { MCP_SERVER, PLUGIN_NAME } from './integration.mjs';
+import { MCP_SERVER, PLUGIN_NAME, hookTimeoutSeconds } from './integration.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const json = (value) => JSON.stringify(value, null, 2) + '\n';
@@ -16,8 +16,8 @@ const run = (request, argv, input) => execute(argv, { cwd: request.repo_path, se
 export function integrationFiles(request) {
   const plugin = join(request.run_path, 'plugin');
   const hook = [process.execPath, join(root, 'hook.mjs')];
-  // Map refresh and claude-post-edit each have an environment.seconds deadline; Claude's default hook timeout is shorter.
-  const hookTimeout = 2 * request.environment.seconds + 30;
+  // Claude's default hook timeout is shorter than the two ix deadlines the hook runs.
+  const hookTimeout = hookTimeoutSeconds(request.environment);
   if (request.agent.family === 'claude') return {
     [join(plugin, '.claude-plugin', 'plugin.json')]: json({ name: PLUGIN_NAME, version: '1.0.0', description: 'Pinned local Ix benchmark integration' }),
     [join(plugin, '.mcp.json')]: json({ mcpServers: { [MCP_SERVER]: { command: 'ix', args: ['mcp'] } } }),
@@ -42,7 +42,8 @@ async function pinnedSkills(request) {
   await run(request, ['git', '-C', source, 'diff', '--exit-code', revision, '--', 'ix-cli/src', 'skills/ix']);
   const names = (await run(request, ['git', '-C', source, 'ls-tree', '-r', '--name-only', revision, '--', 'skills/ix'])).stdout.trim().split('\n');
   if (!names.includes('skills/ix/SKILL.md')) throw new Error('Pinned source has no Ix skill');
-  const base = request.agent.family === 'claude' ? join(request.run_path, 'plugin', 'skills', 'ix') : join(request.repo_path, '.agents', 'skills', 'ix');
+  // Codex: $CODEX_HOME/skills, the location the product installer uses (ix-cli/scripts/skill-harnesses.mjs).
+  const base = request.agent.family === 'claude' ? join(request.run_path, 'plugin', 'skills', 'ix') : join(request.home, '.codex', 'skills', 'ix');
   const files = {};
   for (const name of names) {
     if (!/^skills\/ix\/[\w./-]+$/.test(name) || name.split('/').includes('..')) throw new Error('Invalid pinned skill path');
@@ -62,15 +63,21 @@ export function checkTaskIsolation(request) {
       if (parent === dirname(parent)) break;
     }
   }
-  for (const name of ['.claude', '.codex', '.mcp.json', 'CLAUDE.md', 'AGENTS.md']) {
+  for (const name of ['.claude', '.codex', '.agents', '.mcp.json', 'CLAUDE.md', 'AGENTS.md']) {
     if (existsSync(join(request.repo_path, name))) throw new Error(`Task contains ambient agent configuration: ${name}`);
   }
-  // The only project agent config allowed is our pinned Codex skill.
-  const agents = join(request.repo_path, '.agents');
-  if (existsSync(agents) && !(request.arm === 'ix' && request.agent.family === 'codex' &&
-    readdirSync(agents).join() === 'skills' && readdirSync(join(agents, 'skills')).join() === 'ix')) {
-    throw new Error('Task contains ambient agent skills');
-  }
+}
+
+/** Whether `codex debug prompt-input` output lists a skill by name; that is the model-visible skill list. */
+export function codexSkillListed(promptInput, name) {
+  const texts = [];
+  const walk = (value) => {
+    if (typeof value === 'string') texts.push(value);
+    else if (value && typeof value === 'object') for (const item of Object.values(value)) walk(item);
+  };
+  walk(JSON.parse(promptInput));
+  const entry = new RegExp(`^- ${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: `, 'm');
+  return texts.some((text) => entry.test(text));
 }
 
 export function assertMapped(status, stats) {
@@ -108,6 +115,10 @@ export async function probe(request) {
       if (readFileSync(path, 'utf8') !== expected) throw new Error(`Integration content differs: ${path}`);
       evidence.push({ path, sha256: sha256(expected) });
     }
+    // File presence is not discovery: ask the pinned Codex which skills it puts in front of the model (no model call).
+    if (request.agent.family === 'codex' && !codexSkillListed((await run(request, [request.agent.binary ?? 'codex', 'debug', 'prompt-input'])).stdout, 'ix')) {
+      throw new Error('Codex does not list the installed Ix skill (codex debug prompt-input)');
+    }
     // Exercise the configured hook executable; config presence alone is insufficient.
     await run(request, [process.execPath, join(root, 'hook.mjs'), 'probe']);
     const status = JSON.parse((await run(request, ['ix', 'status', '--format', 'json', '--root', request.repo_path])).stdout);
@@ -117,7 +128,7 @@ export async function probe(request) {
       const path = join(request.run_path, name); write(path, json(data)); evidence.push({ path, sha256: sha256(json(data)) });
     }
   } else {
-    if (existsSync(join(request.run_path, 'plugin')) || existsSync(join(request.home, '.codex', 'config.toml'))) throw new Error('Baseline contains Ix integration');
+    if (existsSync(join(request.run_path, 'plugin')) || existsSync(join(request.home, '.codex', 'config.toml')) || existsSync(join(request.home, '.codex', 'skills'))) throw new Error('Baseline contains Ix integration');
   }
   return { version: 1, repo_path: request.repo_path, base_commit: head, agent_version: request.agent.version,
     ix_available: available, mapped: ix, plugin_installed: ix, skills_installed: ix, hooks_enabled: ix,

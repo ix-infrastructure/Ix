@@ -1,6 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, readdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { validateConfig, validateProbe, schedule } from './config.mjs';
@@ -10,6 +11,7 @@ import { execute } from './process.mjs';
 import { markdown, summarize } from './stats.mjs';
 import { checkResolution } from './evaluation.mjs';
 import { armEnvironment, findBinary } from './isolation.mjs';
+import { PENDING, hookTimeoutSeconds } from './integration.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const json = (file, value) => writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
@@ -32,7 +34,7 @@ export function resolveConfigPaths(config, base = process.cwd()) {
     for (const field of ['source_path', 'ix_cli']) if (config.environment[field]) config.environment[field] = resolve(base, config.environment[field]);
     if (config.environment.tool_paths) config.environment.tool_paths = config.environment.tool_paths.map((dir) => resolve(base, dir));
   }
-  for (const field of ['dataset_export', 'repo_cache']) if (config[field]) config[field] = resolve(base, config[field]);
+  for (const field of ['dataset_export', 'repo_cache', 'work_root']) if (config[field]) config[field] = resolve(base, config[field]);
   return config;
 }
 export function dryConfig() {
@@ -57,6 +59,9 @@ export async function runBenchmark({ manifestPath, config, out, dryRun = false }
     const dataset = readFileSync(config.dataset_export, 'utf8');
     checkManifestSource(manifest, dataset, config.dataset_export);
   }
+  // Agent-facing checkouts live outside the output tree, so a solver cannot browse earlier runs' patches and reports.
+  const workRoot = realpathSync(config.work_root ?? tmpdir());
+  if (!dryRun && contained(workRoot, out)) throw new Error('Output directory is inside the agent work root; choose an output directory outside it or set work_root elsewhere');
   mkdirSync(out, { recursive: true });
   const jobs = schedule(manifest.tasks, config.repeats, config.seed);
   json(join(out, 'harness.json'), { version: 1, files: Object.fromEntries(readdirSync(root).filter((name) => name.endsWith('.mjs')).sort().map((name) => [name, sha256(readFileSync(join(root, name)))])) });
@@ -65,12 +70,18 @@ export async function runBenchmark({ manifestPath, config, out, dryRun = false }
   const runs = [];
   for (const [index, job] of jobs.entries()) {
     const runPath = join(out, `${String(index).padStart(4, '0')}-${job.task.instance_id}-${job.repeat}-${job.arm}`);
-    const repoPath = join(runPath, 'repo'), home = join(runPath, 'home');
+    mkdirSync(runPath);
+    // The work directory holds everything the solver can reach: checkout, home, integrations, hook telemetry.
+    const workPath = mkdtempSync(join(workRoot, 'agent-eval-'));
+    const repoPath = join(workPath, 'repo'), home = join(workPath, 'home');
     mkdirSync(home, { recursive: true });
-    const request = { version: 1, synthetic: dryRun, ...job, task: { instance_id: job.task.instance_id, repo: job.task.repo, base_commit: job.task.base_commit, problem_statement: job.task.problem_statement }, run_path: runPath, repo_path: repoPath, home, agent: config.agent, budget: config.budget, environment: config.environment, evaluator: config.evaluator, dataset_export: config.dataset_export && resolve(config.dataset_export) };
+    const task = { instance_id: job.task.instance_id, repo: job.task.repo, base_commit: job.task.base_commit, problem_statement: job.task.problem_statement };
+    // Setup, probe, agent and hooks never see the dataset export (gold patches), the evaluator or the output directory.
+    const request = { version: 1, synthetic: dryRun, ...job, task, run_path: workPath, repo_path: repoPath, home, agent: config.agent, budget: config.budget, environment: config.environment };
     const env = armEnvironment(request);
-    const requestPath = join(runPath, 'request.json'); json(requestPath, request);
-    const stage = (name, argv, seconds, cwd = repoPath) => execute([...argv, requestPath], { cwd, env, seconds, log: join(runPath, name), allowTimeout: name === 'agent', captureExit: name === 'agent' });
+    const requestPath = join(workPath, 'request.json'); json(requestPath, request);
+    const evaluateRequestPath = join(runPath, 'evaluate-request.json');
+    const stage = (name, argv, seconds, { cwd = repoPath, file = requestPath, ...options } = {}) => execute([...argv, file], { cwd, env, seconds, log: join(runPath, name), ...options });
     const setupStart = performance.now();
     try {
       if (dryRun) mkdirSync(repoPath); else {
@@ -83,8 +94,8 @@ export async function runBenchmark({ manifestPath, config, out, dryRun = false }
       const probe = JSON.parse((await stage('probe', config.environment.probe, config.environment.seconds)).stdout);
       validateProbe(probe, request);
       for (const evidence of probe.evidence ?? []) {
-        const file = realpathSync(resolve(runPath, evidence.path));
-        if (!contained(runPath, file) || sha256(readFileSync(file)) !== evidence.sha256) throw new Error('Invalid environment evidence');
+        const file = realpathSync(resolve(workPath, evidence.path));
+        if (!contained(workPath, file) || sha256(readFileSync(file)) !== evidence.sha256) throw new Error('Invalid environment evidence');
       }
       if (!dryRun) {
         const head = await execute(['git', 'rev-parse', 'HEAD'], { cwd: repoPath, env, seconds: 10 });
@@ -94,9 +105,12 @@ export async function runBenchmark({ manifestPath, config, out, dryRun = false }
         if (diff.stdout) throw new Error('Setup modified tracked task files');
       }
       const setupSeconds = (performance.now() - setupStart) / 1000;
-      const hookLog = join(runPath, 'hooks.jsonl');
+      const hookLog = join(workPath, 'hooks.jsonl'), pending = join(workPath, PENDING);
       if (existsSync(hookLog)) writeFileSync(hookLog, ''); // Exclude setup/probe hook calls.
-      const agent = await stage('agent', config.agent.command, config.budget.seconds);
+      rmSync(pending, { recursive: true, force: true });
+      // A Codex notify hook can still be refreshing the map when the native CLI exits; let it finish before reaping.
+      const agent = await stage('agent', config.agent.command, config.budget.seconds, { allowTimeout: true, captureExit: true, drainSeconds: job.arm === 'ix' ? hookTimeoutSeconds(config.environment) : 0 });
+      if (!agent.timed_out && existsSync(pending) && readdirSync(pending).length) throw new Error('An Ix hook was still running when the agent stage was reaped; its telemetry is incomplete');
       const metrics = parseMetrics(agent.stdout, config.agent.telemetry, { allowIncomplete: agent.timed_out || agent.exit_code !== 0 });
       const overTurns = metrics.turns > config.budget.max_turns;
       const usage = metrics.observed_usage;
@@ -126,7 +140,9 @@ export async function runBenchmark({ manifestPath, config, out, dryRun = false }
       }
       if (!dryRun && job.arm === 'ix' && config.environment.setup.includes(join(root, 'provision.mjs')) && termination === 'completed' && patch && (!existsSync(hookLog) || !readFileSync(hookLog, 'utf8').trim())) throw new Error('Agent changed code without firing the configured Ix hook');
       json(join(runPath, 'prediction.json'), [{ instance_id: job.task.instance_id, model_name_or_path: 'agent-eval', model_patch: patch }]);
-      const evaluation = await stage('evaluate', config.evaluator.command, config.evaluator.seconds, runPath);
+      // Only the evaluator gets the dataset export; it runs after the solver has exited.
+      json(evaluateRequestPath, { ...request, run_path: runPath, evaluator: config.evaluator, dataset_export: config.dataset_export && resolve(config.dataset_export) });
+      const evaluation = await stage('evaluate', config.evaluator.command, config.evaluator.seconds, { cwd: runPath, file: evaluateRequestPath });
       const result = JSON.parse(evaluation.stdout);
       if (result.instance_id !== job.task.instance_id || typeof result.resolved !== 'boolean' || result.evaluator !== config.evaluator.kind || (!dryRun && result.revision !== config.evaluator.revision)) throw new Error('Invalid official evaluation receipt');
       if (!dryRun) {
@@ -138,8 +154,13 @@ export async function runBenchmark({ manifestPath, config, out, dryRun = false }
       const run = { instance_id: job.task.instance_id, repo: job.task.repo, base_commit: job.task.base_commit, repeat: job.repeat, arm: job.arm, ...metrics, termination, official_resolved: Number(result.resolved), resolved: Number(result.resolved && !overTurns && !overTokens), wall_seconds: agent.seconds, hook_seconds: hookSeconds, setup_seconds: setupSeconds, eval_seconds: evaluation.seconds, total_wall_seconds: (performance.now() - setupStart) / 1000 };
       json(join(runPath, 'result.json'), run); runs.push(run);
       writeFileSync(join(out, 'runs.jsonl'), runs.map((r) => JSON.stringify(r)).join('\n') + '\n');
+      for (const name of ['request.json', 'hooks.jsonl', 'map-status.json', 'map-stats.json']) {
+        if (existsSync(join(workPath, name))) copyFileSync(join(workPath, name), join(runPath, name === 'request.json' ? 'agent-request.json' : name));
+      }
+      rmSync(workPath, { recursive: true, force: true });
     } catch (error) {
-      json(join(runPath, 'failure.json'), { stage_error: error.message });
+      // The work directory is kept for inspection; a fatal error ends the experiment, so no later solver sees it.
+      json(join(runPath, 'failure.json'), { stage_error: error.message, work_path: workPath });
       throw new Error(`Run ${index} (${job.task.instance_id}/${job.arm}) invalid: ${error.message}`);
     }
   }

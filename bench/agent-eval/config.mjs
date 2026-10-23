@@ -32,6 +32,7 @@ export function validateConfig(config, synthetic = false) {
   positiveInteger(config.evaluator?.seconds, 'evaluator.seconds');
   command(config.evaluator?.command, 'evaluator.command');
   if (!synthetic && (config.evaluator.kind !== 'swe-bench' || !/^[a-f0-9]{40}$/.test(config.evaluator.revision ?? ''))) throw new Error('Real runs require a revision-pinned SWE-bench evaluator');
+  if (config.work_root !== undefined && (typeof config.work_root !== 'string' || !config.work_root)) throw new Error('work_root must be a directory path');
   if (!synthetic && (typeof config.dataset_export !== 'string' || typeof config.repo_cache !== 'string')) throw new Error('Real runs require dataset_export and repo_cache');
   return config;
 }
