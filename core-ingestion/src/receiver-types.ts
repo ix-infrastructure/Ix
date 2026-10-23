@@ -35,7 +35,7 @@ const mutationTypes = ['assignment_expression', 'augmented_assignment_expression
 // Node types whose `name` field is read, and every non-scope type visited.
 const named = new Set(['type_alias_declaration', ...classes, ...functions, ...bindingTypes, ...parameterTypes]);
 const visited = new Set([...named, ...mutationTypes, 'short_var_declaration', 'range_clause', 'for_in_statement', 'case_clause', 'enumerator',
-  'type_switch_statement', 'catch_clause', 'infix_expression']);
+  'type_switch_statement', 'catch_clause', 'infix_expression', 'type_definition', 'type_spec', 'type_alias']);
 const isScope = (type: string): boolean =>
   classes.has(type) || functions.has(type) || blocks.has(type) || type === 'class_static_block' || type === 'internal_module';
 // Every node type the walk stops at: the scopes and the visited types.
@@ -50,6 +50,30 @@ function typeName(node: any): string | undefined {
     const text = node.text.replace(/\s/g, '');
     if (/^[\w$]+(?:\.[\w$]+)*$/.test(text)) return text;
   }
+}
+
+// The type names a class or function declares for its own body. Scala lists
+// them as bare identifiers (under `parameters` on a function), a Go entry can
+// declare several names, and a Go method receiver `Box[K, T]` redeclares them.
+function declaredTypeParameters(node: any): string[] {
+  const names: string[] = [];
+  for (const list of node.namedChildren) {
+    if (list.type !== 'type_parameters' && list.type !== 'type_parameter_list') continue;
+    for (const p of list.namedChildren) {
+      if (p.type === 'identifier' || p.type === 'type_identifier') names.push(p.text);
+      else if (p.type !== 'annotation' && p.type !== 'type_parameters') {
+        const declared = p.childrenForFieldName('name');
+        if (declared.length) names.push(...declared.map((n: any) => n.text));
+        else if (p.firstNamedChild) names.push(p.firstNamedChild.text);
+      }
+    }
+  }
+  let receiver = node.type === 'method_declaration' ? node.childForFieldName('receiver')?.firstNamedChild?.childForFieldName('type') : null;
+  if (receiver?.type === 'pointer_type') receiver = receiver.firstNamedChild;
+  for (const arg of receiver?.type === 'generic_type' ? receiver.childForFieldName('type_arguments')?.namedChildren ?? [] : []) {
+    if (/^\w+$/.test(arg.text)) names.push(arg.text);
+  }
+  return names;
 }
 
 export function collectReceiverFacts(root: any, language: string, checkBudget: () => void): ReceiverFacts {
@@ -107,16 +131,18 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
   };
   const visit = (node: any, type: string): void => {
     const name = named.has(type) ? node.childForFieldName('name') : null;
-    if (type === 'type_alias_declaration' && name) {
+    // A local type declaration shadows a same-named class (a package-level Go
+    // `type_spec` is the class itself).
+    const localType = ['type_definition', 'type_spec', 'type_alias'].includes(type) && scopeOf() !== root ? node.childForFieldName('name') : null;
+    if ((type === 'type_alias_declaration' && name) || localType) {
       const scope = scopeOf();
       const names = typeParameters.get(scope.id) ?? new Set<string>();
-      names.add(name.text);
+      names.add((name ?? localType).text);
       typeParameters.set(scope.id, names);
     }
     if (classes.has(type) || functions.has(type)) {
-      const generics = node.childForFieldName('type_parameters');
-      if (generics) typeParameters.set(node.id, new Set(generics.namedChildren
-        .map((p: any) => p.childForFieldName('name')?.text ?? p.firstNamedChild?.text)));
+      const generics = declaredTypeParameters(node);
+      if (generics.length) typeParameters.set(node.id, new Set(generics));
       const singleParameter = node.childForFieldName('parameter');
       if (singleParameter?.type === 'identifier') bind(node, singleParameter.text, {});
     }

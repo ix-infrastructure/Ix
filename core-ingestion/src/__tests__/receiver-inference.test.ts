@@ -231,6 +231,23 @@ describe('typed local receivers', () => {
   });
 
   it.each([
+    ['scala', 'class Use { def use[Target](dep: Target) = dep.run() }'],
+    ['scala', 'class Use[Target](dep: Target) { def use() = dep.run() }'],
+    ['scala', 'trait Use[+Target <: AnyRef] { def use(dep: Target) = dep.run() }'],
+    ['scala', 'object Use { def use[F[_], @specialized Target: Ordering](dep: Target) = dep.run() }'],
+    ['scala', 'class Use { type Target = Other; def use(dep: Target) = dep.run() }'],
+    ['ts', 'function use<K, Target>(dep: Target) { dep.run(); }'],
+    ['go', 'func use[K comparable, Target any](dep Target) { dep.Run() }'],
+    ['go', 'type Box[K, Target any] struct{}; func (b *Box[K, Target]) use(dep Target) { dep.Run() }'],
+    ['go', 'func use() { type Target struct{}; var dep Target; dep.Run() }'],
+  ])('%s type parameters and local types shadow the same-named class', (ext, body) => {
+    const result = parse(ext, methods(ext, body));
+    expect(result.relationships.filter(r => r.receiverType === 'Target')).toEqual([]);
+    expect(resolveEdges([result]).filter(e => e.predicate === 'CALLS')).toEqual([]);
+    expect(typedEdgeOps(buildPatch(result, 'hash', 'workspace').ops)).toEqual([]);
+  });
+
+  it.each([
     ['scala', 'object Target { def apply(): Other = new Other() }; object Use { def use() = { val dep = Target(); dep.run() } }'],
     ['ts', 'function use() { let dep = new Target(); dep = unknown(); dep.run(); }'],
     ['go', 'func NewTarget() (*Target, error) { return nil, nil }; func use() { dep, err := NewTarget(); dep.Run(); _ = err }'],
