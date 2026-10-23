@@ -489,6 +489,25 @@ export async function resolveEntityFull(
   });
   const windowFull = nodes.length >= searchLimit;
 
+  // `--path` is applied client-side, after the backend has cut its
+  // weight-ordered window. A common name (`add`, `get`) declared in hundreds
+  // of files can fill that window before the row under --path arrives, and
+  // the read then misses a name the file plainly declares. Only when the
+  // window came back full, ask again with the path as `scope`, which the
+  // backend applies before its limit. An older backend ignores `scope` and
+  // returns the same window, so the merge changes nothing there.
+  if (effectivePath && windowFull) {
+    const scoped = await client.search(symbol, {
+      limit: searchLimit,
+      kind: kindFilter,
+      nameOnly: true,
+      workspaceId,
+      systemId,
+      scope: effectivePath.replace(/\\/g, "/"),
+    });
+    nodes = mergeById(nodes, scoped);
+  }
+
   // The backend orders its window by weight — every exact name before every
   // partial one — so when a name is imported in dozens of files, the window is
   // all imports and the file that DEFINES it (`borderStylesReset.js`, a

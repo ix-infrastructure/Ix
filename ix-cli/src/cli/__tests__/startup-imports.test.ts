@@ -40,8 +40,12 @@ function startupPackages(entries: string[]): { packages: Set<string>; modules: n
 describe("CLI start-up module graph", () => {
   it("does not load zod, the MCP SDK or the parser for every command", () => {
     // `main.ts` imports `run-cli.ts` unconditionally, after enabling the
-    // compile cache, so both are the start-up graph.
-    const { packages, modules } = startupPackages([join(SRC, "cli/main.ts"), join(SRC, "cli/run-cli.ts")]);
+    // compile cache, and `run-cli.ts` imports `register/oss.ts` (every command)
+    // whenever it cannot register just the one being run -- a dynamic import,
+    // so it is named here. Together they are the largest start-up graph.
+    const { packages, modules } = startupPackages([
+      join(SRC, "cli/main.ts"), join(SRC, "cli/run-cli.ts"), join(SRC, "cli/register/oss.ts"),
+    ]);
 
     // The walk really reached the command registry.
     expect(modules).toBeGreaterThan(50);

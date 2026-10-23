@@ -11,6 +11,7 @@ import { resolveEntityFull, activeReadScope, ensureReadScope } from "../resolve.
 import { stderr } from "../stderr.js";
 import { isFileStale } from "../stale.js";
 import { anchorSpan, bareName } from "../edge-sites.js";
+import { WALK_ENTRY_BUDGET, WALK_IGNORE_DIRS, basenameMatcher } from "../symbol-read-check.js";
 import { relativePath, printJson } from "../format.js";
 import { llmError, llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { parsePickOption } from "../options.js";
@@ -678,15 +679,6 @@ async function tryFilenameMatch(
   });
 }
 
-/** Directories a workspace walk must not descend into. Mirrors stale.ts. */
-const WALK_IGNORE_DIRS = new Set([
-  "node_modules", ".git", "dist", "build", "target", ".next",
-  ".cache", "__pycache__", ".ix", ".claude",
-]);
-
-/** How many directory entries a single basename lookup will look at. */
-const WALK_ENTRY_BUDGET = 40_000;
-
 interface LocalMatches {
   paths: string[];
   /** False when the budget ran out, i.e. "no match" is not a proven answer. */
@@ -707,8 +699,7 @@ interface LocalMatches {
  * that distinction to decide whether it may skip the backend fallback.
  */
 function findLocalBasenameMatches(root: string, target: string, limit = 25): LocalMatches {
-  const wanted = path.basename(target);
-  const wantedNoExt = wanted.replace(/\.[^.]+$/, "");
+  const matches = basenameMatcher(target);
   const paths: string[] = [];
   const stack = [root];
   let budget = WALK_ENTRY_BUDGET;
@@ -729,8 +720,7 @@ function findLocalBasenameMatches(root: string, target: string, limit = 25): Loc
         continue;
       }
       if (!entry.isFile()) continue; // symlinks are not followed
-      const nameNoExt = entry.name.replace(/\.[^.]+$/, "");
-      if (entry.name === wanted || nameNoExt === wanted || nameNoExt === wantedNoExt) {
+      if (matches(entry.name)) {
         paths.push(path.join(current, entry.name));
         if (paths.length >= limit) return { paths, exhaustive: true };
       }

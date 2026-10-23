@@ -4,13 +4,24 @@ import { readFileSync, writeFileSync, existsSync, rmSync, chmodSync, realpathSyn
 import { dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { parse, stringify } from "yaml";
+import { createRequire } from "node:module";
+import type * as Yaml from "yaml";
 import { IxClient } from "../client/api.js";
 import { ixHome } from "./ix-home.js";
 import { isLocalEndpoint } from "./backend-version.js";
 import { renameWithRetry, withConfigLock } from "./config-lock.js";
 
 export { ConfigLockError } from "./config-lock.js";
+
+// `yaml` is ~70 modules, loaded the first time config.yaml is actually parsed
+// or written rather than on import: every command imports this file, and
+// `ix --version`, or any call made where there is no config.yaml, never needs
+// it. Synchronous, because `loadConfig` is.
+const requireYaml = createRequire(import.meta.url);
+let yamlModule: typeof Yaml | undefined;
+function yaml(): typeof Yaml {
+  return (yamlModule ??= requireYaml("yaml") as typeof Yaml);
+}
 
 /**
  * The key of a project root's per-root state files. Canonical first: `ix
@@ -41,6 +52,16 @@ export function ingestMtimeCachePath(projectRoot: string): string {
 export function ingestRebuildPath(projectRoot: string): string {
   const key = rootKey(projectRoot);
   return join(ixHome(), `ingest_rebuild_${key}.json`);
+}
+
+/**
+ * Path to the orphan sweeps an earlier run could not finish (see
+ * `loadOrphanSweepPending`). Cleared with the mtime cache, since it describes
+ * the same graph.
+ */
+export function ingestOrphanSweepPath(projectRoot: string): string {
+  const key = rootKey(projectRoot);
+  return join(ixHome(), `ingest_orphans_${key}.json`);
 }
 
 /**
@@ -149,6 +170,7 @@ export function clearMapBaseline(projectRoot: string): void {
 export function clearIngestMtimeCache(projectRoot: string): void {
   try { rmSync(ingestMtimeCachePath(projectRoot), { force: true }); } catch { /* non-critical */ }
   try { rmSync(ingestRebuildPath(projectRoot), { force: true }); } catch { /* non-critical */ }
+  try { rmSync(ingestOrphanSweepPath(projectRoot), { force: true }); } catch { /* non-critical */ }
   try { rmSync(ingestSymbolsPath(projectRoot), { force: true }); } catch { /* non-critical */ }
   try { rmSync(ingestSymbolsJournalPath(projectRoot), { force: true }); } catch { /* non-critical */ }
   clearMapBaseline(projectRoot);
@@ -228,6 +250,7 @@ export function loadConfig(): IxConfig {
     closeSync(fd);
   }
   let parsed: Partial<IxConfig> | null;
+  const { parse } = yaml(); // outside the try: not a parse error if it fails
   try {
     parsed = parse(raw) as Partial<IxConfig> | null;
   } catch (err) {
@@ -346,6 +369,7 @@ function writeConfigLocked(config: IxConfig, configDir: string, configPath: stri
   mkdirSync(configDir, { recursive: true, mode: 0o700 });
   let existing: Record<string, unknown> = {};
   if (existsSync(configPath)) {
+    const { parse } = yaml(); // outside the try: not a parse error if it fails
     try {
       const parsed = parse(readFileSync(configPath, "utf-8"));
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -383,7 +407,7 @@ function writeConfigLocked(config: IxConfig, configDir: string, configPath: stri
   // EPERM/EBUSY while another process has the target open -- an unlocked
   // reader, an indexer, antivirus -- so it is retried for a few seconds.
   const tmpPath = `${configPath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-  writeFileSync(tmpPath, stringify(merged), { mode: 0o600 });
+  writeFileSync(tmpPath, yaml().stringify(merged), { mode: 0o600 });
   try {
     renameWithRetry(tmpPath, configPath);
   } catch (err) {

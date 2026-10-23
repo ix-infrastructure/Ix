@@ -4,7 +4,7 @@
 
 ### Prerequisites
 
-- Node.js 22+
+- Node.js 22+ (22.22 or newer to build the docs site, which Astro requires)
 - Docker and Docker Compose
 
 ### Local Setup

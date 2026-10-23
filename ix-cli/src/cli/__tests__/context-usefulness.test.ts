@@ -193,7 +193,7 @@ describe("ix context usefulness", () => {
         const { lines } = render(fixture);
         const next = lines.filter((l) => l.startsWith("next "));
         expect(next.length).toBeGreaterThan(0);
-        for (const line of next) expect(line).toMatch(/^next cmd="ix read \S+:\d+-\d+"$/);
+        for (const line of next) expect(line).toMatch(/^next cmd="ix read (?:\S+ --path \S+|\S+:\d+-\d+)"(?: stale=true)?$/);
       });
     });
   }
