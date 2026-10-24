@@ -11,7 +11,7 @@ import { llmLine, type LlmValue } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { renderSection, renderKeyValue, renderNote, renderBreadcrumb } from "../ui.js";
 import { forMcp } from "../next-step.js";
-import { ensureFreshMap } from "../map-freshness.js";
+import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "trait", "object", "interface"]);
 const STRUCTURAL_CONTAINER_KINDS = new Set(["class", "object", "trait", "interface"]);
@@ -66,16 +66,17 @@ Examples:
       if (opts.format === "text") printResolved(target);
 
       // An `ix map` after an edit may have left the map for this read (CL-13).
-      // Never throws and never moves the exit code.
-      await ensureFreshMap();
+      // Never throws and never moves the exit code. The json and llm answers
+      // say so too: the system path below comes from the map's regions.
+      const mapState = await ensureFreshMapState();
 
       const isContainer = CONTAINER_KINDS.has(target.kind);
       const isRegion = REGION_KINDS.has(target.kind);
 
       if (isContainer || isRegion) {
-        await overviewContainer(client, target, opts.format);
+        await overviewContainer(client, target, opts.format, mapState);
       } else {
-        await overviewLeaf(client, target, opts.format);
+        await overviewLeaf(client, target, opts.format, mapState);
       }
     });
 }
@@ -139,7 +140,8 @@ function siblingKindLabel(kind: string): string {
 async function overviewContainer(
   client: IxClient,
   target: { id: string; kind: string; name: string; resolutionMode: string },
-  format: string
+  format: string,
+  mapState: MapStaleState = {},
 ): Promise<void> {
   const diagnostics: string[] = [];
   const isRegion = REGION_KINDS.has(target.kind);
@@ -199,11 +201,13 @@ async function overviewContainer(
   };
 
   if (format === "json") {
-    printJson(result);
+    printJson({ ...result, ...mapStaleJson(mapState) });
     return;
   }
 
   if (format === "llm") {
+    // With the answer, not before it (mapStaleLlm).
+    for (const line of mapStaleLlm(mapState)) console.log(line);
     for (const line of overviewContainerLlm({ target, displayPath, systemPath: systemPathMapped, hasMap, childrenByKind, keyItems, diagnostics })) {
       console.log(line);
     }
@@ -235,7 +239,8 @@ async function overviewContainer(
 async function overviewLeaf(
   client: IxClient,
   target: { id: string; kind: string; name: string; resolutionMode: string },
-  format: string
+  format: string,
+  mapState: MapStaleState = {},
 ): Promise<void> {
   const diagnostics: string[] = [];
 
@@ -335,11 +340,13 @@ async function overviewLeaf(
   };
 
   if (format === "json") {
-    printJson(result);
+    printJson({ ...result, ...mapStaleJson(mapState) });
     return;
   }
 
   if (format === "llm") {
+    // With the answer, not before it (mapStaleLlm).
+    for (const line of mapStaleLlm(mapState)) console.log(line);
     for (const line of overviewLeafLlm({ target, displayPath, containedIn, systemPath: systemPathMapped, hasMap, siblingsByKind, keySiblings, diagnostics })) {
       console.log(line);
     }

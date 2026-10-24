@@ -13,12 +13,15 @@ import { Command } from "commander";
 import { registerMapCommand } from "../commands/map.js";
 import { canonicalWorkspacePath, mapResultCachePath, mapStalePath } from "../config.js";
 import {
+  clearMapStale,
   ensureFreshMap,
+  ensureFreshMapState,
   MAP_REFRESH_ARG,
   mapBackgroundRefreshEnabled,
   mapBackgroundTimeoutMs,
   mapRefreshDebounceMs,
   mapRefreshInvocation,
+  mapStaleJson,
   markMapStale,
   readMapRefreshOutcome,
   readMapStale,
@@ -286,6 +289,50 @@ describe("map refresh", () => {
   });
 
   describe("ensureFreshMap (the reader)", () => {
+    it("reports the map its regions are from, as the deferred ix map named it", async () => {
+      await map();
+      writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
+      process.env.IX_AUTO_MAP = "1";
+      let shown: { map_stale: boolean; regions_as_of: { map_rev: number; file_count: number } | null };
+      try {
+        const r = await captured(async () => {
+          const program = new Command();
+          registerMapCommand(program);
+          await program.parseAsync(["node", "ix", "map", repo, "--format", "json"]);
+        });
+        shown = JSON.parse(r.out);
+      } finally {
+        delete process.env.IX_AUTO_MAP;
+        rmSync(lockPathForTest(repo), { force: true });
+      }
+      expect(shown.map_stale, "the edit's map was deferred").toBe(true);
+      expect(shown.regions_as_of).not.toBeNull();
+      expect(readMapStale(repo)?.regionsAsOf, "the marker names the same map").toEqual(shown.regions_as_of);
+
+      const r = await captured(() => ensureFreshMapState({ root: repo, spawn: () => {} }));
+      expect(r.value).toEqual({ mapStale: true, regionsAsOf: shown.regions_as_of });
+      expect(mapStaleJson(r.value)).toEqual({ map_stale: true, regions_as_of: shown.regions_as_of });
+      expect(r.out, "nothing on stdout").toBe("");
+      expect(readMapStale(repo)?.regionsAsOf, "recording the attempt keeps it").toEqual(shown.regions_as_of);
+    });
+
+    it("keeps the map a standing marker names when re-marked, and forgets it once the map is computed", () => {
+      markMapStale(repo, { ingestRev: 1, regionsAsOf: { map_rev: 4, file_count: 3 } });
+      markMapStale(repo, { ingestRev: 2 });
+      expect(readMapStale(repo)?.regionsAsOf).toEqual({ map_rev: 4, file_count: 3 });
+      clearMapStale(repo);
+      markMapStale(repo, { ingestRev: 3 });
+      expect(readMapStale(repo)).not.toBeNull();
+      expect(readMapStale(repo)?.regionsAsOf).toBeUndefined();
+    });
+
+    it("says nothing in the json fields when the map is fresh", async () => {
+      await map();
+      const r = await captured(() => ensureFreshMapState({ root: repo, spawn: () => {} }));
+      expect(r.value).toEqual({});
+      expect(mapStaleJson(r.value)).toEqual({});
+    });
+
     it("makes no request and starts nothing without a marker", async () => {
       await map();
       backend.requests.length = 0;

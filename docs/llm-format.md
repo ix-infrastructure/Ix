@@ -437,6 +437,18 @@ views starting a refresh. `--format json` carries `map_stale` on every map (`fal
 `regions_as_of` (`{map_rev, file_count}` of the last map, `null` when
 fresh); `ix map --silent` ends its line with `· map=stale`.
 
+The region views say it in their machine output too, not only on stderr.
+While the map is stale, `overview`, `subsystems`, `locate`, `impact` and
+`explain` print one `diagnostic code=map_stale` record, worded as `ix map`'s,
+with their answer (just before its first record), and their `--format json`
+object gains `map_stale: true` and, when the deferring `ix map` recorded which
+map it was, `regions_as_of` (`{map_rev, file_count}`, as above) at its top
+level. A fresh map adds neither key and no record. An error answer carries
+neither: it is its own answer, and a caller takes a leading `error` record as
+the command failing. `ix locate` with several targets prints the record once
+per call and puts the keys on each answered target's object; `ix impact --all`
+puts them on the grouping object. Text output only has the stderr line.
+
 `ix stats`:
 
 ```

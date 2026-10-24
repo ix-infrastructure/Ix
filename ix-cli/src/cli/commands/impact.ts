@@ -14,7 +14,7 @@ import { captureJson, lineSpan, printJson, relativePath, rowLocation, sliceEdgeR
 import { forMcp, suggest, type Relation } from "../next-step.js";
 import { llmLine, llmShortId } from "../llm.js";
 import { parsePickOption } from "../options.js";
-import { ensureFreshMap } from "../map-freshness.js";
+import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "object", "trait", "interface"]);
 
@@ -51,8 +51,9 @@ export function registerImpactCommand(program: Command): void {
         if (opts.format === "text" && !set.all) printResolved(target);
 
         // An `ix map` after an edit may have left the map for this read (CL-13).
-        // Never throws and never moves the exit code.
-        await ensureFreshMap();
+        // Never throws and never moves the exit code. The json and llm output
+        // say when it is stale: the region buckets below come from the map.
+        const mapState = await ensureFreshMapState();
 
         // A hollowed graph reports "low risk, no dependents" for anything:
         // the answer is only as good as the edges it counts. Said first, in
@@ -62,11 +63,13 @@ export function registerImpactCommand(program: Command): void {
         if (graph && opts.format === "llm") console.log(llmLine("graph", graphHealthLlmFields(health)));
         if (graph && opts.format === "text") renderWarning(graphHealthProse(health));
 
+        // `--all` says it once, with the header grouping the candidates.
+        const ownState = set.all ? {} : mapState;
         const analyse = (entity: ResolvedEntity) => CONTAINER_KINDS.has(entity.kind)
-          ? containerImpact(client, entity, limit, depth, opts.format, graph)
-          : leafImpact(client, entity, depth, limit, opts.format, graph);
+          ? containerImpact(client, entity, limit, depth, opts.format, graph, ownState)
+          : leafImpact(client, entity, depth, limit, opts.format, graph, ownState);
 
-        if (set.all) await impactOfAll(symbol, set, opts.format, analyse);
+        if (set.all) await impactOfAll(symbol, set, opts.format, analyse, mapState);
         else await analyse(target);
       }
     );
@@ -86,6 +89,7 @@ async function impactOfAll(
   set: TargetSet,
   format: string,
   analyse: (entity: ResolvedEntity) => Promise<void>,
+  mapState: MapStaleState = {},
 ): Promise<void> {
   // `n` is the candidate's `--pick` number (resolve.ts candidateSet).
   const candidates = set.entities.map((e, i) => ({ n: e.n ?? i + 1, id: e.id, name: e.name, kind: e.kind, path: relativePath(e.path) ?? e.path }));
@@ -105,6 +109,7 @@ async function impactOfAll(
       candidates,
       results,
       ...(truncation ? { diagnostics: [{ code: "candidates_truncated", message: truncation }] } : {}),
+      ...mapStaleJson(mapState),
     });
     return;
   }
@@ -112,6 +117,7 @@ async function impactOfAll(
   if (format === "llm") {
     console.log(llmLine("impact_all", [["target", symbol], ["candidates", candidates.length], ["total", total]]));
     if (truncation) console.log(llmLine("diagnostic", [["code", "candidates_truncated"], ["message", truncation]]));
+    for (const line of mapStaleLlm(mapState)) console.log(line);
   } else if (truncation) {
     renderWarning(truncation);
   }
@@ -356,6 +362,7 @@ async function containerImpact(
   depth: number,
   format: string,
   graph?: Record<string, unknown>,
+  mapState: MapStaleState = {},
 ): Promise<void> {
   const isJson = format === "json";
   const diagnostics: string[] = [];
@@ -465,6 +472,7 @@ async function containerImpact(
       stripNulls({
         resolvedTarget: { kind: target.kind, name: target.name },
         graph,
+        ...mapStaleJson(mapState),
         depth,
         systemPath: systemPathMapped.length > 0 ? systemPathMapped : undefined,
         riskSummary: risk.riskSummary,
@@ -494,6 +502,8 @@ async function containerImpact(
     );
   } else if (format === "llm") {
     const lines = [
+      // With the answer, not before it (mapStaleLlm).
+      ...mapStaleLlm(mapState),
       ...impactHeaderLlm(target, risk, systemPathMapped),
       llmLine("counts", [
         ["members", members.length],
@@ -582,6 +592,7 @@ async function leafImpact(
   limit: number,
   format: string,
   graph?: Record<string, unknown>,
+  mapState: MapStaleState = {},
 ): Promise<void> {
   const isJson = format === "json";
   const [callersResult, calleesResult, systemPath, decisionsResult, tasksResult, bugsResult] = await Promise.all([
@@ -641,6 +652,7 @@ async function leafImpact(
       stripNulls({
         resolvedTarget: { kind: target.kind, name: target.name },
         graph,
+        ...mapStaleJson(mapState),
         depth,
         systemPath: systemPathMapped.length > 0 ? systemPathMapped : undefined,
         riskSummary: risk.riskSummary,
@@ -676,6 +688,8 @@ async function leafImpact(
     const callerSlice = sliceEdgeResults(callersResult.nodes, limit);
     const calleeSlice = sliceEdgeResults(calleesResult.nodes, limit);
     const lines = [
+      // With the answer, not before it (mapStaleLlm).
+      ...mapStaleLlm(mapState),
       ...impactHeaderLlm(target, risk, systemPathMapped),
       llmLine("counts", [
         ["callers", callerSlice.total],

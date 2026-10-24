@@ -29,6 +29,13 @@ Ids appear only where two rows would otherwise read the same (same name, kind
 and path); pass one back as the symbol to pick that row. `--fields id` prints
 them everywhere.
 
+A `diagnostic code=map_stale` record (json: `map_stale: true`, with
+`regions_as_of: {map_rev, file_count}` when known) on `ix overview`,
+`subsystems`, `locate`, `impact`, `explain` or `map` means the architecture
+map was not recomputed after the latest edits: system paths and regions are
+the last map's. The answer is still usable; run `ix map --remap` when the
+hierarchy itself matters. A fresh map adds neither.
+
 ### Setting it once
 
 Resolution is: the flag, then `IX_FORMAT`, then `format` in `~/.ix/config.yaml`

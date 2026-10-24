@@ -8,11 +8,12 @@ import { Command } from "commander";
 
 /**
  * CL-13: `ix map` may defer the map after an edit, so every command that reads
- * regions calls `ensureFreshMap` first, which starts a background refresh and
- * never maps inline. These run each reader against a stub client and check
- * three things: it is asked for exactly once, before the first region read,
- * and a refresh that cannot start changes neither the output nor the exit
- * code.
+ * regions calls `ensureFreshMapState` (`ensureFreshMap`, with what its output
+ * says about it) first, which starts a background refresh and never maps
+ * inline. These run each reader against a stub client and check three things:
+ * it is asked for exactly once, before the first region read, and a refresh
+ * that cannot start changes neither the answer nor the exit code -- the json
+ * only says the map is stale (region-readers-stale-output.test.ts).
  */
 
 // The suite runs from a checkout no workspace covers; it is about ordering,
@@ -30,14 +31,14 @@ vi.mock("../config.js", async (importOriginal) => ({
 
 const { events, refreshImpl } = vi.hoisted(() => ({
   events: [] as string[],
-  refreshImpl: { current: async (): Promise<unknown> => undefined },
+  refreshImpl: { current: async (): Promise<unknown> => ({}) },
 }));
 
 vi.mock("../map-freshness.js", async (orig) => ({
   ...(await orig<typeof import("../map-freshness.js")>()),
-  ensureFreshMap: vi.fn(async () => {
+  ensureFreshMapState: vi.fn(async () => {
     events.push("refresh");
-    await refreshImpl.current();
+    return await refreshImpl.current();
   }),
 }));
 
@@ -120,7 +121,7 @@ describe.each(READERS)("ix %s refreshes a deferred map first", (_name, args, loa
 
   beforeEach(() => {
     events.length = 0;
-    refreshImpl.current = async () => undefined;
+    refreshImpl.current = async () => ({});
     process.exitCode = undefined;
     home = mkdtempSync(join(tmpdir(), "ix-readers-refresh-"));
     for (const k of ["IX_HOME", "IX_GRAPH_HEALTH", "IX_MAP_BACKGROUND_REFRESH", "IX_LOCK_DIR"]) saved[k] = process.env[k];
@@ -157,13 +158,15 @@ describe.each(READERS)("ix %s refreshes a deferred map first", (_name, args, loa
     real.markMapStale(join(home, "repo"), { ingestRev: 1 });
     let spawnAsked = 0;
     process.env.IX_MAP_BACKGROUND_REFRESH = "1";
-    refreshImpl.current = () => real.ensureFreshMap({
+    refreshImpl.current = () => real.ensureFreshMapState({
       root: join(home, "repo"),
       spawn: () => { spawnAsked++; throw new Error("spawn EAGAIN"); },
     });
     const failed = await run(register, args);
     expect(spawnAsked, "the reader got as far as starting the refresh").toBe(1);
-    expect(failed).toBe(fine);
+    const { map_stale: mapStale, ...answer } = JSON.parse(failed);
+    expect(mapStale, "the json says the map is stale").toBe(true);
+    expect(answer).toEqual(JSON.parse(fine));
     expect(process.exitCode).toBe(fineExit);
   });
 });

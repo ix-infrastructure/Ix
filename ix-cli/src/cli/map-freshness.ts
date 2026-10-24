@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import type { IxClient } from "../client/api.js";
 import { mapRefreshOutcomePath, mapStalePath } from "./config.js";
 import { loadIngestBaseline } from "./ingest-baseline.js";
+import { llmLine } from "./llm.js";
 
 /**
  * The architecture map left for later (CL-13).
@@ -35,6 +36,12 @@ export interface MapStaleInfo {
   ingestRev: number | null;
   /** When a refresh was last attempted, epoch ms; the debounce runs from here. */
   lastAttemptAt?: number;
+  /**
+   * The last computed map the stored regions come from, when the deferring
+   * `ix map` knew it; what readers report as `regions_as_of`. Absent on a
+   * marker an older CLI wrote.
+   */
+  regionsAsOf?: { map_rev: number; file_count: number };
 }
 
 const isFiniteNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -49,6 +56,11 @@ export function readMapStale(projectRoot: string): MapStaleInfo | null {
     if (data.lastAttemptAt !== undefined && !isFiniteNumber(data.lastAttemptAt)) return null;
     const info: MapStaleInfo = { since: data.since, ingestRev: data.ingestRev as number | null };
     if (data.lastAttemptAt !== undefined) info.lastAttemptAt = data.lastAttemptAt;
+    // Only an extra: one that does not parse leaves the marker standing.
+    const asOf = data.regionsAsOf as Record<string, unknown> | null | undefined;
+    if (asOf && typeof asOf === "object" && isFiniteNumber(asOf.map_rev) && isFiniteNumber(asOf.file_count)) {
+      info.regionsAsOf = { map_rev: asOf.map_rev, file_count: asOf.file_count };
+    }
     return info;
   } catch {
     return null;
@@ -72,12 +84,22 @@ function writeMapStale(projectRoot: string, info: MapStaleInfo): void {
  * Record that the map for `projectRoot` was deferred after an ingest. A new
  * marker each time, with no `lastAttemptAt`: a later edit's refresh has not
  * been tried yet, so the debounce does not hold it back. Best-effort.
+ *
+ * `regionsAsOf` names the last computed map. When not given, the one a marker
+ * already standing named is kept: no map was computed in between, or that
+ * marker would have been removed.
  */
-export function markMapStale(projectRoot: string, info: Partial<Pick<MapStaleInfo, "since" | "ingestRev">> = {}): void {
-  writeMapStale(projectRoot, {
+export function markMapStale(
+  projectRoot: string,
+  info: Partial<Pick<MapStaleInfo, "since" | "ingestRev" | "regionsAsOf">> = {},
+): void {
+  const next: MapStaleInfo = {
     since: info.since ?? Date.now(),
     ingestRev: info.ingestRev !== undefined ? info.ingestRev : (loadIngestBaseline(projectRoot)?.currentRev ?? null),
-  });
+  };
+  const regionsAsOf = info.regionsAsOf ?? readMapStale(projectRoot)?.regionsAsOf;
+  if (regionsAsOf) next.regionsAsOf = { map_rev: regionsAsOf.map_rev, file_count: regionsAsOf.file_count };
+  writeMapStale(projectRoot, next);
 }
 
 /** Remove the marker: the map was computed. Best-effort. */
@@ -205,21 +227,79 @@ export async function spawnMapRefresh(root: string): Promise<void> {
  * It never throws, never touches the exit code and prints nothing on stdout.
  * While the map is stale it says so in one line on stderr, so the reader's
  * answer is never silently older than the code. Resolves to true when the
- * map is stale.
+ * map is stale; `ensureFreshMapState` says the same in the form a reader's
+ * machine output carries (`mapStaleJson`, `mapStaleLlm`).
  */
 export async function ensureFreshMap(opts: EnsureFreshMapOptions = {}): Promise<boolean> {
-  let why: string | undefined;
+  return (await ensureFreshMapState(opts)).mapStale === true;
+}
+
+/**
+ * `ensureFreshMap`, resolving to what the reader's json and llm output say
+ * about it: `{}` when the map is fresh; `mapStale` and, when the marker names
+ * it, the last computed map (`regionsAsOf`) when it is stale. Read from the
+ * marker `ensureFreshMap` reads anyway, so no extra file or request.
+ */
+export async function ensureFreshMapState(opts: EnsureFreshMapOptions = {}): Promise<MapStaleState> {
+  let scheduled: { why: string; marker: MapStaleInfo | null } | undefined;
   try {
-    why = await scheduleRefresh(opts);
+    scheduled = await scheduleRefresh(opts);
   } catch {
     // Never the reader's problem: it answers from the regions it has.
-    why = "its refresh failed";
+    scheduled = { why: "its refresh failed", marker: null };
   }
-  if (why === undefined) return false;
+  if (scheduled === undefined) return {};
   try {
-    process.stderr.write(`ix: architecture map is stale (${why}); regions shown may predate recent edits. Run ix map --remap to refresh.\n`);
+    process.stderr.write(`ix: architecture map is stale (${scheduled.why}); regions shown may predate recent edits. Run ix map --remap to refresh.\n`);
   } catch { /* non-critical */ }
-  return true;
+  const asOf = scheduled.marker?.regionsAsOf;
+  return asOf ? { mapStale: true, regionsAsOf: { ...asOf } } : { mapStale: true };
+}
+
+/**
+ * What a deferred map (CL-13) adds to the output of the command that shows
+ * it. `mapStale` says the map was not recomputed after the last ingest;
+ * `regionsAsOf` names the last computed map the regions come from.
+ */
+export interface MapStaleState {
+  mapStale?: boolean;
+  regionsAsOf?: { map_rev: number; file_count: number };
+}
+
+/**
+ * The one sentence a deferred map's text and llm output lead with: the counts
+ * and regions are the last map's, which one, and how to get this edit's.
+ * `ix map` and every region reader use it, so they say it the same way.
+ */
+export function mapStaleNotice(state: MapStaleState): string {
+  const asOf = state.regionsAsOf
+    ? ` (map rev ${state.regionsAsOf.map_rev}, ${state.regionsAsOf.file_count} files)`
+    : "";
+  return `Stale map: not recomputed after this edit. Every count and region here is from the last map${asOf}. Run ix map --remap to recompute it now; region views refresh it in the background.`;
+}
+
+/**
+ * A region reader's json fields for `state`, spread into the top level of its
+ * payload: `map_stale: true` and, when known, `regions_as_of` (`{map_rev,
+ * file_count}`, as `ix map --format json` has it). Nothing when the map is
+ * fresh, so a fresh answer reads exactly as before.
+ */
+export function mapStaleJson(state: MapStaleState): { map_stale?: true; regions_as_of?: { map_rev: number; file_count: number } } {
+  if (state.mapStale !== true) return {};
+  return state.regionsAsOf
+    ? { map_stale: true, regions_as_of: { ...state.regionsAsOf } }
+    : { map_stale: true };
+}
+
+/**
+ * A region reader's llm records for `state`: the one `diagnostic
+ * code=map_stale` record `ix map` prints (`renderMapLlm`), or none when the
+ * map is fresh. Printed with the answer, never ahead of an `error` record: a
+ * caller takes a leading `error code=` as the command failing (mcp/server.ts).
+ */
+export function mapStaleLlm(state: MapStaleState): string[] {
+  if (state.mapStale !== true) return [];
+  return [llmLine("diagnostic", [["code", "map_stale"], ["message", mapStaleNotice(state)]])];
 }
 
 /** The root a reader's refresh is for, canonical; undefined when there is none. */
@@ -242,8 +322,11 @@ async function readerRoot(given: string | undefined): Promise<string | undefined
   try { return canonicalMapRoot(resolveWorkspaceRoot()); } catch { return undefined; }
 }
 
-/** Why the map is stale after scheduling, or undefined when it is fresh. */
-async function scheduleRefresh(opts: EnsureFreshMapOptions): Promise<string | undefined> {
+/**
+ * Why the map is stale after scheduling, and the marker that says so, or
+ * undefined when it is fresh.
+ */
+async function scheduleRefresh(opts: EnsureFreshMapOptions): Promise<{ why: string; marker: MapStaleInfo } | undefined> {
   const root = await readerRoot(opts.root);
   if (root === undefined) return undefined;
   const marker = readMapStale(root);
@@ -252,7 +335,7 @@ async function scheduleRefresh(opts: EnsureFreshMapOptions): Promise<string | un
   const { isCloudReady } = await import("./remote.js");
   if (await isCloudReady()) return undefined;
 
-  if (!mapBackgroundRefreshEnabled()) return "background refresh is off";
+  if (!mapBackgroundRefreshEnabled()) return { why: "background refresh is off", marker };
 
   const now = opts.now ?? Date.now;
   const debounce = mapRefreshDebounceMs();
@@ -265,11 +348,11 @@ async function scheduleRefresh(opts: EnsureFreshMapOptions): Promise<string | un
     const from = Math.max(m.lastAttemptAt ?? -Infinity, failedAt ?? -Infinity);
     return Number.isFinite(from) && now() - from < debounce;
   };
-  const debouncedWhy = (): string => {
+  const debouncedWhy = (m: MapStaleInfo): { why: string; marker: MapStaleInfo } => {
     const last = readMapRefreshOutcome(root);
-    return last?.ok === false ? "its last background refresh failed" : "a refresh was tried moments ago";
+    return { why: last?.ok === false ? "its last background refresh failed" : "a refresh was tried moments ago", marker: m };
   };
-  if (debounced(marker)) return debouncedWhy();
+  if (debounced(marker)) return debouncedWhy(marker);
 
   // Taken only to decide and record the attempt, then let go for the child:
   // two readers at once start one refresh, not two.
@@ -277,11 +360,12 @@ async function scheduleRefresh(opts: EnsureFreshMapOptions): Promise<string | un
   const lock = acquireMapLock(root, `ix map refresh scheduler ${root}`);
   // Another `ix map` holds it: a running refresh, or an incremental `ix map`
   // that defers the map and only writes the marker. Either way, not now.
-  if (!lock) return "another ix map is running";
+  if (!lock) return { why: "another ix map is running", marker };
+  let current: MapStaleInfo | null;
   try {
-    const current = readMapStale(root);
+    current = readMapStale(root);
     if (current === null) return undefined;
-    if (debounced(current)) return debouncedWhy();
+    if (debounced(current)) return debouncedWhy(current);
     // Recorded before the child starts, so the readers that follow it
     // inside the debounce window do not start another.
     writeMapStale(root, { ...current, lastAttemptAt: now() });
@@ -291,9 +375,9 @@ async function scheduleRefresh(opts: EnsureFreshMapOptions): Promise<string | un
   try {
     await (opts.spawn ?? spawnMapRefresh)(root);
   } catch {
-    return "its refresh could not start";
+    return { why: "its refresh could not start", marker: current };
   }
-  return "refreshing in background";
+  return { why: "refreshing in background", marker: current };
 }
 
 /** What the last background refresh for a root did. */

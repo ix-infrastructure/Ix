@@ -16,7 +16,7 @@ import { canRenderProgress } from "../stderr.js";
 import { loadIngestBaseline } from "../ingest-baseline.js";
 import { saveMapBaseline } from "../map-baseline.js";
 import { loadCachedMap, loadLastMap, resolveMapCacheSlot, saveCachedMap } from "../map-result-cache.js";
-import { clearMapStale, markMapStale, readMapStale } from "../map-freshness.js";
+import { clearMapStale, markMapStale, mapStaleNotice, readMapStale, type MapStaleState } from "../map-freshness.js";
 import { resolveMapRoot } from "../map-root.js";
 import { readBackendHealth } from "./upgrade.js";
 import { renderWarning } from "../ui.js";
@@ -508,12 +508,10 @@ Examples:
  * What a deferred `ix map` (CL-13) adds to its output. `mapStale` says the
  * map was not recomputed for this ingest; `regionsAsOf` names the last
  * computed map that `file_count`, the regions, `region_count`, `levels`,
- * `map_rev` and `outcome` all come from.
+ * `map_rev` and `outcome` all come from. Shared with the region readers, in
+ * `map-freshness.ts`, with `mapStaleNotice`; both still exported from here.
  */
-export interface MapStaleState {
-  mapStale?: boolean;
-  regionsAsOf?: { map_rev: number; file_count: number };
-}
+export { mapStaleNotice, type MapStaleState };
 
 /** `ix map --format json`. Exported for tests. */
 export function mapJsonPayload(
@@ -1188,7 +1186,11 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
   if (deferred) {
     result = deferred;
     // A new marker for a new edit; an unchanged run keeps the one it found.
-    if (localIngest?.incremental) markMapStale(cwd);
+    // It names the map these regions are from, for the readers'
+    // `regions_as_of`.
+    if (localIngest?.incremental) {
+      markMapStale(cwd, { regionsAsOf: { map_rev: deferred.map_rev, file_count: deferred.file_count } });
+    }
   } else if (cached) {
     result = cached;
   } else {
@@ -1321,18 +1323,6 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
   }
   if (staleState.mapStale) renderWarning(mapStaleNotice(staleState));
   renderMapText(result, cwd, opts);
-}
-
-/**
- * The one sentence a deferred map's text and llm output lead with: the counts
- * and regions are the last map's, which one, and how to get this edit's.
- * Exported for tests.
- */
-export function mapStaleNotice(state: MapStaleState): string {
-  const asOf = state.regionsAsOf
-    ? ` (map rev ${state.regionsAsOf.map_rev}, ${state.regionsAsOf.file_count} files)`
-    : "";
-  return `Stale map: not recomputed after this edit. Every count and region here is from the last map${asOf}. Run ix map --remap to recompute it now; region views refresh it in the background.`;
 }
 
 /**

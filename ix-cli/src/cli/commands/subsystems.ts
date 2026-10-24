@@ -11,7 +11,7 @@ import { llmLine, llmError, llmShortId } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { setOutcome } from "../outcome.js";
 import { renderMapText, renderMapLlm, type MapRegion, type MapResult } from "./map.js";
-import { ensureFreshMap } from "../map-freshness.js";
+import { ensureFreshMapState, mapStaleJson, mapStaleLlm } from "../map-freshness.js";
 import {
   renderSubsystemExplanationJson,
   renderSubsystemExplanationText,
@@ -164,8 +164,12 @@ Examples:
       }
 
       // An `ix map` after an edit may have left the map for this read (CL-13).
-      // Never throws and never moves the exit code.
-      await ensureFreshMap();
+      // Never throws and never moves the exit code. The json and llm answers
+      // below say when it is stale; an error is its own answer.
+      const mapState = await ensureFreshMapState();
+      const mapStale = mapStaleJson(mapState);
+      // With the answer, not before it (mapStaleLlm).
+      const sayStaleLlm = (): void => { for (const line of mapStaleLlm(mapState)) console.log(line); };
 
       if (opts.list) {
         let result: SubsystemListResult;
@@ -191,6 +195,7 @@ Examples:
           : scores;
 
         if (opts.format === "llm") {
+          sayStaleLlm();
           console.log(llmLine("subsystems", [["count", filtered.length]]));
           for (const s of filtered) console.log(renderSubsystemScoreLlm(s));
           return;
@@ -198,7 +203,7 @@ Examples:
 
         if (opts.format === "json") {
           if (opts.detailed) {
-            printJson(buildDetailedListPayload(filtered, result.pagination));
+            printJson({ ...buildDetailedListPayload(filtered, result.pagination), ...mapStale });
           } else {
             const compact = filtered.map(s => ({
               name: s.name,
@@ -208,10 +213,11 @@ Examples:
               chunks_per_file: roundFloat(s.chunk_density),
               smell_files: s.smell_files,
             }));
-            printJson({ scores: compact });
+            printJson({ scores: compact, ...mapStale });
           }
           return;
         }
+        // `--detailed` without `--format json`: a text-format run, left as it was.
         if (opts.detailed) {
           printJson(buildDetailedListPayload(filtered, result.pagination));
           return;
@@ -262,20 +268,22 @@ Examples:
 
         const score = (scoreResult.scores ?? []).find((candidate) => candidate.region_id === result.target.id) ?? null;
         if (opts.format === "json") {
-          printJson(renderSubsystemExplanationJson(result, score));
+          printJson({ ...renderSubsystemExplanationJson(result, score), ...mapStale });
           return;
         }
 
+        if (opts.format === "llm") sayStaleLlm();
         console.log(renderSubsystemExplanationText(result, score));
         return;
       }
 
       if (opts.format === "json") {
-        printJson(compactMapResult(result));
+        printJson({ ...compactMapResult(result), ...mapStale });
         return;
       }
 
       if (opts.format === "llm") {
+        sayStaleLlm();
         if (isScopedSubsystemResult(result)) {
           for (const line of renderScopedSubsystemLlm(result)) console.log(line);
         } else {
