@@ -10,6 +10,7 @@ import { clearIngestMtimeCache, clearMapBaseline, ingestMtimeCachePath, saveConf
 import { loadIngestBaseline } from "../ingest-baseline.js";
 import { saveMapBaseline } from "../map-baseline.js";
 import { persistIngestBaselineIfClean } from "../commands/ingest.js";
+import { markMapStale, readMapStale } from "../map-freshness.js";
 import {
   createStaleProbe,
   detectStaleFiles,
@@ -73,6 +74,8 @@ describe("workspace-scoped staleness", () => {
     expect(beforeB).toEqual({
       graphCompleted: true,
       mapCompleted: false,
+      mapStale: false,
+      mapRefreshError: null,
       lastIngestAt: ingestedA.toISOString(),
       currentRev: 11,
       staleFiles: 1,
@@ -138,6 +141,8 @@ describe("workspace-scoped staleness", () => {
     expect(detectStaleFiles(root)).toEqual({
       graphCompleted: false,
       mapCompleted: false,
+      mapStale: false,
+      mapRefreshError: null,
       lastIngestAt: null,
       currentRev: 0,
       staleFiles: 0,
@@ -181,6 +186,44 @@ describe("workspace-scoped staleness", () => {
     });
   });
 
+  it("reports a map deferred after an edit as stale, without calling it completed", () => {
+    const root = path.join(home, "deferred");
+    const filePath = writeSource(root, "deferred.js", "export const value = 1;\n");
+    persistIngestBaselineIfClean(
+      root,
+      new Map([[filePath, fs.statSync(filePath).mtimeMs]]),
+      7,
+      0,
+      0,
+      new Date("2026-08-24T12:00:00.000Z"),
+    );
+    expect(saveMapBaseline(root, 6)).toBe(true);
+    expect(detectStaleFiles(root)).toMatchObject({ mapCompleted: false, mapStale: false });
+
+    markMapStale(root);
+    expect(readMapStale(root)?.ingestRev).toBe(7);
+    // mapCompleted keeps its strict meaning; mapStale says why it is false.
+    expect(detectStaleFiles(root)).toMatchObject({ mapCompleted: false, mapStale: true });
+  });
+
+  it("drops the stale marker with the map baseline and with the ingest baseline", () => {
+    const root = path.join(home, "marker-cleared");
+    markMapStale(root, { ingestRev: 3 });
+    expect(readMapStale(root)).not.toBeNull();
+    clearMapBaseline(root);
+    expect(readMapStale(root)).toBeNull();
+
+    markMapStale(root, { ingestRev: 3 });
+    clearIngestMtimeCache(root);
+    expect(readMapStale(root)).toBeNull();
+  });
+
+  it("reads no stale map for a workspace with no baseline, marker or not", () => {
+    const root = path.join(home, "never-ingested");
+    markMapStale(root, { ingestRev: null });
+    expect(detectStaleFiles(root).mapStale).toBe(false);
+  });
+
   it("preserves the source graph after an empty completed map invalidates hierarchy", () => {
     const root = path.join(home, "empty-completed-map");
     const filePath = writeSource(root, "index.php", "<?php function value() { return 1; }\n");
@@ -201,6 +244,8 @@ describe("workspace-scoped staleness", () => {
     expect(detectStaleFiles(root)).toEqual({
       graphCompleted: true,
       mapCompleted: false,
+      mapStale: false,
+      mapRefreshError: null,
       lastIngestAt: "2026-08-24T12:00:00.000Z",
       currentRev: 26,
       staleFiles: 0,
@@ -275,6 +320,8 @@ describe("workspace-scoped staleness", () => {
     expect(detectStaleFiles(root)).toEqual({
       graphCompleted: true,
       mapCompleted: false,
+      mapStale: false,
+      mapRefreshError: null,
       lastIngestAt: ingestedAt.toISOString(),
       currentRev: 14,
       staleFiles: 1,

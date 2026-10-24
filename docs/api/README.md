@@ -679,8 +679,9 @@ backend:
    with `x-ix-workspace` and `x-ix-system` headers baked in at launch, so the
    browser app never knows about workspaces. `--all` opts out of scoping.
 2. **`POST /__ix/remap`** — rebuild the code map for the workspace this
-   visualizer is scoped to, by running `ix map <workspace-root> --silent` with
-   a 30-minute timeout. Responds `{ "ok": true }` on success, or a `500` with
+   visualizer is scoped to, by running
+   `ix map <workspace-root> --silent --remap` with a 30-minute timeout
+   (`--remap`, so it always recomputes, even while the map is stale). Responds `{ "ok": true }` on success, or a `500` with
    `{ "ok": false, "error": ... }` when the map command fails.
 
    The workspace root is resolved once, by `ix view start`, and baked into the

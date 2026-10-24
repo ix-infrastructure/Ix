@@ -191,7 +191,9 @@ Show methods/functions called by the given symbol (cross-file).
 ### `ix callers <symbols...>`
 
 Show methods/functions that call the given symbols (cross-file). Several
-symbols answer in one call, grouped per symbol.
+symbols answer in one call, grouped per symbol. For a Java method, callers
+through a superclass or interface follow the direct ones, tagged
+`via=<Supertype>.<method>` (json: `via`).
 
 | Flag | Value | Default | Effect |
 |---|---|---|---|
@@ -585,6 +587,7 @@ Map the architectural hierarchy of a codebase.
 | `--graph` | — | off | Render the hierarchy as a graph/tree view (default) |
 | `--list` | — | off | Render the ranked list view instead of the default graph/tree view |
 | `--full` | — | off | Force full local map, bypassing automatic safety limits (advanced/testing) |
+| `--remap` | — | off | Compute the map now, even from an automatic (hook) run that would defer it |
 | `--verbose` | — | off | Show raw confidence/crosscut scores and signals, plus per-file ingest diagnostics (including why a patch failed to commit) |
 | `--silent` | — | off | Suppress all output except a one-line summary (useful for LLM hooks) |
 

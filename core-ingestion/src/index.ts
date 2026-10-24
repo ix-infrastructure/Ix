@@ -242,6 +242,11 @@ export interface ParsedRelationship {
   receiverType?: string;
   receiverFactory?: string;
   /**
+   * Java: methods called in turn on `receiverType` before this call
+   * (`a.getB().m()`); each one's declared return type is the next receiver.
+   */
+  receiverChain?: string[];
+  /**
    * Set on a typed relationship that only exists for its receiver (the call
    * also has its own, unchanged relationship). Without an exact member it
    * resolves to nothing: no edge, no claim, no unresolved-call entry.
@@ -300,6 +305,12 @@ export interface FileParseResult {
   receiverFactories?: Array<[string, string]>;
   receiverHeritage?: Array<[string, string]>;
   receiverPackage?: string;
+  /**
+   * Java: `${srcName}\0${dstName}` of each CALLS relationship whose every call
+   * site also has a typed receiver relationship. When those all resolve to
+   * another file, a same-named method in this file is not the target.
+   */
+  receiverTypedCalls?: string[];
   fileRole: RoleClassification;
 }
 
@@ -2664,6 +2675,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     // Every CALLS relationship by `${scope}\0${callKey}`, so a typed relationship
     // can join the call relationship of the same name.
     const callRelationships = new Map<string, ParsedRelationship>();
+    // Java: per `${scope}\0${callKey}`, whether every call site has a typed receiver.
+    const javaTypedSites = new Map<string, boolean>();
     // JS/TS: helper-literal module paths already emitted (see importVia).
     const jsTsHelperImports = new Set<string>();
     if (isJsTs) {
@@ -3017,7 +3030,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       }
     }
 
-    const receiverFacts = [SupportedLanguages.Scala, SupportedLanguages.TypeScript, SupportedLanguages.Go].includes(language)
+    const receiverFacts = [SupportedLanguages.Scala, SupportedLanguages.TypeScript, SupportedLanguages.Go, SupportedLanguages.Java].includes(language)
       ? collectReceiverFacts(tree.rootNode, language, checkBudget) : undefined;
 
     // --- Second pass: calls and imports ---
@@ -3209,8 +3222,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         // A member call whose receiver has a lexically inferred type or factory
         // also gets a typed relationship (below). The call's own relationship is
         // unchanged, so inference only ever adds edges.
-        const typedReceiver = receiverFacts && match.captures.some((c: any) => c.name === 'call')
-          ? callReceiver(callName.node, receiverFacts) : undefined;
+        const callCapture = receiverFacts ? match.captures.find((c: any) => c.name === 'call') : undefined;
+        const typedReceiver = callCapture ? callReceiver(callName.node, receiverFacts!, callCapture.node) : undefined;
         // A builtin-named call is still dropped; only its typed relationship stays.
         const builtinCall = builtinsForLanguage(language).has(callee) && !qualifierCapture && !namespaceCapture;
         if (builtinCall && !typedReceiver) continue;
@@ -3403,6 +3416,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           }
           jsTsCallBareOnly.set(bareKey, (jsTsCallBareOnly.get(bareKey) ?? true) && isBare);
         }
+        if (language === SupportedLanguages.Java && !builtinCall) {
+          javaTypedSites.set(bareKey, (javaTypedSites.get(bareKey) ?? true) && typedReceiver?.type !== undefined);
+        }
         if (builtinCall) {
           // Only the typed relationship below.
         } else if (!seen.has(callKey)) {
@@ -3422,10 +3438,14 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           delete callRelationships.get(bareKey)?.receiverOnly;
         }
         if (typedReceiver) {
-          // `Type.member`, or `receiver.member` for a factory-typed receiver.
-          const typedName = `${typedReceiver.type ?? typedReceiver.receiver}.${callee}`;
+          // `Type.member`, `receiver.member` for a factory-typed receiver, or
+          // Java `Type.getB().member` for a chain.
+          const chain = typedReceiver.chain?.length ? `${typedReceiver.chain.map(m => `${m}()`).join('.')}.` : '';
+          const typedName = `${typedReceiver.type ?? typedReceiver.receiver}.${chain}${callee}`;
           const typedKey = `${scope}\x00${typedName}`;
-          const receiver = typedReceiver.type ? { receiverType: typedReceiver.type } : { receiverFactory: typedReceiver.factory! };
+          const receiver = typedReceiver.type
+            ? { receiverType: typedReceiver.type, ...(chain ? { receiverChain: typedReceiver.chain } : {}) }
+            : { receiverFactory: typedReceiver.factory! };
           const named = callRelationships.get(typedKey);
           if (named) {
             // Same name as the call's own relationship: try the type first, then
@@ -3469,6 +3489,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     for (const [bareKey, rel] of jsTsCallRelationship) {
       if (jsTsCallBareOnly.get(bareKey) === true) rel.bareCall = true;
     }
+    const receiverTypedCalls = [...javaTypedSites].filter(([key, all]) => all && callRelationships.has(key))
+      .map(([key]) => `${callRelationships.get(key)!.srcName}\0${callRelationships.get(key)!.dstName}`);
 
     // A single relationship can represent multiple same-name uses in one scope.
     // Mark it local-only only when every captured use is shadowed; if any use still
@@ -3557,6 +3579,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       ...(receiverFacts?.factories.length ? { receiverFactories: receiverFacts.factories } : {}),
       ...(receiverFacts?.heritage.length ? { receiverHeritage: receiverFacts.heritage } : {}),
       ...(receiverFacts?.package ? { receiverPackage: receiverFacts.package } : {}),
+      ...(receiverTypedCalls.length ? { receiverTypedCalls } : {}),
       fileRole: classifyFileRole(filePath, source),
     };
   } catch (e) {
@@ -5027,6 +5050,7 @@ export function resolveEdges(
         return pkg !== undefined && scope.wildcards.has(pkg) && !scope.excluded.has(`${pkg}.${type}`);
       }).map(fp => ({ fp, type }));
     }
+    if (language === SupportedLanguages.Java) return javaReceiverProviders(context, summary, parts, type);
     const binding = importBindingsByLocal.get(context)?.get(type);
     // A same-named declaration in the importing file can only be a nested
     // shadow (a `namespace` class); without scope facts, guess neither.
@@ -5054,6 +5078,45 @@ export function resolveEdges(
     const compatible = (fp: string): boolean => importLanguageCompatible(language, fileLanguage.get(fp) ?? languageFromPath(fp));
     return (symbolToFiles.get(type) ?? []).filter(compatible)
       .filter(fp => goPackageKey(fp) === goPackageKey(context)).map(fp => ({ fp, type }));
+  }
+
+  /**
+   * A Java type name in scope, in the order Java looks: this file, a
+   * single-type import, this package, an on-demand import (`import p.*`,
+   * summarized as `p`). The first that has it decides; several files there
+   * mean no type. A qualified `p.T` names its package (or `Outer.T` a nested
+   * type of a type in scope). Summaries without Java facts have no package,
+   * so they provide nothing.
+   */
+  function javaReceiverProviders(context: string, summary: FileSummary | undefined, parts: string[], type: string): Array<{ fp: string; type: string }> {
+    const inPackage = (pkg: string, name: string): string[] => (symbolToFiles.get(name) ?? [])
+      .filter(fp => summaries.get(fp)?.language === SupportedLanguages.Java && summaries.get(fp)?.receiverPackage === pkg);
+    const named = (fq: string): string[] => {
+      const dot = fq.lastIndexOf('.');
+      if (dot <= 0) return [];
+      const prefix = fq.slice(0, dot);
+      const name = fq.slice(dot + 1);
+      const direct = inPackage(prefix, name);
+      if (direct.length) return direct;
+      // `p.Outer.T`: a nested type is declared in its outer type's file.
+      const outer = prefix.lastIndexOf('.');
+      return outer > 0 ? inPackage(prefix.slice(0, outer), name).filter(fp => fileHasSymbol.get(fp)?.has(prefix.slice(outer + 1))) : [];
+    };
+    const as = (fps: string[]) => [...new Set(fps)].map(fp => ({ fp, type }));
+    if (parts.length) {
+      const packaged = named(`${parts.join('.')}.${type}`);
+      if (packaged.length || parts.length > 1) return as(packaged);
+      const outer = receiverProviders(context, parts[0]);
+      return outer.length === 1 && fileHasSymbol.get(outer[0].fp)?.has(type) ? [{ fp: outer[0].fp, type }] : [];
+    }
+    if (fileHasSymbol.get(context)?.has(type)) return [{ fp: context, type }];
+    const imports = (summary?.imports ?? []).map(i => i.dstName);
+    // A single-type import shadows the package, even of a type not in the repo.
+    const single = imports.filter(fq => fq.endsWith(`.${type}`));
+    if (single.length) return as(single.flatMap(named));
+    const samePackage = summary?.receiverPackage ? inPackage(summary.receiverPackage, type) : [];
+    if (samePackage.length) return as(samePackage);
+    return as(imports.flatMap(pkg => inPackage(pkg, type)));
   }
 
   const receiverProviderCache = new Map<string, Array<{ fp: string; type: string }>>();
@@ -5087,12 +5150,53 @@ export function resolveEdges(
       return targets.length === 1 ? targets : [];
     }
     const exact = (fileQKeys.get(fp)?.get(member) ?? []).filter(q => q === key);
-    // Multiple definitions include overloads. Do not guess a signature.
-    if (exact.length) return exact.length === 1 ? [{ fp, key }] : [];
-    const inherited = (summaries.get(fp)?.receiverHeritage ?? []).filter(([child]) => child === name)
-      .flatMap(([, parent]) => receiverMembers(fp, parent, member, nextSeen));
+    const java = summaries.get(fp)?.language === SupportedLanguages.Java;
+    // Multiple definitions include overloads. Do not guess a signature. Java
+    // overloads in one class are one node (one key), so they are one target.
+    if (exact.length) return exact.length === 1 || java ? [{ fp, key }] : [];
+    const parents = (summaries.get(fp)?.receiverHeritage ?? []).filter(([child]) => child === name);
+    if (java) {
+      // The nearest declaration: the superclass chain (listed first), then
+      // each interface in declaration order.
+      for (const [, parent] of parents) {
+        const found = receiverMembers(fp, parent, member, nextSeen);
+        if (found.length) return found;
+      }
+      return [];
+    }
+    const inherited = parents.flatMap(([, parent]) => receiverMembers(fp, parent, member, nextSeen));
     const unique = new Map(inherited.map(target => [`${target.fp}\0${target.key}`, target]));
     return [...unique.values()];
+  }
+
+  /**
+   * Java `a.getB().m()`: the receiver after each call in `chain`, from the
+   * declared return type of the one method that call resolves to. Stops at the
+   * first step that does not resolve or does not return a class type.
+   */
+  function javaChainReceiver(context: string, type: string, chain: string[]): { context: string; type: string } | undefined {
+    let at = { context, type };
+    for (const method of chain) {
+      const targets = receiverMembers(at.context, at.type, method);
+      if (targets.length !== 1) return;
+      const { fp, key } = targets[0];
+      const returns = new Set((summaries.get(fp)?.receiverFactories ?? []).filter(([fn]) => fn === key).map(([, t]) => t));
+      const [returned] = returns;
+      // Overloads with different results (or a primitive one) are not guessed.
+      if (returns.size !== 1 || !returned) return;
+      at = { context: fp, type: returned };
+    }
+    return at;
+  }
+
+  /** The one member a typed CALLS relationship names, if it names exactly one. */
+  function typedCallTarget(srcFilePath: string, rel: ParsedRelationship): { fp: string; key: string } | undefined {
+    const receiver = rel.receiverType
+      ? rel.receiverChain ? javaChainReceiver(srcFilePath, rel.receiverType, rel.receiverChain) : { context: srcFilePath, type: rel.receiverType }
+      : factoryReceiver(srcFilePath, rel.receiverFactory!);
+    const member = rel.dstName.slice(rel.dstName.lastIndexOf('.') + 1);
+    const targets = receiver ? receiverMembers(receiver.context, receiver.type, member) : [];
+    return targets.length === 1 ? targets[0] : undefined;
   }
 
   function factoryReceiver(context: string, factory: string): { context: string; type: string } | undefined {
@@ -5218,6 +5322,22 @@ export function resolveEdges(
     // matches in set order without walking the whole set per relationship.
     const importedOrder = new Map([...importedFilePaths].map((fp, i) => [fp, i]));
     const transitiveOrder = new Map([...transitiveFilePaths].map((fp, i) => [fp, i]));
+
+    const typedCalls = result.receiverTypedCalls?.length ? new Set(result.receiverTypedCalls) : undefined;
+    let typedByCall: Map<string, ParsedRelationship[]> | undefined;
+    // The typed relationships of a call's sites: same caller, same member name.
+    const typedSites = (srcName: string, member: string): ParsedRelationship[] => {
+      if (!typedByCall) {
+        typedByCall = new Map();
+        for (const r of result.relationships) {
+          if (r.predicate !== 'CALLS' || !r.receiverType) continue;
+          const key = `${r.srcName}\0${r.dstName.slice(r.dstName.lastIndexOf('.') + 1)}`;
+          const list = typedByCall.get(key);
+          if (list) list.push(r); else typedByCall.set(key, [r]);
+        }
+      }
+      return typedByCall.get(`${srcName}\0${member}`) ?? [];
+    };
 
     for (const rel of result.relationships) {
       if (rel.predicate !== 'CALLS' && rel.predicate !== 'EXTENDS' && rel.predicate !== 'REFERENCES' && rel.predicate !== 'IMPORTS') continue;
@@ -5363,13 +5483,10 @@ export function resolveEdges(
       // A typed receiver resolves to its exact member. Otherwise a receiver-only
       // relationship stops here, and any other resolves by its own name below.
       if (rel.predicate === 'CALLS' && (rel.receiverType || rel.receiverFactory)) {
-        const receiver = rel.receiverType ? { context: srcFilePath, type: rel.receiverType }
-          : factoryReceiver(srcFilePath, rel.receiverFactory!);
-        const member = rel.dstName.slice(rel.dstName.lastIndexOf('.') + 1);
-        const targets = receiver ? receiverMembers(receiver.context, receiver.type, member) : [];
-        if (targets.length === 1) {
-          resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: targets[0].fp, dstName: rel.dstName,
-            dstQualifiedKey: targets[0].key, predicate: 'CALLS', confidence: 0.95, tier: 'type' });
+        const target = typedCallTarget(srcFilePath, rel);
+        if (target) {
+          resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: target.fp, dstName: rel.dstName,
+            dstQualifiedKey: target.key, predicate: 'CALLS', confidence: 0.95, tier: 'type' });
           stats.resolvedType = (stats.resolvedType ?? 0) + 1;
           continue;
         }
@@ -5399,6 +5516,19 @@ export function resolveEdges(
       // call-site name before any import binding rewrite so a local shadow wins.
       // Without an import binding, preserve the existing file-wide preference.
       const hasSameFileDefinition = fileHasSymbol.get(srcFilePath)?.has(origDstName) === true;
+      // Java: when every site of this call has a typed receiver and each one
+      // resolved to a member in another file, a same-named method here is
+      // some other class's. The call goes to a typed target (which its typed
+      // relationship writes anyway), never to this file.
+      if (hasSameFileDefinition && rel.predicate === 'CALLS' && typedCalls?.has(`${rel.srcName}\0${rel.dstName}`)) {
+        const sites = typedSites(rel.srcName, rel.dstName).map(site => typedCallTarget(srcFilePath, site));
+        if (sites.length && sites.every(t => t && t.fp !== srcFilePath)) {
+          resolved.push({ srcFilePath, srcName, dstFilePath: sites[0]!.fp, dstName: origDstName,
+            dstQualifiedKey: sites[0]!.key, predicate: 'CALLS', confidence: 0.95, tier: 'type' });
+          stats.resolvedType = (stats.resolvedType ?? 0) + 1;
+          continue;
+        }
+      }
       if (
         hasSameFileDefinition &&
         (!binding || (rel.importBinding !== true && sameScopeDefines(result, srcName, origDstName)))

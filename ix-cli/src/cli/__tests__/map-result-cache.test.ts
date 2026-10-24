@@ -16,16 +16,20 @@ import {
   clearMapBaseline,
   ingestMtimeCachePath,
   mapResultCachePath,
+  mapStalePath,
 } from "../config.js";
 import {
   backendIdentity,
   loadCachedMap,
+  loadLastMap,
   resolveMapCacheSlot,
   revisionToken,
   saveCachedMap,
   type MapCacheSlot,
 } from "../map-result-cache.js";
 import { acquireMapLock, lockPathForTest, requestMapRerun, takeMapRerun } from "../single-flight.js";
+import { readMapStale } from "../map-freshness.js";
+import { hasCompletedMapBaseline } from "../stale.js";
 import { createHash } from "node:crypto";
 
 /**
@@ -56,6 +60,8 @@ class FakeBackend {
   onCommit: (() => void) | undefined;
   /** Answer every commit with a 500, as a backend that is down would. */
   failCommits = false;
+  /** Answer a commit carrying a patch for one of these uris with a 500: a partial failure. */
+  readonly failUris = new Set<string>();
   readonly hashes = new Map<string, { workspaceId: string | null; uri: string; hash: string }>();
   private readonly patches = new Map<string, unknown[]>();
   private server: Server | undefined;
@@ -104,6 +110,9 @@ class FakeBackend {
         const parsed = JSON.parse(body) as { patches?: SentPatch[] };
         patches = parsed.patches ?? [parsed as SentPatch];
       } catch { /* a body we cannot read is still a request */ }
+      if (patches.some(p => p.source?.uri && this.failUris.has(p.source.uri))) {
+        return send(500, { error: "write refused" });
+      }
       if (!this.frozenRevision) this.rev += patches.length || 1;
       for (const { patchId, source, intent, ops } of patches) {
         if (patchId) this.patches.set(patchId, ops ?? []);
@@ -233,6 +242,7 @@ describe("ix map reuses an unchanged map", () => {
     for (const k of [
       "HOME", "USERPROFILE", "IX_HOME", "IX_ENDPOINT", "IX_LOCK_DIR", "IX_AUTO_MAP",
       "IX_MAP_FULL_INGEST", "IX_MAP_DEADLINE_MS", "IX_STITCH_COOLDOWN_MS", "IX_STITCH_WAIT_MS",
+      "IX_MAP_EAGER", "IX_MAP_REFRESH_DEBOUNCE_MS",
     ]) {
       saved[k] = process.env[k];
       delete process.env[k];
@@ -344,32 +354,254 @@ describe("ix map reuses an unchanged map", () => {
     expect(line(fresh.stderr)).toBe("map: 4 files · 1s/0ss/1m regions");
   });
 
-  it("asks again when a file changed", async () => {
-    await map("--format", "json");
-    writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
-    const before = backend.mapRequests();
-    const after = await map("--format", "json");
-    expect(backend.mapRequests()).toBe(before + 1);
-    expect(JSON.parse(after.stdout).file_count).toBe(5);
+  describe("an explicit `ix map` computes a stale map (CL-13)", () => {
+    // No IX_AUTO_MAP: a person or agent running the command, who wants the
+    // map now. Only the hooks' automatic runs defer.
+    const autoMap = async (...args: string[]) => {
+      process.env.IX_AUTO_MAP = "1";
+      try { return await map(...args); } finally { delete process.env.IX_AUTO_MAP; }
+    };
+
+    it("computes after an incremental edit, as before CL-13", async () => {
+      await map("--format", "json");
+      writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
+      const before = backend.mapRequests();
+      const after = JSON.parse((await map("--format", "json")).stdout);
+      expect(backend.mapRequests()).toBe(before + 1);
+      expect(after.map_stale).toBe(false);
+      expect(after.regions_as_of).toBeNull();
+      expect(after.file_count).toBe(5);
+      expect(readMapStale(repo)).toBeNull();
+      expect(hasCompletedMapBaseline(repo)).toBe(true);
+    });
+
+    it("recomputes on a no-change run after an automatic map deferred, returns fresh counts, and clears the marker", async () => {
+      const first = JSON.parse((await map("--format", "json")).stdout);
+      writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
+      const deferred = JSON.parse((await autoMap("--format", "json")).stdout);
+      expect(deferred.map_stale, "the hook's run deferred").toBe(true);
+      expect(deferred.file_count).toBe(first.file_count);
+      expect(readMapStale(repo)).not.toBeNull();
+
+      const before = backend.mapRequests();
+      const explicit = JSON.parse((await map("--format", "json")).stdout);
+      expect(backend.mapRequests(), "nothing changed, but the map was stale").toBe(before + 1);
+      expect(explicit.map_stale).toBe(false);
+      expect(explicit.regions_as_of).toBeNull();
+      expect(explicit.file_count, "this ingest's count, not the last map's").toBe(5);
+      expect(explicit.map_rev).toBeGreaterThan(first.map_rev);
+      expect(readMapStale(repo), "the marker is cleared").toBeNull();
+      expect(hasCompletedMapBaseline(repo)).toBe(true);
+
+      // Fresh now: the next run is the ordinary no-change reuse.
+      const again = backend.mapRequests();
+      await map("--format", "json");
+      expect(backend.mapRequests()).toBe(again);
+    });
+
+    it("computes under --silent too: agents run `ix map --silent` to refresh", async () => {
+      await map("--silent");
+      writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
+      const before = backend.mapRequests();
+      const run = await map("--silent");
+      expect(backend.mapRequests()).toBe(before + 1);
+      expect(run.stderr).not.toContain("map=stale");
+      expect(readMapStale(repo)).toBeNull();
+    });
   });
 
-  it("asks again when an ingest wrote to the graph, even if the revision did not move", async () => {
-    await map("--format", "json");
-    backend.frozenRevision = true;
-    writeFileSync(join(repo, "src", "m1.ts"), "export function f1(): number { return 100; }\n", "utf8");
-    const before = backend.mapRequests();
-    await map("--format", "json");
-    expect(backend.mapRequests()).toBe(before + 1);
-  });
+  describe("an automatic map defers after an incremental edit (CL-13)", () => {
+    const line = (s: string) => s.split("\n").find(l => l.startsWith("map: "))?.replace(/ · \d+ms/, "");
+    // IX_AUTO_MAP=1 is what the editor/agent hooks and `ix watch` set; the
+    // outer afterEach restores it.
+    beforeEach(() => { process.env.IX_AUTO_MAP = "1"; });
 
-  it("asks again when a file was deleted, even if the revision did not move", async () => {
-    await map("--format", "json");
-    backend.frozenRevision = true;
-    unlinkSync(join(repo, "src", "m3.ts"));
-    const before = backend.mapRequests();
-    const after = await map("--format", "json");
-    expect(backend.mapRequests()).toBe(before + 1);
-    expect(JSON.parse(after.stdout).file_count).toBe(3);
+    it("defers the map after an incremental edit", async () => {
+      const first = JSON.parse((await map("--format", "json")).stdout);
+      expect(first.map_stale).toBe(false);
+      writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
+      const before = backend.mapRequests();
+      const after = JSON.parse((await map("--format", "json")).stdout);
+      expect(backend.mapRequests(), "no map request after an edit").toBe(before);
+      expect(after.map_stale).toBe(true);
+      // Everything is the previous map's, not this ingest's, and says so.
+      expect(after.file_count).toBe(first.file_count);
+      expect(after.map_rev).toBe(first.map_rev);
+      expect(after.regions).toEqual(first.regions);
+      expect(after.region_count).toBe(first.region_count);
+      expect(after.regions_as_of).toEqual({ map_rev: first.map_rev, file_count: first.file_count });
+      expect(first.regions_as_of, "null, but present, when fresh").toBeNull();
+      expect(existsSync(mapStalePath(repo)), "the marker is written").toBe(true);
+      // The edit itself reached the graph.
+      expect([...backend.hashes.values()].some(r => r.uri === "src/m9.ts")).toBe(true);
+      // The completion marker does not claim the old map for the new revision.
+      expect(hasCompletedMapBaseline(repo)).toBe(false);
+    });
+
+    it("defers when an ingest wrote to the graph, even if the revision did not move", async () => {
+      await map("--format", "json");
+      backend.frozenRevision = true;
+      writeFileSync(join(repo, "src", "m1.ts"), "export function f1(): number { return 100; }\n", "utf8");
+      const before = backend.mapRequests();
+      const after = JSON.parse((await map("--format", "json")).stdout);
+      expect(backend.mapRequests()).toBe(before);
+      expect(after.map_stale).toBe(true);
+    });
+
+    it("defers when a file was deleted, even if the revision did not move", async () => {
+      await map("--format", "json");
+      backend.frozenRevision = true;
+      unlinkSync(join(repo, "src", "m3.ts"));
+      const before = backend.mapRequests();
+      const after = JSON.parse((await map("--format", "json")).stdout);
+      expect(backend.mapRequests()).toBe(before);
+      expect(after.map_stale).toBe(true);
+      expect(after.file_count, "the previous map's count, until a refresh").toBe(4);
+      expect(after.regions_as_of, "named as the previous map's").toEqual({ map_rev: expect.any(Number), file_count: 4 });
+    });
+
+    it("always computes the first map", async () => {
+      const first = JSON.parse((await map("--format", "json")).stdout);
+      expect(backend.mapRequests()).toBe(1);
+      expect(first.map_stale).toBe(false);
+      expect(existsSync(mapStalePath(repo))).toBe(false);
+    });
+
+    it("computes under --remap and clears the marker", async () => {
+      await map("--format", "json");
+      writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
+      await map("--format", "json");
+      expect(readMapStale(repo)).not.toBeNull();
+      const before = backend.mapRequests();
+      const remapped = JSON.parse((await map("--format", "json", "--remap")).stdout);
+      expect(backend.mapRequests()).toBe(before + 1);
+      expect(remapped.map_stale).toBe(false);
+      expect(remapped.file_count).toBe(5);
+      expect(readMapStale(repo)).toBeNull();
+      expect(hasCompletedMapBaseline(repo)).toBe(true);
+    });
+
+    it("computes under --full", async () => {
+      await map("--format", "json");
+      writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
+      const before = backend.mapRequests();
+      const full = JSON.parse((await map("--format", "json", "--full")).stdout);
+      expect(backend.mapRequests()).toBe(before + 1);
+      expect(full.map_stale).toBe(false);
+      expect(readMapStale(repo)).toBeNull();
+    });
+
+    it("computes under IX_MAP_EAGER=1, as before", async () => {
+      process.env.IX_MAP_EAGER = "1";
+      await map("--format", "json");
+      writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
+      const before = backend.mapRequests();
+      const after = JSON.parse((await map("--format", "json")).stdout);
+      expect(backend.mapRequests()).toBe(before + 1);
+      expect(after.file_count).toBe(5);
+      expect(after.map_stale).toBe(false);
+    });
+
+    it("stays deferred on a no-change automatic run while the marker is set", async () => {
+      await map("--format", "json");
+      writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
+      await map("--format", "json");
+      const marker = readMapStale(repo);
+      const before = backend.mapRequests();
+      const again = JSON.parse((await map("--format", "json")).stdout);
+      expect(backend.mapRequests(), "no request for an unchanged, already stale map").toBe(before);
+      expect(again.map_stale).toBe(true);
+      expect(readMapStale(repo), "the marker it found is kept as it was").toEqual(marker);
+    });
+
+    it("computes when there is no stored map to show, or only another request's", async () => {
+      await map("--format", "json");
+      rmSync(mapResultCachePath(repo), { force: true });
+      writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
+      let before = backend.mapRequests();
+      await map("--format", "json");
+      expect(backend.mapRequests(), "nothing stored").toBe(before + 1);
+
+      const stored = JSON.parse(readFileSync(mapResultCachePath(repo), "utf8"));
+      writeFileSync(mapResultCachePath(repo), JSON.stringify({ ...stored, key: "another request" }));
+      writeFileSync(join(repo, "src", "m8.ts"), "export const eight = 8;\n", "utf8");
+      before = backend.mapRequests();
+      const after = JSON.parse((await map("--format", "json")).stdout);
+      expect(backend.mapRequests(), "a foreign stored map").toBe(before + 1);
+      expect(after.map_stale).toBe(false);
+      expect(loadLastMap(repo, "another request")).toBeUndefined();
+    });
+
+    it("computes after an ingest with commit errors", async () => {
+      await map("--format", "json");
+      writeFileSync(join(repo, "src", "m8.ts"), "export const eight = 8;\n", "utf8");
+      writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
+      // One of the two lands, the other is refused: a partial failure, which
+      // exits 1 but still maps.
+      backend.failUris.add("src/m9.ts");
+      const before = backend.mapRequests();
+      await runMap();
+      expect(process.exitCode, "the partial commit failure is reported").toBe(1);
+      expect(backend.mapRequests(), "a run with errors is not deferred").toBe(before + 1);
+      expect(readMapStale(repo)).toBeNull();
+    });
+
+    it("neither maps nor defers after an ingest that failed outright", async () => {
+      await map("--format", "json");
+      writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
+      backend.failCommits = true;
+      const before = backend.mapRequests();
+      await runMap();
+      expect(process.exitCode).toBe(1);
+      expect(backend.mapRequests()).toBe(before);
+      expect(readMapStale(repo)).toBeNull();
+    });
+
+    it("says map=stale on the --silent line, and only then", async () => {
+      const clean = await map("--silent");
+      expect(line(clean.stderr)).toBe("map: 4 files · 1s/0ss/1m regions");
+      writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
+      const deferred = await map("--silent");
+      expect(line(deferred.stderr)).toBe("map: 4 files · 1s/0ss/1m regions · map=stale");
+    });
+
+    it("says map_stale=true in llm only when stale", async () => {
+      const clean = await map("--format", "llm");
+      expect(clean.stdout).not.toContain("map_stale");
+      writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
+      const deferred = await map("--format", "llm");
+      const record = deferred.stdout.split("\n")[0];
+      expect(record).toMatch(/^map .*map_stale=true/);
+      expect(record).toMatch(/\bregions_as_of_rev=\d+\b/);
+      expect(record).toMatch(/\bregions_as_of_files=4\b/);
+      expect(clean.stdout).not.toContain("regions_as_of");
+      // Its own record, straight after the `map` record, not just a field on it.
+      expect(deferred.stdout.split("\n")[1]).toMatch(/^diagnostic code=map_stale message="Stale map: not recomputed after this edit\. Every count and region here is from the last map \(map rev \d+, 4 files\)\. Run ix map --remap/);
+      expect(clean.stdout).not.toContain("diagnostic");
+    });
+
+    it("opens a stale text map with a warning on stdout that says how to refresh", async () => {
+      await map();
+      writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
+      const deferred = await map();
+      const first = deferred.stdout.split("\n").find(l => l.trim() !== "") ?? "";
+      expect(first, "the first thing printed").toMatch(/Warning\s+Stale map: not recomputed after this edit/);
+      expect(first).toContain("ix map --remap");
+      expect(first, "names the map the regions are from").toMatch(/last map \(map rev \d+, 4 files\)/);
+      expect(deferred.stderr).not.toContain("Mapped in");
+    });
+
+    it("marks the map stale when a coalesced map's rerun changed files", async () => {
+      await map("--silent");
+      writeFileSync(join(repo, "src", "m1.ts"), "export const changed = 1;\n", "utf8");
+      backend.onCommit = () => {
+        writeFileSync(join(repo, "src", "m2.ts"), "export const late = 2;\n", "utf8");
+        requestMapRerun(repo);
+      };
+      await map("--silent");
+      const marker = readMapStale(repo);
+      expect(marker, "the rerun's ingest left the map stale, and says so").not.toBeNull();
+    });
   });
 
   it("asks again when another client moved the revision", async () => {
@@ -474,6 +706,62 @@ describe("ingestFiles invalidates the cached map", () => {
       write.mockRestore();
     }
   };
+
+  describe("reports which runs were an ordinary incremental update", () => {
+    const ingestWith = async (extra: { force?: boolean } = {}) => {
+      const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        return await ingestFiles(repo, { format: "json", suppressOutput: true, printSummary: false, mapMode: true, ...extra });
+      } finally {
+        write.mockRestore();
+      }
+    };
+
+    it("is false for the first ingest and for one that changed nothing", async () => {
+      expect((await ingest()).incremental).toBe(false);
+      expect((await ingest()).incremental).toBe(false);
+    });
+
+    it("is true for a baseline run that changed or deleted a file", async () => {
+      await ingest();
+      writeFileSync(join(repo, "src", "m1.ts"), "export const v1 = 100;\n", "utf8");
+      expect((await ingest()).incremental).toBe(true);
+      unlinkSync(join(repo, "src", "m2.ts"));
+      expect((await ingest()).incremental).toBe(true);
+    });
+
+    it("is false under --force", async () => {
+      await ingest();
+      writeFileSync(join(repo, "src", "m1.ts"), "export const v1 = 100;\n", "utf8");
+      expect((await ingestWith({ force: true })).incremental).toBe(false);
+    });
+
+    it("is false when the DB-reset guard fires", async () => {
+      await ingest();
+      backend.hashes.clear();
+      writeFileSync(join(repo, "src", "m1.ts"), "export const v1 = 100;\n", "utf8");
+      expect((await ingest()).incremental).toBe(false);
+    });
+
+    it("is false for an extractor rebuild", async () => {
+      await ingest();
+      const baseline = JSON.parse(readFileSync(ingestMtimeCachePath(repo), "utf8"));
+      writeFileSync(ingestMtimeCachePath(repo), JSON.stringify({ ...baseline, extractor: "tree-sitter/0.1" }));
+      writeFileSync(join(repo, "src", "m1.ts"), "export const v1 = 100;\n", "utf8");
+      expect((await ingest()).incremental).toBe(false);
+    });
+
+    it("is false for a run with commit errors", async () => {
+      await ingest();
+      writeFileSync(join(repo, "src", "m0.ts"), "export const v0 = 100;\n", "utf8");
+      writeFileSync(join(repo, "src", "m1.ts"), "export const v1 = 100;\n", "utf8");
+      backend.failUris.add("src/m1.ts");
+      const summary = await ingest();
+      expect(summary.commitErrors).toBeGreaterThan(0);
+      expect(summary.incremental).toBe(false);
+      process.exitCode = undefined;
+    });
+  });
 
   it("reports an ingest that wrote nothing as unchanged, and one that wrote as changed", async () => {
     expect((await ingest()).graphUnchanged).toBe(false);
