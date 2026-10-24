@@ -71,7 +71,7 @@ jobs:
       # so the commit is the only reliable identity the bundle has.
       sha: ${{ steps.fetch-compass.outputs.sha }}
     steps:
-      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - name: Set up Node.js
@@ -184,7 +184,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         if: runner.os == 'Linux'
         with:
           egress-policy: audit
@@ -492,7 +492,7 @@ jobs:
       id-token: write # keyless signing for provenance attestation
       attestations: write # record the build provenance attestation
     steps:
-      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - name: Checkout

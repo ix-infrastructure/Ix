@@ -153,6 +153,7 @@ import { SupportedLanguages, languageFromPath } from './languages.js';
 import { LANGUAGE_QUERIES } from './queries.js';
 import { classifyFileRole } from './role-classifier.js';
 import type { RoleClassification } from './role-classifier.js';
+import { callReceiver, collectReceiverFacts } from './receiver-types.js';
 import { summarySignature, type FileSummary } from './symbol-index.js';
 export type { FileSummary } from './symbol-index.js';
 
@@ -234,6 +235,18 @@ export interface ParsedRelationship {
    * it becomes an edge only when it resolves to exactly one tracked file.
    */
   importVia?: 'helper';
+  /**
+   * Lexically inferred receiver. An exact member resolves at tier `type`;
+   * otherwise the relationship resolves by its name, as without inference.
+   */
+  receiverType?: string;
+  receiverFactory?: string;
+  /**
+   * Set on a typed relationship that only exists for its receiver (the call
+   * also has its own, unchanged relationship). Without an exact member it
+   * resolves to nothing: no edge, no claim, no unresolved-call entry.
+   */
+  receiverOnly?: true;
 }
 
 /**
@@ -284,6 +297,9 @@ export interface FileParseResult {
    * file parsed cleanly.
    */
   hasParseErrors?: true;
+  receiverFactories?: Array<[string, string]>;
+  receiverHeritage?: Array<[string, string]>;
+  receiverPackage?: string;
   fileRole: RoleClassification;
 }
 
@@ -2645,6 +2661,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       language === SupportedLanguages.Rust || language === SupportedLanguages.PHP;
     const jsTsCallBareOnly = new Map<string, boolean>();
     const jsTsCallRelationship = new Map<string, ParsedRelationship>();
+    // Every CALLS relationship by `${scope}\0${callKey}`, so a typed relationship
+    // can join the call relationship of the same name.
+    const callRelationships = new Map<string, ParsedRelationship>();
     // JS/TS: helper-literal module paths already emitted (see importVia).
     const jsTsHelperImports = new Set<string>();
     if (isJsTs) {
@@ -2998,6 +3017,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       }
     }
 
+    const receiverFacts = [SupportedLanguages.Scala, SupportedLanguages.TypeScript, SupportedLanguages.Go].includes(language)
+      ? collectReceiverFacts(tree.rootNode, language, checkBudget) : undefined;
+
     // --- Second pass: calls and imports ---
     for (const match of pass2Matches) {
       checkBudget();
@@ -3184,7 +3206,14 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         // R package-qualified calls (pkg::func) carry a distinct @_namespace
         // capture so the dstName can keep the :: separator (vs a plain dotted name).
         const namespaceCapture = match.captures.find((c: any) => c.name === '_namespace');
-        if (builtinsForLanguage(language).has(callee) && !qualifierCapture && !namespaceCapture) continue;
+        // A member call whose receiver has a lexically inferred type or factory
+        // also gets a typed relationship (below). The call's own relationship is
+        // unchanged, so inference only ever adds edges.
+        const typedReceiver = receiverFacts && match.captures.some((c: any) => c.name === 'call')
+          ? callReceiver(callName.node, receiverFacts) : undefined;
+        // A builtin-named call is still dropped; only its typed relationship stays.
+        const builtinCall = builtinsForLanguage(language).has(callee) && !qualifierCapture && !namespaceCapture;
+        if (builtinCall && !typedReceiver) continue;
 
         // For Python: skip calls that are decorator applications.
         // When a method is decorated (e.g. @util.deprecated(...)), the call sits at the
@@ -3340,13 +3369,13 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           return `${qualifier}.${callee}`;
         })();
 
-        if (!qualifierCapture && !namespaceCapture && effectiveCallee === callee) {
+        if (!builtinCall && !qualifierCapture && !namespaceCapture && effectiveCallee === callee) {
           recordJsTsImportUse('CALLS', caller, effectiveCallee, callName.node, callee);
         }
 
         const callKey = phpCallKind ? `${phpCallKind}:${effectiveCallee}` : effectiveCallee;
         const bareKey = `${scope}\x00${callKey}`;
-        if (tracksBareCalls) {
+        if (!builtinCall && tracksBareCalls) {
           let isBare: boolean;
           if (isJsTs) {
             // `foo()` / `new Foo()`: the JS/TS queries capture the callee as an
@@ -3374,7 +3403,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           }
           jsTsCallBareOnly.set(bareKey, (jsTsCallBareOnly.get(bareKey) ?? true) && isBare);
         }
-        if (!seen.has(callKey)) {
+        if (builtinCall) {
+          // Only the typed relationship below.
+        } else if (!seen.has(callKey)) {
           seen.add(callKey);
           const rel: ParsedRelationship = {
             srcName: caller,
@@ -3383,7 +3414,29 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
             ...(phpCallKind ? { phpCallKind } : {}),
           };
           relationships.push(rel);
+          callRelationships.set(bareKey, rel);
           if (tracksBareCalls) jsTsCallRelationship.set(bareKey, rel);
+        } else {
+          // The call also names what an earlier typed relationship named: it is
+          // a call in its own right, so it keeps its name-based fallback.
+          delete callRelationships.get(bareKey)?.receiverOnly;
+        }
+        if (typedReceiver) {
+          // `Type.member`, or `receiver.member` for a factory-typed receiver.
+          const typedName = `${typedReceiver.type ?? typedReceiver.receiver}.${callee}`;
+          const typedKey = `${scope}\x00${typedName}`;
+          const receiver = typedReceiver.type ? { receiverType: typedReceiver.type } : { receiverFactory: typedReceiver.factory! };
+          const named = callRelationships.get(typedKey);
+          if (named) {
+            // Same name as the call's own relationship: try the type first, then
+            // fall back to that name as before.
+            if (!named.receiverType && !named.receiverFactory) Object.assign(named, receiver);
+          } else if (!seen.has(typedName)) {
+            seen.add(typedName);
+            const rel: ParsedRelationship = { srcName: caller, dstName: typedName, predicate: 'CALLS', ...receiver, receiverOnly: true };
+            relationships.push(rel);
+            callRelationships.set(typedKey, rel);
+          }
         }
         continue;
       }
@@ -3501,6 +3554,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       ...(phpNamespaces.blocks > 0 ? { phpNamespaceBlocks: phpNamespaces.blocks } : {}),
       // Absent unless true, for the same reason.
       ...(tree.rootNode.hasError ? { hasParseErrors: true as const } : {}),
+      ...(receiverFacts?.factories.length ? { receiverFactories: receiverFacts.factories } : {}),
+      ...(receiverFacts?.heritage.length ? { receiverHeritage: receiverFacts.heritage } : {}),
+      ...(receiverFacts?.package ? { receiverPackage: receiverFacts.package } : {}),
       fileRole: classifyFileRole(filePath, source),
     };
   } catch (e) {
@@ -3540,12 +3596,13 @@ export interface ResolvedEdge {
 }
 
 /**
+ * `type`: a lexical receiver type resolved an exact member (confidence 0.95).
  * `binding`: an explicit import binding names the target. `import`: the
  * target is in a file this one imports (or the import itself). `transitive`:
  * one re-export hop away. `qualifier`: a dotted name's qualifier picked the
  * file. `global`: the only definition of the name anywhere.
  */
-export type ResolutionTier = 'binding' | 'import' | 'transitive' | 'qualifier' | 'global';
+export type ResolutionTier = 'type' | 'binding' | 'import' | 'transitive' | 'qualifier' | 'global';
 
 // ---------------------------------------------------------------------------
 // resolveCallEdges helpers
@@ -3619,6 +3676,8 @@ export function summarizeParseResult(r: FileParseResult): FileSummary {
       });
     } else if (rel.predicate === 'CALLS' || rel.predicate === 'REFERENCES' || rel.predicate === 'EXTENDS') {
       refs.add(rel.dstName);
+      if (rel.receiverType) refs.add(rel.receiverType);
+      if (rel.receiverFactory) refs.add(rel.receiverFactory);
     }
   }
   const summary = {
@@ -3629,6 +3688,10 @@ export function summarizeParseResult(r: FileParseResult): FileSummary {
     ...(exportPublicNames ? { exportPublicNames } : {}),
     imports,
     ...(phpTypes ? { phpTypes } : {}),
+    ...(r.receiverFactories ? { receiverFactories: r.receiverFactories } : {}),
+    ...(r.receiverHeritage ? { receiverHeritage: r.receiverHeritage } : {}),
+    ...(r.receiverPackage ? { receiverPackage: r.receiverPackage } : {}),
+    ...(r.importAliases ? { importAliases: r.importAliases } : {}),
     refs: [...refs].sort(),
   };
   return { ...summary, sig: summarySignature(summary) };
@@ -4106,6 +4169,8 @@ export function resolveEdges(
     importLookups: number; transitiveLookups: number; globalFallbacks: number;
     globalCandidateTotal: number; resolvedImport: number; resolvedTransitive: number;
     resolvedGlobal: number; resolvedQualifier: number; skippedSameFile: number; skippedAmbiguous: number;
+    /** Exact members of an inferred receiver type (optional for older callers). */
+    resolvedType?: number;
   },
   globalIndex?: GlobalResolutionIndex,
   opts?: {
@@ -4889,6 +4954,171 @@ export function resolveEdges(
     return narrowed;
   }
 
+  // Receiver types resolve exact members, in the defining file's import context
+  // as well (factory returns and inheritance).
+  // A Go qualifier names an aliased import, or an unaliased one by its last path element.
+  function goImportForQualifier(summary: FileSummary | undefined, qualifier: string): string | undefined {
+    const aliased = summary?.importAliases?.[qualifier];
+    if (aliased) return aliased;
+    const named = [...new Set((summary?.imports ?? []).map(imp => imp.dstName)
+      .filter(dst => dst.split('/').pop() === qualifier))];
+    return named.length === 1 ? named[0] : undefined;
+  }
+  /**
+   * The names a Scala file's imports bring into scope. Imports are summarized
+   * as written per selector: `a.b.X`, `a.b` (from `a.b._`), and from braces or
+   * Scala 3 `a.b.X => Y` / `a.b.X as Y` (renamed), `a.b.X => _` (hidden),
+   * `a.b._` / `a.b.*` (wildcard).
+   */
+  function scalaImportScope(summary: FileSummary | undefined): {
+    named: Map<string, string[]>; wildcards: Set<string>; excluded: Set<string>;
+  } {
+    const named = new Map<string, string[]>();
+    const wildcards = new Set<string>();
+    const excluded = new Set<string>();
+    const bind = (local: string, fq: string) => named.set(local, [...(named.get(local) ?? []), fq]);
+    for (const { dstName } of summary?.imports ?? []) {
+      const renamed = /^(\S+?)\s*=>\s*(\S+)$/.exec(dstName) ?? /^(\S+)\s+as\s+(\S+)$/.exec(dstName);
+      if (renamed) {
+        // The original name is not imported, not even by a wildcard beside it.
+        excluded.add(renamed[1]);
+        if (renamed[2] !== '_') bind(renamed[2], renamed[1]);
+        continue;
+      }
+      if (dstName.endsWith('._') || dstName.endsWith('.*')) {
+        wildcards.add(dstName.slice(0, -2));
+        continue;
+      }
+      // `a.b.X`, or the package of a top-level wildcard (`import a.b._`).
+      wildcards.add(dstName);
+      if (dstName.includes('.')) bind(dstName.slice(dstName.lastIndexOf('.') + 1), dstName);
+    }
+    return { named, wildcards, excluded };
+  }
+  function findReceiverProviders(context: string, rawType: string): Array<{ fp: string; type: string }> {
+    const summary = summaries.get(context);
+    const language = summary?.language ?? languageFromPath(context);
+    const parts = rawType.split('.');
+    let type = parts.pop()!;
+    if (language === SupportedLanguages.Scala) {
+      const candidates = (symbolToFiles.get(type) ?? []).filter(fp => summaries.get(fp)?.language === language);
+      if (parts.length) return candidates.filter(fp => summaries.get(fp)?.receiverPackage === parts.join('.')).map(fp => ({ fp, type }));
+      const scope = scalaImportScope(summary);
+      // An explicit import binds the name, renamed (`{Target => T}`) or not, to
+      // that type only: never a same-named type of this package.
+      const named = scope.named.get(type);
+      if (named) {
+        return named.flatMap(fq => {
+          const dot = fq.lastIndexOf('.');
+          const original = fq.slice(dot + 1);
+          return (symbolToFiles.get(original) ?? [])
+            .filter(fp => summaries.get(fp)?.language === language && dot > 0 && summaries.get(fp)?.receiverPackage === fq.slice(0, dot))
+            .map(fp => ({ fp, type: original }));
+        });
+      }
+      if (fileHasSymbol.get(context)?.has(type)) return [{ fp: context, type }];
+      // Otherwise only a type in scope: this package's, or a wildcard-imported
+      // package's (`import p._` is summarized as `p`) unless the import renamed
+      // or hid it (`{Target => T, _}`, `{Target => _, _}`). Never a same-named
+      // type elsewhere, which is how `Option` would land on an unrelated class.
+      return candidates.filter(fp => {
+        const pkg = summaries.get(fp)?.receiverPackage;
+        if (pkg === summary?.receiverPackage) return true;
+        return pkg !== undefined && scope.wildcards.has(pkg) && !scope.excluded.has(`${pkg}.${type}`);
+      }).map(fp => ({ fp, type }));
+    }
+    const binding = importBindingsByLocal.get(context)?.get(type);
+    // A same-named declaration in the importing file can only be a nested
+    // shadow (a `namespace` class); without scope facts, guess neither.
+    if (binding && parts.length === 0 && fileHasSymbol.get(context)?.has(type)) return [];
+    if (binding && parts.length === 0) {
+      const files = resolveImportTargets(context, language!, binding.pkg, binding.pkg, 'types');
+      type = binding.imported === 'default'
+        ? (files.length === 1 ? filePublicNames.get(files[0])?.get('default') ?? type : type)
+        : binding.imported;
+      return files.filter(fp => fileHasSymbol.get(fp)?.has(type)).map(fp => ({ fp, type }));
+    }
+    if (parts.length && language === SupportedLanguages.Go) {
+      const prefix = parts.join('.');
+      const alias = goImportForQualifier(summary, prefix);
+      if (!alias) return [];
+      return resolveImportQualifierTargets(context, language, alias)
+        .filter(fp => fileHasSymbol.get(fp)?.has(type)).map(fp => ({ fp, type }));
+    }
+    // A namespace-qualified TS type must not degrade to an unrelated bare type.
+    if (parts.length && language === SupportedLanguages.TypeScript) return [];
+    if (!parts.length && fileHasSymbol.get(context)?.has(type)) return [{ fp: context, type }];
+    // TypeScript: a type neither defined here nor imported is a global or
+    // library type (`Map`, `Response`), never a same-named class elsewhere.
+    if (language !== SupportedLanguages.Go) return [];
+    const compatible = (fp: string): boolean => importLanguageCompatible(language, fileLanguage.get(fp) ?? languageFromPath(fp));
+    return (symbolToFiles.get(type) ?? []).filter(compatible)
+      .filter(fp => goPackageKey(fp) === goPackageKey(context)).map(fp => ({ fp, type }));
+  }
+
+  const receiverProviderCache = new Map<string, Array<{ fp: string; type: string }>>();
+  function receiverProviders(context: string, type: string): Array<{ fp: string; type: string }> {
+    const key = `${context}\0${type}`;
+    if (!receiverProviderCache.has(key)) receiverProviderCache.set(key, findReceiverProviders(context, type));
+    return receiverProviderCache.get(key)!;
+  }
+  const goReceiverFiles = new Map<string, string[]>();
+  const goPackageKey = (fp: string): string => `${nodePath.dirname(fp)}\0${summaries.get(fp)?.receiverPackage ?? ''}`;
+  for (const [fp, summary] of summaries) if (summary.language === SupportedLanguages.Go) {
+    const key = goPackageKey(fp);
+    const files = goReceiverFiles.get(key) ?? [];
+    files.push(fp);
+    goReceiverFiles.set(key, files);
+  }
+
+  function receiverMembers(context: string, type: string, member: string, seen = new Set<string>()): Array<{ fp: string; key: string }> {
+    const providers = receiverProviders(context, type);
+    if (providers.length !== 1) return [];
+    const { fp, type: name } = providers[0];
+    const marker = `${fp}\0${name}`;
+    if (seen.has(marker)) return [];
+    const nextSeen = new Set(seen).add(marker);
+    const key = `${name}.${member}`;
+    if (summaries.get(fp)?.language === SupportedLanguages.Go) {
+      const targets = (qualifiedToFiles.get(key) ?? [])
+        .filter(candidate => summaries.get(candidate)?.language === SupportedLanguages.Go && goPackageKey(candidate) === goPackageKey(fp))
+        .flatMap(candidate => (fileQKeys.get(candidate)?.get(member) ?? [])
+          .filter(q => q === key).map(() => ({ fp: candidate, key })));
+      return targets.length === 1 ? targets : [];
+    }
+    const exact = (fileQKeys.get(fp)?.get(member) ?? []).filter(q => q === key);
+    // Multiple definitions include overloads. Do not guess a signature.
+    if (exact.length) return exact.length === 1 ? [{ fp, key }] : [];
+    const inherited = (summaries.get(fp)?.receiverHeritage ?? []).filter(([child]) => child === name)
+      .flatMap(([, parent]) => receiverMembers(fp, parent, member, nextSeen));
+    const unique = new Map(inherited.map(target => [`${target.fp}\0${target.key}`, target]));
+    return [...unique.values()];
+  }
+
+  function factoryReceiver(context: string, factory: string): { context: string; type: string } | undefined {
+    const summary = summaries.get(context);
+    const language = summary?.language;
+    let name = factory;
+    let pool = [context];
+    if (language === SupportedLanguages.Go) {
+      const dot = factory.lastIndexOf('.');
+      if (dot >= 0) {
+        name = factory.slice(dot + 1);
+        const alias = goImportForQualifier(summary, factory.slice(0, dot));
+        pool = alias ? resolveImportQualifierTargets(context, language, alias) : [];
+      } else pool = goReceiverFiles.get(goPackageKey(context)) ?? [];
+    } else {
+      const owner = factory.replace(/\.apply$/, '');
+      const providers = receiverProviders(context, owner);
+      if (providers.length !== 1) return;
+      pool = [providers[0].fp];
+      name = factory.endsWith('.apply') ? `${providers[0].type}.apply` : providers[0].type;
+    }
+    const matches = pool.flatMap(fp => (summaries.get(fp)?.receiverFactories ?? [])
+      .filter(([fn]) => fn === name).map(([, type]) => ({ context: fp, type })));
+    return matches.length === 1 && matches[0].type ? matches[0] : undefined;
+  }
+
   // ── Main resolution loop ───────────────────────────────────────────
 
 
@@ -5130,6 +5360,21 @@ export function resolveEdges(
         continue;
       }
 
+      // A typed receiver resolves to its exact member. Otherwise a receiver-only
+      // relationship stops here, and any other resolves by its own name below.
+      if (rel.predicate === 'CALLS' && (rel.receiverType || rel.receiverFactory)) {
+        const receiver = rel.receiverType ? { context: srcFilePath, type: rel.receiverType }
+          : factoryReceiver(srcFilePath, rel.receiverFactory!);
+        const member = rel.dstName.slice(rel.dstName.lastIndexOf('.') + 1);
+        const targets = receiver ? receiverMembers(receiver.context, receiver.type, member) : [];
+        if (targets.length === 1) {
+          resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: targets[0].fp, dstName: rel.dstName,
+            dstQualifiedKey: targets[0].key, predicate: 'CALLS', confidence: 0.95, tier: 'type' });
+          stats.resolvedType = (stats.resolvedType ?? 0) + 1;
+          continue;
+        }
+        if (rel.receiverOnly) continue;
+      }
       const origDstName = rel.dstName;
       // Z: resolve a renamed-import call by the provider's public symbol, but keep the
       // ORIGINAL local name on the emitted edge (buildPatchWithResolution maps the edge

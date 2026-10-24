@@ -38,21 +38,21 @@
     "chalk": "^6.0.1",
     "commander": "^15.0.0",
     "yaml": "^2.9.1",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^20.19.43",
-    "@vitest/coverage-v8": "^4.1.11",
-    "eslint": "^10.12.0",
+    "@vitest/coverage-v8": "^4.1.12",
+    "eslint": "^10.13.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-unused-imports": "^4.4.1",
     "fast-check": "^4.10.2",
-    "knip": "^6.40.0",
-    "prettier": "^3.9.9",
+    "knip": "^6.42.1",
+    "prettier": "^3.9.10",
     "tsx": "^4.23.15",
     "typescript": "^5.6.0",
-    "typescript-eslint": "^8.71.1",
+    "typescript-eslint": "^8.72.0",
     "vitest": "^4.1.0"
   },
   "overrides": {

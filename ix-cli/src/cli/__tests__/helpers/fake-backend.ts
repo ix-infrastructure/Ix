@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 
 type SentPatch = {
   patchId?: string;
-  source?: { uri?: string; sourceHash?: string; workspaceId?: string };
+  source?: { uri?: string; sourceHash?: string; workspaceId?: string; extractor?: string };
   ops?: Array<Record<string, unknown>>;
 };
 
@@ -19,6 +19,12 @@ function planMismatchBody(ids: string[]): Record<string, unknown> {
     committed_patch_ids: sorted,
     committed_count: sorted.length,
   };
+}
+
+/** One live edge as a `graphSignature` line. */
+function edgeLine(id: string, e: { src: unknown; dst: unknown; predicate: unknown; attrs?: unknown }): string {
+  const attrs = (e.attrs ?? {}) as { tier?: unknown; confidence?: unknown };
+  return `${id} ${String(e.src)} ${String(e.dst)} ${String(e.predicate)} tier=${String(attrs.tier)} confidence=${String(attrs.confidence)}`;
 }
 
 /** A backend that answers the endpoints an ingest touches, and records them. */
@@ -121,6 +127,61 @@ export class FakeBackend {
   rememberHashes = false;
   /** Answer `/v1/source-hashes` with a 500, as a backend under load does. */
   failSourceHashes = false;
+  /**
+   * Answer the next commits (bulk or single) with these statuses, in order,
+   * before any other decision: a proxy or a restarting backend saying "not
+   * now" (IN-19C). `retryAfter` is sent as the `Retry-After` header.
+   */
+  transientCommitFailures: Array<{ status: number; retryAfter?: string }> = [];
+  /**
+   * ArangoDB is down: `/v1/health` answers 503 `degraded` with
+   * `database: "unreachable"` (Ix-memory 1.0.33+), every commit answers 500,
+   * and `/v1/revisions/current` answers 500.
+   */
+  databaseDown = false;
+  /**
+   * The status commits answer while `databaseDown`. 500 is what the backend
+   * sends; 503 is a backend (or a proxy in front of it) that reads a lost
+   * database as "not now", which the bulk sites would otherwise retry.
+   */
+  databaseDownCommitStatus = 500;
+  /**
+   * Whether `/v1/health` reports `database` at all. Off is a backend older
+   * than 1.0.33: health answers 200 `ok` whatever the database is doing, and
+   * only a read that needs it (`/v1/revisions/current`) can tell.
+   */
+  healthReportsDatabase = true;
+  /**
+   * `/v1/health` reports the database unreachable while it is in fact up and
+   * commits land: a wrong or stale health answer.
+   */
+  healthSaysDatabaseDown = false;
+  /** `/v1/health` requests, in order. */
+  healthRequests = 0;
+  /** `/v1/revisions/current` requests, in order. */
+  revisionRequests = 0;
+  /**
+   * Answer `GET /v1/patches/{id}` with a 500, as a backend under load does:
+   * every read when true, or the reads the predicate picks (given the id and
+   * the stored ops, if any).
+   */
+  failPatchReads: boolean | ((patchId: string, ops: Array<Record<string, unknown>> | undefined) => boolean) = false;
+  /** Answer `GET /v1/patches/{id}` with a 404 for every id, as if nothing were stored. */
+  hidePatchReads = false;
+  /** `GET /v1/patches/{id}` requests served, whatever their answer. */
+  patchReads = 0;
+  /** `GET /v1/entity/{id}` requests served, whatever their answer. */
+  entityReads = 0;
+  /** `POST /v1/nodes` requests served, whatever their answer. */
+  nodesReads = 0;
+  /** Serve `POST /v1/nodes` (Ix-memory 1.0.33+); false answers 404, as an older backend does. */
+  serveNodes = true;
+  /**
+   * Answer `GET /v1/patches/{id}` for a patch committed in bulk as the real
+   * bulk route stores it -- an id manifest (`entityIds`, `nodeIds`,
+   * `nodeOpCount`), no ops -- instead of with its ops.
+   */
+  bulkManifests = false;
   private readonly hashes = new Map<string, { workspaceId: string | null; uri: string; hash: string }>();
 
   /**
@@ -153,9 +214,9 @@ export class FakeBackend {
    * report none, as a pre-#157 backend does. `null` reports none in any mode.
    */
   releaseVersion: string | null | undefined = undefined;
-  private readonly nodes = new Map<string, { kind: unknown; name: unknown; attrs?: unknown; live: boolean }>();
+  private readonly nodes = new Map<string, { kind: unknown; name: unknown; attrs?: unknown; uri?: string; hash?: string; extractor?: string; live: boolean }>();
   private readonly edges = new Map<string, {
-    src: unknown; dst: unknown; predicate: unknown; workspaceId: string; uri: string; live: boolean;
+    src: unknown; dst: unknown; predicate: unknown; attrs?: unknown; workspaceId: string; uri: string; live: boolean;
   }>();
   /** Every committed patch by id, with the rev it last landed at. */
   private readonly stored = new Map<string, {
@@ -171,15 +232,22 @@ export class FakeBackend {
 
   /**
    * The live graph as a sorted, comparable list: nodes as `id kind name`,
-   * edges as `id src dst predicate`. Two backends hold the same graph exactly
-   * when their signatures are equal.
+   * edges as `id src dst predicate tier=<tier> confidence=<confidence>`. The
+   * resolution attrs are part of the line because an edge can be upgraded in
+   * place (same id, new tier). Two backends hold the same graph exactly when
+   * their signatures are equal.
    */
   graphSignature(): { nodes: string[]; edges: string[] } {
     const nodes = [...this.nodes].filter(([, n]) => n.live)
       .map(([id, n]) => `${id} ${String(n.kind)} ${String(n.name)}`).sort();
-    const edges = [...this.edges].filter(([, e]) => e.live)
-      .map(([id, e]) => `${id} ${String(e.src)} ${String(e.dst)} ${String(e.predicate)}`).sort();
+    const edges = [...this.edges].filter(([, e]) => e.live).map(([id, e]) => edgeLine(id, e)).sort();
     return { nodes, edges };
+  }
+
+  /** Live edges whose `tier` attr is `tier`, as `graphSignature` lines. */
+  edgesOfTier(tier: string): string[] {
+    return [...this.edges].filter(([, e]) => e.live && (e.attrs as { tier?: unknown } | undefined)?.tier === tier)
+      .map(([id, e]) => edgeLine(id, e)).sort();
   }
 
   /** Names of the live nodes, to make a signature diff readable. */
@@ -229,9 +297,12 @@ export class FakeBackend {
     if (!deletesApplied) this.applyDeletes(patch);
     for (const op of patch.ops ?? []) {
       const id = String(op.id);
-      if (op.type === "UpsertNode") this.nodes.set(id, { kind: op.kind, name: op.name, attrs: op.attrs, live: true });
+      if (op.type === "UpsertNode") {
+        // As the bulk route does, every upsert takes the patch's provenance.
+        this.nodes.set(id, { kind: op.kind, name: op.name, attrs: op.attrs, uri, hash: patch.source?.sourceHash, extractor: patch.source?.extractor, live: true });
+      }
       else if (op.type === "UpsertEdge") {
-        this.edges.set(id, { src: op.src, dst: op.dst, predicate: op.predicate, workspaceId, uri, live: true });
+        this.edges.set(id, { src: op.src, dst: op.dst, predicate: op.predicate, attrs: op.attrs, workspaceId, uri, live: true });
       }
     }
     if (patch.patchId === undefined) return;
@@ -381,7 +452,7 @@ export class FakeBackend {
 
   private route(url: string, body: string, res: ServerResponse): void {
     const path = new URL(url, "http://x").pathname;
-    const send = (code: number, payload: unknown): void => {
+    const send = (code: number, payload: unknown, headers: Record<string, string> = {}): void => {
       // Stamp the answer onto the request that produced it. Whether a bulk was
       // ACCEPTED or refused is the difference between two completely different
       // code paths in `ingestFiles`, and a test that assumes the wrong one is
@@ -389,7 +460,7 @@ export class FakeBackend {
       // went wrong.
       const last = this.requests[this.requests.length - 1];
       if (last !== undefined && last.code === undefined) last.code = code;
-      res.writeHead(code, { "Content-Type": "application/json" });
+      res.writeHead(code, { "Content-Type": "application/json", ...headers });
       res.end(JSON.stringify(payload));
     };
 
@@ -411,6 +482,19 @@ export class FakeBackend {
       }
       if (this.abortAfterCommits !== undefined && this.commitCount >= this.abortAfterCommits) {
         this.aborter.abort();
+      }
+
+      const transientFailure = this.transientCommitFailures.shift();
+      if (transientFailure !== undefined) {
+        return send(
+          transientFailure.status,
+          { error: `${transientFailure.status}: service unavailable` },
+          transientFailure.retryAfter !== undefined ? { "Retry-After": transientFailure.retryAfter } : {},
+        );
+      }
+      if (this.databaseDown) {
+        const status = this.databaseDownCommitStatus;
+        return send(status, { error: `${status}: Connection refused: arangodb:8529` });
       }
 
       if (path === "/v1/patches/bulk") this.bulkBodyBytes.push(Buffer.byteLength(body));
@@ -505,8 +589,17 @@ export class FakeBackend {
     }
 
     if (path === "/v1/health") {
+      this.healthRequests++;
       const release = this.releaseVersion !== undefined ? this.releaseVersion : this.semantics === "head" ? "1.0.34" : null;
-      return send(200, { status: "ok", version: "1.0.28", ...(release ? { release_version: release } : {}) });
+      const base = { version: "1.0.28", ...(release ? { release_version: release } : {}) };
+      if (!this.healthReportsDatabase) return send(200, { status: "ok", ...base });
+      if (this.databaseDown || this.healthSaysDatabaseDown) return send(503, { status: "degraded", database: "unreachable", ...base });
+      return send(200, { status: "ok", database: "reachable", ...base });
+    }
+    if (path === "/v1/revisions/current") {
+      this.revisionRequests++;
+      if (this.databaseDown) return send(500, { error: "500: Connection refused: arangodb:8529" });
+      return send(200, { rev: this.rev });
     }
     if (path === "/v1/source-hashes") {
       if (this.failSourceHashes) return send(500, { error: "500: transaction begin timeout" });
@@ -523,11 +616,54 @@ export class FakeBackend {
     if (path.startsWith("/v1/stitch/system/")) return send(200, { systemId: null });
     // Read by `reconcileRemovedEntities`, which only an incremental run against
     // a stored graph reaches.
-    if (this.semantics !== undefined && path.startsWith("/v1/patches/")) {
-      const record = this.stored.get(decodeURIComponent(path.slice("/v1/patches/".length)));
-      return record ? send(200, { data: { ops: record.ops } }) : send(404, { error: "404: patch not found" });
+    // Without semantics nothing is stored, so every patch is not found: what a
+    // forced or rebuilt file's reconcile sees, and survives.
+    if (path.startsWith("/v1/patches/")) {
+      const patchId = decodeURIComponent(path.slice("/v1/patches/".length));
+      this.patchReads++;
+      const record = this.stored.get(patchId);
+      const fail = typeof this.failPatchReads === "function"
+        ? this.failPatchReads(patchId, record?.ops)
+        : this.failPatchReads;
+      if (fail) return send(500, { error: "500: transaction begin timeout" });
+      if (this.hidePatchReads) return send(404, { error: "404: patch not found" });
+      if (!record) return send(404, { error: "404: patch not found" });
+      if (this.bulkManifests && record.bulkGroup !== null) {
+        // BulkWriteApi.patchDocument: ids in op order, no ops.
+        const entityIds: string[] = [];
+        const nodeIds: string[] = [];
+        let nodeOpCount = 0;
+        for (const op of record.ops) {
+          const opId = String(op["id"] ?? op["entityId"]);
+          if (op["type"] === "UpsertNode" || op["type"] === "DeleteNode") nodeOpCount++;
+          if (op["type"] === "UpsertNode" && !nodeIds.includes(opId)) nodeIds.push(opId);
+          if (!entityIds.includes(opId)) entityIds.push(opId);
+        }
+        return send(200, { data: { entityIds, nodeIds, nodeOpCount } });
+      }
+      return send(200, { data: { ops: record.ops } });
+    }
+    if (path === "/v1/nodes") {
+      this.nodesReads++;
+      if (!this.serveNodes) {
+        return send(404, { error: `404: no such endpoint ${path}` });
+      }
+      let ids: string[] = [];
+      try {
+        ({ ids = [] } = JSON.parse(body) as { ids?: string[] });
+      } catch { /* none */ }
+      if (ids.length > 1000) return send(413, { error: "payload_too_large" });
+      const nodes = ids.flatMap((id) => {
+        const n = this.nodes.get(id);
+        return n?.live
+          ? [{ id, kind: n.kind, name: n.name, attrs: n.attrs ?? {}, provenance: { sourceUri: n.uri ?? "", sourceHash: n.hash, extractor: n.extractor } }]
+          : [];
+      });
+      const found = new Set(nodes.map((n) => n.id));
+      return send(200, { rev: this.rev, nodes, missing: ids.filter((id) => !found.has(id)) });
     }
     if (this.semantics !== undefined && path.startsWith("/v1/entity/")) {
+      this.entityReads++;
       const id = decodeURIComponent(path.slice("/v1/entity/".length));
       const node = this.nodes.get(id);
       if (!node?.live) return send(404, { error: "404: entity not found" });

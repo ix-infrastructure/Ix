@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
 
-import { readBoundedFile, readCapped } from "../bounded-read.js";
+import { readBoundedBytes, readBoundedFile, readCapped } from "../bounded-read.js";
 
 /**
  * `readBoundedFile` stands between ingestion and a file whose path AND contents
@@ -135,6 +135,51 @@ describe("readCapped", () => {
     const p = nodePath.join(root, "empty.txt");
     fs.writeFileSync(p, "");
     expect(withHandle(p, (fd) => readCapped(fd, 1024))).toBe("");
+  });
+});
+
+/**
+ * The Buffer variant `ix verify` hashes. Same handle and checks as
+ * `readBoundedFile`, but it says why it refused, and a missing file throws, so
+ * "too large to judge" and "not on disk" stay two different answers.
+ */
+describe("readBoundedBytes", () => {
+  let root: string;
+
+  beforeAll(() => {
+    root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "ix-bounded-bytes-"));
+  });
+
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("returns the raw bytes, undecoded", () => {
+    const p = nodePath.join(root, "raw.bin");
+    const raw = Buffer.from([0xef, 0xbb, 0xbf, 0x61, 0xff, 0x0d, 0x0a]);
+    fs.writeFileSync(p, raw);
+    const read = readBoundedBytes(p);
+    expect("bytes" in read && read.bytes.equals(raw)).toBe(true);
+  });
+
+  it("refuses a file over the cap as too_large, and reads it under a cap that admits it", () => {
+    const p = nodePath.join(root, "big.ts");
+    fs.writeFileSync(p, "x".repeat(4096));
+    expect(readBoundedBytes(p, 1024)).toEqual({ refused: "too_large" });
+    expect(readBoundedBytes(p, 4096)).toMatchObject({ bytes: expect.any(Buffer) });
+  });
+
+  it("refuses a directory as not_file", () => {
+    const p = nodePath.join(root, "adir");
+    fs.mkdirSync(p, { recursive: true });
+    // Windows refuses to open a directory at all; either way it is not read.
+    let result: ReturnType<typeof readBoundedBytes> | "threw";
+    try { result = readBoundedBytes(p); } catch { result = "threw"; }
+    expect(result === "threw" || ("refused" in result && result.refused === "not_file")).toBe(true);
+  });
+
+  it("throws for a file that does not exist", () => {
+    expect(() => readBoundedBytes(nodePath.join(root, "absent.ts"))).toThrow(/ENOENT/);
   });
 });
 

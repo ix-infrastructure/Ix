@@ -28,6 +28,11 @@ export interface FileSummary {
   imports: Array<{ dstName: string; importRaw?: string; importVia?: string }>;
   /** `[fqcn, typeName]` for unambiguous PHP types. */
   phpTypes?: Array<[string, string]>;
+  /** Receiver inference facts needed across incremental batches. */
+  receiverFactories?: Array<[string, string]>;
+  receiverHeritage?: Array<[string, string]>;
+  receiverPackage?: string;
+  importAliases?: Record<string, string>;
   /** Sorted unique names this file calls, references or extends (for IN-11). */
   refs: string[];
   /** Hash of what other files can resolve to here: qualified keys, exports, PHP types. */
@@ -35,11 +40,33 @@ export interface FileSummary {
 }
 
 /** The part of a summary other files depend on, hashed. */
-export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNames' | 'phpTypes'>): string {
-  const canonical = JSON.stringify([
+export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNames' | 'phpTypes' | 'receiverFactories' | 'receiverHeritage' | 'receiverPackage'> & Partial<Pick<FileSummary, 'imports' | 'importAliases'>>): string {
+  const parts: unknown[] = [
     [...s.qkeys].map(([n, q]) => `${n}\0${q}`).sort(),
     [...(s.exportPublicNames ?? [])].map(([p, l]) => `${p}\0${l}`).sort(),
     [...(s.phpTypes ?? [])].map(([f, t]) => `${f}\0${t}`).sort(),
-  ]);
+  ];
+  // Receiver facts only when present, so other files keep their signature.
+  if (s.receiverFactories?.length || s.receiverHeritage?.length || s.receiverPackage) {
+    parts.push(
+      // A factory's return type resolves through this file's imports (and Go aliases).
+      [...(s.receiverFactories ?? [])].map(([f, t]) => `${f}\0${t}\0${heritageImportsKey(s.imports, s.importAliases)}`).sort(),
+      // A superclass resolves through this file's imports.
+      [...(s.receiverHeritage ?? [])].map(([f, t]) => `${f}\0${t}\0${heritageImportsKey(s.imports)}`).sort(),
+      s.receiverPackage ?? '',
+    );
+  }
+  const canonical = JSON.stringify(parts);
   return crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 32);
+}
+
+/**
+ * The imports a Scala superclass or a factory's return type resolves through,
+ * as one key. Any import can pick the type (wildcards included), so all of
+ * them count, and so do Go import aliases when given.
+ */
+export function heritageImportsKey(imports: Array<{ dstName: string }> | undefined, aliases?: Record<string, string>): string {
+  const key = [...new Set((imports ?? []).map(i => i.dstName))].sort().join('\0');
+  const named = Object.entries(aliases ?? {}).map(([a, m]) => `${a}=${m}`).sort().join('\0');
+  return named ? `${key}\0\0${named}` : key;
 }

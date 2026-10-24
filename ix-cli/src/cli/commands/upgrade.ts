@@ -39,11 +39,11 @@ export function backendCeiling(): string | null {
   return readCache()?.backendLatest ?? null;
 }
 
-export async function readBackendHealth(client: IxClient) {
+export async function readBackendHealth(client: IxClient, timeoutMs?: number) {
   // backendLatest, NOT latest: `latest` is the CLI's own release series, so a
   // ceiling taken from it would refuse every legitimate container report for
   // ever — silently reinstating the bug this exists to fix.
-  return fetchBackendHealth(client, backendCeiling(), isNewer);
+  return fetchBackendHealth(client, backendCeiling(), isNewer, timeoutMs);
 }
 
 const __filename = fileURLToPath(import.meta.url);

@@ -68,7 +68,8 @@ These commands combine several graph queries into one bounded answer. Reach for 
 
 `ix ingest <path>` writes to the workspace the path belongs to: the registered workspace containing it, else its
 git repository. A file or directory inside that workspace refreshes just that part of it, and the rest of the
-workspace is left alone. A path outside every workspace and repository is ingested as a workspace of its own.
+workspace is left alone. A directory outside every workspace and repository becomes a workspace of its own (never
+the default). A loose file there is ingested but registers nothing, so `ix read` cannot open its neighbours.
 
 `ix ingest` honors `--exclude <glob>` and an `.ixignore` file at the workspace root. `.ixignore` supports a subset of
 `.gitignore` syntax: `#` comments, `*`, `?`, `**`, a leading `/` to anchor to the root, a trailing `/` for
@@ -85,6 +86,7 @@ before it exits: `ix map` re-ingests the workspace, and so does `ix ingest` when
 |---|---|
 | `ix status` | Checks the backend is reachable |
 | `ix doctor` | Checks server, database and graph integrity |
+| `ix verify` | Compares the graph's nodes to a fresh re-parse of a sample of files (nodes only, not edges) |
 | `ix docker start` / `stop` / `restart` | Starts, stops or restarts the local backend containers |
 | `ix docker start --local-token` | Makes the local backend require a bearer token, which the CLI stores and sends (`--no-local-token` turns it off). See [Local token](/reference/configuration/#local-token) |
 | `ix docker status` / `logs` | Shows container health, or tails the backend's logs |

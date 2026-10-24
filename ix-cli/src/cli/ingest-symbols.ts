@@ -50,8 +50,8 @@ export interface SymbolEntry {
   summary: StoredSummary;
   /**
    * What the file's patch resolved its edges to, recorded when the patch is
-   * built from these bytes: a hash of its edge ids and their targets
-   * (`resolutionHash`). A re-resolution's re-send records it only once it lands. An unchanged file is
+   * built from these bytes: a hash of its edge ids, their targets and their
+   * tier/confidence (`resolutionHash`). A re-resolution's re-send records it only once it lands. An unchanged file is
    * re-sent when names it uses change elsewhere, and only if this differs.
    */
   res?: string;
@@ -65,14 +65,20 @@ export interface SymbolEntry {
 }
 
 /**
- * A hash of a patch's edges and where they point. Same bytes resolved against
- * the same names gives the same value, so it changes exactly when something
- * the file refers to moved, appeared or went away.
+ * A hash of a patch's edges, where they point and how they were resolved.
+ * Same bytes resolved against the same names gives the same value, so it
+ * changes exactly when something the file refers to moved, appeared or went
+ * away -- or when an edge keeps its id and target but its `tier`/`confidence`
+ * changes (a receiver's type learned or lost through another file).
  */
-export function resolutionHash(ops: ReadonlyArray<{ type?: unknown; id?: unknown; dst?: unknown }>): string {
+export function resolutionHash(ops: ReadonlyArray<{ type?: unknown; id?: unknown; dst?: unknown; attrs?: unknown }>): string {
   const pairs = ops
     .filter(op => op.type === "UpsertEdge")
-    .map(op => `${String(op.id)}>${String(op.dst)}`)
+    .map(op => {
+      const { tier, confidence } = (op.attrs ?? {}) as { tier?: unknown; confidence?: unknown };
+      const how = tier === undefined && confidence === undefined ? "" : ` ${String(tier)}/${String(confidence)}`;
+      return `${String(op.id)}>${String(op.dst)}${how}`;
+    })
     .sort();
   return createHash("sha256").update(pairs.join("\n")).digest("hex");
 }
@@ -304,6 +310,10 @@ type SummaryFields = {
   qkeys?: Array<[string, string]>;
   exportPublicNames?: Array<[string, string]>;
   phpTypes?: Array<[string, string]>;
+  receiverFactories?: Array<[string, string]>;
+  receiverHeritage?: Array<[string, string]>;
+  receiverPackage?: string;
+  importAliases?: Record<string, string>;
   refs?: string[];
   imports?: Array<{ dstName?: string; importRaw?: string }>;
   sig?: string;
@@ -330,9 +340,15 @@ function bindings(summary: StoredSummary | undefined): Map<string, string[]> {
   const out = new Map<string, string[]>();
   if (!summary) return out;
   const s = summary as SummaryFields;
-  for (const [name, qkey] of s.qkeys ?? []) out.set(`q\0${name}\0${qkey}`, [name, qkey]);
+  for (const [name, qkey] of s.qkeys ?? []) out.set(`q\0${s.receiverPackage ?? ''}\0${name}\0${qkey}`, [name, qkey]);
   for (const [publicName, local] of s.exportPublicNames ?? []) out.set(`e\0${publicName}\0${local}`, [publicName]);
   for (const [fqcn, typeName] of s.phpTypes ?? []) out.set(`p\0${fqcn}\0${typeName}`, [fqcn, typeName]);
+  // A superclass and a factory's return type resolve through this file's
+  // imports (and Go import aliases), so they are part of the key.
+  const heritageImports = [...new Set((s.imports ?? []).map(i => i.dstName ?? ""))].sort().join("\0");
+  const aliases = Object.entries(s.importAliases ?? {}).map(([a, m]) => `${a}=${m}`).sort().join("\0");
+  for (const [name, type] of s.receiverFactories ?? []) out.set(`f\0${name}\0${type}\0${heritageImports}\0\0${aliases}`, [name]);
+  for (const [name, base] of s.receiverHeritage ?? []) out.set(`h\0${name}\0${base}\0${heritageImports}`, [name]);
   return out;
 }
 
@@ -400,16 +416,45 @@ export function findDependents(
     if (stem.length > 0 && stem !== ".") stems.add(stem);
   }
   if (names.size === 0 && stems.size === 0) return [];
+  // A changed superclass changes the members visible through every subclass,
+  // even when those subclass files were not edited (or were already sent).
+  // Likewise a changed type changes what every factory returning it gives a
+  // caller's receiver (a Scala `apply`, a Go `NewX`), so the factory counts too.
+  const inheritors = new Map<string, Set<string>>();
+  const dependsOn = (type: string, name: string) => {
+    for (const key of new Set([type, type.split(".").pop()!])) {
+      const children = inheritors.get(key) ?? new Set<string>();
+      children.add(name);
+      inheritors.set(key, children);
+    }
+  };
+  for (const entry of table.values()) {
+    const s = entry.summary as SummaryFields;
+    for (const [child, parent] of s.receiverHeritage ?? []) {
+      dependsOn(parent, child);
+      if (s.receiverPackage) dependsOn(parent, `${s.receiverPackage}.${child}`);
+    }
+    for (const [factory, type] of s.receiverFactories ?? []) if (type) dependsOn(type, factory);
+  }
+  const affectedNames = new Set(names);
+  const pending = [...affectedNames];
+  for (let i = 0; i < pending.length; i++) {
+    for (const child of inheritors.get(pending[i]) ?? []) {
+      if (affectedNames.has(child)) continue;
+      affectedNames.add(child);
+      pending.push(child);
+    }
+  }
   const out: string[] = [];
   for (const [rel, entry] of table) {
     if (exclude.has(rel)) continue;
     const s = entry.summary as SummaryFields;
-    const byName = names.size > 0 && (s.refs ?? []).some(ref => {
-      if (names.has(ref)) return true;
+    const byName = affectedNames.size > 0 && (s.refs ?? []).some(ref => {
+      if (affectedNames.has(ref)) return true;
       // Most refs are plain names; splitting each costs more than the rest of the scan.
       if (!REF_SEPARATOR.test(ref)) return false;
       const parts = ref.split(/::|->|\.|#|\\/).filter(Boolean);
-      return parts.length > 1 && (names.has(parts[0]) || names.has(parts[parts.length - 1]));
+      return parts.length > 1 && (affectedNames.has(parts[0]) || affectedNames.has(parts[parts.length - 1]));
     });
     // By path segment, not substring: an added `a.ts` must not match every
     // import with an "a" in it.

@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   commitBulkWithPayloadSplit,
   commitFailureIndictsBackend,
@@ -14,6 +14,8 @@ import {
   parseBulkCommittedPatchIds,
   parseSuggestedMaxPatches,
 } from '../commands/ingest.js';
+import { retryCommit } from '../commit-retry.js';
+import { httpError } from '../../client/api.js';
 
 // Verbatim from a backend that refused a bulk save of a >1,000-file repo (Ix#516).
 // A bulk commit runs as one exclusive Arango transaction, and Arango caps that at
@@ -635,5 +637,76 @@ describe('bulk request bounds (IN-05)', () => {
     expect(bytesOf, 'not measured while no byte bound is set').not.toHaveBeenCalled();
     const cut = cutBulkChunks(items, () => 1, { maxFiles: 10, maxOps: 100, maxBytes: 250 }, bytesOf);
     expect(cut.map(c => c.map(item => item.i))).toEqual([[0, 1], [2], [3, 4], [5]]);
+  });
+});
+
+// IN-19C wraps the bulk commit in `retryCommit` with transient retries on. A
+// 413 must reach the payload split exactly as before: no retry of the same
+// oversized body, and no wait.
+describe('commitBulkWithPayloadSplit under retryCommit', () => {
+  it('splits a 413 without retrying it, with the same requests as before', async () => {
+    const bulkCalls: number[][] = [];
+    const committed: number[] = [];
+    const sleep = vi.fn(async () => {});
+    const commitIndividually = vi.fn(async () => {});
+
+    await commitBulkWithPayloadSplit([1, 2, 3, 4, 5], {
+      commitBulk: batch => retryCommit(async () => {
+        bulkCalls.push([...batch]);
+        if (batch.length > 2) {
+          throw httpError(413, '{"error":"payload_too_large"}', new Headers({ 'Retry-After': '1' }));
+        }
+        return batch.length;
+      }, { maxRetries: 6, transient: true, sleep }),
+      onBulkCommitted: batch => committed.push(...batch),
+      commitIndividually,
+    });
+
+    expect(bulkCalls).toEqual([
+      [1, 2, 3, 4, 5],
+      [1, 2, 3],
+      [1, 2],
+      [3],
+      [4, 5],
+    ]);
+    expect(committed).toEqual([1, 2, 3, 4, 5]);
+    expect(sleep, 'a 413 is never waited on').not.toHaveBeenCalled();
+    expect(commitIndividually).not.toHaveBeenCalled();
+  });
+});
+
+// F1 of the #845 review: a 504 on a long bulk used to buy up to three more
+// full re-sends before the per-file fallback. Now the bulk is sent once, and
+// the fallback gets the group at once.
+describe('a slow 504 bulk under retryCommit', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('is sent once and falls back to the per-file path, without three full re-sends', async () => {
+    const bulkCalls: number[][] = [];
+    const commitIndividually = vi.fn(async (_items: number[], _err?: unknown) => {});
+    const start = Date.now();
+
+    const done = commitBulkWithPayloadSplit([1, 2, 3], {
+      commitBulk: batch => retryCommit(
+        () => new Promise<number>((_resolve, reject) => {
+          bulkCalls.push([...batch]);
+          // The gateway gives up after two minutes; the backend may still be at it.
+          setTimeout(() => reject(httpError(504, '<html>Gateway Timeout</html>', new Headers())), 120_000);
+        }),
+        { maxRetries: 6, transient: true },
+      ),
+      onBulkCommitted: vi.fn(),
+      commitIndividually,
+    }).then(() => Date.now() - start);
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    const elapsed = await done;
+
+    expect(bulkCalls).toEqual([[1, 2, 3]]);
+    expect(elapsed, 'one request, no waits').toBe(120_000);
+    expect(commitIndividually).toHaveBeenCalledOnce();
+    const [items, err] = commitIndividually.mock.calls[0];
+    expect(items).toEqual([1, 2, 3]);
+    expect(String(err)).toMatch(/^Error: 504:/);
   });
 });

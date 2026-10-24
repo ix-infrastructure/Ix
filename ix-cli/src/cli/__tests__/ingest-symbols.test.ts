@@ -187,6 +187,43 @@ describe("dependents (IN-11)", () => {
   const summary = (filePath: string, fields: Record<string, unknown>) => ({ filePath, ...fields });
   const entry = (s: ReturnType<typeof summary>): SymbolEntry => ({ hash: "h", summary: s });
 
+  it("propagates changed superclass bindings to transitive subclass callers", () => {
+    const before = summary("mid.scala", { receiverHeritage: [["Mid", "A"]] });
+    const after = summary("mid.scala", { receiverHeritage: [["Mid", "B"]] });
+    const table = new Map([
+      ["mid.scala", entry(after)],
+      ["child.scala", entry(summary("child.scala", { receiverHeritage: [["Child", "Mid"]], refs: ["Mid"] }))],
+      ["leaf.scala", entry(summary("leaf.scala", { receiverHeritage: [["Leaf", "Child"]], refs: ["Child"] }))],
+      ["use.scala", entry(summary("use.scala", { refs: ["Leaf.run"] }))],
+      ["unrelated.scala", entry(summary("unrelated.scala", { refs: ["Other.run"] }))],
+    ]);
+    expect(findDependents(table, changedNames(before, after), [], new Set(["mid.scala"])))
+      .toEqual(["child.scala", "leaf.scala", "use.scala"]);
+  });
+
+  it("propagates inheritance through excluded files and terminates on cycles", () => {
+    const table = new Map([
+      ["a.scala", entry(summary("a.scala", { receiverHeritage: [["A", "B"]], refs: ["B"] }))],
+      ["b.scala", entry(summary("b.scala", { receiverHeritage: [["B", "A"]], refs: ["A"] }))],
+      ["use.scala", entry(summary("use.scala", { refs: ["B.run"] }))],
+    ]);
+    const names = new Set(["A"]);
+    expect(findDependents(table, names, [], new Set(["a.scala", "b.scala"]))).toEqual(["use.scala"]);
+    expect(names).toEqual(new Set(["A"]));
+  });
+
+  it.each(["receiverFactories", "receiverHeritage"])("invalidates dependents when %s changes", (field) => {
+    const before = summary("target", { sig: "before", [field]: [["Target", "Base"]] });
+    const after = summary("target", { sig: "after", [field]: [["Target", "Other"]] });
+    expect(changedNames(before, after)).toEqual(new Set(["Target"]));
+  });
+
+  it("invalidates a subclass when only its file's imports pick a different superclass", () => {
+    const before = summary("child.scala", { sig: "before", receiverHeritage: [["Child", "Parent"]], imports: [{ dstName: "p1.Parent" }] });
+    const after = summary("child.scala", { sig: "after", receiverHeritage: [["Child", "Parent"]], imports: [{ dstName: "p2.Parent" }] });
+    expect(changedNames(before, after)).toEqual(new Set(["Child"]));
+  });
+
   it("changes no names when the signature is the same, and the symmetric difference otherwise", () => {
     const before = summary("m.ts", { sig: "s1", qkeys: [["add", "add"], ["sub", "sub"]] });
     expect(changedNames(before, summary("m.ts", { sig: "s1", qkeys: [["add", "add"], ["sub", "sub"]] }))).toEqual(new Set());
@@ -232,11 +269,21 @@ describe("dependents (IN-11)", () => {
     expect(findDependents(table, new Set(), ["web/a.ts"], new Set())).toEqual(["uses-a.ts", "uses-pkg-a.py"]);
   });
 
-  it("hashes a patch's edges and their targets, in any order, and nothing else", () => {
+  it("hashes a patch's edges and their targets, in any order, and no other op", () => {
     const a = { type: "UpsertEdge", id: "e1", dst: "n1" };
     const b = { type: "UpsertEdge", id: "e2", dst: "n2" };
     const node = { type: "UpsertNode", id: "n9" };
     expect(resolutionHash([a, b, node])).toBe(resolutionHash([b, a]));
     expect(resolutionHash([a, b])).not.toBe(resolutionHash([a, { ...b, dst: "n3" }]));
+  });
+
+  it("hashes an edge's tier and confidence, so a re-tiered edge with the same id and target counts", () => {
+    const typed = { type: "UpsertEdge", id: "e1", dst: "n1", attrs: { confidence: 0.95, tier: "type" } };
+    const global = { ...typed, attrs: { confidence: 0.5, tier: "global" } };
+    expect(resolutionHash([typed])).not.toBe(resolutionHash([global]));
+    expect(resolutionHash([typed])).toBe(resolutionHash([{ ...typed, attrs: { tier: "type", confidence: 0.95, other: 1 } }]));
+    // An edge with no resolution attrs hashes as it always has.
+    expect(resolutionHash([{ type: "UpsertEdge", id: "e1", dst: "n1", attrs: {} }]))
+      .toBe(resolutionHash([{ type: "UpsertEdge", id: "e1", dst: "n1" }]));
   });
 });

@@ -30,7 +30,8 @@ vi.mock("node:os", async (importOriginal) => {
  * sweeps the edges of the files it carries, `/v1/patch` does not, a patch id
  * seen before is not written again, and `/v1/source-hashes` reports the head
  * patch. Graphs are compared by `graphSignature()`: live nodes as
- * `id kind name`, live edges as `id src dst predicate`.
+ * `id kind name`, live edges as `id src dst predicate` plus their `tier` and
+ * `confidence` attrs.
  *
  * Each class of defect has a fixed scenario. A class that fails on `main` is
  * marked `it.fails` with the card that fixes it; that card deletes the marker,
@@ -90,13 +91,17 @@ class World {
   /** Make the working tree match `repo`, and stage it so discovery sees it. */
   write(repo: Repo): void {
     const want = new Map([...repo].map(([p, fns]) => [p, render(p, fns)]));
+    this.writeSources(want);
+  }
+
+  writeSources(want: Map<string, string>): void {
     for (const p of this.onDisk.keys()) if (!want.has(p)) rmSync(join(this.repo, p));
     for (const [p, text] of want) {
       if (this.onDisk.get(p) === text) continue;
       mkdirSync(dirname(join(this.repo, p)), { recursive: true });
       writeFileSync(join(this.repo, p), text, "utf8");
     }
-    this.onDisk = want;
+    this.onDisk = new Map(want);
     execFileSync("git", ["add", "-A"], { cwd: this.repo, stdio: "ignore" });
   }
 
@@ -139,8 +144,8 @@ class World {
 /** The lines two signatures disagree on, with edge endpoints named. */
 function signatureDiff(world: World, live: Signature, want: Signature): string {
   const named = (line: string) => {
-    const [id, src, dst, predicate] = line.split(" ");
-    return `${predicate} ${world.backend.nodeName(src!)} -> ${world.backend.nodeName(dst!)} (${id!.slice(0, 8)})`;
+    const [id, src, dst, predicate, ...attrs] = line.split(" ");
+    return `${predicate} ${world.backend.nodeName(src!)} -> ${world.backend.nodeName(dst!)} (${id!.slice(0, 8)}) ${attrs.join(" ")}`;
   };
   const out: string[] = [];
   for (const key of ["nodes", "edges"] as const) {
@@ -221,6 +226,62 @@ describe("incremental ix map equals a fresh map (fake backend)", () => {
 
   it("the harness: two fresh maps of one tree give one graph", async () => {
     await runSequence("head", []);
+  });
+
+  it("changing an intermediate Scala superclass re-resolves subclass callers", async () => {
+    const world = new World("head");
+    try {
+      await world.start();
+      const sources = new Map([
+        ["a.scala", "trait A { def run() = () }\n"],
+        ["b.scala", "trait B { def run() = () }\n"],
+        ["mid.scala", "class Mid extends A {}\n"],
+        ["child.scala", "class Child extends Mid {}\n"],
+        ["use.scala", "object Use { def use(x: Child) = x.run() }\n"],
+      ]);
+      world.writeSources(sources);
+      await world.map();
+      const before = world.backend.graphSignature();
+      sources.set("mid.scala", "class Mid extends B {}\n");
+      world.writeSources(sources);
+      await world.map();
+      const live = world.backend.graphSignature();
+      const fresh = await world.freshSignature();
+      expect(fresh.edges).not.toEqual(before.edges);
+      expect(signatureDiff(world, live, fresh)).toBe("");
+    } finally {
+      await world.stop();
+    }
+  });
+
+  it("a superclass edit re-tiers a subclass caller's edge in place", async () => {
+    // `x.run()` binds to A.run by name and by type, so the edge keeps its id;
+    // only its tier and confidence depend on Child's parents in another file.
+    const world = new World("head");
+    try {
+      await world.start();
+      const sources = new Map([
+        ["a.scala", "trait A { def run() = () }\n"],
+        ["child.scala", "class Child extends A {}\n"],
+        ["use.scala", "object Use { def use(x: Child) = x.run() }\n"],
+      ]);
+      world.writeSources(sources);
+      await world.map();
+      const [typed, ...more] = world.backend.edgesOfTier("type");
+      expect(more, "one typed edge before the edit").toEqual([]);
+      sources.set("child.scala", "class Child {}\n");
+      world.writeSources(sources);
+      await world.map();
+      const live = world.backend.graphSignature();
+      const fresh = await world.freshSignature();
+      const id = typed!.split(" ")[0]!;
+      const now = fresh.edges.find((line) => line.startsWith(`${id} `));
+      expect(now, "the same edge, no longer typed").toBeDefined();
+      expect(now).not.toEqual(typed);
+      expect(signatureDiff(world, live, fresh)).toBe("");
+    } finally {
+      await world.stop();
+    }
   });
 
   it("a re-map with nothing changed commits nothing", async () => {

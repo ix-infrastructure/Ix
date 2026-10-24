@@ -26,12 +26,20 @@ const MIN_NODE_MAJOR = 22;
 
 // V8's code cache for every module loaded from here on. Compiling the CLI's
 // modules is most of its start-up: measured at ~40 ms of ~180 ms before the
-// first request on a warm machine. Node >= 22.1 keeps the cache under the OS
-// temp directory, keyed by file content and Node version, so an upgrade can
-// never run stale code; NODE_COMPILE_CACHE moves it and
-// NODE_DISABLE_COMPILE_CACHE=1 turns it off. Absent on 22.0: then a no-op.
+// first request on a warm machine. Node >= 22.1 keys the cache by file content
+// and Node version, so an upgrade can never run stale code, and keeps it in
+// its default place under the OS temp directory, which the OS cleans: caches
+// left behind by older Node versions do not pile up in Ix's own state.
+// Node's own settings win, and then this calls nothing: NODE_COMPILE_CACHE has
+// already been applied before this line runs, and NODE_DISABLE_COMPILE_CACHE
+// (any value, as Node reads it) turns the cache off. Absent on 22.0: then a
+// no-op. A directory that cannot be created or written is reported in the
+// return value, which is ignored: it only costs speed.
 try {
-  (nodeModule as { enableCompileCache?: () => unknown }).enableCompileCache?.();
+  const { enableCompileCache } = nodeModule as { enableCompileCache?: () => unknown };
+  if (enableCompileCache && process.env.NODE_COMPILE_CACHE === undefined && process.env.NODE_DISABLE_COMPILE_CACHE === undefined) {
+    enableCompileCache();
+  }
 } catch {
   // A cache that cannot be opened only costs speed.
 }

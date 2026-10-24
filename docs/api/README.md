@@ -448,6 +448,16 @@ Fetch a node with its claims and edges.
 
 **Response** — `{ node: GraphNode, claims: unknown[], edges: unknown[] }`.
 
+#### POST `/v1/nodes`
+
+Many nodes in one read, at the latest revision (Ix-memory 1.0.33+). Body
+`{ ids: string[], fields?: "full" }`, at most 1000 ids (413 above that).
+`fields: "full"` returns whole nodes, attrs and provenance included. `ix map`
+uses it once per batch to check the nodes an extractor change left behind.
+
+**Response** — `{ rev: number, nodes: GraphNode[], missing: string[] }`; only
+live nodes are returned, every other id is in `missing`.
+
 #### GET `/v1/resolve-prefix/{prefix}`
 
 Resolve a shortened entity id prefix. Full UUIDs pass through untouched.

@@ -10,6 +10,7 @@ import { ingestFiles, ingestPathSingleFlight } from "../commands/ingest.js";
 import { acquireMapLock, takeMapRerun } from "../single-flight.js";
 import { ingestMtimeCachePath, ingestRebuildPath, ingestSymbolsJournalPath, ingestSymbolsPath, loadConfig } from "../config.js";
 import { workspaceIdForPath } from "../system.js";
+import { ensureWorkspaceRegistered } from "../bootstrap.js";
 import { FakeBackend } from "./helpers/fake-backend.js";
 import { runWithSignal } from "../../client/run-signal.js";
 import { loadIngestBaseline } from "../ingest-baseline.js";
@@ -192,9 +193,12 @@ describe("ingestFiles against a fake backend", () => {
       "IX_COMMIT_FAILURE_LIMIT",
       "IX_COMMIT_HTTP_MAX_FILES",
       "IX_COMMIT_CONCURRENCY",
+      "IX_COMMIT_CONFLICT_RETRIES",
+      "IX_COMMIT_TRANSIENT_RETRY_MS",
       "IX_STITCH_COOLDOWN_MS",
       "IX_STITCH_WAIT_MS",
       "IX_MAP_DEADLINE_MS",
+      "IX_PARSE_STREAM_CHUNK",
     ]) {
       saved[k] = process.env[k];
       delete process.env[k];
@@ -1266,6 +1270,196 @@ describe("ingestFiles against a fake backend", () => {
     expect(backend.singleCount, "the fan-out is for failures only").toBe(0);
   });
 
+  describe("commit retries and the database probe (IN-19C)", () => {
+    let stderr: ReturnType<typeof vi.spyOn>;
+    const written = (): string => stderr.mock.calls.map((call: unknown[]) => String(call[0])).join("");
+    const sequence = (): string[] =>
+      backend.requests.filter(r => r.path !== "/v1/stitch").map(r => `${r.path} ${r.code}`);
+    beforeEach(() => {
+      stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    });
+    afterEach(() => {
+      stderr.mockRestore();
+      process.exitCode = undefined;
+    });
+
+    it("re-sends a bulk the backend answered 503, and lands everything with no fan-out", async () => {
+      fixture(12);
+      backend.transientCommitFailures = [{ status: 503, retryAfter: "0" }];
+
+      const summary = await run();
+
+      expect(summary.commitErrors).toBe(0);
+      expect(summary.patchesApplied).toBe(12);
+      expect(sequence()).toEqual(["/v1/patches/bulk 503", "/v1/patches/bulk 200"]);
+      expect(backend.singleCount, "no per-file fallback").toBe(0);
+    });
+
+    it("still re-sends a 503 bulk with IX_COMMIT_CONFLICT_RETRIES=0: that knob is for conflicts only", async () => {
+      fixture(4);
+      process.env.IX_COMMIT_CONFLICT_RETRIES = "0";
+      backend.transientCommitFailures = [{ status: 503, retryAfter: "0" }];
+
+      const summary = await run();
+
+      expect(summary.commitErrors).toBe(0);
+      expect(summary.patchesApplied).toBe(4);
+      expect(sequence()).toEqual(["/v1/patches/bulk 503", "/v1/patches/bulk 200"]);
+    });
+
+    it("sends the bulk once with IX_COMMIT_TRANSIENT_RETRY_MS=0, then falls back per file as before", async () => {
+      fixture(4);
+      process.env.IX_COMMIT_TRANSIENT_RETRY_MS = "0";
+      backend.transientCommitFailures = [{ status: 503, retryAfter: "0" }];
+
+      const summary = await run();
+
+      expect(summary.commitErrors).toBe(0);
+      expect(summary.patchesApplied).toBe(4);
+      expect(sequence()).toEqual([
+        "/v1/patches/bulk 503",
+        "/v1/patch 200",
+        "/v1/patch 200",
+        "/v1/patch 200",
+        "/v1/patch 200",
+      ]);
+    });
+
+    it("trips at once when the backend reports its database down and says so, while the commits still decide the exit", async () => {
+      fixture(30);
+      backend.databaseDown = true;
+
+      const message = await runFatal();
+
+      expect(message).toContain("30 of 30");
+      expect(backend.healthRequests, "the probe asked").toBeGreaterThan(0);
+      // Tripped on the first per-file failure, so the fan-out holds the rest.
+      // The held patches are still sent afterwards, as on main, so the exit
+      // code comes from their failures, not from the health answer -- and the
+      // drain's failure budget still bounds them below one request per file.
+      expect(backend.bulkCount, "the held set was re-sent").toBeGreaterThan(1);
+      expect(backend.singleCount).toBeLessThan(30);
+      const banner = written();
+      expect(banner).toContain("cannot reach its database (ArangoDB)");
+      expect(banner).not.toContain("still passes");
+    });
+
+    it("asks about the database before waiting out a 503 on the first bulk", async () => {
+      fixture(30);
+      backend.databaseDown = true;
+      backend.databaseDownCommitStatus = 503;
+      const started = Date.now();
+
+      await runFatal();
+
+      // Asked after the first 503, not after the backoff: the database is
+      // down, so the bulk is not retried and the chunk goes to the cutoff
+      // rather than the per-file fallback. The held set is then still sent,
+      // so the commits, not the probe, decide the exit.
+      expect(Date.now() - started, "no transient backoff").toBeLessThan(5_000);
+      expect(backend.healthRequests, "the probe asked").toBeGreaterThan(0);
+      expect(backend.singleCount).toBeLessThan(30);
+      const banner = written();
+      expect(banner).toContain("cannot reach its database (ArangoDB)");
+    });
+
+    it("a health answer that wrongly says the database is down does not fail a run whose commits land", async () => {
+      fixture(30);
+      backend.healthSaysDatabaseDown = true;
+      backend.transientCommitFailures = [{ status: 503, retryAfter: "0" }];
+
+      const summary = await run();
+
+      expect(backend.healthRequests, "the probe asked, and was told 'unreachable'").toBeGreaterThan(0);
+      expect(summary.commitErrors, "the held patches were sent and landed").toBe(0);
+      expect(summary.patchesApplied).toBe(30);
+      expect(process.exitCode ?? 0).toBe(0);
+      // Every patch landed, so no cutoff banner: it would tell the user the
+      // graph is "partly updated" and to re-run, which is false.
+      expect(written()).not.toContain("kept failing");
+      expect(written()).not.toContain("partly updated");
+    });
+
+    it("does not trip on a 5xx from the current-revision fallback (an older backend proves nothing)", async () => {
+      fixture(30);
+      backend.databaseDown = true;
+      backend.healthReportsDatabase = false;
+
+      await runFatal();
+
+      expect(backend.revisionRequests).toBeGreaterThan(0);
+      expect(written()).not.toContain("cannot reach its database (ArangoDB)");
+    });
+
+    it("changes nothing on a backend that refuses every commit while its database is reachable", async () => {
+      fixture(30);
+      backend.refuseEverything = true;
+
+      const message = await runFatal();
+
+      expect(backend.healthRequests, "the probe asked").toBeGreaterThan(0);
+      expect(message).toContain("30 of 30");
+      // The streak, not the probe, tripped it: five per-file failures, as before.
+      expect(backend.singleCount).toBeGreaterThanOrEqual(5);
+      expect(backend.commitCount, "well under main's 31").toBeLessThan(25);
+      expect(written()).toContain("`ix doctor` still passes");
+    });
+
+    it("does not call a graph wiped under it 'unchanged' when nothing lands", async () => {
+      // A baseline from an earlier map, then a backend that holds none of it:
+      // the DB-reset guard fires, as it does after `ix reset` from another dir.
+      fixture(8);
+      const incremental = () =>
+        ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
+      await incremental();
+      backend.refuseEverything = true;
+
+      let message = "";
+      try {
+        await incremental();
+      } catch (err) {
+        message = String(err);
+      }
+
+      expect(message, "still fatal").toContain("8 of 8");
+      const out = `${written()}\n${message}`;
+      expect(out).toContain("kept failing");
+      expect(out).not.toContain("unchanged");
+      expect(out).toContain("this workspace's graph is still empty");
+    });
+
+    it("does not call it 'unchanged' after a first map that committed nothing, below the cutoff", async () => {
+      fixture(2);
+      backend.refuseEverything = true;
+      let message = "";
+      try {
+        await ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
+      } catch (err) {
+        message = String(err);
+      }
+      expect(message).toContain("committed nothing");
+      expect(message).not.toContain("unchanged");
+      expect(message).toContain("still empty");
+    });
+
+    it("does not call the workspace's graph empty when a scoped run with no local baseline commits nothing", async () => {
+      // `ix ingest <new file>` in a repo mapped from another HOME or machine:
+      // no local baseline, and the lookup covers that one file only, so an
+      // empty answer says nothing about the rest of the graph.
+      fixture(2);
+      backend.refuseEverything = true;
+      let message = "";
+      try {
+        await ingestFiles(join(repo, "src", "m000.ts"), { format: "text", suppressOutput: true, printSummary: false });
+      } catch (err) {
+        message = String(err);
+      }
+      expect(message).toContain("committed nothing");
+      expect(message).not.toContain("still empty");
+      expect(message).toContain("may now be stale");
+    });
+  });
+
   describe("a patch that deletes (IN-04)", () => {
     const incremental = () =>
       ingestFiles(repo, { format: "text", suppressOutput: true, printSummary: false });
@@ -1334,50 +1528,63 @@ describe("ingestFiles against a fake backend", () => {
   });
 
   describe("bulk requests bounded by size (IN-05)", () => {
-    // More than one parse batch (500 files), so what the first batch learns has
-    // a later batch to hold for. The backend refuses a bulk over 300 ops.
+    // More than one parse batch, so what the first batch learns has a later
+    // batch to hold for.
+    //
+    // The batches are 50 files here (IX_PARSE_STREAM_CHUNK), not the default
+    // 500, and every count below is a tenth of what a 500-file batch needs: the
+    // files, the batches and the backend's cap. These tests used to write,
+    // `git add`, read and parse 560 to 1,100 files each. That costs well under
+    // a second on Linux and macOS, but on the 4-core windows-2022 runner, with
+    // the rest of the suite running beside it, it took from seven to more than
+    // thirty seconds, and timed out. The work was all per file, and none of it
+    // is what these tests check: the batch boundaries, the ops per request and
+    // the 413s are the same at a tenth of the size. The backend refuses a bulk
+    // over 30 ops; at 7 ops a file that is 4 files a request. (The variable
+    // is cleared and restored around every test by the describe above.)
     const tooLarge = () => backend.requests.filter(r => r.path === "/v1/patches/bulk" && r.code === 413).length;
+    const smallBatches = (): void => { process.env.IX_PARSE_STREAM_CHUNK = "50"; };
     const saved = process.env.IX_COMMIT_MAX_OPS;
     afterEach(() => {
       if (saved === undefined) delete process.env.IX_COMMIT_MAX_OPS;
       else process.env.IX_COMMIT_MAX_OPS = saved;
     });
 
-    // 560 files, two parse batches: 500, then 60. At 7 ops a file the second
-    // batch is 420 ops, over the cap at the default bounds, so it is refused
-    // too unless the run kept what the first batch learned. It used to be
-    // 1,100 files (three batches), which timed out once on a slow Windows
-    // runner; the second batch alone is what the assertion needs. The longer
-    // timeout is a backstop for the fixture writes and parse there.
-    it("learns the size from the first 413 that suggests one, and is refused no more that run", { timeout: 90_000 }, async () => {
-      fixture(560);
-      backend.maxBulkOps = 300;
+    // 56 files, two parse batches: 50, then 6. At 7 ops a file the second
+    // batch is 42 ops, over the cap at the default bounds, so it is refused
+    // too unless the run kept what the first batch learned.
+    it("learns the size from the first 413 that suggests one, and is refused no more that run", async () => {
+      smallBatches();
+      fixture(56);
+      backend.maxBulkOps = 30;
       backend.suggestMaxPatches = true;
 
       const summary = await run();
 
       expect(tooLarge()).toBe(1);
       expect(summary.commitErrors).toBe(0);
-      expect(summary.patchesApplied).toBe(560);
+      expect(summary.patchesApplied).toBe(56);
       expect(backend.singleCount, "no per-file fallback").toBe(0);
       // Both batches were sent in bounded requests. Without the learned size,
-      // the second batch goes out as one 60-patch request and is refused.
+      // the second batch goes out as one 6-patch request and is refused.
       const accepted = backend.requests.filter(r => r.path === "/v1/patches/bulk" && r.code !== 413);
-      expect(Math.max(...accepted.map(r => r.patches))).toBeLessThanOrEqual(Math.floor(300 / 7));
+      expect(Math.max(...accepted.map(r => r.patches))).toBeLessThanOrEqual(Math.floor(30 / 7));
     });
 
     it("halves on a 413 that suggests nothing, and later batches start at the learned size", async () => {
-      fixture(1100);
-      backend.maxBulkOps = 300;
+      // Three parse batches: 50, 50, then 10.
+      smallBatches();
+      fixture(110);
+      backend.maxBulkOps = 30;
 
       const summary = await run();
 
-      // A few halvings in the first batch only; bisecting each batch afresh
-      // was three times as many.
+      // A few halvings in the first batch only (50, 25, 12, 6 refused; 3
+      // fits); bisecting each batch afresh was more than twice as many.
       expect(tooLarge()).toBeGreaterThan(0);
       expect(tooLarge()).toBeLessThanOrEqual(4);
       expect(summary.commitErrors).toBe(0);
-      expect(summary.patchesApplied).toBe(1100);
+      expect(summary.patchesApplied).toBe(110);
     });
 
     it("keeps its op budget after a 413 for bytes: one large file does not shrink the requests after it", async () => {
@@ -1407,14 +1614,15 @@ describe("ingestFiles against a fake backend", () => {
     });
 
     it("is never refused when IX_COMMIT_MAX_OPS keeps every request under the cap", async () => {
-      fixture(1100);
-      backend.maxBulkOps = 300;
-      process.env.IX_COMMIT_MAX_OPS = "300";
+      smallBatches();
+      fixture(110);
+      backend.maxBulkOps = 30;
+      process.env.IX_COMMIT_MAX_OPS = "30";
 
       const summary = await run();
 
       expect(tooLarge()).toBe(0);
-      expect(summary.patchesApplied).toBe(1100);
+      expect(summary.patchesApplied).toBe(110);
     });
   });
 
@@ -1472,23 +1680,100 @@ describe("ingestFiles against a fake backend", () => {
     fixture(2);
     await ingestFiles(join(repo, "src"), { ...quiet, force: true });
 
-    expect(registered()).toEqual([{ root: repo, id: workspaceIdForPath(repo), isDefault: true }]);
+    expect(registered(), "registered, and the default since none existed").toEqual([{ root: repo, id: workspaceIdForPath(repo), isDefault: true }]);
     expect([...new Set(sent().map(s => `${s.workspaceId} ${s.uri}`))].sort()).toEqual([
       `${workspaceIdForPath(repo)} src/m000.ts`,
       `${workspaceIdForPath(repo)} src/m001.ts`,
     ]);
   });
 
-  it("still gives a path in no workspace and no repository a workspace of its own", async () => {
+  it("ingests a loose FILE under its directory's id but registers nothing", async () => {
     // `repo` here is a plain directory: no `fixture()`, so no `git init`.
     const outside = join(repo, "loose");
     mkdirSync(outside, { recursive: true });
     writeFileSync(join(outside, "x.ts"), "export const x = 1;\n", "utf8");
+    const configPath = join(home, ".ix", "config.yaml");
+    const before = existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined;
 
     await ingestFiles(join(outside, "x.ts"), { ...quiet, force: true });
 
-    expect(registered()).toEqual([{ root: outside, id: workspaceIdForPath(outside), isDefault: true }]);
     expect(sent()).toEqual([{ uri: "x.ts", workspaceId: workspaceIdForPath(outside) }]);
+    expect(registered()).toEqual([]);
+    expect(existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined).toBe(before);
+  });
+
+  it("a coalesced rerun for a loose FILE ingest does not register the file's directory either", async () => {
+    // The holder's rerun widens a loose file to its whole directory once that
+    // directory has a baseline; registering it would make the directory readable.
+    const outside = join(repo, "loose");
+    mkdirSync(outside, { recursive: true });
+    const first = join(outside, "x.ts");
+    const second = join(outside, "y.ts");
+    writeFileSync(first, "export const x = 1;\n", "utf8");
+    // The directory was ingested once and its registration since dropped from
+    // config.yaml by hand: unregistered, but it keeps its baseline.
+    await ingestFiles(outside, quiet);
+    register();
+    expect(registered()).toEqual([]);
+    expect(loadIngestBaseline(outside), "the loose directory has a baseline, so the rerun covers all of it").not.toBeNull();
+    writeFileSync(first, "export const x = 2;\n", "utf8");
+    writeFileSync(second, "export const y = 2;\n", "utf8");
+    const configPath = join(home, ".ix", "config.yaml");
+    const before = existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined;
+    const stdout = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      // The lock is taken before the first await, so the waiter coalesces.
+      const holder = ingestPathSingleFlight(first, { format: "json" });
+      const waiter = ingestPathSingleFlight(second, { format: "json" });
+      await Promise.all([holder, waiter]);
+    } finally {
+      stdout.mockRestore();
+    }
+
+    expect(loadIngestBaseline(outside)!.files.get(second), "the rerun ran").toBe(statSync(second).mtimeMs);
+    expect(registered()).toEqual([]);
+    expect(existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined).toBe(before);
+  });
+
+  it("registers a loose DIRECTORY after a successful ingest, but never as the default", async () => {
+    const outside = join(repo, "loose");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "x.ts"), "export const x = 1;\n", "utf8");
+
+    await ingestFiles(outside, { ...quiet, force: true });
+
+    expect(registered()).toEqual([{ root: outside, id: workspaceIdForPath(outside), isDefault: false }]);
+    expect(sent()).toEqual([{ uri: "x.ts", workspaceId: workspaceIdForPath(outside) }]);
+  });
+
+  it("a git-repo ingest that set the default stays the default through a later map's registration", async () => {
+    fixture(2);
+    await ingestFiles(join(repo, "src", "m000.ts"), { ...quiet, force: true });
+    // `ix map` registers through bootstrap -> ensureWorkspaceRegistered first.
+    ensureWorkspaceRegistered(repo);
+    expect(registered()).toEqual([{ root: repo, id: workspaceIdForPath(repo), isDefault: true }]);
+  });
+
+  it("an explicit --root ingest of a non-repository directory may become the default", async () => {
+    const outside = join(repo, "rooted");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "x.ts"), "export const x = 1;\n", "utf8");
+
+    await ingestFiles(outside, { ...quiet, force: true, root: outside });
+
+    expect(registered()).toEqual([{ root: realpathSync.native(outside), id: workspaceIdForPath(realpathSync.native(outside)), isDefault: true }]);
+  });
+
+  it("leaves an existing default workspace the only default", async () => {
+    fixture(2);
+    const other = join(repo, "..", `${repo.split(/[\\/]/).pop()}-default`);
+    mkdirSync(other, { recursive: true });
+    register({ root: realpathSync.native(other), isDefault: true });
+
+    await ingestFiles(join(repo, "src"), { ...quiet, force: true });
+
+    expect(registered().filter(w => w.isDefault).map(w => w.root)).toEqual([realpathSync.native(other)]);
+    expect(registered().map(w => w.root)).toContain(repo);
   });
 
   it("leaves everything outside a subdirectory run alone: deletions, baseline, extractor, stitch", async () => {

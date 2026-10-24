@@ -11,9 +11,9 @@ import { ParsePool } from './parse-pool.js';
 import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
 import { combineSignals, currentRunSignal } from '../../client/run-signal.js';
-import type { GraphPatchPayload } from '../../client/types.js';
+import type { GraphNode, GraphPatchPayload } from '../../client/types.js';
 import { canonicalWorkspacePath, isPathInside, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
-import { resolveIngestRoot } from '../map-root.js';
+import { resolveIngestRootWithSource } from '../map-root.js';
 import { acquireMapLock, requestMapRerun, takeMapRerun } from '../single-flight.js';
 import { applyRequestedMapCoalesceExitCode } from './map.js';
 import {
@@ -22,6 +22,7 @@ import {
 import {
   clearRebuildProgress, extractorChanged, isRev, loadIngestBaseline, loadRebuildProgress,
   saveIngestBaseline, saveRebuildProgress, type BaselineFileNotes,
+  loadOrphanSweepPending, saveOrphanSweepPending, type OrphanSweepPending,
 } from '../ingest-baseline.js';
 import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
@@ -32,7 +33,7 @@ import {
   changedNames, findDependents, importsChanged, loadIngestSymbols, resolutionHash, saveIngestSymbols,
   type StoredSummary, type SymbolEntry,
 } from '../ingest-symbols.js';
-import { detectSystem, repoWorkspaceIdFor, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
+import { detectSystem, fileIdentity, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
 import { CLIENT_EXPECTED_SCHEMA_VERSION } from '../backend-status.js';
 import { admitStitchWaiting, connectionNeverEstablished, type StitchRefusal } from '../stitch-guard.js';
 import {
@@ -43,6 +44,11 @@ import {
   drainInPasses,
   perFileAction,
 } from '../commit-breaker.js';
+import { retryCommit, TRANSIENT_RETRY_BUDGET_MS } from '../commit-retry.js';
+import { createDatabaseProbe, probeDatabase } from '../database-probe.js';
+// Moved to commit-retry.ts with the retry loop that uses them; re-exported so
+// existing importers keep working.
+export { isAbortError, isRetryableCommitConflict } from '../commit-retry.js';
 import { readBackendHealth } from './upgrade.js';
 import {
   createIgnoreMatcher, parseIgnoreFile, parseIgnorePattern, type IgnorePattern,
@@ -132,6 +138,19 @@ export function parsePositiveIntEnv(name: string, fallback: number): number {
   if (!/^\d+$/.test(raw)) return fallback;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * `parsePositiveIntEnv`, but 0 is a value rather than "unset". For a count of
+ * RETRIES, where 0 means "do not retry" and reading it as the default made the
+ * setting impossible to turn off (IX_COMMIT_CONFLICT_RETRIES=0 retried 6 times).
+ */
+export function parseNonNegativeIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  if (!/^\d+$/.test(raw)) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isSafeInteger(parsed) ? parsed : fallback;
 }
 
 
@@ -287,6 +306,10 @@ interface StoredPatchEntities {
   kinds: Map<string, string>;
   /** External package nodes (`attrs.external`) the stored patch wrote. */
   external: Set<string>;
+  /** Ids only a later window manifest named; an absent one gets no DeleteNode. */
+  extraOnly?: Set<string>;
+  /** Why a later window manifest was left out: a backend error reading it. */
+  extraSkipped?: string;
 }
 
 /**
@@ -337,11 +360,68 @@ function readStoredPatchEntities(raw: unknown): StoredPatchEntities | null {
   };
 }
 
+/**
+ * How many leading candidates `loadStoredPatchEntities` reads and merges: the
+ * current extractor and the one before it. An extractor rebuild leaves its
+ * orphans in the previous extractor's patch, and a graph a pre-fix rebuild
+ * polluted holds them there too. There is no batch patch GET, so merging all
+ * ~30 candidates would cost ~30 reads per reconciled file.
+ */
+const RECONCILE_MANIFEST_WINDOW = 2;
+
 async function loadStoredPatchEntities(
   client: Pick<IxClient, 'getPatch'>,
   patchIds: string[],
+  window: number = RECONCILE_MANIFEST_WINDOW,
 ): Promise<StoredPatchEntities> {
-  for (const patchId of patchIds) {
+  const windowIds = patchIds.slice(0, window);
+  const windowResults = await Promise.all(windowIds.map(async patchId => {
+    try {
+      return { patchId, raw: await client.getPatch(patchId) as unknown, failed: false, error: undefined as unknown };
+    } catch (err) {
+      if (isNotFoundError(err)) return { patchId, raw: null, failed: false, error: undefined as unknown };
+      return { patchId, raw: null, failed: true, error: err };
+    }
+  }));
+
+  // Results are walked in candidate order. A backend error before any patch
+  // was found fails the reconcile, as the first-hit walk always did. One on a
+  // later window patch only loses its extra ids: the patch found first is the
+  // one a first-hit walk would have used, so the file reconciles at least as
+  // fully as it did before the merge, and the skip is reported, not fatal.
+  let primary: StoredPatchEntities | null = null;
+  for (const result of windowResults) {
+    if (result.failed) {
+      if (primary === null) throw result.error;
+      primary.extraSkipped = `patch ${result.patchId} unread: ${result.error instanceof Error ? result.error.message : String(result.error)}`;
+      continue;
+    }
+    if (result.raw === null) continue;
+    const entities = readStoredPatchEntities(result.raw);
+    if (primary === null) {
+      if (!entities) throw new Error(`Patch ${result.patchId} has no entity manifest`);
+      primary = {
+        nodeIds: [...entities.nodeIds],
+        kinds: new Map(entities.kinds),
+        external: new Set(entities.external),
+        extraOnly: new Set(),
+      };
+      continue;
+    }
+    if (!entities) continue;
+    const seen = new Set(primary.nodeIds);
+    for (const id of entities.nodeIds) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      primary.nodeIds.push(id);
+      primary.extraOnly!.add(id);
+    }
+    for (const [id, kind] of entities.kinds) if (!primary.kinds.has(id)) primary.kinds.set(id, kind);
+    for (const id of entities.external) primary.external.add(id);
+  }
+  if (primary) return primary;
+
+  for (const patchId of patchIds.slice(window)) {
     try {
       const entities = readStoredPatchEntities(await client.getPatch(patchId));
       if (entities) return entities;
@@ -351,6 +431,17 @@ async function loadStoredPatchEntities(
     }
   }
   throw new Error('Previous source patch was not found');
+}
+
+interface ReconcileOptions {
+  /** Told when a later stored manifest could not be read and was left out. */
+  onWindowSkipped?: (reason: string) => void;
+  /**
+   * How many leading candidates to read and merge (default
+   * RECONCILE_MANIFEST_WINDOW). 1 is the first-hit walk: one read when the
+   * current candidate exists, which is what an ordinary edit pays.
+   */
+  window?: number;
 }
 
 export async function reconcileRemovedEntities(
@@ -369,8 +460,10 @@ export async function reconcileRemovedEntities(
   // Bounds the entity lookups. One limiter shared by every file a run
   // reconciles keeps the whole run to its slots, however many files run at once.
   lookupLimit: Limiter = task => task(),
+  options: ReconcileOptions = {},
 ): Promise<GraphPatchPayload> {
-  const previous = await loadStoredPatchEntities(client, previousPatchIds);
+  const previous = await loadStoredPatchEntities(client, previousPatchIds, options.window);
+  if (previous.extraSkipped) options.onWindowSkipped?.(previous.extraSkipped);
   const currentNodeIds = new Set(
     patch.ops
       .filter(op => op.type === 'UpsertNode')
@@ -404,6 +497,9 @@ export async function reconcileRemovedEntities(
 
   for (const { nodeId, entity } of lookups) {
     if (entity === null) {
+      // An id only the second window manifest named, already absent: nothing
+      // to delete, and the patch stays free of extra deletes.
+      if (previous.extraOnly?.has(nodeId)) continue;
       // Already absent. Emitting the delete anyway keeps the patch a complete
       // statement of intent and costs nothing.
       removedNodeIds.push(nodeId);
@@ -476,6 +572,281 @@ export async function reconcileRemovedEntities(
 }
 
 /**
+ * The same-hash orphan sweep (IN-20). An extractor change rebuilds every file
+ * with unchanged bytes, and the nodes the old extractor wrote and the new one
+ * does not stay live. The sweep finds them from the old extractor's stored
+ * patch for the file -- one read per file -- and checks every candidate of a
+ * batch with one batched node read, then adds a DeleteNode for each that is
+ * still live, was last written by this file, and is neither an external
+ * package node (shared by every file calling into the package) nor, under
+ * `ix map`, a chunk. It costs nothing per node, and a run's budget bounds it.
+ */
+export interface OrphanSweepBudget {
+  maxMs: number;
+  maxRequests: number;
+  /** Wall time the sweep has spent so far in this run. */
+  usedMs: number;
+  /** Stored-patch and batched node reads made so far in this run. */
+  requests: number;
+  /** Files the sweep skipped because the budget ran out. */
+  skipped: number;
+}
+
+/** Default time budget of a run's orphan sweep (`IX_ORPHAN_SWEEP_MAX_MS`). */
+export const ORPHAN_SWEEP_MAX_MS = 60_000;
+/** Default request budget of a run's orphan sweep (`IX_ORPHAN_SWEEP_MAX_REQUESTS`). */
+export const ORPHAN_SWEEP_MAX_REQUESTS = 25_000;
+
+export function orphanSweepBudget(env: NodeJS.ProcessEnv = process.env): OrphanSweepBudget {
+  const read = (raw: string | undefined, fallback: number): number => {
+    if (raw === undefined || raw.trim() === '') return fallback;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
+  };
+  return {
+    maxMs: read(env.IX_ORPHAN_SWEEP_MAX_MS, ORPHAN_SWEEP_MAX_MS),
+    maxRequests: read(env.IX_ORPHAN_SWEEP_MAX_REQUESTS, ORPHAN_SWEEP_MAX_REQUESTS),
+    usedMs: 0,
+    requests: 0,
+    skipped: 0,
+  };
+}
+
+export interface OrphanSweepFile {
+  /** The file's patch as built, before map mode strips it. */
+  patch: GraphPatchPayload;
+  /**
+   * The stored patch ids, one per earlier extractor, that may name the file's
+   * orphans for its (unchanged) hash: usually just the previous extractor's.
+   */
+  previousPatchIds: string[];
+}
+
+/**
+ * The backend does not serve `POST /v1/nodes`, or answers it without the
+ * provenance the ownership check needs: the sweep is off for the run.
+ */
+export class BatchNodeReadsUnsupported extends Error {}
+
+/** `POST /v1/nodes` takes at most this many ids. */
+const NODES_PER_READ = 1000;
+/** Node ids are UUIDs; the batched read refuses the whole request over one that is not. */
+const NODE_ID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The node ids a stored patch upserted, with the kinds and external flags it
+ * recorded. A patch stored with its ops (`/v1/patch`) has all three; a bulk
+ * patch keeps only ids (`nodeIds`, or the older `entityIds` manifest), which
+ * is why the batched read checks kind and ownership.
+ */
+function storedUpserts(raw: unknown): { ids: string[]; kinds: Map<string, string>; external: Set<string> } | null {
+  const data = (raw as { data?: unknown } | null)?.data as { ops?: unknown; nodeIds?: unknown } | undefined;
+  if (!data) return null;
+  if (Array.isArray(data.ops)) {
+    const ids: string[] = [];
+    const kinds = new Map<string, string>();
+    const external = new Set<string>();
+    for (const op of data.ops as Array<{ type?: unknown; id?: unknown; kind?: unknown; attrs?: unknown }>) {
+      if (op.type !== 'UpsertNode' || typeof op.id !== 'string') continue;
+      ids.push(op.id);
+      if (typeof op.kind === 'string') kinds.set(op.id, op.kind);
+      if (isExternalNode(op)) external.add(op.id);
+    }
+    return { ids, kinds, external };
+  }
+  if (Array.isArray(data.nodeIds)) {
+    return { ids: data.nodeIds.filter((id): id is string => typeof id === 'string'), kinds: new Map(), external: new Set() };
+  }
+  const manifest = readStoredPatchEntities(raw);
+  return manifest ? { ids: manifest.nodeIds, kinds: manifest.kinds, external: manifest.external } : null;
+}
+
+/** The file that last wrote a node, from the provenance the backend keeps. */
+function nodeSourceUri(node: GraphNode): unknown {
+  const provenance = node.provenance as { sourceUri?: unknown; source_uri?: unknown } | undefined;
+  return provenance?.sourceUri ?? provenance?.source_uri;
+}
+
+/**
+ * One node the file's patch upserts, read beside the orphan candidates to tell
+ * whether a patch for these very bytes and this extractor already landed: the
+ * file node if there is one, else the first other non-chunk node.
+ */
+function currentPatchProbe(patch: GraphPatchPayload): string | undefined {
+  let fallback: string | undefined;
+  for (const op of patch.ops) {
+    if (op.type !== 'UpsertNode' || typeof op['id'] !== 'string' || !NODE_ID_SHAPE.test(op['id'])) continue;
+    if (op['kind'] === 'chunk' || isExternalNode(op)) continue;
+    if (op['kind'] === 'file') return op['id'];
+    fallback ??= op['id'];
+  }
+  return fallback;
+}
+
+/**
+ * Whether the backend reports `node` last written by a patch for `patch`'s
+ * file, hash and extractor. The bulk route rewrites every node a patch
+ * upserts with that patch's provenance, so this holds once such a patch has
+ * landed -- under its deterministic id or a salted one.
+ */
+function writtenBy(node: GraphNode | undefined, patch: GraphPatchPayload): boolean {
+  if (!node || (node.deletedRev !== undefined && node.deletedRev !== null)) return false;
+  const provenance = node.provenance as { extractor?: unknown; sourceHash?: unknown; source_hash?: unknown } | undefined;
+  return nodeSourceUri(node) === patch.source.uri
+    && provenance?.extractor === patch.source.extractor
+    && (provenance?.sourceHash ?? provenance?.source_hash) === patch.source.sourceHash;
+}
+
+function isUnsupportedRouteError(error: unknown): boolean {
+  return /^(?:Error:\s*)?(?:404|405|501):/.test(String(error));
+}
+
+/**
+ * The orphan node ids to delete for each file, in `files` order. Never one a
+ * patch of this batch upserts (`batchUpserts`), and never one the backend does
+ * not report live, last written by this very file, non-external and (in map
+ * mode) not a chunk. A file whose reads fail, or that the budget no longer
+ * covers, gets none: the sweep is best effort and the file commits as built.
+ * Throws `BatchNodeReadsUnsupported` when the backend has no batched node read.
+ */
+export async function sweepOrphanNodes(
+  client: Pick<IxClient, 'getPatch' | 'nodes'>,
+  files: OrphanSweepFile[],
+  opts: {
+    mapMode: boolean;
+    budget: OrphanSweepBudget;
+    batchUpserts?: Set<string>;
+    concurrency?: number;
+    onSkip?: (file: OrphanSweepFile, reason: string) => void;
+    /**
+     * Told of each file the sweep did not finish: past the budget, or a read
+     * failed. Every other file was swept (or had nothing to sweep).
+     */
+    onUnswept?: (file: OrphanSweepFile) => void;
+    /**
+     * Told of each file given orphans whose current patch the backend may
+     * already hold: one node of it (`currentPatchProbe`, read in the same
+     * batched node read) was last written by this file at this hash and
+     * extractor, or could not be read. A patch id the backend already holds
+     * is answered `Idempotent` and its deletes dropped, so such a file's
+     * deletes need a salted id.
+     */
+    onWrittenBefore?: (file: OrphanSweepFile) => void;
+    now?: () => number;
+  },
+): Promise<string[][]> {
+  const now = opts.now ?? (() => performance.now());
+  const { budget } = opts;
+  const started = now();
+  const spent = (): number => budget.usedMs + (now() - started);
+  const result: string[][] = files.map(() => []);
+  try {
+    const candidates = await mapLimit(files, opts.concurrency ?? RECONCILE_CONCURRENCY, async (file): Promise<string[] | null> => {
+      if (file.previousPatchIds.length === 0) return null;
+      if (budget.requests >= budget.maxRequests || spent() >= budget.maxMs) {
+        budget.skipped++;
+        opts.onUnswept?.(file);
+        return null;
+      }
+      budget.requests += file.previousPatchIds.length;
+      const reads = await Promise.all(file.previousPatchIds.map(async patchId => {
+        try {
+          return { raw: await client.getPatch(patchId) as unknown, error: null as string | null };
+        } catch (err) {
+          return { raw: null, error: isNotFoundError(err) ? null : (err instanceof Error ? err.message : String(err)) };
+        }
+      }));
+      const failed = reads.find(r => r.error !== null);
+      if (failed) {
+        opts.onSkip?.(file, failed.error!);
+        opts.onUnswept?.(file);
+        return null;
+      }
+      const current = new Set(
+        file.patch.ops.filter(op => op.type === 'UpsertNode').map(op => op['id']).filter((id): id is string => typeof id === 'string'),
+      );
+      const ids = new Set<string>();
+      for (const { raw } of reads) {
+        const stored = raw === null ? null : storedUpserts(raw);
+        if (!stored) continue;
+        for (const id of stored.ids) {
+          if (!current.has(id)
+            && !opts.batchUpserts?.has(id)
+            && NODE_ID_SHAPE.test(id)
+            && !stored.external.has(id)
+            && !(opts.mapMode && stored.kinds.get(id) === 'chunk')) ids.add(id);
+        }
+      }
+      return [...ids];
+    });
+
+    const unique = [...new Set(candidates.flatMap(c => c ?? []))];
+    if (unique.length === 0) return result;
+    const probes = files.map((file, i) =>
+      opts.onWrittenBefore && candidates[i] && candidates[i]!.length > 0 ? currentPatchProbe(file.patch) : undefined);
+    const seen = new Set(unique);
+    for (const probe of probes) {
+      if (probe !== undefined && !seen.has(probe)) {
+        seen.add(probe);
+        unique.push(probe);
+      }
+    }
+    const live = new Map<string, GraphNode>();
+    const unread = new Set<string>();
+    let unreadReason = '';
+    for (let i = 0; i < unique.length; i += NODES_PER_READ) {
+      const ids = unique.slice(i, i + NODES_PER_READ);
+      budget.requests++;
+      try {
+        const answer = await client.nodes(ids, 'full');
+        for (const node of answer?.nodes ?? []) {
+          if (node && typeof node.id === 'string') live.set(node.id, node);
+        }
+      } catch (err) {
+        if (isUnsupportedRouteError(err)) {
+          throw new BatchNodeReadsUnsupported('the backend does not serve the batched node read (POST /v1/nodes)');
+        }
+        for (const id of ids) unread.add(id);
+        unreadReason = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    // Ownership is read from each node's provenance. A backend whose batched
+    // read leaves it out would make every candidate look foreign, and the
+    // sweep a silent no-op; say so and turn it off instead.
+    for (const node of live.values()) {
+      if (typeof nodeSourceUri(node) !== 'string') {
+        throw new BatchNodeReadsUnsupported('the batched node read (POST /v1/nodes) returned nodes without provenance.sourceUri');
+      }
+    }
+
+    files.forEach((file, i) => {
+      const ids = candidates[i];
+      if (!ids || ids.length === 0) return;
+      if (ids.some(id => unread.has(id))) {
+        opts.onSkip?.(file, `node read failed: ${unreadReason}`);
+        opts.onUnswept?.(file);
+        return;
+      }
+      result[i] = ids.filter(id => {
+        const node = live.get(id);
+        if (!node || (node.deletedRev !== undefined && node.deletedRev !== null)) return false;
+        if (isExternalNode(node)) return false;
+        if (opts.mapMode && node.kind === 'chunk') return false;
+        return nodeSourceUri(node) === file.patch.source.uri;
+      });
+      const probe = probes[i];
+      if (result[i]!.length > 0 && probe !== undefined && (unread.has(probe) || writtenBy(live.get(probe), file.patch))) {
+        opts.onWrittenBefore?.(file);
+      }
+    });
+    return result;
+  } finally {
+    budget.usedMs += now() - started;
+  }
+}
+
+/**
  * Files reconciled at once, and entity lookups in flight across all of them:
  * the graph walkers' cap (`EXPAND_CONCURRENCY`), for the same reason.
  */
@@ -512,17 +883,52 @@ export function backendAppliesBulkDeletes(
   const forced = env.IX_BULK_DELETES;
   if (forced === '1') return true;
   if (forced === '0') return false;
+  return releaseAtLeast(health, BULK_DELETES_SINCE) === true;
+}
+
+/**
+ * Whether the release the backend reports is at least `min`: null when it
+ * reports none, or one that does not parse.
+ */
+function releaseAtLeast(health: { release_version?: unknown } | null | undefined, min: string): boolean | null {
   const release = health?.release_version;
-  if (typeof release !== 'string') return false;
+  if (typeof release !== 'string') return null;
   const parse = (v: string): number[] | null => {
     const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(v.trim());
     return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
   };
   const have = parse(release);
-  const need = parse(BULK_DELETES_SINCE)!;
-  if (have === null) return false;
+  const need = parse(min)!;
+  if (have === null) return null;
   for (let i = 0; i < 3; i++) if (have[i] !== need[i]) return have[i] > need[i];
   return true;
+}
+
+/** The first release that serves `POST /v1/nodes` (Ix-memory batch reads). */
+export const BATCH_NODE_READS_SINCE = '1.0.33';
+
+/**
+ * Why the same-hash orphan sweep (IN-20) cannot run against this backend, or
+ * null when it can. The sweep adds DeleteNode ops to rebuild patches, which
+ * only the bulk route of a backend that applies deletes takes without falling
+ * back to one `/v1/patch` per file, and it checks its candidates with one
+ * batched `POST /v1/nodes`. A backend that reports no release but is forced
+ * onto bulk deletes (`IX_BULK_DELETES=1`) is tried; if it does not serve the
+ * batch read, the sweep turns itself off for the run.
+ */
+export function orphanSweepUnsupportedReason(
+  health: { release_version?: unknown } | null | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const release = health?.release_version;
+  const described = typeof release === 'string' ? `release ${release}` : 'unversioned';
+  if (!backendAppliesBulkDeletes(health, env)) {
+    return `the backend (${described}) is older than ${BATCH_NODE_READS_SINCE} or does not apply deletes in bulk`;
+  }
+  if (releaseAtLeast(health, BATCH_NODE_READS_SINCE) === false) {
+    return `the backend (${described}) is older than ${BATCH_NODE_READS_SINCE}`;
+  }
+  return null;
 }
 
 export function planDeletedFileRecovery(
@@ -562,32 +968,6 @@ export function planDeletedFileRecovery(
   return { previousDeletedFiles, nextDeletedFiles, recreatedPaths, forceReingestPaths };
 }
 
-/** Lock contention, as opposed to the transport failures below. Kept separate
-  * only so each group's reason for being retryable stays readable. */
-const COMMIT_CONFLICT_RETRY_PATTERNS = [
-  // ArangoDB lock conflicts. These were briefly split into their own constant
-  // so `commitFailureIndictsBackend` could exclude them; that exclusion was
-  // reverted in round 3 -- it made the cutoff inert in a real saturation mode --
-  // and the split had no consumer left, so it is inlined.
-  'write-write conflict',
-  'timeout waiting to lock key',
-  'error: 1200',
-  // Transport-level failures (k8s ingress reset, socket drop under load).
-  //
-  // These are retried because the request usually never reached the server --
-  // but "usually" is the whole of Ix#495. A bulk commit is chunked and writes
-  // its idempotency keys as each chunk lands, so a socket that drops after the
-  // server started work leaves part of the group committed. Retrying then
-  // re-sends a set the server has partly seen, and because the bulk group id is
-  // a hash of the patch ids, the retry reproduces the same group and is refused
-  // with a 409 that no further retry can clear.
-  //
-  // The retry stays (it is right far more often than not); what changed is that
-  // the resulting 409 is now recoverable — see isBulkPartiallyCommittedError.
-  'fetch failed',
-  'econnreset',
-  'econnrefused',
-];
 
 /**
  * A bulk commit the server accepted only in part, or whose patches all landed
@@ -639,23 +1019,6 @@ export function parseBulkCommittedPatchIds(err: unknown): Set<string> | undefine
   }
 }
 
-// An abort from the shared wall-clock deadline (or a per-request timeout) must
-// NOT be retried — the whole point of the deadline is to stop work. Retrying
-// here would defeat it and add 6 more backed-off requests to an already-late
-// run. AbortSignal.timeout raises a TimeoutError; an aborted deadline raises an
-// AbortError; both also stringify with "aborted".
-export function isAbortError(err: unknown): boolean {
-  const name = (err as { name?: string } | null)?.name;
-  if (name === "AbortError" || name === "TimeoutError") return true;
-  return String(err).toLowerCase().includes("aborted");
-}
-
-export function isRetryableCommitConflict(err: unknown): boolean {
-  if (isAbortError(err)) return false;
-  const message = String(err).toLowerCase();
-  return COMMIT_CONFLICT_RETRY_PATTERNS.some(pattern => message.includes(pattern));
-}
-
 /**
  * Does this commit failure say anything about the BACKEND? (Ix#560)
  *
@@ -692,18 +1055,14 @@ export function commitFailureIndictsBackend(err: unknown, runDeadlineExpired: bo
   return true;
 }
 
+/**
+ * The per-file commit's retry: lock conflicts and transport drops only.
+ * Transient statuses (502/503/504/429) are retried at the BULK sites, which
+ * call `retryCommit` themselves; retrying them per patch would multiply a
+ * per-bulk wait budget by the number of patches.
+ */
 async function retryOnConflict<T>(fn: () => Promise<T>, maxRetries: number): Promise<T> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      if (attempt >= maxRetries || !isRetryableCommitConflict(err)) throw err;
-      // ArangoDB lock conflicts usually clear as soon as the competing transaction
-      // commits. Transport errors may need a bit more breathing room under k8s load.
-      const delay = 10 * (1 << attempt) + Math.random() * 10;
-      await new Promise<void>(r => setTimeout(r, delay));
-    }
-  }
+  return retryCommit(fn, { maxRetries, transient: false });
 }
 
 /**
@@ -1141,11 +1500,17 @@ function renderProgressLine(phase: string, current: number, total: number): stri
 
 type PathIngestOpts = Parameters<typeof ingestFiles>[1];
 
-/** The workspace root `target` ingests into, or undefined when it cannot be resolved. */
-function ingestLockRoot(target: string, explicitRoot?: string): string | undefined {
+/**
+ * The workspace root `target` ingests into, or undefined when it cannot be
+ * resolved. `looseFile`: the target is a file in no workspace and no
+ * repository, which is never registered (see ingestFiles).
+ */
+function ingestLockRoot(target: string, explicitRoot?: string): { root: string; looseFile: boolean } | undefined {
   try {
     const resolved = nodePath.resolve(target);
-    return resolveIngestRoot(resolved, fs.statSync(resolved).isDirectory(), explicitRoot);
+    const isDirectory = fs.statSync(resolved).isDirectory();
+    const { root, source } = resolveIngestRootWithSource(resolved, isDirectory, explicitRoot);
+    return { root, looseFile: source === 'loose' && !isDirectory };
   } catch {
     // `ingestFiles` reports a missing or unreadable path itself.
     return undefined;
@@ -1168,11 +1533,12 @@ function ingestLockRoot(target: string, explicitRoot?: string): string | undefin
  * workspace, so it re-ingests only its own path then.
  */
 export async function ingestPathSingleFlight(target: string, opts: PathIngestOpts): Promise<void> {
-  const root = ingestLockRoot(target, opts.root);
-  if (root === undefined) {
+  const lockRoot = ingestLockRoot(target, opts.root);
+  if (lockRoot === undefined) {
     await ingestFiles(target, opts);
     return;
   }
+  const { root, looseFile } = lockRoot;
   const lock = acquireMapLock(root, `ix ingest ${root}`);
   if (lock === null) {
     requestMapRerun(root);
@@ -1195,8 +1561,11 @@ export async function ingestPathSingleFlight(target: string, opts: PathIngestOpt
       // known here, so this is a plain incremental pass.
       const rerunTarget = loadIngestBaseline(root) !== null ? root : target;
       try {
+        // The rerun may widen a loose file to its whole directory; that must
+        // not register the directory the file's own ingest would not have.
         await ingestFiles(rerunTarget, {
           recursive: true, format: 'json', printSummary: false, suppressOutput: true, root: opts.root,
+          neverRegister: looseFile,
         });
       } catch (err: any) {
         if (opts.format !== 'json') {
@@ -1230,7 +1599,7 @@ export function registerIngestCommand(program: Command): void {
       (value: string, previous: string[] = []) => [...previous, value],
       [] as string[],
     )
-    .addHelpText('after', '\nExamples:\n  ix ingest ./src\n  ix ingest --path ./src --force\n  ix ingest --path ./rocksdb --lang cpp,c\n  ix ingest --github owner/repo\n  ix ingest --github owner/repo --since 2026-01-01 --limit 20 --format json\n  ix ingest --github owner/repo --token ghp_xxxx\n\nA path inside a mapped workspace (or a git repo) refreshes just that part of it, under that\nworkspace; a path outside every workspace and repo is ingested as a workspace of its own.')
+    .addHelpText('after', '\nExamples:\n  ix ingest ./src\n  ix ingest --path ./src --force\n  ix ingest --path ./rocksdb --lang cpp,c\n  ix ingest --github owner/repo\n  ix ingest --github owner/repo --since 2026-01-01 --limit 20 --format json\n  ix ingest --github owner/repo --token ghp_xxxx\n\nA path inside a mapped workspace (or a git repo) refreshes just that part of it, under that\nworkspace; a directory outside every workspace and repo becomes a workspace of its own (never the\ndefault). A loose file outside them is ingested but registers nothing, so ix read cannot open its neighbours.')
     .action(async (positionalPath: string | undefined, opts: {
       path?: string; recursive?: boolean; force?: boolean; github?: string; token?: string;
       since?: string; limit: string; format: string; root?: string; debug?: boolean; lang?: string;
@@ -1622,7 +1991,13 @@ export function describeCommitOutcome(
    * patches? When it did, the banner above has already given the reason, and
    * this line must not send the reader back to a flag that adds nothing.
    */
-  cutoffFired: boolean = cutoffSkipped > 0
+  cutoffFired: boolean = cutoffSkipped > 0,
+  /**
+   * The backend held none of this run's files before it started (a first map,
+   * or one after `ix reset`). With nothing landed, "the graph is unchanged"
+   * would read as "the old graph is still there", and there is none.
+   */
+  graphStartedEmpty: boolean = false
 ): CommitOutcome {
   if (commitErrors <= 0) return { kind: "ok" };
   const attempted = commitErrors + patchesApplied;
@@ -1727,7 +2102,10 @@ export function describeCommitOutcome(
       kind: "fatal",
       message:
         `Ingest committed nothing: all ${commitErrors} ${patches} failed to commit. ` +
-        `The graph is unchanged and may now be stale. Re-run with ${debugFlag} to see why.`,
+        (graphStartedEmpty
+          ? `The backend held none of these files before this run, so this workspace's graph is still empty. `
+          : `The graph is unchanged and may now be stale. `) +
+        `Re-run with ${debugFlag} to see why.`,
     };
   }
   return {
@@ -1736,6 +2114,24 @@ export function describeCommitOutcome(
       `Warning: ${commitErrors} of ${attempted} file patches failed to commit; ` +
       `the graph is missing those files. Re-run 'ix map' to retry, or ${debugFlag} to see why.`,
   };
+}
+
+// Builtin instance-method names that are never a real cross-repo call target.
+const STITCH_COMMODITY = new Set(['map', 'forEach', 'reduce', 'reduceRight', 'flatMap', 'flat', 'push', 'pop', 'shift', 'unshift', 'splice', 'slice', 'concat', 'get', 'set', 'has', 'keys', 'values', 'entries', 'then', 'catch', 'finally', 'resolve', 'race', 'allSettled', 'bind', 'call', 'apply', 'stringify', 'toString', 'valueOf', 'hasOwnProperty']);
+
+/**
+ * The cross-repo stitch entry a parsed relationship contributes, if any. A
+ * receiver-only typed call (ParsedRelationship.receiverOnly) names a target
+ * inferred from a local receiver's type; it is written only when it resolves
+ * in this workspace, so it is never a cross-repo call candidate.
+ */
+export function stitchCallEntry(
+  rel: { predicate?: unknown; dstName?: unknown; srcName?: unknown; receiverOnly?: unknown },
+  filePath: string,
+): { symbol: string; caller: string; callerFilePath: string } | undefined {
+  if (rel.predicate !== 'CALLS' || rel.receiverOnly || typeof rel.dstName !== 'string' || typeof rel.srcName !== 'string') return undefined;
+  if (STITCH_COMMODITY.has(rel.dstName)) return undefined;
+  return { symbol: rel.dstName, caller: rel.srcName, callerFilePath: filePath };
 }
 
 /**
@@ -1769,7 +2165,7 @@ export function ingestCompletedCleanly(parseErrors: number, commitErrors: number
 
 export async function ingestFiles(
   path: string,
-  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean; exclude?: string[]; deadlineSignal?: AbortSignal }
+  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean; exclude?: string[]; deadlineSignal?: AbortSignal; neverRegister?: boolean }
 ): Promise<IngestFilesSummary> {
   // Under `ix mcp` the tool call's deadline is this run's deadline too. The
   // client would see it anyway (createClient combines it), but the commit loop,
@@ -1790,6 +2186,7 @@ export async function ingestFiles(
       fileNodeId,
       symbolNodeId,
       extractorName,
+      PREVIOUS_EXTRACTORS,
     },
     { languageFromPath },
   ] = await loadIngestionModules();
@@ -1828,7 +2225,12 @@ export async function ingestFiles(
   // `resolveIngestRoot`. A path strictly inside that root is a scoped run --
   // discovery, deletion and the stitch are limited to it, and the rest of the
   // workspace's baseline is carried forward untouched.
-  const workspaceRoot = resolveIngestRoot(resolvedPath, fs.statSync(resolvedPath).isDirectory(), opts.root);
+  const targetIsDirectory = fs.statSync(resolvedPath).isDirectory();
+  const { root: workspaceRoot, source: rootSource } = resolveIngestRootWithSource(resolvedPath, targetIsDirectory, opts.root);
+  // A file in no workspace and no repository is ingested under its directory's
+  // id but never registered: that would make the whole directory readable.
+  // `neverRegister`: a coalesced rerun on behalf of such a file ingest.
+  const registerAfterCommit = opts.neverRegister !== true && !(rootSource === 'loose' && !targetIsDirectory);
   // A new workspace is only registered once a commit lands (below, before the
   // summary): see workspaceStateFor.
   const {
@@ -1868,22 +2270,17 @@ export async function ingestFiles(
   // system_id, and each file carries its repoId. A cross-repo edge's dst id is
   // resolved in the dst repo's workspace namespace by core-ingestion.
   const detectedSystem = detectSystem(workspaceRoot);
-  const systemId: string | undefined = detectedSystem?.systemId;
-  const repoOf = (relPath: string): string => (relPath.split('/')[0] || '.');
-  const repoWsCache = new Map<string, string>();
-  const repoWorkspaceId = (repo: string): string => {
-    let ws = repoWsCache.get(repo);
-    if (!ws) { ws = repoWorkspaceIdFor(workspaceRoot, repo); repoWsCache.set(repo, ws); }
-    return ws;
-  };
-  const repoWorkspaceOf = systemId ? (relPath: string) => repoWorkspaceId(repoOf(relPath)) : undefined;
   // Per-file workspace id + multi-repo context fed to buildPatchWithResolution.
-  const fileWorkspaceId = (relPath: string): string => systemId ? repoWorkspaceId(repoOf(relPath)) : workspaceId;
+  // Shared with `ix verify` (system.ts fileIdentity), which must agree exactly.
+  const {
+    systemId,
+    repoOf,
+    fileWorkspaceId,
+    fileMultiRepo,
+  } = fileIdentity(workspaceRoot, workspaceId, detectedSystem?.systemId);
   // The workspace_id a file's nodes are folded under (same value the patch builder
   // stamps on source.workspaceId) — used to scope the baseline hash lookup per file.
   const sourceWorkspaceIdOf = (absPath: string): string => fileWorkspaceId(toWorkspaceRelative(absPath));
-  const fileMultiRepo = (relPath: string) =>
-    systemId ? { systemId, repoId: repoOf(relPath), repoWorkspaceOf } : undefined;
   // Cross-repo dependency gate: map an import module name to the member repo that
   // publishes that package (exact, or prefix at a package boundary for scoped /
   // sub-module / sub-path imports like "@babel/types/lib/x", "tokio::sync",
@@ -1925,8 +2322,6 @@ export async function ingestFiles(
   // {filePath, local entity name, public name} -> add an export entry by public name.
   const stitchExportAliases: Array<{ filePath: string; local: string; pub: string }> = [];
   const stitchExportAliasSeen = new Set<string>();
-  // Builtin instance-method names that are never a real cross-repo call target.
-  const STITCH_COMMODITY = new Set(['map', 'forEach', 'reduce', 'reduceRight', 'flatMap', 'flat', 'push', 'pop', 'shift', 'unshift', 'splice', 'slice', 'concat', 'get', 'set', 'has', 'keys', 'values', 'entries', 'then', 'catch', 'finally', 'resolve', 'race', 'allSettled', 'bind', 'call', 'apply', 'stringify', 'toString', 'valueOf', 'hasOwnProperty']);
   const specToPkg = (spec: string | undefined): string | null => {
     if (!spec || spec.startsWith('.') || spec.startsWith('/')) return null;
     if (spec.startsWith('@')) { const parts = spec.split('/'); return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : null; }
@@ -1957,9 +2352,8 @@ export async function ingestFiles(
         stitchExportAliases.push({ filePath: p.filePath, local: x.local, pub: x.public });
       }
       for (const rel of (p.relationships ?? [])) {
-        if (rel.predicate === 'CALLS' && typeof rel.dstName === 'string' && typeof rel.srcName === 'string' && !STITCH_COMMODITY.has(rel.dstName)) {
-          stitchCalls.push({ symbol: rel.dstName, caller: rel.srcName, callerFilePath: p.filePath });
-        }
+        const call = stitchCallEntry(rel, p.filePath);
+        if (call) stitchCalls.push(call);
         if (rel.predicate !== 'IMPORTS') continue;
         const pkg = specToPkg(typeof rel.importRaw === 'string' ? rel.importRaw : rel.dstName);
         if (!pkg || !stitchProdDeps.has(pkg)) continue;
@@ -2005,10 +2399,13 @@ export async function ingestFiles(
   // Read from the same health answer. Unknown (the check failed) keeps the
   // per-file route for delete-bearing patches.
   let bulkDeletes = false;
+  // Why the same-hash orphan sweep cannot run here; null when it can.
+  let orphanSweepBlocker: string | null = 'the backend release could not be read';
   const reconcileLookups = createLimiter(RECONCILE_CONCURRENCY);
   try {
     const health = await readBackendHealth(client);
     bulkDeletes = backendAppliesBulkDeletes(health);
+    orphanSweepBlocker = orphanSweepUnsupportedReason(health);
     if (debug) process.stderr.write(`\n  [commit] delete-bearing patches via ${bulkDeletes ? 'bulk' : '/v1/patch'}\n`);
     const serverVersion = (health as any)?.schema_version;
     if (typeof serverVersion === 'number' && serverVersion !== CLIENT_EXPECTED_SCHEMA_VERSION) {
@@ -2113,6 +2510,14 @@ export async function ingestFiles(
   // a way this run can have written to the graph, or have found it not where
   // the last run left it, without a patch being counted.
   let dbResetDetected = false;
+  /**
+   * The backend held none of this run's files when it started: the DB-reset
+   * guard fired, or a lookup over the whole file set found no hashes (a first
+   * map, or one after `ix reset` / `reset --ingest`). Only the failure messages
+   * read it: "the graph is unchanged" is misleading when there was no graph.
+   * Unset on any path that ends before the lookup.
+   */
+  let graphStartedEmpty: boolean | undefined;
   let extractorRebuild = false;
   let deletionsFound = false;
   // Path A with a local baseline: the run updated a graph it already knew.
@@ -2222,6 +2627,60 @@ export async function ingestFiles(
    * raises TimeoutError too, and that is a saturation signal, not our clock.
    */
   const runDeadlineExpired = (): boolean => opts.deadlineSignal?.aborted === true;
+  /** The same deadline, for the commit retries' waits to abort on. */
+  const runDeadlineSignal = opts.deadlineSignal;
+  /**
+   * The backend's own word on its database, asked only once commits are
+   * failing (IN-19C). The cutoff judges by a streak, which with ArangoDB down
+   * costs a streak of doomed requests here and a failure budget per drain
+   * pass; the backend can simply say so. One probe answers every caller for a
+   * few seconds, under a 2 s timeout, and only `unreachable` changes anything
+   * -- see `database-probe.ts`.
+   */
+  const newDatabaseProbe = () => createDatabaseProbe(() => probeDatabase({
+    // Through the one place health is fetched and its release recorded.
+    readHealth: timeoutMs => readBackendHealth(client, timeoutMs),
+    currentRevision: timeoutMs => client.currentRevision(timeoutMs),
+  }), 3_000);
+  let askDatabase = newDatabaseProbe();
+  /** `patchesTheBackendTook` when `askDatabase`'s cache was started; a landed patch is newer evidence than any cached verdict. */
+  let askedAtPatches = 0;
+  /** `patchesTheBackendTook` when the backend last reported its database down; undefined since it reported it up. */
+  let databaseDownAsOf: number | undefined;
+  /** The last answer was "unreachable", and nothing has landed since to say otherwise. */
+  const databaseKnownDown = (): boolean =>
+    databaseDownAsOf !== undefined && databaseDownAsOf === patchesTheBackendTook;
+  /** Ask (or reuse a recent answer) and record it. True when the database is down. */
+  const checkDatabase = async (): Promise<boolean> => {
+    // IX_COMMIT_FAILURE_LIMIT=0 opts out of giving up; the probe never stops a run then.
+    if (commitBreaker.limit <= 0) return false;
+    if (runDeadlineExpired()) return databaseKnownDown();
+    if (askedAtPatches !== patchesTheBackendTook) {
+      askDatabase = newDatabaseProbe();
+      askedAtPatches = patchesTheBackendTook;
+    }
+    const verdict = await askDatabase();
+    if (verdict === 'unreachable') databaseDownAsOf = patchesTheBackendTook;
+    else if (verdict === 'reachable') databaseDownAsOf = undefined;
+    return verdict === 'unreachable';
+  };
+  /**
+   * After a commit failure that indicts the backend: if its database is down,
+   * give up now rather than after a streak. A later commit landing clears the
+   * trip, as it clears one a streak set.
+   */
+  const tripIfDatabaseDown = async (err: unknown): Promise<void> => {
+    if (commitBreaker.tripped()) return;
+    if ((await checkDatabase()) && !commitBreaker.tripped()) commitBreaker.trip(err);
+  };
+  const noteCommitRetry = (where: string) =>
+    (info: { attempt: number; delayMs: number; error: unknown; kind: string }): void => {
+      if (!debug) return;
+      const msg = String(info.error);
+      process.stderr.write(
+        `\n  [${where} retry ${info.attempt}, ${info.kind}] waiting ${Math.round(info.delayMs)} ms: ${msg.length > 200 ? `${msg.slice(0, 200)}…` : msg}\n`,
+      );
+    };
   let tooLarge = 0;
   /** The stat loop's record of empty and oversized files, once it exists; `tooLarge` counts its oversized ones. */
   let skippedForSize: ReadonlyMap<string, 'empty' | 'tooLarge'> | undefined;
@@ -2250,7 +2709,7 @@ export async function ingestFiles(
   const resolveStats = {
     importLookups: 0, transitiveLookups: 0, globalFallbacks: 0,
     globalCandidateTotal: 0, resolvedImport: 0, resolvedTransitive: 0,
-    resolvedGlobal: 0, resolvedQualifier: 0, skippedSameFile: 0, skippedAmbiguous: 0,
+    resolvedGlobal: 0, resolvedQualifier: 0, resolvedType: 0, skippedSameFile: 0, skippedAmbiguous: 0,
   };
   // Per-language parse timing: language → { ms, files }
   const langParseMs = new Map<string, { ms: number; files: number }>();
@@ -2376,6 +2835,85 @@ export async function ingestFiles(
       extractorRebuild = true;
       clearMapResultCache(projectRoot);
     }
+    // The same-hash orphan sweep (IN-20, `sweepOrphanNodes`) costs one
+    // stored-patch read per file, and only an extractor change leaves orphans
+    // behind. So it runs only when the baseline says this workspace's files
+    // were last written by another extractor -- whether this run was forced
+    // or not -- and not on a plain --force at the current extractor. The
+    // baseline is the only signal that costs no read. IX_RECONCILE_ON_FORCE=1
+    // opts a --force run in, to repair a graph a pre-fix rebuild left
+    // polluted. On a backend that takes deletes in bulk, the same runs widen
+    // an edited file's reconcile to the second stored patch; an ordinary edit
+    // reads only the first, as before IN-20.
+    const reconcileOrphans = extractorChanged(previousBaseline, currentExtractor)
+      || (Boolean(opts.force) && process.env.IX_RECONCILE_ON_FORCE === '1');
+    // The same-hash sweep reads, per file, the stored patch an earlier
+    // extractor wrote for the file's hash. On an extractor change that is the
+    // extractor the baseline recorded. On an opted-in --force at the current
+    // extractor (a repair) it is whatever an earlier run recorded as left
+    // unswept (`loadOrphanSweepPending`: a sweep the backend could not run, or
+    // one that ran out of budget), for only the files it recorded; with
+    // nothing recorded, the extractor before the current, for every file. An
+    // extractor change also reads what is recorded, for the files recorded.
+    const orphanRepair = reconcileOrphans && !extractorChanged(previousBaseline, currentExtractor);
+    const knownPreviousExtractors: readonly string[] = PREVIOUS_EXTRACTORS ?? [];
+    const orphanCandidateIndex = (extractor: string): number | null => {
+      const at = knownPreviousExtractors.indexOf(extractor);
+      return at < 0 ? null : at + 1;
+    };
+    const orphanPending: OrphanSweepPending = reconcileOrphans && !workspaceMigrated
+      ? loadOrphanSweepPending(projectRoot)
+      : new Map();
+    for (const extractor of [...orphanPending.keys()]) {
+      if (extractor === currentExtractor || orphanCandidateIndex(extractor) === null) orphanPending.delete(extractor);
+    }
+    const orphanBaseExtractor: string | null = (() => {
+      if (!reconcileOrphans) return null;
+      const base = orphanRepair
+        ? (orphanPending.size > 0 ? null : knownPreviousExtractors[0] ?? null)
+        : previousBaseline?.extractor ?? null;
+      return base !== null && orphanCandidateIndex(base) !== null ? base : null;
+    })();
+    /** The earlier extractors whose stored patch for this file the sweep reads. */
+    const orphanSourcesFor = (filePath: string): string[] => {
+      const sources = orphanBaseExtractor === null ? [] : [orphanBaseExtractor];
+      for (const [extractor, files] of orphanPending) {
+        if (!sources.includes(extractor) && (files === null || files.has(filePath))) sources.push(extractor);
+      }
+      return sources;
+    };
+    const orphanSweep = {
+      blocker: orphanSweepBlocker ?? (reconcileOrphans && !orphanRepair && orphanBaseExtractor === null && orphanPending.size === 0
+        ? `the previous extractor (${previousBaseline?.extractor ?? 'unrecorded'}) is not one this CLI knows`
+        : null),
+      budget: orphanSweepBudget(),
+      noticed: false,
+      // Only a whole-workspace run records what it left unswept. A partial
+      // extractor-change run keeps the old extractor in the baseline, so the
+      // next full map sweeps its files anyway.
+      track: reconcileOrphans && !partialRun && !workspaceMigrated,
+      /** Per extractor read this run, the files it did not finish. */
+      unswept: new Map<string, Set<string>>(),
+      /** Recorded "every file" entries this run read for every file. */
+      allAtStart: new Set([...orphanPending].filter(([, files]) => files === null).map(([extractor]) => extractor)),
+    };
+    // One line per run when the sweep is wanted and cannot run: the orphans
+    // stay, and nothing else about the run changes. A whole-workspace
+    // extractor change records the previous extractor for every file, so a
+    // repair after a backend upgrade reads the patch that names them.
+    const noteOrphanSweepBlocked = (): void => {
+      if (orphanSweep.noticed || orphanSweep.blocker === null) return;
+      orphanSweep.noticed = true;
+      if (orphanSweep.track && !orphanRepair && orphanBaseExtractor !== null) {
+        orphanPending.set(orphanBaseExtractor, null);
+        saveOrphanSweepPending(projectRoot, orphanPending);
+      }
+      process.stderr.write(
+        `\n  [orphans kept] nodes the previous extractor wrote and this one does not were not removed: ` +
+        `${orphanSweep.blocker}.` +
+        (orphanSweepBlocker !== null ? ' After upgrading the backend, run IX_RECONCILE_ON_FORCE=1 ix map --force to remove them.' : '') + '\n',
+      );
+    };
     const previousMtimes = previousBaseline?.files ?? new Map<string, number>();
     const {
       previousDeletedFiles,
@@ -2503,6 +3041,10 @@ export async function ingestFiles(
     // file, so the next run's baseline did not name them, they were never
     // found deleted again, and their nodes stayed in the graph for good.
     const deferredDeletions: string[] = [];
+    // Whether the lookup ANSWERED. Thrown every time now, rather than only with
+    // deletions pending, so an empty answer can be told from a failed one; the
+    // catch below does what `loadExistingHashes` did with a swallowed failure.
+    let hashLookupAnswered = false;
     if (hashLookupPaths.length > 0) {
       try {
         knownHashes = await loadExistingHashes(
@@ -2511,10 +3053,11 @@ export async function ingestFiles(
           toWorkspaceRelative,
           sourceWorkspaceIdOf,
           debug,
-          deletedPaths.length > 0,
+          true,
         );
+        hashLookupAnswered = true;
       } catch (err) {
-        if (debug) process.stderr.write(`\n  [deletion cleanup skipped] hash lookup failed: ${err}\n`);
+        if (debug && deletedPaths.length > 0) process.stderr.write(`\n  [deletion cleanup skipped] hash lookup failed: ${err}\n`);
         deferredDeletions.push(...deletedPaths);
         deletedPaths.length = 0;
         knownHashes = new Map();
@@ -2525,6 +3068,19 @@ export async function ingestFiles(
       knownHashes = new Map();
       if (debug) process.stderr.write(`\n  All ${filePaths.length} files mtime-clean — skipping hash lookup\n`);
     }
+    // With no local baseline every file was looked up, so an answer naming
+    // none of them means the backend holds none. Not under --force, which
+    // says nothing about the baseline, and not on a failed lookup, which
+    // says nothing about the backend. Not on a workspace-id migration either:
+    // the old id's graph is still there until the cleanup after this run.
+    // And not on a partial run (a file or directory scope, or --lang): its
+    // lookup covered only its own files, so an empty answer says nothing about
+    // the rest of the workspace -- `ix ingest <new file>` in a repo mapped from
+    // another machine has no local baseline but a full graph.
+    graphStartedEmpty =
+      dbResetDetected ||
+      (!opts.force && !workspaceMigrated && !scopedRun && !opts.lang &&
+        mtimeCache.size === 0 && hashLookupAnswered && knownHashes.size === 0);
     const hashed = performance.now();
     timings.hashMs = Math.round(hashed - discovered);
 
@@ -2539,7 +3095,11 @@ export async function ingestFiles(
     //      entirely if nothing changed (common "ix map" re-run case).
     //   B) No baseline / force → load modules, parse + stream-commit all files.
 
-    type ParsedFile = { filePath: string; parsed: any; hash: string; previousHash: string | undefined };
+    type ParsedFile = {
+      filePath: string; parsed: any; hash: string; previousHash: string | undefined;
+      /** The hash the backend holds for the file, changed or not. Feeds only reconcile. */
+      knownHash?: string | undefined;
+    };
     let resolveEdgesFn: Function | null = null;
     let buildPatchFn: Function | null = null;
 
@@ -2687,7 +3247,9 @@ export async function ingestFiles(
     // Smaller chunks pipeline better: resolve(N) overlaps with commit(N-1) + parse(N+1).
     // With 2000-file chunks, resolve takes 68s and dominates. With 500, resolve ~17s
     // and overlaps well with commit (~5s) + parse (~5s).
-    const PARSE_STREAM_CHUNK     = 500;
+    // IX_PARSE_STREAM_CHUNK is for tests: it lets a run of a hundred files
+    // cross the same batch boundaries as a run of a thousand. Unset, 500.
+    const PARSE_STREAM_CHUNK     = parsePositiveIntEnv('IX_PARSE_STREAM_CHUNK', 500);
     const COMMIT_HTTP_MAX_FILES  = parsePositiveIntEnv('IX_COMMIT_HTTP_MAX_FILES', 1000); // files per HTTP request to the backend
     // Ops per HTTP request; see DEFAULT_COMMIT_MAX_OPS.
     const COMMIT_MAX_OPS         = parsePositiveIntEnv('IX_COMMIT_MAX_OPS', DEFAULT_COMMIT_MAX_OPS);
@@ -2754,7 +3316,12 @@ export async function ingestFiles(
       return cutToLimits(items);
     };
     const COMMIT_CONCURRENCY     = parsePositiveIntEnv('IX_COMMIT_CONCURRENCY', 8); // parallel HTTP save requests
-    const COMMIT_CONFLICT_RETRIES = parsePositiveIntEnv('IX_COMMIT_CONFLICT_RETRIES', 6); // retry transient Arango lock conflicts
+    // Retries of one commit after a lock conflict or a transport drop. 0: none.
+    const COMMIT_CONFLICT_RETRIES = parseNonNegativeIntEnv('IX_COMMIT_CONFLICT_RETRIES', 6);
+    // Total wait for re-sending a BULK the backend answered 502/503/504/429
+    // (at most three retries, `Retry-After` cut to it). 0: no such retries.
+    // Its own knob, so turning conflict retries off leaves these alone.
+    const COMMIT_TRANSIENT_RETRY_MS = parseNonNegativeIntEnv('IX_COMMIT_TRANSIENT_RETRY_MS', TRANSIENT_RETRY_BUDGET_MS);
     // Re-sends of a commit that lost the base-rev race to another writer; see retryOnBaseRevRace.
     const COMMIT_BASE_REV_RETRIES = parsePositiveIntEnv('IX_COMMIT_BASE_REV_RETRIES', 8);
     let baseRevRetries = 0;
@@ -3067,7 +3634,13 @@ export async function ingestFiles(
                   }
                 } else {
                   commitErrors++;
-                  if (indicts) commitBreaker.recordFailure(commitErr);
+                  if (indicts) {
+                    commitBreaker.recordFailure(commitErr);
+                    // Not in the drain (the only caller with a failure
+                    // budget): it ignores `tripped`, so a probe there would
+                    // only add health requests and latency.
+                    if (fallbackOpts?.failureBudget === undefined) await tripIfDatabaseDown(commitErr);
+                  }
                 }
                 if (debug) {
                   const errMsg = String(commitErr);
@@ -3111,6 +3684,10 @@ export async function ingestFiles(
       /** Re-send the held set. What it cannot place is left on `deferredByCutoff`. */
       const commitIndividuallyAfterCutoff = async (itemsIn: PreparedPatch[]): Promise<void> => {
         let items = itemsIn;
+        // Re-sent even when the backend has reported its database down. The
+        // probe may hold patches back during the fan-out, but whether the run
+        // fails is decided by commits, as on main: a wrong or stale health
+        // answer must not turn a run whose patches would land into an exit 1.
         if (debug) {
           process.stderr.write(
             `\n  [cutoff] re-sending ${items.length} held-back patches with a fresh streak\n`,
@@ -3154,9 +3731,19 @@ export async function ingestFiles(
           const bulkStart = performance.now();
           try {
             const result = await retryOnBaseRevRace(
-              () => retryOnConflict(
+              () => retryCommit(
                 () => client.commitPatchBulk(chunk.map(item => item.patch)),
-                COMMIT_CONFLICT_RETRIES,
+                {
+                  maxRetries: COMMIT_CONFLICT_RETRIES,
+                  transient: COMMIT_TRANSIENT_RETRY_MS > 0,
+                  transientBudgetMs: COMMIT_TRANSIENT_RETRY_MS,
+                  signal: runDeadlineSignal,
+                  // Not the breaker: this bulk exists because the breaker
+                  // tripped, so it would always say give up. Asked, not just
+                  // read: a 503 here may be the database going down.
+                  shouldGiveUp: () => checkDatabase(),
+                  onRetry: noteCommitRetry('cutoff bulk'),
+                },
               ),
               COMMIT_BASE_REV_RETRIES,
               noteBaseRevRetry,
@@ -3301,6 +3888,9 @@ export async function ingestFiles(
         // tests, which previously asserted the stranding guarantee at a budget
         // the CLI never runs at and so could not see it fail.
         const leftover = await drainInPasses(items, async pending => {
+          // No database probe here (the per-file loop skips it when given a
+          // failure budget): the drain sends, as on main, so the exit code
+          // follows what the commits did, never a health answer.
           commitBreaker.reset();
           const tookBefore = patchesTheBackendTook;
           await commitItemsSerially(pending, recordDrainMs, undefined, {
@@ -3348,9 +3938,31 @@ export async function ingestFiles(
               );
               const commitStart = performance.now();
               const result = await retryOnBaseRevRace(
-                () => retryOnConflict(
+                () => retryCommit(
                   () => client.commitPatchBulk(items.map(item => item.patch)),
-                  COMMIT_CONFLICT_RETRIES,
+                  {
+                    maxRetries: COMMIT_CONFLICT_RETRIES,
+                    // 502/503/504/429 too, honouring Retry-After up to the
+                    // budget (5 s per bulk by default, requests included; a
+                    // slow bulk is not sent again). A 413 and a 409 are
+                    // thrown at once, to the payload split and the
+                    // partial-commit handling below.
+                    transient: COMMIT_TRANSIENT_RETRY_MS > 0,
+                    transientBudgetMs: COMMIT_TRANSIENT_RETRY_MS,
+                    signal: runDeadlineSignal,
+                    // Asked, not just read. On the first bulk of a run nothing
+                    // has probed yet, and a 503 from a backend whose database
+                    // is down would otherwise spend the whole budget
+                    // before anything asked it. A database reported down trips
+                    // the breaker, so `shouldStop` hands the chunk to the
+                    // cutoff instead of the per-file fallback.
+                    shouldGiveUp: async err => {
+                      if (commitBreaker.tripped()) return true;
+                      await tripIfDatabaseDown(err);
+                      return commitBreaker.tripped() || databaseKnownDown();
+                    },
+                    onRetry: noteCommitRetry('bulk'),
+                  },
                 ),
                 COMMIT_BASE_REV_RETRIES,
                 noteBaseRevRetry,
@@ -3530,11 +4142,14 @@ export async function ingestFiles(
      * file at a time it was a serial chain of entity lookups per batch. The
      * patches come back in file order, without the ones that failed to build.
      */
+    const noteOrphanSkip = (filePath: string, reason: string): void => {
+      if (debug) process.stderr.write(`\n  [orphan reconcile skipped] ${filePath}: ${reason}\n`);
+    };
     const buildFilePatches = async (
       files: ParsedFile[],
       edgesByFile: Map<string, any[]>,
     ): Promise<PreparedPatch[]> => {
-      const built = await mapLimit(files, RECONCILE_CONCURRENCY, async ({ parsed: p, hash, previousHash }, j) => {
+      const built = await mapLimit(files, RECONCILE_CONCURRENCY, async ({ parsed: p, hash, previousHash, knownHash }, j) => {
         try {
           const fileWorkspace = fileWorkspaceId(p.filePath);
           let patch = buildPatchFn!(p, hash, fileWorkspace, edgesByFile.get(p.filePath) ?? emptyEdges, previousHash, fileMultiRepo(p.filePath));
@@ -3546,20 +4161,127 @@ export async function ingestFiles(
               undefined,
               mapMode,
               reconcileLookups,
+              { onWindowSkipped: reason => noteOrphanSkip(p.filePath, reason), window: reconcileOrphans && orphanSweepBlocker === null ? RECONCILE_MANIFEST_WINDOW : 1 },
             );
           }
-          if (mapMode) patch = stripMapModeOps(patch);
-          noteResolution(p.filePath, patch);
-          // source.uri (workspace-relative) and source.workspaceId are set
-          // inside buildPatch; the backend stores both as opaque attributes.
-          return makePreparedPatch(patch, j + 1, p.filePath, previousHash !== undefined || isForced(p.filePath));
+          // Same content, new extractor (or an opted-in --force): the
+          // previous extractor's patch for this hash names what the sweep
+          // below may retire. Without a backend that takes deletes in bulk
+          // and serves the batched node read the file is committed exactly as
+          // built, as before IN-20.
+          let orphanSources: string[] | undefined;
+          let previousPatchIds: string[] | undefined;
+          if (!previousHash && knownHash && reconcileOrphans) {
+            if (orphanSweep.blocker !== null) noteOrphanSweepBlocked();
+            else {
+              orphanSources = orphanSourcesFor(p.filePath);
+              const candidates = sourcePatchIdCandidates(p.filePath, knownHash, fileWorkspace);
+              previousPatchIds = orphanSources.map(extractor => candidates[orphanCandidateIndex(extractor)!]!);
+              if (previousPatchIds.length === 0) previousPatchIds = undefined;
+            }
+          }
+          return { p, hash, j, previousHash, patch: patch as GraphPatchPayload, previousPatchIds, orphanSources };
         } catch (err) {
           parseErrors++;
           process.stderr.write(`\n  [patch build error] ${p.filePath}: ${err}\n`);
           return null;
         }
       });
-      return built.filter((pp): pp is PreparedPatch => pp !== null);
+
+      // The orphan sweep, for the whole batch at once: one stored-patch read
+      // per file and one batched node read. Best effort -- whatever fails here
+      // leaves the patches to commit as built, with no parse error and no
+      // change to the exit code.
+      const sweepable = built.filter((b): b is NonNullable<typeof b> & { previousPatchIds: string[]; orphanSources: string[] } =>
+        b !== null && b.previousPatchIds !== undefined);
+      if (sweepable.length > 0 && orphanSweep.blocker === null) {
+        const batchUpserts = new Set<string>();
+        for (const b of built) {
+          if (b === null) continue;
+          for (const op of b.patch.ops) if (op.type === 'UpsertNode' && typeof op['id'] === 'string') batchUpserts.add(op['id']);
+        }
+        const unswept = new Set<number>();
+        const writtenBefore = new Set<number>();
+        try {
+          const sweepFiles = sweepable.map(b => ({ patch: b.patch, previousPatchIds: b.previousPatchIds }));
+          const orphans = await sweepOrphanNodes(
+            client,
+            sweepFiles,
+            {
+              mapMode,
+              budget: orphanSweep.budget,
+              batchUpserts,
+              onSkip: (file, reason) => noteOrphanSkip(file.patch.source.uri, reason),
+              onUnswept: file => unswept.add(sweepFiles.indexOf(file)),
+              onWrittenBefore: file => writtenBefore.add(sweepFiles.indexOf(file)),
+            },
+          );
+          sweepable.forEach((b, i) => {
+            const ids = orphans[i]!;
+            if (ids.length === 0) return;
+            b.patch = { ...b.patch, ops: [...ids.map(id => ({ type: 'DeleteNode', id })), ...b.patch.ops] };
+            if (orphanRepair || writtenBefore.has(i)) {
+              // The backend already holds this file's patch id: a repair runs
+              // at the current extractor, and an extractor-change run may
+              // follow an earlier one (a partial run, a run cut short) that
+              // committed the file without the deletes. Sent under that id
+              // the deletes would be answered Idempotent and dropped, so they
+              // go under an id salted with them. Every other patch keeps its
+              // deterministic id, the one a later edit, deletion or sweep
+              // reads back.
+              const salt = `orphans-${sha256(Buffer.from([...ids].sort().join('\n'))).slice(0, 12)}`;
+              const salted = buildPatchFn!(b.p, b.hash, fileWorkspaceId(b.p.filePath), edgesByFile.get(b.p.filePath) ?? emptyEdges, undefined, fileMultiRepo(b.p.filePath), salt);
+              b.patch = { ...b.patch, patchId: salted.patchId };
+            }
+          });
+        } catch (err) {
+          if (err instanceof BatchNodeReadsUnsupported) {
+            orphanSweep.blocker = err.message;
+            noteOrphanSweepBlocked();
+          } else {
+            for (const b of sweepable) noteOrphanSkip(b.p.filePath, err instanceof Error ? err.message : String(err));
+          }
+          sweepable.forEach((_, i) => unswept.add(i));
+        }
+        // What this batch left unswept stays recorded for a repair run, and
+        // what it finished comes off the record. Saved per batch, so a run cut
+        // short keeps what it learned.
+        if (orphanSweep.track) {
+          let changed = false;
+          sweepable.forEach((b, i) => {
+            for (const extractor of b.orphanSources) {
+              const files = orphanPending.get(extractor);
+              if (unswept.has(i)) {
+                let mine = orphanSweep.unswept.get(extractor);
+                if (!mine) orphanSweep.unswept.set(extractor, mine = new Set());
+                mine.add(b.p.filePath);
+                if (files === undefined) orphanPending.set(extractor, new Set([b.p.filePath]));
+                else files?.add(b.p.filePath);
+                changed = true;
+              } else if (files?.delete(b.p.filePath)) {
+                changed = true;
+              }
+            }
+          });
+          if (changed) saveOrphanSweepPending(projectRoot, orphanPending);
+        }
+      }
+
+      return built.map(b => {
+        if (b === null) return null;
+        try {
+          let patch = b.patch;
+          if (mapMode) patch = stripMapModeOps(patch);
+          noteResolution(b.p.filePath, patch);
+          // source.uri (workspace-relative) and source.workspaceId are set
+          // inside buildPatch; the backend stores both as opaque attributes.
+          return makePreparedPatch(patch, b.j + 1, b.p.filePath, b.previousHash !== undefined || isForced(b.p.filePath));
+        } catch (err) {
+          parseErrors++;
+          process.stderr.write(`\n  [patch build error] ${b.p.filePath}: ${err}\n`);
+          return null;
+        }
+      }).filter((pp): pp is PreparedPatch => pp !== null);
     };
 
     /** Resolve edges within a batch, build patches, and commit in sub-chunks. */
@@ -3632,7 +4354,7 @@ export async function ingestFiles(
       // Path A: has baseline or all mtime-clean → pre-scan to detect changes before loading modules.
       // If nothing changed, module load is skipped entirely. A file with no
       // backend hash is new: it is parsed and sent with no reconcile.
-      const changedPaths: Array<{ filePath: string; bytes: Buffer; hash: string; previousHash: string | undefined }> = [];
+      const changedPaths: Array<{ filePath: string; bytes: Buffer; hash: string; previousHash: string | undefined; knownHash: string | undefined }> = [];
       for (const filePath of mtimeChangedPaths) {
         try {
           const bytes = fs.readFileSync(filePath);
@@ -3646,7 +4368,7 @@ export async function ingestFiles(
             continue;
           }
           const previousHash = knownHashes.get(filePath);
-          changedPaths.push({ filePath, bytes, hash, previousHash: previousHash !== hash ? previousHash : undefined });
+          changedPaths.push({ filePath, bytes, hash, previousHash: previousHash !== hash ? previousHash : undefined, knownHash: previousHash });
         } catch (err) {
           parseErrors++;
           progressCurrent++;
@@ -3665,8 +4387,8 @@ export async function ingestFiles(
         // filePath here is the workspace-relative path (what goes to parseFile
         // and downstream into buildPatch → source_uri). absFilePath is the
         // absolute path retained for any on-disk ops (reads already happened).
-        const parseable: Array<{ filePath: string; absFilePath: string; source: string; hash: string; previousHash: string | undefined }> = [];
-        for (const { filePath, bytes, hash, previousHash } of changedPaths) {
+        const parseable: Array<{ filePath: string; absFilePath: string; source: string; hash: string; previousHash: string | undefined; knownHash: string | undefined }> = [];
+        for (const { filePath, bytes, hash, previousHash, knownHash } of changedPaths) {
           const sourceText = bytes.toString('utf-8');
           if (isLikelyMinifiedSource(sourceText)) {
             minifiedLikely++;
@@ -3680,7 +4402,7 @@ export async function ingestFiles(
           // deterministic ID derived in buildPatch (node/edge/chunk/patch)
           // hashes relative paths. This makes graph IDs portable across
           // machines and removes backend dependence on host paths.
-          parseable.push({ filePath: toWorkspaceRelative(filePath), absFilePath: filePath, source: sourceText, hash, previousHash });
+          parseable.push({ filePath: toWorkspaceRelative(filePath), absFilePath: filePath, source: sourceText, hash, previousHash, knownHash });
         }
 
         progressPhase   = 'Parsing';
@@ -3716,7 +4438,7 @@ export async function ingestFiles(
             const parsed = parseResults[j] as any;
             if (!parsed) { filesSkipped++; filesSkippedUnparsed++; unparsedRel.add(chunk[j].filePath); continue; }
             entitiesParsed += parsed.entities.length;
-            batch.push({ filePath: chunk[j].filePath, parsed, hash: chunk[j].hash, previousHash: chunk[j].previousHash });
+            batch.push({ filePath: chunk[j].filePath, parsed, hash: chunk[j].hash, previousHash: chunk[j].previousHash, knownHash: chunk[j].knownHash });
             noteSummary(chunk[j].filePath, chunk[j].hash, parsed, currentMtimes.get(chunk[j].absFilePath));
             if (parsed.hasParseErrors) filesWithParseErrors++;
           }
@@ -3771,7 +4493,7 @@ export async function ingestFiles(
       let pendingFlushB: Promise<void> = Promise.resolve();
       for (let i = 0; i < filePaths.length; i += PARSE_STREAM_CHUNK) {
         const chunk = filePaths.slice(i, i + PARSE_STREAM_CHUNK);
-        type FileData = { filePath: string; source: string; hash: string; previousHash: string | undefined } | null;
+        type FileData = { filePath: string; source: string; hash: string; previousHash: string | undefined; knownHash: string | undefined } | null;
         const fileData: FileData[] = new Array(chunk.length).fill(null);
         const parsePromises: Promise<unknown>[] = new Array(chunk.length).fill(Promise.resolve(null));
 
@@ -3861,7 +4583,7 @@ export async function ingestFiles(
               return;
             }
             const relFilePath = toWorkspaceRelative(absFilePath);
-            const fd: NonNullable<FileData> = { filePath: relFilePath, source: sourceText, hash, previousHash: previousHash !== hash ? previousHash : undefined };
+            const fd: NonNullable<FileData> = { filePath: relFilePath, source: sourceText, hash, previousHash: previousHash !== hash ? previousHash : undefined, knownHash: previousHash };
             fileData[idx] = fd;
             parsePromises[idx] = ensureParsePool(filePaths.length).parse(fd.filePath, fd.source).then(r => { progressCurrent++; return r; });
           } catch (err) {
@@ -3879,7 +4601,7 @@ export async function ingestFiles(
           const parsed = parseResults[j] as any;
           if (!parsed) { filesSkipped++; filesSkippedUnparsed++; unparsedRel.add(f.filePath); continue; }
           entitiesParsed += parsed.entities.length;
-          batch.push({ filePath: f.filePath, parsed, hash: f.hash, previousHash: f.previousHash });
+          batch.push({ filePath: f.filePath, parsed, hash: f.hash, previousHash: f.previousHash, knownHash: f.knownHash });
           noteSummary(f.filePath, f.hash, parsed, currentMtimes.get(chunk[j]));
           if (parsed.hasParseErrors) filesWithParseErrors++;
         }
@@ -3893,6 +4615,24 @@ export async function ingestFiles(
     timings.parseMs = Math.round(parsed - hashed);
     // Clear the parse bar
     if (interval) process.stderr.write('\r' + ' '.repeat(PROG_LINE_WIDTH) + '\r');
+    // A recorded "every file" entry this run swept file by file now holds
+    // only the files it left.
+    if (orphanSweep.track && orphanSweep.blocker === null && orphanSweep.allAtStart.size > 0) {
+      for (const extractor of orphanSweep.allAtStart) {
+        if (orphanPending.get(extractor) === null) orphanPending.set(extractor, orphanSweep.unswept.get(extractor) ?? new Set());
+      }
+      saveOrphanSweepPending(projectRoot, orphanPending);
+    }
+    if (orphanSweep.budget.skipped > 0) {
+      process.stderr.write(
+        `\n  [orphans kept] the orphan cleanup reached its budget (${Math.round(orphanSweep.budget.maxMs / 1000)}s / ` +
+        `${orphanSweep.budget.maxRequests} requests); ${orphanSweep.budget.skipped} file(s) were committed without it. ` +
+        (orphanSweep.track
+          ? `Run IX_RECONCILE_ON_FORCE=1 ix map --force to continue: it sweeps only the files left, and each run picks up where the last stopped. ` +
+            `IX_ORPHAN_SWEEP_MAX_MS and IX_ORPHAN_SWEEP_MAX_REQUESTS raise the budget.\n`
+          : orphanRepair ? `Run the same command again to retry them.\n` : `The next full ix map sweeps them.\n`),
+      );
+    }
 
     if (deletedPaths.length > 0) {
       progressPhase = 'Saving';
@@ -3933,6 +4673,13 @@ export async function ingestFiles(
             dependentSourceUris,
             mapMode,
             reconcileLookups,
+            {
+              onWindowSkipped: reason => noteOrphanSkip(relFilePath, reason),
+              // The second stored patch (a graph a pre-fix rebuild left
+              // polluted) is merged only where its extra deletes can go in
+              // bulk; elsewhere the first-hit walk, as before IN-20.
+              window: orphanSweepBlocker === null ? RECONCILE_MANIFEST_WINDOW : 1,
+            },
           );
           if (mapMode) patch = stripMapModeOps(patch);
           deletedPatches.push(makePreparedPatch(patch, i + 1, relFilePath, true));
@@ -4417,10 +5164,17 @@ export async function ingestFiles(
 
   // A new workspace is registered only now, and only if the backend took
   // something: see workspaceStateFor.
-  if (registrationPending && patchesTheBackendTook > 0) {
-    ensureWorkspaceIdState(workspaceRoot);
+  if (registrationPending && patchesTheBackendTook > 0 && registerAfterCommit) {
+    // A repository (or --root) ingest may become the default when none exists, as
+    // before CL-05; a loose directory never does: an ingest of a stray directory
+    // must not pick the workspace other commands fall back to.
+    ensureWorkspaceIdState(workspaceRoot, { setDefault: rootSource !== 'loose' });
     if (!opts.suppressOutput && opts.format === 'text') {
       process.stderr.write(chalk.dim(`Registered workspace "${workspaceName}" (${workspaceRoot}).\n`));
+    }
+  } else if (registrationPending && patchesTheBackendTook > 0) {
+    if (!opts.suppressOutput && opts.format === 'text') {
+      process.stderr.write(chalk.dim(`Not registered as a workspace: ${workspaceRoot} (a file outside every workspace and repository). Run ix map ${workspaceRoot} to query and read it.\n`));
     }
   }
 
@@ -4433,6 +5187,14 @@ export async function ingestFiles(
   // left the agent believing the graph was current while `ix search` and
   // `ix impact` answered from a stale one. A wrong answer nobody can see is
   // worse than a failed command.
+  // A trip alone is not enough: the database probe can trip the breaker on a
+  // bulk failure with no `commitErrors++` (a health answer of "unreachable"
+  // that turns out wrong), and the cutoff and drain may then land every patch.
+  // Printing the cutoff banner then would say the graph is "partly updated"
+  // and ask for a re-run when nothing is missing. A skipped patch is counted
+  // in `commitErrors`, so this still fires whenever the cutoff held anything
+  // back that did not land.
+  const cutoffFired = commitBreaker.everTripped() && commitErrors > 0;
   const commitReport = describeCommitOutcome(
     commitErrors,
     patchesApplied,
@@ -4442,7 +5204,8 @@ export async function ingestFiles(
     commitBreaker.skipped(),
     // The same expression the banner is gated on, so this can never say "See
     // the cutoff above" with no cutoff above it.
-    commitBreaker.everTripped()
+    cutoffFired,
+    graphStartedEmpty === true
   );
   const summary: IngestFilesSummary = {
     filesDiscovered,
@@ -4488,15 +5251,7 @@ export async function ingestFiles(
       (filesChanged > 0 || deletionsFound) &&
       parseErrors + crashedParses() + commitErrors === 0,
   };
-  // `everTripped()` alone, and it is not a weakening: `recordFailure` has one
-  // call site, in the per-file catch immediately after `commitErrors++`, so a
-  // trip already implies a real commit failure. A `commitLoopErrors` counter
-  // guarded this for two rounds against a scenario that no longer exists --
-  // replay failures were moved off `recordFailure` onto a local counter, and a
-  // deletion patch that fails to BUILD never reaches the breaker at all. A dead
-  // conjunct defended by a comment describing an impossible case is the exact
-  // shape this PR has spent rounds removing.
-  if (commitBreaker.everTripped()) {
+  if (cutoffFired) {
     // Gated on the cutoff having FIRED, not on what was left unsent. A patch
     // that was never sent produces no `[commit error]` line even under
     // --verbose, so this has to print for those -- but gating on them alone
@@ -4508,7 +5263,10 @@ export async function ingestFiles(
     //
     // Before the stitch line and before the commit report: this is the cause,
     // and everything else printed about this run is its consequence.
-    process.stderr.write(`${describeCommitCutoff(commitBreaker, client.endpoint, patchesApplied, opts.deadlineSignal?.aborted === true)}\n`);
+    process.stderr.write(`${describeCommitCutoff(commitBreaker, client.endpoint, patchesApplied, opts.deadlineSignal?.aborted === true, {
+      graphStartedEmpty: graphStartedEmpty === true,
+      databaseUnreachable: databaseKnownDown(),
+    })}\n`);
   }
   if (stitchErrors > 0) {
     process.stderr.write(`  ${describeStitchFailure(stitchError)}\n`);
@@ -4674,6 +5432,7 @@ export async function ingestFiles(
       console.log(chalk.dim(`    resolved transitive:${resolveStats.resolvedTransitive}`));
       console.log(chalk.dim(`    resolved global:    ${resolveStats.resolvedGlobal}`));
       console.log(chalk.dim(`    resolved qualifier: ${resolveStats.resolvedQualifier}`));
+      console.log(chalk.dim(`    resolved type:      ${resolveStats.resolvedType}`));
       console.log(chalk.dim(`    skipped same-file:  ${resolveStats.skippedSameFile}`));
       console.log(chalk.dim(`    skipped ambiguous:  ${resolveStats.skippedAmbiguous}`));
     }

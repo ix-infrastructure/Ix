@@ -101,8 +101,9 @@ surfaces (#575).
 - **`ix ingest <path>` writes to the workspace the path belongs to** -- the
   registered workspace containing it, else its git repository -- and a file or
   directory inside it refreshes just that part, leaving the rest of the
-  workspace alone. Only a path in no workspace and no repository becomes a
-  workspace of its own.
+  workspace alone. Only a directory in no workspace and no repository becomes
+  a workspace of its own (never the default); a loose file there is ingested
+  but registers nothing, so `ix read` cannot open its neighbours.
 - **`ix ingest <path>` coalesces with a running `ix map` or `ix ingest` of the
   same workspace**, as `ix map` does: it does not run beside the holder, asks
   it for one more pass, and exits 0 (or `IX_MAP_COALESCE_EXIT_CODE`). With
@@ -864,6 +865,20 @@ Upgrade ix CLI, backend, and components to the latest version.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--check` | — | off | Only check for updates, don't install |
+
+### `ix verify [paths...]`
+
+Compare the graph's nodes to a fresh re-parse of a sample of files. Nodes only: edges are not compared yet.
+
+| Flag | Value | Default | Effect |
+|---|---|---|---|
+| `--sample` | `<n>` | `20` (or the number of paths given) | How many files to check: named paths first, then files the last map could not apply, then the most recently changed, then a seeded random pick |
+| `--seed` | `<n>` | `24` | Seed for the random part of the sample; the same seed checks the same files |
+| `--root` | `<dir>` | — | Workspace root directory |
+| `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
+| `--quiet` | — | off | Drop headers, section titles and advisory hints |
+| `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
 ### `ix view`
 

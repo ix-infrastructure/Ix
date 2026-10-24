@@ -44,6 +44,7 @@ const OSS_HELP = [
   `  status                Check status`,
   `  stats                 Show stats`,
   `  doctor                Diagnose issues`,
+  `  verify                Compare graph to a re-parse`,
   `  mcp [install|doctor]  Serve agent tools over MCP`,
   `  docker <action>       Manage backend`,
   `  view                  Open visualizer`,
