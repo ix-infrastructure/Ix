@@ -189,11 +189,15 @@ describe("map refresh", () => {
     expect(process.exitCode ?? 0).toBe(0);
   }
 
-  /** A mapped repo whose last `ix map` deferred the map after an edit. */
+  /**
+   * A mapped repo whose last `ix map` deferred the map after an edit: an
+   * automatic one (IX_AUTO_MAP=1, as the hooks run it), since only those defer.
+   */
   async function deferred(): Promise<void> {
     await map();
     writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
-    await map();
+    process.env.IX_AUTO_MAP = "1";
+    try { await map(); } finally { delete process.env.IX_AUTO_MAP; }
     expect(readMapStale(repo), "the edit's map was deferred").not.toBeNull();
     backend.requests.length = 0;
   }

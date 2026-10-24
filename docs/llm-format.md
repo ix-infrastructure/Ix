@@ -417,8 +417,10 @@ and `files_too_large_paths`, and has them on every map: zero and an empty list
 when no file was too large. `ix map --silent` adds `too_large=N` to its one
 line.
 
-After an edit, `ix map` ingests the change but defers the map itself: it
-prints the last computed map's regions and marks the `map` record
+An `ix map` you (or an agent) run always computes the map, and clears a
+stale one. The automatic `ix map` the editor/agent hooks and `ix watch` run
+after an edit (they set `IX_AUTO_MAP=1`) ingests the change but defers the
+map itself: it prints the last computed map's regions and marks the `map` record
 `map_stale=true` (only when true, so a fresh map says nothing). `files`,
 `regions`, `levels`, `rev`, `outcome` and the `region` records are then the
 last map's, not this ingest's, and `regions_as_of_rev` and
@@ -429,8 +431,8 @@ same in a sentence. The next region view (`overview`, `subsystems`,
 the last map, says so in one line on stderr
 (`ix: architecture map is stale (<why>); ...`), and starts a detached
 background refresh unless one ran moments ago or another `ix map` holds the
-lock. `ix map --remap` recomputes the map at once; `IX_MAP_EAGER=1` makes
-every `ix map` compute, as before; `IX_MAP_BACKGROUND_REFRESH=0` stops region
+lock. `ix map --remap` recomputes the map at once, even from an automatic
+run; `IX_MAP_EAGER=1` makes automatic runs compute too, as before; `IX_MAP_BACKGROUND_REFRESH=0` stops region
 views starting a refresh. `--format json` carries `map_stale` on every map (`false` when fresh) and
 `regions_as_of` (`{map_rev, file_count}` of the last map, `null` when
 fresh); `ix map --silent` ends its line with `· map=stale`.
@@ -667,9 +669,9 @@ Two deliberate exceptions remain:
   changed, and a missing hierarchy does not make a file out of date.
 
   `map_stale=true` (only when true) says why `map_complete` is false right
-  after an edit: the last `ix map` deferred the map, and the hierarchy is the
-  last computed one until the next region view or `ix map --remap` refreshes
-  it. `--format json` carries it as `mapStale`, always present.
+  after an edit: the last automatic `ix map` deferred the map, and the
+  hierarchy is the last computed one until the next region view or `ix map`
+  refreshes it. `--format json` carries it as `mapStale`, always present.
 
   `graph_health` is a third, separate question: whether the graph the backend
   holds for this workspace is whole (`ok`), has nodes but lost their edges

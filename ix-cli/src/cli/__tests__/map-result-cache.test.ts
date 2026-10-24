@@ -354,8 +354,67 @@ describe("ix map reuses an unchanged map", () => {
     expect(line(fresh.stderr)).toBe("map: 4 files · 1s/0ss/1m regions");
   });
 
-  describe("defers the map after an incremental edit (CL-13)", () => {
+  describe("an explicit `ix map` computes a stale map (CL-13)", () => {
+    // No IX_AUTO_MAP: a person or agent running the command, who wants the
+    // map now. Only the hooks' automatic runs defer.
+    const autoMap = async (...args: string[]) => {
+      process.env.IX_AUTO_MAP = "1";
+      try { return await map(...args); } finally { delete process.env.IX_AUTO_MAP; }
+    };
+
+    it("computes after an incremental edit, as before CL-13", async () => {
+      await map("--format", "json");
+      writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
+      const before = backend.mapRequests();
+      const after = JSON.parse((await map("--format", "json")).stdout);
+      expect(backend.mapRequests()).toBe(before + 1);
+      expect(after.map_stale).toBe(false);
+      expect(after.regions_as_of).toBeNull();
+      expect(after.file_count).toBe(5);
+      expect(readMapStale(repo)).toBeNull();
+      expect(hasCompletedMapBaseline(repo)).toBe(true);
+    });
+
+    it("recomputes on a no-change run after an automatic map deferred, returns fresh counts, and clears the marker", async () => {
+      const first = JSON.parse((await map("--format", "json")).stdout);
+      writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
+      const deferred = JSON.parse((await autoMap("--format", "json")).stdout);
+      expect(deferred.map_stale, "the hook's run deferred").toBe(true);
+      expect(deferred.file_count).toBe(first.file_count);
+      expect(readMapStale(repo)).not.toBeNull();
+
+      const before = backend.mapRequests();
+      const explicit = JSON.parse((await map("--format", "json")).stdout);
+      expect(backend.mapRequests(), "nothing changed, but the map was stale").toBe(before + 1);
+      expect(explicit.map_stale).toBe(false);
+      expect(explicit.regions_as_of).toBeNull();
+      expect(explicit.file_count, "this ingest's count, not the last map's").toBe(5);
+      expect(explicit.map_rev).toBeGreaterThan(first.map_rev);
+      expect(readMapStale(repo), "the marker is cleared").toBeNull();
+      expect(hasCompletedMapBaseline(repo)).toBe(true);
+
+      // Fresh now: the next run is the ordinary no-change reuse.
+      const again = backend.mapRequests();
+      await map("--format", "json");
+      expect(backend.mapRequests()).toBe(again);
+    });
+
+    it("computes under --silent too: agents run `ix map --silent` to refresh", async () => {
+      await map("--silent");
+      writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
+      const before = backend.mapRequests();
+      const run = await map("--silent");
+      expect(backend.mapRequests()).toBe(before + 1);
+      expect(run.stderr).not.toContain("map=stale");
+      expect(readMapStale(repo)).toBeNull();
+    });
+  });
+
+  describe("an automatic map defers after an incremental edit (CL-13)", () => {
     const line = (s: string) => s.split("\n").find(l => l.startsWith("map: "))?.replace(/ · \d+ms/, "");
+    // IX_AUTO_MAP=1 is what the editor/agent hooks and `ix watch` set; the
+    // outer afterEach restores it.
+    beforeEach(() => { process.env.IX_AUTO_MAP = "1"; });
 
     it("defers the map after an incremental edit", async () => {
       const first = JSON.parse((await map("--format", "json")).stdout);
@@ -443,7 +502,7 @@ describe("ix map reuses an unchanged map", () => {
       expect(after.map_stale).toBe(false);
     });
 
-    it("stays deferred on a no-change run while the marker is set", async () => {
+    it("stays deferred on a no-change automatic run while the marker is set", async () => {
       await map("--format", "json");
       writeFileSync(join(repo, "src", "m9.ts"), "export const nine = 9;\n", "utf8");
       await map("--format", "json");

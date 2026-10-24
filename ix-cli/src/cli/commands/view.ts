@@ -525,10 +525,13 @@ const server = http.createServer((req, res) => {
       return;
     }
     // --silent because nothing here reads stdout, and the default text render
-    // is work done only to be thrown away. maxBuffer is raised anyway: the
+    // is work done only to be thrown away. --remap because this is the Remap
+    // button: it must recompute the map even when the server inherited
+    // IX_AUTO_MAP=1, under which a stale map would be served as is (CL-13).
+    // maxBuffer is raised anyway: the
     // default 1 MiB makes Node SIGTERM the child mid-map, which surfaces as a
     // 500 rather than as the truncation it is.
-    const child = execFile(process.execPath, [MAP_MAIN, "map", MAP_ROOT, "--silent"], { cwd: MAP_ROOT, timeout: 1800000, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
+    const child = execFile(process.execPath, [MAP_MAIN, "map", MAP_ROOT, "--silent", "--remap"], { cwd: MAP_ROOT, timeout: 1800000, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
       mapInFlight = null;
       if (res.destroyed) return; // client disconnected while mapping
       res.writeHead(err ? 500 : 200, { "Content-Type": "application/json" });

@@ -78,9 +78,10 @@ export function applyRequestedMapCoalesceExitCode(
 }
 
 /**
- * Whether `ix map` computes the map even after an incremental edit, as it did
- * before CL-13. IX_MAP_EAGER=1 restores that for a caller that reads regions
- * straight from `ix map` and cannot run a region view to refresh them.
+ * Whether an automatic `ix map` (IX_AUTO_MAP=1) computes the map even after an
+ * incremental edit, as it did before CL-13. IX_MAP_EAGER=1 restores that for
+ * a hook that reads regions straight from `ix map` and cannot run a region
+ * view to refresh them. An `ix map` run by hand always computes.
  */
 export function mapEager(raw = process.env.IX_MAP_EAGER): boolean {
   return raw === "1";
@@ -446,7 +447,7 @@ export function registerMapCommand(program: Command): void {
     .option("--graph", "Render the hierarchy as a graph/tree view (default)")
     .option("--list", "Render the ranked list view instead of the default graph/tree view")
     .option("--full", "Force full local map, bypassing automatic safety limits (advanced/testing)")
-    .option("--remap", "Compute the map now, even after an edit that would defer it")
+    .option("--remap", "Compute the map now, even from an automatic (hook) run that would defer it")
     .option("--verbose", "Show raw confidence/crosscut scores and signals, plus per-file ingest diagnostics (including why a patch failed to commit)")
     .option("--silent", "Suppress all output except a one-line summary (useful for LLM hooks)")
     .addHelpText(
@@ -468,12 +469,15 @@ Advanced:
   --silent  Skip the full map rendering. Prints one summary line to stderr and
             exits. Ideal for LLM hooks and automated workflows where the full
             output would waste context tokens.
-  --remap   Compute the map now. After an edit, \`ix map\` ingests it and
-            defers the map itself: it prints the last map's regions marked
-            stale (map=stale), and the next region view (overview, subsystems,
-            locate, impact, explain, view) answers from them and starts a
-            background refresh. IX_MAP_EAGER=1 always computes, as before;
-            IX_MAP_BACKGROUND_REFRESH=0 stops region views starting one.
+  --remap   Compute the map now, even from an automatic run. An \`ix map\`
+            you run computes the map (and clears a stale one). The automatic
+            \`ix map\` the editor/agent hooks run after an edit (they set
+            IX_AUTO_MAP=1) ingests it and defers the map itself: it prints the
+            last map's regions marked stale (map=stale), and the next region
+            view (overview, subsystems, locate, impact, explain, view) answers
+            from them and starts a background refresh. IX_MAP_EAGER=1 makes
+            automatic runs compute too, as before; IX_MAP_BACKGROUND_REFRESH=0
+            stops region views starting one.
 
 Examples:
   ix map .
@@ -1157,17 +1161,20 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
   // only: a cloud ingest reports no summary, so it cannot vouch for that.
   const cacheSlot = localIngest ? await resolveMapCacheSlot(client, mapRequest, () => readBackendHealth(client)) : undefined;
 
-  // CL-13: after an incremental edit, leave `/v1/map` for the next command
-  // that reads regions (`ensureFreshMap`) and print the last map's regions,
-  // marked stale. The hooks that run this after every edit read none of them,
-  // and the request was most of the run. Not for the first map (nothing is
-  // stored), --full, --remap or IX_MAP_EAGER=1, a system scope (never
-  // stored), a cloud ingest, or an ingest that might have left the graph
-  // somewhere unexpected (`incremental` is false then). A run that changed
-  // nothing while the map is already stale stays deferred: computing it here
-  // would only move the cost to the next hook.
+  // CL-13: an automatic map (IX_AUTO_MAP=1: the editor/agent hooks and
+  // `ix watch`) leaves `/v1/map` after an incremental edit for the next
+  // command that reads regions (`ensureFreshMap`) and prints the last map's
+  // regions, marked stale. Those hooks read none of them, and the request was
+  // most of the run. An `ix map` a person or agent runs never defers: it is
+  // asked for because the map is wanted now, so it computes, and clears the
+  // marker, as before CL-13. Also not for the first map (nothing is stored),
+  // --full, --remap or IX_MAP_EAGER=1, a system scope (never stored), a cloud
+  // ingest, or an ingest that might have left the graph somewhere unexpected
+  // (`incremental` is false then). An automatic run that changed nothing
+  // while the map is already stale stays deferred: computing it there would
+  // only move the cost to the next hook.
   const staleBefore = localIngest ? readMapStale(cwd) : null;
-  const deferAllowed = !opts.full && !opts.remap && !mapEager() && !mapRequest.systemId;
+  const deferAllowed = autoMap && !opts.full && !opts.remap && !mapEager() && !mapRequest.systemId;
   const wantsDefer = deferAllowed && cacheSlot !== undefined && localIngest !== undefined
     && (localIngest.incremental || (staleBefore !== null && localIngest.graphUnchanged));
   const deferred = wantsDefer ? loadLastMap(cwd, cacheSlot!.key) : undefined;
