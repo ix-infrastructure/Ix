@@ -149,6 +149,18 @@ export function acquireMapLock(workspaceRoot: string, label: string): LockHandle
 }
 
 /**
+ * Whether a live process holds the map lock for `workspaceRoot`, without
+ * taking it. A lock whose holder is gone (see `isStale`) reads as free. For a
+ * caller that only decides whether to start work that will take the lock
+ * itself; the answer can change the moment it is read.
+ */
+export function mapLockHeld(workspaceRoot: string): boolean {
+  const path = lockPathFor(workspaceRoot);
+  try { statSync(path); } catch { return false; }
+  return !isStale(readMeta(path), path);
+}
+
+/**
  * Acquire the lock stored at `path`, with the same semantics as
  * [[acquireMapLock]]: a LockHandle on success, null when a live holder owns it.
  *

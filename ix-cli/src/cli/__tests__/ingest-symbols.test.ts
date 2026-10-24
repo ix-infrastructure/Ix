@@ -218,6 +218,29 @@ describe("dependents (IN-11)", () => {
     expect(changedNames(before, after)).toEqual(new Set(["Target"]));
   });
 
+  it("invalidates a Java chained caller when a method's declared result changes, inherited or not", () => {
+    // `i.getUrl().get()` where Invoker inherits getUrl from Base: the caller
+    // names `getUrl`, never `Base.getUrl`.
+    const before = summary("Base.java", { language: "java", sig: "before", receiverFactories: [["Base.getUrl", "URL"]] });
+    const after = summary("Base.java", { language: "java", sig: "after", receiverFactories: [["Base.getUrl", "URI"]] });
+    expect(changedNames(before, after)).toEqual(new Set(["Base.getUrl", "getUrl"]));
+    const table = new Map([
+      ["Base.java", entry(after)],
+      ["Use.java", entry(summary("Use.java", { language: "java", refs: ["Invoker", "Invoker.getUrl", "Invoker.getUrl().get", "get", "getUrl"] }))],
+      ["Other.java", entry(summary("Other.java", { language: "java", refs: ["Other.run"] }))],
+    ]);
+    expect(findDependents(table, changedNames(before, after), [], new Set(["Base.java"]))).toEqual(["Use.java"]);
+    // A changed class reaches callers chained through a method returning it.
+    const holder = new Map([
+      ["Invoker.java", entry(summary("Invoker.java", { language: "java", receiverFactories: [["Invoker.getUrl", "URL"]] }))],
+      ["Use.java", entry(summary("Use.java", { language: "java", refs: ["getUrl", "get"] }))],
+    ]);
+    expect(findDependents(holder, new Set(["URL"]), [], new Set())).toEqual(["Use.java"]);
+    // Scala factories keep naming the factory only.
+    const scala = summary("Mk.scala", { language: "scala", sig: "a", receiverFactories: [["Mk.apply", "T"]] });
+    expect(changedNames(scala, { ...scala, sig: "b", receiverFactories: [["Mk.apply", "U"]] })).toEqual(new Set(["Mk.apply"]));
+  });
+
   it("invalidates a subclass when only its file's imports pick a different superclass", () => {
     const before = summary("child.scala", { sig: "before", receiverHeritage: [["Child", "Parent"]], imports: [{ dstName: "p1.Parent" }] });
     const after = summary("child.scala", { sig: "after", receiverHeritage: [["Child", "Parent"]], imports: [{ dstName: "p2.Parent" }] });

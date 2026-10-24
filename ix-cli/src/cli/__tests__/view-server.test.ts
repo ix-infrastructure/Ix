@@ -75,7 +75,7 @@ describe("view server (/__ix/remap)", () => {
     // behind whenever a run was interrupted before cleanup.
     marker = join(distDir, "stub-ran.txt");
 
-    // A stub `ix` CLI main: the server runs `node <MAP_MAIN> map <root> --silent`.
+    // A stub `ix` CLI main: the server runs `node <MAP_MAIN> map <root> --silent --remap`.
     // STUB_MS holds it open so overlapping requests are observable; STUB_EXIT
     // drives the failure path.
     // `.cjs` for the same reason the server script is: this stub is CommonJS
@@ -239,9 +239,10 @@ describe("view server (/__ix/remap)", () => {
     const res = await post("/__ix/remap", { host: `127.0.0.1:${port}` });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
-    // The recorded workspace root, never the server's own cwd, and --silent
-    // because nothing reads the output.
-    expect(runs()).toEqual([`map ${mapRoot} --silent`]);
+    // The recorded workspace root, never the server's own cwd, --silent
+    // because nothing reads the output, and --remap so an automatic map's
+    // deferral (CL-13) can never turn the Remap button into a no-op.
+    expect(runs()).toEqual([`map ${mapRoot} --silent --remap`]);
   });
 
   it("uses the argv CLI path outside the test-only MAP_MAIN override", async () => {
@@ -250,7 +251,7 @@ describe("view server (/__ix/remap)", () => {
       resetRuns();
       const res = await post("/__ix/remap", { host: `127.0.0.1:${port}` });
       expect(res.status).toBe(200);
-      expect(runs()).toEqual([`map ${mapRoot} --silent`]);
+      expect(runs()).toEqual([`map ${mapRoot} --silent --remap`]);
     } finally {
       await startServer({ STUB_EXIT: "0" });
     }

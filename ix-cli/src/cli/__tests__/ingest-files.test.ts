@@ -198,6 +198,7 @@ describe("ingestFiles against a fake backend", () => {
       "IX_STITCH_COOLDOWN_MS",
       "IX_STITCH_WAIT_MS",
       "IX_MAP_DEADLINE_MS",
+      "IX_PARSE_STREAM_CHUNK",
     ]) {
       saved[k] = process.env[k];
       delete process.env[k];
@@ -1527,50 +1528,63 @@ describe("ingestFiles against a fake backend", () => {
   });
 
   describe("bulk requests bounded by size (IN-05)", () => {
-    // More than one parse batch (500 files), so what the first batch learns has
-    // a later batch to hold for. The backend refuses a bulk over 300 ops.
+    // More than one parse batch, so what the first batch learns has a later
+    // batch to hold for.
+    //
+    // The batches are 50 files here (IX_PARSE_STREAM_CHUNK), not the default
+    // 500, and every count below is a tenth of what a 500-file batch needs: the
+    // files, the batches and the backend's cap. These tests used to write,
+    // `git add`, read and parse 560 to 1,100 files each. That costs well under
+    // a second on Linux and macOS, but on the 4-core windows-2022 runner, with
+    // the rest of the suite running beside it, it took from seven to more than
+    // thirty seconds, and timed out. The work was all per file, and none of it
+    // is what these tests check: the batch boundaries, the ops per request and
+    // the 413s are the same at a tenth of the size. The backend refuses a bulk
+    // over 30 ops; at 7 ops a file that is 4 files a request. (The variable
+    // is cleared and restored around every test by the describe above.)
     const tooLarge = () => backend.requests.filter(r => r.path === "/v1/patches/bulk" && r.code === 413).length;
+    const smallBatches = (): void => { process.env.IX_PARSE_STREAM_CHUNK = "50"; };
     const saved = process.env.IX_COMMIT_MAX_OPS;
     afterEach(() => {
       if (saved === undefined) delete process.env.IX_COMMIT_MAX_OPS;
       else process.env.IX_COMMIT_MAX_OPS = saved;
     });
 
-    // 560 files, two parse batches: 500, then 60. At 7 ops a file the second
-    // batch is 420 ops, over the cap at the default bounds, so it is refused
-    // too unless the run kept what the first batch learned. It used to be
-    // 1,100 files (three batches), which timed out once on a slow Windows
-    // runner; the second batch alone is what the assertion needs. The longer
-    // timeout is a backstop for the fixture writes and parse there.
-    it("learns the size from the first 413 that suggests one, and is refused no more that run", { timeout: 90_000 }, async () => {
-      fixture(560);
-      backend.maxBulkOps = 300;
+    // 56 files, two parse batches: 50, then 6. At 7 ops a file the second
+    // batch is 42 ops, over the cap at the default bounds, so it is refused
+    // too unless the run kept what the first batch learned.
+    it("learns the size from the first 413 that suggests one, and is refused no more that run", async () => {
+      smallBatches();
+      fixture(56);
+      backend.maxBulkOps = 30;
       backend.suggestMaxPatches = true;
 
       const summary = await run();
 
       expect(tooLarge()).toBe(1);
       expect(summary.commitErrors).toBe(0);
-      expect(summary.patchesApplied).toBe(560);
+      expect(summary.patchesApplied).toBe(56);
       expect(backend.singleCount, "no per-file fallback").toBe(0);
       // Both batches were sent in bounded requests. Without the learned size,
-      // the second batch goes out as one 60-patch request and is refused.
+      // the second batch goes out as one 6-patch request and is refused.
       const accepted = backend.requests.filter(r => r.path === "/v1/patches/bulk" && r.code !== 413);
-      expect(Math.max(...accepted.map(r => r.patches))).toBeLessThanOrEqual(Math.floor(300 / 7));
+      expect(Math.max(...accepted.map(r => r.patches))).toBeLessThanOrEqual(Math.floor(30 / 7));
     });
 
     it("halves on a 413 that suggests nothing, and later batches start at the learned size", async () => {
-      fixture(1100);
-      backend.maxBulkOps = 300;
+      // Three parse batches: 50, 50, then 10.
+      smallBatches();
+      fixture(110);
+      backend.maxBulkOps = 30;
 
       const summary = await run();
 
-      // A few halvings in the first batch only; bisecting each batch afresh
-      // was three times as many.
+      // A few halvings in the first batch only (50, 25, 12, 6 refused; 3
+      // fits); bisecting each batch afresh was more than twice as many.
       expect(tooLarge()).toBeGreaterThan(0);
       expect(tooLarge()).toBeLessThanOrEqual(4);
       expect(summary.commitErrors).toBe(0);
-      expect(summary.patchesApplied).toBe(1100);
+      expect(summary.patchesApplied).toBe(110);
     });
 
     it("keeps its op budget after a 413 for bytes: one large file does not shrink the requests after it", async () => {
@@ -1600,14 +1614,15 @@ describe("ingestFiles against a fake backend", () => {
     });
 
     it("is never refused when IX_COMMIT_MAX_OPS keeps every request under the cap", async () => {
-      fixture(1100);
-      backend.maxBulkOps = 300;
-      process.env.IX_COMMIT_MAX_OPS = "300";
+      smallBatches();
+      fixture(110);
+      backend.maxBulkOps = 30;
+      process.env.IX_COMMIT_MAX_OPS = "30";
 
       const summary = await run();
 
       expect(tooLarge()).toBe(0);
-      expect(summary.patchesApplied).toBe(1100);
+      expect(summary.patchesApplied).toBe(110);
     });
   });
 

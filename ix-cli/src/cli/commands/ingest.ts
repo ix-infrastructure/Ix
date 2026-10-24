@@ -1740,6 +1740,19 @@ export interface IngestFilesSummary {
    */
   graphUnchanged: boolean;
   /**
+   * True only when this run was an ordinary incremental update of a graph
+   * whose baseline it trusted: a local baseline existed (Path A), nothing was
+   * forced or migrated, the DB-reset guard and an extractor rebuild did not
+   * fire, at least one file changed or was deleted, and nothing failed to
+   * parse or commit.
+   *
+   * `ix map` reads it to decide whether it may defer `/v1/map` to the next
+   * command that reads regions (CL-13). It errs towards false: a run that
+   * might have left the graph somewhere unexpected computes the map, so the
+   * completed-map diagnostics still see every run that had errors.
+   */
+  incremental: boolean;
+  /**
    * Files tree-sitter parsed with ERROR or MISSING nodes. They are in the
    * graph, but whatever sat in the broken region may not be. Not counted in
    * `parseErrors`, which is files that produced nothing.
@@ -2507,6 +2520,8 @@ export async function ingestFiles(
   let graphStartedEmpty: boolean | undefined;
   let extractorRebuild = false;
   let deletionsFound = false;
+  // Path A with a local baseline: the run updated a graph it already knew.
+  let baselineRun = false;
   let stitchSent = false;
   let filesSkipped = 0;
   /**
@@ -3232,7 +3247,9 @@ export async function ingestFiles(
     // Smaller chunks pipeline better: resolve(N) overlaps with commit(N-1) + parse(N+1).
     // With 2000-file chunks, resolve takes 68s and dominates. With 500, resolve ~17s
     // and overlaps well with commit (~5s) + parse (~5s).
-    const PARSE_STREAM_CHUNK     = 500;
+    // IX_PARSE_STREAM_CHUNK is for tests: it lets a run of a hundred files
+    // cross the same batch boundaries as a run of a thousand. Unset, 500.
+    const PARSE_STREAM_CHUNK     = parsePositiveIntEnv('IX_PARSE_STREAM_CHUNK', 500);
     const COMMIT_HTTP_MAX_FILES  = parsePositiveIntEnv('IX_COMMIT_HTTP_MAX_FILES', 1000); // files per HTTP request to the backend
     // Ops per HTTP request; see DEFAULT_COMMIT_MAX_OPS.
     const COMMIT_MAX_OPS         = parsePositiveIntEnv('IX_COMMIT_MAX_OPS', DEFAULT_COMMIT_MAX_OPS);
@@ -4332,6 +4349,7 @@ export async function ingestFiles(
     // calls as a whole-repository pass would.
     const hasBaseline = previousBaseline !== null && mtimeCache.size > 0;
     const incrementalRun = (hasBaseline || knownHashes.size > 0 || mtimeChangedPaths.length === 0) && !opts.force;
+    baselineRun = hasBaseline && incrementalRun;
     if (incrementalRun) {
       // Path A: has baseline or all mtime-clean → pre-scan to detect changes before loading modules.
       // If nothing changed, module load is skipped entirely. A file with no
@@ -5224,6 +5242,14 @@ export async function ingestFiles(
       parseErrors + crashedParses() === 0 &&
       commitErrors === 0 &&
       stitchErrors === 0,
+    incremental:
+      baselineRun &&
+      opts.force !== true &&
+      !workspaceMigrated &&
+      !dbResetDetected &&
+      !extractorRebuild &&
+      (filesChanged > 0 || deletionsFound) &&
+      parseErrors + crashedParses() + commitErrors === 0,
   };
   if (cutoffFired) {
     // Gated on the cutoff having FIRED, not on what was left unsent. A patch

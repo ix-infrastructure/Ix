@@ -20,6 +20,7 @@ import { getEffectiveSystemPath, hasMapData } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
 import { renderSection, renderKeyValue, renderNote, renderWarning, renderBreadcrumb, reportAmbiguousTarget, reportResolutionNotices } from "../ui.js";
 import { forMcp } from "../next-step.js";
+import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "trait", "object", "interface"]);
 const FILE_KINDS = new Set(["file"]);
@@ -35,6 +36,9 @@ interface LocateOutput {
   systemPath: Array<{ name: string; kind: string }> | null;
   hasMapData?: boolean;
   stale?: boolean;
+  /** The map is deferred (CL-13): the system path is the last map's. */
+  map_stale?: true;
+  regions_as_of?: { map_rev: number; file_count: number };
   diagnostics: string[];
   /** A miss: the `unresolved_target` record fields every graph command's miss carries. */
   error?: "unresolved_target";
@@ -63,7 +67,21 @@ Several symbols answer in one call, grouped per symbol (json: {targets: [...]}).
 ${EXIT_CODES_HELP}`)
     .action(async (symbols: string[], opts: { kind?: string; path?: string; pick?: number; format: string }) => {
       const client = createClient();
-      await runPerTarget(symbols, opts.format, (symbol) => locateOne(client, symbol, opts));
+      // An `ix map` after an edit may have left the map for the system paths
+      // read below (CL-13). Checked once per call, on the first target that
+      // resolves, so several targets print at most one stale-map notice --
+      // and, in llm, one `diagnostic code=map_stale` record. In json each
+      // answered target carries `map_stale`.
+      let mapChecked: Promise<MapStaleState> | undefined;
+      const freshMap = (): Promise<MapStaleState> => (mapChecked ??= ensureFreshMapState());
+      let staleSaid = false;
+      const staleLlmOnce = (state: MapStaleState): string[] => {
+        if (staleSaid) return [];
+        const lines = mapStaleLlm(state);
+        staleSaid = lines.length > 0;
+        return lines;
+      };
+      await runPerTarget(symbols, opts.format, (symbol) => locateOne(client, symbol, opts, freshMap, staleLlmOnce));
     });
 }
 
@@ -71,6 +89,8 @@ async function locateOne(
   client: IxClient,
   symbol: string,
   opts: { kind?: string; path?: string; pick?: number; format: string },
+  freshMap: () => Promise<MapStaleState>,
+  staleLlmOnce: (state: MapStaleState) => string[],
 ): Promise<void> {
   const diagnostics: string[] = [];
 
@@ -119,6 +139,9 @@ async function locateOne(
 
   const isContainer = CONTAINER_KINDS.has(target.kind);
   const isFile = FILE_KINDS.has(target.kind);
+
+  // Never throws and never moves the exit code.
+  const mapState = await freshMap();
 
   // Parallel fetch: effective system path, parent container (for non-containers), entity details
   const [systemPath, containsResult, details] = await Promise.all([
@@ -194,6 +217,10 @@ async function locateOne(
   if (stale) {
     output.stale = true;
   }
+  // Only json reads these. llm has its own record, once per call, with the
+  // answer and not before it (mapStaleLlm).
+  if (opts.format === "json") Object.assign(output, mapStaleJson(mapState));
+  if (opts.format === "llm") for (const line of staleLlmOnce(mapState)) console.log(line);
 
   outputLocate(output, symbol, opts.format);
 }

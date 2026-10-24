@@ -21,6 +21,9 @@ Each row carries the location you would otherwise grep or re-read for:
 - `callers`, `callees`, `imports`, `imported-by` rows: `site=path:line` is the
   call or import itself, with `snippet=` (the line) and `also=` (more sites in
   the same scope); `path=`/`lines=` are where the other entity is defined.
+  On a Java method, `callers` also lists callers through a superclass or
+  interface after the direct ones, each ending `via=<Supertype>.<method>`
+  (json: `via`).
 - `read`: every source line is `<line number><TAB><source>`, after a
   `content lines=<n> numbered=true` record — cite and edit by those numbers.
 - `text`: `match path=... line=... snippet=...`.
@@ -28,6 +31,13 @@ Each row carries the location you would otherwise grep or re-read for:
 Ids appear only where two rows would otherwise read the same (same name, kind
 and path); pass one back as the symbol to pick that row. `--fields id` prints
 them everywhere.
+
+A `diagnostic code=map_stale` record (json: `map_stale: true`, with
+`regions_as_of: {map_rev, file_count}` when known) on `ix overview`,
+`subsystems`, `locate`, `impact`, `explain` or `map` means the architecture
+map was not recomputed after the latest edits: system paths and regions are
+the last map's. The answer is still usable; run `ix map --remap` when the
+hierarchy itself matters. A fresh map adds neither.
 
 ### Setting it once
 

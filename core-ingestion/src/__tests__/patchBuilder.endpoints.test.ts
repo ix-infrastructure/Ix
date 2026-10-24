@@ -66,7 +66,7 @@ describe('every edge has a node at both ends', () => {
     const crossFile = edges.filter((e) => e.attrs.confidence !== undefined);
     expect(crossFile.length).toBeGreaterThan(10);
     for (const e of crossFile) {
-      expect(['binding', 'import', 'transitive', 'qualifier', 'global']).toContain(e.attrs.tier);
+      expect(['type', 'binding', 'import', 'transitive', 'qualifier', 'global']).toContain(e.attrs.tier);
     }
   });
 

@@ -16,6 +16,12 @@
 // under the default forks pool, so no file can leak an IX_HOME to the next.
 delete process.env.IX_HOME;
 
+// No test may start a real background map refresh (a detached `ix
+// __map-refresh` process that outlives the test). Region views start one
+// whenever a deferred map is stale; with this they only say so. The tests of
+// that path turn it back on and inject the spawner.
+process.env.IX_MAP_BACKGROUND_REFRESH = "0";
+
 // A target that resolves to nothing runs one bounded `rg` over the workspace to
 // say why (`cli/miss-reason.ts`). Under test the "workspace" is this checkout,
 // whose sources and fixtures mention every name a test misses on, so the
