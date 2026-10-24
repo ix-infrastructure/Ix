@@ -367,6 +367,22 @@ use, skipping comments and the name's own declaration. A row whose file is
 missing, outside the workspace, or has no findable use simply has no `site=`.
 `--format json` carries the same object as `site: {path, line, snippet, also}`.
 
+`ix callers` on a Java method also lists the callers that reach it through a
+supertype. For a target `C.m`, it walks `C`'s superclasses and interfaces (up
+to five levels) and adds the callers of each one's own `m`: a call typed
+against the interface or superclass can run `C.m`. Such a row ends with
+`via=<Supertype>.<m>`, the member the call names; json adds `via` to the row.
+Direct rows come first and carry no `via`; a caller that is both is listed
+once, as a direct row. `shown`/`total` count every row, and `--all` adds the
+same rows per candidate. A call typed directly against the interface is a
+plain caller of the interface method, with no `via`.
+
+```
+callers target=getUrl shown=2 total=2 resolved=2
+ref name=invoke kind=method path=src/rpc/Filter.java lines=10-24
+ref name=select kind=method path=src/cluster/Cluster.java lines=30-41 via=Invoker.getUrl
+```
+
 `ix around <path>[:<line>]` — the dependents of the code at a location, sized
 for an agent's context (`--budget`, default 300 tokens):
 

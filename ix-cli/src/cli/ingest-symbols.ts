@@ -307,6 +307,7 @@ function onDiskGen(target: string): string | undefined {
 // and refers to, so the run can find those files without reading the rest.
 
 type SummaryFields = {
+  language?: string;
   qkeys?: Array<[string, string]>;
   exportPublicNames?: Array<[string, string]>;
   phpTypes?: Array<[string, string]>;
@@ -347,9 +348,17 @@ function bindings(summary: StoredSummary | undefined): Map<string, string[]> {
   // imports (and Go import aliases), so they are part of the key.
   const heritageImports = [...new Set((s.imports ?? []).map(i => i.dstName ?? ""))].sort().join("\0");
   const aliases = Object.entries(s.importAliases ?? {}).map(([a, m]) => `${a}=${m}`).sort().join("\0");
-  for (const [name, type] of s.receiverFactories ?? []) out.set(`f\0${name}\0${type}\0${heritageImports}\0\0${aliases}`, [name]);
+  // A Java method result (`URL.getUrl`) types a chained call, which names the
+  // method only (`x.getUrl().m()`): the method name counts too.
+  for (const [name, type] of s.receiverFactories ?? []) out.set(`f\0${name}\0${type}\0${heritageImports}\0\0${aliases}`, javaMember(s, name));
   for (const [name, base] of s.receiverHeritage ?? []) out.set(`h\0${name}\0${base}\0${heritageImports}`, [name]);
   return out;
+}
+
+/** `[Class.method, method]` for a Java method result, else `[name]`. */
+function javaMember(s: SummaryFields, name: string): string[] {
+  const dot = name.lastIndexOf(".");
+  return s.language === "java" && dot > 0 ? [name, name.slice(dot + 1)] : [name];
 }
 
 /**
@@ -419,7 +428,8 @@ export function findDependents(
   // A changed superclass changes the members visible through every subclass,
   // even when those subclass files were not edited (or were already sent).
   // Likewise a changed type changes what every factory returning it gives a
-  // caller's receiver (a Scala `apply`, a Go `NewX`), so the factory counts too.
+  // caller's receiver (a Scala `apply`, a Go `NewX`, a Java method result), so
+  // the factory counts too.
   const inheritors = new Map<string, Set<string>>();
   const dependsOn = (type: string, name: string) => {
     for (const key of new Set([type, type.split(".").pop()!])) {
@@ -434,7 +444,7 @@ export function findDependents(
       dependsOn(parent, child);
       if (s.receiverPackage) dependsOn(parent, `${s.receiverPackage}.${child}`);
     }
-    for (const [factory, type] of s.receiverFactories ?? []) if (type) dependsOn(type, factory);
+    for (const [factory, type] of s.receiverFactories ?? []) if (type) for (const name of javaMember(s, factory)) dependsOn(type, name);
   }
   const affectedNames = new Set(names);
   const pending = [...affectedNames];

@@ -254,6 +254,32 @@ describe("incremental ix map equals a fresh map (fake backend)", () => {
     }
   });
 
+  it("changing an intermediate Java superclass re-resolves subclass callers", async () => {
+    const world = new World("head");
+    try {
+      await world.start();
+      const sources = new Map([
+        ["src/p/A.java", "package p;\npublic class A {\n  public void run() {}\n}\n"],
+        ["src/p/B.java", "package p;\npublic class B {\n  public void run() {}\n}\n"],
+        ["src/p/Mid.java", "package p;\npublic class Mid extends A {\n}\n"],
+        ["src/p/Child.java", "package p;\npublic class Child extends Mid {\n}\n"],
+        ["src/q/Use.java", "package q;\nimport p.Child;\npublic class Use {\n  void use(Child x) {\n    x.run();\n  }\n}\n"],
+      ]);
+      world.writeSources(sources);
+      await world.map();
+      const before = world.backend.graphSignature();
+      sources.set("src/p/Mid.java", "package p;\npublic class Mid extends B {\n}\n");
+      world.writeSources(sources);
+      await world.map();
+      const live = world.backend.graphSignature();
+      const fresh = await world.freshSignature();
+      expect(fresh.edges).not.toEqual(before.edges);
+      expect(signatureDiff(world, live, fresh)).toBe("");
+    } finally {
+      await world.stop();
+    }
+  });
+
   it("a superclass edit re-tiers a subclass caller's edge in place", async () => {
     // `x.run()` binds to A.run by name and by type, so the edge keeps its id;
     // only its tier and confidence depend on Child's parents in another file.
