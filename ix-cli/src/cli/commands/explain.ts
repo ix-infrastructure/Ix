@@ -26,13 +26,14 @@ export function registerExplainCommand(program: Command): void {
     .description("Explain an entity — infers role, importance, and structural context")
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
+    .option("--no-suggest", "Disable did-you-mean candidates on unresolved targets")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--raw", "Show raw metadata dump (legacy format)")
     .addHelpText("after", "\nExamples:\n  ix explain IngestionService\n  ix explain expand --path memory-layer\n  ix explain verify_token --kind function --format json\n  ix explain IxClient --raw")
-    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; format: string; raw?: boolean }) => {
+    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; suggest?: boolean; format: string; raw?: boolean }) => {
       const client = createClient({ query: true });
-      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
+      const resolveOpts = { suggest: opts.suggest, suggestCommand: "explain", missStarted: performance.now(), kind: opts.kind, path: opts.path, pick: opts.pick };
       const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
       if (!target) return;
 

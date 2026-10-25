@@ -211,7 +211,7 @@ export class IxClient {
 
   async search(
     term: string,
-    opts?: { limit?: number; kind?: string; language?: string; asOfRev?: number; nameOnly?: boolean; workspaceId?: string; systemId?: string; scope?: string }
+    opts?: { limit?: number; kind?: string; language?: string; asOfRev?: number; nameOnly?: boolean; workspaceId?: string; systemId?: string; scope?: string; signal?: AbortSignal }
   ): Promise<GraphNode[]> {
     return this.post("/v1/search", {
       term,
@@ -227,7 +227,7 @@ export class IxClient {
       // request with a derived circe decoder and drop the unknown field, so
       // sending it is always safe; callers keep their own filter as well.
       scope: opts?.scope,
-    });
+    }, opts?.signal);
   }
 
   // Vector-similarity search. The backend (POST /v1/search/semantic) embeds the
@@ -805,9 +805,9 @@ export class IxClient {
     return this.token !== undefined;
   }
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
+  private async post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
     const payload = JSON.stringify(body);
-    return this.read<T>("POST", path, payload, () =>
+    const send = () =>
       fetch(`${this.endpoint}${path}`, {
         method: "POST",
         headers: this.headers(true, "POST", path),
@@ -816,8 +816,19 @@ export class IxClient {
         // timeout, so a stalled connection could hang the process indefinitely.
         // 2 min per request, also bounded by the shared deadline when set, and
         // by the read deadline when this POST is a read.
-        signal: this.signalFor(2 * 60 * 1000, isSharedRead(path)),
-      }));
+        signal: signal ? AbortSignal.any([signal, this.signalFor(2 * 60 * 1000, isSharedRead(path))])
+          : this.signalFor(2 * 60 * 1000, isSharedRead(path)),
+      });
+    if (signal) {
+      // Optional probes own their cancellation: no shared memo, queue or retry
+      // may outlive their budget or cancel another caller's ordinary search.
+      signal.throwIfAborted();
+      const response = await send();
+      const text = await response.text();
+      if (!response.ok) throw httpError(response.status, text);
+      return parseOrThrowWithStatus<T>({ status: response.status, text });
+    }
+    return this.read<T>("POST", path, payload, send);
   }
 
   private async get<T>(path: string, timeoutMs = 2 * 60 * 1000): Promise<T> {

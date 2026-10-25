@@ -112,11 +112,61 @@ beforeEach(() => {
   }));
 });
 afterEach(() => {
+  vi.useRealTimers();
   process.exitCode = savedExitCode;
   delete process.env[LEGACY_EXIT_CODES_ENV];
 });
 
 const COMMANDS = ["locate", "callers", "callees", "impact", "explain"] as const;
+
+describe.each(["locate", "callers", "impact", "explain"])("%s miss candidates", (command) => {
+  function nearGraph(): void {
+    // Model a 20ms base miss without depending on the test runner's CPU load.
+    vi.useFakeTimers({ toFake: ["performance", "setTimeout", "clearTimeout"] });
+    search.mockImplementation(async (term: string, options?: { signal?: AbortSignal }) => {
+      if (term === "parse_config" && !options?.signal) vi.advanceTimersByTime(20);
+      return term === "parse" ? [{ id: "parser-id", name: "parseConfig", kind: "function", attrs: { line_start: 12 }, provenance: { sourceUri: "src/config.ts" } }] : [];
+    });
+  }
+
+  it("adds bounded candidates without selecting a near match", async () => {
+    nearGraph();
+    const result = await run([command, "parse_config", "--format", "json"]);
+    expect(result.exitCode).toBe(3);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      error: "unresolved_target",
+      candidates: [{ name: "parseConfig", kind: "function", path: "src/config.ts", line: 12 }],
+    });
+  });
+
+  it("can disable candidate queries", async () => {
+    search.mockClear();
+    graph({});
+    const result = await run([command, "Missing", "--no-suggest", "--format", "json"]);
+    expect(JSON.parse(result.stdout).candidates).toEqual([]);
+    expect(search.mock.calls.every(([, options]) => !options?.signal)).toBe(true);
+  });
+
+  it("preserves the existing JSON record, adding only candidates", async () => {
+    graph({});
+    const payload = JSON.parse((await run([command, "Missing", "--format", "json"])).stdout);
+    const { candidates, ...legacy } = payload;
+    expect(candidates).toEqual([]);
+    expect(legacy).toEqual(command === "locate" ? {
+      resolvedTarget: null, resolutionMode: "none", systemPath: null,
+      diagnostics: ["No graph entity found."], error: "unresolved_target",
+      message: 'No graph entity found for "Missing".',
+    } : { error: "unresolved_target", message: 'No entity found matching "Missing".' });
+  });
+
+  it("prints did-you-mean and a path retry, without turning the miss into success", async () => {
+    nearGraph();
+    const result = await run([command, "parse_config"]);
+    expect(result.exitCode).toBe(3);
+    expect(result.stderr).toContain("Did you mean:");
+    expect(result.stderr).toContain(`ix ${command} 'parseConfig' --path 'src/config.ts'`);
+  });
+});
 
 describe.each(COMMANDS)("ix %s outcome codes", (command) => {
   it("exits 3 with unresolved_target for a name that is not in the graph", async () => {
@@ -518,7 +568,14 @@ describe("several targets in one call", () => {
 
 describe("locate misses carry the fields every miss carries", () => {
   it("suggestions for a near name, in json and llm", async () => {
-    search.mockImplementation(async (term: string) => (term === "Uniqu" ? [] : UNIQUE));
+    vi.useFakeTimers({ toFake: ["performance", "setTimeout", "clearTimeout"] });
+    search.mockImplementation(async (term: string, options?: { signal?: AbortSignal }) => {
+      if (term === "Uniqu") {
+        if (!options?.signal) vi.advanceTimersByTime(20);
+        return [];
+      }
+      return UNIQUE;
+    });
     const json = JSON.parse((await run(["locate", "Uniqu", "--format", "json"])).stdout);
     expect(json.error).toBe("unresolved_target");
     expect(json.suggestions?.map((s: { name: string }) => s.name)).toEqual(["Unique"]);

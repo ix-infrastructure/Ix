@@ -199,6 +199,7 @@ through a superclass or interface follow the direct ones, tagged
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
+| `--no-suggest` | — | off | Disable did-you-mean candidates on unresolved targets |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--all` | — | off | When the symbol is ambiguous, answer for every candidate; rows are tagged with their candidate |
 | `--limit` | `<n>` | `50` | Max results to show |
@@ -412,6 +413,7 @@ Explain an entity — infers role, importance, and structural context.
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
+| `--no-suggest` | — | off | Disable did-you-mean candidates on unresolved targets |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
@@ -470,6 +472,7 @@ System risk analysis — what behavior is at risk if this changes.
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
+| `--no-suggest` | — | off | Disable did-you-mean candidates on unresolved targets |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--all` | — | off | When the target is ambiguous, analyse every candidate; each analysis is tagged with its candidate |
 | `--depth` | `<n>` | `1` | Expansion depth for callers/importers (default 1, max 3) |
@@ -563,6 +566,7 @@ Several symbols answer in one call, grouped per symbol.
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to results from files matching this path substring |
+| `--no-suggest` | — | off | Disable did-you-mean candidates on unresolved targets |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |

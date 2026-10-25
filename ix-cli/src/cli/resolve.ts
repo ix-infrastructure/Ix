@@ -17,6 +17,7 @@ import { isQuiet } from "./output-shape.js";
 import { disambiguationHint } from "./next-step.js";
 import { explainSymbolMiss, missProbeWouldRun } from "./miss-reason.js";
 import { isBackendUnreachable } from "./errors.js";
+import { findTargetCandidates, type TargetCandidate } from "./target-suggestions.js";
 import {
   candidateOrigin, isFileStemMatch, looksLikeCodeIdentifier, requestsNonCode,
 } from "./candidate-origin.js";
@@ -229,6 +230,10 @@ export interface ResolutionNotice {
  * means an agent running `ix … 2>&1` reads the miss twice.
  */
 export interface ResolveOpts {
+  suggest?: boolean;
+  /** Only these command boundaries run the bounded candidate probes. */
+  suggestCommand?: string;
+  missStarted?: number;
   kind?: string;
   path?: string;
   pick?: number;
@@ -257,6 +262,8 @@ export type ResolveResult =
       ambiguous: false;
       hiddenTestCount?: number;
       suggestions?: Suggestion[];
+      candidates?: TargetCandidate[];
+      retryCommand?: string;
       /**
        * Why it missed, when that is more than "no such name": a file target
        * that is on disk but not in the graph (`file_not_in_graph`), or on
@@ -529,7 +536,8 @@ export async function resolveEntityFull(
     // find it is a fragment of the name: one request each for a leading and a
     // trailing fragment, ranked by edit distance. Only on this miss path.
     missProse(opts, `No entity found matching "${symbol}".`);
-    const near = await nearestNames(client, symbol, { kind: kindFilter, workspaceId, systemId });
+    const near = opts?.suggestCommand || opts?.suggest === false ? []
+      : await nearestNames(client, symbol, { kind: kindFilter, workspaceId, systemId });
     return { resolved: false, ambiguous: false, ...(near.length ? { suggestions: near } : {}) };
   }
 
@@ -550,7 +558,7 @@ export async function resolveEntityFull(
     missProse(opts, `No entity named "${symbol}" found in paths matching "${effectivePath}".`);
     // The name exists — just not under --path. Saying where it does live is the
     // whole answer to the question the filter was asking.
-    const suggestions = toSuggestions(roleFiltered);
+    const suggestions = opts?.suggest === false ? [] : toSuggestions(roleFiltered);
     return { resolved: false, ambiguous: false, hiddenTestCount, ...(suggestions.length ? { suggestions } : {}) };
   }
 
@@ -627,7 +635,7 @@ export async function resolveEntityFull(
 
   // Nothing resolved at all
   missProse(opts, `No entity found matching "${symbol}".`);
-  const suggestions = toSuggestions(filteredNodes);
+  const suggestions = opts?.suggest === false ? [] : toSuggestions(filteredNodes);
   return { resolved: false, ambiguous: false, hiddenTestCount, ...(suggestions.length ? { suggestions } : {}) };
 }
 
@@ -1450,7 +1458,7 @@ async function fileMiss(client: IxClient, target: string, opts?: ResolveOpts): P
   missProse(opts, message);
   const { workspaceId, systemId } = activeScope();
   const stem = path.basename(target).replace(/\.[^.]+$/, "");
-  const near = (await nearestNames(client, stem, { kind: "file", workspaceId, systemId }, (n) => {
+  const near = opts?.suggestCommand || opts?.suggest === false ? [] : (await nearestNames(client, stem, { kind: "file", workspaceId, systemId }, (n) => {
     const name = String(n.name ?? "");
     return name.replace(/\.[^.]+$/, "");
   })).filter((sug) => !opts?.path || (sug.path ?? "").toLowerCase().includes(opts.path.toLowerCase()));
@@ -1543,6 +1551,7 @@ export async function resolveFileOrReport(
   opts: ResolveOpts | undefined,
   format: string,
 ): Promise<ResolvedEntity | null> {
+  opts = { ...opts, missStarted: performance.now() };
   // The format goes in so the resolver knows whether a person will read its
   // prose, or whether the structured record below is the only copy that should
   // reach stdout.
@@ -1575,10 +1584,25 @@ export async function reportUnresolved(
   // exist. Only on this path, and cached per backend revision.
   const graph = await checkGraphHealth(client, activeScope());
   if (isUnhealthy(graph)) {
-    reportResolutionFailure(target, { ...result, graph }, format, opts);
+    reportResolutionFailure(target, await withTargetCandidates(client, target, { ...result, graph }, opts), format, opts);
     return;
   }
-  reportResolutionFailure(target, await withMissReason(client, target, result, opts, format), format, opts);
+  const reason = await withMissReason(client, target, result, opts, format);
+  reportResolutionFailure(target, await withTargetCandidates(client, target, reason, opts), format, opts);
+}
+
+/** Add guidance at the final command miss, never during qualified-name resolution. */
+export async function withTargetCandidates(
+  client: IxClient,
+  target: string,
+  result: Extract<ResolveResult, { ambiguous: false }>,
+  opts?: ResolveOpts,
+): Promise<Extract<ResolveResult, { ambiguous: false }>> {
+  if (!opts?.suggestCommand) return result;
+  const guidance = await findTargetCandidates(client, target, {
+    ...opts, ...activeScope(), fileTarget: looksFileLike(target),
+  }, performance.now() - (opts.missStarted ?? performance.now()));
+  return { ...result, ...guidance };
 }
 
 /**
@@ -1662,6 +1686,7 @@ export async function resolveTargetSetOrReport(
     const entity = await resolveFileOrReport(client, target, withAll, format);
     return entity ? { entities: [entity] } : null;
   }
+  withAll.missStarted = performance.now();
   const result = await resolveFileOrEntityFull(client, target, { ...opts, format });
   if (result.resolved) {
     const tie = result.notices?.find((n) => n.code === "ambiguous_target");

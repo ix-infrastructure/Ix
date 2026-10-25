@@ -24,6 +24,7 @@ export function registerImpactCommand(program: Command): void {
     .description("System risk analysis — what behavior is at risk if this changes")
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
+    .option("--no-suggest", "Disable did-you-mean candidates on unresolved targets")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--all", "When the target is ambiguous, analyse every candidate; each analysis is tagged with its candidate")
     .option("--depth <n>", "Expansion depth for callers/importers (default 1, max 3)", "1")
@@ -37,13 +38,13 @@ export function registerImpactCommand(program: Command): void {
     .action(
       async (
         symbol: string,
-        opts: { kind?: string; path?: string; pick?: number; all?: boolean; depth: string; limit: string; format: string }
+        opts: { kind?: string; path?: string; pick?: number; suggest?: boolean; all?: boolean; depth: string; limit: string; format: string }
       ) => {
         const client = createClient({ query: true });
         const limit = parseInt(opts.limit, 10);
         const depth = Math.min(Math.max(parseInt(opts.depth, 10) || 1, 1), 3);
 
-        const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, all: opts.all };
+        const resolveOpts = { suggest: opts.suggest, suggestCommand: "impact", missStarted: performance.now(), kind: opts.kind, path: opts.path, pick: opts.pick, all: opts.all };
         const set = await resolveTargetSetOrReport(client, symbol, resolveOpts, opts.format);
         if (!set) return;
         const target = set.entities[0];

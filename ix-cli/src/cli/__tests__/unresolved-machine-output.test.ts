@@ -92,6 +92,7 @@ describe("unresolved targets in machine formats", () => {
     expect(JSON.parse(result.stdout)).toEqual({
       error: "unresolved_target",
       message: 'No entity found matching "DefinitelyMissing".',
+      ...(["explain", "impact", "callers"].includes(_command) ? { candidates: [] } : {}),
     });
   });
 
@@ -208,6 +209,7 @@ describe("unresolved targets in machine formats", () => {
       // The slug and message every other command's miss carries.
       error: "unresolved_target",
       message: 'No graph entity found for "DefinitelyMissing".',
+      candidates: [],
     });
   });
 
