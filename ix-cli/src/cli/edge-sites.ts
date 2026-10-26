@@ -1,7 +1,9 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { absoluteFromSourceUri, isReadablePath } from "./config.js";
+import { canonicalizeDiscoveredFilePath, discoverSourceFiles } from "./file-discovery.js";
 import { rowLocation } from "./format.js";
 
 /**
@@ -237,8 +239,18 @@ export function findImports(lines: string[], keys: string[]): number[] {
 /** Reads each file at most once per command, and only inside a readable workspace. */
 export class SourceFiles {
   private readonly cache = new Map<string, string[] | null>();
+  private paths?: string[];
 
   constructor(private readonly root?: string) {}
+
+  /** Source paths for local heuristics, listed once and read through the same safe cache. */
+  sourcePaths(): string[] {
+    const root = canonicalizeDiscoveredFilePath(this.root ?? process.cwd());
+    return this.paths ??= discoverSourceFiles(root)
+      .map((file) => path.relative(root, file).split(path.sep).join("/"))
+      .filter((file) => file !== ".." && !file.startsWith("../") && !path.isAbsolute(file))
+      .sort();
+  }
 
   lines(relPath: string | undefined): string[] | null {
     if (!relPath) return null;

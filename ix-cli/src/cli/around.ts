@@ -9,6 +9,7 @@ import {
 import { rowLocation } from "./format.js";
 import { checkGraphHealth, isUnhealthy, type GraphHealth } from "./graph-health.js";
 import { isTestPath } from "./explain/related-files.js";
+import { heuristicTests } from "./around-tests.js";
 
 /**
  * `ix around`: who depends on the code at a place in a file.
@@ -65,6 +66,8 @@ export interface AroundRef {
   name?: string;
   /** For a test reached in two hops: the caller it calls. */
   via?: string;
+  /** Evidence for a test file; multiple sources indicate agreement. */
+  sources?: Array<"graph" | "import" | "naming">;
 }
 
 export interface AroundSection {
@@ -86,7 +89,7 @@ export interface AroundSymbol {
   callers: AroundSection;
   /** Files that import this file, name the symbol, and use it -- at the use. */
   users: AroundSection;
-  /** Test files that call it, call a caller of it, or import and use it. */
+  /** Graph tests unioned with file-level import and naming evidence. */
   tests: AroundSection;
   /** Other definitions in the same file with the same name. */
   sameName: Array<{ kind: string; lineStart: number; lineEnd: number }>;
@@ -539,6 +542,7 @@ export async function gatherAround(client: AroundClient, req: AroundRequest): Pr
     const lines = req.files.lines(p);
     importerLines.set(row.id, { row, path: p, lines: lines ? findImports(lines, fileKeys) : [] });
   }
+  const heuristic = chosen.length > 0 ? heuristicTests(relPath, req.files, isTestFile) : [];
 
   const symbols = await Promise.all(chosen.map(async (d): Promise<AroundSymbol> => {
     const sets = await callerSets(client, d.id, preloaded.get(d.id));
@@ -591,7 +595,14 @@ export async function gatherAround(client: AroundClient, req: AroundRequest): Pr
         const c = current.get(o.id);
         return { kind: o.kind, lineStart: c?.start ?? o.lineStart, lineEnd: c?.end ?? o.lineEnd };
       });
-    const testRows = [...tests.values()];
+    for (const ref of tests.values()) ref.sources = ["graph"];
+    for (const ref of heuristic) {
+      const existing = tests.get(ref.path);
+      if (existing) existing.sources!.push(...ref.sources!);
+      else tests.set(ref.path, { ...ref });
+    }
+    const testRank = (r: AroundRef) => r.sources!.includes("graph") ? (r.sources!.length > 1 ? 0 : 1) : 2;
+    const testRows = [...tests.values()].sort((a, b) => testRank(a) - testRank(b));
     const decl = req.ranges && req.ranges.length > 0 ? declarationLines(d, anchorPlaced, req.ranges) : undefined;
     // In the current file's coordinates, like the symbol's own span.
     const shift = here.start - d.start;
@@ -685,6 +696,12 @@ export function fitToBudget(
   start: Partial<AroundCaps> = {},
 ): AroundResult {
   const caps: AroundCaps = { ...DEFAULT_CAPS, ...start };
+  // Unlimited/large CLI limits must shrink from actual row counts, not Infinity.
+  caps.symbols = Math.min(caps.symbols, result.symbols.length);
+  for (const key of ["callers", "users", "tests"] as const) {
+    caps[key] = Math.min(caps[key], Math.max(0, ...result.symbols.map((s) => s[key].rows.length)));
+  }
+  caps.importers = Math.min(caps.importers, result.importers.rows.length);
   let snippet = 100;
   const fits = () => {
     const fitted = withCaps(result, caps, snippet);

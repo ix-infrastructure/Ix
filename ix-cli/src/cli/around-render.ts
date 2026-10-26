@@ -18,7 +18,8 @@ function span(s: { lineStart: number; lineEnd: number }): string {
 function refText(r: AroundRef): string {
   const where = r.line !== undefined ? `${r.path}:${r.line}` : r.path;
   const via = r.via ? ` (via ${r.via})` : "";
-  return r.snippet ? `${where}${via} ${r.snippet}` : `${where}${via}`;
+  const sources = r.sources?.length ? ` [${r.sources.join(", ")}]` : "";
+  return r.snippet ? `${where}${via}${sources} ${r.snippet}` : `${where}${via}${sources}`;
 }
 
 function sectionLines(label: string, section: AroundSection, indent: string): string[] {
@@ -88,6 +89,7 @@ function refFields(r: AroundRef): Array<[string, string | number | undefined]> {
     ["site", r.line !== undefined ? `${r.path}:${r.line}` : r.path],
     ["name", r.name],
     ["via", r.via],
+    ["sources", r.sources?.join(",")],
     ["snippet", r.snippet],
   ];
 }
