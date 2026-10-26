@@ -15,9 +15,8 @@ import { resolveToken, type RepoAccess } from "./text-references.js";
  * a changed file in the top five 0.600 of the time, against 0.485 for BM25
  * over the repository. But a graph-expanded bundle, ranked by graph distance,
  * lost to BM25 at equal size (0.57 against 0.67). So the ranking here is
- * lexical first: the resolved starting files lead, BM25 against the issue
- * orders the rest, and graph closeness to a starting point only breaks ties
- * and nudges.
+ * lexical first: resolved starts get a bounded boost, and graph closeness
+ * only breaks ties and nudges.
  *
  * Starting points, most specific first:
  *
@@ -50,6 +49,8 @@ export const MAX_RANKED_FILES = 20;
  * not overturn a clear lexical lead.
  */
 export const CLOSENESS_BOOST = 0.1;
+/** A start adds at most this fraction of the strongest lexical score. */
+const START_BOOST = 0.1;
 
 /** Extensions of files a fix edits. */
 const CODE_EXTENSIONS = [
@@ -69,15 +70,69 @@ const CODE_FILE = new RegExp(`\\.(?:${CODE_EXTENSIONS.join("|")})$`);
  * Verified fixes change.
  */
 const NOISE = new RegExp(
-  "(^|/)(__tests__|tests?|spec|specs|fixtures?|__fixtures__|test-fixtures|samples|examples?|vendor|"
-  + "third_party|node_modules|dist|build|coverage|docs?|changelog_unreleased|"
-  + "site|website|docs-site|playground|tests?[_-]config|benchmarks|\\.?storybook|e2e|cypress|integration-tests)/"
+  "(^|/)(__tests__|tests?|spec|specs|fixtures?|__fixtures__|test-fixtures|samples|vendor|"
+  + "third_party|node_modules|dist|build|coverage|changelog_unreleased|"
+  + "website|docs-site|playground|tests?[_-]config|benchmarks|\\.?storybook|e2e|cypress|integration-tests)/"
   + "|\\.(test|spec)\\.[^/]+$|\\.min\\.js$|(^|/)test_[^/]+\\.py$|_test\\.(py|go)$",
 );
+const PACKAGE_NOISE = /(^|\/)(docs?|examples?|site)\//;
 
 /** Source code a fix would edit: a code file that is not a test, fixture, doc or build output. */
-export function isSourcePath(path: string): boolean {
-  return CODE_FILE.test(path) && !NOISE.test(path) && !isTestPath(path);
+export function isSourcePath(path: string): boolean;
+export function isSourcePath(path: string, context: { importable: boolean; header?: string }): boolean;
+export function isSourcePath(path: string, context?: { importable: boolean; header?: string }): boolean {
+  return CODE_FILE.test(path) && !NOISE.test(path) && !isTestPath(path)
+    && (!PACKAGE_NOISE.test(path) || !!context?.importable)
+    && !/_pb2(?:_grpc)?\.py$/.test(path) && !generatedHeader(context?.header);
+}
+
+function generatedHeader(text: string | undefined): boolean {
+  let blockEnd: string | undefined;
+  for (const line of (text ?? "").slice(0, 4096).split("\n")) {
+    const comment = line.trim();
+    if (!comment) continue;
+    if (!blockEnd) {
+      const block = [["/*", "*/"], ["<!--", "-->"], ['"""', '"""'], ["'''", "'''"]]
+        .find(([start]) => comment.startsWith(start));
+      if (block) blockEnd = block[1];
+      else if (!/^(?:#|\/\/|--)/.test(comment)) break;
+      if (block && comment.slice(block[0].length).includes(blockEnd!)) blockEnd = undefined;
+    } else if (comment.includes(blockEnd)) blockEnd = undefined;
+    if (/\bgenerated\b|\bdo not edit\b/i.test(comment)) return true;
+  }
+  return false;
+}
+
+/** One eligibility set for paths, symbol hits, BM25 and graph neighbours. */
+function issueSourcePaths(repo: RepoAccess, files: string[]): ReadonlySet<string> {
+  const packages = new Set(files.filter((p) => p.endsWith("/__init__.py")).map((p) => posix.dirname(p)));
+  for (const config of files.filter((p) => /(^|\/)(pyproject\.toml|setup\.cfg|setup\.py)$/.test(p))) {
+    const text = repo.read(config) ?? "";
+    // Literal package names, source roots and find/include patterns. Never
+    // execute setup.py; dynamic packaging can still use __init__.py evidence.
+    for (const match of text.matchAll(/["']((?:docs?|examples?|site)(?:[./][\w-]+)*(?:[.*]*)?)["']/g)) {
+      packages.add(posix.join(posix.dirname(config), match[1].replace(/[.*]+$/, "").replaceAll(".", "/")));
+    }
+    if (config.endsWith("setup.cfg")) {
+      for (const match of text.matchAll(/^\s*(?:(?:where|packages|include)?\s*=\s*)?((?:docs?|examples?|site)(?:[./][\w-]+)*)(?:\.\*)?\s*$/gm)) {
+        packages.add(posix.join(posix.dirname(config), match[1].replaceAll(".", "/")));
+      }
+    }
+  }
+  const source = new Set<string>();
+  for (const path of files) {
+    let parent = posix.dirname(path);
+    let importable = false;
+    // A package above docs/ does not make its documentation importable.
+    const boundary = path.match(/^(?:.*\/)?(?:docs?|examples?|site)\//)?.[0].length ?? 0;
+    while (parent !== ".") {
+      if (packages.has(parent) && parent.length + 1 >= boundary) { importable = true; break; }
+      parent = posix.dirname(parent);
+    }
+    if (!isSourcePath(path, { importable })) continue;
+    if (isSourcePath(path, { importable, header: repo.read(path) })) source.add(path);
+  }
+  return source;
 }
 
 // A path-like token with a code extension: `saving_api.py`, `src/a/index.ts`,
@@ -103,14 +158,66 @@ export interface IssueCandidates {
   paths: string[];
   /** Code names: multi-part first, then single backticked words. */
   identifiers: string[];
+  /** Names defined or used only in the reporter's snippet, lowest priority. */
+  snippetIdentifiers?: string[];
+  /** Each traceback's frames, innermost first, separate from explicit paths. */
+  tracebacks?: string[][];
+}
+
+function tracebackCandidates(text: string): { text: string; groups: string[][] } {
+  const groups: string[][] = [];
+  let frames: string[] = [];
+  let style = "";
+  const flush = () => {
+    if (frames.length) groups.push(style === "python" ? frames.reverse() : frames);
+    frames = [];
+    style = "";
+  };
+  const lines = text.split("\n").map((line) => {
+    if (/Traceback \(most recent call last\)/.test(line)) { flush(); return ""; }
+    const python = line.match(/^\s*File ["']([^"']+)["'], line \d+/);
+    const js = /^\s*at\s/.test(line) ? line.match(/(?:\(|\s)((?:[A-Za-z]:)?[^\s():]+):\d+(?::\d+)?\)?\s*$/) : null;
+    const frame = python?.[1] ?? js?.[1];
+    if (frame) {
+      const nextStyle = python ? "python" : "js";
+      if (style && style !== nextStyle) flush();
+      style = nextStyle;
+      frames.push(frame.replaceAll("\\", "/"));
+      return "";
+    }
+    // Source/caret lines belong to the trace too; they must not create
+    // additional identifier or path starts after its selected frame.
+    if (style && /^\s/.test(line)) return "";
+    if (/^\S/.test(line)) flush();
+    return line;
+  });
+  flush();
+  return { text: lines.join("\n"), groups };
+}
+
+function runtimeFrame(path: string): boolean {
+  return /(^|\/)(site-packages|dist-packages|\.?venv|env|node_modules)\//i.test(path)
+    || /(^|\/)lib(?:64)?\/python\d[^/]*\//i.test(path)
+    || /(^|\/)Python\d+\/Lib\//i.test(path)
+    || /(^|\/)(manage|setup|__main__|runpy|conftest)\.py$/.test(path)
+    || path.startsWith("node:");
 }
 
 /** The paths and code names an issue mentions, most specific first. */
 export function extractCandidates(text: string): IssueCandidates {
+  const trace = tracebackCandidates(text);
+  text = trace.text;
   const paths = unique([...text.matchAll(PATH)].map((m) => m[1]));
   // A path's own parts are not names in the issue: `saving_api` in
   // `saving/saving_api.py` is the path again, not a function.
-  const prose = text.replace(PATH, " ");
+  const snippets: string[] = [];
+  const prose = text.replace(PATH, " ")
+    .replace(/(`{3,}|~{3,})[^\n]*\n[\s\S]*?\1/g, (code) => { snippets.push(code); return " "; })
+    .replace(/^(?: {4}|\t).+$/gm, (code) => { snippets.push(code); return " "; })
+    .replace(/^\s*(?:(?:class|def|function)\s+\w+[^\n]*|(?:\w+\s*=\s*)?[\w.]+\([^\n]*\)[:;]?)\s*$/gm,
+      (code) => { snippets.push(code); return " "; })
+    .replace(/`[^`\n]*(?:\([^`\n]*\)|\b(?:class|def|function|const)\b)[^`\n]*`/g,
+      (code) => { snippets.push(code); return " "; });
   const inTicks = [...prose.matchAll(BACKTICK)].flatMap((m) => [...m[1].matchAll(WORD)].map((w) => w[0]));
   const multi = [...inTicks, ...[...prose.matchAll(IDENT)].map((m) => m[0])].filter((t) => IDENT_FULL.test(t));
   const single = inTicks.filter((t) => !IDENT_FULL.test(t) && t.length >= 4);
@@ -129,7 +236,13 @@ export function extractCandidates(text: string): IssueCandidates {
     seen.add(token);
     identifiers.push(token);
   }
-  return { paths, identifiers: identifiers.slice(0, MAX_CANDIDATES) };
+  const snippetIdentifiers = unique(snippets.flatMap((code) => [...code.matchAll(WORD)].map((m) => m[0])))
+    .filter((name) => !seen.has(name) && !isGenericIdentifier(name));
+  return {
+    paths, identifiers: [...identifiers, ...snippetIdentifiers].slice(0, MAX_CANDIDATES),
+    ...(snippetIdentifiers.length ? { snippetIdentifiers } : {}),
+    ...(trace.groups.length ? { tracebacks: trace.groups } : {}),
+  };
 }
 
 /** One search hit, as the starting-point picker needs it. */
@@ -155,6 +268,9 @@ export interface StartingPoint {
   lineStart?: number;
   lineEnd?: number;
   via: StartVia;
+  /** Snippet-only names are hints, not evidence of a broken definition. */
+  snippet?: boolean;
+  traceback?: boolean;
 }
 
 /** Kinds a definition has, most navigable first. Anything else ranks after. */
@@ -181,6 +297,7 @@ export interface PickDeps {
    * in favour of the one the issue reads like.
    */
   fileScore?: (path: string) => number;
+  sourcePaths?: ReadonlySet<string>;
 }
 
 /**
@@ -193,10 +310,11 @@ export async function pickStartingPoints(
   deps: PickDeps,
   max = MAX_STARTS,
 ): Promise<{ starts: StartingPoint[]; unresolved: string[] }> {
-  const { paths, identifiers } = extractCandidates(text);
+  const { paths, identifiers, snippetIdentifiers, tracebacks } = extractCandidates(text);
   const starts: StartingPoint[] = [];
   const unresolved: string[] = [];
   const taken = (path: string) => starts.some((s) => s.path === path);
+  const source = (path: string) => deps.sourcePaths?.has(path) ?? isSourcePath(path);
 
   const tracked = new Set(deps.files);
   const byBasename = new Map<string, string[]>();
@@ -211,11 +329,23 @@ export async function pickStartingPoints(
   for (const token of paths) {
     if (starts.length >= max) return { starts, unresolved };
     const path = resolveIssuePath(token, tracked, byBasename);
-    if (!path || !isSourcePath(path)) {
+    if (!path || !source(path)) {
       unresolved.push(token);
       continue;
     }
     if (!taken(path)) starts.push({ token, name: posix.basename(path), kind: "file", path, via: "path in issue" });
+  }
+
+  for (const frames of tracebacks ?? []) {
+    if (starts.length >= max) return { starts, unresolved };
+    for (const token of frames) {
+      if (runtimeFrame(token)) { unresolved.push(token); continue; }
+      const path = resolveIssuePath(token, tracked, byBasename);
+      if (!path || !source(path)) { unresolved.push(token); continue; }
+      // Even if another trace named this file, this traceback gets no second start.
+      if (!taken(path)) starts.push({ token, name: posix.basename(path), kind: "file", path, via: "path in issue", traceback: true });
+      break;
+    }
   }
 
   const score = deps.fileScore ?? (() => 0);
@@ -225,7 +355,7 @@ export async function pickStartingPoints(
     // issue that names nothing.
     const hits = (await deps.search(token))
       .filter((h): h is SymbolHit & { path: string } =>
-        h.name === token && !!h.path && !NOT_DEFINITIONS.has(h.kind.toLowerCase()) && isSourcePath(h.path))
+        h.name === token && !!h.path && !NOT_DEFINITIONS.has(h.kind.toLowerCase()) && source(h.path))
       .sort((a, b) =>
         kindRank(a.kind) - kindRank(b.kind) || score(b.path) - score(a.path) || cmp(a.path, b.path));
     if (hits.length === 0) {
@@ -239,6 +369,7 @@ export async function pickStartingPoints(
       ...(best.lineStart !== undefined ? { lineStart: best.lineStart } : {}),
       ...(best.lineEnd !== undefined ? { lineEnd: best.lineEnd } : {}),
       via: "identifier in issue",
+      ...(snippetIdentifiers?.includes(token) ? { snippet: true } : {}),
     });
   }
   return { starts, unresolved };
@@ -332,7 +463,9 @@ export const BM25_IDENTIFIER_WEIGHT = 2;
 export function bm25QueryWeights(query: string): Map<string, number> {
   const weights = new Map<string, number>();
   for (const t of bm25Tokens(query)) if (!BM25_STOPWORDS.has(t)) weights.set(t, 1);
-  for (const id of extractCandidates(query).identifiers) {
+  const { identifiers, snippetIdentifiers } = extractCandidates(query);
+  for (const id of identifiers) {
+    if (snippetIdentifiers?.includes(id)) continue;
     for (const t of bm25Tokens(id)) if (weights.has(t)) weights.set(t, BM25_IDENTIFIER_WEIGHT);
   }
   return weights;
@@ -447,6 +580,8 @@ export interface IssuePlan {
   fallback: boolean;
   /** BM25 over the tracked source files, best first. */
   bm25: Bm25Hit[];
+  /** Internal repo-aware eligibility; the bundle only emits ranked files. */
+  sourcePaths?: ReadonlySet<string>;
 }
 
 /**
@@ -464,19 +599,21 @@ export async function planIssue(
   },
 ): Promise<IssuePlan> {
   const files = deps.repo?.files() ?? [];
+  const sourcePaths = deps.repo ? issueSourcePaths(deps.repo, files) : undefined;
   const rank = deps.rank ?? bm25Rank;
-  const bm25 = deps.repo ? rank(deps.repo, files.filter(isSourcePath), text) : [];
+  const bm25 = deps.repo ? rank(deps.repo, [...sourcePaths!], text) : [];
   const scores = new Map(bm25.map((h) => [h.path, h.score]));
   const { starts, unresolved } = await pickStartingPoints(text, {
-    files, search: deps.search, fileScore: (p) => scores.get(p) ?? 0,
+    files, search: deps.search, fileScore: (p) => scores.get(p) ?? 0, sourcePaths,
   });
-  if (starts.length > 0 || bm25.length === 0) return { starts, unresolved, fallback: false, bm25 };
+  if (starts.length > 0 || bm25.length === 0) return { starts, unresolved, fallback: false, bm25, sourcePaths };
   const top = bm25[0].path;
   return {
     starts: [{ token: top, name: posix.basename(top), kind: "file", path: top, via: "bm25 fallback" }],
     unresolved,
     fallback: true,
     bm25,
+    sourcePaths,
   };
 }
 
@@ -514,15 +651,15 @@ export function issueConfidence(plan: Pick<IssuePlan, "starts" | "fallback">): I
   if (plan.fallback) {
     return { confident: false, starts: [], reason: "no code name in the issue resolved to a definition" };
   }
-  const starts = plan.starts.filter((s) => s.via === "path in issue"
-    || (s.via === "identifier in issue" && !isGenericIdentifier(s.token)));
+  const starts = plan.starts.filter((s) => !s.snippet && (s.via === "path in issue"
+    || (s.via === "identifier in issue" && !isGenericIdentifier(s.token))));
   if (starts.length === 0) {
     const names = plan.starts.map((s) => s.token);
     return {
       confident: false,
       starts,
       reason: names.length > 0
-        ? `only common words resolved (${names.join(", ")}), which name many definitions`
+        ? `only common words or snippet-only names resolved (${names.join(", ")})`
         : "nothing in the issue resolved to a definition",
     };
   }
@@ -557,7 +694,7 @@ export function leanIssueView(plan: IssuePlan, ranked = LEAN_RANKED): LeanIssueV
     return { confidence: "low", reason: c.reason, startingPoints: [], alsoRanked: [], unresolved: plan.unresolved };
   }
   const startPaths = new Set(c.starts.map((s) => s.path));
-  const alsoRanked = rankIssueFiles({ starts: [], bm25: plan.bm25, near: new Map() }, ranked + startPaths.size)
+  const alsoRanked = rankIssueFiles({ starts: [], bm25: plan.bm25, near: new Map(), sourcePaths: plan.sourcePaths }, ranked + startPaths.size)
     .filter((f) => !startPaths.has(f.path))
     .slice(0, ranked);
   return { confidence: "high", startingPoints: c.starts, alsoRanked, unresolved: plan.unresolved };
@@ -603,7 +740,7 @@ export async function chooseCentre(
 
 export interface RankedFile {
   path: string;
-  /** BM25 against the issue, boosted by closeness to a starting point. */
+  /** BM25 with bounded start and graph-closeness boosts. */
   score: number;
   reason: string;
 }
@@ -615,46 +752,42 @@ export interface Closeness {
 }
 
 /**
- * The files to read, best first: the starting files in the order they were
- * found, then every other source file by
- *
- *     bm25(file, issue) * (1 + CLOSENESS_BOOST * closeness(file))
- *
- * where closeness is 1 for a file one hop from a starting point, 0.5 for one
- * of its ranked related files, 0 otherwise. Ties go to the closer file, then
- * the path. A graph neighbour the issue's text does not match at all still
- * ranks, after every file it does match.
+ * Lexical ranking with a start boost capped at 10% of the best lexical hit.
+ * Snippet-only starts receive no boost. Closeness remains a small relative
+ * nudge. The existing reason field explains every contribution.
  */
 export function rankIssueFiles(
-  input: { starts: StartingPoint[]; bm25: Bm25Hit[]; near: ReadonlyMap<string, Closeness> },
+  input: { starts: StartingPoint[]; bm25: Bm25Hit[]; near: ReadonlyMap<string, Closeness>; sourcePaths?: ReadonlySet<string> },
   limit = MAX_RANKED_FILES,
 ): RankedFile[] {
-  const lexical = new Map(input.bm25.map((h) => [h.path, h.score]));
-  const out: RankedFile[] = [];
-  const startPaths = new Set<string>();
+  const source = (path: string) => input.sourcePaths?.has(path) ?? isSourcePath(path);
+  const lexical = new Map(input.bm25.filter((h) => source(h.path)).map((h) => [h.path, h.score]));
+  const starts = new Map<string, StartingPoint>();
   for (const s of input.starts) {
-    if (startPaths.has(s.path)) continue;
-    startPaths.add(s.path);
-    out.push({
-      path: s.path,
-      score: round(lexical.get(s.path) ?? 0),
-      reason: `starting point (${s.via}: ${s.token})`,
-    });
+    if (!starts.has(s.path)) starts.set(s.path, s);
   }
-  const pool = new Set([...lexical.keys(), ...input.near.keys()]);
-  const rest = [...pool]
-    .filter((path) => !startPaths.has(path) && isSourcePath(path))
+  let best = 0;
+  for (const score of lexical.values()) best = Math.max(best, score);
+  const pool = new Set([...starts.keys(), ...lexical.keys(), ...input.near.keys()]);
+  return [...pool]
+    .filter(source)
     .map((path) => {
       const bm25 = lexical.get(path) ?? 0;
       const near = input.near.get(path);
       const closeness = near?.weight ?? 0;
-      const reason = [bm25 > 0 ? `bm25 ${bm25.toFixed(2)}` : "no bm25 match", near?.reason]
+      const start = starts.get(path);
+      const boost = start && !start.snippet ? best * START_BOOST : 0;
+      const reason = [
+        bm25 > 0 ? `bm25 ${bm25.toFixed(2)}` : "no bm25 match",
+        start ? `starting point (${start.traceback ? "traceback" : start.via}: ${start.token}); ${start.snippet ? "snippet only; " : ""}boost ${boost.toFixed(2)}` : undefined,
+        near?.reason,
+      ]
         .filter(Boolean).join("; ");
-      return { path, score: bm25 * (1 + CLOSENESS_BOOST * closeness), closeness, reason };
+      return { path, score: bm25 * (1 + CLOSENESS_BOOST * closeness) + boost, closeness, start: !!start, reason };
     })
-    .sort((a, b) => b.score - a.score || b.closeness - a.closeness || cmp(a.path, b.path));
-  for (const r of rest) out.push({ path: r.path, score: round(r.score), reason: r.reason });
-  return out.slice(0, limit);
+    .sort((a, b) => b.score - a.score || Number(b.start) - Number(a.start) || b.closeness - a.closeness || cmp(a.path, b.path))
+    .slice(0, limit)
+    .map((r) => ({ path: r.path, score: round(r.score), reason: r.reason }));
 }
 
 /**

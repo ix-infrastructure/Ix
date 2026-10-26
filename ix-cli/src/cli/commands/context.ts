@@ -1763,7 +1763,7 @@ async function buildIssueBundle(
       startingPoints: starts,
       unresolved: plan.unresolved,
       fallback: plan.fallback || walked,
-      rankedFiles: rankIssueFiles({ starts, bm25: plan.bm25, near }),
+      rankedFiles: rankIssueFiles({ starts, bm25: plan.bm25, near, sourcePaths: plan.sourcePaths }),
       extraEntities: around.flatMap((n) => n.related),
     },
   });

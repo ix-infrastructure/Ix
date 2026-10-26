@@ -13,6 +13,7 @@ import {
   bm25Tokens,
   extractCandidates,
   isSourcePath,
+  issueConfidence,
   pickStartingPoints,
   planIssue,
   rankIssueFiles,
@@ -328,7 +329,7 @@ describe("rankIssueFiles", () => {
     { token: "listByKind", name: "listByKind", kind: "method", path: "src/client/api.ts", via: "identifier in issue" as const },
   ];
 
-  it("puts starting points first, then BM25 order", () => {
+  it("boosts starts without overturning a clear lexical lead", () => {
     const ranked = rankIssueFiles({
       starts,
       bm25: [
@@ -339,10 +340,10 @@ describe("rankIssueFiles", () => {
       near: new Map(),
     });
     expect(ranked.map((r) => r.path)).toEqual([
-      "src/client/api.ts", "src/cli/commands/inventory.ts", "src/cli/commands/rank.ts",
+      "src/cli/commands/inventory.ts", "src/client/api.ts", "src/cli/commands/rank.ts",
     ]);
-    expect(ranked[0].reason).toContain("starting point");
-    expect(ranked[1].reason).toContain("bm25");
+    expect(ranked[1].reason).toContain("starting point");
+    expect(ranked[0].reason).toContain("bm25");
   });
 
   it("uses graph closeness to break ties and nudge, never to overturn a clear lexical lead", () => {
@@ -362,9 +363,173 @@ describe("rankIssueFiles", () => {
       ]),
     });
     expect(ranked.map((r) => r.path)).toEqual([
-      "src/client/api.ts", "src/far-strong.ts", "src/near-tie.ts", "src/far-tie.ts",
-      "src/near-weak.ts", "src/near-only.ts",
+      "src/far-strong.ts", "src/near-tie.ts", "src/far-tie.ts",
+      "src/near-weak.ts", "src/client/api.ts", "src/near-only.ts",
     ]);
     expect(ranked.find((r) => r.path === "src/near-tie.ts")?.reason).toContain("one hop from listByKind");
+  });
+});
+
+describe("issue localization regressions", () => {
+  const search = async (name: string) => [hit(name, "class", `src/${name}.py`)];
+
+  it("keeps a prose-named failure ahead of snippet-defined and snippet-used names", async () => {
+    const text = [
+      "```python", "class DemoModel(ModelBase):", "    field = ModelField()", "```",
+      "The decode_payload function corrupts escaped payload values.",
+    ].join("\n");
+    const repo = memoryRepo({
+      "src/DemoModel.py": "class DemoModel: pass",
+      "src/ModelBase.py": "class ModelBase: pass",
+      "src/ModelField.py": "class ModelField: pass",
+      "src/decode_payload.py": "def decode_payload(payload): # corrupts escaped payload values\n    return payload",
+    });
+    const plan = await planIssue(text, { repo, search });
+    expect(plan.starts[0].token).toBe("decode_payload");
+    expect(rankIssueFiles({ ...plan, near: new Map() })[0].path).toBe("src/decode_payload.py");
+  });
+
+  it("caps a weak start boost below much stronger lexical hits", () => {
+    const ranked = rankIssueFiles({
+      starts: [{ token: "ModelBase", name: "ModelBase", kind: "class", path: "src/base.py", via: "identifier in issue" }],
+      bm25: [
+        { path: "src/messages_pb2.py", score: 1000 },
+        { path: "src/parser.py", score: 30 }, { path: "src/decoder.py", score: 20 }, { path: "src/base.py", score: 1 },
+      ],
+      near: new Map(),
+    });
+    expect(ranked.map((f) => f.path)).toEqual(["src/parser.py", "src/decoder.py", "src/base.py"]);
+    expect(ranked[2].reason).toContain("starting point");
+    expect(ranked[2].reason).toContain("bm25");
+    expect(Object.keys(ranked[0]).sort()).toEqual(["path", "reason", "score"]);
+  });
+
+  it("uses a start to break a close lexical race, but gives snippet-only names no boost", async () => {
+    const plan = await planIssue("```python\nclass DemoModel(ModelBase):\n    field = ModelField()\n```", {
+      search, repo: memoryRepo({ "src/ModelBase.py": "class ModelBase: pass" }),
+    });
+    expect(plan.starts[0]).toMatchObject({ token: "ModelBase", snippet: true });
+    expect(issueConfidence(plan).confident).toBe(false);
+    const input = {
+      starts: [{ ...plan.starts[0], path: "src/base.py" }],
+      bm25: [{ path: "src/other.py", score: 10 }, { path: "src/base.py", score: 9.5 }],
+      near: new Map(),
+    };
+    expect(rankIssueFiles(input)[0].path).toBe("src/other.py");
+    const ranked = rankIssueFiles({ ...input, starts: [{ ...input.starts[0], snippet: false }] });
+    expect(ranked[0].path).toBe("src/base.py");
+    expect(ranked[0].score).toBe(10.5);
+  });
+
+  it("prefers a prose mention over an inline call or an indented definition", () => {
+    const { identifiers, snippetIdentifiers } = extractCandidates([
+      "Calling `ModelField(value)` reproduces this.",
+      "    class DemoModel(ModelBase): pass",
+      "decode_payload fails to unescape values.",
+    ].join("\n"));
+    expect(identifiers[0]).toBe("decode_payload");
+    expect(snippetIdentifiers).toEqual(expect.arrayContaining(["ModelField", "DemoModel", "ModelBase"]));
+    expect(extractCandidates("`ModelField(value)` reproduces it; `ModelField` drops values.").snippetIdentifiers)
+      .toBeUndefined();
+    expect(extractCandidates("class DemoModel(ModelBase):\nfield = ModelField()\ndecode_payload fails").identifiers[0])
+      .toBe("decode_payload");
+  });
+
+  it("takes one innermost eligible frame per traceback, skipping runtime and wrapper frames", async () => {
+    const text = [
+      "Traceback (most recent call last):",
+      '  File "/project/src/outer.py", line 1, in run',
+      '  File "/project/src/inner.py", line 2, in decode',
+      '  File "/project/manage.py", line 3, in main',
+      '  File "/project/.venv/lib/python3.12/site-packages/lib/worker.py", line 4, in call',
+      '  File "/usr/lib/python3.12/json/decoder.py", line 5, in decode',
+      "ValueError: invalid payload",
+      "Traceback (most recent call last):",
+      '  File "/project/src/outer.py", line 1, in run',
+      '  File "/project/src/final.py", line 8, in decode',
+      "    outer_helper()",
+      "ValueError: final failure",
+    ].join("\n");
+    const out = await pickStartingPoints(text, {
+      files: ["src/outer.py", "src/inner.py", "src/final.py", "src/helper.py", "manage.py", "lib/worker.py", "json/decoder.py"],
+      search: async (name) => name === "outer_helper" ? [hit(name, "function", "src/helper.py")] : [],
+    });
+    expect(out.starts.map((s) => s.path)).toEqual(["src/inner.py", "src/final.py"]);
+    expect(rankIssueFiles({ starts: out.starts, bm25: [], near: new Map() })[0].reason).toContain("traceback");
+  });
+
+  it("keeps JavaScript's innermost-first frame order and skips dependency frames", async () => {
+    const out = await pickStartingPoints([
+      "TypeError: invalid payload",
+      "    at parse (/project/node_modules/tool/parser.ts:1:2)",
+      "    at decode (/project/src/decoder.ts:4:8)",
+      "    at run (/project/src/runner.ts:9:3)",
+    ].join("\n"), { files: ["src/decoder.ts", "src/runner.ts", "tool/parser.ts"], search: async () => [] });
+    expect(out.starts.map((s) => s.path)).toEqual(["src/decoder.ts"]);
+  });
+
+  it("tries an outer frame when the innermost frame is untracked", async () => {
+    const out = await pickStartingPoints([
+      "Traceback (most recent call last):",
+      '  File "/project/src/outer.py", line 1, in run',
+      '  File "/project/missing.py", line 2, in decode',
+    ].join("\n"), { files: ["src/outer.py"], search: async () => [] });
+    expect(out.starts.map((s) => s.path)).toEqual(["src/outer.py"]);
+  });
+
+  it.each([
+    ["setup.py", 'from setuptools import setup\nsetup(packages=["docs.plugin"])'],
+    ["setup.cfg", "[options]\npackages = docs.plugin"],
+    ["pyproject.toml", '[tool.setuptools]\npackages = ["docs.plugin"]'],
+  ])("recognizes a namespace package declared in %s", async (config, text) => {
+    const plan = await planIssue("decode_payload", {
+      search: async () => [],
+      repo: memoryRepo({ [config]: text, "docs/plugin/decoder.py": "decode_payload", "docs/tutorial.py": "decode_payload" }),
+    });
+    expect(plan.bm25.map((h) => h.path)).toEqual(["docs/plugin/decoder.py"]);
+  });
+
+  it("excludes multiline generated headers but keeps handwritten code mentioning generation", async () => {
+    const plan = await planIssue("decode_payload", {
+      search: async () => [],
+      repo: memoryRepo({
+        "src/block.ts": "/**\nThis file is generated.\n*/\nconst decode_payload = 1;",
+        "src/module.py": '"""\nDO NOT EDIT\n"""\ndef decode_payload(): pass',
+        "src/manual.py": 'def decode_payload():\n    return "generated"',
+      }),
+    });
+    expect(plan.bm25.map((h) => h.path)).toEqual(["src/manual.py"]);
+  });
+
+  it("retains importable docs, examples and site packages but excludes generated files everywhere", async () => {
+    const repo = memoryRepo({
+      "docs/__init__.py": "",
+      "docs/parser.py": "decode_payload escaped values",
+      "examples/plugin/__init__.py": "",
+      "examples/plugin/decoder.py": "decode_payload escaped values",
+      "site/runtime/decoder.py": "decode_payload escaped values",
+      "pyproject.toml": '[tool.setuptools.packages.find]\ninclude = ["site.runtime*"]',
+      "docs/tutorial.py": "# DO NOT EDIT\ndecode_payload escaped values",
+      "src/migrations/0001_initial.py": "# Generated by a migration tool\ndecode_payload escaped values",
+      "src/migrations/manual.py": "# Handwritten data migration\ndecode_payload escaped values",
+      "src/messages_pb2.py": "decode_payload escaped values",
+      "src/messages_pb2_grpc.py": "decode_payload escaped values",
+      "src/generated.ts": "// AUTO-GENERATED. DO NOT EDIT\nconst decode_payload = 1;",
+      "src/__init__.py": "",
+      "src/docs/tutorial.py": "decode_payload escaped values",
+      "examples/demo.py": "decode_payload escaped values",
+    });
+    const plan = await planIssue("decode_payload escaped values migrations/0001_initial.py", {
+      repo, search: async () => [hit("decode_payload", "function", "src/generated.ts")],
+    });
+    const expected = ["docs/parser.py", "examples/plugin/decoder.py", "site/runtime/decoder.py", "src/migrations/manual.py"];
+    expect(plan.bm25.map((h) => h.path).sort()).toEqual(expected.sort());
+    const near = new Map(repo.files().map((path) => [path, { weight: 1, reason: "one hop" }]));
+    const ranked = rankIssueFiles({ ...plan, near }).map((f) => f.path);
+    for (const path of expected) expect(ranked).toContain(path);
+    for (const path of ["src/migrations/0001_initial.py", "src/messages_pb2.py", "src/messages_pb2_grpc.py", "src/generated.ts", "docs/tutorial.py", "examples/demo.py", "src/docs/tutorial.py"]) {
+      expect(ranked).not.toContain(path);
+      expect(plan.starts.map((s) => s.path)).not.toContain(path);
+    }
   });
 });
