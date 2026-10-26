@@ -36,6 +36,7 @@ import {
   type StartingPoint,
   type SymbolHit,
 } from "../explain/issue.js";
+import { collectIssueEntities, rankIssueEntities, type IssueEntityRanking } from "../explain/issue-entities.js";
 import { symbolReadChecker } from "../symbol-read-check.js";
 import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/related-files.js";
 import { cachedBm25Ranker } from "../explain/bm25-cache.js";
@@ -296,6 +297,8 @@ interface ContextBundle {
     lineStart?: number;
     lineEnd?: number;
     stale: boolean;
+    /** Issue relevance; absent on bundles built from a named target. */
+    score?: number;
   }>;
   relationships: Array<{ src: string; dst: string; predicate: string }>;
   claims: Array<{ id: string; entityId: string; statement: string; status: string }>;
@@ -342,7 +345,7 @@ interface ContextBundle {
   metadata: {
     asOfRev?: number;
     depth?: string;
-    rankingRule: "deterministic-tier";
+    rankingRule: "deterministic-tier" | "issue-bm25";
   };
 }
 
@@ -1605,6 +1608,9 @@ export interface IssueBundleInput extends IssueSummary {
   rankedFiles: RankedFile[];
   /** The other starting points' related files, entered as entities. */
   extraEntities?: EntityLocation[];
+  query?: string;
+  repo?: IssueEntityRanking["repo"];
+  distances?: ReadonlyMap<string, number>;
 }
 
 /**
@@ -1736,17 +1742,35 @@ async function buildIssueBundle(
   ]);
 
   const near = new Map<string, Closeness>();
+  const distances = new Map<string, number>();
+  const atDistance = (id: string, distance: number) => {
+    distances.set(id, Math.min(distances.get(id) ?? Infinity, distance));
+  };
   const mark = (path: string | undefined, weight: number, reason: string) => {
     if (!path) return;
     const prior = near.get(path);
     if (!prior || weight > prior.weight) near.set(path, { weight, reason });
   };
   for (const n of [{ start: centre, facts, related: facts.relatedRefs ?? [] }, ...around]) {
+    atDistance(n.start.id!, 0);
     for (const ref of oneHopRefs(n.facts)) {
       if (ref.path !== n.start.path) mark(ref.path, 1, `one hop from ${n.start.name}`);
     }
-    for (const ref of n.related) mark(ref.path, 0.5, `near ${n.start.name}`);
+    // Neighbour members and text/history-related files do not establish a
+    // direct graph edge. Only the facts' direct references fill missing hops.
+    for (const ref of [
+      ...(n.facts?.importRefs ?? []), ...(n.facts?.calleeRefs ?? []),
+      ...(n.facts?.topCallerRefs ?? []), ...(n.facts?.topDependentRefs ?? []),
+      ...(n.facts?.memberRefs ?? []),
+    ]) atDistance(ref.id, 1);
+    for (const ref of n.related) {
+      mark(ref.path, 0.5, `near ${n.start.name}`);
+    }
   }
+  const rankedFiles = rankIssueFiles({ starts, bm25: plan.bm25, near });
+  const candidates = await collectIssueEntities(client, rankedFiles, activeReadScope());
+  const repo = gitRepoAccess(resolveWorkspaceRoot());
+  const tracked = new Set(repo?.files());
 
   return buildBundle({
     resolved,
@@ -1763,8 +1787,11 @@ async function buildIssueBundle(
       startingPoints: starts,
       unresolved: plan.unresolved,
       fallback: plan.fallback || walked,
-      rankedFiles: rankIssueFiles({ starts, bm25: plan.bm25, near }),
-      extraEntities: around.flatMap((n) => n.related),
+      rankedFiles,
+      extraEntities: [...candidates, ...around.flatMap((n) => n.related)],
+      query: text,
+      repo: repo ? { read: path => tracked.has(path) ? repo.read(path) : undefined } : undefined,
+      distances,
     },
   });
 }
@@ -1997,7 +2024,7 @@ export function buildBundle(input: BuildInput): ContextBundle {
   // the field an agent reads to decide whether to trust the rest, so a wrong
   // one is worse than none.
   const seen = new Set<string>([resolved.id]);
-  const entities: ContextBundle["entities"] = [
+  let entities: ContextBundle["entities"] = [
     {
       id: resolved.id,
       name: resolved.name,
@@ -2110,6 +2137,10 @@ export function buildBundle(input: BuildInput): ContextBundle {
     .sort((a, b) => cmp(a.src, b.src) || cmp(a.dst, b.dst) || cmp(a.predicate, b.predicate))
     .map((edge) => ({ src: edge.src, dst: edge.dst, predicate: edge.predicate }));
 
+  if (issue?.query !== undefined) {
+    entities = rankIssueEntities(entities, { ...issue, query: issue.query }, relationships);
+  }
+
   const evidence = rankEvidence({ resolved, facts, context, relationships, prov, entities, issue });
 
   const bundle: ContextBundle = {
@@ -2170,7 +2201,7 @@ export function buildBundle(input: BuildInput): ContextBundle {
     metadata: {
       asOfRev,
       depth,
-      rankingRule: "deterministic-tier",
+      rankingRule: issue?.query !== undefined ? "issue-bm25" : "deterministic-tier",
     },
   };
 
