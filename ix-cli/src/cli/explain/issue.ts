@@ -5,6 +5,7 @@ import { posix } from "node:path";
 
 import { isTestPath } from "./related-files.js";
 import { resolveToken, type RepoAccess } from "./text-references.js";
+import type { CompanionSource } from "./issue-companions.js";
 
 /**
  * From an issue's text to the files its fix starts in, for
@@ -537,7 +538,7 @@ export interface LeanIssueView {
   confidence: "high" | "low";
   reason?: string;
   startingPoints: StartingPoint[];
-  /** The next files by BM25 against the issue, starting files excluded. */
+  /** Ranked follow-up files, starting files excluded. */
   alsoRanked: RankedFile[];
   unresolved: string[];
 }
@@ -603,9 +604,11 @@ export async function chooseCentre(
 
 export interface RankedFile {
   path: string;
-  /** BM25 against the issue, boosted by closeness to a starting point. */
+  /** BM25 boosted by closeness, or a bounded companion evidence score. */
   score: number;
   reason: string;
+  /** Present only when post-ranking companion expansion promoted this file. */
+  companion?: { source: CompanionSource; seed: string };
 }
 
 /** Why a file is near a starting point, and how near: 1 one hop, 0.5 two. */

@@ -26,6 +26,7 @@ import {
   CENTRE_FALLBACK_TRIES,
   chooseCentre,
   CLOSENESS_BOOST,
+  LEAN_RANKED,
   leanIssueView,
   planIssue,
   rankIssueFiles,
@@ -39,6 +40,7 @@ import {
 import { symbolReadChecker } from "../symbol-read-check.js";
 import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/related-files.js";
 import { cachedBm25Ranker } from "../explain/bm25-cache.js";
+import { companionHistory, expandIssueCompanions } from "../explain/issue-companions.js";
 import { collectTextReferences, gitRepoAccess, type TextSource } from "../explain/text-references.js";
 import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
@@ -1763,7 +1765,9 @@ async function buildIssueBundle(
       startingPoints: starts,
       unresolved: plan.unresolved,
       fallback: plan.fallback || walked,
-      rankedFiles: rankIssueFiles({ starts, bm25: plan.bm25, near }),
+      rankedFiles: await expandIssueCompanions(text, rankIssueFiles({ starts, bm25: plan.bm25, near }), {
+        repo: plan.repo, history: companionHistory(resolveWorkspaceRoot()),
+      }),
       extraEntities: around.flatMap((n) => n.related),
     },
   });
@@ -1794,26 +1798,36 @@ async function planIssueWith(client: IxClient, text: string) {
   await ensureReadScope(client);
   const scope = activeReadScope();
   const root = resolveWorkspaceRoot();
-  return planIssue(text, {
-    repo: gitRepoAccess(root),
+  const repo = gitRepoAccess(root);
+  const plan = await planIssue(text, {
+    repo,
     // Through the on-disk term index (bm25-cache.ts): the same ranking, with
     // only the files that differ from HEAD read again.
     rank: cachedBm25Ranker(root),
     search: async (name) =>
       (await client.search(name, { limit: ISSUE_SEARCH_LIMIT, nameOnly: true, ...scope })).map(symbolHit),
   });
+  return { ...plan, repo };
 }
 
 /**
  * `ix context --from-issue --lean`: the starting points Ix trusts and the
  * next few files, with no bundle around them. See `leanIssueView` for why.
- * Nothing here needs a centre node, so it is also the cheap path: one search
- * per name the issue mentions, and BM25 over the tracked files.
+ * Nothing here needs a centre node: one search per issue name, BM25 over
+ * tracked files, then the same bounded companion pass as the full bundle.
  */
 async function emitLeanIssue(arg: string, opts: ContextOptions): Promise<void> {
   const text = await readIssueOrReport(arg, opts.format);
   if (text === undefined) return;
-  const view = leanIssueView(await planIssueWith(createClient({ query: true }), text));
+  const plan = await planIssueWith(createClient({ query: true }), text);
+  const view = leanIssueView(plan);
+  if (view.confidence === "high") {
+    const starts = new Set(view.startingPoints.map((s) => s.path));
+    view.alsoRanked = (await expandIssueCompanions(text, rankIssueFiles({
+      starts: view.startingPoints, bm25: plan.bm25, near: new Map(),
+    }), { repo: plan.repo, history: companionHistory(resolveWorkspaceRoot()) }))
+      .filter((f) => !starts.has(f.path)).slice(0, LEAN_RANKED);
+  }
   if (opts.format === "json") {
     printJson({ kind: "issue_lean", ...view });
   } else if (opts.format === "llm") {
@@ -1841,7 +1855,8 @@ export function renderLeanIssueText(view: LeanIssueView): string {
     lines.push(`  ${spanOf(s)}  ${s.kind === "file" ? "" : `${s.name} (${s.kind}) — `}${startWhy(s)}`);
   }
   if (view.alsoRanked.length > 0) {
-    lines.push(`Then, by the issue's text: ${view.alsoRanked.map((f) => f.path).join(", ")}`);
+    const label = view.alsoRanked.some((f) => f.companion) ? "Then, ranked files (including companions)" : "Then, by the issue's text";
+    lines.push(`${label}: ${view.alsoRanked.map((f) => f.path).join(", ")}`);
   }
   return lines.join("\n");
 }

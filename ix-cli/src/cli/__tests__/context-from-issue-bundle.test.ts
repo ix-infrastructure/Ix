@@ -119,6 +119,15 @@ describe("ix context --from-issue bundle", () => {
     expect(parsed.data?.issue).toEqual(b.issue);
   });
 
+  it("preserves companion provenance when validating saved JSON", () => {
+    const companion = { source: "re-export" as const, seed: "src/client/api.ts" };
+    const files = ranked(3);
+    files[1] = { ...files[1], companion };
+    const b = build(issue({ rankedFiles: files }));
+    const parsed = contextBundleSchema.parse(JSON.parse(JSON.stringify(b)));
+    expect(parsed.rankedFiles?.[1]).toHaveProperty("companion", companion);
+  });
+
   it("puts the other starting points right after the target, and their neighbours in the bundle", () => {
     const b = build(issue());
     expect(b.entities[1]).toMatchObject({ id: "f-rank", path: "src/cli/commands/rank.ts" });

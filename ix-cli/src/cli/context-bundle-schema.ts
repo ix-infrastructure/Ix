@@ -79,7 +79,12 @@ function buildSchemas(z: typeof Zod.z) {
       })
       .optional(),
     rankedFiles: z
-      .array(z.object({ path: z.string(), score: z.number(), reason: z.string() }))
+      .array(z.object({
+        path: z.string(), score: z.number(), reason: z.string(),
+        companion: z.object({
+          source: z.enum(["co-change", "re-export", "issue-import"]), seed: z.string(),
+        }).optional(),
+      }))
       .optional(),
     entities: z.array(
       z.object({

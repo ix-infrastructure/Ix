@@ -105,6 +105,12 @@ describe("lean rendering", () => {
     expect(renderLeanIssueText(low)).toMatch(/^Ix found no confident starting point/);
   });
 
+  it("labels companion results in the text view", () => {
+    const view = { ...high, alsoRanked: [{ path: "src/index.ts", score: 1, reason: "companion",
+      companion: { source: "re-export" as const, seed: "src/b.ts" } }] };
+    expect(renderLeanIssueText(view)).toContain("Then, ranked files (including companions): src/index.ts");
+  });
+
   it("renders llm records", () => {
     const lines = renderLeanIssueLlm(high);
     expect(lines[0]).toBe("issue confidence=high");
