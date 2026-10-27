@@ -177,6 +177,25 @@ describe("issue candidate discovery", () => {
     expect(candidates.every(e => e.path === path)).toBe(true);
   });
 
+  it("uses at most two listings per ranked file even with thousands of definitions", async () => {
+    const files = Array.from({ length: MAX_RANKED_FILES + 5 }, (_, i) => ({ path: `src/f${i}.py`, score: 1, reason: "bm25" }));
+    const listByKind = vi.fn(async (kind: string, opts: { scope?: string }) =>
+      Array.from({ length: ISSUE_ENTITIES_PER_KIND + 10 }, (_, i) => node({
+        ...far, kind, path: opts.scope!, id: `${opts.scope}:${kind}:${i}`,
+      })));
+    const candidates = await collectIssueEntities({ listByKind }, files, { systemId: "fixture" });
+    expect(listByKind).toHaveBeenCalledTimes(2 * MAX_RANKED_FILES);
+    expect(candidates).toHaveLength(2 * MAX_RANKED_FILES * ISSUE_ENTITIES_PER_KIND);
+    for (const file of files.slice(0, MAX_RANKED_FILES)) {
+      for (const kind of ["function", "method"]) {
+        expect(listByKind).toHaveBeenCalledWith(kind, {
+          systemId: "fixture", scope: file.path, limit: ISSUE_ENTITIES_PER_KIND,
+        });
+      }
+    }
+    expect(candidates.some(entity => entity.path === files[MAX_RANKED_FILES].path)).toBe(false);
+  });
+
   it("keeps other candidates when one listing fails", async () => {
     const listByKind = vi.fn(async (kind: string) => {
       if (kind === "function") throw new Error("unavailable");
