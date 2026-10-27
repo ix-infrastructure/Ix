@@ -21,7 +21,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, extname, join, relative } from "node:path";
+import { dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /* global process, console */
@@ -96,10 +96,12 @@ function codeInvocations(text) {
 }
 
 /** Invocations in text: `ix …` code spans, and lines of fenced blocks starting with `ix `. */
-function textInvocations(text) {
+export function textInvocations(text) {
   const found = [];
-  for (const m of text.matchAll(/`(ix\s+[a-z][^`\n]*)`/g)) {
-    found.push({ argv: tokens(m[1]), line: lineOf(text, m.index), snippet: m[1].slice(0, 100) });
+  // Template strings escape Markdown backticks. Match the same delimiter on
+  // both sides so its closing backslash never becomes part of the final flag.
+  for (const m of text.matchAll(/(\\?)`(ix\s+[a-z][^`\n]*?)\1`/g)) {
+    found.push({ argv: tokens(m[2]), line: lineOf(text, m.index), snippet: m[2].slice(0, 100) });
   }
   let inFence = false;
   text.split("\n").forEach((raw, i) => {
@@ -115,7 +117,7 @@ function textInvocations(text) {
  * prompts as JSON strings, where a fenced block's newlines are `\n` escapes:
  * scanned as raw text, those blocks are invisible.
  */
-function jsonInvocations(text) {
+export function jsonInvocations(text) {
   let data;
   try {
     data = JSON.parse(text);
@@ -149,7 +151,7 @@ function lineOf(text, index) {
 }
 
 /** What is wrong with one invocation, or null. */
-function check(argv, surface) {
+export function check(argv, surface) {
   const cmd = argv[0];
   if (!/^[a-z][a-z-]*$/.test(cmd)) return null; // a placeholder or a variable
   if (PRO_COMMANDS.has(cmd)) return null;
@@ -217,4 +219,6 @@ function main(argv) {
   return 0;
 }
 
-process.exit(main(process.argv.slice(2)));
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.exit(main(process.argv.slice(2)));
+}
