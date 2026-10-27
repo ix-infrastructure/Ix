@@ -315,6 +315,11 @@ export const PYTHON_QUERIES = `
 (import_statement
   name: (dotted_name) @import.source) @import
 
+(import_statement
+  name: (aliased_import
+    name: (dotted_name) @import.source
+    alias: (identifier) @import.alias)) @import
+
 (import_from_statement
   module_name: (dotted_name) @import.source) @import
 
@@ -351,37 +356,6 @@ export const PYTHON_QUERIES = `
   function: (attribute
     attribute: (identifier) @call.name)) @call
 
-; Attribute calls with object captured as qualifier so Tier-1b resolution can use
-; class/module name to break ties (e.g. Session.execute → resolves to Session in
-; the importing file).  Emitted alongside the bare-name pattern above so that
-; bare-name global fallback still fires when qualifier resolution fails.
-(call
-  function: (attribute
-    object: (identifier) @_qualifier
-    attribute: (identifier) @call.name)) @call
-
-; Django ORM manager pattern: Model.objects.method(...)
-; Unwinds the intermediate accessor (objects/related_manager/etc.) and captures
-; the model class as qualifier, e.g. User.objects.filter(...) → CALLS User.filter.
-; This creates cross-file edges between view/form code and model definitions.
-(call
-  function: (attribute
-    object: (attribute
-      object: (identifier) @_qualifier
-      attribute: (identifier))
-    attribute: (identifier) @call.name)) @call
-
-; Chained call pattern: qualifier.method1(...).method2(...)
-; Propagates the qualifier from the inner call to the outer, e.g.
-; User.filter(...).order_by(...) → CALLS User.order_by.
-(call
-  function: (attribute
-    object: (call
-      function: (attribute
-        object: (identifier) @_qualifier
-        attribute: (identifier)))
-    attribute: (identifier) @call.name)) @call
-
 ; Heritage queries - Python class inheritance
 (class_definition
   name: (identifier) @heritage.class
@@ -399,45 +373,6 @@ export const PYTHON_QUERIES = `
   arguments: (argument_list
     (keyword_argument
       value: (identifier) @call.name)))
-
-; Typed parameters: capture name + type together so qualifier substitution can
-; map a local variable name to its declared class (e.g. query: Query → 'query' → 'Query').
-(function_definition
-  parameters: (parameters
-    (typed_parameter
-      (identifier) @_typed_param_name
-      type: (type (identifier) @_typed_param_type)))) @_typed_param_scope
-
-(function_definition
-  parameters: (parameters
-    (typed_default_parameter
-      (identifier) @_typed_param_name
-      type: (type (identifier) @_typed_param_type)))) @_typed_param_scope
-
-; Assignment tracking: x = SomeClass() or x = SomeClass(args)
-; Maps local variable name → constructor type for untyped-parameter qualifier substitution.
-; Only PascalCase RHS names are tracked in TypeScript (constructor convention).
-(function_definition
-  body: (block
-    (expression_statement
-      (assignment
-        left: (identifier) @_assign_lhs
-        right: (call
-          function: (identifier) @_assign_rhs_type))))) @_assign_scope
-
-; Assignment tracking: x = Model.objects.method()
-; Captures the outermost identifier (model class) for ORM manager patterns.
-(function_definition
-  body: (block
-    (expression_statement
-      (assignment
-        left: (identifier) @_assign_lhs
-        right: (call
-          function: (attribute
-            object: (attribute
-              object: (identifier) @_assign_rhs_type
-              attribute: (identifier))
-            attribute: (identifier))))))) @_assign_scope
 
 ; Assignment tracking: x = module.Class (direct attribute reference, no call)
 ; Handles variable aliasing like: engineclass = base.Engine
