@@ -155,7 +155,9 @@ one gate at a time per machine.
 `fixtures/polyglot/` has 23 files: Python with cross-file calls (`app/`),
 TypeScript with import-bound calls (`web/src/`), Java (`server/`), and
 `README.md`, `package.json` and `.github/workflows/ci.yml`.
-`fixtures/polyglot-b/` shares those last three names and nothing else. Other
+`fixtures/polyglot-b/` shares those last three names and nothing else.
+`fixtures/pyimports/` is a Python package whose calls go through absolute,
+aliased and package (`__init__.py`) imports, beside a same-named module. Other
 tests may reuse them; keep them small.
 
 ## Graph signatures by hand

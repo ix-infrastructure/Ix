@@ -315,6 +315,12 @@ export const PYTHON_QUERIES = `
 (import_statement
   name: (dotted_name) @import.source) @import
 
+; import a.b as m — the module is a.b, bound locally as m (m.f() -> a/b.py::f)
+(import_statement
+  name: (aliased_import
+    name: (dotted_name) @import.source
+    alias: (identifier) @import.alias)) @import
+
 (import_from_statement
   module_name: (dotted_name) @import.source) @import
 

@@ -66,10 +66,11 @@ def top_level():
     });
     // The qualifier pattern also emits the fully-qualified form so Tier-1b
     // resolution can resolve e.g. Session.execute → session.py when the
-    // qualifier is a class name present in the caller's imports.
+    // qualifier is a class name present in the caller's imports. Inside a
+    // method too, a typed parameter's qualifier is its declared type.
     expect(result!.relationships).toContainEqual({
       srcName: 'Service.run',
-      dstName: 'value.save',
+      dstName: 'User.save',
       predicate: 'CALLS',
     });
   });
@@ -136,6 +137,42 @@ def my_view(request):
       dstName: 'execute',
       predicate: 'CALLS',
     });
+  });
+
+  it('substitutes typed and constructor-assigned receivers inside a method', () => {
+    const result = parseFile(
+      '/repo/service.py',
+      `
+class Service:
+    def run(self, q: Query, limit: int = 10):
+        x = Builder()
+        q.filter()
+        x.build()
+      `,
+    );
+
+    expect(result).not.toBeNull();
+    const calls = result!.relationships.filter(r => r.predicate === 'CALLS' && r.srcName === 'Service.run');
+    expect(calls).toContainEqual({ srcName: 'Service.run', dstName: 'Query.filter', predicate: 'CALLS' });
+    expect(calls).toContainEqual({ srcName: 'Service.run', dstName: 'Builder.build', predicate: 'CALLS' });
+    expect(calls.map(c => c.dstName)).not.toContain('q.filter');
+    expect(calls.map(c => c.dstName)).not.toContain('x.build');
+  });
+
+  it('records import a.b as m as an IMPORTS edge and a module alias', () => {
+    const result = parseFile(
+      '/repo/app/main.py',
+      'import pkg.sub.mod as m\nimport os.path\n\ndef main():\n    return m.load()\n',
+    );
+
+    expect(result!.relationships).toContainEqual({
+      srcName: 'main.py',
+      dstName: 'pkg.sub.mod',
+      predicate: 'IMPORTS',
+      importRaw: 'pkg.sub.mod',
+    });
+    expect(result!.importAliases).toEqual({ m: 'pkg.sub.mod' });
+    expect(result!.relationships).toContainEqual({ srcName: 'main', dstName: 'm.load', predicate: 'CALLS' });
   });
 
   it('emits REFERENCES edge for class passed as keyword argument value', () => {

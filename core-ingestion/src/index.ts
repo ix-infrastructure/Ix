@@ -2647,6 +2647,17 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
 
     // Track class ranges for containment: [name, startLine, endLine]
     const classRanges: Array<{ name: string; start: number; end: number }> = [];
+    // Python: key the typed-receiver maps the way the lookup does
+    // (findEnclosingDefinition): `Container.name` for a function inside a
+    // class, the bare name otherwise. The container is found exactly as for
+    // the function's own entity, so a method's receivers are not lost to a
+    // key mismatch.
+    const pythonScopeKey = (scopeNode: any): string | null => {
+      const funcName = scopeNode.childForFieldName?.('name')?.text as string | undefined;
+      if (!funcName) return null;
+      const className = findEnclosing(classRanges, scopeNode.startPosition.row + 1, funcName);
+      return className ? `${className}.${funcName}` : funcName;
+    };
     // Track seen calls per enclosing scope to avoid duplicate CALLS edges
     const seenCalls = new Map<string, Set<string>>();
     // Track seen type references per enclosing class/file to avoid duplicate REFERENCES edges
@@ -2919,10 +2930,10 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         const typedParamName = match.captures.find((c: any) => c.name === '_typed_param_name');
         const typedParamType = match.captures.find((c: any) => c.name === '_typed_param_type');
         if (typedParamScope && typedParamName && typedParamType) {
-          const funcName = typedParamScope.node.childForFieldName?.('name')?.text as string | undefined;
-          if (funcName) {
-            if (!paramTypeMap.has(funcName)) paramTypeMap.set(funcName, new Map());
-            paramTypeMap.get(funcName)!.set(typedParamName.node.text, typedParamType.node.text);
+          const scope = pythonScopeKey(typedParamScope.node);
+          if (scope) {
+            if (!paramTypeMap.has(scope)) paramTypeMap.set(scope, new Map());
+            paramTypeMap.get(scope)!.set(typedParamName.node.text, typedParamType.node.text);
           }
           continue;
         }
@@ -2937,10 +2948,10 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           // to avoid cross-module false edges (e.g. orm.query → select.where in SQLAlchemy).
           const rhsName = assignRhsType.node.text;
           if (/^[A-Z]/.test(rhsName)) {
-            const funcName = assignScope.node.childForFieldName?.('name')?.text as string | undefined;
-            if (funcName) {
-              if (!assignTypeMap.has(funcName)) assignTypeMap.set(funcName, new Map());
-              assignTypeMap.get(funcName)!.set(assignLhs.node.text, rhsName);
+            const scope = pythonScopeKey(assignScope.node);
+            if (scope) {
+              if (!assignTypeMap.has(scope)) assignTypeMap.set(scope, new Map());
+              assignTypeMap.get(scope)!.set(assignLhs.node.text, rhsName);
             }
           }
           continue;
@@ -3768,6 +3779,8 @@ export interface GlobalResolutionIndex {
   packageToFiles:   Map<string, string[]>;
   goPkgDirToFiles:  Map<string, string[]>;
   goPkgPathToFiles: Map<string, string[]>;
+  /** Python packages: directory name -> its `__init__.py` files. */
+  pyPackageDirToFiles?: Map<string, string[]>;
   phpFqcnToTypes?:  Map<string, Array<{ filePath: string; typeName: string }>>;
   /**
    * Per-file summaries, every language, when the caller supplied them. With
@@ -3814,6 +3827,7 @@ export function buildGlobalResolutionIndex(
   const packageToFiles = new Map<string, string[]>();
   const goPkgDirToFiles = new Map<string, string[]>();
   const goPkgPathToFiles = new Map<string, string[]>();
+  const pyPackageDirToFiles = new Map<string, string[]>();
   const phpFqcnToTypes = new Map<string, Array<{ filePath: string; typeName: string }>>();
 
   // A summarized file is indexed by path too, so `resolveEdges` can rely on
@@ -3836,6 +3850,14 @@ export function buildGlobalResolutionIndex(
       const dirList = dirToIndexFiles.get(dirName) ?? [];
       dirList.push(fp);
       dirToIndexFiles.set(dirName, dirList);
+    }
+
+    // pyPackageDirToFiles (Python): `pkg/__init__.py` is what `import pkg` names.
+    if (stem === '__init__' && ext === '.py') {
+      const dirName = nodePath.basename(nodePath.dirname(fp));
+      const dirList = pyPackageDirToFiles.get(dirName) ?? [];
+      dirList.push(fp);
+      pyPackageDirToFiles.set(dirName, dirList);
     }
 
     // packageToFiles (Scala/Java)
@@ -4062,9 +4084,34 @@ export function buildGlobalResolutionIndex(
     packageToFiles,
     goPkgDirToFiles,
     goPkgPathToFiles,
+    pyPackageDirToFiles,
     phpFqcnToTypes,
     ...(summaries ? { summaries } : {}),
   };
+}
+
+// Python module lookup: every `.py` file under each path suffix of up to
+// PY_MODULE_MAX_SEGMENTS segments (`c.py`, `b/c.py`, `a/b/c.py`, ...), so
+// `a.b.c` -> `a/b/c.py` is one map lookup. Keyed by `key` (resolveEdges'
+// normalized path key: posix, lower-cased on Windows).
+const PY_MODULE_MAX_SEGMENTS = 16;
+const pySuffixIndexCache = new WeakMap<GlobalResolutionIndex, Map<string, string[]>>();
+function pythonSuffixIndex(filePaths: Iterable<string>, key: (filePath: string) => string): Map<string, string[]> {
+  const index = new Map<string, string[]>();
+  // De-duplicated up front: a per-list `includes` would be quadratic in a
+  // common tail (`__init__.py`). One path yields each tail once.
+  for (const fp of new Set(filePaths)) {
+    const normalized = key(fp);
+    if (!normalized.endsWith('.py')) continue;
+    const segments = normalized.split('/');
+    for (let i = Math.max(0, segments.length - PY_MODULE_MAX_SEGMENTS); i < segments.length; i++) {
+      const tail = segments.slice(i).join('/');
+      if (!tail) continue;
+      const list = index.get(tail);
+      if (list) list.push(fp); else index.set(tail, [fp]);
+    }
+  }
+  return index;
 }
 
 // Commodity callee names for the fuzzy resolution tiers (transitive re-export +
@@ -4501,6 +4548,17 @@ export function resolveEdges(
     if (stem === 'index') addPath(dirToIndexFiles, nodePath.basename(nodePath.dirname(r.filePath)), r.filePath);
   }
 
+  // pyPackageDirToFiles: Python package entries (`pkg/__init__.py` under `pkg`).
+  // Kept apart from dirToIndexFiles so other languages' stem lookups (Go
+  // qualifier targets are not language-filtered) see exactly what they did.
+  const pyPackageDirToFiles = globalIndex?.pyPackageDirToFiles
+    ? new Map<string, string[]>(globalIndex.pyPackageDirToFiles)
+    : new Map<string, string[]>();
+  for (const r of batchSummaries) {
+    if (nodePath.extname(r.filePath) !== '.py' || nodePath.basename(r.filePath, '.py') !== '__init__') continue;
+    addPath(pyPackageDirToFiles, nodePath.basename(nodePath.dirname(r.filePath)), r.filePath);
+  }
+
   // Relative imports must be resolved against the importing file's directory.
   // Keep a normalized path lookup so they do not fall back to a same-named file
   // elsewhere in the repository.
@@ -4821,6 +4879,113 @@ export function resolveEdges(
     return [];
   }
 
+  // `.py` files by path suffix (see pythonSuffixIndex). The global index's
+  // part is built once per index, not per batch; the batch's own files are
+  // indexed here. Both on the first Python module lookup only.
+  let pyGlobalSuffixToFiles: Map<string, string[]> | undefined;
+  let pyBatchSuffixToFiles: Map<string, string[]> | undefined;
+  function pythonFilesBySuffix(suffix: string): string[] {
+    if (!pyBatchSuffixToFiles) {
+      if (globalIndex) {
+        pyGlobalSuffixToFiles = pySuffixIndexCache.get(globalIndex);
+        if (!pyGlobalSuffixToFiles) {
+          pyGlobalSuffixToFiles = pythonSuffixIndex([...globalIndex.stemToFiles.values()].flat(), normalizedPathKey);
+          pySuffixIndexCache.set(globalIndex, pyGlobalSuffixToFiles);
+        }
+      }
+      pyBatchSuffixToFiles = pythonSuffixIndex(batchSummaries.map(r => r.filePath), normalizedPathKey);
+    }
+    const fromIndex = pyGlobalSuffixToFiles?.get(suffix) ?? [];
+    const fromBatch = pyBatchSuffixToFiles.get(suffix) ?? [];
+    if (fromBatch.length === 0) return fromIndex;
+    if (fromIndex.length === 0) return fromBatch;
+    return [...new Set([...fromIndex, ...fromBatch])];
+  }
+
+  /**
+   * Python absolute module `a.b.c` -> the files it can name: `a/b/c.py` or
+   * `a/b/c/__init__.py` below some source root. Matched on the full module
+   * path, so `from pkg.sub.mod import f` no longer means "any mod.py".
+   *   - One file matches: that file.
+   *   - Several (two packages named `a.b` in a monorepo): the one under the
+   *     deepest source root that contains the importing file; when no root
+   *     contains it, the root sharing the longest directory prefix with it.
+   *     On a tie, all of them, which the callers treat as ambiguous.
+   *   - None: today's stem matching (`modNameToFiles`), so nothing that
+   *     resolved before stops resolving.
+   * An undotted name keeps its stem match; only when no Python file has that
+   * stem does it name a package, `name/__init__.py`.
+   * Every lookup is a map lookup (`pythonFilesBySuffix`), never a scan, and
+   * memoized per (importing file, module): the transitive tier asks again for
+   * every file that imports the importing file.
+   */
+  const pythonModuleTargetsMemo = new Map<string, string[]>();
+  function pythonModuleTargets(srcFilePath: string, modName: string): string[] {
+    const memoKey = `${srcFilePath}\0${modName}`;
+    let targets = pythonModuleTargetsMemo.get(memoKey);
+    if (!targets) {
+      targets = pythonModuleTargetsUncached(srcFilePath, modName);
+      pythonModuleTargetsMemo.set(memoKey, targets);
+    }
+    return targets;
+  }
+  function pythonModuleTargetsUncached(srcFilePath: string, modName: string): string[] {
+    const isPython = (fp: string): boolean =>
+      importLanguageCompatible(SupportedLanguages.Python, fileLanguage.get(fp) ?? languageFromPath(fp));
+    const stemMatches = (): string[] => modNameToFiles(modName, srcFilePath).filter(isPython);
+    if (!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(modName)) return stemMatches();
+    const parts = modName.split('.');
+    const last = parts[parts.length - 1];
+    const srcKey = normalizedPathKey(srcFilePath);
+    if (parts.length === 1) {
+      const byStem = stemMatches();
+      if (byStem.length > 0) return byStem;
+      return (pyPackageDirToFiles.get(last) ?? []).filter(fp => normalizedPathKey(fp) !== srcKey);
+    }
+
+    const modulePath = parts.join('/');
+    const matches: Array<{ fp: string; root: string }> = [];
+    for (const relPath of [`${modulePath}.py`, `${modulePath}/__init__.py`]) {
+      const suffix = normalizedPathKey(relPath);
+      for (const fp of pythonFilesBySuffix(suffix)) {
+        const key = normalizedPathKey(fp);
+        if (key === srcKey || matches.some(m => m.fp === fp)) continue;
+        matches.push({ fp, root: key.slice(0, key.length - suffix.length) });
+      }
+    }
+    if (matches.length === 0) return stemMatches();
+    if (matches.length === 1) return [matches[0].fp];
+
+    const srcDir = nodePath.posix.dirname(srcKey);
+    const srcDirParts = srcDir === '.' ? [] : srcDir.split('/');
+    const scored = matches.map(m => {
+      const rootParts = m.root === '' ? [] : m.root.replace(/\/$/, '').split('/');
+      let shared = 0;
+      while (shared < rootParts.length && shared < srcDirParts.length && rootParts[shared] === srcDirParts[shared]) shared++;
+      return { fp: m.fp, shared, contains: shared === rootParts.length };
+    });
+    const containing = scored.filter(m => m.contains);
+    const pool = containing.length > 0 ? containing : scored;
+    const best = Math.max(...pool.map(m => m.shared));
+    const closest = pool.filter(m => m.shared === best);
+    return closest.length === 1 ? [closest[0].fp] : matches.map(m => m.fp);
+  }
+
+  /**
+   * The `__init__.py` of the package a Python `from . import x` (or
+   * `from .. import x`) names, when `x` is not a submodule. Such a binding is
+   * recorded as `{ pkg: '.x', imported: 'x' }`; the package is the dots alone.
+   */
+  function pythonRelativePackageInit(srcFilePath: string, binding: ImportBinding): string | undefined {
+    const dots = binding.pkg.match(/^\.+/)?.[0];
+    if (!dots || binding.pkg !== `${dots}${binding.imported}` || binding.imported.includes('.')) return undefined;
+    const packageDir = relativeImportTarget(srcFilePath, SupportedLanguages.Python, dots);
+    if (packageDir === null) return undefined;
+    const init = normalizedPathKey(nodePath.posix.join(packageDir, '__init__.py'));
+    const files = (normalizedPathToFiles.get(init) ?? []).filter(fp => normalizedPathKey(fp) !== normalizedPathKey(srcFilePath));
+    return files.length === 1 ? files[0] : undefined;
+  }
+
   function resolveImportTargets(
     srcFilePath: string,
     srcLanguage: SupportedLanguages,
@@ -4842,8 +5007,13 @@ export function resolveEdges(
     // come from the global stem index, so fall back to the extension-derived
     // language (always available) — otherwise an undefined dst language would
     // slip cross-language matches (e.g. a Python import -> a Rust/Elixir file).
+    // A Python module specifier (an `import` / `from … import` source, or a
+    // binding's package) matches by full module path. A bare imported name
+    // (`from pkg import f` -> `f`, no importRaw) keeps the stem match.
+    const pythonModule = srcLanguage === SupportedLanguages.Python && typeof importRaw === 'string';
     const importMatches = (configuredMatches === undefined
-      ? resolveRelativeImportTargets(srcFilePath, srcLanguage, importRaw) ?? modNameToFiles(modName, srcFilePath)
+      ? resolveRelativeImportTargets(srcFilePath, srcLanguage, importRaw)
+        ?? (pythonModule ? pythonModuleTargets(srcFilePath, normalizeImportTarget(modName)) : modNameToFiles(modName, srcFilePath))
       : indexedConfiguredMatches ?? [])
       .filter(fp => importLanguageCompatible(srcLanguage, fileLanguage.get(fp) ?? languageFromPath(fp)));
     if (srcLanguage !== SupportedLanguages.Go || importMatches.length <= 1) return importMatches;
@@ -4854,6 +5024,7 @@ export function resolveEdges(
   }
 
   function resolveImportQualifierTargets(srcFilePath: string, srcLanguage: SupportedLanguages, modName: unknown): string[] {
+    if (srcLanguage === SupportedLanguages.Python) return pythonModuleTargets(srcFilePath, normalizeImportTarget(modName));
     const importMatches = modNameToFiles(modName, srcFilePath);
     if (srcLanguage !== SupportedLanguages.Go || importMatches.length <= 1) return importMatches;
     return narrowGoImportCandidates(srcFilePath, modName, importMatches, files => files);
@@ -5548,13 +5719,19 @@ export function resolveEdges(
       let bindingProviderFiles: string[] | undefined;
       if (rel.predicate === 'CALLS' || rel.predicate === 'EXTENDS' || rel.predicate === 'REFERENCES') {
         if (binding) {
-          const providerFiles = bindingProviderFiles = [...new Set(resolveImportTargets(
+          let providerFiles = bindingProviderFiles = [...new Set(resolveImportTargets(
             srcFilePath,
             srcLanguage,
             binding.pkg,
             binding.pkg,
             rel.predicate === 'CALLS' ? 'runtime' : 'types',
           ))];
+          // Python `from . import x` with no submodule `x`: `x` is a name the
+          // package itself defines, in its `__init__.py`.
+          if (providerFiles.length === 0 && srcLanguage === SupportedLanguages.Python) {
+            const packageInit = pythonRelativePackageInit(srcFilePath, binding);
+            if (packageInit) providerFiles = bindingProviderFiles = [packageInit];
+          }
           if (
             configuredBindingTargets !== undefined &&
             providerFiles.length === 1 &&
@@ -5651,8 +5828,13 @@ export function resolveEdges(
         const memberPart = dstName.slice(qualDot + 1);
         if (memberPart && qualifierPart) {
           const elixirAliasedModule = srcLanguage === SupportedLanguages.Elixir ? result.importAliases?.[qualifierPart]: undefined;
+          // Python `import a.b as m`: `m.f` is `f` in the one file a.b names.
+          // An ambiguous module stays unresolved here, as without the alias.
+          const pythonAliasedModule = srcLanguage === SupportedLanguages.Python ? result.importAliases?.[qualifierPart] : undefined;
+          const pythonAliasedFiles = pythonAliasedModule ? resolveImportQualifierTargets(srcFilePath, srcLanguage, pythonAliasedModule) : [];
           const aliasedImportMatches = srcLanguage === SupportedLanguages.Go ? resolveImportQualifierTargets(srcFilePath, srcLanguage, result.importAliases?.[qualifierPart] ?? '')
           : elixirAliasedModule ? (symbolToFiles.get(elixirAliasedModule) ?? []).filter(fp => fp !== srcFilePath)
+          : pythonAliasedFiles.length === 1 ? pythonAliasedFiles
           : [];
           // Try import-scoped qualifier first
           const qualifierSearchPool = aliasedImportMatches.length > 0
