@@ -187,7 +187,11 @@ export interface ResolvedEntity {
 
 export interface AmbiguousResult {
   resolutionMode: "ambiguous";
-  candidates: Array<{ id: string; name: string; kind: string; path?: string; line?: number; score?: number; rank?: number }>;
+  /**
+   * `container`: the type that holds the candidate (its CONTAINS parent, never
+   * a file), when the graph names one. Added after the list is ranked.
+   */
+  candidates: Array<{ id: string; name: string; kind: string; path?: string; line?: number; score?: number; rank?: number; container?: string }>;
   diagnostics?: Array<{ code: string; message: string }>;
   /** How many candidates tied (the candidate list shows at most 8 of them). */
   total?: number;
@@ -472,6 +476,16 @@ export async function resolveEntityFull(
   preferredKinds: string[],
   opts?: ResolveOpts
 ): Promise<ResolveResult> {
+  return withContainers(client, await rankEntity(client, symbol, preferredKinds, opts));
+}
+
+/** `resolveEntityFull` without the candidates' containers: for lookups inside the resolver. */
+async function rankEntity(
+  client: IxClient,
+  symbol: string,
+  preferredKinds: string[],
+  opts?: ResolveOpts
+): Promise<ResolveResult> {
   // Scope is applied server-side (workspace_id, or system_id for a co-ingest). Only an
   // EXPLICIT --path narrows further, client-side; we no longer default the path filter
   // to the absolute workspace root, which never matched workspace-relative source_uris.
@@ -670,9 +684,34 @@ function cmpStr(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-/** Order for display and `--pick`: (path, line, id), independent of backend order. */
+/** Tiebreak for equal candidates: (path, line, id), independent of backend order. */
 function displayOrder(a: any, b: any): number {
   return cmpStr(nodePath(a), nodePath(b)) || lineOf(a) - lineOf(b) || cmpStr(String(a.id), String(b.id));
+}
+
+/**
+ * A ranked candidate list dealt round-robin by file: the best of each file
+ * (files in the order of their best), then each file's second-best, and so on.
+ * Within a file the ranked order stands. Only 8 are listed, and a file that
+ * defines the name eight times would otherwise fill the page alone, with the
+ * definitions the caller wants in other files out of sight. This is the order
+ * the list is numbered in, so `--pick n` and `--all`'s `candidate=<n>` follow it.
+ * Files compare as lower-cased posix paths, so `src\a.py` and `src/a.py` are one file.
+ */
+export function roundRobinByFile<T>(ranked: readonly T[], nodeOf: (item: T) => any = (item) => item): T[] {
+  const files = new Map<string, T[]>();
+  for (const item of ranked) {
+    const key = nodePath(nodeOf(item));
+    const group = files.get(key);
+    if (group) group.push(item);
+    else files.set(key, [item]);
+  }
+  const groups = [...files.values()];
+  const dealt: T[] = [];
+  for (let round = 0; dealt.length < ranked.length; round++) {
+    for (const group of groups) if (round < group.length) dealt.push(group[round]);
+  }
+  return dealt;
 }
 
 function entityPath(node: any): string | undefined {
@@ -979,22 +1018,79 @@ function importIdsOf(owner: object): Set<string> {
   return fullCandidates.get(owner)?.imports ?? new Set();
 }
 
+/** At most this many names are asked for containers; candidates usually share one. */
+const CONTAINER_NAME_LOOKUPS = 3;
+
+/**
+ * Name the type that holds each candidate of an ambiguous result: its
+ * `container`, the CONTAINS parent the graph has for it unless that is a file
+ * (a top-level definition has none). Eight `crop` rows in one file cannot be
+ * told apart without it.
+ *
+ * Entities carry no container attribute, so it comes from the edges: one
+ * `/v1/expand-by-name` per distinct candidate name (one in the usual case,
+ * where every candidate has the name that was asked for), never a request per
+ * candidate. That endpoint answers for every entity of the name, so only
+ * edges into a listed candidate are read. Best effort: a backend that cannot
+ * answer leaves the rows as they were, and `container` is then absent.
+ *
+ * Only the ambiguous record (exit 2) pays for this. A resolved target, a
+ * `--pick` and a tie notice make no extra request.
+ */
+async function withContainers(client: IxClient, result: ResolveResult): Promise<ResolveResult> {
+  if (result.resolved || !result.ambiguous) return result;
+  const all = allCandidatesOf(result.result);
+  const ids = new Set(all.map((c) => c.id));
+  const names = [...new Set(result.result.candidates.map((c) => c.name).filter(Boolean))].slice(0, CONTAINER_NAME_LOOKUPS);
+  const answers = await Promise.all(names.map(async (name) => {
+    try {
+      return await client.expandByName(name, { direction: "in", predicates: ["CONTAINS"] });
+    } catch {
+      return null;
+    }
+  }));
+  const owners = new Map<string, Set<string>>();
+  for (const answer of answers) {
+    if (!answer || !Array.isArray(answer.nodes) || !Array.isArray(answer.edges)) continue;
+    const byId = new Map(answer.nodes.map((n: any) => [String(n?.id), n]));
+    for (const e of answer.edges) {
+      if (e?.predicate !== "CONTAINS" || !ids.has(String(e.dst))) continue;
+      const parent = byId.get(String(e.src));
+      const name = parent?.name || parent?.attrs?.name;
+      if (!name || String(parent.kind ?? "").toLowerCase() === "file") continue;
+      const set = owners.get(String(e.dst)) ?? new Set<string>();
+      set.add(String(name));
+      owners.set(String(e.dst), set);
+    }
+  }
+  // Added in place: the listed rows are the same objects as the head of the
+  // full list, so `--pick` and the shown page stay one list. Two different
+  // owners for one candidate is not an answer.
+  for (const c of all) {
+    const found = owners.get(c.id);
+    if (found?.size === 1) c.container = [...found][0];
+  }
+  return result;
+}
+
 function buildAmbiguous(
   nodes: any[],
   scores?: number[],
   extra?: { total?: number; truncated?: boolean; diagnostics?: Array<{ code: string; message: string }> },
 ): AmbiguousResult {
-  // The 8 best by the caller's ranking, then shown (and numbered for --pick) in
-  // (path, line, id) order so `--pick n` means the same thing on every run.
+  // The caller's ranking dealt round-robin by file, then the first 8 shown and
+  // numbered for --pick. The ranking breaks ties by (path, line, id), so
+  // `--pick n` means the same thing on every run.
   const seen = new Set<string>();
-  const picked: Array<{ node: any; score?: number }> = [];
-  for (let i = 0; i < nodes.length && picked.length < 8; i++) {
+  const ranked: Array<{ node: any; score?: number }> = [];
+  for (let i = 0; i < nodes.length; i++) {
     const node = nodes[i] as any;
     if (seen.has(node.id)) continue;
     seen.add(node.id);
-    picked.push({ node, score: scores?.[i] });
+    ranked.push({ node, score: scores?.[i] });
   }
-  picked.sort((a, b) => displayOrder(a.node, b.node));
+  const dealt = roundRobinByFile(ranked, (r) => r.node);
+  const picked = dealt.slice(0, 8);
   const candidates: AmbiguousResult["candidates"] = picked.map(({ node, score }, i) => {
     const line = lineOf(node);
     const rank = i + 1;
@@ -1018,9 +1114,8 @@ function buildAmbiguous(
       ...(extra?.diagnostics ?? []),
     ],
   };
-  const unique = nodes.filter((n: any, i) => n?.id && nodes.findIndex((m: any) => m?.id === n.id) === i);
-  const imports = new Set(unique.filter((n: any) => candidateOrigin(n) === "import").map((n: any) => String(n.id)));
-  rememberAll(result, candidates, [...unique].sort(displayOrder).map(candidateOf), imports);
+  const imports = new Set(ranked.filter(({ node }) => candidateOrigin(node) === "import").map(({ node }) => String(node.id)));
+  rememberAll(result, candidates, dealt.map(({ node }) => candidateOf(node)), imports);
   return result;
 }
 
@@ -1131,6 +1226,15 @@ export async function resolveFileOrEntityFull(
   target: string,
   opts?: ResolveOpts
 ): Promise<ResolveResult> {
+  return withContainers(client, await rankFileOrEntity(client, target, opts));
+}
+
+/** `resolveFileOrEntityFull` without the candidates' containers (`--all` lists none). */
+async function rankFileOrEntity(
+  client: IxClient,
+  target: string,
+  opts?: ResolveOpts
+): Promise<ResolveResult> {
   // 1. Raw UUID
   if (isRawId(target)) {
     let n: any;
@@ -1220,7 +1324,7 @@ export async function resolveFileOrEntityFull(
     // A literal hit that is only fuzzy (no exact name) does not stop the
     // qualified reading, but the qualified one replaces it only where that
     // keeps the exit code: a resolved literal is replaced only by a resolved one.
-    const literal = await resolveEntityFull(client, target, allKinds, { ...opts, silentMiss: true });
+    const literal = await rankEntity(client, target, allKinds, { ...opts, silentMiss: true });
     if ((literal.resolved || literal.ambiguous) && !isFuzzyResult(literal)) return literal;
     const qualified = await resolveQualified(client, scoped, opts, true);
     if (qualified?.resolved) return qualified;
@@ -1231,11 +1335,11 @@ export async function resolveFileOrEntityFull(
       : `No entity found matching "${target}".`);
     return literal;
   }
-  if (!looksFileLike(target)) return resolveEntityFull(client, target, allKinds, opts);
+  if (!looksFileLike(target)) return rankEntity(client, target, allKinds, opts);
   // A path is a question about a file. "No entity found" answered it as if it
   // were a symbol, which does not say whether the file exists, was never
   // ingested, or was mistyped -- three different next steps.
-  const result = await resolveEntityFull(client, target, allKinds, { ...opts, silentMiss: true });
+  const result = await rankEntity(client, target, allKinds, { ...opts, silentMiss: true });
   if (result.resolved || result.ambiguous) return result;
   return fileMiss(client, target, opts);
 }
@@ -1258,7 +1362,7 @@ async function resolveQualified(
   // This gives a precise path hint rather than a guess from snake_case conversion.
   // The lookup is silent: no "not found" or ambiguity text for the class.
   const shortClassName = scoped.className.split(/::|[.#]/).pop()!;
-  const classResult = await resolveEntityFull(
+  const classResult = await rankEntity(
     client,
     shortClassName,
     ['class', 'interface', 'struct', 'trait', 'object', 'function'],
@@ -1313,7 +1417,7 @@ async function resolveQualified(
     path: pathHint,        // always use the class-derived hint, not opts?.path
     searchLimit: 50,
   };
-  const result = await resolveEntityFull(client, scoped.methodName, ['method', 'function'], scopedOpts);
+  const result = await rankEntity(client, scoped.methodName, ['method', 'function'], scopedOpts);
   if (result.resolved) {
     // Rewrite the display name to show the full scoped form, as the user typed it
     return {
@@ -1383,7 +1487,8 @@ async function membersOf(
  * `Class.method` / `Class#method`: the method looked up IN each class (one
  * class, or every class that holds the name). One method found resolves; several
  * are the ambiguous record (exit 1, the same code as the miss this replaces),
- * sorted by (path, line, id) so `--pick n` selects among them. None is null,
+ * sorted by (path, line, id) and dealt round-robin by file (roundRobinByFile)
+ * so `--pick n` selects among them. None is null,
  * which the caller reports as the miss.
  */
 async function resolveInClasses(
@@ -1407,10 +1512,10 @@ async function resolveInClasses(
   }
   if (found.size === 0) return null;
   const display = `${scoped.className}${scoped.sep}${scoped.methodName}`;
-  const ordered = [...found.values()].sort((a, b) =>
+  const ordered = roundRobinByFile([...found.values()].sort((a, b) =>
     cmpStr(normalizeForPathMatch(a.path), normalizeForPathMatch(b.path))
     || (a.line ?? Number.MAX_SAFE_INTEGER) - (b.line ?? Number.MAX_SAFE_INTEGER)
-    || cmpStr(a.id, b.id));
+    || cmpStr(a.id, b.id)));
   if (ordered.length === 1) {
     const only = ordered[0];
     return {
@@ -1662,7 +1767,8 @@ export async function resolveTargetSetOrReport(
     const entity = await resolveFileOrReport(client, target, withAll, format);
     return entity ? { entities: [entity] } : null;
   }
-  const result = await resolveFileOrEntityFull(client, target, { ...opts, format });
+  // The --all candidate list does not show containers: no request for them.
+  const result = await rankFileOrEntity(client, target, { ...opts, format });
   if (result.resolved) {
     const tie = result.notices?.find((n) => n.code === "ambiguous_target");
     if (!tie || tie.candidates.length <= 1) {

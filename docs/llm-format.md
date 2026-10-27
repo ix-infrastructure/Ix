@@ -117,8 +117,14 @@ which value it ignored, on stderr, when a person is there to read it.
   not choose a target. The error also carries `shown=<n> total=<m>` after
   `count=` (and `truncated=true` when the search window came back full, so
   `total` is a lower bound); json has `total` and `truncated` beside
-  `candidates`. Candidates are numbered in (path, line, id) order, so
-  `--pick <n>` means the same thing on every run. (The
+  `candidates`. Candidates are ranked by how well they match (ties in
+  (path, line, id) order), then dealt round-robin by file: the best of each
+  file, then each file's second-best, and so on, so a file that defines the
+  name many times does not fill the 8 shown on its own. That order is the
+  numbering, so `--pick <n>` and `--all`'s `candidate=<n>` mean the same thing
+  on every run. A candidate inside a class or other type carries
+  `container=<name>` (json `container`), last on its record; it is absent for
+  a top-level definition, or when the graph could not say. (The
   backend spells a missing target `unknown_target` in its own JSON bodies; that
   is a wire detail and is translated on the way out, so a consumer never sees
   both.)
