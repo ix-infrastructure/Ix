@@ -206,4 +206,37 @@ class KernelHandle:
     );
   });
 
+  describe('class heritage', () => {
+    const extendsOf = (source: string) => parseFile('/repo/pkg/models.py', source)!.relationships
+      .filter(rel => rel.predicate === 'EXTENDS')
+      .map(rel => [rel.srcName, rel.dstName]);
+
+    it('extends a bare base, as before', () => {
+      expect(extendsOf('class X(Base):\n    pass\n')).toEqual([['X', 'Base']]);
+    });
+
+    it('extends a dotted base by its dotted name', () => {
+      expect(extendsOf('class Attention(nn.Module):\n    pass\n')).toEqual([['Attention', 'nn.Module']]);
+      expect(extendsOf('class X(a.b.Base):\n    pass\n')).toEqual([['X', 'a.b.Base']]);
+    });
+
+    it('extends the subscripted name of a generic base', () => {
+      expect(extendsOf('class Repo(Generic[T]):\n    pass\n')).toEqual([['Repo', 'Generic']]);
+      expect(extendsOf('class IntBox(Box[int]):\n    pass\n')).toEqual([['IntBox', 'Box']]);
+      expect(extendsOf('class Y(mod.Base[K, V]):\n    pass\n')).toEqual([['Y', 'mod.Base']]);
+    });
+
+    it('extends every base of a mixed list, and never a keyword argument', () => {
+      expect(extendsOf(
+        'class X(Base, pkg.Mixin, Box[int], mod.Base[T], metaclass=Meta, total=False):\n    pass\n',
+      )).toEqual([['X', 'Base'], ['X', 'pkg.Mixin'], ['X', 'Box'], ['X', 'mod.Base']]);
+    });
+
+    it('extends nothing for keyword-only, splat and call bases', () => {
+      expect(extendsOf('class Movie(TypedDict, total=False):\n    pass\n')).toEqual([['Movie', 'TypedDict']]);
+      expect(extendsOf('class X(metaclass=Meta):\n    pass\n')).toEqual([]);
+      expect(extendsOf('class X(*bases, **kw):\n    pass\n')).toEqual([]);
+      expect(extendsOf('class X(make_base()):\n    pass\n')).toEqual([]);
+    });
+  });
 });

@@ -2769,6 +2769,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         if (defCapture.name === 'definition.const') {
           const valueType = match.captures.find((c: any) => c.name === 'const.value')?.node.type;
           if (valueType === 'arrow_function' || valueType === 'function_expression') continue;
+          // JS: a class expression is the class rule's (same name and node id).
+          if (valueType === 'class' && language === SupportedLanguages.JavaScript) continue;
         }
         const rawName = nameCapture?.node.text
           ?? (defCapture.name === 'definition.constructor' ? 'init' : '');
@@ -5245,6 +5247,37 @@ export function resolveEdges(
     return qks.includes(`${qualifierPart}.${memberPart}`);
   }
 
+  /**
+   * Python: the files of the module a dotted qualifier names through this
+   * file's own imports -- `base` after `from pkg import base` (or
+   * `from . import base`), `pkg.base` after `import pkg.base`. An absolute
+   * module must match by its whole path, so `from torch import nn` never
+   * lands on an in-repo `nn.py`; a relative one is exact already.
+   */
+  function pythonQualifierModuleFiles(srcFilePath: string, result: FileParseResult, qualifier: string): string[] {
+    const [head, ...rest] = qualifier.split('.');
+    const tail = rest.length > 0 ? `.${rest.join('.')}` : '';
+    const specs: string[] = [];
+    const binding = importBindingsByLocal.get(srcFilePath)?.get(head);
+    if (binding) {
+      specs.push(`${binding.pkg}.${binding.imported}${tail}`);
+      // `from . import base` records pkg `.base`: the module is pkg itself.
+      if (binding.pkg.replace(/^\.+/, '') === binding.imported) specs.push(`${binding.pkg}${tail}`);
+    } else if (result.relationships.some(rel => rel.predicate === 'IMPORTS' && typeof rel.importRaw === 'string' &&
+      !rel.importRaw.startsWith('.') && (rel.importRaw === qualifier || rel.importRaw.startsWith(`${qualifier}.`)))) {
+      specs.push(qualifier);
+    }
+    const files = new Set<string>();
+    for (const spec of specs) {
+      const suffix = `/${spec.replace(/\./g, '/')}`;
+      for (const fp of resolveImportTargets(srcFilePath, SupportedLanguages.Python, spec, spec)) {
+        const modulePath = `/${fp.replace(/\\/g, '/').replace(/\.py$/, '').replace(/\/__init__$/, '')}`;
+        if (spec.startsWith('.') || modulePath.endsWith(suffix)) files.add(fp);
+      }
+    }
+    return [...files];
+  }
+
   function sameScopeDefines(result: FileParseResult, srcName: string, dstName: string): boolean {
     const sourceEntities = result.entities.filter(e => e.name === srcName || qualifiedKey(e) === srcName);
     if (sourceEntities.length === 0) return false;
@@ -5680,6 +5713,17 @@ export function resolveEdges(
               }
             }
             continue;
+          }
+          // Python module-qualified base (`class X(base.Base)`): a module-scope
+          // class of the module the qualifier is imported as. No such import, no
+          // edge from here: `nn.Module` from an external package stays unresolved.
+          if (qualImportMatches.length === 0 && rel.predicate === 'EXTENDS' && srcLanguage === SupportedLanguages.Python) {
+            const moduleMatches = pythonQualifierModuleFiles(srcFilePath, result, qualifierPart)
+              .filter(fp => fp !== srcFilePath && (fileQKeys.get(fp)?.get(memberPart) ?? []).includes(memberPart));
+            if (moduleMatches.length === 1) {
+              resolved.push({ srcFilePath, srcName, dstFilePath: moduleMatches[0], dstName: origDstName, dstQualifiedKey: memberPart, predicate: rel.predicate, confidence: 0.9, tier: 'qualifier' });
+              continue;
+            }
           }
           // Global qualifier fallback — check files that define the qualified member.
           // Commodity gate (mirrors the bare-name global fallback below): a member
