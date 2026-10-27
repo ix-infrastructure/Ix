@@ -35,6 +35,7 @@ These commands combine several graph queries into one bounded answer. Reach for 
 |---|---|---|
 | `ix callers <symbol>` | What calls this | `ix callers verify_token` |
 | `ix callees <symbol>` | What this calls | `ix callees processPayment` |
+| `ix overrides <symbol>` | The other definitions of a method: what it overrides or implements, its overrides, sibling implementations | `ix overrides handle --path src/Base.java` |
 | `ix trace <symbol>` | How a flow moves, up and down | `ix trace user_login_flow` |
 | `ix contains <symbol>` | The members of a class or module | `ix contains IngestionService` |
 | `ix imports <symbol>` | What this imports | `ix imports auth_provider.py` |

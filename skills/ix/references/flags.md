@@ -627,6 +627,26 @@ Check that `ix mcp` is registered and launchable from each client.
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
+### `ix overrides <symbols...>`
+
+Alias: `ix implementations`. Show the other definitions of a method: what it
+overrides or implements, its overrides, and sibling implementations. Read
+from the graph's `EXTENDS` (extends and implements) and `CONTAINS` edges and
+matched by name, up to 5 levels each way and 32 types; a free function
+answers with no rows and `no_owner_type`. Several symbols answer in one call,
+grouped per symbol.
+
+| Flag | Value | Default | Effect |
+|---|---|---|---|
+| `--kind` | `<kind>` | — | Filter target entity by kind |
+| `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
+| `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--limit` | `<n>` | `50` | Max results to show |
+| `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
+| `--quiet` | — | off | Drop headers, section titles and advisory hints |
+| `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
+
 ### `ix overview <target>`
 
 Structural summary — what a target contains or what surrounds it.

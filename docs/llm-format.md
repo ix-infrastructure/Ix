@@ -383,6 +383,44 @@ ref name=invoke kind=method path=src/rpc/Filter.java lines=10-24
 ref name=select kind=method path=src/cluster/Cluster.java lines=30-41 via=Invoker.getUrl
 ```
 
+`ix overrides <method>` (alias `ix implementations`) lists the other
+definitions of a method, the ones that move with it when its signature or
+behaviour changes. The header names the target as `<Type>.<method>`, the type
+that contains it (`owner=`) and the farthest supertype that declares the
+method (`root=`). Then one `override` record per definition:
+
+```
+overrides target=Mid.m owner=Mid root=Base.m shown=3 total=3
+override name=m relation=overrides owner=Base kind=method path=pkg/base.py lines=3-5 depth=1
+override name=m relation=overridden_by owner=Leaf kind=method path=pkg/leaf.py lines=5-7 depth=1
+override name=m relation=sibling owner=Other kind=method path=pkg/other.py lines=7-9 depth=1 via=Base.m
+```
+
+`relation` is `overrides` (declared on a supertype) or `implements` (the
+supertype's kind is interface, trait or protocol; a graph that stores the
+base as a class says `overrides`), `overridden_by` (declared on a subtype), or
+`sibling` (declared on another subtype of the root, `via=<Root>.<method>`).
+`depth` counts levels from the target's type for up and down rows, and from
+the root for siblings. Rows are ordered by relation, then depth, then path.
+Matching is by name through `EXTENDS` (which carries `implements`) and
+`CONTAINS` edges, never by signature; each type is a graph id, so a
+same-named class in another file is not in the family. Diagnostics:
+
+- `no_owner_type`: the target is not a member of a class, interface or trait
+  (a free function). No rows, exit 0.
+- `hierarchy_truncated cap=depth|types|edges`: a walk stopped at 5 levels, at
+  32 types (16 of them supertypes), or at the server's edge cap. The header
+  carries `truncated=true`.
+- `overloads_not_distinguished`: in Java, Kotlin, C#, Scala or C++, a matched
+  type declares the method more than once; check each row's parameters.
+- `heritage_not_in_graph`: the type has no `EXTENDS` edge but its header names
+  a base, so the map may predate heritage capture; re-map.
+
+`--format json` carries `{target, resolvedTarget, owner, root, rows, total,
+truncated, diagnostics}`; each row is `{name, kind, id, path, lineStart,
+lineEnd, owner: {name, kind, id}, relation, depth, via?}`. Over MCP it is
+`ix_neighbors relation=overrides` or `ix_overrides`.
+
 `ix around <path>[:<line>]` — the dependents of the code at a location, sized
 for an agent's context (`--budget`, default 300 tokens):
 
@@ -650,7 +688,7 @@ error code=unresolved_target message="No entity named 'IngestionService' found" 
 
 Renderers shipped: Tier 1 (`map`, `subsystems`, `impact`, `smells`,
 `overview`) plus `stats`; Tier 2 (`inventory`, `rank`, `depends`, `trace`,
-`contains`, `callers`, `callees`, `imports`, `imported-by`); Tier 3 (`search`,
+`contains`, `callers`, `callees`, `imports`, `imported-by`, `overrides`); Tier 3 (`search`,
 `text`, `history`, `patches`); Tier 4 (`entity`, `locate`, `diff`,
 `conflicts`); Tier 5 (`explain`, `read`, `status`, `doctor`, `savings`).
 

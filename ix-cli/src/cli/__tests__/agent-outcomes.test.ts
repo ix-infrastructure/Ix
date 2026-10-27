@@ -6,6 +6,7 @@ import { ALL_CONCURRENCY, registerCallersCommand } from "../commands/callers.js"
 import { registerExplainCommand } from "../commands/explain.js";
 import { registerImpactCommand } from "../commands/impact.js";
 import { registerLocateCommand } from "../commands/locate.js";
+import { registerOverridesCommand } from "../commands/overrides.js";
 import { WorkspaceNotMappedError, renderCliError, setErrorFormat } from "../errors.js";
 import { LEGACY_EXIT_CODES_ENV, exitCodeFor, worseExitCode } from "../outcome.js";
 import { ALL_CANDIDATE_CAP } from "../resolve.js";
@@ -77,6 +78,7 @@ async function run(args: string[]): Promise<{ stdout: string; stderr: string; ex
   registerImpactCommand(program);
   registerLocateCommand(program);
   registerExplainCommand(program);
+  registerOverridesCommand(program);
   const stdout: string[] = [];
   const stderr: string[] = [];
   const log = vi.spyOn(console, "log").mockImplementation((...parts) => { stdout.push(parts.join(" ")); });
@@ -116,7 +118,7 @@ afterEach(() => {
   delete process.env[LEGACY_EXIT_CODES_ENV];
 });
 
-const COMMANDS = ["locate", "callers", "callees", "impact", "explain"] as const;
+const COMMANDS = ["locate", "callers", "callees", "impact", "explain", "overrides"] as const;
 
 describe.each(COMMANDS)("ix %s outcome codes", (command) => {
   it("exits 3 with unresolved_target for a name that is not in the graph", async () => {
@@ -159,7 +161,7 @@ describe.each(COMMANDS)("ix %s outcome codes", (command) => {
   });
 });
 
-describe.each(["locate", "callers", "callees", "impact"] as const)("ix %s on a target that resolves", (command) => {
+describe.each(["locate", "callers", "callees", "impact", "overrides"] as const)("ix %s on a target that resolves", (command) => {
   it("exits 0", async () => {
     const result = await run([command, "Unique", "--format", "json"]);
     expect(result.exitCode).toBe(0);

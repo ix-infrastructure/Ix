@@ -35,8 +35,8 @@ export const DISPATCH_DEPTH = 5;
 /** Supertypes looked at, at most, for one target: each costs one small expand. */
 export const DISPATCH_MAX_TYPES = 16;
 
-const TYPE_KINDS = new Set(["class", "interface", "enum", "record", "trait", "object", "annotation"]);
-const byName = (a: any, b: any): number =>
+export const TYPE_KINDS = new Set(["class", "interface", "enum", "record", "trait", "object", "annotation"]);
+export const byName = (a: any, b: any): number =>
   String(a.name ?? "").localeCompare(String(b.name ?? "")) || String(a.id ?? "").localeCompare(String(b.id ?? ""));
 
 /**

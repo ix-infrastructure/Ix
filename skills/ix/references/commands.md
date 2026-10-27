@@ -43,6 +43,7 @@ These aggregate multiple graph operations into single bounded responses.
 |---|---|---|
 | What calls a function | `ix callers` | `ix callers verify_token` |
 | What a function calls | `ix callees` | `ix callees processPayment` |
+| Other definitions of a method, before changing its signature | `ix overrides` | `ix overrides handle --path src/Base.java` |
 | Members of a class | `ix contains` | `ix contains IngestionService` |
 | What an entity imports | `ix imports` | `ix imports auth_provider.py` |
 | What imports an entity | `ix imported-by` | `ix imported-by AuthProvider` |

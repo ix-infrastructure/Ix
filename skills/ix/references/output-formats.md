@@ -24,6 +24,10 @@ Each row carries the location you would otherwise grep or re-read for:
   On a Java method, `callers` also lists callers through a superclass or
   interface after the direct ones, each ending `via=<Supertype>.<method>`
   (json: `via`).
+- `overrides` rows: `override name=... relation=... owner=<Type> path=...
+  lines=... depth=<n>`, where `relation` is `overrides` or `implements` (a
+  base declaration), `overridden_by` (below the target) or `sibling` (another
+  implementation of the root's method, `via=<Root>.<method>`).
 - `read`: every source line is `<line number><TAB><source>`, after a
   `content lines=<n> numbered=true` record — cite and edit by those numbers.
 - `text`: `match path=... line=... snippet=...`.

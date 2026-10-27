@@ -47,6 +47,7 @@ Glob and Read need several steps or cannot answer at all:
 | Where to start on an issue or task; what a file or symbol touches | `ix_context target=<name or path>` or `ix_context issue=<issue text>` |
 | Who calls / is called by / imports / is imported by X, across files | `ix_neighbors symbol=X relation=callers\|callees\|imports\|imported_by` |
 | What a change to X reaches, before editing it | `ix_impact target=X` |
+| Before changing a method's signature: every override, base declaration and sibling implementation | `ix_neighbors symbol=X relation=overrides` |
 | Which definition a name means when several share it | `ix_search term=X` |
 | A definition's source by name, without knowing its file | `ix_read symbol=X` |
 
