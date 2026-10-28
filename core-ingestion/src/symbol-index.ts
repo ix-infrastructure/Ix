@@ -25,7 +25,7 @@ export interface FileSummary {
   /** `[public, local]` export names (JS/TS), when the file has any. */
   exportPublicNames?: Array<[string, string]>;
   /** The file's IMPORTS relationships, as the import resolver reads them. */
-  imports: Array<{ dstName: string; importRaw?: string; importVia?: string }>;
+  imports: Array<{ dstName: string; importRaw?: string; importVia?: string; importAliased?: boolean }>;
   /** `[fqcn, typeName]` for unambiguous PHP types. */
   phpTypes?: Array<[string, string]>;
   /** Receiver inference facts needed across incremental batches. */

@@ -74,6 +74,42 @@ describe('Python absolute imports resolve by full module path', () => {
     expect(callsTo(edges, OTHER_MOD)).toEqual([]);
   });
 
+  it('import torch.nn as nn does not bind a local nn.py by stem', () => {
+    // A third-party module: no file has the full path torch/nn.py. The alias was
+    // never resolved before, so it gets no stem fallback (unlike `import torch.nn`).
+    const NN = '/repo/models/nn.py';
+    const local = py(NN, 'def relu(x):\n    return x\n\nclass Linear:\n    pass\n');
+    const caller = py('/repo/app/main.py', 'import torch.nn as nn\n\ndef main(a):\n    nn.Linear()\n    return nn.relu(a)\n');
+    expect(caller.relationships).toContainEqual(expect.objectContaining({ predicate: 'IMPORTS', dstName: 'torch.nn', importAliased: true }));
+    expect(summarizeParseResult(caller).imports).toEqual([{ dstName: 'torch.nn', importRaw: 'torch.nn', importAliased: true }]);
+    const edges = resolveEdges([caller, local]);
+
+    expect(importsOf(edges, '/repo/app/main.py', NN)).toEqual([]);
+    expect(callsTo(edges, NN).filter(e => e.confidence >= 0.9)).toEqual([]);
+  });
+
+  it('import torch.nn as nn stays unbound across batches too', () => {
+    const NN = '/repo/models/nn.py';
+    const local = py(NN, 'def relu(x):\n    return x\n');
+    const caller = py('/repo/app/main.py', 'import torch.nn as nn\n\ndef main(a):\n    return nn.relu(a)\n');
+    const all = [caller, local];
+    const index = buildGlobalResolutionIndex(all.map(r => r.filePath), undefined, undefined, new Map(all.map(r => [r.filePath, summarizeParseResult(r)])));
+    const edges = resolveEdges([caller], undefined, index);
+
+    expect(importsOf(edges, '/repo/app/main.py', NN)).toEqual([]);
+    expect(callsTo(edges, NN).filter(e => e.confidence >= 0.9)).toEqual([]);
+  });
+
+  it('an aliased import in an imported module does not reach a same-stem file transitively', () => {
+    const NN = '/repo/models/nn.py';
+    const local = py(NN, 'def relu(x):\n    return x\n');
+    const shim = py('/repo/app/shim.py', 'import torch.nn as nn\n');
+    const caller = py('/repo/app/main.py', 'import app.shim\n\ndef main(a):\n    return relu(a)\n');
+    const edges = resolveEdges([caller, shim, local]);
+
+    expect(callsTo(edges, NN).filter(e => e.confidence >= 0.6)).toEqual([]);
+  });
+
   it('import pkg.sub.mod; pkg.sub.mod.load() resolves to that module', () => {
     const caller = py('/repo/app/main.py', 'import pkg.sub.mod\n\ndef main():\n    return pkg.sub.mod.load()\n');
     const edges = resolveEdges([caller, mod(), otherMod()]);

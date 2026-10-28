@@ -283,6 +283,14 @@ describe("dependents (IN-11)", () => {
     expect(importsChanged(undefined, now)).toBe(false);
   });
 
+  it("counts adding or dropping a Python import alias as an import change", () => {
+    const plain = summary("m.py", { imports: [{ dstName: "torch.nn", importRaw: "torch.nn" }] });
+    const aliased = summary("m.py", { imports: [{ dstName: "torch.nn", importRaw: "torch.nn", importAliased: true }] });
+    expect(importsChanged(plain, aliased)).toBe(true);
+    expect(importsChanged(aliased, plain)).toBe(true);
+    expect(importsChanged(aliased, { ...aliased })).toBe(false);
+  });
+
   it("matches an import by path segment, not by substring", () => {
     const table = new Map<string, SymbolEntry>([
       ["uses-a.ts", entry(summary("uses-a.ts", { refs: [], imports: [{ importRaw: "./a.js" }] }))],

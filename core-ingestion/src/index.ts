@@ -207,7 +207,11 @@ export interface ParsedRelationship {
   importRaw?: string;
   /** PHP namespace import category. Absent for all other languages. */
   importKind?: 'type' | 'function' | 'const';
-  /** PHP aliases need binding metadata before exact FQCN resolution is safe. */
+  /**
+   * PHP aliases need binding metadata before exact FQCN resolution is safe.
+   * Python `import a.b as m`: the module resolves by full path only, never by
+   * the stem fallback (`import torch.nn as nn` must not bind a local nn.py).
+   */
   importAliased?: boolean;
   /** PHP call shape used to distinguish constructors from same-named functions. */
   phpCallKind?: 'constructor' | 'function' | 'member' | 'static';
@@ -3160,7 +3164,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
             predicate: 'IMPORTS',
             importRaw,
             ...(importKind ? { importKind } : {}),
-            ...(phpImportAliased ? { importAliased: true } : {}),
+            ...(phpImportAliased || (language === SupportedLanguages.Python && importAlias) ? { importAliased: true } : {}),
           });
         }
         continue;
@@ -3707,6 +3711,7 @@ export function summarizeParseResult(r: FileParseResult): FileSummary {
         dstName: rel.dstName,
         ...(typeof rel.importRaw === 'string' ? { importRaw: rel.importRaw } : {}),
         ...(rel.importVia ? { importVia: rel.importVia } : {}),
+        ...(rel.importAliased ? { importAliased: true } : {}),
       });
     } else if (rel.predicate === 'CALLS' || rel.predicate === 'REFERENCES' || rel.predicate === 'EXTENDS') {
       refs.add(rel.dstName);
@@ -4876,7 +4881,9 @@ export function resolveEdges(
    *     contains it, the root sharing the longest directory prefix with it.
    *     On a tie, all of them, which the callers treat as ambiguous.
    *   - None: today's stem matching (`modNameToFiles`), so nothing that
-   *     resolved before stops resolving.
+   *     resolved before stops resolving. Not when `strict` (an aliased
+   *     `import a.b as m`, which was never resolved before): then none, so
+   *     `import torch.nn as nn` does not bind a local `nn.py`.
    * A module and a package of one name under one root (`a/b.py` beside
    * `a/b/__init__.py`): the package, as Python's import system picks it.
    * An undotted name keeps its stem match; only when no Python file has that
@@ -4888,16 +4895,16 @@ export function resolveEdges(
    * transitive tier asks again for every file that imports the importing file.
    */
   const pythonModuleTargetsMemo = new Map<string, string[]>();
-  function pythonModuleTargets(srcFilePath: string, modName: string): string[] {
-    const memoKey = `${srcFilePath}\0${modName}`;
+  function pythonModuleTargets(srcFilePath: string, modName: string, strict = false): string[] {
+    const memoKey = `${srcFilePath}\0${modName}\0${strict ? 's' : ''}`;
     let targets = pythonModuleTargetsMemo.get(memoKey);
     if (!targets) {
-      targets = pythonModuleTargetsUncached(srcFilePath, modName);
+      targets = pythonModuleTargetsUncached(srcFilePath, modName, strict);
       pythonModuleTargetsMemo.set(memoKey, targets);
     }
     return targets;
   }
-  function pythonModuleTargetsUncached(srcFilePath: string, modName: string): string[] {
+  function pythonModuleTargetsUncached(srcFilePath: string, modName: string, strict: boolean): string[] {
     const isPython = (fp: string): boolean =>
       importLanguageCompatible(SupportedLanguages.Python, fileLanguage.get(fp) ?? languageFromPath(fp));
     const stemMatches = (): string[] => modNameToFiles(modName, srcFilePath).filter(isPython);
@@ -4940,7 +4947,7 @@ export function resolveEdges(
     const found = [...collect(`${modulePath}.py`, false), ...collect(`${modulePath}/__init__.py`, true)];
     const packageRoots = new Set(found.filter(m => m.isPackage).map(m => m.root));
     const matches = found.filter(m => m.isPackage || !packageRoots.has(m.root));
-    if (matches.length === 0) return stemMatches();
+    if (matches.length === 0) return strict ? [] : stemMatches();
     if (matches.length === 1) return [matches[0].fp];
 
     const scored = matches.map(m => ({ fp: m.fp, ...scoreRoot(m.root) }));
@@ -4972,6 +4979,7 @@ export function resolveEdges(
     modName: unknown,
     importRaw?: unknown,
     kind: 'runtime' | 'types' = 'runtime',
+    pythonStrict = false,
   ): string[] {
     const configuredMatches =
       (srcLanguage === SupportedLanguages.JavaScript || srcLanguage === SupportedLanguages.TypeScript) &&
@@ -4993,7 +5001,7 @@ export function resolveEdges(
     const pythonModule = srcLanguage === SupportedLanguages.Python && typeof importRaw === 'string';
     const importMatches = (configuredMatches === undefined
       ? resolveRelativeImportTargets(srcFilePath, srcLanguage, importRaw)
-        ?? (pythonModule ? pythonModuleTargets(srcFilePath, normalizeImportTarget(modName)) : modNameToFiles(modName, srcFilePath))
+        ?? (pythonModule ? pythonModuleTargets(srcFilePath, normalizeImportTarget(modName), pythonStrict) : modNameToFiles(modName, srcFilePath))
       : indexedConfiguredMatches ?? [])
       .filter(fp => importLanguageCompatible(srcLanguage, fileLanguage.get(fp) ?? languageFromPath(fp)));
     if (srcLanguage !== SupportedLanguages.Go || importMatches.length <= 1) return importMatches;
@@ -5003,8 +5011,8 @@ export function resolveEdges(
     });
   }
 
-  function resolveImportQualifierTargets(srcFilePath: string, srcLanguage: SupportedLanguages, modName: unknown): string[] {
-    if (srcLanguage === SupportedLanguages.Python) return pythonModuleTargets(srcFilePath, normalizeImportTarget(modName));
+  function resolveImportQualifierTargets(srcFilePath: string, srcLanguage: SupportedLanguages, modName: unknown, pythonStrict = false): string[] {
+    if (srcLanguage === SupportedLanguages.Python) return pythonModuleTargets(srcFilePath, normalizeImportTarget(modName), pythonStrict);
     const importMatches = modNameToFiles(modName, srcFilePath);
     if (srcLanguage !== SupportedLanguages.Go || importMatches.length <= 1) return importMatches;
     return narrowGoImportCandidates(srcFilePath, modName, importMatches, files => files);
@@ -5451,7 +5459,7 @@ export function resolveEdges(
       // A helper-literal import is inferred and binds no names: it becomes an
       // IMPORTS edge below but does not widen call-resolution scope.
       if (rel.importVia === 'helper') continue;
-      for (const fp of resolveImportTargets(srcFilePath, srcLanguage, rel.dstName, rel.importRaw)) {
+      for (const fp of resolveImportTargets(srcFilePath, srcLanguage, rel.dstName, rel.importRaw, 'runtime', rel.importAliased === true)) {
         importedFilePaths.add(fp);
       }
     }
@@ -5464,7 +5472,7 @@ export function resolveEdges(
       if (!fpSummary) continue;
       for (const rel of fpSummary.imports) {
         if (rel.importVia === 'helper') continue;
-        for (const transitiveFp of resolveImportTargets(fp, fpSummary.language, rel.dstName, rel.importRaw)) {
+        for (const transitiveFp of resolveImportTargets(fp, fpSummary.language, rel.dstName, rel.importRaw, 'runtime', rel.importAliased === true)) {
           if (!importedFilePaths.has(transitiveFp)) transitiveFilePaths.add(transitiveFp);
         }
       }
@@ -5545,7 +5553,7 @@ export function resolveEdges(
 
         const importMatches = pythonHasRelativeModuleImport && rel.importRaw === undefined
           ? []
-          : resolveImportTargets(srcFilePath, result.language, rel.dstName, rel.importRaw);
+          : resolveImportTargets(srcFilePath, result.language, rel.dstName, rel.importRaw, 'runtime', rel.importAliased === true);
         // A helper-literal import (`importModule(resolve("../x/dist/y.js"))`) is
         // inferred from a string, so it is kept only when that path names
         // exactly one tracked file — never through the package fallbacks below.
@@ -5811,7 +5819,7 @@ export function resolveEdges(
           // Python `import a.b as m`: `m.f` is `f` in the one file a.b names.
           // An ambiguous module stays unresolved here, as without the alias.
           const pythonAliasedModule = srcLanguage === SupportedLanguages.Python ? result.importAliases?.[qualifierPart] : undefined;
-          const pythonAliasedFiles = pythonAliasedModule ? resolveImportQualifierTargets(srcFilePath, srcLanguage, pythonAliasedModule) : [];
+          const pythonAliasedFiles = pythonAliasedModule ? resolveImportQualifierTargets(srcFilePath, srcLanguage, pythonAliasedModule, true) : [];
           const aliasedImportMatches = srcLanguage === SupportedLanguages.Go ? resolveImportQualifierTargets(srcFilePath, srcLanguage, result.importAliases?.[qualifierPart] ?? '')
           : elixirAliasedModule ? (symbolToFiles.get(elixirAliasedModule) ?? []).filter(fp => fp !== srcFilePath)
           : pythonAliasedFiles.length === 1 ? pythonAliasedFiles

@@ -316,7 +316,7 @@ type SummaryFields = {
   receiverPackage?: string;
   importAliases?: Record<string, string>;
   refs?: string[];
-  imports?: Array<{ dstName?: string; importRaw?: string }>;
+  imports?: Array<{ dstName?: string; importRaw?: string; importAliased?: boolean }>;
   sig?: string;
 };
 
@@ -386,7 +386,10 @@ export function changedNames(before: StoredSummary | undefined, after: StoredSum
 export function importsChanged(before: StoredSummary | undefined, after: StoredSummary | undefined): boolean {
   if (!before || !after) return false;
   const key = (s: StoredSummary) =>
-    JSON.stringify(((s as SummaryFields).imports ?? []).map(i => `${i.dstName ?? ""}\0${i.importRaw ?? ""}`).sort());
+    JSON.stringify(((s as SummaryFields).imports ?? [])
+      // An aliased Python import resolves by full path only, so adding or
+      // dropping `as m` changes what it names. Unaliased keys stay as they were.
+      .map(i => `${i.dstName ?? ""}\0${i.importRaw ?? ""}${i.importAliased ? "\0aliased" : ""}`).sort());
   return key(before) !== key(after);
 }
 

@@ -170,7 +170,10 @@ class Service:
       dstName: 'pkg.sub.mod',
       predicate: 'IMPORTS',
       importRaw: 'pkg.sub.mod',
+      importAliased: true,
     });
+    // The unaliased import carries no flag: it keeps the stem fallback.
+    expect(result!.relationships).toContainEqual({ srcName: 'main.py', dstName: 'os.path', predicate: 'IMPORTS', importRaw: 'os.path' });
     expect(result!.importAliases).toEqual({ m: 'pkg.sub.mod' });
     expect(result!.relationships).toContainEqual({ srcName: 'main', dstName: 'm.load', predicate: 'CALLS' });
   });
