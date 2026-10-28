@@ -59,13 +59,23 @@ describe("check-plugin-contract", () => {
     expect(problems("Run `ix map --format json --remap.` when stale.")).toEqual([null]);
   });
 
-  it("normalises the command and subcommand words too", () => {
-    expect(contract.check(["map\\"], surface)).toBeNull();
-    expect(contract.check(["map,", "--remap"], surface)).toBeNull();
-    expect(contract.check(["docker", "start.", "--port"], surface)).toBeNull();
-    expect(contract.check(["mapp."], surface)).toBe('unknown command "mapp"');
-    expect(contract.check(["docker", "start", "--remap"], surface)).toBe(
-      '"docker start" has no --remap',
-    );
+  it("reports a flag the CLI lacks under the full name the plugin wrote", () => {
+    expect(contract.check(["map", "--re_map"], surface)).toBe('"map" has no --re_map');
+    expect(contract.check(["map", "--remap_x."], surface)).toBe('"map" has no --remap_x');
+  });
+
+  it("reads a command span closed by an escaped backtick", () => {
+    expect(problems("`Run \\`ix map\\` first.`")).toEqual([null]);
+    expect(problems("`Run \\`ix mapp\\` first.`")).toEqual(['unknown command "mapp"']);
+  });
+
+  it("still skips prose whose first word ends in punctuation", () => {
+    const prose = [
+      "throw new Error(`\\`ix failed: ${msg}\\``);",
+      "Reason: `ix unavailable.`",
+      "Saw `ix exited, code 1` in the log.",
+    ].join("\n");
+    expect(problems(prose)).toEqual([null, null, null]);
+    expect(contract.check(["docker", "start.", "--remap"], surface)).toBe('"docker" has no --remap');
   });
 });

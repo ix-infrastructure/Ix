@@ -150,30 +150,31 @@ function lineOf(text, index) {
   return text.slice(0, index).split("\n").length;
 }
 
-/** A command word without what prose or escaping leaves after it: `map.`, `map\`, `map,`. */
-function word(token) {
-  return token?.replace(/[\\`'",.;:!?)\]}]+$/, "");
+/** A flag's name without `=value` or the escape, quote or punctuation after it. */
+function flagName(token) {
+  return token.split("=")[0].replace(/[\\`'",.;:!?)\]}]+$/, "");
 }
 
 /** What is wrong with one invocation, or null. */
 export function check(argv, surface) {
-  const cmd = word(argv[0]);
+  const cmd = argv[0];
   if (!/^[a-z][a-z-]*$/.test(cmd)) return null; // a placeholder or a variable
   if (PRO_COMMANDS.has(cmd)) return null;
   const top = surface.get(cmd);
   if (!top) return `unknown command "${cmd}"`;
   let entry = top;
   let name = cmd;
-  const sub = word(argv[1]);
+  const sub = argv[1];
   if (sub && top.subcommands.has(sub) && surface.has(`${cmd} ${sub}`)) {
     entry = surface.get(`${cmd} ${sub}`);
     name = `${cmd} ${sub}`;
   }
-  // The flag name alone: drops `=value` and a trailing `\`, quote, backtick or
-  // punctuation, but never a letter, so `--remapp` stays `--remapp`.
+  // Only trailing punctuation is dropped, never a letter or `_`, so `--remapp`
+  // and `--re_map` are reported under the name the plugin wrote.
   const bad = argv
-    .map((a) => a.match(/^--[a-z][a-z0-9-]*/)?.[0])
-    .filter((f) => f && !entry.flags.has(f) && !GLOBAL_FLAGS.has(f));
+    .filter((a) => /^--[a-z][a-z0-9-]*/.test(a))
+    .map(flagName)
+    .filter((f) => !entry.flags.has(f) && !GLOBAL_FLAGS.has(f));
   return bad.length ? `"${name}" has no ${bad.join(", ")}` : null;
 }
 
