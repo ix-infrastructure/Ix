@@ -195,6 +195,15 @@ export interface HealthResponse {
   database?: "reachable" | "unreachable";
 }
 
+/** `POST /v1/degree` (Ix-memory ≥ v1.0.33): one-hop neighbour counts per node id. */
+export interface DegreeResponse {
+  rev: number;
+  /** Count per requested id. An id the backend could not count is absent. */
+  counts: Record<string, number>;
+  /** True when some count stopped short of the full neighbourhood. */
+  truncated: boolean;
+}
+
 export interface PatchSource {
   // uri is the provenance source URI. In the client-agnostic backend design it
   // is a workspace-relative path (POSIX separators), not an absolute host path.

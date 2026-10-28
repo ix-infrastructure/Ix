@@ -490,6 +490,25 @@ Expand a node's neighborhood.
 
 Same as expand, but by entity name.
 
+#### POST `/v1/degree`
+
+One-hop neighbour counts for many nodes in one request (backend v1.0.33 and
+later). `ix rank` scores its candidates with it, and falls back to one
+`/v1/expand` per candidate when the route is missing (404/405) or the request
+fails.
+
+**Request body**
+
+| Field | Type | Default |
+|---|---|---|
+| `ids` | string[] | required, at most 5000 |
+| `direction` | string | required |
+| `predicates` | string[] | — |
+| `distinct` | boolean | — (`true`: count distinct neighbour nodes) |
+| `branchId` | string | — |
+
+**Response** — `{ rev: number, counts: { [id]: number }, truncated: boolean }`.
+
 ### Planning Artifacts
 
 Planning artifacts (goals, truth statements, decisions, bugs, tasks) persist

@@ -405,6 +405,49 @@ describe("ix mcp", () => {
     expect(parsed.candidates).toEqual([{ file: "ix-cli/src/a.ts", smell: "orphan" }]);
   });
 
+  it("applies the ix_smells limit to a stale answer and says the path was not applied", async () => {
+    const stale = {
+      count: 3,
+      shown: 3,
+      truncated: false,
+      inference_version: "smell_v1",
+      smells: [
+        { smell: "has_smell.god_module", entity_id: "entity-a-012", confidence: 0.9 },
+        { smell: "has_smell.orphan_file", entity_id: "entity-b-012", confidence: 0.5 },
+        { smell: "has_smell.orphan_file", entity_id: "entity-c-012", confidence: 0.4 },
+      ],
+      stale: true,
+      computed_at: "2026-10-21T09:30:00Z",
+      computed_rev: 12,
+      diagnostics: [{ code: "smells_stale", reason: "timeout", message: "fresh analysis did not finish within 20 s; showing stored results from rev 12" }],
+    };
+    const client = await connect(async () => ({ ok: true, stdout: JSON.stringify(stale), stderr: "" }));
+
+    const result = await client.callTool({ name: "ix_smells", arguments: { path: "src/foo", limit: 2 } });
+
+    expect(result.isError).toBeFalsy();
+    const content = (result as CallToolResult).content[0];
+    const parsed = JSON.parse(content?.type === "text" ? content.text : "{}");
+    expect(parsed.smells).toEqual(stale.smells.slice(0, 2));
+    expect(parsed).toMatchObject({ count: 3, shown: 2, truncated: true, stale: true, computed_rev: 12 });
+    expect(parsed.diagnostics.map((d: { code: string }) => d.code)).toEqual(["smells_stale", "smells_path_unfiltered"]);
+    expect(parsed.diagnostics[1].message).toContain('path "src/foo" was not applied');
+  });
+
+  it("a stale ix_smells answer without a path gets no path diagnostic", async () => {
+    const stale = {
+      count: 1, shown: 1, truncated: false, inference_version: "smell_v1",
+      smells: [{ smell: "has_smell.orphan_file", entity_id: "entity-a-012", confidence: 0.5 }],
+      stale: true, computed_at: null, computed_rev: null,
+      diagnostics: [{ code: "smells_stale", reason: "not_permitted", message: "not permitted to run a fresh analysis; showing stored results from an earlier run" }],
+    };
+    const client = await connect(async () => ({ ok: true, stdout: JSON.stringify(stale), stderr: "" }));
+    const result = await client.callTool({ name: "ix_smells", arguments: {} });
+    const content = (result as CallToolResult).content[0];
+    const parsed = JSON.parse(content?.type === "text" ? content.text : "{}");
+    expect(parsed).toEqual(stale);
+  });
+
   it("maps ix_ingest onto the github form the plugins used", async () => {
     const calls: string[][] = [];
     const client = await connect(async (args) => {

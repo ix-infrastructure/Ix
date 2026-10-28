@@ -108,6 +108,11 @@ export function parsePickOption(value: string): number {
   return parsePositiveInt(value, "1 or 2");
 }
 
+/** Parse a `--wait <seconds>` budget: a positive whole number of seconds. */
+export function parseWaitSecondsOption(value: string): number {
+  return parsePositiveInt(value, "20 or 600");
+}
+
 /**
  * Parse a `--max-*` budget flag.
  *

@@ -12,6 +12,7 @@ import type {
   GraphPatchPayload,
   PatchCommitResult,
   CapabilitiesResponse,
+  DegreeResponse,
 } from "./types.js";
 
 export interface ListSubsystemsOptions {
@@ -79,7 +80,7 @@ function hasCode(err: unknown, codes: ReadonlySet<string>): boolean {
  * answer cannot change because of anything the same command does.
  */
 const SHARED_READ_PREFIXES = [
-  "/v1/expand", "/v1/search", "/v1/context", "/v1/list",
+  "/v1/expand", "/v1/degree", "/v1/search", "/v1/context", "/v1/list",
   "/v1/entity/", "/v1/provenance/", "/v1/resolve-prefix/",
 ];
 
@@ -313,6 +314,26 @@ export class IxClient {
     });
   }
 
+  /**
+   * One-hop neighbour counts for many nodes in one request (backend ≥ v1.0.33,
+   * at most 5000 ids). With `distinct`, a node's count is its distinct
+   * neighbour nodes, what `expand(id, {direction, predicates})` lists. An id
+   * the backend could not count is absent from `counts`; `truncated` says some
+   * count stopped short.
+   */
+  async degree(
+    ids: string[],
+    opts: { direction: string; predicates?: string[]; distinct?: boolean; branchId?: string },
+  ): Promise<DegreeResponse> {
+    return this.post("/v1/degree", {
+      ids,
+      direction: opts.direction,
+      predicates: opts.predicates,
+      distinct: opts.distinct,
+      ...(opts.branchId !== undefined ? { branchId: opts.branchId } : {}),
+    });
+  }
+
   async listGoals(): Promise<GraphNode[]> {
     return this.get("/v1/truth");
   }
@@ -499,6 +520,11 @@ export class IxClient {
     weakMaxNeighbors?: number;
     workspaceId?: string;
     systemId?: string;
+    /**
+     * How long to wait for the analysis before the request is aborted (default
+     * 2 minutes). `ix smells` sets its `--wait` budget here. Never retried.
+     */
+    timeoutMs?: number;
   }): Promise<any> {
     const params = new URLSearchParams();
     if (opts?.orphanMaxConnections !== undefined) params.set("orphan-max-connections", String(opts.orphanMaxConnections));
@@ -508,7 +534,7 @@ export class IxClient {
     if (opts?.workspaceId)                        params.set("workspace_id",            opts.workspaceId);
     if (opts?.systemId)                           params.set("system_id",               opts.systemId);
     const qs = params.toString();
-    return this.post(qs ? `/v1/smells?${qs}` : "/v1/smells", {});
+    return this.post(qs ? `/v1/smells?${qs}` : "/v1/smells", {}, opts?.timeoutMs);
   }
 
   async listSmells(opts?: { workspaceId?: string; systemId?: string }): Promise<any> {

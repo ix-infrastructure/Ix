@@ -501,6 +501,35 @@ templates, data/config) are dropped; `filtered_non_source=<k>` appears when any
 were. Output stops at `--limit` (default 50, highest confidence first); when it
 cuts, a `diagnostic code=results_truncated` record follows the header.
 
+`ix smells` waits for a fresh analysis for 20 s in llm and json (`--wait
+<seconds>` or `IX_SMELLS_WAIT` changes it; text waits 10 minutes). When the
+analysis has not finished by then, or the backend refuses to run it (a 403;
+on kOS running analysis is admin-only), the answer is the stored claims from
+the last completed run, as `ix smells --list` prints them, with one
+`diagnostic code=smells_stale` record after the header, and exit 0:
+
+```
+smells count=2 shown=2 version=smell_v1
+diagnostic code=smells_stale reason=timeout computed_rev=12 computed_at=2026-10-21T09:30:00Z message="fresh analysis did not finish within 20 s; showing stored results from rev 12 (2026-10-21T09:30:00Z)"
+smell kind=has_smell.god_module entity=entity-b-012 confidence=0.9 version=smell_v1
+```
+
+`reason` is `timeout` or `not_permitted`. `computed_rev` is the newest `rev`
+a stored claim carries and `computed_at` that claim's `run_at`; each is left
+out when the backend stores none. Stored rows carry entity ids, not paths, so
+no non-source filter applies; they are ranked by confidence and capped at
+`--limit` (default 50) as a fresh run is. `--format json` carries the same as
+`stale: true`, `computed_rev`, `computed_at` (`null` when unknown) and
+`diagnostics: [{code: "smells_stale", reason, message}]` beside the `--list`
+fields. With nothing stored either, the answer is the usual `error
+code=backend_error` record, exit 1. A fresh run within the wait prints exactly
+what it always did. Node's HTTP client stops waiting for a response after 5
+minutes whatever the wait, so a longer `--wait` falls back to the stored
+claims at that point, and the message gives the time actually waited.
+The MCP tool `ix_smells` applies its `limit` to a stale answer's stored
+claims; its `path` cannot be applied to them (they carry entity ids), so it
+adds a `smells_path_unfiltered` diagnostic saying the rows are workspace-wide.
+
 `ix impact <leaf>`:
 
 ```
