@@ -106,6 +106,40 @@ describe('Python absolute imports resolve by full module path', () => {
     expect(callsTo(withBeside, elsewhere.filePath).filter(e => e.confidence >= 0.6)).toEqual([]);
   });
 
+  it('import json as j inside a package does not bind the package\'s own json.py', () => {
+    // myapp has an __init__.py, so it is a package, not a source root: under
+    // Python 3 absolute imports `import json` there is the stdlib json.
+    const init = py('/repo/src/myapp/__init__.py', '');
+    const local = py('/repo/src/myapp/json.py', 'def dumps(x):\n    return x\n');
+    const caller = py('/repo/src/myapp/views.py', 'import json as j\n\ndef v(a):\n    return j.dumps(a)\n');
+    const all = [caller, init, local];
+    const index = buildGlobalResolutionIndex(all.map(r => r.filePath), undefined, undefined, new Map(all.map(r => [r.filePath, summarizeParseResult(r)])));
+
+    for (const edges of [resolveEdges(all), resolveEdges([caller], undefined, index)]) {
+      expect(importsOf(edges, caller.filePath, local.filePath)).toEqual([]);
+      expect(callsTo(edges, local.filePath).filter(e => e.confidence >= 0.6)).toEqual([]);
+    }
+
+    // A json.py under the source root above the package is what Python finds.
+    const top = py('/repo/src/json.py', 'def dumps(x):\n    return x\n');
+    const withTop = resolveEdges([caller, init, local, top]);
+    expect(importsOf(withTop, caller.filePath, top.filePath)).toHaveLength(1);
+    expect(callsTo(withTop, top.filePath)).toContainEqual(
+      expect.objectContaining({ srcName: 'v', dstQualifiedKey: 'dumps', confidence: 0.9 }),
+    );
+    expect(importsOf(withTop, caller.filePath, local.filePath)).toEqual([]);
+  });
+
+  it('import logging inside a package does not bind the package\'s own logging/ subpackage', () => {
+    const init = py('/repo/myapp/__init__.py', '');
+    const nested = py('/repo/myapp/logging/__init__.py', 'def getLogger():\n    return 1\n');
+    const caller = py('/repo/myapp/views.py', 'import logging\n\ndef v():\n    return logging.getLogger()\n');
+    const edges = resolveEdges([caller, init, nested]);
+
+    expect(importsOf(edges, caller.filePath, nested.filePath)).toEqual([]);
+    expect(callsTo(edges, nested.filePath).filter(e => e.confidence >= 0.6)).toEqual([]);
+  });
+
   it('import torch.nn as nn stays unbound across batches too', () => {
     const NN = '/repo/models/nn.py';
     const local = py(NN, 'def relu(x):\n    return x\n');

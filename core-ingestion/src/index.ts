@@ -4893,6 +4893,9 @@ export function resolveEdges(
    * nested `myapp/logging/` does not capture `import logging` elsewhere.
    * When `strict` (`import yaml as y`) it gets no stem match: only a module
    * or package under the deepest root that contains the importing file.
+   * In both undotted cases a root that is itself a package directory (has an
+   * `__init__.py`) does not count, so a package's own `json.py` never stands
+   * in for the stdlib `json`.
    * Candidates come from the stem and package maps (`pythonFilesBySuffix`),
    * never a scan, and are memoized per (importing file, module): the
    * transitive tier asks again for every file that imports the importing file.
@@ -4940,8 +4943,15 @@ export function resolveEdges(
       const packageRoots = new Set(found.filter(m => m.isPackage).map(m => m.root));
       return found.filter(m => m.isPackage || !packageRoots.has(m.root));
     };
+    // A directory with its own `__init__.py` is a package, not a source root:
+    // under Python 3 absolute imports, `import json` in `myapp/views.py` is the
+    // top-level `json`, not `myapp/json.py`.
+    const isPackageDir = (root: string): boolean =>
+      (normalizedPathToFiles.get(normalizedPathKey(`${root}__init__.py`)) ?? []).length > 0;
     const deepestContaining = (found: Array<{ fp: string; root: string }>): string[] => {
-      const containing = found.map(m => ({ fp: m.fp, ...scoreRoot(m.root) })).filter(m => m.contains);
+      const containing = found
+        .map(m => ({ fp: m.fp, root: m.root, ...scoreRoot(m.root) }))
+        .filter(m => m.contains && !isPackageDir(m.root));
       if (containing.length === 0) return [];
       const deepest = Math.max(...containing.map(m => m.shared));
       return containing.filter(m => m.shared === deepest).map(m => m.fp);
