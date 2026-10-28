@@ -171,10 +171,24 @@ describe('Python package __init__.py', () => {
     const sub = py('/repo/pkg/tools.py', 'def run():\n    return 1\n');
     const edges = resolveEdges([caller, init, sub]);
 
-    // As before: `tools.run()` reaches pkg/tools.py by the member name.
+    // As before: `tools.run()` reaches pkg/tools.py by the member name. That
+    // holds only while no other tools.py exists; see the next case.
     expect(callsTo(edges, sub.filePath)).toEqual([
       expect.objectContaining({ srcName: 'main', dstQualifiedKey: 'run' }),
     ]);
+    expect(callsTo(edges, init.filePath)).toEqual([]);
+  });
+
+  it('from pkg import tools with another tools.py elsewhere guesses neither', () => {
+    const caller = py('/repo/app/main.py', 'from pkg import tools\n\ndef main():\n    return tools.run()\n');
+    const init = py('/repo/pkg/__init__.py', 'VERSION = 1\n');
+    const sub = py('/repo/pkg/tools.py', 'def run():\n    return 1\n');
+    const decoy = py('/repo/other/tools.py', 'def run():\n    return 2\n');
+    const edges = resolveEdges([caller, init, sub, decoy]);
+
+    // Unresolved, as on the base: the submodule is named by a bare imported
+    // name, which still matches by stem. What matters is no edge to the decoy.
+    expect(callsTo(edges, decoy.filePath)).toEqual([]);
     expect(callsTo(edges, init.filePath)).toEqual([]);
   });
 
@@ -260,5 +274,40 @@ describe('Python typed receivers inside methods', () => {
     expect(calls).toContainEqual({ srcName: 'Service.run', dstName: 'Query.filter', predicate: 'CALLS' });
     expect(calls).toContainEqual({ srcName: 'run', dstName: 'q.filter', predicate: 'CALLS' });
     expect(calls).not.toContainEqual({ srcName: 'run', dstName: 'Query.filter', predicate: 'CALLS' });
+  });
+});
+
+describe('Python packages are found only where the import can reach them', () => {
+  it('import logging does not resolve to a nested myapp/logging/ package', () => {
+    const caller = py('/repo/app/main.py', 'import logging\n\ndef main():\n    return logging.getLogger()\n');
+    const nested = py('/repo/myapp/logging/__init__.py', 'def getLogger():\n    return 1\n');
+    const edges = resolveEdges([caller, nested]);
+
+    expect(importsOf(edges, caller.filePath, nested.filePath)).toEqual([]);
+    expect(callsTo(edges, nested.filePath).filter(e => e.confidence >= 0.9)).toEqual([]);
+  });
+
+  it('import pkg resolves to pkg/__init__.py under a root that contains the importing file', () => {
+    const caller = py('/repo/app/main.py', 'import pkg\n\ndef main():\n    return pkg.entry()\n');
+    const init = py('/repo/pkg/__init__.py', 'def entry():\n    return 1\n');
+    const nested = py('/repo/vendor/lib/pkg/__init__.py', 'def entry():\n    return 2\n');
+    const edges = resolveEdges([caller, init, nested]);
+
+    expect(importsOf(edges, caller.filePath, init.filePath)).toHaveLength(1);
+    expect(importsOf(edges, caller.filePath, nested.filePath)).toEqual([]);
+  });
+
+  it('a package beside a same-named module under one root wins, as in Python', () => {
+    const caller = py('/repo/app/main.py', 'from a.b import fetch\n\ndef main():\n    return fetch()\n');
+    const module = py('/repo/a/b.py', 'def fetch():\n    return 1\n');
+    const pkg = py('/repo/a/b/__init__.py', 'def fetch():\n    return 2\n');
+    const edges = resolveEdges([caller, module, pkg]);
+
+    expect(importsOf(edges, caller.filePath, pkg.filePath)).toHaveLength(1);
+    expect(importsOf(edges, caller.filePath, module.filePath)).toEqual([]);
+    expect(callsTo(edges, pkg.filePath)).toEqual([
+      expect.objectContaining({ srcName: 'main', dstQualifiedKey: 'fetch', confidence: 0.9 }),
+    ]);
+    expect(callsTo(edges, module.filePath)).toEqual([]);
   });
 });

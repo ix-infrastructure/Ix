@@ -165,8 +165,10 @@ describe("Python import resolution through a map (fake backend)", () => {
       expect(edges.filter((e) => e.includes("-> load@pkg/sub/mod.py"))).toEqual([]);
     }],
     ["a package pkg/sub/mod/ appears beside pkg/sub/mod.py", { "pkg/sub/mod/__init__.py": MODULE("None") }, (edges) => {
-      // Module and package of one name under one root: ambiguous, no guess.
-      expect(edges.filter((e) => e.startsWith("read_config@") || e.startsWith("read_alias@"))).toEqual([]);
+      // Module and package of one name under one root: Python imports the package.
+      expect(edges).toContain("read_config@app/main.py -> load@pkg/sub/mod/__init__.py");
+      expect(edges).toContain("read_alias@app/main.py -> load@pkg/sub/mod/__init__.py");
+      expect(edges.filter((e) => e.includes("-> load@pkg/sub/mod.py"))).toEqual([]);
     }],
   ];
 

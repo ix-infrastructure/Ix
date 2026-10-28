@@ -4090,30 +4090,6 @@ export function buildGlobalResolutionIndex(
   };
 }
 
-// Python module lookup: every `.py` file under each path suffix of up to
-// PY_MODULE_MAX_SEGMENTS segments (`c.py`, `b/c.py`, `a/b/c.py`, ...), so
-// `a.b.c` -> `a/b/c.py` is one map lookup. Keyed by `key` (resolveEdges'
-// normalized path key: posix, lower-cased on Windows).
-const PY_MODULE_MAX_SEGMENTS = 16;
-const pySuffixIndexCache = new WeakMap<GlobalResolutionIndex, Map<string, string[]>>();
-function pythonSuffixIndex(filePaths: Iterable<string>, key: (filePath: string) => string): Map<string, string[]> {
-  const index = new Map<string, string[]>();
-  // De-duplicated up front: a per-list `includes` would be quadratic in a
-  // common tail (`__init__.py`). One path yields each tail once.
-  for (const fp of new Set(filePaths)) {
-    const normalized = key(fp);
-    if (!normalized.endsWith('.py')) continue;
-    const segments = normalized.split('/');
-    for (let i = Math.max(0, segments.length - PY_MODULE_MAX_SEGMENTS); i < segments.length; i++) {
-      const tail = segments.slice(i).join('/');
-      if (!tail) continue;
-      const list = index.get(tail);
-      if (list) list.push(fp); else index.set(tail, [fp]);
-    }
-  }
-  return index;
-}
-
 // Commodity callee names for the fuzzy resolution tiers (transitive re-export +
 // global symbol fallback; see resolveEdges). Those tiers resolve a call on bare
 // name alone and can cross module/package/repo boundaries. Builtin / stdlib
@@ -4879,27 +4855,15 @@ export function resolveEdges(
     return [];
   }
 
-  // `.py` files by path suffix (see pythonSuffixIndex). The global index's
-  // part is built once per index, not per batch; the batch's own files are
-  // indexed here. Both on the first Python module lookup only.
-  let pyGlobalSuffixToFiles: Map<string, string[]> | undefined;
-  let pyBatchSuffixToFiles: Map<string, string[]> | undefined;
-  function pythonFilesBySuffix(suffix: string): string[] {
-    if (!pyBatchSuffixToFiles) {
-      if (globalIndex) {
-        pyGlobalSuffixToFiles = pySuffixIndexCache.get(globalIndex);
-        if (!pyGlobalSuffixToFiles) {
-          pyGlobalSuffixToFiles = pythonSuffixIndex([...globalIndex.stemToFiles.values()].flat(), normalizedPathKey);
-          pySuffixIndexCache.set(globalIndex, pyGlobalSuffixToFiles);
-        }
-      }
-      pyBatchSuffixToFiles = pythonSuffixIndex(batchSummaries.map(r => r.filePath), normalizedPathKey);
-    }
-    const fromIndex = pyGlobalSuffixToFiles?.get(suffix) ?? [];
-    const fromBatch = pyBatchSuffixToFiles.get(suffix) ?? [];
-    if (fromBatch.length === 0) return fromIndex;
-    if (fromIndex.length === 0) return fromBatch;
-    return [...new Set([...fromIndex, ...fromBatch])];
+  // Python files whose normalized path ends in `suffix` (`a/b/c.py` or
+  // `a/b/c/__init__.py`): the candidates are the files with that stem, or the
+  // package entries under a directory of that name, so no extra index is built.
+  function pythonFilesBySuffix(suffix: string, name: string, isPackage: boolean): string[] {
+    const candidates = (isPackage ? pyPackageDirToFiles : stemToFiles).get(name) ?? [];
+    return candidates.filter(fp => {
+      const key = normalizedPathKey(fp);
+      return key === suffix || key.endsWith(`/${suffix}`);
+    });
   }
 
   /**
@@ -4913,11 +4877,15 @@ export function resolveEdges(
    *     On a tie, all of them, which the callers treat as ambiguous.
    *   - None: today's stem matching (`modNameToFiles`), so nothing that
    *     resolved before stops resolving.
+   * A module and a package of one name under one root (`a/b.py` beside
+   * `a/b/__init__.py`): the package, as Python's import system picks it.
    * An undotted name keeps its stem match; only when no Python file has that
-   * stem does it name a package, `name/__init__.py`.
-   * Every lookup is a map lookup (`pythonFilesBySuffix`), never a scan, and
-   * memoized per (importing file, module): the transitive tier asks again for
-   * every file that imports the importing file.
+   * stem does it name a package, `name/__init__.py`, and then only one under
+   * a source root that contains the importing file (the deepest), so a
+   * nested `myapp/logging/` does not capture `import logging` elsewhere.
+   * Candidates come from the stem and package maps (`pythonFilesBySuffix`),
+   * never a scan, and are memoized per (importing file, module): the
+   * transitive tier asks again for every file that imports the importing file.
    */
   const pythonModuleTargetsMemo = new Map<string, string[]>();
   function pythonModuleTargets(srcFilePath: string, modName: string): string[] {
@@ -4937,33 +4905,45 @@ export function resolveEdges(
     const parts = modName.split('.');
     const last = parts[parts.length - 1];
     const srcKey = normalizedPathKey(srcFilePath);
+    const srcDir = nodePath.posix.dirname(srcKey);
+    const srcDirParts = srcDir === '.' ? [] : srcDir.split('/');
+    // How many leading directories a match's source root shares with the
+    // importing file's directory, and whether the root contains that file.
+    const scoreRoot = (root: string): { shared: number; contains: boolean } => {
+      const rootParts = root === '' ? [] : root.replace(/\/$/, '').split('/');
+      let shared = 0;
+      while (shared < rootParts.length && shared < srcDirParts.length && rootParts[shared] === srcDirParts[shared]) shared++;
+      return { shared, contains: shared === rootParts.length };
+    };
+    const collect = (relPath: string, isPackage: boolean): Array<{ fp: string; root: string; isPackage: boolean }> => {
+      const suffix = normalizedPathKey(relPath);
+      return pythonFilesBySuffix(suffix, last, isPackage)
+        .filter(fp => normalizedPathKey(fp) !== srcKey)
+        .map(fp => {
+          const key = normalizedPathKey(fp);
+          return { fp, root: key.slice(0, key.length - suffix.length), isPackage };
+        });
+    };
+
     if (parts.length === 1) {
       const byStem = stemMatches();
       if (byStem.length > 0) return byStem;
-      return (pyPackageDirToFiles.get(last) ?? []).filter(fp => normalizedPathKey(fp) !== srcKey);
+      const containing = collect(`${last}/__init__.py`, true)
+        .map(m => ({ fp: m.fp, ...scoreRoot(m.root) }))
+        .filter(m => m.contains);
+      if (containing.length === 0) return [];
+      const deepest = Math.max(...containing.map(m => m.shared));
+      return containing.filter(m => m.shared === deepest).map(m => m.fp);
     }
 
     const modulePath = parts.join('/');
-    const matches: Array<{ fp: string; root: string }> = [];
-    for (const relPath of [`${modulePath}.py`, `${modulePath}/__init__.py`]) {
-      const suffix = normalizedPathKey(relPath);
-      for (const fp of pythonFilesBySuffix(suffix)) {
-        const key = normalizedPathKey(fp);
-        if (key === srcKey || matches.some(m => m.fp === fp)) continue;
-        matches.push({ fp, root: key.slice(0, key.length - suffix.length) });
-      }
-    }
+    const found = [...collect(`${modulePath}.py`, false), ...collect(`${modulePath}/__init__.py`, true)];
+    const packageRoots = new Set(found.filter(m => m.isPackage).map(m => m.root));
+    const matches = found.filter(m => m.isPackage || !packageRoots.has(m.root));
     if (matches.length === 0) return stemMatches();
     if (matches.length === 1) return [matches[0].fp];
 
-    const srcDir = nodePath.posix.dirname(srcKey);
-    const srcDirParts = srcDir === '.' ? [] : srcDir.split('/');
-    const scored = matches.map(m => {
-      const rootParts = m.root === '' ? [] : m.root.replace(/\/$/, '').split('/');
-      let shared = 0;
-      while (shared < rootParts.length && shared < srcDirParts.length && rootParts[shared] === srcDirParts[shared]) shared++;
-      return { fp: m.fp, shared, contains: shared === rootParts.length };
-    });
+    const scored = matches.map(m => ({ fp: m.fp, ...scoreRoot(m.root) }));
     const containing = scored.filter(m => m.contains);
     const pool = containing.length > 0 ? containing : scored;
     const best = Math.max(...pool.map(m => m.shared));
