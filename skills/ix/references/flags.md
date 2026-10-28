@@ -127,8 +127,8 @@ surfaces (#575).
   no row carries is dropped rather than emitted empty.
 - **`--pick <n>` is 1-based** everywhere it appears, and is how you resolve an
   ambiguous target without re-running with a longer name. It indexes the list
-  in its stable numbered order (best match first, dealt round-robin by file so
-  one file cannot fill the page), and also selects among the candidates of a
+  in its stable numbered order (best match first; equal matches dealt
+  round-robin by file so one file cannot fill the page), and also selects among the candidates of a
   resolution notice (a target that resolved by choosing among equal matches;
   only the true ties are listed and numbered).
 - **`--all` answers an ambiguous name for every candidate** (`callers`,

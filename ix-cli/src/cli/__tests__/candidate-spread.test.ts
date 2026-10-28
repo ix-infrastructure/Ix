@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
 import { registerCallersCommand } from "../commands/callers.js";
 import { registerLocateCommand } from "../commands/locate.js";
-import { resolveFileOrEntityFull, roundRobinByFile } from "../resolve.js";
+import { CONTAINER_LOOKUP_TIMEOUT_MS, resolveFileOrEntityFull, roundRobinByFile } from "../resolve.js";
 
 // An ambiguous name lists 8 candidates. A file that defines the name many times
 // must not fill that page on its own: the page is dealt round-robin by file
@@ -182,6 +182,25 @@ describe("ambiguous candidates spread across files", () => {
     for (const row of body.results) {
       expect(row.name).toBe(`callerOf_${[...ROUND_ROBIN, ...REST][row.candidate - 1]}`);
     }
+    // --all lists no containers, so it asks for none.
+    expect(expandByName).not.toHaveBeenCalled();
+  });
+
+  it("deals only among equal scores: an import never goes ahead of a definition", async () => {
+    // Two definitions in one file and an import of the name in each of nine
+    // other files. The imports score worse (+5) but inside the window; dealt
+    // across the whole list they would push the second definition off the page.
+    const def = (id: string, line: number) => ({
+      id, kind: "function", name: "clamp", attrs: { line_start: line, line_end: line + 3 }, provenance: { sourceUri: "app/utils.py" },
+    });
+    const imports = Array.from({ length: 9 }, (_, i) => ({
+      id: `import-${i}`, kind: "module", name: "clamp", attrs: { line_start: 1, line_end: 1 }, provenance: { sourceUri: `app/use${i}.py` },
+    }));
+    search.mockImplementation(async (term: string) => (term === "clamp" ? [...imports, def("def-1", 10), def("def-2", 40)] : []));
+    const body = JSON.parse((await run(["locate", "clamp", "--format", "json"])).stdout);
+    expect(body.total).toBe(11);
+    expect(body.candidates.map((c: { id: string }) => c.id))
+      .toEqual(["def-1", "def-2", ...imports.slice(0, 6).map((i) => i.id)]);
   });
 });
 
@@ -200,7 +219,7 @@ describe("candidate rows name their container", () => {
     expect(Object.keys(byId["cache-1"])).toEqual(["id", "name", "kind", "path", "line", "score", "rank", "container"]);
     // One request for the name, not one per candidate.
     expect(expandByName).toHaveBeenCalledTimes(1);
-    expect(expandByName).toHaveBeenCalledWith("crop", { direction: "in", predicates: ["CONTAINS"] });
+    expect(expandByName).toHaveBeenCalledWith("crop", { direction: "in", predicates: ["CONTAINS"], timeoutMs: CONTAINER_LOOKUP_TIMEOUT_MS });
   });
 
   it("llm: `container=` ends the candidate record", async () => {
@@ -223,6 +242,20 @@ describe("candidate rows name their container", () => {
     const body = JSON.parse(result.stdout);
     expect(body.candidates.map((c: { id: string }) => c.id)).toEqual(ROUND_ROBIN);
     expect(body.candidates.some((c: object) => "container" in c)).toBe(false);
+  });
+
+  it("locate asks once for a dotted name it re-reads as Class.method", async () => {
+    // `Config.load` matches only fuzzily, in two files (ambiguous), and no
+    // class Config exists: locate tries the qualified reading, keeps the
+    // literal ambiguity, and asks for containers on that result only.
+    const entry = (id: string, path: string) => ({
+      id, kind: "config_entry", name: "Config.loadAll", attrs: { line_start: 3, line_end: 3 }, provenance: { sourceUri: path },
+    });
+    search.mockImplementation(async () => [entry("e1", "conf/a.toml"), entry("e2", "conf/b.toml")]);
+    const result = await run(["locate", "Config.load", "--format", "json"]);
+    expect(result.exitCode).toBe(2);
+    expect(JSON.parse(result.stdout).candidates.map((c: { id: string }) => c.id).sort()).toEqual(["e1", "e2"]);
+    expect(expandByName).toHaveBeenCalledTimes(1);
   });
 
   it("--pick resolves without asking for containers", async () => {

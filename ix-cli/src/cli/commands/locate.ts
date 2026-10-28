@@ -5,7 +5,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
 import {
-  resolveFileOrEntityFull, resolveEntityFull, printResolved, printAmbiguous,
+  resolveFileOrEntityFull, rankEntity, withContainers, printResolved, printAmbiguous,
   looksFileLike, isRawId, qualifiedSeparator, isFuzzyResult, withMissReason,
   type ResolvedEntity, type ResolveResult, type Suggestion,
 } from "../resolve.js";
@@ -245,14 +245,17 @@ async function resolveWithAmbiguity(
     // Symbol resolution — use full result to detect ambiguity
     const allKinds = ["file", "class", "object", "trait", "interface", "module", "function", "method", "constant"];
     const sep = qualifiedSeparator(symbol);
-    result = await resolveEntityFull(client, symbol, allKinds, { ...opts, format, ...(sep ? { silentMiss: true } : {}) });
+    result = await rankEntity(client, symbol, allKinds, { ...opts, format, ...(sep ? { silentMiss: true } : {}) });
     // `Class::method`, `Class.method` and `Class#method` are read as a qualified
     // name only when the name as typed matches nothing, or (for `.`/`#`) matches
     // only fuzzily; resolveFileOrEntityFull then keeps the literal result unless
-    // the qualified one keeps the exit code.
+    // the qualified one keeps the exit code. Containers are asked for only on
+    // the result kept, so a re-resolved name does not pay for them twice.
     const missed = !result.resolved && !result.ambiguous;
     if (sep && (missed || (sep !== "::" && isFuzzyResult(result)))) {
       result = await resolveFileOrEntityFull(client, symbol, { ...opts, format });
+    } else {
+      result = await withContainers(client, result);
     }
   }
 

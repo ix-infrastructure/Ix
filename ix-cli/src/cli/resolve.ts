@@ -479,8 +479,12 @@ export async function resolveEntityFull(
   return withContainers(client, await rankEntity(client, symbol, preferredKinds, opts));
 }
 
-/** `resolveEntityFull` without the candidates' containers: for lookups inside the resolver. */
-async function rankEntity(
+/**
+ * `resolveEntityFull` without the candidates' containers: for lookups inside
+ * the resolver, and for a caller that may re-resolve before it reports (add
+ * them with `withContainers` on the result it keeps).
+ */
+export async function rankEntity(
   client: IxClient,
   symbol: string,
   preferredKinds: string[],
@@ -1022,6 +1026,14 @@ function importIdsOf(owner: object): Set<string> {
 const CONTAINER_NAME_LOOKUPS = 3;
 
 /**
+ * The container lookup is decoration on an answer that is already complete,
+ * and `/v1/expand-by-name` is not scoped to the workspace: on a large shared
+ * graph a common name (`get`, `__init__`) can be slow. Past this the rows go
+ * out without `container` rather than hold up the exit-2 record.
+ */
+export const CONTAINER_LOOKUP_TIMEOUT_MS = 5_000;
+
+/**
  * Name the type that holds each candidate of an ambiguous result: its
  * `container`, the CONTAINS parent the graph has for it unless that is a file
  * (a top-level definition has none). Eight `crop` rows in one file cannot be
@@ -1032,19 +1044,20 @@ const CONTAINER_NAME_LOOKUPS = 3;
  * where every candidate has the name that was asked for), never a request per
  * candidate. That endpoint answers for every entity of the name, so only
  * edges into a listed candidate are read. Best effort: a backend that cannot
- * answer leaves the rows as they were, and `container` is then absent.
+ * answer (or not within CONTAINER_LOOKUP_TIMEOUT_MS) leaves the rows as they
+ * were, and `container` is then absent.
  *
  * Only the ambiguous record (exit 2) pays for this. A resolved target, a
  * `--pick` and a tie notice make no extra request.
  */
-async function withContainers(client: IxClient, result: ResolveResult): Promise<ResolveResult> {
+export async function withContainers(client: IxClient, result: ResolveResult): Promise<ResolveResult> {
   if (result.resolved || !result.ambiguous) return result;
   const all = allCandidatesOf(result.result);
   const ids = new Set(all.map((c) => c.id));
   const names = [...new Set(result.result.candidates.map((c) => c.name).filter(Boolean))].slice(0, CONTAINER_NAME_LOOKUPS);
   const answers = await Promise.all(names.map(async (name) => {
     try {
-      return await client.expandByName(name, { direction: "in", predicates: ["CONTAINS"] });
+      return await client.expandByName(name, { direction: "in", predicates: ["CONTAINS"], timeoutMs: CONTAINER_LOOKUP_TIMEOUT_MS });
     } catch {
       return null;
     }
@@ -1073,14 +1086,27 @@ async function withContainers(client: IxClient, result: ResolveResult): Promise<
   return result;
 }
 
+/** Consecutive runs of equal score, in order; no scores is one run. */
+function scoreTiers<T extends { score?: number }>(ranked: readonly T[]): T[][] {
+  const tiers: T[][] = [];
+  for (const item of ranked) {
+    const last = tiers[tiers.length - 1];
+    if (last && last[0].score === item.score) last.push(item);
+    else tiers.push([item]);
+  }
+  return tiers;
+}
+
 function buildAmbiguous(
   nodes: any[],
   scores?: number[],
   extra?: { total?: number; truncated?: boolean; diagnostics?: Array<{ code: string; message: string }> },
 ): AmbiguousResult {
-  // The caller's ranking dealt round-robin by file, then the first 8 shown and
-  // numbered for --pick. The ranking breaks ties by (path, line, id), so
-  // `--pick n` means the same thing on every run.
+  // The caller's ranking dealt round-robin by file within each score tier,
+  // then the first 8 shown and numbered for --pick. A tier is a run of equal
+  // scores: spreading never puts a worse score (an import's +5) ahead of a
+  // better one, so the page is still the 8 best by score. The ranking breaks
+  // ties by (path, line, id), so `--pick n` means the same thing on every run.
   const seen = new Set<string>();
   const ranked: Array<{ node: any; score?: number }> = [];
   for (let i = 0; i < nodes.length; i++) {
@@ -1089,7 +1115,7 @@ function buildAmbiguous(
     seen.add(node.id);
     ranked.push({ node, score: scores?.[i] });
   }
-  const dealt = roundRobinByFile(ranked, (r) => r.node);
+  const dealt = scoreTiers(ranked).flatMap((tier) => roundRobinByFile(tier, (r) => r.node));
   const picked = dealt.slice(0, 8);
   const candidates: AmbiguousResult["candidates"] = picked.map(({ node, score }, i) => {
     const line = lineOf(node);

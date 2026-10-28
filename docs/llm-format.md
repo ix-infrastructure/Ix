@@ -118,9 +118,11 @@ which value it ignored, on stderr, when a person is there to read it.
   `count=` (and `truncated=true` when the search window came back full, so
   `total` is a lower bound); json has `total` and `truncated` beside
   `candidates`. Candidates are ranked by how well they match (ties in
-  (path, line, id) order), then dealt round-robin by file: the best of each
-  file, then each file's second-best, and so on, so a file that defines the
-  name many times does not fill the 8 shown on its own. That order is the
+  (path, line, id) order), then each run of equal scores is dealt
+  round-robin by file: the best of each file, then each file's second-best,
+  and so on, so a file that defines the name many times does not fill the 8
+  shown on its own. A worse score never goes ahead of a better one, so an
+  import of the name still comes after every definition. That order is the
   numbering, so `--pick <n>` and `--all`'s `candidate=<n>` mean the same thing
   on every run. A candidate inside a class or other type carries
   `container=<name>` (json `container`), last on its record; it is absent for
