@@ -4877,9 +4877,10 @@ export function resolveEdges(
    * path, so `from pkg.sub.mod import f` no longer means "any mod.py".
    *   - One file matches: that file.
    *   - Several (two packages named `a.b` in a monorepo): the one under the
-   *     deepest source root that contains the importing file; when no root
-   *     contains it, the root sharing the longest directory prefix with it.
-   *     On a tie, all of them, which the callers treat as ambiguous.
+   *     deepest source root that contains the importing file. When no root
+   *     contains it, or the deepest tie, all of them, which the callers treat
+   *     as ambiguous (never the longest shared prefix: that binds a sibling
+   *     copy, e.g. `tests/fixtures/pkg`, over the real package).
    *   - None: today's stem matching (`modNameToFiles`), so nothing that
    *     resolved before stops resolving. Not when `strict` (an aliased
    *     `import a.b as m`, which was never resolved before): then none, so
@@ -4890,6 +4891,8 @@ export function resolveEdges(
    * stem does it name a package, `name/__init__.py`, and then only one under
    * a source root that contains the importing file (the deepest), so a
    * nested `myapp/logging/` does not capture `import logging` elsewhere.
+   * When `strict` (`import yaml as y`) it gets no stem match: only a module
+   * or package under the deepest root that contains the importing file.
    * Candidates come from the stem and package maps (`pythonFilesBySuffix`),
    * never a scan, and are memoized per (importing file, module): the
    * transitive tier asks again for every file that imports the importing file.
@@ -4932,29 +4935,41 @@ export function resolveEdges(
         });
     };
 
-    if (parts.length === 1) {
-      const byStem = stemMatches();
-      if (byStem.length > 0) return byStem;
-      const containing = collect(`${last}/__init__.py`, true)
-        .map(m => ({ fp: m.fp, ...scoreRoot(m.root) }))
-        .filter(m => m.contains);
+    // A package beside a same-named module under one root shadows the module.
+    const preferPackages = <T extends { root: string; isPackage: boolean }>(found: T[]): T[] => {
+      const packageRoots = new Set(found.filter(m => m.isPackage).map(m => m.root));
+      return found.filter(m => m.isPackage || !packageRoots.has(m.root));
+    };
+    const deepestContaining = (found: Array<{ fp: string; root: string }>): string[] => {
+      const containing = found.map(m => ({ fp: m.fp, ...scoreRoot(m.root) })).filter(m => m.contains);
       if (containing.length === 0) return [];
       const deepest = Math.max(...containing.map(m => m.shared));
       return containing.filter(m => m.shared === deepest).map(m => m.fp);
+    };
+
+    if (parts.length === 1) {
+      // `import yaml as y` was never resolved before, so it gets no stem
+      // match: only a `yaml.py` / `yaml/__init__.py` under a source root that
+      // contains the importing file, where Python could actually find it.
+      if (strict) return deepestContaining(preferPackages([...collect(`${last}.py`, false), ...collect(`${last}/__init__.py`, true)]));
+      const byStem = stemMatches();
+      if (byStem.length > 0) return byStem;
+      return deepestContaining(collect(`${last}/__init__.py`, true));
     }
 
     const modulePath = parts.join('/');
     const found = [...collect(`${modulePath}.py`, false), ...collect(`${modulePath}/__init__.py`, true)];
-    const packageRoots = new Set(found.filter(m => m.isPackage).map(m => m.root));
-    const matches = found.filter(m => m.isPackage || !packageRoots.has(m.root));
+    const matches = preferPackages(found);
     if (matches.length === 0) return strict ? [] : stemMatches();
     if (matches.length === 1) return [matches[0].fp];
 
-    const scored = matches.map(m => ({ fp: m.fp, ...scoreRoot(m.root) }));
-    const containing = scored.filter(m => m.contains);
-    const pool = containing.length > 0 ? containing : scored;
-    const best = Math.max(...pool.map(m => m.shared));
-    const closest = pool.filter(m => m.shared === best);
+    // Only a root that contains the importing file can win. A shared prefix
+    // alone is no evidence: `tests/test_x.py` must not bind a copy under
+    // `tests/fixtures/` over the real `src/` package.
+    const containing = matches.map(m => ({ fp: m.fp, ...scoreRoot(m.root) })).filter(m => m.contains);
+    if (containing.length === 0) return matches.map(m => m.fp);
+    const deepest = Math.max(...containing.map(m => m.shared));
+    const closest = containing.filter(m => m.shared === deepest);
     return closest.length === 1 ? [closest[0].fp] : matches.map(m => m.fp);
   }
 

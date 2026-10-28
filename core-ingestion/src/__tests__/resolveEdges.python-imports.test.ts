@@ -88,6 +88,24 @@ describe('Python absolute imports resolve by full module path', () => {
     expect(callsTo(edges, NN).filter(e => e.confidence >= 0.9)).toEqual([]);
   });
 
+  it('import yaml as y binds a local yaml.py only under a root that contains the importing file', () => {
+    const elsewhere = py('/repo/tools/yaml.py', 'def load(x):\n    return x\n');
+    const caller = py('/repo/app/main.py', 'import yaml as y\n\ndef main(a):\n    return y.load(a)\n');
+    const edges = resolveEdges([caller, elsewhere]);
+
+    expect(importsOf(edges, caller.filePath, elsewhere.filePath)).toEqual([]);
+    expect(callsTo(edges, elsewhere.filePath).filter(e => e.confidence >= 0.6)).toEqual([]);
+
+    const beside = py('/repo/app/yaml.py', 'def load(x):\n    return x\n');
+    const withBeside = resolveEdges([caller, elsewhere, beside]);
+    expect(importsOf(withBeside, caller.filePath, beside.filePath)).toHaveLength(1);
+    expect(callsTo(withBeside, beside.filePath)).toContainEqual(
+      expect.objectContaining({ srcName: 'main', dstQualifiedKey: 'load', confidence: 0.9 }),
+    );
+    expect(importsOf(withBeside, caller.filePath, elsewhere.filePath)).toEqual([]);
+    expect(callsTo(withBeside, elsewhere.filePath).filter(e => e.confidence >= 0.6)).toEqual([]);
+  });
+
   it('import torch.nn as nn stays unbound across batches too', () => {
     const NN = '/repo/models/nn.py';
     const local = py(NN, 'def relu(x):\n    return x\n');
@@ -121,14 +139,27 @@ describe('Python absolute imports resolve by full module path', () => {
     expect(callsTo(edges, OTHER_MOD)).toEqual([]);
   });
 
-  it('prefers the package under the importing file\'s source root when two match', () => {
+  it('declines when no matching root contains the importing file, however much path it shares', () => {
+    // svc1/src shares more of the path with svc1/tests than svc2/src does, but
+    // neither root contains the test, so neither is where Python looks.
     const caller = py('/repo/svc1/tests/test_main.py', 'from app.util import load\n\ndef test_main():\n    return load()\n');
     const mine = py('/repo/svc1/src/app/util.py', 'def load():\n    return 1\n');
     const theirs = py('/repo/svc2/src/app/util.py', 'def load():\n    return 2\n');
     const edges = resolveEdges([caller, mine, theirs]);
 
-    expect(callsTo(edges, mine.filePath)).toHaveLength(1);
-    expect(callsTo(edges, theirs.filePath)).toEqual([]);
+    expect(edges.filter(e => e.predicate === 'CALLS')).toEqual([]);
+    expect(edges.filter(e => e.predicate === 'IMPORTS' && e.dstName === 'app.util')).toEqual([]);
+  });
+
+  it('a test does not bind a fixture copy of the package over the real src package', () => {
+    const caller = py('/repo/tests/test_mod.py', 'from pkg.sub.mod import load\n\ndef test_it():\n    return load()\n');
+    const real = py('/repo/src/pkg/sub/mod.py', 'def load():\n    return 1\n');
+    const fixture = py('/repo/tests/fixtures/pkg/sub/mod.py', 'def load():\n    return 2\n');
+    const edges = resolveEdges([caller, real, fixture]);
+
+    expect(importsOf(edges, caller.filePath, fixture.filePath)).toEqual([]);
+    expect(callsTo(edges, fixture.filePath).filter(e => e.confidence >= 0.6)).toEqual([]);
+    expect(callsTo(edges, real.filePath).filter(e => e.confidence >= 0.6)).toEqual([]);
   });
 
   it('prefers the deepest source root that contains the importing file', () => {
