@@ -77,7 +77,7 @@ const PACKAGES = [
 ];
 
 describe("acceptance 1: a bare basename shared by three files", () => {
-  it("resolves to the same file in both orders, scored, with a path-sorted notice", async () => {
+  it("resolves to the same file in both orders, scored, with a notice in rank order", async () => {
     const [a, b] = await inBothOrders(PACKAGES, (c) => full(c, "index.ts"));
     for (const r of [a, b]) {
       expect(r.resolved).toBe(true);

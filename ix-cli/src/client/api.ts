@@ -227,7 +227,7 @@ export class IxClient {
       // request with a derived circe decoder and drop the unknown field, so
       // sending it is always safe; callers keep their own filter as well.
       scope: opts?.scope,
-    }, opts?.signal);
+    }, { signal: opts?.signal });
   }
 
   // Vector-similarity search. The backend (POST /v1/search/semantic) embeds the
@@ -289,14 +289,14 @@ export class IxClient {
 
   async expandByName(
     name: string,
-    opts?: { direction?: string; predicates?: string[]; kinds?: string[] }
+    opts?: { direction?: string; predicates?: string[]; kinds?: string[]; timeoutMs?: number }
   ): Promise<{ nodes: any[]; edges: any[] }> {
     return this.post("/v1/expand-by-name", {
       name,
       direction: opts?.direction ?? "both",
       predicates: opts?.predicates,
       kinds: opts?.kinds,
-    });
+    }, { timeoutMs: opts?.timeoutMs });
   }
 
   async expand(
@@ -805,7 +805,11 @@ export class IxClient {
     return this.token !== undefined;
   }
 
-  private async post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+  private async post<T>(
+    path: string, body: unknown, opts?: { timeoutMs?: number; signal?: AbortSignal },
+  ): Promise<T> {
+    const timeoutMs = opts?.timeoutMs ?? 2 * 60 * 1000;
+    const signal = opts?.signal;
     const payload = JSON.stringify(body);
     const send = () =>
       fetch(`${this.endpoint}${path}`, {
@@ -814,10 +818,11 @@ export class IxClient {
         body: payload,
         // These small reads/writes (source-hashes, stitch, list, ...) had no
         // timeout, so a stalled connection could hang the process indefinitely.
-        // 2 min per request, also bounded by the shared deadline when set, and
-        // by the read deadline when this POST is a read.
-        signal: signal ? AbortSignal.any([signal, this.signalFor(2 * 60 * 1000, isSharedRead(path))])
-          : this.signalFor(2 * 60 * 1000, isSharedRead(path)),
+        // 2 min per request unless the caller bounds it, also bounded by the
+        // shared deadline when set, and by the read deadline when this POST is
+        // a read.
+        signal: signal ? AbortSignal.any([signal, this.signalFor(timeoutMs, isSharedRead(path))])
+          : this.signalFor(timeoutMs, isSharedRead(path)),
       });
     if (signal) {
       // Optional probes own their cancellation: no shared memo, queue or retry

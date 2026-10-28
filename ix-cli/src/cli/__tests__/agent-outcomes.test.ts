@@ -422,22 +422,26 @@ describe("--all on an ambiguous target", () => {
   ];
 
   it("skips an import of the name when definitions are listed, keeping --pick numbers", async () => {
-    graph({ clamp: [CLAMP_IMPORT, ...CLAMP_DEFS] });
+    // A second definition in app/utils.py. The import scores worse than every
+    // definition, so it ranks last (the file round-robin deals only among
+    // equal scores) and the definitions keep their shown numbers under --all.
+    const pyAgain = { ...CLAMP_DEFS[0], id: "py2-id", attrs: { line_start: 40, line_end: 41 } };
+    graph({ clamp: [CLAMP_IMPORT, ...CLAMP_DEFS, pyAgain] });
     const plain = JSON.parse((await run(["callers", "clamp", "--format", "json"])).stdout);
     expect(plain.candidates.map((c: { id: string; rank: number }) => [c.rank, c.id]))
-      .toEqual([[1, "import-id"], [2, "py-id"], [3, "ts-id"]]);
+      .toEqual([[1, "py-id"], [2, "ts-id"], [3, "py2-id"], [4, "import-id"]]);
 
     expand.mockClear();
     const body = JSON.parse((await run(["callers", "clamp", "--all", "--format", "json"])).stdout);
-    expect(body.candidates.map((c: { n: number; path: string }) => [c.n, c.path]))
-      .toEqual([[2, "app/utils.py"], [3, "web/src/math.ts"]]);
-    expect(new Set(body.results.map((r: { candidate: number }) => r.candidate))).toEqual(new Set([2, 3]));
-    expect(expand.mock.calls.map(([id]) => id).sort()).toEqual(["py-id", "ts-id"]);
+    expect(body.candidates.map((c: { n: number; id: string }) => [c.n, c.id]))
+      .toEqual([[1, "py-id"], [2, "ts-id"], [3, "py2-id"]]);
+    expect(new Set(body.results.map((r: { candidate: number }) => r.candidate))).toEqual(new Set([1, 2, 3]));
+    expect(expand.mock.calls.map(([id]) => id).sort()).toEqual(["py-id", "py2-id", "ts-id"]);
     // The skipped import is not a candidate the search cut off.
     expect((body.diagnostics ?? []).map((d: { code: string }) => d.code)).not.toContain("candidates_truncated");
 
     const impact = JSON.parse((await run(["impact", "clamp", "--all", "--format", "json"])).stdout);
-    expect(impact.results.map((r: { candidate: number }) => r.candidate)).toEqual([2, 3]);
+    expect(impact.results.map((r: { candidate: number }) => r.candidate)).toEqual([1, 2, 3]);
   });
 
   it("still answers for imports when no definition is listed", async () => {
