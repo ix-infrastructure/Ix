@@ -36,7 +36,7 @@ import {
   type StartingPoint,
   type SymbolHit,
 } from "../explain/issue.js";
-import { collectIssueEntities, rankIssueEntities, type IssueEntityRanking } from "../explain/issue-entities.js";
+import { collectIssueEntities, placeIssueMatches, rankIssueEntities, type IssueEntityRanking } from "../explain/issue-entities.js";
 import { symbolReadChecker } from "../symbol-read-check.js";
 import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/related-files.js";
 import { cachedBm25Ranker } from "../explain/bm25-cache.js";
@@ -2138,7 +2138,10 @@ export function buildBundle(input: BuildInput): ContextBundle {
     .map((edge) => ({ src: edge.src, dst: edge.dst, predicate: edge.predicate }));
 
   if (issue?.query !== undefined) {
-    entities = rankIssueEntities(entities, { ...issue, query: issue.query }, relationships);
+    const pinned = new Set([resolved.id, ...issue.startingPoints.flatMap((s) => s.id ? [s.id] : [])]);
+    entities = placeIssueMatches(
+      entities, rankIssueEntities(entities, { ...issue, query: issue.query }, relationships),
+      pinned, budgets.maxEntities);
   }
 
   const evidence = rankEvidence({ resolved, facts, context, relationships, prov, entities, issue });

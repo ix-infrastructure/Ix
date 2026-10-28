@@ -37,6 +37,13 @@ describe("plugin prompt invocations", () => {
     expect(invocations.every(inv => check(inv.argv, surface) === null)).toBe(true);
   });
 
+  it("checks trailing punctuation in escaped fenced prompts without hiding misspelt flags", () => {
+    const fence = "\\`\\`\\`";
+    const invocations = textInvocations(`${fence}sh\nix map --remap.\nix map --remapp.\n${fence}`);
+    expect(invocations.map(inv => inv.line)).toEqual([2, 3]);
+    expect(invocations.map(inv => check(inv.argv, surface))).toEqual([null, '"map" has no --remapp']);
+  });
+
   it("preserves JSON prompt decoding, paths and line numbers", () => {
     const invocations = jsonInvocations(JSON.stringify({ agent: { prompt: "Instructions:\n`ix map --remap`" } }));
     expect(invocations).toMatchObject([{ argv: ["map", "--remap"], line: "agent.prompt:2" }]);

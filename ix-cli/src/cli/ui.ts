@@ -231,7 +231,7 @@ export function reportUnresolvedTarget(
  * from the only field that was included. One call has to be enough to pick.
  */
 function candidateLines(
-  candidates: ReadonlyArray<{ id?: string; name: string; kind?: string; path?: string }>,
+  candidates: ReadonlyArray<{ id?: string; name: string; kind?: string; path?: string; container?: string }>,
   record: "candidate" | "suggestion",
 ): string[] {
   return candidates.map((candidate, index) => llmLine(record, [
@@ -242,6 +242,8 @@ function candidateLines(
     // Short form: the full uuid is four times the tokens and nothing here needs
     // it -- `--pick <n>` is the way to choose, and a prefix resolves an entity.
     ["id", candidate.id ? candidate.id.slice(0, 8) : undefined],
+    // Last, so a reader of the fields before it sees them where they were.
+    ["container", candidate.container],
   ]));
 }
 
@@ -290,9 +292,10 @@ export function reportAmbiguousTarget(
   }
   for (let index = 0; index < result.candidates.length; index += 1) {
     const candidate = result.candidates[index];
-    const shortPath = candidate.path ? ` in ${candidate.path}` : "";
+    const shortPath = candidate.path ? ` in ${candidate.path}${candidate.line != null ? `:${candidate.line}` : ""}` : "";
+    const container = candidate.container ? `  ${candidate.container}` : "";
     console.error(
-      `  ${index + 1}. ${chalk.cyan((candidate.kind ?? "").padEnd(10))} ${chalk.dim(candidate.id.slice(0, 8))}  ${candidate.name}${chalk.dim(shortPath)}`,
+      `  ${index + 1}. ${chalk.cyan((candidate.kind ?? "").padEnd(10))} ${chalk.dim(candidate.id.slice(0, 8))}  ${candidate.name}${container}${chalk.dim(shortPath)}`,
     );
   }
   const hints = ["--pick <n>"];

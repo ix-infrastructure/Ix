@@ -17,7 +17,7 @@ function bundle(query: string, source: string, members = [near, far], edges = [
   { src: "start", dst: "near", predicate: "CALLS" },
   { src: "near", dst: "bridge", predicate: "CALLS" },
   { src: "bridge", dst: "far", predicate: "CALLS" },
-], extraEntities: EntityLocation[] = []) {
+], extraEntities: EntityLocation[] = [], maxEntities = 3) {
   const read = vi.fn(() => source);
   const issue = {
     startingPoints: [{ id: "start", name: "Cache", kind: "class", path, token: "Cache", via: "identifier in issue" as const }],
@@ -36,7 +36,7 @@ function bundle(query: string, source: string, members = [near, far], edges = [
       nodes: [], edges, claims: [], conflicts: [], decisions: [], intents: [],
       metadata: { query: "", seedEntities: [], hopsExpanded: 1, asOfRev: 1 },
     } as never,
-    provenance: {}, budgets: clampBudgets({ maxEntities: 2 }),
+    provenance: {}, budgets: clampBudgets({ maxEntities }),
     isStale: () => false, issue,
   });
   return { result, read };
@@ -48,11 +48,11 @@ describe("issue entity ranking", () => {
       "class Cache:", "    def prepare(self):", "        return self.ready",
       "    def restore(self):", '        """Discard expired entries during snapshot recovery."""', "        return self.snapshot",
     ].join("\n"));
-    expect(result.entities[0].id).toBe("far");
-    expect(result.entities[0]).toMatchObject({ path, lineStart: 4, lineEnd: 6, stale: false });
+    expect(result.entities.map(e => e.id)).toEqual(["start", "far", "near"]);
+    expect(result.entities[1]).toMatchObject({ path, lineStart: 4, lineEnd: 6, stale: false });
     expect(read).toHaveBeenCalledTimes(1);
     const parsed = contextBundleSchema.parse(JSON.parse(JSON.stringify(result)));
-    expect(parsed.entities[0]).toHaveProperty("score", expect.any(Number));
+    expect(parsed.entities[1]).toHaveProperty("score", expect.any(Number));
   });
 
   it("breaks a lexical tie by distance from the strongest starts", () => {
@@ -63,8 +63,8 @@ describe("issue entity ranking", () => {
     const lexical = rank([far, near], "snapshot recovery", source).result;
     expect(lexical[0].score).toBe(lexical[1].score);
     const { result } = bundle("snapshot recovery", source, [far, near]);
-    expect(result.entities.map(e => e.id)).toEqual(["near", "far"]);
-    expect(result.entities[0].score).toBeGreaterThan(result.entities[1].score!);
+    expect(result.entities.map(e => e.id)).toEqual(["start", "near", "far"]);
+    expect(result.entities[1].score).toBeGreaterThan(result.entities[2].score!);
   });
 
   it("refines equivalent split identifiers by an exact issue identifier hit", () => {
@@ -72,8 +72,8 @@ describe("issue entity ranking", () => {
       "class Cache:", "    def reset_cache(self):", "        return expired_snapshots()",
       "    def resetCache(self):", "        return expired_snapshots()", "",
     ].join("\n"), [{ ...near, name: "reset_cache" }, { ...far, name: "resetCache" }]);
-    expect(result.entities.map(e => e.id)).toEqual(["far", "near"]);
-    expect(result.entities[0].score).toBeGreaterThan(result.entities[1].score!);
+    expect(result.entities.map(e => e.id)).toEqual(["start", "far", "near"]);
+    expect(result.entities[1].score).toBeGreaterThan(result.entities[2].score!);
   });
 
   it("combines direct facts from another start with context edges using the shortest distance", () => {
@@ -86,6 +86,41 @@ describe("issue entity ranking", () => {
       distances: new Map([["far", 1]]), // second start directly calls far
     }, [{ src: "first", dst: "bridge" }, { src: "bridge", dst: "near" }, { src: "near", dst: "far" }]);
     expect(result.map(e => e.id)).toEqual(["far", "near"]);
+  });
+
+  it("keeps the target, starting points and structure in budget under many matches", () => {
+    const methods: EntityLocation[] = Array.from({ length: 60 }, (_, i) => ({
+      id: `m${i}`, name: `recover${i}`, kind: "method", path, lineStart: i + 2, lineEnd: i + 2,
+    }));
+    const source = ["class Cache:", ...methods.map(m => `    def ${m.name}(self): return snapshot_recovery()`)].join("\n");
+    const imported: EntityLocation = { id: "imp", name: "store", kind: "module" };
+    const other = { id: "other", name: "Snapshot", kind: "class", path: "src/snapshot.py", token: "Snapshot", via: "identifier in issue" as const };
+    const result = buildBundle({
+      resolved: { id: "start", name: "Cache", kind: "class", resolutionMode: "issue" },
+      facts: {
+        id: "start", name: "Cache", kind: "class", path, stale: false,
+        memberRefs: [], members: [], memberCount: 0, importRefs: [imported],
+        topCallers: [], topDependents: [], diagnostics: [], historyLength: 1,
+      } as unknown as ContextFacts,
+      context: {
+        nodes: [], edges: [{ src: "start", dst: "imp", predicate: "IMPORTS" }],
+        claims: [], conflicts: [], decisions: [], intents: [],
+        metadata: { query: "", seedEntities: [], hopsExpanded: 1, asOfRev: 1 },
+      } as never,
+      provenance: {}, budgets: clampBudgets({}), isStale: () => false,
+      issue: {
+        startingPoints: [{ id: "start", name: "Cache", kind: "class", path, token: "Cache", via: "identifier in issue" as const }, other],
+        unresolved: [], fallback: false, rankedFiles: [{ path, score: 1, reason: "bm25" }],
+        query: "snapshot recovery", repo: { read: () => source }, extraEntities: methods,
+      },
+    });
+    const ids = result.entities.map(e => e.id);
+    const limit = clampBudgets({}).maxEntities;
+    expect(ids.slice(0, 2)).toEqual(["start", "other"]);
+    expect(ids).toContain("imp");
+    expect(result.relationships).toEqual([{ src: "start", dst: "imp", predicate: "IMPORTS" }]);
+    expect(ids.filter(id => id.startsWith("m")).length).toBeLessThan(limit);
+    expect(result.entities[2].score).toBeGreaterThan(0);
   });
 
   it("retains new scores through JSON validation while accepting old entities without them", () => {
@@ -161,7 +196,7 @@ describe("issue candidate discovery", () => {
       "class Cache:", "    def prepare(self):", "        return self.ready",
       "    def restore(self):", '        """Discard expired entries during snapshot recovery."""', "        return self.snapshot",
     ].join("\n"), [near], [], candidates);
-    expect(result.entities[0].id).toBe("far");
+    expect(result.entities[1].id).toBe("far");
     expect(listByKind).toHaveBeenCalledTimes(2);
     expect(listByKind).toHaveBeenCalledWith("method", { workspaceId: "fixture", scope: path, limit: ISSUE_ENTITIES_PER_KIND });
   });

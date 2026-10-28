@@ -98,6 +98,29 @@ export function rankIssueEntities<T extends EntityLocation>(
     .map(({ entity, score }) => ({ ...entity, score }));
 }
 
+/**
+ * Order a ranked bundle for the entity budget. The pinned entities (the target
+ * and the other starting points) stay first, the best issue matches take at
+ * most half of what is left, and everything else keeps its deterministic
+ * order. Sorting the whole list by match score instead put every non-function
+ * (the target, its imports, its files) behind hundreds of candidates, so the
+ * budget cut them and their relationships with them.
+ */
+export function placeIssueMatches<T extends { id: string }>(
+  original: T[],
+  ranked: Array<T & { score: number }>,
+  pinned: ReadonlySet<string>,
+  limit: number,
+): Array<T & { score: number }> {
+  const scores = new Map(ranked.map(e => [e.id, e.score]));
+  const head = original.filter(e => pinned.has(e.id));
+  const slots = Math.max(0, Math.ceil((limit - head.length) / 2));
+  const matches = ranked.filter(e => e.score > 0 && !pinned.has(e.id)).slice(0, slots);
+  const placed = new Set([...head, ...matches].map(e => e.id));
+  return [...head, ...matches, ...original.filter(e => !placed.has(e.id))]
+    .map(e => ({ ...e, score: scores.get(e.id) ?? 0 }));
+}
+
 /** Include an adjacent JS/TS doc comment, outside the parser's definition span. */
 function definitionText(lines: string[], start: number, end: number): string {
   let first = start - 1;
