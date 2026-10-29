@@ -258,6 +258,27 @@ describe("interfaces", () => {
       ["sibling", "Job.run", 1, "Runnable.run"],
     ]);
   });
+
+  it("text prints one heading per relation when overrides and implements interleave", async () => {
+    // Task extends B (a/), implements Runnable (src/), B extends A: by depth then
+    // path the up-rows run overrides, implements, overrides.
+    const b = type("B", "a/B.ts");
+    const a = type("A", "a/A.ts");
+    graph.value = new Graph()
+      .extends(TASK, b, RUNNABLE).extends(b, a)
+      .contains(b, method(b, "run", 2)).contains(a, method(a, "run", 2))
+      .contains(RUNNABLE, method(RUNNABLE, "run", 2)).contains(TASK, RUN)
+      .map;
+    target.value = asTarget(RUN);
+    expect(brief(json((await run(["overrides", "run", "--format", "json"])).out).rows)).toEqual([
+      ["overrides", "B.run", 1, undefined],
+      ["implements", "Runnable.run", 1, undefined],
+      ["overrides", "A.run", 2, undefined],
+    ]);
+    const text = (await run(["overrides", "run"])).out.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+    expect(text.match(/^ {2}\S.*$/gm)).toEqual(["  overrides", "  implements"]);
+    expect(text).toMatch(/ {2}overrides\n {4}B\.run .*depth 1\n {4}A\.run .*depth 2\n {2}implements\n {4}Runnable\.run /);
+  });
 });
 
 describe("no family to report", () => {
@@ -485,7 +506,20 @@ describe("headerDeclaresBase", () => {
     ["A.kt", "class A(val m: Map<String, List<Int>>)", false],
     ["A.kt", "class A(val f: (Int) -> Unit) : Base()", true],
     ["A.kt", "class A(val f: (Int) -> Unit)", false],
-    ["A.cs", "public class A<T> where T : IComparable<List<T>>", true],
+    ["A.cs", "public class A<T> where T : IComparable<List<T>>", false],
+    ["A.cs", "public class Repo<T> where T : IEntity {", false],
+    ["A.cs", "public class Repo<T> : Base where T : IEntity {", true],
+    ["A.kt", "class Box<T>(val t: T) where T : Comparable<T>", false],
+    ["A.swift", "class Box<T> where T: Equatable {", false],
+    ["a.ts", "class Box<T extends Item> {", false],
+    ["a.ts", "class Box<T extends Item> extends Base<T> {", true],
+    ["A.java", "public class Box<T extends Comparable<T>> {", false],
+    ["A.java", "public class Box<T extends Comparable<T>> implements Sized {", true],
+    ["a.py", "class Foo(metaclass=ABCMeta):", false],
+    ["a.py", "class Foo(**kwargs):", false],
+    ["a.py", "class Foo(Base, metaclass=ABCMeta):", true],
+    ["a.py", "class Foo(Generic[K, V]):", true],
+    ["a.py", "class Foo(object, Mixin):", true],
     ["A.cs", "public class A<K, V<W>> : IMap<K, IList<V<W>>>", true],
     ["a.cpp", "struct A : B<C<D>>, E {", true],
     ["A.kt", "class A(val x: Int", false],

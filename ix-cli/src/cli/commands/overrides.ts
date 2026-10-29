@@ -115,15 +115,21 @@ async function overridesOne(client: IxClient, symbol: string, opts: OverridesOpt
     return;
   }
   if (!isQuiet()) console.log(`${chalk.bold("Overrides")} of ${chalk.cyan(qualified)}:`);
-  let heading: string | undefined;
+  // `overrides` and `implements` rows share a rank and interleave by depth:
+  // one heading per relation, in order of first appearance.
+  const groups = new Map<string, OverrideRow[]>();
   for (const r of rows) {
     const title = r.relation === "sibling" && r.via ? `${TEXT_HEADINGS.sibling} (via ${r.via})` : TEXT_HEADINGS[r.relation];
-    if (title !== heading) {
-      heading = title;
-      console.log(`  ${chalk.dim(title)}`);
+    const group = groups.get(title);
+    if (group) group.push(r);
+    else groups.set(title, [r]);
+  }
+  for (const [title, group] of groups) {
+    console.log(`  ${chalk.dim(title)}`);
+    for (const r of group) {
+      const where = locationLabel(r);
+      console.log(`    ${chalk.bold(`${r.owner.name}.${r.name}`)}${where ? `  ${chalk.dim(where)}` : ""}  ${chalk.dim(`depth ${r.depth}`)}`);
     }
-    const where = locationLabel(r);
-    console.log(`    ${chalk.bold(`${r.owner.name}.${r.name}`)}${where ? `  ${chalk.dim(where)}` : ""}  ${chalk.dim(`depth ${r.depth}`)}`);
   }
 }
 

@@ -105,16 +105,20 @@ export function headerDeclaresBase(lines: readonly string[], lineStart: number, 
   // The header up to its body: a few lines at most.
   const header = lines.slice(Math.max(0, lineStart - 1), lineStart + 2).join(" ").split(/[{]/)[0];
   if (/\.pyi?$/i.test(path)) {
-    const bases = /\bclass\s+\w+\s*(?:\[[^\]]*\])?\s*\(([^)]*)\)/.exec(header)?.[1]?.trim();
-    return !!bases && !/^(object)?$/.test(bases);
+    const bases = /\bclass\s+\w+\s*(?:\[[^\]]*\])?\s*\(([^)]*)\)/.exec(header)?.[1];
+    // Keyword arguments (`metaclass=ABCMeta`, `**kw`) and `object` are not bases.
+    return !!bases && bases.split(",").map((b) => b.trim())
+      .some((b) => b !== "" && b !== "object" && !b.startsWith("**") && !/^\w+\s*=/.test(b));
   }
   if (/\.rb$/i.test(path)) return /\bclass\s+[\w:]+\s*<\s*\S/.test(header);
   if (/\.(kt|kts|cs|swift|cpp|cc|cxx|c\+\+|hpp|hh|hxx|h)$/i.test(path)) {
-    // Constructor parameters and generic arguments carry colons of their own.
-    const bare = outsideBrackets(header);
+    // Constructor parameters and generic arguments carry colons of their own,
+    // and so does a `where T : Bound` clause, which follows any base list.
+    const bare = outsideBrackets(header).split(/\bwhere\b/)[0];
     return /\b(class|struct|interface|object|record|enum|protocol)\s+\w+[^:;]*?:\s*[\w:]/.test(bare);
   }
-  return /\b(extends|implements)\b/.test(header);
+  // Type parameter bounds (`<T extends Item>`) sit inside the brackets.
+  return /\b(extends|implements)\b/.test(outsideBrackets(header));
 }
 
 /**
