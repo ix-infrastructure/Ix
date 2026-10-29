@@ -412,7 +412,9 @@ function importSegments(spec: string): string[] {
  * Files in `table` that may resolve differently now: a name they refer to is in
  * `names` (also by its first or last segment, for `obj.method` and `Mod::f`), or
  * an import of theirs names the stem of a path in `paths` (a file that appeared,
- * went away, or changed what it imports). Files in `exclude` -- the ones the
+ * went away, or changed what it imports), or it is a Python file with imports
+ * below the directory of a `__init__.py` in `packageEntries` (one that appeared
+ * or went away). Files in `exclude` -- the ones the
  * run already sent -- are left out. Over-matching costs a parse; the resolution hash then decides whether
  * anything is sent.
  */
@@ -421,13 +423,26 @@ export function findDependents(
   names: ReadonlySet<string>,
   paths: Iterable<string>,
   exclude: ReadonlySet<string>,
+  packageEntries: Iterable<string> = [],
 ): string[] {
   const stems = new Set<string>();
   for (const p of paths) {
     const stem = importStem(p);
     if (stem.length > 0 && stem !== ".") stems.add(stem);
   }
-  if (names.size === 0 && stems.size === 0) return [];
+  // A `__init__.py` that came or went turns its directory into a package, or
+  // back into a plain folder. That changes what imports inside it can bind
+  // (`import helpers as h` in `tools/main.py` names `tools/helpers.py` only
+  // while `tools/` is not a package), whatever the import's name, so every
+  // Python file below it that imports anything is re-resolved.
+  const packageDirs: string[] = [];
+  for (const p of packageEntries) {
+    const posix = p.replace(/\\/g, "/");
+    if (path.posix.basename(posix) !== "__init__.py") continue;
+    const dir = path.posix.dirname(posix);
+    packageDirs.push(dir === "." ? "" : `${dir}/`);
+  }
+  if (names.size === 0 && stems.size === 0 && packageDirs.length === 0) return [];
   // A changed superclass changes the members visible through every subclass,
   // even when those subclass files were not edited (or were already sent).
   // Likewise a changed type changes what every factory returning it gives a
@@ -478,7 +493,9 @@ export function findDependents(
       }
       return false;
     });
-    if (byName || byImport) out.push(rel);
+    const byPackage = !byName && !byImport && packageDirs.length > 0 && s.language === "python" &&
+      (s.imports ?? []).length > 0 && packageDirs.some(dir => rel.replace(/\\/g, "/").startsWith(dir));
+    if (byName || byImport || byPackage) out.push(rel);
   }
   return out.sort();
 }

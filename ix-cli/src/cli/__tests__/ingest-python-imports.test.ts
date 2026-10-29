@@ -28,7 +28,8 @@ const ENV_KEYS = [
   "IX_STITCH_COOLDOWN_MS", "IX_STITCH_WAIT_MS", "IX_MAP_DEADLINE_MS",
 ] as const;
 
-type Sources = Record<string, string>;
+/** File contents by path; `null` deletes the file. */
+type Sources = Record<string, string | null>;
 
 const MODULE = (body: string) =>
   `def load(path):\n    return ${body}\n\n\nclass Query:\n    def where(self, clause):\n        return clause\n`;
@@ -62,6 +63,13 @@ const BASE: Sources = {
   "other/mod.py": MODULE("path.upper()"),
   "app/__init__.py": "\"\"\"App.\"\"\"\n",
   "app/main.py": MAIN("pkg.sub.mod"),
+  // `import x as y` binds a module beside the importer only while its folder
+  // is not a package: tools/ is a script folder, jobs/ a package.
+  "tools/main.py": "import helpers as h\n\n\ndef main():\n    return h.go()\n",
+  "tools/helpers.py": "def go():\n    return 1\n",
+  "jobs/__init__.py": "",
+  "jobs/run.py": "import tasks as t\n\n\ndef main():\n    return t.go()\n",
+  "jobs/tasks.py": "def go():\n    return 2\n",
 };
 
 describe("Python import resolution through a map (fake backend)", () => {
@@ -87,6 +95,10 @@ describe("Python import resolution through a map (fake backend)", () => {
 
   function write(repoDir: string, sources: Sources): void {
     for (const [p, text] of Object.entries(sources)) {
+      if (text === null) {
+        rmSync(join(repoDir, p));
+        continue;
+      }
       mkdirSync(dirname(join(repoDir, p)), { recursive: true });
       writeFileSync(join(repoDir, p), text, "utf8");
     }
@@ -143,6 +155,8 @@ describe("Python import resolution through a map (fake backend)", () => {
         "run@app/main.py -> entry@pkg/__init__.py",
       ]));
       expect(edges.filter((e) => e.includes("other/mod.py"))).toEqual([]);
+      expect(edges).toContain("main@tools/main.py -> go@tools/helpers.py");
+      expect(edges.filter((e) => e.includes("jobs/"))).toEqual([]);
     } finally {
       await backend.stop();
     }
@@ -169,6 +183,17 @@ describe("Python import resolution through a map (fake backend)", () => {
       expect(edges).toContain("read_config@app/main.py -> load@pkg/sub/mod/__init__.py");
       expect(edges).toContain("read_alias@app/main.py -> load@pkg/sub/mod/__init__.py");
       expect(edges.filter((e) => e.includes("-> load@pkg/sub/mod.py"))).toEqual([]);
+    }],
+    // An empty __init__.py is never parsed; the baseline's package list sees it.
+    ["an empty __init__.py turns the script folder tools/ into a package", { "tools/__init__.py": "" }, (edges) => {
+      // `import helpers` inside package tools is the top-level helpers now.
+      expect(edges.filter((e) => e.includes("tools/"))).toEqual([]);
+    }],
+    ["a __init__.py with code turns the script folder tools/ into a package", { "tools/__init__.py": "VERSION = 1\n" }, (edges) => {
+      expect(edges.filter((e) => e.includes("tools/"))).toEqual([]);
+    }],
+    ["the package jobs/ loses its empty __init__.py and becomes a script folder", { "jobs/__init__.py": null }, (edges) => {
+      expect(edges).toContain("main@jobs/run.py -> go@jobs/tasks.py");
     }],
   ];
 

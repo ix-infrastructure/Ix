@@ -185,6 +185,19 @@ describe('Python absolute imports resolve by full module path', () => {
     expect(edges.filter(e => e.predicate === 'IMPORTS' && e.dstName === 'app.util')).toEqual([]);
   });
 
+  it('binds a lone full-path match although no root contains the importing file, as the stem match did', () => {
+    // The src layout: tests/ beside src/, which only the test runner's path
+    // config joins. One file in the repo has the module's full path, which is
+    // stronger evidence than the unique stem that already bound it before;
+    // declining here would drop every test -> code edge in such a repo.
+    const caller = py('/repo/tests/test_mod.py', 'from pkg.sub.mod import load\n\ndef test_it():\n    return load()\n');
+    const real = py('/repo/src/pkg/sub/mod.py', 'def load():\n    return 1\n');
+    const edges = resolveEdges([caller, real]);
+
+    expect(importsOf(edges, caller.filePath, real.filePath)).toHaveLength(1);
+    expect(callsTo(edges, real.filePath).filter(e => e.confidence >= 0.9)).toHaveLength(1);
+  });
+
   it('a test does not bind a fixture copy of the package over the real src package', () => {
     const caller = py('/repo/tests/test_mod.py', 'from pkg.sub.mod import load\n\ndef test_it():\n    return load()\n');
     const real = py('/repo/src/pkg/sub/mod.py', 'def load():\n    return 1\n');

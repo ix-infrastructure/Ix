@@ -300,6 +300,28 @@ describe("dependents (IN-11)", () => {
     expect(findDependents(table, new Set(), ["web/a.ts"], new Set())).toEqual(["uses-a.ts", "uses-pkg-a.py"]);
   });
 
+  it("re-resolves the Python files below a __init__.py that came or went, whatever they import", () => {
+    const py = (filePath: string, imports: Array<{ dstName: string; importRaw?: string }>) =>
+      entry(summary(filePath, { language: "python", refs: [], imports }));
+    const table = new Map<string, SymbolEntry>([
+      ["tools/main.py", py("tools/main.py", [{ dstName: "helpers", importRaw: "helpers" }])],
+      ["tools/deep/run.py", py("tools/deep/run.py", [{ dstName: "json", importRaw: "json" }])],
+      ["tools/plain.py", py("tools/plain.py", [])],
+      ["tools/main.ts", entry(summary("tools/main.ts", { language: "typescript", refs: [], imports: [{ dstName: "./x", importRaw: "./x" }] }))],
+      ["toolsx/main.py", py("toolsx/main.py", [{ dstName: "helpers", importRaw: "helpers" }])],
+      ["top.py", py("top.py", [{ dstName: "helpers", importRaw: "helpers" }])],
+    ]);
+    expect(findDependents(table, new Set(), ["tools/__init__.py"], new Set(), ["tools/__init__.py"]))
+      .toEqual(["tools/deep/run.py", "tools/main.py"]);
+    expect(findDependents(table, new Set(), [], new Set(["tools/main.py"]), ["tools\\__init__.py"])).toEqual(["tools/deep/run.py"]);
+    // A root-level __init__.py covers every Python file with imports.
+    expect(findDependents(table, new Set(), [], new Set(), ["__init__.py"]))
+      .toEqual(["tools/deep/run.py", "tools/main.py", "toolsx/main.py", "top.py"]);
+    // Only an __init__.py counts, and only when passed as one that came or went.
+    expect(findDependents(table, new Set(), [], new Set(), ["tools/helpers.py"])).toEqual([]);
+    expect(findDependents(table, new Set(), ["tools/__init__.py"], new Set())).toEqual([]);
+  });
+
   it("hashes a patch's edges and their targets, in any order, and no other op", () => {
     const a = { type: "UpsertEdge", id: "e1", dst: "n1" };
     const b = { type: "UpsertEdge", id: "e2", dst: "n2" };

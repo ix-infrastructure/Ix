@@ -307,7 +307,8 @@ describe("agent outcomes", () => {
 // Python callers through imports (fixtures/pyimports): app/main.py reaches
 // pkg/sub/mod.py by an absolute import, an aliased module import and a typed
 // receiver inside a method, and pkg/__init__.py by a package import.
-// other/mod.py defines the same names and must never be a caller's target.
+// other/mod.py defines the same names; only other/use.py, which imports it,
+// calls into it.
 describe("python callers through imports", () => {
   type Row = { name?: string; path?: string };
   const callers = (co: Checkout, symbol: string, path: string): { resultSource: string; results: Row[] } =>
@@ -330,9 +331,11 @@ describe("python callers through imports", () => {
     expect(entry.resultSource).toBe("graph");
     expect(entry.results.map((r) => r.name)).toContain("run");
 
-    // The same-named module is imported by nobody, so nothing calls into it.
-    const other = JSON.parse(ix(env, co, ["callers", "load", "--path", "other/mod.py", "--format", "json"], true).stdout);
-    expect(other.resultSource === "graph" ? other.results : []).toEqual([]);
+    // The same-named module has exactly one caller, other/use.py, which
+    // imports it: answered from the graph, with nothing from app/main.py.
+    const other = callers(co, "load", "other/mod.py");
+    expect(other.resultSource).toBe("graph");
+    expect(other.results.map((r) => `${r.name}@${r.path}`)).toEqual(["read_other@other/use.py"]);
   });
 });
 
