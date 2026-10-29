@@ -1608,6 +1608,8 @@ export interface IssueBundleInput extends IssueSummary {
   rankedFiles: RankedFile[];
   /** The other starting points' related files, entered as entities. */
   extraEntities?: EntityLocation[];
+  /** Lexical discoveries, behind graph context unless they match the issue. */
+  discoveredEntities?: EntityLocation[];
   query?: string;
   repo?: IssueEntityRanking["repo"];
   distances?: ReadonlyMap<string, number>;
@@ -1788,7 +1790,8 @@ async function buildIssueBundle(
       unresolved: plan.unresolved,
       fallback: plan.fallback || walked,
       rankedFiles,
-      extraEntities: [...candidates, ...around.flatMap((n) => n.related)],
+      extraEntities: around.flatMap((n) => n.related),
+      discoveredEntities: candidates,
       query: text,
       repo: repo ? { read: path => tracked.has(path) ? repo.read(path) : undefined } : undefined,
       distances,
@@ -2104,7 +2107,7 @@ export function buildBundle(input: BuildInput): ContextBundle {
   // through the summaries -- ahead of its located ref, which `seen` then
   // skipped -- came out as twelve entities all named `watch.ts`.
   const trailingMembers = memberRefs.slice(LEADING_MEMBERS);
-  const locatedById = new Map(trailingMembers.map((ref) => [ref.id, ref]));
+  const locatedById = new Map([...trailingMembers, ...(issue?.discoveredEntities ?? [])].map((ref) => [ref.id, ref]));
   const fileNames = new Set(
     [...contextNodes, resolved].filter((n) => n.kind === "file").map((n) => n.name));
   for (const node of orderedNodes(contextNodes)) {
@@ -2130,6 +2133,9 @@ export function buildBundle(input: BuildInput): ContextBundle {
     });
   }
   pushLocated(trailingMembers);
+  // Unmatched discoveries must not evict graph context. Positive issue matches
+  // are promoted within their reserved budget by placeIssueMatches below.
+  pushLocated(issue?.discoveredEntities ?? []);
 
   // Relationships: graph edges, ordered deterministically.
   const contextEdges = context.edges.length > 0 ? context.edges : (context.edgeSummaries ?? []);

@@ -17,12 +17,12 @@ function bundle(query: string, source: string, members = [near, far], edges = [
   { src: "start", dst: "near", predicate: "CALLS" },
   { src: "near", dst: "bridge", predicate: "CALLS" },
   { src: "bridge", dst: "far", predicate: "CALLS" },
-], extraEntities: EntityLocation[] = [], maxEntities = 3) {
+], discoveredEntities: EntityLocation[] = [], maxEntities = 3) {
   const read = vi.fn(() => source);
   const issue = {
     startingPoints: [{ id: "start", name: "Cache", kind: "class", path, token: "Cache", via: "identifier in issue" as const }],
     unresolved: [], fallback: false, rankedFiles: [{ path, score: 1, reason: "bm25" }],
-    query, repo: { read }, extraEntities,
+    query, repo: { read }, discoveredEntities,
   };
   const result = buildBundle({
     resolved: { id: "start", name: "Cache", kind: "class", resolutionMode: "issue" },
@@ -111,7 +111,7 @@ describe("issue entity ranking", () => {
       issue: {
         startingPoints: [{ id: "start", name: "Cache", kind: "class", path, token: "Cache", via: "identifier in issue" as const }, other],
         unresolved: [], fallback: false, rankedFiles: [{ path, score: 1, reason: "bm25" }],
-        query: "snapshot recovery", repo: { read: () => source }, extraEntities: methods,
+        query: "snapshot recovery", repo: { read: () => source }, discoveredEntities: methods,
       },
     });
     const ids = result.entities.map(e => e.id);
@@ -121,6 +121,55 @@ describe("issue entity ranking", () => {
     expect(result.relationships).toEqual([{ src: "start", dst: "imp", predicate: "IMPORTS" }]);
     expect(ids.filter(id => id.startsWith("m")).length).toBeLessThan(limit);
     expect(result.entities[2].score).toBeGreaterThan(0);
+  });
+
+  it.each(["nodes", "summaries"])("keeps backend-only dependencies ahead of unmatched discoveries (%s)", shape => {
+    const methods: EntityLocation[] = Array.from({ length: 60 }, (_, i) => ({
+      id: `m${i}`, name: `prepare${i}`, kind: "method", path,
+    }));
+    const edge = { src: "start", dst: "dependency", predicate: "IMPORTS" };
+    const build = (discoveredEntities: EntityLocation[], extraEntities: EntityLocation[] = []) => buildBundle({
+      resolved: { id: "start", name: "Cache", kind: "class", resolutionMode: "issue" },
+      facts: {
+        id: "start", name: "Cache", kind: "class", path, stale: false,
+        memberRefs: [], members: [], memberCount: 0, importRefs: [],
+        topCallers: [], topDependents: [], diagnostics: [], historyLength: 1,
+      } as unknown as ContextFacts,
+      context: {
+        nodes: shape === "nodes" ? [{ id: "dependency", name: "store", kind: "module" }] : [],
+        edges: shape === "nodes" ? [edge] : [],
+        nodeSummaries: shape === "summaries" ? [{ id: "dependency", name: "store", kind: "module" }] : [],
+        edgeSummaries: shape === "summaries" ? [edge] : [],
+        claims: [], conflicts: [], decisions: [], intents: [],
+        metadata: { query: "", seedEntities: [], hopsExpanded: 1, asOfRev: 1 },
+      } as never,
+      provenance: {}, budgets: clampBudgets({}), isStale: () => false,
+      issue: {
+        startingPoints: [{ id: "start", name: "Cache", kind: "class", path, token: "Cache", via: "identifier in issue" as const }],
+        unresolved: [], fallback: false, rankedFiles: [{ path, score: 1, reason: "bm25" }],
+        query: "snapshot recovery", repo: { read: () => "" }, discoveredEntities, extraEntities,
+      },
+    });
+    const baseline = build([]);
+    const result = build(methods);
+    expect(baseline.entities.map(e => e.id)).toEqual(["start", "dependency"]);
+    expect(baseline.relationships).toEqual([edge]);
+    expect(result.entities).toHaveLength(clampBudgets({}).maxEntities);
+    expect(result.entities.slice(0, 2)).toEqual(baseline.entities);
+    expect(result.entities.every(e => e.score === 0)).toBe(true);
+    expect(result.relationships).toEqual(baseline.relationships);
+
+    // A stale backend summary must not replace a discovered definition's location.
+    const located = { id: "dependency", name: "loadStore", kind: "function", path: "src/store.py", lineStart: 7, lineEnd: 9 };
+    const overlap = build([...methods, located]);
+    expect(overlap.entities[1]).toMatchObject(located);
+    expect(overlap.entities.filter(e => e.id === located.id)).toHaveLength(1);
+    expect(overlap.relationships).toEqual(baseline.relationships);
+
+    const neighbour = { id: "other-neighbour", name: "store.py", kind: "file", path: "src/store.py" };
+    const withNeighbour = build(methods, [neighbour]);
+    expect(withNeighbour.entities.slice(0, 3).map(e => e.id)).toEqual(["start", neighbour.id, "dependency"]);
+    expect(withNeighbour.relationships).toEqual(baseline.relationships);
   });
 
   it("retains new scores through JSON validation while accepting old entities without them", () => {
