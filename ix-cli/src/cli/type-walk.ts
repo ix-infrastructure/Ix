@@ -81,6 +81,25 @@ const CAP_ORDER: readonly HierarchyCap[] = ["depth", "types", "edges"];
 
 const typeRef = (n: any): TypeRef => ({ id: String(n.id), name: String(n.name ?? ""), kind: String(n.kind ?? "") });
 
+/**
+ * `text` without its `(...)` and `<...>` runs, nesting included, in one pass.
+ * A `>` closes only an open `<`, so `->` inside a parameter list is not a
+ * bracket; a `)` closes back to its `(`. An unclosed run drops the rest of
+ * the text: what follows it is inside the brackets as far as anyone can tell.
+ */
+export function outsideBrackets(text: string): string {
+  const open: string[] = [];
+  let out = "";
+  for (const ch of text) {
+    if (ch === "(" || ch === "<") open.push(ch);
+    else if (ch === ")" && open.includes("(")) {
+      while (open.pop() !== "(") { /* unwind any `<` left open inside the parens */ }
+    } else if (ch === ">" && open[open.length - 1] === "<") open.pop();
+    else if (open.length === 0) out += ch;
+  }
+  return out;
+}
+
 /** Whether a type's header line visibly names a base: the graph may predate heritage capture. */
 export function headerDeclaresBase(lines: readonly string[], lineStart: number, path: string): boolean {
   // The header up to its body: a few lines at most.
@@ -92,7 +111,7 @@ export function headerDeclaresBase(lines: readonly string[], lineStart: number, 
   if (/\.rb$/i.test(path)) return /\bclass\s+[\w:]+\s*<\s*\S/.test(header);
   if (/\.(kt|kts|cs|swift|cpp|cc|cxx|c\+\+|hpp|hh|hxx|h)$/i.test(path)) {
     // Constructor parameters and generic arguments carry colons of their own.
-    const bare = header.replace(/\([^)]*\)/g, "").replace(/<[^<>]*>/g, "");
+    const bare = outsideBrackets(header);
     return /\b(class|struct|interface|object|record|enum|protocol)\s+\w+[^:;]*?:\s*[\w:]/.test(bare);
   }
   return /\b(extends|implements)\b/.test(header);

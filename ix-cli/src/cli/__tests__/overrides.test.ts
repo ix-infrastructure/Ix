@@ -6,7 +6,7 @@ import { Command } from "commander";
 import { registerOverridesCommand } from "../commands/overrides.js";
 import { WorkspaceNotMappedError } from "../errors.js";
 import {
-  HIERARCHY_DEPTH, HIERARCHY_MAX_REQUESTS, HIERARCHY_MAX_TYPES, HIERARCHY_UP_MAX_TYPES, headerDeclaresBase, overrideFamily,
+  HIERARCHY_DEPTH, HIERARCHY_MAX_REQUESTS, HIERARCHY_MAX_TYPES, HIERARCHY_UP_MAX_TYPES, headerDeclaresBase, outsideBrackets, overrideFamily,
 } from "../type-walk.js";
 
 /**
@@ -204,6 +204,21 @@ describe("ix overrides on a three-level hierarchy", () => {
     expect(body.rows).toHaveLength(1);
     expect(body).toMatchObject({ total: 3, truncated: true });
     expect(body.diagnostics.map((d: any) => d.code)).toEqual(["results_truncated"]);
+  });
+
+  it.each(["abc", "-1", "10abc", "1e3"])("refuses --limit %s with invalid_limit, exit 1, no request", async (limit) => {
+    const json1 = await run(["overrides", "m", "--limit", limit, "--format", "json"]);
+    expect(json1.exitCode).toBe(1);
+    expect(json(json1.out)).toMatchObject({ error: "invalid_limit" });
+    const llm = await run(["overrides", "m", "--limit", limit, "--format", "llm"]);
+    expect(llm.exitCode).toBe(1);
+    expect(llm.out.join("\n")).toMatch(/invalid_limit/);
+    expect(graph.calls).toHaveLength(0);
+  });
+
+  it("--limit 0 is a count: no rows, total kept", async () => {
+    const body = json((await run(["overrides", "m", "--limit", "0", "--format", "json"])).out);
+    expect(body).toMatchObject({ rows: [], total: 3, truncated: true });
   });
 });
 
@@ -467,8 +482,33 @@ describe("headerDeclaresBase", () => {
     ["a.cpp", "class A : public Base {", true],
     ["a.rb", "class A < Base", true],
     ["a.rb", "class A", false],
+    ["A.kt", "class A(val m: Map<String, List<Int>>)", false],
+    ["A.kt", "class A(val f: (Int) -> Unit) : Base()", true],
+    ["A.kt", "class A(val f: (Int) -> Unit)", false],
+    ["A.cs", "public class A<T> where T : IComparable<List<T>>", true],
+    ["A.cs", "public class A<K, V<W>> : IMap<K, IList<V<W>>>", true],
+    ["a.cpp", "struct A : B<C<D>>, E {", true],
+    ["A.kt", "class A(val x: Int", false],
+    ["A.kt", "class A<T", false],
+    ["A.kt", "class A) : Base()", true],
   ])("%s: %s -> %s", (path, line, expected) => {
     expect(headerDeclaresBase([line], 1, path)).toBe(expected);
+  });
+});
+
+describe("outsideBrackets", () => {
+  it.each([
+    ["A<B<C>>", "A"],
+    ["A(b, (c), d) : E", "A : E"],
+    ["A(x: Map<K, V>) : B<C>", "A : B"],
+    ["A(f: () -> Unit) : B", "A : B"],
+    ["A(b <c) : D", "A : D"],
+    ["A(b", "A"],
+    ["A<b", "A"],
+    ["A) > B", "A) > B"],
+    ["", ""],
+  ])("%s -> %s", (text, expected) => {
+    expect(outsideBrackets(text)).toBe(expected);
   });
 });
 

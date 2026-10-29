@@ -7,14 +7,20 @@ import type { IxClient } from "../../client/api.js";
 import { disambiguatingIds, lineSpan, locationLabel, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
 import { runPerTarget } from "../multi-target.js";
-import { parsePickOption } from "../options.js";
+import { parseCountOption, parsePickOption } from "../options.js";
 import { EXIT_CODES_HELP } from "../outcome.js";
 import { isQuiet, projectRow } from "../output-shape.js";
 import { printResolved, resolveFileOrReport } from "../resolve.js";
+import { reportError } from "./around.js";
 import { overrideFamily, type OverrideRelation, type OverrideRow } from "../type-walk.js";
 
 interface OverridesOpts {
   kind?: string; path?: string; pick?: number; limit: string; format: string;
+}
+
+/** `--limit` as a count, or undefined when it is not one (`abc`, `-1`, `10abc`). */
+export function parseOverridesLimit(value: string): number | undefined {
+  try { return parseCountOption(value, "50"); } catch { return undefined; }
 }
 
 const TEXT_HEADINGS: Record<OverrideRelation, string> = {
@@ -47,13 +53,19 @@ and 32 types.
 Several symbols answer in one call, grouped per symbol (json: {targets: [...]}).
 ${EXIT_CODES_HELP}`)
     .action(async (symbols: string[], opts: OverridesOpts) => {
+      // The root hook refuses a malformed <n> already; this holds where it is
+      // not installed, so `abc` never becomes NaN and silently zero rows.
+      if (parseOverridesLimit(opts.limit) === undefined) {
+        reportError("invalid_limit", `--limit must be a non-negative integer (for example, 50), not "${opts.limit}".`, opts.format);
+        return;
+      }
       const client = createClient();
       await runPerTarget(symbols, opts.format, (symbol) => overridesOne(client, symbol, opts));
     });
 }
 
 async function overridesOne(client: IxClient, symbol: string, opts: OverridesOpts): Promise<void> {
-  const limit = parseInt(opts.limit, 10);
+  const limit = parseOverridesLimit(opts.limit) ?? 0;
   const target = await resolveFileOrReport(client, symbol, { kind: opts.kind, path: opts.path, pick: opts.pick }, opts.format);
   if (!target) return;
   if (opts.format === "text") printResolved(target);
