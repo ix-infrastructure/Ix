@@ -78,18 +78,24 @@ function* walk(dir) {
 const STRING = /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|`((?:[^`\\$]|\\.)*)`/g;
 
 /** Invocations in code: argv arrays handed to something that runs ix. */
-function codeInvocations(text) {
+export function codeInvocations(text) {
   const found = [];
   const call = /([A-Za-z_][\w.]*)\(\s*\[([^\]]*)\]/g;
   for (const m of text.matchAll(call)) {
     const fn = m[1];
-    const items = [...m[2].matchAll(STRING)].map((s) => s[1] ?? s[2] ?? s[3]);
+    const literals = [...m[2].matchAll(STRING)];
+    const items = literals.map((s) => s[1] ?? s[2] ?? s[3]);
     const startsWithIx = items[0] === "ix";
     if (!startsWithIx && !/ix|safeRun|run_?ix/i.test(fn)) continue;
+    // Keep the command's position: dropping `command` from ["ix", command, "x"]
+    // would incorrectly turn the target "x" into the command.
+    if (!literals[0] || m[2].slice(0, literals[0].index).trim()) continue;
+    if (startsWithIx && (!literals[1] ||
+      m[2].slice(literals[0].index + literals[0][0].length, literals[1].index).trim() !== ",")) continue;
     const argv = startsWithIx ? items.slice(1) : items;
     if (argv.length === 0) continue;
-    // `[...args, "--format", "llm"]` and `["--version"]` carry no command of their own.
-    if (/^\s*\.\.\./.test(m[2]) || argv[0].startsWith("-")) continue;
+    // `["--version"]` carries no command of its own.
+    if (argv[0].startsWith("-")) continue;
     found.push({ argv, line: lineOf(text, m.index), snippet: m[0].slice(0, 100) });
   }
   return found;
