@@ -1045,9 +1045,6 @@ async function runSmells(runIx: IxRunner, input: ToolInput): Promise<CallToolRes
   const silent = silentJsonFailure(result, "ix_smells");
   if (silent) return silent;
   const parsed = parseJsonOutput(result.stdout);
-  if (isRecord(parsed) && parsed.stale === true && Array.isArray(parsed.smells)) {
-    return staleSmellsResult(parsed, parsed.smells, input, structured);
-  }
   if (!isRecord(parsed) || !Array.isArray(parsed.candidates)) {
     const text = textResult(result.stdout.trim() || "{}");
     return structured ? withStructuredContent(text) : text;
@@ -1078,38 +1075,6 @@ async function runSmells(runIx: IxRunner, input: ToolInput): Promise<CallToolRes
   // Compact, and the object once rather than twice. The indent was two spaces
   // per level of a list of smell candidates, and the structured copy was the
   // same bytes again.
-  const text = textResult(JSON.stringify(payload));
-  return structured ? { ...text, structuredContent: payload } : text;
-}
-
-/**
- * `ix smells` answered with stored claims, marked stale: the fresh analysis
- * did not finish within its wait, or the backend refused to run it. Stored
- * claims carry entity ids, not file paths, so the limit applies but a path
- * cannot; a `smells_path_unfiltered` diagnostic says so rather than passing
- * the whole workspace off as the answer for that path.
- */
-function staleSmellsResult(
-  parsed: Record<string, unknown>,
-  stored: unknown[],
-  input: ToolInput,
-  structured: boolean,
-): CallToolResult {
-  const smells = stored.slice(0, numberArg(input, "limit"));
-  const diagnostics = Array.isArray(parsed.diagnostics) ? [...parsed.diagnostics] : [];
-  if (typeof input.path === "string") {
-    diagnostics.push({
-      code: "smells_path_unfiltered",
-      message: `stored smells carry entity ids, not file paths, so path "${input.path}" was not applied; these are stored smells from the whole workspace`,
-    });
-  }
-  const payload = {
-    ...parsed,
-    shown: smells.length,
-    truncated: parsed.truncated === true || stored.length > smells.length,
-    smells,
-    diagnostics,
-  };
   const text = textResult(JSON.stringify(payload));
   return structured ? { ...text, structuredContent: payload } : text;
 }

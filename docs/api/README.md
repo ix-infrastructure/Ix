@@ -495,7 +495,11 @@ Same as expand, but by entity name.
 One-hop neighbour counts for many nodes in one request (backend v1.0.33 and
 later). `ix rank` scores its candidates with it, and falls back to one
 `/v1/expand` per candidate when the route is missing (404/405) or the request
-fails.
+fails. A `distinct` count is not quite what `/v1/expand` lists: it counts a
+node with a self-loop as its own neighbour, and has no 1000-neighbour limit.
+It is never lower, so `ix rank` treats it as a ceiling and expands only the
+candidates that could make the rows it shows, which then score exactly as
+before.
 
 **Request body**
 

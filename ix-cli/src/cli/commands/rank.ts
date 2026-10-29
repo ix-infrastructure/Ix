@@ -147,9 +147,16 @@ async function scoreAllCandidates(
 export const DEGREE_MAX_IDS = 5000;
 
 /**
+ * The most neighbours `/v1/expand` returns when no `limit` is sent (Ix-memory
+ * `ExpandRoutes`), so the most an expand-path score can be. Only used to
+ * guess which candidates to expand; a wrong guess costs requests, not scores.
+ */
+const EXPAND_DEFAULT_LIMIT = 1000;
+
+/**
  * Backends (by endpoint) not to score through `POST /v1/degree` again in this
  * process: the route answered 404 or 405 (it predates them, Ix-memory <
- * v1.0.33), or its counts disagreed with expand's on the rows a rank showed.
+ * v1.0.33), or it counted fewer neighbours than expand lists for some node.
  */
 const degreeUnusable = new Set<string>();
 
@@ -159,24 +166,36 @@ function errorStatus(err: unknown): number | undefined {
   return m ? Number(m[1]) : undefined;
 }
 
+/** The `n`th largest of `values` (1-based); `Infinity` when `n` is 0. */
+function nthLargest(values: number[], n: number): number {
+  if (n <= 0) return Infinity;
+  return [...values].sort((a, b) => b - a)[Math.min(n, values.length) - 1]!;
+}
+
 /**
  * Score every candidate with `POST /v1/degree`, at most `DEGREE_MAX_IDS` ids
- * per request, counting distinct neighbour nodes as the expand path does.
+ * per request, then expand only the candidates that could be among the `top`
+ * rows the caller shows, so those rows score exactly as the expand path does.
+ *
+ * A degree count `d` (with `distinct`) is not quite the expand-path score: a
+ * self-loop makes the node its own neighbour (expand leaves the seed out), and
+ * expand stops at `EXPAND_DEFAULT_LIMIT` neighbours. It is never lower, so it
+ * bounds the score from above, and `min(d - 1, EXPAND_DEFAULT_LIMIT)` is the
+ * usual floor. Every candidate whose ceiling reaches the `top`th highest floor
+ * is expanded; when an exact score then lands below its floor, the floors are
+ * worked out again and the new contenders expanded, until every row that can
+ * be shown has its exact score. A candidate never expanded keeps `d` as its
+ * score, which is below every shown row's. `d = 0` is exact.
  *
  * Returns null when the caller must score through `scoreAllCandidates`
  * instead: the route is missing (404/405, remembered for this backend), the
  * request failed or was refused (413, a transport error, anything else), the
- * answer is not the expected shape, or the backend says it truncated a count,
- * since a truncated count must never become a score. An id absent from
- * `counts` is scored by expanding it, so it ends up exactly as today: its
- * neighbour count, or 0 with today's diagnostic when the expand fails.
- *
- * The `verifyTop` highest counts (the rows the caller shows) are checked
- * against expand before they are trusted: a backend whose `distinct` count
- * is not expand's distinct neighbour nodes (the seed, a self-loop, a hidden
- * node counted differently) falls back to the expand path, silently, and is
- * not asked again in this process. An expand that fails during the check
- * falls back too, without being remembered.
+ * answer is not the expected shape, the backend says it truncated a count
+ * (a truncated count must never become a score), or an expand lists more
+ * neighbours than `d` (remembered: its counts are no ceiling). An id absent
+ * from `counts` is always expanded. An expand that fails scores 0 with
+ * today's diagnostic, as on the expand path, and after one every candidate
+ * not yet expanded is expanded, as the expand path would have.
  */
 export async function scoreViaDegree(
   candidates: any[],
@@ -184,7 +203,7 @@ export async function scoreViaDegree(
   client: IxClient,
   diagnostics: string[],
   entityKind: string,
-  verifyTop = 0,
+  top = 0,
 ): Promise<ScoredEntity[] | null> {
   const endpoint = String(client.endpoint);
   if (degreeUnusable.has(endpoint)) return null;
@@ -210,64 +229,68 @@ export async function scoreViaDegree(
       return null;
     }
     for (const [id, n] of Object.entries(res.counts)) {
-      if (typeof n === "number" && Number.isFinite(n)) counts.set(id, n);
+      if (typeof n === "number" && Number.isFinite(n) && n >= 0) counts.set(id, n);
     }
   }
 
-  const diagnosticsBefore = diagnostics.length;
-  const missing = candidates.filter((node: any) => !counts.has(node.id));
-  const rescored = new Map<any, ScoredEntity>();
-  if (missing.length > 0) {
-    const scored = await scoreAllCandidates(missing, config, client, diagnostics, entityKind);
-    missing.forEach((node: any, index) => rescored.set(node, scored[index]!));
-  }
-  const fromDegree = new Set<ScoredEntity>();
-  const results = candidates.map((node: any): ScoredEntity => {
-    const expanded = rescored.get(node);
-    if (expanded) return expanded;
-    const entity = {
-      id: node.id,
-      name: node.name || node.attrs?.name || "(unnamed)",
-      kind: node.kind || entityKind,
-      score: counts.get(node.id)!,
-    };
-    fromDegree.add(entity);
-    return entity;
-  });
+  // The rows the caller's `slice(0, top)` keeps.
+  const shown = candidates.slice(0, top).length;
+  const exact = candidates.map((node: any): number | undefined => (counts.get(node.id) === 0 ? 0 : undefined));
+  const failed = new Array<boolean>(candidates.length).fill(false);
+  const floor = (node: any, i: number): number => {
+    const d = counts.get(node.id);
+    return exact[i] ?? (d === undefined ? 0 : Math.max(0, Math.min(d - 1, EXPAND_DEFAULT_LIMIT)));
+  };
+  const ceiling = (node: any, i: number): number => exact[i] ?? counts.get(node.id) ?? Infinity;
 
-  const agrees = await degreeAgreesWithExpand(results, fromDegree, verifyTop, config, client);
-  if (agrees !== true) {
-    // The expand path redoes every candidate and reports its own failures.
-    diagnostics.length = diagnosticsBefore;
-    if (agrees === "differs") degreeUnusable.add(endpoint);
-    return null;
-  }
-  return results;
-}
-
-/**
- * Whether the `top` highest degree-counted rows, picked the way the caller
- * sorts and slices them, have the same score as `expand` gives: `true`,
- * `"differs"` when a count disagrees, `"failed"` when an expand failed.
- */
-async function degreeAgreesWithExpand(
-  results: ScoredEntity[],
-  fromDegree: Set<ScoredEntity>,
-  top: number,
-  config: { direction: string; predicates: string[] },
-  client: IxClient,
-): Promise<true | "differs" | "failed"> {
-  const shown = [...results].sort((a, b) => b.score - a.score).slice(0, top).filter((r) => fromDegree.has(r));
-  if (shown.length === 0) return true;
-  const checks = await mapLimit(shown, SCORE_CONCURRENCY, async (row): Promise<true | "differs" | "failed"> => {
-    try {
-      const result = await client.expand(row.id, { direction: config.direction, predicates: config.predicates });
-      return new Set(result.nodes.map((n) => n.id)).size === row.score ? true : "differs";
-    } catch {
-      return "failed";
+  // After a failed expand, expand everything left, as the expand path would
+  // have: failures can otherwise lower the bar one round-trip at a time.
+  let expandAll = false;
+  for (;;) {
+    const threshold = expandAll ? -Infinity : nthLargest(candidates.map(floor), shown);
+    const pending: number[] = [];
+    candidates.forEach((node: any, i) => {
+      if (exact[i] === undefined && ceiling(node, i) >= threshold) pending.push(i);
+    });
+    if (pending.length === 0) break;
+    const scores = await mapLimit(pending, SCORE_CONCURRENCY, async (i): Promise<number | undefined> => {
+      try {
+        const result = await client.expand(candidates[i].id, {
+          direction: config.direction,
+          predicates: config.predicates,
+        });
+        const seen = new Set<string>();
+        for (const n of result.nodes) seen.add(n.id);
+        return seen.size;
+      } catch {
+        return undefined;
+      }
+    });
+    for (const [k, i] of pending.entries()) {
+      const score = scores[k];
+      const d = counts.get(candidates[i].id);
+      if (score !== undefined && d !== undefined && score > d) {
+        degreeUnusable.add(endpoint);
+        return null;
+      }
+      if (score === undefined) {
+        failed[i] = true;
+        expandAll = true;
+      }
+      exact[i] = score ?? 0;
     }
+  }
+
+  // In candidate order, as the expand path reports them.
+  candidates.forEach((node: any, i) => {
+    if (failed[i]) diagnostics.push(`Failed to expand entity ${node.id}`);
   });
-  return checks.includes("differs") ? "differs" : checks.includes("failed") ? "failed" : true;
+  return candidates.map((node: any, i): ScoredEntity => ({
+    id: node.id,
+    name: node.name || node.attrs?.name || "(unnamed)",
+    kind: node.kind || entityKind,
+    score: exact[i] ?? counts.get(node.id)!,
+  }));
 }
 
 export function registerRankCommand(program: Command): void {
@@ -372,9 +395,9 @@ export function registerRankCommand(program: Command): void {
           return;
         }
 
-        // 4. Score ALL candidates: one /v1/degree per DEGREE_MAX_IDS, the
-        // rows shown checked against expand, or one expand each where the
-        // backend cannot answer that or its counts disagree.
+        // 4. Score ALL candidates: one /v1/degree per DEGREE_MAX_IDS plus an
+        // expand of each candidate that could be shown, or one expand each
+        // where the backend cannot answer that.
         const config = METRIC_CONFIG[metric];
         const scored = await scoreViaDegree(candidates, config, client, diagnostics, opts.kind, topN)
           ?? await scoreAllCandidates(candidates, config, client, diagnostics, opts.kind);

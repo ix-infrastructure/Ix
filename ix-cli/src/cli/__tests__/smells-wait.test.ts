@@ -55,11 +55,18 @@ const REPORT: SmellReport = {
   ],
 };
 
+/**
+ * `GET /v1/smells` as the backend answers it: confidence, file and signals
+ * live under `value`. Today's backend puts no `rev`/`run_at` on a row; these
+ * rows carry them to show that they are read when present.
+ */
 const STORED = {
   smells: [
-    { smell: "has_smell.orphan_file", entity_id: "entity-a-0123456789", confidence: 0.4, inference_version: "smell_v1", rev: 11, run_at: "2026-10-20T08:00:00Z" },
-    { smell: "has_smell.god_module", entity_id: "entity-b-0123456789", confidence: 0.9, inference_version: "smell_v1", rev: 12, run_at: "2026-10-21T09:30:00Z" },
+    { smell: "has_smell.orphan_file", entity_id: "entity-a-0123456789", value: { confidence: 0.4, file: "src/a.ts", signals: { connectivity: 0 } }, inference_version: "smell_v1", rev: 11, run_at: "2026-10-20T08:00:00Z" },
+    { smell: "has_smell.god_module", entity_id: "entity-b-0123456789", value: { confidence: 0.9, file: "src/big.ts", signals: { chunks: 42, fan_in: 18, fan_out: 9 } }, inference_version: "smell_v1", rev: 12, run_at: "2026-10-21T09:30:00Z" },
   ],
+  total: 2,
+  truncated: false,
 };
 
 describe("ix smells wait budget and stored-results fallback", () => {
@@ -124,12 +131,18 @@ describe("ix smells wait budget and stored-results fallback", () => {
         message: "fresh analysis did not finish within 20 s; showing stored results from rev 12 (2026-10-21T09:30:00Z)",
       }]);
       expect(out.count).toBe(2);
+      expect(out.shown).toBe(2);
+      expect(out.truncated).toBe(false);
       expect(out.inference_version).toBe("smell_v1");
-      // Highest confidence first, entity ids cut to 12 as `--list` prints them.
-      expect(out.smells).toEqual([
-        { smell: "has_smell.god_module", entity_id: "entity-b-012", confidence: 0.9 },
-        { smell: "has_smell.orphan_file", entity_id: "entity-a-012", confidence: 0.4 },
+      expect(out.rev).toBe(12);
+      expect(out.run_at).toBe("2026-10-21T09:30:00Z");
+      // A fresh run's `candidates`, highest confidence first, plus the
+      // entity id cut to 12 as `--list` prints it.
+      expect(out.candidates).toEqual([
+        { file: "src/big.ts", smell: "has_smell.god_module", confidence: 0.9, signals: { chunks: 42, fan_in: 18, fan_out: 9 }, entity_id: "entity-b-012" },
+        { file: "src/a.ts", smell: "has_smell.orphan_file", confidence: 0.4, signals: { connectivity: 0 }, entity_id: "entity-a-012" },
       ]);
+      expect(out.smells).toBeUndefined();
       expect(process.exitCode ?? 0).toBe(0);
     });
 
@@ -151,17 +164,53 @@ describe("ix smells wait budget and stored-results fallback", () => {
         reason: "not_permitted",
         message: "not permitted to run a fresh analysis; showing stored results from rev 12 (2026-10-21T09:30:00Z)",
       }]);
-      expect(out.smells).toHaveLength(2);
+      expect(out.candidates).toHaveLength(2);
       expect(process.exitCode ?? 0).toBe(0);
     });
 
-    it("says so when the stored rows carry no revision or time", async () => {
+    it("says so when the stored rows carry no revision or time, as today's backend's do", async () => {
       fakeClient.runSmells.mockImplementation(neverAnswers());
-      fakeClient.listSmells.mockResolvedValue({ smells: [{ smell: "has_smell.orphan_file", entity_id: "e1", confidence: 0.5 }] });
+      fakeClient.listSmells.mockResolvedValue({
+        smells: [{ smell: "has_smell.orphan_file", entity_id: "e1", value: { confidence: 0.5, file: "src/x.ts", signals: {} }, inference_version: "smell_v1" }],
+        total: 1,
+        truncated: false,
+      });
       const out = JSON.parse(await run(["--format", "json"], 20_000));
       expect(out.computed_rev).toBeNull();
       expect(out.computed_at).toBeNull();
+      expect("rev" in out).toBe(false);
       expect(out.diagnostics[0].message).toBe("fresh analysis did not finish within 20 s; showing stored results from an earlier run");
+    });
+
+    it("the backend's truncated stored list makes the answer truncated, and says how much came back", async () => {
+      fakeClient.runSmells.mockImplementation(neverAnswers());
+      fakeClient.listSmells.mockResolvedValue({ ...STORED, total: 900, truncated: true });
+      const out = JSON.parse(await run(["--format", "json"], 20_000));
+      expect(out.truncated).toBe(true);
+      expect(out.candidates).toHaveLength(2);
+      expect(out.diagnostics[0].message).toBe(
+        "fresh analysis did not finish within 20 s; showing stored results from rev 12 (2026-10-21T09:30:00Z); the backend returned 2 of 900 stored claims",
+      );
+    });
+
+    it("drops non-source orphans and caps by --limit the way a fresh run does", async () => {
+      fakeClient.runSmells.mockImplementation(neverAnswers());
+      fakeClient.listSmells.mockResolvedValue({
+        smells: [
+          ...STORED.smells,
+          { smell: "has_smell.orphan_file", entity_id: "entity-c-0123456789", value: { confidence: 0.8, file: "README.md", signals: { connectivity: 0 } }, inference_version: "smell_v1" },
+        ],
+      });
+      const out = JSON.parse(await run(["--format", "json", "--limit", "1"], 20_000));
+      expect(out).toMatchObject({ count: 2, shown: 1, truncated: true, filtered_non_source: 1, stale: true });
+      expect(out.candidates.map((c: { file: string }) => c.file)).toEqual(["src/big.ts"]);
+    });
+
+    it("reads a row that carries its fields at the top level too", async () => {
+      fakeClient.runSmells.mockImplementation(neverAnswers());
+      fakeClient.listSmells.mockResolvedValue({ smells: [{ smell: "has_smell.orphan_file", entity_id: "e1", confidence: 0.5, file: "src/x.ts" }] });
+      const out = JSON.parse(await run(["--format", "json"], 20_000));
+      expect(out.candidates).toEqual([{ file: "src/x.ts", smell: "has_smell.orphan_file", confidence: 0.5, signals: {}, entity_id: "e1" }]);
     });
 
     it("keeps today's error, with a hint, when nothing is stored either", async () => {
@@ -191,10 +240,10 @@ describe("ix smells wait budget and stored-results fallback", () => {
 
       expect(waitPassed()).toBe(20_000);
       expect(lines).toEqual([
-        "smells count=2 shown=2 version=smell_v1",
+        "smells rev=12 count=2 shown=2 version=smell_v1",
         'diagnostic code=smells_stale reason=timeout computed_rev=12 computed_at=2026-10-21T09:30:00Z message="fresh analysis did not finish within 20 s; showing stored results from rev 12 (2026-10-21T09:30:00Z)"',
-        "smell kind=has_smell.god_module entity=entity-b-012 confidence=0.9 version=smell_v1",
-        "smell kind=has_smell.orphan_file entity=entity-a-012 confidence=0.4 version=smell_v1",
+        "smell kind=has_smell.god_module file=src/big.ts confidence=0.9 chunks=42 fan_in=18 fan_out=9",
+        "smell kind=has_smell.orphan_file file=src/a.ts confidence=0.4 connections=0",
       ]);
       expect(process.exitCode ?? 0).toBe(0);
     });
@@ -210,10 +259,10 @@ describe("ix smells wait budget and stored-results fallback", () => {
     it("caps stored smells at 50 by default, like a fresh run", async () => {
       fakeClient.runSmells.mockImplementation(neverAnswers());
       fakeClient.listSmells.mockResolvedValue({
-        smells: Array.from({ length: 60 }, (_, i) => ({ smell: "has_smell.orphan_file", entity_id: `e${i}`, confidence: i / 100, rev: 3 })),
+        smells: Array.from({ length: 60 }, (_, i) => ({ smell: "has_smell.orphan_file", entity_id: `e${i}`, value: { confidence: i / 100, file: `src/f${i}.ts` }, rev: 3 })),
       });
       const lines = (await run(["--format", "llm"], 20_000)).split("\n");
-      expect(lines[0]).toBe("smells count=60 shown=50 version=smell_v1");
+      expect(lines[0]).toBe("smells rev=3 count=60 shown=50 version=smell_v1");
       expect(lines[1]).toContain("code=smells_stale");
       expect(lines[2]).toContain("code=results_truncated");
       expect(lines.filter(l => l.startsWith("smell ")).length).toBe(50);
@@ -266,8 +315,11 @@ describe("ix smells wait budget and stored-results fallback", () => {
       fakeClient.runSmells.mockImplementation(neverAnswers());
       const out = await run([], 600_000);
       expect(out).toContain("Stale: fresh analysis did not finish within 10 min; showing stored results from rev 12 (2026-10-21T09:30:00Z)");
-      expect(out).toContain("Smell Claims");
+      expect(out).toContain("Architecture Smells");
       expect(out).toContain("God Module");
+      expect(out).toContain("src/big.ts");
+      // Nothing was stored by this run, so no "claims stored" footer.
+      expect(out).not.toContain("Smell claims stored");
       expect(process.exitCode ?? 0).toBe(0);
     });
   });
@@ -338,6 +390,39 @@ describe("ix smells wait budget and stored-results fallback", () => {
       process.env.IX_SMELLS_WAIT = "15m";
       await run(["--format", "json"]);
       expect(waitPassed()).toBe(20_000);
+    });
+
+    it("caps IX_SMELLS_WAIT at an hour", async () => {
+      fakeClient.runSmells.mockResolvedValue(REPORT);
+      process.env.IX_SMELLS_WAIT = "99999999";
+      await run(["--format", "json"]);
+      expect(waitPassed()).toBe(3_600_000);
+    });
+
+    it("ignores IX_SMELLS_WAIT under MCP, whose runner gives ix_smells 30 s", async () => {
+      fakeClient.runSmells.mockResolvedValue(REPORT);
+      process.env.IX_SMELLS_WAIT = "45";
+      const savedCaller = process.env.IX_CALLER;
+      process.env.IX_CALLER = "mcp";
+      try {
+        await run(["--format", "json"]);
+      } finally {
+        if (savedCaller === undefined) delete process.env.IX_CALLER;
+        else process.env.IX_CALLER = savedCaller;
+      }
+      expect(waitPassed()).toBe(20_000);
+    });
+
+    it("accepts a --wait of an hour, and refuses more", async () => {
+      fakeClient.runSmells.mockResolvedValue(REPORT);
+      await run(["--format", "json", "--wait", "3600"]);
+      expect(waitPassed()).toBe(3_600_000);
+      fakeClient.runSmells.mockClear();
+      await expect(run(["--format", "json", "--wait", "3601"])).rejects.toMatchObject({
+        code: "commander.invalidArgument",
+        message: expect.stringContaining("at most 3600 seconds"),
+      });
+      expect(fakeClient.runSmells).not.toHaveBeenCalled();
     });
 
     it("rejects a --wait that is not a positive number of seconds", async () => {

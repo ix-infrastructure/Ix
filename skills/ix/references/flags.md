@@ -772,17 +772,19 @@ Detect architecture smells in the codebase.
 | `--weak-max-neighbors` | `<n>` | `1` | Max neighbors for weak component |
 | `--list` | — | off | List existing smell claims without rerunning |
 | `--limit` | `<n>` | 50 (text/llm); all (json) | Max candidates, highest confidence first; 0 = all, unfiltered. Otherwise non-source orphan files (docs, templates, data) are dropped before the cut. With `--list`, caps the stored claims (all when omitted) |
-| `--wait` | `<seconds>` | 20 (json/llm); 600 (text) | How long to wait for a fresh analysis. `IX_SMELLS_WAIT` (whole seconds) sets it too; the flag wins. Past it, or when the backend refuses to run analysis (403), the stored results are shown instead, marked stale (exit 0); with none stored, the error stands (exit 1). Text prints a progress line on stderr every 10 s when stderr is a terminal. The HTTP client stops waiting for an answer after 5 minutes, so a longer wait falls back there |
+| `--wait` | `<seconds>` | 20 (json/llm); 600 (text) | How long to wait for a fresh analysis, at most 3600. `IX_SMELLS_WAIT` (whole seconds, capped at 3600; ignored under MCP) sets it too; the flag wins. Past it, or when the backend refuses to run analysis (403), the stored results are shown instead, marked stale (exit 0); with none stored, the error stands (exit 1). Text prints a progress line on stderr every 10 s when stderr is a terminal. The HTTP client stops waiting for an answer after 5 minutes, so a longer wait falls back there |
 
-A stale answer is the stored claims, shaped as `--list` prints them (entity
-ids, not paths; no non-source filter), highest confidence first and capped like
-a fresh run. JSON adds `stale: true`, `computed_rev` and `computed_at` (the
-newest `rev` a stored claim carries and its `run_at`; `null` when the backend
-does not store them) and `diagnostics: [{code: "smells_stale", reason:
-"timeout" | "not_permitted", message}]`. llm prints one
-`diagnostic code=smells_stale` record after the header; text leads with a
-`Stale:` line. The CLI stops waiting but cannot tell whether the backend goes
-on, so a stale answer never claims a refresh is running.
+A stale answer is the stored claims shaped as a fresh run's output (`file`,
+`smell`, `confidence`, `signals` per candidate, plus the claim's `entity_id`),
+with the same non-source filter, ranking and cap. JSON adds `stale: true`,
+`computed_rev` and `computed_at` (the newest `rev` a stored claim carries and
+its `run_at`; `null` when the backend does not store them, as today's do not)
+and `diagnostics: [{code: "smells_stale", reason: "timeout" | "not_permitted",
+message}]`; `truncated` is also true when the backend returned only part of
+its stored claims. llm prints one `diagnostic code=smells_stale` record after
+the header; text leads with a `Stale:` line. The CLI stops waiting but cannot
+tell whether the backend goes on, so a stale answer never claims a refresh is
+running.
 
 ### `ix stats`
 

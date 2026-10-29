@@ -7,7 +7,8 @@ import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { llmLine, llmError, type LlmValue } from "../llm.js";
 import { printJson, sliceRanked, truncationHint, type Slice } from "../format.js";
-import { parseWaitSecondsOption } from "../options.js";
+import { MAX_WAIT_SECONDS, parseWaitSecondsOption } from "../options.js";
+import { forMcp } from "../next-step.js";
 import { canRenderProgress } from "../stderr.js";
 
 export interface SmellCandidate {
@@ -112,12 +113,19 @@ const AGENT_WAIT_SECONDS = 20;
 const TEXT_WAIT_SECONDS = 10 * 60;
 const PROGRESS_EVERY_MS = 10_000;
 
-/** The wait budget: --wait, then IX_SMELLS_WAIT (whole seconds), then the format's default. */
+/**
+ * The wait budget: --wait, then IX_SMELLS_WAIT (whole seconds, at most
+ * `MAX_WAIT_SECONDS`), then the format's default. Under MCP the variable is
+ * ignored: the ix_smells runner gives the command 30 s, and a wait inherited
+ * from the server's environment must not outlast it and leave nothing.
+ */
 function smellsWaitSeconds(format: string, wait?: number, env = process.env.IX_SMELLS_WAIT): number {
   if (wait !== undefined) return wait;
-  const raw = env?.trim();
+  const raw = forMcp() ? undefined : env?.trim();
   // Matched, not parsed: `parseInt("15m")` is 15. A malformed value is ignored.
-  if (raw && /^\d+$/.test(raw) && Number(raw) > 0 && Number.isSafeInteger(Number(raw))) return Number(raw);
+  if (raw && /^\d+$/.test(raw) && Number(raw) > 0 && Number.isSafeInteger(Number(raw))) {
+    return Math.min(Number(raw), MAX_WAIT_SECONDS);
+  }
   return format === "json" || format === "llm" ? AGENT_WAIT_SECONDS : TEXT_WAIT_SECONDS;
 }
 
@@ -347,83 +355,124 @@ stops waiting for an answer after 5 minutes, so a longer wait ends there.`)
       }
       stopProgress();
 
-      // Plain `--format json` is the raw contract MCP ix_smells and plugin
-      // fallbacks path-filter themselves, so it neither caps nor drops rows
-      // unless --limit is passed. An explicit `--limit 0` means everything,
-      // so it drops nothing either, in every format.
-      const rawJson = opts.format === "json" && opts.limit === undefined;
-      const limit = resolveLimit(opts.limit, opts.format);
-      const everything = opts.limit !== undefined && limit === Infinity;
-      const selection = selectSmells(report, limit, !(rawJson || everything));
-      const { slice, filteredNonSource } = selection;
-
-      if (opts.format === "json") {
-        // Compact: hoist inference_version to top, drop file_id UUIDs
-        const compact: Record<string, unknown> = {
-          rev: report.rev,
-          run_at: report.run_at,
-          count: slice.total,
-          shown: slice.shown,
-          truncated: slice.truncated,
-          ...(filteredNonSource > 0 ? { filtered_non_source: filteredNonSource } : {}),
-          inference_version: "smell_v1",
-          candidates: slice.rows.map(c => ({
-            file: c.file,
-            smell: c.smell,
-            confidence: c.confidence,
-            signals: c.signals,
-          })),
-        };
-        printJson(compact);
-        return;
-      }
-
-      if (opts.format === "llm") {
-        for (const line of renderSmellsRunLlm(report, selection)) console.log(line);
-        return;
-      }
-
-      const countText = slice.truncated
-        ? `${slice.total} candidates · showing ${slice.shown}`
-        : `${slice.total} candidates`;
-      const hiddenText = filteredNonSource > 0
-        ? ` (${filteredNonSource} non-source orphan files hidden)`
-        : "";
-      console.log(
-        `\n${chalk.bold("Architecture Smells")}  ` +
-        chalk.dim(`rev ${report.rev} · ${countText}${hiddenText}`)
-      );
-
-      if (slice.total === 0) {
-        console.log(chalk.green("\n  No smell candidates found."));
-        return;
-      }
-
-      // Group the shown rows by smell kind; each group stays confidence-sorted.
-      const byKind = new Map<string, SmellCandidate[]>();
-      for (const c of slice.rows) {
-        if (!byKind.has(c.smell)) byKind.set(c.smell, []);
-        byKind.get(c.smell)!.push(c);
-      }
-
-      for (const [kind, candidates] of byKind) {
-        const label = SMELL_LABELS[kind] ?? kind;
-        console.log(`\n${chalk.bold(label)}  ${chalk.dim(`(${candidates.length})`)}`);
-
-        for (const c of candidates) {
-          const conf = confidenceBar(c.confidence);
-          const fileName = c.file.length > 45
-            ? "…" + c.file.slice(-44)
-            : c.file.padEnd(45);
-          const signalStr = formatSignals(c.smell, c.signals);
-          console.log(`  ${conf} ${chalk.dim(fileName)}  ${chalk.dim(signalStr)}`);
-        }
-      }
-
-      if (slice.truncated) console.log(chalk.dim(`\n${truncationHint(slice, "smell candidates")}`));
-
-      console.log(chalk.dim(`\nSmell claims stored with inference_version=smell_v1. Use 'ix smells --list' to retrieve.`));
+      printSmellsReport(report, opts);
     });
+}
+
+/** What marks an answer made from stored claims as stale (see printStoredSmells). */
+interface StaleAnswer {
+  reason: StaleReason;
+  message: string;
+  asOf: { computed_rev: number | null; computed_at: string | null };
+  /** The backend returned only part of the stored claims. */
+  storedTruncated: boolean;
+}
+
+/**
+ * Print a smells report: a fresh run, or (with `stale`) the stored claims
+ * made into one. A stale report is the same output plus its markers: json
+ * gains `stale`, `computed_at`, `computed_rev` and a `smells_stale`
+ * diagnostic, llm one `diagnostic code=smells_stale` record after its header,
+ * text a "Stale:" line first.
+ */
+function printSmellsReport(report: SmellReport, opts: { format: string; limit?: string }, stale?: StaleAnswer): void {
+  // Plain `--format json` is the raw contract MCP ix_smells and plugin
+  // fallbacks path-filter themselves, so it neither caps nor drops rows
+  // unless --limit is passed. An explicit `--limit 0` means everything,
+  // so it drops nothing either, in every format.
+  const rawJson = opts.format === "json" && opts.limit === undefined;
+  const limit = resolveLimit(opts.limit, opts.format);
+  const everything = opts.limit !== undefined && limit === Infinity;
+  const selection = selectSmells(report, limit, !(rawJson || everything));
+  const { slice, filteredNonSource } = selection;
+
+  if (opts.format === "json") {
+    // Compact: hoist inference_version to top, drop file_id UUIDs
+    const compact: Record<string, unknown> = {
+      rev: report.rev,
+      run_at: report.run_at,
+      count: slice.total,
+      shown: slice.shown,
+      truncated: slice.truncated || stale?.storedTruncated === true,
+      ...(filteredNonSource > 0 ? { filtered_non_source: filteredNonSource } : {}),
+      inference_version: "smell_v1",
+      candidates: slice.rows.map(c => ({
+        file: c.file,
+        smell: c.smell,
+        confidence: c.confidence,
+        signals: c.signals,
+        // A stored claim is keyed by its entity; its file can be missing.
+        ...(stale ? { entity_id: c.file_id.slice(0, 12) } : {}),
+      })),
+      ...(stale ? {
+        stale: true,
+        computed_at: stale.asOf.computed_at,
+        computed_rev: stale.asOf.computed_rev,
+        diagnostics: [{ code: "smells_stale", reason: stale.reason, message: stale.message }],
+      } : {}),
+    };
+    printJson(compact);
+    return;
+  }
+
+  if (opts.format === "llm") {
+    const lines = renderSmellsRunLlm(report, selection);
+    if (stale) {
+      lines.splice(1, 0, llmLine("diagnostic", [
+        ["code", "smells_stale"],
+        ["reason", stale.reason],
+        ["computed_rev", stale.asOf.computed_rev ?? undefined],
+        ["computed_at", stale.asOf.computed_at ?? undefined],
+        ["message", stale.message],
+      ]));
+    }
+    for (const line of lines) console.log(line);
+    return;
+  }
+
+  if (stale) console.log(chalk.yellow(`\nStale: ${stale.message}.`));
+  const countText = slice.truncated
+    ? `${slice.total} candidates · showing ${slice.shown}`
+    : `${slice.total} candidates`;
+  const hiddenText = filteredNonSource > 0
+    ? ` (${filteredNonSource} non-source orphan files hidden)`
+    : "";
+  const revText = stale && report.rev === undefined ? "" : `rev ${report.rev} · `;
+  console.log(
+    `\n${chalk.bold("Architecture Smells")}  ` +
+    chalk.dim(`${revText}${countText}${hiddenText}`)
+  );
+
+  if (slice.total === 0) {
+    console.log(chalk.green("\n  No smell candidates found."));
+    return;
+  }
+
+  // Group the shown rows by smell kind; each group stays confidence-sorted.
+  const byKind = new Map<string, SmellCandidate[]>();
+  for (const c of slice.rows) {
+    if (!byKind.has(c.smell)) byKind.set(c.smell, []);
+    byKind.get(c.smell)!.push(c);
+  }
+
+  for (const [kind, candidates] of byKind) {
+    const label = SMELL_LABELS[kind] ?? kind;
+    console.log(`\n${chalk.bold(label)}  ${chalk.dim(`(${candidates.length})`)}`);
+
+    for (const c of candidates) {
+      const conf = confidenceBar(c.confidence);
+      const fileName = c.file.length > 45
+        ? "…" + c.file.slice(-44)
+        : c.file.padEnd(45);
+      const signalStr = formatSignals(c.smell, c.signals);
+      console.log(`  ${conf} ${chalk.dim(fileName)}  ${chalk.dim(signalStr)}`);
+    }
+  }
+
+  if (slice.truncated) console.log(chalk.dim(`\n${truncationHint(slice, "smell candidates")}`));
+
+  // Nothing was stored by a stale answer; it is what was stored before.
+  if (!stale) console.log(chalk.dim(`\nSmell claims stored with inference_version=smell_v1. Use 'ix smells --list' to retrieve.`));
 }
 
 /** The text rendering of stored smell claims (`--list`, and the stale fallback). */
@@ -438,13 +487,33 @@ function printSmellsListText(listSlice: Slice<any>): void {
 }
 
 /**
+ * A stored smell claim (a `GET /v1/smells` row: `{entity_id, smell, value:
+ * {confidence, file, signals}, inference_version}`) as the candidate a fresh
+ * run reports. Fields are read from `value`, then from the row itself.
+ */
+export function storedSmellToCandidate(row: any): SmellCandidate {
+  const record = (v: unknown): Record<string, unknown> | undefined =>
+    v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : undefined;
+  const value = record(row?.value) ?? {};
+  const file = value.file ?? row?.file;
+  return {
+    file_id: typeof row?.entity_id === "string" ? row.entity_id : "",
+    file: typeof file === "string" ? file : "",
+    smell: String(row?.smell ?? ""),
+    confidence: Number(value.confidence ?? row?.confidence) || 0,
+    signals: record(value.signals) ?? record(row?.signals) ?? {},
+    inference_version: typeof row?.inference_version === "string" ? row.inference_version : "smell_v1",
+  };
+}
+
+/**
  * Answer with the stored smell claims (`GET /v1/smells`, what `--list`
- * reads) when a fresh run timed out or was refused, marked stale: json gains
- * `stale`, `computed_at`, `computed_rev` and a `smells_stale` diagnostic, llm
- * one `diagnostic code=smells_stale` record after its header, text a "Stale:"
- * line. Rows are ranked by confidence and capped like a fresh run (50 for
- * text and llm, all for json, unless --limit). With nothing stored, or the
- * stored results unreadable, it is today's error: exit 1, `backend_error`.
+ * reads) when a fresh run timed out or was refused: the claims are made into
+ * the report a fresh run returns (same `candidates`, same filter, ranking and
+ * cap) and printed with its stale markers (see printSmellsReport). A backend
+ * that returned only part of what it stores makes the answer `truncated` and
+ * says so in the message. With nothing stored, or the stored results
+ * unreadable, it is today's error: exit 1, `backend_error`.
  */
 async function printStoredSmells(
   client: { listSmells(opts: { workspaceId?: string; systemId?: string }): Promise<any> },
@@ -476,41 +545,18 @@ async function printStoredSmells(
   }
 
   const asOf = storedSmellsAsOf(stored);
-  const message = staleMessage(cause, asOf);
-  const slice = sliceRanked<any>(rows, resolveLimit(opts.limit, opts.format), (s) => -(Number(s.confidence) || 0));
-
-  if (opts.format === "json") {
-    printJson({
-      count: slice.total,
-      shown: slice.shown,
-      truncated: slice.truncated,
-      inference_version: "smell_v1",
-      smells: slice.rows.map((s: any) => ({
-        smell: s.smell,
-        entity_id: s.entity_id?.slice(0, 12),
-        confidence: s.confidence,
-      })),
-      stale: true,
-      computed_at: asOf.computed_at,
-      computed_rev: asOf.computed_rev,
-      diagnostics: [{ code: "smells_stale", reason, message }],
-    });
-    return;
-  }
-  if (opts.format === "llm") {
-    const lines = renderSmellsListLlm(slice.rows, slice);
-    lines.splice(1, 0, llmLine("diagnostic", [
-      ["code", "smells_stale"],
-      ["reason", reason],
-      ["computed_rev", asOf.computed_rev ?? undefined],
-      ["computed_at", asOf.computed_at ?? undefined],
-      ["message", message],
-    ]));
-    for (const line of lines) console.log(line);
-    return;
-  }
-  console.log(chalk.yellow(`\nStale: ${message}.`));
-  printSmellsListText(slice);
+  const storedTruncated = stored?.truncated === true;
+  const total = typeof stored?.total === "number" && stored.total > rows.length ? stored.total : undefined;
+  const partial = !storedTruncated ? ""
+    : total !== undefined ? `; the backend returned ${rows.length} of ${total} stored claims`
+    : "; the backend returned only part of the stored claims";
+  const report = {
+    rev: asOf.computed_rev ?? undefined,
+    run_at: asOf.computed_at ?? undefined,
+    count: rows.length,
+    candidates: rows.map(storedSmellToCandidate),
+  } as unknown as SmellReport;
+  printSmellsReport(report, opts, { reason, message: staleMessage(cause, asOf) + partial, asOf, storedTruncated });
 }
 
 function confidenceBar(conf: number): string {

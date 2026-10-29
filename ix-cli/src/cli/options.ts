@@ -108,9 +108,20 @@ export function parsePickOption(value: string): number {
   return parsePositiveInt(value, "1 or 2");
 }
 
-/** Parse a `--wait <seconds>` budget: a positive whole number of seconds. */
+/** The longest `--wait <seconds>` budget: an hour. */
+export const MAX_WAIT_SECONDS = 3600;
+
+/**
+ * Parse a `--wait <seconds>` budget: a positive whole number of seconds, at
+ * most `MAX_WAIT_SECONDS`. Unbounded, a large value overflowed the timer (it
+ * fires at once above ~24.8 days) instead of waiting.
+ */
 export function parseWaitSecondsOption(value: string): number {
-  return parsePositiveInt(value, "20 or 600");
+  const seconds = parsePositiveInt(value, "20 or 600");
+  if (seconds > MAX_WAIT_SECONDS) {
+    throw new InvalidArgumentError(`must be at most ${MAX_WAIT_SECONDS} seconds (for example, 20 or 600)`);
+  }
+  return seconds;
 }
 
 /**
