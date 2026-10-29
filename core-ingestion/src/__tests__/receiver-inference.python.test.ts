@@ -370,6 +370,31 @@ class Service:
     expect(resolveEdges([model, use]).filter(e => e.predicate === 'IMPORTS' || e.predicate === 'CALLS')).toEqual([]);
   });
 
+  it.each(['base.Base', 'base.Base[int]'])('resolves inherited typed calls through %s across batches', baseType => {
+    const base = parse('src/pkg/base.py', 'class Base:\n    def run(self): pass\n');
+    const child = parse('src/pkg/child.py', `from pkg import base
+class Child(${baseType}): pass
+`);
+    const use = parse('src/app/service.py', `from pkg.child import Child
+class Service:
+    def execute(self, item: Child):
+        item.run()
+`);
+    const decoy = parse('src/other/base.py', 'class Base:\n    def run(self): pass\n');
+    const files = [base, child, use, decoy];
+    const summaries = new Map(files.map(r => [r.filePath, summarizeParseResult(r)]));
+    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
+    const edges = resolveEdges(files);
+    const expected = expect.objectContaining({ srcFilePath: use.filePath, srcName: 'Service.execute',
+      dstName: 'item.run', dstFilePath: base.filePath, dstQualifiedKey: 'Base.run', predicate: 'CALLS',
+      tier: 'type', callSite: expect.any(Number) });
+    expect(edges).toContainEqual(expected);
+    expect(edges).toContainEqual(expect.objectContaining({ srcFilePath: child.filePath,
+      srcName: 'Child', dstName: 'base.Base', dstFilePath: base.filePath, dstQualifiedKey: 'Base', predicate: 'EXTENDS' }));
+    expect(edges.some(e => e.dstFilePath === decoy.filePath)).toBe(false);
+    expect(resolveEdges([use], undefined, index)).toEqual(edges.filter(e => e.srcFilePath === use.filePath));
+  });
+
   it('uses superclass import aliases from stored summaries', () => {
     const base = parse('src/pkg/base.py', 'class Base:\n    def run(self): pass\n');
     const middle = parse('src/pkg/middle.py', 'from .base import Base as Parent\nclass Middle(Parent): pass\n');
@@ -397,6 +422,18 @@ class Service:
     const second = parse('second/src/pkg/helper.py', 'def run(): pass\n');
     const use = parse('tests/test_helper.py', 'import pkg.helper as helper\ndef execute():\n    helper.run()\n');
     expect(resolveEdges([first, second, use]).filter(e => e.predicate === 'IMPORTS' || e.predicate === 'CALLS')).toEqual([]);
+  });
+
+  it('does not select an ambiguous module root by the receiver class name', () => {
+    const first = parse('first/src/pkg/model.py', 'class Target:\n    def run(self): pass\n');
+    const second = parse('second/src/pkg/model.py', 'class Other:\n    def run(self): pass\n');
+    const use = parse('tests/test_model.py', 'from pkg.model import Target\ndef execute(item: Target):\n    item.run()\n');
+    const files = [first, second, use];
+    const summaries = new Map(files.map(r => [r.filePath, summarizeParseResult(r)]));
+    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
+    for (const edges of [resolveEdges(files), resolveEdges([use], undefined, index)]) {
+      expect(edges.filter(e => e.predicate === 'IMPORTS' || e.predicate === 'CALLS')).toEqual([]);
+    }
   });
 
   it('does not borrow a constructor hidden by an instance or module reassignment', () => {

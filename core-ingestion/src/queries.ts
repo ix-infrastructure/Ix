@@ -183,6 +183,12 @@ export const JAVASCRIPT_QUERIES = `
 (class_declaration
   name: (identifier) @name) @definition.class
 
+; A class expression bound to a name (const/let/var A = class [Named] {})
+; is the class A; the binding is the name the rest of the code uses.
+(variable_declarator
+  name: (identifier) @name
+  value: (class)) @definition.class
+
 (function_declaration
   name: (identifier) @name) @definition.function
 
@@ -297,11 +303,20 @@ export const JAVASCRIPT_QUERIES = `
   constructor: (identifier) @call.name) @call
 
 ; Heritage queries - class extends (JavaScript uses different AST than TypeScript)
-; In tree-sitter-javascript, class_heritage directly contains the parent identifier
+; In tree-sitter-javascript, class_heritage directly contains the parent
+; expression: a bare name or ns.Base. A call (extends mixin(Base)) is no edge.
 (class_declaration
   name: (identifier) @heritage.class
   (class_heritage
-    (identifier) @heritage.extends)) @heritage
+    [(identifier) (member_expression)] @heritage.extends)) @heritage
+
+; A class expression bound to a name (const A = class extends B {}) extends
+; under the binding's name, as its definition is named.
+(variable_declarator
+  name: (identifier) @heritage.class
+  value: (class
+    (class_heritage
+      [(identifier) (member_expression)] @heritage.extends))) @heritage
 `;
 
 // Python queries - works with tree-sitter-python
@@ -315,6 +330,7 @@ export const PYTHON_QUERIES = `
 (import_statement
   name: (dotted_name) @import.source) @import
 
+; import a.b as m — the module is a.b, bound locally as m (m.f() -> a/b.py::f)
 (import_statement
   name: (aliased_import
     name: (dotted_name) @import.source
@@ -356,11 +372,20 @@ export const PYTHON_QUERIES = `
   function: (attribute
     attribute: (identifier) @call.name)) @call
 
-; Heritage queries - Python class inheritance
+; Heritage queries - Python class inheritance: a bare or dotted base
+; (Base, nn.Module, a.b.Base). Only direct children of the base list match, so
+; keyword arguments (metaclass=Meta, total=False) and *bases never do.
 (class_definition
   name: (identifier) @heritage.class
   superclasses: (argument_list
-    (identifier) @heritage.extends)) @heritage
+    [(identifier) (attribute)] @heritage.extends)) @heritage
+
+; A generic base (Generic[T], Box[int], mod.Base[T]) extends the subscripted name.
+(class_definition
+  name: (identifier) @heritage.class
+  superclasses: (argument_list
+    (subscript
+      value: [(identifier) (attribute)] @heritage.extends))) @heritage
 
 ; Type references — captures types used in type annotations / hints
 (typed_parameter type: (type (identifier) @reference.type))

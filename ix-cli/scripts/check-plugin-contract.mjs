@@ -19,7 +19,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, extname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -96,10 +96,12 @@ function codeInvocations(text) {
 }
 
 /** Invocations in text: `ix …` code spans, and lines of fenced blocks starting with `ix `. */
-function textInvocations(text) {
+export function textInvocations(text) {
   const found = [];
   for (const m of text.matchAll(/`(ix\s+[a-z][^`\n]*)`/g)) {
-    found.push({ argv: tokens(m[1]), line: lineOf(text, m.index), snippet: m[1].slice(0, 100) });
+    // Inside a JS template literal the span is written \`ix …\`: the closing
+    // backtick's escape is captured as the span's last character.
+    found.push({ argv: tokens(m[1].replace(/\\+$/, "")), line: lineOf(text, m.index), snippet: m[1].slice(0, 100) });
   }
   let inFence = false;
   text.split("\n").forEach((raw, i) => {
@@ -148,8 +150,13 @@ function lineOf(text, index) {
   return text.slice(0, index).split("\n").length;
 }
 
+/** A flag's name without `=value` or the escape, quote or punctuation after it. */
+function flagName(token) {
+  return token.split("=")[0].replace(/[\\`'",.;:!?)\]}]+$/, "");
+}
+
 /** What is wrong with one invocation, or null. */
-function check(argv, surface) {
+export function check(argv, surface) {
   const cmd = argv[0];
   if (!/^[a-z][a-z-]*$/.test(cmd)) return null; // a placeholder or a variable
   if (PRO_COMMANDS.has(cmd)) return null;
@@ -162,9 +169,11 @@ function check(argv, surface) {
     entry = surface.get(`${cmd} ${sub}`);
     name = `${cmd} ${sub}`;
   }
+  // Only trailing punctuation is dropped, never a letter or `_`, so `--remapp`
+  // and `--re_map` are reported under the name the plugin wrote.
   const bad = argv
     .filter((a) => /^--[a-z][a-z0-9-]*/.test(a))
-    .map((a) => a.split("=")[0])
+    .map(flagName)
     .filter((f) => !entry.flags.has(f) && !GLOBAL_FLAGS.has(f));
   return bad.length ? `"${name}" has no ${bad.join(", ")}` : null;
 }
@@ -217,4 +226,7 @@ function main(argv) {
   return 0;
 }
 
-process.exit(main(process.argv.slice(2)));
+// Run as a script, not when a test imports it. Real paths, so a symlinked
+// invocation still runs the check rather than exiting 0 having checked nothing.
+const isMain = process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+if (isMain) process.exit(main(process.argv.slice(2)));

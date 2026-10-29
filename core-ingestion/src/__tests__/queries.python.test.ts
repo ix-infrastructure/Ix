@@ -60,9 +60,8 @@ def top_level():
       predicate: 'CALLS',
       bareCall: true,
     });
-    // The qualifier pattern also emits the fully-qualified form so Tier-1b
-    // resolution can resolve e.g. Session.execute → session.py when the
-    // qualifier is a class name present in the caller's imports.
+    // Keep the source receiver and call site; the declared type directs resolution
+    // without adding a guessed bare-member edge.
     expect(result!.relationships).toContainEqual({
       srcName: 'Service.run',
       dstName: 'value.save',
@@ -142,6 +141,45 @@ def my_view(request):
     });
   });
 
+  it('substitutes typed and constructor-assigned receivers inside a method', () => {
+    const result = parseFile(
+      '/repo/service.py',
+      `
+class Service:
+    def run(self, q: Query, limit: int = 10):
+        x = Builder()
+        q.filter()
+        x.build()
+      `,
+    );
+
+    expect(result).not.toBeNull();
+    const calls = result!.relationships.filter(r => r.predicate === 'CALLS' && r.srcName === 'Service.run');
+    expect(calls).toContainEqual(expect.objectContaining({ srcName: 'Service.run', dstName: 'q.filter', predicate: 'CALLS', receiverType: 'Query', receiverOnly: true, callSite: expect.any(Number) }));
+    expect(calls).toContainEqual(expect.objectContaining({ srcName: 'Service.run', dstName: 'x.build', predicate: 'CALLS', receiverType: 'Builder', receiverOnly: true, callSite: expect.any(Number) }));
+    expect(calls.map(c => c.dstName)).not.toContain('filter');
+    expect(calls.map(c => c.dstName)).not.toContain('build');
+  });
+
+  it('records import a.b as m as an IMPORTS edge and a module alias', () => {
+    const result = parseFile(
+      '/repo/app/main.py',
+      'import pkg.sub.mod as m\nimport os.path\n\ndef main():\n    return m.load()\n',
+    );
+
+    expect(result!.relationships).toContainEqual({
+      srcName: 'main.py',
+      dstName: 'pkg.sub.mod',
+      predicate: 'IMPORTS',
+      importRaw: 'pkg.sub.mod',
+      importAliased: true,
+    });
+    // Unaliased dotted imports bind their head so the full member path is preserved.
+    expect(result!.relationships).toContainEqual({ srcName: 'main.py', dstName: 'os.path', predicate: 'IMPORTS', importRaw: 'os.path' });
+    expect(result!.importAliases).toEqual({ m: 'pkg.sub.mod', os: 'os' });
+    expect(result!.relationships).toContainEqual(expect.objectContaining({ srcName: 'main', dstName: 'm.load', predicate: 'CALLS', receiverOnly: true, callSite: expect.any(Number) }));
+  });
+
   it('emits REFERENCES edge for class passed as keyword argument value', () => {
     const result = parseFile(
       '/repo/admin/sites.py',
@@ -217,4 +255,37 @@ class KernelHandle:
     );
   });
 
+  describe('class heritage', () => {
+    const extendsOf = (source: string) => parseFile('/repo/pkg/models.py', source)!.relationships
+      .filter(rel => rel.predicate === 'EXTENDS')
+      .map(rel => [rel.srcName, rel.dstName]);
+
+    it('extends a bare base, as before', () => {
+      expect(extendsOf('class X(Base):\n    pass\n')).toEqual([['X', 'Base']]);
+    });
+
+    it('extends a dotted base by its dotted name', () => {
+      expect(extendsOf('class Attention(nn.Module):\n    pass\n')).toEqual([['Attention', 'nn.Module']]);
+      expect(extendsOf('class X(a.b.Base):\n    pass\n')).toEqual([['X', 'a.b.Base']]);
+    });
+
+    it('extends the subscripted name of a generic base', () => {
+      expect(extendsOf('class Repo(Generic[T]):\n    pass\n')).toEqual([['Repo', 'Generic']]);
+      expect(extendsOf('class IntBox(Box[int]):\n    pass\n')).toEqual([['IntBox', 'Box']]);
+      expect(extendsOf('class Y(mod.Base[K, V]):\n    pass\n')).toEqual([['Y', 'mod.Base']]);
+    });
+
+    it('extends every base of a mixed list, and never a keyword argument', () => {
+      expect(extendsOf(
+        'class X(Base, pkg.Mixin, Box[int], mod.Base[T], metaclass=Meta, total=False):\n    pass\n',
+      )).toEqual([['X', 'Base'], ['X', 'pkg.Mixin'], ['X', 'Box'], ['X', 'mod.Base']]);
+    });
+
+    it('extends nothing for keyword-only, splat and call bases', () => {
+      expect(extendsOf('class Movie(TypedDict, total=False):\n    pass\n')).toEqual([['Movie', 'TypedDict']]);
+      expect(extendsOf('class X(metaclass=Meta):\n    pass\n')).toEqual([]);
+      expect(extendsOf('class X(*bases, **kw):\n    pass\n')).toEqual([]);
+      expect(extendsOf('class X(make_base()):\n    pass\n')).toEqual([]);
+    });
+  });
 });

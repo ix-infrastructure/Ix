@@ -110,7 +110,8 @@ export function collectPythonReceiverFacts(root: any, checkBudget: () => void): 
       if (isClass) {
         scope.owner = scope;
         for (const base of node.childForFieldName('superclasses')?.namedChildren ?? []) {
-          const type = concrete(base);
+          // Match heritage queries: Base[T] inherits the subscripted class.
+          const type = concrete(base.type === 'subscript' ? base.childForFieldName('value') : base);
           if (type) heritage.push([name, type]);
         }
       } else if (comprehensionTypes.has(node.type)) {
