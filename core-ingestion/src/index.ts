@@ -679,6 +679,26 @@ function extractJsImportBindings(stmtNode: any, rawSpec: string): ImportBinding[
   return out;
 }
 
+/**
+ * JS/TS: the name a statement binds a whole module to -- `ns` in
+ * `import * as ns from 'x'`, in a top-level `const ns = require('x')`, and in
+ * the re-export `export * as ns from 'x'` (what an importer's `import { ns }`
+ * names). Resolves `ns.Base` heritage, as Python's `import a.b as m` does.
+ */
+function jsTsNamespaceAlias(stmtNode: any): string | undefined {
+  if (!stmtNode) return undefined;
+  const child = (node: any, type: string): any => node?.namedChildren?.find((c: any) => c.type === type);
+  if (stmtNode.type === 'import_statement') return child(child(child(stmtNode, 'import_clause'), 'namespace_import'), 'identifier')?.text;
+  if (stmtNode.type === 'export_statement') return child(child(stmtNode, 'namespace_export'), 'identifier')?.text;
+  if (stmtNode.type !== 'call_expression' || stmtNode.childForFieldName?.('function')?.text !== 'require') return undefined;
+  const declarator = stmtNode.parent;
+  if (declarator?.type !== 'variable_declarator') return undefined;
+  if (declarator.childForFieldName?.('value')?.startIndex !== stmtNode.startIndex) return undefined;
+  if (declarator.parent?.parent?.type !== 'program') return undefined;
+  const name = declarator.childForFieldName?.('name');
+  return name?.type === 'identifier' ? name.text : undefined;
+}
+
 const JS_TS_FUNCTION_NODES = new Set([
   'function_declaration',
   'generator_function_declaration',
@@ -3114,6 +3134,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           if (stmtNode) {
             const rawSpec = unwrapImportSpecifier(importSource.node.text);
             for (const b of extractJsImportBindings(stmtNode, rawSpec)) importBindings.push(b);
+            const namespaceAlias = jsTsNamespaceAlias(stmtNode);
+            if (namespaceAlias) importAliases[namespaceAlias] = rawSpec;
           }
         }
         // Grouped alias `alias MyApp.{User, Repo}`: each member alias is captured bare
@@ -5462,6 +5484,35 @@ export function resolveEdges(
     return [...files];
   }
 
+  /**
+   * JS/TS: the files of the module a qualifier is bound to -- `ns` after
+   * `import * as ns from './base'` or `const ns = require('./base')`, or
+   * `import { ns } from './barrel'` where the barrel has
+   * `export * as ns from './base'`. Undefined when the qualifier is bound to
+   * no module; an external one (`import * as React from 'react'`) has no files.
+   */
+  function jsTsQualifierModuleFiles(srcFilePath: string, srcLanguage: SupportedLanguages, qualifier: string): string[] | undefined {
+    if (qualifier.includes('.')) return undefined;
+    const aliasIn = (fp: string, name: string): string | undefined => {
+      const aliases = summaries.get(fp)?.importAliases;
+      return aliases && Object.hasOwn(aliases, name) ? aliases[name] : undefined;
+    };
+    const ownSpec = aliasIn(srcFilePath, qualifier);
+    if (ownSpec !== undefined) return resolveImportTargets(srcFilePath, srcLanguage, ownSpec, ownSpec, 'types');
+    const binding = importBindingsByLocal.get(srcFilePath)?.get(qualifier);
+    if (!binding || binding.imported === 'default') return undefined;
+    const files = new Set<string>();
+    let bound = false;
+    for (const provider of resolveImportTargets(srcFilePath, srcLanguage, binding.pkg, binding.pkg, 'types')) {
+      const spec = aliasIn(provider, binding.imported);
+      if (spec === undefined) continue;
+      bound = true;
+      const providerLanguage = summaries.get(provider)?.language ?? srcLanguage;
+      for (const fp of resolveImportTargets(provider, providerLanguage, spec, spec, 'types')) files.add(fp);
+    }
+    return bound ? [...files] : undefined;
+  }
+
   function sameScopeDefines(result: FileParseResult, srcName: string, dstName: string): boolean {
     const sourceEntities = result.entities.filter(e => e.name === srcName || qualifiedKey(e) === srcName);
     if (sourceEntities.length === 0) return false;
@@ -5917,6 +5968,21 @@ export function resolveEdges(
               .filter(fp => fp !== srcFilePath && (fileQKeys.get(fp)?.get(memberPart) ?? []).includes(memberPart));
             if (moduleMatches.length === 1) {
               resolved.push({ srcFilePath, srcName, dstFilePath: moduleMatches[0], dstName: origDstName, dstQualifiedKey: memberPart, predicate: rel.predicate, confidence: 0.9, tier: 'qualifier' });
+              continue;
+            }
+          }
+          // JS/TS module-qualified base (`class A extends ns.Base`,
+          // `implements ns.I`): a module-scope type of the module `ns` is bound
+          // to. A qualifier bound to a module stops here either way, so an
+          // external `React.Component` never falls through to a same-named type.
+          if (qualImportMatches.length === 0 && rel.predicate === 'EXTENDS' && srcIsJsTs) {
+            const moduleFiles = jsTsQualifierModuleFiles(srcFilePath, srcLanguage, qualifierPart);
+            if (moduleFiles !== undefined) {
+              const moduleMatches = moduleFiles
+                .filter(fp => fp !== srcFilePath && (fileQKeys.get(fp)?.get(memberPart) ?? []).includes(memberPart));
+              if (moduleMatches.length === 1) {
+                resolved.push({ srcFilePath, srcName, dstFilePath: moduleMatches[0], dstName: origDstName, dstQualifiedKey: memberPart, predicate: rel.predicate, confidence: 0.9, tier: 'qualifier' });
+              }
               continue;
             }
           }

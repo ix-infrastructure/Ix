@@ -165,6 +165,173 @@ describe('EXTENDS resolution for JavaScript bases', () => {
   });
 });
 
+describe('EXTENDS resolution for TypeScript bases', () => {
+  const base = {
+    '/repo/src/base.ts': [
+      'export class Base<T = unknown> {}',
+      'export interface I<T = unknown> {}',
+      'export interface K {}',
+      '',
+    ].join('\n'),
+    '/repo/src/barrel.ts': "export * as ns from './base';\n",
+  };
+
+  it('resolves a namespace-qualified class base through import * as ns', () => {
+    expect(heritage({
+      ...base,
+      '/repo/src/widget.ts': [
+        "import * as ns from './base';",
+        'export class A extends ns.Base {}',
+        'export abstract class B extends ns.Base<string> {}',
+        '',
+      ].join('\n'),
+    }, '/repo/src/widget.ts')).toEqual([
+      'A ns.Base -> /repo/src/base.ts:Base',
+      'B ns.Base -> /repo/src/base.ts:Base',
+    ]);
+  });
+
+  it('resolves a namespace-qualified base through a named import of a module', () => {
+    expect(heritage({
+      ...base,
+      '/repo/src/widget.ts': "import { ns } from './barrel';\nexport class A extends ns.Base implements ns.I<number> {}\n",
+    }, '/repo/src/widget.ts')).toEqual([
+      'A ns.Base -> /repo/src/base.ts:Base',
+      'A ns.I -> /repo/src/base.ts:I',
+    ]);
+  });
+
+  it('resolves bare and generic bases, as before', () => {
+    expect(heritage({
+      ...base,
+      '/repo/src/widget.ts': [
+        "import { Base } from './base';",
+        'export class A extends Base {}',
+        'export class B extends Base<number> {}',
+        '',
+      ].join('\n'),
+    }, '/repo/src/widget.ts')).toEqual([
+      'A Base -> /repo/src/base.ts:Base',
+      'B Base -> /repo/src/base.ts:Base',
+    ]);
+  });
+
+  it('resolves generic, namespace-qualified and listed implemented interfaces', () => {
+    expect(heritage({
+      ...base,
+      '/repo/src/widget.ts': [
+        "import * as ns from './base.js';",
+        "import { I, K } from './base';",
+        'export class A implements I<string> {}',
+        'export class B implements ns.I {}',
+        'export class C implements ns.I<number> {}',
+        'export class D extends ns.Base<T> implements I<T>, ns.K {}',
+        'export abstract class E implements ns.I<T>, K {}',
+        '',
+      ].join('\n'),
+    }, '/repo/src/widget.ts')).toEqual([
+      'A I -> /repo/src/base.ts:I',
+      'B ns.I -> /repo/src/base.ts:I',
+      'C ns.I -> /repo/src/base.ts:I',
+      'D I -> /repo/src/base.ts:I',
+      'D ns.Base -> /repo/src/base.ts:Base',
+      'D ns.K -> /repo/src/base.ts:K',
+      'E K -> /repo/src/base.ts:K',
+      'E ns.I -> /repo/src/base.ts:I',
+    ]);
+  });
+
+  it('resolves generic, namespace-qualified and listed interface bases', () => {
+    expect(heritage({
+      ...base,
+      '/repo/src/shapes.ts': [
+        "import * as ns from './base';",
+        "import type { I, K } from './base';",
+        'export interface J1 extends I<string> {}',
+        'export interface J2 extends ns.I {}',
+        'export interface J3 extends ns.I<number>, K, ns.K {}',
+        '',
+      ].join('\n'),
+    }, '/repo/src/shapes.ts')).toEqual([
+      'J1 I -> /repo/src/base.ts:I',
+      'J2 ns.I -> /repo/src/base.ts:I',
+      'J3 K -> /repo/src/base.ts:K',
+      'J3 ns.I -> /repo/src/base.ts:I',
+      'J3 ns.K -> /repo/src/base.ts:K',
+    ]);
+  });
+
+  it('never lands a qualified base on a same-named type the namespace does not hold', () => {
+    expect(heritage({
+      ...base,
+      '/repo/src/other.ts': 'export class Widget {}\nexport interface Shape {}\n',
+      '/repo/src/widget.ts': [
+        "import * as ns from './base';",
+        "import * as other from './other';",
+        'export class A extends ns.Widget implements ns.Shape {}',
+        'export class B extends missing.Widget implements missing.Shape {}',
+        'export interface J extends ns.Shape, missing.Shape {}',
+        '',
+      ].join('\n'),
+    }, '/repo/src/widget.ts')).toEqual([]);
+  });
+
+  it('leaves an external base unresolved beside in-repo same-named types', () => {
+    expect(heritage({
+      '/repo/src/Component.ts': 'export class Component {}\nexport interface OnInit {}\nexport interface Props {}\n',
+      '/repo/src/panel.ts': [
+        "import * as React from 'react';",
+        "import * as core from '@angular/core';",
+        "import { OnInit } from '@angular/core';",
+        'export class Panel extends React.Component<Props> implements core.OnInit, OnInit {}',
+        'export interface PanelProps extends React.Props<Panel> {}',
+        '',
+      ].join('\n'),
+    }, '/repo/src/panel.ts')).toEqual([]);
+  });
+});
+
+describe('EXTENDS resolution for JavaScript namespace bases', () => {
+  const base = { '/repo/src/base.js': 'export class Base {}\n', '/repo/src/other.js': 'export class Other {}\n' };
+
+  it('resolves ns.Base through import * as ns', () => {
+    expect(heritage({
+      ...base,
+      '/repo/src/widget.js': [
+        "import * as ns from './base.js';",
+        'class A extends ns.Base {}',
+        'const B = class extends ns.Base {};',
+        '',
+      ].join('\n'),
+    }, '/repo/src/widget.js')).toEqual([
+      'A ns.Base -> /repo/src/base.js:Base',
+      'B ns.Base -> /repo/src/base.js:Base',
+    ]);
+  });
+
+  it('resolves ns.Base through const ns = require()', () => {
+    expect(heritage({
+      ...base,
+      '/repo/src/widget.js': "const ns = require('./base');\nclass A extends ns.Base {}\n",
+    }, '/repo/src/widget.js')).toEqual(['A ns.Base -> /repo/src/base.js:Base']);
+  });
+
+  it('never resolves ns.Other to a module the namespace is not', () => {
+    expect(heritage({
+      ...base,
+      '/repo/src/widget.js': [
+        "const ns = require('./base');",
+        "const lib = require('lib');",
+        "import { Other } from './other.js';",
+        'class A extends ns.Other {}',
+        'class B extends lib.Base {}',
+        'class C extends missing.Base {}',
+        '',
+      ].join('\n'),
+    }, '/repo/src/widget.js')).toEqual([]);
+  });
+});
+
 describe('EXTENDS edges in the patch', () => {
   /** The EXTENDS edges `srcPath`'s patch writes, as `srcId -> dstId`. */
   function patchedExtends(files: Record<string, string>, srcPath: string): string[] {
@@ -197,6 +364,18 @@ describe('EXTENDS edges in the patch', () => {
     }, user)).toEqual([
       `${id(user, 'User')} -> ${id('/repo/app/models.py', 'Model')}`,
       `${id(user, 'User')} -> ${id(user, 'Box')}`,
+    ].sort());
+  });
+
+  it('links a TypeScript class to its namespace-qualified and generic bases', () => {
+    const widget = '/repo/src/widget.ts';
+    const base = '/repo/src/base.ts';
+    expect(patchedExtends({
+      [base]: 'export class Base {}\nexport interface I<T> {}\n',
+      [widget]: "import * as ns from './base';\nexport class Widget extends ns.Base implements ns.I<number> {}\n",
+    }, widget)).toEqual([
+      `${id(widget, 'Widget')} -> ${id(base, 'Base')}`,
+      `${id(widget, 'Widget')} -> ${id(base, 'I')}`,
     ].sort());
   });
 

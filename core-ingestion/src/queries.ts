@@ -145,24 +145,45 @@ export const TYPESCRIPT_QUERIES = `
     (extends_clause
       value: [(identifier) (member_expression)] @heritage.extends))) @heritage
 
+; Heritage queries - class implements interface, each of a list: a bare name,
+; ns.I, or a generic I<T> / ns.I<T> by its name (never a type argument).
 (abstract_class_declaration
   name: (type_identifier) @heritage.class
   (class_heritage
     (implements_clause
-      (type_identifier) @heritage.implements))) @heritage.impl
+      [(type_identifier) (nested_type_identifier)] @heritage.implements))) @heritage.impl
 
-; Heritage queries - class implements interface
+(abstract_class_declaration
+  name: (type_identifier) @heritage.class
+  (class_heritage
+    (implements_clause
+      (generic_type
+        name: [(type_identifier) (nested_type_identifier)] @heritage.implements)))) @heritage.impl
+
 (class_declaration
   name: (type_identifier) @heritage.class
   (class_heritage
     (implements_clause
-      (type_identifier) @heritage.implements))) @heritage.impl
+      [(type_identifier) (nested_type_identifier)] @heritage.implements))) @heritage.impl
 
-; Heritage queries - interface extends interface
+(class_declaration
+  name: (type_identifier) @heritage.class
+  (class_heritage
+    (implements_clause
+      (generic_type
+        name: [(type_identifier) (nested_type_identifier)] @heritage.implements)))) @heritage.impl
+
+; Heritage queries - interface extends interface, the same name forms
 (interface_declaration
   name: (type_identifier) @heritage.class
   (extends_type_clause
-    (type_identifier) @heritage.extends)) @heritage
+    [(type_identifier) (nested_type_identifier)] @heritage.extends)) @heritage
+
+(interface_declaration
+  name: (type_identifier) @heritage.class
+  (extends_type_clause
+    (generic_type
+      name: [(type_identifier) (nested_type_identifier)] @heritage.extends))) @heritage
 
 ; Type references — captures types used in annotations/parameters/return types,
 ; and inside the type forms they compose: Promise<Foo>, Foo[], Foo | null,
