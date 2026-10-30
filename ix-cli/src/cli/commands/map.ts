@@ -488,8 +488,9 @@ Advanced:
             otherwise. Loopback describes the URL, not who owns the backend: an
             ssh -L tunnel, kubectl port-forward or local proxy to a shared
             backend passes the check, so never use this flag through one. An
-            old id whose re-ingest was not clean stays recorded in config.yaml
-            (pending_prune_of) and the next run with this flag retries it.
+            old id whose re-ingest was not clean, or was filtered by --lang or
+            --exclude, stays recorded in config.yaml (pending_prune_of) and the
+            next run with this flag retries it.
 
 Examples:
   ix map .

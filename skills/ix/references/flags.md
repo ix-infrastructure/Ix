@@ -132,7 +132,8 @@ surfaces (#575).
     those pass it. Never use the flag through one.
   - **The old id stays recorded until it is deleted.** The re-key writes the old
     id and the endpoint to the workspace's `pending_prune_of` in `config.yaml`. If
-    the re-ingest is not clean or the delete fails, the next run with the flag
+    the re-ingest is not clean, covers only part of the workspace (`--lang`,
+    `--exclude`), or the delete fails, the next run with the flag
     against that endpoint re-ingests and retries the deletion; nothing is
     orphaned. It also keeps the old graph while another root in your config still
     uses that id. The delete refuses a redirect rather than following it. A

@@ -2185,6 +2185,7 @@ const STALE_KEEP_REASON: Record<StaleWorkspaceKeepReason, string> = {
   endpoint_changed: 'it was recorded against a different endpoint than the one configured now; it stays recorded until --prune-stale-workspace runs against that endpoint',
   shared_in_config: 'another registered workspace still uses that id; it stays recorded until none does, then --prune-stale-workspace deletes it',
   ingest_unclean: `the re-ingest did not complete cleanly; ${RETRY_PRUNE}`,
+  ingest_partial: `a --lang or --exclude run re-ingests only part of the workspace; ${RETRY_PRUNE} (without those filters)`,
 };
 
 export async function ingestFiles(
@@ -5032,6 +5033,7 @@ export async function ingestFiles(
         pruneOptIn: pruneStaleWorkspace,
         endpoint: client.endpoint,
         ingestClean,
+        ingestComplete: !partialRun && (opts.exclude ?? []).length === 0,
         otherRegisteredIds,
       });
       if (cleanup.action === 'delete') {

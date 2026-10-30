@@ -248,7 +248,8 @@ export function clearPendingPrune(root: string, prune: PendingPrune): void {
  * Do not use the flag through one.
  */
 export type StaleWorkspaceKeepReason =
-  | "not_opted_in" | "current_id" | "non_local_endpoint" | "endpoint_changed" | "shared_in_config" | "ingest_unclean";
+  | "not_opted_in" | "current_id" | "non_local_endpoint" | "endpoint_changed" | "shared_in_config" | "ingest_unclean"
+  | "ingest_partial";
 export type StaleWorkspaceCleanup =
   | { action: "delete"; workspaceId: string }
   | { action: "keep"; reason: StaleWorkspaceKeepReason; workspaceId: string };
@@ -259,6 +260,8 @@ export function staleWorkspaceCleanup(input: {
   pruneOptIn: boolean;
   endpoint: string;
   ingestClean: boolean;
+  /** The re-ingest covered the whole workspace: no --lang filter, no ad-hoc --exclude. */
+  ingestComplete: boolean;
   /** Workspace ids the caller's config registers for roots OTHER than this one. */
   otherRegisteredIds: readonly string[];
 }): StaleWorkspaceCleanup {
@@ -270,6 +273,8 @@ export function staleWorkspaceCleanup(input: {
   if (input.prune.endpoint !== input.endpoint) return keep("endpoint_changed");
   if (input.otherRegisteredIds.includes(old)) return keep("shared_in_config");
   if (!input.ingestClean) return keep("ingest_unclean");
+  // A filtered run re-sent only some files under the new id: deleting the old graph would drop the rest.
+  if (!input.ingestComplete) return keep("ingest_partial");
   return { action: "delete", workspaceId: old };
 }
 

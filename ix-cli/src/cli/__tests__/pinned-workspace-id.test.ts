@@ -292,6 +292,26 @@ describe("ix ingest --prune-stale-workspace", () => {
     expect(r.err).toContain(`Deleted the previous workspace graph ${PINNED}`);
   }, 60_000);
 
+  it("after a --lang or --exclude re-ingest keeps the old id recorded, and the next full run deletes it", async () => {
+    fs.writeFileSync(path.join(ws, "b.py"), "def b():\n    return 1\n");
+    for (const filter of [["--lang", "typescript"], ["--exclude", "b.py"]]) {
+      writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
+      resetWorkspaceIdMemosForTests();
+      const partial = await runIngest([ws, ...filter, "--prune-stale-workspace"]);
+
+      expect(partial.exitCode, partial.err).toBe(0);
+      expect(deletes()).toEqual([]);
+      expect(pendingFor(ws)).toEqual([{ workspace_id: PINNED, endpoint: baseUrl }]);
+      expect(partial.err).toContain(`Kept the previous workspace graph ${PINNED}: a --lang or --exclude run`);
+    }
+
+    resetWorkspaceIdMemosForTests();
+    const full = await runIngest([ws, "--prune-stale-workspace"]);
+    expect(full.exitCode, full.err).toBe(0);
+    expect(deletedIds()).toEqual([PINNED]);
+    expect(pendingFor(ws)).toBeUndefined();
+  }, 60_000);
+
   it("after an unclean re-ingest keeps the old id recorded, and the next run deletes it", async () => {
     writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
     mode.failCommits = true;
@@ -505,6 +525,7 @@ describe("staleWorkspaceCleanup: the deletion rule", () => {
     pruneOptIn: true,
     endpoint: local,
     ingestClean: true,
+    ingestComplete: true,
     otherRegisteredIds: [] as string[],
   };
 
@@ -537,6 +558,7 @@ describe("staleWorkspaceCleanup: the deletion rule", () => {
   it("keeps the graph for another endpoint, an unclean ingest, a shared id, or the current id", () => {
     expect(staleWorkspaceCleanup({ ...base, endpoint: "http://localhost:9999" })).toEqual(expect.objectContaining({ reason: "endpoint_changed" }));
     expect(staleWorkspaceCleanup({ ...base, ingestClean: false })).toEqual(expect.objectContaining({ reason: "ingest_unclean" }));
+    expect(staleWorkspaceCleanup({ ...base, ingestComplete: false })).toEqual(expect.objectContaining({ reason: "ingest_partial" }));
     expect(staleWorkspaceCleanup({ ...base, otherRegisteredIds: [PINNED] })).toEqual(expect.objectContaining({ reason: "shared_in_config" }));
     expect(staleWorkspaceCleanup({ ...base, currentWorkspaceId: PINNED })).toEqual(expect.objectContaining({ reason: "current_id" }));
   });
