@@ -5,9 +5,33 @@ import type { SourceFiles } from "./edge-sites.js";
 import type { AroundRef } from "./around.js";
 
 const SCRIPT = /\.(?:[cm]?[jt]sx?)$/;
+/**
+ * Test files read for import evidence per call, nearest the target first. A
+ * monorepo can hold thousands of test files; naming evidence needs no read.
+ */
+const MAX_TEST_READS = 400;
+const TEST_DIR = /^(?:tests?|__tests__|specs?)$/;
+
+/**
+ * Where a test lives in the source tree: its directory above the first test
+ * directory (`packages/a/tests/unit/x.py` -> `packages/a`), else its own.
+ */
+function testAnchor(test: string): string {
+  const dirs = path.posix.dirname(test).split("/").filter((d) => d !== ".");
+  const at = dirs.findIndex((d) => TEST_DIR.test(d));
+  return (at < 0 ? dirs : dirs.slice(0, at)).join("/");
+}
+
+/** A test can only be named for a file in its own part of the tree, not a same-named file in another package. */
+function inScope(target: string, test: string): boolean {
+  const anchor = testAnchor(test);
+  const dir = path.posix.dirname(target);
+  return anchor === "" || dir === anchor || dir.startsWith(anchor + "/");
+}
 
 /** Naming evidence is file-level: it does not imply a call to any particular symbol. */
 function namedFor(target: string, test: string): boolean {
+  if (!inScope(target, test)) return false;
   const ext = path.posix.extname(target);
   const base = path.posix.basename(target, ext);
   const mod = base === "__init__" || base === "index" ? path.posix.basename(path.posix.dirname(target)) : base;
@@ -36,6 +60,11 @@ function pythonResolver(paths: string[]): (module: string, importer: string) => 
   }
   const known = new Set(paths);
   const at = (base: string) => [base + ".py", base + "/__init__.py"].find((p) => known.has(p));
+  // A suffix match stands for `module` only if its implied sys.path entry is
+  // not itself inside a package and the name is dotted: `import json` is the
+  // standard library (or a site package), not some `app/json.py`.
+  const rootOf = (file: string, tail: string) =>
+    file.replace(/\.py$/, "").replace(/\/__init__$/, "").slice(0, -tail.length).replace(/\/$/, "");
   return (module, importer) => {
     const dots = module.match(/^\.+/)?.[0].length ?? 0;
     const tail = module.slice(dots).replace(/\./g, "/");
@@ -45,8 +74,11 @@ function pythonResolver(paths: string[]): (module: string, importer: string) => 
     }
     const exact = at(tail) ?? at(`src/${tail}`);
     if (exact) return exact;
+    if (!tail.includes("/")) return undefined;
     const candidates = modules.get(tail) ?? [];
-    return candidates.length === 1 ? candidates[0] : undefined;
+    if (candidates.length !== 1) return undefined;
+    const root = rootOf(candidates[0], tail);
+    return root && known.has(`${root}/__init__.py`) ? undefined : candidates[0];
   };
 }
 
@@ -70,23 +102,27 @@ function scriptImport(spec: string, importer: string, known: Set<string>): strin
 /**
  * Match imports to the target file node's source path, rather than its basename.
  * The graph can omit an IMPORTS edge when Python imports name a package/module.
- * Scan only source test files; SourceFiles bounds and guards every disk read.
+ * Scan only source test files, at most {@link MAX_TEST_READS} of them, nearest
+ * `target` first (`near`: smaller is nearer); SourceFiles bounds and guards
+ * every disk read.
  */
 export function heuristicTests(
-  target: string, files: SourceFiles, isTest: (file: string) => boolean,
+  target: string, files: SourceFiles, isTest: (file: string) => boolean, near: (file: string) => number,
 ): AroundRef[] {
   if (!target.endsWith(".py") && !SCRIPT.test(target)) return [];
   const paths = files.sourcePaths();
   const known = new Set([...paths, target]);
   const resolvePython = pythonResolver([...known]);
+  const python = target.endsWith(".py");
+  const tests = paths
+    .filter((file) => file !== target && isTest(file) && (python ? file.endsWith(".py") : SCRIPT.test(file)))
+    .map((file) => ({ file, near: near(file) }))
+    .sort((a, b) => a.near - b.near || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
   const rows: AroundRef[] = [];
-  for (const file of paths) {
-    if (file === target || !isTest(file)) continue;
-    const python = target.endsWith(".py") && file.endsWith(".py");
-    const script = SCRIPT.test(target) && SCRIPT.test(file);
-    if (!python && !script) continue;
+  let reads = 0;
+  for (const { file } of tests) {
     const naming = namedFor(target, file);
-    const lines = files.lines(file);
+    const lines = reads++ < MAX_TEST_READS ? files.lines(file) : null;
     let imported: number | undefined;
     for (let i = 0; lines && i < lines.length; i++) {
       const line = lines[i].trim();
@@ -106,7 +142,7 @@ export function heuristicTests(
           `${from[1]}${from[1].endsWith(".") ? "" : "."}${m}`)] : modules;
         if (specs.some((spec) => resolvePython(spec, file) === target)) imported = i + 1;
         i = end;
-      } else if (script && !/^(?:\/\/|\/\*|\*)/.test(line)) {
+      } else if (!/^(?:\/\/|\/\*|\*)/.test(line)) {
         const re = /\bfrom\s*["']([^"']+)["']|\b(?:require|import)\s*\(\s*["']([^"']+)["']|^\s*import\s*["']([^"']+)["']/g;
         for (const match of line.matchAll(re)) {
           if (scriptImport(match[1] ?? match[2] ?? match[3], file, known) === target) imported = i + 1;

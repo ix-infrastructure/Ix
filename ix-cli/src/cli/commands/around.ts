@@ -68,6 +68,17 @@ export function aroundRelPath(abs: string, root: string): string | undefined {
   return rel.startsWith("..") || path.isAbsolute(rel) ? undefined : rel;
 }
 
+/**
+ * `--limit`: digits are the row count (0 for all). Anything else falls back as
+ * it always has (`abc` to the default, `-1` to 1) rather than failing, so a
+ * runner passing a bad value keeps its exit status.
+ */
+export function limitOption(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  if (/^\d+$/.test(raw)) return Number(raw);
+  return Math.max(1, parseInt(raw, 10) || DEFAULT_CAPS.callers);
+}
+
 export function capsFor(limit?: number, format = "text"): AroundCaps {
   if (limit === undefined && format !== "json") return { ...DEFAULT_CAPS };
   const rows = limit === undefined || limit === 0 ? Infinity : limit;
@@ -110,11 +121,7 @@ Examples:
         return;
       }
       const lines = readLines(abs);
-      if (opts.limit !== undefined && (!/^\d+$/.test(opts.limit) || !Number.isSafeInteger(Number(opts.limit)))) {
-        reportError("invalid_limit", "--limit must be a non-negative integer (0 for all).", opts.format);
-        return;
-      }
-      const caps = capsFor(opts.limit === undefined ? undefined : Number(opts.limit), opts.format);
+      const caps = capsFor(limitOption(opts.limit), opts.format);
       const client = createClient();
 
       let result: AroundResult;
@@ -125,6 +132,7 @@ Examples:
           anchorLines: lines,
           files: new SourceFiles(root),
           caps,
+          heuristicTests: true,
         });
       } catch (err) {
         if (err instanceof AroundError) {

@@ -402,8 +402,14 @@ was cut to the budget. With more than one symbol each row names its own with
 `of=`. `caller` is a CALLS/REFERENCES edge at its call site; `user` is a file
 that imports this one, names the symbol in that import, and uses it -- found
 on disk, so it also catches a function handed over by name, which no edge
-records; `test` is a test file that calls it, calls a caller of it (`via=`
-that caller), or imports and uses it. `importers` counts every file importing
+records; `test` is a test file the graph links to it (it calls it, calls a
+caller of it -- `via=` that caller -- or imports and uses it) or, in `ix
+around` though not the post-edit hook, a test file that imports this file or
+is named for it in the same part of the tree. Its `sources=` says which:
+`graph`, `import`, `naming`, or several when they agree; agreement ranks
+first, then graph alone, then import, then naming, nearest first. A `test`
+row without `graph` is file-level evidence, not a call to this symbol.
+`importers` counts every file importing
 this one; its `importer` rows are the first cut when the answer is over
 budget. Empty lists print no rows. On a degraded graph a `graph` record
 follows the header and the totals are floors.

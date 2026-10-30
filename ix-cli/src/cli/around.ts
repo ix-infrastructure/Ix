@@ -402,6 +402,12 @@ export interface AroundRequest {
    * reported earlier does not take that method's place.
    */
   exclude?: Set<string>;
+  /**
+   * Also list test files that import the file or are named for it, found by
+   * reading local test files. `ix around` asks for it; the post-edit hook does
+   * not, so it stays cheap and reports only what the graph links to a symbol.
+   */
+  heuristicTests?: boolean;
 }
 
 type AroundClient = Pick<IxClient, "search" | "expand" | "workspaceSystem" | "currentRevision" | "stats"> & { endpoint?: string };
@@ -542,7 +548,9 @@ export async function gatherAround(client: AroundClient, req: AroundRequest): Pr
     const lines = req.files.lines(p);
     importerLines.set(row.id, { row, path: p, lines: lines ? findImports(lines, fileKeys) : [] });
   }
-  const heuristic = chosen.length > 0 ? heuristicTests(relPath, req.files, isTestFile) : [];
+  const heuristic = req.heuristicTests && chosen.length > 0
+    ? heuristicTests(relPath, req.files, isTestFile, (p) => localityRank(relPath, p))
+    : [];
 
   const symbols = await Promise.all(chosen.map(async (d): Promise<AroundSymbol> => {
     const sets = await callerSets(client, d.id, preloaded.get(d.id));
@@ -601,8 +609,17 @@ export async function gatherAround(client: AroundClient, req: AroundRequest): Pr
       if (existing) existing.sources!.push(...ref.sources!);
       else tests.set(ref.path, { ...ref });
     }
-    const testRank = (r: AroundRef) => r.sources!.includes("graph") ? (r.sources!.length > 1 ? 0 : 1) : 2;
-    const testRows = [...tests.values()].sort((a, b) => testRank(a) - testRank(b));
+    // Graph agreeing with a file-level source, graph alone (in graph order),
+    // import and naming, import, naming; file-level rows nearest first, so a
+    // same-named test elsewhere never outranks one beside the file.
+    const testRank = (r: AroundRef) => {
+      const has = (s: "graph" | "import" | "naming") => r.sources!.includes(s);
+      if (has("graph")) return r.sources!.length > 1 ? 0 : 1;
+      return has("import") ? (has("naming") ? 2 : 3) : 4;
+    };
+    const testRows = [...tests.values()].sort((a, b) =>
+      testRank(a) - testRank(b)
+      || (testRank(a) > 1 ? localityRank(relPath, a.path) - localityRank(relPath, b.path) : 0));
     const decl = req.ranges && req.ranges.length > 0 ? declarationLines(d, anchorPlaced, req.ranges) : undefined;
     // In the current file's coordinates, like the symbol's own span.
     const shift = here.start - d.start;

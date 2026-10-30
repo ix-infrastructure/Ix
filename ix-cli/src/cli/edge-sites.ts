@@ -243,10 +243,14 @@ export class SourceFiles {
 
   constructor(private readonly root?: string) {}
 
-  /** Source paths for local heuristics, listed once and read through the same safe cache. */
+  /**
+   * Source paths for local heuristics, listed once and read through the same
+   * safe cache. Unverified: `lines` checks each file it reads, and a large
+   * repository would otherwise pay a stat and a realpath per file.
+   */
   sourcePaths(): string[] {
     const root = canonicalizeDiscoveredFilePath(this.root ?? process.cwd());
-    return this.paths ??= discoverSourceFiles(root)
+    return this.paths ??= discoverSourceFiles(root, { verify: false })
       .map((file) => path.relative(root, file).split(path.sep).join("/"))
       .filter((file) => file !== ".." && !file.startsWith("../") && !path.isAbsolute(file))
       .sort();

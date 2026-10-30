@@ -22,7 +22,7 @@ vi.mock("../config.js", async (original) => ({
 
 import { gatherAround } from "../around.js";
 import { aroundJson, renderAroundLlm, renderAroundText } from "../around-render.js";
-import { registerAroundCommand } from "../commands/around.js";
+import { limitOption, registerAroundCommand } from "../commands/around.js";
 import { SourceFiles } from "../edge-sites.js";
 
 afterEach(() => {
@@ -31,7 +31,7 @@ afterEach(() => {
   state.root = "";
 });
 
-function fixture(target: string, contents: Record<string, string>, graphTests: string[] = []) {
+function fixture(target: string, contents: Record<string, string>, graphTests: string[] = [], heuristic = true) {
   state.root = mkdtempSync(join(process.cwd(), ".around-fixture-"));
   const all = { [target]: target.endsWith(".py") ? "def run():\n    pass" : "export function run() {}", ...contents };
   for (const [file, text] of Object.entries(all)) {
@@ -58,7 +58,7 @@ function fixture(target: string, contents: Record<string, string>, graphTests: s
   };
   return () => gatherAround(state.client, {
     relPath: target, anchorLines: all[target].split("\n"), files: new SourceFiles(state.root),
-    caps: { tests: 100 },
+    caps: { tests: 100 }, heuristicTests: heuristic,
   });
 }
 
@@ -135,6 +135,67 @@ describe("around test selection", () => {
     });
   });
 
+  it("names a test for a file only in the file's own part of the tree, nearest and import-matched first", async () => {
+    const gather = fixture("pkg3/src/m4.ts", {
+      ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`pkg${i}/__tests__/m4.test.ts`, "// naming only"])),
+      "pkg3/test/imports.ts": 'import { run } from "../src/m4";',
+      "pkg3/src/m4.spec.ts": "// naming only",
+      "tests/m4.test.ts": "// naming only",
+      "packages/b/src/m4.test.ts": "// naming only",
+    });
+    const rows = (await gather()).symbols[0].tests.rows;
+    expect(rows.map((r: any) => [r.path, r.sources])).toEqual([
+      ["pkg3/test/imports.ts", ["import"]],
+      ["pkg3/src/m4.spec.ts", ["naming"]],
+      ["pkg3/__tests__/m4.test.ts", ["naming"]],
+      ["tests/m4.test.ts", ["naming"]],
+    ]);
+    rmSync(state.root, { recursive: true, force: true });
+    const python = fixture("packages/a/src/models.py", {
+      "packages/a/tests/test_models.py": "# naming only",
+      "packages/c/tests/test_models.py": "# naming only",
+      "packages/b/src/models_test.py": "# naming only",
+    });
+    expect((await python()).symbols[0].tests.rows.map((r) => r.path)).toEqual(["packages/a/tests/test_models.py"]);
+  });
+
+  it("does not take a standard-library or site-package import for a same-named local module", async () => {
+    const gather = fixture("app/json.py", {
+      "app/__init__.py": "",
+      "tests/test_api.py": "import json",
+      "tests/test_other.py": "from json import dumps",
+      "tests/test_dotted.py": "import os.path",
+      "tests/test_local.py": "from app import json",
+      "tests/test_qualified.py": "import app.json as subject",
+      "lib/os/path.py": "",
+    });
+    expect((await gather()).symbols[0].tests.rows.map((r: any) => [r.path, r.sources])).toEqual([
+      ["tests/test_local.py", ["import"]],
+      ["tests/test_qualified.py", ["import"]],
+    ]);
+  });
+
+  it("reads a bounded number of test files, nearest the target first", async () => {
+    const gather = fixture("src/widget.ts", {
+      ...Object.fromEntries(Array.from({ length: 450 }, (_, i) => [`far/away/t${i}.test.ts`, "// unrelated"])),
+      "src/widget-import.test.ts": 'import "./widget";',
+    });
+    const reads = vi.spyOn(SourceFiles.prototype, "lines");
+    const rows = (await gather()).symbols[0].tests.rows;
+    expect(rows.map((r) => r.path)).toEqual(["src/widget-import.test.ts"]);
+    expect(reads.mock.calls.filter(([p]) => String(p).endsWith(".test.ts")).length).toBe(400);
+  });
+
+  it("leaves file-level test evidence to callers that ask for it, so the post-edit hook lists no files", async () => {
+    const gather = fixture("src/widget.ts", {
+      "src/widget.test.ts": 'import { run } from "./widget";',
+    }, [], false);
+    const listing = vi.spyOn(SourceFiles.prototype, "sourcePaths");
+    const result = await gather();
+    expect(result.symbols[0].tests.total).toBe(0);
+    expect(listing).not.toHaveBeenCalled();
+  });
+
   it("leaves JSON uncapped, retains text defaults, and honors explicit limits including all", async () => {
     fixture("src/widget.ts", Object.fromEntries([
       ...Array.from({ length: 9 }, (_, i) => [`tests/case${i}.ts`, 'import "../src/widget";']),
@@ -159,6 +220,12 @@ describe("around test selection", () => {
     expect(limited.importers.rows).toHaveLength(7);
     expect(await command(["--limit", "0", "--budget", "10000"])).toContain("tests (9):");
     expect(await command(["--limit", "7", "--budget", "10000"])).toContain("tests (7 of 9):");
+    // A malformed limit falls back as it always did, without failing the run.
+    const exit = process.exitCode;
+    expect(JSON.parse(await command(["--format", "json", "--limit", "abc"])).symbols[0].tests.rows).toHaveLength(8);
+    expect(await command(["--limit", "1e3", "--budget", "10000"])).toContain("tests (1 of 9):");
+    expect(process.exitCode).toBe(exit);
+    expect([limitOption("-1"), limitOption("abc"), limitOption("0"), limitOption(undefined)]).toEqual([1, 8, 0, undefined]);
     // Unlimited lists must still terminate when fitting the normal text budget.
     expect((await command(["--limit", "0"])).length).toBeLessThan(1800);
   });
