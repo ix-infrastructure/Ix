@@ -35,6 +35,8 @@ export interface FileSummary {
   importAliases?: Record<string, string>;
   /** TypeScript: the type names this file puts in the global scope. */
   tsGlobalTypes?: string[];
+  /** TypeScript: the file is a module, so only its tsGlobalTypes are globals. Absent in older summaries. */
+  tsModule?: true;
   /** Sorted unique names this file calls, references or extends (for IN-11). */
   refs: string[];
   /** Hash of what other files can resolve to here: qualified keys, exports, PHP types. */

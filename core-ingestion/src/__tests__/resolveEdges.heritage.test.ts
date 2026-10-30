@@ -425,6 +425,78 @@ describe('EXTENDS resolution for TypeScript bases', () => {
       .map(edge => `${edge.dstName} -> ${edge.dstFilePath}`)).toEqual(['Base -> /repo/src/base.ts']);
   });
 
+  it('resolves an unimported base to a namespace member merged across scripts, not one inside a module', () => {
+    const app = 'namespace App {\n  export class D extends Base {}\n}\n';
+    expect(heritage({
+      '/repo/src/a.ts': 'namespace App {\n  export class Base {}\n}\n',
+      '/repo/src/b.ts': app,
+    }, '/repo/src/b.ts')).toEqual(['D Base -> /repo/src/a.ts:Base']);
+    expect(heritage({
+      '/repo/src/a.ts': 'export {};\nnamespace App {\n  export class Base {}\n}\n',
+      '/repo/src/b.ts': app,
+    }, '/repo/src/b.ts')).toEqual([]);
+  });
+
+  it('keeps the plain fallback for a base CommonJS destructuring binds, and resolves const ns = require()', () => {
+    expect(heritage({
+      '/repo/src/a.ts': 'export class Base {}\nexport class K {}\n',
+      '/repo/src/b.ts': [
+        "const { Base } = require('./a');",
+        "const ns = require('./a');",
+        'export class D extends Base {}',
+        'export class E extends ns.K {}',
+        '',
+      ].join('\n'),
+    }, '/repo/src/b.ts')).toEqual([
+      'D Base -> /repo/src/a.ts:Base',
+      'E ns.K -> /repo/src/a.ts:K',
+    ]);
+    expect(parseFile('/repo/src/b.ts', [
+      "const { Base, Other: Renamed } = require('./a');",
+      "export const Member = require('./m').Member;",
+      "import eq = require('./e');",
+      'function f() { const { Inner } = require(\'./i\'); }',
+      '',
+    ].join('\n'))!.importAliases).toEqual({
+      'require:Base': './a',
+      'require:Renamed': './a',
+      'require:Member': './m',
+      eq: './e',
+    });
+  });
+
+  it('keeps the plain fallback against a summary written before tsModule existed', () => {
+    // The CLI reuses an unchanged file's summary while the extractor name
+    // stays the same, so an older summary has neither tsModule nor tsGlobalTypes.
+    const resolveAgainstOld = (files: Record<string, string>, srcPath: string) => {
+      const parsed = Object.entries(files).map(([filePath, source]) => parseFile(filePath, source)!);
+      const summaries = new Map(parsed.map(r => {
+        const { tsModule: _m, tsGlobalTypes: _g, ...old } = summarizeParseResult(r);
+        return [r.filePath, r.filePath === srcPath ? summarizeParseResult(r) : { ...old, sig: 'old' }];
+      }));
+      const index = buildGlobalResolutionIndex(parsed.map(r => r.filePath), undefined, undefined, summaries);
+      return resolveEdges(parsed.filter(r => r.filePath === srcPath), undefined, index)
+        .filter(edge => edge.predicate === 'EXTENDS')
+        .map(edge => `${edge.dstName} -> ${edge.dstFilePath}`);
+    };
+    expect(resolveAgainstOld({
+      '/repo/src/a.ts': 'class Base {}\n',
+      '/repo/src/b.ts': 'export class D extends Base {}\n',
+    }, '/repo/src/b.ts')).toEqual(['Base -> /repo/src/a.ts']);
+    expect(resolveAgainstOld({
+      '/repo/src/a.ts': 'export {};\ndeclare global {\n  interface Plug {}\n}\n',
+      '/repo/src/b.ts': 'export class D implements Plug {}\n',
+    }, '/repo/src/b.ts')).toEqual(['Plug -> /repo/src/a.ts']);
+  });
+
+  it('marks a TypeScript module, never a script or a declaration file', () => {
+    expect(parseFile('/repo/src/a.ts', 'export class A {}\n')!.tsModule).toBe(true);
+    expect(parseFile('/repo/src/a.ts', "import './x';\nclass A {}\n")!.tsModule).toBe(true);
+    expect(parseFile('/repo/src/a.ts', 'class A {}\n')!.tsModule).toBeUndefined();
+    expect(parseFile('/repo/types/a.d.ts', 'export declare class A {}\n')!.tsModule).toBeUndefined();
+    expect(parseFile('/repo/src/a.js', 'export class A {}\n')!.tsModule).toBeUndefined();
+  });
+
   it('signs what importers resolve through: namespace re-exports and globals', () => {
     const sig = (filePath: string, source: string) => summarizeParseResult(parseFile(filePath, source)!).sig;
     const barrel = sig('/repo/src/m/index.ts', "export * as ns from './a';\n");
@@ -432,6 +504,9 @@ describe('EXTENDS resolution for TypeScript bases', () => {
     expect(sig('/repo/src/m/index.ts', "export * as other from './a';\n")).not.toBe(barrel);
     expect(sig('/repo/src/m/index.ts', "export * from './a';\n")).not.toBe(barrel);
     expect(sig('/repo/src/base.ts', 'export class Base {}\n')).not.toBe(sig('/repo/src/base.ts', 'class Base {}\n'));
+    // A script's namespace members are globals too, so turning it into a module re-signs it.
+    expect(sig('/repo/src/base.ts', 'export {};\nnamespace App { export class Base {} }\n'))
+      .not.toBe(sig('/repo/src/base.ts', 'namespace App { export class Base {} }\n'));
     // Files with neither keep the signature they had.
     expect(sig('/repo/src/base.ts', "import * as ns from './a';\nexport class Base {}\n"))
       .toBe(sig('/repo/src/base.ts', 'export class Base {}\n'));

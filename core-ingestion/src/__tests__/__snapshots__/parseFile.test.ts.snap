@@ -972,5 +972,6 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "srcName": "sample-command.ts",
     },
   ],
+  "tsModule": true,
 }
 `;

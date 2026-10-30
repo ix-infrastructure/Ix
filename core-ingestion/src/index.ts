@@ -320,6 +320,12 @@ export interface FileParseResult {
    * global scope (a script's top-level types, a module's `declare global {}`).
    */
   tsGlobalTypes?: string[];
+  /**
+   * TypeScript, not a declaration file: present (true) when the file is a
+   * module, so its types outside `declare global {}` are not globals. Absent
+   * for a script, and in a summary written before it existed.
+   */
+  tsModule?: true;
   fileRole: RoleClassification;
 }
 
@@ -716,17 +722,58 @@ function jsTsNamespaceAlias(stmtNode: any): string | undefined {
 }
 
 /**
- * TypeScript: `import ns = require('x')` at the top level, as `[ns, 'x']`. It
- * binds a whole module, as `import * as ns` does, but no import query sees it.
+ * TypeScript: the `importAliases` key of a name a top-level CommonJS
+ * destructuring binds (`const { Base } = require('x')`). The name is a member
+ * of the module, not the module, so it is kept apart from `ns` aliases; it only
+ * tells the resolver the name is bound.
  */
-function tsImportEqualsAliases(root: any): Array<[string, string]> {
+const TS_REQUIRE_BINDING_KEY = (name: string): string => `require:${name}`;
+
+/**
+ * TypeScript: what top-level CommonJS-style statements bind, as `[key, 'x']`.
+ * `import ns = require('x')` and `const ns = require('x')` bind a whole module,
+ * as `import * as ns` does; `const { Base } = require('x')` and
+ * `const Base = require('x').Base` bind a member (TS_REQUIRE_BINDING_KEY). No
+ * TypeScript import query sees any of them.
+ */
+function tsRequireAliases(root: any): Array<[string, string]> {
   const out: Array<[string, string]> = [];
-  for (const stmt of root?.namedChildren ?? []) {
-    if (stmt.type !== 'import_statement') continue;
-    const clause = stmt.namedChildren?.find((c: any) => c.type === 'import_require_clause');
-    const name = clause?.namedChildren?.find((c: any) => c.type === 'identifier')?.text;
-    const source = clause?.childForFieldName?.('source')?.text;
-    if (name && source) out.push([name, unwrapImportSpecifier(source)]);
+  const requireSpec = (value: any): string | undefined => {
+    if (value?.type !== 'call_expression' || value.childForFieldName?.('function')?.text !== 'require') return undefined;
+    const arg = value.childForFieldName?.('arguments')?.namedChildren?.[0];
+    return arg?.type === 'string' ? unwrapImportSpecifier(arg.text) : undefined;
+  };
+  for (const top of root?.namedChildren ?? []) {
+    const stmt = top.type === 'export_statement' ? top.childForFieldName?.('declaration') : top;
+    if (stmt?.type === 'import_statement') {
+      const clause = stmt.namedChildren?.find((c: any) => c.type === 'import_require_clause');
+      const name = clause?.namedChildren?.find((c: any) => c.type === 'identifier')?.text;
+      const source = clause?.childForFieldName?.('source')?.text;
+      if (name && source) out.push([name, unwrapImportSpecifier(source)]);
+      continue;
+    }
+    if (stmt?.type !== 'lexical_declaration' && stmt?.type !== 'variable_declaration') continue;
+    for (const declarator of stmt.namedChildren ?? []) {
+      if (declarator.type !== 'variable_declarator') continue;
+      const name = declarator.childForFieldName?.('name');
+      let value = declarator.childForFieldName?.('value');
+      const wholeModule = requireSpec(value);
+      if (wholeModule !== undefined && name?.type === 'identifier') {
+        out.push([name.text, wholeModule]);
+        continue;
+      }
+      while (value?.type === 'member_expression') value = value.childForFieldName?.('object');
+      const spec = wholeModule ?? requireSpec(value);
+      if (spec === undefined) continue;
+      const locals = name?.type === 'identifier' ? [name]
+        : name?.type === 'object_pattern'
+          ? (name.namedChildren ?? []).map((c: any) =>
+            c.type === 'shorthand_property_identifier_pattern' ? c
+              : c.type === 'pair_pattern' && c.childForFieldName?.('value')?.type === 'identifier' ? c.childForFieldName('value')
+                : undefined)
+          : [];
+      for (const local of locals) if (local?.text) out.push([TS_REQUIRE_BINDING_KEY(local.text), spec]);
+    }
   }
   return out;
 }
@@ -740,30 +787,42 @@ const TS_GLOBAL_TYPE_NODES = new Set([
 ]);
 
 /**
- * TypeScript: the type names a file puts in the global scope -- every
- * top-level class, interface, type alias and enum of a script (a file with no
- * top-level import or export), and those in a module's `declare global {}`.
- * Besides a declaration file's, these are the only types an unimported
- * heritage base can name.
+ * TypeScript: whether a file is a module -- it has a top-level import or
+ * export. A module's own types are not globals; a script's are.
+ */
+function isTsModule(root: any): boolean {
+  return (root?.namedChildren ?? []).some((stmt: any) => stmt.type === 'import_statement' || stmt.type === 'export_statement');
+}
+
+/**
+ * TypeScript: the type names a file puts in the global scope -- every class,
+ * interface, type alias and enum of a script (a file with no top-level import
+ * or export), at the top level or in its namespaces (which merge across
+ * scripts), and those in a module's `declare global {}`.
  */
 function tsGlobalTypeNames(root: any): string[] {
   const names = new Set<string>();
-  const collect = (decl: any) => {
-    if (!TS_GLOBAL_TYPE_NODES.has(decl?.type)) return;
-    const name = decl.childForFieldName?.('name')?.text;
-    if (name) names.add(name);
+  // A script's statements, and its namespaces' (`namespace App { export class Base {} }`).
+  const collect = (stmts: any[]) => {
+    for (let decl of stmts) {
+      if (decl?.type === 'export_statement' || decl?.type === 'ambient_declaration' || decl?.type === 'expression_statement') {
+        decl = decl.type === 'export_statement' ? decl.childForFieldName?.('declaration') : decl.namedChildren?.[0];
+      }
+      if (decl?.type === 'internal_module' || decl?.type === 'module') {
+        if (decl.childForFieldName?.('name')?.type !== 'string') collect(decl.childForFieldName?.('body')?.namedChildren ?? []);
+        continue;
+      }
+      if (!TS_GLOBAL_TYPE_NODES.has(decl?.type)) continue;
+      const name = decl.childForFieldName?.('name')?.text;
+      if (name) names.add(name);
+    }
   };
   const top: any[] = root?.namedChildren ?? [];
-  const isScript = !top.some(stmt => stmt.type === 'import_statement' || stmt.type === 'export_statement');
+  if (!isTsModule(root)) collect(top);
   for (const stmt of top) {
-    if (isScript) collect(stmt);
-    if (stmt.type !== 'ambient_declaration') continue;
-    // `declare global { ... }`; `declare module 'x'` and namespaces are not global.
-    const block = stmt.children?.some((c: any) => c.type === 'global')
-      ? stmt.namedChildren?.find((c: any) => c.type === 'statement_block')
-      : undefined;
-    if (block) for (const decl of block.namedChildren ?? []) collect(decl);
-    else if (isScript) for (const decl of stmt.namedChildren ?? []) collect(decl);
+    // A module's `declare global { ... }`; `declare module 'x'` is not global.
+    if (stmt.type !== 'ambient_declaration' || !stmt.children?.some((c: any) => c.type === 'global')) continue;
+    collect(stmt.namedChildren?.find((c: any) => c.type === 'statement_block')?.namedChildren ?? []);
   }
   return [...names].sort();
 }
@@ -3670,9 +3729,10 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     const exportPublicNames = isJsTs ? extractJsExportPublicNames(tree.rootNode) : [];
     const isTsSource = language === SupportedLanguages.TypeScript && !TS_DECLARATION_FILE.test(filePath);
     if (language === SupportedLanguages.TypeScript) {
-      for (const [name, spec] of tsImportEqualsAliases(tree.rootNode)) importAliases[name] ??= spec;
+      for (const [name, spec] of tsRequireAliases(tree.rootNode)) importAliases[name] ??= spec;
     }
     const tsGlobalTypes = isTsSource ? tsGlobalTypeNames(tree.rootNode) : [];
+    const tsModule = isTsSource && isTsModule(tree.rootNode);
 
     return {
       filePath,
@@ -3694,6 +3754,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       ...(receiverFacts?.package ? { receiverPackage: receiverFacts.package } : {}),
       ...(receiverTypedCalls.length ? { receiverTypedCalls } : {}),
       ...(tsGlobalTypes.length ? { tsGlobalTypes } : {}),
+      ...(tsModule ? { tsModule: true as const } : {}),
       fileRole: classifyFileRole(filePath, source),
     };
   } catch (e) {
@@ -3831,6 +3892,7 @@ export function summarizeParseResult(r: FileParseResult): FileSummary {
     ...(r.receiverPackage ? { receiverPackage: r.receiverPackage } : {}),
     ...(r.importAliases ? { importAliases: r.importAliases } : {}),
     ...(r.tsGlobalTypes ? { tsGlobalTypes: r.tsGlobalTypes } : {}),
+    ...(r.tsModule ? { tsModule: true as const } : {}),
     refs: [...refs].sort(),
   };
   return { ...summary, sig: summarySignature(summary) };
@@ -6196,18 +6258,24 @@ export function resolveEdges(
       // TypeScript: a heritage base that no import binds and no imported file
       // defines (`implements Iterable<T>`, `extends PromiseLike<T>`) is a
       // global -- lib.d.ts, an @types package, or an in-repo ambient
-      // declaration. A module's top-level types are not globals, so only a
-      // declaration file or a type another file puts in the global scope (a
-      // script's, or one in `declare global {}`) is a candidate, never a
-      // same-named module type. A name `import X = require('./x')` binds is
-      // not unbound: the resolver does not follow `export =`, so it keeps the
-      // plain fallback.
+      // declaration. A module's types are not globals, so a candidate the
+      // index knows is a TS module (tsModule) only counts for a type it puts in
+      // `declare global {}`, never for a same-named module type. Any other
+      // candidate -- a declaration file, a script and its namespaces, or a
+      // summary written before tsModule existed -- keeps the plain fallback,
+      // as does a name `import X = require('./x')` or
+      // `const { X } = require('./x')` binds: the resolver does not follow
+      // CommonJS exports.
       const srcAliases = summaries.get(srcFilePath)?.importAliases;
       const tsUnboundBase = srcLanguage === SupportedLanguages.TypeScript && rel.predicate === 'EXTENDS' && !binding &&
-        !(srcAliases && Object.hasOwn(srcAliases, dstName));
+        !(srcAliases && (Object.hasOwn(srcAliases, dstName) || Object.hasOwn(srcAliases, TS_REQUIRE_BINDING_KEY(dstName))));
+      const tsGlobalCandidate = (fp: string): boolean => {
+        const summary = summaries.get(fp);
+        return !summary?.tsModule || (summary.tsGlobalTypes ?? []).includes(dstName);
+      };
       let globalMatches = candidates.filter(fp =>
         fp !== srcFilePath && fileLanguage.get(fp) === srcLanguage && insideBoundPackage(fp) &&
-        (!tsUnboundBase || TS_DECLARATION_FILE.test(fp) || (summaries.get(fp)?.tsGlobalTypes ?? []).includes(dstName)));
+        (!tsUnboundBase || tsGlobalCandidate(fp)));
       const importHint = pickCallerAlignedCandidate(importMatches, srcName, dstName)?.chosen
         ?? pickCallerAlignedCandidate(transitiveMatches, srcName, dstName)?.chosen;
       if (importHint) {
