@@ -3,10 +3,10 @@
 import { type Command } from "commander";
 import chalk from "chalk";
 import { createClient } from "../../client/factory.js";
-import { clearMapBaseline, clearMapResultCache } from "../config.js";
+import { clearMapBaseline, clearMapResultCache, getEndpoint } from "../config.js";
 import { roundFloat, printJson } from "../format.js";
 import { llmLine, llmError, llmShortId } from "../llm.js";
-import { bootstrap, resolveWorkspaceId } from "../bootstrap.js";
+import { assertStaleWorkspacePruneAllowed, bootstrap, resolveWorkspaceId } from "../bootstrap.js";
 import { configParseError, formatFetchError, renderStructuredError } from "../errors.js";
 import { ingestFiles, type IngestFilesSummary } from "./ingest.js";
 import { detectSystem } from "../system.js";
@@ -450,6 +450,7 @@ export function registerMapCommand(program: Command): void {
     .option("--remap", "Compute the map now, even from an automatic (hook) run that would defer it")
     .option("--verbose", "Show raw confidence/crosscut scores and signals, plus per-file ingest diagnostics (including why a patch failed to commit)")
     .option("--silent", "Suppress all output except a one-line summary (useful for LLM hooks)")
+    .option("--prune-stale-workspace", "Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest. Loopback endpoints only -- and loopback is the URL, not ownership: never use it through a tunnel or proxy to a shared backend")
     .addHelpText(
       "after",
       `
@@ -478,6 +479,18 @@ Advanced:
             from them and starts a background refresh. IX_MAP_EAGER=1 makes
             automatic runs compute too, as before; IX_MAP_BACKGROUND_REFRESH=0
             stops region views starting one.
+  --prune-stale-workspace
+            A workspace registered with a workspace_id other than the one its
+            path derives keeps that id (it may be pinned on purpose, e.g. a
+            team sharing one graph). This flag switches it to the path-derived
+            id and, after a clean re-ingest, deletes the old id's graph. Refused
+            unless the configured endpoint is loopback; nothing is ever deleted
+            otherwise. Loopback describes the URL, not who owns the backend: an
+            ssh -L tunnel, kubectl port-forward or local proxy to a shared
+            backend passes the check, so never use this flag through one. An
+            old id whose re-ingest was not clean, or was filtered by --lang or
+            --exclude, stays recorded in config.yaml (pending_prune_of) and the
+            next run with this flag retries it.
 
 Examples:
   ix map .
@@ -492,9 +505,10 @@ Examples:
   ix map --list
   ix map --all-items
   ix map . --full
-  ix map . --full --verbose`
+  ix map . --full --verbose
+  ix map --prune-stale-workspace`
     )
-    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remap?: boolean; verbose?: boolean; silent?: boolean }) => {
+    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remap?: boolean; verbose?: boolean; silent?: boolean; pruneStaleWorkspace?: boolean }) => {
       const held: HeldMap = {};
       try {
         await runMapCommand(pathArg, opts, held);
@@ -993,7 +1007,7 @@ function formatRegionLine(region: MapRegion, verbose: boolean, depth = 0): strin
 /** What a map that ran holds when it finishes: the workspace whose lock it took. */
 interface HeldMap { root?: string; local?: boolean }
 
-async function runMapCommand(pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remap?: boolean; verbose?: boolean; silent?: boolean }, held: HeldMap): Promise<void> {
+async function runMapCommand(pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remap?: boolean; verbose?: boolean; silent?: boolean; pruneStaleWorkspace?: boolean }, held: HeldMap): Promise<void> {
   let cwd: string;
   try {
     cwd = resolveMapRoot(pathArg);
@@ -1030,6 +1044,15 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
   // process exit (see single-flight.ts) and a stale lock from a crashed map
   // is stolen, so this never wedges.
   const mapLock = acquireMapLock(cwd, `ix map ${cwd}`);
+  if (!mapLock && opts.pruneStaleWorkspace) {
+    // The holder would not prune: coalescing would drop the request silently.
+    const msg = "Another ix map is running for this workspace; run ix map --prune-stale-workspace again once it finishes.";
+    if (opts.format === "json") printJson({ error: "map_in_progress", message: msg });
+    else if (opts.format === "llm") console.log(llmError("map_in_progress", msg));
+    else console.error(chalk.red("Error:"), msg);
+    process.exitCode = 1;
+    return;
+  }
   if (!mapLock) {
     if (!silent && opts.format !== "json" && opts.format !== "llm") {
       process.stderr.write(chalk.dim("  Another ix map is already running for this workspace — skipping.\n"));
@@ -1097,6 +1120,17 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
   // cloud ingestion doesn't require a local Ix backend.
   const ingestStart = performance.now();
   let localIngest: IngestFilesSummary | undefined;
+  if (opts.pruneStaleWorkspace) {
+    // Before bootstrap re-keys anything: the prune only runs against a local backend.
+    try {
+      if (cloudReady) throw new Error("--prune-stale-workspace only runs against a local (loopback) backend; the active backend is remote. Nothing was changed.");
+      assertStaleWorkspacePruneAllowed(getEndpoint());
+    } catch (err: any) {
+      emitError(err.message);
+      process.exitCode = 1;
+      return;
+    }
+  }
   if (cloudReady) {
     const runner = getRemoteRunner()!; // isCloudReady guarantees non-null
     try {
@@ -1112,7 +1146,7 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
     }
   } else {
     try {
-      await bootstrap(cwd);
+      await bootstrap(cwd, { adoptPathId: opts.pruneStaleWorkspace === true, quiet: silent || machineFormat });
     } catch (err: any) {
       emitError(err.message);
       process.exitCode = 1;
@@ -1131,6 +1165,7 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
         // failure — and the failure message told the user to pass a flag
         // that does not exist. --verbose is map's equivalent lever.
         debug: Boolean(opts.verbose),
+        pruneStaleWorkspace: opts.pruneStaleWorkspace === true,
       });
     } catch (err: any) {
       emitError(formatFetchError(err));

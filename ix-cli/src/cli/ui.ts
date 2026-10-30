@@ -16,6 +16,7 @@ import type { AmbiguousResult, ResolutionNotice, ResolveResult, Suggestion } fro
 import { forMcp } from "./next-step.js";
 import { graphHealthJson, graphHealthLlmFields, graphHealthProse, type GraphHealth } from "./graph-health.js";
 import { setOutcome } from "./outcome.js";
+import { didYouMeanRows, type TargetCandidate } from "./target-suggestions.js";
 
 // ── Brand palette ─────────────────────────────────────────────────────────────
 //
@@ -178,12 +179,15 @@ export function reportUnresolvedTarget(
   target: string | string[],
   format?: string,
   suggestions?: Suggestion[],
-  detail?: { reason?: string; message?: string; graph?: GraphHealth; files?: string[] },
+  detail?: { reason?: string; message?: string; graph?: GraphHealth; files?: string[]; didYouMean?: TargetCandidate[]; retryCommand?: string },
 ): void {
   // A file target's miss says which of "not ingested" and "does not exist" it
   // is; the code stays `unresolved_target` so a consumer routes on one slug.
   const message = detail?.message ?? unresolvedTargetMessage(target);
   const near = suggestions ?? [];
+  // A person reads the suggestions, topped up from the probe's list; llm keeps
+  // the suggestion rows, whose ids resolve an entity directly.
+  const display = didYouMeanRows(near, detail?.didYouMean);
   if (format === "json") {
     printJson({
       ...unresolvedTargetRecord(target),
@@ -191,6 +195,7 @@ export function reportUnresolvedTarget(
       ...(detail?.reason ? { reason: detail.reason } : {}),
       ...(detail?.files?.length ? { files: detail.files } : {}),
       ...(near.length ? { suggestions: near } : {}),
+      ...(detail?.didYouMean ? { didYouMean: detail.didYouMean } : {}),
       ...(detail?.graph ? { graph: graphHealthJson(detail.graph) } : {}),
     });
   } else if (format === "llm") {
@@ -203,21 +208,22 @@ export function reportUnresolvedTarget(
       ...candidateLines(near, "suggestion"),
     ];
     if (near.length) {
-      lines.push(llmLine("hint", [["text", "Re-run with one of these names, or narrow with --path."]]));
+      lines.push(llmLine("hint", [["text", detail?.retryCommand ?? "Re-run with one of these names, or narrow with --path."]]));
     }
     console.log(lines.join("\n"));
   } else {
     if (detail?.graph) console.error(chalk.yellow(graphHealthProse(detail.graph)));
-    if (!near.length) {
+    if (!display.length) {
       setOutcome("not_found");
       return;
     }
     // The resolver already wrote the miss itself for a person; this adds the
     // part that makes it actionable.
     console.error(chalk.dim("Did you mean:"));
-    for (const s of near) {
+    for (const s of display) {
       console.error(`  ${chalk.cyan((s.kind || "").padEnd(10))} ${s.name}${s.path ? chalk.dim(` in ${s.path}`) : ""}`);
     }
+    if (detail?.retryCommand) console.error(`Try: ${detail.retryCommand}`);
   }
   setOutcome("not_found");
 }
@@ -385,6 +391,7 @@ export function reportResolutionFailure(
   } else {
     reportUnresolvedTarget(target, format, result.suggestions, {
       reason: result.reason, message: result.message, graph: result.graph, files: result.files,
+      didYouMean: result.didYouMean, retryCommand: result.retryCommand,
     });
   }
 }

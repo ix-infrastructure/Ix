@@ -6,6 +6,7 @@ import { ALL_CONCURRENCY, registerCallersCommand } from "../commands/callers.js"
 import { registerExplainCommand } from "../commands/explain.js";
 import { registerImpactCommand } from "../commands/impact.js";
 import { registerLocateCommand } from "../commands/locate.js";
+import { registerOverridesCommand } from "../commands/overrides.js";
 import { WorkspaceNotMappedError, renderCliError, setErrorFormat } from "../errors.js";
 import { LEGACY_EXIT_CODES_ENV, exitCodeFor, worseExitCode } from "../outcome.js";
 import { ALL_CANDIDATE_CAP } from "../resolve.js";
@@ -77,6 +78,7 @@ async function run(args: string[]): Promise<{ stdout: string; stderr: string; ex
   registerImpactCommand(program);
   registerLocateCommand(program);
   registerExplainCommand(program);
+  registerOverridesCommand(program);
   const stdout: string[] = [];
   const stderr: string[] = [];
   const log = vi.spyOn(console, "log").mockImplementation((...parts) => { stdout.push(parts.join(" ")); });
@@ -112,11 +114,134 @@ beforeEach(() => {
   }));
 });
 afterEach(() => {
+  vi.useRealTimers();
   process.exitCode = savedExitCode;
   delete process.env[LEGACY_EXIT_CODES_ENV];
 });
 
-const COMMANDS = ["locate", "callers", "callees", "impact", "explain"] as const;
+const COMMANDS = ["locate", "callers", "callees", "impact", "explain", "overrides"] as const;
+
+describe.each(["locate", "callers", "impact", "explain"])("%s miss candidates", (command) => {
+  function nearGraph(): void {
+    // Model a 20ms base miss without depending on the test runner's CPU load.
+    vi.useFakeTimers({ toFake: ["performance", "setTimeout", "clearTimeout"] });
+    search.mockImplementation(async (term: string, options?: { signal?: AbortSignal }) => {
+      if (term === "parse_config" && !options?.signal) vi.advanceTimersByTime(20);
+      return term === "parse" ? [{ id: "parser-id", name: "parseConfig", kind: "function", attrs: { line_start: 12 }, provenance: { sourceUri: "src/config.ts" } }] : [];
+    });
+  }
+
+  it("adds bounded candidates without selecting a near match", async () => {
+    nearGraph();
+    const result = await run([command, "parse_config", "--format", "json"]);
+    expect(result.exitCode).toBe(3);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      error: "unresolved_target",
+      didYouMean: [{ name: "parseConfig", kind: "function", path: "src/config.ts", line: 12 }],
+    });
+    // The ambiguity field keeps its one meaning.
+    expect(JSON.parse(result.stdout).candidates).toBeUndefined();
+  });
+
+  it("keeps llm suggestion ids when the probe supplies the names", async () => {
+    nearGraph();
+    const llm = (await run([command, "parse_config", "--format", "llm"])).stdout;
+    expect(llm).toMatch(/suggestion n=1 name=parseConfig .*id=/);
+  });
+
+  it("keeps did-you-mean when every probe outlives its budget", async () => {
+    // A slow backend: the bounded probes never answer in time, the resolver's
+    // own near-name lookup (no budget) still does.
+    search.mockImplementation((term: string, options?: { signal?: AbortSignal }) => {
+      if (options?.signal) {
+        return new Promise((_resolve, reject) => {
+          options.signal!.addEventListener("abort", () => reject(options.signal!.reason), { once: true });
+        });
+      }
+      return Promise.resolve(term === "parseConifg" ? [] : [{ id: "parser-id", name: "parseConfig", kind: "function", provenance: { sourceUri: "src/config.ts" } }]);
+    });
+    const json = JSON.parse((await run([command, "parseConifg", "--format", "json"])).stdout);
+    expect(json.didYouMean).toEqual([]);
+    expect(json.suggestions?.map((s: { name: string }) => s.name)).toEqual(["parseConfig"]);
+    expect((await run([command, "parseConifg", "--format", "llm"])).stdout).toMatch(/suggestion n=1 name=parseConfig .*id=/);
+    const text = await run([command, "parseConifg"]);
+    expect(text.exitCode).toBe(3);
+    expect(text.stderr).toContain("Did you mean:");
+    expect(text.stderr).toContain("parseConfig");
+  });
+
+  // The resolver's own lookup (no signal) finds parseConfig; the bounded probe
+  // for the exact term finds a different near name, parseConfg.
+  function probeFinds(otherProbes: "answer" | "hang"): void {
+    const config = { id: "parser-id", name: "parseConfig", kind: "function", provenance: { sourceUri: "src/config.ts" } };
+    const other = { id: "other-id", name: "parseConfg", kind: "function", provenance: { sourceUri: "src/other.ts" } };
+    search.mockImplementation((term: string, options?: { signal?: AbortSignal }) => {
+      if (!options?.signal) return Promise.resolve(term === "parseConifg" ? [] : [config]);
+      if (term === "parseConifg") return Promise.resolve([other]);
+      if (otherProbes === "answer") return Promise.resolve([]);
+      return new Promise((_resolve, reject) => {
+        options.signal!.addEventListener("abort", () => reject(options.signal!.reason), { once: true });
+      });
+    });
+  }
+
+  it("keeps the resolver's suggestions first when the probe only partly answers", async () => {
+    probeFinds("hang");
+    const text = await run([command, "parseConifg"]);
+    expect(text.exitCode).toBe(3);
+    const rows = text.stderr.slice(text.stderr.indexOf("Did you mean:"));
+    expect(rows.indexOf("parseConfig ")).toBeGreaterThan(-1);
+    expect(rows.indexOf("parseConfg ")).toBeGreaterThan(rows.indexOf("parseConfig "));
+    // A deadline-cut probe never names a winner.
+    expect(text.stderr).not.toContain("Try:");
+    const json = JSON.parse((await run([command, "parseConifg", "--format", "json"])).stdout);
+    expect(json.suggestions.map((s: { name: string }) => s.name)).toEqual(["parseConfig"]);
+  });
+
+  it("drops a retry for an entity the suggestion rows do not list", async () => {
+    probeFinds("answer");
+    const llm = (await run([command, "parseConifg", "--format", "llm"])).stdout;
+    expect(llm).toMatch(/suggestion n=1 name=parseConfig .*id=/);
+    expect(llm).not.toContain("--path 'src/other.ts'");
+    expect(llm).toContain("Re-run with one of these names");
+    expect((await run([command, "parseConifg"])).stderr).not.toContain("Try:");
+  });
+
+  it("still suggests a long name more than two edits away", async () => {
+    const row = { id: "input-id", name: "validateUserInput", kind: "function", provenance: { sourceUri: "src/validate.ts" } };
+    search.mockImplementation(async (term: string) => (term === "validateUserImptx" ? [] : [row]));
+    const json = JSON.parse((await run([command, "validateUserImptx", "--format", "json"])).stdout);
+    expect(json.suggestions?.map((s: { name: string }) => s.name)).toEqual(["validateUserInput"]);
+  });
+
+  it("can disable candidate queries", async () => {
+    search.mockClear();
+    graph({});
+    const result = await run([command, "Missing", "--no-suggest", "--format", "json"]);
+    expect(JSON.parse(result.stdout).didYouMean).toEqual([]);
+    expect(search.mock.calls.every(([, options]) => !options?.signal)).toBe(true);
+  });
+
+  it("preserves the existing JSON record, adding only didYouMean", async () => {
+    graph({});
+    const payload = JSON.parse((await run([command, "Missing", "--format", "json"])).stdout);
+    const { didYouMean, ...legacy } = payload;
+    expect(didYouMean).toEqual([]);
+    expect(legacy).toEqual(command === "locate" ? {
+      resolvedTarget: null, resolutionMode: "none", systemPath: null,
+      diagnostics: ["No graph entity found."], error: "unresolved_target",
+      message: 'No graph entity found for "Missing".',
+    } : { error: "unresolved_target", message: 'No entity found matching "Missing".' });
+  });
+
+  it("prints did-you-mean and a path retry, without turning the miss into success", async () => {
+    nearGraph();
+    const result = await run([command, "parse_config"]);
+    expect(result.exitCode).toBe(3);
+    expect(result.stderr).toContain("Did you mean:");
+    expect(result.stderr).toContain(`ix ${command} 'parseConfig' --path 'src/config.ts'`);
+  });
+});
 
 describe.each(COMMANDS)("ix %s outcome codes", (command) => {
   it("exits 3 with unresolved_target for a name that is not in the graph", async () => {
@@ -159,7 +284,7 @@ describe.each(COMMANDS)("ix %s outcome codes", (command) => {
   });
 });
 
-describe.each(["locate", "callers", "callees", "impact"] as const)("ix %s on a target that resolves", (command) => {
+describe.each(["locate", "callers", "callees", "impact", "overrides"] as const)("ix %s on a target that resolves", (command) => {
   it("exits 0", async () => {
     const result = await run([command, "Unique", "--format", "json"]);
     expect(result.exitCode).toBe(0);

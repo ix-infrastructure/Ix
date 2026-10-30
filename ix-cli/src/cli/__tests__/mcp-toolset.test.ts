@@ -156,6 +156,40 @@ describe("ix_neighbors", () => {
   });
 });
 
+describe("overrides over MCP", () => {
+  it("ix_neighbors relation=overrides and ix_overrides run the same command", async () => {
+    const calls: string[][] = [];
+    const server = createIxMcpServer({
+      version: "test",
+      tools: "all",
+      runIx: async (args) => {
+        calls.push(args);
+        return { ok: true, stdout: "overrides target=Mid.m owner=Mid shown=0 total=0", stderr: "" };
+      },
+    });
+    const client = new Client({ name: "overrides", version: "1.0.0" });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await server.connect(st);
+    await client.connect(ct);
+    clients.push(client);
+
+    const args = { symbol: "m", path: "pkg/mid.py", pick: 2, limit: 20 };
+    // Both page like the other edge tools: the offset a results_truncated row hands back is forwarded.
+    const viaNeighbors = await client.callTool({ name: "ix_neighbors", arguments: { ...args, relation: "overrides", offset: 50 } });
+    const direct = await client.callTool({ name: "ix_overrides", arguments: { ...args, offset: 50 } });
+
+    const expected = ["overrides", "--path=pkg/mid.py", "--pick=2", "--limit=20", "--offset=50", "--format=llm", "--", "m"];
+    expect(calls).toEqual([expected, expected]);
+    expect(viaNeighbors.isError).toBeFalsy();
+    expect(direct.content).toEqual(viaNeighbors.content);
+  });
+
+  it("ix_overrides is in the full catalog, not the core set", async () => {
+    expect(await names({ tools: "all" })).toContain("ix_overrides");
+    expect(await names()).not.toContain("ix_overrides");
+  });
+});
+
 describe("tool descriptions", () => {
   it("stay within three short sentences, so a catalog is skimmable", async () => {
     const tools = (await (await connect({ tools: "all", proAvailable: true })).listTools()).tools;

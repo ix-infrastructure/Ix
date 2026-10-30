@@ -315,6 +315,7 @@ type SummaryFields = {
   receiverHeritage?: Array<[string, string]>;
   receiverPackage?: string;
   importAliases?: Record<string, string>;
+  tsGlobalTypes?: string[];
   refs?: string[];
   imports?: Array<{ dstName?: string; importRaw?: string; importAliased?: boolean }>;
   sig?: string;
@@ -352,6 +353,12 @@ function bindings(summary: StoredSummary | undefined): Map<string, string[]> {
   // method only (`x.getUrl().m()`): the method name counts too.
   for (const [name, type] of s.receiverFactories ?? []) out.set(`f\0${name}\0${type}\0${heritageImports}\0\0${aliases}`, javaMember(s, name));
   for (const [name, base] of s.receiverHeritage ?? []) out.set(`h\0${name}\0${base}\0${heritageImports}\0\0${aliases}`, [name]);
+  // `export * as ns from './a'` is what an importer's `ns.Base` resolves through.
+  for (const [key, spec] of Object.entries(s.importAliases ?? {})) {
+    if (key.startsWith("export:")) out.set(`n\0${key}\0${spec}`, [key.slice("export:".length)]);
+  }
+  // A TypeScript global is what an unimported heritage base can name.
+  for (const name of s.tsGlobalTypes ?? []) out.set(`g\0${name}`, [name]);
   return out;
 }
 

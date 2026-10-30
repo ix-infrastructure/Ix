@@ -109,6 +109,27 @@ export function parsePickOption(value: string): number {
 }
 
 /**
+ * The longest `--wait <seconds>` budget: 5 minutes. Node's fetch (undici)
+ * gives up on a response whose headers have not arrived after 300 s whatever
+ * the request's own timeout, so a longer wait would end there anyway.
+ */
+export const MAX_WAIT_SECONDS = 300;
+
+/**
+ * Parse a `--wait <seconds>` budget: a positive whole number of seconds, at
+ * most `MAX_WAIT_SECONDS`.
+ */
+export function parseWaitSecondsOption(value: string): number {
+  const seconds = parsePositiveInt(value, "20 or 300");
+  if (seconds > MAX_WAIT_SECONDS) {
+    throw new InvalidArgumentError(
+      `must be at most ${MAX_WAIT_SECONDS} seconds, the longest the HTTP client waits for an answer (for example, 20 or 300)`,
+    );
+  }
+  return seconds;
+}
+
+/**
  * Parse a `--max-*` budget flag.
  *
  * Validated at parse time rather than read back out of the raw option string
