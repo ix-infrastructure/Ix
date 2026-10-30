@@ -20,7 +20,7 @@ vi.mock("../config.js", async (original) => ({
   resolveWorkspaceRoot: () => state.root,
 }));
 
-import { gatherAround } from "../around.js";
+import { DEFAULT_TOKEN_BUDGET, fitToBudget, gatherAround, type AroundResult } from "../around.js";
 import { aroundJson, renderAroundLlm, renderAroundText } from "../around-render.js";
 import { limitOption, registerAroundCommand } from "../commands/around.js";
 import { SourceFiles } from "../edge-sites.js";
@@ -63,7 +63,7 @@ function fixture(target: string, contents: Record<string, string>, graphTests: s
 }
 
 describe("around test selection", () => {
-  it("unions import-only, naming-only, both and graph evidence, ranking agreement first", async () => {
+  it("tags graph tests with agreeing file-level evidence and lists the rest once for the file", async () => {
     const gather = fixture("src/widget.ts", {
       "tests/import-only.ts": 'import { run as subject } from "../src/widget.js";',
       "src/widget.spec.ts": "// naming only",
@@ -76,19 +76,26 @@ describe("around test selection", () => {
       "other/widget.ts": "export const value = 1;",
     }, ["tests/graph.ts", "tests/agreement.ts"]);
     const result = await gather();
-    const rows = result.symbols[0].tests.rows;
-    expect(rows.map((r) => r.path).slice(0, 2)).toEqual(["tests/agreement.ts", "tests/graph.ts"]);
-    expect(Object.fromEntries(rows.map((r: any) => [r.path, r.sources]))).toEqual({
-      "tests/agreement.ts": ["graph", "import"],
-      "tests/graph.ts": ["graph"],
-      "tests/import-only.ts": ["import"],
-      "src/widget.spec.ts": ["naming"],
-      "src/widget.test.ts": ["naming"],
-      "__tests__/widget-extra.ts": ["import", "naming"],
-    });
+    expect(result.symbols[0].tests.rows.map((r) => [r.path, r.sources])).toEqual([
+      ["tests/agreement.ts", ["graph", "import"]],
+      ["tests/graph.ts", ["graph"]],
+    ]);
+    // Import, then naming; nearest first. The root __tests__/widget-extra.ts is
+    // as near other/widget.ts as this widget.ts, so its name is no evidence.
+    expect(result.fileTests!.rows.map((r) => [r.path, r.sources])).toEqual([
+      ["__tests__/widget-extra.ts", ["import"]],
+      ["tests/import-only.ts", ["import"]],
+      ["src/widget.spec.ts", ["naming"]],
+      ["src/widget.test.ts", ["naming"]],
+    ]);
     expect(JSON.stringify(aroundJson(result))).toContain('"sources":["graph","import"]');
-    expect(renderAroundText(result)).toContain("[graph, import]");
-    expect(renderAroundLlm(result).join("\n")).toContain("sources=graph,import");
+    expect(JSON.stringify(aroundJson(result).fileTests)).toContain('"sources":["naming"]');
+    const text = renderAroundText(result);
+    expect(text).toContain("[graph, import]");
+    expect(text).toContain("file-level tests of widget.ts (4):\n  __tests__/widget-extra.ts:1 [import]");
+    const llm = renderAroundLlm(result).join("\n");
+    expect(llm).toContain("sources=graph,import");
+    expect(llm).toContain("file_tests shown=4 total=4\nfile_test site=__tests__/widget-extra.ts:1 sources=import");
   });
 
   it("resolves Python package initializers and JS/TS directory imports", async () => {
@@ -97,7 +104,7 @@ describe("around test selection", () => {
       "tests/from.py": "from sample import run",
       "tests/test_sample.py": "# naming only",
     });
-    expect((await python()).symbols[0].tests.rows).toEqual(expect.arrayContaining([
+    expect((await python()).fileTests!.rows).toEqual(expect.arrayContaining([
       expect.objectContaining({ path: "tests/package.py", sources: ["import"] }),
       expect.objectContaining({ path: "tests/from.py", sources: ["import"] }),
       expect.objectContaining({ path: "tests/test_sample.py", sources: ["naming"] }),
@@ -109,7 +116,7 @@ describe("around test selection", () => {
       "tests/dynamic.ts": 'const subject = import("../src/widget/index.js");',
       "tests/bare.ts": 'import "widget";',
     });
-    expect((await script()).symbols[0].tests.rows.map((r) => r.path)).toEqual([
+    expect((await script()).fileTests!.rows.map((r) => r.path)).toEqual([
       "tests/commonjs.ts", "tests/directory.ts", "tests/dynamic.ts",
     ]);
   });
@@ -127,11 +134,19 @@ describe("around test selection", () => {
       "other/widget.py": "def other(): pass",
       "tests/__fixtures__/test_widget.py": "from sample import widget",
     });
-    const rows = (await gather()).symbols[0].tests.rows;
+    const rows = (await gather()).fileTests!.rows;
+    // Root-level names are as near other/widget.py: no naming evidence.
     expect(Object.fromEntries(rows.map((r: any) => [r.path, r.sources]))).toEqual({
       "tests/import_only.py": ["import"], "tests/dotted.py": ["import"],
-      "src/sample/tests/relative.py": ["import"], "test_widget.py": ["naming"],
-      "widget_test.py": ["naming"], "tests/nested/test_widget_extra.py": ["import", "naming"],
+      "src/sample/tests/relative.py": ["import"], "tests/nested/test_widget_extra.py": ["import"],
+    });
+    rmSync(state.root, { recursive: true, force: true });
+    const alone = fixture("src/sample/widget.py", {
+      "test_widget.py": "# naming only", "widget_test.py": "# naming only",
+      "tests/nested/test_widget_extra.py": "from sample.widget import run", "src/sample/__init__.py": "",
+    });
+    expect(Object.fromEntries((await alone()).fileTests!.rows.map((r: any) => [r.path, r.sources]))).toEqual({
+      "test_widget.py": ["naming"], "widget_test.py": ["naming"], "tests/nested/test_widget_extra.py": ["import", "naming"],
     });
   });
 
@@ -143,7 +158,7 @@ describe("around test selection", () => {
       "tests/m4.test.ts": "// naming only",
       "packages/b/src/m4.test.ts": "// naming only",
     });
-    const rows = (await gather()).symbols[0].tests.rows;
+    const rows = (await gather()).fileTests!.rows;
     expect(rows.map((r: any) => [r.path, r.sources])).toEqual([
       ["pkg3/test/imports.ts", ["import"]],
       ["pkg3/src/m4.spec.ts", ["naming"]],
@@ -156,7 +171,25 @@ describe("around test selection", () => {
       "packages/c/tests/test_models.py": "# naming only",
       "packages/b/src/models_test.py": "# naming only",
     });
-    expect((await python()).symbols[0].tests.rows.map((r) => r.path)).toEqual(["packages/a/tests/test_models.py"]);
+    expect((await python()).fileTests!.rows.map((r) => r.path)).toEqual(["packages/a/tests/test_models.py"]);
+  });
+
+  it("takes a name as evidence only when no same-named module is as near the test", async () => {
+    const monorepo = fixture("packages/a/utils.py", {
+      "packages/b/utils.py": "",
+      "tests/test_utils.py": "# root: as near both utils.py",
+      "packages/a/tests/test_utils.py": "# a's own",
+      "packages/b/tests/test_utils.py": "# b's own",
+    });
+    expect((await monorepo()).fileTests!.rows.map((r) => r.path)).toEqual(["packages/a/tests/test_utils.py"]);
+    rmSync(state.root, { recursive: true, force: true });
+    // A colocated test is nearer its own module than a same-named one below it.
+    const script = fixture("src/widget.ts", {
+      "src/sub/widget.ts": "export const other = 1;",
+      "src/widget.test.ts": "// naming only",
+      "src/sub/widget.test.ts": "// the other's",
+    });
+    expect((await script()).fileTests!.rows.map((r) => r.path)).toEqual(["src/widget.test.ts"]);
   });
 
   it("does not take a standard-library or site-package import for a same-named local module", async () => {
@@ -169,7 +202,7 @@ describe("around test selection", () => {
       "tests/test_qualified.py": "import app.json as subject",
       "lib/os/path.py": "",
     });
-    expect((await gather()).symbols[0].tests.rows.map((r: any) => [r.path, r.sources])).toEqual([
+    expect((await gather()).fileTests!.rows.map((r: any) => [r.path, r.sources])).toEqual([
       ["tests/test_local.py", ["import"]],
       ["tests/test_qualified.py", ["import"]],
     ]);
@@ -181,7 +214,7 @@ describe("around test selection", () => {
       "src/widget-import.test.ts": 'import "./widget";',
     });
     const reads = vi.spyOn(SourceFiles.prototype, "lines");
-    const rows = (await gather()).symbols[0].tests.rows;
+    const rows = (await gather()).fileTests!.rows;
     expect(rows.map((r) => r.path)).toEqual(["src/widget-import.test.ts"]);
     expect(reads.mock.calls.filter(([p]) => String(p).endsWith(".test.ts")).length).toBe(400);
   });
@@ -193,6 +226,7 @@ describe("around test selection", () => {
     const listing = vi.spyOn(SourceFiles.prototype, "sourcePaths");
     const result = await gather();
     expect(result.symbols[0].tests.total).toBe(0);
+    expect(result.fileTests).toBeUndefined();
     expect(listing).not.toHaveBeenCalled();
   });
 
@@ -207,7 +241,7 @@ describe("around test selection", () => {
     const gather = fixture("src/foo.service.ts", {
       "tests/service.ts": 'import { FooService } from "../src/foo.service";',
     });
-    expect(Object.fromEntries((await gather()).symbols[0].tests.rows.map((r: any) => [r.path, r.sources])))
+    expect(Object.fromEntries((await gather()).fileTests!.rows.map((r: any) => [r.path, r.sources])))
       .toEqual({ "tests/service.ts": ["import"] });
   });
 
@@ -215,12 +249,12 @@ describe("around test selection", () => {
     const script = fixture("src/a.ts", {
       "__tests__/api.test.ts": "// other module", "__tests__/a.extra.test.ts": "// naming only",
     });
-    expect((await script()).symbols[0].tests.rows.map((r) => r.path)).toEqual(["__tests__/a.extra.test.ts"]);
+    expect((await script()).fileTests!.rows.map((r) => r.path)).toEqual(["__tests__/a.extra.test.ts"]);
     rmSync(state.root, { recursive: true, force: true });
     const python = fixture("a.py", {
       "tests/test_auth.py": "# other module", "tests/test_a_more.py": "# naming only",
     });
-    expect((await python()).symbols[0].tests.rows.map((r) => r.path)).toEqual(["tests/test_a_more.py"]);
+    expect((await python()).fileTests!.rows.map((r) => r.path)).toEqual(["tests/test_a_more.py"]);
   });
 
   it("drops a naming-only test that is listed but gone from disk, keeping one that is there but unread", async () => {
@@ -230,7 +264,7 @@ describe("around test selection", () => {
     vi.spyOn(SourceFiles.prototype, "lines").mockImplementation(function (this: SourceFiles, p) {
       return p === "src/widget.spec.ts" ? null : lines.call(this, p);
     });
-    expect((await gather()).symbols[0].tests.rows.map((r) => r.path)).toEqual(["src/widget.spec.ts"]);
+    expect((await gather()).fileTests!.rows.map((r) => r.path)).toEqual(["src/widget.spec.ts"]);
   });
 
   it("leaves JSON uncapped, retains text defaults, and honors explicit limits including all", async () => {
@@ -246,24 +280,96 @@ describe("around test selection", () => {
       return String(output.mock.calls.at(-1)![0]);
     }
     const json = JSON.parse(await command(["--format", "json"]));
-    expect(json.symbols[0].tests.rows).toHaveLength(9);
+    expect(json.fileTests.rows).toHaveLength(9);
     expect(json.symbols[0].users.rows).toHaveLength(9);
     expect(json.importers.rows).toHaveLength(9);
     const text = await command(["--budget", "10000"]);
-    expect(text).toContain("tests (5 of 9):");
+    expect(text).toContain("file-level tests of widget.ts (5 of 9):");
     expect(text).toContain("used by importers (5 of 9):");
     const limited = JSON.parse(await command(["--format", "json", "--limit", "7"]));
-    expect(limited.symbols[0].tests.rows).toHaveLength(7);
+    expect(limited.fileTests.rows).toHaveLength(7);
     expect(limited.importers.rows).toHaveLength(7);
-    expect(await command(["--limit", "0", "--budget", "10000"])).toContain("tests (9):");
-    expect(await command(["--limit", "7", "--budget", "10000"])).toContain("tests (7 of 9):");
+    expect(await command(["--limit", "0", "--budget", "10000"])).toContain("widget.ts (9):");
+    expect(await command(["--limit", "7", "--budget", "10000"])).toContain("widget.ts (7 of 9):");
     // A malformed limit falls back as it always did, without failing the run.
     const exit = process.exitCode;
-    expect(JSON.parse(await command(["--format", "json", "--limit", "abc"])).symbols[0].tests.rows).toHaveLength(8);
-    expect(await command(["--limit", "1e3", "--budget", "10000"])).toContain("tests (1 of 9):");
+    expect(JSON.parse(await command(["--format", "json", "--limit", "abc"])).fileTests.rows).toHaveLength(8);
+    expect(await command(["--limit", "1e3", "--budget", "10000"])).toContain("widget.ts (1 of 9):");
     expect(process.exitCode).toBe(exit);
     expect([limitOption("-1"), limitOption("abc"), limitOption("0"), limitOption(undefined)]).toEqual([1, 8, 0, undefined]);
     // Unlimited lists must still terminate when fitting the normal text budget.
     expect((await command(["--limit", "0"])).length).toBeLessThan(1800);
+  });
+});
+
+/** A file of `names` functions, each called from `callers` other files; `graphTests` maps a name to the tests calling it. */
+function symbolsFixture(names: string[], callers: number, graphTests: Record<string, string[]>, contents: Record<string, string>) {
+  state.root = mkdtempSync(join(process.cwd(), ".around-fixture-"));
+  const target = "src/widget.ts";
+  const all = { [target]: names.map((n) => `export function ${n}() {}`).join("\n"), ...contents };
+  for (const [file, text] of Object.entries(all)) {
+    mkdirSync(join(state.root, file, ".."), { recursive: true });
+    writeFileSync(join(state.root, file), text);
+  }
+  const node = (id: string, kind: string, name: string, file: string, line = 1) => ({
+    id, kind, name, provenance: { sourceUri: file }, attrs: { line_start: line, line_end: line },
+  });
+  const file = node("target-file", "file", "widget.ts", target);
+  const defs = names.map((n, i) => node(`def-${n}`, "function", n, target, i + 1));
+  state.client = {
+    search: vi.fn(async () => [file]),
+    expand: vi.fn(async (id: string, opts: any) => {
+      if (id === file.id && opts.predicates.includes("CONTAINS")) return {
+        nodes: defs, edges: defs.map((d) => ({ src: file.id, dst: d.id, predicate: "CONTAINS" })),
+      };
+      const def = defs.find((d) => d.id === id);
+      if (!def || opts.hops === 2) return { nodes: [], edges: [] };
+      return {
+        nodes: [
+          ...Array.from({ length: callers }, (_, i) => node(`${def.name}-c${i}`, "function", `use${i}`, `lib/${def.name}/c${i}.ts`)),
+          ...(graphTests[def.name] ?? []).map((p) => node(p, "function", "it", p)),
+        ],
+        edges: [],
+      };
+    }),
+  };
+  return (caps: Record<string, number> = {}) => gatherAround(state.client, {
+    relPath: target, anchorLines: all[target].split("\n"), files: new SourceFiles(state.root), caps, heuristicTests: true,
+  });
+}
+
+describe("around file-level tests over several symbols", () => {
+  it("lists file-level tests once for the file, not under each symbol, and cuts them before callers", async () => {
+    const gather = symbolsFixture(["run", "stop", "reset"], 4, { run: ["tests/run.test.ts"] }, {
+      "tests/run.test.ts": 'import { run } from "../src/widget";\nrun();',
+      ...Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`tests/case${i}.ts`, 'import "../src/widget";'])),
+      ...Object.fromEntries(["run", "stop", "reset"].flatMap((n) => Array.from({ length: 4 }, (_, i) => [
+        `lib/${n}/c${i}.ts`, `export const value${i} = ${n}(); // a call site long enough to cost the budget`,
+      ]))),
+    });
+    const result = await gather();
+    expect(result.symbols.map((s) => [s.name, s.tests.total])).toEqual([["run", 1], ["stop", 0], ["reset", 0]]);
+    // The graph's test agrees with the import; it is not repeated in the file's list.
+    expect(result.symbols[0].tests.rows.map((r) => [r.path, r.sources])).toEqual([["tests/run.test.ts", ["graph", "import"]]]);
+    expect(result.fileTests!.rows.map((r) => r.path)).toEqual([0, 1, 2, 3, 4].map((i) => `tests/case${i}.ts`));
+
+    // The file's tests cost no symbol a caller row it would have kept without them.
+    const render = (r: AroundResult) => renderAroundText(r);
+    const fitted = fitToBudget(result, render, DEFAULT_TOKEN_BUDGET);
+    const callersKept = (r: AroundResult) => r.symbols.map((s) => s.callers.rows.length);
+    expect(callersKept(fitted)).toEqual(callersKept(fitToBudget({ ...result, fileTests: undefined }, render, DEFAULT_TOKEN_BUDGET)));
+    const text = render(fitted);
+    expect(text).not.toContain("`stop` tests");
+    expect(text).toMatch(/file-level tests of widget\.ts \(\d of 5\):/);
+    expect(text.split("tests/case0.ts").length - 1).toBe(1);
+  });
+
+  it("looks up call sites on disk for a bounded number of callers, keeping every row", async () => {
+    const gather = symbolsFixture(["run"], 120, {}, {});
+    const reads = vi.spyOn(SourceFiles.prototype, "lines");
+    const result = await gather({ callers: Infinity });
+    expect(result.symbols[0].callers.rows).toHaveLength(120);
+    expect(result.symbols[0].callers.rows[119]).toMatchObject({ path: "lib/run/c119.ts", line: 1 });
+    expect(new Set(reads.mock.calls.map(([p]) => p).filter((p) => String(p).startsWith("lib/"))).size).toBe(100);
   });
 });

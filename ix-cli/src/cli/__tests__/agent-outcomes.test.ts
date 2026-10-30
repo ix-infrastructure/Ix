@@ -10,6 +10,7 @@ import { registerOverridesCommand } from "../commands/overrides.js";
 import { WorkspaceNotMappedError, renderCliError, setErrorFormat } from "../errors.js";
 import { LEGACY_EXIT_CODES_ENV, exitCodeFor, worseExitCode } from "../outcome.js";
 import { ALL_CANDIDATE_CAP } from "../resolve.js";
+import { SUGGEST_MAX_MS } from "../target-suggestions.js";
 
 // The outcome contract an agent routes on (outcome.ts): 0 results, 2 ambiguous
 // (candidates returned), 3 not found (suggestions), 4 workspace not mapped,
@@ -171,12 +172,18 @@ describe.each(["locate", "callers", "impact", "explain"])("%s miss candidates", 
   });
 
   // The resolver's own lookup (no signal) finds parseConfig; the bounded probe
-  // for the exact term finds a different near name, parseConfg.
+  // for the exact term finds a different near name, parseConfg. The probe's
+  // budget is half the miss, so a miss that took no time would leave it well
+  // under a millisecond and a loaded run would cut it: the resolver's first
+  // lookups take long enough to give the probe its full budget.
   function probeFinds(otherProbes: "answer" | "hang"): void {
     const config = { id: "parser-id", name: "parseConfig", kind: "function", provenance: { sourceUri: "src/config.ts" } };
     const other = { id: "other-id", name: "parseConfg", kind: "function", provenance: { sourceUri: "src/other.ts" } };
-    search.mockImplementation((term: string, options?: { signal?: AbortSignal }) => {
-      if (!options?.signal) return Promise.resolve(term === "parseConifg" ? [] : [config]);
+    search.mockImplementation(async (term: string, options?: { signal?: AbortSignal }) => {
+      if (!options?.signal) {
+        await new Promise((resolve) => setTimeout(resolve, 2 * SUGGEST_MAX_MS + 10));
+        return term === "parseConifg" ? [] : [config];
+      }
       if (term === "parseConifg") return Promise.resolve([other]);
       if (otherProbes === "answer") return Promise.resolve([]);
       return new Promise((_resolve, reject) => {

@@ -89,7 +89,11 @@ export interface AroundSymbol {
   callers: AroundSection;
   /** Files that import this file, name the symbol, and use it -- at the use. */
   users: AroundSection;
-  /** Graph tests unioned with file-level import and naming evidence. */
+  /**
+   * Test files the graph links to it: they call it, call a caller of it, or
+   * import and use it. With file-level evidence gathered, each row's
+   * `sources` adds `import` / `naming` when that evidence agrees.
+   */
   tests: AroundSection;
   /** Other definitions in the same file with the same name. */
   sameName: Array<{ kind: string; lineStart: number; lineEnd: number }>;
@@ -145,6 +149,12 @@ export interface AroundResult {
   /** Every importer of the file, at its import line. */
   importers: AroundSection & { tests: number };
   /**
+   * Test files that import the file or are named for it but that the graph
+   * links to none of `symbols` -- file-level evidence, listed once rather
+   * than under each symbol. Present only when the request asked for it.
+   */
+  fileTests?: AroundSection;
+  /**
    * Edited definitions left out because the request excluded them (the hook's
    * "already told"); absent when none were. Lets the hook's log tell an edit
    * outside every definition from one inside a definition it already reported.
@@ -158,9 +168,10 @@ export interface AroundCaps {
   users: number;
   tests: number;
   importers: number;
+  fileTests: number;
 }
 
-export const DEFAULT_CAPS: AroundCaps = { symbols: 3, callers: 8, users: 5, tests: 5, importers: 5 };
+export const DEFAULT_CAPS: AroundCaps = { symbols: 3, callers: 8, users: 5, tests: 5, importers: 5, fileTests: 5 };
 
 /**
  * How close `other` is to `edited`, smaller first: 0 for the same directory,
@@ -182,6 +193,13 @@ export function localityRank(edited: string, other: string): number {
 
 /** The default token budget for rendered output: it lands in an agent's context after every edit. */
 export const DEFAULT_TOKEN_BUDGET = 300;
+
+/**
+ * Callers per symbol whose call site is looked up on disk; past it a row has
+ * the graph's location and no snippet. Bounds the reads of an uncapped
+ * (`--format json`, `--limit 0`) answer about a heavily called symbol.
+ */
+const MAX_CALLER_SITES = 100;
 
 /** Whole-file questions rank at most this many top-level definitions by caller count. */
 const WHOLE_FILE_CANDIDATES = 12;
@@ -549,8 +567,9 @@ export async function gatherAround(client: AroundClient, req: AroundRequest): Pr
     importerLines.set(row.id, { row, path: p, lines: lines ? findImports(lines, fileKeys) : [] });
   }
   const heuristic = req.heuristicTests && chosen.length > 0
-    ? heuristicTests(relPath, req.files, isTestFile, (p) => localityRank(relPath, p))
+    ? heuristicTests(relPath, req.files, isTestFile, localityRank)
     : [];
+  const graphTestPaths = new Set<string>();
 
   const symbols = await Promise.all(chosen.map(async (d): Promise<AroundSymbol> => {
     const sets = await callerSets(client, d.id, preloaded.get(d.id));
@@ -563,7 +582,7 @@ export async function gatherAround(client: AroundClient, req: AroundRequest): Pr
     const crossFirst = [...nonTest].sort((a, b) =>
       Number(rowLocation(a).path === relPath) - Number(rowLocation(b).path === relPath) || near(a) - near(b));
     const callers = crossFirst.slice(0, caps.callers)
-      .map((row) => siteRef(row, safeSite("callers", row, target, req.files)));
+      .map((row, i) => siteRef(row, i < MAX_CALLER_SITES ? safeSite("callers", row, target, req.files) : undefined));
     const callerPaths = new Set(hop1.map((r) => rowLocation(r).path));
 
     // Tests: callers that are tests, then tests calling a caller, then test
@@ -604,25 +623,18 @@ export async function gatherAround(client: AroundClient, req: AroundRequest): Pr
         return { kind: o.kind, lineStart: c?.start ?? o.lineStart, lineEnd: c?.end ?? o.lineEnd };
       });
     // Sources only when file-level evidence was gathered: without it every row
-    // is graph evidence and the tag would only cost the hook budget.
-    if (req.heuristicTests) for (const ref of tests.values()) ref.sources = ["graph"];
-    for (const ref of heuristic) {
-      const existing = tests.get(ref.path);
-      if (existing) existing.sources!.push(...ref.sources!);
-      else tests.set(ref.path, { ...ref });
+    // is graph evidence and the tag would only cost the hook budget. File-level
+    // evidence only tags a graph row here; a test the graph links to no symbol
+    // goes to the file's own list, so it is neither repeated under each symbol
+    // nor read as a call to one.
+    if (req.heuristicTests) {
+      for (const ref of tests.values()) ref.sources = ["graph"];
+      for (const ref of heuristic) tests.get(ref.path)?.sources!.push(...ref.sources!);
     }
-    // Graph agreeing with a file-level source, graph alone (in graph order),
-    // import and naming, import, naming; file-level rows nearest first, so a
-    // same-named test elsewhere never outranks one beside the file.
-    const testRank = (r: AroundRef) => {
-      const sources = r.sources ?? ["graph"];
-      const has = (s: "graph" | "import" | "naming") => sources.includes(s);
-      if (has("graph")) return sources.length > 1 ? 0 : 1;
-      return has("import") ? (has("naming") ? 2 : 3) : 4;
-    };
+    for (const p of tests.keys()) graphTestPaths.add(p);
+    // Graph agreeing with a file-level source first, then graph alone, each in graph order.
     const testRows = [...tests.values()].sort((a, b) =>
-      testRank(a) - testRank(b)
-      || (testRank(a) > 1 ? localityRank(relPath, a.path) - localityRank(relPath, b.path) : 0));
+      Number((a.sources?.length ?? 1) === 1) - Number((b.sources?.length ?? 1) === 1));
     const decl = req.ranges && req.ranges.length > 0 ? declarationLines(d, anchorPlaced, req.ranges) : undefined;
     // In the current file's coordinates, like the symbol's own span.
     const shift = here.start - d.start;
@@ -659,12 +671,20 @@ export async function gatherAround(client: AroundClient, req: AroundRequest): Pr
       }),
   };
 
+  // Import and naming, import, naming; nearest first within each, so a
+  // same-named test elsewhere never outranks one beside the file.
+  const fileRank = (r: AroundRef) => r.sources!.includes("import") ? (r.sources!.length > 1 ? 0 : 1) : 2;
+  const fileTestRows = heuristic
+    .filter((r) => !graphTestPaths.has(r.path))
+    .sort((a, b) => fileRank(a) - fileRank(b) || localityRank(relPath, a.path) - localityRank(relPath, b.path));
+
   const health = await healthP.catch(() => undefined);
   return {
     path: relPath,
     graph: isUnhealthy(health) ? health : undefined,
     symbols,
     importers,
+    ...(req.heuristicTests ? { fileTests: { total: fileTestRows.length, rows: fileTestRows.slice(0, caps.fileTests) } } : {}),
     ...(alreadyReported > 0 ? { excluded: alreadyReported } : {}),
   };
 }
@@ -699,15 +719,18 @@ function withCaps(result: AroundResult, caps: AroundCaps, snippetChars: number):
       tests: { total: s.tests.total, rows: s.tests.rows.slice(0, caps.tests).map(trimRef) },
     })),
     importers: { ...result.importers, rows: result.importers.rows.slice(0, caps.importers).map(trimRef) },
+    ...(result.fileTests
+      ? { fileTests: { total: result.fileTests.total, rows: result.fileTests.rows.slice(0, caps.fileTests).map(trimRef) } }
+      : {}),
   };
 }
 
 /**
  * Cut the answer until its rendering fits `budget` tokens, least useful first:
- * the file-level importer rows (the count stays), then long snippets, then
- * rows from each list down to a floor, then symbols, then everything down to
- * one row. Totals are kept, so what was cut reads as "N of M", never as
- * absence.
+ * the file-level importer rows (the count stays), then long snippets, then the
+ * file-level test rows down to one, then rows from each list down to a floor,
+ * then symbols, then everything down to one row. Totals are kept, so what was
+ * cut reads as "N of M", never as absence.
  */
 export function fitToBudget(
   result: AroundResult,
@@ -722,6 +745,7 @@ export function fitToBudget(
     caps[key] = Math.min(caps[key], Math.max(0, ...result.symbols.map((s) => s[key].rows.length)));
   }
   caps.importers = Math.min(caps.importers, result.importers.rows.length);
+  caps.fileTests = Math.min(caps.fileTests, result.fileTests?.rows.length ?? 0);
   let snippet = 100;
   const fits = () => {
     const fitted = withCaps(result, caps, snippet);
@@ -740,6 +764,7 @@ export function fitToBudget(
     fits,
     () => shrink(["importers"], 0),
     () => { snippet = 70; return fits(); },
+    () => shrink(["fileTests"], 1),
     () => shrink(["callers", "users", "tests"], 3),
     () => shrink(["callers", "users", "tests"], 2),
     () => { while (caps.symbols > 1) { caps.symbols--; const f = fits(); if (f) return f; } return undefined; },

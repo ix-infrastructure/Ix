@@ -88,6 +88,7 @@ export function capsFor(limit?: number, format = "text"): AroundCaps {
     users: rows,
     tests: rows,
     importers: rows,
+    fileTests: rows,
   };
 }
 

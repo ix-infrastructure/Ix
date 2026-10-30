@@ -29,12 +29,26 @@ function inScope(target: string, test: string): boolean {
   return anchor === "" || dir === anchor || dir.startsWith(anchor + "/");
 }
 
-/** Naming evidence is file-level: it does not imply a call to any particular symbol. */
-function namedFor(target: string, test: string): boolean {
+/** The module name a test is named for: a package initializer or index takes its directory's. */
+function moduleName(file: string): string {
+  const base = path.posix.basename(file, path.posix.extname(file));
+  return base === "__init__" || base === "index" ? path.posix.basename(path.posix.dirname(file)) : base;
+}
+
+/**
+ * Naming evidence is file-level: it does not imply a call to any particular
+ * symbol. `rivals` are the other non-test files with the target's module name:
+ * a test is named for the target only if no rival in its scope is as near to
+ * it, so a root `tests/test_utils.py` names no `utils.py` in a monorepo with two.
+ */
+function namedFor(
+  target: string, test: string, rivals: string[], near: (from: string, to: string) => number,
+): boolean {
   if (!inScope(target, test)) return false;
+  const distance = near(test, target);
+  if (rivals.some((r) => inScope(r, test) && near(test, r) <= distance)) return false;
   const ext = path.posix.extname(target);
-  const base = path.posix.basename(target, ext);
-  const mod = base === "__init__" || base === "index" ? path.posix.basename(path.posix.dirname(target)) : base;
+  const mod = moduleName(target);
   const name = path.posix.basename(test);
   // A longer name must continue past a separator: `a` is not named by `api`.
   const continues = (stem: string, prefix: string) =>
@@ -107,25 +121,28 @@ function scriptImport(spec: string, importer: string, known: Set<string>): strin
  * Match imports to the target file node's source path, rather than its basename.
  * The graph can omit an IMPORTS edge when Python imports name a package/module.
  * Scan only source test files, at most {@link MAX_TEST_READS} of them, nearest
- * `target` first (`near`: smaller is nearer); SourceFiles bounds and guards
- * every disk read.
+ * `target` first (`near(from, to)`: smaller is nearer); SourceFiles bounds and
+ * guards every disk read.
  */
 export function heuristicTests(
-  target: string, files: SourceFiles, isTest: (file: string) => boolean, near: (file: string) => number,
+  target: string, files: SourceFiles, isTest: (file: string) => boolean, near: (from: string, to: string) => number,
 ): AroundRef[] {
   if (!target.endsWith(".py") && !SCRIPT.test(target)) return [];
   const paths = files.sourcePaths();
   const known = new Set([...paths, target]);
   const resolvePython = pythonResolver([...known]);
   const python = target.endsWith(".py");
+  const sameLanguage = (file: string) => python ? file.endsWith(".py") : SCRIPT.test(file);
+  const mod = moduleName(target);
+  const rivals = paths.filter((file) => file !== target && sameLanguage(file) && !isTest(file) && moduleName(file) === mod);
   const tests = paths
-    .filter((file) => file !== target && isTest(file) && (python ? file.endsWith(".py") : SCRIPT.test(file)))
-    .map((file) => ({ file, near: near(file) }))
+    .filter((file) => file !== target && isTest(file) && sameLanguage(file))
+    .map((file) => ({ file, near: near(target, file) }))
     .sort((a, b) => a.near - b.near || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
   const rows: AroundRef[] = [];
   let reads = 0;
   for (const { file } of tests) {
-    const naming = namedFor(target, file);
+    const naming = namedFor(target, file, rivals, near);
     const lines = reads++ < MAX_TEST_READS ? files.lines(file) : null;
     let imported: number | undefined;
     for (let i = 0; lines && i < lines.length; i++) {
