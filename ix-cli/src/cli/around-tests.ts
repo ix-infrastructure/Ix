@@ -36,14 +36,17 @@ function namedFor(target: string, test: string): boolean {
   const base = path.posix.basename(target, ext);
   const mod = base === "__init__" || base === "index" ? path.posix.basename(path.posix.dirname(target)) : base;
   const name = path.posix.basename(test);
+  // A longer name must continue past a separator: `a` is not named by `api`.
+  const continues = (stem: string, prefix: string) =>
+    stem === prefix || (stem.startsWith(prefix) && /^[._-]/.test(stem.slice(prefix.length)));
   if (ext === ".py" && test.endsWith(".py")) {
     return name === `test_${mod}.py` || name === `${mod}_test.py`
-      || (/(^|\/)tests\//.test(test) && name.startsWith(`test_${mod}`));
+      || (/(^|\/)tests\//.test(test) && continues(name.replace(/\.py$/, ""), `test_${mod}`));
   }
   if (!SCRIPT.test(target) || !SCRIPT.test(test)) return false;
   const stem = name.replace(SCRIPT, "");
   return stem === `${mod}.test` || stem === `${mod}.spec`
-    || (/(^|\/)__tests__\//.test(test) && stem.startsWith(mod));
+    || (/(^|\/)__tests__\//.test(test) && continues(stem, mod));
 }
 
 /** Resolve only local Python modules. Ambiguous package-root suffixes are not evidence. */
@@ -91,7 +94,8 @@ function scriptImport(spec: string, importer: string, known: Set<string>): strin
     const stem = base.replace(/\.[cm]?jsx?$/, "");
     const extensions = base.endsWith(".mjs") ? [".mts"] : base.endsWith(".cjs") ? [".cts"] : [".ts", ".tsx"];
     candidates.push(...extensions.map((ext) => stem + ext));
-  } else if (!path.posix.extname(base)) {
+  } else if (!SCRIPT.test(base)) {
+    // Extensionless, including dotted basenames: `./foo.service` is foo.service.ts.
     for (const ext of [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"]) {
       candidates.push(base + ext, `${base}/index${ext}`);
     }
@@ -150,7 +154,10 @@ export function heuristicTests(
       }
       if (imported !== undefined) break;
     }
-    if (naming || imported !== undefined) rows.push({
+    // Unread (past the cap, or unreadable): naming alone needs the file to be
+    // there, since an unverified git listing still holds deleted tracked files.
+    if (imported === undefined && (!naming || (!lines && !files.exists(file)))) continue;
+    rows.push({
       path: file, line: imported, snippet: imported !== undefined ? lines![imported - 1].trim() : undefined,
       sources: [...(imported !== undefined ? ["import" as const] : []), ...(naming ? ["naming" as const] : [])],
     });

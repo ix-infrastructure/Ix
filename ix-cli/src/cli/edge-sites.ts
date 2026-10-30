@@ -46,6 +46,8 @@ export type SiteRelation = "callers" | "callees" | "imports" | "imported-by";
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const SNIPPET_CHARS = 160;
 const MAX_ALSO = 4;
+/** Files listed for local heuristics outside git, where nothing else bounds the walk. */
+const SOURCE_WALK_LIMIT = 5000;
 /** How far past a span a site is still looked for when the span cannot be re-anchored. */
 const SPAN_SLACK = 30;
 
@@ -250,10 +252,20 @@ export class SourceFiles {
    */
   sourcePaths(): string[] {
     const root = canonicalizeDiscoveredFilePath(this.root ?? process.cwd());
-    return this.paths ??= discoverSourceFiles(root, { verify: false })
+    return this.paths ??= discoverSourceFiles(root, { verify: false, walkLimit: SOURCE_WALK_LIMIT })
       .map((file) => path.relative(root, file).split(path.sep).join("/"))
       .filter((file) => file !== ".." && !file.startsWith("../") && !path.isAbsolute(file))
       .sort();
+  }
+
+  /** Whether `relPath` is a regular file on disk; a read already cached counts. */
+  exists(relPath: string): boolean {
+    if (this.cache.get(relPath)) return true;
+    try {
+      return fs.statSync(absoluteFromSourceUri(relPath, this.root)).isFile();
+    } catch {
+      return false;
+    }
   }
 
   lines(relPath: string | undefined): string[] | null {

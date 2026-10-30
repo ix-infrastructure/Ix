@@ -196,6 +196,43 @@ describe("around test selection", () => {
     expect(listing).not.toHaveBeenCalled();
   });
 
+  it("tags no sources on graph-only rows when file-level evidence is off, so the hook text is unchanged", async () => {
+    const gather = fixture("src/widget.ts", { "tests/graph.ts": "run();" }, ["tests/graph.ts"], false);
+    const result = await gather();
+    expect(result.symbols[0].tests.rows.map((r) => r.sources)).toEqual([undefined]);
+    expect(renderAroundText(result)).not.toContain("[graph]");
+  });
+
+  it("resolves extensionless imports of dotted basenames", async () => {
+    const gather = fixture("src/foo.service.ts", {
+      "tests/service.ts": 'import { FooService } from "../src/foo.service";',
+    });
+    expect(Object.fromEntries((await gather()).symbols[0].tests.rows.map((r: any) => [r.path, r.sources])))
+      .toEqual({ "tests/service.ts": ["import"] });
+  });
+
+  it("names a test only when the name continues past a separator", async () => {
+    const script = fixture("src/a.ts", {
+      "__tests__/api.test.ts": "// other module", "__tests__/a.extra.test.ts": "// naming only",
+    });
+    expect((await script()).symbols[0].tests.rows.map((r) => r.path)).toEqual(["__tests__/a.extra.test.ts"]);
+    rmSync(state.root, { recursive: true, force: true });
+    const python = fixture("a.py", {
+      "tests/test_auth.py": "# other module", "tests/test_a_more.py": "# naming only",
+    });
+    expect((await python()).symbols[0].tests.rows.map((r) => r.path)).toEqual(["tests/test_a_more.py"]);
+  });
+
+  it("drops a naming-only test that is listed but gone from disk, keeping one that is there but unread", async () => {
+    const gather = fixture("src/widget.ts", { "src/widget.spec.ts": "// naming only" });
+    vi.spyOn(SourceFiles.prototype, "sourcePaths").mockReturnValue(["src/widget.spec.ts", "src/widget.test.ts", "src/widget.ts"]);
+    const lines = SourceFiles.prototype.lines;
+    vi.spyOn(SourceFiles.prototype, "lines").mockImplementation(function (this: SourceFiles, p) {
+      return p === "src/widget.spec.ts" ? null : lines.call(this, p);
+    });
+    expect((await gather()).symbols[0].tests.rows.map((r) => r.path)).toEqual(["src/widget.spec.ts"]);
+  });
+
   it("leaves JSON uncapped, retains text defaults, and honors explicit limits including all", async () => {
     fixture("src/widget.ts", Object.fromEntries([
       ...Array.from({ length: 9 }, (_, i) => [`tests/case${i}.ts`, 'import "../src/widget";']),

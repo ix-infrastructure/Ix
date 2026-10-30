@@ -603,7 +603,9 @@ export async function gatherAround(client: AroundClient, req: AroundRequest): Pr
         const c = current.get(o.id);
         return { kind: o.kind, lineStart: c?.start ?? o.lineStart, lineEnd: c?.end ?? o.lineEnd };
       });
-    for (const ref of tests.values()) ref.sources = ["graph"];
+    // Sources only when file-level evidence was gathered: without it every row
+    // is graph evidence and the tag would only cost the hook budget.
+    if (req.heuristicTests) for (const ref of tests.values()) ref.sources = ["graph"];
     for (const ref of heuristic) {
       const existing = tests.get(ref.path);
       if (existing) existing.sources!.push(...ref.sources!);
@@ -613,8 +615,9 @@ export async function gatherAround(client: AroundClient, req: AroundRequest): Pr
     // import and naming, import, naming; file-level rows nearest first, so a
     // same-named test elsewhere never outranks one beside the file.
     const testRank = (r: AroundRef) => {
-      const has = (s: "graph" | "import" | "naming") => r.sources!.includes(s);
-      if (has("graph")) return r.sources!.length > 1 ? 0 : 1;
+      const sources = r.sources ?? ["graph"];
+      const has = (s: "graph" | "import" | "naming") => sources.includes(s);
+      if (has("graph")) return sources.length > 1 ? 0 : 1;
       return has("import") ? (has("naming") ? 2 : 3) : 4;
     };
     const testRows = [...tests.values()].sort((a, b) =>
