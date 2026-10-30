@@ -352,7 +352,7 @@ function bindings(summary: StoredSummary | undefined): Map<string, string[]> {
   // A Java method result (`URL.getUrl`) types a chained call, which names the
   // method only (`x.getUrl().m()`): the method name counts too.
   for (const [name, type] of s.receiverFactories ?? []) out.set(`f\0${name}\0${type}\0${heritageImports}\0\0${aliases}`, javaMember(s, name));
-  for (const [name, base] of s.receiverHeritage ?? []) out.set(`h\0${name}\0${base}\0${heritageImports}`, [name]);
+  for (const [name, base] of s.receiverHeritage ?? []) out.set(`h\0${name}\0${base}\0${heritageImports}\0\0${aliases}`, [name]);
   // `export * as ns from './a'` is what an importer's `ns.Base` resolves through.
   for (const [key, spec] of Object.entries(s.importAliases ?? {})) {
     if (key.startsWith("export:")) out.set(`n\0${key}\0${spec}`, [key.slice("export:".length)]);

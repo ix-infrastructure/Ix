@@ -177,12 +177,14 @@ describe.each(["locate", "callers", "impact", "explain"])("%s miss candidates", 
   // under a millisecond and a loaded run would cut it: the resolver's first
   // lookups take long enough to give the probe its full budget.
   function probeFinds(otherProbes: "answer" | "hang"): void {
+    // Give the bounded probe a deterministic budget, even on a busy runner.
+    vi.useFakeTimers({ toFake: ["performance", "setTimeout", "clearTimeout"] });
     const config = { id: "parser-id", name: "parseConfig", kind: "function", provenance: { sourceUri: "src/config.ts" } };
     const other = { id: "other-id", name: "parseConfg", kind: "function", provenance: { sourceUri: "src/other.ts" } };
-    search.mockImplementation(async (term: string, options?: { signal?: AbortSignal }) => {
+    search.mockImplementation((term: string, options?: { signal?: AbortSignal }) => {
       if (!options?.signal) {
-        await new Promise((resolve) => setTimeout(resolve, 2 * SUGGEST_MAX_MS + 10));
-        return term === "parseConifg" ? [] : [config];
+        if (term === "parseConifg") vi.advanceTimersByTime(2 * SUGGEST_MAX_MS + 10);
+        return Promise.resolve(term === "parseConifg" ? [] : [config]);
       }
       if (term === "parseConifg") return Promise.resolve([other]);
       if (otherProbes === "answer") return Promise.resolve([]);
@@ -194,14 +196,18 @@ describe.each(["locate", "callers", "impact", "explain"])("%s miss candidates", 
 
   it("keeps the resolver's suggestions first when the probe only partly answers", async () => {
     probeFinds("hang");
-    const text = await run([command, "parseConifg"]);
+    const textRun = run([command, "parseConifg"]);
+    await vi.runAllTimersAsync();
+    const text = await textRun;
     expect(text.exitCode).toBe(3);
     const rows = text.stderr.slice(text.stderr.indexOf("Did you mean:"));
     expect(rows.indexOf("parseConfig ")).toBeGreaterThan(-1);
     expect(rows.indexOf("parseConfg ")).toBeGreaterThan(rows.indexOf("parseConfig "));
     // A deadline-cut probe never names a winner.
     expect(text.stderr).not.toContain("Try:");
-    const json = JSON.parse((await run([command, "parseConifg", "--format", "json"])).stdout);
+    const jsonRun = run([command, "parseConifg", "--format", "json"]);
+    await vi.runAllTimersAsync();
+    const json = JSON.parse((await jsonRun).stdout);
     expect(json.suggestions.map((s: { name: string }) => s.name)).toEqual(["parseConfig"]);
   });
 

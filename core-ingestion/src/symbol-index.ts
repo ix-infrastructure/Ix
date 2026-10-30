@@ -56,7 +56,7 @@ export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNam
       // A factory's return type resolves through this file's imports (and Go aliases).
       [...(s.receiverFactories ?? [])].map(([f, t]) => `${f}\0${t}\0${heritageImportsKey(s.imports, s.importAliases)}`).sort(),
       // A superclass resolves through this file's imports.
-      [...(s.receiverHeritage ?? [])].map(([f, t]) => `${f}\0${t}\0${heritageImportsKey(s.imports)}`).sort(),
+      [...(s.receiverHeritage ?? [])].map(([f, t]) => `${f}\0${t}\0${heritageImportsKey(s.imports, s.importAliases)}`).sort(),
       s.receiverPackage ?? '',
     );
   }

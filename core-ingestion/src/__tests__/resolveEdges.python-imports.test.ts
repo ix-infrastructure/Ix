@@ -46,7 +46,7 @@ describe('Python absolute imports resolve by full module path', () => {
       predicate: 'CALLS',
       confidence: 0.9,
     });
-    expect(importsOf(edges, '/repo/app/main.py', MOD)).toHaveLength(1);
+    expect(importsOf(edges, '/repo/app/main.py', MOD)).toHaveLength(2);
     expect(callsTo(edges, OTHER_MOD)).toEqual([]);
     expect(importsOf(edges, '/repo/app/main.py', OTHER_MOD)).toEqual([]);
   });
@@ -104,6 +104,57 @@ describe('Python absolute imports resolve by full module path', () => {
     );
     expect(importsOf(withBeside, caller.filePath, elsewhere.filePath)).toEqual([]);
     expect(callsTo(withBeside, elsewhere.filePath).filter(e => e.confidence >= 0.6)).toEqual([]);
+  });
+
+  it.each([
+    ['/repo/', 'pkg', 'pkg/__init__.py'],
+    ['/repo/', 'model', 'model.py'],
+    ['', 'pkg', 'pkg/__init__.py'],
+    ['', 'model', 'model.py'],
+  ])('resolves the unique src-layout root %s%s from tests in full and incremental batches', (prefix, module, path) => {
+    const target = py(`${prefix}src/${path}`, 'class Target:\n    def run(self): pass\n');
+    // A package still shadows a same-named module under the same source root.
+    const shadowed = py(`${prefix}src/pkg.py`, 'class Target:\n    def run(self): pass\n');
+    for (const statement of [`from ${module} import Target`, `import ${module} as m`]) {
+      const type = statement.startsWith('from ') ? 'Target' : 'm.Target';
+      const caller = py(`${prefix}tests/test_pkg.py`, `${statement}\n\ndef test_it():\n    item = ${type}()\n    item.run()\n`);
+      const all = [caller, target, shadowed];
+      const index = buildGlobalResolutionIndex(all.map(r => r.filePath), undefined, undefined, new Map(all.map(r => [r.filePath, summarizeParseResult(r)])));
+
+      for (const edges of [resolveEdges(all), resolveEdges([caller], undefined, index)]) {
+        expect(importsOf(edges, caller.filePath, target.filePath).length).toBeGreaterThan(0);
+        expect(callsTo(edges, target.filePath)).toContainEqual(
+          expect.objectContaining({ srcName: 'test_it', dstQualifiedKey: 'Target.run', confidence: 0.95 }),
+        );
+        expect(importsOf(edges, caller.filePath, shadowed.filePath)).toEqual([]);
+        expect(callsTo(edges, shadowed.filePath)).toEqual([]);
+      }
+    }
+  });
+
+  it.each(['model.py', 'pkg/__init__.py'])('keeps ambiguous src-layout roots unresolved for %s', path => {
+    const module = path.startsWith('pkg/') ? 'pkg' : 'model';
+    const caller = py('/repo/tests/test_pkg.py', `from ${module} import Target\n\ndef test_it(item: Target):\n    item.run()\n`);
+    const first = py(`/repo/src/${path}`, 'class Target:\n    def run(self): pass\n');
+    const second = py(`/repo/tests/fixtures/${path}`, 'class Target:\n    def run(self): pass\n');
+    const all = [caller, first, second];
+    const index = buildGlobalResolutionIndex(all.map(r => r.filePath), undefined, undefined, new Map(all.map(r => [r.filePath, summarizeParseResult(r)])));
+
+    for (const edges of [resolveEdges(all), resolveEdges([caller], undefined, index)]) {
+      expect(edges.filter(e => e.predicate === 'IMPORTS' || e.predicate === 'CALLS')).toEqual([]);
+    }
+  });
+
+  it.each(['/repo/src/', '/repo/tests/fixtures/src/'])('does not treat a package or fixture directory %s as a source root', root => {
+    const caller = py('/repo/tests/test_model.py', 'from model import Target\n\ndef test_it(item: Target):\n    item.run()\n');
+    const target = py(`${root}model.py`, 'class Target:\n    def run(self): pass\n');
+    const all = [caller, target];
+    if (root === '/repo/src/') all.push(py(`${root}__init__.py`, ''));
+    const index = buildGlobalResolutionIndex(all.map(r => r.filePath), undefined, undefined, new Map(all.map(r => [r.filePath, summarizeParseResult(r)])));
+
+    for (const edges of [resolveEdges(all), resolveEdges([caller], undefined, index)]) {
+      expect(edges.filter(e => e.predicate === 'IMPORTS' || e.predicate === 'CALLS')).toEqual([]);
+    }
   });
 
   it('import json as j inside a package does not bind the package\'s own json.py', () => {
@@ -167,7 +218,7 @@ describe('Python absolute imports resolve by full module path', () => {
     const edges = resolveEdges([caller, mod(), otherMod()]);
 
     expect(callsTo(edges, MOD)).toEqual([
-      expect.objectContaining({ srcName: 'main', dstName: 'load', dstQualifiedKey: 'load', confidence: 0.9 }),
+      expect.objectContaining({ srcName: 'main', dstName: 'pkg.sub.mod.load', dstQualifiedKey: 'load', confidence: 0.9 }),
     ]);
     expect(importsOf(edges, '/repo/app/main.py', MOD)).toHaveLength(1);
     expect(callsTo(edges, OTHER_MOD)).toEqual([]);
@@ -194,7 +245,7 @@ describe('Python absolute imports resolve by full module path', () => {
     const real = py('/repo/src/pkg/sub/mod.py', 'def load():\n    return 1\n');
     const edges = resolveEdges([caller, real]);
 
-    expect(importsOf(edges, caller.filePath, real.filePath)).toHaveLength(1);
+    expect(importsOf(edges, caller.filePath, real.filePath)).toHaveLength(2);
     expect(callsTo(edges, real.filePath).filter(e => e.confidence >= 0.9)).toHaveLength(1);
   });
 
@@ -265,7 +316,7 @@ describe('Python package __init__.py', () => {
     expect(callsTo(edges, init.filePath)).toEqual([
       expect.objectContaining({ srcName: 'main', dstName: 'load', dstQualifiedKey: 'load', confidence: 0.9 }),
     ]);
-    expect(importsOf(edges, '/repo/app/main.py', init.filePath)).toHaveLength(1);
+    expect(importsOf(edges, '/repo/app/main.py', init.filePath)).toHaveLength(2);
     expect(callsTo(edges, decoy.filePath)).toEqual([]);
   });
 
@@ -286,22 +337,22 @@ describe('Python package __init__.py', () => {
     const edges = resolveEdges([caller, init, sub]);
 
     // As before: `tools.run()` reaches pkg/tools.py by the member name. That
-    // holds only while no other tools.py exists; see the next case.
+    // holds even with an unrelated tools.py; the full package path disambiguates it.
     expect(callsTo(edges, sub.filePath)).toEqual([
       expect.objectContaining({ srcName: 'main', dstQualifiedKey: 'run' }),
     ]);
     expect(callsTo(edges, init.filePath)).toEqual([]);
   });
 
-  it('from pkg import tools with another tools.py elsewhere guesses neither', () => {
+  it('from pkg import tools ignores an unrelated tools.py elsewhere', () => {
     const caller = py('/repo/app/main.py', 'from pkg import tools\n\ndef main():\n    return tools.run()\n');
     const init = py('/repo/pkg/__init__.py', 'VERSION = 1\n');
     const sub = py('/repo/pkg/tools.py', 'def run():\n    return 1\n');
     const decoy = py('/repo/other/tools.py', 'def run():\n    return 2\n');
     const edges = resolveEdges([caller, init, sub, decoy]);
 
-    // Unresolved, as on the base: the submodule is named by a bare imported
-    // name, which still matches by stem. What matters is no edge to the decoy.
+    // The submodule is resolved by its package path, never by the coincidental stem.
+    expect(callsTo(edges, sub.filePath)).toContainEqual(expect.objectContaining({ dstQualifiedKey: 'run' }));
     expect(callsTo(edges, decoy.filePath)).toEqual([]);
     expect(callsTo(edges, init.filePath)).toEqual([]);
   });
@@ -346,11 +397,11 @@ describe('Python typed receivers inside methods', () => {
       '        return q.filter()',
       '',
     ].join('\n'));
-    expect(caller.relationships).toContainEqual({ srcName: 'Service.run', dstName: 'Query.filter', predicate: 'CALLS' });
+    expect(caller.relationships).toContainEqual(expect.objectContaining({ srcName: 'Service.run', dstName: 'q.filter', predicate: 'CALLS', receiverType: 'Query', receiverOnly: true }));
     const edges = resolveEdges([caller, query(), decoy()]);
 
     expect(callsTo(edges, '/repo/db/query.py')).toContainEqual(
-      expect.objectContaining({ srcName: 'Service.run', dstName: 'Query.filter', dstQualifiedKey: 'Query.filter' }),
+      expect.objectContaining({ srcName: 'Service.run', dstName: 'q.filter', dstQualifiedKey: 'Query.filter' }),
     );
     expect(callsTo(edges, '/repo/other/decoy.py')).toEqual([]);
   });
@@ -365,11 +416,11 @@ describe('Python typed receivers inside methods', () => {
       '        return x.build()',
       '',
     ].join('\n'));
-    expect(caller.relationships).toContainEqual({ srcName: 'Service.run', dstName: 'Builder.build', predicate: 'CALLS' });
+    expect(caller.relationships).toContainEqual(expect.objectContaining({ srcName: 'Service.run', dstName: 'x.build', predicate: 'CALLS', receiverType: 'Builder', receiverOnly: true }));
     const edges = resolveEdges([caller, builder(), decoy()]);
 
     expect(callsTo(edges, '/repo/db/builder.py')).toContainEqual(
-      expect.objectContaining({ srcName: 'Service.run', dstName: 'Builder.build', dstQualifiedKey: 'Builder.build' }),
+      expect.objectContaining({ srcName: 'Service.run', dstName: 'x.build', dstQualifiedKey: 'Builder.build' }),
     );
     expect(callsTo(edges, '/repo/other/decoy.py')).toEqual([]);
   });
@@ -385,9 +436,9 @@ describe('Python typed receivers inside methods', () => {
       '',
     ].join('\n'));
     const calls = caller.relationships.filter(r => r.predicate === 'CALLS');
-    expect(calls).toContainEqual({ srcName: 'Service.run', dstName: 'Query.filter', predicate: 'CALLS' });
-    expect(calls).toContainEqual({ srcName: 'run', dstName: 'q.filter', predicate: 'CALLS' });
-    expect(calls).not.toContainEqual({ srcName: 'run', dstName: 'Query.filter', predicate: 'CALLS' });
+    expect(calls).toContainEqual(expect.objectContaining({ srcName: 'Service.run', dstName: 'q.filter', predicate: 'CALLS', receiverType: 'Query', receiverOnly: true }));
+    expect(calls).toContainEqual({ srcName: 'run', dstName: 'q.filter', predicate: 'CALLS', receiverOnly: true, importBinding: false, callSite: expect.any(Number) });
+    expect(calls.filter(r => r.srcName === 'run').every(r => r.receiverType === undefined)).toBe(true);
   });
 });
 
@@ -417,7 +468,7 @@ describe('Python packages are found only where the import can reach them', () =>
     const pkg = py('/repo/a/b/__init__.py', 'def fetch():\n    return 2\n');
     const edges = resolveEdges([caller, module, pkg]);
 
-    expect(importsOf(edges, caller.filePath, pkg.filePath)).toHaveLength(1);
+    expect(importsOf(edges, caller.filePath, pkg.filePath)).toHaveLength(2);
     expect(importsOf(edges, caller.filePath, module.filePath)).toEqual([]);
     expect(callsTo(edges, pkg.filePath)).toEqual([
       expect.objectContaining({ srcName: 'main', dstQualifiedKey: 'fetch', confidence: 0.9 }),

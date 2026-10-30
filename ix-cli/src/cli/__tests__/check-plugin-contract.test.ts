@@ -13,6 +13,7 @@ type Invocation = { argv: string[]; line: number; snippet: string };
 // @ts-expect-error — no .d.mts: the local interface below is the type contract.
 const contract = (await import("../../../scripts/check-plugin-contract.mjs")) as unknown as {
   textInvocations: (text: string) => Invocation[];
+  codeInvocations: (text: string) => Invocation[];
   check: (argv: string[], surface: Surface) => string | null;
 };
 
@@ -28,6 +29,25 @@ function problems(text: string): (string | null)[] {
 }
 
 describe("check-plugin-contract", () => {
+  it.each([
+    'common.run_ix_lookup(["ix", command, "x", "--format", "json"])',
+    'runIx([command, "x", "--format", "json"])',
+    'runIx([...args, "map", "--format", "json"])',
+  ])("does not promote an argument to a dynamic command: %s", (source) => {
+    expect(contract.codeInvocations(source)).toEqual([]);
+  });
+
+  it.each([
+    ['common.run_ix_lookup(["ix", "mapp", "x"])', 'unknown command "mapp"'],
+    ['runIx(["mapp", target])', 'unknown command "mapp"'],
+    ['runIx(["map", target, "--remapp"])', '"map" has no --remapp'],
+    ['safeRun(["ix", "map", target, "--remap"])', null],
+  ])("still checks literal commands with variable arguments: %s", (source, problem) => {
+    const invocations = contract.codeInvocations(source);
+    expect(invocations).toHaveLength(1);
+    expect(contract.check(invocations[0].argv, surface)).toBe(problem);
+  });
+
   it("reads a flag inside an escaped-backtick template literal (ix-openclaw / ix-opencode)", () => {
     const openclaw = "      : `Map is stale. Run \\`ix map --remap\\` to refresh it now._`;";
     const opencode =

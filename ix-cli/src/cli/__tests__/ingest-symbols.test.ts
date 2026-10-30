@@ -247,6 +247,17 @@ describe("dependents (IN-11)", () => {
     expect(changedNames(before, after)).toEqual(new Set(["Child"]));
   });
 
+  it("invalidates a Python subclass when an import alias picks a different superclass", () => {
+    const before = summary("child.py", { sig: "before", receiverHeritage: [["Child", "Parent"]], importAliases: { Parent: "first.Base" } });
+    const after = summary("child.py", { sig: "after", receiverHeritage: [["Child", "Parent"]], importAliases: { Parent: "second.Base" } });
+    expect(changedNames(before, after)).toEqual(new Set(["Child"]));
+    const table = new Map<string, SymbolEntry>([
+      ["use.py", entry(summary("use.py", { refs: ["Child.run"] }))],
+      ["other.py", entry(summary("other.py", { refs: ["Other.run"] }))],
+    ]);
+    expect(findDependents(table, changedNames(before, after), [], new Set())).toEqual(["use.py"]);
+  });
+
   it("changes no names when the signature is the same, and the symmetric difference otherwise", () => {
     const before = summary("m.ts", { sig: "s1", qkeys: [["add", "add"], ["sub", "sub"]] });
     expect(changedNames(before, summary("m.ts", { sig: "s1", qkeys: [["add", "add"], ["sub", "sub"]] }))).toEqual(new Set());
