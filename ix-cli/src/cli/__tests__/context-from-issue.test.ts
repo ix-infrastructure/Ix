@@ -11,9 +11,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   bm25Rank,
   bm25Tokens,
+  chooseCentre,
   extractCandidates,
   isSourcePath,
   issueConfidence,
+  leanIssueView,
   pickStartingPoints,
   planIssue,
   rankIssueFiles,
@@ -427,8 +429,9 @@ describe("issue localization regressions", () => {
       "    class DemoModel(ModelBase): pass",
       "decode_payload fails to unescape values.",
     ].join("\n"));
-    expect(identifiers[0]).toBe("decode_payload");
-    expect(snippetIdentifiers).toEqual(expect.arrayContaining(["ModelField", "DemoModel", "ModelBase"]));
+    // The inline call ranks after the plain mention but stays evidence.
+    expect(identifiers.slice(0, 2)).toEqual(["decode_payload", "ModelField"]);
+    expect(snippetIdentifiers).toEqual(["DemoModel", "ModelBase"]);
     expect(extractCandidates("`ModelField(value)` reproduces it; `ModelField` drops values.").snippetIdentifiers)
       .toBeUndefined();
     expect(extractCandidates("class DemoModel(ModelBase):\nfield = ModelField()\ndecode_payload fails").identifiers[0])
@@ -498,7 +501,8 @@ describe("issue localization regressions", () => {
         "src/manual.py": 'def decode_payload():\n    return "generated"',
       }),
     });
-    expect(plan.bm25.map((h) => h.path)).toEqual(["src/manual.py"]);
+    expect(plan.bm25.filter((h) => plan.sourcePaths!.has(h.path)).map((h) => h.path)).toEqual(["src/manual.py"]);
+    expect(rankIssueFiles({ ...plan, near: new Map() }).map((f) => f.path)).toEqual(["src/manual.py"]);
   });
 
   it("retains importable docs, examples and site packages but excludes generated files everywhere", async () => {
@@ -523,7 +527,7 @@ describe("issue localization regressions", () => {
       repo, search: async () => [hit("decode_payload", "function", "src/generated.ts")],
     });
     const expected = ["docs/parser.py", "examples/plugin/decoder.py", "site/runtime/decoder.py", "src/migrations/manual.py"];
-    expect(plan.bm25.map((h) => h.path).sort()).toEqual(expected.sort());
+    expect(plan.bm25.filter((h) => plan.sourcePaths!.has(h.path)).map((h) => h.path).sort()).toEqual(expected.sort());
     const near = new Map(repo.files().map((path) => [path, { weight: 1, reason: "one hop" }]));
     const ranked = rankIssueFiles({ ...plan, near }).map((f) => f.path);
     for (const path of expected) expect(ranked).toContain(path);
@@ -531,5 +535,94 @@ describe("issue localization regressions", () => {
       expect(ranked).not.toContain(path);
       expect(plan.starts.map((s) => s.path)).not.toContain(path);
     }
+  });
+
+  it("keeps a call the issue writes in its own words as a confident start", async () => {
+    const text = "Calling `saveModel()` raises a KeyError.";
+    // Not snippet-only: after the prose mention, but evidence all the same.
+    expect(extractCandidates(text)).toEqual({ paths: [], identifiers: ["KeyError", "saveModel"] });
+    const plan = await planIssue(text, {
+      // KeyError is a builtin: nothing in the repository defines it.
+      search: async (name) => name === "saveModel" ? [hit(name, "function", "src/saving.py")] : [],
+      repo: memoryRepo({ "src/saving.py": "def saveModel(): raise KeyError" }),
+    });
+    expect(plan.starts[0]).toMatchObject({ token: "saveModel", path: "src/saving.py" });
+    expect(plan.starts[0].snippet).toBeUndefined();
+    expect(issueConfidence(plan).confident).toBe(true);
+    expect(leanIssueView(plan).startingPoints.map((s) => s.token)).toEqual(["saveModel"]);
+    // A line that is only a call is a reproduction step, not a snippet-only hint.
+    const bare = extractCandidates("Steps:\nmodel.save_weights(path)\nraises a KeyError");
+    expect(bare.identifiers).toEqual(["KeyError", "save_weights"]);
+    expect(bare.snippetIdentifiers).toBeUndefined();
+  });
+
+  it.each([
+    ["setup.py", 'setup(packages=find_packages(include=["docs.plugin*"], exclude=["docs", "examples", "tests"]))'],
+    ["setup.py", 'setup(packages=find_packages(exclude=("docs", "examples")), package_data={"docs.plugin": ["*.txt"]})'],
+    ["pyproject.toml", '[tool.setuptools.packages.find]\nwhere = ["."]\nexclude = [\n  "docs*",\n  "examples*",\n]'],
+    ["setup.cfg", "[options]\npackages = find:\n\n[options.packages.find]\nexclude =\n    docs\n    examples\n    tests"],
+  ])("does not treat docs or examples an exclude list names in %s as packages", async (config, text) => {
+    const plan = await planIssue("decode_payload", {
+      search: async () => [],
+      repo: memoryRepo({
+        [config]: text, "docs/conf.py": "decode_payload", "examples/demo.py": "decode_payload",
+        "src/decoder.py": "decode_payload",
+      }),
+    });
+    expect(plan.sourcePaths!.has("docs/conf.py")).toBe(false);
+    expect(plan.sourcePaths!.has("examples/demo.py")).toBe(false);
+    expect(plan.bm25.map((h) => h.path)).not.toContain("docs/conf.py");
+    expect(plan.sourcePaths!.has("src/decoder.py")).toBe(true);
+  });
+
+  it("still reads an include next to an exclude", async () => {
+    const plan = await planIssue("decode_payload", {
+      search: async () => [],
+      repo: memoryRepo({
+        "setup.py": 'setup(packages=find_packages(include=["docs.plugin"], exclude=["docs"]))',
+        "docs/plugin/decoder.py": "decode_payload", "docs/conf.py": "decode_payload",
+      }),
+    });
+    expect(plan.bm25.map((h) => h.path)).toEqual(["docs/plugin/decoder.py"]);
+  });
+
+  it.each([
+    "// Code generated by protoc-gen-go. DO NOT EDIT.\npackage pb",
+    "# Generated by Django 4.2 on 2024-01-01 10:00\nfrom django.db import migrations",
+    "/**\n * @generated SignedSource<<abc>>\n */\nexport const a = 1;",
+    "// AUTO-GENERATED FILE\nexport const a = 1;",
+    '"""This file was automatically generated."""\nimport os',
+    "# DO NOT EDIT THIS FILE - it is machine generated\nimport os",
+  ])("drops a generated header: %s", (header) => {
+    expect(isSourcePath("src/a.ts", { importable: true, header })).toBe(false);
+  });
+
+  it.each([
+    "// Validates generated request IDs before they reach the store.\nexport const a = 1;",
+    '"""Parse the generated protobuf descriptors."""\nimport os',
+    "/**\n * Classify a candidate: a definition, an import, or generated output.\n */\nexport const a = 1;",
+    "/** docs/api/README.md claims the reference is generated from the client source. */\nexport const a = 1;",
+    "// Do not edit the order of these entries without updating the parser.\nexport const a = 1;",
+  ])("keeps a handwritten module whose doc mentions generation: %s", (header) => {
+    expect(isSourcePath("src/a.ts", { importable: true, header })).toBe(true);
+  });
+
+  it("opens only the files it surfaces, not every source file, when BM25 has an index", async () => {
+    const files: Record<string, string> = { "src/generated_top.py": "# Generated by a tool\ndecode_payload" };
+    for (let i = 0; i < 60; i++) files[`src/f${String(i).padStart(2, "0")}.py`] = "decode_payload value";
+    const reads = new Set<string>();
+    const repo = { ...memoryRepo(files), read: (path: string) => { reads.add(path); return files[path]; } };
+    // A ranker that answers from its index, as cachedBm25Ranker does on a warm HEAD.
+    const rank = (_repo: RepoAccess, paths: string[]) =>
+      paths.map((path, i) => ({ path, score: path === "src/generated_top.py" ? 100 : 60 - i })).sort((a, b) => b.score - a.score);
+    const plan = await planIssue("nothing named here", { repo, search: async () => [], rank });
+    // The fallback skips the generated top hit after reading only its header and the next one.
+    expect(plan.starts[0]).toMatchObject({ via: "bm25 fallback", path: "src/f00.py" });
+    expect([...reads].sort()).toEqual(["src/f00.py", "src/generated_top.py"]);
+    const ranked = rankIssueFiles({ ...plan, near: new Map() }, 5);
+    expect(ranked.map((f) => f.path)).toEqual(["src/f00.py", "src/f01.py", "src/f02.py", "src/f03.py", "src/f04.py"]);
+    expect(reads.size).toBe(6);
+    const { centre } = await chooseCentre([], plan.bm25, async (path) => path, 10, plan.sourcePaths);
+    expect(centre?.path).toBe("src/f00.py");
   });
 });

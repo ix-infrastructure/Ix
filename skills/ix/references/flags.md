@@ -275,7 +275,7 @@ Build a bounded, deterministic context bundle for a symbol, file, or entity (or 
 
 | Flag | Value | Default | Effect |
 |---|---|---|---|
-| `--from-issue` | `<file>` | — | Start from an issue or bug report instead of a target: a file, or `-` for stdin. Resolves the paths and code names it mentions to up to 3 definitions (tests, docs, build output and imports excluded), builds the bundle around the first, and adds a `rankedFiles` list: starting files first, then BM25 against the issue text, nudged by graph closeness. Falls back to the best BM25 file when nothing resolves. Not combinable with a target, `--kind`, `--path`, `--pick` or `--diff` |
+| `--from-issue` | `<file>` | — | Start from an issue or bug report instead of a target: a file, or `-` for stdin. Resolves the paths and code names it mentions to up to 3 definitions (tests, docs, build output and imports excluded), builds the bundle around the first, and adds a `rankedFiles` list: BM25 against the issue text, starting files boosted by up to 10% of the best BM25 score (snippet-only names get no boost), nudged by graph closeness. Falls back to the best BM25 file when nothing resolves. Not combinable with a target, `--kind`, `--path`, `--pick` or `--diff` |
 | `--lean` | — | off | With `--from-issue`: only the starting points Ix trusts (a path the issue names, or a specific identifier) as `path:lines` with why, then the next 4 files by the issue's text — about 150 tokens instead of a full bundle. When it trusts none (a BM25 fallback, or only common words like `debug` resolved), one line saying so. Not combinable with `--save` or `--out` |
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
