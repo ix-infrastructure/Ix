@@ -61,15 +61,22 @@ export interface IssueEntityRanking {
 }
 
 /**
+ * A query word in this many scored definitions or fewer always tells them
+ * apart, however small the pool: it can admit at most this many.
+ */
+export const FEW_DEFINITIONS = 3;
+
+/**
  * Whether a query word found in `df` of `n` scored definitions tells them
  * apart: it is in at most half of them, which is where its BM25 IDF reaches
  * log 2. A word in most of them (`return`, `value`, `data` in a body) has an
  * IDF near zero but still a positive score, and on its own let hundreds of
- * unrelated listed helpers into the bundle's reserved match budget. A pool of
- * one definition cannot tell, so its one match counts.
+ * unrelated listed helpers into the bundle's reserved match budget. In a small
+ * pool half is too few: two of three methods naming `stale_entries` are the
+ * match, not noise, so a word in {@link FEW_DEFINITIONS} or fewer counts.
  */
 function isDistinctive(df: number, n: number): boolean {
-  return df <= Math.max(1, n / 2);
+  return df <= Math.max(FEW_DEFINITIONS, n / 2);
 }
 
 /** BM25 dominates; bounded boosts refine it without promoting a zero match. */

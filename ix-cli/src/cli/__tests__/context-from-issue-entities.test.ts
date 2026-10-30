@@ -2,11 +2,13 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { buildBundle, clampBudgets } from "../commands/context.js";
+import { buildBundle, clampBudgets, issueBundleSection } from "../commands/context.js";
 import { contextBundleSchema } from "../context-bundle-schema.js";
 import type { GraphNode } from "../../client/types.js";
 import type { ContextFacts, EntityLocation } from "../explain/facts.js";
-import { collectIssueEntities, ISSUE_ENTITIES_PER_KIND, ISSUE_ENTITY_FILES, rankIssueEntities } from "../explain/issue-entities.js";
+import {
+  collectIssueEntities, FEW_DEFINITIONS, ISSUE_ENTITIES_PER_KIND, ISSUE_ENTITY_FILES, rankIssueEntities,
+} from "../explain/issue-entities.js";
 import { MAX_BM25_BYTES, MAX_RANKED_FILES } from "../explain/issue.js";
 
 const path = "src/cache.py";
@@ -233,6 +235,46 @@ describe("issue entity ranking", () => {
     expect(mixed.truncation.entitiesTruncated).toBe(baseline.truncation.entitiesTruncated);
   });
 
+  it("keeps listed matches in a small pool where the matching words are in most definitions", () => {
+    // Two of three methods name stale_entries: "most" of a pool this small is
+    // the match itself, not words every helper shares.
+    const source = [
+      "class Cache:",
+      "    def get_entry(self):", "        return self.stale_entries.pop()",
+      "    def put_entry(self, value):", "        self.stale_entries.append(value)",
+      "    def size(self):", "        return len(self.items)",
+    ].join("\n");
+    const methods: EntityLocation[] = [
+      { id: "a", name: "get_entry", kind: "method", path, lineStart: 2, lineEnd: 3 },
+      { id: "b", name: "put_entry", kind: "method", path, lineStart: 4, lineEnd: 5 },
+      { id: "c", name: "size", kind: "method", path, lineStart: 6, lineEnd: 7 },
+    ];
+    const scores = (listedOnly?: ReadonlySet<string>) => Object.fromEntries(rankIssueEntities(methods, {
+      query: "stale entries survive restart", repo: { read: () => source },
+      startingPoints: [], rankedFiles: [{ path, score: 1, reason: "bm25" }], listedOnly,
+    }, []).map(e => [e.id, e.score]));
+    const graph = scores();
+    expect(graph.a).toBeGreaterThan(0);
+    expect(graph.b).toBeGreaterThan(0);
+    expect(graph.c).toBe(0);
+    expect(scores(new Set(["a", "b"]))).toEqual(graph);
+    expect(scores(new Set(["a", "b", "c"]))).toEqual(graph);
+  });
+
+  it("still drops a small pool's listed definitions when they all share one common word", () => {
+    const helpers = Array.from({ length: FEW_DEFINITIONS + 2 }, (_, i) => `def helper_${i}(self): return self.value + ${i}`);
+    const listed: EntityLocation[] = helpers.map((_, i) => ({
+      id: `h${i}`, name: `helper_${i}`, kind: "method", path, lineStart: i + 1, lineEnd: i + 1,
+    }));
+    const ranking = {
+      query: "Cache returns a stale value after restart", repo: { read: () => helpers.join("\n") },
+      startingPoints: [], rankedFiles: [{ path, score: 1, reason: "bm25" }],
+    };
+    expect(rankIssueEntities(listed, ranking, []).every(e => e.score > 0)).toBe(true);
+    const filtered = rankIssueEntities(listed, { ...ranking, listedOnly: new Set(listed.map(e => e.id)) }, []);
+    expect(filtered.every(e => e.score === 0)).toBe(true);
+  });
+
   it("retains new scores through JSON validation while accepting old entities without them", () => {
     const { result } = bundle("snapshot recovery", "");
     expect(result.entities.every(e => typeof e.score === "number" && Number.isFinite(e.score))).toBe(true);
@@ -356,5 +398,93 @@ describe("issue candidate discovery", () => {
       return [node(far)];
     });
     expect(await collectIssueEntities({ listByKind }, [{ path, score: 1, reason: "bm25" }], {})).toEqual([far]);
+  });
+});
+
+describe("issue bundle section, as --from-issue wires it", () => {
+  const source = [
+    "class Cache:", "    def prepare(self):", "        return self.ready",
+    "    def restore(self):", '        """Discard expired entries during snapshot recovery."""', "        return self.snapshot",
+  ].join("\n");
+  const start = { id: "start", name: "Cache", kind: "class", path, token: "Cache", via: "identifier in issue" as const };
+  const second = { id: "second", name: "Store", kind: "class", path: "src/store.py", token: "Store", via: "identifier in issue" as const };
+  const callee: EntityLocation = { id: "near", name: "prepare", kind: "method", path, lineStart: 2, lineEnd: 3 };
+  const untracked = "src/generated.py";
+
+  async function section() {
+    const listByKind = vi.fn(async (kind: string, opts: { scope?: string }) => {
+      if (kind !== "method") return [];
+      const entity = opts.scope === path ? far : { ...far, id: "gen", name: "regenerate", path: untracked };
+      return [{
+        id: entity.id, name: entity.name, kind: entity.kind, provenance: { sourceUri: entity.path },
+        attrs: { line_start: entity.lineStart, line_end: entity.lineEnd },
+      } as unknown as GraphNode];
+    });
+    const read = vi.fn((file: string) => file === path ? source : "regenerate expired entries snapshot recovery");
+    const issue = await issueBundleSection({ listByKind }, {
+      text: "expired entries survive snapshot recovery",
+      plan: {
+        bm25: [{ path, score: 2 }, { path: untracked, score: 1 }], unresolved: [], fallback: false,
+        repo: { files: () => [path, second.path], read },
+      },
+      starts: [start, second],
+      walked: false,
+      neighbourhoods: [
+        {
+          start,
+          facts: { calleeRefs: [callee], neighbourRefs: [{ id: "neighbour", name: "Peer", kind: "class", path: "src/peer.py" }] } as unknown as ContextFacts,
+          related: [{ id: "related", name: "peer.py", kind: "file", path: "src/peer.py" }],
+        },
+        {
+          start: second,
+          facts: { importRefs: [{ id: "imported", name: "store", kind: "module" }] } as unknown as ContextFacts,
+          related: [{ id: "second-related", name: "store_util.py", kind: "file", path: "src/store_util.py" }],
+        },
+      ],
+      scope: { workspaceId: "ws" },
+    });
+    return { issue, listByKind, read };
+  }
+
+  it("seeds distances only from the starts and their facts' direct references", async () => {
+    const { issue } = await section();
+    expect(Object.fromEntries(issue.distances!)).toEqual({ start: 0, near: 1, second: 0, imported: 1 });
+    expect(issue.extraEntities!.map(e => e.id)).toEqual(["second-related"]);
+    expect(issue.rankedFiles.slice(0, 2).map(f => f.path)).toEqual([path, second.path]);
+  });
+
+  it("lists definitions in the active read scope and reads only tracked files", async () => {
+    const { issue, listByKind, read } = await section();
+    expect(listByKind).toHaveBeenCalledWith("method", { workspaceId: "ws", scope: path, limit: ISSUE_ENTITIES_PER_KIND });
+    expect(listByKind).toHaveBeenCalledWith("method", { workspaceId: "ws", scope: untracked, limit: ISSUE_ENTITIES_PER_KIND });
+    expect(issue.discoveredEntities!.map(e => e.id).sort()).toEqual(["far", "gen"]);
+    expect(issue.repo!.read(untracked)).toBeUndefined();
+    expect(issue.repo!.read(path)).toBe(source);
+    expect(read).not.toHaveBeenCalledWith(untracked);
+  });
+
+  it("builds a bundle that ranks the listed match first and never reads an untracked file", async () => {
+    const { issue, read } = await section();
+    const result = buildBundle({
+      resolved: { id: "start", name: "Cache", kind: "class", resolutionMode: "issue" },
+      facts: {
+        id: "start", name: "Cache", kind: "class", path, stale: false,
+        memberRefs: [], members: [], memberCount: 0, calleeRefs: [callee],
+        topCallers: [], topDependents: [], diagnostics: [], historyLength: 1,
+      } as unknown as ContextFacts,
+      context: {
+        nodes: [], edges: [{ src: "start", dst: "near", predicate: "CALLS" }],
+        claims: [], conflicts: [], decisions: [], intents: [],
+        metadata: { query: "", seedEntities: [], hopsExpanded: 1, asOfRev: 1 },
+      } as never,
+      provenance: {}, budgets: clampBudgets({}), isStale: () => false, issue,
+    });
+    expect(result.entities.slice(0, 3).map(e => e.id)).toEqual(["start", "second", "far"]);
+    expect(result.entities[2].score).toBeGreaterThan(0);
+    // The untracked file's definition matches every issue word, but its text
+    // was never read, so it scores on its name alone and is dropped.
+    expect(result.entities.some(e => e.id === "gen")).toBe(false);
+    expect(read).not.toHaveBeenCalledWith(untracked);
+    expect(result.metadata.rankingRule).toBe("issue-bm25");
   });
 });

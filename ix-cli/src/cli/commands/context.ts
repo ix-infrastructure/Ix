@@ -31,6 +31,7 @@ import {
   rankIssueFiles,
   readIssueText,
   type Closeness,
+  type IssuePlan,
   type LeanIssueView,
   type RankedFile,
   type StartingPoint,
@@ -40,7 +41,7 @@ import { collectIssueEntities, placeIssueMatches, rankIssueEntities, type IssueE
 import { symbolReadChecker } from "../symbol-read-check.js";
 import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/related-files.js";
 import { cachedBm25Ranker } from "../explain/bm25-cache.js";
-import { collectTextReferences, gitRepoAccess, type TextSource } from "../explain/text-references.js";
+import { collectTextReferences, gitRepoAccess, type RepoAccess, type TextSource } from "../explain/text-references.js";
 import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { parseBudgetOption, parsePickOption, parseRevisionOption } from "../options.js";
@@ -1743,6 +1744,52 @@ async function buildIssueBundle(
     checkGraphHealth(client, activeReadScope()),
   ]);
 
+  const issue = await issueBundleSection(client, {
+    text, plan, starts, walked,
+    neighbourhoods: [{ start: centre, facts, related: facts.relatedRefs ?? [] }, ...around],
+    scope: activeReadScope(),
+  });
+
+  return buildBundle({
+    resolved,
+    facts,
+    context,
+    provenance: facts.provenance,
+    asOfRev: opts.asOfRev,
+    depth: opts.depth,
+    budgets,
+    format,
+    graphCompleted: hasCompletedSourceGraphBaseline(),
+    graphHealth: bundleGraphHealth(workspaceHealth, resolved, facts),
+    issue,
+  });
+}
+
+/** A starting point with its facts and related files, as `--from-issue` loads it. */
+interface IssueNeighbourhood {
+  start: StartingPoint;
+  facts?: ContextFacts;
+  related: EntityLocation[];
+}
+
+/**
+ * The issue section of a `--from-issue` bundle, once the centre's facts and
+ * the other starts' neighbourhoods are loaded: closeness and graph distances
+ * from those facts, the ranked files, and the definitions listed in the top
+ * ones. `neighbourhoods` is the centre's first, then the other starts'.
+ */
+export async function issueBundleSection(
+  client: Pick<IxClient, "listByKind">,
+  input: {
+    text: string;
+    plan: Pick<IssuePlan, "bm25" | "unresolved" | "fallback"> & { repo?: Pick<RepoAccess, "files" | "read"> };
+    starts: StartingPoint[];
+    walked: boolean;
+    neighbourhoods: IssueNeighbourhood[];
+    scope: { workspaceId?: string; systemId?: string };
+  },
+): Promise<IssueBundleInput> {
+  const { text, plan, starts, walked, neighbourhoods } = input;
   const near = new Map<string, Closeness>();
   const distances = new Map<string, number>();
   const atDistance = (id: string, distance: number) => {
@@ -1753,7 +1800,7 @@ async function buildIssueBundle(
     const prior = near.get(path);
     if (!prior || weight > prior.weight) near.set(path, { weight, reason });
   };
-  for (const n of [{ start: centre, facts, related: facts.relatedRefs ?? [] }, ...around]) {
+  for (const n of neighbourhoods) {
     atDistance(n.start.id!, 0);
     for (const ref of oneHopRefs(n.facts)) {
       if (ref.path !== n.start.path) mark(ref.path, 1, `one hop from ${n.start.name}`);
@@ -1770,35 +1817,23 @@ async function buildIssueBundle(
     }
   }
   const rankedFiles = rankIssueFiles({ starts, bm25: plan.bm25, near });
-  const candidates = await collectIssueEntities(client, rankedFiles, activeReadScope());
+  const candidates = await collectIssueEntities(client, rankedFiles, input.scope);
   // The listing planIssueWith already ran: a second `git ls-files` would only
   // repeat it. Only tracked paths are read, as BM25 read them.
   const repo = plan.repo;
   const tracked = new Set(repo?.files());
 
-  return buildBundle({
-    resolved,
-    facts,
-    context,
-    provenance: facts.provenance,
-    asOfRev: opts.asOfRev,
-    depth: opts.depth,
-    budgets,
-    format,
-    graphCompleted: hasCompletedSourceGraphBaseline(),
-    graphHealth: bundleGraphHealth(workspaceHealth, resolved, facts),
-    issue: {
-      startingPoints: starts,
-      unresolved: plan.unresolved,
-      fallback: plan.fallback || walked,
-      rankedFiles,
-      extraEntities: around.flatMap((n) => n.related),
-      discoveredEntities: candidates,
-      query: text,
-      repo: repo ? { read: path => tracked.has(path) ? repo.read(path) : undefined } : undefined,
-      distances,
-    },
-  });
+  return {
+    startingPoints: starts,
+    unresolved: plan.unresolved,
+    fallback: plan.fallback || walked,
+    rankedFiles,
+    extraEntities: neighbourhoods.slice(1).flatMap((n) => n.related),
+    discoveredEntities: candidates,
+    query: text,
+    repo: repo ? { read: path => tracked.has(path) ? repo.read(path) : undefined } : undefined,
+    distances,
+  };
 }
 
 /** The issue's text, or undefined after reporting why it has none. */
