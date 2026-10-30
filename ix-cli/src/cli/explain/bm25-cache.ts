@@ -141,7 +141,22 @@ export function cachedBm25Ranker(
     const terms = [...weights.keys()];
     const index = loadIndex(indexPath, root);
     if (index && index.head === state.head) {
-      return bm25Score(docsFromIndex(index, repo, files, terms, state.dirty), weights);
+      // A caller can ask about clean files an index at this HEAD never saw: one
+      // built by an older CLI that passed fewer paths. Fold them in once, as a
+      // HEAD move does, instead of reading them on every query.
+      const known = new Set([...index.paths, ...index.skipped]);
+      const blobs = state.blobs;
+      const unseen = blobs && files.some((path) => !state.dirty.has(path) && !known.has(path) && blobs.has(path));
+      if (!unseen) return bm25Score(docsFromIndex(index, repo, files, terms, state.dirty), weights);
+      // The index's own paths stay in it (reused, not read), so a caller
+      // passing fewer files does not undo this.
+      const wanted = new Set(files);
+      const kept = [...known].filter((path) => !wanted.has(path) && !state.dirty.has(path) && blobs!.has(path));
+      const { docs, built } = buildIndex(repo, [...files, ...kept], terms, state, root, index);
+      const after = readState();
+      if (after && after.head === state.head && sameSet(after.dirty, state.dirty)) saveIndex(indexPath, built);
+      for (const path of kept) docs.delete(path);
+      return bm25Score(docs, weights);
     }
 
     // Built for another commit, or not at all. A file whose blob is unchanged

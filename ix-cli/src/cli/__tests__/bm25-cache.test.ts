@@ -93,6 +93,23 @@ describe("cachedBm25Ranker", () => {
     expect(watched.reads.sort()).toEqual(["src/auth/session.ts", "src/list.ts"]);
   });
 
+  it("folds files an index at this HEAD never saw into it once, keeping the files it had", async () => {
+    const repo = gitRepoAccess(dir)!;
+    const files = sourceFiles(repo);
+    const fewer = files.filter((path) => path !== "src/auth/session.ts");
+    cachedBm25Ranker(dir)(repo, fewer, QUERIES[2]); // an older caller passed fewer files
+
+    const first = counting(repo);
+    expect(cachedBm25Ranker(dir)(first, files, QUERIES[2])).toEqual(bm25Rank(repo, files, QUERIES[2]));
+    expect(first.reads).toEqual(["src/auth/session.ts"]);
+
+    for (const asked of [files, fewer]) {
+      const again = counting(repo);
+      expect(cachedBm25Ranker(dir)(again, asked, QUERIES[2])).toEqual(bm25Rank(repo, asked, QUERIES[2]));
+      expect(again.reads).toEqual([]);
+    }
+  });
+
   it("does not store a dirty file's text under HEAD", async () => {
     write("src/auth/login.ts", "export const changed = 'nothing about passwords';\n");
     const repo = gitRepoAccess(dir)!;

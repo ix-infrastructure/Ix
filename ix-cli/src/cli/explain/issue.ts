@@ -121,11 +121,14 @@ function generatedHeader(text: string | undefined): boolean {
 // `is auto-generated`.
 const AUTO_GENERATED = "(?:auto-?|automatically |machine[ -])generated";
 // `DO NOT EDIT` counts when it ends its sentence or its comment, or when what
-// follows says why in terms of generation (`DO NOT EDIT: regenerate with make`);
-// `Do not modify: callers depend on order.` is a handwritten warning.
+// follows says why in terms of generation (`DO NOT EDIT: regenerate with make`)
+// or names the tool that writes it (`DO NOT EDIT: maintained by tools/sync.sh`);
+// `Do not modify: callers depend on order.` and a comment that calls itself
+// hand-written are handwritten warnings.
 const GENERATED_MARKER = new RegExp(
-  "@generated\\b|\\bdo not (?:edit|modify)(?: (?:this file|manually|by hand|directly))?"
-  + "(?:\\s*(?:[.!]|\\*/|-->|$)|\\s*[:;,(-].*\\b(?:re)?generat)"
+  "@generated\\b|\\bdo not (?:edit|modify)(?: (?:this file|manually|by hand|directly))*"
+  + "(?:\\s*(?:[.!]|\\*/|-->|$)|\\s*[:;,(-](?!.*\\bhand-?written\\b)"
+  + ".*(?:\\b(?:re)?generat|\\b(?:maintained|managed|synced|written) (?:by|from|with) \\S*(?:[./]\\w|tool|script)))"
   + `|^\\W*${AUTO_GENERATED}\\b|\\b${AUTO_GENERATED} (?:by|from|with|using|file|code|module|source)\\b`
   + `|\\b(?:is|was|been|are) ${AUTO_GENERATED}\\b`
   + "|^\\W*(?:code )?generated (?:by|from|with|using)\\b"
@@ -280,7 +283,13 @@ function tracebackCandidates(text: string): { text: string; groups: string[][]; 
     frames = [];
     style = "";
   };
+  // A blank line followed by indented text ends a trace: a frame's source and
+  // caret lines follow it directly, and anything else is the issue's own text.
+  let blank = false;
   const lines = text.split("\n").map((line) => {
+    const afterBlank = blank;
+    blank = !line.trim();
+    if (blank) return style ? "" : line;
     if (/Traceback \(most recent call last\)/.test(line)) { flush(); return ""; }
     const python = line.match(/^\s*File ["']([^"']+)["'], line \d+/);
     const js = /^\s*at\s/.test(line) ? line.match(/(?:\(|\s)(?:file:\/\/(?:\/(?=[A-Za-z]:))?)?((?:[A-Za-z]:)?[^\s():]+):\d+(?::\d+)?\)?\s*$/) : null;
@@ -294,7 +303,10 @@ function tracebackCandidates(text: string): { text: string; groups: string[][]; 
     }
     // Source/caret lines belong to the trace too; they must not create
     // additional identifier or path starts after its selected frame.
-    if (style && /^\s/.test(line)) return "";
+    if (style && /^\s/.test(line)) {
+      if (!afterBlank) return "";
+      flush();
+    }
     if (/^\S/.test(line)) {
       if (style === "python" && /^[A-Za-z_][\w.]*(?::\s|:?\s*$)/.test(line)) exceptions.push(line);
       flush();
@@ -315,6 +327,44 @@ function runtimeFrame(path: string): boolean {
     || path.startsWith("node:");
 }
 
+/**
+ * Which lines are an indented code block, read one line at a time in order.
+ * Four spaces or a tab, as Markdown has it, except inside a list: there a
+ * nested `- item` or an item's indented continuation is prose, and a code
+ * block needs eight spaces after a blank line.
+ */
+function indentedCode(): (line: string) => boolean {
+  let inList = false;
+  let inCode = false;
+  let blank = true;
+  return (line) => {
+    const afterBlank = blank;
+    blank = !line.trim();
+    if (blank) return false;
+    let width = 0;
+    for (const ch of line.match(/^[ \t]*/)![0]) width = ch === "\t" ? width - (width % 4) + 4 : width + 1;
+    const item = /^\s*(?:[-*+]|\d{1,9}[.)])\s+\S/.test(line);
+    if (width < 4) {
+      inCode = false;
+      inList = item || (inList && !afterBlank);
+      return false;
+    }
+    if (inList) inCode = inCode || (afterBlank && width >= 8);
+    else inCode = true;
+    return inCode;
+  };
+}
+
+// Words a snippet is written in, not names it uses: keywords and builtins
+// long enough to pass isGenericIdentifier. Dunder names are dropped by shape.
+const SNIPPET_NOISE = new Set([
+  "abstract", "arguments", "classmethod", "constexpr", "continue", "debugger", "decltype", "delegate",
+  "enumerate", "explicit", "fallthrough", "function", "hasOwnProperty", "implements", "instanceof",
+  "interface", "internal", "isinstance", "namespace", "noexcept", "nonlocal", "operator", "override",
+  "property", "protected", "prototype", "readonly", "register", "staticmethod", "synchronized",
+  "template", "toString", "transient", "typename", "undefined", "unsigned", "volatile",
+]);
+
 /** The paths and code names an issue mentions, most specific first. */
 export function extractCandidates(text: string): IssueCandidates {
   const trace = tracebackCandidates(text);
@@ -328,9 +378,10 @@ export function extractCandidates(text: string): IssueCandidates {
   // It ranks after plain mentions but is evidence, not a snippet-only hint.
   const calls: string[] = [];
   const tickedCalls: string[] = [];
+  const indented = indentedCode();
   const prose = text.replace(PATH, " ")
     .replace(/(`{3,}|~{3,})[^\n]*\n[\s\S]*?\1/g, (code) => { snippets.push(code); return " "; })
-    .replace(/^(?: {4}|\t).+$/gm, (code) => { snippets.push(code); return " "; })
+    .split("\n").map((line) => indented(line) ? (snippets.push(line), " ") : line).join("\n")
     .replace(CODE_DEFINITION_LINE, (code) => { snippets.push(code); return " "; })
     .replace(/^\s*(?:\w+\s*=\s*)?[\w.]+\([^\n]*\)[:;]?\s*$/gm, (code) => { calls.push(code); return " "; })
     .replace(/`[^`\n]*\b(?:class|def|function|const)\b[^`\n]*`/g, (code) => { snippets.push(code); return " "; })
@@ -362,7 +413,7 @@ export function extractCandidates(text: string): IssueCandidates {
     identifiers.push(token);
   }
   const snippetIdentifiers = unique(snippets.flatMap((code) => [...code.matchAll(WORD)].map((m) => m[0])))
-    .filter((name) => !seen.has(name) && !isGenericIdentifier(name));
+    .filter((name) => !seen.has(name) && !isGenericIdentifier(name) && !SNIPPET_NOISE.has(name) && !/^__\w+__$/.test(name));
   return {
     paths, identifiers: [...identifiers, ...snippetIdentifiers].slice(0, MAX_CANDIDATES),
     ...(snippetIdentifiers.length ? { snippetIdentifiers } : {}),
@@ -922,9 +973,21 @@ export function rankIssueFiles(
       return { path, score: bm25 * (1 + CLOSENESS_BOOST * closeness) + boost, closeness, start: !!start, reason };
     })
     .sort((a, b) => b.score - a.score || Number(b.start) - Number(a.start) || b.closeness - a.closeness || cmp(a.path, b.path));
+  // A file the issue names, or its traceback's frame, stays in the list
+  // whatever its BM25 score: an agent reads rankedFiles as the files to open.
+  // It keeps its place by score; it only displaces the weakest other file.
+  const named = new Set(rows.filter((r) => {
+    const start = starts.get(r.path);
+    return start?.via === "path in issue" && !start.snippet && source(r.path);
+  }).slice(0, limit).map((r) => r.path));
+  let others = limit - named.size;
   for (const r of rows) {
     if (kept.length >= limit) break;
-    if (source(r.path)) kept.push({ path: r.path, score: round(r.score), reason: r.reason });
+    if (named.has(r.path)) kept.push({ path: r.path, score: round(r.score), reason: r.reason });
+    else if (others > 0 && source(r.path)) {
+      others--;
+      kept.push({ path: r.path, score: round(r.score), reason: r.reason });
+    }
   }
   return kept;
 }
