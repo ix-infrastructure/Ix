@@ -119,6 +119,15 @@ describe("ix context --from-issue bundle", () => {
     expect(parsed.data?.issue).toEqual(b.issue);
   });
 
+  it("keeps a start's snippet and traceback marks through the schema", () => {
+    const starts: StartingPoint[] = [{ ...STARTS[0], snippet: true }, { ...STARTS[1], traceback: true }];
+    const b = build({ ...issue(), startingPoints: starts });
+    const parsed = contextBundleSchema.safeParse(JSON.parse(JSON.stringify(b)));
+    expect(parsed.success).toBe(true);
+    expect(parsed.data?.issue?.startingPoints).toEqual(b.issue?.startingPoints);
+    expect(parsed.data?.issue?.startingPoints.map((s) => [s.snippet, s.traceback])).toEqual([[true, undefined], [undefined, true]]);
+  });
+
   it("puts the other starting points right after the target, and their neighbours in the bundle", () => {
     const b = build(issue());
     expect(b.entities[1]).toMatchObject({ id: "f-rank", path: "src/cli/commands/rank.ts" });
