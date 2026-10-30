@@ -6,7 +6,8 @@ import { Command } from "commander";
 import { registerOverridesCommand } from "../commands/overrides.js";
 import { WorkspaceNotMappedError } from "../errors.js";
 import {
-  HIERARCHY_DEPTH, HIERARCHY_MAX_REQUESTS, HIERARCHY_MAX_TYPES, HIERARCHY_UP_MAX_TYPES, headerDeclaresBase, outsideBrackets, overrideFamily,
+  HERITAGE_LOOKUPS, HIERARCHY_DEPTH, HIERARCHY_MAX_REQUESTS, HIERARCHY_MAX_TYPES, HIERARCHY_UP_MAX_TYPES,
+  headerBaseNames, headerDeclaresBase, outsideBrackets, overrideFamily,
 } from "../type-walk.js";
 
 /**
@@ -19,7 +20,7 @@ import {
 type Node = { id: string; kind: string; name: string; attrs: Record<string, unknown> };
 
 const { graph, target, sources, resolveError } = vi.hoisted(() => ({
-  graph: { value: new Map<string, Node[]>(), calls: [] as string[] },
+  graph: { value: new Map<string, Node[]>(), calls: [] as string[], named: [] as Node[], searchFails: false },
   target: { value: {} as Record<string, unknown> },
   sources: { value: new Map<string, string[]>() },
   resolveError: { value: undefined as Error | undefined },
@@ -30,6 +31,12 @@ const client = {
     const key = `${id} ${opts.direction} ${opts.predicates.join(",")}`;
     graph.calls.push(key);
     return { nodes: graph.value.get(key) ?? [], edges: [] };
+  },
+  // Name search, as the backend answers it: fuzzy, so callers match the name exactly.
+  search: async (term: string) => {
+    graph.calls.push(`search ${term}`);
+    if (graph.searchFails) throw new Error("search unavailable");
+    return graph.named.filter((n) => n.name.toLowerCase().includes(term.toLowerCase())) as any[];
   },
 };
 
@@ -116,6 +123,8 @@ beforeEach(() => {
   savedExitCode = process.exitCode;
   graph.value = threeLevels().map;
   graph.calls = [];
+  graph.named = [];
+  graph.searchFails = false;
   target.value = asTarget(MID_M);
   sources.value = new Map();
   resolveError.value = undefined;
@@ -214,6 +223,32 @@ describe("ix overrides on a three-level hierarchy", () => {
     expect(llm.exitCode).toBe(1);
     expect(llm.out.join("\n")).toMatch(/invalid_limit/);
     expect(graph.calls).toHaveLength(0);
+  });
+
+  it("pages with --offset, pointing at the next page", async () => {
+    const first = json((await run(["overrides", "m", "--limit", "1", "--format", "json"])).out);
+    expect(first.diagnostics).toEqual([expect.objectContaining({ code: "results_truncated", next_offset: 1 })]);
+    expect(first.diagnostics[0].message).toContain("next: ix overrides --limit 1 --format json --offset 1 m");
+    const second = json((await run(["overrides", "m", "--limit", "1", "--offset", "1", "--format", "json"])).out);
+    expect(brief(second.rows)).toEqual([["overridden_by", "Leaf.m", 1, undefined]]);
+    expect(second).toMatchObject({ offset: 1, total: 3, truncated: true });
+    expect(second.diagnostics[0]).toMatchObject({ code: "results_truncated", next_offset: 2 });
+    const last = json((await run(["overrides", "m", "--limit", "1", "--offset", "2", "--format", "json"])).out);
+    expect(brief(last.rows)).toEqual([["sibling", "Other.m", 1, "Base.m"]]);
+    expect(last).toMatchObject({ offset: 2, total: 3, truncated: false, diagnostics: [] });
+
+    const llm = (await run(["overrides", "m", "--limit", "1", "--offset", "1", "--format", "llm"])).out;
+    expect(llm[0]).toMatch(/^overrides .*offset=1 shown=1 total=3/);
+    expect(llm[1]).toMatch(/^diagnostic code=results_truncated next_offset=2 /);
+  });
+
+  it("an offset past the end says so", async () => {
+    const body = json((await run(["overrides", "m", "--offset", "9", "--format", "json"])).out);
+    expect(body).toMatchObject({ rows: [], total: 3, truncated: false });
+    expect(body.diagnostics).toEqual([{ code: "offset_past_end", message: "3 rows; --offset 9 is past the end." }]);
+    const text = await run(["overrides", "m", "--offset", "9"]);
+    expect(text.err.join("")).toContain("past the end");
+    expect(text.out.join("\n")).not.toContain("No overrides");
   });
 
   it("--limit 0 is a count: no rows, total kept", async () => {
@@ -436,6 +471,27 @@ describe("bounds", () => {
     expect(brief(body.rows)).toEqual([["overrides", "Base.m", 2, undefined]]);
   });
 
+  it("a supertype the types cap cut off is not listed as a sibling", async () => {
+    // 15 direct supertypes, then Root and Zed one level up: the cap admits Root
+    // (first by name) and cuts Zed, though Owner -> P01 -> Zed -> Root.
+    const owner = type("Owner", "src/Owner.java");
+    const target_m = method(owner, "m");
+    const root = type("Root", "src/Root.java");
+    const zed = type("Zed", "src/Zed.java");
+    const sib = type("Sib", "src/Sib.java");
+    const parents = Array.from({ length: HIERARCHY_UP_MAX_TYPES - 1 }, (_, i) => type(`P${String(i).padStart(2, "0")}`, `src/P${i}.java`));
+    const g = new Graph().contains(owner, target_m)
+      .contains(root, method(root, "m")).contains(zed, method(zed, "m")).contains(sib, method(sib, "m"));
+    for (const p of parents) g.extends(owner, p);
+    g.extends(parents[0], root).extends(parents[1], zed).extends(zed, root).extends(sib, root);
+    graph.value = g.map;
+    target.value = asTarget(target_m);
+
+    const body = json((await run(["overrides", "m", "--limit", "500", "--format", "json"])).out);
+    expect(body.diagnostics).toEqual([expect.objectContaining({ code: "hierarchy_truncated", cap: "types" })]);
+    expect(brief(body.rows)).toEqual([["overrides", "Root.m", 2, undefined], ["sibling", "Sib.m", 1, "Root.m"]]);
+  });
+
   it("matches types by id: a same-named class elsewhere is not in the family", async () => {
     const base = type("Base", "pkg/base.py");
     const otherBase = { ...type("Base", "vendor/base.py"), id: "t-Base-vendor" };
@@ -471,18 +527,86 @@ describe("diagnostics", () => {
     expect(body.diagnostics).toEqual([]);
   });
 
-  it("heritage_not_in_graph when the header names a base the graph has no edge for", async () => {
+  it("heritage_not_in_graph when the header names a base that is a type in the graph, with no edge to it", async () => {
     const stale = type("Mid", "pkg/stale.py");
     const m = method(stale, "m");
     graph.value = new Graph().contains(stale, m).map;
+    graph.named = [type("Base", "pkg/base.py"), method(type("Base", "pkg/base.py"), "Base_helper")];
     target.value = asTarget(m);
     sources.value = new Map([["pkg/stale.py", ["class Mid(Base):", "    def m(self):", "        pass"]]]);
     const body = json((await run(["overrides", "m", "--format", "json"])).out);
     expect(body.diagnostics).toEqual([expect.objectContaining({ code: "heritage_not_in_graph" })]);
     expect(body.diagnostics[0].message).toContain("pkg/stale.py:1");
+    expect(body.diagnostics[0].message).toContain("Base is a type in the graph");
+    expect(graph.calls.filter((c) => c.startsWith("search "))).toEqual(["search Base"]);
 
     sources.value = new Map([["pkg/stale.py", ["class Mid:", "    def m(self):"]]]);
+    graph.calls = [];
     expect(json((await run(["overrides", "m", "--format", "json"])).out).diagnostics).toEqual([]);
+    // No base named: no search at all.
+    expect(graph.calls).toHaveLength(3);
+  });
+
+  it.each([
+    ["pkg/err.py", "class MyError(Exception):"],
+    ["pkg/models.py", "class Post(models.Model):"],
+    ["pkg/gen.py", "class Box(Generic[T], ABC):"],
+    ["src/Foo.java", "public class Foo extends RuntimeException {"],
+    ["src/App.tsx", "class App extends React.Component<Props> {"],
+  ])("no heritage_not_in_graph for a library or builtin base a re-map cannot link (%s)", async (path, header) => {
+    const owner = type("Owner", path);
+    const m = method(owner, "m");
+    graph.value = new Graph().contains(owner, m).map;
+    // A same-named function, and the owner itself, are not the base type.
+    graph.named = [node("f-Exception", "function", "Exception", "pkg/util.py"), node("f-Model", "method", "Model", "pkg/x.py"), owner];
+    target.value = asTarget(m);
+    sources.value = new Map([[path, [header, "  m() {}"]]]);
+    const body = json((await run(["overrides", "m", "--format", "json"])).out);
+    expect(body.diagnostics).toEqual([]);
+    expect(body.rows).toEqual([]);
+  });
+
+  it("a failed name search is not evidence of a stale map", async () => {
+    const stale = type("Mid", "pkg/stale.py");
+    const m = method(stale, "m");
+    graph.value = new Graph().contains(stale, m).map;
+    graph.searchFails = true;
+    target.value = asTarget(m);
+    sources.value = new Map([["pkg/stale.py", ["class Mid(Base):"]]]);
+    const result = await run(["overrides", "m", "--format", "json"]);
+    expect(result.exitCode).toBe(0);
+    expect(json(result.out).diagnostics).toEqual([]);
+  });
+
+  it(`looks up at most ${HERITAGE_LOOKUPS} base names, within the request bound`, async () => {
+    const stale = type("Mid", "pkg/stale.py");
+    const m = method(stale, "m");
+    graph.value = new Graph().contains(stale, m).map;
+    target.value = asTarget(m);
+    sources.value = new Map([["pkg/stale.py", ["class Mid(A, B, C, D, E, F, G):"]]]);
+    await run(["overrides", "m", "--format", "json"]);
+    expect(graph.calls.filter((c) => c.startsWith("search "))).toHaveLength(HERITAGE_LOOKUPS);
+    expect(graph.calls.length).toBeLessThanOrEqual(HIERARCHY_MAX_REQUESTS);
+  });
+});
+
+describe("headerBaseNames", () => {
+  it.each([
+    ["a.py", "class A(Base):", ["Base"]],
+    ["a.py", "class A(models.Model, Mixin):", ["Model", "Mixin"]],
+    ["a.py", "class A(Generic[K, V], Mapping[str, List[int]]):", ["Generic", "Mapping"]],
+    ["a.py", "class A(Base, metaclass=ABCMeta, *args, **kw):", ["Base"]],
+    ["a.py", "class A(object):", []],
+    ["a.rb", "class A < Mod::Base", ["Base"]],
+    ["A.java", "public sealed class A extends B implements C, pkg.D permits E, F {", ["B", "C", "D"]],
+    ["a.ts", "class A<T extends X> extends ns.Base<T> implements I<T>, J {", ["Base", "I", "J"]],
+    ["a.ts", "class A extends mixin(B, C) {", ["mixin"]],
+    ["A.kt", "class A(val x: Int) : Base(), I by impl", ["Base", "I"]],
+    ["A.cs", "public class Repo<T> : Base<T>, IRepo where T : IEntity {", ["Base", "IRepo"]],
+    ["a.cpp", "class A : public virtual ns::B, private C<D> {", ["B", "C"]],
+    ["A.swift", "final class A: NSObject, Codable {", ["NSObject", "Codable"]],
+  ])("%s: %s -> %j", (path, line, expected) => {
+    expect(headerBaseNames([line], 1, path)).toEqual(expected);
   });
 });
 
@@ -547,7 +671,7 @@ describe("outsideBrackets", () => {
 });
 
 describe("overrideFamily", () => {
-  it("reads only expand, so any client with expand will do", async () => {
+  it("reads only expand and search, so any client with both will do", async () => {
     const family = await overrideFamily(client, asTarget(MID_M) as any, { lines: () => null });
     expect(family.rows.map((r) => r.relation)).toEqual(["overrides", "overridden_by", "sibling"]);
   });

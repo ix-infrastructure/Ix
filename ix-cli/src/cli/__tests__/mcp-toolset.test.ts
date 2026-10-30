@@ -174,11 +174,11 @@ describe("overrides over MCP", () => {
     clients.push(client);
 
     const args = { symbol: "m", path: "pkg/mid.py", pick: 2, limit: 20 };
+    // Both page like the other edge tools: the offset a results_truncated row hands back is forwarded.
     const viaNeighbors = await client.callTool({ name: "ix_neighbors", arguments: { ...args, relation: "overrides", offset: 50 } });
-    const direct = await client.callTool({ name: "ix_overrides", arguments: args });
+    const direct = await client.callTool({ name: "ix_overrides", arguments: { ...args, offset: 50 } });
 
-    // The family is one bounded page: no --offset for a command that has none.
-    const expected = ["overrides", "--path=pkg/mid.py", "--pick=2", "--limit=20", "--format=llm", "--", "m"];
+    const expected = ["overrides", "--path=pkg/mid.py", "--pick=2", "--limit=20", "--offset=50", "--format=llm", "--", "m"];
     expect(calls).toEqual([expected, expected]);
     expect(viaNeighbors.isError).toBeFalsy();
     expect(direct.content).toEqual(viaNeighbors.content);

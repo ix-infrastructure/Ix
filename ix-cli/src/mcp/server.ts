@@ -535,11 +535,10 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       const relation = stringArg(input, "relation");
       // The CLI spells one of them with a dash.
       const command = relation === "imported_by" ? "imported-by" : relation;
-      // `ix overrides` answers a bounded family in one page: it takes no --offset.
       return runFormatted(
         runIx,
         "ix_neighbors",
-        ix(command, [stringArg(input, "symbol")], symbolOptions(input, { offset: relation !== "overrides" })),
+        ix(command, [stringArg(input, "symbol")], symbolOptions(input, { offset: true })),
       );
     },
   );
@@ -553,6 +552,7 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
     "ix_overrides",
     "Before a signature change: every override, base declaration and sibling implementation, with path:lines. Prefer ix_neighbors.",
     "overrides",
+    EDGE_TOOL_INPUT,
   );
   registerTool(
     ctx,

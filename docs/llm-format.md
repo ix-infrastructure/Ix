@@ -421,11 +421,15 @@ same-named class in another file is not in the family. Diagnostics:
   carries `truncated=true`.
 - `overloads_not_distinguished`: in Java, Kotlin, C#, Scala or C++, a matched
   type declares the method more than once; check each row's parameters.
-- `heritage_not_in_graph`: the type has no `EXTENDS` edge but its header names
-  a base, so the map may predate heritage capture; re-map.
+- `heritage_not_in_graph`: the type has no `EXTENDS` edge, but its header
+  names a base that is itself a type in the graph, so the map may predate
+  heritage capture; re-map. A base the graph does not hold (a library or
+  builtin class such as `Exception`) is not reported: no map links it.
+- `results_truncated next_offset=<n>` past `--limit`, and `offset_past_end`,
+  as for the other edge commands: page with `--offset`.
 
 `--format json` carries `{target, resolvedTarget, owner, root, rows, total,
-truncated, diagnostics}`; each row is `{name, kind, id, path, lineStart,
+offset?, truncated, diagnostics}`; each row is `{name, kind, id, path, lineStart,
 lineEnd, owner: {name, kind, id}, relation, depth, via?}`. Over MCP it is
 `ix_neighbors relation=overrides` or `ix_overrides`.
 
