@@ -4,8 +4,8 @@ import { execFile } from "node:child_process";
 import { posix } from "node:path";
 
 import { combineSignals, currentRunSignal } from "../../client/run-signal.js";
-import { coChangedFiles, type CoChange, type GitRunner } from "./history.js";
-import { isSourcePath, MAX_RANKED_FILES, type RankedFile } from "./issue.js";
+import { coChangedFiles, GIT_MAX_BUFFER, type CoChange, type GitRunner } from "./history.js";
+import { isGenericIdentifier, isSourcePath, MAX_RANKED_FILES, type RankedFile } from "./issue.js";
 import type { RepoAccess } from "./text-references.js";
 
 export const COMPANION_BUDGET_MS = 750;
@@ -14,6 +14,12 @@ export const MAX_COMPANIONS = 3;
 export const MAX_COMPANION_READS = 24;
 export const MAX_COMPANION_CANDIDATES = 12;
 export const MAX_COMPANION_IMPORTS = 8;
+/**
+ * Co-changes read per seed: the candidate cap plus room for files already
+ * ranked, which co-change with a leading file more often than not and are
+ * skipped, so they cannot crowd a new file out.
+ */
+export const MAX_COMPANION_HISTORY = MAX_COMPANION_CANDIDATES + MAX_RANKED_FILES;
 const MAX_BYTES = 64 * 1024;
 const CACHE_ENTRIES = 64;
 const CACHE_TTL_MS = 30_000;
@@ -30,7 +36,7 @@ export function companionHistory(root: string): CompanionHistory {
     let failed = false;
     const run: GitRunner = (args) => new Promise((resolve) => {
       execFile("git", ["--literal-pathspecs", "-c", "core.quotepath=false", ...args], {
-        cwd: root, encoding: "utf8", timeout: COMPANION_BUDGET_MS, maxBuffer: 1024 * 1024,
+        cwd: root, encoding: "utf8", timeout: COMPANION_BUDGET_MS, maxBuffer: GIT_MAX_BUFFER,
         signal: combineSignals(signal, currentRunSignal()),
       }, (err, stdout) => {
         if (err) failed = true;
@@ -42,7 +48,7 @@ export function companionHistory(root: string): CompanionHistory {
     const key = JSON.stringify([root, revision.trim(), path]);
     const cached = historyCache.get(key);
     if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.files;
-    const files = await coChangedFiles(run, path, new Set(), MAX_COMPANION_CANDIDATES);
+    const files = await coChangedFiles(run, path, new Set(), MAX_COMPANION_HISTORY);
     if (!signal.aborted && !failed) {
       historyCache.delete(key);
       historyCache.set(key, { at: Date.now(), files });
@@ -133,8 +139,12 @@ export async function expandIssueCompanions(
     if (isSourcePath(file)) tracked.add(file);
   }
   const seeds = primary.filter((f) => tracked.has(f.path)).slice(0, MAX_COMPANION_SEEDS);
-  const seedPaths = new Set([primary[0].path, ...seeds.map((s) => s.path)]);
-  const words = new Set(issue.slice(0, MAX_BYTES).match(/[A-Za-z_$][\w$]*/g) ?? []);
+  // Already ranked, seeds included: never a candidate, so never one of the
+  // MAX_COMPANION_CANDIDATES slots a new file needs.
+  const primaryPaths = new Set(primary.map((f) => f.path));
+  // Specific names only: prose words such as "path" or "config" also name
+  // imports, and would promote whatever module defines them.
+  const words = new Set((issue.slice(0, MAX_BYTES).match(/[A-Za-z_$][\w$]*/g) ?? []).filter((w) => !isGenericIdentifier(w)));
   const texts = new Map<string, string | undefined>();
   const read = (path: string): string | undefined => {
     if (!live() || !tracked.has(path)) return undefined;
@@ -147,7 +157,7 @@ export async function expandIssueCompanions(
   };
   const found = new Map<string, { path: string; source: CompanionSource; seed: string; weight: number }>();
   const credit = (path: string, source: CompanionSource, seed: string, weight: number) => {
-    if (!live() || seedPaths.has(path) || !tracked.has(path)) return;
+    if (!live() || primaryPaths.has(path) || !tracked.has(path)) return;
     const prior = found.get(path);
     if (!prior && found.size >= MAX_COMPANION_CANDIDATES) return;
     if (!prior || weight > prior.weight) found.set(path, { path, source, seed, weight });
@@ -209,7 +219,7 @@ export async function expandIssueCompanions(
       if (!deps.history || !live()) break;
       // A provider that ignores cancellation still cannot delay this pass.
       const changes = await Promise.race([deps.history(seed.path, signal).catch(() => []), stopped]);
-      for (const change of (changes ?? []).slice(0, MAX_COMPANION_CANDIDATES)) {
+      for (const change of (changes ?? []).slice(0, MAX_COMPANION_HISTORY)) {
         credit(change.path, "co-change", seed.path, 0.8 * Math.min(1, Math.max(0, change.score)));
       }
     }
@@ -218,9 +228,7 @@ export async function expandIssueCompanions(
     controller.abort();
     signal.removeEventListener("abort", onAbort!);
   }
-  const primaryPaths = new Set(primary.map((f) => f.path));
   const companions: RankedFile[] = [...found.values()]
-    .filter((c) => !primaryPaths.has(c.path))
     .sort((a, b) => b.weight - a.weight || a.path.localeCompare(b.path))
     .slice(0, MAX_COMPANIONS)
     .map((c) => ({ path: c.path, score: Math.max(0, primary[0].score) * 0.8 * c.weight,

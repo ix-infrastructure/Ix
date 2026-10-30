@@ -146,6 +146,23 @@ describe("ix context --from-issue bundle", () => {
     expect(text).toContain("ranked files: src/client/api.ts");
   });
 
+  it("names companion files in the evidence row even past the shown primary files", () => {
+    const companion = { path: "src/client/index.ts", score: 1, reason: "companion (re-export of src/client/api.ts)",
+      companion: { source: "re-export" as const, seed: "src/client/api.ts" } };
+    const b = build(issue({ rankedFiles: [...ranked(20), companion] }));
+    expect(b.rankedFiles).toHaveLength(21);
+    const row = b.evidence.find((e) => e.id === "issue-ranked-files")!;
+    const shown = row.title.replace(/^ranked files: /, "").split(", ");
+    expect(shown).toEqual([...ranked(20).slice(0, 10).map((f) => f.path), "src/client/index.ts"]);
+    expect(row.reason).toContain("then companion files");
+    expect(row.reason).toContain("index.ts (companion (re-export of src/client/api.ts))");
+    expect(captureLog(() => renderBundle(b, "llm")).join("\n")).toMatch(/^evidence .*title="ranked files: .*src\/client\/index.ts"/m);
+    expect(captureLog(() => renderBundle(b, "text")).join("\n")).toContain("src/client/index.ts");
+
+    const plain = build(issue({ rankedFiles: ranked(20) })).evidence.find((e) => e.id === "issue-ranked-files")!;
+    expect(plain.reason).not.toContain("companion");
+  });
+
   it("says so when the start came from BM25 because nothing in the issue resolved", () => {
     const b = build(issue({
       startingPoints: [{ token: "src/client/api.ts", id: "f-api", name: "api.ts", kind: "file", path: "src/client/api.ts", via: "bm25 fallback" }],

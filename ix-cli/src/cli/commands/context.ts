@@ -2648,7 +2648,11 @@ function issueEvidence(issue: IssueBundleInput): EvidenceItem[] {
       ...locationField(starts[0]),
     });
   }
-  const shown = issue.rankedFiles.slice(0, SHOWN_RANKED_FILES);
+  // Companions (issue-companions.ts) follow the whole primary list, past the
+  // first SHOWN_RANKED_FILES once BM25 matches enough files: named after the
+  // primary files shown, or text and llm output would never show one.
+  const companions = issue.rankedFiles.filter((f) => f.companion);
+  const shown = [...issue.rankedFiles.filter((f) => !f.companion).slice(0, SHOWN_RANKED_FILES), ...companions];
   if (shown.length > 0) {
     items.push({
       id: "issue-ranked-files",
@@ -2656,7 +2660,7 @@ function issueEvidence(issue: IssueBundleInput): EvidenceItem[] {
       source: "issue.ranking",
       title: `ranked files: ${shown.map((f) => f.path).join(", ")}`,
       score: tierScore(TIER.issue, 1),
-      reason: `starting points first, then bm25 against the issue text, graph neighbours of a starting point boosted up to ${Math.round(CLOSENESS_BOOST * 100)}%, then any companion files; `
+      reason: `starting points first, then bm25 against the issue text, graph neighbours of a starting point boosted up to ${Math.round(CLOSENESS_BOOST * 100)}%${companions.length > 0 ? ", then companion files of a leading file" : ""}; `
         + shown.map((f) => `${f.path.split("/").pop()} (${f.reason})`).join("; "),
       refs: [],
     });

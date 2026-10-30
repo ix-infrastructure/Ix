@@ -9,7 +9,7 @@ import {
   companionHistory, COMPANION_BUDGET_MS, expandIssueCompanions,
   MAX_COMPANION_CANDIDATES, MAX_COMPANION_IMPORTS, MAX_COMPANION_READS, MAX_COMPANIONS,
 } from "../explain/issue-companions.js";
-import { rankIssueFiles, type RankedFile } from "../explain/issue.js";
+import { MAX_RANKED_FILES, rankIssueFiles, type RankedFile } from "../explain/issue.js";
 import { gitRepoAccess, type RepoAccess } from "../explain/text-references.js";
 import { runWithSignal } from "../../client/run-signal.js";
 
@@ -44,12 +44,12 @@ describe("issue companion expansion", () => {
   });
 
   it.each([
-    ["pkg/worker.py", "from .types import JobError as Failure\ndef run_job(): pass", "pkg/types.py", "class JobError(Exception): pass"],
-    ["src/worker.ts", 'import { JobError as Failure } from "./types.js";\nexport function runJob() {}', "src/types.ts", "export class JobError {}"],
-    ["src/worker.ts", 'import Failure from "./types";\nexport function runJob() {}', "src/types.ts", "export default class JobError {}"],
+    ["pkg/worker.py", "from .types import JobError as JobFailure\ndef run_job(): pass", "pkg/types.py", "class JobError(Exception): pass"],
+    ["src/worker.ts", 'import { JobError as JobFailure } from "./types.js";\nexport function runJob() {}', "src/types.ts", "export class JobError {}"],
+    ["src/worker.ts", 'import JobFailure from "./types";\nexport function runJob() {}', "src/types.ts", "export default class JobError {}"],
   ])("finds the definition of an issue-mentioned imported alias in %s", async (seed, source, target, definition) => {
     const files = repo({ [seed]: source, [target]: definition });
-    const result = await expandIssueCompanions("Failure escapes the job", ranking(seed), { repo: files });
+    const result = await expandIssueCompanions("JobFailure escapes the job", ranking(seed), { repo: files });
     expect(result.map((r) => r.path)).toEqual([seed, target]);
     expect(result[1].companion).toEqual({ source: "issue-import", seed });
   });
@@ -102,19 +102,19 @@ describe("issue companion expansion", () => {
   it("enforces file-read, import-name and candidate budgets", async () => {
     const files: Record<string, string> = { "pkg/worker.py": "" };
     for (let i = 0; i < 50; i++) {
-      files[`pkg/dependency${i}.py`] = `class Error${i}: pass`;
-      files["pkg/worker.py"] += `from .dependency${i} import Error${i}\n`;
+      files[`pkg/dependency${i}.py`] = `class JobError${i}: pass`;
+      files["pkg/worker.py"] += `from .dependency${i} import JobError${i}\n`;
       files[`pkg/entry${i}_registry.py`] = "from .worker import run_job";
     }
     const access = repo(files);
     const history = vi.fn(async () => Object.keys(files).map((path) => ({ path, commits: 2, score: 1 })));
-    const result = await expandIssueCompanions(Object.keys(files).map((_, i) => `Error${i}`).join(" "), ranking("pkg/worker.py"), { repo: access, history });
+    const result = await expandIssueCompanions(Object.keys(files).map((_, i) => `JobError${i}`).join(" "), ranking("pkg/worker.py"), { repo: access, history });
     expect(vi.mocked(access.read).mock.calls.length).toBeLessThanOrEqual(MAX_COMPANION_READS);
     expect(result.filter((f) => f.companion).length).toBeLessThanOrEqual(MAX_COMPANIONS);
     expect(result).toHaveLength(1 + MAX_COMPANIONS);
     // Without the entry points, at most eight imported names are resolved.
     const importsOnly = repo(Object.fromEntries(Object.entries(files).filter(([p]) => !p.includes("registry"))));
-    await expandIssueCompanions("Error0 " + Array.from({ length: 50 }, (_, i) => `Error${i}`).join(" "), ranking("pkg/worker.py"), { repo: importsOnly });
+    await expandIssueCompanions("JobError0 " + Array.from({ length: 50 }, (_, i) => `JobError${i}`).join(" "), ranking("pkg/worker.py"), { repo: importsOnly });
     expect(vi.mocked(importsOnly.read).mock.calls.length).toBeLessThanOrEqual(1 + MAX_COMPANION_IMPORTS);
   });
 
@@ -220,6 +220,32 @@ describe("issue companion expansion", () => {
     expect(result).toEqual(primary);
   });
 
+  it("does not treat common prose words as naming an import", async () => {
+    const files = repo({
+      "src/worker.ts": 'import { join, config } from "./util";\nimport { RetryPolicy } from "./policy";\nexport function runJob() {}',
+      "src/util.ts": "export function join() {}\nexport const config = {};",
+      "src/policy.ts": "export class RetryPolicy {}",
+    });
+    const primary = ranking("src/worker.ts");
+    const prose = await expandIssueCompanions("runJob cannot join the config path", primary, { repo: files });
+    expect(prose).toEqual(primary);
+    const named = await expandIssueCompanions("runJob ignores RetryPolicy", primary, { repo: files });
+    expect(named.slice(1)).toMatchObject([{ path: "src/policy.ts", companion: { source: "issue-import" } }]);
+  });
+
+  it("keeps a companion when an earlier seed's history is all files already ranked", async () => {
+    const ranked = Array.from({ length: MAX_RANKED_FILES }, (_, i) => `src/f${i}.ts`);
+    const files = repo(Object.fromEntries([...ranked, "src/companion.ts"].map((p) => [p, ""])));
+    const primary = ranking(...ranked);
+    // f0 co-changes with as many ranked non-seed files as there are candidate slots.
+    const history = async (path: string) => path === "src/f0.ts"
+      ? ranked.slice(2, 2 + MAX_COMPANION_CANDIDATES).map((p) => ({ path: p, commits: 5, score: 1 }))
+      : [{ path: "src/companion.ts", commits: 2, score: 0.5 }];
+    const result = await expandIssueCompanions("bug", primary, { repo: files, history });
+    expect(result.slice(0, MAX_RANKED_FILES)).toEqual(primary);
+    expect(result.slice(MAX_RANKED_FILES)).toMatchObject([{ path: "src/companion.ts", companion: { source: "co-change", seed: "src/f1.ts" } }]);
+  });
+
   it("keeps the original ranking without a checkout or when history fails", async () => {
     const primary = ranking("a.ts");
     expect(await expandIssueCompanions("bug", primary, {})).toEqual(primary);
@@ -258,6 +284,36 @@ describe("companion history in a synthetic git repository", () => {
       git("commit", "-qm", "Update pair again");
       expect(await companionHistory(dir)("worker.py", signal)).toEqual([{ path: "schema.py", commits: 3, score: 1.5 }]);
       expect(logCalls()).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still reads co-changes when a sweep in the window prints more than a megabyte", async () => {
+    const dir = mkdtempSync(join(process.cwd(), ".companion-test-"));
+    const git = (args: string[], input?: string) => execFileSync("git", args, { cwd: dir, encoding: "utf8", input, maxBuffer: 64 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"] });
+    try {
+      git(["init", "-q"]);
+      git(["config", "user.name", "Fixture"]);
+      git(["config", "user.email", "fixture@example.invalid"]);
+      for (let i = 0; i < 2; i++) {
+        writeFileSync(join(dir, "worker.py"), `def run_job(): return ${i}\n`);
+        writeFileSync(join(dir, "schema.py"), `VERSION = ${i}\n`);
+        git(["add", "worker.py", "schema.py"]);
+        git(["commit", "-qm", "Update worker and schema"]);
+      }
+      // A vendored sweep with the worker in it: index entries only, no files,
+      // and long paths, so the log passes a megabyte with few of them.
+      const blob = git(["hash-object", "-w", "--stdin"], "").trim();
+      const deep = `vendor/${"generated_protocol_buffers/".repeat(8)}`;
+      const sweep = Array.from({ length: 5_000 }, (_, i) => `100644 ${blob}\t${deep}module_${String(i).padStart(6, "0")}.py`);
+      git(["update-index", "--index-info"], sweep.join("\n") + "\n");
+      writeFileSync(join(dir, "worker.py"), "def run_job(): return 9\n");
+      git(["add", "worker.py"]);
+      git(["commit", "-qm", "Vendor generated modules"]);
+      const log = git(["log", "-100", "--format=%x00%h", "--name-only", "--relative", "--full-diff", "--", "worker.py"]);
+      expect(log.length).toBeGreaterThan(1024 * 1024);
+      expect(await companionHistory(dir)("worker.py", new AbortController().signal)).toEqual([{ path: "schema.py", commits: 2, score: 1 }]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
