@@ -36,6 +36,7 @@ import {
   type StartingPoint,
   type SymbolHit,
 } from "../explain/issue.js";
+import { collectIssueEntities, placeIssueMatches, rankIssueEntities, type IssueEntityRanking } from "../explain/issue-entities.js";
 import { symbolReadChecker } from "../symbol-read-check.js";
 import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/related-files.js";
 import { cachedBm25Ranker, saveBm25Index } from "../explain/bm25-cache.js";
@@ -296,6 +297,8 @@ interface ContextBundle {
     lineStart?: number;
     lineEnd?: number;
     stale: boolean;
+    /** Issue relevance; absent on bundles built from a named target. */
+    score?: number;
   }>;
   relationships: Array<{ src: string; dst: string; predicate: string }>;
   claims: Array<{ id: string; entityId: string; statement: string; status: string }>;
@@ -342,7 +345,7 @@ interface ContextBundle {
   metadata: {
     asOfRev?: number;
     depth?: string;
-    rankingRule: "deterministic-tier";
+    rankingRule: "deterministic-tier" | "issue-bm25";
   };
 }
 
@@ -1614,6 +1617,11 @@ export interface IssueBundleInput extends IssueSummary {
   rankedFiles: RankedFile[];
   /** The other starting points' related files, entered as entities. */
   extraEntities?: EntityLocation[];
+  /** Lexical discoveries, behind graph context unless they match the issue. */
+  discoveredEntities?: EntityLocation[];
+  query?: string;
+  repo?: IssueEntityRanking["repo"];
+  distances?: ReadonlyMap<string, number>;
 }
 
 /**
@@ -1745,17 +1753,37 @@ async function buildIssueBundle(
   ]);
 
   const near = new Map<string, Closeness>();
+  const distances = new Map<string, number>();
+  const atDistance = (id: string, distance: number) => {
+    distances.set(id, Math.min(distances.get(id) ?? Infinity, distance));
+  };
   const mark = (path: string | undefined, weight: number, reason: string) => {
     if (!path) return;
     const prior = near.get(path);
     if (!prior || weight > prior.weight) near.set(path, { weight, reason });
   };
   for (const n of [{ start: centre, facts, related: facts.relatedRefs ?? [] }, ...around]) {
+    atDistance(n.start.id!, 0);
     for (const ref of oneHopRefs(n.facts)) {
       if (ref.path !== n.start.path) mark(ref.path, 1, `one hop from ${n.start.name}`);
     }
-    for (const ref of n.related) mark(ref.path, 0.5, `near ${n.start.name}`);
+    // Neighbour members and text/history-related files do not establish a
+    // direct graph edge. Only the facts' direct references fill missing hops.
+    for (const ref of [
+      ...(n.facts?.importRefs ?? []), ...(n.facts?.calleeRefs ?? []),
+      ...(n.facts?.topCallerRefs ?? []), ...(n.facts?.topDependentRefs ?? []),
+      ...(n.facts?.memberRefs ?? []),
+    ]) atDistance(ref.id, 1);
+    for (const ref of n.related) {
+      mark(ref.path, 0.5, `near ${n.start.name}`);
+    }
   }
+  const rankedFiles = rankIssueFiles({ starts, bm25: plan.bm25, near });
+  const candidates = await collectIssueEntities(client, rankedFiles, activeReadScope());
+  // The listing planIssueWith already ran: a second `git ls-files` would only
+  // repeat it. Only tracked paths are read, as BM25 read them.
+  const repo = plan.repo;
+  const tracked = new Set(repo?.files());
 
   return buildBundle({
     resolved,
@@ -1772,8 +1800,12 @@ async function buildIssueBundle(
       startingPoints: starts,
       unresolved: plan.unresolved,
       fallback: plan.fallback || walked,
-      rankedFiles: rankIssueFiles({ starts, bm25: plan.bm25, near }),
+      rankedFiles,
       extraEntities: around.flatMap((n) => n.related),
+      discoveredEntities: candidates,
+      query: text,
+      repo: repo ? { read: path => tracked.has(path) ? repo.read(path) : undefined } : undefined,
+      distances,
     },
   });
 }
@@ -1798,13 +1830,18 @@ async function readIssueOrReport(arg: string, format: string | undefined): Promi
   return text;
 }
 
-/** The issue's starting points and lexical ranking, against this workspace's graph. */
+/**
+ * The issue's starting points and lexical ranking, against this workspace's
+ * graph, with the repository access they were planned against (undefined
+ * outside a git checkout) so a caller does not list the files again.
+ */
 async function planIssueWith(client: IxClient, text: string) {
   await ensureReadScope(client);
   const scope = activeReadScope();
   const root = resolveWorkspaceRoot();
-  return planIssue(text, {
-    repo: gitRepoAccess(root),
+  const repo = gitRepoAccess(root);
+  const plan = await planIssue(text, {
+    repo,
     // Through the on-disk term index (bm25-cache.ts): the same ranking, with
     // only the files that differ from HEAD read again. The caller saves the
     // index after printing (saveBm25Index).
@@ -1812,6 +1849,7 @@ async function planIssueWith(client: IxClient, text: string) {
     search: async (name) =>
       (await client.search(name, { limit: ISSUE_SEARCH_LIMIT, nameOnly: true, ...scope })).map(symbolHit),
   });
+  return { ...plan, repo };
 }
 
 /**
@@ -2007,7 +2045,7 @@ export function buildBundle(input: BuildInput): ContextBundle {
   // the field an agent reads to decide whether to trust the rest, so a wrong
   // one is worse than none.
   const seen = new Set<string>([resolved.id]);
-  const entities: ContextBundle["entities"] = [
+  let entities: ContextBundle["entities"] = [
     {
       id: resolved.id,
       name: resolved.name,
@@ -2087,7 +2125,7 @@ export function buildBundle(input: BuildInput): ContextBundle {
   // through the summaries -- ahead of its located ref, which `seen` then
   // skipped -- came out as twelve entities all named `watch.ts`.
   const trailingMembers = memberRefs.slice(LEADING_MEMBERS);
-  const locatedById = new Map(trailingMembers.map((ref) => [ref.id, ref]));
+  const locatedById = new Map([...trailingMembers, ...(issue?.discoveredEntities ?? [])].map((ref) => [ref.id, ref]));
   const fileNames = new Set(
     [...contextNodes, resolved].filter((n) => n.kind === "file").map((n) => n.name));
   for (const node of orderedNodes(contextNodes)) {
@@ -2113,12 +2151,33 @@ export function buildBundle(input: BuildInput): ContextBundle {
     });
   }
   pushLocated(trailingMembers);
+  // Unmatched discoveries must not evict graph context. Positive issue matches
+  // are promoted within their reserved budget by placeIssueMatches below; the
+  // ones that only the listing found, and that do not match, are dropped there.
+  const discoveredOnly = new Set(
+    (issue?.discoveredEntities ?? []).map((ref) => ref.id).filter((id) => !seen.has(id)));
+  pushLocated(issue?.discoveredEntities ?? []);
 
   // Relationships: graph edges, ordered deterministically.
   const contextEdges = context.edges.length > 0 ? context.edges : (context.edgeSummaries ?? []);
   const relationships = [...contextEdges]
     .sort((a, b) => cmp(a.src, b.src) || cmp(a.dst, b.dst) || cmp(a.predicate, b.predicate))
     .map((edge) => ({ src: edge.src, dst: edge.dst, predicate: edge.predicate }));
+
+  if (issue?.query !== undefined) {
+    const pinned = new Set([resolved.id, ...issue.startingPoints.flatMap((s) => s.id ? [s.id] : [])]);
+    // A listed definition that does not match the issue was never graph
+    // context: keeping it would fill spare budget with score-0 noise and count
+    // it as truncated content the bundle never had. One that matches only
+    // words most of the listed definitions share scores 0 here too.
+    entities = placeIssueMatches(
+      entities,
+      rankIssueEntities(entities, { ...issue, query: issue.query, listedOnly: discoveredOnly }, relationships),
+      pinned, budgets.maxEntities)
+      .filter((e) => e.score > 0 || !discoveredOnly.has(e.id));
+  } else {
+    entities = entities.filter((e) => !discoveredOnly.has(e.id));
+  }
 
   const evidence = rankEvidence({ resolved, facts, context, relationships, prov, entities, issue });
 
@@ -2180,7 +2239,7 @@ export function buildBundle(input: BuildInput): ContextBundle {
     metadata: {
       asOfRev,
       depth,
-      rankingRule: "deterministic-tier",
+      rankingRule: issue?.query !== undefined ? "issue-bm25" : "deterministic-tier",
     },
   };
 
