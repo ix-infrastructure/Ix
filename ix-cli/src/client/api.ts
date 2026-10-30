@@ -340,7 +340,7 @@ export class IxClient {
       predicates: opts.predicates,
       distinct: opts.distinct,
       ...(opts.branchId !== undefined ? { branchId: opts.branchId } : {}),
-    }, opts.timeoutMs);
+    }, { timeoutMs: opts.timeoutMs });
   }
 
   async listGoals(): Promise<GraphNode[]> {
@@ -543,7 +543,7 @@ export class IxClient {
     if (opts?.workspaceId)                        params.set("workspace_id",            opts.workspaceId);
     if (opts?.systemId)                           params.set("system_id",               opts.systemId);
     const qs = params.toString();
-    return this.post(qs ? `/v1/smells?${qs}` : "/v1/smells", {}, opts?.timeoutMs);
+    return this.post(qs ? `/v1/smells?${qs}` : "/v1/smells", {}, { timeoutMs: opts?.timeoutMs });
   }
 
   async listSmells(opts?: { workspaceId?: string; systemId?: string }): Promise<any> {
