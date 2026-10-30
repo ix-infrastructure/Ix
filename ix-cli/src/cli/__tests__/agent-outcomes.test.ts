@@ -173,10 +173,15 @@ describe.each(["locate", "callers", "impact", "explain"])("%s miss candidates", 
   // The resolver's own lookup (no signal) finds parseConfig; the bounded probe
   // for the exact term finds a different near name, parseConfg.
   function probeFinds(otherProbes: "answer" | "hang"): void {
+    // Give the bounded probe a deterministic budget, even on a busy runner.
+    vi.useFakeTimers({ toFake: ["performance", "setTimeout", "clearTimeout"] });
     const config = { id: "parser-id", name: "parseConfig", kind: "function", provenance: { sourceUri: "src/config.ts" } };
     const other = { id: "other-id", name: "parseConfg", kind: "function", provenance: { sourceUri: "src/other.ts" } };
     search.mockImplementation((term: string, options?: { signal?: AbortSignal }) => {
-      if (!options?.signal) return Promise.resolve(term === "parseConifg" ? [] : [config]);
+      if (!options?.signal) {
+        if (term === "parseConifg") vi.advanceTimersByTime(20);
+        return Promise.resolve(term === "parseConifg" ? [] : [config]);
+      }
       if (term === "parseConifg") return Promise.resolve([other]);
       if (otherProbes === "answer") return Promise.resolve([]);
       return new Promise((_resolve, reject) => {
@@ -187,14 +192,18 @@ describe.each(["locate", "callers", "impact", "explain"])("%s miss candidates", 
 
   it("keeps the resolver's suggestions first when the probe only partly answers", async () => {
     probeFinds("hang");
-    const text = await run([command, "parseConifg"]);
+    const textRun = run([command, "parseConifg"]);
+    await vi.runAllTimersAsync();
+    const text = await textRun;
     expect(text.exitCode).toBe(3);
     const rows = text.stderr.slice(text.stderr.indexOf("Did you mean:"));
     expect(rows.indexOf("parseConfig ")).toBeGreaterThan(-1);
     expect(rows.indexOf("parseConfg ")).toBeGreaterThan(rows.indexOf("parseConfig "));
     // A deadline-cut probe never names a winner.
     expect(text.stderr).not.toContain("Try:");
-    const json = JSON.parse((await run([command, "parseConifg", "--format", "json"])).stdout);
+    const jsonRun = run([command, "parseConifg", "--format", "json"]);
+    await vi.runAllTimersAsync();
+    const json = JSON.parse((await jsonRun).stdout);
     expect(json.suggestions.map((s: { name: string }) => s.name)).toEqual(["parseConfig"]);
   });
 
