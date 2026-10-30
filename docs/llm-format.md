@@ -109,6 +109,25 @@ which value it ignored, on stderr, when a person is there to read it.
   the filter. Any miss may carry
   `suggestion` records with the nearest names in the graph (`locate` included),
   and a miss on an empty or degraded graph carries a `graph` record saying so.
+  `locate`, `callers`, `impact` and `explain` also add a JSON `didYouMean` array
+  (at most five `{name, kind, path, line}` objects; unknown locations are `null`).
+  It is a separate field from an ambiguity's `candidates`, which keeps its meaning.
+  Existing error fields, suggestion row shapes (llm `suggestion` rows keep `id=`)
+  and exit codes are preserved. Text prints “Did you mean” from the suggestions,
+  unchanged and first, topped up to five from `didYouMean`; text and llm include an
+  `ix <command> ... --path ...` retry when one name clearly scores best, every
+  probe answered in time, and the suggestion rows list that name. These
+  names never select a target.
+  Ranking prefers case-insensitive exact names, the last qualified segment,
+  snake/camel normalization, prefix/suffix matches, then edit distance at most two.
+  File misses use basename and workspace-relative path suffix matches.
+  The probe sends at most seven name-index requests (never an empty term) and
+  reads at most 256 rows, with names bounded to 128 characters. All requests
+  share a deadline of half the elapsed miss time, capped at 100 ms; timed-out
+  probes are cancelled without retries. On a slow backend `didYouMean` can
+  therefore be empty; the suggestions do not depend on that deadline and are
+  the same as without the probe. `--no-suggest` skips both and returns
+  `didYouMean: []`.
   A graph read from a directory no registered workspace covers is
   `workspace_not_mapped`, with `dir=` and a `hint=` naming the command that
   maps it.
@@ -117,8 +136,16 @@ which value it ignored, on stderr, when a person is there to read it.
   not choose a target. The error also carries `shown=<n> total=<m>` after
   `count=` (and `truncated=true` when the search window came back full, so
   `total` is a lower bound); json has `total` and `truncated` beside
-  `candidates`. Candidates are numbered in (path, line, id) order, so
-  `--pick <n>` means the same thing on every run. (The
+  `candidates`. Candidates are ranked by how well they match (ties in
+  (path, line, id) order), then each run of equal scores is dealt
+  round-robin by file: the best of each file, then each file's second-best,
+  and so on, so a file that defines the name many times does not fill the 8
+  shown on its own. A worse score never goes ahead of a better one, so an
+  import of the name still comes after every definition. That order is the
+  numbering, so `--pick <n>` and `--all`'s `candidate=<n>` mean the same thing
+  on every run. A candidate inside a class or other type carries
+  `container=<name>` (json `container`), last on its record; it is absent for
+  a top-level definition, or when the graph could not say. (The
   backend spells a missing target `unknown_target` in its own JSON bodies; that
   is a wire detail and is translated on the way out, so a consumer never sees
   both.)
@@ -383,6 +410,52 @@ ref name=invoke kind=method path=src/rpc/Filter.java lines=10-24
 ref name=select kind=method path=src/cluster/Cluster.java lines=30-41 via=Invoker.getUrl
 ```
 
+`ix overrides <method>` (alias `ix implementations`) lists the other
+definitions of a method, the ones that move with it when its signature or
+behaviour changes. The header names the target as `<Type>.<method>`, the type
+that contains it (`owner=`) and the farthest supertype that declares the
+method (`root=`). When the method is declared on more than one top
+supertype (two interfaces, or a base class and an interface, neither under
+the other), `roots=` lists each, `root` first (json: `roots`), and siblings
+come from every one. Then one `override` record per definition:
+
+```
+overrides target=Mid.m owner=Mid root=Base.m shown=3 total=3
+override name=m relation=overrides owner=Base kind=method path=pkg/base.py lines=3-5 depth=1
+override name=m relation=overridden_by owner=Leaf kind=method path=pkg/leaf.py lines=5-7 depth=1
+override name=m relation=sibling owner=Other kind=method path=pkg/other.py lines=7-9 depth=1 via=Base.m
+```
+
+`relation` is `overrides` (declared on a supertype) or `implements` (the
+supertype's kind is interface, trait or protocol; a graph that stores the
+base as a class says `overrides`), `overridden_by` (declared on a subtype), or
+`sibling` (declared on another subtype of a root, `via=<Root>.<method>`
+naming that root; a type under two roots is listed once, under the first).
+`depth` counts levels from the target's type for up and down rows, and from
+the root for siblings. Rows are ordered by relation, then depth, then path.
+Matching is by name through `EXTENDS` (which carries `implements`) and
+`CONTAINS` edges, never by signature; each type is a graph id, so a
+same-named class in another file is not in the family. Diagnostics:
+
+- `no_owner_type`: the target is not a member of a class, interface or trait
+  (a free function). No rows, exit 0.
+- `hierarchy_truncated cap=depth|types|edges`: a walk stopped at 5 levels, at
+  32 types (16 of them supertypes), or at the server's edge cap. The header
+  carries `truncated=true`.
+- `overloads_not_distinguished`: in Java, Kotlin, C#, Scala or C++, a matched
+  type declares the method more than once; check each row's parameters.
+- `heritage_not_in_graph`: the type has no `EXTENDS` edge, but its header
+  names a base that is itself a type in the graph, so the map may predate
+  heritage capture; re-map. A base the graph does not hold (a library or
+  builtin class such as `Exception`) is not reported: no map links it.
+- `results_truncated next_offset=<n>` past `--limit`, and `offset_past_end`,
+  as for the other edge commands: page with `--offset`.
+
+`--format json` carries `{target, resolvedTarget, owner, root, rows, total,
+offset?, truncated, diagnostics}`; each row is `{name, kind, id, path, lineStart,
+lineEnd, owner: {name, kind, id}, relation, depth, via?}`. Over MCP it is
+`ix_neighbors relation=overrides` or `ix_overrides`.
+
 `ix around <path>[:<line>]` — the dependents of the code at a location, sized
 for an agent's context (`--budget`, default 300 tokens):
 
@@ -498,6 +571,45 @@ smell kind=has_smell.orphan_file file=tmp.py confidence=0.8 connections=0
 templates, data/config) are dropped; `filtered_non_source=<k>` appears when any
 were. Output stops at `--limit` (default 50, highest confidence first); when it
 cuts, a `diagnostic code=results_truncated` record follows the header.
+
+`ix smells` waits for a fresh analysis for 20 s in llm and json (`--wait
+<seconds>` or `IX_SMELLS_WAIT` changes it; text waits 5 minutes, which is
+also the most: Node's HTTP client stops waiting for a response there). When the analysis has not finished by then, or the backend refuses
+to run it (a 403; on kOS running analysis is admin-only), the answer is the
+stored claims from the last completed run, shaped as a fresh run's output
+(each claim's `file`, `confidence` and signals, the same non-source filter,
+ranking and cap), with one `diagnostic code=smells_stale` record after the
+header, and exit 0:
+
+```
+smells rev=12 count=2 shown=2 version=smell_v1
+diagnostic code=smells_stale reason=timeout computed_rev=12 computed_at=2026-10-21T09:30:00Z message="fresh analysis did not finish within 20 s; showing stored results from rev 12 (2026-10-21T09:30:00Z)"
+smell kind=has_smell.god_module file=src/big.ts entity=3f2a9c1d7b4e confidence=0.9 chunks=42 fan_in=18 fan_out=9
+```
+
+Each stale `smell` row also carries its claim's `entity` id (12 characters),
+as `--list` rows do, since a stored claim can lack a `file`. `reason` is `timeout` or `not_permitted`. `computed_rev` is the newest `rev`
+a stored claim carries and `computed_at` that claim's `run_at` (or the
+response's own `rev`/`run_at`); each is left out when the backend stores
+none, and today's backends store neither, so the message says "from an
+earlier run". When the backend returns only part of what it stores, the
+message adds "the backend returned N of M stored claims". `--format json`
+carries the same as `stale: true`, `computed_rev`, `computed_at` (`null` when
+unknown) and `diagnostics: [{code: "smells_stale", reason, message}]` beside a
+fresh run's fields (`rev`/`run_at` are the stored ones, left out when
+unknown; `truncated` is also true when the backend's stored list was cut),
+and each candidate gains its claim's `entity_id` (12 characters). With nothing
+stored either, the answer is the usual `error code=backend_error` record,
+exit 1. A fresh run within the wait prints exactly what it always did.
+
+Exit codes against the 2-minute wait `ix smells` had before: a 403, or a
+timeout with stored claims, used to exit 1 and now exits 0 with the stale
+answer. An analysis that takes longer than the wait but under 2 minutes used
+to print a fresh answer and now prints the stale one (exit 0), or, when
+nothing is stored yet (a first run), exits 1 with `backend_error`; pass
+`--wait 120` for the old wait. The MCP tool `ix_smells` path-filters
+and limits a stale answer's candidates as it does a fresh one's, and ignores
+`IX_SMELLS_WAIT`, so its 20 s wait stays inside the tool's 30 s limit.
 
 `ix impact <leaf>`:
 
@@ -656,7 +768,7 @@ error code=unresolved_target message="No entity named 'IngestionService' found" 
 
 Renderers shipped: Tier 1 (`map`, `subsystems`, `impact`, `smells`,
 `overview`) plus `stats`; Tier 2 (`inventory`, `rank`, `depends`, `trace`,
-`contains`, `callers`, `callees`, `imports`, `imported-by`); Tier 3 (`search`,
+`contains`, `callers`, `callees`, `imports`, `imported-by`, `overrides`); Tier 3 (`search`,
 `text`, `history`, `patches`); Tier 4 (`entity`, `locate`, `diff`,
 `conflicts`); Tier 5 (`explain`, `read`, `status`, `doctor`, `savings`).
 

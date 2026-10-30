@@ -111,6 +111,39 @@ surfaces (#575).
   holder runs the extra pass before it exits: `ix map` re-ingests the
   workspace, and so does `ix ingest` once the workspace has a baseline
   (otherwise it re-ingests only its own path).
+- **A registered `workspace_id` is never re-keyed on its own.** `ix map` and
+  `ix ingest` use the id `config.yaml` registers for a root, even when it differs
+  from the id the root's absolute path derives (sha256 of `repo:<path>`, 8 hex
+  chars) -- a team sharing one graph from clones at different paths, or a tool
+  that keys on the id, pins it on purpose. The mismatch is one stderr warning
+  per run, skipped under `--silent` and the machine formats; `pinned: true` on
+  the workspace entry silences it for good and makes `--prune-stale-workspace`
+  refuse to re-key that root (remove it first if you mean to). The CLI never
+  writes or removes `pinned`.
+  `--prune-stale-workspace` is the only way to switch to the path-derived id: it
+  re-keys, re-ingests the whole workspace, and after a clean ingest deletes the
+  old id's graph. Before this, a mismatched id was re-keyed silently and the old
+  id's whole workspace deleted after the next clean ingest, on any backend.
+  - **Loopback only, and loopback is the URL, not ownership.** The flag is
+    refused unless the configured endpoint is loopback (`localhost`,
+    `127.0.0.0/8`, `[::1]`, `0.0.0.0`), because nothing on a backend records who
+    owns a workspace id. The check cannot tell your own backend from a shared one
+    reached through an `ssh -L` tunnel, `kubectl port-forward` or a local proxy:
+    those pass it. Never use the flag through one.
+  - **The old id stays recorded until it is deleted.** The re-key writes the old
+    id and the endpoint to the workspace's `pending_prune_of` in `config.yaml`. If
+    the re-ingest is not clean, covers only part of the workspace (`--lang`,
+    `--exclude`), or the delete fails, the next run with the flag
+    against that endpoint re-ingests and retries the deletion; nothing is
+    orphaned. It also keeps the old graph while another root in your config still
+    uses that id. The delete refuses a redirect rather than following it. A
+    hand-edited marker without a quoted `workspace_id` and an `endpoint` is
+    skipped with a one-time warning, never guessed at.
+  - **Multi-repo systems use path ids per member.** When the mapped directory
+    holds two or more member repos, each member's files are keyed by that
+    member's path-derived id, so a pinned id on the system root does not apply
+    to them. A repo mapped both on its own (under a pinned id) and as a member of
+    a system (under its path id) is therefore stored twice.
 - **`ix ingest` honours `--exclude <glob>` and a `.ixignore` at the workspace
   root**, matched relative to that root. A deliberate subset of `.gitignore`: `#` comments, `*`, `?`, `**`, a
   leading `/` to anchor at the root, a trailing `/` for directories only, and a
@@ -127,7 +160,8 @@ surfaces (#575).
   no row carries is dropped rather than emitted empty.
 - **`--pick <n>` is 1-based** everywhere it appears, and is how you resolve an
   ambiguous target without re-running with a longer name. It indexes the list
-  in stable (path, line, id) order, and also selects among the candidates of a
+  in its stable numbered order (best match first; equal matches dealt
+  round-robin by file so one file cannot fill the page), and also selects among the candidates of a
   resolution notice (a target that resolved by choosing among equal matches;
   only the true ties are listed and numbered).
 - **`--all` answers an ambiguous name for every candidate** (`callers`,
@@ -201,6 +235,7 @@ through a superclass or interface follow the direct ones, tagged
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
+| `--no-suggest` | — | off | Disable did-you-mean candidates on unresolved targets |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--all` | — | off | When the symbol is ambiguous, answer for every candidate; rows are tagged with their candidate |
 | `--limit` | `<n>` | `50` | Max results to show |
@@ -414,6 +449,7 @@ Explain an entity — infers role, importance, and structural context.
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
+| `--no-suggest` | — | off | Disable did-you-mean candidates on unresolved targets |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
@@ -472,6 +508,7 @@ System risk analysis — what behavior is at risk if this changes.
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
+| `--no-suggest` | — | off | Disable did-you-mean candidates on unresolved targets |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--all` | — | off | When the target is ambiguous, analyse every candidate; each analysis is tagged with its candidate |
 | `--depth` | `<n>` | `1` | Expansion depth for callers/importers (default 1, max 3) |
@@ -534,6 +571,7 @@ Ingest source files or GitHub data into the knowledge graph.
 | `--debug` | — | `false` | Show phase timing breakdown |
 | `--lang` | `<langs>` | — | Comma-separated languages to include (e.g. cpp,c or typescript). Aliases: c++=cpp, c#=csharp, py=python, ts=typescript, js=javascript |
 | `--exclude` | `<glob>` | — | Exclude paths matching this glob (repeatable; same syntax as `.ixignore`) |
+| `--prune-stale-workspace` | — | off | Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest. Loopback endpoints only -- and loopback is the URL, not ownership: never use it through a tunnel or proxy to a shared backend |
 
 ### `ix init`
 
@@ -565,6 +603,7 @@ Several symbols answer in one call, grouped per symbol.
 |---|---|---|---|
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to results from files matching this path substring |
+| `--no-suggest` | — | off | Disable did-you-mean candidates on unresolved targets |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
@@ -592,6 +631,7 @@ Map the architectural hierarchy of a codebase.
 | `--remap` | — | off | Compute the map now, even from an automatic (hook) run that would defer it |
 | `--verbose` | — | off | Show raw confidence/crosscut scores and signals, plus per-file ingest diagnostics (including why a patch failed to commit) |
 | `--silent` | — | off | Suppress all output except a one-line summary (useful for LLM hooks) |
+| `--prune-stale-workspace` | — | off | Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest. Loopback endpoints only -- and loopback is the URL, not ownership: never use it through a tunnel or proxy to a shared backend |
 
 ### `ix mcp`
 
@@ -624,6 +664,27 @@ Check that `ix mcp` is registered and launchable from each client.
 | Flag | Value | Default | Effect |
 |---|---|---|---|
 | `--host` | `<ids...>` | — | Only these hosts |
+| `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
+| `--quiet` | — | off | Drop headers, section titles and advisory hints |
+| `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
+
+### `ix overrides <symbols...>`
+
+Alias: `ix implementations`. Show the other definitions of a method: what it
+overrides or implements, its overrides, and sibling implementations. Read
+from the graph's `EXTENDS` (extends and implements) and `CONTAINS` edges and
+matched by name, up to 5 levels each way and 32 types; a free function
+answers with no rows and `no_owner_type`. Several symbols answer in one call,
+grouped per symbol.
+
+| Flag | Value | Default | Effect |
+|---|---|---|---|
+| `--kind` | `<kind>` | — | Filter target entity by kind |
+| `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
+| `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--limit` | `<n>` | `50` | Max results to show |
+| `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
@@ -715,7 +776,7 @@ Wipe graph data.
 | `--yes` / `-y` | — | off | Skip confirmation prompt |
 | `--code` | — | off | Reset only code graph (files, functions, classes, regions); preserve goals, plans, tasks, bugs, and decisions |
 | `--ingest` | — | off | Re-run ix map after wiping (rebuilds the code graph) |
-| `--workspace` | — | off | Reset only the registered workspace containing cwd (`/v1/reset/workspace`); every other workspace is left alone. The fix for a hollowed graph, with `--ingest` |
+| `--workspace` | — | off | Reset only the workspace id the registered workspace containing cwd uses (`/v1/reset/workspace`); other ids are left alone, but anyone else who registered the same id (a shared, pinned workspace) loses that graph too. The fix for a hollowed graph, with `--ingest` |
 
 ### `ix savings`
 
@@ -773,6 +834,19 @@ Detect architecture smells in the codebase.
 | `--weak-max-neighbors` | `<n>` | `1` | Max neighbors for weak component |
 | `--list` | — | off | List existing smell claims without rerunning |
 | `--limit` | `<n>` | 50 (text/llm); all (json) | Max candidates, highest confidence first; 0 = all, unfiltered. Otherwise non-source orphan files (docs, templates, data) are dropped before the cut. With `--list`, caps the stored claims (all when omitted) |
+| `--wait` | `<seconds>` | 20 (json/llm); 300 (text) | How long to wait for a fresh analysis, at most 300 (the HTTP client stops waiting for an answer after 5 minutes). `IX_SMELLS_WAIT` (whole seconds, capped at 300; ignored under MCP) sets it too; the flag wins. Past it, or when the backend refuses to run analysis (403), the stored results are shown instead, marked stale (exit 0); with none stored, the error stands (exit 1). Text prints a progress line on stderr every 10 s when stderr is a terminal. `--wait 120` restores the 2-minute wait json/llm had before |
+
+A stale answer is the stored claims shaped as a fresh run's output (`file`,
+`smell`, `confidence`, `signals` per candidate, plus the claim's `entity_id`),
+with the same non-source filter, ranking and cap. JSON adds `stale: true`,
+`computed_rev` and `computed_at` (the newest `rev` a stored claim carries and
+its `run_at`; `null` when the backend does not store them, as today's do not)
+and `diagnostics: [{code: "smells_stale", reason: "timeout" | "not_permitted",
+message}]`; `truncated` is also true when the backend returned only part of
+its stored claims. llm prints one `diagnostic code=smells_stale` record after
+the header, and each row carries its claim's `entity`; text leads with a `Stale:` line. The CLI stops waiting but cannot
+tell whether the backend goes on, so a stale answer never claims a refresh is
+running.
 
 ### `ix stats`
 

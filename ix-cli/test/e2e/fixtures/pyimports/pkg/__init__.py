@@ -1,0 +1,2 @@
+def entry():
+    return "entry"

@@ -5,11 +5,12 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
 import {
-  resolveFileOrEntityFull, resolveEntityFull, printResolved, printAmbiguous,
-  looksFileLike, isRawId, qualifiedSeparator, isFuzzyResult, withMissReason,
+  resolveFileOrEntityFull, rankEntity, withContainers, printResolved, printAmbiguous,
+  looksFileLike, isRawId, qualifiedSeparator, isFuzzyResult, withMissReason, withTargetCandidates,
   type ResolvedEntity, type ResolveResult, type Suggestion,
 } from "../resolve.js";
 import { EXIT_CODES_HELP, setOutcome } from "../outcome.js";
+import { didYouMeanRows, type TargetCandidate } from "../target-suggestions.js";
 import { runPerTarget } from "../multi-target.js";
 import { isFileStale } from "../stale.js";
 import { stderr } from "../stderr.js";
@@ -46,6 +47,7 @@ interface LocateOutput {
   reason?: string;
   files?: string[];
   suggestions?: Suggestion[];
+  didYouMean?: TargetCandidate[];
 }
 
 export function registerLocateCommand(program: Command): void {
@@ -54,6 +56,7 @@ export function registerLocateCommand(program: Command): void {
     .description("Resolve symbols to their position in the codebase and system hierarchy")
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to results from files matching this path substring")
+    .option("--no-suggest", "Disable did-you-mean candidates on unresolved targets")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", `\nExamples:
@@ -65,7 +68,7 @@ export function registerLocateCommand(program: Command): void {
 
 Several symbols answer in one call, grouped per symbol (json: {targets: [...]}).
 ${EXIT_CODES_HELP}`)
-    .action(async (symbols: string[], opts: { kind?: string; path?: string; pick?: number; format: string }) => {
+    .action(async (symbols: string[], opts: { kind?: string; path?: string; pick?: number; suggest?: boolean; format: string }) => {
       const client = createClient();
       // An `ix map` after an edit may have left the map for the system paths
       // read below (CL-13). Checked once per call, on the first target that
@@ -88,13 +91,13 @@ ${EXIT_CODES_HELP}`)
 async function locateOne(
   client: IxClient,
   symbol: string,
-  opts: { kind?: string; path?: string; pick?: number; format: string },
+  opts: { kind?: string; path?: string; pick?: number; suggest?: boolean; format: string },
   freshMap: () => Promise<MapStaleState>,
   staleLlmOnce: (state: MapStaleState) => string[],
 ): Promise<void> {
   const diagnostics: string[] = [];
 
-  const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
+  const resolveOpts = { suggest: opts.suggest, suggestCommand: "locate", missStarted: performance.now(), kind: opts.kind, path: opts.path, pick: opts.pick };
 
   // Resolution with ambiguity detection
   const { target, ambiguous, miss } = await resolveWithAmbiguity(client, symbol, resolveOpts, opts.format);
@@ -116,6 +119,7 @@ async function locateOne(
     // it) and gains the `error` slug, reason and suggestions every other
     // command's miss carries, so one parser reads them all.
     const reason = miss ? await withMissReason(client, symbol, miss, resolveOpts, opts.format) : undefined;
+    const guidance = reason ? await withTargetCandidates(client, symbol, reason, resolveOpts) : undefined;
     const output: LocateOutput = {
       resolvedTarget: null,
       resolutionMode: "none",
@@ -125,9 +129,10 @@ async function locateOne(
       message: reason?.message ?? `No graph entity found for "${symbol}".`,
       ...(reason?.reason ? { reason: reason.reason } : {}),
       ...(reason?.files?.length ? { files: reason.files } : {}),
-      ...(miss?.suggestions?.length ? { suggestions: miss.suggestions } : {}),
+      ...(guidance?.suggestions?.length ? { suggestions: guidance.suggestions } : {}),
+      didYouMean: guidance?.didYouMean ?? [],
     };
-    outputLocate(output, symbol, opts.format);
+    outputLocate(output, symbol, opts.format, guidance?.retryCommand);
     // #539: a machine caller could not tell this from a successful command
     // that intentionally returned nothing. Exits 3, the not-found code
     // `context`, `explain`, `read` and `trace` share.
@@ -245,14 +250,17 @@ async function resolveWithAmbiguity(
     // Symbol resolution — use full result to detect ambiguity
     const allKinds = ["file", "class", "object", "trait", "interface", "module", "function", "method", "constant"];
     const sep = qualifiedSeparator(symbol);
-    result = await resolveEntityFull(client, symbol, allKinds, { ...opts, format, ...(sep ? { silentMiss: true } : {}) });
+    result = await rankEntity(client, symbol, allKinds, { ...opts, format, ...(sep ? { silentMiss: true } : {}) });
     // `Class::method`, `Class.method` and `Class#method` are read as a qualified
     // name only when the name as typed matches nothing, or (for `.`/`#`) matches
     // only fuzzily; resolveFileOrEntityFull then keeps the literal result unless
-    // the qualified one keeps the exit code.
+    // the qualified one keeps the exit code. Containers are asked for only on
+    // the result kept, so a re-resolved name does not pay for them twice.
     const missed = !result.resolved && !result.ambiguous;
     if (sep && (missed || (sep !== "::" && isFuzzyResult(result)))) {
       result = await resolveFileOrEntityFull(client, symbol, { ...opts, format });
+    } else {
+      result = await withContainers(client, result);
     }
   }
 
@@ -310,7 +318,7 @@ function humanizeBreadcrumb(nodes: Array<{ name: string; kind: string }>): strin
 // ── Output ──────────────────────────────────────────────────────────────────
 
 /** Render `ix locate` output as llm records: a `locate` header (or structured error) plus `note` lines. */
-export function renderLocateLlm(output: LocateOutput, symbol: string): string[] {
+export function renderLocateLlm(output: LocateOutput, symbol: string, retryCommand?: string): string[] {
   const t = output.resolvedTarget;
   if (!t) {
     const near = output.suggestions ?? [];
@@ -321,7 +329,7 @@ export function renderLocateLlm(output: LocateOutput, symbol: string): string[] 
         ["n", i + 1], ["name", c.name], ["kind", c.kind],
         ["path", c.path ? relativePath(c.path) ?? c.path : undefined], ["id", llmShortId(c.id)],
       ])),
-      ...(near.length ? [llmLine("hint", [["text", "Re-run with one of these names, or narrow with --path."]])] : []),
+      ...(near.length ? [llmLine("hint", [["text", retryCommand ?? "Re-run with one of these names, or narrow with --path."]])] : []),
     ];
   }
   const lines = [llmLine("locate", [
@@ -340,13 +348,13 @@ export function renderLocateLlm(output: LocateOutput, symbol: string): string[] 
   return lines;
 }
 
-function outputLocate(output: LocateOutput, symbol: string, format: string): void {
+function outputLocate(output: LocateOutput, symbol: string, format: string, retryCommand?: string): void {
   if (format === "json") {
     printJson(output);
     return;
   }
   if (format === "llm") {
-    for (const line of renderLocateLlm(output, symbol)) console.log(line);
+    for (const line of renderLocateLlm(output, symbol, retryCommand)) console.log(line);
     return;
   }
 
@@ -354,11 +362,13 @@ function outputLocate(output: LocateOutput, symbol: string, format: string): voi
 
   if (!output.resolvedTarget) {
     stderr(`No graph entity found for "${symbol}".`);
-    if (output.suggestions?.length) {
+    const near = didYouMeanRows(output.suggestions, output.didYouMean);
+    if (near.length) {
       stderr(chalk.dim("Did you mean:"));
-      for (const c of output.suggestions) {
+      for (const c of near) {
         stderr(`  ${chalk.cyan((c.kind || "").padEnd(10))} ${c.name}${c.path ? chalk.dim(` in ${c.path}`) : ""}`);
       }
+      if (retryCommand) stderr(`Try: ${retryCommand}`);
     }
     console.log("No matches found.");
     return;

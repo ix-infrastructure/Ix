@@ -176,8 +176,10 @@ describe("ix mcp structured output", () => {
     // not to, which is what a caller of `--tools=all` is choosing between.
     // Raised from 17,000 for the undescribed `offset` on ix_text and
     // ix_inventory (~64 bytes each), which print next_offset= and so have to
-    // take it back. Neither is in the core set.
-    expect(total).toBeLessThan(17_200);
+    // take it back. Neither is in the core set. Raised again from 17,200 for
+    // ix_overrides (one more symbol tool, ~730 bytes) and the `overrides`
+    // relation on ix_neighbors (~75 bytes, the one change in the core set).
+    expect(total).toBeLessThan(18_100);
   });
 
   it("attaches structuredContent only where an outputSchema was declared", async () => {

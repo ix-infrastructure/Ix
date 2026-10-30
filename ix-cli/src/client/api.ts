@@ -12,6 +12,7 @@ import type {
   GraphPatchPayload,
   PatchCommitResult,
   CapabilitiesResponse,
+  DegreeResponse,
 } from "./types.js";
 
 export interface ListSubsystemsOptions {
@@ -79,12 +80,20 @@ function hasCode(err: unknown, codes: ReadonlySet<string>): boolean {
  * answer cannot change because of anything the same command does.
  */
 const SHARED_READ_PREFIXES = [
-  "/v1/expand", "/v1/search", "/v1/context", "/v1/list",
+  "/v1/expand", "/v1/degree", "/v1/search", "/v1/context", "/v1/list",
   "/v1/entity/", "/v1/provenance/", "/v1/resolve-prefix/",
 ];
 
 function isSharedRead(path: string): boolean {
   return SHARED_READ_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
+
+/** Rejects with the signal's reason once it aborts. */
+function untilAborted(signal: AbortSignal): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    if (signal.aborted) reject(signal.reason);
+    else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  });
 }
 
 export class IxClient {
@@ -211,7 +220,7 @@ export class IxClient {
 
   async search(
     term: string,
-    opts?: { limit?: number; kind?: string; language?: string; asOfRev?: number; nameOnly?: boolean; workspaceId?: string; systemId?: string; scope?: string }
+    opts?: { limit?: number; kind?: string; language?: string; asOfRev?: number; nameOnly?: boolean; workspaceId?: string; systemId?: string; scope?: string; signal?: AbortSignal }
   ): Promise<GraphNode[]> {
     return this.post("/v1/search", {
       term,
@@ -227,7 +236,7 @@ export class IxClient {
       // request with a derived circe decoder and drop the unknown field, so
       // sending it is always safe; callers keep their own filter as well.
       scope: opts?.scope,
-    });
+    }, { signal: opts?.signal });
   }
 
   // Vector-similarity search. The backend (POST /v1/search/semantic) embeds the
@@ -289,14 +298,14 @@ export class IxClient {
 
   async expandByName(
     name: string,
-    opts?: { direction?: string; predicates?: string[]; kinds?: string[] }
+    opts?: { direction?: string; predicates?: string[]; kinds?: string[]; timeoutMs?: number }
   ): Promise<{ nodes: any[]; edges: any[] }> {
     return this.post("/v1/expand-by-name", {
       name,
       direction: opts?.direction ?? "both",
       predicates: opts?.predicates,
       kinds: opts?.kinds,
-    });
+    }, { timeoutMs: opts?.timeoutMs });
   }
 
   async expand(
@@ -311,6 +320,27 @@ export class IxClient {
       // Only when asked for, so every existing caller sends the body it did.
       ...(opts?.limit !== undefined ? { limit: opts.limit } : {}),
     });
+  }
+
+  /**
+   * One-hop neighbour counts for many nodes in one request (backend ≥ v1.0.33,
+   * at most 5000 ids). With `distinct`, a node's count is its distinct
+   * neighbour nodes, what `expand(id, {direction, predicates})` lists. An id
+   * the backend could not count is absent from `counts`; `truncated` says some
+   * count stopped short. `timeoutMs` bounds this one request (default 2
+   * minutes); the client's read deadline applies as well.
+   */
+  async degree(
+    ids: string[],
+    opts: { direction: string; predicates?: string[]; distinct?: boolean; branchId?: string; timeoutMs?: number },
+  ): Promise<DegreeResponse> {
+    return this.post("/v1/degree", {
+      ids,
+      direction: opts.direction,
+      predicates: opts.predicates,
+      distinct: opts.distinct,
+      ...(opts.branchId !== undefined ? { branchId: opts.branchId } : {}),
+    }, opts.timeoutMs);
   }
 
   async listGoals(): Promise<GraphNode[]> {
@@ -499,6 +529,11 @@ export class IxClient {
     weakMaxNeighbors?: number;
     workspaceId?: string;
     systemId?: string;
+    /**
+     * How long to wait for the analysis before the request is aborted (default
+     * 2 minutes). `ix smells` sets its `--wait` budget here. Never retried.
+     */
+    timeoutMs?: number;
   }): Promise<any> {
     const params = new URLSearchParams();
     if (opts?.orphanMaxConnections !== undefined) params.set("orphan-max-connections", String(opts.orphanMaxConnections));
@@ -508,7 +543,7 @@ export class IxClient {
     if (opts?.workspaceId)                        params.set("workspace_id",            opts.workspaceId);
     if (opts?.systemId)                           params.set("system_id",               opts.systemId);
     const qs = params.toString();
-    return this.post(qs ? `/v1/smells?${qs}` : "/v1/smells", {});
+    return this.post(qs ? `/v1/smells?${qs}` : "/v1/smells", {}, opts?.timeoutMs);
   }
 
   async listSmells(opts?: { workspaceId?: string; systemId?: string }): Promise<any> {
@@ -567,11 +602,34 @@ export class IxClient {
     );
   }
 
-  // Delete all nodes/edges/patches under a single workspace_id (Ix#225 gap 2: clean up
-  // the orphans left when a workspace's id is migrated to the path-based id). Scoped to
-  // exactly that id server-side; other workspaces are untouched.
+  // Delete all nodes/edges/patches under a single workspace_id (`ix reset --workspace`,
+  // and the opted-in cleanup after `--prune-stale-workspace`). Scoped to exactly that id
+  // server-side -- but an id can be shared: anyone who registers the same id for their
+  // clone writes to the same workspace, and loses it too.
+  //
+  // `redirect: "manual"`, like the other reset routes (runResetSync): a destructive
+  // request must reach the endpoint the caller checked, never wherever a proxy in
+  // front of it points. A 3xx is refused, not followed.
   async deleteWorkspace(workspaceId: string): Promise<void> {
-    await this.post("/v1/reset/workspace", { workspaceId });
+    try {
+      const resp = await fetch(`${this.endpoint}/v1/reset/workspace`, {
+        method: "POST",
+        redirect: "manual",
+        headers: this.headers(true, "POST", "/v1/reset/workspace"),
+        body: JSON.stringify({ workspaceId }),
+        signal: this.signalFor(2 * 60 * 1000),
+      });
+      if (resp.status >= 300 && resp.status < 400) {
+        await resp.body?.cancel().catch(() => {});
+        throw this.resetRedirectError("workspace reset route", resp);
+      }
+      const text = await resp.text();
+      // A write: never retried, whatever the status.
+      if (!resp.ok) throw httpError(resp.status, text);
+    } finally {
+      // The reads after a write get the whole read deadline again (as in `read`).
+      if (this.readDeadlineMs !== undefined) this.readDeadlineAt = Date.now() + this.readDeadlineMs;
+    }
   }
 
   // True when the configured endpoint is a local memory-layer. A local
@@ -805,19 +863,43 @@ export class IxClient {
     return this.token !== undefined;
   }
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
+  private async post<T>(
+    path: string, body: unknown, opts?: { timeoutMs?: number; signal?: AbortSignal },
+  ): Promise<T> {
+    const timeoutMs = opts?.timeoutMs ?? 2 * 60 * 1000;
+    const signal = opts?.signal;
     const payload = JSON.stringify(body);
-    return this.read<T>("POST", path, payload, () =>
+    const send = () =>
       fetch(`${this.endpoint}${path}`, {
         method: "POST",
         headers: this.headers(true, "POST", path),
         body: payload,
         // These small reads/writes (source-hashes, stitch, list, ...) had no
         // timeout, so a stalled connection could hang the process indefinitely.
-        // 2 min per request, also bounded by the shared deadline when set, and
-        // by the read deadline when this POST is a read.
-        signal: this.signalFor(2 * 60 * 1000, isSharedRead(path)),
-      }));
+        // 2 min per request unless the caller bounds it, also bounded by the
+        // shared deadline when set, and by the read deadline when this POST is
+        // a read.
+        signal: signal ? AbortSignal.any([signal, this.signalFor(timeoutMs, isSharedRead(path))])
+          : this.signalFor(timeoutMs, isSharedRead(path)),
+      });
+    if (signal) {
+      // Optional probes own their cancellation: no shared memo or retry may
+      // outlive their budget or cancel another caller's ordinary search. They
+      // still count against the in-flight limit; one cancelled while it waits
+      // for a slot rejects at once and, given the slot later, sends nothing.
+      signal.throwIfAborted();
+      const run = async (): Promise<SuccessBody> => {
+        signal.throwIfAborted();
+        const response = await send();
+        const text = await response.text();
+        if (!response.ok) throw httpError(response.status, text);
+        return { status: response.status, text };
+      };
+      const queued = this.limiter ? this.limiter.run(run) : run();
+      queued.catch(() => {});
+      return parseOrThrowWithStatus<T>(await Promise.race([queued, untilAborted(signal)]));
+    }
+    return this.read<T>("POST", path, payload, send);
   }
 
   private async get<T>(path: string, timeoutMs = 2 * 60 * 1000): Promise<T> {
