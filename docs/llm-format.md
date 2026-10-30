@@ -395,7 +395,10 @@ ref name=select kind=method path=src/cluster/Cluster.java lines=30-41 via=Invoke
 definitions of a method, the ones that move with it when its signature or
 behaviour changes. The header names the target as `<Type>.<method>`, the type
 that contains it (`owner=`) and the farthest supertype that declares the
-method (`root=`). Then one `override` record per definition:
+method (`root=`). When the method is declared on more than one top
+supertype (two interfaces, or a base class and an interface, neither under
+the other), `roots=` lists each, `root` first (json: `roots`), and siblings
+come from every one. Then one `override` record per definition:
 
 ```
 overrides target=Mid.m owner=Mid root=Base.m shown=3 total=3
@@ -407,7 +410,8 @@ override name=m relation=sibling owner=Other kind=method path=pkg/other.py lines
 `relation` is `overrides` (declared on a supertype) or `implements` (the
 supertype's kind is interface, trait or protocol; a graph that stores the
 base as a class says `overrides`), `overridden_by` (declared on a subtype), or
-`sibling` (declared on another subtype of the root, `via=<Root>.<method>`).
+`sibling` (declared on another subtype of a root, `via=<Root>.<method>`
+naming that root; a type under two roots is listed once, under the first).
 `depth` counts levels from the target's type for up and down rows, and from
 the root for siblings. Rows are ordered by relation, then depth, then path.
 Matching is by name through `EXTENDS` (which carries `implements`) and

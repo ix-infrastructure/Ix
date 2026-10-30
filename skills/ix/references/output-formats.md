@@ -27,7 +27,9 @@ Each row carries the location you would otherwise grep or re-read for:
 - `overrides` rows: `override name=... relation=... owner=<Type> path=...
   lines=... depth=<n>`, where `relation` is `overrides` or `implements` (a
   base declaration), `overridden_by` (below the target) or `sibling` (another
-  implementation of the root's method, `via=<Root>.<method>`).
+  implementation of a root's method, `via=<Root>.<method>`). The header's
+  `root=` is the farthest declaring supertype; `roots=` lists every top one
+  when there are several (two interfaces, or a class and an interface).
 - `read`: every source line is `<line number><TAB><source>`, after a
   `content lines=<n> numbered=true` record — cite and edit by those numbers.
 - `text`: `match path=... line=... snippet=...`.

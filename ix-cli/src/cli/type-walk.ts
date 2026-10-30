@@ -76,6 +76,12 @@ export interface OverrideFamily {
   owner?: TypeRef & { path?: string };
   /** The farthest supertype declaring the method, as `Type.m`; absent when none does. */
   root?: string;
+  /**
+   * Every top declaration, `root` first, when there are several: supertypes
+   * declaring the method that no other declaring supertype is above (two
+   * interfaces, or a base class and an interface). Siblings come from each.
+   */
+  roots?: string[];
   rows: OverrideRow[];
   /** A bound stopped a walk: there may be more rows than these. */
   truncated: boolean;
@@ -94,6 +100,11 @@ const typeRef = (n: any): TypeRef => ({ id: String(n.id), name: String(n.name ??
  * the text: what follows it is inside the brackets as far as anyone can tell.
  */
 export function outsideBrackets(text: string): string {
+  return scanBrackets(text).out;
+}
+
+/** `outsideBrackets`, and whether a run is still open at the end of `text`. */
+function scanBrackets(text: string): { out: string; open: boolean } {
   const open: string[] = [];
   let out = "";
   for (const ch of text) {
@@ -103,7 +114,33 @@ export function outsideBrackets(text: string): string {
     } else if (ch === ">" && open[open.length - 1] === "<") open.pop();
     else if (open.length === 0) out += ch;
   }
-  return out;
+  return { out, open: open.length > 0 };
+}
+
+/**
+ * A type's header, up to its body: the line at `lineStart` and at most two
+ * more, which join only before the type keyword (annotation and decorator
+ * lines) or while the header visibly goes on: a bracket still open, a
+ * trailing `,`, `extends` or `implements` (or `:` outside Python, where it
+ * opens the body), or a next line opening with `:`, `,`, `extends`,
+ * `implements`, `where` or `permits`. A bodyless `data class P(val x: Int)`
+ * ends on its own line, so a `fun f(): Config` below it is not read as a base.
+ */
+function headerText(lines: readonly string[], lineStart: number, path: string): string {
+  const trailing = /\.pyi?$/i.test(path) ? /(?:,|\b(?:extends|implements))\s*$/ : /(?:[:,]|\b(?:extends|implements))\s*$/;
+  let text = "";
+  for (let i = Math.max(0, lineStart - 1); i < Math.min(lines.length, lineStart + 2); i++) {
+    const line = lines[i] ?? "";
+    if (text !== "") {
+      const scan = scanBrackets(text);
+      const started = /\b(?:class|struct|interface|object|record|enum|protocol|trait)\b/.test(scan.out);
+      if (started && !scan.open && !trailing.test(text)
+        && !/^\s*(?:[:,]|(?:extends|implements|where|permits)\b)/.test(line)) break;
+    }
+    text += (text === "" ? "" : " ") + line;
+    if (line.includes("{")) break;
+  }
+  return text.split(/[{]/)[0];
 }
 
 /**
@@ -112,8 +149,7 @@ export function outsideBrackets(text: string): string {
  * Generic arguments, constructor parameters and keyword arguments are not bases.
  */
 export function headerBaseNames(lines: readonly string[], lineStart: number, path: string): string[] {
-  // The header up to its body: a few lines at most.
-  const header = lines.slice(Math.max(0, lineStart - 1), lineStart + 2).join(" ").split(/[{]/)[0];
+  const header = headerText(lines, lineStart, path);
   let bases: string[];
   if (/\.pyi?$/i.test(path)) {
     let list = /\bclass\s+\w+\s*(?:\[[^\]]*\])?\s*\(([^)]*)\)/.exec(header)?.[1] ?? "";
@@ -200,7 +236,7 @@ export async function overrideFamily(
 
   // Up: supertypes, nearest first. The owner's own members only where a second `m` can hide in it.
   const overloads = OVERLOAD_LANGUAGES.test(target.path ?? "");
-  const [{ found: up, ownerHasBase }] = await Promise.all([
+  const [{ found: up, ownerHasBase, parentsOf }] = await Promise.all([
     walkUp(owner, expand, caps),
     overloads ? loadMembers([owner]) : undefined,
   ]);
@@ -216,15 +252,34 @@ export async function overrideFamily(
   ]);
 
   const declaring = up.filter((u) => (members.get(u.type.id) ?? []).length > 0);
-  // The farthest declaration; among equals, the first in walk order (by name).
-  const root = declaring.reduce<typeof declaring[number] | undefined>((best, u) => (!best || u.depth > best.depth ? u : best), undefined);
+  // The supertypes above one, through the EXTENDS edges the up walk read.
+  const aboveOf = (id: string): Set<string> => {
+    const seen = new Set<string>();
+    for (let todo = [id]; todo.length > 0;) {
+      for (const p of parentsOf.get(todo.pop()!) ?? []) if (!seen.has(p)) { seen.add(p); todo.push(p); }
+    }
+    return seen;
+  };
+  const aboveDeclaring = new Map(declaring.map((d) => [d.type.id, aboveOf(d.type.id)]));
+  // Top declarations: no other declaring supertype strictly above them (in a
+  // cycle, each is above the other, and both stay). The farthest first; among
+  // equals, the first in walk order (by name).
+  const roots = declaring
+    .filter((d) => !declaring.some((e) => e !== d && aboveDeclaring.get(d.type.id)!.has(e.type.id)
+      && !aboveDeclaring.get(e.type.id)!.has(d.type.id)))
+    .sort((a, b) => b.depth - a.depth);
+  const qualify = (t: any) => `${t.name}.${target.name}`;
 
-  // Siblings: from the root down, around the owner's own subtree.
-  const siblings = new Map<string, number>();
-  if (root) {
+  // Siblings: from each root down, around the owner's own subtree, each
+  // under the first root that reaches it. One root at a time, so the shared
+  // types budget is spent in the same order on every run.
+  const siblings = new Map<string, { depth: number; via: string }>();
+  for (const root of roots) {
     await walkDown(root.type, subtypesOf, types, caps,
       (t) => t.id === owner.id || below.has(t.id),
-      (t, depth) => { if (!ancestors.has(t.id)) siblings.set(t.id, depth); });
+      (t, depth) => { if (!ancestors.has(t.id) && !siblings.has(t.id)) siblings.set(t.id, { depth, via: qualify(root.type) }); });
+  }
+  if (roots.length > 0) {
     // A supertype the up walk did not reach (cut by a cap) shows up on the way
     // down from the root, above the owner or one of its supertypes: not a sibling.
     const above = new Set([owner.id, ...ancestors]);
@@ -254,8 +309,7 @@ export async function overrideFamily(
   };
   for (const u of up) add(u.type.id, ABSTRACT_KINDS.has(String(u.type.kind ?? "").toLowerCase()) ? "implements" : "overrides", u.depth);
   for (const [id, depth] of below) add(id, "overridden_by", depth);
-  const via = root ? `${root.type.name}.${target.name}` : undefined;
-  for (const [id, depth] of siblings) add(id, "sibling", depth, via);
+  for (const [id, { depth, via }] of siblings) add(id, "sibling", depth, via);
   rows.sort((a, b) => RELATION_ORDER[a.relation] - RELATION_ORDER[b.relation]
     || a.depth - b.depth
     || String(a.path ?? "").localeCompare(String(b.path ?? ""))
@@ -290,7 +344,8 @@ export async function overrideFamily(
 
   return {
     owner: { ...typeRef(owner), ...(ownerLocation.path ? { path: ownerLocation.path } : {}) },
-    ...(root ? { root: via } : {}),
+    ...(roots.length > 0 ? { root: qualify(roots[0].type) } : {}),
+    ...(roots.length > 1 ? { roots: roots.map((r) => qualify(r.type)) } : {}),
     rows,
     truncated: caps.size > 0,
     diagnostics,
@@ -345,13 +400,18 @@ type Expand = (id: string, direction: "in" | "out", predicate: string) => Promis
  * `HIERARCHY_DEPTH` levels and `HIERARCHY_UP_MAX_TYPES` types. The level past
  * the last is expanded only to tell a cut walk from a finished one.
  */
-async function walkUp(owner: any, expand: Expand, caps: Set<HierarchyCap>): Promise<{ found: Array<{ type: any; depth: number }>; ownerHasBase: boolean }> {
+async function walkUp(owner: any, expand: Expand, caps: Set<HierarchyCap>): Promise<{
+  found: Array<{ type: any; depth: number }>; ownerHasBase: boolean; parentsOf: Map<string, string[]>;
+}> {
   const seen = new Set<string>([owner.id]);
   const found: Array<{ type: any; depth: number }> = [];
+  // The supertype ids each expanded type names, cut-off ones included.
+  const parentsOf = new Map<string, string[]>();
   let ownerHasBase = false;
   let frontier = [owner];
   for (let depth = 1; frontier.length > 0; depth++) {
     const parents = await mapLimit(frontier, ALL_CONCURRENCY, (t) => expand(t.id, "out", "EXTENDS"));
+    frontier.forEach((t, i) => parentsOf.set(t.id, parents[i].map((n) => String(n.id))));
     if (depth === 1) ownerHasBase = parents[0].length > 0;
     const next: any[] = [];
     let stop = false;
@@ -366,7 +426,7 @@ async function walkUp(owner: any, expand: Expand, caps: Set<HierarchyCap>): Prom
     if (stop || depth > HIERARCHY_DEPTH) break;
     frontier = next;
   }
-  return { found, ownerHasBase };
+  return { found, ownerHasBase, parentsOf };
 }
 
 /**

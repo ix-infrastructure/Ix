@@ -314,6 +314,68 @@ describe("interfaces", () => {
     expect(text.match(/^ {2}\S.*$/gm)).toEqual(["  overrides", "  implements"]);
     expect(text).toMatch(/ {2}overrides\n {4}B\.run .*depth 1\n {4}A\.run .*depth 2\n {2}implements\n {4}Runnable\.run /);
   });
+
+  it("two interfaces declaring the method: the siblings of each, via its own root", async () => {
+    // C implements I1 and I2; X implements only I1, Y only I2. Y must change
+    // with C.m as much as X does, though I1 sorts first.
+    const i1 = type("I1", "src/I1.java", "interface");
+    const i2 = type("I2", "src/I2.java", "interface");
+    const c = type("C", "src/C.java");
+    const x = type("X", "src/X.java");
+    const y = type("Y", "src/Y.java");
+    const cm = method(c, "m");
+    graph.value = new Graph()
+      .extends(c, i1, i2).extends(x, i1).extends(y, i2)
+      .contains(i1, method(i1, "m", 2)).contains(i2, method(i2, "m", 2))
+      .contains(c, cm).contains(x, method(x, "m")).contains(y, method(y, "m"))
+      .map;
+    target.value = asTarget(cm);
+    const body = json((await run(["overrides", "m", "--format", "json"])).out);
+    expect(brief(body.rows)).toEqual([
+      ["implements", "I1.m", 1, undefined],
+      ["implements", "I2.m", 1, undefined],
+      ["sibling", "X.m", 1, "I1.m"],
+      ["sibling", "Y.m", 1, "I2.m"],
+    ]);
+    expect(body.root).toBe("I1.m");
+    expect(body.roots).toEqual(["I1.m", "I2.m"]);
+    expect(body.truncated).toBe(false);
+    expect(body.diagnostics).toEqual([]);
+    const llm = (await run(["overrides", "m", "--format", "llm"])).out;
+    expect(llm[0]).toBe("overrides target=C.m owner=C root=I1.m roots=I1.m,I2.m shown=4 total=4");
+    const text = (await run(["overrides", "m"])).out.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+    expect(text).toMatch(/siblings \(via I1\.m\)\n {4}X\.m .*\n {2}siblings \(via I2\.m\)\n {4}Y\.m /);
+  });
+
+  it("a base class chain and an interface: the class root and the interface are both roots, the mid-chain base is not", async () => {
+    // C extends B extends A, C implements I; A, B and I declare m. B is under
+    // A, so A's walk covers it: B is no root of its own.
+    const a = type("A", "src/A.java");
+    const b = type("B", "src/B.java");
+    const i = type("I", "src/I.java", "interface");
+    const c = type("C", "src/C.java");
+    const z = type("Z", "src/Z.java");
+    const w = type("W", "src/W.java");
+    const cm = method(c, "m");
+    graph.value = new Graph()
+      .extends(c, b, i).extends(b, a).extends(z, a).extends(w, i)
+      .contains(a, method(a, "m", 2)).contains(b, method(b, "m", 2)).contains(i, method(i, "m", 2))
+      .contains(c, cm).contains(z, method(z, "m")).contains(w, method(w, "m"))
+      .map;
+    target.value = asTarget(cm);
+    const body = json((await run(["overrides", "m", "--format", "json"])).out);
+    expect(body.roots).toEqual(["A.m", "I.m"]);
+    expect(brief(body.rows.filter((r: any) => r.relation === "sibling"))).toEqual([
+      ["sibling", "W.m", 1, "I.m"],
+      ["sibling", "Z.m", 1, "A.m"],
+    ]);
+  });
+
+  it("one root: no roots key", async () => {
+    graph.value = threeLevels().map;
+    target.value = asTarget(MID_M);
+    expect(json((await run(["overrides", "m", "--format", "json"])).out).roots).toBeUndefined();
+  });
 });
 
 describe("no family to report", () => {
@@ -607,6 +669,24 @@ describe("headerBaseNames", () => {
     ["A.swift", "final class A: NSObject, Codable {", ["NSObject", "Codable"]],
   ])("%s: %s -> %j", (path, line, expected) => {
     expect(headerBaseNames([line], 1, path)).toEqual(expected);
+  });
+
+  it.each([
+    // A bodyless type ends on its own line: what follows is not its header.
+    ["a.kt", ["data class Point(val x: Int)", "", "fun area(p: Point): Double = 0.0"], []],
+    ["a.kt", ["data class Point(val x: Int)", "fun area(p: Point): Config = TODO()"], []],
+    ["a.kt", ["class A", "class B : Base()"], []],
+    ["a.py", ["class A(Base):", "    x: Other = Other()"], ["Base"]],
+    // A header that goes on over lines is read whole.
+    ["A.java", ["public class A", "    extends B", "    implements C {"], ["B", "C"]],
+    ["A.java", ["@Entity", "public class A extends B {"], ["B"]],
+    ["a.py", ["@dataclass", "class A(Base):"], ["Base"]],
+    ["a.py", ["class A(", "    Base,", "):"], ["Base"]],
+    ["a.cpp", ["class A", "    : public Base {"], ["Base"]],
+    ["A.cs", ["public class A : Base,", "    IThing {"], ["Base", "IThing"]],
+    ["A.kt", ["class A(", "    val x: Int,", ") : Base() {"], ["Base"]],
+  ])("%s over lines: %j -> %j", (path, lines, expected) => {
+    expect(headerBaseNames(lines, 1, path)).toEqual(expected);
   });
 });
 

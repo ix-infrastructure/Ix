@@ -94,6 +94,7 @@ async function overridesOne(client: IxClient, symbol: string, opts: OverridesOpt
       resolvedTarget: { id: target.id, name: target.name, kind: target.kind, ...(target.path ? { path: target.path } : {}) },
       ...(family.owner ? { owner: family.owner } : {}),
       ...(family.root ? { root: family.root } : {}),
+      ...(family.roots ? { roots: family.roots } : {}),
       rows,
       total,
       ...(offset > 0 ? { offset } : {}),
@@ -106,7 +107,7 @@ async function overridesOne(client: IxClient, symbol: string, opts: OverridesOpt
   const qualified = family.owner ? `${family.owner.name}.${target.name}` : target.name;
   if (opts.format === "llm") {
     console.log(llmLine("overrides", [
-      ["target", qualified], ["owner", family.owner?.name], ["root", family.root],
+      ["target", qualified], ["owner", family.owner?.name], ["root", family.root], ["roots", family.roots?.join(",")],
       ["offset", offset > 0 ? offset : undefined], ["shown", rows.length], ["total", total], ["truncated", truncated ? true : undefined],
     ]));
     for (const d of diagnostics) {
