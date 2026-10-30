@@ -502,8 +502,8 @@ were. Output stops at `--limit` (default 50, highest confidence first); when it
 cuts, a `diagnostic code=results_truncated` record follows the header.
 
 `ix smells` waits for a fresh analysis for 20 s in llm and json (`--wait
-<seconds>`, at most 3600, or `IX_SMELLS_WAIT` changes it; text waits 10
-minutes). When the analysis has not finished by then, or the backend refuses
+<seconds>` or `IX_SMELLS_WAIT` changes it; text waits 5 minutes, which is
+also the most: Node's HTTP client stops waiting for a response there). When the analysis has not finished by then, or the backend refuses
 to run it (a 403; on kOS running analysis is admin-only), the answer is the
 stored claims from the last completed run, shaped as a fresh run's output
 (each claim's `file`, `confidence` and signals, the same non-source filter,
@@ -513,10 +513,11 @@ header, and exit 0:
 ```
 smells rev=12 count=2 shown=2 version=smell_v1
 diagnostic code=smells_stale reason=timeout computed_rev=12 computed_at=2026-10-21T09:30:00Z message="fresh analysis did not finish within 20 s; showing stored results from rev 12 (2026-10-21T09:30:00Z)"
-smell kind=has_smell.god_module file=src/big.ts confidence=0.9 chunks=42 fan_in=18 fan_out=9
+smell kind=has_smell.god_module file=src/big.ts entity=3f2a9c1d7b4e confidence=0.9 chunks=42 fan_in=18 fan_out=9
 ```
 
-`reason` is `timeout` or `not_permitted`. `computed_rev` is the newest `rev`
+Each stale `smell` row also carries its claim's `entity` id (12 characters),
+as `--list` rows do, since a stored claim can lack a `file`. `reason` is `timeout` or `not_permitted`. `computed_rev` is the newest `rev`
 a stored claim carries and `computed_at` that claim's `run_at` (or the
 response's own `rev`/`run_at`); each is left out when the backend stores
 none, and today's backends store neither, so the message says "from an
@@ -528,10 +529,14 @@ fresh run's fields (`rev`/`run_at` are the stored ones, left out when
 unknown; `truncated` is also true when the backend's stored list was cut),
 and each candidate gains its claim's `entity_id` (12 characters). With nothing
 stored either, the answer is the usual `error code=backend_error` record,
-exit 1. A fresh run within the wait prints exactly what it always did. Node's
-HTTP client stops waiting for a response after 5 minutes whatever the wait,
-so a longer `--wait` falls back to the stored claims at that point, and the
-message gives the time actually waited. The MCP tool `ix_smells` path-filters
+exit 1. A fresh run within the wait prints exactly what it always did.
+
+Exit codes against the 2-minute wait `ix smells` had before: a 403, or a
+timeout with stored claims, used to exit 1 and now exits 0 with the stale
+answer. An analysis that takes longer than the wait but under 2 minutes used
+to print a fresh answer and now prints the stale one (exit 0), or, when
+nothing is stored yet (a first run), exits 1 with `backend_error`; pass
+`--wait 120` for the old wait. The MCP tool `ix_smells` path-filters
 and limits a stale answer's candidates as it does a fresh one's, and ignores
 `IX_SMELLS_WAIT`, so its 20 s wait stays inside the tool's 30 s limit.
 

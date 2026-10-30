@@ -242,9 +242,20 @@ describe("ix smells wait budget and stored-results fallback", () => {
       expect(lines).toEqual([
         "smells rev=12 count=2 shown=2 version=smell_v1",
         'diagnostic code=smells_stale reason=timeout computed_rev=12 computed_at=2026-10-21T09:30:00Z message="fresh analysis did not finish within 20 s; showing stored results from rev 12 (2026-10-21T09:30:00Z)"',
-        "smell kind=has_smell.god_module file=src/big.ts confidence=0.9 chunks=42 fan_in=18 fan_out=9",
-        "smell kind=has_smell.orphan_file file=src/a.ts confidence=0.4 connections=0",
+        // Each stored row names its claim's entity, as `--list` rows do.
+        "smell kind=has_smell.god_module file=src/big.ts entity=entity-b-012 confidence=0.9 chunks=42 fan_in=18 fan_out=9",
+        "smell kind=has_smell.orphan_file file=src/a.ts entity=entity-a-012 confidence=0.4 connections=0",
       ]);
+      expect(process.exitCode ?? 0).toBe(0);
+    });
+
+    it("a stored row without a file is still identified by its entity", async () => {
+      fakeClient.runSmells.mockImplementation(neverAnswers());
+      fakeClient.listSmells.mockResolvedValue({
+        smells: [{ smell: "has_smell.weak_component_member", entity_id: "entity-d-0123456789", value: { confidence: 0.6, signals: { neighbor_count: 1 } }, inference_version: "smell_v1" }],
+      });
+      const lines = (await run(["--format", "llm"], 20_000)).split("\n");
+      expect(lines[2]).toMatch(/^smell kind=has_smell\.weak_component_member .*entity=entity-d-012 confidence=0\.6 neighbors=1$/);
       expect(process.exitCode ?? 0).toBe(0);
     });
 
@@ -288,10 +299,10 @@ describe("ix smells wait budget and stored-results fallback", () => {
   });
 
   describe("text", () => {
-    it("waits up to 10 minutes by default", async () => {
-      fakeClient.runSmells.mockImplementation(answersAfter(5 * 60_000, REPORT));
-      const out = await run([], 5 * 60_000);
-      expect(waitPassed()).toBe(600_000);
+    it("waits up to 5 minutes by default, the longest the HTTP client waits", async () => {
+      fakeClient.runSmells.mockImplementation(answersAfter(4 * 60_000, REPORT));
+      const out = await run([], 4 * 60_000);
+      expect(waitPassed()).toBe(300_000);
       expect(out).toContain("Architecture Smells");
       expect(fakeClient.listSmells).not.toHaveBeenCalled();
     });
@@ -313,8 +324,8 @@ describe("ix smells wait budget and stored-results fallback", () => {
 
     it("on expiry shows stored results under a visible stale header", async () => {
       fakeClient.runSmells.mockImplementation(neverAnswers());
-      const out = await run([], 600_000);
-      expect(out).toContain("Stale: fresh analysis did not finish within 10 min; showing stored results from rev 12 (2026-10-21T09:30:00Z)");
+      const out = await run([], 300_000);
+      expect(out).toContain("Stale: fresh analysis did not finish within 5 min; showing stored results from rev 12 (2026-10-21T09:30:00Z)");
       expect(out).toContain("Architecture Smells");
       expect(out).toContain("God Module");
       expect(out).toContain("src/big.ts");
@@ -324,25 +335,25 @@ describe("ix smells wait budget and stored-results fallback", () => {
     });
   });
 
-  describe("a wait longer than the HTTP client's 5 minute limit", () => {
-    it("text: the 300 s headers timeout falls back to stored results, naming the time actually waited", async () => {
+  describe("the HTTP client's own 5 minute limit, which can fire a moment before a 300 s wait", () => {
+    it("text: the 300 s headers timeout falls back to stored results", async () => {
       fakeClient.runSmells.mockImplementation(headersTimeoutAt300s());
       const out = await run([], 300_000);
-      expect(waitPassed()).toBe(600_000);
-      expect(out).toContain("Stale: fresh analysis did not finish within 5 min, the longest the HTTP client waits for an answer; showing stored results from rev 12 (2026-10-21T09:30:00Z)");
+      expect(waitPassed()).toBe(300_000);
+      expect(out).toContain("Stale: fresh analysis did not finish within 5 min; showing stored results from rev 12 (2026-10-21T09:30:00Z)");
       expect(out).toContain("God Module");
       expect(errs).toEqual([]);
       expect(process.exitCode ?? 0).toBe(0);
     });
 
-    it("json with a long --wait: stale answer, exit 0", async () => {
+    it("json with --wait 300: stale answer, exit 0", async () => {
       fakeClient.runSmells.mockImplementation(headersTimeoutAt300s());
-      const out = JSON.parse(await run(["--format", "json", "--wait", "900"], 300_000));
+      const out = JSON.parse(await run(["--format", "json", "--wait", "300"], 300_000));
       expect(out.stale).toBe(true);
       expect(out.diagnostics).toEqual([{
         code: "smells_stale",
         reason: "timeout",
-        message: "fresh analysis did not finish within 5 min, the longest the HTTP client waits for an answer; showing stored results from rev 12 (2026-10-21T09:30:00Z)",
+        message: "fresh analysis did not finish within 5 min; showing stored results from rev 12 (2026-10-21T09:30:00Z)",
       }]);
       expect(process.exitCode ?? 0).toBe(0);
     });
@@ -392,11 +403,11 @@ describe("ix smells wait budget and stored-results fallback", () => {
       expect(waitPassed()).toBe(20_000);
     });
 
-    it("caps IX_SMELLS_WAIT at an hour", async () => {
+    it("caps IX_SMELLS_WAIT at 5 minutes, the longest the HTTP client waits", async () => {
       fakeClient.runSmells.mockResolvedValue(REPORT);
       process.env.IX_SMELLS_WAIT = "99999999";
       await run(["--format", "json"]);
-      expect(waitPassed()).toBe(3_600_000);
+      expect(waitPassed()).toBe(300_000);
     });
 
     it("ignores IX_SMELLS_WAIT under MCP, whose runner gives ix_smells 30 s", async () => {
@@ -413,14 +424,14 @@ describe("ix smells wait budget and stored-results fallback", () => {
       expect(waitPassed()).toBe(20_000);
     });
 
-    it("accepts a --wait of an hour, and refuses more", async () => {
+    it("accepts a --wait of 5 minutes, and refuses more: the HTTP client would stop waiting there anyway", async () => {
       fakeClient.runSmells.mockResolvedValue(REPORT);
-      await run(["--format", "json", "--wait", "3600"]);
-      expect(waitPassed()).toBe(3_600_000);
+      await run(["--format", "json", "--wait", "300"]);
+      expect(waitPassed()).toBe(300_000);
       fakeClient.runSmells.mockClear();
-      await expect(run(["--format", "json", "--wait", "3601"])).rejects.toMatchObject({
+      await expect(run(["--format", "json", "--wait", "301"])).rejects.toMatchObject({
         code: "commander.invalidArgument",
-        message: expect.stringContaining("at most 3600 seconds"),
+        message: expect.stringContaining("at most 300 seconds"),
       });
       expect(fakeClient.runSmells).not.toHaveBeenCalled();
     });

@@ -168,11 +168,32 @@ export const DEGREE_CHECK_MIN = 10;
 const EXPAND_DEFAULT_LIMIT = 1000;
 
 /**
- * Backends (by endpoint) not to score through `POST /v1/degree` again in this
- * process: the route answered 404 or 405 (it predates them, Ix-memory <
- * v1.0.33), or it counted fewer neighbours than expand lists for some node.
+ * How long a backend stays off the degree path once it is found unusable.
+ * Longer than any one CLI process, so a command asks once; short enough that
+ * a long-lived `ix mcp` server tries again after a backend upgrade, or after
+ * a mismatch that an ingest landing between the two calls caused.
  */
-const degreeUnusable = new Set<string>();
+export const DEGREE_UNUSABLE_TTL_MS = 10 * 60_000;
+
+/**
+ * Backends (by endpoint) not to score through `POST /v1/degree` again until
+ * the time stored (epoch ms): the route answered 404 or 405 (it predates them,
+ * Ix-memory < v1.0.33), or it counted fewer neighbours than expand lists for
+ * some node.
+ */
+const degreeUnusable = new Map<string, number>();
+
+function markDegreeUnusable(endpoint: string): void {
+  degreeUnusable.set(endpoint, Date.now() + DEGREE_UNUSABLE_TTL_MS);
+}
+
+function isDegreeUnusable(endpoint: string): boolean {
+  const until = degreeUnusable.get(endpoint);
+  if (until === undefined) return false;
+  if (Date.now() < until) return true;
+  degreeUnusable.delete(endpoint);
+  return false;
+}
 
 /** The HTTP status an `IxClient` error carries at the front of its message, if any. */
 function errorStatus(err: unknown): number | undefined {
@@ -211,12 +232,13 @@ function nthLargest(values: number[], n: number): number {
  * undercount on a candidate outside that margin is not caught.
  *
  * Returns null when the caller must score through `scoreAllCandidates`
- * instead: the route is missing (404/405, remembered for this backend), the
- * request failed or was refused (413, a transport error, anything else), the
- * answer is not the expected shape, the backend says it truncated a count
- * (a truncated count must never become a score), or an expand lists more
- * neighbours than `d` (remembered: its counts are no ceiling). An id absent
- * from `counts` is always expanded. An expand that fails scores 0 with
+ * instead: the route is missing (404/405, remembered for this backend for
+ * `DEGREE_UNUSABLE_TTL_MS`), the request failed or was refused (413, a
+ * transport error, anything else), the answer is not the expected shape, the
+ * backend says it truncated a count (a truncated count must never become a
+ * score), or an expand lists more neighbours than `d` (remembered the same
+ * way: its counts are no ceiling). An id absent from `counts` is always
+ * expanded. An expand that fails scores 0 with
  * today's diagnostic, as on the expand path, and after one every candidate
  * not yet expanded is expanded, as the expand path would have.
  */
@@ -229,7 +251,7 @@ export async function scoreViaDegree(
   top = 0,
 ): Promise<ScoredEntity[] | null> {
   const endpoint = String(client.endpoint);
-  if (degreeUnusable.has(endpoint)) return null;
+  if (isDegreeUnusable(endpoint)) return null;
 
   const counts = new Map<string, number>();
   const ids = [...new Set<string>(candidates.map((node: any) => node.id))];
@@ -244,7 +266,7 @@ export async function scoreViaDegree(
       });
     } catch (err) {
       const status = errorStatus(err);
-      if (status === 404 || status === 405) degreeUnusable.add(endpoint);
+      if (status === 404 || status === 405) markDegreeUnusable(endpoint);
       return null;
     }
     if (!res || typeof res.counts !== "object" || res.counts === null) return null;
@@ -306,7 +328,7 @@ export async function scoreViaDegree(
       const score = scores[k];
       const d = counts.get(candidates[i].id);
       if (score !== undefined && d !== undefined && score > d) {
-        degreeUnusable.add(endpoint);
+        markDegreeUnusable(endpoint);
         return null;
       }
       if (score === undefined) {

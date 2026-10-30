@@ -2,7 +2,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
-import { DEGREE_CHECK_MIN, DEGREE_MAX_IDS, DEGREE_TIMEOUT_MS, registerRankCommand, scoreViaDegree } from "../commands/rank.js";
+import {
+  DEGREE_CHECK_MIN, DEGREE_MAX_IDS, DEGREE_TIMEOUT_MS, DEGREE_UNUSABLE_TTL_MS, registerRankCommand, scoreViaDegree,
+} from "../commands/rank.js";
 
 const { listByKind, expand, degree } = vi.hoisted(() => ({ listByKind: vi.fn(), expand: vi.fn(), degree: vi.fn() }));
 vi.mock("../../client/api.js", () => ({
@@ -309,6 +311,27 @@ describe("ix rank /v1/degree fallback", () => {
     degree.mockImplementation(realDegree);
     await run(args);
     expect(degree).toHaveBeenCalledTimes(2);
+  });
+
+  it("forgets a missing route after DEGREE_UNUSABLE_TTL_MS, so a long-lived MCP server tries again after an upgrade", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const before = await oldPathOutput(args);
+      process.env.IX_ENDPOINT = freshEndpoint();
+      degree.mockReset().mockRejectedValue(new Error("404: not found"));
+      await run(args);
+      vi.advanceTimersByTime(DEGREE_UNUSABLE_TTL_MS - 1);
+      await run(args);
+      expect(degree).toHaveBeenCalledTimes(1);
+
+      // The backend was upgraded meanwhile.
+      degree.mockReset().mockImplementation(realDegree);
+      vi.advanceTimersByTime(1);
+      expect(await run(args)).toBe(before);
+      expect(degree).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a malformed answer falls back too", async () => {

@@ -107,10 +107,11 @@ function resolveLimit(raw: string | undefined, format: string): number {
 /**
  * How long `ix smells` waits for a fresh analysis, in seconds. An agent's
  * formats (json, llm) get a short budget and fall back to the stored results;
- * a person at a terminal (text) waits longer, with a progress line.
+ * a person at a terminal (text) waits as long as the HTTP client can
+ * (`MAX_WAIT_SECONDS`), with a progress line.
  */
 const AGENT_WAIT_SECONDS = 20;
-const TEXT_WAIT_SECONDS = 10 * 60;
+const TEXT_WAIT_SECONDS = MAX_WAIT_SECONDS;
 const PROGRESS_EVERY_MS = 10_000;
 
 /**
@@ -140,7 +141,8 @@ type StaleReason = "timeout" | "not_permitted";
  * Node's fetch (undici) gives up on a response whose headers have not arrived
  * after 300 s, whatever the request's own timeout, and rejects with `TypeError:
  * fetch failed` carrying this code in its `cause`. `POST /v1/smells` sends its
- * headers only when the analysis is done, so a wait over 5 minutes ends here.
+ * headers only when the analysis is done, so a 300 s wait (the most there is)
+ * can end here a moment before the request's own timeout fires.
  */
 function isHeadersTimeout(err: unknown): boolean {
   for (let e: unknown = err, hops = 0; e && hops < 5; hops++) {
@@ -182,16 +184,10 @@ function storedSmellsAsOf(stored: any): { computed_rev: number | null; computed_
   return { computed_rev: rev, computed_at: at };
 }
 
-/**
- * What the stale header says happened. `waitedSeconds` is set when the HTTP
- * client stopped waiting before the budget ran out, so the message gives the
- * time actually waited rather than the budget.
- */
-function staleCause(reason: StaleReason, waitSeconds: number, waitedSeconds?: number): string {
+/** What the stale header says happened. */
+function staleCause(reason: StaleReason, waitSeconds: number): string {
   if (reason === "not_permitted") return "not permitted to run a fresh analysis";
-  return waitedSeconds === undefined
-    ? `fresh analysis did not finish within ${formatWait(waitSeconds)}`
-    : `fresh analysis did not finish within ${formatWait(waitedSeconds)}, the longest the HTTP client waits for an answer`;
+  return `fresh analysis did not finish within ${formatWait(waitSeconds)}`;
 }
 
 function staleMessage(cause: string, asOf: { computed_rev: number | null; computed_at: string | null }): string {
@@ -239,7 +235,7 @@ export function registerSmellsCommand(program: Command): void {
     .option("--weak-max-neighbors <n>",    "Max neighbors for weak component",  "1")
     .option("--list",                      "List existing smell claims without rerunning")
     .option("--limit <n>",                 "Max candidates to show, highest confidence first (0 = all, non-source orphans included; with --list, caps the stored claims)")
-    .option("--wait <seconds>",            "How long to wait for a fresh analysis before showing stored results instead (default 20 for json/llm, 600 for text; IX_SMELLS_WAIT)", parseWaitSecondsOption)
+    .option("--wait <seconds>",            "How long to wait for a fresh analysis before showing stored results instead, at most 300 (default 20 for json/llm, 300 for text; IX_SMELLS_WAIT)", parseWaitSecondsOption)
     .addHelpText("after", `
 Runs graph-query-based architecture smell detection and stores results as
 versioned claims (inference_version=smell_v1) on affected File nodes.
@@ -258,11 +254,11 @@ Examples:
   ix smells --list
   ix smells --format json --wait 60
 
-json and llm wait 20 s for a fresh analysis, text 10 minutes (--wait or
-IX_SMELLS_WAIT, in seconds, changes it). If the analysis has not finished by
+json and llm wait 20 s for a fresh analysis, text 5 minutes (--wait or
+IX_SMELLS_WAIT, in seconds, changes it; 5 minutes is the most, the longest
+the HTTP client waits for an answer). If the analysis has not finished by
 then, or the backend does not permit running it, the stored results from the
-last completed run are shown instead, marked stale. The HTTP client itself
-stops waiting for an answer after 5 minutes, so a longer wait ends there.`)
+last completed run are shown instead, marked stale.`)
     .action(async (opts: {
       format: string;
       orphanMaxConnections: string;
@@ -326,7 +322,6 @@ stops waiting for an answer after 5 minutes, so a longer wait ends there.`)
 
       const waitSeconds = smellsWaitSeconds(opts.format, opts.wait);
       const stopProgress = opts.format === "json" || opts.format === "llm" ? () => {} : startSmellsProgress();
-      const startedAt = Date.now();
       let report: SmellReport;
       try {
         report = await client.runSmells({
@@ -344,8 +339,7 @@ stops waiting for an answer after 5 minutes, so a longer wait ends there.`)
         if (reason !== undefined) {
           // The client gave up or was refused. Whether the backend carries on
           // is not ours to know, so say only what the stored results are.
-          const waited = isHeadersTimeout(err) ? Math.round((Date.now() - startedAt) / 1000) : undefined;
-          await printStoredSmells(client, { workspaceId: systemId ? undefined : resolveWorkspaceId(), systemId }, opts, staleCause(reason, waitSeconds, waited), reason);
+          await printStoredSmells(client, { workspaceId: systemId ? undefined : resolveWorkspaceId(), systemId }, opts, staleCause(reason, waitSeconds), reason);
           return;
         }
         if (opts.format === "llm") console.log(llmError("backend_error", err.message ?? "smells request failed"));
@@ -416,7 +410,7 @@ function printSmellsReport(report: SmellReport, opts: { format: string; limit?: 
   }
 
   if (opts.format === "llm") {
-    const lines = renderSmellsRunLlm(report, selection);
+    const lines = renderSmellsRunLlm(report, selection, stale !== undefined);
     if (stale) {
       lines.splice(1, 0, llmLine("diagnostic", [
         ["code", "smells_stale"],
@@ -597,8 +591,11 @@ export function renderSmellsListLlm(smells: any[], slice?: Slice<unknown>): stri
 /**
  * Render a fresh `ix smells` detection run as llm records, highest-confidence
  * first. Without a selection, every candidate is shown (no filter, no cap).
+ * With `withEntity` (a stale answer made from stored claims), each row also
+ * carries its claim's `entity` id (12 characters), as `--list` rows do: a
+ * stored claim is keyed by its entity, and its file can be missing.
  */
-export function renderSmellsRunLlm(report: SmellReport, selection?: SmellSelection): string[] {
+export function renderSmellsRunLlm(report: SmellReport, selection?: SmellSelection, withEntity = false): string[] {
   const { slice, filteredNonSource } = selection ?? {
     slice: sliceRanked([...report.candidates].sort((a, b) => b.confidence - a.confidence), Infinity),
     filteredNonSource: 0,
@@ -620,6 +617,7 @@ export function renderSmellsRunLlm(report: SmellReport, selection?: SmellSelecti
     lines.push(llmLine("smell", [
       ["kind", c.smell],
       ["file", c.file],
+      ["entity", withEntity && c.file_id ? c.file_id.slice(0, 12) : undefined],
       ["confidence", c.confidence],
       ...signalFields(c.smell, c.signals),
     ]));

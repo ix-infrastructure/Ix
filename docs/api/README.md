@@ -501,7 +501,9 @@ It should never be lower, so `ix rank` treats it as a ceiling and expands only
 the candidates that could make the rows it shows, which then score exactly as
 before. As a check on that, it also expands the next candidates by count (at
 least 10); if any expand lists more neighbours than its count, rank scores
-every candidate by expanding instead, for the rest of the process.
+every candidate by expanding instead. Either finding (a missing route, or a
+count below what expand lists) is remembered for that backend for 10 minutes,
+so a long-lived `ix mcp` server tries the route again after a backend upgrade.
 
 **Request body**
 
