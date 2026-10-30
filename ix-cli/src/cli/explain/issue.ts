@@ -538,7 +538,7 @@ export interface LeanIssueView {
   confidence: "high" | "low";
   reason?: string;
   startingPoints: StartingPoint[];
-  /** Ranked follow-up files, starting files excluded. */
+  /** The next files by BM25 against the issue, starting files excluded. */
   alsoRanked: RankedFile[];
   unresolved: string[];
 }

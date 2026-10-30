@@ -37,10 +37,10 @@ describe("issue companion expansion", () => {
     const files = repo({ [seed]: source, [entry]: exports, "other.ts": "export const unrelated = 1" });
     const primary = ranking(seed, "other.ts");
     const result = await expandIssueCompanions("The job fails", primary, { repo: files });
-    expect(result.map((r) => r.path)).toEqual([seed, entry, "other.ts"]);
-    expect(result[0]).toBe(primary[0]);
-    expect(result[1].companion).toEqual({ source: "re-export", seed });
-    expect(result[1].score).toBeLessThan(primary[0].score);
+    expect(result.map((r) => r.path)).toEqual([seed, "other.ts", entry]);
+    expect(result.slice(0, 2)).toEqual(primary);
+    expect(result[2].companion).toEqual({ source: "re-export", seed });
+    expect(result[2].score).toBeLessThan(primary[0].score);
   });
 
   it.each([
@@ -79,7 +79,7 @@ describe("issue companion expansion", () => {
     expect(result).toEqual(primary);
   });
 
-  it("expands only two seeds, deduplicates promotions and preserves number one at every k", async () => {
+  it("expands only two seeds, appends new files only and keeps the primary list whole at every k", async () => {
     const files = repo(Object.fromEntries(["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "f.ts", "g.ts"].map((p) => [p, ""])));
     const primary = ranking("a.ts", "b.ts", "c.ts", "d.ts", "e.ts");
     const history = vi.fn(async (_path: string) => ["a.ts", "b.ts", "g.ts", "d.ts", "f.ts", "e.ts"]
@@ -87,15 +87,15 @@ describe("issue companion expansion", () => {
     for (const limit of [0, 1, 2, 5, 20]) {
       history.mockClear();
       const result = await expandIssueCompanions("bug", primary, { repo: files, history }, limit);
-      expect(result.length).toBeLessThanOrEqual(limit);
-      if (limit > 0) expect(result[0]).toBe(primary[0]);
+      expect(result.length).toBeLessThanOrEqual(limit + (limit <= 1 ? 0 : MAX_COMPANIONS));
+      expect(result.slice(0, Math.min(limit, primary.length))).toEqual(primary.slice(0, limit));
       expect(new Set(result.map((r) => r.path)).size).toBe(result.length);
       expect(result.filter((r) => r.companion).length).toBeLessThanOrEqual(MAX_COMPANIONS);
       expect(result.filter((r) => r.companion).every((r) => r.score <= primary[0].score * 0.8)).toBe(true);
       expect(history.mock.calls.map(([path]) => path)).toEqual(limit <= 1 ? [] : ["a.ts", "b.ts"]);
     }
     const result = await expandIssueCompanions("bug", primary, { repo: files, history }, 5);
-    expect(result.map((r) => r.path)).toEqual(["a.ts", "d.ts", "b.ts", "e.ts", "c.ts"]);
+    expect(result.map((r) => r.path)).toEqual(["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "f.ts", "g.ts"]);
     expect(primary.map((r) => r.path)).toEqual(["a.ts", "b.ts", "c.ts", "d.ts", "e.ts"]);
   });
 
@@ -194,6 +194,32 @@ describe("issue companion expansion", () => {
     expect(history).not.toHaveBeenCalled();
   });
 
+  it("places companions after every starting point and BM25 follow-up, whatever their score", async () => {
+    const files = repo(Object.fromEntries(["s1.ts", "s2.ts", "s3.ts", "b1.ts", "b2.ts", "b3.ts", "c1.ts", "c2.ts", "c3.ts"].map((p) => [p, ""])));
+    const starts = ["s1.ts", "s2.ts", "s3.ts"].map((path) => ({ path, via: "path" as const, token: path }));
+    const primary = rankIssueFiles({
+      starts: starts as unknown as Parameters<typeof rankIssueFiles>[0]["starts"],
+      bm25: [["s1.ts", 10], ["b1.ts", 9], ["b2.ts", 8], ["b3.ts", 7]].map(([path, score]) => ({ path: path as string, score: score as number })),
+      near: new Map(),
+    });
+    const history = async () => ["c1.ts", "c2.ts", "c3.ts"].map((path) => ({ path, commits: 2, score: 0.5 }));
+    const result = await expandIssueCompanions("bug", primary, { repo: files, history });
+    expect(result.map((r) => r.path)).toEqual(["s1.ts", "s2.ts", "s3.ts", "b1.ts", "b2.ts", "b3.ts", "c1.ts", "c2.ts", "c3.ts"]);
+    expect(result.slice(0, primary.length)).toEqual(primary);
+    expect(result.slice(primary.length).every((r) => r.companion?.source === "co-change")).toBe(true);
+  });
+
+  it("does not treat the word 'default' as naming a default import", async () => {
+    const files = repo({
+      "src/worker.ts": 'import Logger from "./logger";\nimport Store from "./store";\nexport function runJob() {}',
+      "src/logger.ts": "export default class Logger {}",
+      "src/store.ts": "export default class Store {}",
+    });
+    const primary = ranking("src/worker.ts", "src/other.ts");
+    const result = await expandIssueCompanions("runJob ignores the default retry count", primary, { repo: files });
+    expect(result).toEqual(primary);
+  });
+
   it("keeps the original ranking without a checkout or when history fails", async () => {
     const primary = ranking("a.ts");
     expect(await expandIssueCompanions("bug", primary, {})).toEqual(primary);
@@ -233,6 +259,34 @@ describe("companion history in a synthetic git repository", () => {
       expect(await companionHistory(dir)("worker.py", signal)).toEqual([{ path: "schema.py", commits: 3, score: 1.5 }]);
       expect(logCalls()).toBe(2);
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not cache a failed git log as having no co-changes", async () => {
+    const dir = mkdtempSync(join(process.cwd(), ".companion-test-"));
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    try {
+      git("init", "-q");
+      git("config", "user.name", "Fixture");
+      git("config", "user.email", "fixture@example.invalid");
+      for (let i = 0; i < 2; i++) {
+        writeFileSync(join(dir, "worker.py"), `def run_job(): return ${i}\n`);
+        writeFileSync(join(dir, "schema.py"), `VERSION = ${i}\n`);
+        git("add", "worker.py", "schema.py");
+        git("commit", "-qm", "Update worker and schema");
+      }
+      const signal = new AbortController().signal;
+      const actual = (await vi.importActual<typeof import("node:child_process")>("node:child_process")).execFile;
+      vi.mocked(execFile).mockImplementation(((file: string, args: string[], opts: unknown, cb: (e: Error | null, out: string) => void) => {
+        if (args.includes("log")) { cb(new Error("timed out"), ""); return undefined as never; }
+        return (actual as unknown as (...a: unknown[]) => never)(file, args, opts, cb);
+      }) as unknown as typeof execFile);
+      expect(await companionHistory(dir)("worker.py", signal)).toEqual([]);
+      vi.mocked(execFile).mockImplementation(actual);
+      expect(await companionHistory(dir)("worker.py", signal)).toEqual([{ path: "schema.py", commits: 2, score: 1 }]);
+    } finally {
+      vi.mocked(execFile).mockImplementation((await vi.importActual<typeof import("node:child_process")>("node:child_process")).execFile);
       rmSync(dir, { recursive: true, force: true });
     }
   });

@@ -26,11 +26,16 @@ export type CompanionHistory = (path: string, signal: AbortSignal) => Promise<Co
 export function companionHistory(root: string): CompanionHistory {
   let head: Promise<string | undefined> | undefined;
   return async (path, signal) => {
+    // A failed or timed-out git call reads as "no history": never cache that.
+    let failed = false;
     const run: GitRunner = (args) => new Promise((resolve) => {
       execFile("git", ["--literal-pathspecs", "-c", "core.quotepath=false", ...args], {
         cwd: root, encoding: "utf8", timeout: COMPANION_BUDGET_MS, maxBuffer: 1024 * 1024,
         signal: combineSignals(signal, currentRunSignal()),
-      }, (err, stdout) => resolve(err ? undefined : stdout));
+      }, (err, stdout) => {
+        if (err) failed = true;
+        resolve(err ? undefined : stdout);
+      });
     });
     const revision = await (head ??= run(["rev-parse", "--verify", "HEAD"]));
     if (!revision || signal.aborted) return [];
@@ -38,7 +43,7 @@ export function companionHistory(root: string): CompanionHistory {
     const cached = historyCache.get(key);
     if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.files;
     const files = await coChangedFiles(run, path, new Set(), MAX_COMPANION_CANDIDATES);
-    if (!signal.aborted) {
+    if (!signal.aborted && !failed) {
       historyCache.delete(key);
       historyCache.set(key, { at: Date.now(), files });
       while (historyCache.size > CACHE_ENTRIES) historyCache.delete(historyCache.keys().next().value!);
@@ -97,7 +102,8 @@ function escaped(name: string): string {
 
 /**
  * Expand two leading hits without changing the primary ranker's contract.
- * Three companions at most alternate with primary results; rank one is fixed.
+ * The primary list (starting points, then BM25 follow-ups) is kept whole and
+ * in order; at most three companions not already in it are appended after it.
  * All probes share one deadline and byte/read/candidate/name caps. Missing
  * history or unsupported syntax simply leaves the primary results intact.
  */
@@ -189,7 +195,9 @@ export async function expandIssueCompanions(
       for (const ref of imports(text ?? "", seed.path.endsWith(".py"))) {
         for (const name of ref.names) {
           if (names >= MAX_COMPANION_IMPORTS || !live()) break;
-          if (!words.has(name.local) && !words.has(name.imported)) continue;
+          // A default import is named in the issue only by its local binding:
+          // the word "default" in prose is not a reference to it.
+          if (!words.has(name.local) && (name.imported === "default" || !words.has(name.imported))) continue;
           names++;
           const target = moduleFile(seed.path, ref.module, tracked);
           const path = target && definition(target, name.imported);
@@ -210,17 +218,12 @@ export async function expandIssueCompanions(
     controller.abort();
     signal.removeEventListener("abort", onAbort!);
   }
+  const primaryPaths = new Set(primary.map((f) => f.path));
   const companions: RankedFile[] = [...found.values()]
+    .filter((c) => !primaryPaths.has(c.path))
     .sort((a, b) => b.weight - a.weight || a.path.localeCompare(b.path))
     .slice(0, MAX_COMPANIONS)
     .map((c) => ({ path: c.path, score: Math.max(0, primary[0].score) * 0.8 * c.weight,
       reason: `companion (${c.source} of ${c.seed})`, companion: { source: c.source, seed: c.seed } }));
-  const promoted = new Set(companions.map((c) => c.path));
-  const rest = primary.filter((f) => !promoted.has(f.path));
-  const out: RankedFile[] = [];
-  for (let i = 0; i < rest.length || i < companions.length; i++) {
-    if (rest[i]) out.push(rest[i]);
-    if (companions[i]) out.push(companions[i]);
-  }
-  return out.slice(0, limit);
+  return [...primary.slice(0, limit), ...companions];
 }
