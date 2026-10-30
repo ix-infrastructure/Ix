@@ -2134,7 +2134,10 @@ export function buildBundle(input: BuildInput): ContextBundle {
   }
   pushLocated(trailingMembers);
   // Unmatched discoveries must not evict graph context. Positive issue matches
-  // are promoted within their reserved budget by placeIssueMatches below.
+  // are promoted within their reserved budget by placeIssueMatches below; the
+  // ones that only the listing found, and that do not match, are dropped there.
+  const discoveredOnly = new Set(
+    (issue?.discoveredEntities ?? []).map((ref) => ref.id).filter((id) => !seen.has(id)));
   pushLocated(issue?.discoveredEntities ?? []);
 
   // Relationships: graph edges, ordered deterministically.
@@ -2145,9 +2148,15 @@ export function buildBundle(input: BuildInput): ContextBundle {
 
   if (issue?.query !== undefined) {
     const pinned = new Set([resolved.id, ...issue.startingPoints.flatMap((s) => s.id ? [s.id] : [])]);
+    // A listed definition that does not match the issue was never graph
+    // context: keeping it would fill spare budget with score-0 noise and count
+    // it as truncated content the bundle never had.
     entities = placeIssueMatches(
       entities, rankIssueEntities(entities, { ...issue, query: issue.query }, relationships),
-      pinned, budgets.maxEntities);
+      pinned, budgets.maxEntities)
+      .filter((e) => e.score > 0 || !discoveredOnly.has(e.id));
+  } else {
+    entities = entities.filter((e) => !discoveredOnly.has(e.id));
   }
 
   const evidence = rankEvidence({ resolved, facts, context, relationships, prov, entities, issue });

@@ -6,7 +6,7 @@ import { buildBundle, clampBudgets } from "../commands/context.js";
 import { contextBundleSchema } from "../context-bundle-schema.js";
 import type { GraphNode } from "../../client/types.js";
 import type { ContextFacts, EntityLocation } from "../explain/facts.js";
-import { collectIssueEntities, ISSUE_ENTITIES_PER_KIND, rankIssueEntities } from "../explain/issue-entities.js";
+import { collectIssueEntities, ISSUE_ENTITIES_PER_KIND, ISSUE_ENTITY_FILES, rankIssueEntities } from "../explain/issue-entities.js";
 import { MAX_BM25_BYTES, MAX_RANKED_FILES } from "../explain/issue.js";
 
 const path = "src/cache.py";
@@ -154,9 +154,10 @@ describe("issue entity ranking", () => {
     const result = build(methods);
     expect(baseline.entities.map(e => e.id)).toEqual(["start", "dependency"]);
     expect(baseline.relationships).toEqual([edge]);
-    expect(result.entities).toHaveLength(clampBudgets({}).maxEntities);
-    expect(result.entities.slice(0, 2)).toEqual(baseline.entities);
-    expect(result.entities.every(e => e.score === 0)).toBe(true);
+    // Unmatched discoveries were never graph context: they neither fill spare
+    // budget nor count as truncated.
+    expect(result.entities).toEqual(baseline.entities);
+    expect(result.truncation.entitiesTruncated).toBe(baseline.truncation.entitiesTruncated);
     expect(result.relationships).toEqual(baseline.relationships);
 
     // A stale backend summary must not replace a discovered definition's location.
@@ -170,6 +171,20 @@ describe("issue entity ranking", () => {
     const withNeighbour = build(methods, [neighbour]);
     expect(withNeighbour.entities.slice(0, 3).map(e => e.id)).toEqual(["start", neighbour.id, "dependency"]);
     expect(withNeighbour.relationships).toEqual(baseline.relationships);
+  });
+
+  it("keeps only matching discoveries and does not report unmatched ones as truncated", () => {
+    const lines = Array.from({ length: 300 }, (_, i) => i === 7
+      ? "def d7(self): return self.snapshot_recovery()" : `def d${i}(self): return ${i}`);
+    const discovered: EntityLocation[] = lines.map((_, i) => ({
+      id: `d${i}`, name: `d${i}`, kind: "method", path, lineStart: i + 1, lineEnd: i + 1,
+    }));
+    const without = bundle("snapshot recovery", lines.join("\n"), [], [], [], 10).result;
+    const { result } = bundle("snapshot recovery", lines.join("\n"), [], [], discovered, 10);
+    expect(without.truncation.entitiesTruncated).toBe(0);
+    expect(result.truncation.entitiesTruncated).toBe(0);
+    expect(result.entities.map(e => e.id)).toEqual(["start", "d7"]);
+    expect(result.entities[1].score).toBeGreaterThan(0);
   });
 
   it("retains new scores through JSON validation while accepting old entities without them", () => {
@@ -217,6 +232,15 @@ describe("bounded definition text", () => {
     expect(result.every(e => e.score === 0)).toBe(true);
   });
 
+  it("ignores a stale span that no longer names its definition", () => {
+    // The map placed restore at line 2; a local edit moved another function there.
+    const { result } = rank([{ ...far, lineStart: 2, lineEnd: 3 }], "snapshot recovery", [
+      "class Cache:", "    def recover_snapshot(self):", "        # Snapshot recovery.",
+      "    def restore(self):", "        return self.ready",
+    ].join("\n"));
+    expect(result[0].score).toBe(0);
+  });
+
   it("only reads functions in the bounded top-file pool", () => {
     const read = vi.fn(() => "snapshot recovery");
     const files = Array.from({ length: MAX_RANKED_FILES + 1 }, (_, i) => ({ path: `src/f${i}.ts`, score: 1, reason: "bm25" }));
@@ -256,28 +280,28 @@ describe("issue candidate discovery", () => {
       : Array.from({ length: ISSUE_ENTITIES_PER_KIND + 10 }, (_, i) => node({ ...far, id: `m${i}` })));
     const files = Array.from({ length: MAX_RANKED_FILES + 5 }, (_, i) => ({ path: i === 0 ? path : `src/f${i}.py`, score: 1, reason: "bm25" }));
     const candidates = await collectIssueEntities({ listByKind }, files, { systemId: "fixture" });
-    expect(listByKind).toHaveBeenCalledTimes(2 * MAX_RANKED_FILES);
+    expect(listByKind).toHaveBeenCalledTimes(2 * ISSUE_ENTITY_FILES);
     expect(candidates).toHaveLength(ISSUE_ENTITIES_PER_KIND);
     expect(candidates.every(e => e.path === path)).toBe(true);
   });
 
-  it("uses at most two listings per ranked file even with thousands of definitions", async () => {
+  it("lists only the top-ranked files, two listings each, even with thousands of definitions", async () => {
     const files = Array.from({ length: MAX_RANKED_FILES + 5 }, (_, i) => ({ path: `src/f${i}.py`, score: 1, reason: "bm25" }));
     const listByKind = vi.fn(async (kind: string, opts: { scope?: string }) =>
       Array.from({ length: ISSUE_ENTITIES_PER_KIND + 10 }, (_, i) => node({
         ...far, kind, path: opts.scope!, id: `${opts.scope}:${kind}:${i}`,
       })));
     const candidates = await collectIssueEntities({ listByKind }, files, { systemId: "fixture" });
-    expect(listByKind).toHaveBeenCalledTimes(2 * MAX_RANKED_FILES);
-    expect(candidates).toHaveLength(2 * MAX_RANKED_FILES * ISSUE_ENTITIES_PER_KIND);
-    for (const file of files.slice(0, MAX_RANKED_FILES)) {
+    expect(listByKind).toHaveBeenCalledTimes(2 * ISSUE_ENTITY_FILES);
+    expect(candidates).toHaveLength(2 * ISSUE_ENTITY_FILES * ISSUE_ENTITIES_PER_KIND);
+    for (const file of files.slice(0, ISSUE_ENTITY_FILES)) {
       for (const kind of ["function", "method"]) {
         expect(listByKind).toHaveBeenCalledWith(kind, {
           systemId: "fixture", scope: file.path, limit: ISSUE_ENTITIES_PER_KIND,
         });
       }
     }
-    expect(candidates.some(entity => entity.path === files[MAX_RANKED_FILES].path)).toBe(false);
+    expect(candidates.some(entity => entity.path === files[ISSUE_ENTITY_FILES].path)).toBe(false);
   });
 
   it("keeps other candidates when one listing fails", async () => {

@@ -12,6 +12,11 @@ import type { RepoAccess } from "./text-references.js";
 
 /** Two listings per file, never a request per definition. */
 export const ISSUE_ENTITIES_PER_KIND = 256;
+/**
+ * Only the best-ranked files are listed: two requests each, on every
+ * `--from-issue` run, so this bounds the added backend cost.
+ */
+export const ISSUE_ENTITY_FILES = 5;
 
 /** Include definitions in lexically ranked files even when no start reaches them. */
 export async function collectIssueEntities(
@@ -19,7 +24,7 @@ export async function collectIssueEntities(
   files: RankedFile[],
   scope: { workspaceId?: string; systemId?: string },
 ): Promise<EntityLocation[]> {
-  const found = await Promise.all(files.slice(0, MAX_RANKED_FILES).flatMap(({ path }) =>
+  const found = await Promise.all(files.slice(0, ISSUE_ENTITY_FILES).flatMap(({ path }) =>
     ["function", "method"].map(async kind => {
       const nodes = await client.listByKind(kind, {
         ...scope, scope: path, limit: ISSUE_ENTITIES_PER_KIND,
@@ -76,7 +81,10 @@ export function rankIssueEntities<T extends EntityLocation>(
     const end = positiveLine(entity.lineEnd);
     // A missing/stale span gets the name only, never the surrounding file's
     // unrelated words. The span includes the signature and Python docstring.
+    // The file is the working tree and the span is from the last map, so a
+    // span whose opening lines no longer name the definition is stale.
     const body = source && start && end && end >= start && end <= source.length
+      && namesDefinition(source, start, end, entity.name)
       ? definitionText(source, start, end) : "";
     const text = `${entity.name}\n${body}`;
     const doc = bm25Doc("", text, wanted);
@@ -119,6 +127,16 @@ export function placeIssueMatches<T extends { id: string }>(
   const placed = new Set([...head, ...matches].map(e => e.id));
   return [...head, ...matches, ...original.filter(e => !placed.has(e.id))]
     .map(e => ({ ...e, score: scores.get(e.id) ?? 0 }));
+}
+
+/** Lines a signature may span after decorators or annotations. */
+const SIGNATURE_LINES = 5;
+
+/** Whether the span's opening lines still contain the definition's name. */
+function namesDefinition(lines: string[], start: number, end: number, name: string): boolean {
+  const own = name.split(/[.#:]/).pop() ?? name;
+  const head = lines.slice(start - 1, Math.min(end, start - 1 + SIGNATURE_LINES)).join("\n");
+  return [...head.matchAll(/[A-Za-z_$][\w$]*/g)].some(m => m[0] === own);
 }
 
 /** Include an adjacent JS/TS doc comment, outside the parser's definition span. */

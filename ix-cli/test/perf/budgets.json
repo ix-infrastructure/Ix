@@ -28,9 +28,9 @@
       "tolerance": 1.25
     },
     "context --from-issue": {
-      "requests": 159,
-      "bytes": 3620740,
-      "wallMs": 1577,
+      "requests": 118,
+      "bytes": 2959562,
+      "wallMs": 1356,
       "tolerance": 1.25
     },
     "impact resolveWorkspaceRoot": {
