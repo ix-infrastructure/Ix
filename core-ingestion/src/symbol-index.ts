@@ -33,6 +33,8 @@ export interface FileSummary {
   receiverHeritage?: Array<[string, string]>;
   receiverPackage?: string;
   importAliases?: Record<string, string>;
+  /** TypeScript: the type names this file puts in the global scope. */
+  tsGlobalTypes?: string[];
   /** Sorted unique names this file calls, references or extends (for IN-11). */
   refs: string[];
   /** Hash of what other files can resolve to here: qualified keys, exports, PHP types. */
@@ -40,7 +42,7 @@ export interface FileSummary {
 }
 
 /** The part of a summary other files depend on, hashed. */
-export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNames' | 'phpTypes' | 'receiverFactories' | 'receiverHeritage' | 'receiverPackage'> & Partial<Pick<FileSummary, 'imports' | 'importAliases'>>): string {
+export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNames' | 'phpTypes' | 'receiverFactories' | 'receiverHeritage' | 'receiverPackage'> & Partial<Pick<FileSummary, 'imports' | 'importAliases' | 'tsGlobalTypes'>>): string {
   const parts: unknown[] = [
     [...s.qkeys].map(([n, q]) => `${n}\0${q}`).sort(),
     [...(s.exportPublicNames ?? [])].map(([p, l]) => `${p}\0${l}`).sort(),
@@ -56,6 +58,12 @@ export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNam
       s.receiverPackage ?? '',
     );
   }
+  // JS/TS `export * as ns from './a'` (key `export:ns`): what an importer's
+  // `import { ns }` resolves `ns.Base` through. Only when present, as above.
+  const namespaceExports = Object.entries(s.importAliases ?? {}).filter(([key]) => key.startsWith('export:'));
+  if (namespaceExports.length > 0) parts.push(['export:', ...namespaceExports.map(([k, m]) => `${k}\0${m}`).sort()]);
+  // TypeScript globals an unimported heritage base may name.
+  if (s.tsGlobalTypes?.length) parts.push(['global:', ...[...s.tsGlobalTypes].sort()]);
   const canonical = JSON.stringify(parts);
   return crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 32);
 }

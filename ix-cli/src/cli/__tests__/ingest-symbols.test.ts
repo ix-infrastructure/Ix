@@ -258,6 +258,21 @@ describe("dependents (IN-11)", () => {
     expect(definedNames(summary("p.php", { phpTypes: [["App\\Foo", "Foo"]] }))).toEqual(new Set(["App\\Foo", "Foo"]));
   });
 
+  it("names a barrel's renamed or retargeted export * as ns, and a TypeScript global that came or went", () => {
+    const barrel = summary("m/index.ts", { sig: "s1", importAliases: { "export:ns": "./a" } });
+    expect(changedNames(barrel, { ...barrel, sig: "s2", importAliases: { "export:ns": "./b" } })).toEqual(new Set(["ns"]));
+    expect(changedNames(barrel, { ...barrel, sig: "s2", importAliases: { "export:other": "./a" } })).toEqual(new Set(["ns", "other"]));
+    // A file's own namespace import is not something an importer binds to.
+    expect(changedNames(barrel, { ...barrel, sig: "s2", importAliases: { "export:ns": "./a", ns: "./c" } })).toEqual(new Set());
+    const script = summary("base.ts", { sig: "s1", qkeys: [["Base", "Base"]], tsGlobalTypes: ["Base"] });
+    expect(changedNames(script, { ...script, sig: "s2", tsGlobalTypes: undefined })).toEqual(new Set(["Base"]));
+    const table = new Map<string, SymbolEntry>([
+      ["use.ts", entry(summary("use.ts", { refs: ["ns.Base"] }))],
+      ["other.ts", entry(summary("other.ts", { refs: ["Other"] }))],
+    ]);
+    expect(findDependents(table, new Set(["ns"]), [], new Set())).toEqual(["use.ts"]);
+  });
+
   it("finds files that refer to a changed name, by whole name or by segment, or import a path that came or went", () => {
     const table = new Map<string, SymbolEntry>([
       ["main.ts", entry(summary("main.ts", { refs: ["sub"], imports: [{ dstName: "./math", importRaw: "./math" }] }))],

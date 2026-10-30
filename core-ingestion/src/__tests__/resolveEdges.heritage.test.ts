@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { parseFile, resolveEdges } from '../index.js';
+import { buildGlobalResolutionIndex, parseFile, resolveEdges, summarizeParseResult } from '../index.js';
 import { buildPatchWithResolution, symbolNodeId } from '../patch-builder.js';
 
 /** Where each EXTENDS edge of `srcPath` resolves: `src -> dstFile:dstKey`. */
@@ -362,6 +362,79 @@ describe('EXTENDS resolution for TypeScript bases', () => {
       'A Plugin -> /repo/types/globals.d.ts:Plugin',
       'A Widget -> /repo/types/globals.d.ts:Widget',
     ]);
+  });
+
+  it('resolves an unimported base to a type a script file or declare global puts in the global scope', () => {
+    expect(heritage({
+      '/repo/src/base.ts': 'class Base {}\ninterface Shape {}\n',
+      '/repo/src/plug.ts': 'export {};\ndeclare global {\n  interface Plug {}\n}\n',
+      '/repo/src/script.ts': 'class A extends Base implements Shape {}\n',
+      '/repo/src/widget.ts': 'export class W extends Base implements Plug {}\n',
+    }, '/repo/src/script.ts')).toEqual([
+      'A Base -> /repo/src/base.ts:Base',
+      'A Shape -> /repo/src/base.ts:Shape',
+    ]);
+    expect(heritage({
+      '/repo/src/base.ts': 'class Base {}\n',
+      '/repo/src/plug.ts': 'export {};\ndeclare global {\n  interface Plug {}\n}\n',
+      '/repo/src/widget.ts': 'export class W extends Base implements Plug {}\n',
+    }, '/repo/src/widget.ts')).toEqual([
+      'W Base -> /repo/src/base.ts:Base',
+      'W Plug -> /repo/src/plug.ts:Plug',
+    ]);
+  });
+
+  it('still keeps a script or declare module type from a module type of the same name', () => {
+    expect(heritage({
+      '/repo/src/base.ts': 'export class Base {}\n',
+      '/repo/src/ext.ts': "export {};\ndeclare module 'x' {\n  interface Plug {}\n}\n",
+      '/repo/src/script.ts': 'class A extends Base implements Plug {}\n',
+    }, '/repo/src/script.ts')).toEqual([]);
+  });
+
+  it('resolves a base bound by import = require()', () => {
+    expect(heritage({
+      ...base,
+      '/repo/src/other.ts': 'export class Base {}\n',
+      '/repo/src/plain.ts': 'export class Plain {}\n',
+      '/repo/src/widget.ts': [
+        "import ns = require('./base');",
+        "import Plain = require('./plain');",
+        'export class A extends ns.Base<number> implements ns.K {}',
+        'export class B extends Plain {}',
+        '',
+      ].join('\n'),
+    }, '/repo/src/widget.ts')).toEqual([
+      'A ns.Base -> /repo/src/base.ts:Base',
+      'A ns.K -> /repo/src/base.ts:K',
+      'B Plain -> /repo/src/plain.ts:Plain',
+    ]);
+  });
+
+  it('reads TypeScript globals from the index when the file is not in the batch', () => {
+    const parsed = [
+      parseFile('/repo/src/base.ts', 'class Base {}\n')!,
+      parseFile('/repo/src/widget.ts', 'export class W extends Base {}\n')!,
+    ];
+    const index = buildGlobalResolutionIndex(
+      parsed.map(r => r.filePath), undefined, undefined,
+      new Map(parsed.map(r => [r.filePath, summarizeParseResult(r)])),
+    );
+    expect(resolveEdges([parsed[1]], undefined, index)
+      .filter(edge => edge.predicate === 'EXTENDS')
+      .map(edge => `${edge.dstName} -> ${edge.dstFilePath}`)).toEqual(['Base -> /repo/src/base.ts']);
+  });
+
+  it('signs what importers resolve through: namespace re-exports and globals', () => {
+    const sig = (filePath: string, source: string) => summarizeParseResult(parseFile(filePath, source)!).sig;
+    const barrel = sig('/repo/src/m/index.ts', "export * as ns from './a';\n");
+    expect(sig('/repo/src/m/index.ts', "export * as ns from './b';\n")).not.toBe(barrel);
+    expect(sig('/repo/src/m/index.ts', "export * as other from './a';\n")).not.toBe(barrel);
+    expect(sig('/repo/src/m/index.ts', "export * from './a';\n")).not.toBe(barrel);
+    expect(sig('/repo/src/base.ts', 'export class Base {}\n')).not.toBe(sig('/repo/src/base.ts', 'class Base {}\n'));
+    // Files with neither keep the signature they had.
+    expect(sig('/repo/src/base.ts', "import * as ns from './a';\nexport class Base {}\n"))
+      .toBe(sig('/repo/src/base.ts', 'export class Base {}\n'));
   });
 });
 

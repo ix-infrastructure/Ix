@@ -315,6 +315,11 @@ export interface FileParseResult {
    * another file, a same-named method in this file is not the target.
    */
   receiverTypedCalls?: string[];
+  /**
+   * TypeScript, not a declaration file: the type names this file puts in the
+   * global scope (a script's top-level types, a module's `declare global {}`).
+   */
+  tsGlobalTypes?: string[];
   fileRole: RoleClassification;
 }
 
@@ -708,6 +713,59 @@ function jsTsNamespaceAlias(stmtNode: any): string | undefined {
   if (declarator.parent?.parent?.type !== 'program') return undefined;
   const name = declarator.childForFieldName?.('name');
   return name?.type === 'identifier' ? name.text : undefined;
+}
+
+/**
+ * TypeScript: `import ns = require('x')` at the top level, as `[ns, 'x']`. It
+ * binds a whole module, as `import * as ns` does, but no import query sees it.
+ */
+function tsImportEqualsAliases(root: any): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  for (const stmt of root?.namedChildren ?? []) {
+    if (stmt.type !== 'import_statement') continue;
+    const clause = stmt.namedChildren?.find((c: any) => c.type === 'import_require_clause');
+    const name = clause?.namedChildren?.find((c: any) => c.type === 'identifier')?.text;
+    const source = clause?.childForFieldName?.('source')?.text;
+    if (name && source) out.push([name, unwrapImportSpecifier(source)]);
+  }
+  return out;
+}
+
+const TS_GLOBAL_TYPE_NODES = new Set([
+  'class_declaration',
+  'abstract_class_declaration',
+  'interface_declaration',
+  'type_alias_declaration',
+  'enum_declaration',
+]);
+
+/**
+ * TypeScript: the type names a file puts in the global scope -- every
+ * top-level class, interface, type alias and enum of a script (a file with no
+ * top-level import or export), and those in a module's `declare global {}`.
+ * Besides a declaration file's, these are the only types an unimported
+ * heritage base can name.
+ */
+function tsGlobalTypeNames(root: any): string[] {
+  const names = new Set<string>();
+  const collect = (decl: any) => {
+    if (!TS_GLOBAL_TYPE_NODES.has(decl?.type)) return;
+    const name = decl.childForFieldName?.('name')?.text;
+    if (name) names.add(name);
+  };
+  const top: any[] = root?.namedChildren ?? [];
+  const isScript = !top.some(stmt => stmt.type === 'import_statement' || stmt.type === 'export_statement');
+  for (const stmt of top) {
+    if (isScript) collect(stmt);
+    if (stmt.type !== 'ambient_declaration') continue;
+    // `declare global { ... }`; `declare module 'x'` and namespaces are not global.
+    const block = stmt.children?.some((c: any) => c.type === 'global')
+      ? stmt.namedChildren?.find((c: any) => c.type === 'statement_block')
+      : undefined;
+    if (block) for (const decl of block.namedChildren ?? []) collect(decl);
+    else if (isScript) for (const decl of stmt.namedChildren ?? []) collect(decl);
+  }
+  return [...names].sort();
 }
 
 const JS_TS_FUNCTION_NODES = new Set([
@@ -3610,6 +3668,11 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     }
 
     const exportPublicNames = isJsTs ? extractJsExportPublicNames(tree.rootNode) : [];
+    const isTsSource = language === SupportedLanguages.TypeScript && !TS_DECLARATION_FILE.test(filePath);
+    if (language === SupportedLanguages.TypeScript) {
+      for (const [name, spec] of tsImportEqualsAliases(tree.rootNode)) importAliases[name] ??= spec;
+    }
+    const tsGlobalTypes = isTsSource ? tsGlobalTypeNames(tree.rootNode) : [];
 
     return {
       filePath,
@@ -3630,6 +3693,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       ...(receiverFacts?.heritage.length ? { receiverHeritage: receiverFacts.heritage } : {}),
       ...(receiverFacts?.package ? { receiverPackage: receiverFacts.package } : {}),
       ...(receiverTypedCalls.length ? { receiverTypedCalls } : {}),
+      ...(tsGlobalTypes.length ? { tsGlobalTypes } : {}),
       fileRole: classifyFileRole(filePath, source),
     };
   } catch (e) {
@@ -3766,6 +3830,7 @@ export function summarizeParseResult(r: FileParseResult): FileSummary {
     ...(r.receiverHeritage ? { receiverHeritage: r.receiverHeritage } : {}),
     ...(r.receiverPackage ? { receiverPackage: r.receiverPackage } : {}),
     ...(r.importAliases ? { importAliases: r.importAliases } : {}),
+    ...(r.tsGlobalTypes ? { tsGlobalTypes: r.tsGlobalTypes } : {}),
     refs: [...refs].sort(),
   };
   return { ...summary, sig: summarySignature(summary) };
@@ -6132,11 +6197,17 @@ export function resolveEdges(
       // defines (`implements Iterable<T>`, `extends PromiseLike<T>`) is a
       // global -- lib.d.ts, an @types package, or an in-repo ambient
       // declaration. A module's top-level types are not globals, so only a
-      // declaration file is a candidate, never a same-named module type.
-      const tsUnboundBase = srcLanguage === SupportedLanguages.TypeScript && rel.predicate === 'EXTENDS' && !binding;
+      // declaration file or a type another file puts in the global scope (a
+      // script's, or one in `declare global {}`) is a candidate, never a
+      // same-named module type. A name `import X = require('./x')` binds is
+      // not unbound: the resolver does not follow `export =`, so it keeps the
+      // plain fallback.
+      const srcAliases = summaries.get(srcFilePath)?.importAliases;
+      const tsUnboundBase = srcLanguage === SupportedLanguages.TypeScript && rel.predicate === 'EXTENDS' && !binding &&
+        !(srcAliases && Object.hasOwn(srcAliases, dstName));
       let globalMatches = candidates.filter(fp =>
         fp !== srcFilePath && fileLanguage.get(fp) === srcLanguage && insideBoundPackage(fp) &&
-        (!tsUnboundBase || TS_DECLARATION_FILE.test(fp)));
+        (!tsUnboundBase || TS_DECLARATION_FILE.test(fp) || (summaries.get(fp)?.tsGlobalTypes ?? []).includes(dstName)));
       const importHint = pickCallerAlignedCandidate(importMatches, srcName, dstName)?.chosen
         ?? pickCallerAlignedCandidate(transitiveMatches, srcName, dstName)?.chosen;
       if (importHint) {
