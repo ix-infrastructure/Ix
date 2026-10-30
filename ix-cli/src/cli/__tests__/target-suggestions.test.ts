@@ -25,19 +25,27 @@ describe("bounded unresolved-target candidates", () => {
     ["prefix", "parse", "parseConfig"],
     ["suffix", "Config", "parseConfig"],
     ["two edits", "parseConifg", "parseConfig"],
-    ["index window when neither half matches", "bxdg", "bcdf"],
     ["short name", "xy", "xz"],
   ])("finds %s", async (_strategy, target, name) => {
     const result = await findTargetCandidates(graph([node(name)]), target, options, 200);
-    expect(result.candidates).toEqual([{ name, kind: "function", path: "src/sample.ts", line: 7 }]);
+    expect(result.didYouMean).toEqual([{ name, kind: "function", path: "src/sample.ts", line: 7 }]);
     expect(result.retryCommand).toBe(`ix locate '${name}' --path 'src/sample.ts'`);
+  });
+
+  it("never sends an empty term, whose /v1/search meaning is undocumented", async () => {
+    const client = graph([node("bcdf")]);
+    // Neither half of the name matches: only a match-all window would find it.
+    const result = await findTargetCandidates(client, "bxdg", options, 200);
+    expect(client.search.mock.calls.map(([term]) => term)).not.toContain("");
+    expect(client.search.mock.calls.length).toBeLessThanOrEqual(SUGGEST_MAX_REQUESTS);
+    expect(result.didYouMean).toEqual([]);
   });
 
   it("ranks strategies in order, deduplicates index responses and caps at five", async () => {
     const nodes = ["parseconfig", "parse_config", "parseConfigExtra", "extraParseConfig", "parseConifg", "parseConfg", "parseCongif"].map((name) => node(name));
     nodes.push(node("parseconfig", "src/sample.ts", "chunk"));
     const result = await findTargetCandidates(graph(nodes), "PARSECONFIG", options, 200);
-    expect(result.candidates.map((c) => c.name)).toEqual([
+    expect(result.didYouMean.map((c) => c.name)).toEqual([
       "parseconfig", "parse_config", "extraParseConfig", "parseConfigExtra", "parseConfg",
     ]);
     expect(result.retryCommand).toContain("'parseconfig'");
@@ -45,19 +53,19 @@ describe("bounded unresolved-target candidates", () => {
 
   it("does not recommend a retry for equal best names in different files", async () => {
     const result = await findTargetCandidates(graph([node("parseConfig", "src/a.ts"), node("parseConfig", "src/b.ts")]), "parse_config", options, 200);
-    expect(result.candidates).toHaveLength(2);
+    expect(result.didYouMean).toHaveLength(2);
     expect(result.retryCommand).toBeUndefined();
   });
 
   it("keeps close edit scores ambiguous and rejects distances above two", async () => {
     const result = await findTargetCandidates(graph([node("abcdx"), node("abcyx"), node("axyzz")]), "abcde", options, 200);
-    expect(result.candidates.map((c) => c.name)).toEqual(["abcdx", "abcyx"]);
+    expect(result.didYouMean.map((c) => c.name)).toEqual(["abcdx", "abcyx"]);
     expect(result.retryCommand).toBeUndefined();
   });
 
   it.each(["old/config.ts", "other\\src\\config.ts", "config.ts"])("suggests moved file %s by basename", async (target) => {
     const result = await findTargetCandidates(graph([node("config.ts", "new/config.ts", "file")]), target, { ...options, fileTarget: true }, 200);
-    expect(result.candidates[0]?.path).toBe("new/config.ts");
+    expect(result.didYouMean[0]?.path).toBe("new/config.ts");
     expect(result.retryCommand).toBe("ix locate 'new/config.ts' --path 'new/config.ts'");
   });
 
@@ -65,7 +73,7 @@ describe("bounded unresolved-target candidates", () => {
     const result = await findTargetCandidates(graph([
       node("config.ts", "project/src/config.ts", "file"), node("config.ts", "lib/config.ts", "file"),
     ]), "workspace/src/config.ts", { ...options, fileTarget: true }, 200);
-    expect(result.candidates.map((c) => c.path)).toEqual(["project/src/config.ts", "lib/config.ts"]);
+    expect(result.didYouMean.map((c) => c.path)).toEqual(["project/src/config.ts", "lib/config.ts"]);
     expect(result.retryCommand).toContain("'project/src/config.ts'");
   });
 
@@ -77,7 +85,7 @@ describe("bounded unresolved-target candidates", () => {
   it("uses stable null location fields when the name index has no location", async () => {
     const client = graph([]);
     client.search.mockResolvedValue([{ id: "sample", name: "Sample", kind: "class" }] as any);
-    expect((await findTargetCandidates(client, "sample", options, 200)).candidates)
+    expect((await findTargetCandidates(client, "sample", options, 200)).didYouMean)
       .toEqual([{ name: "Sample", kind: "class", path: null, line: null }]);
   });
 
@@ -87,7 +95,7 @@ describe("bounded unresolved-target candidates", () => {
     const result = await findTargetCandidates(client, "parse_config", options, 200);
     expect(client.search.mock.calls.length).toBeLessThanOrEqual(SUGGEST_MAX_REQUESTS);
     expect(client.search.mock.calls.reduce((total, [, opts]) => total + (opts?.limit ?? 0), 0)).toBeLessThanOrEqual(SUGGEST_MAX_ROWS);
-    expect(result.candidates).toHaveLength(5);
+    expect(result.didYouMean).toHaveLength(5);
     for (const [, opts] of client.search.mock.calls) {
       expect(opts).toMatchObject({ nameOnly: true, workspaceId: "workspace-test", systemId: "system-test" });
     }
@@ -100,7 +108,7 @@ describe("bounded unresolved-target candidates", () => {
     const pending = findTargetCandidates(client, "Missing", options, missMs);
     const budget = Math.min(missMs / 2, SUGGEST_MAX_MS);
     await vi.advanceTimersByTimeAsync(budget);
-    expect(await pending).toEqual({ candidates: [] });
+    expect(await pending).toEqual({ didYouMean: [] });
     expect(performance.now()).toBe(budget);
     expect((client.search.mock.calls[0][1] as any).signal.aborted).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
@@ -112,14 +120,14 @@ describe("bounded unresolved-target candidates", () => {
     client.search.mockImplementation((term) => term === "parse" ? Promise.resolve([node("parseConfig")]) : new Promise(() => {}));
     const pending = findTargetCandidates(client, "parse_config", options, 200);
     await vi.advanceTimersByTimeAsync(100);
-    expect((await pending).candidates[0]?.name).toBe("parseConfig");
+    expect((await pending).didYouMean[0]?.name).toBe("parseConfig");
   });
 
   it("does no work when disabled, out of budget, or given an oversized name", async () => {
     const client = graph([]);
-    expect(await findTargetCandidates(client, "Missing", { ...options, suggest: false }, 200)).toEqual({ candidates: [] });
-    expect(await findTargetCandidates(client, "Missing", options, 0)).toEqual({ candidates: [] });
-    expect(await findTargetCandidates(client, "x".repeat(129), options, 200)).toEqual({ candidates: [] });
+    expect(await findTargetCandidates(client, "Missing", { ...options, suggest: false }, 200)).toEqual({ didYouMean: [] });
+    expect(await findTargetCandidates(client, "Missing", options, 0)).toEqual({ didYouMean: [] });
+    expect(await findTargetCandidates(client, "x".repeat(129), options, 200)).toEqual({ didYouMean: [] });
     expect(client.search).not.toHaveBeenCalled();
   });
 
@@ -129,7 +137,7 @@ describe("bounded unresolved-target candidates", () => {
       node("parseConfig", "src/a.ts", "function"), node("parseConfig", "src/b.ts", "class"),
     ]);
     const result = await findTargetCandidates(client, "parse_config", { ...options, kind: "function" }, 200);
-    expect(result.candidates).toHaveLength(1);
-    expect(result.candidates[0].kind).toBe("function");
+    expect(result.didYouMean).toHaveLength(1);
+    expect(result.didYouMean[0].kind).toBe("function");
   });
 });

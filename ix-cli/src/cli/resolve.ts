@@ -266,7 +266,8 @@ export type ResolveResult =
       ambiguous: false;
       hiddenTestCount?: number;
       suggestions?: Suggestion[];
-      candidates?: TargetCandidate[];
+      /** Did-you-mean names from the bounded probe; never the ambiguity `candidates`. */
+      didYouMean?: TargetCandidate[];
       retryCommand?: string;
       /**
        * Why it missed, when that is more than "no such name": a file target
@@ -554,7 +555,7 @@ export async function rankEntity(
     // find it is a fragment of the name: one request each for a leading and a
     // trailing fragment, ranked by edit distance. Only on this miss path.
     missProse(opts, `No entity found matching "${symbol}".`);
-    const near = opts?.suggestCommand || opts?.suggest === false ? []
+    const near = opts?.suggest === false ? []
       : await nearestNames(client, symbol, { kind: kindFilter, workspaceId, systemId });
     return { resolved: false, ambiguous: false, ...(near.length ? { suggestions: near } : {}) };
   }
@@ -1589,7 +1590,7 @@ async function fileMiss(client: IxClient, target: string, opts?: ResolveOpts): P
   missProse(opts, message);
   const { workspaceId, systemId } = activeScope();
   const stem = path.basename(target).replace(/\.[^.]+$/, "");
-  const near = opts?.suggestCommand || opts?.suggest === false ? [] : (await nearestNames(client, stem, { kind: "file", workspaceId, systemId }, (n) => {
+  const near = opts?.suggest === false ? [] : (await nearestNames(client, stem, { kind: "file", workspaceId, systemId }, (n) => {
     const name = String(n.name ?? "");
     return name.replace(/\.[^.]+$/, "");
   })).filter((sug) => !opts?.path || (sug.path ?? "").toLowerCase().includes(opts.path.toLowerCase()));
@@ -1730,10 +1731,16 @@ export async function withTargetCandidates(
   opts?: ResolveOpts,
 ): Promise<Extract<ResolveResult, { ambiguous: false }>> {
   if (!opts?.suggestCommand) return result;
-  const guidance = await findTargetCandidates(client, target, {
+  const { suggestions, ...guidance } = await findTargetCandidates(client, target, {
     ...opts, ...activeScope(), fileTarget: looksFileLike(target),
   }, performance.now() - (opts.missStarted ?? performance.now()));
-  return { ...result, ...guidance };
+  // The resolver's own near names (no time budget) stay the suggestions, so a
+  // probe that runs out of time on a slow backend never takes them away; the
+  // probe's ranking fills them only when the resolver found none.
+  return {
+    ...result, ...guidance,
+    ...(!result.suggestions?.length && suggestions?.length ? { suggestions } : {}),
+  };
 }
 
 /**

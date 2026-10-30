@@ -20,8 +20,9 @@ export interface SuggestOptions {
   fileTarget?: boolean;
 }
 
-// Seven targeted index probes and one bounded index window, never a graph scan.
-export const SUGGEST_MAX_REQUESTS = 8;
+// At most seven targeted name-index probes, each for a non-empty term: never a
+// graph scan, and never an empty term, whose meaning /v1/search leaves open.
+export const SUGGEST_MAX_REQUESTS = 7;
 export const SUGGEST_MAX_ROWS = 256;
 export const SUGGEST_MAX_MS = 100;
 const MAX_NAME = 128;
@@ -50,9 +51,9 @@ export async function findTargetCandidates(
   target: string,
   opts: SuggestOptions,
   missMs: number,
-): Promise<{ candidates: TargetCandidate[]; suggestions?: Suggestion[]; retryCommand?: string }> {
+): Promise<{ didYouMean: TargetCandidate[]; suggestions?: Suggestion[]; retryCommand?: string }> {
   const budget = Math.min(SUGGEST_MAX_MS, Math.max(0, missMs / 2));
-  if (opts.suggest === false || !target || target.length > MAX_NAME || budget <= 0) return { candidates: [] };
+  if (opts.suggest === false || !target || target.length > MAX_NAME || budget <= 0) return { didYouMean: [] };
   const started = performance.now();
   const deadline = started + budget;
   const controller = new AbortController();
@@ -64,8 +65,7 @@ export async function findTargetCandidates(
   const parts = target.split(/::|[.#]/).pop()!.replace(/([a-z\d])([A-Z])/g, "$1_$2").toLowerCase().split(/[_-]/);
   const width = Math.max(1, Math.ceil(bare.length / 2));
   const terms = [...new Set([target, bare, ...words.slice(0, 2), ...parts.slice(0, 2), bare.slice(0, width), bare.slice(-width)])]
-    .filter(Boolean).slice(0, SUGGEST_MAX_REQUESTS - 1);
-  terms.push(""); // the existing name-only search exposes a bounded name-index window
+    .filter(Boolean).slice(0, SUGGEST_MAX_REQUESTS);
   const rowsPerRequest = Math.floor(SUGGEST_MAX_ROWS / terms.length);
   const ranked: Array<{ candidate: TargetCandidate; score: number; id: string }> = [];
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -120,7 +120,7 @@ export async function findTargetCandidates(
   const unique = ranked.filter(({ candidate }, i, all) => all.findIndex(({ candidate: other }) =>
     other.name === candidate.name && other.path === candidate.path
       && other.kind === candidate.kind && other.line === candidate.line) === i);
-  const candidates = unique.slice(0, 5).map(({ candidate }) => candidate);
+  const didYouMean = unique.slice(0, 5).map(({ candidate }) => candidate);
   const best = unique[0];
   // A whole strategy tier (or the only result) is clear; lexical tie breaks aren't.
   const clear = best && (!unique[1] || unique[1].score - best.score >= 1);
@@ -131,5 +131,5 @@ export async function findTargetCandidates(
   const suggestions = unique.slice(0, 3).map(({ candidate, id }) => ({
     id, name: candidate.name, kind: candidate.kind, path: candidate.path ?? undefined,
   }));
-  return { candidates, ...(suggestions.length ? { suggestions } : {}), ...(retryCommand ? { retryCommand } : {}) };
+  return { didYouMean, ...(suggestions.length ? { suggestions } : {}), ...(retryCommand ? { retryCommand } : {}) };
 }

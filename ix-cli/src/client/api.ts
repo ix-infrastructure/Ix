@@ -87,6 +87,14 @@ function isSharedRead(path: string): boolean {
   return SHARED_READ_PREFIXES.some((prefix) => path.startsWith(prefix));
 }
 
+/** Rejects with the signal's reason once it aborts. */
+function untilAborted(signal: AbortSignal): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    if (signal.aborted) reject(signal.reason);
+    else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  });
+}
+
 export class IxClient {
   private readonly memo?: RequestMemo<SuccessBody>;
   private readonly limiter?: Limiter;
@@ -825,13 +833,21 @@ export class IxClient {
           : this.signalFor(timeoutMs, isSharedRead(path)),
       });
     if (signal) {
-      // Optional probes own their cancellation: no shared memo, queue or retry
-      // may outlive their budget or cancel another caller's ordinary search.
+      // Optional probes own their cancellation: no shared memo or retry may
+      // outlive their budget or cancel another caller's ordinary search. They
+      // still count against the in-flight limit; one cancelled while it waits
+      // for a slot rejects at once and, given the slot later, sends nothing.
       signal.throwIfAborted();
-      const response = await send();
-      const text = await response.text();
-      if (!response.ok) throw httpError(response.status, text);
-      return parseOrThrowWithStatus<T>({ status: response.status, text });
+      const run = async (): Promise<SuccessBody> => {
+        signal.throwIfAborted();
+        const response = await send();
+        const text = await response.text();
+        if (!response.ok) throw httpError(response.status, text);
+        return { status: response.status, text };
+      };
+      const queued = this.limiter ? this.limiter.run(run) : run();
+      queued.catch(() => {});
+      return parseOrThrowWithStatus<T>(await Promise.race([queued, untilAborted(signal)]));
     }
     return this.read<T>("POST", path, payload, send);
   }

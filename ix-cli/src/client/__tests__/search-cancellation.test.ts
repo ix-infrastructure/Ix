@@ -59,7 +59,29 @@ describe("search probe cancellation", () => {
     completeRead(new Response("[]", { status: 200 }));
     expect(await ordinary).toEqual([]);
     expect(await client.search("sample")).toEqual([]);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // The probe was cancelled while it waited for the only slot: it never sent.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(client.sharedReadHits).toBe(1);
+  });
+
+  it("counts probes against the client's in-flight limit", async () => {
+    const pending: Array<(response: Response) => void> = [];
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => { pending.push(resolve); }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new IxClient(undefined, undefined, { maxInFlight: 2 });
+    const controller = new AbortController();
+    const probes = Array.from({ length: 5 }, (_, i) => client.search(`term${i}`, { signal: controller.signal }));
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    pending.shift()!(new Response("[]", { status: 200 }));
+    expect(await probes[0]).toEqual([]);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    // Cancelling frees every queued probe at once; none of them is sent later.
+    const rejected = Promise.allSettled(probes.slice(1));
+    controller.abort();
+    for (const resolve of pending.splice(0)) resolve(new Response("[]", { status: 200 }));
+    expect((await rejected).map((r) => r.status)).toEqual(["rejected", "rejected", "rejected", "rejected"]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });

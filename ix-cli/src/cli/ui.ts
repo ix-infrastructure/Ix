@@ -179,13 +179,15 @@ export function reportUnresolvedTarget(
   target: string | string[],
   format?: string,
   suggestions?: Suggestion[],
-  detail?: { reason?: string; message?: string; graph?: GraphHealth; files?: string[]; candidates?: TargetCandidate[]; retryCommand?: string },
+  detail?: { reason?: string; message?: string; graph?: GraphHealth; files?: string[]; didYouMean?: TargetCandidate[]; retryCommand?: string },
 ): void {
   // A file target's miss says which of "not ingested" and "does not exist" it
   // is; the code stays `unresolved_target` so a consumer routes on one slug.
   const message = detail?.message ?? unresolvedTargetMessage(target);
   const near = suggestions ?? [];
-  const display = detail?.candidates?.length ? detail.candidates.map((c) => ({ ...c, path: c.path ?? undefined })) : near;
+  // A person reads the probe's richer list; llm keeps the suggestion rows,
+  // whose ids resolve an entity directly.
+  const display = detail?.didYouMean?.length ? detail.didYouMean.map((c) => ({ ...c, path: c.path ?? undefined })) : near;
   if (format === "json") {
     printJson({
       ...unresolvedTargetRecord(target),
@@ -193,7 +195,7 @@ export function reportUnresolvedTarget(
       ...(detail?.reason ? { reason: detail.reason } : {}),
       ...(detail?.files?.length ? { files: detail.files } : {}),
       ...(near.length ? { suggestions: near } : {}),
-      ...(detail?.candidates ? { candidates: detail.candidates } : {}),
+      ...(detail?.didYouMean ? { didYouMean: detail.didYouMean } : {}),
       ...(detail?.graph ? { graph: graphHealthJson(detail.graph) } : {}),
     });
   } else if (format === "llm") {
@@ -203,9 +205,9 @@ export function reportUnresolvedTarget(
         ...(detail?.files?.length ? [["files", detail.files.join(",")]] as Array<[string, string]> : []),
       ]),
       ...(detail?.graph ? [llmLine("graph", graphHealthLlmFields(detail.graph))] : []),
-      ...candidateLines(display, "suggestion"),
+      ...candidateLines(near, "suggestion"),
     ];
-    if (display.length) {
+    if (near.length) {
       lines.push(llmLine("hint", [["text", detail?.retryCommand ?? "Re-run with one of these names, or narrow with --path."]]));
     }
     console.log(lines.join("\n"));
@@ -389,7 +391,7 @@ export function reportResolutionFailure(
   } else {
     reportUnresolvedTarget(target, format, result.suggestions, {
       reason: result.reason, message: result.message, graph: result.graph, files: result.files,
-      candidates: result.candidates, retryCommand: result.retryCommand,
+      didYouMean: result.didYouMean, retryCommand: result.retryCommand,
     });
   }
 }

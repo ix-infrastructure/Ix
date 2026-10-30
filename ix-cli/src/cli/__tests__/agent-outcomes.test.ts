@@ -135,23 +135,59 @@ describe.each(["locate", "callers", "impact", "explain"])("%s miss candidates", 
     expect(result.exitCode).toBe(3);
     expect(JSON.parse(result.stdout)).toMatchObject({
       error: "unresolved_target",
-      candidates: [{ name: "parseConfig", kind: "function", path: "src/config.ts", line: 12 }],
+      didYouMean: [{ name: "parseConfig", kind: "function", path: "src/config.ts", line: 12 }],
     });
+    // The ambiguity field keeps its one meaning.
+    expect(JSON.parse(result.stdout).candidates).toBeUndefined();
+  });
+
+  it("keeps llm suggestion ids when the probe supplies the names", async () => {
+    nearGraph();
+    const llm = (await run([command, "parse_config", "--format", "llm"])).stdout;
+    expect(llm).toMatch(/suggestion n=1 name=parseConfig .*id=/);
+  });
+
+  it("keeps did-you-mean when every probe outlives its budget", async () => {
+    // A slow backend: the bounded probes never answer in time, the resolver's
+    // own near-name lookup (no budget) still does.
+    search.mockImplementation((term: string, options?: { signal?: AbortSignal }) => {
+      if (options?.signal) {
+        return new Promise((_resolve, reject) => {
+          options.signal!.addEventListener("abort", () => reject(options.signal!.reason), { once: true });
+        });
+      }
+      return Promise.resolve(term === "parseConifg" ? [] : [{ id: "parser-id", name: "parseConfig", kind: "function", provenance: { sourceUri: "src/config.ts" } }]);
+    });
+    const json = JSON.parse((await run([command, "parseConifg", "--format", "json"])).stdout);
+    expect(json.didYouMean).toEqual([]);
+    expect(json.suggestions?.map((s: { name: string }) => s.name)).toEqual(["parseConfig"]);
+    expect((await run([command, "parseConifg", "--format", "llm"])).stdout).toMatch(/suggestion n=1 name=parseConfig .*id=/);
+    const text = await run([command, "parseConifg"]);
+    expect(text.exitCode).toBe(3);
+    expect(text.stderr).toContain("Did you mean:");
+    expect(text.stderr).toContain("parseConfig");
+  });
+
+  it("still suggests a long name more than two edits away", async () => {
+    const row = { id: "input-id", name: "validateUserInput", kind: "function", provenance: { sourceUri: "src/validate.ts" } };
+    search.mockImplementation(async (term: string) => (term === "validateUserImptx" ? [] : [row]));
+    const json = JSON.parse((await run([command, "validateUserImptx", "--format", "json"])).stdout);
+    expect(json.suggestions?.map((s: { name: string }) => s.name)).toEqual(["validateUserInput"]);
   });
 
   it("can disable candidate queries", async () => {
     search.mockClear();
     graph({});
     const result = await run([command, "Missing", "--no-suggest", "--format", "json"]);
-    expect(JSON.parse(result.stdout).candidates).toEqual([]);
+    expect(JSON.parse(result.stdout).didYouMean).toEqual([]);
     expect(search.mock.calls.every(([, options]) => !options?.signal)).toBe(true);
   });
 
-  it("preserves the existing JSON record, adding only candidates", async () => {
+  it("preserves the existing JSON record, adding only didYouMean", async () => {
     graph({});
     const payload = JSON.parse((await run([command, "Missing", "--format", "json"])).stdout);
-    const { candidates, ...legacy } = payload;
-    expect(candidates).toEqual([]);
+    const { didYouMean, ...legacy } = payload;
+    expect(didYouMean).toEqual([]);
     expect(legacy).toEqual(command === "locate" ? {
       resolvedTarget: null, resolutionMode: "none", systemPath: null,
       diagnostics: ["No graph entity found."], error: "unresolved_target",
@@ -572,14 +608,7 @@ describe("several targets in one call", () => {
 
 describe("locate misses carry the fields every miss carries", () => {
   it("suggestions for a near name, in json and llm", async () => {
-    vi.useFakeTimers({ toFake: ["performance", "setTimeout", "clearTimeout"] });
-    search.mockImplementation(async (term: string, options?: { signal?: AbortSignal }) => {
-      if (term === "Uniqu") {
-        if (!options?.signal) vi.advanceTimersByTime(20);
-        return [];
-      }
-      return UNIQUE;
-    });
+    search.mockImplementation(async (term: string) => (term === "Uniqu" ? [] : UNIQUE));
     const json = JSON.parse((await run(["locate", "Uniqu", "--format", "json"])).stdout);
     expect(json.error).toBe("unresolved_target");
     expect(json.suggestions?.map((s: { name: string }) => s.name)).toEqual(["Unique"]);

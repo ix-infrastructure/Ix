@@ -47,7 +47,7 @@ interface LocateOutput {
   reason?: string;
   files?: string[];
   suggestions?: Suggestion[];
-  candidates?: TargetCandidate[];
+  didYouMean?: TargetCandidate[];
 }
 
 export function registerLocateCommand(program: Command): void {
@@ -130,7 +130,7 @@ async function locateOne(
       ...(reason?.reason ? { reason: reason.reason } : {}),
       ...(reason?.files?.length ? { files: reason.files } : {}),
       ...(guidance?.suggestions?.length ? { suggestions: guidance.suggestions } : {}),
-      candidates: guidance?.candidates ?? [],
+      didYouMean: guidance?.didYouMean ?? [],
     };
     outputLocate(output, symbol, opts.format, guidance?.retryCommand);
     // #539: a machine caller could not tell this from a successful command
@@ -321,7 +321,7 @@ function humanizeBreadcrumb(nodes: Array<{ name: string; kind: string }>): strin
 export function renderLocateLlm(output: LocateOutput, symbol: string, retryCommand?: string): string[] {
   const t = output.resolvedTarget;
   if (!t) {
-    const near = output.candidates?.length ? output.candidates.map((c) => ({ ...c, id: undefined })) : output.suggestions ?? [];
+    const near = output.suggestions ?? [];
     return [
       llmError("unresolved_target", output.message ?? `No graph entity found for "${symbol}".`,
         [["reason", output.reason], ["files", output.files?.join(",")]]),
@@ -362,7 +362,7 @@ function outputLocate(output: LocateOutput, symbol: string, format: string, retr
 
   if (!output.resolvedTarget) {
     stderr(`No graph entity found for "${symbol}".`);
-    const near = output.candidates?.length ? output.candidates : output.suggestions;
+    const near = output.didYouMean?.length ? output.didYouMean : output.suggestions;
     if (near?.length) {
       stderr(chalk.dim("Did you mean:"));
       for (const c of near) {
