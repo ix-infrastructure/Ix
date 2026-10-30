@@ -6,9 +6,9 @@ import { parseFile, resolveEdges } from '../index.js';
 import { buildPatchWithResolution, symbolNodeId } from '../patch-builder.js';
 
 /** Where each EXTENDS edge of `srcPath` resolves: `src -> dstFile:dstKey`. */
-function heritage(files: Record<string, string>, srcPath: string): string[] {
+function heritage(files: Record<string, string>, srcPath: string, opts?: Parameters<typeof resolveEdges>[3]): string[] {
   const parsed = Object.entries(files).map(([filePath, source]) => parseFile(filePath, source)!);
-  return resolveEdges(parsed)
+  return resolveEdges(parsed, undefined, undefined, opts)
     .filter(edge => edge.predicate === 'EXTENDS' && edge.srcFilePath === srcPath)
     .map(edge => `${edge.srcName} ${edge.dstName} -> ${edge.dstFilePath}:${edge.dstQualifiedKey}`)
     .sort();
@@ -288,6 +288,36 @@ describe('EXTENDS resolution for TypeScript bases', () => {
         '',
       ].join('\n'),
     }, '/repo/src/panel.ts')).toEqual([]);
+  });
+  it('never binds an external namespace to an in-repo file by its stem', () => {
+    const files = {
+      '/repo/src/react.ts': 'export class Component {}\n',
+      '/repo/src/core/index.ts': 'export interface OnInit {}\n',
+      '/repo/src/panel.ts': [
+        "import * as React from 'react';",
+        "import * as core from '@angular/core';",
+        'export class Panel extends React.Component implements core.OnInit {}',
+        '',
+      ].join('\n'),
+    };
+    expect(heritage(files, '/repo/src/panel.ts')).toEqual([]);
+    expect(heritage(files, '/repo/src/panel.ts', { resolveModuleSpecifier: () => undefined })).toEqual([]);
+  });
+
+  it('resolves a namespace the workspace resolver maps to an in-repo module', () => {
+    expect(heritage({
+      ...base,
+      '/repo/src/widget.ts': "import * as models from '@acme/models';\nexport class A extends models.Base {}\n",
+    }, '/repo/src/widget.ts', {
+      resolveModuleSpecifier: (_source, specifier) => specifier === '@acme/models' ? ['/repo/src/base.ts'] : undefined,
+    })).toEqual(['A models.Base -> /repo/src/base.ts:Base']);
+  });
+
+  it('does not treat export * as ns as a binding in its own file', () => {
+    expect(heritage({
+      ...base,
+      '/repo/src/widget.ts': "export * as ns from './base';\nexport class A extends ns.Base {}\n",
+    }, '/repo/src/widget.ts')).toEqual([]);
   });
 });
 

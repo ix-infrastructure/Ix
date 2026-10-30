@@ -680,16 +680,27 @@ function extractJsImportBindings(stmtNode: any, rawSpec: string): ImportBinding[
 }
 
 /**
+ * JS/TS: the `importAliases` key of a re-exported namespace -- `export * as ns
+ * from 'x'` binds no local `ns`, so it is kept apart from the file's own
+ * namespace imports, but an importer's `import { ns }` still names it.
+ */
+const JS_TS_NAMESPACE_EXPORT_KEY = (name: string): string => `export:${name}`;
+
+/**
  * JS/TS: the name a statement binds a whole module to -- `ns` in
  * `import * as ns from 'x'`, in a top-level `const ns = require('x')`, and in
  * the re-export `export * as ns from 'x'` (what an importer's `import { ns }`
- * names). Resolves `ns.Base` heritage, as Python's `import a.b as m` does.
+ * names; keyed by JS_TS_NAMESPACE_EXPORT_KEY). Resolves `ns.Base` heritage, as
+ * Python's `import a.b as m` does.
  */
 function jsTsNamespaceAlias(stmtNode: any): string | undefined {
   if (!stmtNode) return undefined;
   const child = (node: any, type: string): any => node?.namedChildren?.find((c: any) => c.type === type);
   if (stmtNode.type === 'import_statement') return child(child(child(stmtNode, 'import_clause'), 'namespace_import'), 'identifier')?.text;
-  if (stmtNode.type === 'export_statement') return child(child(stmtNode, 'namespace_export'), 'identifier')?.text;
+  if (stmtNode.type === 'export_statement') {
+    const exported = child(child(stmtNode, 'namespace_export'), 'identifier')?.text;
+    return exported ? JS_TS_NAMESPACE_EXPORT_KEY(exported) : undefined;
+  }
   if (stmtNode.type !== 'call_expression' || stmtNode.childForFieldName?.('function')?.text !== 'require') return undefined;
   const declarator = stmtNode.parent;
   if (declarator?.type !== 'variable_declarator') return undefined;
@@ -5485,6 +5496,21 @@ export function resolveEdges(
   }
 
   /**
+   * JS/TS: the in-repo files a module specifier names for a module-qualified
+   * base -- a relative path, or what the workspace resolver maps a bare one
+   * to. No stem match: `import * as React from 'react'` must not bind an
+   * unrelated `src/react.ts`, so an unmapped bare specifier names no files.
+   */
+  function jsTsModuleSpecFiles(srcFilePath: string, srcLanguage: SupportedLanguages, spec: string): string[] {
+    const relative = resolveRelativeImportTargets(srcFilePath, srcLanguage, spec);
+    const files = relative ?? (opts?.resolveModuleSpecifier?.(srcFilePath, spec, 'types') ?? [])
+      .flatMap(fp => normalizedPathToFiles.get(normalizedPathKey(fp)) ?? []);
+    return files.filter(fp =>
+      normalizedPathKey(fp) !== normalizedPathKey(srcFilePath) &&
+      importLanguageCompatible(srcLanguage, fileLanguage.get(fp) ?? languageFromPath(fp)));
+  }
+
+  /**
    * JS/TS: the files of the module a qualifier is bound to -- `ns` after
    * `import * as ns from './base'` or `const ns = require('./base')`, or
    * `import { ns } from './barrel'` where the barrel has
@@ -5493,22 +5519,22 @@ export function resolveEdges(
    */
   function jsTsQualifierModuleFiles(srcFilePath: string, srcLanguage: SupportedLanguages, qualifier: string): string[] | undefined {
     if (qualifier.includes('.')) return undefined;
-    const aliasIn = (fp: string, name: string): string | undefined => {
+    const aliasIn = (fp: string, key: string): string | undefined => {
       const aliases = summaries.get(fp)?.importAliases;
-      return aliases && Object.hasOwn(aliases, name) ? aliases[name] : undefined;
+      return aliases && Object.hasOwn(aliases, key) ? aliases[key] : undefined;
     };
     const ownSpec = aliasIn(srcFilePath, qualifier);
-    if (ownSpec !== undefined) return resolveImportTargets(srcFilePath, srcLanguage, ownSpec, ownSpec, 'types');
+    if (ownSpec !== undefined) return jsTsModuleSpecFiles(srcFilePath, srcLanguage, ownSpec);
     const binding = importBindingsByLocal.get(srcFilePath)?.get(qualifier);
     if (!binding || binding.imported === 'default') return undefined;
     const files = new Set<string>();
     let bound = false;
-    for (const provider of resolveImportTargets(srcFilePath, srcLanguage, binding.pkg, binding.pkg, 'types')) {
-      const spec = aliasIn(provider, binding.imported);
+    for (const provider of jsTsModuleSpecFiles(srcFilePath, srcLanguage, binding.pkg)) {
+      const spec = aliasIn(provider, binding.imported) ?? aliasIn(provider, JS_TS_NAMESPACE_EXPORT_KEY(binding.imported));
       if (spec === undefined) continue;
       bound = true;
       const providerLanguage = summaries.get(provider)?.language ?? srcLanguage;
-      for (const fp of resolveImportTargets(provider, providerLanguage, spec, spec, 'types')) files.add(fp);
+      for (const fp of jsTsModuleSpecFiles(provider, providerLanguage, spec)) files.add(fp);
     }
     return bound ? [...files] : undefined;
   }
