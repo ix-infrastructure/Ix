@@ -366,6 +366,12 @@ describe("reportToolEdit (no git repository)", () => {
     expect(outcome.reported).toEqual(["src/lib.js#beta"]);
   });
 
+  it("still reports an edit to protobuf output: only issue ranking drops *_pb2.py", async () => {
+    const calls: AroundRequest[] = [];
+    await reportToolEdit({ ...input, tool_input: { ...input.tool_input, file_path: "/ws/src/messages_pb2.py" } }, new Set(), {}, d(calls));
+    expect(calls.map((c) => c.relPath)).toEqual(["src/messages_pb2.py"]);
+  });
+
   it("prints nothing for a non-edit tool, a non-code file, or a symbol already reported", async () => {
     expect((await reportToolEdit({ ...input, tool_name: "Read" }, new Set(), {}, d([]))).output).toBeUndefined();
     expect((await reportToolEdit({ ...input, tool_input: { file_path: "/ws/README.md" } }, new Set(), {}, d([]))).output).toBeUndefined();

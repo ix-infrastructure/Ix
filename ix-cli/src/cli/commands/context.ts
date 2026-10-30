@@ -30,6 +30,7 @@ import {
   planIssue,
   rankIssueFiles,
   readIssueText,
+  START_BOOST,
   type Closeness,
   type LeanIssueView,
   type RankedFile,
@@ -1725,7 +1726,7 @@ async function buildIssueBundle(
   // A path start has no node yet, and the graph may not have one either: it
   // does not index every tracked file. chooseCentre walks BM25 for one it does.
   const { starts, centre, walked } = await chooseCentre(
-    plan.starts, plan.bm25, (path) => findFileNode(client, path));
+    plan.starts, plan.bm25, (path) => findFileNode(client, path), CENTRE_FALLBACK_TRIES, plan.sourcePaths);
   if (!centre) {
     issueFailure(
       "issue_unresolved",
@@ -1772,7 +1773,7 @@ async function buildIssueBundle(
       startingPoints: starts,
       unresolved: plan.unresolved,
       fallback: plan.fallback || walked,
-      rankedFiles: rankIssueFiles({ starts, bm25: plan.bm25, near }),
+      rankedFiles: rankIssueFiles({ starts, bm25: plan.bm25, near, sourcePaths: plan.sourcePaths }),
       extraEntities: around.flatMap((n) => n.related),
     },
   });
@@ -2650,7 +2651,7 @@ function issueEvidence(issue: IssueBundleInput): EvidenceItem[] {
       source: "issue.ranking",
       title: `ranked files: ${shown.map((f) => f.path).join(", ")}`,
       score: tierScore(TIER.issue, 1),
-      reason: `starting points first, then bm25 against the issue text, graph neighbours of a starting point boosted up to ${Math.round(CLOSENESS_BOOST * 100)}%; `
+      reason: `bm25 against the issue text, starting points boosted by up to ${Math.round(START_BOOST * 100)}% of the best bm25 score, graph neighbours of a starting point boosted up to ${Math.round(CLOSENESS_BOOST * 100)}%; `
         + shown.map((f) => `${f.path.split("/").pop()} (${f.reason})`).join("; "),
       refs: [],
     });
