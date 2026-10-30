@@ -1771,7 +1771,9 @@ async function buildIssueBundle(
   }
   const rankedFiles = rankIssueFiles({ starts, bm25: plan.bm25, near });
   const candidates = await collectIssueEntities(client, rankedFiles, activeReadScope());
-  const repo = gitRepoAccess(resolveWorkspaceRoot());
+  // The listing planIssueWith already ran: a second `git ls-files` would only
+  // repeat it. Only tracked paths are read, as BM25 read them.
+  const repo = plan.repo;
   const tracked = new Set(repo?.files());
 
   return buildBundle({
@@ -1819,19 +1821,25 @@ async function readIssueOrReport(arg: string, format: string | undefined): Promi
   return text;
 }
 
-/** The issue's starting points and lexical ranking, against this workspace's graph. */
+/**
+ * The issue's starting points and lexical ranking, against this workspace's
+ * graph, with the repository access they were planned against (undefined
+ * outside a git checkout) so a caller does not list the files again.
+ */
 async function planIssueWith(client: IxClient, text: string) {
   await ensureReadScope(client);
   const scope = activeReadScope();
   const root = resolveWorkspaceRoot();
-  return planIssue(text, {
-    repo: gitRepoAccess(root),
+  const repo = gitRepoAccess(root);
+  const plan = await planIssue(text, {
+    repo,
     // Through the on-disk term index (bm25-cache.ts): the same ranking, with
     // only the files that differ from HEAD read again.
     rank: cachedBm25Ranker(root),
     search: async (name) =>
       (await client.search(name, { limit: ISSUE_SEARCH_LIMIT, nameOnly: true, ...scope })).map(symbolHit),
   });
+  return { ...plan, repo };
 }
 
 /**
@@ -2150,9 +2158,11 @@ export function buildBundle(input: BuildInput): ContextBundle {
     const pinned = new Set([resolved.id, ...issue.startingPoints.flatMap((s) => s.id ? [s.id] : [])]);
     // A listed definition that does not match the issue was never graph
     // context: keeping it would fill spare budget with score-0 noise and count
-    // it as truncated content the bundle never had.
+    // it as truncated content the bundle never had. One that matches only
+    // words most of the listed definitions share scores 0 here too.
     entities = placeIssueMatches(
-      entities, rankIssueEntities(entities, { ...issue, query: issue.query }, relationships),
+      entities,
+      rankIssueEntities(entities, { ...issue, query: issue.query, listedOnly: discoveredOnly }, relationships),
       pinned, budgets.maxEntities)
       .filter((e) => e.score > 0 || !discoveredOnly.has(e.id));
   } else {

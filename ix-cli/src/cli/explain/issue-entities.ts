@@ -53,6 +53,23 @@ export interface IssueEntityRanking {
   startingPoints: StartingPoint[];
   /** Direct graph distances established by the already collected facts. */
   distances?: ReadonlyMap<string, number>;
+  /**
+   * Definitions only the file listing found. They score only when they match
+   * an issue word that singles them out: see {@link isDistinctive}.
+   */
+  listedOnly?: ReadonlySet<string>;
+}
+
+/**
+ * Whether a query word found in `df` of `n` scored definitions tells them
+ * apart: it is in at most half of them, which is where its BM25 IDF reaches
+ * log 2. A word in most of them (`return`, `value`, `data` in a body) has an
+ * IDF near zero but still a positive score, and on its own let hundreds of
+ * unrelated listed helpers into the bundle's reserved match budget. A pool of
+ * one definition cannot tell, so its one match counts.
+ */
+function isDistinctive(df: number, n: number): boolean {
+  return df <= Math.max(1, n / 2);
 }
 
 /** BM25 dominates; bounded boosts refine it without promoting a zero match. */
@@ -94,6 +111,14 @@ export function rankIssueEntities<T extends EntityLocation>(
     exact.set(entity.id, hits.size);
   }
   const lexical = new Map(bm25Score(docs, weights).map(h => [h.path, h.score]));
+  if (issue.listedOnly?.size) {
+    const df = new Map<string, number>();
+    for (const doc of docs.values()) for (const t of doc.tf.keys()) df.set(t, (df.get(t) ?? 0) + 1);
+    for (const id of issue.listedOnly) {
+      const terms = docs.get(id)?.tf.keys() ?? [];
+      if (![...terms].some(t => isDistinctive(df.get(t)!, docs.size))) lexical.delete(id);
+    }
+  }
   const distances = graphDistances(issue.startingPoints, edges, issue.distances);
   const distance = (id: string) => distances.get(id) ?? Infinity;
   return entities.map((entity, index) => ({

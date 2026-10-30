@@ -89,10 +89,12 @@ describe("issue entity ranking", () => {
   });
 
   it("keeps the target, starting points and structure in budget under many matches", () => {
-    const methods: EntityLocation[] = Array.from({ length: 60 }, (_, i) => ({
+    // 60 real matches among 200 listed definitions: the issue's words single them out.
+    const methods: EntityLocation[] = Array.from({ length: 200 }, (_, i) => ({
       id: `m${i}`, name: `recover${i}`, kind: "method", path, lineStart: i + 2, lineEnd: i + 2,
     }));
-    const source = ["class Cache:", ...methods.map(m => `    def ${m.name}(self): return snapshot_recovery()`)].join("\n");
+    const source = ["class Cache:", ...methods.map((m, i) =>
+      `    def ${m.name}(self): return ${i < 60 ? "snapshot_recovery()" : i}`)].join("\n");
     const imported: EntityLocation = { id: "imp", name: "store", kind: "module" };
     const other = { id: "other", name: "Snapshot", kind: "class", path: "src/snapshot.py", token: "Snapshot", via: "identifier in issue" as const };
     const result = buildBundle({
@@ -185,6 +187,50 @@ describe("issue entity ranking", () => {
     expect(result.truncation.entitiesTruncated).toBe(0);
     expect(result.entities.map(e => e.id)).toEqual(["start", "d7"]);
     expect(result.entities[1].score).toBeGreaterThan(0);
+  });
+
+  it("drops listed definitions that share only words most of them use", () => {
+    // Helpers whose bodies share one issue word ("value") with each other and
+    // the issue score just above 0: they must neither take the reserved match
+    // half of the budget nor count as truncated.
+    const helpers = Array.from({ length: 200 }, (_, i) => i === 7
+      ? "def helper_7(self): return self.stale_value"
+      : `def helper_${i}(self): return self.value + ${i}`);
+    const listed: EntityLocation[] = helpers.map((_, i) => ({
+      id: `h${i}`, name: `helper_${i}`, kind: "method", path, lineStart: i + 1, lineEnd: i + 1,
+    }));
+    const query = "Cache returns a stale value after restart";
+    const imported: EntityLocation = { id: "imp", name: "store", kind: "module" };
+    const build = (discoveredEntities: EntityLocation[]) => buildBundle({
+      resolved: { id: "start", name: "Cache", kind: "class", resolutionMode: "issue" },
+      facts: {
+        id: "start", name: "Cache", kind: "class", path, stale: false,
+        memberRefs: [], members: [], memberCount: 0, importRefs: [imported],
+        topCallers: [], topDependents: [], diagnostics: [], historyLength: 1,
+      } as unknown as ContextFacts,
+      context: {
+        nodes: [], edges: [{ src: "start", dst: "imp", predicate: "IMPORTS" }],
+        claims: [], conflicts: [], decisions: [], intents: [],
+        metadata: { query: "", seedEntities: [], hopsExpanded: 1, asOfRev: 1 },
+      } as never,
+      provenance: {}, budgets: clampBudgets({}), isStale: () => false,
+      issue: {
+        startingPoints: [{ id: "start", name: "Cache", kind: "class", path, token: "Cache", via: "identifier in issue" as const }],
+        unresolved: [], fallback: false, rankedFiles: [{ path, score: 1, reason: "bm25" }],
+        query, repo: { read: () => helpers.join("\n") }, discoveredEntities,
+      },
+    });
+    const baseline = build([]);
+    const noise = build(listed.filter(e => e.id !== "h7"));
+    expect(noise.entities.map(e => e.id)).toEqual(baseline.entities.map(e => e.id));
+    expect(noise.truncation.entitiesTruncated).toBe(baseline.truncation.entitiesTruncated);
+    expect(noise.relationships).toEqual(baseline.relationships);
+
+    // The one helper that also says "stale" is told apart, and kept.
+    const mixed = build(listed);
+    expect(mixed.entities.map(e => e.id)).toEqual(["start", "h7", ...baseline.entities.slice(1).map(e => e.id)]);
+    expect(mixed.entities[1].score).toBeGreaterThan(0);
+    expect(mixed.truncation.entitiesTruncated).toBe(baseline.truncation.entitiesTruncated);
   });
 
   it("retains new scores through JSON validation while accepting old entities without them", () => {
