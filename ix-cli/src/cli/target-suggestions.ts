@@ -67,7 +67,9 @@ export async function findTargetCandidates(
   const terms = [...new Set([target, bare, ...words.slice(0, 2), ...parts.slice(0, 2), bare.slice(0, width), bare.slice(-width)])]
     .filter(Boolean).slice(0, SUGGEST_MAX_REQUESTS);
   const rowsPerRequest = Math.floor(SUGGEST_MAX_ROWS / terms.length);
-  const ranked: Array<{ candidate: TargetCandidate; score: number; id: string }> = [];
+  const ranked: Array<{ candidate: TargetCandidate; score: number; id: string; retryPath: string | null }> = [];
+  let complete = false;
+  let cut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const expired = new Promise<void>((resolve) => {
@@ -81,7 +83,7 @@ export async function findTargetCandidates(
         });
         if (controller.signal.aborted) return;
         for (const node of nodes.slice(0, rowsPerRequest)) {
-          if (performance.now() >= deadline) break;
+          if (performance.now() >= deadline) { cut = true; break; }
           const name = String(node.name ?? node.attrs?.name ?? "");
           if (!node.id || !name || name.length > MAX_NAME || ["chunk", "import", "reference"].includes(node.kind)) continue;
           if ((isPath && node.kind !== "file") || (opts.kind && node.kind !== opts.kind)) continue;
@@ -104,13 +106,16 @@ export async function findTargetCandidates(
             score = 4 + edits / 10;
           }
           const line = Number(node.attrs?.line_start ?? node.attrs?.lineStart ?? (node as any).line_start);
-          ranked.push({ score, id: node.id, candidate: { name, kind: node.kind,
-            path: rawPath ? relativePath(rawPath) ?? rawPath : null,
-            line: Number.isInteger(line) && line > 0 ? line : null } });
+          const shown = rawPath ? relativePath(rawPath) ?? rawPath : null;
+          ranked.push({ score, id: node.id, candidate: { name, kind: node.kind, path: shown,
+            line: Number.isInteger(line) && line > 0 ? line : null },
+            // `--path` substring-matches the stored sourceUri and the shell
+            // never expands a quoted `~/`: retry with the stored form then.
+            retryPath: shown?.startsWith("~") ? nodePath : shown });
         }
       } catch { /* Optional guidance must never replace the original error. */ }
     });
-    await Promise.race([Promise.all(probes), expired]);
+    await Promise.race([Promise.all(probes).then(() => { complete = !controller.signal.aborted && !cut; }), expired]);
   } finally {
     clearTimeout(timer);
     controller.abort();
@@ -122,14 +127,37 @@ export async function findTargetCandidates(
       && other.kind === candidate.kind && other.line === candidate.line) === i);
   const didYouMean = unique.slice(0, 5).map(({ candidate }) => candidate);
   const best = unique[0];
-  // A whole strategy tier (or the only result) is clear; lexical tie breaks aren't.
-  const clear = best && (!unique[1] || unique[1].score - best.score >= 1);
+  // A whole strategy tier (or the only result) is clear; lexical tie breaks
+  // aren't. A probe cut off by the deadline never names a winner: the missing
+  // answers could hold a better or tying name.
+  const clear = complete && best && (!unique[1] || unique[1].score - best.score >= 1);
   const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
-  const retryCommand = clear && best.candidate.path && opts.suggestCommand
-    ? `ix ${opts.suggestCommand} ${quote(isPath ? best.candidate.path : best.candidate.name)} --path ${quote(best.candidate.path)}${opts.kind ? ` --kind ${quote(opts.kind)}` : ""}`
+  const retryCommand = clear && best.retryPath && opts.suggestCommand
+    ? `ix ${opts.suggestCommand} ${quote(isPath ? best.retryPath : best.candidate.name)} --path ${quote(best.retryPath)}${opts.kind ? ` --kind ${quote(opts.kind)}` : ""}`
     : undefined;
   const suggestions = unique.slice(0, 3).map(({ candidate, id }) => ({
     id, name: candidate.name, kind: candidate.kind, path: candidate.path ?? undefined,
   }));
   return { didYouMean, ...(suggestions.length ? { suggestions } : {}), ...(retryCommand ? { retryCommand } : {}) };
+}
+
+type Row = { name: string; kind: string; path?: string | null };
+
+/**
+ * The rows a person reads: the resolver's suggestions (no time budget) always
+ * come first and unchanged, the probe's names only fill the rest up to five,
+ * so a probe the deadline cut short never shortens or reorders them.
+ */
+export function didYouMeanRows(suggestions: Row[] | undefined, didYouMean: TargetCandidate[] | undefined): Row[] {
+  const rows: Row[] = [...(suggestions ?? [])];
+  for (const c of didYouMean ?? []) {
+    if (rows.length >= 5) break;
+    if (!rows.some((r) => r.name === c.name && r.kind === c.kind && (r.path ?? null) === c.path)) rows.push(c);
+  }
+  return rows;
+}
+
+/** True when a row names the same entity a retry command would select. */
+export function rowsInclude(rows: Row[] | undefined, candidate: TargetCandidate | undefined): boolean {
+  return !!candidate && !!rows?.some((r) => r.name === candidate.name && (r.path ?? null) === candidate.path);
 }

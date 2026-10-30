@@ -16,7 +16,7 @@ import type { AmbiguousResult, ResolutionNotice, ResolveResult, Suggestion } fro
 import { forMcp } from "./next-step.js";
 import { graphHealthJson, graphHealthLlmFields, graphHealthProse, type GraphHealth } from "./graph-health.js";
 import { setOutcome } from "./outcome.js";
-import type { TargetCandidate } from "./target-suggestions.js";
+import { didYouMeanRows, type TargetCandidate } from "./target-suggestions.js";
 
 // ── Brand palette ─────────────────────────────────────────────────────────────
 //
@@ -185,9 +185,9 @@ export function reportUnresolvedTarget(
   // is; the code stays `unresolved_target` so a consumer routes on one slug.
   const message = detail?.message ?? unresolvedTargetMessage(target);
   const near = suggestions ?? [];
-  // A person reads the probe's richer list; llm keeps the suggestion rows,
-  // whose ids resolve an entity directly.
-  const display = detail?.didYouMean?.length ? detail.didYouMean.map((c) => ({ ...c, path: c.path ?? undefined })) : near;
+  // A person reads the suggestions, topped up from the probe's list; llm keeps
+  // the suggestion rows, whose ids resolve an entity directly.
+  const display = didYouMeanRows(near, detail?.didYouMean);
   if (format === "json") {
     printJson({
       ...unresolvedTargetRecord(target),

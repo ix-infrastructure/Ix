@@ -113,9 +113,10 @@ which value it ignored, on stderr, when a person is there to read it.
   (at most five `{name, kind, path, line}` objects; unknown locations are `null`).
   It is a separate field from an ambiguity's `candidates`, which keeps its meaning.
   Existing error fields, suggestion row shapes (llm `suggestion` rows keep `id=`)
-  and exit codes are preserved. Text prints “Did you mean” from `didYouMean`, or
-  from the suggestions when it is empty; text and llm include an
-  `ix <command> ... --path ...` retry when one name clearly scores best. These
+  and exit codes are preserved. Text prints “Did you mean” from the suggestions,
+  unchanged and first, topped up to five from `didYouMean`; text and llm include an
+  `ix <command> ... --path ...` retry when one name clearly scores best, every
+  probe answered in time, and the suggestion rows list that name. These
   names never select a target.
   Ranking prefers case-insensitive exact names, the last qualified segment,
   snake/camel normalization, prefix/suffix matches, then edit distance at most two.

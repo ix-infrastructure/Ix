@@ -168,6 +168,43 @@ describe.each(["locate", "callers", "impact", "explain"])("%s miss candidates", 
     expect(text.stderr).toContain("parseConfig");
   });
 
+  // The resolver's own lookup (no signal) finds parseConfig; the bounded probe
+  // for the exact term finds a different near name, parseConfg.
+  function probeFinds(otherProbes: "answer" | "hang"): void {
+    const config = { id: "parser-id", name: "parseConfig", kind: "function", provenance: { sourceUri: "src/config.ts" } };
+    const other = { id: "other-id", name: "parseConfg", kind: "function", provenance: { sourceUri: "src/other.ts" } };
+    search.mockImplementation((term: string, options?: { signal?: AbortSignal }) => {
+      if (!options?.signal) return Promise.resolve(term === "parseConifg" ? [] : [config]);
+      if (term === "parseConifg") return Promise.resolve([other]);
+      if (otherProbes === "answer") return Promise.resolve([]);
+      return new Promise((_resolve, reject) => {
+        options.signal!.addEventListener("abort", () => reject(options.signal!.reason), { once: true });
+      });
+    });
+  }
+
+  it("keeps the resolver's suggestions first when the probe only partly answers", async () => {
+    probeFinds("hang");
+    const text = await run([command, "parseConifg"]);
+    expect(text.exitCode).toBe(3);
+    const rows = text.stderr.slice(text.stderr.indexOf("Did you mean:"));
+    expect(rows.indexOf("parseConfig ")).toBeGreaterThan(-1);
+    expect(rows.indexOf("parseConfg ")).toBeGreaterThan(rows.indexOf("parseConfig "));
+    // A deadline-cut probe never names a winner.
+    expect(text.stderr).not.toContain("Try:");
+    const json = JSON.parse((await run([command, "parseConifg", "--format", "json"])).stdout);
+    expect(json.suggestions.map((s: { name: string }) => s.name)).toEqual(["parseConfig"]);
+  });
+
+  it("drops a retry for an entity the suggestion rows do not list", async () => {
+    probeFinds("answer");
+    const llm = (await run([command, "parseConifg", "--format", "llm"])).stdout;
+    expect(llm).toMatch(/suggestion n=1 name=parseConfig .*id=/);
+    expect(llm).not.toContain("--path 'src/other.ts'");
+    expect(llm).toContain("Re-run with one of these names");
+    expect((await run([command, "parseConifg"])).stderr).not.toContain("Try:");
+  });
+
   it("still suggests a long name more than two edits away", async () => {
     const row = { id: "input-id", name: "validateUserInput", kind: "function", provenance: { sourceUri: "src/validate.ts" } };
     search.mockImplementation(async (term: string) => (term === "validateUserImptx" ? [] : [row]));

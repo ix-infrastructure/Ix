@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { IxClient } from "../../client/api.js";
-import { findTargetCandidates, SUGGEST_MAX_MS, SUGGEST_MAX_REQUESTS, SUGGEST_MAX_ROWS } from "../target-suggestions.js";
+import { didYouMeanRows, findTargetCandidates, SUGGEST_MAX_MS, SUGGEST_MAX_REQUESTS, SUGGEST_MAX_ROWS } from "../target-suggestions.js";
 
 const node = (name: string, path = "src/sample.ts", kind = "function") => ({
   id: `${name}:${path}`, name, kind, attrs: { line_start: 7 }, provenance: { sourceUri: path },
@@ -120,7 +120,30 @@ describe("bounded unresolved-target candidates", () => {
     client.search.mockImplementation((term) => term === "parse" ? Promise.resolve([node("parseConfig")]) : new Promise(() => {}));
     const pending = findTargetCandidates(client, "parse_config", options, 200);
     await vi.advanceTimersByTimeAsync(100);
-    expect((await pending).didYouMean[0]?.name).toBe("parseConfig");
+    const result = await pending;
+    expect(result.didYouMean[0]?.name).toBe("parseConfig");
+    // The hung probes could hold a better or tying name: no winner.
+    expect(result.retryCommand).toBeUndefined();
+  });
+
+  it("retries a legacy absolute path under HOME by its stored form, not ~/", async () => {
+    vi.stubEnv("HOME", "/home/someone");
+    try {
+      const stored = "/home/someone/elsewhere/src/sample.ts";
+      const result = await findTargetCandidates(graph([node("parseConfig", stored)]), "parse_config", options, 200);
+      expect(result.didYouMean[0]?.path).toBe("~/elsewhere/src/sample.ts");
+      expect(result.retryCommand).toBe(`ix locate 'parseConfig' --path '${stored}'`);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("lists the resolver's suggestions first, unchanged, topped up to five from the probe", () => {
+    const suggestions = [{ name: "b", kind: "function", path: "src/b.ts" }, { name: "a", kind: "function", path: "src/a.ts" }];
+    const probe = ["a", "c", "d", "e", "f"].map((name) => ({ name, kind: "function", path: `src/${name}.ts`, line: 1 }));
+    expect(didYouMeanRows(suggestions, probe).map((r) => r.name)).toEqual(["b", "a", "c", "d", "e"]);
+    expect(didYouMeanRows(undefined, probe.slice(0, 2)).map((r) => r.name)).toEqual(["a", "c"]);
+    expect(didYouMeanRows(suggestions, [])).toEqual(suggestions);
   });
 
   it("does no work when disabled, out of budget, or given an oversized name", async () => {

@@ -17,7 +17,7 @@ import { isQuiet } from "./output-shape.js";
 import { disambiguationHint } from "./next-step.js";
 import { explainSymbolMiss, missProbeWouldRun } from "./miss-reason.js";
 import { isBackendUnreachable } from "./errors.js";
-import { findTargetCandidates, type TargetCandidate } from "./target-suggestions.js";
+import { findTargetCandidates, rowsInclude, type TargetCandidate } from "./target-suggestions.js";
 import {
   candidateOrigin, isFileStemMatch, looksLikeCodeIdentifier, requestsNonCode,
 } from "./candidate-origin.js";
@@ -1736,10 +1736,14 @@ export async function withTargetCandidates(
   }, performance.now() - (opts.missStarted ?? performance.now()));
   // The resolver's own near names (no time budget) stay the suggestions, so a
   // probe that runs out of time on a slow backend never takes them away; the
-  // probe's ranking fills them only when the resolver found none.
+  // probe's ranking fills them only when the resolver found none. A retry is
+  // kept only for an entity those rows list, so the hint and the rows agree.
+  const kept = result.suggestions?.length ? result.suggestions : suggestions;
+  const { retryCommand, ...rest } = guidance;
   return {
-    ...result, ...guidance,
+    ...result, ...rest,
     ...(!result.suggestions?.length && suggestions?.length ? { suggestions } : {}),
+    ...(retryCommand && rowsInclude(kept, guidance.didYouMean[0]) ? { retryCommand } : {}),
   };
 }
 

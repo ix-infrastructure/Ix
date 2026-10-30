@@ -10,7 +10,7 @@ import {
   type ResolvedEntity, type ResolveResult, type Suggestion,
 } from "../resolve.js";
 import { EXIT_CODES_HELP, setOutcome } from "../outcome.js";
-import type { TargetCandidate } from "../target-suggestions.js";
+import { didYouMeanRows, type TargetCandidate } from "../target-suggestions.js";
 import { runPerTarget } from "../multi-target.js";
 import { isFileStale } from "../stale.js";
 import { stderr } from "../stderr.js";
@@ -362,8 +362,8 @@ function outputLocate(output: LocateOutput, symbol: string, format: string, retr
 
   if (!output.resolvedTarget) {
     stderr(`No graph entity found for "${symbol}".`);
-    const near = output.didYouMean?.length ? output.didYouMean : output.suggestions;
-    if (near?.length) {
+    const near = didYouMeanRows(output.suggestions, output.didYouMean);
+    if (near.length) {
       stderr(chalk.dim("Did you mean:"));
       for (const c of near) {
         stderr(`  ${chalk.cyan((c.kind || "").padEnd(10))} ${c.name}${c.path ? chalk.dim(` in ${c.path}`) : ""}`);
