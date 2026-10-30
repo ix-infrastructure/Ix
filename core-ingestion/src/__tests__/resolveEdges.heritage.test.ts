@@ -319,6 +319,50 @@ describe('EXTENDS resolution for TypeScript bases', () => {
       '/repo/src/widget.ts': "export * as ns from './base';\nexport class A extends ns.Base {}\n",
     }, '/repo/src/widget.ts')).toEqual([]);
   });
+
+  it('resolves a namespace base a barrel re-exports', () => {
+    const models = {
+      '/repo/src/models/base.ts': 'export class Base {}\nexport interface I<T> {}\n',
+      '/repo/src/models/shape.ts': 'export interface Shape {}\n',
+      '/repo/src/models/index.ts': "export * from './base';\nexport { Shape } from './shape';\n",
+    };
+    expect(heritage({
+      ...models,
+      '/repo/src/widget.ts': [
+        "import * as models from './models';",
+        'export class A extends models.Base implements models.I<string>, models.Shape {}',
+        'export class B extends models.Missing {}',
+        '',
+      ].join('\n'),
+    }, '/repo/src/widget.ts')).toEqual([
+      'A models.Base -> /repo/src/models/base.ts:Base',
+      'A models.I -> /repo/src/models/base.ts:I',
+      'A models.Shape -> /repo/src/models/shape.ts:Shape',
+    ]);
+  });
+
+  it('never lands an unimported generic or bare base on a same-named module type', () => {
+    expect(heritage({
+      '/repo/src/lib/iter.ts': 'export interface Iterable<T> {}\nexport class Repository<T> {}\nexport interface Plain {}\n',
+      '/repo/src/widget.ts': [
+        'export class A implements Iterable<number> {}',
+        'export class B extends Repository<User> {}',
+        'export interface C extends Iterable<number>, Plain {}',
+        '',
+      ].join('\n'),
+    }, '/repo/src/widget.ts')).toEqual([]);
+  });
+
+  it('still resolves an unimported base to an in-repo ambient declaration', () => {
+    expect(heritage({
+      '/repo/src/lib/iter.ts': 'export interface Iterable<T> {}\n',
+      '/repo/types/globals.d.ts': 'interface Plugin<T> {}\ndeclare class Widget {}\n',
+      '/repo/src/widget.ts': 'export class A extends Widget implements Plugin<number>, Iterable<number> {}\n',
+    }, '/repo/src/widget.ts')).toEqual([
+      'A Plugin -> /repo/types/globals.d.ts:Plugin',
+      'A Widget -> /repo/types/globals.d.ts:Widget',
+    ]);
+  });
 });
 
 describe('EXTENDS resolution for JavaScript namespace bases', () => {
@@ -343,6 +387,14 @@ describe('EXTENDS resolution for JavaScript namespace bases', () => {
     expect(heritage({
       ...base,
       '/repo/src/widget.js': "const ns = require('./base');\nclass A extends ns.Base {}\n",
+    }, '/repo/src/widget.js')).toEqual(['A ns.Base -> /repo/src/base.js:Base']);
+  });
+
+  it('resolves ns.Base through a barrel that re-exports it', () => {
+    expect(heritage({
+      ...base,
+      '/repo/src/index.js': "export * from './base.js';\n",
+      '/repo/src/widget.js': "import * as ns from './index.js';\nclass A extends ns.Base {}\n",
     }, '/repo/src/widget.js')).toEqual(['A ns.Base -> /repo/src/base.js:Base']);
   });
 

@@ -4223,6 +4223,9 @@ function packageNameOf(spec: string): string {
 // not trustworthy. (Tunable; the named-list above carries the builtin-method load.)
 const COMMODITY_DEF_FILE_THRESHOLD = 5;
 
+/** A TypeScript declaration file (`x.d.ts`, `x.d.mts`, `x.d.cts`): ambient types, visible without an import. */
+const TS_DECLARATION_FILE = /\.d\.[cm]?ts$/;
+
 /**
  * Resolves CALLS and EXTENDS relationships to their cross-file targets by
  * building a symbol table and import map over the full batch of parsed files.
@@ -5539,6 +5542,26 @@ export function resolveEdges(
     return bound ? [...files] : undefined;
   }
 
+  /**
+   * JS/TS: the files a barrel names one hop on -- `models.Base` after
+   * `import * as models from './models'` where models/index.ts has
+   * `export * from './base'` or `export { Base } from './base'`. The summary
+   * keeps re-exports among the barrel's imports, so this hops through both,
+   * as the transitive tier does.
+   */
+  function jsTsReexportedFiles(barrels: string[]): string[] {
+    const files = new Set<string>();
+    for (const barrel of barrels) {
+      const summary = summaries.get(barrel);
+      if (!summary) continue;
+      for (const rel of summary.imports) {
+        if (rel.importVia === 'helper' || rel.importRaw === undefined) continue;
+        for (const fp of jsTsModuleSpecFiles(barrel, summary.language, rel.importRaw)) files.add(fp);
+      }
+    }
+    return [...files];
+  }
+
   function sameScopeDefines(result: FileParseResult, srcName: string, dstName: string): boolean {
     const sourceEntities = result.entities.filter(e => e.name === srcName || qualifiedKey(e) === srcName);
     if (sourceEntities.length === 0) return false;
@@ -6004,10 +6027,17 @@ export function resolveEdges(
           if (qualImportMatches.length === 0 && rel.predicate === 'EXTENDS' && srcIsJsTs) {
             const moduleFiles = jsTsQualifierModuleFiles(srcFilePath, srcLanguage, qualifierPart);
             if (moduleFiles !== undefined) {
-              const moduleMatches = moduleFiles
-                .filter(fp => fp !== srcFilePath && (fileQKeys.get(fp)?.get(memberPart) ?? []).includes(memberPart));
+              const definesMember = (fp: string): boolean =>
+                fp !== srcFilePath && (fileQKeys.get(fp)?.get(memberPart) ?? []).includes(memberPart);
+              const moduleMatches = moduleFiles.filter(definesMember);
+              // Not defined in the module itself: a barrel re-exporting it.
+              const reexportMatches = moduleMatches.length === 0
+                ? jsTsReexportedFiles(moduleFiles).filter(definesMember)
+                : [];
               if (moduleMatches.length === 1) {
                 resolved.push({ srcFilePath, srcName, dstFilePath: moduleMatches[0], dstName: origDstName, dstQualifiedKey: memberPart, predicate: rel.predicate, confidence: 0.9, tier: 'qualifier' });
+              } else if (reexportMatches.length === 1) {
+                resolved.push({ srcFilePath, srcName, dstFilePath: reexportMatches[0], dstName: origDstName, dstQualifiedKey: memberPart, predicate: rel.predicate, confidence: 0.8, tier: 'qualifier' });
               }
               continue;
             }
@@ -6098,8 +6128,15 @@ export function resolveEdges(
       // a parameter or a closure variable (`const gte = ...; gte(x)`). Filtering
       // the members out first would turn an ambiguous name into a "unique" one
       // and link that local to an unrelated module's function of the same name.
+      // TypeScript: a heritage base that no import binds and no imported file
+      // defines (`implements Iterable<T>`, `extends PromiseLike<T>`) is a
+      // global -- lib.d.ts, an @types package, or an in-repo ambient
+      // declaration. A module's top-level types are not globals, so only a
+      // declaration file is a candidate, never a same-named module type.
+      const tsUnboundBase = srcLanguage === SupportedLanguages.TypeScript && rel.predicate === 'EXTENDS' && !binding;
       let globalMatches = candidates.filter(fp =>
-        fp !== srcFilePath && fileLanguage.get(fp) === srcLanguage && insideBoundPackage(fp));
+        fp !== srcFilePath && fileLanguage.get(fp) === srcLanguage && insideBoundPackage(fp) &&
+        (!tsUnboundBase || TS_DECLARATION_FILE.test(fp)));
       const importHint = pickCallerAlignedCandidate(importMatches, srcName, dstName)?.chosen
         ?? pickCallerAlignedCandidate(transitiveMatches, srcName, dstName)?.chosen;
       if (importHint) {
