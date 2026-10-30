@@ -475,8 +475,18 @@ was cut to the budget. With more than one symbol each row names its own with
 `of=`. `caller` is a CALLS/REFERENCES edge at its call site; `user` is a file
 that imports this one, names the symbol in that import, and uses it -- found
 on disk, so it also catches a function handed over by name, which no edge
-records; `test` is a test file that calls it, calls a caller of it (`via=`
-that caller), or imports and uses it. `importers` counts every file importing
+records; `test` is a test file the graph links to it (it calls it, calls a
+caller of it -- `via=` that caller -- or imports and uses it). In `ix around`,
+though not the post-edit hook, test files that import this file or are named
+for it in the same part of the tree are file-level evidence, not a call to any
+one symbol: a `test` row they agree with says so in `sources=` (`graph,import`,
+`graph,naming`; those rank first), and the rest follow the symbols once, as a
+`file_tests shown= total=` header and `file_test` rows with `sources=import`,
+`naming` or both -- both first, then import, then naming, nearest first. A name
+counts only when no same-named file is as near the test, so a repository-root
+`tests/test_utils.py` names no `utils.py` in a tree with two. `file_test` rows
+are cut, down to one, before any symbol's rows.
+`importers` counts every file importing
 this one; its `importer` rows are the first cut when the answer is over
 budget. Empty lists print no rows. On a degraded graph a `graph` record
 follows the header and the totals are floors.

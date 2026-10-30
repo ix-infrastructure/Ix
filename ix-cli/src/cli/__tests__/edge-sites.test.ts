@@ -251,4 +251,14 @@ describe("edgeTargetFor", () => {
     const target = { id: "x", name: "target", kind: "function", path: "src/lib.ts" };
     expect(await edgeTargetFor(failing, target, "callees")).toEqual({ name: "target", kind: "function", path: "src/lib.ts" });
   });
+
+  it("bounds the source listing outside git", () => {
+    const root = mkdtempSync(join(tmpdir(), "ix-source-walk-"));
+    try {
+      for (let i = 0; i < 5010; i++) writeFileSync(join(root, `f${i}.ts`), "");
+      expect(new SourceFiles(root).sourcePaths()).toHaveLength(5000);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

@@ -18,7 +18,8 @@ function span(s: { lineStart: number; lineEnd: number }): string {
 function refText(r: AroundRef): string {
   const where = r.line !== undefined ? `${r.path}:${r.line}` : r.path;
   const via = r.via ? ` (via ${r.via})` : "";
-  return r.snippet ? `${where}${via} ${r.snippet}` : `${where}${via}`;
+  const sources = r.sources?.length ? ` [${r.sources.join(", ")}]` : "";
+  return r.snippet ? `${where}${via}${sources} ${r.snippet}` : `${where}${via}${sources}`;
 }
 
 function sectionLines(label: string, section: AroundSection, indent: string): string[] {
@@ -69,6 +70,9 @@ export function renderAroundText(result: AroundResult, opts: AroundTextOptions =
       lines.push(`${p}same name in file: ${s.sameName.map((o) => `${span(o)} (${o.kind})`).join(", ")}`);
     }
   }
+  if (result.fileTests) {
+    lines.push(...sectionLines(`file-level tests of ${path.posix.basename(result.path)}`, result.fileTests, "  "));
+  }
   const imp = result.importers;
   if (imp.total > 0) {
     const tests = imp.tests > 0 ? ` (${imp.tests} test${imp.tests === 1 ? "" : "s"})` : "";
@@ -88,6 +92,7 @@ function refFields(r: AroundRef): Array<[string, string | number | undefined]> {
     ["site", r.line !== undefined ? `${r.path}:${r.line}` : r.path],
     ["name", r.name],
     ["via", r.via],
+    ["sources", r.sources?.join(",")],
     ["snippet", r.snippet],
   ];
 }
@@ -112,6 +117,7 @@ function symbolLlm(s: AroundSymbol, many: boolean): string[] {
 /**
  * `around path=... symbols=<n>`, then per symbol a `symbol` record carrying
  * the totals and the `caller` / `user` / `test` rows shown, then the file's
+ * `file_tests` header and `file_test` rows (when gathered), then its
  * `importers` header and rows. Fewer rows than a total means the list was cut.
  */
 export function renderAroundLlm(result: AroundResult): string[] {
@@ -125,6 +131,10 @@ export function renderAroundLlm(result: AroundResult): string[] {
   ];
   if (result.graph) out.push(llmLine("graph", graphHealthLlmFields(result.graph)));
   for (const s of result.symbols) out.push(...symbolLlm(s, many));
+  if (result.fileTests && result.fileTests.total > 0) {
+    out.push(llmLine("file_tests", [["shown", result.fileTests.rows.length], ["total", result.fileTests.total]]));
+    for (const r of result.fileTests.rows) out.push(llmLine("file_test", refFields(r)));
+  }
   if (result.importers.total > 0) {
     out.push(llmLine("importers", [
       ["shown", result.importers.rows.length], ["total", result.importers.total], ["tests", result.importers.tests],

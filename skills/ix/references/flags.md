@@ -196,9 +196,11 @@ before a command name — `ix --version`, not `ix map --version`.
 
 Show who depends on the code at a file location: callers, importers, tests. `<target>` is `path[:line[-end]]`, relative to the workspace root or absolute.
 
+Each symbol's tests are the ones the graph links to it. Test files that import the target file (local Python package imports, JS/TS relative imports) or follow its naming convention are file-level evidence: one that agrees with a graph test adds to that row's `sources` (`graph`, `import`, `naming`) and ranks it first; the rest are listed once for the file (`fileTests` in json, `file_test` rows in llm), not under each symbol. A name counts only when no same-named file is as near the test.
+
 | Flag | Value | Default | Effect |
 |---|---|---|---|
-| `--limit` | `<n>` | `8` | Max rows per list (callers; users, tests and importers cap at 5) |
+| `--limit` | `<n>` | text/llm: 8 callers, 5 others; json: all | Max rows per list; `0` for all. Explicit limits apply to callers, users, tests, file-level tests and non-test importer rows. Text/llm remain subject to `--budget` |
 | `--budget` | `<tokens>` | `300` | Token budget for text/llm output (~4 chars a token); rows are cut to fit, totals are kept. json is not cut |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |

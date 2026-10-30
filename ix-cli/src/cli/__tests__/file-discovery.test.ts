@@ -35,6 +35,16 @@ describe('file discovery', () => {
     expect(rel(root, tryGitLsFiles(root, true)!)).toEqual(['src/café.ts', 'src/plain.ts', 'src/日本語.ts']);
   });
 
+  it('an unverified listing (no per-file stat or realpath) names the same files, in git and in the walk', () => {
+    const root = tree({ 'src/café.ts': '', 'src/plain.ts': '', 'tests/test_app.py': '', 'README.md': '' });
+    const walked = rel(root, discoverSourceFiles(root));
+    expect(rel(root, discoverSourceFiles(root, { verify: false }))).toEqual(walked);
+    git(root, 'init', '-q');
+    git(root, 'add', '-A');
+    expect(rel(root, tryGitLsFiles(root, true, undefined, emptyDiscoveryCounts(), false)!)).toEqual(rel(root, tryGitLsFiles(root, true)!));
+    expect(rel(root, discoverSourceFiles(root, { verify: false }))).toEqual(walked);
+  });
+
   it('git and the walk return the same files for the same tree', () => {
     const files = {
       '.gitignore': 'generated/\nlocal.ts\n',

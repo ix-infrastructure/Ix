@@ -146,12 +146,17 @@ const GIT_SAFE_CONFIG = [
  *
  * `-z` and `core.quotePath=false`: without them git quotes a non-ASCII name
  * (`"caf\303\251.ts"`), the stat on that string fails, and the file vanished.
+ *
+ * `verify: false` skips the per-file stat and realpath (most of the cost in a
+ * large repository) and returns resolved paths, for a caller that guards each
+ * read itself.
  */
 export function tryGitLsFiles(
   dir: string,
   recursive: boolean,
   exclude?: DiscoveryExclude,
   counts: DiscoveryCounts = emptyDiscoveryCounts(),
+  verify = true,
 ): string[] | null {
   try {
     const result = spawnSync(
@@ -192,6 +197,10 @@ export function tryGitLsFiles(
       // is saying it is source. An untracked one under such a name is what a
       // missing .gitignore line would have caught -- a fresh `node_modules`.
       if (inSkippedDir(entry) && isUntracked(entry)) { counts.skippedDirs++; continue; }
+      if (!verify) {
+        if (!seenCanonical.has(fullPath)) { seenCanonical.add(fullPath); files.push(fullPath); }
+        continue;
+      }
       try {
         if (!fs.statSync(fullPath).isFile()) continue;
       } catch {
@@ -278,23 +287,26 @@ export function* walkFiles(
  * The source files under `dir`, canonical and de-duplicated: git's list when
  * `dir` is in a work tree, else the walk.
  *
+ * `verify: false`: see {@link tryGitLsFiles}.
+ *
  * `walkLimit` stops the walk after that many files. A git listing is bounded
  * by the repository, but a walk is bounded by nothing: a command run from a
  * home directory would read the whole disk.
  */
 export function discoverSourceFiles(
   dir: string,
-  opts: { recursive?: boolean; exclude?: DiscoveryExclude; counts?: DiscoveryCounts; walkLimit?: number } = {},
+  opts: { recursive?: boolean; exclude?: DiscoveryExclude; counts?: DiscoveryCounts; walkLimit?: number; verify?: boolean } = {},
 ): string[] {
   const recursive = opts.recursive ?? true;
   const counts = opts.counts ?? emptyDiscoveryCounts();
-  const listed = tryGitLsFiles(dir, recursive, opts.exclude, counts);
+  const verify = opts.verify ?? true;
+  const listed = tryGitLsFiles(dir, recursive, opts.exclude, counts, verify);
   if (listed) return listed;
   const out: string[] = [];
   const seen = new Set<string>();
   for (const filePath of walkFiles(dir, recursive, opts.exclude, counts)) {
     if (opts.walkLimit !== undefined && out.length >= opts.walkLimit) break;
-    const canonical = canonicalizeDiscoveredFilePath(filePath);
+    const canonical = verify ? canonicalizeDiscoveredFilePath(filePath) : filePath;
     if (seen.has(canonical)) continue;
     seen.add(canonical);
     out.push(canonical);

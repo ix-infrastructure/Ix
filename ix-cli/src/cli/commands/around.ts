@@ -68,13 +68,27 @@ export function aroundRelPath(abs: string, root: string): string | undefined {
   return rel.startsWith("..") || path.isAbsolute(rel) ? undefined : rel;
 }
 
-export function capsFor(limit: number): AroundCaps {
+/**
+ * `--limit`: digits are the row count (0 for all). Anything else falls back as
+ * it always has (`abc` to the default, `-1` to 1) rather than failing, so a
+ * runner passing a bad value keeps its exit status.
+ */
+export function limitOption(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  if (/^\d+$/.test(raw)) return Number(raw);
+  return Math.max(1, parseInt(raw, 10) || DEFAULT_CAPS.callers);
+}
+
+export function capsFor(limit?: number, format = "text"): AroundCaps {
+  if (limit === undefined && format !== "json") return { ...DEFAULT_CAPS };
+  const rows = limit === undefined || limit === 0 ? Infinity : limit;
   return {
     ...DEFAULT_CAPS,
-    callers: limit,
-    users: Math.min(limit, DEFAULT_CAPS.users),
-    tests: Math.min(limit, DEFAULT_CAPS.tests),
-    importers: Math.min(limit, DEFAULT_CAPS.importers),
+    callers: rows,
+    users: rows,
+    tests: rows,
+    importers: rows,
+    fileTests: rows,
   };
 }
 
@@ -82,7 +96,7 @@ export function registerAroundCommand(program: Command): void {
   program
     .command("around <target>")
     .description("Show who depends on the code at a file location: callers, importers, tests")
-    .option("--limit <n>", "Max rows per list (callers; users, tests and importers cap at 5)", String(DEFAULT_CAPS.callers))
+    .option("--limit <n>", "Max rows per list; 0 for all (text/llm default: 8 callers, 5 others; json: all)")
     .option("--budget <tokens>", `Token budget for text/llm output (~4 chars a token)`, (v: string) => parseBudgetOption(v, String(DEFAULT_TOKEN_BUDGET)), DEFAULT_TOKEN_BUDGET)
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", `
@@ -94,7 +108,7 @@ Examples:
   ix around src/cli/options.ts:109
   ix around src/cli/options.ts:100-140 --format llm
   ix around src/cli/config.ts --limit 3`)
-    .action(async (target: string, opts: { limit: string; budget: number; format: string }) => {
+    .action(async (target: string, opts: { limit?: string; budget: number; format: string }) => {
       const parsed = parseAroundTarget(target);
       if (!parsed) {
         reportError("invalid_line_range", `Invalid target "${target}". Use path, path:line or path:start-end (1-based).`, opts.format);
@@ -108,8 +122,7 @@ Examples:
         return;
       }
       const lines = readLines(abs);
-      const limit = Math.max(1, parseInt(opts.limit, 10) || DEFAULT_CAPS.callers);
-      const caps = capsFor(limit);
+      const caps = capsFor(limitOption(opts.limit), opts.format);
       const client = createClient();
 
       let result: AroundResult;
@@ -120,6 +133,7 @@ Examples:
           anchorLines: lines,
           files: new SourceFiles(root),
           caps,
+          heuristicTests: true,
         });
       } catch (err) {
         if (err instanceof AroundError) {
