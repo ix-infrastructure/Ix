@@ -497,9 +497,11 @@ later). `ix rank` scores its candidates with it, and falls back to one
 `/v1/expand` per candidate when the route is missing (404/405) or the request
 fails. A `distinct` count is not quite what `/v1/expand` lists: it counts a
 node with a self-loop as its own neighbour, and has no 1000-neighbour limit.
-It is never lower, so `ix rank` treats it as a ceiling and expands only the
-candidates that could make the rows it shows, which then score exactly as
-before.
+It should never be lower, so `ix rank` treats it as a ceiling and expands only
+the candidates that could make the rows it shows, which then score exactly as
+before. As a check on that, it also expands the next candidates by count (at
+least 10); if any expand lists more neighbours than its count, rank scores
+every candidate by expanding instead, for the rest of the process.
 
 **Request body**
 

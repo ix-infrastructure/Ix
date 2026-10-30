@@ -319,11 +319,12 @@ export class IxClient {
    * at most 5000 ids). With `distinct`, a node's count is its distinct
    * neighbour nodes, what `expand(id, {direction, predicates})` lists. An id
    * the backend could not count is absent from `counts`; `truncated` says some
-   * count stopped short.
+   * count stopped short. `timeoutMs` bounds this one request (default 2
+   * minutes); the client's read deadline applies as well.
    */
   async degree(
     ids: string[],
-    opts: { direction: string; predicates?: string[]; distinct?: boolean; branchId?: string },
+    opts: { direction: string; predicates?: string[]; distinct?: boolean; branchId?: string; timeoutMs?: number },
   ): Promise<DegreeResponse> {
     return this.post("/v1/degree", {
       ids,
@@ -331,7 +332,7 @@ export class IxClient {
       predicates: opts.predicates,
       distinct: opts.distinct,
       ...(opts.branchId !== undefined ? { branchId: opts.branchId } : {}),
-    });
+    }, opts.timeoutMs);
   }
 
   async listGoals(): Promise<GraphNode[]> {

@@ -147,6 +147,20 @@ async function scoreAllCandidates(
 export const DEGREE_MAX_IDS = 5000;
 
 /**
+ * How long one `POST /v1/degree` may take before rank scores by expanding
+ * instead. Well under the client's 60 s read deadline, which the fallback's
+ * expands share: a slow degree call must leave them the time to finish.
+ */
+export const DEGREE_TIMEOUT_MS = 15_000;
+
+/**
+ * At least this many candidates beyond the ones that can be shown are
+ * expanded as a check that the degree counts really bound the expand scores
+ * (more when more rows are shown: as many as are shown).
+ */
+export const DEGREE_CHECK_MIN = 10;
+
+/**
  * The most neighbours `/v1/expand` returns when no `limit` is sent (Ix-memory
  * `ExpandRoutes`), so the most an expand-path score can be. Only used to
  * guess which candidates to expand; a wrong guess costs requests, not scores.
@@ -185,7 +199,16 @@ function nthLargest(values: number[], n: number): number {
  * is expanded; when an exact score then lands below its floor, the floors are
  * worked out again and the new contenders expanded, until every row that can
  * be shown has its exact score. A candidate never expanded keeps `d` as its
- * score, which is below every shown row's. `d = 0` is exact.
+ * score, which is below every shown row's. `d = 0` is taken as exact.
+ *
+ * That rests on `d` never being below the expand score, which is what the
+ * backend's `distinct` count is meant to give but cannot be checked against
+ * its source from here. So once the shown rows are exact, the candidates with
+ * the highest counts not yet expanded (as many as are shown, at least
+ * `DEGREE_CHECK_MIN`, zeros included) are expanded too: the ones a modest
+ * undercount would have wrongly kept out. Any of them, or any other expand,
+ * listing more neighbours than its `d` sends rank to the expand path. An
+ * undercount on a candidate outside that margin is not caught.
  *
  * Returns null when the caller must score through `scoreAllCandidates`
  * instead: the route is missing (404/405, remembered for this backend), the
@@ -217,6 +240,7 @@ export async function scoreViaDegree(
         direction: config.direction,
         predicates: config.predicates,
         distinct: true,
+        timeoutMs: DEGREE_TIMEOUT_MS,
       });
     } catch (err) {
       const status = errorStatus(err);
@@ -237,6 +261,7 @@ export async function scoreViaDegree(
   const shown = candidates.slice(0, top).length;
   const exact = candidates.map((node: any): number | undefined => (counts.get(node.id) === 0 ? 0 : undefined));
   const failed = new Array<boolean>(candidates.length).fill(false);
+  const expanded = new Array<boolean>(candidates.length).fill(false);
   const floor = (node: any, i: number): number => {
     const d = counts.get(node.id);
     return exact[i] ?? (d === undefined ? 0 : Math.max(0, Math.min(d - 1, EXPAND_DEFAULT_LIMIT)));
@@ -246,12 +271,23 @@ export async function scoreViaDegree(
   // After a failed expand, expand everything left, as the expand path would
   // have: failures can otherwise lower the bar one round-trip at a time.
   let expandAll = false;
+  let checked = shown === 0;
   for (;;) {
     const threshold = expandAll ? -Infinity : nthLargest(candidates.map(floor), shown);
-    const pending: number[] = [];
+    let pending: number[] = [];
     candidates.forEach((node: any, i) => {
       if (exact[i] === undefined && ceiling(node, i) >= threshold) pending.push(i);
     });
+    if (pending.length === 0 && !checked) {
+      // The shown rows are exact: check the counts just below them.
+      checked = true;
+      pending = candidates
+        .map((node: any, i) => ({ i, d: counts.get(node.id) ?? 0 }))
+        .filter(({ i }) => !expanded[i])
+        .sort((a, b) => b.d - a.d || a.i - b.i)
+        .slice(0, Math.max(shown, DEGREE_CHECK_MIN))
+        .map(({ i }) => i);
+    }
     if (pending.length === 0) break;
     const scores = await mapLimit(pending, SCORE_CONCURRENCY, async (i): Promise<number | undefined> => {
       try {
@@ -278,6 +314,7 @@ export async function scoreViaDegree(
         expandAll = true;
       }
       exact[i] = score ?? 0;
+      expanded[i] = true;
     }
   }
 

@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
-import { DEGREE_MAX_IDS, registerRankCommand, scoreViaDegree } from "../commands/rank.js";
+import { DEGREE_CHECK_MIN, DEGREE_MAX_IDS, DEGREE_TIMEOUT_MS, registerRankCommand, scoreViaDegree } from "../commands/rank.js";
 
 const { listByKind, expand, degree } = vi.hoisted(() => ({ listByKind: vi.fn(), expand: vi.fn(), degree: vi.fn() }));
 vi.mock("../../client/api.js", () => ({
@@ -153,7 +153,7 @@ describe("ix rank scores with one POST /v1/degree", () => {
     expect(await expandSize("n13", "callers")).toBe(500);
   });
 
-  it.each(cases)("--by %s --format %s: byte-identical to the expand path, expanding only rows that can be shown", async (metric, format) => {
+  it.each(cases)("--by %s --format %s: byte-identical to the expand path", async (metric, format) => {
     const args = ["--by", metric, "--kind", "class", "--top", "3", "--format", format];
     const before = await oldPathOutput(args);
 
@@ -164,7 +164,6 @@ describe("ix rank scores with one POST /v1/degree", () => {
 
     expect(after).toBe(before);
     expect(degree).toHaveBeenCalledTimes(1);
-    expect(expand.mock.calls.length).toBeLessThan(NODES.length);
   });
 
   it.each(METRICS)("--by %s: byte-identical for every --top, self-loops and hubs included", async (metric) => {
@@ -191,7 +190,13 @@ describe("ix rank scores with one POST /v1/degree", () => {
 
   it("sends the metric's direction and predicates, every candidate, and distinct: true", async () => {
     await run(["--by", "callers", "--kind", "class", "--format", "json"]);
-    expect(degree).toHaveBeenCalledWith(NODES.map(n => n.id), { direction: "in", predicates: ["CALLS", "REFERENCES"], distinct: true });
+    expect(degree).toHaveBeenCalledWith(NODES.map(n => n.id), {
+      direction: "in", predicates: ["CALLS", "REFERENCES"], distinct: true, timeoutMs: DEGREE_TIMEOUT_MS,
+    });
+  });
+
+  it("bounds the degree call well inside the 60 s read deadline, so the expand fallback keeps time to run", () => {
+    expect(DEGREE_TIMEOUT_MS).toBeLessThanOrEqual(15_000);
   });
 
   it("keeps filters: only the candidates left after --path, --exclude-path and --exclude-kind are counted", async () => {
@@ -334,6 +339,49 @@ describe("ix rank when degree is no ceiling on expand", () => {
     // Not asked again for this backend.
     expect(await run(args)).toBe(before);
     expect(degree).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ix rank when degree undercounts a candidate it would not otherwise expand", () => {
+  it.each(METRICS)("--by %s: a top row whose count is too low is caught by the check expands; the expand path, same output", async (metric) => {
+    const args = ["--by", metric, "--kind", "class", "--top", "1", "--format", "json"];
+    const before = await oldPathOutput(args);
+    const topName = JSON.parse(before).results[0].name as string;
+    const topId = NODES.find(n => (n.name || "(unnamed)") === topName)!.id;
+    process.env.IX_ENDPOINT = freshEndpoint();
+    // The true top row counted just under the highest floor of the others,
+    // so the contender rounds never expand it; only the check can.
+    degree.mockImplementation(async (ids: string[], opts: any) => {
+      const res = await realDegree(ids, opts);
+      const counts = res.counts as Record<string, number>;
+      const maxOtherFloor = Math.max(...ids.filter(id => id !== topId).map(id => Math.max(0, Math.min(counts[id]! - 1, 1000))));
+      counts[topId] = Math.max(0, maxOtherFloor - 1);
+      return res;
+    });
+    degree.mockClear();
+    expect(await run(args)).toBe(before);
+    // Remembered: the next rank against this backend expands straight away.
+    expect(await run(args)).toBe(before);
+    expect(degree).toHaveBeenCalledTimes(1);
+  });
+
+  it(`expands at least ${DEGREE_CHECK_MIN} candidates beyond the shown rows, highest counts first`, async () => {
+    const candidates = Array.from({ length: 40 }, (_, i) => ({ id: `c${i}`, name: `C${i}`, kind: "class" }));
+    const d = (id: string) => 40 - Number(id.slice(1));
+    const expanded: string[] = [];
+    const client = {
+      endpoint: freshEndpoint(),
+      degree: async (ids: string[]) => ({ rev: 1, truncated: false, counts: Object.fromEntries(ids.map(id => [id, d(id)])) }),
+      expand: async (id: string) => {
+        expanded.push(id);
+        return { nodes: Array.from({ length: d(id) }, (_, k) => ({ id: `x${k}` })), edges: [] };
+      },
+    };
+    const scored = await scoreViaDegree(candidates, { direction: "in", predicates: ["CALLS"] }, client as any, [], "class", 2);
+    expect(scored!.map(s => s.score)).toEqual(candidates.map(c => d(c.id)));
+    // The three that could be shown (c2's count reaches c1's floor), the
+    // next ten checked, nothing else.
+    expect([...expanded].sort()).toEqual(candidates.slice(0, 3 + DEGREE_CHECK_MIN).map(c => c.id).sort());
   });
 });
 
