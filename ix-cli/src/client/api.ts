@@ -289,14 +289,14 @@ export class IxClient {
 
   async expandByName(
     name: string,
-    opts?: { direction?: string; predicates?: string[]; kinds?: string[] }
+    opts?: { direction?: string; predicates?: string[]; kinds?: string[]; timeoutMs?: number }
   ): Promise<{ nodes: any[]; edges: any[] }> {
     return this.post("/v1/expand-by-name", {
       name,
       direction: opts?.direction ?? "both",
       predicates: opts?.predicates,
       kinds: opts?.kinds,
-    });
+    }, opts?.timeoutMs);
   }
 
   async expand(
@@ -828,7 +828,7 @@ export class IxClient {
     return this.token !== undefined;
   }
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
+  private async post<T>(path: string, body: unknown, timeoutMs = 2 * 60 * 1000): Promise<T> {
     const payload = JSON.stringify(body);
     return this.read<T>("POST", path, payload, () =>
       fetch(`${this.endpoint}${path}`, {
@@ -837,9 +837,10 @@ export class IxClient {
         body: payload,
         // These small reads/writes (source-hashes, stitch, list, ...) had no
         // timeout, so a stalled connection could hang the process indefinitely.
-        // 2 min per request, also bounded by the shared deadline when set, and
-        // by the read deadline when this POST is a read.
-        signal: this.signalFor(2 * 60 * 1000, isSharedRead(path)),
+        // 2 min per request unless the caller bounds it, also bounded by the
+        // shared deadline when set, and by the read deadline when this POST is
+        // a read.
+        signal: this.signalFor(timeoutMs, isSharedRead(path)),
       }));
   }
 

@@ -159,7 +159,8 @@ surfaces (#575).
   no row carries is dropped rather than emitted empty.
 - **`--pick <n>` is 1-based** everywhere it appears, and is how you resolve an
   ambiguous target without re-running with a longer name. It indexes the list
-  in stable (path, line, id) order, and also selects among the candidates of a
+  in its stable numbered order (best match first; equal matches dealt
+  round-robin by file so one file cannot fill the page), and also selects among the candidates of a
   resolution notice (a target that resolved by choosing among equal matches;
   only the true ties are listed and numbered).
 - **`--all` answers an ambiguous name for every candidate** (`callers`,
@@ -223,7 +224,9 @@ Show methods/functions called by the given symbol (cross-file).
 ### `ix callers <symbols...>`
 
 Show methods/functions that call the given symbols (cross-file). Several
-symbols answer in one call, grouped per symbol.
+symbols answer in one call, grouped per symbol. For a Java method, callers
+through a superclass or interface follow the direct ones, tagged
+`via=<Supertype>.<method>` (json: `via`).
 
 | Flag | Value | Default | Effect |
 |---|---|---|---|
@@ -503,7 +506,7 @@ System risk analysis — what behavior is at risk if this changes.
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--all` | — | off | When the target is ambiguous, analyse every candidate; each analysis is tagged with its candidate |
 | `--depth` | `<n>` | `1` | Expansion depth for callers/importers (default 1, max 3) |
-| `--limit` | `<n>` | `10` | Max top-impacted members to show |
+| `--limit` | `<n>` | `10` | Max top-impacted members (and llm caller/callee rows) to show; JSON lists are not cut |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
@@ -618,6 +621,7 @@ Map the architectural hierarchy of a codebase.
 | `--graph` | — | off | Render the hierarchy as a graph/tree view (default) |
 | `--list` | — | off | Render the ranked list view instead of the default graph/tree view |
 | `--full` | — | off | Force full local map, bypassing automatic safety limits (advanced/testing) |
+| `--remap` | — | off | Compute the map now, even from an automatic (hook) run that would defer it |
 | `--verbose` | — | off | Show raw confidence/crosscut scores and signals, plus per-file ingest diagnostics (including why a patch failed to commit) |
 | `--silent` | — | off | Suppress all output except a one-line summary (useful for LLM hooks) |
 | `--prune-stale-workspace` | — | off | Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest. Loopback endpoints only -- and loopback is the URL, not ownership: never use it through a tunnel or proxy to a shared backend |

@@ -30,6 +30,79 @@ export const ALL_CONCURRENCY = 4;
 /** Rows per page of the text fallback. --limit does not apply to it. */
 export const TEXT_FALLBACK_PAGE = 10;
 
+/** Supertype levels walked for a Java method's dispatch callers. */
+export const DISPATCH_DEPTH = 5;
+/** Supertypes looked at, at most, for one target: each costs one small expand. */
+export const DISPATCH_MAX_TYPES = 16;
+
+const TYPE_KINDS = new Set(["class", "interface", "enum", "record", "trait", "object", "annotation"]);
+const byName = (a: any, b: any): number =>
+  String(a.name ?? "").localeCompare(String(b.name ?? "")) || String(a.id ?? "").localeCompare(String(b.id ?? ""));
+
+/**
+ * Callers that reach a Java method through a supertype. For a target `C.m`,
+ * the callers of `S.m` for each supertype `S` of `C` (EXTENDS edges, which
+ * include `implements`) that declares `m`: a call typed against `S` targets
+ * `S.m` statically and may run `C.m`. Each row carries `dispatchVia: "S.m"`
+ * (printed as `via`). Nothing for another language, or for a class with no
+ * supertype in the graph (two requests then).
+ */
+export async function dispatchCallers(
+  client: Pick<IxClient, "expand">,
+  target: { id: string; name: string; path?: string },
+): Promise<{ rows: any[]; capped: boolean }> {
+  const none = { rows: [], capped: false };
+  if (!/\.java$/i.test(target.path ?? "")) return none;
+  const owners = (await client.expand(target.id, { direction: "in", predicates: ["CONTAINS"] })).nodes
+    .filter((n: any) => TYPE_KINDS.has(String(n.kind ?? "").toLowerCase()));
+  if (owners.length !== 1) return none;
+  const seen = new Set<string>([owners[0].id]);
+  const members: Array<{ id: string; via: string }> = [];
+  let frontier: any[] = owners;
+  for (let depth = 0; depth < DISPATCH_DEPTH && frontier.length > 0 && seen.size <= DISPATCH_MAX_TYPES; depth++) {
+    const parents = await mapLimit(frontier, ALL_CONCURRENCY, (n) => client.expand(n.id, { direction: "out", predicates: ["EXTENDS"] }));
+    const next: any[] = [];
+    for (const n of parents.flatMap((r) => r.nodes).sort(byName)) {
+      if (!n?.id || seen.has(n.id) || seen.size > DISPATCH_MAX_TYPES) continue;
+      seen.add(n.id);
+      next.push(n);
+    }
+    const contained = await mapLimit(next, ALL_CONCURRENCY, (n) => client.expand(n.id, { direction: "out", predicates: ["CONTAINS"] }));
+    next.forEach((type, i) => {
+      for (const m of contained[i].nodes) {
+        if (m?.id && m.id !== target.id && m.name === target.name && /^(method|function)$/i.test(String(m.kind ?? ""))) {
+          members.push({ id: m.id, via: `${type.name}.${target.name}` });
+        }
+      }
+    });
+    frontier = next;
+  }
+  const calls = await mapLimit(members, ALL_CONCURRENCY, (m) => client.expand(m.id, { direction: "in", predicates: ["CALLS"] }));
+  return {
+    rows: calls.flatMap((r, i) => r.nodes.map((n: any) => ({ ...n, dispatchVia: members[i].via }))),
+    capped: calls.some((r) => expandCapped(r)),
+  };
+}
+
+/**
+ * Direct rows as the graph gave them, then dispatch rows for callers not
+ * already listed (a direct row wins; the first supertype wins among the rest).
+ */
+async function withDispatch(
+  client: IxClient, target: { id: string; name: string; path?: string }, direct: any[],
+): Promise<{ rows: any[]; capped: boolean }> {
+  const dispatch = await dispatchCallers(client, target);
+  if (dispatch.rows.length === 0) return { rows: direct, capped: false };
+  const listed = new Set(direct.map((n) => n.id).filter(Boolean));
+  const extra: any[] = [];
+  for (const n of dispatch.rows) {
+    if (n.id && listed.has(n.id)) continue;
+    if (n.id) listed.add(n.id);
+    extra.push(n);
+  }
+  return { rows: [...direct, ...extra], capped: dispatch.capped };
+}
+
 /**
  * rg's argv for the text fallback. -F and -e: the name is a literal pattern,
  * never a regex or a flag (a symbol named `--pre=x` would otherwise run an rg
@@ -85,10 +158,14 @@ async function edgesOfAll(
     direction: relation === "callers" ? "in" : "out",
     predicates: ["CALLS", "REFERENCES"],
   }));
-  const rows = expanded.flatMap((result, i) => result.nodes.map((n: any) => ({ ...n, candidate: candidates[i].n })));
+  // Callers of a Java method also include its dispatch callers, per candidate.
+  const merged = relation === "callers"
+    ? await mapLimit(set.entities, ALL_CONCURRENCY, (e, i) => withDispatch(client, e, expanded[i].nodes))
+    : expanded.map((r) => ({ rows: r.nodes, capped: false }));
+  const rows = merged.flatMap((result, i) => result.rows.map((n: any) => ({ ...n, candidate: candidates[i].n })));
   const health = await healthDiagnostics(healthCheck);
   bannerOverRows(health, format, rows.length);
-  const slice = sliceEdgeResults(rows, limit, offset, expanded.some((r) => expandCapped(r)));
+  const slice = sliceEdgeResults(rows, limit, offset, expanded.some((r) => expandCapped(r)) || merged.some((m) => m.capped));
   if (slice.nextOffset !== undefined) slice.next = nextPageCommand(cmd, [symbol], slice.nextOffset);
   // Call sites are looked up against the candidate the row belongs to.
   const sites = await mapLimit(set.entities, ALL_CONCURRENCY, (e) => edgeTargetFor(client, e, relation));
@@ -185,10 +262,12 @@ async function callersOne(client: IxClient, symbol: string, opts: EdgeOpts, cmd:
   if (opts.format === "text") printResolved(target);
   const healthCheck = checkGraphHealth(client, activeReadScope());
   // Use expand by entity ID to avoid aggregating results across all same-named entities
-  const result = await client.expand(target.id, {
+  const direct = await client.expand(target.id, {
     direction: "in",
     predicates: ["CALLS", "REFERENCES"],
   });
+  const merged = await withDispatch(client, target, direct.nodes);
+  const result = { ...direct, nodes: merged.rows };
   const health = await healthDiagnostics(healthCheck);
   bannerOverRows(health, opts.format, result.nodes.length);
   // `ix ingest --force` does not bring a hollowed graph's edges back; the
@@ -314,7 +393,7 @@ async function callersOne(client: IxClient, symbol: string, opts: EdgeOpts, cmd:
     // Both graph and text empty (also the health-gated path: --offset does not apply).
     formatEdgeResults(sliceEdgeResults([], limit), "callers", target.name, opts.format, target, "graph", health.diagnostics);
   } else {
-    const slice = sliceEdgeResults(result.nodes, limit, offset, expandCapped(result));
+    const slice = sliceEdgeResults(result.nodes, limit, offset, expandCapped(direct) || merged.capped);
     if (slice.nextOffset !== undefined) slice.next = nextPageCommand(cmd, [symbol], slice.nextOffset);
     const site = await edgeTargetFor(client, target, "callers");
     formatEdgeResults({ ...slice, rows: withEdgeSites(slice.rows, "callers", site) }, "callers", target.name, opts.format, target, "graph", health.diagnostics);

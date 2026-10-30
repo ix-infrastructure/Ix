@@ -2,14 +2,27 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { resolveWorkspaceRoot } from "./config.js";
-import { loadIngestBaseline } from "./ingest-baseline.js";
+import { canonicalWorkspacePath, resolveWorkspaceRoot } from "./config.js";
+import { loadIngestBaseline, type IngestBaseline } from "./ingest-baseline.js";
 import { hasCompletedMapFor } from "./map-baseline.js";
+import { readMapRefreshOutcome, readMapStale } from "./map-freshness.js";
 import { canonicalizeDiscoveredFilePath, discoverSourceFiles } from "./file-discovery.js";
 
 export interface StaleInfo {
   graphCompleted: boolean;
   mapCompleted: boolean;
+  /**
+   * The last `ix map` deferred the map after an edit (CL-13): regions are the
+   * last computed map's until a region view or `ix map --remap` refreshes
+   * them. `mapCompleted` keeps its strict meaning and reads false meanwhile;
+   * this says why.
+   */
+  mapStale: boolean;
+  /**
+   * While `mapStale`: why the last background refresh failed, when it did
+   * (`readMapRefreshOutcome`); null otherwise.
+   */
+  mapRefreshError: string | null;
   lastIngestAt: string | null;
   currentRev: number;
   staleFiles: number;
@@ -87,6 +100,8 @@ export function detectStaleFiles(
     return {
       graphCompleted: false,
       mapCompleted: false,
+      mapStale: false,
+      mapRefreshError: null,
       lastIngestAt: null,
       currentRev: 0,
       staleFiles: 0,
@@ -153,9 +168,14 @@ export function detectStaleFiles(
     }
   }
 
+  const mapStale = readMapStale(workspaceRoot) !== null;
+  const lastRefresh = mapStale ? readMapRefreshOutcome(workspaceRoot) : null;
+  const mapRefreshError = lastRefresh?.ok === false ? (lastRefresh.reason ?? "no reason recorded") : null;
   return {
     graphCompleted: true,
     mapCompleted: hasCompletedMapFor(workspaceRoot, baseline),
+    mapStale,
+    mapRefreshError,
     lastIngestAt: baseline.lastIngestAt,
     currentRev: baseline.currentRev,
     staleFiles: changedFiles.length,
@@ -163,6 +183,23 @@ export function detectStaleFiles(
     replayedFiles: baseline.replayedFiles,
     parseTimeouts,
   };
+}
+
+/**
+ * The ingest baseline for `root`, and the spelling of the root it is stored
+ * under. The baselines match their root as a string. `ix map` stores the
+ * canonical root, so a symlinked or 8.3-named spelling of it (RUNNER~1 on
+ * Windows) read as never mapped; a root stored as given (`ix ingest` of a path
+ * spelled that way) is still found under its own spelling first.
+ */
+function loadBaselineUnderEitherSpelling(root: string): { root: string; baseline: IngestBaseline } | null {
+  const resolved = path.resolve(root);
+  const asGiven = loadIngestBaseline(resolved);
+  if (asGiven) return { root: resolved, baseline: asGiven };
+  const canonical = canonicalWorkspacePath(resolved);
+  if (canonical === resolved) return null;
+  const baseline = loadIngestBaseline(canonical);
+  return baseline ? { root: canonical, baseline } : null;
 }
 
 /**
@@ -175,9 +212,8 @@ export function detectStaleFiles(
  */
 export function hasCompletedMapBaseline(root?: string): boolean {
   try {
-    const workspaceRoot = path.resolve(root ?? resolveWorkspaceRoot());
-    const baseline = loadIngestBaseline(workspaceRoot);
-    return baseline !== null && hasCompletedMapFor(workspaceRoot, baseline);
+    const found = loadBaselineUnderEitherSpelling(root ?? resolveWorkspaceRoot());
+    return found !== null && hasCompletedMapFor(found.root, found.baseline);
   } catch {
     return false;
   }
@@ -186,7 +222,7 @@ export function hasCompletedMapBaseline(root?: string): boolean {
 /** Whether source ingestion completed cleanly for the active workspace. */
 export function hasCompletedSourceGraphBaseline(root?: string): boolean {
   try {
-    return loadIngestBaseline(path.resolve(root ?? resolveWorkspaceRoot())) !== null;
+    return loadBaselineUnderEitherSpelling(root ?? resolveWorkspaceRoot()) !== null;
   } catch {
     return false;
   }

@@ -2,8 +2,8 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
-import { homedir } from "os";
 
+import { ixHome } from "./ix-home.js";
 import type { IxClient } from "../client/api.js";
 import type { HealthResponse } from "../client/types.js";
 
@@ -17,10 +17,16 @@ import type { HealthResponse } from "../client/types.js";
  * future call site from silently forgetting to.
  */
 
-const IX_HOME = process.env.IX_HOME || join(homedir(), ".ix");
-
-/** The release the backend is believed to be running. */
-export const BACKEND_VERSION_FILE = join(IX_HOME, ".backend-version");
+/**
+ * The release the backend is believed to be running: `$IX_HOME/.backend-version`.
+ *
+ * A function, not a const, so the path follows IX_HOME as it is when the stamp
+ * is read or written rather than when this module was first imported -- see
+ * `ixHome()`.
+ */
+export function backendVersionFile(): string {
+  return join(ixHome(), ".backend-version");
+}
 
 /**
  * The one definition of a valid version string, imported by upgrade.ts too.
@@ -123,7 +129,7 @@ export function recordBackendRelease(
   const value = typeof reported === "string" ? reported.trim() : "";
   if (!value || value.length > MAX_VERSION_LENGTH || !VERSION_RE.test(value)) return false;
 
-  const tracked = getTrackedVersion(BACKEND_VERSION_FILE);
+  const tracked = getTrackedVersion(backendVersionFile());
   if (value === tracked) return false; // already agrees; do not touch the file
 
   const ceiling =
@@ -133,7 +139,7 @@ export function recordBackendRelease(
   // No published release can be older than what a container legitimately runs.
   if (ceiling ? isNewer(value, ceiling) : isNewer(value, tracked)) return false;
 
-  return writeVersionStamp(BACKEND_VERSION_FILE, value);
+  return writeVersionStamp(backendVersionFile(), value);
 }
 
 /**

@@ -30,6 +30,15 @@ import { isRev } from "./ingest-baseline.js";
  * workspace whose data was deleted without a commit, which the ingest's
  * DB-reset guard catches.
  *
+ * The revision is the backend's GLOBAL head because that is the only one it
+ * serves (`/v1/revisions/current`; see docs/api/openapi.yaml). A write in any
+ * workspace therefore invalidates every workspace's slot. Once the backend
+ * serves a workspace-local revision (audit F-18), the slot should key on that
+ * instead; until then no client code asks for one.
+ *
+ * After an incremental edit, `ix map` does not ask at all: it defers the map
+ * and prints the last stored response (`loadLastMap`, `map-freshness.ts`).
+ *
  * Only a workspace-scoped map is cached. A system-scoped one can change
  * without a commit: the stitcher writes cross-repo edges and stamps system
  * ids directly. So does the unscoped global map, which persists regions as a
@@ -189,5 +198,22 @@ export function saveCachedMap(projectRoot: string, slot: MapCacheSlot, result: C
     fs.renameSync(tmp, target);
   } catch {
     try { fs.rmSync(tmp, { force: true }); } catch { /* non-critical */ }
+  }
+}
+
+/**
+ * The last response stored for this root and request key, whatever revision
+ * it was computed at -- what a deferred `ix map` prints (CL-13). Deliberately
+ * blind to the revision: the caller has just ingested an edit and knows the
+ * regions are behind, and marks them so. Used only on that deferral path;
+ * everything else reads `loadCachedMap`.
+ */
+export function loadLastMap(projectRoot: string, key: string): CachedMapResponse | undefined {
+  try {
+    const data = JSON.parse(fs.readFileSync(mapResultCachePath(projectRoot), "utf-8")) as Partial<SerializedMapCache>;
+    if (data.root !== projectRoot || data.key !== key) return undefined;
+    return isCachedMapResponse(data.result) ? data.result : undefined;
+  } catch {
+    return undefined;
   }
 }

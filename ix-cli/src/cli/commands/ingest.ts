@@ -1749,6 +1749,19 @@ export interface IngestFilesSummary {
    */
   graphUnchanged: boolean;
   /**
+   * True only when this run was an ordinary incremental update of a graph
+   * whose baseline it trusted: a local baseline existed (Path A), nothing was
+   * forced or migrated, the DB-reset guard and an extractor rebuild did not
+   * fire, at least one file changed or was deleted, and nothing failed to
+   * parse or commit.
+   *
+   * `ix map` reads it to decide whether it may defer `/v1/map` to the next
+   * command that reads regions (CL-13). It errs towards false: a run that
+   * might have left the graph somewhere unexpected computes the map, so the
+   * completed-map diagnostics still see every run that had errors.
+   */
+  incremental: boolean;
+  /**
    * Files tree-sitter parsed with ERROR or MISSING nodes. They are in the
    * graph, but whatever sat in the broken region may not be. Not counted in
    * `parseErrors`, which is files that produced nothing.
@@ -2546,6 +2559,8 @@ export async function ingestFiles(
   let graphStartedEmpty: boolean | undefined;
   let extractorRebuild = false;
   let deletionsFound = false;
+  // Path A with a local baseline: the run updated a graph it already knew.
+  let baselineRun = false;
   let stitchSent = false;
   let filesSkipped = 0;
   /**
@@ -2807,6 +2822,13 @@ export async function ingestFiles(
       resolveModuleSpecifier: createTypeScriptModuleResolver(workspaceRoot, resolutionPaths),
       packageDirOf: declaredPackageDirs(workspaceRoot, resolutionPaths),
     };
+
+    // Every Python package entry the run resolves against, empty ones included
+    // (an empty file is never parsed, so no summary or mtime records it). A
+    // --lang run's resolution paths leave languages out, so it knows none.
+    const pythonPackageEntries = langFilter
+      ? null
+      : resolutionPaths.map(toWorkspaceRelative).filter(rel => nodePath.posix.basename(rel) === '__init__.py');
 
     filesDiscovered = filePaths.length;
     const discovered = performance.now();
@@ -4373,6 +4395,7 @@ export async function ingestFiles(
     // calls as a whole-repository pass would.
     const hasBaseline = previousBaseline !== null && mtimeCache.size > 0;
     const incrementalRun = (hasBaseline || knownHashes.size > 0 || mtimeChangedPaths.length === 0) && !opts.force;
+    baselineRun = hasBaseline && incrementalRun;
     if (incrementalRun) {
       // Path A: has baseline or all mtime-clean → pre-scan to detect changes before loading modules.
       // If nothing changed, module load is skipped entirely. A file with no
@@ -4744,6 +4767,7 @@ export async function ingestFiles(
               replayedFiles: previousBaseline.replayedFiles,
               pendingFiles: previousBaseline.pendingFiles,
               parseTimeouts: previousBaseline.parseTimeouts,
+              pythonPackageEntries: previousBaseline.pythonPackageEntries,
             },
           );
         }
@@ -4764,7 +4788,19 @@ export async function ingestFiles(
     const deletedRel = deletedPaths.map(toWorkspaceRelative);
     // Left pending by an earlier run whose re-send did not land.
     const pendingRel = incrementalRun ? [...symbolTable()].filter(([, e]) => e.pending).map(([rel]) => rel) : [];
-    if (incrementalRun && (summaryBeforeRun.size > 0 || deletedRel.length > 0 || pendingRel.length > 0)) {
+    // Files that appeared or went away: a Python `__init__.py` among them makes
+    // its directory a package, or a plain folder again, which changes what
+    // imports below it bind. The baseline's list adds the empty ones.
+    const pathsAddedOrDeleted: string[] = [...deletedRel];
+    const previousPackageEntries = previousBaseline?.pythonPackageEntries;
+    if (pythonPackageEntries && previousPackageEntries) {
+      const was = new Set(previousPackageEntries);
+      const now = new Set(pythonPackageEntries);
+      for (const rel of now) if (!was.has(rel)) pathsAddedOrDeleted.push(rel);
+      for (const rel of was) if (!now.has(rel)) pathsAddedOrDeleted.push(rel);
+    }
+    const packagesChanged = pathsAddedOrDeleted.some(rel => nodePath.posix.basename(rel) === '__init__.py');
+    if (incrementalRun && (summaryBeforeRun.size > 0 || deletedRel.length > 0 || pendingRel.length > 0 || packagesChanged)) {
       const table = symbolTable();
       const names = new Set<string>();
       // Paths whose importers may resolve differently: files that appeared,
@@ -4774,6 +4810,7 @@ export async function ingestFiles(
         const after = table.get(rel)?.summary;
         for (const n of changedNames(before, after)) names.add(n);
         if (before === undefined || importsChanged(before, after)) pathsChanged.push(rel);
+        if (before === undefined) pathsAddedOrDeleted.push(rel);
       }
       for (const rel of deletedRel) {
         for (const n of changedNames(table.get(rel)?.summary, undefined)) names.add(n);
@@ -4781,7 +4818,7 @@ export async function ingestFiles(
       const absByRel = new Map(resolutionPaths.map(abs => [toWorkspaceRelative(abs), abs] as const));
       const exclude = new Set<string>([...summaryBeforeRun.keys(), ...deletedRel]);
       for (const rel of table.keys()) if (!absByRel.has(rel)) exclude.add(rel);
-      const found = findDependents(table, names, [...pathsChanged, ...deletedRel], exclude);
+      const found = findDependents(table, names, [...pathsChanged, ...deletedRel], exclude, pathsAddedOrDeleted);
       const dependents = [...new Set([...found, ...pendingRel.filter(rel => !exclude.has(rel))])].sort()
         // A scoped run reads nothing outside its scope.
         .filter(rel => inScope(absByRel.get(rel)!));
@@ -4943,7 +4980,9 @@ export async function ingestFiles(
       // An unfinished re-ingest must not vouch for the new extractor: files
       // that failed would then be hash-clean next run and keep the old output.
       runClean ? baselineExtractor : (previousBaseline?.extractor ?? baselineExtractor),
-      { replayedFiles, pendingFiles, parseTimeouts },
+      // A scoped run re-resolves only its own dependents, so it keeps the old
+      // package list and the next full run still sees what changed outside.
+      { replayedFiles, pendingFiles, parseTimeouts, pythonPackageEntries: (scopedRun ? null : pythonPackageEntries) ?? previousBaseline?.pythonPackageEntries },
     );
     // The symbol table describes files, not the graph, so it is kept whether or
     // not every commit landed -- pruned to the files that still exist. A
@@ -5280,6 +5319,14 @@ export async function ingestFiles(
       parseErrors + crashedParses() === 0 &&
       commitErrors === 0 &&
       stitchErrors === 0,
+    incremental:
+      baselineRun &&
+      opts.force !== true &&
+      !workspaceMigrated &&
+      !dbResetDetected &&
+      !extractorRebuild &&
+      (filesChanged > 0 || deletionsFound) &&
+      parseErrors + crashedParses() + commitErrors === 0,
   };
   if (cutoffFired) {
     // Gated on the cutoff having FIRED, not on what was left unsent. A patch

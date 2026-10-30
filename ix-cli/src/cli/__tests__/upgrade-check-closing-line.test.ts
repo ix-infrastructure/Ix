@@ -56,9 +56,10 @@ describe("ix upgrade --check output", () => {
   let logs: string[];
 
   beforeEach(() => {
-    // upgrade.ts binds IX_HOME and VERSION_CACHE as module-level consts at load
-    // time, so `await import` below only picks up this temp home if the module
-    // is not already in the registry. Running this file alone it is not, and the
+    // upgrade.ts used to bind IX_HOME and VERSION_CACHE as module-level consts
+    // at load time (it resolves them per call now), so `await import` below
+    // only picked up this temp home if the module was not already in the
+    // registry. Running this file alone it is not, and the
     // test passed; in a full-suite run another file has already imported it and
     // the writeCache at the end of the command lands in the developer's REAL
     // ~/.ix, seeding latest: "99.0.0" for CLI, compass and backend. The test

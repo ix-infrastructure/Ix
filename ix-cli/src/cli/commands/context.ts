@@ -38,7 +38,7 @@ import {
 } from "../explain/issue.js";
 import { symbolReadChecker } from "../symbol-read-check.js";
 import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/related-files.js";
-import { cachedBm25Ranker } from "../explain/bm25-cache.js";
+import { cachedBm25Ranker, saveBm25Index } from "../explain/bm25-cache.js";
 import { collectTextReferences, gitRepoAccess, type TextSource } from "../explain/text-references.js";
 import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
@@ -457,13 +457,22 @@ export function registerContextCommand(program: Command): void {
         renderInvestigationDiff(saved, fresh, opts.format, requestedBudgets);
         return;
       }
+      // The BM25 index is written once the answer is out (planIssueWith).
       if (opts.fromIssue && opts.lean) {
-        await emitLeanIssue(opts.fromIssue, opts);
+        try {
+          await emitLeanIssue(opts.fromIssue, opts);
+        } finally {
+          saveBm25Index();
+        }
         return;
       }
       if (opts.fromIssue) {
-        const bundle = await buildIssueBundle(opts.fromIssue, opts, clampBudgets(opts, fmt), fmt);
-        if (bundle) await emitBundle(bundle, opts);
+        try {
+          const bundle = await buildIssueBundle(opts.fromIssue, opts, clampBudgets(opts, fmt), fmt);
+          if (bundle) await emitBundle(bundle, opts);
+        } finally {
+          saveBm25Index();
+        }
         return;
       }
       if (!target) {
@@ -1797,8 +1806,9 @@ async function planIssueWith(client: IxClient, text: string) {
   return planIssue(text, {
     repo: gitRepoAccess(root),
     // Through the on-disk term index (bm25-cache.ts): the same ranking, with
-    // only the files that differ from HEAD read again.
-    rank: cachedBm25Ranker(root),
+    // only the files that differ from HEAD read again. The caller saves the
+    // index after printing (saveBm25Index).
+    rank: cachedBm25Ranker(root, { deferSave: true }),
     search: async (name) =>
       (await client.search(name, { limit: ISSUE_SEARCH_LIMIT, nameOnly: true, ...scope })).map(symbolHit),
   });

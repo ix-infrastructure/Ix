@@ -117,8 +117,16 @@ which value it ignored, on stderr, when a person is there to read it.
   not choose a target. The error also carries `shown=<n> total=<m>` after
   `count=` (and `truncated=true` when the search window came back full, so
   `total` is a lower bound); json has `total` and `truncated` beside
-  `candidates`. Candidates are numbered in (path, line, id) order, so
-  `--pick <n>` means the same thing on every run. (The
+  `candidates`. Candidates are ranked by how well they match (ties in
+  (path, line, id) order), then each run of equal scores is dealt
+  round-robin by file: the best of each file, then each file's second-best,
+  and so on, so a file that defines the name many times does not fill the 8
+  shown on its own. A worse score never goes ahead of a better one, so an
+  import of the name still comes after every definition. That order is the
+  numbering, so `--pick <n>` and `--all`'s `candidate=<n>` mean the same thing
+  on every run. A candidate inside a class or other type carries
+  `container=<name>` (json `container`), last on its record; it is absent for
+  a top-level definition, or when the graph could not say. (The
   backend spells a missing target `unknown_target` in its own JSON bodies; that
   is a wire detail and is translated on the way out, so a consumer never sees
   both.)
@@ -367,6 +375,22 @@ use, skipping comments and the name's own declaration. A row whose file is
 missing, outside the workspace, or has no findable use simply has no `site=`.
 `--format json` carries the same object as `site: {path, line, snippet, also}`.
 
+`ix callers` on a Java method also lists the callers that reach it through a
+supertype. For a target `C.m`, it walks `C`'s superclasses and interfaces (up
+to five levels) and adds the callers of each one's own `m`: a call typed
+against the interface or superclass can run `C.m`. Such a row ends with
+`via=<Supertype>.<m>`, the member the call names; json adds `via` to the row.
+Direct rows come first and carry no `via`; a caller that is both is listed
+once, as a direct row. `shown`/`total` count every row, and `--all` adds the
+same rows per candidate. A call typed directly against the interface is a
+plain caller of the interface method, with no `via`.
+
+```
+callers target=getUrl shown=2 total=2 resolved=2
+ref name=invoke kind=method path=src/rpc/Filter.java lines=10-24
+ref name=select kind=method path=src/cluster/Cluster.java lines=30-41 via=Invoker.getUrl
+```
+
 `ix around <path>[:<line>]` — the dependents of the code at a location, sized
 for an agent's context (`--budget`, default 300 tokens):
 
@@ -417,6 +441,38 @@ and `files_too_large_paths`, and has them on every map: zero and an empty list
 when no file was too large. `ix map --silent` adds `too_large=N` to its one
 line.
 
+An `ix map` you (or an agent) run always computes the map, and clears a
+stale one. The automatic `ix map` the editor/agent hooks and `ix watch` run
+after an edit (they set `IX_AUTO_MAP=1`) ingests the change but defers the
+map itself: it prints the last computed map's regions and marks the `map` record
+`map_stale=true` (only when true, so a fresh map says nothing). `files`,
+`regions`, `levels`, `rev`, `outcome` and the `region` records are then the
+last map's, not this ingest's, and `regions_as_of_rev` and
+`regions_as_of_files` name that map (both only when stale). A
+`diagnostic code=map_stale` record follows the `map` record and says the
+same in a sentence. The next region view (`overview`, `subsystems`,
+`locate`, `impact`, `explain`, `view`) never maps inline: it answers from
+the last map, says so in one line on stderr
+(`ix: architecture map is stale (<why>); ...`), and starts a detached
+background refresh unless one ran moments ago or another `ix map` holds the
+lock. `ix map --remap` recomputes the map at once, even from an automatic
+run; `IX_MAP_EAGER=1` makes automatic runs compute too, as before; `IX_MAP_BACKGROUND_REFRESH=0` stops region
+views starting a refresh. `--format json` carries `map_stale` on every map (`false` when fresh) and
+`regions_as_of` (`{map_rev, file_count}` of the last map, `null` when
+fresh); `ix map --silent` ends its line with `· map=stale`.
+
+The region views say it in their machine output too, not only on stderr.
+While the map is stale, `overview`, `subsystems`, `locate`, `impact` and
+`explain` print one `diagnostic code=map_stale` record, worded as `ix map`'s,
+with their answer (just before its first record), and their `--format json`
+object gains `map_stale: true` and, when the deferring `ix map` recorded which
+map it was, `regions_as_of` (`{map_rev, file_count}`, as above) at its top
+level. A fresh map adds neither key and no record. An error answer carries
+neither: it is its own answer, and a caller takes a leading `error` record as
+the command failing. `ix locate` with several targets prints the record once
+per call and puts the keys on each answered target's object; `ix impact --all`
+puts them on the grouping object. Text output only has the stderr line.
+
 `ix stats`:
 
 ```
@@ -460,6 +516,9 @@ diagnostic code=results_truncated message="14 callers; showing 10. Raise --limit
 printed after the `--limit` cut (the two lists share one header, so `shown`/`total` are split by list).
 `ix impact` has no `--offset`, so its truncation diagnostic carries no `next_offset=`; it points at
 `ix callers`/`ix callees` (over MCP, `ix_neighbors`), which page.
+In `--format json` the same rows (`callerList`, `calleeList`, bucket `members`) carry `path`,
+`lineStart` and `lineEnd`, and a container target's JSON adds `dependentList`, its located
+importers and dependents.
 
 `ix overview <container>`:
 
@@ -647,6 +706,11 @@ Two deliberate exceptions remain:
   `subsystems` and region-scoped views may be empty or stale. `stale` follows
   `graph_complete`, not `map_complete`: it is a claim about files having
   changed, and a missing hierarchy does not make a file out of date.
+
+  `map_stale=true` (only when true) says why `map_complete` is false right
+  after an edit: the last automatic `ix map` deferred the map, and the
+  hierarchy is the last computed one until the next region view or `ix map`
+  refreshes it. `--format json` carries it as `mapStale`, always present.
 
   `graph_health` is a third, separate question: whether the graph the backend
   holds for this workspace is whole (`ok`), has nodes but lost their edges

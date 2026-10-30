@@ -40,6 +40,8 @@ import { backendCeiling, isNewer, readBackendHealth } from "./upgrade.js";
 import { loadIngestBaseline } from "../ingest-baseline.js";
 import { isCloudReady } from "../remote.js";
 import { hasCompletedMapBaseline } from "../stale.js";
+import { readMapRefreshOutcome, readMapStale } from "../map-freshness.js";
+import { loadMapBaseline } from "../map-baseline.js";
 import { printJson } from "../format.js";
 import { runVerify, type VerifyReport } from "../verify.js";
 import { healthFromError } from "../database-probe.js";
@@ -349,6 +351,68 @@ function workspaceOrNone(lookup: () => WorkspaceConfig | undefined): WorkspaceCo
   }
 }
 
+/**
+ * The "Completed map for this workspace" check, for one resolved root.
+ * Exported for tests.
+ */
+export async function assessMapCompletion(
+  root: string,
+  cloudReady: () => Promise<boolean> = isCloudReady,
+): Promise<CheckResult> {
+  const source = loadIngestBaseline(root);
+  if (!source) {
+    // No local baseline means one of: never mapped, an initial map
+    // that committed patches but never finished, or a workspace fed
+    // by the cloud runner — which writes none by design. Only the
+    // last is healthy, and only a registered runner makes it
+    // possible, so that is the one case this warns instead of fails.
+    const cloud = await cloudReady();
+    return cloud
+      ? { ok: false, warn: true, detail: "no local baseline — expected for a cloud-ingested workspace" }
+      : { ok: false, detail: "no completed map baseline — the graph may be partial. Run `ix map`." };
+  }
+  if (!hasCompletedMapBaseline(root)) {
+    // CL-13: an `ix map` after an edit defers the map, so the
+    // marker trails the source revision until a region view
+    // refreshes it. That is the design working, not a partial map,
+    // and failing here would make `ix doctor` exit 1 after every edit.
+    const stale = readMapStale(root);
+    if (stale !== null) {
+      // Deferred maps are only ever served from a map that completed once;
+      // without one there is nothing to be merely stale against.
+      if (loadMapBaseline(root) === null && loadMapBaseline(canonicalWorkspacePath(root)) === null) {
+        return {
+          ok: false,
+          detail: "no architecture map has ever completed for this workspace — run `ix map --remap`",
+        };
+      }
+      // A background refresh that failed is reported, not failed on: a
+      // map that takes longer than the refresh's limit, or a backend that was
+      // briefly down, must not keep `ix doctor` exiting 1 after every edit.
+      // The regions are the last completed map's, and `--remap` brings them
+      // up to date.
+      const last = readMapRefreshOutcome(root);
+      if (last?.ok === false) {
+        return {
+          ok: false,
+          warn: true,
+          detail: `architecture map is stale; its last background refresh failed (${last.reason ?? "no reason recorded"}) — run \`ix map --remap\``,
+        };
+      }
+      return {
+        ok: false,
+        warn: true,
+        detail: "architecture map is stale (deferred after an edit); a region view refreshes it in the background, or run `ix map --remap`",
+      };
+    }
+    return {
+      ok: false,
+      detail: `source graph at revision ${source.currentRev} has no completed architecture map — run \`ix map\``,
+    };
+  }
+  return { ok: true, detail: `recorded at revision ${source.currentRev}` };
+}
+
 /** "ripgrep on PATH": `ix text` needs it; everything else works without it. */
 export function checkRipgrep(run: () => string = () => execFileSync("rg", ["--version"], { encoding: "utf-8", timeout: 5000 })): CheckResult {
   try {
@@ -597,26 +661,7 @@ export function registerDoctorCommand(program: Command): void {
             try {
               // Resolve once: both marker files are keyed by the exact root
               // string, and `hasCompletedMapBaseline` resolves internally.
-              const root = resolvePath(matchedWorkspace.root_path);
-              const source = loadIngestBaseline(root);
-              if (!source) {
-                // No local baseline means one of: never mapped, an initial map
-                // that committed patches but never finished, or a workspace fed
-                // by the cloud runner — which writes none by design. Only the
-                // last is healthy, and only a registered runner makes it
-                // possible, so that is the one case this warns instead of fails.
-                const cloud = await isCloudReady();
-                return cloud
-                  ? { ok: false, warn: true, detail: "no local baseline — expected for a cloud-ingested workspace" }
-                  : { ok: false, detail: "no completed map baseline — the graph may be partial. Run `ix map`." };
-              }
-              if (!hasCompletedMapBaseline(root)) {
-                return {
-                  ok: false,
-                  detail: `source graph at revision ${source.currentRev} has no completed architecture map — run \`ix map\``,
-                };
-              }
-              return { ok: true, detail: `recorded at revision ${source.currentRev}` };
+              return await assessMapCompletion(resolvePath(matchedWorkspace.root_path));
             } catch (e: any) {
               return { ok: false, detail: e.message ?? "map completion check failed" };
             }

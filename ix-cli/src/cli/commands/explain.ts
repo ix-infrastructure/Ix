@@ -14,6 +14,7 @@ import { renderExplainLlm, renderExplainRawLlm } from "../explain/llm.js";
 import { printLlmLines } from "../llm.js";
 import { parsePickOption } from "../options.js";
 import { renderSection, renderWarning, renderNote } from "../ui.js";
+import { ensureFreshMapState, mapStaleJson, mapStaleLlm } from "../map-freshness.js";
 import { forMcp, toolCall } from "../next-step.js";
 import {
   assessTargetStructure, checkGraphHealth, graphHealthJson, graphHealthProse, isUnhealthy, worseHealth,
@@ -39,6 +40,13 @@ export function registerExplainCommand(program: Command): void {
         await rawExplain(client, target, opts.format);
         return;
       }
+
+      // The facts below include the target's system > subsystem > module
+      // path, read from the map's regions; an `ix map` after an edit may have
+      // left the map for this read (CL-13). Never throws and never moves the
+      // exit code; with no deferred map it is one file check. The json and
+      // llm output say when it is stale.
+      const mapState = await ensureFreshMapState();
 
       // New pipeline: collect facts → infer role → infer importance → render.
       // The workspace health check runs alongside: cached per backend
@@ -66,7 +74,7 @@ export function registerExplainCommand(program: Command): void {
       }
 
       if (opts.format === "llm") {
-        printLlmLines(renderExplainLlm(facts, role, importance, rendered, health));
+        printLlmLines([...mapStaleLlm(mapState), ...renderExplainLlm(facts, role, importance, rendered, health)]);
       } else if (opts.format === "json") {
         const output: any = {
           resolvedTarget: { kind: target.kind, name: target.name },
@@ -74,6 +82,7 @@ export function registerExplainCommand(program: Command): void {
           role,
           importance,
           rendered,
+          ...mapStaleJson(mapState),
         };
         if (degraded) {
           output.graph = graphHealthJson(health);

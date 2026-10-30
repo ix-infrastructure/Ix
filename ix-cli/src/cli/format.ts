@@ -225,11 +225,18 @@ function isRawIdName(value: string): boolean {
 }
 
 function edgeRowPriority(node: any): number {
+  // A dispatch row (`ix callers` through a supertype) follows every direct one.
+  const dispatch = typeof node.dispatchVia === "string" ? 3 : 0;
   const name = node.name || node.attrs?.name || "";
   const resolved = !!name && !isRawIdName(name);
-  if (!resolved) return 2;
+  if (!resolved) return dispatch + 2;
   const path = node.provenance?.source_uri ?? node.provenance?.sourceUri ?? node.attrs?.path;
-  return path ? 0 : 1;
+  return dispatch + (path ? 0 : 1);
+}
+
+/** The supertype member a dispatch row's call targets (`via`), absent on a direct row. */
+function dispatchVia(node: any): string | undefined {
+  return typeof node.dispatchVia === "string" ? node.dispatchVia : undefined;
 }
 
 /**
@@ -922,6 +929,7 @@ export function renderEdgeResultsLlm(
       id: n.id ?? undefined,
       site: n.site as EdgeSite | undefined,
       candidate: typeof n.candidate === "number" ? n.candidate as number : undefined,
+      via: dispatchVia(n),
       ...rowLocation(n),
     };
   });
@@ -966,6 +974,8 @@ export function renderEdgeResultsLlm(
     // Which `--all` candidate the row belongs to. Outside projectRow: a row
     // that lost it under `--fields` could not be attributed at all.
     const tag: Array<[string, LlmValue]> = ref.candidate !== undefined ? [["candidate", ref.candidate]] : [];
+    // A dispatch row: the call targets this supertype member.
+    if (ref.via !== undefined) tag.push(["via", ref.via]);
     // An unresolved row has no name to go by, so its id is all there is.
     lines.push(ref.resolved
       ? llmLine("ref", [...projectRow([
@@ -1007,6 +1017,7 @@ export function formatEdgeResults(
         ...rowLocation(n),
         ...(n.site ? { site: n.site } : {}),
         ...(typeof n.candidate === "number" ? { candidate: n.candidate } : {}),
+        ...(dispatchVia(n) ? { via: dispatchVia(n) } : {}),
       };
       if (!resolved) {
         ref.resolved = false;
@@ -1096,7 +1107,8 @@ export function formatEdgeResults(
       console.log(
         `  ${chalk.cyan((n.kind ?? "").padEnd(10))}  ${chalk.dim(shortId)}  ${chalk.bold(name)}`
         + (where ? `  ${chalk.dim(where)}` : "")
-        + (typeof n.candidate === "number" ? `  ${chalk.dim(`[${n.candidate}]`)}` : ""),
+        + (typeof n.candidate === "number" ? `  ${chalk.dim(`[${n.candidate}]`)}` : "")
+        + (dispatchVia(n) ? `  ${chalk.dim(`(via ${dispatchVia(n)})`)}` : ""),
       );
       const site = n.site as EdgeSite | undefined;
       if (site) console.log(`      ${chalk.dim(`at ${siteLabel(site)}`)}  ${site.snippet}`);

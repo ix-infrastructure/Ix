@@ -8,12 +8,13 @@ import { createClient } from "../../client/factory.js";
 import { activeReadScope, candidatesCut, resolveTargetSetOrReport, printResolved, type ResolvedEntity, type TargetSet } from "../resolve.js";
 import { EXIT_CODES_HELP } from "../outcome.js";
 import { checkGraphHealth, graphHealthJson, graphHealthLlmFields, graphHealthProse, isUnhealthy } from "../graph-health.js";
-import { bucketByHierarchy, getSystemPath, formatSystemPath, hasMapData, type SystemPath } from "../hierarchy.js";
+import { bucketByHierarchy, getSystemPath, formatSystemPath, hasMapData, type BucketMember, type SystemPath } from "../hierarchy.js";
 import { inferRiskSemantics, humanizeLabel, type ImpactFacts, type RiskSemantics } from "../impact/risk-semantics.js";
 import { captureJson, lineSpan, printJson, relativePath, rowLocation, sliceEdgeResults, stripNulls, type Slice } from "../format.js";
 import { forMcp, suggest, type Relation } from "../next-step.js";
 import { llmLine, llmShortId } from "../llm.js";
 import { parsePickOption } from "../options.js";
+import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "object", "trait", "interface"]);
 
@@ -49,6 +50,11 @@ export function registerImpactCommand(program: Command): void {
 
         if (opts.format === "text" && !set.all) printResolved(target);
 
+        // An `ix map` after an edit may have left the map for this read (CL-13).
+        // Never throws and never moves the exit code. The json and llm output
+        // say when it is stale: the region buckets below come from the map.
+        const mapState = await ensureFreshMapState();
+
         // A hollowed graph reports "low risk, no dependents" for anything:
         // the answer is only as good as the edges it counts. Said first, in
         // every format, before the counts it undermines.
@@ -57,11 +63,13 @@ export function registerImpactCommand(program: Command): void {
         if (graph && opts.format === "llm") console.log(llmLine("graph", graphHealthLlmFields(health)));
         if (graph && opts.format === "text") renderWarning(graphHealthProse(health));
 
+        // `--all` says it once, with the header grouping the candidates.
+        const ownState = set.all ? {} : mapState;
         const analyse = (entity: ResolvedEntity) => CONTAINER_KINDS.has(entity.kind)
-          ? containerImpact(client, entity, limit, depth, opts.format, graph)
-          : leafImpact(client, entity, depth, limit, opts.format, graph);
+          ? containerImpact(client, entity, limit, depth, opts.format, graph, ownState)
+          : leafImpact(client, entity, depth, limit, opts.format, graph, ownState);
 
-        if (set.all) await impactOfAll(symbol, set, opts.format, analyse);
+        if (set.all) await impactOfAll(symbol, set, opts.format, analyse, mapState);
         else await analyse(target);
       }
     );
@@ -81,6 +89,7 @@ async function impactOfAll(
   set: TargetSet,
   format: string,
   analyse: (entity: ResolvedEntity) => Promise<void>,
+  mapState: MapStaleState = {},
 ): Promise<void> {
   // `n` is the candidate's `--pick` number (resolve.ts candidateSet).
   const candidates = set.entities.map((e, i) => ({ n: e.n ?? i + 1, id: e.id, name: e.name, kind: e.kind, path: relativePath(e.path) ?? e.path }));
@@ -100,6 +109,7 @@ async function impactOfAll(
       candidates,
       results,
       ...(truncation ? { diagnostics: [{ code: "candidates_truncated", message: truncation }] } : {}),
+      ...mapStaleJson(mapState),
     });
     return;
   }
@@ -107,6 +117,7 @@ async function impactOfAll(
   if (format === "llm") {
     console.log(llmLine("impact_all", [["target", symbol], ["candidates", candidates.length], ["total", total]]));
     if (truncation) console.log(llmLine("diagnostic", [["code", "candidates_truncated"], ["message", truncation]]));
+    for (const line of mapStaleLlm(mapState)) console.log(line);
   } else if (truncation) {
     renderWarning(truncation);
   }
@@ -351,6 +362,7 @@ async function containerImpact(
   depth: number,
   format: string,
   graph?: Record<string, unknown>,
+  mapState: MapStaleState = {},
 ): Promise<void> {
   const isJson = format === "json";
   const diagnostics: string[] = [];
@@ -414,10 +426,16 @@ async function containerImpact(
 
   // Bucket all dependents by hierarchy. First occurrence of each id wins, as
   // the id list this replaced did; the nodes go in whole so their names and
-  // kinds need no second read.
+  // kinds need no second read. `via` remembers which expand that first
+  // occurrence came from, for the JSON `dependentList`.
   const uniqueDependents = new Map<string, any>();
-  for (const n of [...directImporters, ...directDependents]) {
-    if (!uniqueDependents.has(n.id)) uniqueDependents.set(n.id, n);
+  const dependentVia = new Map<string, "importer" | "dependent">();
+  for (const [nodes, via] of [[directImporters, "importer"], [directDependents, "dependent"]] as const) {
+    for (const n of nodes) {
+      if (uniqueDependents.has(n.id)) continue;
+      uniqueDependents.set(n.id, n);
+      dependentVia.set(n.id, via);
+    }
   }
   // Independent of the member counts, so the two run together.
   const [callerResults, propagationBuckets] = await Promise.all([
@@ -460,6 +478,7 @@ async function containerImpact(
       stripNulls({
         resolvedTarget: { kind: target.kind, name: target.name },
         graph,
+        ...mapStaleJson(mapState),
         depth,
         systemPath: systemPathMapped.length > 0 ? systemPathMapped : undefined,
         riskSummary: risk.riskSummary,
@@ -479,8 +498,13 @@ async function containerImpact(
           region: b.region.name,
           regionKind: b.region.kind,
           count: b.members.length,
-          members: b.members.slice(0, 5).map((m) => ({ name: m.name, kind: m.kind })),
+          members: b.members.slice(0, 5).map(bucketMemberJson),
         })) : undefined,
+        // Every direct importer and dependent, located. Not cut by --limit:
+        // JSON keeps every row, as callerList does.
+        dependentList: uniqueDependents.size > 0
+          ? [...uniqueDependents.values()].map((n: any) => ({ ...impactRowJson(n), via: dependentVia.get(n.id) }))
+          : undefined,
         decisions: decisions.length > 0 ? decisions : undefined,
         tasks: tasks.length > 0 ? tasks : undefined,
         bugs: bugs.length > 0 ? bugs : undefined,
@@ -489,6 +513,8 @@ async function containerImpact(
     );
   } else if (format === "llm") {
     const lines = [
+      // With the answer, not before it (mapStaleLlm).
+      ...mapStaleLlm(mapState),
       ...impactHeaderLlm(target, risk, systemPathMapped),
       llmLine("counts", [
         ["members", members.length],
@@ -536,6 +562,31 @@ async function containerImpact(
   }
 }
 
+// ── JSON rows ────────────────────────────────────────────────────────────────
+
+/** The location fields a JSON row adds, each left out when unknown (never null). */
+function locationJson(loc: { path?: string; lineStart?: number; lineEnd?: number }): { path?: string; lineStart?: number; lineEnd?: number } {
+  return stripNulls({ path: loc.path, lineStart: loc.lineStart, lineEnd: loc.lineEnd });
+}
+
+/**
+ * One caller, callee or dependent row in `--format json`: `kind` and `name`
+ * first, as they always were, then where the node is (`rowLocation`), the same
+ * fields `topImpactedMembers` carries.
+ */
+export function impactRowJson(node: any): { kind: string; name: string; path?: string; lineStart?: number; lineEnd?: number } {
+  return {
+    kind: node.kind,
+    name: node.name || node.attrs?.name || "(unnamed)",
+    ...locationJson(rowLocation(node)),
+  };
+}
+
+/** A propagation bucket member in `--format json`: `name`, `kind`, then its location. */
+function bucketMemberJson(m: BucketMember): BucketMember {
+  return { name: m.name, kind: m.kind, ...locationJson(m) };
+}
+
 // ── Leaf impact ──────────────────────────────────────────────────────────────
 
 /** One caller or callee row, located the way member rows are: `path` and `lines`. */
@@ -577,6 +628,7 @@ async function leafImpact(
   limit: number,
   format: string,
   graph?: Record<string, unknown>,
+  mapState: MapStaleState = {},
 ): Promise<void> {
   const isJson = format === "json";
   const [callersResult, calleesResult, systemPath, decisionsResult, tasksResult, bugsResult] = await Promise.all([
@@ -636,6 +688,7 @@ async function leafImpact(
       stripNulls({
         resolvedTarget: { kind: target.kind, name: target.name },
         graph,
+        ...mapStaleJson(mapState),
         depth,
         systemPath: systemPathMapped.length > 0 ? systemPathMapped : undefined,
         riskSummary: risk.riskSummary,
@@ -648,19 +701,13 @@ async function leafImpact(
           callers: callersResult.nodes.length,
           callees: calleesResult.nodes.length,
         },
-        callerList: callersResult.nodes.length > 0 ? callersResult.nodes.map((n: any) => ({
-          kind: n.kind,
-          name: n.name || n.attrs?.name || "(unnamed)",
-        })) : undefined,
-        calleeList: calleesResult.nodes.length > 0 ? calleesResult.nodes.map((n: any) => ({
-          kind: n.kind,
-          name: n.name || n.attrs?.name || "(unnamed)",
-        })) : undefined,
+        callerList: callersResult.nodes.length > 0 ? callersResult.nodes.map(impactRowJson) : undefined,
+        calleeList: calleesResult.nodes.length > 0 ? calleesResult.nodes.map(impactRowJson) : undefined,
         propagationBuckets: propagationBuckets.length > 0 ? propagationBuckets.map((b) => ({
           region: b.region.name,
           regionKind: b.region.kind,
           count: b.members.length,
-          members: b.members.slice(0, 5).map((m) => ({ name: m.name, kind: m.kind })),
+          members: b.members.slice(0, 5).map(bucketMemberJson),
         })) : undefined,
         decisions: decisions.length > 0 ? decisions : undefined,
         tasks: tasks.length > 0 ? tasks : undefined,
@@ -671,6 +718,8 @@ async function leafImpact(
     const callerSlice = sliceEdgeResults(callersResult.nodes, limit);
     const calleeSlice = sliceEdgeResults(calleesResult.nodes, limit);
     const lines = [
+      // With the answer, not before it (mapStaleLlm).
+      ...mapStaleLlm(mapState),
       ...impactHeaderLlm(target, risk, systemPathMapped),
       llmLine("counts", [
         ["callers", callerSlice.total],
