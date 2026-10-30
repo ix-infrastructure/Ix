@@ -39,6 +39,7 @@ import {
 import { symbolReadChecker } from "../symbol-read-check.js";
 import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/related-files.js";
 import { cachedBm25Ranker, saveBm25Index } from "../explain/bm25-cache.js";
+import { companionHistory, expandIssueCompanions } from "../explain/issue-companions.js";
 import { collectTextReferences, gitRepoAccess, type TextSource } from "../explain/text-references.js";
 import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
@@ -1772,7 +1773,9 @@ async function buildIssueBundle(
       startingPoints: starts,
       unresolved: plan.unresolved,
       fallback: plan.fallback || walked,
-      rankedFiles: rankIssueFiles({ starts, bm25: plan.bm25, near }),
+      rankedFiles: await expandIssueCompanions(text, rankIssueFiles({ starts, bm25: plan.bm25, near }), {
+        repo: plan.repo, history: companionHistory(resolveWorkspaceRoot()),
+      }),
       extraEntities: around.flatMap((n) => n.related),
     },
   });
@@ -1803,8 +1806,9 @@ async function planIssueWith(client: IxClient, text: string) {
   await ensureReadScope(client);
   const scope = activeReadScope();
   const root = resolveWorkspaceRoot();
-  return planIssue(text, {
-    repo: gitRepoAccess(root),
+  const repo = gitRepoAccess(root);
+  const plan = await planIssue(text, {
+    repo,
     // Through the on-disk term index (bm25-cache.ts): the same ranking, with
     // only the files that differ from HEAD read again. The caller saves the
     // index after printing (saveBm25Index).
@@ -1812,13 +1816,15 @@ async function planIssueWith(client: IxClient, text: string) {
     search: async (name) =>
       (await client.search(name, { limit: ISSUE_SEARCH_LIMIT, nameOnly: true, ...scope })).map(symbolHit),
   });
+  return { ...plan, repo };
 }
 
 /**
  * `ix context --from-issue --lean`: the starting points Ix trusts and the
  * next few files, with no bundle around them. See `leanIssueView` for why.
  * Nothing here needs a centre node, so it is also the cheap path: one search
- * per name the issue mentions, and BM25 over the tracked files.
+ * per name the issue mentions, and BM25 over the tracked files. Companion
+ * files (issue-companions.ts) are full-bundle only.
  */
 async function emitLeanIssue(arg: string, opts: ContextOptions): Promise<void> {
   const text = await readIssueOrReport(arg, opts.format);
@@ -2642,7 +2648,11 @@ function issueEvidence(issue: IssueBundleInput): EvidenceItem[] {
       ...locationField(starts[0]),
     });
   }
-  const shown = issue.rankedFiles.slice(0, SHOWN_RANKED_FILES);
+  // Companions (issue-companions.ts) follow the whole primary list, past the
+  // first SHOWN_RANKED_FILES once BM25 matches enough files: named after the
+  // primary files shown, or text and llm output would never show one.
+  const companions = issue.rankedFiles.filter((f) => f.companion);
+  const shown = [...issue.rankedFiles.filter((f) => !f.companion).slice(0, SHOWN_RANKED_FILES), ...companions];
   if (shown.length > 0) {
     items.push({
       id: "issue-ranked-files",
@@ -2650,7 +2660,7 @@ function issueEvidence(issue: IssueBundleInput): EvidenceItem[] {
       source: "issue.ranking",
       title: `ranked files: ${shown.map((f) => f.path).join(", ")}`,
       score: tierScore(TIER.issue, 1),
-      reason: `starting points first, then bm25 against the issue text, graph neighbours of a starting point boosted up to ${Math.round(CLOSENESS_BOOST * 100)}%; `
+      reason: `starting points first, then bm25 against the issue text, graph neighbours of a starting point boosted up to ${Math.round(CLOSENESS_BOOST * 100)}%${companions.length > 0 ? ", then companion files of a leading file" : ""}; `
         + shown.map((f) => `${f.path.split("/").pop()} (${f.reason})`).join("; "),
       refs: [],
     });
