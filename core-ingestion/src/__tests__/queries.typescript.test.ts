@@ -136,3 +136,39 @@ describe('TypeScript queries', () => {
     });
   });
 });
+
+describe('TypeScript class and interface heritage', () => {
+  const extendsOf = (source: string) => parseFile('/repo/src/widgets.ts', source)!.relationships
+    .filter(rel => rel.predicate === 'EXTENDS')
+    .map(rel => [rel.srcName, rel.dstName]);
+
+  it('extends a bare, generic or namespace-qualified class, as before', () => {
+    expect(extendsOf('class A extends B {}\n')).toEqual([['A', 'B']]);
+    expect(extendsOf('class A extends B<T> {}\n')).toEqual([['A', 'B']]);
+    expect(extendsOf('class A extends ns.B {}\n')).toEqual([['A', 'ns.B']]);
+    expect(extendsOf('abstract class A extends ns.B<T> {}\n')).toEqual([['A', 'ns.B']]);
+  });
+
+  it('implements bare, generic and namespace-qualified interfaces by name', () => {
+    expect(extendsOf('class A implements I {}\n')).toEqual([['A', 'I']]);
+    expect(extendsOf('class A implements I<T> {}\n')).toEqual([['A', 'I']]);
+    expect(extendsOf('class A implements ns.I {}\n')).toEqual([['A', 'ns.I']]);
+    expect(extendsOf('class A implements ns.I<T> {}\n')).toEqual([['A', 'ns.I']]);
+    expect(extendsOf('abstract class A implements a.b.I<T>, J {}\n').sort()).toEqual([['A', 'J'], ['A', 'a.b.I']]);
+    expect(extendsOf('class A extends B<T> implements I<T>, ns.J, ns.K<X>, L {}\n').sort())
+      .toEqual([['A', 'B'], ['A', 'I'], ['A', 'L'], ['A', 'ns.J'], ['A', 'ns.K']]);
+  });
+
+  it('extends bare, generic and namespace-qualified interfaces by name', () => {
+    expect(extendsOf('interface J extends I {}\n')).toEqual([['J', 'I']]);
+    expect(extendsOf('interface J extends I<T> {}\n')).toEqual([['J', 'I']]);
+    expect(extendsOf('interface J extends ns.I {}\n')).toEqual([['J', 'ns.I']]);
+    expect(extendsOf('interface J extends I<T>, ns.K<X>, M {}\n').sort())
+      .toEqual([['J', 'I'], ['J', 'M'], ['J', 'ns.K']]);
+  });
+
+  it('takes no edge from a type argument', () => {
+    expect(extendsOf('class A implements I<Arg> {}\ninterface J extends K<Arg> {}\n').sort())
+      .toEqual([['A', 'I'], ['J', 'K']]);
+  });
+});

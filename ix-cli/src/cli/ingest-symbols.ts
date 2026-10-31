@@ -315,8 +315,9 @@ type SummaryFields = {
   receiverHeritage?: Array<[string, string]>;
   receiverPackage?: string;
   importAliases?: Record<string, string>;
+  tsGlobalTypes?: string[];
   refs?: string[];
-  imports?: Array<{ dstName?: string; importRaw?: string }>;
+  imports?: Array<{ dstName?: string; importRaw?: string; importAliased?: boolean }>;
   sig?: string;
 };
 
@@ -352,6 +353,12 @@ function bindings(summary: StoredSummary | undefined): Map<string, string[]> {
   // method only (`x.getUrl().m()`): the method name counts too.
   for (const [name, type] of s.receiverFactories ?? []) out.set(`f\0${name}\0${type}\0${heritageImports}\0\0${aliases}`, javaMember(s, name));
   for (const [name, base] of s.receiverHeritage ?? []) out.set(`h\0${name}\0${base}\0${heritageImports}`, [name]);
+  // `export * as ns from './a'` is what an importer's `ns.Base` resolves through.
+  for (const [key, spec] of Object.entries(s.importAliases ?? {})) {
+    if (key.startsWith("export:")) out.set(`n\0${key}\0${spec}`, [key.slice("export:".length)]);
+  }
+  // A TypeScript global is what an unimported heritage base can name.
+  for (const name of s.tsGlobalTypes ?? []) out.set(`g\0${name}`, [name]);
   return out;
 }
 
@@ -386,7 +393,10 @@ export function changedNames(before: StoredSummary | undefined, after: StoredSum
 export function importsChanged(before: StoredSummary | undefined, after: StoredSummary | undefined): boolean {
   if (!before || !after) return false;
   const key = (s: StoredSummary) =>
-    JSON.stringify(((s as SummaryFields).imports ?? []).map(i => `${i.dstName ?? ""}\0${i.importRaw ?? ""}`).sort());
+    JSON.stringify(((s as SummaryFields).imports ?? [])
+      // An aliased Python import resolves by full path only, so adding or
+      // dropping `as m` changes what it names. Unaliased keys stay as they were.
+      .map(i => `${i.dstName ?? ""}\0${i.importRaw ?? ""}${i.importAliased ? "\0aliased" : ""}`).sort());
   return key(before) !== key(after);
 }
 
@@ -409,7 +419,9 @@ function importSegments(spec: string): string[] {
  * Files in `table` that may resolve differently now: a name they refer to is in
  * `names` (also by its first or last segment, for `obj.method` and `Mod::f`), or
  * an import of theirs names the stem of a path in `paths` (a file that appeared,
- * went away, or changed what it imports). Files in `exclude` -- the ones the
+ * went away, or changed what it imports), or it is a Python file with imports
+ * below the directory of a `__init__.py` in `packageEntries` (one that appeared
+ * or went away). Files in `exclude` -- the ones the
  * run already sent -- are left out. Over-matching costs a parse; the resolution hash then decides whether
  * anything is sent.
  */
@@ -418,13 +430,26 @@ export function findDependents(
   names: ReadonlySet<string>,
   paths: Iterable<string>,
   exclude: ReadonlySet<string>,
+  packageEntries: Iterable<string> = [],
 ): string[] {
   const stems = new Set<string>();
   for (const p of paths) {
     const stem = importStem(p);
     if (stem.length > 0 && stem !== ".") stems.add(stem);
   }
-  if (names.size === 0 && stems.size === 0) return [];
+  // A `__init__.py` that came or went turns its directory into a package, or
+  // back into a plain folder. That changes what imports inside it can bind
+  // (`import helpers as h` in `tools/main.py` names `tools/helpers.py` only
+  // while `tools/` is not a package), whatever the import's name, so every
+  // Python file below it that imports anything is re-resolved.
+  const packageDirs: string[] = [];
+  for (const p of packageEntries) {
+    const posix = p.replace(/\\/g, "/");
+    if (path.posix.basename(posix) !== "__init__.py") continue;
+    const dir = path.posix.dirname(posix);
+    packageDirs.push(dir === "." ? "" : `${dir}/`);
+  }
+  if (names.size === 0 && stems.size === 0 && packageDirs.length === 0) return [];
   // A changed superclass changes the members visible through every subclass,
   // even when those subclass files were not edited (or were already sent).
   // Likewise a changed type changes what every factory returning it gives a
@@ -475,7 +500,9 @@ export function findDependents(
       }
       return false;
     });
-    if (byName || byImport) out.push(rel);
+    const byPackage = !byName && !byImport && packageDirs.length > 0 && s.language === "python" &&
+      (s.imports ?? []).length > 0 && packageDirs.some(dir => rel.replace(/\\/g, "/").startsWith(dir));
+    if (byName || byImport || byPackage) out.push(rel);
   }
   return out.sort();
 }

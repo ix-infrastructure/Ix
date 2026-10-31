@@ -472,6 +472,36 @@ paths:
                   nodes: { type: array, items: { $ref: "#/components/schemas/GraphNode" } }
                   edges: { type: array, items: { $ref: "#/components/schemas/GraphEdge" } }
 
+  /v1/degree:
+    post:
+      tags: [entities]
+      summary: One-hop neighbour counts for many nodes
+      operationId: degree
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids, direction]
+              properties:
+                ids: { type: array, maxItems: 5000, items: { type: string } }
+                direction: { type: string }
+                predicates: { type: array, items: { type: string } }
+                distinct: { type: boolean }
+                branchId: { type: string }
+      responses:
+        "200":
+          description: Counts per requested id
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rev: { type: integer }
+                  counts: { type: object, additionalProperties: { type: integer } }
+                  truncated: { type: boolean }
+
   /v1/expand-by-name:
     post:
       tags: [entities]

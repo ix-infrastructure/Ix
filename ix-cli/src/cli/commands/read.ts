@@ -53,7 +53,7 @@ export interface ReadResult {
 
 interface AmbiguityResult {
   targetType: "ambiguous-file" | "ambiguous-symbol";
-  candidates: Array<{ name: string; kind?: string; path?: string; id?: string; rank?: number }>;
+  candidates: Array<{ name: string; kind?: string; path?: string; id?: string; rank?: number; container?: string }>;
   diagnostics?: Array<{ code: string; message: string }>;
 }
 
@@ -330,6 +330,7 @@ export function renderReadAmbiguityLlm(result: AmbiguityResult, target: string):
       ["kind", c.kind],
       ["path", c.path ? relativePath(c.path) ?? c.path : undefined],
       ["id", llmShortId(c.id)],
+      ["container", c.container],
     ]));
   });
   lines.push(llmLine("hint", [[
@@ -391,7 +392,8 @@ function outputAmbiguity(result: AmbiguityResult, target: string, format: string
       const kindStr = c.kind ? chalk.cyan(c.kind.padEnd(10)) : "";
       const pathStr = c.path ? chalk.dim(` ${c.path}`) : "";
       const idStr = c.id ? chalk.dim(` ${c.id.slice(0, 8)}`) : "";
-      stderr(`  ${i + 1}. ${kindStr}${idStr}  ${c.name}${pathStr}`);
+      const containerStr = c.container ? `  ${c.container}` : "";
+      stderr(`  ${i + 1}. ${kindStr}${idStr}  ${c.name}${containerStr}${pathStr}`);
     }
     if (result.targetType === "ambiguous-file") {
       stderr(chalk.dim("\nProvide a more specific path to disambiguate."));
@@ -758,7 +760,7 @@ function filterMatches(
 
 type SymbolResult =
   | { type: "resolved"; node: any; sourceUri: string | null }
-  | { type: "ambiguous"; candidates: Array<{ name: string; kind?: string; path?: string; id?: string }> }
+  | { type: "ambiguous"; candidates: Array<{ name: string; kind?: string; path?: string; id?: string; container?: string }> }
   | { type: "not-found" };
 
 /**
@@ -788,6 +790,7 @@ async function trySymbolMatch(
       type: "ambiguous",
       candidates: full.result.candidates.map(c => ({
         name: c.name, kind: c.kind, path: c.path, id: c.id,
+        ...(c.container ? { container: c.container } : {}),
       })),
     };
   }

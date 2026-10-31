@@ -1,7 +1,9 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { absoluteFromSourceUri, isReadablePath } from "./config.js";
+import { canonicalizeDiscoveredFilePath, discoverSourceFiles } from "./file-discovery.js";
 import { rowLocation } from "./format.js";
 
 /**
@@ -44,6 +46,8 @@ export type SiteRelation = "callers" | "callees" | "imports" | "imported-by";
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const SNIPPET_CHARS = 160;
 const MAX_ALSO = 4;
+/** Files listed for local heuristics outside git, where nothing else bounds the walk. */
+const SOURCE_WALK_LIMIT = 5000;
 /** How far past a span a site is still looked for when the span cannot be re-anchored. */
 const SPAN_SLACK = 30;
 
@@ -237,8 +241,32 @@ export function findImports(lines: string[], keys: string[]): number[] {
 /** Reads each file at most once per command, and only inside a readable workspace. */
 export class SourceFiles {
   private readonly cache = new Map<string, string[] | null>();
+  private paths?: string[];
 
   constructor(private readonly root?: string) {}
+
+  /**
+   * Source paths for local heuristics, listed once and read through the same
+   * safe cache. Unverified: `lines` checks each file it reads, and a large
+   * repository would otherwise pay a stat and a realpath per file.
+   */
+  sourcePaths(): string[] {
+    const root = canonicalizeDiscoveredFilePath(this.root ?? process.cwd());
+    return this.paths ??= discoverSourceFiles(root, { verify: false, walkLimit: SOURCE_WALK_LIMIT })
+      .map((file) => path.relative(root, file).split(path.sep).join("/"))
+      .filter((file) => file !== ".." && !file.startsWith("../") && !path.isAbsolute(file))
+      .sort();
+  }
+
+  /** Whether `relPath` is a regular file on disk; a read already cached counts. */
+  exists(relPath: string): boolean {
+    if (this.cache.get(relPath)) return true;
+    try {
+      return fs.statSync(absoluteFromSourceUri(relPath, this.root)).isFile();
+    } catch {
+      return false;
+    }
+  }
 
   lines(relPath: string | undefined): string[] | null {
     if (!relPath) return null;

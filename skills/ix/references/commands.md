@@ -43,6 +43,7 @@ These aggregate multiple graph operations into single bounded responses.
 |---|---|---|
 | What calls a function | `ix callers` | `ix callers verify_token` |
 | What a function calls | `ix callees` | `ix callees processPayment` |
+| Other definitions of a method, before changing its signature | `ix overrides` | `ix overrides handle --path src/Base.java` |
 | Members of a class | `ix contains` | `ix contains IngestionService` |
 | What an entity imports | `ix imports` | `ix imports auth_provider.py` |
 | What imports an entity | `ix imported-by` | `ix imported-by AuthProvider` |
@@ -210,9 +211,10 @@ ix inventory --kind function --path auth.py
   `ix reset -y --code` in one repo also destroys the graphs of every other
   mapped workspace (e.g. packwise) and empties the `--all` combined view;
   re-run `ix map` per workspace to rebuild. The workspace-scoped reset is
-  `ix reset --workspace` (`/v1/reset/workspace` for the registered workspace
-  containing cwd, nothing else); with `--ingest` it is the repair for a
-  degraded graph.
+  `ix reset --workspace` (`/v1/reset/workspace` for the id of the registered
+  workspace containing cwd, no other id -- but if that id is shared, pinned by
+  a team, everyone using it loses the graph); with `--ingest` it is the repair
+  for a degraded graph.
 
 - **The OSS↔Pro command boundary is derived at runtime, not declared.**
   `run-cli.ts` (which `main.ts` loads) snapshots `ossCmdNames` immediately

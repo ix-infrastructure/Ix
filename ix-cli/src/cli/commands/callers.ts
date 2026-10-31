@@ -35,8 +35,8 @@ export const DISPATCH_DEPTH = 5;
 /** Supertypes looked at, at most, for one target: each costs one small expand. */
 export const DISPATCH_MAX_TYPES = 16;
 
-const TYPE_KINDS = new Set(["class", "interface", "enum", "record", "trait", "object", "annotation"]);
-const byName = (a: any, b: any): number =>
+export const TYPE_KINDS = new Set(["class", "interface", "enum", "record", "trait", "object", "annotation"]);
+export const byName = (a: any, b: any): number =>
   String(a.name ?? "").localeCompare(String(b.name ?? "")) || String(a.id ?? "").localeCompare(String(b.id ?? ""));
 
 /**
@@ -129,7 +129,7 @@ function bannerOverRows(health: { diagnostics?: Diagnostic[] }, format: string, 
 }
 
 interface EdgeOpts {
-  kind?: string; path?: string; pick?: number; all?: boolean; limit: string; offset: string; format: string;
+  kind?: string; path?: string; pick?: number; suggest?: boolean; all?: boolean; limit: string; offset: string; format: string;
 }
 
 const ALL_FLAG = "When the symbol is ambiguous, answer for every candidate; rows are tagged with their candidate";
@@ -185,6 +185,7 @@ export function registerCallersCommand(program: Command): void {
     .description("Show methods/functions that call the given symbols (cross-file)")
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
+    .option("--no-suggest", "Disable did-you-mean candidates on unresolved targets")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
     .option("--all", ALL_FLAG)
     .option("--limit <n>", "Max results to show", "50")
@@ -251,7 +252,7 @@ ${EXIT_CODES_HELP}`)
 async function callersOne(client: IxClient, symbol: string, opts: EdgeOpts, cmd: Command): Promise<void> {
   const limit = parseInt(opts.limit, 10);
   const offset = parseOffset(opts.offset);
-  const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, all: opts.all };
+  const resolveOpts = { suggest: opts.suggest, suggestCommand: "callers", kind: opts.kind, path: opts.path, pick: opts.pick, all: opts.all };
   const set = await resolveTargetSetOrReport(client, symbol, resolveOpts, opts.format);
   if (!set) return;
   if (set.all) {

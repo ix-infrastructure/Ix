@@ -15,6 +15,7 @@ interface SerializedIngestBaseline {
   replayedFiles?: string[];
   pendingFiles?: string[];
   parseTimeouts?: string[];
+  pythonPackageEntries?: string[];
 }
 
 export interface IngestBaseline {
@@ -67,6 +68,15 @@ export interface IngestBaseline {
    * every run, so recording it clean skipped it for good.
    */
   parseTimeouts: string[];
+  /**
+   * Workspace-relative paths of every Python `__init__.py` the last run
+   * resolved against, empty ones included. An empty file is never parsed and
+   * never in `files`, yet whether its directory is a package changes what
+   * imports below it bind, so the next run diffs this list to find the
+   * directories that became, or stopped being, packages. Absent on a baseline
+   * written before this was recorded, or by a --lang run: unknown, not "none".
+   */
+  pythonPackageEntries?: string[];
 }
 
 /** Per-file lists a baseline write records beside the mtimes. */
@@ -77,6 +87,8 @@ export interface BaselineFileNotes {
   pendingFiles?: readonly string[];
   /** See `IngestBaseline.parseTimeouts`. */
   parseTimeouts?: readonly string[];
+  /** See `IngestBaseline.pythonPackageEntries`. Not written when null or absent. */
+  pythonPackageEntries?: readonly string[] | null;
 }
 
 const stringList = (value: unknown): string[] =>
@@ -130,6 +142,7 @@ export function loadIngestBaseline(projectRoot: string): IngestBaseline | null {
       replayedFiles: stringList(data.replayedFiles),
       pendingFiles: stringList(data.pendingFiles),
       parseTimeouts: stringList(data.parseTimeouts),
+      ...(Array.isArray(data.pythonPackageEntries) ? { pythonPackageEntries: stringList(data.pythonPackageEntries) } : {}),
     };
   } catch {
     return null;
@@ -143,7 +156,7 @@ export function saveIngestBaseline(
   now: Date = new Date(),
   deletedFiles: Map<string, string[]> = new Map(),
   extractor?: string | null,
-  { replayedFiles = [], pendingFiles = [], parseTimeouts = [] }: BaselineFileNotes = {},
+  { replayedFiles = [], pendingFiles = [], parseTimeouts = [], pythonPackageEntries }: BaselineFileNotes = {},
 ): void {
   try {
     // Keep the last good rev rather than writing a shape the read side will
@@ -170,6 +183,8 @@ export function saveIngestBaseline(
       ...(replayedFiles.length > 0 ? { replayedFiles: [...replayedFiles].sort() } : {}),
       ...(pendingFiles.length > 0 ? { pendingFiles: [...new Set(pendingFiles)].sort() } : {}),
       ...(parseTimeouts.length > 0 ? { parseTimeouts: [...new Set(parseTimeouts)].sort() } : {}),
+      // Written when known, even empty: no packages is a state, absent is unknown.
+      ...(pythonPackageEntries ? { pythonPackageEntries: [...new Set(pythonPackageEntries)].sort() } : {}),
     };
     const target = ingestMtimeCachePath(projectRoot);
     fs.mkdirSync(path.dirname(target), { recursive: true });

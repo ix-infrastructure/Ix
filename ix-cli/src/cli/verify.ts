@@ -515,7 +515,7 @@ export async function runVerify(client: VerifyClient, rootInput: string, opts: R
     counts: { files: 0, clean: 0, stale: 0, diverged: 0, unverified: 0 }, files: [],
   });
 
-  // Read-only lookup: `workspaceStateFor` registers and migrates as it goes.
+  // Read-only lookup: `workspaceStateFor` registers as it goes.
   const workspace = findWorkspaceForCwd(root);
   const baseline = workspace ? loadIngestBaseline(root) : null;
   if (!workspace || !baseline) return unverified("not_mapped", GRAPH_MAP_FIX);

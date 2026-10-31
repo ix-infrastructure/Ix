@@ -299,6 +299,7 @@ describe("gatherAround", () => {
     // app.ts is already a caller; cli.ts hands `target` over by name, which the graph has no edge for.
     expect(s.users.rows).toEqual([{ path: "src/cli.ts", line: 2, snippet: "program.option(\"--x <n>\", \"x\", target);" }]);
     expect(s.tests.rows).toEqual([{ path: "src/__tests__/app.test.ts", line: 2, snippet: "it(\"runs\", () => expect(run()).toBe(3));", name: undefined, via: "run" }]);
+    expect(s.tests.rows[0]).not.toHaveProperty("sources");
     expect(result.importers.total).toBe(2);
   });
 
