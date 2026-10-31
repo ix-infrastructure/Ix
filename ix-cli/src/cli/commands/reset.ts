@@ -31,7 +31,8 @@ export function registerResetCommand(program: Command): void {
     .option("--ingest", "Re-run ix map after wiping (rebuilds the code graph)")
     .option(
       "--workspace",
-      "Wipe only the workspace this directory belongs to (every other workspace on the backend is untouched). " +
+      "Wipe only the workspace id this directory is registered under; other ids on the backend are untouched, " +
+        "but anyone else who registered the same id (a shared, pinned workspace) loses it too. " +
         "With --ingest, this is the repair for a graph that has lost its edges",
     )
     .action(async (opts: { yes?: boolean; code?: boolean; ingest?: boolean; workspace?: boolean }) => {
@@ -167,7 +168,8 @@ async function resetThisWorkspace(opts: { yes?: boolean; ingest?: boolean }): Pr
   }
   if (!opts.yes) {
     console.log(chalk.yellow(
-      `This deletes the graph of workspace '${ws.workspace_name}' (${ws.root_path}) and nothing else.`,
+      `This deletes the graph of workspace '${ws.workspace_name}' (${ws.root_path}), id ${ws.workspace_id}. ` +
+      `Other workspace ids are kept, but if this id is shared (pinned by a team), everyone using it loses this graph.`,
     ));
     process.stdout.write(chalk.yellow(`Reset workspace '${ws.workspace_name}'? (y/N) `));
     const answer = await new Promise<string>(resolve => {
@@ -195,7 +197,7 @@ async function resetThisWorkspace(opts: { yes?: boolean; ingest?: boolean }): Pr
   clearStitchScopeCache(ws.workspace_id);
   clearGraphHealthCache();
   clearStitchCooldown(getEndpoint());
-  console.log(chalk.green("✓") + ` Workspace '${ws.workspace_name}' wiped. Other workspaces untouched.`);
+  console.log(chalk.green("✓") + ` Workspace '${ws.workspace_name}' (id ${ws.workspace_id}) wiped. Other workspace ids untouched.`);
 
   if (!opts.ingest) {
     console.log(chalk.dim("  Run `ix map` to rebuild it."));

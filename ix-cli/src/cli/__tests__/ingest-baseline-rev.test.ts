@@ -208,3 +208,19 @@ describe("unfinished orphan sweeps", () => {
     expect(fs.existsSync(ingestOrphanSweepPath(root))).toBe(false);
   });
 });
+
+describe("ingest baseline python package entries", () => {
+  const files = new Map<string, number>([["a.py", 1_000]]);
+
+  it("round-trips the list, keeps an empty one, and reads an older baseline as unknown", () => {
+    const root = path.join(home, "p");
+    saveIngestBaseline(root, files, 1, undefined, undefined, undefined, { pythonPackageEntries: ["pkg/__init__.py", "a/__init__.py", "a/__init__.py"] });
+    expect(loadIngestBaseline(root)?.pythonPackageEntries).toEqual(["a/__init__.py", "pkg/__init__.py"]);
+
+    saveIngestBaseline(root, files, 1, undefined, undefined, undefined, { pythonPackageEntries: [] });
+    expect(loadIngestBaseline(root)?.pythonPackageEntries).toEqual([]);
+
+    saveIngestBaseline(root, files, 1);
+    expect(loadIngestBaseline(root)?.pythonPackageEntries).toBeUndefined();
+  });
+});

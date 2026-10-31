@@ -145,24 +145,45 @@ export const TYPESCRIPT_QUERIES = `
     (extends_clause
       value: [(identifier) (member_expression)] @heritage.extends))) @heritage
 
+; Heritage queries - class implements interface, each of a list: a bare name,
+; ns.I, or a generic I<T> / ns.I<T> by its name (never a type argument).
 (abstract_class_declaration
   name: (type_identifier) @heritage.class
   (class_heritage
     (implements_clause
-      (type_identifier) @heritage.implements))) @heritage.impl
+      [(type_identifier) (nested_type_identifier)] @heritage.implements))) @heritage.impl
 
-; Heritage queries - class implements interface
+(abstract_class_declaration
+  name: (type_identifier) @heritage.class
+  (class_heritage
+    (implements_clause
+      (generic_type
+        name: [(type_identifier) (nested_type_identifier)] @heritage.implements)))) @heritage.impl
+
 (class_declaration
   name: (type_identifier) @heritage.class
   (class_heritage
     (implements_clause
-      (type_identifier) @heritage.implements))) @heritage.impl
+      [(type_identifier) (nested_type_identifier)] @heritage.implements))) @heritage.impl
 
-; Heritage queries - interface extends interface
+(class_declaration
+  name: (type_identifier) @heritage.class
+  (class_heritage
+    (implements_clause
+      (generic_type
+        name: [(type_identifier) (nested_type_identifier)] @heritage.implements)))) @heritage.impl
+
+; Heritage queries - interface extends interface, the same name forms
 (interface_declaration
   name: (type_identifier) @heritage.class
   (extends_type_clause
-    (type_identifier) @heritage.extends)) @heritage
+    [(type_identifier) (nested_type_identifier)] @heritage.extends)) @heritage
+
+(interface_declaration
+  name: (type_identifier) @heritage.class
+  (extends_type_clause
+    (generic_type
+      name: [(type_identifier) (nested_type_identifier)] @heritage.extends))) @heritage
 
 ; Type references — captures types used in annotations/parameters/return types,
 ; and inside the type forms they compose: Promise<Foo>, Foo[], Foo | null,
@@ -182,6 +203,12 @@ export const TYPESCRIPT_QUERIES = `
 export const JAVASCRIPT_QUERIES = `
 (class_declaration
   name: (identifier) @name) @definition.class
+
+; A class expression bound to a name (const/let/var A = class [Named] {})
+; is the class A; the binding is the name the rest of the code uses.
+(variable_declarator
+  name: (identifier) @name
+  value: (class)) @definition.class
 
 (function_declaration
   name: (identifier) @name) @definition.function
@@ -297,11 +324,20 @@ export const JAVASCRIPT_QUERIES = `
   constructor: (identifier) @call.name) @call
 
 ; Heritage queries - class extends (JavaScript uses different AST than TypeScript)
-; In tree-sitter-javascript, class_heritage directly contains the parent identifier
+; In tree-sitter-javascript, class_heritage directly contains the parent
+; expression: a bare name or ns.Base. A call (extends mixin(Base)) is no edge.
 (class_declaration
   name: (identifier) @heritage.class
   (class_heritage
-    (identifier) @heritage.extends)) @heritage
+    [(identifier) (member_expression)] @heritage.extends)) @heritage
+
+; A class expression bound to a name (const A = class extends B {}) extends
+; under the binding's name, as its definition is named.
+(variable_declarator
+  name: (identifier) @heritage.class
+  value: (class
+    (class_heritage
+      [(identifier) (member_expression)] @heritage.extends))) @heritage
 `;
 
 // Python queries - works with tree-sitter-python
@@ -314,6 +350,12 @@ export const PYTHON_QUERIES = `
 
 (import_statement
   name: (dotted_name) @import.source) @import
+
+; import a.b as m — the module is a.b, bound locally as m (m.f() -> a/b.py::f)
+(import_statement
+  name: (aliased_import
+    name: (dotted_name) @import.source
+    alias: (identifier) @import.alias)) @import
 
 (import_from_statement
   module_name: (dotted_name) @import.source) @import
@@ -382,11 +424,20 @@ export const PYTHON_QUERIES = `
         attribute: (identifier)))
     attribute: (identifier) @call.name)) @call
 
-; Heritage queries - Python class inheritance
+; Heritage queries - Python class inheritance: a bare or dotted base
+; (Base, nn.Module, a.b.Base). Only direct children of the base list match, so
+; keyword arguments (metaclass=Meta, total=False) and *bases never do.
 (class_definition
   name: (identifier) @heritage.class
   superclasses: (argument_list
-    (identifier) @heritage.extends)) @heritage
+    [(identifier) (attribute)] @heritage.extends)) @heritage
+
+; A generic base (Generic[T], Box[int], mod.Base[T]) extends the subscripted name.
+(class_definition
+  name: (identifier) @heritage.class
+  superclasses: (argument_list
+    (subscript
+      value: [(identifier) (attribute)] @heritage.extends))) @heritage
 
 ; Type references — captures types used in type annotations / hints
 (typed_parameter type: (type (identifier) @reference.type))
