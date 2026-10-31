@@ -148,7 +148,7 @@ export type SourcePaths = Pick<ReadonlySet<string>, "has">;
  */
 function issueSourcePaths(repo: RepoAccess, files: string[]): { paths: string[]; source: SourcePaths } {
   const packages = new Set(files.filter((p) => p.endsWith("/__init__.py")).map((p) => posix.dirname(p)));
-  for (const config of files.filter((p) => /(^|\/)(pyproject\.toml|setup\.cfg|setup\.py)$/.test(p))) {
+  for (const config of packagingConfigs(files)) {
     // An exclude list names docs/ to keep it OUT of the package; drop it
     // before looking for package names.
     const text = packagingSections(withoutExcludes(repo.read(config) ?? "", config.endsWith("setup.cfg")), config);
@@ -192,6 +192,24 @@ function issueSourcePaths(repo: RepoAccess, files: string[]): { paths: string[];
     return verdict;
   };
   return { paths: [...eligible], source: { has } };
+}
+
+/** Packaging configs read per issue, shallowest first. */
+const MAX_PACKAGING_CONFIGS = 32;
+
+/**
+ * The packaging configs worth reading. One under a test, fixture, vendored or
+ * build directory is skipped unread: every package it could name sits under
+ * that same directory, which `NOISE` already excludes. The rest are capped,
+ * shallowest first, so a monorepo's own configs win over nested copies.
+ */
+function packagingConfigs(files: string[]): string[] {
+  return files
+    .filter((p) => /(^|\/)(pyproject\.toml|setup\.cfg|setup\.py)$/.test(p) && !NOISE.test(p))
+    .map((p) => ({ p, depth: p.split("/").length }))
+    .sort((a, b) => a.depth - b.depth || cmp(a.p, b.p))
+    .slice(0, MAX_PACKAGING_CONFIGS)
+    .map(({ p }) => p);
 }
 
 // A packaging key and its value: `packages=[...]`, `find_packages(include=
@@ -286,9 +304,14 @@ function tracebackCandidates(text: string): { text: string; groups: string[][]; 
   // A blank line followed by indented text ends a trace: a frame's source and
   // caret lines follow it directly, and anything else is the issue's own text.
   let blank = false;
+  // Whether the line before was a Python frame line, so this one may be its
+  // source line even when the trace was pasted without indentation.
+  let afterFrame = false;
   const lines = text.split("\n").map((line) => {
     const afterBlank = blank;
+    const sourceLine = afterFrame;
     blank = !line.trim();
+    afterFrame = false;
     if (blank) return style ? "" : line;
     if (/Traceback \(most recent call last\)/.test(line)) { flush(); return ""; }
     const python = line.match(/^\s*File ["']([^"']+)["'], line \d+/);
@@ -298,9 +321,15 @@ function tracebackCandidates(text: string): { text: string; groups: string[][]; 
       const nextStyle = python ? "python" : "js";
       if (style && style !== nextStyle) flush();
       style = nextStyle;
+      afterFrame = !!python;
       frames.push(frame.replaceAll("\\", "/"));
       return "";
     }
+    // A Python trace pasted without its indentation: the line right after a
+    // frame is that frame's source, and a row of carets marks it. Neither
+    // ends the trace; an exception line (`ValueError: boom`) still does.
+    if (style === "python" && /^\S/.test(line)
+      && (/^[\s^~]+$/.test(line) || (sourceLine && !/^[A-Za-z_][\w.]*(?::\s|:?\s*$)/.test(line)))) return "";
     // Source/caret lines belong to the trace too; they must not create
     // additional identifier or path starts after its selected frame.
     if (style && /^\s/.test(line)) {
@@ -383,7 +412,14 @@ export function extractCandidates(text: string): IssueCandidates {
     .replace(/(`{3,}|~{3,})[^\n]*\n[\s\S]*?\1/g, (code) => { snippets.push(code); return " "; })
     .split("\n").map((line) => indented(line) ? (snippets.push(line), " ") : line).join("\n")
     .replace(CODE_DEFINITION_LINE, (code) => { snippets.push(code); return " "; })
-    .replace(/^\s*(?:\w+\s*=\s*)?[\w.]+\([^\n]*\)[:;]?\s*$/gm, (code) => { calls.push(code); return " "; })
+    // A line with backticks is prose that happens to start with `Word(`
+    // ("Error(s) when calling `render` (iOS)"): its backticked names are
+    // read below, as anywhere else.
+    .replace(/^\s*(?:\w+\s*=\s*)?[\w.]+\([^\n]*\)[:;]?\s*$/gm, (code) => {
+      if (code.includes("`")) return code;
+      calls.push(code);
+      return " ";
+    })
     .replace(/`[^`\n]*\b(?:class|def|function|const)\b[^`\n]*`/g, (code) => { snippets.push(code); return " "; })
     .replace(/`[^`\n]*\([^`\n]*\)[^`\n]*`/g, (code) => { tickedCalls.push(code); return " "; })
     // After the snippets are cut: an exception line read as prose wherever it sat.

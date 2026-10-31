@@ -727,6 +727,28 @@ describe("issue localization regressions", () => {
     expect(plan.sourcePaths!.has("docs/conf.py")).toBe(true);
   });
 
+  it("reads a bounded number of packaging configs, skipping vendored and fixture copies", async () => {
+    const files: Record<string, string> = {
+      "pyproject.toml": '[tool.setuptools]\npackages = ["docs.plugin"]',
+      "docs/plugin/decoder.py": "decode_payload",
+      "tests/fixtures/proj/setup.py": 'setup(packages=["docs"])',
+      "vendor/lib/setup.cfg": "[options]\npackages = docs",
+    };
+    for (let i = 0; i < 100; i++) files[`pkgs/p${String(i).padStart(3, "0")}/pyproject.toml`] = "[tool.setuptools]\npackages = []";
+    const repo = memoryRepo(files);
+    const read: string[] = [];
+    const plan = await planIssue("decode_payload", {
+      search: async () => [],
+      repo: { ...repo, read: (path) => { read.push(path); return repo.read(path); } },
+    });
+    const configs = read.filter((p) => /(pyproject\.toml|setup\.cfg|setup\.py)$/.test(p));
+    expect(configs[0]).toBe("pyproject.toml");
+    expect(configs.length).toBeLessThanOrEqual(32);
+    expect(configs).not.toContain("tests/fixtures/proj/setup.py");
+    expect(configs).not.toContain("vendor/lib/setup.cfg");
+    expect(plan.sourcePaths!.has("docs/plugin/decoder.py")).toBe(true);
+  });
+
   it("reads a fenced Python traceback's exception line as evidence, not a snippet", () => {
     const out = extractCandidates([
       "Saving fails:", "```", "Traceback (most recent call last):",
@@ -770,6 +792,28 @@ describe("issue localization regressions", () => {
       expect(out.identifiers).toContain("renderPage");
       expect(out.tracebacks).toHaveLength(1);
     }
+  });
+
+  it("keeps an unindented Python traceback as one trace and starts from its innermost frame", async () => {
+    const text = [
+      "Crash:", "```", "Traceback (most recent call last):",
+      'File "/p/src/outer.py", line 1, in <module>', "outer()",
+      'File "/p/src/inner.py", line 2, in outer', "inner()", "^^^^^^^",
+      "ValueError: boom", "```",
+    ].join("\n");
+    const out = extractCandidates(text);
+    expect(out.tracebacks).toEqual([["/p/src/inner.py", "/p/src/outer.py"]]);
+    const picked = await pickStartingPoints(text, { files: ["src/outer.py", "src/inner.py"], search: async () => [] });
+    expect(picked.starts.map((s) => s.path)).toEqual(["src/inner.py"]);
+    // An exception line straight after a frame (no source line) still ends the trace.
+    const bare = extractCandidates(['File "/p/src/a.py", line 1, in run', "pkg.DecodeError: bad", "then `renderPage` fails"].join("\n"));
+    expect(bare.tracebacks).toEqual([["/p/src/a.py"]]);
+    expect(bare.identifiers).toEqual(expect.arrayContaining(["DecodeError", "renderPage"]));
+  });
+
+  it("reads backticked names on a prose line that starts like a call", () => {
+    expect(extractCandidates("Error(s) when calling `render` on mobile (iOS)").identifiers).toContain("render");
+    expect(extractCandidates("model.save(path)").identifiers).toEqual([]);
   });
 
   it("does not look up a snippet's keywords or dunder methods", () => {
