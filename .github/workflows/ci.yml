@@ -157,8 +157,8 @@ jobs:
           # is the toolchain node-gyp supports. Revisit when node-gyp ships
           # VS18 support (then windows-latest can return).
           - { os: windows-2022, node: "22" }
-          - { os: macos-14, node: "22" }
-          - { os: macos-14, node: "24" }
+          - { os: macos-15, node: "22" }
+          - { os: macos-15, node: "24" }
     defaults:
       run:
         shell: bash

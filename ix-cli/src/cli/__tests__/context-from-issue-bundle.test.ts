@@ -133,6 +133,15 @@ describe("ix context --from-issue bundle", () => {
     expect(parsed.rankedFiles?.[1]).toHaveProperty("companion", companion);
   });
 
+  it("keeps a start's snippet and traceback marks through the schema", () => {
+    const starts: StartingPoint[] = [{ ...STARTS[0], snippet: true }, { ...STARTS[1], traceback: true }];
+    const b = build({ ...issue(), startingPoints: starts });
+    const parsed = contextBundleSchema.safeParse(JSON.parse(JSON.stringify(b)));
+    expect(parsed.success).toBe(true);
+    expect(parsed.data?.issue?.startingPoints).toEqual(b.issue?.startingPoints);
+    expect(parsed.data?.issue?.startingPoints.map((s) => [s.snippet, s.traceback])).toEqual([[true, undefined], [undefined, true]]);
+  });
+
   it("puts the other starting points right after the target, and their neighbours in the bundle", () => {
     const b = build(issue());
     expect(b.entities[1]).toMatchObject({ id: "f-rank", path: "src/cli/commands/rank.ts" });
@@ -160,22 +169,26 @@ describe("ix context --from-issue bundle", () => {
       git("init", "-q");
       git("config", "user.name", "Fixture");
       git("config", "user.email", "fixture@example.invalid");
+      // other.py changes on its own, so only worker.py has a co-change partner (schema.py).
+      writeFileSync(join(dir, "other.py"), "NAME = 0\n");
+      git("add", "other.py");
+      git("commit", "-qm", "Add other");
       for (let i = 0; i < 2; i++) {
         writeFileSync(join(dir, "worker.py"), `def run_job(): return ${i}\n`);
         writeFileSync(join(dir, "schema.py"), `VERSION = ${i}\n`);
-        writeFileSync(join(dir, "other.py"), `NAME = ${i}\n`);
-        git("add", "worker.py", "schema.py", "other.py");
+        git("add", "worker.py", "schema.py");
         git("commit", "-qm", "Update worker and schema");
       }
       const start: StartingPoint = { token: "worker.py", name: "worker.py", kind: "file", path: "worker.py", via: "path in issue" };
       const files = await issueRankedFiles("run_job fails in worker.py",
         { starts: [start], bm25: [{ path: "other.py", score: 2 }], near: new Map() }, gitRepoAccess(dir), dir);
-      expect(files.map((f) => f.path)).toEqual(["worker.py", "other.py", "schema.py"]);
+      // The named file keeps its boosted place in the primary ranking (here below a stronger BM25 hit); the companion follows it.
+      expect(files.map((f) => f.path)).toEqual(["other.py", "worker.py", "schema.py"]);
       expect(files[2]).toMatchObject({ companion: { source: "co-change", seed: "worker.py" } });
 
       const b = build(issue({ rankedFiles: files }));
       const parsed = contextBundleSchema.parse(JSON.parse(JSON.stringify(b)));
-      expect(parsed.rankedFiles?.map((f) => f.path)).toEqual(["worker.py", "other.py", "schema.py"]);
+      expect(parsed.rankedFiles?.map((f) => f.path)).toEqual(files.map((f) => f.path));
       expect(parsed.rankedFiles?.[2]).toHaveProperty("companion", { source: "co-change", seed: "worker.py" });
       // Without a checkout the primary ranking comes back unchanged.
       expect((await issueRankedFiles("run_job fails", { starts: [start], bm25: [], near: new Map() }, undefined, dir))

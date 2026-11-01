@@ -205,7 +205,8 @@ describe("issue companion expansion", () => {
     });
     const history = async () => ["c1.ts", "c2.ts", "c3.ts"].map((path) => ({ path, commits: 2, score: 0.5 }));
     const result = await expandIssueCompanions("bug", primary, { repo: files, history });
-    expect(result.map((r) => r.path)).toEqual(["s1.ts", "s2.ts", "s3.ts", "b1.ts", "b2.ts", "b3.ts", "c1.ts", "c2.ts", "c3.ts"]);
+    // The primary order is rankIssueFiles' own (starts are boosted, not forced first); companions follow all of it.
+    expect(result.map((r) => r.path)).toEqual([...primary.map((r) => r.path), "c1.ts", "c2.ts", "c3.ts"]);
     expect(result.slice(0, primary.length)).toEqual(primary);
     expect(result.slice(primary.length).every((r) => r.companion?.source === "co-change")).toBe(true);
   });
