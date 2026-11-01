@@ -116,7 +116,7 @@ function escaped(name: string): string {
 export async function expandIssueCompanions(
   issue: string,
   primary: RankedFile[],
-  deps: { repo?: RepoAccess; history?: CompanionHistory; now?: () => number },
+  deps: { repo?: Pick<RepoAccess, "files" | "read">; history?: CompanionHistory; now?: () => number },
   limit = MAX_RANKED_FILES,
 ): Promise<RankedFile[]> {
   if (!deps.repo || primary.length === 0 || limit <= 1) return primary.slice(0, Math.max(0, limit));

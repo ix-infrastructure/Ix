@@ -98,6 +98,7 @@ function buildSchemas(z: typeof Zod.z) {
         lineStart: z.number().int().positive().optional(),
         lineEnd: z.number().int().positive().optional(),
         stale: z.boolean(),
+        score: z.number().optional(),
       }),
     ),
     relationships: z.array(z.object({ src: z.string(), dst: z.string(), predicate: z.string() })),

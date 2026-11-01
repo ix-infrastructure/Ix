@@ -97,6 +97,9 @@ function codeInvocations(text) {
 
 /** Invocations in text: `ix …` code spans, and lines of fenced blocks starting with `ix `. */
 export function textInvocations(text) {
+  // Template-string prompts escape Markdown backticks in the source. Decode
+  // those delimiters before tokenizing so the closing escape is not a flag.
+  text = text.replace(/\\`/g, "`");
   const found = [];
   for (const m of text.matchAll(/`(ix\s+[a-z][^`\n]*)`/g)) {
     // Inside a JS template literal the span is written \`ix …\`: the closing
